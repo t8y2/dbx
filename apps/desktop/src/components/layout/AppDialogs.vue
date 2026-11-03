@@ -17,6 +17,7 @@ const DataDictionaryDialog = defineAsyncComponent(() => import("@/components/doc
 const TableImportDialog = defineAsyncComponent(() => import("@/components/import/TableImportDialog.vue"));
 const MongoImportDialog = defineAsyncComponent(() => import("@/components/document/MongoImportDialog.vue"));
 const MongoDatabaseDumpDialog = defineAsyncComponent(() => import("@/components/document/MongoDatabaseDumpDialog.vue"));
+const DamengDumpDialog = defineAsyncComponent(() => import("@/components/document/DamengDumpDialog.vue"));
 const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
 const ConfigPassphraseDialog = defineAsyncComponent(() => import("@/components/config/ConfigPassphraseDialog.vue"));
 const ConfigConnectionSelectDialog = defineAsyncComponent(() => import("@/components/config/ConfigConnectionSelectDialog.vue"));
@@ -25,11 +26,15 @@ const SshHostKeyPromptDialog = defineAsyncComponent(() => import("@/components/s
 const ConnectionPasswordPromptDialog = defineAsyncComponent(() => import("@/components/connection/ConnectionPasswordPromptDialog.vue"));
 const DatabaseExportDialog = defineAsyncComponent(() => import("@/components/export/DatabaseExportDialog.vue"));
 const DataGenerateDialog = defineAsyncComponent(() => import("@/components/generate/DataGenerateDialog.vue"));
+const PlDebugLaunchDialog = defineAsyncComponent(() => import("@/components/debug/PlDebugLaunchDialog.vue"));
+const PlDebugRecoveryDialog = defineAsyncComponent(() => import("@/components/debug/PlDebugRecoveryDialog.vue"));
+import { plDebugLaunchTarget, plDebugRecoveryConnectionId } from "@/components/debug/plDebugLaunch";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { useReadOnlyUnlockStore, WRITE_UNLOCK_FIVE_MINUTES_SECS, WRITE_UNLOCK_ONE_MINUTE_SECS, type WriteUnlockDurationSecs } from "@/stores/readOnlyUnlockStore";
 import { useDialogSources } from "@/composables/useDialogSources";
+import { useMountedOnce } from "@/composables/useMountedOnce";
 import type { ConnectionDeepLinkDraft, ConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
 import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
 import type { SqlParameterDescriptor, SqlParameterSyntax } from "@/lib/sql/sqlParameters";
@@ -105,6 +110,9 @@ const readOnlyUnlockStore = useReadOnlyUnlockStore();
 const unlockDuration = ref<WriteUnlockDurationSecs>(WRITE_UNLOCK_ONE_MINUTE_SECS);
 const sqlExecutionDangerStore = useSqlExecutionDangerStore();
 const dialogs = useDialogSources();
+const transferDialogMounted = useMountedOnce(() => dialogs.showTransferDialog.value);
+const sqlFileDialogMounted = useMountedOnce(() => dialogs.showSqlFileDialog.value);
+const mongoImportDialogMounted = useMountedOnce(() => dialogs.showMongoImportDialog.value);
 const productionConfirmationDetails = computed(() => {
   const request = productionSafetyStore.pending;
   if (!request) return "";
@@ -159,6 +167,8 @@ watch(
 </script>
 
 <template>
+  <PlDebugLaunchDialog v-if="plDebugLaunchTarget" />
+  <PlDebugRecoveryDialog v-if="plDebugRecoveryConnectionId" />
   <ConnectionDialog
     v-if="shouldShowConnectionDialog"
     :open="shouldShowConnectionDialog"
@@ -234,6 +244,7 @@ watch(
     @execute="emit('sqlParametersConfirm', $event)"
   />
   <DataTransferDialog
+    v-if="transferDialogMounted"
     v-model:open="dialogs.showTransferDialog.value"
     :task-id="dialogs.transferTaskId.value"
     :prefill-connection-id="dialogs.transferPrefillConnectionId.value"
@@ -265,6 +276,7 @@ watch(
     :session-id="dialogs.dataCompareSessionId.value"
   />
   <SqlFileExecutionDialog
+    v-if="sqlFileDialogMounted"
     v-model:open="dialogs.showSqlFileDialog.value"
     :task-id="dialogs.sqlFileTaskId.value"
     :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value"
@@ -279,6 +291,7 @@ watch(
     :prefill-connection-id="dialogs.diagramPrefillConnectionId.value"
     :prefill-database="dialogs.diagramPrefillDatabase.value"
     :prefill-schema="dialogs.diagramPrefillSchema.value"
+    :prefill-catalog="dialogs.diagramPrefillCatalog.value"
     :focus-table-name="dialogs.diagramFocusTableName.value"
     :focus-table-names="dialogs.diagramFocusTableNames.value"
     @open-target="emit('openDiagramTarget', $event)"
@@ -300,7 +313,7 @@ watch(
     :prefill-schema="dialogs.tableImportPrefillSchema.value"
     :prefill-table="dialogs.tableImportPrefillTable.value"
   />
-  <MongoImportDialog v-model:open="dialogs.showMongoImportDialog.value" :connection-id="dialogs.mongoImportPrefillConnectionId.value" :database="dialogs.mongoImportPrefillDatabase.value" :collection="dialogs.mongoImportPrefillCollection.value" />
+  <MongoImportDialog v-if="mongoImportDialogMounted" v-model:open="dialogs.showMongoImportDialog.value" :connection-id="dialogs.mongoImportPrefillConnectionId.value" :database="dialogs.mongoImportPrefillDatabase.value" :collection="dialogs.mongoImportPrefillCollection.value" />
   <MongoDatabaseDumpDialog
     v-if="dialogs.showMongoDatabaseDumpDialog.value"
     v-model:open="dialogs.showMongoDatabaseDumpDialog.value"
@@ -308,6 +321,7 @@ watch(
     :database="dialogs.mongoDatabaseDumpPrefillDatabase.value"
     :mode="dialogs.mongoDatabaseDumpMode.value"
   />
+  <DamengDumpDialog v-if="dialogs.showDamengDumpDialog.value" v-model:open="dialogs.showDamengDumpDialog.value" :connection-id="dialogs.damengDumpPrefillConnectionId.value" :database="dialogs.damengDumpPrefillDatabase.value" :mode="dialogs.damengDumpMode.value" />
   <DataGenerateDialog
     v-if="dialogs.showTableDataGenerateDialog.value"
     v-model:open="dialogs.showTableDataGenerateDialog.value"
@@ -321,6 +335,7 @@ watch(
     v-if="dialogs.showFieldLineageDialog.value"
     v-model:open="dialogs.showFieldLineageDialog.value"
     :prefill-connection-id="dialogs.lineagePrefillConnectionId.value"
+    :prefill-database-type="dialogs.lineagePrefillDatabaseType.value"
     :prefill-database="dialogs.lineagePrefillDatabase.value"
     :prefill-schema="dialogs.lineagePrefillSchema.value"
     :prefill-table="dialogs.lineagePrefillTable.value"

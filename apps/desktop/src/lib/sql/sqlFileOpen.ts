@@ -1,9 +1,28 @@
+import type { QueryTab } from "@/types/database";
+
+/** File identity comes from the query tab, never its editable display title. */
+export function queryTabExternalFilePath(tab: QueryTab | undefined | null): string | undefined {
+  return tab?.mode === "query" && tab.externalSqlPath?.trim() ? tab.externalSqlPath : undefined;
+}
+
 export function isSqlFilePath(path: string): boolean {
   return /\.sql$/i.test(path.trim());
 }
 
+export function isDdlFilePath(path: string): boolean {
+  return /\.ddl$/i.test(path.trim());
+}
+
 export function isScriptFilePath(path: string): boolean {
   return /\.(sql|js)$/i.test(path.trim());
+}
+
+export function isSqlOrScriptFilePath(path: string): boolean {
+  return /\.(sql|ddl|js)$/i.test(path.trim());
+}
+
+export function isSpreadsheetFilePath(path: string): boolean {
+  return /\.(xlsx|xls|csv|tsv)$/i.test(path.trim());
 }
 
 export interface QueryEditorFileDialogFilter {
@@ -46,6 +65,16 @@ export function normalizeExternalSqlPath(path: string): string {
     .replace(/\\/g, "/")
     .replace(/\/{2,}/g, "/");
   return normalized.length > 1 ? normalized.replace(/\/$/, "") : normalized;
+}
+
+export function relocateExternalSqlPathWithinFolder(path: string, previousFolderPath: string, nextFolderPath: string): string | null {
+  const normalizedPath = normalizeExternalSqlPath(path);
+  const previous = normalizeExternalSqlPath(previousFolderPath);
+  const next = normalizeExternalSqlPath(nextFolderPath);
+  if (!normalizedPath || !previous || !next || (normalizedPath !== previous && !normalizedPath.startsWith(`${previous}/`))) return null;
+  const nextPrefix = nextFolderPath.trim().replace(/[\\/]+$/, "");
+  if (!nextPrefix) return null;
+  return `${nextPrefix}${normalizedPath.slice(previous.length)}`;
 }
 
 export function externalSqlFileDisplayTitles(paths: string[]): string[] {

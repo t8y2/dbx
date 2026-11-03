@@ -3,19 +3,19 @@ import { supportsCreateDatabaseCharset, supportsCreateDatabaseLocale } from "@/l
 import { DEFAULT_GBASE8S_DATABASE_LOCALE, defaultGbase8sDatabaseLocale, GBASE8S_DATABASE_LOCALES } from "@/lib/database/createDatabaseCharsetOptions";
 
 describe("GBase 8s / Informix create-database locale support", () => {
-  it("offers a locale picker only for the gbase8s profile", () => {
-    expect(supportsCreateDatabaseLocale("gbase", "gbase8s")).toBe(true);
+  it("offers a locale picker only for the gbase8s type", () => {
+    expect(supportsCreateDatabaseLocale("gbase8s")).toBe(true);
     // Plain Informix's agent has no directive handling, so the locale picker must stay hidden
     // there until InformixAgent implements it; showing it would silently ignore the choice.
-    expect(supportsCreateDatabaseLocale("informix", undefined)).toBe(false);
+    expect(supportsCreateDatabaseLocale("informix")).toBe(false);
   });
 
   it("does not treat GBase 8a or MySQL as locale-picking", () => {
-    expect(supportsCreateDatabaseLocale("gbase", "gbase8a")).toBe(false);
-    expect(supportsCreateDatabaseLocale("mysql", "mysql")).toBe(false);
+    expect(supportsCreateDatabaseLocale("gbase")).toBe(false);
+    expect(supportsCreateDatabaseLocale("mysql")).toBe(false);
     // The MySQL charset path stays independent of the Informix locale path.
     expect(supportsCreateDatabaseCharset("mysql", "mysql")).toBe(true);
-    expect(supportsCreateDatabaseCharset("gbase", "gbase8s")).toBe(false);
+    expect(supportsCreateDatabaseCharset("gbase8s", "gbase8s")).toBe(false);
   });
 
   it("defaults to a Chinese-capable UTF-8 locale", () => {

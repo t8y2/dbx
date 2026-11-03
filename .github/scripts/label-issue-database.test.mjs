@@ -21,8 +21,8 @@ function issueWithDatabase(database, title = "[Bug]") {
 }
 
 function matchedLabels(database, title) {
-  return triageIssue(issueWithDatabase(database, title)).summary.labelsToAdd
-    .filter((label) => label.startsWith("db/"))
+  return triageIssue(issueWithDatabase(database, title))
+    .summary.labelsToAdd.filter((label) => label.startsWith("db/"))
     .sort();
 }
 
@@ -35,10 +35,7 @@ test("database issue catalog covers every DatabaseType", () => {
 test("database label synchronization includes every catalog entry once", () => {
   const labelNames = allDatabaseLabelSpecs().map((label) => label.name);
   assert.equal(new Set(labelNames).size, databaseIssueDrivers.length);
-  assert.deepEqual(
-    labelNames.sort(),
-    databaseIssueDrivers.map((driver) => `db/${driver.dbType}`).sort(),
-  );
+  assert.deepEqual(labelNames.sort(), databaseIssueDrivers.map((driver) => `db/${driver.dbType}`).sort());
 });
 
 test("Kingbase aliases retain historical and current company names", () => {

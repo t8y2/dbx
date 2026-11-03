@@ -24,6 +24,19 @@ describe("countTransferObjects", () => {
 });
 
 describe("buildTransferObjectSelections", () => {
+  it("retains separate same-name package selections and omits them only from a data-only request", () => {
+    const selected = { TABLE: setOf(["orders"]), PACKAGE: setOf(["Pkg.With.Dot😀"]), PACKAGE_BODY: setOf(["Pkg.With.Dot😀"]) };
+    const fields = buildTransferObjectSelectionField(selected, []);
+    expect(fields.objects).toEqual([
+      { objectType: "PACKAGE", names: ["Pkg.With.Dot😀"] },
+      { objectType: "PACKAGE_BODY", names: ["Pkg.With.Dot😀"] },
+    ]);
+    expect(countTransferObjects({ tables: ["orders"], ...fields })).toBe(3);
+    expect(buildTransferObjectSelectionField(selected, ["PACKAGE", "PACKAGE_BODY"]).objects).toEqual([]);
+    expect(buildTransferObjectSelectionField(selected, []).objects).toEqual(fields.objects);
+    expect(buildTransferObjectSelectionField({ PACKAGE_BODY: selected.PACKAGE_BODY }, []).objects).toEqual([{ objectType: "PACKAGE_BODY", names: ["Pkg.With.Dot😀"] }]);
+  });
+
   it("serializes non-table selections in request order", () => {
     const result = buildTransferObjectSelections(
       {

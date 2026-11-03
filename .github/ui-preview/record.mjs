@@ -34,7 +34,10 @@ const MODEL = env("PLAN_MODEL", "deepseek-flash");
 const VIEW = { width: 1440, height: 900 };
 // never pressed: they delete the sandbox's own data or its setup
 const FORBIDDEN = /删除|清空|移除|卸载|重置|格式化|delete|remove|clear all|drop\b|truncate\b/i;
-const secrets = env("SECRETS", "").split("\n").map((s) => s.trim()).filter((s) => s.length >= 8);
+const secrets = env("SECRETS", "")
+  .split("\n")
+  .map((s) => s.trim())
+  .filter((s) => s.length >= 8);
 
 const log = (...a) => console.log("[ui-preview]", ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -46,7 +49,13 @@ const manifest = { summary: "", scenes: [], video: null, poster: null, errors: [
 function outline() {
   const lines = [];
   const MAX = 420;
-  const own = (e) => [...e.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent.trim()).join(" ").replace(/\s+/g, " ").slice(0, 70);
+  const own = (e) =>
+    [...e.childNodes]
+      .filter((n) => n.nodeType === 3)
+      .map((n) => n.textContent.trim())
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .slice(0, 70);
   const shown = (e) => {
     const r = e.getBoundingClientRect();
     if (!r.width || !r.height) return false;
@@ -58,9 +67,19 @@ function outline() {
     if (lines.length >= MAX || e.hasAttribute?.("data-ui-preview")) return;
     const tag = e.tagName.toLowerCase();
     if (["script", "style", "svg", "link", "meta", "noscript", "template"].includes(tag) || !shown(e)) return;
-    const cls = [...e.classList].slice(0, 4).map((c) => "." + c).join("");
-    const data = [...e.attributes].filter((a) => a.name.startsWith("data-") && a.value.length < 40).slice(0, 3).map((a) => `[${a.name}="${a.value}"]`).join("");
-    const aria = ["role", "aria-label", "title", "placeholder", "type"].map((k) => e.getAttribute(k) ? `${k}="${e.getAttribute(k).slice(0, 40)}"` : "").filter(Boolean).join(" ");
+    const cls = [...e.classList]
+      .slice(0, 4)
+      .map((c) => "." + c)
+      .join("");
+    const data = [...e.attributes]
+      .filter((a) => a.name.startsWith("data-") && a.value.length < 40)
+      .slice(0, 3)
+      .map((a) => `[${a.name}="${a.value}"]`)
+      .join("");
+    const aria = ["role", "aria-label", "title", "placeholder", "type"]
+      .map((k) => (e.getAttribute(k) ? `${k}="${e.getAttribute(k).slice(0, 40)}"` : ""))
+      .filter(Boolean)
+      .join(" ");
     const text = own(e);
     const r = e.getBoundingClientRect();
     const away = r.top >= fold ? " (below the fold)" : "";
@@ -75,8 +94,7 @@ function outline() {
 }
 
 async function screenText(page) {
-  return page.evaluate(() => document.documentElement.innerText + "\n" +
-    [...document.querySelectorAll("input, textarea")].map((e) => e.value).join("\n")).catch(() => "");
+  return page.evaluate(() => document.documentElement.innerText + "\n" + [...document.querySelectorAll("input, textarea")].map((e) => e.value).join("\n")).catch(() => "");
 }
 async function checkLeak(page, where) {
   if (!secrets.length) return;
@@ -109,8 +127,12 @@ async function askPlanner(messages) {
     if (!res.ok) throw new Error(`planner API ${res.status}: ${(await res.text()).slice(0, 300)}`);
     const j = await res.json();
     const text = j.choices?.[0]?.message?.content ?? "";
-    try { return JSON.parse(text.replace(/^```(?:json)?\s*|\s+```$/g, "")); }
-    catch (e) { last = new Error(`reply not JSON (${j.choices?.[0]?.finish_reason}): ${e.message}`); log(last.message, "— asking again"); }
+    try {
+      return JSON.parse(text.replace(/^```(?:json)?\s*|\s+```$/g, ""));
+    } catch (e) {
+      last = new Error(`reply not JSON (${j.choices?.[0]?.finish_reason}): ${e.message}`);
+      log(last.message, "— asking again");
+    }
   }
   throw last;
 }
@@ -141,16 +163,22 @@ async function readTree(root) {
 
 async function codeContext(diff, src) {
   if (!src) return "";
-  const changed = [...new Set([...diff.matchAll(/^diff --git a\/(\S+) b\/\1$/gm)].map((m) => m[1]))]
-    .filter((f) => /^apps\/desktop\/src\//.test(f) && !SKIP.test(f.slice("apps/desktop/src/".length - 1)) && !SKIP.test(f));
+  const changed = [...new Set([...diff.matchAll(/^diff --git a\/(\S+) b\/\1$/gm)].map((m) => m[1]))].filter((f) => /^apps\/desktop\/src\//.test(f) && !SKIP.test(f.slice("apps/desktop/src/".length - 1)) && !SKIP.test(f));
 
   // 1. the changed files
   let out = "";
   for (const f of changed.slice(0, 12)) {
     let body;
-    try { body = await fs.readFile(path.join(src, f), "utf8"); } catch { continue; }
+    try {
+      body = await fs.readFile(path.join(src, f), "utf8");
+    } catch {
+      continue;
+    }
     const chunk = `--- ${f}\n${body.length > 8000 ? body.slice(0, 8000) + "\n… (cut)" : body}\n`;
-    if (out.length + chunk.length > 20e3) { out += "… (cut)\n"; break; }
+    if (out.length + chunk.length > 20e3) {
+      out += "… (cut)\n";
+      break;
+    }
     out += chunk;
   }
 
@@ -170,16 +198,14 @@ async function codeContext(diff, src) {
   let entries = "";
   for (const name of components.slice(0, 6)) {
     const kebab = name.replace(/([a-z])([A-Z])/g, "$1-$2").toLowerCase();
-    const re = new RegExp(
-      "import\\s+" + name + "\\b" +
-      "|from\\s+[\"'][^\"']*/" + name + "(\\.vue)?[\"']" +
-      "|import\\(\\s*[\"'][^\"']*/" + name + "(\\.vue)?[\"']\\s*\\)" +
-      "|<" + kebab + "[\\s>/]|<" + name + "[\\s>/]");
+    const re = new RegExp("import\\s+" + name + "\\b" + "|from\\s+[\"'][^\"']*/" + name + "(\\.vue)?[\"']" + "|import\\(\\s*[\"'][^\"']*/" + name + "(\\.vue)?[\"']\\s*\\)" + "|<" + kebab + "[\\s>/]|<" + name + "[\\s>/]");
     const flags = new Map(); // caller file -> Set of line numbers
     for (const p of files) {
       const t = await read(p);
       if (!t || rel(p).endsWith(`/${name}.vue`)) continue;
-      t.split("\n").forEach((l, i) => { if (re.test(l)) (flags.get(p) ?? flags.set(p, new Set()).get(p)).add(i); });
+      t.split("\n").forEach((l, i) => {
+        if (re.test(l)) (flags.get(p) ?? flags.set(p, new Set()).get(p)).add(i);
+      });
     }
     for (const [p, lines] of flags) {
       // a dynamic import renames the component (const X = defineAsyncComponent):
@@ -194,14 +220,19 @@ async function codeContext(diff, src) {
       }
       if (aliases.size > 1) {
         const tagRe = new RegExp("<(?:" + [...aliases].join("|") + "|" + [...aliases].map((a) => a.replace(/([a-z])([A-Z])/g, "$1-$2").toLowerCase()).join("|") + ")[\\s>/]");
-        linesArr.forEach((l, i) => { if (tagRe.test(l)) lines.add(i); });
+        linesArr.forEach((l, i) => {
+          if (tagRe.test(l)) lines.add(i);
+        });
       }
       // the usage with its v-if/v-show/:open condition, and identifiers in it
       const span = [];
       for (const i of lines) span.push(linesArr.slice(Math.max(0, i - 6), i + 14).join("\n"));
       const cond = span.join("\n");
       const chunk = `--- ${rel(p)} renders ${name} (how it is shown):\n${cond.slice(0, 2500)}\n`;
-      if (entries.length + chunk.length > 9e3) { entries += "… (cut)\n"; break; }
+      if (entries.length + chunk.length > 9e3) {
+        entries += "… (cut)\n";
+        break;
+      }
       entries += chunk;
       // who flips those conditions: identifiers in v-if / :open / v-model near the usage
       const ids = [...new Set([...cond.matchAll(/(?:v-if|v-show|:open|v-model:open|:model-value)="\s*([A-Za-z_$][\w$.]*)/g)].map((m) => m[1]))].slice(0, 4);
@@ -270,9 +301,10 @@ async function glide(page, x, y) {
   const n = Math.max(8, Math.round(ms / 16));
   const from = { ...mouse };
   for (let i = 1; i <= n; i++) {
-    const t = i / n, e = t < .5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2;
+    const t = i / n,
+      e = t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2;
     // a slight arc, not a ruler line
-    const bend = Math.sin(Math.PI * t) * Math.min(40, d * .08);
+    const bend = Math.sin(Math.PI * t) * Math.min(40, d * 0.08);
     const nx = from.x + (x - from.x) * e - ((y - from.y) / (d || 1)) * bend;
     const ny = from.y + (y - from.y) * e + ((x - from.x) / (d || 1)) * bend;
     await page.mouse.move(nx, ny);
@@ -319,11 +351,14 @@ async function locate(page, step) {
       const el = await hit.evaluateHandle((n, text) => {
         for (;;) {
           const kids = [...n.children].filter((c) => (c.textContent || "").includes(text) && c.getBoundingClientRect().width > 0);
-          if (kids.length === 1) n = kids[0]; else return n;
+          if (kids.length === 1) n = kids[0];
+          else return n;
         }
       }, text);
       return el.asElement() || hit;
-    } catch { return hit; }
+    } catch {
+      return hit;
+    }
   };
   let loc = text ? all.filter({ hasText: text }) : all;
   let hit = await visible(loc);
@@ -356,7 +391,6 @@ async function locate(page, step) {
   throw new Error(`nothing visible matches ${step.target}${step.text ? ` with "${step.text}"` : ""} (${await loc.count()} in the page)`);
 }
 
-
 // Out of sight is scrolled to as a reader would, with the wheel over what
 // scrolls. Each view that hides it, the innermost first, is wheeled in small
 // steps until the element is in the middle of it, or at its top when it's
@@ -378,19 +412,22 @@ async function bringIntoView(page, loc) {
         const root = s === document.scrollingElement;
         const b = root ? clip : s.getBoundingClientRect();
         // what of it shows: inside the window and every view around it
-        let top = Math.max(b.top, 0), bottom = Math.min(b.bottom, innerHeight);
-        let left = Math.max(b.left, 0), right = Math.min(b.right, innerWidth);
+        let top = Math.max(b.top, 0),
+          bottom = Math.min(b.bottom, innerHeight);
+        let left = Math.max(b.left, 0),
+          right = Math.min(b.right, innerWidth);
         for (let p = s.parentElement; p && !root; p = p.parentElement) {
           if (!scrollers.includes(p) || p === document.scrollingElement) continue;
           const pb = p.getBoundingClientRect();
-          top = Math.max(top, pb.top); bottom = Math.min(bottom, pb.bottom);
-          left = Math.max(left, pb.left); right = Math.min(right, pb.right);
+          top = Math.max(top, pb.top);
+          bottom = Math.min(bottom, pb.bottom);
+          left = Math.max(left, pb.left);
+          right = Math.min(right, pb.right);
         }
         const room = bottom - top - 2 * PAD;
         const want = r.height <= room ? (r.top + r.bottom) / 2 - (top + bottom) / 2 : r.top - (top + PAD);
         const shown = r.top >= top + Math.min(PAD, Math.max(0, room - r.height) / 2) && (r.height <= room ? r.bottom <= bottom - PAD : r.top <= top + PAD * 2);
-        out.push({ shown, dy: Math.max(-s.scrollTop, Math.min(s.scrollHeight - s.clientHeight - s.scrollTop, want)),
-          x: (left + right) / 2, y: (top + bottom) / 2, seen: bottom - top > 20 && right - left > 20 });
+        out.push({ shown, dy: Math.max(-s.scrollTop, Math.min(s.scrollHeight - s.clientHeight - s.scrollTop, want)), x: (left + right) / 2, y: (top + bottom) / 2, seen: bottom - top > 20 && right - left > 20 });
       }
       return out;
     }, PAD);
@@ -416,7 +453,8 @@ async function pointAt(page, loc) {
   await bringIntoView(page, loc);
   const b = await loc.boundingBox();
   if (!b) throw new Error("the element has no box");
-  const x = b.x + Math.min(b.width / 2, 60), y = b.y + b.height / 2;
+  const x = b.x + Math.min(b.width / 2, 60),
+    y = b.y + b.height / 2;
   await glide(page, x, y);
   return b;
 }
@@ -425,10 +463,16 @@ async function pointAt(page, loc) {
 // the seeded connections painted in, is ready
 async function settle(page) {
   await page.waitForLoadState("load").catch(() => {});
-  await page.waitForFunction(() => {
-    const txt = document.body.innerText || "";
-    return txt.includes("新建连接") || txt.includes("New Connection") || document.querySelectorAll("button").length >= 6;
-  }, null, { timeout: 20000 }).catch(() => {});
+  await page
+    .waitForFunction(
+      () => {
+        const txt = document.body.innerText || "";
+        return txt.includes("新建连接") || txt.includes("New Connection") || document.querySelectorAll("button").length >= 6;
+      },
+      null,
+      { timeout: 20000 },
+    )
+    .catch(() => {});
   await sleep(1500);
 }
 
@@ -440,13 +484,18 @@ async function runStep(page, step, scene) {
   switch (step.do) {
     case "click": {
       const loc = await locate(page, step);
-      const label = (await loc.innerText().catch(() => "")) + " " + (await loc.getAttribute("title").catch(() => "") || "");
+      const label = (await loc.innerText().catch(() => "")) + " " + ((await loc.getAttribute("title").catch(() => "")) || "");
       if (FORBIDDEN.test(label)) throw new Error(`won't press "${label.trim().slice(0, 40)}"`);
       await pointAt(page, loc);
       await sleep(180);
       if (step.dblclick) {
-        await page.mouse.down(); await sleep(60); await page.mouse.up();
-        await sleep(120); await page.mouse.down(); await sleep(60); await page.mouse.up();
+        await page.mouse.down();
+        await sleep(60);
+        await page.mouse.up();
+        await sleep(120);
+        await page.mouse.down();
+        await sleep(60);
+        await page.mouse.up();
       } else {
         await page.mouse.down();
         await sleep(90);
@@ -465,7 +514,9 @@ async function runStep(page, step, scene) {
     case "type": {
       const loc = await locate(page, step);
       await pointAt(page, loc);
-      await page.mouse.down(); await sleep(80); await page.mouse.up();
+      await page.mouse.down();
+      await sleep(80);
+      await page.mouse.up();
       await loc.fill("");
       await page.keyboard.type(String(step.value ?? ""), { delay: 70 });
       await sleep(600);
@@ -517,7 +568,8 @@ async function runStep(page, step, scene) {
           if (b) {
             // the target with room around it, never so small that a button
             // is shown without where it is
-            const w = Math.min(VIEW.width, Math.max(560, b.width + 48)), h = Math.min(VIEW.height, Math.max(340, b.height + 48));
+            const w = Math.min(VIEW.width, Math.max(560, b.width + 48)),
+              h = Math.min(VIEW.height, Math.max(340, b.height + 48));
             const x = Math.min(VIEW.width - w, Math.max(0, b.x + b.width / 2 - w / 2));
             const y = Math.min(VIEW.height - h, Math.max(0, b.y + b.height / 2 - h / 2));
             clip = { x, y, width: w, height: h };
@@ -553,7 +605,9 @@ async function main() {
     await lp.goto(BASE);
     await settle(lp);
     outlines.app = await lp.evaluate(outline);
-  } catch (e) { outlines.app = `(failed to load: ${e.message})`; }
+  } catch (e) {
+    outlines.app = `(failed to load: ${e.message})`;
+  }
   await look.close();
 
   const MAXDIFF = 150e3;
@@ -561,13 +615,18 @@ async function main() {
   log(`code context: ${code.length} characters`);
   const ask = [
     { role: "system", content: GUIDE },
-    { role: "user", content: `PR title: ${env("PR_TITLE", "")}\n\nPR description:\n${body.slice(0, 6000)}\n\nDiff${diff.length > MAXDIFF ? " (cut)" : ""}:\n${diff.slice(0, MAXDIFF)}\n\n` +
-      `=== outline: app ===\n${outlines.app}` +
-      (code ? `\n\n=== the changed frontend files (the PR's version) ===\n${code}` : "") },
+    {
+      role: "user",
+      content: `PR title: ${env("PR_TITLE", "")}\n\nPR description:\n${body.slice(0, 6000)}\n\nDiff${diff.length > MAXDIFF ? " (cut)" : ""}:\n${diff.slice(0, MAXDIFF)}\n\n` + `=== outline: app ===\n${outlines.app}` + (code ? `\n\n=== the changed frontend files (the PR's version) ===\n${code}` : ""),
+    },
   ];
   let plan;
-  try { plan = env("PLAN_FILE") ? JSON.parse(await fs.readFile(env("PLAN_FILE"), "utf8")) : await askPlanner(ask); }
-  catch (e) { plan = null; manifest.errors.push(`plan: ${e.message}`); }
+  try {
+    plan = env("PLAN_FILE") ? JSON.parse(await fs.readFile(env("PLAN_FILE"), "utf8")) : await askPlanner(ask);
+  } catch (e) {
+    plan = null;
+    manifest.errors.push(`plan: ${e.message}`);
+  }
   if (!plan || plan.ui_change === false || !plan.scenes?.length) {
     manifest.summary = plan?.summary || "";
     manifest.skipped = plan ? "no visible UI change found in the diff" : "no plan";
@@ -582,7 +641,8 @@ async function main() {
   if (plan.scenes.length) {
     const rec = await browser.newContext({ ...ctxOpts, recordVideo: { dir: path.join(OUT, "raw"), size: VIEW } });
     await rec.addInitScript({ path: path.join(here, "cursor.js") });
-    let repairs = 0, interactive = false;
+    let repairs = 0,
+      interactive = false;
     // one take per scene: every scene starts from the app as it opens, and
     // its video keeps only what happens once the app has settled — the
     // load never reaches the final cut, so a scene change reads as a cut,
@@ -613,8 +673,9 @@ async function main() {
       for (let i = 0; i < steps.length; i++) {
         const step = steps[i];
         if (["click", "hover", "type", "press", "scroll", "upload"].includes(step.do)) interactive = true;
-        try { await runStep(page, step, scene); }
-        catch (e) {
+        try {
+          await runStep(page, step, scene);
+        } catch (e) {
           if (manifest.leak) break;
           manifest.errors.push(`${scene.title} · ${step.do} ${step.target || step.name || ""}: ${e.message.split("\n")[0]}`);
           log("step failed:", e.message);
@@ -640,13 +701,27 @@ async function main() {
           repairs++;
           // the page as it is now, and what went wrong: the rest of the scene again
           try {
-            const fix = await askPlanner([...ask, { role: "assistant", content: JSON.stringify(plan) },
-              { role: "user", content: `Step ${i + 1} of scene "${scene.title}" failed: ${e.message.split("\n")[0]}\nThe page now:\n${await page.evaluate(outline)}\n\nIf the failed selector came from the diff, remember the changed-file paths above say which dialog, panel or component holds it — a different one may have to be opened (or closed) first, not just a different selector for this page. Reply with JSON {"steps": [...]}: the steps to do instead of that one and the ones after it in this scene.` }]);
-            if (Array.isArray(fix.steps)) { steps = [...steps.slice(0, i + 1), ...fix.steps.slice(0, 20)]; log("repaired:", JSON.stringify(fix.steps)); }
-          } catch (e2) { manifest.errors.push(`repair: ${e2.message}`); }
+            const fix = await askPlanner([
+              ...ask,
+              { role: "assistant", content: JSON.stringify(plan) },
+              {
+                role: "user",
+                content: `Step ${i + 1} of scene "${scene.title}" failed: ${e.message.split("\n")[0]}\nThe page now:\n${await page.evaluate(outline)}\n\nIf the failed selector came from the diff, remember the changed-file paths above say which dialog, panel or component holds it — a different one may have to be opened (or closed) first, not just a different selector for this page. Reply with JSON {"steps": [...]}: the steps to do instead of that one and the ones after it in this scene.`,
+              },
+            ]);
+            if (Array.isArray(fix.steps)) {
+              steps = [...steps.slice(0, i + 1), ...fix.steps.slice(0, 20)];
+              log("repaired:", JSON.stringify(fix.steps));
+            }
+          } catch (e2) {
+            manifest.errors.push(`repair: ${e2.message}`);
+          }
         }
       }
-      if (manifest.leak) { await page.close().catch(() => {}); break; }
+      if (manifest.leak) {
+        await page.close().catch(() => {});
+        break;
+      }
       await caption(page, "");
       await sleep(600);
       takes.push({ video: await page.video().path(), from: Math.max(0, (ready - began) / 1000 - 0.2) });
@@ -659,9 +734,7 @@ async function main() {
       // the takes joined, each already trimmed of its load
       const args = ["-y", "-loglevel", "error"];
       const pins = takes.map((t, i) => (args.push("-ss", t.from.toFixed(2), "-i", t.video), `[${i}:v]`));
-      args.push("-filter_complex", `${pins.join("")}concat=n=${takes.length}:v=1:a=0[v]`, "-map", "[v]",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-r", "30",
-        path.join(OUT, "preview.mp4"));
+      args.push("-filter_complex", `${pins.join("")}concat=n=${takes.length}:v=1:a=0[v]`, "-map", "[v]", "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-r", "30", path.join(OUT, "preview.mp4"));
       execFileSync("ffmpeg", args);
       manifest.video = "preview.mp4";
       manifest.poster = await poster(browser);
@@ -671,7 +744,8 @@ async function main() {
   await browser.close();
   if (manifest.leak) {
     for (const f of await fs.readdir(OUT)) await fs.rm(path.join(OUT, f), { recursive: true, force: true });
-    manifest.scenes = []; manifest.video = manifest.poster = null;
+    manifest.scenes = [];
+    manifest.video = manifest.poster = null;
   }
   await fs.writeFile(path.join(OUT, "manifest.json"), JSON.stringify(manifest, null, 2));
   log("done:", JSON.stringify({ shots: manifest.scenes.reduce((n, s) => n + s.shots.length, 0), video: manifest.video, errors: manifest.errors.length, leak: manifest.leak }));

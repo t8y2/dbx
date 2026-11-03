@@ -21,6 +21,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("DBX Keychain access authorized. Restart your MCP client.");
         return Ok(());
     }
+    if std::env::args_os().nth(1).is_some_and(|argument| argument == credentials::VERIFY_ARGUMENT) {
+        if std::env::args_os().len() != 2 {
+            return Err(format!("Usage: dbx-mcp {}", credentials::VERIFY_ARGUMENT).into());
+        }
+        credentials::verify_background_access()?;
+        return Ok(());
+    }
     run_noninteractive(run())
 }
 

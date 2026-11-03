@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -1211,10 +1210,11 @@ func (s *server) peekMessages(params jsonObject) (any, error) {
 			return nil, err
 		}
 	}
+	decodePayload := boolOrDefault(params, "decode", false) || boolOrDefault(params, "decodePayload", false) || boolOrDefault(params, "decode_payload", false)
 	messageCapacity := peekMessageCapacity(len(fetched), offset, count)
 	messages := make([]jsonObject, 0, messageCapacity)
 	for index := offset; index < int64(len(fetched)) && len(messages) < count; index++ {
-		messages = append(messages, peekedMessageFromDelivery(queue, index, fetched[index]))
+		messages = append(messages, peekedMessageFromDelivery(queue, index, fetched[index], decodePayload))
 	}
 	return jsonObject{"messages": messages}, nil
 }
@@ -1258,7 +1258,7 @@ func resolveRoutingKey(params jsonObject, queue string) string {
 	return routingKey
 }
 
-func peekedMessageFromDelivery(queue string, index int64, delivery amqp.Delivery) jsonObject {
+func peekedMessageFromDelivery(queue string, index int64, delivery amqp.Delivery, decodePayload ...bool) jsonObject {
 	message := jsonObject{
 		"topic":         queue,
 		"offset":        index,
@@ -1268,6 +1268,7 @@ func peekedMessageFromDelivery(queue string, index int64, delivery amqp.Delivery
 		"deliveryTag":   delivery.DeliveryTag,
 		"timestamp":     int64(0),
 		"headers":       stringHeaders(delivery.Headers),
+		"properties":    deliveryProperties(delivery),
 		"payloadBase64": base64.StdEncoding.EncodeToString(delivery.Body),
 	}
 	if delivery.MessageId != "" {
@@ -1276,8 +1277,8 @@ func peekedMessageFromDelivery(queue string, index int64, delivery amqp.Delivery
 	if !delivery.Timestamp.IsZero() {
 		message["timestamp"] = delivery.Timestamp.UnixMilli()
 	}
-	if utf8.Valid(delivery.Body) {
-		message["payloadText"] = string(delivery.Body)
+	if text, ok := decodeDeliveryPayloadText(delivery.Body, decodePayload...); ok {
+		message["payloadText"] = text
 	}
 	return message
 }
@@ -1322,6 +1323,9 @@ func (s *server) sendMessage(params jsonObject) (any, error) {
 				publishing.Headers[key] = converted
 			}
 		}
+	}
+	if err := applyMessageProperties(&publishing, params); err != nil {
+		return nil, err
 	}
 	if err := channel.PublishWithContext(context.Background(), exchange, routingKey, false, false, publishing); err != nil {
 		return nil, err

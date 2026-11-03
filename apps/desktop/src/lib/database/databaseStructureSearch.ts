@@ -22,9 +22,12 @@ export interface DatabaseStructureSearchHit {
   schema?: string;
   tableName: string;
   tableType?: string;
-  columnName: string;
+  /** 字段级命中的列名；表注释命中（表级结果行）时为 undefined。 */
+  columnName?: string;
   columnComment?: string;
-  matchedIn: Array<"name" | "comment">;
+  /** 表自身注释的命中内容，仅当 matchedIn 含 "tableComment" 时有值。 */
+  tableComment?: string;
+  matchedIn: Array<"name" | "comment" | "tableComment">;
 }
 
 export interface DatabaseStructureSearchOptions {
@@ -75,24 +78,42 @@ export function mapStructureSearchRows(columns: string[], rows: unknown[][], ter
     const tableType = asString(record.object_type) || undefined;
     const columnName = asString(record.column_name);
     const columnComment = asString(record.column_comment) || undefined;
-    if (!tableName || !columnName) continue;
-    const matchedIn: Array<"name" | "comment"> = [];
-    if (termMatches(columnName, query)) matchedIn.push("name");
-    if (termMatches(columnComment, query)) matchedIn.push("comment");
+    const tableComment = asString(record.table_comment) || undefined;
+    if (!tableName) continue;
+    const matchedIn: Array<"name" | "comment" | "tableComment"> = [];
+    if (columnName && termMatches(columnName, query)) matchedIn.push("name");
+    if (columnComment && termMatches(columnComment, query)) matchedIn.push("comment");
+    // 表注释命中是表级结果行：column_name 为空，只有 table_comment 参与匹配。
+    if (tableComment && termMatches(tableComment, query)) matchedIn.push("tableComment");
     if (!matchedIn.length) continue;
-    hits.push({ schema, tableName, tableType, columnName, columnComment, matchedIn });
+    hits.push({
+      schema,
+      tableName,
+      tableType,
+      columnName: columnName || undefined,
+      columnComment,
+      tableComment,
+      matchedIn,
+    });
   }
   return hits;
 }
 
 export function structureHitPreview(hit: DatabaseStructureSearchHit): string {
   const parts: string[] = [];
-  if (hit.matchedIn.includes("name")) parts.push(hit.columnName);
+  if (hit.matchedIn.includes("name") && hit.columnName) parts.push(hit.columnName);
   if (hit.matchedIn.includes("comment") && hit.columnComment) {
-    const comment = hit.columnComment.replace(/\s+/g, " ").trim();
-    parts.push(comment.length > 90 ? `${comment.slice(0, 90)}...` : comment);
+    parts.push(truncateComment(hit.columnComment));
   }
-  return parts.join(" · ") || hit.columnName;
+  if (hit.matchedIn.includes("tableComment") && hit.tableComment) {
+    parts.push(truncateComment(hit.tableComment));
+  }
+  return parts.join(" · ") || hit.columnName || "";
+}
+
+function truncateComment(comment: string): string {
+  const normalized = comment.replace(/\s+/g, " ").trim();
+  return normalized.length > 90 ? `${normalized.slice(0, 90)}...` : normalized;
 }
 
 export async function buildDatabaseStructureSearchSql(options: DatabaseStructureSearchSqlOptions): Promise<DatabaseStructureSearchSql | null> {

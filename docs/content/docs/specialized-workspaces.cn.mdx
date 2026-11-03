@@ -34,6 +34,25 @@ Redis 和 MongoDB 有独立的详细文档：
 
 连接只读时，DBX 会禁用或拒绝 Redis、MongoDB 和 GridFS 中的修改操作。危险 Redis 命令还会经过独立的命令安全分类。
 
+## DynamoDB PartiQL
+
+DynamoDB 连接可以通过查询编辑器执行原生 PartiQL。例如：
+
+```sql
+SELECT "pk", "status" FROM "orders" WHERE "pk" = 'order-1001';
+INSERT INTO "orders" VALUE {'pk': 'order-1002', 'status': 'NEW'};
+UPDATE "orders" SET "status" = 'PAID' WHERE "pk" = 'order-1002';
+DELETE FROM "orders" WHERE "pk" = 'order-1002';
+```
+
+DBX 使用 AWS SDK 的 [ExecuteStatement](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_ExecuteStatement.html)，不将 PartiQL 翻译为其他 SQL。实际支持范围、IAM 权限及错误由 DynamoDB 决定；这不是完整关系型 SQL，不提供 JOIN、SQL 文件执行、DDL 或跨语句事务。原有 `DBX DYNAMODB SCAN` / Item 命令保持可用。
+
+SELECT 会按服务返回的 `NextToken` 继续读取，包括过滤后没有匹配项的中间页。结果遵循编辑器行数上限，最多读取 1,000 页；达到限制或服务未提供可继续的令牌时，会标记截断并显示警告，不将部分数据报告为完整结果。`LIMIT` 不是这里的行数控制语法，应使用编辑器结果上限或更精确的条件。没有分区键条件的 SELECT 可能扫描大量数据并产生费用。
+
+查询结果使用已返回数据的本地分页，不注入 SQL `LIMIT` / `OFFSET` 或派生表 `COUNT`；文档浏览器的游标分页不受影响。
+
+投影结果保留 DynamoDB 的大数、二进制及嵌套类型表示，不添加用于文档编辑的合成 `_id`。单条写入不进入客户端分页循环；受影响数量表示服务确认的单条操作，并非服务返回的精确变更行数。读取和写入仍经过原有只读、生产确认、超时和取消链路。
+
 ## 搜索与文档索引
 
 Elasticsearch、Easysearch、Meilisearch 和 Manticore Search 使用面向索引与文档的浏览方式。DBX 会根据驱动返回的对象结构展示索引或集合，并提供浏览、查询和查看文档的入口。

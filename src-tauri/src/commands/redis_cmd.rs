@@ -4,8 +4,8 @@ use tauri::State;
 use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::db::redis_driver::{
     classify_command, parse_command_argv, RedisBlob, RedisCollectionPage, RedisCommandResult, RedisCommandSafety,
-    RedisDatabaseInfo, RedisKeysExpiryResult, RedisScanResult, RedisStreamConsumer, RedisStreamGroup, RedisStreamPage,
-    RedisStreamPendingPage, RedisValue,
+    RedisDatabaseInfo, RedisKeyMetadata, RedisKeysExpiryResult, RedisScanResult, RedisStreamConsumer, RedisStreamGroup,
+    RedisStreamPage, RedisStreamPendingPage, RedisValue,
 };
 
 #[tauri::command]
@@ -52,6 +52,18 @@ pub async fn redis_scan_keys_batch(
     .await
 }
 
+/// Reads TYPE and TTL for an explicit list of keys so the key browser can
+/// fill the badges of rows it already listed without rescanning the keyspace.
+#[tauri::command]
+pub async fn redis_key_metadata_batch(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raws: Vec<String>,
+) -> Result<Vec<RedisKeyMetadata>, String> {
+    dbx_core::redis_ops::redis_key_metadata_batch_in_db_core(&state, &connection_id, db, &key_raws).await
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn redis_scan_values(
@@ -83,8 +95,16 @@ pub async fn redis_get_value(
     connection_id: String,
     db: u32,
     key_raw: String,
+    preview_limit_bytes: Option<usize>,
 ) -> Result<RedisValue, String> {
-    dbx_core::redis_ops::redis_get_value_in_db_core(&state, &connection_id, db, &key_raw).await
+    dbx_core::redis_ops::redis_get_value_in_db_with_preview_limit_core(
+        &state,
+        &connection_id,
+        db,
+        &key_raw,
+        preview_limit_bytes,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -288,9 +308,11 @@ pub async fn redis_list_push(
     key_raw: String,
     value: String,
     ttl: Option<i64>,
+    side: Option<String>,
 ) -> Result<(), String> {
     ensure_connection_writable(&state, &connection_id, "LPUSH").await?;
-    dbx_core::redis_ops::redis_list_push_in_db_core(&state, &connection_id, db, &key_raw, &value, ttl).await
+    let side = dbx_core::redis_ops::ListPushSide::from_str_lossy(side.as_deref());
+    dbx_core::redis_ops::redis_list_push_in_db_core(&state, &connection_id, db, &key_raw, &value, ttl, side).await
 }
 
 #[tauri::command]
@@ -515,7 +537,7 @@ pub async fn redis_execute_command(
     skip_safety_check: Option<bool>,
 ) -> Result<RedisCommandResult, String> {
     let argv = parse_command_argv(&command).map_err(|error| format!("Invalid Redis command: {error}"))?;
-    let cmd_name = argv[0].to_ascii_uppercase();
+    let cmd_name = String::from_utf8_lossy(&argv[0]).to_ascii_uppercase();
     let safety = classify_command(&cmd_name);
     // In read-only mode, only allow safe read commands through the raw command interface
     if let Some(name) = dbx_core::query::connection_readonly_name(&state, &connection_id).await {

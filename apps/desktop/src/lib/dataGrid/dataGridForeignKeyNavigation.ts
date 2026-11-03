@@ -1,6 +1,8 @@
 import type { NavigationTarget } from "@/composables/useNavigationTargets";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
-import type { ForeignKeyInfo } from "@/types/database";
+import type { DatabaseType, ForeignKeyInfo } from "@/types/database";
+import { isSchemaAware, usesDatabaseObjectTreeMode } from "@/lib/database/databaseFeatureSupport";
+import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, type JdbcDialectConnection } from "@/lib/database/jdbcDialect";
 
 export interface ForeignKeyAssociation {
   foreignKey: ForeignKeyInfo;
@@ -87,9 +89,36 @@ export function foreignKeyMetadataRequestCurrent(options: { requestGeneration: n
   return options.requestGeneration === options.currentGeneration && options.requestIdentity === options.currentIdentity;
 }
 
-/** 构建跳转到被引用表的导航目标：ref_schema 缺失时回退当前 schema（同 ER 图） */
-export function foreignKeyNavigationTarget(options: { connectionId: string; database: string; currentSchema?: string; fk: ForeignKeyInfo; whereInput?: string }): NavigationTarget {
-  const schema = options.fk.ref_schema || options.currentSchema || undefined;
+function isDatabaseTreeHierarchy(options: { connection?: JdbcDialectConnection; databaseType?: DatabaseType }): boolean {
+  const type = options.connection ? (effectiveDatabaseTypeForConnection(options.connection) ?? options.databaseType) : options.databaseType;
+  if (type) {
+    return !isSchemaAware(type) || (options.connection ? connectionUsesDatabaseObjectTreeMode(options.connection) : usesDatabaseObjectTreeMode(type));
+  }
+  if (options.connection) {
+    return connectionUsesDatabaseObjectTreeMode(options.connection);
+  }
+  return false;
+}
+
+/** 构建跳转到被引用表的导航目标：
+ * - 仅数据库层级（如 MySQL / 数据库对象树模式）：ref_schema 承载目标数据库名，跨库跳转时切至目标库，schema 置空
+ * - 模式感知数据库（如 PostgreSQL / SQL Server）：database 保持当前库，ref_schema 承载模式名（缺失时回退当前 schema，同 ER 图）
+ */
+export function foreignKeyNavigationTarget(options: { connectionId: string; database: string; currentSchema?: string; fk: ForeignKeyInfo; whereInput?: string; connection?: JdbcDialectConnection; databaseType?: DatabaseType }): NavigationTarget {
+  const isDbTree = isDatabaseTreeHierarchy(options);
+  if (isDbTree) {
+    const database = options.fk.ref_schema?.trim() || options.database;
+    return {
+      connectionId: options.connectionId,
+      database,
+      schema: undefined,
+      tableName: options.fk.ref_table,
+      columnName: options.fk.ref_column,
+      whereInput: options.whereInput,
+    };
+  }
+
+  const schema = options.fk.ref_schema?.trim() || options.currentSchema || undefined;
   return {
     connectionId: options.connectionId,
     database: options.database,

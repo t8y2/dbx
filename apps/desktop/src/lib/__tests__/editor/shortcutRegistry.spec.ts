@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isCloseAllTabsShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCloseAllTabsShortcut, isSaveAllTabsShortcut } from "@/lib/editor/keyboardShortcuts";
 import {
   closeOtherTabsDefaultShortcut,
   countShortcutConflictPairs,
@@ -14,6 +14,7 @@ import {
   MACOS_RESERVED_SHORTCUTS,
   normalizeModifierOnlyShortcut,
   normalizeShortcutSettings,
+  readNormalizedShortcutSettings,
   resolveCapturedShortcutEdit,
   selectionOccurrenceDefaultShortcut,
   selectLineEndsDefaultShortcut,
@@ -51,7 +52,7 @@ describe("shortcutRegistry editor actions", () => {
     "foldAll",
     "unfoldAll",
   ];
-  const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "disconnectSidebarConnection", "viewTableDdl"];
+  const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "disconnectSidebarConnection", "viewTableDdl", "editSidebarTableStructure"];
 
   it("registers pagination navigation as unassigned grid shortcuts", () => {
     const paginationActions = [
@@ -169,6 +170,17 @@ describe("shortcutRegistry editor actions", () => {
     expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.openDataInNewTab, "MacIntel")).toBe("Alt");
   });
 
+  it("registers a conflict-free DBeaver-style shortcut for executing all SQL", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "executeAllSql");
+
+    expect(definition).toMatchObject({ scope: "editor", defaultShortcut: "Alt+X" });
+    expect(DEFAULT_SHORTCUT_SETTINGS.executeAllSql).toBe("Alt+X");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.executeAllSql, "MacIntel")).toBe("Alt+X");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.executeAllSql, "Win32")).toBe("Alt+X");
+    expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS.executeAllSql)).toBe("Alt-x");
+    expect(findShortcutConflict("executeAllSql", DEFAULT_SHORTCUT_SETTINGS.executeAllSql, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
   it("registers a conflict-free DBeaver-style shortcut for executing in a new result tab", () => {
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "executeSqlInNewResultTab");
 
@@ -206,6 +218,38 @@ describe("shortcutRegistry editor actions", () => {
     expect(findCrossScopeShortcutConflicts(DEFAULT_SHORTCUT_SETTINGS).selectCurrentStatement).toContain("disconnectSidebarConnection");
   });
 
+  it("registers conflict-free statement navigation shortcuts", () => {
+    const previous = SHORTCUT_DEFINITIONS.find((item) => item.id === "previousStatement");
+    const next = SHORTCUT_DEFINITIONS.find((item) => item.id === "nextStatement");
+    const start = SHORTCUT_DEFINITIONS.find((item) => item.id === "statementStart");
+
+    expect(previous).toMatchObject({ labelKey: "settings.shortcutPreviousStatement", scope: "editor", defaultShortcut: "Ctrl+Shift+ArrowUp" });
+    expect(next).toMatchObject({ labelKey: "settings.shortcutNextStatement", scope: "editor", defaultShortcut: "Ctrl+Shift+ArrowDown" });
+    expect(start).toMatchObject({ labelKey: "settings.shortcutStatementStart", scope: "editor", defaultShortcut: "Alt+Home" });
+
+    for (const id of ["previousStatement", "nextStatement", "statementStart"] as const) {
+      expect(DEFAULT_SHORTCUT_SETTINGS[id]).toBe(SHORTCUT_DEFINITIONS.find((item) => item.id === id)?.defaultShortcut);
+      expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS[id])).not.toBe("");
+      expect(findShortcutConflict(id, DEFAULT_SHORTCUT_SETTINGS[id], DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+    }
+  });
+
+  it("registers conflict-free line bookmark shortcuts", () => {
+    const toggle = SHORTCUT_DEFINITIONS.find((item) => item.id === "toggleBookmark");
+    const next = SHORTCUT_DEFINITIONS.find((item) => item.id === "nextBookmark");
+    const previous = SHORTCUT_DEFINITIONS.find((item) => item.id === "previousBookmark");
+
+    expect(toggle).toMatchObject({ labelKey: "settings.shortcutToggleBookmark", scope: "editor", defaultShortcut: "Mod+F2" });
+    expect(next).toMatchObject({ labelKey: "settings.shortcutNextBookmark", scope: "editor", defaultShortcut: "F2" });
+    expect(previous).toMatchObject({ labelKey: "settings.shortcutPreviousBookmark", scope: "editor", defaultShortcut: "Shift+F2" });
+
+    for (const id of ["toggleBookmark", "nextBookmark", "previousBookmark"] as const) {
+      expect(DEFAULT_SHORTCUT_SETTINGS[id]).toBe(SHORTCUT_DEFINITIONS.find((item) => item.id === id)?.defaultShortcut);
+      expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS[id])).not.toBe("");
+      expect(findShortcutConflict(id, DEFAULT_SHORTCUT_SETTINGS[id], DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+    }
+  });
+
   it("keeps current-view search and editor find contextual on Mod+F", () => {
     const focusSearch = SHORTCUT_DEFINITIONS.find((item) => item.id === "focusSearch");
     const find = SHORTCUT_DEFINITIONS.find((item) => item.id === "find");
@@ -214,6 +258,21 @@ describe("shortcutRegistry editor actions", () => {
     expect(find).toMatchObject({ scope: "editor", defaultShortcut: "Mod+F" });
     expect(findShortcutConflict("focusSearch", DEFAULT_SHORTCUT_SETTINGS.focusSearch, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
     expect(findShortcutConflict("find", DEFAULT_SHORTCUT_SETTINGS.find, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
+  it("registers conflict-free global shortcuts for the toolbar connection, database, and schema pickers", () => {
+    const pickerDefaults: Array<[ShortcutActionId, string]> = [
+      ["openConnectionPicker", "Mod+Alt+C"],
+      ["openDatabasePicker", "Mod+Alt+D"],
+      ["openSchemaPicker", "Mod+Alt+S"],
+    ];
+
+    for (const [id, defaultShortcut] of pickerDefaults) {
+      const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === id);
+      expect(definition).toMatchObject({ labelKey: `settings.shortcut${id[0]!.toUpperCase()}${id.slice(1)}`, scope: "global", defaultShortcut });
+      expect(DEFAULT_SHORTCUT_SETTINGS[id]).toBe(defaultShortcut);
+      expect(findShortcutConflict(id, defaultShortcut, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+    }
   });
 
   it("registers a conflict-free global shortcut for Zen mode", () => {
@@ -278,6 +337,20 @@ describe("shortcutRegistry editor actions", () => {
     expect(normalizeShortcutSettings({ closeTab: "" }).closeTab).toBe("");
   });
 
+  it("registers reopenClosedTab as a global shortcut with Shift+Mod+T default", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "reopenClosedTab");
+    expect(definition).toMatchObject({
+      id: "reopenClosedTab",
+      labelKey: "settings.shortcutReopenClosedTab",
+      scope: "global",
+      defaultShortcut: "Shift+Mod+T",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.reopenClosedTab).toBe("Shift+Mod+T");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.reopenClosedTab, "Win32")).toBe("Ctrl+Shift+T");
+    expect(formatShortcut(DEFAULT_SHORTCUT_SETTINGS.reopenClosedTab, "MacIntel")).toBe("Shift+Cmd+T");
+    expect(findShortcutConflict("reopenClosedTab", DEFAULT_SHORTCUT_SETTINGS.reopenClosedTab, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
   it("registers closeWindow as a global shortcut with Shift+Mod+W default", () => {
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "closeWindow");
     expect(definition).toMatchObject({
@@ -310,6 +383,23 @@ describe("shortcutRegistry editor actions", () => {
     // 显式分配后生效；默认未绑定时永不触发
     expect(isCloseAllTabsShortcut(event, { closeAllTabs: "Shift+Mod+Alt+W" }, "MacIntel")).toBe(true);
     expect(isCloseAllTabsShortcut(event, {}, "MacIntel")).toBe(false);
+  });
+
+  it("registers saveAllTabs as an unbound global shortcut that users can assign", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "saveAllTabs");
+    expect(definition).toMatchObject({
+      id: "saveAllTabs",
+      labelKey: "contextMenu.saveAllTabs",
+      scope: "global",
+      defaultShortcut: "",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.saveAllTabs).toBe("");
+    expect(normalizeShortcutSettings({}).saveAllTabs).toBe("");
+    expect(normalizeShortcutSettings({ saveAllTabs: "Shift+Mod+Alt+S" }).saveAllTabs).toBe("Shift+Mod+Alt+S");
+    expect(normalizeShortcutSettings({ saveAllTabs: "" }).saveAllTabs).toBe("");
+    const event = { key: "s", shiftKey: true, metaKey: true, altKey: true };
+    expect(isSaveAllTabsShortcut(event, { saveAllTabs: "Shift+Mod+Alt+S" }, "MacIntel")).toBe(true);
+    expect(isSaveAllTabsShortcut(event, {}, "MacIntel")).toBe(false);
   });
 
   it("normalizes custom, cleared, and invalid modifier-only shortcuts", () => {
@@ -445,6 +535,13 @@ describe("shortcutRegistry editor actions", () => {
       expect(definition?.scope).toBe("sidebar");
       expect(DEFAULT_SHORTCUT_SETTINGS[actionId]).toBe(definition?.defaultShortcut);
     }
+  });
+
+  it("registers editSidebarTableStructure F4 as a conflict-free sidebar default", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "editSidebarTableStructure");
+    expect(definition).toMatchObject({ scope: "sidebar", defaultShortcut: "F4", labelKey: "settings.shortcutEditSidebarTableStructure" });
+    expect(DEFAULT_SHORTCUT_SETTINGS.editSidebarTableStructure).toBe("F4");
+    expect(findShortcutConflict("editSidebarTableStructure", DEFAULT_SHORTCUT_SETTINGS.editSidebarTableStructure, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
   });
 
   it("detects conflicts only within sidebar shortcuts", () => {
@@ -757,5 +854,44 @@ describe("shortcutRegistry editor actions", () => {
       const settings = settingsWith({ globalSearch: "Mod+Alt+F" });
       expect(findShortcutConflict("quickOpen", "Alt Alt", settings, "Win32")).toBeNull();
     });
+  });
+});
+
+describe("normalized shortcut table cache", () => {
+  const platform = "Win32";
+
+  it("returns a fresh, mutable copy on every call", () => {
+    const first = normalizeShortcutSettings({}, platform);
+    first.executeSql = "Mod+Alt+Shift+9";
+    expect(normalizeShortcutSettings({}, platform).executeSql).not.toBe("Mod+Alt+Shift+9");
+  });
+
+  it("follows in-place edits of the same settings object", () => {
+    const settings: Partial<ShortcutSettings> = { executeSql: "Mod+Alt+7" };
+    expect(readNormalizedShortcutSettings(settings, platform).executeSql).toBe("Mod+Alt+7");
+    settings.executeSql = "Mod+Alt+8";
+    expect(readNormalizedShortcutSettings(settings, platform).executeSql).toBe("Mod+Alt+8");
+    delete settings.executeSql;
+    expect(readNormalizedShortcutSettings(settings, platform).executeSql).toBe(normalizeShortcutSettings({}, platform).executeSql);
+  });
+
+  it("keeps platform-specific results apart", () => {
+    const settings: Partial<ShortcutSettings> = {};
+    const win = readNormalizedShortcutSettings(settings, "Win32");
+    const mac = readNormalizedShortcutSettings(settings, "MacIntel");
+    expect(win).toEqual(normalizeShortcutSettings(settings, "Win32"));
+    expect(mac).toEqual(normalizeShortcutSettings(settings, "MacIntel"));
+  });
+
+  it("shares one frozen table between read-only callers", () => {
+    const settings: Partial<ShortcutSettings> = { executeSql: "Mod+Alt+6" };
+    const shared = readNormalizedShortcutSettings(settings, platform);
+    expect(readNormalizedShortcutSettings({ ...settings }, platform)).toBe(shared);
+    expect(Object.isFrozen(shared)).toBe(true);
+  });
+
+  it("treats non-string configured values as unset", () => {
+    const withBogus = { executeSql: 42 } as unknown as Partial<ShortcutSettings>;
+    expect(normalizeShortcutSettings(withBogus, platform)).toEqual(normalizeShortcutSettings({}, platform));
   });
 });

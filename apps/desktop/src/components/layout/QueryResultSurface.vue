@@ -14,12 +14,11 @@ const resultClass = computed(() => (typeof attrs.class === "string" ? attrs.clas
 const surfaceProps = computed<ContentAreaSurfaceProps>(() => ({
   activeTab: props.activeTab,
   activeConnection: props.activeConnection,
-  executableSql: props.executableSql,
+  hasExecutableSql: props.hasExecutableSql,
   activeOutputView: props.activeOutputView,
   formatSqlRequest: props.formatSqlRequest,
   compressSqlRequest: props.compressSqlRequest,
-  selectedSql: props.selectedSql,
-  cursorPos: props.cursorPos,
+  keywordCaseRequest: props.keywordCaseRequest,
   blockDangerousRedisCommands: props.blockDangerousRedisCommands,
 }));
 const contentEmits = createContentSurfaceEventForwarders(emit);
@@ -27,6 +26,8 @@ const bindings = computed(() => ({ ...surfaceProps.value, ...contentEmits }));
 const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
 
 defineExpose<QueryResultSurfaceHandle>({
+  focusResultGrid: () => contentAreaRef.value?.focusResultGrid() ?? false,
+  cancelResultGridFocus: () => contentAreaRef.value?.cancelResultGridFocus(),
   focusSearch: (target: Element | null = null) => contentAreaRef.value?.focusSearch(target) ?? false,
   refreshData: () => contentAreaRef.value?.refreshData() ?? false,
   toggleResultsPane: () => contentAreaRef.value?.toggleResultsPane() ?? false,

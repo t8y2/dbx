@@ -43,6 +43,7 @@ pub fn allowed_command(command: &str) -> bool {
             | "confirm_exit"
             | "complete_app_close"
             | "reveal_path_in_file_manager"
+            | "open_path_with_default_app"
             | "get_platform"
             | "load_app_appearance_settings"
             | "update_app_appearance_settings"
@@ -68,11 +69,19 @@ mod tests {
     use super::*;
     #[test]
     fn gate_denies_business_commands() {
-        for command in ["load_connections", "webdav_sync_upload", "load_ai_config", "plugin_invoke", "migration_fake"] {
+        for command in [
+            "load_connections",
+            "webdav_sync_upload",
+            "load_ai_config",
+            "plugin_invoke",
+            "migration_fake",
+            "set_macos_app_icon_appearance",
+        ] {
             assert!(!allowed_command(command));
         }
         assert!(allowed_command("migration_start"));
         assert!(allowed_command("reveal_path_in_file_manager"));
+        assert!(allowed_command("open_path_with_default_app"));
     }
     #[test]
     fn invoke_dispatch_rejects_business_commands_until_ready() {

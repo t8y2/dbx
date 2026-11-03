@@ -12,15 +12,20 @@ execute the gate and report cancelled prerequisites as a failure.
 
 ## Contributor concurrency
 
-PRs from anyone other than the repository owner share a main `CI` concurrency
-group keyed by the PR author's stable numeric user ID. Only one run in that
-author's group executes at a time; other authors have independent groups.
+PRs from anyone other than the repository owner share main `CI` concurrency
+groups keyed by the PR author's stable numeric user ID and the parity of the PR
+number (`pr-author-<id>-even` / `pr-author-<id>-odd`). At most two runs per author
+execute at a time — one per parity group — and other authors have independent
+groups. Actions expressions have no modulo, so parity is read from the PR number's
+last digit with `endsWith`. Two PRs of the same parity still queue behind each other.
 The PR author, not the trigger actor or author association, determines this
 policy, so a maintainer retrigger cannot bypass contributor limits.
 `cancel-in-progress: false` preserves the executing PR, and `queue: max` retains
 up to 100 pending runs rather than replacing earlier pending PRs. Further runs
-beyond that limit are cancelled by GitHub. Updates to the same contributor PR
-also enqueue separate runs; this policy does not deduplicate superseded commits.
+beyond that limit are cancelled by GitHub. Superseded commits on the same
+contributor PR (base `main`) are cancelled by the separate
+`cancel-superseded-ci.yml` workflow: on `synchronize` it re-reads the PR and
+cancels that PR's older runs unless the event SHA is once again the head.
 
 The repository owner (`t8y2` here, compared with `github.repository_owner`) is
 exempt from author-level limits. Owner PRs retain one cancellation group per PR,
@@ -159,6 +164,12 @@ publish a shared snapshot: rust-cache does not update an exact cache hit, so lat
 successful builds would otherwise keep restoring the unfinished snapshot.
 The first successful main run must populate the new namespace before fork PRs can
 reuse it. Target caching is not a per-commit snapshot of workspace artifacts.
+
+The Win7 job looks up AWS-LC and OpenSSL artifacts from main runs.
+Each artifact name includes the fixture hash and the pinned nightly toolchain.
+If an artifact is absent or expires, the job builds that dependency.
+Main uploads each new artifact for 30 days. PRs do not upload copies.
+Run `node .github/scripts/find-win7-prebuilt-artifact.mjs --help` for lookup usage.
 
 Clippy, nextest and native Agent nextest builds emit Cargo HTML timing reports.
 Their `DBX-*-cargo-timings` artifacts are retained for three days, including after

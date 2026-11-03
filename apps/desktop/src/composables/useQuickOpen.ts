@@ -8,6 +8,7 @@ import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
 import { getSqlFileFilter, getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
 import { composeGlobalSearchRoots, getGlobalSearchExtensions, globalSearchSettingsVersion } from "@/lib/globalSearch/globalSearchSettings";
+import { isQuickOpenScopeActive, pruneQuickOpenScope, quickOpenScopeIds, quickOpenScopeIncludes, setQuickOpenScopeIds } from "@/lib/quickOpen/quickOpenScope";
 import { containsHan, pinyinFirstLetters } from "@/lib/common/pinyin";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
 import i18n, { currentLocale } from "@/i18n";
@@ -278,6 +279,17 @@ export function matchQuickOpenText(query: string, text: string): QuickOpenMatch 
   return null;
 }
 
+/** Search concatenated metadata literally so matches cannot stitch unrelated fields together. */
+function matchQuickOpenMetadata(query: string, text: string): QuickOpenMatch | null {
+  const lowerQuery = query.trim().toLowerCase();
+  const lowerText = text.toLowerCase();
+  const index = lowerText.indexOf(lowerQuery);
+  if (index < 0) return null;
+  if (lowerText === lowerQuery) return { kind: "exact", score: 1, indices: [] };
+  if (index === 0) return { kind: "prefix", score: 200 + Math.min(text.length - lowerQuery.length, 99), indices: [] };
+  return { kind: "substring", score: 400 + Math.min(index, 99), indices: [] };
+}
+
 interface MatchedItem extends QuickOpenItem {
   matchScore: number;
   matchIndices: number[];
@@ -428,16 +440,19 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
   }
 
   const sqlLibraryAllItems = computed<QuickOpenItem[]>(() => {
-    return savedSqlStore.allFiles.map((file) => ({
-      id: `sqllib-${file.id}`,
-      type: "sql_library_file" as const,
-      label: file.name,
-      description: getConnectionLabel(file.connectionId),
-      connectionId: file.connectionId,
-      connectionName: getConnectionLabel(file.connectionId),
-      sqlFileId: file.id,
-      searchText: `${file.name} ${getConnectionLabel(file.connectionId)}`,
-    }));
+    // Files bound to a connection outside the scope are hidden with it; unbound files stay visible.
+    return savedSqlStore.allFiles
+      .filter((file) => !file.connectionId || quickOpenScopeIncludes(file.connectionId))
+      .map((file) => ({
+        id: `sqllib-${file.id}`,
+        type: "sql_library_file" as const,
+        label: file.name,
+        description: getConnectionLabel(file.connectionId),
+        connectionId: file.connectionId,
+        connectionName: getConnectionLabel(file.connectionId),
+        sqlFileId: file.id,
+        searchText: `${file.name} ${getConnectionLabel(file.connectionId)}`,
+      }));
   });
 
   const sqlLibraryRecentItems = computed<QuickOpenItem[]>(() => {
@@ -558,7 +573,9 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
 
   const allItems = computed((): QuickOpenItem[] => {
     const items: QuickOpenItem[] = [];
-    const connections = connectionStore.connections;
+    // A narrowed scope hides unselected connections and everything beneath them,
+    // keeping local tree entries in sync with the remote search pool.
+    const connections = connectionStore.connections.filter((conn) => quickOpenScopeIncludes(conn.id));
     const treeNodes = connectionStore.treeNodes;
 
     // Add connections
@@ -826,6 +843,8 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
       return priority(left) - priority(right);
     });
     for (const conn of orderedConnections) {
+      // Connection scope: unselected connections contribute neither results nor on-demand connects.
+      if (!quickOpenScopeIncludes(conn.id)) continue;
       // listCompletionTables connects on demand. Keeping disconnected connections
       // out here makes quick-open blind to unloaded tables after a cold start.
       if (REMOTE_SEARCH_UNSUPPORTED_TYPES.has(conn.db_type)) continue;
@@ -919,15 +938,33 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     void loadExternalSqlFiles();
   });
 
+  /**
+   * Invalidate in-flight remote work and schedule a fresh search for `rawQuery`.
+   * Both the query watcher and the scope watcher funnel through here: bumping the
+   * generation keeps stale responses from landing, and the debounce coalesces bursts.
+   */
+  function scheduleRemoteSearch(rawQuery: string): void {
+    selectedIndex.value = 0;
+    const generation = ++remoteSearchGeneration;
+    cancelStaleRemoteRequestWaiters(generation);
+    if (remoteSearchTimer) clearTimeout(remoteSearchTimer);
+    remoteSearchTimer = undefined;
+    remoteItems.value = [];
+
+    const normalizedQuery = rawQuery.trim();
+    if (normalizedQuery.length < REMOTE_SEARCH_MIN_QUERY_LENGTH) return;
+    const contexts = remoteSearchContexts();
+    if (contexts.length === 0) return;
+
+    remoteSearchTimer = setTimeout(() => {
+      remoteSearchTimer = undefined;
+      void runRemoteSearch(normalizedQuery, generation, contexts);
+    }, REMOTE_SEARCH_DEBOUNCE_MS);
+  }
+
   watch(
     searchQuery,
     (query) => {
-      selectedIndex.value = 0;
-      const generation = ++remoteSearchGeneration;
-      cancelStaleRemoteRequestWaiters(generation);
-      if (remoteSearchTimer) clearTimeout(remoteSearchTimer);
-      remoteItems.value = [];
-
       const normalizedQuery = query.trim();
 
       // Ensure external SQL files are loaded when the user starts searching
@@ -938,16 +975,20 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
         void loadPluginWorkbenches();
       }
 
-      if (normalizedQuery.length < REMOTE_SEARCH_MIN_QUERY_LENGTH) return;
-      const contexts = remoteSearchContexts();
-      if (contexts.length === 0) return;
-
-      remoteSearchTimer = setTimeout(() => {
-        remoteSearchTimer = undefined;
-        void runRemoteSearch(normalizedQuery, generation, contexts);
-      }, REMOTE_SEARCH_DEBOUNCE_MS);
+      scheduleRemoteSearch(query);
     },
     { flush: "sync" },
+  );
+
+  // Changing the connection scope re-runs the current query immediately, without retyping.
+  watch(quickOpenScopeIds, () => {
+    scheduleRemoteSearch(searchQuery.value);
+  });
+
+  // Drop a selected connection that no longer exists, so the picker never points at it.
+  watch(
+    () => connectionStore.connections.map((conn) => conn.id).join("\n"),
+    () => pruneQuickOpenScope(connectionStore.connections.map((conn) => conn.id)),
   );
 
   const filteredItems = computed((): MatchedItem[] => {
@@ -969,7 +1010,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
       if (seen.has(key)) continue;
       seen.add(key);
       const labelMatch = matchQuickOpenText(searchQuery.value, item.label);
-      const metadataMatch = labelMatch ? null : matchQuickOpenText(searchQuery.value, item.searchText);
+      const metadataMatch = labelMatch ? null : matchQuickOpenMetadata(searchQuery.value, item.searchText);
       const result = labelMatch ?? metadataMatch;
       if (result) {
         matched.push({
@@ -1105,5 +1146,9 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     setQuery,
     loadExternalSqlFiles,
     loadPluginWorkbenches,
+    // Connection scope: empty = all connections.
+    scopeConnectionIds: quickOpenScopeIds,
+    scopeActive: computed(() => isQuickOpenScopeActive()),
+    setScopeConnectionIds: setQuickOpenScopeIds,
   };
 }

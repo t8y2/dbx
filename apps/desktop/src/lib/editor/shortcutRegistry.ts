@@ -3,6 +3,10 @@ import { isModifierDoubleTapShortcut, matchesModifierDoubleTapShortcut } from "@
 
 export type ShortcutActionId =
   | "executeSql"
+  | "executeAllSql"
+  | "stepInto"
+  | "stepOut"
+  | "stepOver"
   | "executeSqlInNewResultTab"
   | "explainSql"
   | "formatSql"
@@ -20,12 +24,20 @@ export type ShortcutActionId =
   | "deleteLine"
   | "moveLineUp"
   | "moveLineDown"
+  | "scrollLineUp"
+  | "scrollLineDown"
   | "copyLineUp"
   | "copyLineDown"
   | "undo"
   | "redo"
   | "selectAll"
   | "selectCurrentStatement"
+  | "previousStatement"
+  | "nextStatement"
+  | "statementStart"
+  | "toggleBookmark"
+  | "nextBookmark"
+  | "previousBookmark"
   | "extendSelection"
   | "addNextSelectionOccurrence"
   | "selectAllSelectionOccurrences"
@@ -51,12 +63,17 @@ export type ShortcutActionId =
   | "newQuery"
   | "openSettings"
   | "closeTab"
+  | "reopenClosedTab"
   | "closeOtherTabs"
   | "closeAllTabs"
+  | "saveAllTabs"
   | "closeWindow"
   | "focusSearch"
   | "quickOpen"
   | "globalSearch"
+  | "openConnectionPicker"
+  | "openDatabasePicker"
+  | "openSchemaPicker"
   | "toggleAiPanel"
   | "navigateTabHistoryBack"
   | "navigateTabHistoryForward"
@@ -80,6 +97,8 @@ export type ShortcutActionId =
   | "replace"
   | "refreshData"
   | "toggleResultsPane"
+  | "focusResultGrid"
+  | "focusSqlEditor"
   | "toggleTranspose"
   | "cancelSearch"
   | "toggleSidebar"
@@ -91,10 +110,11 @@ export type ShortcutActionId =
   | "disconnectAllActiveConnections"
   | "openDataInNewTab"
   | "viewTableDdl"
+  | "editSidebarTableStructure"
   | "sendSelectionToAi"
   | "sqlIntentionActions";
 
-export type ShortcutScope = "global" | "editor" | "grid" | "search" | "sidebar";
+export type ShortcutScope = "global" | "debug" | "editor" | "grid" | "search" | "sidebar";
 
 export interface ShortcutDefinition {
   id: ShortcutActionId;
@@ -178,11 +198,32 @@ const EDIT_TABLE_STRUCTURE_DEFAULT = "Mod+Shift+D";
 const TAB_NAVIGATION_HISTORY_ACTIONS: ShortcutActionId[] = ["navigateTabHistoryBack", "navigateTabHistoryForward"];
 
 export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
+  { id: "stepInto", labelKey: "plDebug.toolbar.stepIn", scope: "debug", defaultShortcut: "Mod+I" },
+  { id: "stepOut", labelKey: "plDebug.toolbar.stepOut", scope: "debug", defaultShortcut: "Mod+O" },
+  { id: "stepOver", labelKey: "plDebug.toolbar.stepOver", scope: "debug", defaultShortcut: "Mod+P" },
+  {
+    id: "scrollLineUp",
+    labelKey: "settings.shortcutScrollLineUp",
+    scope: "editor",
+    defaultShortcut: "Ctrl+ArrowUp",
+  },
+  {
+    id: "scrollLineDown",
+    labelKey: "settings.shortcutScrollLineDown",
+    scope: "editor",
+    defaultShortcut: "Ctrl+ArrowDown",
+  },
   {
     id: "executeSql",
     labelKey: "settings.shortcutExecuteSql",
     scope: "editor",
     defaultShortcut: "Mod+Enter",
+  },
+  {
+    id: "executeAllSql",
+    labelKey: "settings.shortcutExecuteAllSql",
+    scope: "editor",
+    defaultShortcut: "Alt+X",
   },
   {
     id: "executeSqlInNewResultTab",
@@ -321,6 +362,42 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutSelectCurrentStatement",
     scope: "editor",
     defaultShortcut: "Mod+Shift+E",
+  },
+  {
+    id: "previousStatement",
+    labelKey: "settings.shortcutPreviousStatement",
+    scope: "editor",
+    defaultShortcut: "Ctrl+Shift+ArrowUp",
+  },
+  {
+    id: "nextStatement",
+    labelKey: "settings.shortcutNextStatement",
+    scope: "editor",
+    defaultShortcut: "Ctrl+Shift+ArrowDown",
+  },
+  {
+    id: "statementStart",
+    labelKey: "settings.shortcutStatementStart",
+    scope: "editor",
+    defaultShortcut: "Alt+Home",
+  },
+  {
+    id: "toggleBookmark",
+    labelKey: "settings.shortcutToggleBookmark",
+    scope: "editor",
+    defaultShortcut: "Mod+F2",
+  },
+  {
+    id: "nextBookmark",
+    labelKey: "settings.shortcutNextBookmark",
+    scope: "editor",
+    defaultShortcut: "F2",
+  },
+  {
+    id: "previousBookmark",
+    labelKey: "settings.shortcutPreviousBookmark",
+    scope: "editor",
+    defaultShortcut: "Shift+F2",
   },
   {
     id: "extendSelection",
@@ -473,6 +550,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Mod+W",
   },
   {
+    id: "reopenClosedTab",
+    labelKey: "settings.shortcutReopenClosedTab",
+    scope: "global",
+    defaultShortcut: "Shift+Mod+T",
+  },
+  {
     id: "closeOtherTabs",
     labelKey: "contextMenu.closeOtherTabs",
     scope: "global",
@@ -483,6 +566,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     // registry doesn't have, so this action ships unbound and stays optional.
     id: "closeAllTabs",
     labelKey: "contextMenu.closeAllTabs",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "saveAllTabs",
+    labelKey: "contextMenu.saveAllTabs",
     scope: "global",
     defaultShortcut: "",
   },
@@ -511,6 +600,24 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutGlobalSearch",
     scope: "global",
     defaultShortcut: "Mod+Alt+F",
+  },
+  {
+    id: "openConnectionPicker",
+    labelKey: "settings.shortcutOpenConnectionPicker",
+    scope: "global",
+    defaultShortcut: "Mod+Alt+C",
+  },
+  {
+    id: "openDatabasePicker",
+    labelKey: "settings.shortcutOpenDatabasePicker",
+    scope: "global",
+    defaultShortcut: "Mod+Alt+D",
+  },
+  {
+    id: "openSchemaPicker",
+    labelKey: "settings.shortcutOpenSchemaPicker",
+    scope: "global",
+    defaultShortcut: "Mod+Alt+S",
   },
   {
     id: "toggleAiPanel",
@@ -651,6 +758,18 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "",
   },
   {
+    id: "focusResultGrid",
+    labelKey: "settings.shortcutFocusResultGrid",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "focusSqlEditor",
+    labelKey: "settings.shortcutFocusSqlEditor",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
     id: "toggleTranspose",
     labelKey: "settings.shortcutToggleTranspose",
     scope: "grid",
@@ -718,6 +837,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Shift+Mod+D",
   },
   {
+    id: "editSidebarTableStructure",
+    labelKey: "settings.shortcutEditSidebarTableStructure",
+    scope: "sidebar",
+    defaultShortcut: "F4",
+  },
+  {
     id: "sendSelectionToAi",
     labelKey: "settings.shortcutSendSelectionToAi",
     scope: "editor",
@@ -763,6 +888,7 @@ function shortcutsUseSameKeys(first: string, second: string, platform = globalTh
 }
 
 function shortcutDefaultForPlatform(definition: ShortcutDefinition, platform: string): string {
+  if ((definition.id === "scrollLineUp" || definition.id === "scrollLineDown") && isMacShortcutPlatform(platform)) return definition.defaultShortcut.replace("Ctrl+", "Ctrl+Alt+");
   if (definition.id === "addNextSelectionOccurrence") return selectionOccurrenceDefaultShortcut("addNextSelectionOccurrence", platform);
   if (definition.id === "selectAllSelectionOccurrences") return selectionOccurrenceDefaultShortcut("selectAllSelectionOccurrences", platform);
   if (definition.id === "selectLineEnds") return selectLineEndsDefaultShortcut(platform);
@@ -779,7 +905,75 @@ export function needsTabNavigationHistoryShortcutMigration(settings?: Partial<Sh
   return !!settings && TAB_NAVIGATION_HISTORY_ACTIONS.some((actionId) => !hasExplicitShortcut(settings, actionId));
 }
 
+// Keystroke handlers (editor keydown, global shortcut matching, Tab handling)
+// normalize the whole table on every key press, and a full pass re-parses every
+// binding. The result is a pure function of the configured string values and the
+// platform, so it is cached per distinct table. A lookup compares the configured
+// values by index instead of serializing the table: hot paths call this a dozen
+// times per keystroke, and building a JSON key (plus copying the result) allocated
+// more per key press than everything else in the editor combined.
+interface NormalizedShortcutEntry {
+  platform: string;
+  /** Configured value per SHORTCUT_DEFINITIONS entry, `undefined` when not an explicit string. */
+  configured: readonly (string | undefined)[];
+  result: Readonly<ShortcutSettings>;
+}
+
+const NORMALIZED_SHORTCUT_CACHE_LIMIT = 8;
+const normalizedShortcutEntries: NormalizedShortcutEntry[] = [];
+// Fast path for the common case of the same (store-owned) settings object arriving again.
+const normalizedShortcutEntryByInput = new WeakMap<object, NormalizedShortcutEntry>();
+
+function normalizedShortcutEntryMatches(entry: NormalizedShortcutEntry, settings: Partial<ShortcutSettings> | undefined): boolean {
+  for (let index = 0; index < SHORTCUT_DEFINITIONS.length; index += 1) {
+    const value = settings?.[SHORTCUT_DEFINITIONS[index].id];
+    if ((typeof value === "string" ? value : undefined) !== entry.configured[index]) return false;
+  }
+  return true;
+}
+
+function resolveNormalizedShortcutEntry(settings: Partial<ShortcutSettings> | undefined, platform: string): NormalizedShortcutEntry {
+  if (settings) {
+    const direct = normalizedShortcutEntryByInput.get(settings);
+    if (direct && direct.platform === platform && normalizedShortcutEntryMatches(direct, settings)) return direct;
+  }
+  for (let index = 0; index < normalizedShortcutEntries.length; index += 1) {
+    const entry = normalizedShortcutEntries[index];
+    if (entry.platform !== platform || !normalizedShortcutEntryMatches(entry, settings)) continue;
+    if (index > 0) {
+      normalizedShortcutEntries.splice(index, 1);
+      normalizedShortcutEntries.unshift(entry);
+    }
+    if (settings) normalizedShortcutEntryByInput.set(settings, entry);
+    return entry;
+  }
+  const entry: NormalizedShortcutEntry = {
+    platform,
+    configured: SHORTCUT_DEFINITIONS.map((definition) => {
+      const value = settings?.[definition.id];
+      return typeof value === "string" ? value : undefined;
+    }),
+    result: Object.freeze(computeNormalizedShortcutSettings(settings, platform)),
+  };
+  normalizedShortcutEntries.unshift(entry);
+  if (normalizedShortcutEntries.length > NORMALIZED_SHORTCUT_CACHE_LIMIT) normalizedShortcutEntries.pop();
+  if (settings) normalizedShortcutEntryByInput.set(settings, entry);
+  return entry;
+}
+
 export function normalizeShortcutSettings(settings?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): ShortcutSettings {
+  return { ...resolveNormalizedShortcutEntry(settings, platform).result };
+}
+
+/**
+ * Same table as `normalizeShortcutSettings`, without the defensive copy. The returned object is
+ * shared and frozen, so it is meant for per-keystroke matching that only reads one or a few actions.
+ */
+export function readNormalizedShortcutSettings(settings?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): Readonly<ShortcutSettings> {
+  return resolveNormalizedShortcutEntry(settings, platform).result;
+}
+
+function computeNormalizedShortcutSettings(settings: Partial<ShortcutSettings> | undefined, platform: string): ShortcutSettings {
   const reservedKeyRepairedActionIds = new Set<ShortcutActionId>();
   const normalized = Object.fromEntries(
     SHORTCUT_DEFINITIONS.map((definition) => {

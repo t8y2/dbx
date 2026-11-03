@@ -41,6 +41,19 @@ pub struct MqSocksProxy {
     pub password: String,
 }
 
+/// Kafka PEM certificate paths. Field names are snake_case on the wire and
+/// shared verbatim with the desktop frontend and the Java agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MqKafkaTlsConfig {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ca_cert_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_cert_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client_key_path: String,
+}
+
 /// Configuration for an MQ admin connection, decoded from
 /// `ConnectionConfig.external_config`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +67,11 @@ pub struct MqAdminConfig {
     /// Skip TLS certificate verification (self-signed clusters only).
     #[serde(default)]
     pub tls_skip_verify: bool,
+    /// Kafka-only PEM certificate paths, read from the `tls` section of
+    /// `external_config`. Paths stay on this machine and are excluded from
+    /// cloud sync (see `persistence/cloud_sync.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<MqKafkaTlsConfig>,
     /// Manually pin a server version (e.g. `3.1`), skipping auto-detection for
     /// environments where the version endpoint is blocked by a gateway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,7 +105,9 @@ pub struct MqAdminConfig {
 impl MqAdminConfig {
     /// Decode the MQ admin config from a connection's `external_config` slot.
     pub fn from_connection(cfg: &ConnectionConfig) -> Result<Self, String> {
-        let raw = cfg
+        let mut normalized = cfg.clone();
+        crate::connection::connection_secrets::normalize_rocketmq_credentials(&mut normalized);
+        let raw = normalized
             .external_config
             .as_ref()
             .ok_or("This connection has no message queue admin configuration (external_config is empty)")?;
@@ -129,6 +149,19 @@ impl MqAdminConfig {
     /// Budget for establishing the MQ adapter (agent spawn + handshake/connect).
     pub fn connect_timeout(&self) -> Duration {
         Duration::from_secs(self.connect_timeout_secs.max(1))
+    }
+
+    /// Rust process/RPC wall around the agent's independently bounded network setup.
+    /// Proxy keeps a fixed allowance for spawn, handshake and JSON-RPC overhead.
+    pub fn adapter_connect_timeout(&self) -> Duration {
+        let overhead = if self.system_kind == MqSystemKind::RocketMq
+            && self.extra.get("connectionMode").and_then(serde_json::Value::as_str) == Some("proxy")
+        {
+            5
+        } else {
+            0
+        };
+        self.connect_timeout().saturating_add(Duration::from_secs(overhead))
     }
 
     /// Milliseconds for agent `connect_timeout_ms` (Advanced connect timeout).
@@ -202,6 +235,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -209,6 +244,8 @@ mod tests {
             connect_timeout_secs: 5,
             query_timeout_secs: 30,
             idle_timeout_secs: 60,
+            manual_transaction_timeout_secs: 300,
+            idle_disconnect_secs: 0,
             keepalive_interval_secs: crate::models::connection::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
@@ -245,6 +282,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         };
         cfg.redis_key_separator = ":".to_string();
@@ -316,6 +354,24 @@ mod tests {
     }
 
     #[test]
+    fn proxy_adapter_timeout_allows_bounded_process_overhead() {
+        for (kind, extra, expected) in [
+            ("rocketmq", serde_json::json!({ "connectionMode": "proxy" }), 10),
+            ("rocketmq", serde_json::json!({ "connectionMode": "remoting" }), 5),
+            ("rocketmq", serde_json::json!({}), 5),
+            ("kafka", serde_json::json!({ "connectionMode": "proxy" }), 5),
+        ] {
+            let cfg = connection_with_external(serde_json::json!({
+                "systemKind": kind, "adminUrl": "", "extra": extra
+            }));
+            let mqc = MqAdminConfig::from_connection(&cfg).unwrap();
+            assert_eq!(mqc.adapter_connect_timeout(), Duration::from_secs(expected));
+            assert_eq!(mqc.connect_timeout(), Duration::from_secs(5));
+            assert_eq!(mqc.connect_timeout_ms(), 5_000);
+        }
+    }
+
+    #[test]
     fn copies_advanced_timeouts_from_connection_config() {
         let mut cfg = connection_with_external(serde_json::json!({
             "systemKind": "rocketmq",
@@ -378,5 +434,28 @@ mod tests {
                 .expect("should rewrite admin URL with endpoint");
 
         assert_eq!(rewritten, "https://127.0.0.1:49152/pulsar-admin?tenant=public");
+    }
+
+    #[test]
+    fn kafka_tls_section_is_optional_and_snake_case() {
+        let config: MqAdminConfig = serde_json::from_value(serde_json::json!({
+            "systemKind": "kafka",
+            "adminUrl": "",
+            "tls": {
+                "ca_cert_path": "/certs/ca-chain.pem",
+                "client_cert_path": "/certs/client.crt",
+                "client_key_path": "/certs/client.key"
+            }
+        }))
+        .unwrap();
+        let tls = config.tls.expect("kafka tls section should decode");
+        assert_eq!(tls.ca_cert_path, "/certs/ca-chain.pem");
+        assert_eq!(tls.client_cert_path, "/certs/client.crt");
+        assert_eq!(tls.client_key_path, "/certs/client.key");
+
+        // 没有 tls section 时字段缺省为 None，不影响旧连接反序列化。
+        let legacy: MqAdminConfig =
+            serde_json::from_value(serde_json::json!({ "systemKind": "kafka", "adminUrl": "" })).unwrap();
+        assert!(legacy.tls.is_none());
     }
 }

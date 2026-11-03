@@ -63,13 +63,7 @@ export function detectIssueCommand(commentBody) {
 
 export function findEligibleMergedPullRequest({ context, commentUser, repository }) {
   return context.pullRequests
-    .filter(
-      (pullRequest) =>
-        pullRequest.state === "MERGED" &&
-        pullRequest.baseRefName === context.defaultBranch &&
-        pullRequest.repository?.nameWithOwner === repository &&
-        sameLogin(pullRequest.author?.login, commentUser),
-    )
+    .filter((pullRequest) => pullRequest.state === "MERGED" && pullRequest.baseRefName === context.defaultBranch && pullRequest.repository?.nameWithOwner === repository && sameLogin(pullRequest.author?.login, commentUser))
     .sort((left, right) => (right.mergedAt || "").localeCompare(left.mergedAt || ""))[0];
 }
 
@@ -92,10 +86,7 @@ async function handleUnclaim({ issueNumber, commentUser, client }) {
 
   const assignee = context.assignees.find(({ login }) => sameLogin(login, commentUser));
   if (!assignee) {
-    await client.commentIssue(
-      issueNumber,
-      `❌ @${commentUser} 你当前没有认领 #${issueNumber}，无法使用 \`/unclaim\`。`,
-    );
+    await client.commentIssue(issueNumber, `❌ @${commentUser} 你当前没有认领 #${issueNumber}，无法使用 \`/unclaim\`。`);
     return { status: "not-assignee" };
   }
 
@@ -116,28 +107,15 @@ async function handleClose({ issueNumber, commentUser, repository, client }) {
 
   const pullRequest = findEligibleMergedPullRequest({ context, commentUser, repository });
   if (!pullRequest) {
-    await client.commentIssue(
-      issueNumber,
-      `❌ @${commentUser} 暂不能关闭 #${issueNumber}：未找到由你提交、已合并到 \`${context.defaultBranch}\` 且关联此 Issue 的 PR。`,
-    );
+    await client.commentIssue(issueNumber, `❌ @${commentUser} 暂不能关闭 #${issueNumber}：未找到由你提交、已合并到 \`${context.defaultBranch}\` 且关联此 Issue 的 PR。`);
     return { status: "no-merged-pull-request" };
   }
 
-  await client.closeIssue(
-    issueNumber,
-    `✅ @${commentUser} 的关联 PR #${pullRequest.number} 已合并，关闭 #${issueNumber}。`,
-  );
+  await client.closeIssue(issueNumber, `✅ @${commentUser} 的关联 PR #${pullRequest.number} 已合并，关闭 #${issueNumber}。`);
   return { status: "closed", pullRequest };
 }
 
-export async function handleIssueCommand({
-  issueNumber,
-  commentBody,
-  commentUser,
-  commentUserType,
-  repository,
-  client,
-}) {
+export async function handleIssueCommand({ issueNumber, commentBody, commentUser, commentUserType, repository, client }) {
   const command = detectIssueCommand(commentBody);
   if (!command) return { status: "ignored" };
   if (commentUserType === "Bot") return { status: "ignored-bot" };
@@ -158,17 +136,7 @@ export function createGitHubClient({ repository, runGh = gh }) {
 
   return {
     async getIssueContext(issueNumber) {
-      return JSON.parse(
-        await runGh([
-          "issue",
-          "view",
-          String(issueNumber),
-          "--repo",
-          repository,
-          "--json",
-          "state,assignees",
-        ]),
-      );
+      return JSON.parse(await runGh(["issue", "view", String(issueNumber), "--repo", repository, "--json", "state,assignees"]));
     },
 
     async getIssueCloseContext(issueNumber) {
@@ -176,18 +144,7 @@ export function createGitHubClient({ repository, runGh = gh }) {
       let context;
 
       do {
-        const args = [
-          "api",
-          "graphql",
-          "-f",
-          `owner=${owner}`,
-          "-f",
-          `name=${name}`,
-          "-F",
-          `number=${issueNumber}`,
-          "-f",
-          `query=${ISSUE_CLOSE_CONTEXT_QUERY}`,
-        ];
+        const args = ["api", "graphql", "-f", `owner=${owner}`, "-f", `name=${name}`, "-F", `number=${issueNumber}`, "-f", `query=${ISSUE_CLOSE_CONTEXT_QUERY}`];
         if (endCursor) args.push("-f", `endCursor=${endCursor}`);
 
         const response = JSON.parse(await runGh(args));
@@ -205,11 +162,7 @@ export function createGitHubClient({ repository, runGh = gh }) {
           if (!context.defaultBranch) throw new Error(`Default branch was not found for ${repository}`);
         }
 
-        context.pullRequests.push(
-          ...issue.timelineItems.nodes
-            .map((node) => node.source)
-            .filter((source) => source?.__typename === "PullRequest"),
-        );
+        context.pullRequests.push(...issue.timelineItems.nodes.map((node) => node.source).filter((source) => source?.__typename === "PullRequest"));
 
         const { hasNextPage, endCursor: nextCursor } = issue.timelineItems.pageInfo;
         endCursor = hasNextPage ? nextCursor : undefined;
@@ -231,17 +184,7 @@ export function createGitHubClient({ repository, runGh = gh }) {
     },
 
     async closeIssue(issueNumber, comment) {
-      await runGh([
-        "issue",
-        "close",
-        String(issueNumber),
-        "--repo",
-        repository,
-        "--reason",
-        "completed",
-        "--comment",
-        comment,
-      ]);
+      await runGh(["issue", "close", String(issueNumber), "--repo", repository, "--reason", "completed", "--comment", comment]);
     },
   };
 }

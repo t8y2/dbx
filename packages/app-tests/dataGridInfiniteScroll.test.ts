@@ -54,8 +54,10 @@ test("load-all selects the last loaded row only after a valid append completes",
   assert.match(loadAllFn, /if \(!segment\) \{[\s\S]*?selectAndRevealLastLoadedRow\(\);[\s\S]*?return;/);
   assert.match(loadAllFn, /resolvedDatabaseType\.value === "elasticsearch" \|\| resolvedDatabaseType\.value === "easysearch"/);
   assert.match(loadAllFn, /LOAD_ALL_ROWS_CONFIRM_ROW_THRESHOLD/);
-  assert.match(loadAllFn, /infiniteScrollLoadAllPending = true/);
-  assert.match(loadAllFn, /emit\("paginate", segment\.offset, segment\.limit, currentWhereInput\(\), effectiveOrderBy\(\), true\)/);
+  assert.match(loadAllFn, /infiniteScrollLoadAllPending = !reloadFromFirstRow/);
+  // A reload of a jumped-to discrete page (#11940) replaces the page through
+  // the non-append path; only chunked runs append.
+  assert.match(loadAllFn, /emit\("paginate", segment\.offset, segment\.limit, currentWhereInput\(\), effectiveOrderBy\(\), !reloadFromFirstRow\)/);
   assert.match(source, /\(\) => \[props\.loading, props\.result\.rows\.length, props\.result\.appended_from_row_count\] as const[\s\S]*?\{ flush: "post" \}/);
   assert.match(source, /props\.result\.appended_from_row_count !== requestedOffset[\s\S]*?return;[\s\S]*?if \(shouldSelectLastRow\) selectAndRevealLastLoadedRow\(\)/);
   assert.match(source, /function selectAndRevealLastLoadedRow\(\)[\s\S]*?selectRow\(rowIndex\)[\s\S]*?remainingFrames = 12[\s\S]*?scrollCanvasRowIntoView\(rowIndex, "end"\)[\s\S]*?scrollDomRowIntoView\(rowIndex, "end"\)[\s\S]*?requestAnimationFrame\(revealWhenReady\)/);
@@ -69,8 +71,13 @@ test("load-all selects the last loaded row only after a valid append completes",
   assert.equal(contentAreaSource.match(/emit\('paginate', activeTab\.id, offset, limit, whereInput, orderBy, appendResult\)/g)?.length, 2);
   assert.match(documentBrowserSource, /:load-all-rows-enabled="false"/);
   // A non-append result replacement must clear the all-loaded marker (stale all-loaded
-  // used to lock scrolling and degrade the load-all button to locate-only after WHERE edits).
+  // used to lock scrolling and degrade the load-all button to locate-only after WHERE edits) —
+  // except for a #11940 reload of a jumped-to discrete page, which owns the full result
+  // and keeps the marker when its (uncapped) result is complete.
   const nonAppendIdx = source.indexOf("// A non-append result replaces the whole data set");
   assert.ok(nonAppendIdx > 0, "non-append replacement branch must exist");
-  assert.match(source.slice(nonAppendIdx, nonAppendIdx + 420), /infiniteScrollAllLoaded = false;/);
+  const window = source.slice(nonAppendIdx, nonAppendIdx + 1100);
+  assert.match(window, /if \(reloadedFromFirstRow\) \{[\s\S]*?infiniteScrollAllLoaded = true;[\s\S]*?selectAndRevealLastLoadedRow\(\);[\s\S]*?\} else \{[\s\S]*?infiniteScrollAllLoaded = false;/);
+  // The reload must not claim completeness over a capped/truncated result.
+  assert.match(window, /truncated && props\.result\.has_more !== true/);
 });

@@ -3,6 +3,16 @@ package app.dbx.jdbc;
 final class LegacyJdbcDriverClass {
     private LegacyJdbcDriverClass() {}
 
+    static boolean isLegacyAlias(String driverClass) {
+        if (driverClass == null) {
+            return false;
+        }
+        return switch (driverClass) {
+            case "teradata", "db2", "h2_embedded", "h2_embedded_v2" -> true;
+            default -> false;
+        };
+    }
+
     static Class<?> load(String driverClass, String jdbcUrl, ClassLoader loader) throws ClassNotFoundException {
         try {
             return Class.forName(driverClass, true, loader);

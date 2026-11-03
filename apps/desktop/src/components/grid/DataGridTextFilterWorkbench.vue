@@ -45,6 +45,7 @@ const emit = defineEmits<{
   toggleValueSuggestion: [option: DataGridLocalFilterOption];
   toggleAllValueSuggestions: [];
   applyValueSuggestions: [];
+  customModeOrder: [];
 }>();
 
 const { t } = useI18n();
@@ -186,6 +187,7 @@ watch(
         @toggle-value-suggestion="emit('toggleValueSuggestion', $event)"
         @toggle-all-value-suggestions="emit('toggleAllValueSuggestions')"
         @apply-value-suggestions="emit('applyValueSuggestions')"
+        @custom-mode-order="emit('customModeOrder')"
       />
     </div>
 

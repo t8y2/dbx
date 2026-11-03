@@ -49,6 +49,7 @@ vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
       initColumnWidths: vi.fn(),
       onResizeStart: vi.fn(),
       autoFitColumn: vi.fn(),
+      hasUserSizedColumns: ref(false),
       renderedColumnWidths: ref([120, 120, 120, 120]),
       totalWidth: ref(480),
       columnVars: ref({ "--total-w": "480px" }),
@@ -93,7 +94,7 @@ interface MountGridOptions {
   quickEntry?: boolean;
   hideNullColumns?: boolean;
   readonlyColumnIndexes?: number[];
-  databaseType?: "dameng" | "mongodb";
+  databaseType?: "dameng" | "mongodb" | "iris";
   customSaveHandler?: CustomSaveHandler;
   editable?: boolean;
   allowInsertRows?: boolean;
@@ -409,6 +410,36 @@ describe("DataGrid multi-row paste from a blank cell", () => {
     expect(save.mock.calls[0]![0].newRows).toHaveLength(50);
     expect(save.mock.calls[0]![0].newRows.at(-1)).toEqual([51, "Excel 50", null, null]);
     expect(save.mock.calls[0]![0].dirtyRows.size).toBe(0);
+  });
+
+  it("keeps a pasted empty string as an empty string instead of NULL", async () => {
+    const save = vi.fn<CustomSaveHandler["save"]>().mockResolvedValue();
+    const { host } = mountGrid({ customSaveHandler: { canInsert: true, save } });
+    await settle();
+    await addBlankRow(host);
+    await selectCell(visibleCells(pendingRows(host)[0]!)[0]!);
+    await paste(host, "2\t\tAda\tLovelace");
+    host.querySelector<HTMLElement>("[data-toolbar-action='save']")!.click();
+    await settle();
+
+    expect(save.mock.calls[0]![0].newRows).toEqual([[2, "", "Ada", "Lovelace"]]);
+  });
+
+  it("saves the configured NULL text as NULL while keeping an empty field empty", async () => {
+    const save = vi.fn<CustomSaveHandler["save"]>().mockResolvedValue();
+    const { host } = mountGrid({ customSaveHandler: { canInsert: true, save } });
+    await settle();
+    const settingsStore = useSettingsStore();
+    settingsStore.updateEditorSettings({
+      dataGridExtractorOptions: { ...settingsStore.editorSettings.dataGridExtractorOptions, dsv: { ...settingsStore.editorSettings.dataGridExtractorOptions.dsv, nullText: "\\N" } },
+    });
+    await addBlankRow(host);
+    await selectCell(visibleCells(pendingRows(host)[0]!)[0]!);
+    await paste(host, "\\N\tkeep\tAda\tLovelace");
+    host.querySelector<HTMLElement>("[data-toolbar-action='save']")!.click();
+    await settle();
+
+    expect(save.mock.calls[0]![0].newRows).toEqual([[null, "keep", "Ada", "Lovelace"]]);
   });
 
   it("expands beyond pre-added blank rows when pasted rows exceed them", async () => {
@@ -839,6 +870,47 @@ describe("selected transpose edit scope", () => {
     ).toEqual(["1", "hidden", "2"]);
   });
 
+  it("generates increment values with zero padding, prefix, and suffix in the dialog", async () => {
+    const { host } = mountGrid({ result: resultWithThreeRows() });
+    await openSelectedRows(host);
+    transposeCells(host)[0].click();
+    await settle();
+    transposeCells(host)[1].dispatchEvent(new MouseEvent("click", { shiftKey: true, bubbles: true }));
+    await settle();
+    transposeCells(host)[1].dispatchEvent(new MouseEvent("contextmenu", { shiftKey: true, bubbles: true, cancelable: true, clientX: 12, clientY: 12 }));
+    await settle();
+    const menuButton = (label: string) => {
+      const button = [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].find((item) => item.textContent?.trim() === label);
+      if (!button) throw new Error(`Context menu item not found: ${label}`);
+      return button;
+    };
+    menuButton(i18n.global.t("grid.generateValue")).dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    await settle();
+    menuButton(i18n.global.t("grid.generateIncrementId")).click();
+    await settle();
+    const dialog = document.querySelector<HTMLElement>("[role='dialog']")!;
+    const inputs = dialog.querySelectorAll<HTMLInputElement>("input");
+    expect(inputs).toHaveLength(4);
+    inputs[1].value = "4";
+    inputs[1].dispatchEvent(new Event("input"));
+    inputs[2].value = "ITEM_";
+    inputs[2].dispatchEvent(new Event("input"));
+    inputs[3].value = "_V1";
+    inputs[3].dispatchEvent(new Event("input"));
+    await settle();
+    expect(dialog.textContent).toContain("ITEM_0001_V1, ITEM_0002_V1");
+    const apply = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === i18n.global.t("grid.applyBulkEdit"))!;
+    apply.click();
+    await settle();
+    expect(useToast().message.value).toBe(i18n.global.t("grid.generatedValuesApplied", { count: 2 }));
+    await toggleTranspose(host);
+    expect(
+      displayRows(host)
+        .slice(0, 3)
+        .map((row) => visibleCellTexts(row)[2]),
+    ).toEqual(["ITEM_0001_V1", "hidden", "ITEM_0002_V1"]);
+  });
+
   it("maps pasted records through the transpose scope and stops at its end", async () => {
     const { host } = mountGrid({ result: resultWithThreeRows() });
     await openSelectedRows(host);
@@ -863,5 +935,11 @@ describe("selected transpose edit scope", () => {
     resultRef.value = markRaw({ ...original, rows: [original.rows[2], original.rows[0], original.rows[1]] });
     await settle();
     expect(transposeCells(host).map((cell) => cell.textContent?.trim())).toEqual(["third", "first"]);
+  });
+
+  it("renders the add-row toolbar action for Caché / IRIS table data (#11808)", async () => {
+    const { host } = mountGrid({ databaseType: "iris" });
+    await settle();
+    expect(host.querySelector("[data-toolbar-action='addRow']")).not.toBeNull();
   });
 });

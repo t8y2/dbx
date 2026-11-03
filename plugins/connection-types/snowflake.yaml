@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 480
 dbType: snowflake
+compareModes: [schema, data]
 rustVariant: Snowflake
 label: Snowflake
 runtimeMode: agent

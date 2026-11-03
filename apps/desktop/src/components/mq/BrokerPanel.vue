@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { formatError } from "@/lib/backend/errorUtils";
+import AutoRefreshControl from "@/components/common/AutoRefreshControl.vue";
 import { ref, watch, onMounted, onUnmounted, computed } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ClusterInfo, MqAdminConfig, MqSystemKind } from "@/types/mq";
@@ -55,6 +56,15 @@ function refreshNow() {
   void loadClusterInfo();
 }
 
+function disableAutoRefresh() {
+  autoRefresh.value = false;
+}
+
+function selectAutoRefreshInterval(seconds: number) {
+  refreshInterval.value = seconds;
+  autoRefresh.value = true;
+}
+
 function startAutoRefresh() {
   stopAutoRefresh();
   if (autoRefresh.value && !isDocumentHidden()) {
@@ -107,19 +117,18 @@ onUnmounted(() => {
     <div class="panel-toolbar">
       <h3>{{ isRocketMqCluster ? t("mqBroker.clusterTitle") : t("mqBroker.title") }}</h3>
       <div class="toolbar-actions">
-        <label class="checkbox-label">
-          <input type="checkbox" v-model="autoRefresh" />
-          {{ t("mqBroker.autoRefresh") }}
-        </label>
-        <select v-model.number="refreshInterval" :disabled="!autoRefresh" class="refresh-interval">
-          <option :value="5">{{ t("mqBroker.refreshInterval5s") }}</option>
-          <option :value="10">{{ t("mqBroker.refreshInterval10s") }}</option>
-          <option :value="30">{{ t("mqBroker.refreshInterval30s") }}</option>
-          <option :value="60">{{ t("mqBroker.refreshInterval60s") }}</option>
-        </select>
-        <button @click="refreshNow" :disabled="loading" class="btn-secondary">
-          {{ loading ? t("mqBroker.refreshing") : t("mqBroker.refreshNow") }}
-        </button>
+        <AutoRefreshControl
+          :enabled="autoRefresh"
+          :interval-seconds="refreshInterval"
+          :intervals="[5, 10, 30, 60]"
+          :loading="loading"
+          :label="t('mqBroker.autoRefresh')"
+          :off-label="t('serverDashboard.off')"
+          :refresh-label="loading ? t('mqBroker.refreshing') : t('mqBroker.refreshNow')"
+          @refresh="refreshNow"
+          @disable="disableAutoRefresh"
+          @select="selectAutoRefreshInterval"
+        />
       </div>
     </div>
 

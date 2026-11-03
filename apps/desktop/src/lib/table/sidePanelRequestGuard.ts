@@ -6,6 +6,8 @@
  * epoch; in-flight requests capture the epoch at start and compare before
  * writing results.
  */
+import { waitForMetadata } from "@/lib/metadata/metadataLoadBudget";
+
 export interface SidePanelRequestGuard {
   /** Bump the epoch, invalidating all previously captured epochs. */
   bump: () => void;
@@ -17,17 +19,30 @@ export interface SidePanelRequestGuard {
   isStale: (capturedEpoch: number) => boolean;
   /** Returns true if the captured epoch is still current (request is fresh). */
   isFresh: (capturedEpoch: number) => boolean;
+  wait: <T>(capturedEpoch: number, promise: Promise<T>, timeoutMs: number) => Promise<T>;
 }
 
 export function createSidePanelRequestGuard(): SidePanelRequestGuard {
   let epoch = 0;
+  let controller = new AbortController();
+  const start = () => {
+    epoch++;
+    controller.abort(new Error("Metadata waiting cancelled locally."));
+    controller = new AbortController();
+    return epoch;
+  };
   return {
-    bump: () => {
-      epoch++;
-    },
-    start: () => ++epoch,
+    bump: start,
+    start,
     capture: () => epoch,
     isStale: (capturedEpoch: number) => capturedEpoch !== epoch,
     isFresh: (capturedEpoch: number) => capturedEpoch === epoch,
+    wait: (capturedEpoch, promise, timeoutMs) => {
+      if (capturedEpoch !== epoch) {
+        void promise.catch(() => undefined);
+        return Promise.reject(new Error("Metadata waiting cancelled locally."));
+      }
+      return waitForMetadata(promise, timeoutMs, controller.signal);
+    },
   };
 }

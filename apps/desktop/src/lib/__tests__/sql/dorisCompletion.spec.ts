@@ -18,6 +18,27 @@ describe("Doris and SelectDB SQL assistance", () => {
     expect(getSqlFunctionSignatureHelp(call, call.length, "doris")).not.toBeNull();
   });
 
+  it.each(["doris", "starrocks"] as const)("offers MySQL date and interval functions with proper templates for %s", (databaseType) => {
+    const addItems = buildSqlCompletionItems("SELECT date_ad", 14, { databaseType, tables: [], columnsByTable: new Map() });
+    expect(addItems).toContainEqual(expect.objectContaining({ label: "DATE_ADD", type: "function", apply: "DATE_ADD(${date}, INTERVAL ${expr} ${unit})" }));
+
+    const subItems = buildSqlCompletionItems("SELECT date_su", 14, { databaseType, tables: [], columnsByTable: new Map() });
+    expect(subItems).toContainEqual(expect.objectContaining({ label: "DATE_SUB", type: "function", apply: "DATE_SUB(${date}, INTERVAL ${expr} ${unit})" }));
+
+    const addDateItems = buildSqlCompletionItems("SELECT addda", 12, { databaseType, tables: [], columnsByTable: new Map() });
+    expect(addDateItems).toContainEqual(expect.objectContaining({ label: "ADDDATE", type: "function", apply: "ADDDATE(${date}, INTERVAL ${expr} ${unit})" }));
+
+    const extractItems = buildSqlCompletionItems("SELECT extra", 12, { databaseType, tables: [], columnsByTable: new Map() });
+    expect(extractItems).toContainEqual(expect.objectContaining({ label: "EXTRACT", type: "function", apply: "EXTRACT(${unit} FROM ${date})" }));
+
+    const call = "SELECT DATE_ADD(created_at, ";
+    const help = getSqlFunctionSignatureHelp(call, call.length, databaseType);
+    expect(help).not.toBeNull();
+    expect(help?.name).toBe("DATE_ADD");
+    expect(help?.parameters).toEqual(["date", "INTERVAL expr unit"]);
+    expect(help?.activeParameter).toBe(1);
+  });
+
   it("ranks a matching column ahead of a function prefix match", () => {
     const sql = "SELECT bitmap_ FROM events";
     const items = buildSqlCompletionItems(sql, sql.indexOf(" FROM"), {

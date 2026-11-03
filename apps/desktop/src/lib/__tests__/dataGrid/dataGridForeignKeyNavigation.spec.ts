@@ -156,4 +156,98 @@ describe("foreignKeyNavigationTarget", () => {
     const target = foreignKeyNavigationTarget({ connectionId: "c1", database: "db", fk: fk(), whereInput: '"id" = 7' });
     expect(target.whereInput).toBe('"id" = 7');
   });
+
+  it("en MySQL navega a la base de datos de ref_schema y vacía schema", () => {
+    const target = foreignKeyNavigationTarget({
+      connectionId: "c1",
+      database: "db_vrent",
+      fk: fk({ ref_schema: "other_db", ref_table: "tb_company", ref_column: "id" }),
+      databaseType: "mysql",
+    });
+    expect(target.database).toBe("other_db");
+    expect(target.schema).toBeUndefined();
+    expect(target.tableName).toBe("tb_company");
+    expect(target.columnName).toBe("id");
+  });
+
+  it("con conexión nativa MySQL resuelve target.database según ref_schema", () => {
+    const target = foreignKeyNavigationTarget({
+      connectionId: "c1",
+      database: "db_vrent",
+      fk: fk({ ref_schema: "other_db", ref_table: "tb_company" }),
+      connection: { db_type: "mysql" },
+    });
+    expect(target.database).toBe("other_db");
+    expect(target.schema).toBeUndefined();
+  });
+
+  it("en MySQL sin ref_schema mantiene la base de datos actual", () => {
+    const target = foreignKeyNavigationTarget({
+      connectionId: "c1",
+      database: "db_vrent",
+      fk: fk({ ref_schema: null, ref_table: "tb_company" }),
+      databaseType: "mysql",
+    });
+    expect(target.database).toBe("db_vrent");
+    expect(target.schema).toBeUndefined();
+  });
+
+  it("con conexión JDBC MySQL navega a la base de datos de ref_schema", () => {
+    const target = foreignKeyNavigationTarget({
+      connectionId: "c1",
+      database: "db_vrent",
+      fk: fk({ ref_schema: "other_db", ref_table: "tb_company" }),
+      connection: { db_type: "jdbc", driver_profile: "mysql" },
+    });
+    expect(target.database).toBe("other_db");
+    expect(target.schema).toBeUndefined();
+  });
+
+  it("en bases con esquema (PostgreSQL) preserva database y asigna ref_schema como schema", () => {
+    const target = foreignKeyNavigationTarget({
+      connectionId: "c1",
+      database: "app_db",
+      currentSchema: "public",
+      fk: fk({ ref_schema: "sales", ref_table: "customers" }),
+      databaseType: "postgres",
+      connection: { db_type: "postgres" },
+    });
+    expect(target.database).toBe("app_db");
+    expect(target.schema).toBe("sales");
+  });
+
+  it("con objeto de conexión sin db_type pero databaseType postgres preserva schema", () => {
+    const target = foreignKeyNavigationTarget({
+      connectionId: "c1",
+      database: "app_db",
+      currentSchema: "public",
+      fk: fk({ ref_schema: "sales", ref_table: "customers" }),
+      databaseType: "postgres",
+      connection: {},
+    });
+    expect(target.database).toBe("app_db");
+    expect(target.schema).toBe("sales");
+  });
+
+  it("en MySQL con ref_schema de espacios en blanco cae a database actual", () => {
+    const target = foreignKeyNavigationTarget({
+      connectionId: "c1",
+      database: "db_vrent",
+      fk: fk({ ref_schema: "   ", ref_table: "tb_company" }),
+      databaseType: "mysql",
+    });
+    expect(target.database).toBe("db_vrent");
+    expect(target.schema).toBeUndefined();
+  });
+
+  it("en MySQL con ref_schema con espacios recorta el nombre del destino", () => {
+    const target = foreignKeyNavigationTarget({
+      connectionId: "c1",
+      database: "db_vrent",
+      fk: fk({ ref_schema: "  other_db  ", ref_table: "tb_company" }),
+      databaseType: "mysql",
+    });
+    expect(target.database).toBe("other_db");
+    expect(target.schema).toBeUndefined();
+  });
 });

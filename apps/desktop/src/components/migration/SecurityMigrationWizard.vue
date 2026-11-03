@@ -17,6 +17,7 @@ const exportingDiagnostic = ref(false);
 const canRevealPaths = computed(() => isTauriRuntime());
 const errorCode = computed(() => props.store.state.errorCode);
 const errorMessage = computed(() => props.store.state.errorMessage);
+const keyRecoveryRequired = computed(() => props.store.state.status?.keyRecoveryRequired === true);
 const errorAdviceKey = computed(() => {
   if (props.store.state.error === "cleanupFailed") return "migration.errors.cleanupAdvice";
   switch (errorCode.value) {
@@ -101,8 +102,8 @@ async function diagnostic() {
       <div v-if="props.store.state.loading" class="py-10 text-center text-sm text-muted-foreground">{{ t("migration.checking") }}</div>
       <template v-else>
         <div v-if="props.store.state.step === 1" class="space-y-5">
-          <p class="text-sm text-muted-foreground">{{ t("migration.intro") }}</p>
-          <div class="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm">
+          <p class="text-sm text-muted-foreground">{{ keyRecoveryRequired ? t("migration.keyUnavailable") : t("migration.intro") }}</p>
+          <div v-if="!keyRecoveryRequired" class="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm">
             <h2 class="font-medium">{{ t("migration.whyTitle") }}</h2>
             <p class="mt-2 text-muted-foreground">{{ t("migration.whyBody") }}</p>
             <ul class="mt-3 list-disc space-y-1 pl-5 text-muted-foreground">
@@ -126,8 +127,7 @@ async function diagnostic() {
             </div>
           </div>
           <p v-if="status?.dataDir" class="break-all text-xs text-muted-foreground">
-            {{ t("migration.dataDir")
-            }}<!--
+            {{ t("migration.dataDir") }}<!--
             --><button
               type="button"
               class="break-all text-left underline decoration-dotted underline-offset-2 hover:text-foreground disabled:cursor-default disabled:no-underline"
@@ -138,17 +138,22 @@ async function diagnostic() {
               {{ status.dataDir }}
             </button>
           </p>
-          <p v-if="status?.keyProviderAvailable === false && !status.keyCreationAllowed" class="rounded-lg bg-destructive/10 p-3 text-sm text-destructive">{{ t("migration.keyUnavailable") }}</p>
+          <p v-if="status?.keyProviderAvailable === false && !status.keyCreationAllowed && !keyRecoveryRequired" class="rounded-lg bg-destructive/10 p-3 text-sm text-destructive">{{ t("migration.keyUnavailable") }}</p>
           <p v-else-if="status?.keyStatus === 'will_create'" class="rounded-lg bg-primary/5 p-3 text-sm text-muted-foreground">{{ t("migration.keyWillCreateHint") }}</p>
           <p v-if="status?.keyFileConfigured === false && status?.persistentKeyConfigured === false && status?.keyCreationAllowed === false" class="text-xs text-muted-foreground">{{ t("migration.keyRecoveryHint") }}</p>
           <div v-if="props.store.state.error" class="space-y-1 rounded-lg bg-destructive/10 p-4 text-sm text-destructive">
-            <p>{{ t(`migration.${props.store.state.error === "statusFailed" ? "statusFailed" : props.store.state.error === "cleanupFailed" ? "cleanupFailed" : "failed"}`) }}</p>
+            <p>{{ keyRecoveryRequired ? t("migration.keyUnavailable") : t(`migration.${props.store.state.error === "statusFailed" ? "statusFailed" : props.store.state.error === "cleanupFailed" ? "cleanupFailed" : "failed"}`) }}</p>
             <p v-if="errorCode">{{ t("migration.errorCode", { code: errorCode }) }}</p>
             <p v-if="errorMessage">{{ errorMessage }}</p>
             <p>{{ t(errorAdviceKey) }}</p>
           </div>
           <div class="flex flex-wrap gap-3">
-            <button v-if="props.store.state.error === 'statusFailed' || (status?.keyProviderAvailable === false && !status?.keyCreationAllowed)" class="rounded-md bg-primary px-4 py-2 text-primary-foreground disabled:opacity-50" :disabled="props.store.state.busy" @click="props.store.retryStatus">
+            <button
+              v-if="props.store.state.error === 'statusFailed' || keyRecoveryRequired || (status?.keyProviderAvailable === false && !status?.keyCreationAllowed)"
+              class="rounded-md bg-primary px-4 py-2 text-primary-foreground disabled:opacity-50"
+              :disabled="props.store.state.busy"
+              @click="props.store.retryStatus"
+            >
               {{ t("migration.retryStatus") }}</button
             ><button
               v-else
@@ -184,8 +189,7 @@ async function diagnostic() {
             <h2 class="font-medium">{{ t("migration.successTitle") }}</h2>
             <p class="mt-2 text-sm text-muted-foreground">{{ t("migration.successIntro") }}</p>
             <p v-if="status?.backupPath" class="mt-3 break-all text-xs text-muted-foreground">
-              {{ t("migration.backupPath")
-              }}<!--
+              {{ t("migration.backupPath") }}<!--
               --><button
                 type="button"
                 class="break-all text-left underline decoration-dotted underline-offset-2 hover:text-foreground disabled:cursor-default disabled:no-underline"

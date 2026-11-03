@@ -1,5 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
+use std::fs::{File, OpenOptions};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use fs2::FileExt;
+use sha2::{Digest, Sha256};
 
 const UPDATE_IN_PROGRESS: &str = "Plugin update is in progress. Please try again after it finishes.";
 const OPERATIONS_ACTIVE: &str = "Plugin update blocked by active operations. Please wait for them to finish.";
@@ -7,6 +13,22 @@ const OPERATIONS_ACTIVE: &str = "Plugin update blocked by active operations. Ple
 #[derive(Debug, Clone, Default)]
 pub struct PluginLifecycle {
     usage: Arc<Mutex<HashMap<String, PluginUsage>>>,
+    store: Option<Arc<PathBuf>>,
+}
+
+pub(super) struct PluginUpdateProbe(Option<File>);
+
+impl PluginUpdateProbe {
+    pub(super) fn requested(&self) -> Result<bool, String> {
+        let Some(file) = &self.0 else { return Ok(false) };
+        match FileExt::try_lock_shared(file) {
+            Ok(()) => FileExt::unlock(file)
+                .map(|()| false)
+                .map_err(|error| format!("Failed to release plugin lifecycle probe: {error}")),
+            Err(error) if lock_contended(&error) => Ok(true),
+            Err(error) => Err(format!("Failed to inspect plugin lifecycle lock: {error}")),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -44,6 +66,9 @@ struct PluginUsageLease {
     lifecycle: PluginLifecycle,
     plugin_id: String,
     kind: PluginUsageKind,
+    // Release the runtime barrier before admitting new operations.
+    runtime_lock: Mutex<Option<File>>,
+    _activity_lock: Option<File>,
 }
 
 #[derive(Debug)]
@@ -54,6 +79,39 @@ enum PluginUsageKind {
 }
 
 impl PluginLifecycle {
+    pub(super) fn for_store(root: &Path) -> Self {
+        Self { store: Some(Arc::new(root.join(".runtime"))), ..Self::default() }
+    }
+
+    fn lock_file(&self, plugin_id: &str, name: &str) -> Result<Option<File>, String> {
+        let Some(root) = &self.store else { return Ok(None) };
+        // IDs arriving from external tool calls must never become filesystem paths.
+        let key = format!("{:x}", Sha256::digest(plugin_id.as_bytes()));
+        let dir = root.join(key);
+        std::fs::create_dir_all(&dir).map_err(|error| format!("Failed to prepare plugin lifecycle: {error}"))?;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join(name))
+            .map(Some)
+            .map_err(|error| format!("Failed to open plugin lifecycle lock: {error}"))
+    }
+
+    pub(super) fn runtime_lease(&self, plugin_id: &str) -> Result<Option<File>, String> {
+        let file = self.lock_file(plugin_id, "runtime.lock")?;
+        if let Some(file) = &file {
+            FileExt::try_lock_shared(file).map_err(|_| UPDATE_IN_PROGRESS.to_string())?;
+        }
+        Ok(file)
+    }
+
+    /// An exclusive activity lock requests idle runtimes in *every* DBX host to stop.
+    pub(super) fn update_probe(&self, plugin_id: &str) -> Result<PluginUpdateProbe, String> {
+        Ok(PluginUpdateProbe(self.lock_file(plugin_id, "activity.lock")?))
+    }
+
     pub(crate) fn check_update(&self, plugin_id: &str) -> Result<(), String> {
         let usage = self.usage.lock().unwrap_or_else(|error| error.into_inner());
         usage.get(plugin_id).map_or(Ok(()), PluginUsage::ensure_updatable)
@@ -78,6 +136,26 @@ impl PluginLifecycle {
         if usage.updating {
             return Err(UPDATE_IN_PROGRESS.to_string());
         }
+        if matches!(kind, PluginUsageKind::Update) {
+            usage.ensure_updatable()?;
+        }
+        let file = self.lock_file(plugin_id, "activity.lock")?;
+        if let Some(file) = &file {
+            let result = if matches!(kind, PluginUsageKind::Update) {
+                FileExt::try_lock_exclusive(file)
+            } else {
+                FileExt::try_lock_shared(file)
+            };
+            result.map_err(|error| {
+                if lock_contended(&error) {
+                    if matches!(kind, PluginUsageKind::Update) {
+                        "Plugin update blocked by active connections or operations in another DBX host. Close them and try again.".to_string()
+                    } else {
+                        UPDATE_IN_PROGRESS.to_string()
+                    }
+                } else { format!("Failed to lock plugin lifecycle: {error}") }
+            })?;
+        }
         match &kind {
             PluginUsageKind::Connection(label) => *usage.connections.entry(label.clone()).or_default() += 1,
             PluginUsageKind::Operation => usage.operations += 1,
@@ -87,8 +165,50 @@ impl PluginLifecycle {
             }
         }
         Ok(PluginUsageGuard {
-            _lease: Arc::new(PluginUsageLease { lifecycle: self.clone(), plugin_id: plugin_id.to_string(), kind }),
+            _lease: Arc::new(PluginUsageLease {
+                lifecycle: self.clone(),
+                plugin_id: plugin_id.to_string(),
+                kind,
+                runtime_lock: Mutex::new(None),
+                _activity_lock: file,
+            }),
         })
+    }
+}
+
+fn lock_contended(error: &std::io::Error) -> bool {
+    error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
+impl PluginUsageGuard {
+    pub(super) fn runtime_lease(&self) -> Result<Option<File>, String> {
+        self._lease.lifecycle.runtime_lease(&self._lease.plugin_id)
+    }
+
+    /// Called on a blocking installer thread, after the activity lock prevents new work.
+    /// Runtime monitors release their shared locks only after all executable handles drop.
+    pub(super) fn drain_runtimes(&self) -> Result<(), String> {
+        let Some(file) = self._lease.lifecycle.lock_file(&self._lease.plugin_id, "runtime.lock")? else {
+            return Ok(());
+        };
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match FileExt::try_lock_exclusive(&file) {
+                Ok(()) => {
+                    *self._lease.runtime_lock.lock().unwrap_or_else(|error| error.into_inner()) = Some(file);
+                    return Ok(());
+                }
+                Err(error) if lock_contended(&error) && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "Failed to stop plugin '{}' runtimes in other DBX hosts: {error}",
+                        self._lease.plugin_id
+                    ))
+                }
+            }
+        }
     }
 }
 

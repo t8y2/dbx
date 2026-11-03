@@ -46,9 +46,12 @@ export type DataGridContextMenuIcons = {
 export function createDataGridFilterSubmenu(options: {
   label: string;
   icon: Component;
-  labels: Record<"equals" | "notEquals" | "like" | "notLike" | "lessThan" | "greaterThan" | "isNull" | "isNotNull" | "clear", string>;
+  labels: Record<"equals" | "notEquals" | "like" | "notLike" | "lessThan" | "greaterThan" | "custom" | "isNull" | "isNotNull" | "clear", string>;
   apply: (mode: "equals" | "not-equals" | "like" | "not-like" | "less-than" | "greater-than" | "is-null" | "is-not-null") => void;
+  applyCustom: () => void;
   clear: () => void;
+  /** Result grids filter in memory and have no SQL condition builder (#13237). */
+  hideCustom?: boolean;
 }): DataGridContextMenuItem {
   const { labels } = options;
   return {
@@ -61,6 +64,7 @@ export function createDataGridFilterSubmenu(options: {
       { label: labels.notLike, action: () => options.apply("not-like") },
       { label: labels.lessThan, action: () => options.apply("less-than") },
       { label: labels.greaterThan, action: () => options.apply("greater-than") },
+      ...(options.hideCustom ? [] : [{ label: labels.custom, action: () => options.applyCustom() }]),
       { label: "", separator: true },
       { label: labels.isNull, action: () => options.apply("is-null") },
       { label: labels.isNotNull, action: () => options.apply("is-not-null") },
@@ -113,6 +117,9 @@ export function createDataGridColumnContextMenuItems(options: {
   headerColumn: boolean;
   contextColumn: boolean;
   canCopyAlterSql: boolean;
+  canCopyMetadata?: boolean;
+  /** 当前列（或选中列）解析到了非空注释时才提供「复制列注释」。 */
+  canCopyComment?: boolean;
   canFilter: boolean;
   hasSort: boolean;
   sortMode: "database" | "local";
@@ -120,6 +127,7 @@ export function createDataGridColumnContextMenuItems(options: {
   frozenColumnCount?: number;
   contextVisibleColIdx?: number;
   hasColumnSelection?: boolean;
+  hasUserSizedColumns?: boolean;
   /** 显式多选的可见列数量；为 undefined 时按 0 处理。 */
   selectedColumnCount?: number;
   /** 当前可见列总数，用于判断「选中列覆盖全部可见列」而禁用批量隐藏。 */
@@ -128,16 +136,18 @@ export function createDataGridColumnContextMenuItems(options: {
   hiddenColumnCount?: number;
   canHideIdenticalColumns?: boolean;
   labels: Record<
-    "copyName" | "copyNames" | "details" | "copyAlterSql" | "databaseAscending" | "databaseDescending" | "localAscending" | "localDescending" | "clearSort" | "freezeToColumn" | "freezeSelectedColumns" | "unfreezeColumns" | "hideColumn" | "hideSelectedColumns" | "showAllColumnsMenu",
+    "copyName" | "copyComment" | "copyNames" | "details" | "copyAlterSql" | "databaseAscending" | "databaseDescending" | "localAscending" | "localDescending" | "clearSort" | "freezeToColumn" | "freezeSelectedColumns" | "unfreezeColumns" | "hideColumn" | "hideSelectedColumns" | "showAllColumnsMenu",
     string
   > &
-    Partial<Record<"freezeCurrentColumn" | "unfreezeCurrentColumn" | "hideIdenticalColumns", string>>;
-  icons: Pick<DataGridContextMenuIcons, "copy" | "columnDetails" | "database" | "ascending" | "descending" | "clearSort">;
+    Partial<Record<"freezeCurrentColumn" | "unfreezeCurrentColumn" | "hideIdenticalColumns" | "copyMetadata" | "clearRememberedColumnWidths", string>>;
+  icons: Pick<DataGridContextMenuIcons, "copy" | "columnDetails" | "database" | "ascending" | "descending" | "clearSort"> & Partial<Record<"clearRememberedColumnWidths", Component>>;
   actions: {
     copyName: () => void;
+    copyComment: () => void;
     copyNames: () => void;
     details: () => void;
     copyAlterSql: () => void;
+    copyMetadata?: () => void;
     sort: (direction: "asc" | "desc" | null, mode: "database" | "local") => void;
     freezeToColumn: () => void;
     freezeSelectedColumns: () => void;
@@ -148,6 +158,7 @@ export function createDataGridColumnContextMenuItems(options: {
     hideSelectedColumns: () => void;
     hideIdenticalColumns?: () => void;
     showAllColumnsMenu: () => void;
+    clearRememberedColumnWidths?: () => void;
   };
   filterSubmenu: DataGridContextMenuItem;
   highlightSubmenu?: DataGridContextMenuItem;
@@ -155,6 +166,9 @@ export function createDataGridColumnContextMenuItems(options: {
   const items: DataGridContextMenuItem[] = [];
   if (options.headerColumn) {
     items.push({ label: options.labels.copyName, action: options.actions.copyName, icon: options.icons.copy });
+    if (options.canCopyMetadata) items.push({ label: options.labels.copyMetadata ?? "Copy column metadata", action: options.actions.copyMetadata!, icon: options.icons.copy });
+    // 只有解析到注释时才给出入口：无元数据的查询结果里永远为空，展示反而误导。
+    if (options.canCopyComment) items.push({ label: options.labels.copyComment, action: options.actions.copyComment, icon: options.icons.copy });
     items.push({ label: options.labels.copyNames, action: options.actions.copyNames, icon: options.icons.copy });
     items.push({ label: options.labels.details, action: options.actions.details, icon: options.icons.columnDetails });
     if (options.canCopyAlterSql) items.push({ label: options.labels.copyAlterSql, action: options.actions.copyAlterSql, icon: options.icons.copy });
@@ -195,6 +209,13 @@ export function createDataGridColumnContextMenuItems(options: {
     if ((options.hiddenColumnCount ?? 0) > 0) {
       items.push({ label: options.labels.showAllColumnsMenu, action: options.actions.showAllColumnsMenu });
     }
+    if (options.hasUserSizedColumns && options.labels.clearRememberedColumnWidths && options.actions.clearRememberedColumnWidths) {
+      items.push({
+        label: options.labels.clearRememberedColumnWidths,
+        action: options.actions.clearRememberedColumnWidths,
+        icon: options.icons.clearRememberedColumnWidths,
+      });
+    }
     if ((options.frozenColumnCount ?? 0) > 0) {
       if ((options.contextVisibleColIdx ?? -1) < (options.frozenColumnCount ?? 0) && options.labels.unfreezeCurrentColumn && options.actions.unfreezeCurrentColumn) items.push({ label: options.labels.unfreezeCurrentColumn, action: options.actions.unfreezeCurrentColumn });
       items.push({ label: options.labels.unfreezeColumns, action: options.actions.unfreezeColumns });
@@ -213,6 +234,13 @@ export function createDataGridColumnContextMenuItems(options: {
     });
     if ((options.hiddenColumnCount ?? 0) > 0) {
       items.push({ label: options.labels.showAllColumnsMenu, action: options.actions.showAllColumnsMenu });
+    }
+    if (options.hasUserSizedColumns && options.labels.clearRememberedColumnWidths && options.actions.clearRememberedColumnWidths) {
+      items.push({
+        label: options.labels.clearRememberedColumnWidths,
+        action: options.actions.clearRememberedColumnWidths,
+        icon: options.icons.clearRememberedColumnWidths,
+      });
     }
   }
   return items;

@@ -9,6 +9,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { buildKafkaMessageSearchText, kafkaMessageSearchTextMatches, normalizeKafkaMessageSearchQuery } from "@/lib/mq/kafkaMessageSearch";
 import { sortKafkaMessagesByPublishTime, type KafkaMessageDisplayOrder } from "@/lib/mq/kafkaMessageSort";
 import { parseNonNegativeSafeInteger } from "@/lib/mq/mqPeekFilters";
+import { formatMqMessagePayload } from "@/lib/mq/thriftBinary";
 import { useToast } from "@/composables/useToast";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -37,15 +38,18 @@ const incomplete = ref(false);
 const partition = ref<string | number>("");
 const offset = ref<string | number>("");
 const count = ref(20);
+const decodePayload = ref(false);
 const advancedExpanded = ref(false);
 const messageSearchQuery = ref("");
 type KafkaPeekStartPosition = NonNullable<PeekMessagesOptions["startPosition"]>;
 const kafkaStartPosition = ref<KafkaPeekStartPosition>("latest");
+const kafkaStartTimestamp = ref("");
 const kafkaMessageDisplayOrder = ref<KafkaMessageDisplayOrder>("newest");
 let messageRequestVersion = 0;
 
 const isKafka = computed(() => props.mqSystemKind === "kafka");
 const isKafkaOffsetMode = computed(() => kafkaStartPosition.value === "offset");
+const isKafkaTimestampMode = computed(() => kafkaStartPosition.value === "timestamp");
 const isMonitoring = computed(() => props.appearance === "monitoring");
 const normalizedMessageSearchQuery = computed(() => normalizeKafkaMessageSearchQuery(messageSearchQuery.value));
 const searchableMessages = computed(() =>
@@ -95,6 +99,11 @@ async function loadMessages() {
         options.offset = parsedOffset;
         offset.value = String(parsedOffset);
       }
+      if (isKafkaTimestampMode.value) {
+        const parsedTime = Date.parse(String(kafkaStartTimestamp.value));
+        if (!Number.isFinite(parsedTime)) throw new Error(t("mqMessages.timestampRequired"));
+        options.timestamp = parsedTime;
+      }
     } else {
       if (partitionText !== "") {
         const parsedPartition = parseNonNegativeSafeInteger(partitionText);
@@ -135,7 +144,8 @@ function invalidateMessageRequest() {
 }
 
 function messagePayload(message: PeekedMessage): string {
-  return message.payloadText ?? message.payloadBase64;
+  const enabled = decodePayload.value;
+  return formatMqMessagePayload(message, { decode: enabled, allowRawStructSniff: enabled });
 }
 
 async function copyMessagePayload(message: PeekedMessage) {
@@ -144,6 +154,10 @@ async function copyMessagePayload(message: PeekedMessage) {
 
 async function copyMessageHeaders(message: PeekedMessage) {
   await copyMessageText(JSON.stringify(message.headers, null, 2));
+}
+
+async function copyMessageProperties(message: PeekedMessage) {
+  await copyMessageText(JSON.stringify(message.properties, null, 2));
 }
 
 async function copyMessageText(text: string) {
@@ -213,6 +227,10 @@ watch(kafkaStartPosition, () => {
         <span>{{ t("mqMessages.count") }}</span>
         <input v-model.number="count" data-testid="peek-count" type="number" min="1" max="100" :disabled="loading" />
       </label>
+      <label class="peek-checkbox-control">
+        <input v-model="decodePayload" data-testid="rabbitmq-decode-payload" type="checkbox" />
+        <span>{{ t("mqMessages.decodePayload") }}</span>
+      </label>
       <label v-if="isKafka && !isMonitoring">
         <span>{{ t("mqMessages.startPosition") }}</span>
         <Select v-model="kafkaStartPosition" :disabled="loading">
@@ -223,8 +241,13 @@ watch(kafkaStartPosition, () => {
             <SelectItem value="latest">{{ t("mqMessages.kafkaLatest") }}</SelectItem>
             <SelectItem value="earliest">{{ t("mqMessages.kafkaEarliest") }}</SelectItem>
             <SelectItem value="offset">{{ t("mqMessages.kafkaOffset") }}</SelectItem>
+            <SelectItem value="timestamp">{{ t("mqMessages.kafkaTimestamp") }}</SelectItem>
           </SelectContent>
         </Select>
+      </label>
+      <label v-if="isKafka && isKafkaTimestampMode && !isMonitoring">
+        <span>{{ t("mqMessages.startTimestamp") }}</span>
+        <input v-model="kafkaStartTimestamp" data-testid="kafka-peek-start-timestamp" type="datetime-local" step="1" :disabled="loading" />
       </label>
       <label v-if="isKafka">
         <span>{{ t("mqMessages.timeOrder") }}</span>
@@ -306,6 +329,18 @@ watch(kafkaStartPosition, () => {
           </div>
           <div class="message-headers-values">
             <span v-for="(value, key) in message.headers" :key="key">{{ key }}: {{ value }}</span>
+          </div>
+        </div>
+        <div v-if="mqSystemKind === 'rabbitmq' && Object.keys(message.properties || {}).length" class="message-headers" data-testid="message-properties">
+          <div class="message-headers-heading">
+            <span>{{ t("mqMessages.messageProperties") }}</span>
+            <Button type="button" variant="outline" size="sm" class="message-copy-action h-7 gap-1.5 px-2 text-xs" :aria-label="`${t('grid.copy')} ${t('mqMessages.messageProperties')}`" data-testid="copy-message-properties" @click="copyMessageProperties(message)">
+              <Copy :size="14" aria-hidden="true" />
+              {{ t("grid.copy") }}
+            </Button>
+          </div>
+          <div class="message-headers-values">
+            <span v-for="(value, key) in message.properties" :key="key">{{ key }}: {{ value }}</span>
           </div>
         </div>
       </article>
@@ -391,7 +426,7 @@ watch(kafkaStartPosition, () => {
   font-weight: 500;
 }
 
-.peek-controls input,
+.peek-controls input:not([type="checkbox"]),
 .peek-controls :deep(.message-browser-start-position) {
   height: 32px;
   width: 100%;
@@ -404,7 +439,16 @@ watch(kafkaStartPosition, () => {
   font-size: 13px;
 }
 
-.peek-controls input:focus,
+.peek-controls label.peek-checkbox-control {
+  flex-direction: row;
+  align-items: center;
+  align-self: end;
+  height: 32px;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.peek-controls input:not([type="checkbox"]):focus,
 .peek-controls :deep(.message-browser-start-position:focus-visible) {
   outline: none;
   border-color: var(--color-primary);

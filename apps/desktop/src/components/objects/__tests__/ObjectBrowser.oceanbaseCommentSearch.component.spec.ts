@@ -20,6 +20,7 @@ vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     getConfig: () => connection,
     ensureConnected: vi.fn().mockResolvedValue(undefined),
+    tableNameFilterForScope: () => undefined,
     orderByPinnedTreeNodes: (rows: unknown[]) => rows,
   }),
 }));
@@ -80,7 +81,11 @@ gridStyle.textContent = ".object-browser-grid-wrapper { padding: 8px; }";
 beforeEach(() => {
   vi.clearAllMocks();
   invalidateObjectBrowserRowsCache({});
-  mocks.listObjects.mockResolvedValue(objects);
+  mocks.listObjects.mockImplementation((_connectionId, _database, _schema, _types, filter) => {
+    if (filter === "nEeDlE") return Promise.resolve(objects.slice(0, 3));
+    if (filter === "100%_") return Promise.resolve([objects[0]]);
+    return Promise.resolve(objects);
+  });
   document.head.append(gridStyle);
 });
 
@@ -98,6 +103,7 @@ async function searchObjects(host: HTMLElement, query: string) {
   expect(input).not.toBeNull();
   input!.value = query;
   input!.dispatchEvent(new Event("input", { bubbles: true }));
+  await vi.waitFor(() => expect(mocks.listObjects.mock.calls.at(-1)?.[4]).toBe(query || undefined));
   await nextTick();
 }
 

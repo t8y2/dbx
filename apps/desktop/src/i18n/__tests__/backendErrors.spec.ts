@@ -13,6 +13,7 @@ import ko from "@/i18n/locales/ko";
 import ptBR from "@/i18n/locales/pt-BR";
 import ru from "@/i18n/locales/ru";
 import tr from "@/i18n/locales/tr";
+import th from "@/i18n/locales/th";
 import zhCN from "@/i18n/locales/zh-CN";
 import zhTW from "@/i18n/locales/zh-TW";
 import { PHOENIX_DRIVER_NOT_INSTALLED_ERROR, PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR } from "@/lib/database/phoenixConnection";
@@ -27,6 +28,7 @@ const LOCALES = {
   ko,
   "pt-BR": ptBR,
   ru,
+  th,
   tr,
   "zh-CN": zhCN,
   "zh-TW": zhTW,
@@ -69,6 +71,12 @@ const CASES: { name: string; message: string; key: string; params?: Record<strin
     message: "Plugin update blocked by active connections: Production S3, Local storage",
     key: "pluginPlatform.updateBlockedByConnections",
     params: { labels: "Production S3, Local storage" },
+  },
+  {
+    name: "plugin uninstall blocked by saved plugin connections",
+    message: "Cannot uninstall plugin 'com.lwai.todo' while these connections still use it: 待办 Todo, Todo (Copy)",
+    key: "pluginPlatform.uninstallBlockedByConnections",
+    params: { plugin: "com.lwai.todo", labels: "待办 Todo, Todo (Copy)" },
   },
   {
     name: "plugin update waits for active operations",
@@ -122,9 +130,42 @@ const CASES: { name: string; message: string; key: string; params?: Record<strin
     key: "connection.sshTotpCancelled",
   },
   {
-    name: "streaming export unsupported",
+    name: "SSH fixed local port already in use",
+    message: "Failed to bind requested local port 4059: Address already in use (os error 48)",
+    key: "connection.sshLocalPortBindFailed",
+    params: { port: "4059", error: "Address already in use (os error 48)" },
+  },
+  {
+    name: "SSH fixed local port on a later layer",
+    message: "SSH layer 2 failed: Failed to bind requested local port 4059: Only one usage of each socket address is normally permitted. (os error 10048)",
+    key: "connection.sshLocalPortBindFailed",
+    params: { port: "4059", error: "Only one usage of each socket address is normally permitted. (os error 10048)" },
+  },
+  {
+    name: "streaming export cannot page through the query",
+    message: "Streaming export cannot page through this query. Export a single SELECT statement, or load the full result first and export the loaded rows.",
+    key: "exportProgress.streamingUnsupported",
+  },
+  {
+    name: "streaming export inside a manual transaction",
+    message: "A manual transaction cannot use a result cursor, and this query cannot be split into pages. Commit or roll back the transaction, then export again.",
+    key: "exportProgress.transactionUnsupported",
+  },
+  {
+    // apps/desktop/src/stores/queryStore.ts still raises this wording for MongoDB exports.
+    name: "legacy streaming export wording from the frontend",
     message: "Streaming export is unsupported for this query. Simplify it or use a supported driver.",
     key: "exportProgress.streamingUnsupported",
+  },
+  {
+    name: "offset pagination needs a result cursor",
+    message: "This query requires an Agent result session for offset pagination",
+    key: "editor.resultSessionRequiredForPaging",
+  },
+  {
+    name: "offset pagination inside a manual transaction",
+    message: "This query requires an existing result session for offset pagination in a manual transaction",
+    key: "editor.resultSessionRequiredForPaging",
   },
   {
     name: "agent session missing",
@@ -214,6 +255,26 @@ const CASES: { name: string; message: string; key: string; params?: Record<strin
     message: "Please try again in 42s",
     key: "auth.rateLimited",
     params: { seconds: "42" },
+  },
+  {
+    name: "dameng native dump tool missing",
+    message: "[damengToolNotFound] Dameng client tool 'dexp' was not found in 'C:\\dm8\\bin'. Configure the Dameng client bin directory in Settings > Data.",
+    key: "damengDump.errors.toolNotFound",
+  },
+  {
+    name: "dameng native dump on a non-dameng connection",
+    message: "[damengConnectionRequired] Native dexp/dimp dump is only available for Dameng connections.",
+    key: "damengDump.errors.connectionRequired",
+  },
+  {
+    name: "dameng native dump without a stored password",
+    message: "[damengPasswordMissing] The connection has no password available; reconnect and enter the password first.",
+    key: "damengDump.errors.passwordMissing",
+  },
+  {
+    name: "dameng native dump with a userid-breaking credential",
+    message: "[damengUseridInvalid] The connection's password contains '/' or '@', which the dexp/dimp USERID argument cannot encode; the task was not started.",
+    key: "damengDump.errors.useridInvalid",
   },
 ];
 
@@ -641,7 +702,9 @@ describe("backend error wording is pinned to the Rust sources", () => {
   const rust = (path: string) => readFileSync(new URL(`../../../../../${path}`, import.meta.url), "utf8");
 
   test.each([
-    ["crates/dbx-core/src/data/query_result_export.rs", "Streaming export is unsupported for this query. Simplify it or use a supported driver."],
+    ["crates/dbx-core/src/data/query_result_export.rs", "Streaming export cannot page through this query. Export a single SELECT statement, or load the full result first and export the loaded rows."],
+    ["crates/dbx-core/src/data/query_result_export.rs", "A manual transaction cannot use a result cursor, and this query cannot be split into pages. Commit or roll back the transaction, then export again."],
+    ["crates/dbx-sql-data/src/query_result_sql.rs", "This query requires an Agent result session for offset pagination"],
     ["crates/dbx-core/src/data/query_result_export.rs", "Streaming export needs a result-set session, but this driver returned no session_id."],
     ["crates/dbx-core/src/data/mongodb_import_export.rs", "MongoDB Legacy Agent does not support insertMany; upgrade or reinstall the MongoDB Legacy driver"],
     ["crates/dbx-core/src/data/mongodb_import_export.rs", "MongoDB Legacy Agent returned an invalid find cursor"],

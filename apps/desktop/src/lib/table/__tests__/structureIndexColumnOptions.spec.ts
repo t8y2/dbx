@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sortStructureIndexColumnOptions } from "../tableStructureEditorState";
+import { canIndexTypeHaveSpecialIssue, sortStructureIndexColumnOptions } from "../tableStructureEditorState";
 
 describe("sortStructureIndexColumnOptions", () => {
   const options = [{ name: "order_total" }, { name: "ID" }, { name: "amount2" }, { name: "amount10" }, { name: "customer" }];
@@ -20,5 +20,34 @@ describe("sortStructureIndexColumnOptions", () => {
     const picked = new Map([["ID", 1]]);
     const [first] = sortStructureIndexColumnOptions(options, picked);
     expect(first).toEqual({ name: "ID" });
+  });
+
+  it("returns a copy intact for empty or single element lists", () => {
+    expect(sortStructureIndexColumnOptions([], new Map())).toEqual([]);
+    const single = [{ name: "col_a" }];
+    expect(sortStructureIndexColumnOptions(single, new Map([["col_a", 1]]))).toEqual([{ name: "col_a" }]);
+  });
+});
+
+describe("canIndexTypeHaveSpecialIssue", () => {
+  it("returns true only for MySQL FULLTEXT/SPATIAL and SQL Server SPATIAL", () => {
+    expect(canIndexTypeHaveSpecialIssue("mysql", "FULLTEXT")).toBe(true);
+    expect(canIndexTypeHaveSpecialIssue("mysql", "SPATIAL")).toBe(true);
+    expect(canIndexTypeHaveSpecialIssue("mysql", "BTREE")).toBe(false);
+    expect(canIndexTypeHaveSpecialIssue("mysql", "HASH")).toBe(false);
+
+    expect(canIndexTypeHaveSpecialIssue("sqlserver", "SPATIAL")).toBe(true);
+    expect(canIndexTypeHaveSpecialIssue("sqlserver", "CLUSTERED")).toBe(false);
+    expect(canIndexTypeHaveSpecialIssue("sqlserver", "NONCLUSTERED")).toBe(false);
+    expect(canIndexTypeHaveSpecialIssue("sqlserver", "COLUMNSTORE")).toBe(false);
+
+    expect(canIndexTypeHaveSpecialIssue("postgres", "BTREE")).toBe(false);
+    expect(canIndexTypeHaveSpecialIssue("postgres", "GIN")).toBe(false);
+    expect(canIndexTypeHaveSpecialIssue("postgres", "GIST")).toBe(false);
+    expect(canIndexTypeHaveSpecialIssue("oracle", "NORMAL")).toBe(false);
+    expect(canIndexTypeHaveSpecialIssue("sqlite", "BTREE")).toBe(false);
+
+    expect(canIndexTypeHaveSpecialIssue("sqlserver", null)).toBe(false);
+    expect(canIndexTypeHaveSpecialIssue("sqlserver", "")).toBe(false);
   });
 });

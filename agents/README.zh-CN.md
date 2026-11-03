@@ -25,6 +25,7 @@ DBX 的 Agent 驱动 —— 通过 JDBC 和原生数据库驱动支持各种数�
 | exasol | Exasol | Exasol JDBC |
 | oceanbase-oracle | OceanBase Oracle 模式 | OceanBase JDBC |
 | gbase8a | GBase 8a | 外部 GBase 8a JDBC |
+| gbase8c | GBase 8c | 内置 GBase 8c JDBC |
 | gbase8s | GBase 8s | 外部 GBase 8s JDBC |
 | oracle | Oracle 10g+ | go-ora 原生 agent |
 | h2 | H2 | H2 JDBC |
@@ -50,10 +51,18 @@ DBX 的 Agent 驱动 —— 通过 JDBC 和原生数据库驱动支持各种数�
 | etcd | etcd | jetcd |
 | zookeeper | Apache ZooKeeper | go-zookeeper 原生 Agent |
 | rabbitmq | RabbitMQ | amqp091-go 原生 agent |
-| rocketmq | Apache RocketMQ | rocketmq-admin-go 原生 agent |
+| rocketmq | Apache RocketMQ | rocketmq-admin-go（Remoting）及官方 Go v5 SDK（Proxy gRPC）原生 agent |
 | iris | InterSystems IRIS | InterSystems IRIS JDBC |
 | cache | InterSystems Caché | InterSystems Caché JDBC (CacheDB) |
 
+
+## RocketMQ 接入模式
+
+同一 `rocketmq` Agent 支持原有 NameServer/Remoting 接入与 RocketMQ 5.x 官方 Proxy gRPC 接入。Proxy 模式通过握手能力 `rocketmq_proxy_grpc` 协商；未指定模式的旧配置继续使用 Remoting，无需迁移驱动标识。
+
+Proxy 消息使用官方 Go v5 SDK 的 RPC、签名和协议类型，并为每个连接独立配置 TLS 与拨号器；SDK v5.1.4 高层 Producer 未传递连接选项，因此此处不使用全局 TLS 开关或全局连接构造器替换。消息支持普通发送、Key、Tag 与用户属性，不将 gRPC 消费映射为无副作用预览。可选 NameServer 管理通道复用现有 Remoting 实现，失败时独立标记 degraded。
+
+开发验证可运行 `go test ./...` 与 `go test -race ./...`。官方 Proxy 集成用例默认关闭，需要预先准备普通 Topic，并显式设置 `ROCKETMQ_PROXY_INTEGRATION=1`、`ROCKETMQ_PROXY_ENDPOINT`、`ROCKETMQ_PROXY_TOPIC` 及 `ROCKETMQ_PROXY_TLS`；集成用例会向该 Topic 发送测试消息。原生 Agent 不需要 JRE，Java 仅用于本地官方服务集成 fixture。
 
 ## 多 JRE 支持
 

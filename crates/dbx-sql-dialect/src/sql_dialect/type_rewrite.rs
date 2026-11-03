@@ -483,6 +483,24 @@ mod tests {
     }
 
     #[test]
+    fn oracle_family_rewrites_postgres_boolean() {
+        // Issue #12453: a PostgreSQL -> Dameng "structure and data" transfer failed
+        // CREATE TABLE on every table with a boolean column ("无效的数据类型"), because
+        // the Oracle family has no BOOLEAN type and used to pass the source spelling
+        // through unchanged. NUMBER(1) is the family stand-in and matches the 1/0
+        // literals the data path writes for these targets.
+        for target in [DatabaseType::Dameng, DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            assert_eq!(rewrite_column_type("boolean", target, Some(DialectKind::Postgres)), "NUMBER(1)");
+        }
+        // The passthrough arms stay intact for the types these engines already accept.
+        assert_eq!(
+            rewrite_column_type("timestamp with time zone", DatabaseType::Dameng, Some(DialectKind::Postgres)),
+            "timestamp with time zone"
+        );
+        assert_eq!(rewrite_column_type("text", DatabaseType::Dameng, Some(DialectKind::Postgres)), "text");
+    }
+
+    #[test]
     fn sqlserver_keeps_identity_path_not_counter() {
         let profile = profile_for(DatabaseType::SqlServer);
         assert!(matches!(

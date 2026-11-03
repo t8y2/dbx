@@ -6,6 +6,7 @@ const pending = (): MigrationPreflight => ({
   migrationId: "secret-store-v1",
   state: "pending",
   needsMigration: true,
+  keyRecoveryRequired: false,
   keyProviderAvailable: true,
   keyCreationAllowed: false,
   databasePlaintextCount: 2,
@@ -62,6 +63,58 @@ describe("migration store", () => {
     expect(store.completed.value).toBe(true);
     expect(store.blocking.value).toBe(false);
     expect(store.state.entered).toBe(false);
+  });
+
+  it("keeps completed migration state on the status retry path when the device key needs recovery", async () => {
+    const recovery = {
+      ...done(),
+      keyRecoveryRequired: true,
+      keyProviderAvailable: false,
+      keyStatus: "unavailable" as const,
+      errorCode: "KEYRING_ACCESS_FAILED",
+      errorMessage: "The platform credential store refused access",
+    };
+    const status = vi.fn().mockResolvedValueOnce(recovery).mockResolvedValue(done());
+    const retry = vi.fn();
+    const store = useMigrationStore({ migrationStatus: status, migrationStart: vi.fn(), migrationRetry: retry, migrationCleanupBackups: vi.fn() });
+
+    await store.initialize();
+    expect(store.state.status?.state).toBe("succeeded");
+    expect(store.state.error).toBe("keyRecoveryRequired");
+    expect(store.blocking.value).toBe(true);
+    expect(store.diagnostic().keyRecoveryRequired).toBe(true);
+
+    await store.retryStatus();
+    expect(status).toHaveBeenNthCalledWith(2, true);
+    expect(retry).not.toHaveBeenCalled();
+    expect(store.completed.value).toBe(true);
+    expect(store.blocking.value).toBe(false);
+  });
+
+  it("does not retry migration when key recovery becomes necessary after migration completes", async () => {
+    const recovery = {
+      ...done(),
+      keyRecoveryRequired: true,
+      keyProviderAvailable: false,
+      keyStatus: "unavailable" as const,
+      errorCode: "KEYRING_ACCESS_FAILED",
+      errorMessage: "The platform credential store refused access",
+    };
+    const retry = vi.fn();
+    const store = useMigrationStore({
+      migrationStatus: vi.fn().mockResolvedValueOnce(pending()).mockResolvedValue(recovery),
+      migrationStart: vi.fn().mockResolvedValue({ state: "succeeded" }),
+      migrationRetry: retry,
+      migrationCleanupBackups: vi.fn(),
+    });
+
+    await store.initialize();
+    await store.start();
+
+    expect(store.state.step).toBe(1);
+    expect(store.state.error).toBe("keyRecoveryRequired");
+    expect(store.state.status?.state).toBe("succeeded");
+    expect(retry).not.toHaveBeenCalled();
   });
 
   it("keeps status failures on the status retry path", async () => {

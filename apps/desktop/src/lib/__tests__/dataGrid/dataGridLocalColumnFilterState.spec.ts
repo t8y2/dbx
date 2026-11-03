@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { buildDataGridLocalFilterOptions, dataGridLocalFilterKey, restoreDataGridLocalColumnFilters, rowMatchesDataGridLocalColumnFilters, serializeDataGridLocalColumnFilters, sortDataGridLocalFilterOptions, type DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
+import {
+  buildDataGridLocalFilterOptions,
+  dataGridLocalFilterKey,
+  filterDataGridLocalFilterOptions,
+  parseDataGridLocalFilterCountQuery,
+  restoreDataGridLocalColumnFilters,
+  rowMatchesDataGridLocalColumnFilters,
+  serializeDataGridLocalColumnFilters,
+  sortDataGridLocalFilterOptions,
+  type DataGridLocalFilterOption,
+} from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 
 function filterOption(label: string, count: number | null): DataGridLocalFilterOption {
   return { key: `str:${label}`, label, count, value: label };
@@ -102,5 +112,101 @@ describe("data grid local column filter state", () => {
     expect(sorted).not.toBe(options);
     expect(sorted.map((option) => option.label)).toEqual(["alpha", "beta"]);
     expect(options).toEqual(snapshot);
+  });
+
+  it("parses count comparison queries with all supported operators", () => {
+    const gt = parseDataGridLocalFilterCountQuery(">1");
+    expect(gt).not.toBeNull();
+    expect(gt!(2)).toBe(true);
+    expect(gt!(1)).toBe(false);
+    expect(gt!(null)).toBe(false);
+
+    const gte = parseDataGridLocalFilterCountQuery(">= 2");
+    expect(gte).not.toBeNull();
+    expect(gte!(2)).toBe(true);
+    expect(gte!(1)).toBe(false);
+
+    const lt = parseDataGridLocalFilterCountQuery("< 3");
+    expect(lt).not.toBeNull();
+    expect(lt!(2)).toBe(true);
+    expect(lt!(3)).toBe(false);
+    expect(lt!(null)).toBe(true);
+
+    const lte = parseDataGridLocalFilterCountQuery("<= 2");
+    expect(lte).not.toBeNull();
+    expect(lte!(2)).toBe(true);
+    expect(lte!(3)).toBe(false);
+
+    const eq = parseDataGridLocalFilterCountQuery("=1");
+    expect(eq).not.toBeNull();
+    expect(eq!(1)).toBe(true);
+    expect(eq!(2)).toBe(false);
+
+    const eqDouble = parseDataGridLocalFilterCountQuery("== 1");
+    expect(eqDouble).not.toBeNull();
+    expect(eqDouble!(1)).toBe(true);
+
+    const ne = parseDataGridLocalFilterCountQuery("!= 1");
+    expect(ne).not.toBeNull();
+    expect(ne!(2)).toBe(true);
+    expect(ne!(1)).toBe(false);
+
+    const neDiamond = parseDataGridLocalFilterCountQuery("<>1");
+    expect(neDiamond).not.toBeNull();
+    expect(neDiamond!(2)).toBe(true);
+    expect(neDiamond!(1)).toBe(false);
+  });
+
+  it("parses count queries with count and 数量 prefixes", () => {
+    const countPrefix = parseDataGridLocalFilterCountQuery("count: >1");
+    expect(countPrefix).not.toBeNull();
+    expect(countPrefix!(2)).toBe(true);
+    expect(countPrefix!(1)).toBe(false);
+
+    const countColon = parseDataGridLocalFilterCountQuery("count: 3");
+    expect(countColon).not.toBeNull();
+    expect(countColon!(3)).toBe(true);
+    expect(countColon!(2)).toBe(false);
+
+    const countEq = parseDataGridLocalFilterCountQuery("count=2");
+    expect(countEq).not.toBeNull();
+    expect(countEq!(2)).toBe(true);
+
+    const zhGt = parseDataGridLocalFilterCountQuery("数量 > 2");
+    expect(zhGt).not.toBeNull();
+    expect(zhGt!(3)).toBe(true);
+    expect(zhGt!(2)).toBe(false);
+
+    const zhColon = parseDataGridLocalFilterCountQuery("数量: 1");
+    expect(zhColon).not.toBeNull();
+    expect(zhColon!(1)).toBe(true);
+  });
+
+  it("does not treat bare numbers or invalid queries as count filters", () => {
+    expect(parseDataGridLocalFilterCountQuery("1")).toBeNull();
+    expect(parseDataGridLocalFilterCountQuery("100")).toBeNull();
+    expect(parseDataGridLocalFilterCountQuery("alpha")).toBeNull();
+    expect(parseDataGridLocalFilterCountQuery("")).toBeNull();
+    expect(parseDataGridLocalFilterCountQuery("   ")).toBeNull();
+    expect(parseDataGridLocalFilterCountQuery(">abc")).toBeNull();
+  });
+
+  it("filters options by count while preserving literal label matches", () => {
+    const options = [filterOption("apple", 5), filterOption("banana", 1), filterOption("orange", 2), filterOption(">1 special", 1)];
+
+    // Filter duplicates (>1): matches apple (5), orange (2), and ">1 special" (label match)
+    const duplicates = filterDataGridLocalFilterOptions(options, ">1");
+    expect(duplicates.map((opt) => opt.label)).toEqual(["apple", "orange", ">1 special"]);
+
+    // Filter unique (=1): matches banana (1) and ">1 special" (1)
+    const uniques = filterDataGridLocalFilterOptions(options, "=1");
+    expect(uniques.map((opt) => opt.label)).toEqual(["banana", ">1 special"]);
+
+    // Normal text query: matches "an" -> banana, orange
+    const textFiltered = filterDataGridLocalFilterOptions(options, "an");
+    expect(textFiltered.map((opt) => opt.label)).toEqual(["banana", "orange"]);
+
+    // Empty query returns all options
+    expect(filterDataGridLocalFilterOptions(options, "")).toEqual(options);
   });
 });

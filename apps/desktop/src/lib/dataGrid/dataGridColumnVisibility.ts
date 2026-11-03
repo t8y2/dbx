@@ -101,7 +101,7 @@ export function invertedHiddenColumnIndexes(availableIndexes: number[], hiddenIn
   return next;
 }
 
-export function allNullColumnIndexes(rows: ReadonlyArray<ReadonlyArray<unknown>>, availableIndexes: number[]): number[] {
+export function allNullColumnIndexes(rows: ReadonlyArray<ReadonlyArray<unknown>>, availableIndexes: number[], includeEmptyStrings = false): number[] {
   if (rows.length === 0) return [];
   // 单遍行扫描 + 候选原地压缩：列一旦见到非 null 即永久剔除，候选清空提前
   // 返回。最坏复杂度同为 O(列×行)（全 null 时无法避免），改进在于常数项：
@@ -112,7 +112,8 @@ export function allNullColumnIndexes(rows: ReadonlyArray<ReadonlyArray<unknown>>
   for (const row of rows) {
     let write = 0;
     for (let read = 0; read < count; read++) {
-      if (row[candidates[read]!] === null) candidates[write++] = candidates[read]!;
+      const value = row[candidates[read]!];
+      if (value === null || (includeEmptyStrings && value === "")) candidates[write++] = candidates[read]!;
     }
     count = write;
     if (count === 0) return [];

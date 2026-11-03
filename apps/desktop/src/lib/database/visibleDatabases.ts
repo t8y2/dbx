@@ -150,6 +150,12 @@ export function visibleDatabaseFilterIsEnabled(visibleDatabases: string[] | unde
   return Array.isArray(visibleDatabases);
 }
 
+/**
+ * 匹配全部库名的通配符。用于把“显示全部（含系统库）”持久化成动态过滤条件：
+ * 未配置筛选时系统库默认隐藏，而显式库名快照又会让之后新建的库无法自动出现。
+ */
+export const MATCH_ALL_VISIBLE_DATABASE_PATTERN = "%";
+
 const visibleDatabasePatternRegExpCache = new Map<string, RegExp>();
 
 /** SQL LIKE 语义：`%` 匹配任意字符序列、`_` 匹配单个字符，其余按字面匹配（区分大小写）。 */
@@ -238,7 +244,7 @@ export function filterDatabaseNamesForConnection(databaseNames: string[], connec
 }
 
 export function filterDatabaseNamesForVisiblePicker(databaseNames: string[], connection: VisibleDatabaseConnection | undefined): string[] {
-  if (connection?.db_type === "gbase" && connection.driver_profile === "gbase8s") {
+  if (connection?.db_type === "gbase8s") {
     return databaseNames;
   }
   return databaseNames.filter((name) => !isSystemDatabaseName(effectiveDatabaseTypeForConnection(connection), name));

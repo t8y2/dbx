@@ -50,6 +50,58 @@ function createDuplicateForeignKeyPreparation(): SchemaDiffPreparation {
 }
 
 describe("schema diff SQL selection projections", () => {
+  it("keeps explicit same-name package specification and body identities separate through projection", () => {
+    const functionDiffs = (["PACKAGE", "PACKAGE_BODY"] as const).map((programKind) => ({
+      type: "modified" as const,
+      name: 'Pkg.With.Dot,"中文😀',
+      programKind,
+      source: { name: 'Pkg.With.Dot,"中文😀', function_type: programKind, data_type: "", arguments: "", definition: `${programKind} original` },
+    }));
+    const result: SchemaDiffPreparation = { diffs: [], functionDiffs, syncSql: "" };
+    const objects = convertToSchemaDiffObjects([], functionDiffs);
+    expect(new Set(objects.map((object) => object.id)).size).toBe(2);
+    expect(objects.map((object) => object.routineType)).toEqual(["PACKAGE", "PACKAGE_BODY"]);
+    setSchemaDiffObjectSelected(objects, objects[0]!.id, false);
+    expect(selectSchemaDiffInput(result, objects).functionDiffs).toEqual([functionDiffs[1]]);
+    expect(selectSchemaDiffInputForObject(result, objects, objects[1]!.id).functionDiffs).toEqual([functionDiffs[1]]);
+  });
+
+  it("does not guess a package identity from an arbitrary source or target definition", () => {
+    const source = { name: "P", function_type: "PACKAGE_BODY", data_type: "", arguments: "", definition: "retained body" };
+    expect(() => convertToSchemaDiffObjects([], [{ type: "added", name: "P", source }])).toThrow("explicit program kind");
+    expect(() => convertToSchemaDiffObjects([], [{ type: "removed", name: "P", target: source }])).toThrow("explicit program kind");
+    expect(() => convertToSchemaDiffObjects([], [{ type: "conflict", name: "P", source: { ...source, function_type: "FUNCTION" }, target: source }])).toThrow("explicit program kind");
+  });
+
+  it("preserves legacy PostgreSQL overload IDs and selection", () => {
+    const functionDiffs = ["integer", "text"].map((arguments_) => ({ type: "added" as const, name: "f", source: { name: "f", function_type: "FUNCTION", data_type: "", arguments: arguments_, definition: "original" } }));
+    const objects = convertToSchemaDiffObjects([], functionDiffs);
+    expect(objects.map((object) => object.id)).toEqual(["func-f-integer", "func-f-text"]);
+    setSchemaDiffObjectSelected(objects, "func-f-text", false);
+    expect(selectSchemaDiffInput({ diffs: [], functionDiffs, syncSql: "" }, objects).functionDiffs).toEqual([functionDiffs[0]]);
+  });
+
+  it("retains equal and unreadable Oracle originals without selecting executable steps", () => {
+    const functionDiffs = (["equal", "unreadable", "conflict"] as const).map((type) => ({
+      type,
+      name: `${type}.Proc`,
+      source: { name: `${type}.Proc`, function_type: "PROCEDURE", data_type: "", arguments: "", definition: "retained source" },
+      target: { name: `${type}.Proc`, function_type: "PROCEDURE", data_type: "", arguments: "", definition: "retained target" },
+      changes: type === "equal" ? [] : ["read or kind issue"],
+    }));
+    const result: SchemaDiffPreparation = { diffs: [], functionDiffs, syncSql: "" };
+    const objects = convertToSchemaDiffObjects([], functionDiffs);
+    expect(objects.map((object) => [object.operationType, object.selected, object.routineType])).toEqual([
+      ["none", false, "PROCEDURE"],
+      ["none", false, "PROCEDURE"],
+      ["none", false, "PROCEDURE"],
+    ]);
+    expect(objects[1]!.sourceDdl).toBe("retained source");
+    expect(objects[1]!.targetDdl).toBe("retained target");
+    objects.forEach((object) => setSchemaDiffObjectSelected(objects, object.id, true));
+    expect(selectSchemaDiffInput(result, objects).functionDiffs).toEqual([]);
+  });
+
   it("keeps every composite foreign key column in the selection dependency closure", () => {
     const result = createPreparation();
     result.diffs[0]!.foreignKeys = [

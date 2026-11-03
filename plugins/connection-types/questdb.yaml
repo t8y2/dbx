@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 430
 dbType: questdb
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Questdb
 label: QuestDB
 dialect: QuestDB

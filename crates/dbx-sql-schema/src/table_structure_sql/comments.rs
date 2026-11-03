@@ -37,7 +37,8 @@ pub(super) fn build_table_comment_sql(options: &TableStructureSqlOptions, warnin
         | StructureDialect::Oracle
         | StructureDialect::Dameng
         | StructureDialect::Oscar
-        | StructureDialect::H2 => {
+        | StructureDialect::H2
+        | StructureDialect::SapHana => {
             vec![format!("COMMENT ON TABLE {table} IS {quoted};")]
         }
         StructureDialect::ClickHouse => {
@@ -256,6 +257,10 @@ mod tests {
             partitioned: false,
             is_gaussdb_m_mode: false,
             table_collation: None,
+            primary_key_name: None,
+            primary_key_change: None,
+            oracle_foreign_key_changes: None,
+            oracle_constraint_changes: None,
             foreign_table,
         }
     }

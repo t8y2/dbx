@@ -1,12 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  createGitHubClient,
-  detectIssueCommand,
-  findEligibleMergedPullRequest,
-  handleIssueCommand,
-} from "./issue-commands.mjs";
+import { createGitHubClient, detectIssueCommand, findEligibleMergedPullRequest, handleIssueCommand } from "./issue-commands.mjs";
 
 const repository = "t8y2/dbx";
 
@@ -117,13 +112,7 @@ test("findEligibleMergedPullRequest requires the assignee's merged PR on the def
     repository: { nameWithOwner: repository },
   };
   const context = closeContext({
-    pullRequests: [
-      { ...eligible, number: 101, state: "OPEN" },
-      { ...eligible, number: 102, baseRefName: "release" },
-      { ...eligible, number: 103, author: { login: "someone-else" } },
-      { ...eligible, number: 104, repository: { nameWithOwner: "someone/dbx" } },
-      eligible,
-    ],
+    pullRequests: [{ ...eligible, number: 101, state: "OPEN" }, { ...eligible, number: 102, baseRefName: "release" }, { ...eligible, number: 103, author: { login: "someone-else" } }, { ...eligible, number: 104, repository: { nameWithOwner: "someone/dbx" } }, eligible],
   });
 
   assert.equal(findEligibleMergedPullRequest({ context, commentUser: "contributor", repository }), eligible);
@@ -175,9 +164,7 @@ test("close succeeds after the assignee's linked PR is merged", async () => {
 
 test("commands ignore bots and closed unclaim requests", async () => {
   const botClient = recordingClient();
-  const botResult = await handleIssueCommand(
-    commandOptions("/claim", botClient, { commentUserType: "Bot" }),
-  );
+  const botResult = await handleIssueCommand(commandOptions("/claim", botClient, { commentUserType: "Bot" }));
   assert.equal(botResult.status, "ignored-bot");
   assert.deepEqual(botClient.calls, []);
 
@@ -213,10 +200,7 @@ test("GitHub client aggregates paginated pull request cross references", async (
             assignees: { nodes: [{ login: "contributor" }] },
             timelineItems: {
               pageInfo: { hasNextPage: false, endCursor: "done" },
-              nodes: [
-                { source: { __typename: "Issue", number: 11 } },
-                { source: { __typename: "PullRequest", number: 12 } },
-              ],
+              nodes: [{ source: { __typename: "Issue", number: 11 } }, { source: { __typename: "PullRequest", number: 12 } }],
             },
           },
         },
@@ -233,7 +217,10 @@ test("GitHub client aggregates paginated pull request cross references", async (
   });
 
   const context = await client.getIssueCloseContext("123");
-  assert.deepEqual(context.pullRequests.map(({ number }) => number), [10, 12]);
+  assert.deepEqual(
+    context.pullRequests.map(({ number }) => number),
+    [10, 12],
+  );
   assert.equal(args.length, 2);
   assert.equal(args[1].includes("endCursor=next-page"), true);
 });

@@ -152,7 +152,7 @@ impl BackupConfig {
         if !self.include_structure && !self.include_data && !self.include_objects {
             return Err("Select backup contents".into());
         }
-        if !matches!(self.output_compression.as_str(), "none" | "gzip") {
+        if !matches!(self.output_compression.as_str(), "none" | "gzip" | "nb3") {
             return Err("Unsupported backup compression".into());
         }
         if !matches!(self.table_filter_mode.as_str(), "all" | "include" | "exclude" | "selected") {
@@ -195,7 +195,7 @@ impl BackupSchedule {
         if !matches!(self.frequency.as_str(), "hourly" | "daily" | "weekly")
             || !(1..=168).contains(&self.interval_hours)
             || self.weekday > 6
-            || !(1..=100).contains(&self.retention_count)
+            || !(0..=1000).contains(&self.retention_count)
         {
             return Err("Invalid backup schedule".into());
         }

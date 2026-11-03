@@ -14,7 +14,8 @@ export function normalizeJsonArgument(value: string): string | null {
   const withoutEjsonDeserialize = replaceMongoEjsonDeserialize(withoutComments);
   // Rewrite mongo shell constructors that are not valid JSON into extended JSON
   // (mongo_driver::json_value_to_bson): ObjectId / ISODate / new Date / NumberLong /
-  // NumberInt / NumberDecimal / UUID / BinData / Timestamp / MinKey / MaxKey.
+  // NumberInt / NumberDecimal / UUID / BinData / Timestamp / MinKey / MaxKey, plus the
+  // mongosh names Int32 / Long / Double / Decimal128.
   const withExtendedJson = replaceMongoShellConstructors(withoutEjsonDeserialize);
   const preprocessed = quoteUnquotedObjectKeys(convertSingleQuotedStrings(withExtendedJson));
   try {
@@ -546,7 +547,9 @@ function replaceMongoEjsonDeserialize(source: string): string {
  * `Date` is only recognised after `new`, matching the shell where a bare `Date()`
  * returns a string rather than a date.
  */
-const SHELL_CONSTRUCTORS = new Set(["ObjectId", "ISODate", "Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey"]);
+const SHELL_CONSTRUCTORS = new Set(["ObjectId", "ISODate", "Date", "NumberLong", "NumberInt", "NumberDecimal", "Int32", "Long", "Double", "Decimal128", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey"]);
+/** mongosh's BSON type names for the legacy number constructors. */
+const NUMBER_CONSTRUCTOR_ALIASES: Record<string, string> = { Int32: "NumberInt", Long: "NumberLong", Decimal128: "NumberDecimal" };
 /** `MinKey` / `MaxKey` are also valid without parentheses, as in `{ $lt: MaxKey }`. */
 const BARE_KEY_CONSTANT = /^(MinKey|MaxKey)(?![\w$])/;
 const CONSTRUCTOR_CALL = /^(new\s+)?([A-Za-z_$][\w$]*)\s*\(/;
@@ -614,6 +617,8 @@ function keyConstantJson(name: string): string {
 
 /** Rewrite one `Name(...)` / `new Name(...)` call at {@link index}, or null when it is not a known constructor. */
 function matchShellConstructorCall(source: string, index: number): { json: string; end: number } | null {
+  // Only at the start of a name, so `myLong(1)` is not read as `Long(1)`.
+  if (index > 0 && /[\w$.]/.test(source[index - 1]!)) return null;
   const match = CONSTRUCTOR_CALL.exec(source.slice(index));
   if (!match) return null;
   const name = match[2]!;
@@ -637,7 +642,7 @@ function shellConstructorToExtendedJson(name: string, args: string[]): string | 
   const arg = args[0]?.trim();
   const literal = arg ? (QUOTED_ARGUMENT.exec(arg)?.[2] ?? null) : null;
 
-  switch (name) {
+  switch (NUMBER_CONSTRUCTOR_ALIASES[name] ?? name) {
     case "MinKey":
     case "MaxKey":
       return arg ? null : keyConstantJson(name);
@@ -656,15 +661,17 @@ function shellConstructorToExtendedJson(name: string, args: string[]): string | 
       return INTEGER_ARGUMENT.test(arg) && fitsIntegerBounds(arg, INT64_BOUNDS) ? `{"$date":{"$numberLong":${JSON.stringify(arg)}}}` : null;
     case "NumberLong":
     case "NumberInt": {
+      const long = name === "NumberLong" || name === "Long";
       const value = literal ?? arg;
       if (value === undefined || !INTEGER_ARGUMENT.test(value)) return null;
-      if (!fitsIntegerBounds(value, name === "NumberLong" ? INT64_BOUNDS : INT32_BOUNDS)) return null;
-      return wrap(name === "NumberLong" ? "$numberLong" : "$numberInt", value);
+      if (!fitsIntegerBounds(value, long ? INT64_BOUNDS : INT32_BOUNDS)) return null;
+      return wrap(long ? "$numberLong" : "$numberInt", value);
     }
-    case "NumberDecimal": {
+    case "NumberDecimal":
+    case "Double": {
       const value = literal ?? arg;
       if (value === undefined || !DECIMAL_ARGUMENT.test(value)) return null;
-      return wrap("$numberDecimal", value);
+      return wrap(name === "Double" ? "$numberDouble" : "$numberDecimal", value);
     }
     default:
       return null;

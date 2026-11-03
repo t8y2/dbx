@@ -51,3 +51,24 @@ pub async fn delete_saved_sql_file(
     state.app.storage.delete_saved_sql_file(&id).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultQueryContent {
+    sql: String,
+    updated_at: String,
+}
+
+pub async fn save_default_query_content(
+    State(state): State<Arc<WebState>>,
+    Path(id): Path<String>,
+    Json(content): Json<DefaultQueryContent>,
+) -> Result<Json<()>, AppError> {
+    state
+        .app
+        .storage
+        .save_default_query_content(&id, &content.sql, &content.updated_at)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(()))
+}

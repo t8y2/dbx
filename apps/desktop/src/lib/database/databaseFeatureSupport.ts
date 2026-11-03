@@ -116,7 +116,7 @@ export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
  * ZooKeeper has no query surface: its agent implements only kv_* operations,
  * so the sidebar "new query" flow would call list-databases and fail
  * (issue #8215). It is excluded alongside the other specialized surfaces
- * (nacos, consul, hbase) whose connection workbench replaces query tabs.
+ * (nacos, consul, hbase, etcd) whose connection workbench replaces query tabs.
  *
  * The message-queue surfaces (`mq` — Pulsar/Kafka/RocketMQ/RabbitMQ — and
  * `mqtt`) belong to the same group: brokers have no SQL engine, and their
@@ -128,7 +128,7 @@ export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
  * hidden there as well (issue #9609).
  */
 export function supportsConnectionQueryActions(dbType?: DatabaseType): boolean {
-  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase" && dbType !== "zookeeper" && dbType !== "plugin" && dbType !== "mq" && dbType !== "mqtt" && dbType !== "meilisearch" && dbType !== "salesforce";
+  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase" && dbType !== "etcd" && dbType !== "zookeeper" && dbType !== "plugin" && dbType !== "mq" && dbType !== "mqtt" && dbType !== "meilisearch" && dbType !== "salesforce";
 }
 
 /**
@@ -235,6 +235,10 @@ export function supportsObjectBrowser(dbType?: DatabaseType): boolean {
   return supportsDatabaseFeature(dbType, "objectBrowser");
 }
 
+export function supportsPlDebugRoutine(dbType?: DatabaseType): boolean {
+  return dbType === "oracle" || dbType === "oceanbase-oracle";
+}
+
 export function supportsConnectionDatabaseBrowser(dbType?: DatabaseType): boolean {
   // MongoDB reuses the object browser for collections, not the SQL database list.
   //
@@ -281,7 +285,20 @@ export function usesPostgresLikeStructureCopy(dbType?: DatabaseType): boolean {
   return !!dbType && PG_LIKE_STRUCTURE_TYPES.has(dbType);
 }
 
-const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql", "oracle", "jdbc", "oceanbase-oracle", "dameng", "sqlserver"];
+/**
+ * PostgreSQL-protocol connections whose native driver can page a sidebar table
+ * list by top-level relation and append each page's partition descendants
+ * (`list_table_roots_page_core`). GaussDB's external M/JDBC driver still pages
+ * rows itself, so it keeps the row-based cursor.
+ */
+const PARTITION_ROOT_PAGED_TABLE_TYPES: ReadonlySet<DatabaseType> = new Set(["postgres", "redshift", "gaussdb", "kwdb", "opengauss"]);
+
+export function pagesTablePartitionsWithRootPage(connection?: Pick<ConnectionConfig, "db_type" | "driver_profile"> | null): boolean {
+  if (!connection || !PARTITION_ROOT_PAGED_TABLE_TYPES.has(connection.db_type)) return false;
+  return !(connection.db_type === "gaussdb" && connection.driver_profile?.toLowerCase() === "gaussdb-m");
+}
+
+const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "gaussdb", "opengauss", "mysql", "oracle", "jdbc", "oceanbase-oracle", "dameng", "sqlserver"];
 
 /** Oracle-family databases, kept ONLY for the Oracle-specific ALTER SESSION SET
  *  CURRENT_SCHEMA compensation in queryStore. Do not use for toolbar/dirty-bit
@@ -294,9 +311,10 @@ const ORACLE_STICKY_TRANSACTION_TYPES: ReadonlySet<string> = new Set(["oracle", 
  *  (crates/dbx-core/src/query/mod.rs + sql_risk.rs `prove_read_only_for_database`).
  *  Every member must also be in TRANSACTION_SUPPORTED_TYPES above: a database
  *  cannot reach manual mode (and this UX) without explicit transaction control
- *  (#9018). Family members like doris/kingbase join only when their transaction
- *  support lands. */
-const PROVEN_READ_ONLY_STICKY_TYPES: ReadonlySet<string> = new Set(["oracle", "oceanbase-oracle", "mysql", "postgres"]);
+ *  (#9018). The PostgreSQL family (PostgreSQL, GaussDB, openGauss) and MySQL use
+ *  the strict `sql_risk` proof; Oracle keeps its lexical classifier. Family
+ *  members like doris/kingbase join only when their transaction support lands. */
+const PROVEN_READ_ONLY_STICKY_TYPES: ReadonlySet<string> = new Set(["oracle", "oceanbase-oracle", "mysql", "postgres", "gaussdb", "opengauss"]);
 
 /**
  * Returns true if the given database type supports explicit transaction control

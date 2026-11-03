@@ -22,12 +22,18 @@ async function command(executable, args, signal) {
   return new Promise((resolveCommand, reject) => {
     const child = spawn(executable, args, { stdio: ["ignore", "pipe", "pipe"], signal });
     let output = "";
-    child.stdout.on("data", (data) => { output += data; });
-    child.stderr.on("data", (data) => { output += data; });
+    child.stdout.on("data", (data) => {
+      output += data;
+    });
+    child.stderr.on("data", (data) => {
+      output += data;
+    });
     const timer = setTimeout(() => child.kill("SIGKILL"), 120000);
     const fail = () => reject(new Error(`${executable.split("/").at(-1)} ${args[0]} failed.`));
     let failed = false;
-    child.on("error", () => { failed = true; });
+    child.on("error", () => {
+      failed = true;
+    });
     child.on("close", (code) => {
       clearTimeout(timer);
       if (code === 0 && !failed) resolveCommand(output);
@@ -43,10 +49,7 @@ export async function verifyMcp(binary, options = {}) {
   if (!statSync(binary).isFile()) throw new Error("MCP binary must be a regular file.");
   await command(ctx.codesign, ["--verify", "--strict", "--all-architectures", "-R", `=${ctx.requirement}`, binary], ctx.signal);
   const info = await command(ctx.codesign, ["--display", "--verbose=4", "--requirements", "-", binary], ctx.signal);
-  if (!info.split(/\r?\n/).includes(`Identifier=${mcpIdentifier}`)
-    || !info.split(/\r?\n/).includes(`TeamIdentifier=${ctx.env.APPLE_TEAM_ID}`)
-    || !/^Timestamp=(?!none$).+/m.test(info)
-    || /Signature=adhoc/.test(info)) {
+  if (!info.split(/\r?\n/).includes(`Identifier=${mcpIdentifier}`) || !info.split(/\r?\n/).includes(`TeamIdentifier=${ctx.env.APPLE_TEAM_ID}`) || !/^Timestamp=(?!none$).+/m.test(info) || /Signature=adhoc/.test(info)) {
     throw new Error("MCP signature must have the expected identifier, team and secure timestamp.");
   }
   const designated = info.match(/^designated => (.+)$/m)?.[1];
@@ -66,7 +69,10 @@ export async function signMcp(binary, options = {}) {
     throw new Error("APPLE_CERTIFICATE must be a base64 PKCS12 bundle.");
   }
   const originalList = await command(ctx.security, ["list-keychains", "-d", "user"], ctx.signal);
-  const originalKeychains = originalList.split(/\r?\n/).filter((line) => line.trim()).map((line) => JSON.parse(line.trim()));
+  const originalKeychains = originalList
+    .split(/\r?\n/)
+    .filter((line) => line.trim())
+    .map((line) => JSON.parse(line.trim()));
   if (!originalKeychains.every((keychain) => typeof keychain === "string")) throw new Error("Invalid keychain search list.");
   const directory = mkdtempSync(join(ctx.env.RUNNER_TEMP || ctx.env.TMPDIR || tmpdir(), "dbx-mcp-signing-"));
   chmodSync(directory, 0o700);
@@ -84,22 +90,33 @@ export async function signMcp(binary, options = {}) {
     await command(ctx.security, ["set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", password, keychain], ctx.signal);
     await command(ctx.security, ["list-keychains", "-d", "user", "-s", keychain, ...originalKeychains], ctx.signal);
     const identities = await command(ctx.security, ["find-identity", "-v", "-p", "codesigning", keychain], ctx.signal);
-    const candidates = [...identities.matchAll(/\b([A-Fa-f0-9]{40}) "(Developer ID Application: [^"\r\n]+)"/g)]
-      .filter(([, hash, name]) => name.endsWith(` (${ctx.env.APPLE_TEAM_ID})`)
-        && (name === ctx.env.APPLE_SIGNING_IDENTITY || hash.toUpperCase() === ctx.env.APPLE_SIGNING_IDENTITY.toUpperCase()));
+    const candidates = [...identities.matchAll(/\b([A-Fa-f0-9]{40}) "(Developer ID Application: [^"\r\n]+)"/g)].filter(
+      ([, hash, name]) => name.endsWith(` (${ctx.env.APPLE_TEAM_ID})`) && (name === ctx.env.APPLE_SIGNING_IDENTITY || hash.toUpperCase() === ctx.env.APPLE_SIGNING_IDENTITY.toUpperCase()),
+    );
     if (candidates.length !== 1) throw new Error("Expected exactly one valid configured Developer ID Application identity in the temporary keychain.");
-    await command(ctx.codesign, ["--force", "--sign", candidates[0][1], "--keychain", keychain, "--identifier", mcpIdentifier,
-      "--requirements", `=designated => ${ctx.requirement}`, "--timestamp", binary], ctx.signal);
+    await command(ctx.codesign, ["--force", "--sign", candidates[0][1], "--keychain", keychain, "--identifier", mcpIdentifier, "--requirements", `=designated => ${ctx.requirement}`, "--timestamp", binary], ctx.signal);
     await verifyMcp(binary, options);
   } catch (failure) {
     error = failure;
   } finally {
     const failures = [];
-    try { await command(ctx.security, ["list-keychains", "-d", "user", "-s", ...originalKeychains]); } catch (failure) { failures.push(failure); }
-    if (existsSync(keychain)) {
-      try { await command(ctx.security, ["delete-keychain", keychain]); } catch (failure) { failures.push(failure); }
+    try {
+      await command(ctx.security, ["list-keychains", "-d", "user", "-s", ...originalKeychains]);
+    } catch (failure) {
+      failures.push(failure);
     }
-    try { rmSync(directory, { recursive: true, force: true }); } catch (failure) { failures.push(failure); }
+    if (existsSync(keychain)) {
+      try {
+        await command(ctx.security, ["delete-keychain", keychain]);
+      } catch (failure) {
+        failures.push(failure);
+      }
+    }
+    try {
+      rmSync(directory, { recursive: true, force: true });
+    } catch (failure) {
+      failures.push(failure);
+    }
     if (failures.length) error = new Error("MCP signing keychain cleanup failed; refusing publication.", { cause: error });
   }
   if (error) throw error;

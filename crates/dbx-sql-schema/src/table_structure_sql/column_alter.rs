@@ -160,9 +160,15 @@ pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> Ta
             } else if options.database_type == Some(crate::models::connection::DatabaseType::Xugu) {
                 statements.extend(build_xugu_existing_column_sql(&table, &options.column));
             } else {
-                statements.extend(build_oracle_like_existing_column_sql(dialect, &table, &options.column))
+                statements.extend(build_oracle_like_existing_column_sql(
+                    dialect,
+                    &table,
+                    &options.column,
+                    options.database_type,
+                ))
             }
         }
+        StructureDialect::SapHana => statements.extend(build_saphana_existing_column_sql(&table, &options.column)),
         StructureDialect::Dameng => {
             statements.extend(build_dameng_existing_column_sql(&table, &options.column, true, &mut warnings))
         }
@@ -215,7 +221,7 @@ fn is_column_extra_empty(extra: &ColumnExtra) -> bool {
     !extra.auto_increment.unwrap_or(false)
         && !extra.on_update_current_timestamp.unwrap_or(false)
         && is_column_identity_empty(&extra.identity)
-        && !extra.generated.as_ref().is_some_and(|generated| !generated.expression.trim().is_empty())
+        && extra.generated.as_ref().is_none_or(|generated| generated.expression.trim().is_empty())
         && !extra.manticore_indexed.unwrap_or(false)
         && !extra.manticore_stored.unwrap_or(false)
         && !extra.manticore_attribute.unwrap_or(false)
@@ -484,12 +490,12 @@ pub(super) fn build_mysql_existing_column_sql(
 pub(super) fn build_mysql_existing_column_clause(column: &EditableStructureColumn, position_clause: &str) -> String {
     let original_name = column.original.as_ref().map(|original| original.name.as_str()).unwrap_or(&column.name);
     let operation = if column.name == original_name {
-        format!("MODIFY COLUMN {}", column_definition(StructureDialect::Mysql, column))
+        format!("MODIFY COLUMN {}", column_definition(StructureDialect::Mysql, column, None))
     } else {
         format!(
             "CHANGE COLUMN {} {}",
             quote_ident(StructureDialect::Mysql, original_name),
-            column_definition(StructureDialect::Mysql, column)
+            column_definition(StructureDialect::Mysql, column, None)
         )
     };
     format!("{operation}{position_clause}")
@@ -500,7 +506,7 @@ pub(super) fn build_transwarp_existing_column_clause(column: &EditableStructureC
     format!(
         "CHANGE {} {}",
         quote_ident(StructureDialect::Mysql, original_name),
-        column_definition(StructureDialect::Mysql, column)
+        column_definition(StructureDialect::Mysql, column, None)
     )
 }
 
@@ -532,7 +538,7 @@ pub(super) fn build_doris_existing_column_sql(
     if type_changed || nullable_changed || default_changed || comment_changed || !position_clause.is_empty() {
         statements.push(format!(
             "ALTER TABLE {table} MODIFY COLUMN {}{position_clause};",
-            column_definition(StructureDialect::Doris, &current_column)
+            column_definition(StructureDialect::Doris, &current_column, None)
         ));
     }
 
@@ -568,7 +574,7 @@ fn build_postgres_like_existing_column_sql(
     let type_changed = column.data_type.trim() != original.data_type.trim();
     if type_changed {
         let column_name = quote_ident(StructureDialect::Postgres, current_name);
-        let data_type = column_data_type(StructureDialect::Postgres, column);
+        let data_type = column_data_type(StructureDialect::Postgres, column, None);
         if use_xugu_type_syntax {
             statements.push(format!("ALTER TABLE {table} ALTER COLUMN {column_name} {data_type};"));
         } else {
@@ -717,7 +723,7 @@ pub(super) fn build_informix_existing_column_sql(table: &str, column: &EditableS
     let nullable_changed = column.is_nullable != original.is_nullable;
     let default_changed = normalize_default(Some(&column.default_value)) != original_default(column);
     if type_changed || nullable_changed || default_changed {
-        let mut parts = vec![quote_ident(dialect, &current_name), column_data_type(dialect, column)];
+        let mut parts = vec![quote_ident(dialect, &current_name), column_data_type(dialect, column, None)];
         if column.is_nullable {
             parts.push("NULL".to_string());
         } else {
@@ -738,6 +744,7 @@ pub(super) fn build_oracle_like_existing_column_sql(
     dialect: StructureDialect,
     table: &str,
     column: &EditableStructureColumn,
+    database_type: Option<crate::models::connection::DatabaseType>,
 ) -> Vec<String> {
     let Some(original) = &column.original else {
         return Vec::new();
@@ -745,18 +752,31 @@ pub(super) fn build_oracle_like_existing_column_sql(
     let mut statements = Vec::new();
     let mut current_name = original.name.clone();
     if column.name != original.name {
-        statements.push(format!(
-            "ALTER TABLE {table} RENAME COLUMN {} TO {};",
-            quote_ident(dialect, &original.name),
-            quote_ident(dialect, &column.name)
-        ));
+        // Dameng accepts the Oracle-style MODIFY (…) but not `RENAME COLUMN`:
+        // the supported form is `ALTER COLUMN old RENAME TO new` (verified on
+        // DM8 8.1.3.62). Oracle and the other Oracle-compatible dialects keep
+        // the RENAME COLUMN form.
+        let rename = if dialect == StructureDialect::Dameng {
+            format!(
+                "ALTER TABLE {table} ALTER COLUMN {} RENAME TO {};",
+                quote_ident(dialect, &original.name),
+                quote_ident(dialect, &column.name)
+            )
+        } else {
+            format!(
+                "ALTER TABLE {table} RENAME COLUMN {} TO {};",
+                quote_ident(dialect, &original.name),
+                quote_ident(dialect, &column.name)
+            )
+        };
+        statements.push(rename);
         current_name = column.name.clone();
     }
     let type_changed = column.data_type.trim() != original.data_type.trim();
     let nullable_changed = column.is_nullable != original.is_nullable;
     let default_changed = normalize_default(Some(&column.default_value)) != original_default(column);
     if type_changed || nullable_changed || default_changed {
-        let data_type = column_data_type(dialect, column);
+        let data_type = column_data_type(dialect, column, database_type);
         let mut parts = vec![quote_ident(dialect, &current_name), data_type];
         let default_value = normalize_default(Some(&column.default_value));
         if !default_value.is_empty() {
@@ -783,6 +803,55 @@ pub(super) fn build_oracle_like_existing_column_sql(
     statements
 }
 
+pub(super) fn build_saphana_existing_column_sql(table: &str, column: &EditableStructureColumn) -> Vec<String> {
+    let Some(original) = &column.original else {
+        return Vec::new();
+    };
+    let mut statements = Vec::new();
+    let mut current_name = original.name.clone();
+    if column.name != original.name {
+        statements.push(format!(
+            "RENAME COLUMN {table}.{} TO {};",
+            quote_ident(StructureDialect::SapHana, &original.name),
+            quote_ident(StructureDialect::SapHana, &column.name)
+        ));
+        current_name = column.name.clone();
+    }
+
+    let type_changed = column.data_type.trim() != original.data_type.trim();
+    let nullable_changed = column.is_nullable != original.is_nullable;
+    let default_changed = normalize_default(Some(&column.default_value)) != original_default(column);
+    let comment_changed = clean(&column.comment) != original_comment(column);
+    if type_changed || nullable_changed || default_changed {
+        let mut parts = vec![
+            quote_ident(StructureDialect::SapHana, &current_name),
+            column_data_type(StructureDialect::SapHana, column, None),
+        ];
+        let default_value = normalize_default(Some(&column.default_value));
+        if !default_value.is_empty() {
+            parts.push(format!(
+                "DEFAULT {}",
+                format_default_for_sql(StructureDialect::SapHana, &column.data_type, &default_value)
+            ));
+        } else if default_changed {
+            parts.push("DEFAULT NULL".to_string());
+        }
+        if nullable_changed {
+            parts.push(if column.is_nullable { "NULL" } else { "NOT NULL" }.to_string());
+        }
+        statements.push(format!("ALTER TABLE {table} ALTER ({});", parts.join(" ")));
+    }
+    if comment_changed {
+        let comment_value =
+            if clean(&column.comment).is_empty() { "NULL".to_string() } else { quote_string(&clean(&column.comment)) };
+        statements.push(format!(
+            "COMMENT ON COLUMN {table}.{} IS {comment_value};",
+            quote_ident(StructureDialect::SapHana, &current_name)
+        ));
+    }
+    statements
+}
+
 pub(super) fn build_dameng_existing_column_sql(
     table: &str,
     column: &EditableStructureColumn,
@@ -798,7 +867,12 @@ pub(super) fn build_dameng_existing_column_sql(
         statements.push(format!("ALTER TABLE {table} DROP IDENTITY;"));
     }
 
-    statements.extend(build_oracle_like_existing_column_sql(StructureDialect::Dameng, table, column));
+    statements.extend(build_oracle_like_existing_column_sql(
+        StructureDialect::Dameng,
+        table,
+        column,
+        Some(crate::models::connection::DatabaseType::Dameng),
+    ));
 
     if let DamengIdentityTransition::Add { seed, increment } = transition {
         statements.push(format!(
@@ -828,7 +902,7 @@ pub(super) fn build_iris_existing_column_sql(table: &str, column: &EditableStruc
     let nullable_changed = column.is_nullable != original.is_nullable;
     let default_changed = normalize_default(Some(&column.default_value)) != original_default(column);
     if type_changed || nullable_changed || default_changed {
-        let mut parts = vec![quote_ident(dialect, &current_name), column_data_type(dialect, column)];
+        let mut parts = vec![quote_ident(dialect, &current_name), column_data_type(dialect, column, None)];
         let default_value = normalize_default(Some(&column.default_value));
         if !default_value.is_empty() {
             parts.push(format!("DEFAULT {}", format_default_for_sql(dialect, &column.data_type, &default_value)));
@@ -874,7 +948,7 @@ pub(super) fn build_oscar_existing_column_sql(
 
     // 类型或默认值变更：带括号的 MODIFY 只允许 "col TYPE [DEFAULT ...]"，不含 NULL/NOT NULL。
     if type_changed || default_changed {
-        let data_type = column_data_type(dialect, column);
+        let data_type = column_data_type(dialect, column, None);
         let mut parts = vec![quote_ident(dialect, &current_name), data_type];
         let default_value = normalize_default(Some(&column.default_value));
         if !default_value.is_empty() {
@@ -948,7 +1022,7 @@ pub(super) fn build_sqlserver_existing_column_sql(
         statements.push(build_sqlserver_alter_column_preserving_default_sql(
             table,
             &current_name,
-            &column_data_type(dialect, column),
+            &column_data_type(dialect, column, None),
             column.is_nullable,
         ));
     } else {
@@ -960,7 +1034,7 @@ pub(super) fn build_sqlserver_existing_column_sql(
             statements.push(format!(
                 "ALTER TABLE {table} ALTER COLUMN {} {} {null_clause};",
                 quote_ident(dialect, &current_name),
-                column_data_type(dialect, column)
+                column_data_type(dialect, column, None)
             ));
         }
     }
@@ -1087,7 +1161,7 @@ pub(super) fn build_h2_existing_column_sql(table: &str, column: &EditableStructu
         statements.push(format!(
             "ALTER TABLE {table} ALTER COLUMN {} SET DATA TYPE {};",
             quote_ident(StructureDialect::H2, &current_name),
-            column_data_type(StructureDialect::H2, column)
+            column_data_type(StructureDialect::H2, column, None)
         ));
     }
     if column.is_nullable != original.is_nullable {
@@ -1256,7 +1330,7 @@ pub(super) fn build_questdb_existing_column_sql(table: &str, column: &EditableSt
         statements.push(format!(
             "ALTER TABLE {table} ALTER COLUMN {} TYPE {};",
             quote_ident(StructureDialect::Questdb, current_name),
-            column_data_type(StructureDialect::Questdb, column)
+            column_data_type(StructureDialect::Questdb, column, None)
         ));
     }
     statements

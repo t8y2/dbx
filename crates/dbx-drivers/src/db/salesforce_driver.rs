@@ -676,8 +676,10 @@ fn parse_soql_response(value: Value, elapsed_ms: u128, max_rows: usize) -> Query
     QueryResult {
         columns,
         column_types,
+        deferred_large_value_cells: Vec::new(),
         column_sortables: Vec::new(),
         spatial_columns: Vec::new(),
+        raw_key_cells: Vec::new(),
         spatial_values: Vec::new(),
         rows,
         affected_rows: total_size,
@@ -865,6 +867,8 @@ fn parse_describe_columns(describe: &Value) -> Vec<ColumnInfo> {
                         character_maximum_length: length.and_then(|l| i32::try_from(l).ok()),
                         enum_values: picklist_values,
                         resolved_schema: None,
+                        resolved_table: None,
+                        resolved_object_type: None,
                         // Plugin-provided column metadata capabilities do not apply:
                         // the describe payload is parsed here, not by a plugin driver.
                         metadata_capabilities: None,
@@ -1174,8 +1178,10 @@ impl SfClient {
                 Ok(QueryResult {
                     columns: vec!["Id".to_string()],
                     column_types: vec!["String".to_string()],
+                    deferred_large_value_cells: Vec::new(),
                     column_sortables: vec![false],
                     spatial_columns: Vec::new(),
+                    raw_key_cells: Vec::new(),
                     spatial_values: Vec::new(),
                     rows: vec![vec![Value::String(new_id)]],
                     affected_rows: 1,
@@ -1210,8 +1216,10 @@ fn salesforce_affected_query_result(affected_rows: u64, started: Instant) -> Que
     QueryResult {
         columns: Vec::new(),
         column_types: Vec::new(),
+        deferred_large_value_cells: Vec::new(),
         column_sortables: Vec::new(),
         spatial_columns: Vec::new(),
+        raw_key_cells: Vec::new(),
         spatial_values: Vec::new(),
         rows: Vec::new(),
         affected_rows,

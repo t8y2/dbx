@@ -3,10 +3,10 @@
 import { createApp, h, nextTick, reactive, shallowRef } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
-import { language, syntaxTree } from "@codemirror/language";
+import { ensureSyntaxTree, language, syntaxTree } from "@codemirror/language";
 import { EditorView, showTooltip } from "@codemirror/view";
 import { toggleLineComment, undo } from "@codemirror/commands";
-import { completionStatus, currentCompletions, startCompletion } from "@codemirror/autocomplete";
+import { acceptCompletion, setSelectedCompletion, completionStatus, currentCompletions, startCompletion } from "@codemirror/autocomplete";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import QueryEditor from "../QueryEditor.vue";
 import type { QueryEditorProps } from "../queryEditorTypes";
@@ -16,6 +16,7 @@ const cleanups: Array<() => void> = [];
 
 afterEach(() => {
   for (const cleanup of cleanups.splice(0).reverse()) cleanup();
+  window.getSelection()?.removeAllRanges();
   vi.restoreAllMocks();
 });
 
@@ -69,6 +70,46 @@ async function expectSqlCompletion(view: EditorView) {
 }
 
 describe("QueryEditor language capabilities", () => {
+  it("updates MyBatis highlighting when parameter substitution settings change", async () => {
+    const sql = "SELECT 1 WHERE htm = #{packetCode} AND 1 = 1\nORDER BY htm";
+    const { editor, view, settings, onExecute } = await mountEditor({ modelValue: sql, databaseType: "mysql", dialect: "mysql" });
+    const parameterPosition = sql.indexOf("#{") + 2;
+    ensureSyntaxTree(view.state, sql.length, 1000);
+    expect(syntaxTree(view.state).resolveInner(parameterPosition, 1).name).toBe("SqlParameter");
+    settings.updateEditorSettings({ sqlVariableSyntaxOverrides: { mysql: { mybatis: false } } });
+    await nextTick();
+    ensureSyntaxTree(view.state, sql.length, 1000);
+    expect(syntaxTree(view.state).resolveInner(parameterPosition, 1).name).toBe("LineComment");
+    settings.updateEditorSettings({ sqlVariableSyntaxOverrides: {} });
+    await nextTick();
+    ensureSyntaxTree(view.state, sql.length, 1000);
+    expect(syntaxTree(view.state).resolveInner(parameterPosition, 1).name).toBe("SqlParameter");
+    settings.updateEditorSettings({ sqlVariableSubstitutionEnabled: false });
+    await nextTick();
+    ensureSyntaxTree(view.state, sql.length, 1000);
+    expect(syntaxTree(view.state).resolveInner(parameterPosition, 1).name).toBe("LineComment");
+    settings.updateEditorSettings({ sqlVariableSubstitutionEnabled: true });
+    await nextTick();
+    ensureSyntaxTree(view.state, sql.length, 1000);
+    expect(syntaxTree(view.state).resolveInner(parameterPosition, 1).name).toBe("SqlParameter");
+    expect(view.state.doc.toString()).toBe(sql);
+    expect(editor.requestExecuteAll({ bypassPicker: true })).toBe(true);
+    expect(onExecute.mock.calls[0][0].fullSql).toBe(sql);
+  });
+  it.each([
+    ["p_", "p_input"],
+    ["v_", "v_local"],
+  ])("completes and inserts MySQL routine value %s (#12293)", async (prefix, expected) => {
+    const sql = `CREATE PROCEDURE p(IN p_input INT)\nBEGIN\nDECLARE v_local INT;\nSELECT ${prefix}`;
+    const { view } = await mountEditor({ databaseType: "mysql", modelValue: sql, initialSelection: { anchor: sql.length, head: sql.length } });
+    expect(startCompletion(view)).toBe(true);
+    await vi.waitFor(() => expect(completionStatus(view.state)).toBe("active"));
+    expect(currentCompletions(view.state)[0]?.label).toBe(expected);
+    view.dispatch({ effects: setSelectedCompletion(0) });
+    await vi.waitFor(() => expect(acceptCompletion(view)).toBe(true));
+    expect(view.state.doc.toString()).toBe(sql.slice(0, -prefix.length) + expected);
+  });
+
   it("does not install SQL grammar or expose SQL completions for Qdrant", async () => {
     const { view } = await mountEditor();
     expectPlainText(view);

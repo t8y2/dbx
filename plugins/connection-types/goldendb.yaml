@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 310
 dbType: goldendb
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Goldendb
 label: 金篆 GoldenDB
 dialect: GoldenDB

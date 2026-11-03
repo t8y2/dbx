@@ -138,6 +138,7 @@ async fn live_postgres_all_schema_export_restores_one_sql_file() {
             schema: String::new(),
             file_path: export_path.display().to_string(),
             selected_tables: Vec::new(),
+            selected_objects: None,
             excluded_tables: Vec::new(),
             include_structure: true,
             include_data: true,

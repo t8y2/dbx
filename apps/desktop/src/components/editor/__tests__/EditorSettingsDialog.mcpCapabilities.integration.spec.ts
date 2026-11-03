@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import dialogSource from "../EditorSettingsDialog.vue?raw";
 import { DEFAULT_DESKTOP_SETTINGS, DEFAULT_SIDEBAR_TABLE_PAGE_SIZE, normalizeMcpGlobalPolicy, type McpGlobalPolicy } from "@/stores/settingsStore";
 import { shouldConfirmEditorSettingsDialogClose } from "@/lib/settings/editorSettingsDraft";
+import { SIDEBAR_HOVER_DELAY_DEFAULT, normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import { mergeMcpToolsetSelection, setMcpCategoryEnabled, setMcpToolsEnabled, setMcpToolsetEnabled, type McpCapabilityCategoryId } from "@/lib/mcp/mcpToolCatalog";
 import { addMcpAllowedToolName, MCP_PLUGIN_TOOLS_WILDCARD, mcpExecutionModeFromPolicy, mcpPolicyFieldsForExecutionMode, type McpExecutionMode } from "@/lib/mcp/mcpPolicySelection";
 import { editableDatabaseAccess, mergeDatabaseAccess, type McpDatabaseAccess } from "@/lib/mcp/mcpDatabaseAccess";
@@ -256,6 +257,8 @@ function createHarness(initial: Partial<McpGlobalPolicy> = {}) {
     hasApplyBlocker: ref(false),
     historyRetention: { save: vi.fn(async () => {}) },
     mcpHistoryRetention: { save: vi.fn(async () => {}) },
+    editSidebarHoverDelay: ref(SIDEBAR_HOVER_DELAY_DEFAULT),
+    normalizeSidebarHoverDelay,
     editorSettingsPatchFromDraft: () => ({}),
     currentEditorSettingsDraft: () => ({}),
     editEditorSettingsBase: ref({}),

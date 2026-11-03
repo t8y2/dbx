@@ -10810,39 +10810,21 @@ function openExternalUrl(url: string) {
                   <h3 class="text-base font-bold">{{ t("connection.advancedConnectionBehavior") }}</h3>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.connectTimeout") }}</Label>
-                    <div class="col-span-3 grid grid-cols-2 gap-2">
-                      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.connect_timeout_inherit === true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
+                    <div class="connection-timeout-options col-span-3 grid gap-2">
+                      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5" :class="form.connect_timeout_inherit === true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
                         <input id="connect-timeout-global" v-model="form.connect_timeout_inherit" type="radio" name="connect-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
                         <div class="flex min-w-0 flex-1 items-center gap-1">
-                          <label for="connect-timeout-global" class="min-w-0 cursor-pointer truncate text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
+                          <label for="connect-timeout-global" class="min-w-0 cursor-pointer whitespace-normal break-words text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
                           <HelpTooltip :label="t('connection.globalConnectTimeoutHint')" content-class="max-w-[280px]">
                             {{ t("connection.globalConnectTimeoutHint") }}
                           </HelpTooltip>
                         </div>
-                        <Input
-                          v-model.number="editGlobalConnectTimeoutSecs"
-                          type="number"
-                          min="1"
-                          :max="MAX_CONNECT_TIMEOUT_SECS"
-                          step="1"
-                          class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20"
-                          :disabled="form.connect_timeout_inherit !== true"
-                          @input="clampConnectTimeoutInput($event, 'global')"
-                        />
+                        <Input v-model.number="editGlobalConnectTimeoutSecs" type="number" min="1" :max="MAX_CONNECT_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full" :disabled="form.connect_timeout_inherit !== true" @input="clampConnectTimeoutInput($event, 'global')" />
                       </div>
-                      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.connect_timeout_inherit !== true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
+                      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5" :class="form.connect_timeout_inherit !== true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
                         <input id="connect-timeout-connection" v-model="form.connect_timeout_inherit" type="radio" name="connect-timeout-scope" :value="false" class="h-3.5 w-3.5 shrink-0 accent-primary" />
-                        <label for="connect-timeout-connection" class="min-w-0 flex-1 cursor-pointer truncate text-xs" :title="t('connection.useConnectionQueryTimeout')">{{ t("connection.useConnectionQueryTimeout") }}</label>
-                        <Input
-                          v-model.number="form.connect_timeout_secs"
-                          type="number"
-                          min="1"
-                          :max="MAX_CONNECT_TIMEOUT_SECS"
-                          step="1"
-                          class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20"
-                          :disabled="form.connect_timeout_inherit === true"
-                          @input="clampConnectTimeoutInput($event, 'connection')"
-                        />
+                        <label for="connect-timeout-connection" class="min-w-0 flex-1 cursor-pointer whitespace-normal break-words text-xs" :title="t('connection.useConnectionQueryTimeout')">{{ t("connection.useConnectionQueryTimeout") }}</label>
+                        <Input v-model.number="form.connect_timeout_secs" type="number" min="1" :max="MAX_CONNECT_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full" :disabled="form.connect_timeout_inherit === true" @input="clampConnectTimeoutInput($event, 'connection')" />
                       </div>
                     </div>
                   </div>
@@ -10859,21 +10841,21 @@ function openExternalUrl(url: string) {
                      budget the provider cannot honor. -->
                   <div v-if="!isPluginConnection" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.queryTimeout") }}</Label>
-                    <div class="col-span-3 grid grid-cols-2 gap-2">
-                      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.query_timeout_inherit === true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
+                    <div class="connection-timeout-options col-span-3 grid gap-2">
+                      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5" :class="form.query_timeout_inherit === true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
                         <input id="query-timeout-global" v-model="form.query_timeout_inherit" type="radio" name="query-timeout-scope" :value="true" class="h-3.5 w-3.5 shrink-0 accent-primary" />
                         <div class="flex min-w-0 flex-1 items-center gap-1">
-                          <label for="query-timeout-global" class="min-w-0 cursor-pointer truncate text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
+                          <label for="query-timeout-global" class="min-w-0 cursor-pointer whitespace-normal break-words text-xs" :title="t('connection.useGlobalQueryTimeout')">{{ t("connection.useGlobalQueryTimeout") }}</label>
                           <HelpTooltip :label="t('connection.globalQueryTimeoutHint')" content-class="max-w-[280px]">
                             {{ t("connection.globalQueryTimeoutHint") }}
                           </HelpTooltip>
                         </div>
-                        <Input v-model.number="editGlobalQueryTimeoutSecs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20" :disabled="form.query_timeout_inherit !== true" @input="clampQueryTimeoutInput($event, 'global')" />
+                        <Input v-model.number="editGlobalQueryTimeoutSecs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full" :disabled="form.query_timeout_inherit !== true" @input="clampQueryTimeoutInput($event, 'global')" />
                       </div>
-                      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5 sm:flex" :class="form.query_timeout_inherit !== true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
+                      <div class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 rounded border px-2 py-1.5" :class="form.query_timeout_inherit !== true ? 'border-primary/60 bg-background' : 'border-border bg-muted/30 text-muted-foreground'">
                         <input id="query-timeout-connection" v-model="form.query_timeout_inherit" type="radio" name="query-timeout-scope" :value="false" class="h-3.5 w-3.5 shrink-0 accent-primary" />
-                        <label for="query-timeout-connection" class="min-w-0 flex-1 cursor-pointer truncate text-xs" :title="t('connection.useConnectionQueryTimeout')">{{ t("connection.useConnectionQueryTimeout") }}</label>
-                        <Input v-model.number="form.query_timeout_secs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full shrink-0 sm:col-span-1 sm:w-20" :disabled="form.query_timeout_inherit === true" @input="clampQueryTimeoutInput($event, 'connection')" />
+                        <label for="query-timeout-connection" class="min-w-0 flex-1 cursor-pointer whitespace-normal break-words text-xs" :title="t('connection.useConnectionQueryTimeout')">{{ t("connection.useConnectionQueryTimeout") }}</label>
+                        <Input v-model.number="form.query_timeout_secs" type="number" min="0" :max="MAX_QUERY_TIMEOUT_SECS" step="1" class="col-span-2 h-7 w-full" :disabled="form.query_timeout_inherit === true" @input="clampQueryTimeoutInput($event, 'connection')" />
                       </div>
                     </div>
                   </div>
@@ -11936,6 +11918,11 @@ html.dbx-legacy-webview.dark .connection-transport-layer-option--selected:hover 
 /* Group padding reduces the label space; keep short labels on one line. */
 .connection-dialog-content .connection-advanced-section > .grid.grid-cols-4 {
   grid-template-columns: minmax(7.5rem, 1fr) repeat(3, minmax(0, 1fr));
+}
+
+/* Size timeout choices by the available form width, not the viewport. */
+.connection-timeout-options {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
 }
 
 .connection-advanced-section > .grid > [data-slot="label"] {

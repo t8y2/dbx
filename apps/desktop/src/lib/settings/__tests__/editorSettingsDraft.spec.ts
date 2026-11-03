@@ -685,3 +685,10 @@ describe("editorSettingsDraft - tabMaxWidth", () => {
     expect(patch.tabMaxWidth).toBe(240);
   });
 });
+
+it("tracks sidebar hover drafts and normalizes delay before applying", () => {
+  const base = editorSettingsDraftFromSettings(makeSettings({ sidebarHoverEnabled: true, sidebarHoverDelay: 300 }));
+  const changed = { ...base, sidebarHoverEnabled: false, sidebarHoverDelay: 750 };
+  expect(editorSettingsPatchFromDraft(changed, base)).toEqual({ sidebarHoverEnabled: false, sidebarHoverDelay: 750 });
+  expect(editorSettingsPatchFromDraft({ ...base, sidebarHoverDelay: 9999 }, base)).toEqual({ sidebarHoverDelay: 2000 });
+});

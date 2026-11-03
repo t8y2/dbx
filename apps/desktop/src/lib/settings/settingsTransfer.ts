@@ -1,3 +1,4 @@
+import { SIDEBAR_HOVER_DELAY_MIN, SIDEBAR_HOVER_DELAY_MAX } from "@/lib/sidebar/sidebarHoverSettings";
 import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, type EditorSettingsDraftKey } from "./editorSettingsDraft";
 import { DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS, DEFAULT_DESKTOP_SETTINGS, DEFAULT_EDITOR_SETTINGS, DEFAULT_TOOLBAR_ITEMS, normalizeDesktopSettings, normalizeEditorSettings, type DesktopSettings, type EditorSettings } from "@/stores/settingsStore";
 import type { AppThemeMode } from "@/lib/app/appTheme";
@@ -218,6 +219,8 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "sidebarObjectInfoMode",
     "sidebarAllowHorizontalScroll",
     "sidebarShowConnectionEndpoints",
+    "sidebarHoverEnabled",
+    "sidebarHoverDelay",
     "sidebarShowTooltips",
     "sidebarIndent",
     "sidebarFontSize",
@@ -280,6 +283,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "damengClientBinDir",
     "autoOpenExportFolder",
     "applyColumnFormattersOnExport",
+    "csvWithoutBom",
     "csvQuoteMode",
     "csvNullMode",
     "queryResultExportFileNameSource",
@@ -399,6 +403,7 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
   "autoSelectActiveSidebarNode",
   "sidebarPinDefaultDatabase",
   "sidebarAllowHorizontalScroll",
+  "sidebarHoverEnabled",
   "sidebarShowTooltips",
   "updateNotificationsEnabled",
   "autoDownloadUpdates",
@@ -410,6 +415,7 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
 ] as const satisfies readonly EditorSettingsDraftKey[];
 
 const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: unknown) => boolean>> = {
+  sidebarHoverDelay: (value) => typeof value === "number" && Number.isInteger(value) && value >= SIDEBAR_HOVER_DELAY_MIN && value <= SIDEBAR_HOVER_DELAY_MAX,
   // The editor font slider and the Ctrl+wheel zoom both clamp to this range.
   fontSize: (value) => typeof value === "number" && Number.isFinite(value) && value >= EDITOR_MIN_FONT_SIZE && value <= EDITOR_MAX_FONT_SIZE,
   welcomePageMode: (value) => value === "intro" || value === "workspace",

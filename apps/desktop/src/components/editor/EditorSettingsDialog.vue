@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { SIDEBAR_HOVER_DELAY_MIN, SIDEBAR_HOVER_DELAY_MAX, normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import { cleanupMcpHistoryRetention, loadMcpHistoryRetentionLimit, saveMcpHistoryRetentionLimit } from "@/lib/backend/api";
 import { HISTORY_RETENTION_LIMITS, useHistoryRetentionSetting } from "@/composables/useHistoryRetentionSetting";
 import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } from "vue";
@@ -1061,6 +1062,8 @@ const editRedisDatabaseDisplayLimit = ref(settingsStore.editorSettings.redisData
 const editSidebarObjectInfoMode = ref<SidebarObjectInfoMode>(settingsStore.editorSettings.sidebarObjectInfoMode);
 const editSidebarAllowHorizontalScroll = ref(settingsStore.editorSettings.sidebarAllowHorizontalScroll);
 const editSidebarShowConnectionEndpoints = ref(settingsStore.editorSettings.sidebarShowConnectionEndpoints);
+const editSidebarHoverEnabled = ref(settingsStore.editorSettings.sidebarHoverEnabled);
+const editSidebarHoverDelay = ref(settingsStore.editorSettings.sidebarHoverDelay);
 const editSidebarShowTooltips = ref(settingsStore.editorSettings.sidebarShowTooltips);
 const editSidebarIndent = ref(settingsStore.editorSettings.sidebarIndent);
 const editSidebarFontSize = ref(settingsStore.editorSettings.sidebarFontSize);
@@ -1070,6 +1073,7 @@ const editPreferredExportPath = ref(settingsStore.editorSettings.preferredExport
 const editDamengClientBinDir = ref(settingsStore.editorSettings.damengClientBinDir);
 const editAutoOpenExportFolder = ref(settingsStore.editorSettings.autoOpenExportFolder);
 const editApplyColumnFormattersOnExport = ref(settingsStore.editorSettings.applyColumnFormattersOnExport);
+const editCsvWithoutBom = ref(settingsStore.editorSettings.csvWithoutBom);
 const editCsvQuoteMode = ref<CsvQuoteMode>(settingsStore.editorSettings.csvQuoteMode);
 const editCsvNullMode = ref<CsvNullMode>(settingsStore.editorSettings.csvNullMode);
 const editQueryResultExportFileNameSource = ref<QueryResultExportFileNameSource>(settingsStore.editorSettings.queryResultExportFileNameSource);
@@ -1448,6 +1452,8 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarObjectInfoMode: editSidebarObjectInfoMode.value,
     sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll.value,
     sidebarShowConnectionEndpoints: editSidebarShowConnectionEndpoints.value,
+    sidebarHoverEnabled: editSidebarHoverEnabled.value,
+    sidebarHoverDelay: editSidebarHoverDelay.value,
     sidebarShowTooltips: editSidebarShowTooltips.value,
     sidebarIndent: editSidebarIndent.value,
     sidebarFontSize: editSidebarFontSize.value,
@@ -1462,6 +1468,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     damengClientBinDir: editDamengClientBinDir.value,
     autoOpenExportFolder: editAutoOpenExportFolder.value,
     applyColumnFormattersOnExport: editApplyColumnFormattersOnExport.value,
+    csvWithoutBom: editCsvWithoutBom.value,
     csvQuoteMode: editCsvQuoteMode.value,
     csvNullMode: editCsvNullMode.value,
     queryResultExportFileNameSource: editQueryResultExportFileNameSource.value,
@@ -2164,6 +2171,8 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarObjectInfoMode.value = settingsStore.editorSettings.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = settingsStore.editorSettings.sidebarAllowHorizontalScroll;
   editSidebarShowConnectionEndpoints.value = settingsStore.editorSettings.sidebarShowConnectionEndpoints;
+  editSidebarHoverEnabled.value = settingsStore.editorSettings.sidebarHoverEnabled;
+  editSidebarHoverDelay.value = settingsStore.editorSettings.sidebarHoverDelay;
   editSidebarShowTooltips.value = settingsStore.editorSettings.sidebarShowTooltips;
   editSidebarIndent.value = settingsStore.editorSettings.sidebarIndent;
   editSidebarFontSize.value = settingsStore.editorSettings.sidebarFontSize;
@@ -2173,6 +2182,7 @@ function syncEditorSettingsDraftFromStore() {
   editDamengClientBinDir.value = settingsStore.editorSettings.damengClientBinDir;
   editAutoOpenExportFolder.value = settingsStore.editorSettings.autoOpenExportFolder;
   editApplyColumnFormattersOnExport.value = settingsStore.editorSettings.applyColumnFormattersOnExport;
+  editCsvWithoutBom.value = settingsStore.editorSettings.csvWithoutBom;
   editCsvQuoteMode.value = settingsStore.editorSettings.csvQuoteMode;
   editCsvNullMode.value = settingsStore.editorSettings.csvNullMode;
   editQueryResultExportFileNameSource.value = settingsStore.editorSettings.queryResultExportFileNameSource;
@@ -2339,6 +2349,8 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sidebarObjectInfoMode: editSidebarObjectInfoMode,
   sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll,
   sidebarShowConnectionEndpoints: editSidebarShowConnectionEndpoints,
+  sidebarHoverEnabled: editSidebarHoverEnabled,
+  sidebarHoverDelay: editSidebarHoverDelay,
   sidebarShowTooltips: editSidebarShowTooltips,
   sidebarIndent: editSidebarIndent,
   sidebarFontSize: editSidebarFontSize,
@@ -2353,6 +2365,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   damengClientBinDir: editDamengClientBinDir,
   autoOpenExportFolder: editAutoOpenExportFolder,
   applyColumnFormattersOnExport: editApplyColumnFormattersOnExport,
+  csvWithoutBom: editCsvWithoutBom,
   csvQuoteMode: editCsvQuoteMode,
   csvNullMode: editCsvNullMode,
   queryResultExportFileNameSource: editQueryResultExportFileNameSource,
@@ -2716,6 +2729,7 @@ async function persistSettings() {
   if (hasApplyBlocker.value) return;
   await historyRetention.save();
   await mcpHistoryRetention.save();
+  editSidebarHoverDelay.value = normalizeSidebarHoverDelay(editSidebarHoverDelay.value);
   const editorSettingsPatch = editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value);
   const sidebarObjectDisplayChanged = editorSettingsPatch.sidebarObjectDisplay !== undefined && editorSettingsPatch.sidebarObjectDisplay !== settingsStore.editorSettings.sidebarObjectDisplay;
   const sidebarTablePageSizeChanged = editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
@@ -2938,6 +2952,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
     editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
     editSidebarShowConnectionEndpoints.value = DEFAULT_EDITOR_SETTINGS.sidebarShowConnectionEndpoints;
+    editSidebarHoverEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarHoverEnabled;
+    editSidebarHoverDelay.value = DEFAULT_EDITOR_SETTINGS.sidebarHoverDelay;
     editSidebarShowTooltips.value = DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips;
     editSidebarIndent.value = DEFAULT_EDITOR_SETTINGS.sidebarIndent;
     editSidebarFontSize.value = DEFAULT_EDITOR_SETTINGS.sidebarFontSize;
@@ -3003,6 +3019,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDamengClientBinDir.value = DEFAULT_EDITOR_SETTINGS.damengClientBinDir;
     editAutoOpenExportFolder.value = DEFAULT_EDITOR_SETTINGS.autoOpenExportFolder;
     editApplyColumnFormattersOnExport.value = DEFAULT_EDITOR_SETTINGS.applyColumnFormattersOnExport;
+    editCsvWithoutBom.value = DEFAULT_EDITOR_SETTINGS.csvWithoutBom;
     editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
     editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
     editQueryResultExportFileNameSource.value = DEFAULT_EDITOR_SETTINGS.queryResultExportFileNameSource;
@@ -3173,6 +3190,8 @@ function resetAllDefaults() {
   editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
   editSidebarShowConnectionEndpoints.value = DEFAULT_EDITOR_SETTINGS.sidebarShowConnectionEndpoints;
+  editSidebarHoverEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarHoverEnabled;
+  editSidebarHoverDelay.value = DEFAULT_EDITOR_SETTINGS.sidebarHoverDelay;
   editSidebarShowTooltips.value = DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips;
   editSidebarIndent.value = DEFAULT_EDITOR_SETTINGS.sidebarIndent;
   editSidebarFontSize.value = DEFAULT_EDITOR_SETTINGS.sidebarFontSize;
@@ -3187,6 +3206,7 @@ function resetAllDefaults() {
   editDamengClientBinDir.value = DEFAULT_EDITOR_SETTINGS.damengClientBinDir;
   editAutoOpenExportFolder.value = DEFAULT_EDITOR_SETTINGS.autoOpenExportFolder;
   editApplyColumnFormattersOnExport.value = DEFAULT_EDITOR_SETTINGS.applyColumnFormattersOnExport;
+  editCsvWithoutBom.value = DEFAULT_EDITOR_SETTINGS.csvWithoutBom;
   editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
   editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
   editQueryResultExportFileNameSource.value = DEFAULT_EDITOR_SETTINGS.queryResultExportFileNameSource;
@@ -10081,6 +10101,35 @@ onUnmounted(() => {
                 <Switch id="sidebar-show-connection-endpoints" v-model="editSidebarShowConnectionEndpoints" />
               </div>
               <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="sidebar-hover-enabled">{{ t("settings.sidebarHoverEnabled") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.sidebarHoverEnabledDescription") }}</p>
+                </div>
+                <Switch id="sidebar-hover-enabled" v-model="editSidebarHoverEnabled" />
+              </div>
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="sidebar-hover-delay">{{ t("settings.sidebarHoverDelay") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.sidebarHoverDelayDescription") }}</p>
+                </div>
+                <Input
+                  id="sidebar-hover-delay"
+                  type="number"
+                  class="w-24 text-right"
+                  :disabled="!editSidebarHoverEnabled"
+                  :min="SIDEBAR_HOVER_DELAY_MIN"
+                  :max="SIDEBAR_HOVER_DELAY_MAX"
+                  :step="50"
+                  :model-value="editSidebarHoverDelay"
+                  @update:model-value="
+                    (value: string | number) => {
+                      const n = typeof value === 'string' ? Number(value) : value;
+                      if (Number.isFinite(n)) editSidebarHoverDelay = n;
+                    }
+                  "
+                />
+              </div>
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="sidebar-show-tooltips">
                     {{ t("settings.sidebarShowTooltips") }}
@@ -11036,6 +11085,10 @@ onUnmounted(() => {
               <div class="space-y-3">
                 <div class="text-sm font-medium text-muted-foreground">
                   {{ t("settings.exportSection") }}
+                </div>
+                <div class="flex items-center justify-between gap-4">
+                  <Label for="csv-without-bom">{{ t("settings.csvWithoutBom") }}</Label>
+                  <Switch id="csv-without-bom" v-model="editCsvWithoutBom" />
                 </div>
                 <div class="flex items-start justify-between gap-4">
                   <div class="min-w-0 space-y-0.5">

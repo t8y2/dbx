@@ -713,6 +713,8 @@ export const useConnectionStore = defineStore("connection", () => {
     schema?: string;
     tableName?: string;
     tableNames?: string[];
+    /** Typed object browser selection; the dialog exports exactly these objects. */
+    objects?: api.DatabaseExportSelectedObject[];
     allDatabases?: boolean;
   } | null>(null);
   const sidebarLayout = ref<SidebarLayout>(emptyLayout());

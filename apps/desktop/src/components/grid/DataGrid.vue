@@ -9689,6 +9689,14 @@ let userFacingSqlGeneration = 0;
 // Legacy snapshots may retain a display page without the actual execution text.
 // Do not present the original, unpaginated statement as the executed SQL there.
 const actualExecutionSql = computed(() => props.result.sqlPage?.executedSql || props.result.executedStatement || (!props.pageSql ? props.result.sourceStatement || props.sql || "" : ""));
+// Copy the SQL attached to the displayed result, not conditions still being
+// edited. Prefer the display page over an internal pagination probe.
+const quickQuerySql = computed(() => sqlWithDisplayDatabaseName(props.result.sqlPage?.sql || props.pageSql || props.result.sourceStatement || props.sql || "").trim());
+const canCopyQuickQuerySql = computed(() => !!quickQuerySql.value && !props.loading && !isApplyingWhere.value && !isQueryExecutionErrorResult(props.result));
+
+async function copyQuickQuerySql() {
+  if (canCopyQuickQuerySql.value) await copyText(quickQuerySql.value);
+}
 
 function sqlWithDisplayDatabaseName(sql: string): string {
   const database = props.tableMeta?.database ?? props.database;
@@ -15461,6 +15469,16 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   @apply-value-suggestions="applyFilterValueSuggestions"
                   @custom-mode-order="openFilterModeOrderDialog"
                 />
+                <div class="flex shrink-0 items-center border-r px-1">
+                  <Tooltip>
+                    <TooltipTrigger as-child>
+                      <Button data-grid-copy-query-sql type="button" variant="ghost" size="icon" class="h-5 w-5" :disabled="!canUseWhereSearch || !canCopyQuickQuerySql" :aria-label="t('grid.copyQuerySql')" @click="copyQuickQuerySql">
+                        <Copy class="h-3 w-3" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">{{ t("grid.copyQuerySql") }}</TooltipContent>
+                  </Tooltip>
+                </div>
               </template>
 
               <slot name="search-bar" :local-filter-count="localFilterCount + serverColumnFilterCount" :has-local-column-filters="hasLocalColumnFilters || hasServerColumnFilters" :local-filter-summaries="localFilterSummaries" :clear-local-filter="clearLocalFilter" />

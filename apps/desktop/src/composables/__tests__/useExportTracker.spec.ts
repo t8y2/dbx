@@ -597,6 +597,25 @@ describe("SQL-file failure details", () => {
     task.onOpen?.();
     expect(onOpen).toHaveBeenCalledOnce();
   });
+
+  it("stores target connection, database, schema, and previews when provided in options", () => {
+    const tracker = useExportTracker();
+    const onOpen = vi.fn();
+    const previews = [{ fileName: "test.sql", filePath: "/tmp/test.sql", preview: "SELECT 1;", sizeBytes: 10, lineCount: 1 }];
+    const task = tracker.addSqlFileTask("sql-options-id", "test.sql", "/tmp/test.sql", {
+      onOpen,
+      targetConnectionId: "conn-1",
+      targetDatabase: "db1",
+      targetSchema: "public",
+      previews,
+    });
+
+    expect(task.onOpen).toBe(onOpen);
+    expect(task.targetConnectionId).toBe("conn-1");
+    expect(task.targetDatabase).toBe("db1");
+    expect(task.targetSchema).toBe("public");
+    expect(task.sqlFilePreviews).toEqual(previews);
+  });
 });
 
 describe("formatDataTransferDuration", () => {

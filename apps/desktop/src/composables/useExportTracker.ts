@@ -26,6 +26,22 @@ export interface SqlFileFailure {
   truncated?: boolean;
 }
 
+export interface SqlFilePerFileResult {
+  fileName: string;
+  statementIndex: number;
+  successCount: number;
+  failureCount: number;
+  affectedRows: number;
+}
+
+export interface AddSqlFileTaskOptions {
+  onOpen?: () => void;
+  targetConnectionId?: string;
+  targetDatabase?: string;
+  targetSchema?: string;
+  previews?: api.SqlFilePreview[];
+}
+
 export interface SqlFileFailureContext {
   fileIndex?: number;
   fileName?: string;
@@ -76,6 +92,8 @@ export interface ExportTask {
   oracleRoutineDeployment?: OracleRoutineDeployment;
   sqlFileFailures?: SqlFileFailure[];
   sqlFileFailuresOmitted?: number;
+  sqlFilePerFileResults?: SqlFilePerFileResult[];
+  sqlFilePreviews?: api.SqlFilePreview[];
   multiDbSourceTabId?: string;
   multiDbTotal?: number;
   multiDbCompleted?: number;
@@ -603,7 +621,8 @@ export function useExportTracker() {
     if (task.status === "Done" || task.status === "Error") finishExportTask(task);
   }
 
-  function addSqlFileTask(executionId: string, fileName: string, filePath: string, onOpen?: () => void): ExportTask {
+  function addSqlFileTask(executionId: string, fileName: string, filePath: string, onOpenOrOptions?: (() => void) | AddSqlFileTaskOptions): ExportTask {
+    const options = typeof onOpenOrOptions === "function" ? { onOpen: onOpenOrOptions } : onOpenOrOptions;
     sqlFileFailureStates.delete(executionId);
     const task = reactive<ExportTask>({
       exportId: executionId,
@@ -623,7 +642,11 @@ export function useExportTracker() {
       statementSummary: "",
       sqlFileFailures: [],
       sqlFileFailuresOmitted: 0,
-      onOpen,
+      targetConnectionId: options?.targetConnectionId,
+      targetDatabase: options?.targetDatabase,
+      targetSchema: options?.targetSchema,
+      sqlFilePreviews: options?.previews ? [...options.previews] : undefined,
+      onOpen: options?.onOpen,
     });
     taskMap.set(executionId, task);
     return task;

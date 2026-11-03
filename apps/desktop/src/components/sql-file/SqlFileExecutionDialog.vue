@@ -57,7 +57,7 @@ import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Play, Square, X } fr
 const { t } = useI18n();
 const { toast } = useToast();
 const { highlight } = useSqlHighlighter();
-const { addSqlFileTask, updateSqlFileTask } = useExportTracker();
+const { tasks, addSqlFileTask, updateSqlFileTask, registerTaskCancelHandler, unregisterTaskCancelHandler } = useExportTracker();
 const open = defineModel<boolean>("open", { default: false });
 
 const props = defineProps<{
@@ -843,8 +843,17 @@ async function startExecution() {
   activeExecutionTask.value = null;
   failureDetailsExpanded.value = false;
   const taskLabel = previews.value.length === 1 ? previews.value[0]!.fileName : `${previews.value[0]!.fileName} (+${previews.value.length - 1})`;
-  activeExecutionTask.value = addSqlFileTask(batchId, taskLabel, filePathDisplay.value, () => {
-    openCurrentTask(batchId);
+  activeExecutionTask.value = addSqlFileTask(batchId, taskLabel, filePathDisplay.value, {
+    onOpen: () => {
+      openCurrentTask(batchId);
+    },
+    targetConnectionId: connectionId.value,
+    targetDatabase: target.database,
+    targetSchema: target.schema,
+    previews: previews.value.map((p) => ({ ...p })),
+  });
+  registerTaskCancelHandler(batchId, async () => {
+    await cancelSqlFileExecution(batchId).catch(() => {});
   });
   let completedSuccessfully = false;
   let terminal: SqlFileProgress | null = null;
@@ -876,9 +885,12 @@ async function startExecution() {
       batchId,
       (next) => {
         if (next.executionId !== batchId) return;
-        progress.value = next;
-        terminalStatus.value = next.status;
-        terminalError.value = next.error ?? terminalError.value;
+        const currentExecutionMatches = executionId.value === batchId;
+        if (currentExecutionMatches) {
+          progress.value = next;
+          terminalStatus.value = next.status;
+          terminalError.value = next.error ?? terminalError.value;
+        }
 
         // Detect per-file boundary events from the backend (populated only
         // during multi-file execution).  The backend emits a file-start
@@ -892,18 +904,34 @@ async function startExecution() {
             const preview = previews.value[fi];
             const displayName = preview ? (displayFileNames.value.get(preview.filePath) ?? next.fileName ?? "") : (next.fileName ?? "");
             if (next.status === "running") {
-              currentFileIndex.value = fi;
-              currentFileName.value = displayName;
+              if (currentExecutionMatches) {
+                currentFileIndex.value = fi;
+                currentFileName.value = displayName;
+              }
             } else if (next.status === "statementDone") {
-              perFileResults.value[fi] = {
-                fileName: displayName,
-                statementIndex: next.statementIndex,
-                successCount: next.successCount,
-                failureCount: next.failureCount,
-                affectedRows: next.affectedRows,
-              };
-              currentFileIndex.value = fi;
-              currentFileName.value = displayName;
+              if (currentExecutionMatches) {
+                perFileResults.value[fi] = {
+                  fileName: displayName,
+                  statementIndex: next.statementIndex,
+                  successCount: next.successCount,
+                  failureCount: next.failureCount,
+                  affectedRows: next.affectedRows,
+                };
+                currentFileIndex.value = fi;
+                currentFileName.value = displayName;
+              }
+              const tracked = tasks.value.find((t) => t.exportId === batchId);
+              if (tracked) {
+                const list = tracked.sqlFilePerFileResults ? [...tracked.sqlFilePerFileResults] : [];
+                list[fi] = {
+                  fileName: displayName,
+                  statementIndex: next.statementIndex,
+                  successCount: next.successCount,
+                  failureCount: next.failureCount,
+                  affectedRows: next.affectedRows,
+                };
+                tracked.sqlFilePerFileResults = list;
+              }
             }
           }
         }
@@ -913,7 +941,7 @@ async function startExecution() {
           fileIndex: currentFileIndex.value >= 0 ? currentFileIndex.value : previews.value.length === 1 ? 0 : undefined,
           fileName: currentFileName.value || (previews.value.length === 1 ? (displayFileNames.value.get(previews.value[0]!.filePath) ?? previews.value[0]!.fileName) : undefined),
         });
-        if (next.status === "statementFailed") failureDetailsExpanded.value = true;
+        if (currentExecutionMatches && next.status === "statementFailed") failureDetailsExpanded.value = true;
 
         if (isTerminalProgress(next.status)) {
           resolveTerminalProgress(next);
@@ -947,7 +975,9 @@ async function startExecution() {
         executionPaths,
       );
       terminal = await terminalProgress;
-      progress.value = terminal;
+      if (executionId.value === batchId) {
+        progress.value = terminal;
+      }
       if (terminal.status === "error") {
         throw new Error(terminal.error || "SQL file execution failed");
       }
@@ -996,19 +1026,21 @@ async function startExecution() {
       }
     }
   } catch (e: any) {
-    terminalStatus.value = cancelRequested.value ? "cancelled" : "error";
-    terminalError.value = e?.message || String(e);
+    if (executionId.value === batchId) {
+      terminalStatus.value = cancelRequested.value ? "cancelled" : "error";
+      terminalError.value = e?.message || String(e);
+    }
     const lastProgress = progress.value as SqlFileProgress | null;
     updateSqlFileTask(batchId, {
       executionId: batchId,
-      status: terminalStatus.value,
+      status: cancelRequested.value ? "cancelled" : "error",
       statementIndex: lastProgress?.statementIndex ?? 0,
       successCount: lastProgress?.successCount ?? 0,
       failureCount: lastProgress?.failureCount ?? 0,
       affectedRows: lastProgress?.affectedRows ?? 0,
       elapsedMs: lastProgress?.elapsedMs ?? 0,
       statementSummary: lastProgress?.statementSummary ?? "",
-      error: terminalError.value,
+      error: e?.message || String(e),
     });
     if (!cancelRequested.value) {
       if (isRunningInBackground.value || !open.value) {
@@ -1019,19 +1051,22 @@ async function startExecution() {
           },
         });
       } else {
-        toast(terminalError.value, 5000);
+        toast(e?.message || String(e), 5000);
       }
     }
   } finally {
+    unregisterTaskCancelHandler(batchId);
     if (txnSessionId.value && (!completedSuccessfully || disposed || cancelRequested.value)) {
       await finishTransaction(false);
     }
     if (cancelRequested.value && !progress.value) {
       updateSqlFileTask(batchId, { executionId: batchId, status: "cancelled", statementIndex: 0, successCount: 0, failureCount: 0, affectedRows: 0, elapsedMs: 0, statementSummary: "" });
     }
-    running.value = false;
-    cancelling.value = false;
-    executionStarted.value = false;
+    if (executionId.value === batchId) {
+      running.value = false;
+      cancelling.value = false;
+      executionStarted.value = false;
+    }
     await releaseManagedPreviews();
   }
 }
@@ -1074,6 +1109,72 @@ watch(sqlConnections, () => {
   applyTarget(resolveInitialTarget());
 });
 
+function restoreExecutionFromTask(task: ExportTask) {
+  executionId.value = task.exportId;
+  activeExecutionTask.value = task;
+  const isRunning = task.status === "Running" || task.status === "Cancelling";
+  running.value = isRunning;
+  cancelling.value = task.status === "Cancelling";
+  executionStarted.value = isRunning;
+
+  let mappedStatus: SqlFileStatus = "running";
+  if (task.status === "Done") mappedStatus = "done";
+  else if (task.status === "Error") mappedStatus = "error";
+  else if (task.status === "Cancelled" || task.status === "Cancelling") mappedStatus = "cancelled";
+  else if (task.status === "Running") mappedStatus = "running";
+
+  terminalStatus.value = mappedStatus;
+  terminalError.value = task.errorMessage || "";
+  failureDetailsExpanded.value = (task.failureCount ?? 0) > 0 || (task.sqlFileFailures?.length ?? 0) > 0;
+
+  progress.value = {
+    executionId: task.exportId,
+    status: mappedStatus,
+    statementIndex: task.statementIndex ?? 0,
+    successCount: task.successCount ?? 0,
+    failureCount: task.failureCount ?? 0,
+    affectedRows: task.affectedRows ?? 0,
+    elapsedMs: task.elapsedMs ?? 0,
+    bytesRead: task.bytesRead,
+    totalBytes: task.totalBytes,
+    phase: task.sqlFilePhase,
+    statementSummary: task.statementSummary ?? "",
+    error: task.errorMessage || undefined,
+  };
+
+  if (task.targetConnectionId) {
+    connectionId.value = task.targetConnectionId;
+  }
+  if (task.targetDatabase) {
+    targetNamespace.value = task.targetSchema ? `${task.targetDatabase}.${task.targetSchema}` : task.targetDatabase;
+  }
+
+  if (task.sqlFilePreviews && task.sqlFilePreviews.length > 0) {
+    previews.value = [...task.sqlFilePreviews];
+    pathInput.value = task.filePath || "";
+    activePreviewPath.value = previews.value[0]?.filePath || "";
+  } else if (task.filePath || task.tableName) {
+    const fallbackPath = task.filePath || task.tableName;
+    pathInput.value = fallbackPath;
+    previews.value = [
+      {
+        fileName: task.tableName || fallbackPath,
+        filePath: fallbackPath,
+        preview: "",
+        sizeBytes: task.totalBytes ?? 0,
+        lineCount: 0,
+      },
+    ];
+    activePreviewPath.value = fallbackPath;
+  }
+
+  if (task.sqlFilePerFileResults && task.sqlFilePerFileResults.length > 0) {
+    perFileResults.value = [...task.sqlFilePerFileResults];
+  } else {
+    perFileResults.value = [];
+  }
+}
+
 watch(
   [open, () => props.taskId],
   ([value, taskId]) => {
@@ -1086,12 +1187,22 @@ watch(
       return;
     }
     isRunningInBackground.value = false;
-    if (running.value || txnSessionId.value || resolvingTransaction.value) return;
     const targetTaskId = taskId || inspectingExecutionId.value;
-    if (targetTaskId && (targetTaskId === executionId.value || targetTaskId === activeExecutionTask.value?.exportId)) {
+    if (targetTaskId) {
       inspectingExecutionId.value = null;
+      if (targetTaskId === executionId.value) {
+        return;
+      }
+      const matchedTask = tasks.value.find((t) => t.exportId === targetTaskId && t.kind === "sql-file");
+      if (matchedTask) {
+        restoreExecutionFromTask(matchedTask);
+        return;
+      }
+      resetState();
+      handleOpenChange(false);
       return;
     }
+    if (running.value || txnSessionId.value || resolvingTransaction.value) return;
     inspectingExecutionId.value = null;
     resetState();
     if (connectionId.value) {

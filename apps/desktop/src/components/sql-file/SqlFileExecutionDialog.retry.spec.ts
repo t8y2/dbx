@@ -1,47 +1,56 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick, reactive } from "vue";
+import { createApp, defineComponent, h, nextTick, reactive, ref, computed } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TreeNode } from "@/types/database";
 
-const mocks = vi.hoisted(() => ({
-  desktop: true,
-  releaseSqlFilePreview: vi.fn(),
-  previewWebSqlFile: vi.fn(),
-  addSqlFileTask: vi.fn(),
-  beginManualTransaction: vi.fn(),
-  commitManualTransaction: vi.fn(),
-  rollbackManualTransaction: vi.fn(),
-  cancelSqlFileExecution: vi.fn(),
-  ensureConnected: vi.fn(),
-  executeSqlFiles: vi.fn(),
-  fetchSqlFileTargetOptions: vi.fn(),
-  highlight: vi.fn(),
-  highlighterState: undefined as undefined | { ready: boolean; appearance: string },
-  listenSqlFileProgress: vi.fn(),
-  openFileDialog: vi.fn(),
-  previewSqlFile: vi.fn(),
-  refreshSqlFilePreview: vi.fn(),
-  inspectSqlFileTables: vi.fn(),
-  progressHandler: undefined as undefined | ((progress: Record<string, unknown>) => void),
-  changeDialogOpen: undefined as undefined | ((open: boolean) => void),
-  connections: [{ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" }] as Array<{ id: string; name: string; db_type: string; driver_profile: string; database: string }>,
-  treeNodes: [] as TreeNode[],
-  editorSettings: { sidebarConnectionSortMode: "manual" as "manual" | "asc" | "desc" },
-  getConfig: vi.fn(),
-  refreshDatabaseTreeNode: vi.fn(),
-  refreshObjectListTreeNode: vi.fn(),
-  requestConfirmation: vi.fn(),
-  toast: vi.fn(),
-  trackerTask: undefined as any,
-  unlisten: vi.fn(),
-  updateSqlFileTask: vi.fn(),
-  uuid: vi.fn(),
-  queryStore: {
-    tabs: [{ id: "mysql-tab", connectionId: "mysql-1", database: "" }] as Array<{ id: string; connectionId: string; database: string; schema?: string; catalog?: string }>,
-    activeTabId: "mysql-tab" as string | null,
-  },
-}));
+const mocks = vi.hoisted(() => {
+  const trackerTasks = [] as any[];
+  return {
+    desktop: true,
+    releaseSqlFilePreview: vi.fn(),
+    previewWebSqlFile: vi.fn(),
+    addSqlFileTask: vi.fn(),
+    beginManualTransaction: vi.fn(),
+    commitManualTransaction: vi.fn(),
+    rollbackManualTransaction: vi.fn(),
+    cancelSqlFileExecution: vi.fn(),
+    ensureConnected: vi.fn(),
+    executeSqlFiles: vi.fn(),
+    fetchSqlFileTargetOptions: vi.fn(),
+    highlight: vi.fn(),
+    highlighterState: undefined as undefined | { ready: boolean; appearance: string },
+    listenSqlFileProgress: vi.fn(),
+    openFileDialog: vi.fn(),
+    previewSqlFile: vi.fn(),
+    refreshSqlFilePreview: vi.fn(),
+    inspectSqlFileTables: vi.fn(),
+    progressHandler: undefined as undefined | ((progress: Record<string, unknown>) => void),
+    changeDialogOpen: undefined as undefined | ((open: boolean) => void),
+    connections: [{ id: "mysql-1", name: "MySQL", db_type: "mysql", driver_profile: "mysql", database: "" }] as Array<{ id: string; name: string; db_type: string; driver_profile: string; database: string }>,
+    treeNodes: [] as TreeNode[],
+    editorSettings: { sidebarConnectionSortMode: "manual" as "manual" | "asc" | "desc" },
+    getConfig: vi.fn(),
+    refreshDatabaseTreeNode: vi.fn(),
+    refreshObjectListTreeNode: vi.fn(),
+    requestConfirmation: vi.fn(),
+    toast: vi.fn(),
+    trackerTask: undefined as any,
+    trackerTasks,
+    tasks: undefined as any,
+    registerTaskCancelHandler: vi.fn(),
+    unregisterTaskCancelHandler: vi.fn(),
+    unlisten: vi.fn(),
+    updateSqlFileTask: vi.fn(),
+    uuid: vi.fn(),
+    queryStore: {
+      tabs: [{ id: "mysql-tab", connectionId: "mysql-1", database: "" }] as Array<{ id: string; connectionId: string; database: string; schema?: string; catalog?: string }>,
+      activeTabId: "mysql-tab" as string | null,
+    },
+  };
+});
+
+mocks.tasks = computed(() => mocks.trackerTasks);
 
 function passthrough(tag: string) {
   return defineComponent({
@@ -74,7 +83,13 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.openFileDialog }));
 vi.mock("@/composables/useSqlHighlighter", () => ({ useSqlHighlighter: () => ({ highlight: mocks.highlight }) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/composables/useExportTracker", () => ({
-  useExportTracker: () => ({ addSqlFileTask: mocks.addSqlFileTask, updateSqlFileTask: mocks.updateSqlFileTask }),
+  useExportTracker: () => ({
+    tasks: mocks.tasks,
+    addSqlFileTask: mocks.addSqlFileTask,
+    updateSqlFileTask: mocks.updateSqlFileTask,
+    registerTaskCancelHandler: mocks.registerTaskCancelHandler,
+    unregisterTaskCancelHandler: mocks.unregisterTaskCancelHandler,
+  }),
 }));
 vi.mock("@/composables/useDatabaseOptions", () => ({
   fetchSqlFileTargetOptions: mocks.fetchSqlFileTargetOptions,
@@ -219,6 +234,28 @@ async function mountReadyDialog(onOpenChange = vi.fn()) {
   await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
 }
 
+async function mountDialogWrapper(initialOpen = true, initialTaskId: string | null = null, onOpenChange = vi.fn()) {
+  root = document.createElement("div");
+  document.body.append(root);
+  const open = ref(initialOpen);
+  const taskId = ref<string | null>(initialTaskId);
+  app = createApp({
+    setup() {
+      return () =>
+        h(SqlFileExecutionDialog, {
+          open: open.value,
+          "onUpdate:open": (val: boolean) => {
+            open.value = val;
+            onOpenChange(val);
+          },
+          taskId: taskId.value,
+        });
+    },
+  });
+  app.mount(root);
+  return { open, taskId, onOpenChange };
+}
+
 async function completeFirstExecution() {
   mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
     mocks.progressHandler?.(progress(request.executionId, "running", { fileIndex: 0, fileName: "first.sql" }));
@@ -250,9 +287,11 @@ beforeEach(() => {
   mocks.progressHandler = undefined;
   mocks.highlighterState = reactive({ ready: false, appearance: "light" });
   mocks.highlight.mockReset().mockImplementation((sql: string) => (mocks.highlighterState!.ready ? `<span data-theme="${mocks.highlighterState!.appearance}">${sql}</span>` : sql));
+  mocks.trackerTasks.length = 0;
   mocks.trackerTask = undefined;
-  mocks.addSqlFileTask.mockImplementation((exportId: string, tableName: string, filePath: string, onOpen?: () => void) => {
-    mocks.trackerTask = reactive({
+  mocks.addSqlFileTask.mockImplementation((exportId: string, tableName: string, filePath: string, onOpenOrOptions?: any) => {
+    const options = typeof onOpenOrOptions === "function" ? { onOpen: onOpenOrOptions } : onOpenOrOptions;
+    const task = reactive({
       exportId,
       kind: "sql-file",
       tableName,
@@ -262,15 +301,42 @@ beforeEach(() => {
       totalRows: null,
       status: "Running",
       errorMessage: null,
+      statementIndex: 0,
+      successCount: 0,
+      failureCount: 0,
+      affectedRows: 0,
+      elapsedMs: 0,
+      statementSummary: "",
       sqlFileFailures: [],
       sqlFileFailuresOmitted: 0,
-      onOpen,
+      targetConnectionId: options?.targetConnectionId,
+      targetDatabase: options?.targetDatabase,
+      targetSchema: options?.targetSchema,
+      sqlFilePreviews: options?.previews,
+      onOpen: options?.onOpen,
     });
-    return mocks.trackerTask;
+    mocks.trackerTasks.push(task);
+    mocks.trackerTask = task;
+    return task;
   });
-  mocks.updateSqlFileTask.mockImplementation((_executionId: string, next: Record<string, any>, context?: { fileIndex?: number; fileName?: string }) => {
+  mocks.updateSqlFileTask.mockImplementation((executionId: string, next: Record<string, any>, context?: { fileIndex?: number; fileName?: string }) => {
+    const task = mocks.trackerTasks.find((t: any) => t.exportId === executionId) ?? mocks.trackerTask;
+    if (!task) return;
+    if (next.status) {
+      if (next.status === "done") task.status = "Done";
+      else if (next.status === "error") task.status = "Error";
+      else if (next.status === "cancelled") task.status = "Cancelled";
+      else if (next.status === "running") task.status = "Running";
+    }
+    if (next.error) task.errorMessage = next.error;
+    if (next.statementIndex !== undefined) task.statementIndex = next.statementIndex;
+    if (next.successCount !== undefined) task.successCount = next.successCount;
+    if (next.failureCount !== undefined) task.failureCount = next.failureCount;
+    if (next.affectedRows !== undefined) task.affectedRows = next.affectedRows;
+    if (next.elapsedMs !== undefined) task.elapsedMs = next.elapsedMs;
+    if (next.statementSummary !== undefined) task.statementSummary = next.statementSummary;
     if (next.status === "statementFailed" && next.error) {
-      mocks.trackerTask.sqlFileFailures.push({
+      task.sqlFileFailures.push({
         statementIndex: next.statementIndex,
         statementSummary: next.statementSummary,
         error: next.error,
@@ -591,6 +657,147 @@ describe("SqlFileExecutionDialog retries", () => {
       expect(completedToastCall).toBeDefined();
       expect(completedToastCall![2]?.label).toBe("sqlFile.viewDetails");
     });
+  });
+
+  it("restores task A details after task B starts and completes when reopening task A via taskId", async () => {
+    let taskCount = 0;
+    mocks.uuid.mockReset().mockImplementation(() => `task-${++taskCount}`);
+
+    const onOpenChange = vi.fn();
+    const { open, taskId } = await mountDialogWrapper(true, null, onOpenChange);
+
+    await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalled());
+    findButton("sqlFile.browse").click();
+    await vi.waitFor(() => expect(mocks.previewSqlFile).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+
+    // 1. Run Task A (fails on statement with an error)
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "running", { fileIndex: 0, fileName: "first.sql", statementIndex: 0 }));
+      mocks.progressHandler?.(progress(request.executionId, "statementFailed", { fileIndex: 0, fileName: "first.sql", statementIndex: 1, error: "Syntax error in A" }));
+      mocks.progressHandler?.(progress(request.executionId, "error", { statementIndex: 1, failureCount: 1, error: "Task A failed" }));
+    });
+
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(root!.textContent).toContain("Task A failed"));
+    expect(root!.textContent).toContain("Syntax error in A");
+    const taskA = mocks.trackerTasks.find((t: any) => t.exportId === "task-1");
+    expect(taskA).toBeDefined();
+
+    // 2. Close dialog, and start Task B
+    open.value = false;
+    await nextTick();
+
+    // Reopen without taskId to start Task B
+    open.value = true;
+    taskId.value = null;
+    await nextTick();
+
+    // Browse and start execution for Task B (completes successfully)
+    findButton("sqlFile.browse").click();
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "running", { fileIndex: 0, fileName: "second.sql", statementIndex: 0 }));
+      mocks.progressHandler?.(progress(request.executionId, "statementDone", { fileIndex: 0, fileName: "second.sql", statementIndex: 1, successCount: 1 }));
+      mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 1, successCount: 1 }));
+    });
+
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.trackerTasks.some((t: any) => t.exportId === "task-2" && t.status === "Done")).toBe(true));
+    expect(root!.textContent).not.toContain("Syntax error in A");
+
+    // 3. Reopen Task A from list via taskA.onOpen / taskId
+    taskA.onOpen?.();
+    taskId.value = "task-1";
+    open.value = true;
+    await nextTick();
+
+    // Assert: Dialog restores Task A! Shows Task A's failure details and error, not Task B or empty page
+    await vi.waitFor(() => expect(root!.textContent).toContain("Syntax error in A"));
+    expect(root!.textContent).toContain("Task A failed");
+  });
+
+  it("restores task A details without showing task B when task B is actively running in background", async () => {
+    let taskCount = 0;
+    mocks.uuid.mockReset().mockImplementation(() => `task-${++taskCount}`);
+
+    const onOpenChange = vi.fn();
+    const { open, taskId } = await mountDialogWrapper(true, null, onOpenChange);
+
+    await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalled());
+    findButton("sqlFile.browse").click();
+    await vi.waitFor(() => expect(mocks.previewSqlFile).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+
+    // 1. Run Task A to completion
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "running", { fileIndex: 0, fileName: "first.sql" }));
+      mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 10, successCount: 10, affectedRows: 25 }));
+    });
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.trackerTasks.some((t: any) => t.exportId === "task-1" && t.status === "Done")).toBe(true));
+
+    // 2. Start Task B, which stays running
+    open.value = false;
+    await nextTick();
+    open.value = true;
+    taskId.value = null;
+    await nextTick();
+
+    findButton("sqlFile.browse").click();
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+
+    const gateB = deferred();
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "running", { fileIndex: 0, fileName: "second.sql", statementIndex: 3, successCount: 3 }));
+      return gateB.promise;
+    });
+
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.trackerTasks.some((t: any) => t.exportId === "task-2" && t.status === "Running")).toBe(true));
+
+    // 3. User reopens Task A while Task B is running
+    taskId.value = "task-1";
+    await nextTick();
+
+    // Assert: Displays Task A (statementIndex 10, affectedRows 25), not Task B (statements 3)
+    await vi.waitFor(() => expect(root!.textContent).toContain("25"));
+
+    // 4. User switches to Task B: displays Task B
+    taskId.value = "task-2";
+    await nextTick();
+    await vi.waitFor(() => expect(root!.textContent).toContain("sqlFile.status.running"));
+
+    // Clean up running task B
+    gateB.resolve();
+  });
+
+  it("does not display a different task when taskId cannot be restored", async () => {
+    let taskCount = 0;
+    mocks.uuid.mockReset().mockImplementation(() => `task-${++taskCount}`);
+
+    const onOpenChange = vi.fn();
+    const { taskId } = await mountDialogWrapper(true, null, onOpenChange);
+
+    await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalled());
+    findButton("sqlFile.browse").click();
+    await vi.waitFor(() => expect(mocks.previewSqlFile).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+
+    // Run Task A
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 5, successCount: 5 }));
+    });
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.trackerTasks.some((t: any) => t.exportId === "task-1")).toBe(true));
+
+    // Attempt to open non-existent task
+    taskId.value = "non-existent-id";
+    await nextTick();
+
+    // Dialog should not show Task A
+    expect(root!.textContent).not.toContain("sqlFile.status.done");
   });
 
   it("cancels the active ordinary run and allows a fresh retry", async () => {

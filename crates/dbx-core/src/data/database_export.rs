@@ -3793,9 +3793,16 @@ impl ExportDestinationIdentity {
                 .map(|bytes| Some(Self::PersistentVolumeUuid(bytes)))
                 .map_err(|_| "Stored database export destination volume UUID has an invalid length".to_string()),
             EXPORT_DESTINATION_IDENTITY_NETWORK_MOUNT_SOURCE_KIND => {
-                let source = String::from_utf8(payload.to_vec())
+                let Some((length, source)) = payload.split_at_checked(4) else {
+                    return Err("Stored database export destination mount source is truncated".to_string());
+                };
+                let length = u32::from_le_bytes([length[0], length[1], length[2], length[3]]);
+                if source.len() != length as usize {
+                    return Err("Stored database export destination mount source has an invalid length".to_string());
+                }
+                let source = std::str::from_utf8(source)
                     .map_err(|_| "Stored database export destination mount source is not valid UTF-8".to_string())?;
-                Ok(Some(Self::NetworkMountSource(source)))
+                Ok(Some(Self::NetworkMountSource(source.to_string())))
             }
             _ => Err("Stored database export destination identity has an unknown kind".to_string()),
         }
@@ -4036,6 +4043,7 @@ fn recorded_export_destination_identity_mismatch(
 /// filesystem family whose device identity changes on every remount (issue
 /// #14018). Everything else — ext4, btrfs, xfs, tmpfs, overlay, … — keeps the
 /// strict identity check.
+#[cfg(any(target_os = "linux", test))]
 fn linux_f_type_is_network_filesystem(f_type: i64) -> bool {
     matches!(
         f_type as u64,
@@ -4049,7 +4057,7 @@ fn linux_f_type_is_network_filesystem(f_type: i64) -> bool {
 
 #[cfg(target_os = "linux")]
 fn linux_f_type_for_path(path: &std::path::Path) -> Option<i64> {
-    let Some(text) = path.to_str() else { return None };
+    let text = path.to_str()?;
     let Ok(c_path) = std::ffi::CString::new(text) else { return None };
     let mut buf: nix::libc::statfs = unsafe { std::mem::zeroed() };
     // SAFETY: `c_path` is a NUL-terminated string owned by this call and `buf`
@@ -4065,6 +4073,7 @@ fn linux_f_type_for_path(path: &std::path::Path) -> Option<i64> {
 /// contains `path` (the longest matching mount point wins, so nested mounts
 /// resolve to their own entry). `/proc/mounts` escapes spaces as `\040` and
 /// tabs as `\011`; both are decoded before matching.
+#[cfg(target_os = "linux")]
 fn linux_mount_source_for_path(path: &std::path::Path) -> Option<String> {
     let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
     linux_mount_source_from_proc(path, &mounts)
@@ -4072,12 +4081,14 @@ fn linux_mount_source_for_path(path: &std::path::Path) -> Option<String> {
 
 /// Pure parsing half of [`linux_mount_source_for_path`], split out so tests can
 /// feed synthetic `/proc/mounts` content without a Linux filesystem.
+#[cfg(any(target_os = "linux", test))]
 fn linux_mount_source_from_proc(path: &std::path::Path, mounts: &str) -> Option<String> {
     let mut best: Option<(usize, String)> = None;
     for line in mounts.lines() {
         let mut fields = line.split(' ');
-        let source = fields.next()?;
-        let mount_point = fields.next()?;
+        let (Some(source), Some(mount_point)) = (fields.next(), fields.next()) else {
+            continue;
+        };
         let mount_point = decode_proc_mounts_field(mount_point);
         if path.starts_with(&mount_point) {
             let depth = mount_point.matches('/').count();
@@ -4089,25 +4100,31 @@ fn linux_mount_source_from_proc(path: &std::path::Path, mounts: &str) -> Option<
     best.map(|(_, source)| source)
 }
 
-/// Decodes the octal escapes (`\040` space, `\011` tab, `\134` backslash) that
-/// `/proc/mounts` uses inside its source and mount-point fields.
+/// Decodes the octal escapes (`\040` space, `\011` tab, `\012` newline,
+/// `\134` backslash) that `/proc/mounts` uses inside its source and
+/// mount-point fields. Works on bytes so the rest of a UTF-8 path is copied
+/// verbatim.
+#[cfg(any(target_os = "linux", test))]
 fn decode_proc_mounts_field(field: &str) -> String {
-    let mut decoded = String::with_capacity(field.len());
     let bytes = field.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
     let mut i = 0usize;
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 3 < bytes.len() {
-            let octal = &field[i + 1..i + 4];
-            if let Ok(value) = u8::from_str_radix(octal, 8) {
-                decoded.push(value as char);
-                i += 4;
-                continue;
+            let digits = &bytes[i + 1..i + 4];
+            if digits.iter().all(|digit| (b'0'..=b'7').contains(digit)) {
+                let value = digits.iter().fold(0u16, |acc, digit| acc * 8 + u16::from(digit - b'0'));
+                if let Ok(value) = u8::try_from(value) {
+                    decoded.push(value);
+                    i += 4;
+                    continue;
+                }
             }
         }
-        decoded.push(field[i..].chars().next().unwrap_or('\0'));
-        i += field[i..].chars().next().unwrap_or('\0').len_utf8();
+        decoded.push(bytes[i]);
+        i += 1;
     }
-    decoded
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 fn export_destination_identity_mismatch(
@@ -5997,7 +6014,7 @@ mod tests {
         concurrent_metadata_prefetch_allowed, database_export_metadata_prefetch_concurrency,
         emit_database_export_cancelled, metadata_prefetch_concurrency, metadata_prefetch_pool_capacity,
         postgres_create_schema_sql, postgres_export_schema_names, set_export_cancelled, snapshot_batch_cancelled,
-        ExportStatus, EXPORT_CANCELLED_ERROR,
+        ExportStatus, EXPORT_CANCELLED_ERROR, EXPORT_DESTINATION_IDENTITY_NETWORK_MOUNT_SOURCE_KIND,
     };
     use super::{
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
@@ -6011,17 +6028,16 @@ mod tests {
         format_xugu_spatial_export_literal, generate_postgres_enum_ddl, generate_postgres_extension_ddl,
         generate_postgres_sequence_create_ddl, generate_postgres_sequence_post_table_ddl,
         generate_postgres_sequence_setval_sql, is_dameng_auto_increment_ddl, is_postgres_extension_member_routine,
-        linux_f_type_is_network_filesystem, linux_mount_source_for_path, linux_mount_source_from_proc,
-        mysql_database_export_preamble, mysql_view_dependencies_from_rows, mysql_view_dependencies_sql,
-        normalize_export_table_ddl, record_export_destination_identity, record_export_error,
-        replace_database_export_select_list, sort_export_views_by_dependencies, split_postgres_export_table_ddl,
-        write_database_export_rows, write_database_export_rows_with_mode, BuildDatabaseSqlExportOptions,
-        BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions, DatabaseExportObjectCounts,
-        DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportDestinationIdentity, ExportedTableSql,
-        PostgresExportEnum, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
-        SqlInsertDialect, SqlInsertMode, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
-        POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, POSTGRES_EXPORT_SEQUENCES_SQL,
-        POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
+        linux_f_type_is_network_filesystem, linux_mount_source_from_proc, mysql_database_export_preamble,
+        mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
+        record_export_destination_identity, record_export_error, replace_database_export_select_list,
+        sort_export_views_by_dependencies, split_postgres_export_table_ddl, write_database_export_rows,
+        write_database_export_rows_with_mode, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions,
+        BuildExportSqlInsertOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter,
+        DdlNormalizeOptions, ExportDestinationIdentity, ExportedTableSql, PostgresExportEnum, PostgresExportExtension,
+        PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode,
+        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
+        POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
     };
     use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
@@ -10603,10 +10619,31 @@ mod tests {
     fn network_mount_source_identity_encodes_and_decodes_round_trip() {
         let source = "rclone://remote:backup";
         let encoded = ExportDestinationIdentity::NetworkMountSource(source.to_string()).encode();
+        assert_eq!(encoded[6], EXPORT_DESTINATION_IDENTITY_NETWORK_MOUNT_SOURCE_KIND);
         assert_eq!(
             ExportDestinationIdentity::decode(&encoded).unwrap(),
             Some(ExportDestinationIdentity::NetworkMountSource(source.to_string()))
         );
+
+        // The length prefix is part of the wire format: a truncated payload
+        // must be rejected instead of silently producing a shorter source.
+        let mut truncated = encoded.clone();
+        truncated.pop();
+        assert!(ExportDestinationIdentity::decode(&truncated).is_err());
+        let mut inflated = encoded.clone();
+        inflated.push(b'x');
+        assert!(ExportDestinationIdentity::decode(&inflated).is_err());
+    }
+
+    #[test]
+    fn linux_f_type_classifies_network_filesystems() {
+        for f_type in [0x65735546u64, 0x6969, 0xFF534D42, 0xFE534D42, 0x517B] {
+            assert!(linux_f_type_is_network_filesystem(f_type as i64), "0x{f_type:x} should be network");
+        }
+        // Local filesystems keep the strict device check.
+        for f_type in [0xEF53u64, 0x58465342, 0x9123683E, 0x01021994, 0x794C7630] {
+            assert!(!linux_f_type_is_network_filesystem(f_type as i64), "0x{f_type:x} should be local");
+        }
     }
 
     // Linux 执行级用例：/proc/mounts 解析（最长前缀、八进制转义、无匹配）
@@ -10619,15 +10656,38 @@ mod tests {
             Some("rclone://remote:backup")
         );
         assert_eq!(linux_mount_source_from_proc(std::path::Path::new("/mnt"), mounts).as_deref(), Some("/dev/sda1"));
-        assert_eq!(linux_mount_source_from_proc(std::path::Path::new("/opt"), mounts), None);
+        // The root mount covers every absolute path without a dedicated entry,
+        // and `/mnt/backup2` must not match the `/mnt/backup` entry because
+        // matching is component-wise.
+        assert_eq!(linux_mount_source_from_proc(std::path::Path::new("/opt"), mounts).as_deref(), Some("/dev/sda1"));
+        assert_eq!(
+            linux_mount_source_from_proc(std::path::Path::new("/mnt/backup2"), mounts).as_deref(),
+            Some("/dev/sda1")
+        );
+        // Without a root entry nothing matches.
+        assert_eq!(linux_mount_source_from_proc(std::path::Path::new("/opt"), "proc /proc proc rw 0 0\n"), None);
     }
 
     #[test]
     fn linux_mount_source_for_path_decodes_octal_escapes() {
-        let mounts = "usbhd /mnt/backup\040drive vfat rw 0 0\n";
+        // Rust has no octal escapes: the source literal needs `\\040` so the
+        // parser sees the same `\040` text the kernel writes to /proc/mounts.
+        let mounts = "usbhd /mnt/backup\\040drive vfat rw 0 0\n";
         assert_eq!(
             linux_mount_source_from_proc(std::path::Path::new("/mnt/backup drive"), mounts).as_deref(),
             Some("usbhd")
+        );
+        let mounts = "nas:/export /mnt/back\\134slash nfs rw 0 0\n";
+        assert_eq!(
+            linux_mount_source_from_proc(std::path::Path::new("/mnt/back\\slash"), mounts).as_deref(),
+            Some("nas:/export")
+        );
+        // Non-ASCII bytes are not escaped by the kernel and must survive
+        // decoding unchanged.
+        let mounts = "nas:/数据 /mnt/备份 nfs rw 0 0\n";
+        assert_eq!(
+            linux_mount_source_from_proc(std::path::Path::new("/mnt/备份/db"), mounts).as_deref(),
+            Some("nas:/数据")
         );
     }
 

@@ -8348,7 +8348,7 @@ export default withEnglishFallback({
     sidebarAllowHorizontalScroll: "允許側邊欄水平捲動",
     sidebarAllowHorizontalScrollDescription: "透過啟用側邊欄的水平捲動功能，完整顯示長表格、檢視和集合的名稱",
     sidebarShowConnectionEndpoints: "在連線名稱後顯示伺服器與帳號",
-    sidebarShowConnectionEndpointsDescription: "在側邊欄連線名稱後顯示「伺服器:連接埠@帳號」，便於區分不同伺服器或帳號的連線。",
+    sidebarShowConnectionEndpointsDescription: "在側邊欄連線名稱後顯示「伺服器:連接埠{'@'}帳號」，便於區分不同伺服器或帳號的連線。",
     sidebarHoverEnabled: "滑鼠貼邊自動展開側邊欄",
     sidebarHoverEnabledDescription: "滑鼠停留在左側邊緣時暫時展開已收合的側邊欄。關閉後可使用展開按鈕或快捷鍵。",
     sidebarHoverDelay: "側邊欄貼邊觸發延遲（毫秒）",

@@ -8089,7 +8089,7 @@ export default withEnglishFallback({
     sidebarAllowHorizontalScroll: "Yan paneldə üfüqi sürüşdürməyə icazə ver",
     sidebarAllowHorizontalScrollDescription: "Yan paneldə üfüqi sürüşdürməyə icazə verərək uzun cədvəl, görünüş və kolleksiya adlarını tam göstər.",
     sidebarShowConnectionEndpoints: "Bağlantı adından sonra server və hesabı göstər",
-    sidebarShowConnectionEndpointsDescription: "Bağlantıları ayırd etmək üçün yan paneldə hər bağlantı adından sonra server:port@hesab göstər.",
+    sidebarShowConnectionEndpointsDescription: "Bağlantıları ayırd etmək üçün yan paneldə hər bağlantı adından sonra server:port{'@'}hesab göstər.",
     sidebarHoverEnabled: "Kənara yaxınlaşdıqda yan paneli avtomatik aç",
     sidebarHoverEnabledDescription: "Yığılmış yan paneli müvəqqəti açmaq üçün kursoru sol kənarda saxlayın. Deaktiv olduqda açma düyməsini və ya klaviatura qısayolunu istifadə edin.",
     sidebarHoverDelay: "Yan panelin kənarında gözləmə müddəti (ms)",

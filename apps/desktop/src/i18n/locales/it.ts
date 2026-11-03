@@ -9232,7 +9232,7 @@ export default withEnglishFallback({
     sidebarAllowHorizontalScroll: "Consenti scorrimento orizzontale barra laterale",
     sidebarAllowHorizontalScrollDescription: "Mostra i nomi lunghi di tabelle, viste e collezioni per intero consentendo lo scorrimento orizzontale della barra laterale.",
     sidebarShowConnectionEndpoints: "Mostra server e account dopo il nome della connessione",
-    sidebarShowConnectionEndpointsDescription: "Aggiunge server:porta@account dopo ogni nome di connessione nella barra laterale per distinguerle.",
+    sidebarShowConnectionEndpointsDescription: "Aggiunge server:porta{'@'}account dopo ogni nome di connessione nella barra laterale per distinguerle.",
     sidebarHoverEnabled: "Espandi la barra laterale al passaggio sul bordo",
     sidebarHoverEnabledDescription: "Passa il mouse sul bordo sinistro per aprire temporaneamente la barra laterale compressa. Se disattivato, usa il pulsante di espansione o la scorciatoia da tastiera.",
     sidebarHoverDelay: "Ritardo sul bordo della barra laterale (ms)",

@@ -8852,7 +8852,7 @@ export default withEnglishFallback({
     sidebarAllowHorizontalScroll: "Izinkan gulir horizontal bilah sisi",
     sidebarAllowHorizontalScrollDescription: "Tampilkan nama tabel, tampilan, dan koleksi yang panjang secara lengkap dengan mengizinkan gulir horizontal pada bilah sisi.",
     sidebarShowConnectionEndpoints: "Tampilkan server dan akun setelah nama koneksi",
-    sidebarShowConnectionEndpointsDescription: "Menambahkan server:port@akun setelah setiap nama koneksi di bilah sisi untuk membedakan koneksi.",
+    sidebarShowConnectionEndpointsDescription: "Menambahkan server:port{'@'}akun setelah setiap nama koneksi di bilah sisi untuk membedakan koneksi.",
     sidebarHoverEnabled: "Perluas bilah sisi saat mengarahkan kursor ke tepi",
     sidebarHoverEnabledDescription: "Arahkan kursor ke tepi kiri untuk membuka sementara bilah sisi yang diciutkan. Saat dinonaktifkan, gunakan tombol perluas atau pintasan keyboard.",
     sidebarHoverDelay: "Jeda kursor di tepi bilah sisi (ms)",

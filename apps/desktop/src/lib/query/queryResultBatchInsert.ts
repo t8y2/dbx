@@ -18,6 +18,12 @@ export function batchResultInsertRequest(result: QueryResult, metadata: QueryMet
   const hidden = new Set(result.hidden_column_indexes ?? []);
   const indexes = result.columns.map((_, index) => index).filter((index) => !hidden.has(index));
   if (!indexes.length || indexes.some((index) => !mapping[index])) return undefined;
+  const targetIndexBySource = new Map(indexes.map((sourceIndex, targetIndex) => [sourceIndex, targetIndex]));
+  const spatialColumns = result.spatial_columns?.flatMap((col) => {
+    const targetIndex = targetIndexBySource.get(col.column_index);
+    return targetIndex === undefined ? [] : [{ ...col, column_index: targetIndex }];
+  });
+  const spatialValues = result.spatial_values?.map((row) => indexes.map((idx) => row[idx] ?? null));
   return {
     version: 1,
     extractor: "sql-inserts",
@@ -29,5 +35,7 @@ export function batchResultInsertRequest(result: QueryResult, metadata: QueryMet
     rows: result.rows.map((row) => indexes.map((index) => row[index])),
     selectionKind: "rows",
     options,
+    spatialColumns: spatialColumns?.length ? spatialColumns : undefined,
+    spatialValues: spatialValues?.length ? spatialValues : undefined,
   };
 }

@@ -27,8 +27,8 @@
   "neo4j": "0.1.54",
   "nebula": "0.1.3",
   "oceanbase-oracle": "0.1.88",
-  "oracle": "0.1.78",
-  "oracle-oci": "0.1.11",
+  "oracle": "0.1.79",
+  "oracle-oci": "0.1.12",
   "snowflake": "0.1.92",
   "sqlite-worker": "0.1.7",
   "spanner": "0.1.44",
@@ -51,8 +51,8 @@
   "etcd": "0.1.48",
   "etcd2": "0.1.4",
   "zookeeper": "0.1.35",
-  "kafka": "0.1.23",
+  "kafka": "0.1.24",
   "rocketmq": "0.1.19",
-  "rabbitmq": "0.1.17",
-  "sqlserver-legacy": "0.1.66"
+  "rabbitmq": "0.1.18",
+  "sqlserver-legacy": "0.1.67"
 }

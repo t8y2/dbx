@@ -33,6 +33,10 @@ pub enum MqttAuth {
     Password { username: String, password: String },
     #[serde(rename = "certificate")]
     Certificate {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        username: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        password: String,
         #[serde(rename = "caCertPath")]
         ca_cert_path: Option<String>,
         #[serde(rename = "clientCertPath")]
@@ -49,6 +53,14 @@ pub enum MqttTlsVerificationMode {
 }
 
 impl MqttAuth {
+    pub fn credentials(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Password { username, password } => Some((username, password)),
+            Self::Certificate { username, password, .. } if !username.is_empty() => Some((username, password)),
+            _ => None,
+        }
+    }
+
     pub fn kind_str(&self) -> &'static str {
         match self {
             MqttAuth::None => "none",

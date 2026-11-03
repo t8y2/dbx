@@ -33,4 +33,18 @@ describe("table named apply must not suppress clause keywords (#13829)", () => {
     const kinds = labels("SELECT *\nFROM t1 OUTER APPLY ", "sqlserver");
     expect(kinds.some((label) => label.startsWith("keyword:"))).toBe(false);
   });
+
+  it.each([
+    ["SELECT *\nFROM t1 CROSS /* comment */ APPLY ", "block comment"],
+    ["SELECT *\nFROM t1 OUTER /* c */ APPLY ", "short block comment"],
+    ["SELECT *\nFROM t1 CROSS -- note\nAPPLY ", "line comment"],
+  ])("keeps APPLY table context when separated by %s", (sql) => {
+    const kinds = labels(sql, "sqlserver");
+    expect(kinds.some((label) => label.startsWith("keyword:"))).toBe(false);
+  });
+
+  it("does not let a masked comment fake a CROSS/OUTER prefix for a bare apply table", () => {
+    expect(labels("SELECT *\nFROM /* cross */ apply wher", "postgres")).toContain("keyword:WHERE");
+    expect(labels("SELECT *\nFROM /* outer */ apply wher", "sqlserver")).toContain("keyword:WHERE");
+  });
 });

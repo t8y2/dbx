@@ -1,4 +1,4 @@
-import type { DatabaseType } from "@/types/database";
+import type { DatabaseType, QueryResult } from "@/types/database";
 import type { DataGridCopyInsertMode, DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 
 export const DATA_GRID_COPY_EXTRACTOR_IDS = [
@@ -169,6 +169,8 @@ export interface DataGridExtractRequest {
   rows: unknown[][];
   selectionKind: DataGridSelectionKind;
   options: DataGridExtractorOptions;
+  spatialColumns?: QueryResult["spatial_columns"];
+  spatialValues?: QueryResult["spatial_values"];
 }
 
 export type DataGridExtractWarningCode = "omitted-columns" | "duplicate-json-column-names" | "php-date-not-iso";

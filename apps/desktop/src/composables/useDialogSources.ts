@@ -1,5 +1,6 @@
 import { ref, watch } from "vue";
-import type { SqlFilePreview } from "@/lib/backend/api";
+import type { DatabaseExportSelectedObject, SqlFilePreview } from "@/lib/backend/api";
+import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
@@ -10,6 +11,7 @@ import type { ConnectionConfig, DatabaseType, SidebarLayout } from "@/types/data
 
 const showTransferDialog = ref(false);
 const transferTaskId = ref<string | null>(null);
+const transferReexecuteTask = ref<ExportTask | null>(null);
 const showSchemaDiffDialog = ref(false);
 const showDataCompareDialog = ref(false);
 const showSqlFileDialog = ref(false);
@@ -110,6 +112,7 @@ const databaseExportPrefillDatabase = ref("");
 const databaseExportPrefillSchema = ref("");
 const databaseExportPrefillTable = ref("");
 const databaseExportPrefillTables = ref<string[]>([]);
+const databaseExportPrefillObjects = ref<DatabaseExportSelectedObject[]>([]);
 const databaseExportAllDatabases = ref(false);
 
 let watchersRegistered = false;
@@ -137,6 +140,16 @@ export function openDataCompareSession(sessionId: string): void {
 
 export function openDataTransferTask(taskId: string): void {
   transferTaskId.value = taskId;
+  transferReexecuteTask.value = null;
+  showTransferDialog.value = true;
+}
+
+export function reexecuteDataTransferTask(taskOrId: ExportTask | string): void {
+  const tracker = useExportTracker();
+  const task = typeof taskOrId === "string" ? tracker.tasks.value.find((t) => t.exportId === taskOrId) : taskOrId;
+  if (!task || !task.dataTransferRequest) return;
+  transferTaskId.value = null;
+  transferReexecuteTask.value = task;
   showTransferDialog.value = true;
 }
 
@@ -180,6 +193,7 @@ export function useDialogSources() {
     watch(showTransferDialog, (open) => {
       if (!open) {
         transferTaskId.value = null;
+        transferReexecuteTask.value = null;
         clearTransferPrefill();
       }
     });
@@ -404,6 +418,7 @@ export function useDialogSources() {
           databaseExportPrefillSchema.value = v.schema ?? "";
           databaseExportPrefillTable.value = v.tableName ?? "";
           databaseExportPrefillTables.value = v.tableNames ?? [];
+          databaseExportPrefillObjects.value = v.objects ?? [];
           databaseExportAllDatabases.value = v.allDatabases ?? false;
           showDatabaseExportDialog.value = true;
           connectionStore.databaseExportSource = null;
@@ -609,6 +624,7 @@ export function useDialogSources() {
   return {
     showTransferDialog,
     transferTaskId,
+    transferReexecuteTask,
     showSchemaDiffDialog,
     showDataCompareDialog,
     showSqlFileDialog,
@@ -705,6 +721,7 @@ export function useDialogSources() {
     databaseExportPrefillSchema,
     databaseExportPrefillTable,
     databaseExportPrefillTables,
+    databaseExportPrefillObjects,
     databaseExportAllDatabases,
     onExportClick,
     onExportConfirm,

@@ -2,6 +2,8 @@ import { styleTags, tags } from "@lezer/highlight";
 import type { SQLDialect } from "@codemirror/lang-sql";
 import type { DatabaseType } from "@/types/database";
 import { driverProfileSqlBuiltinTerms } from "@/lib/database/driverProfileExtensions";
+import { withSqlParameterHighlighting } from "./codemirrorSqlParameters";
+import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
 
 // In SQL, quoted identifiers (e.g. `col`, "col", [col]) represent column, table,
 // and schema names — not string literals (#12122). CodeMirror's SQL grammar tags
@@ -372,7 +374,7 @@ export function codeMirrorBaseDialect(langSql: CodeMirrorSqlLanguageModule, dial
   return dialectName === "postgres" ? langSql.PostgreSQL : dialectName === "sqlserver" ? langSql.MSSQL : langSql.MySQL;
 }
 
-export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName = "mysql", databaseType?: DatabaseType, driverProfile?: string): SQLDialect {
+export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModule, dialectName: CodeMirrorSqlDialectName = "mysql", databaseType?: DatabaseType, driverProfile?: string, parameterOptions?: SqlParameterOptions): SQLDialect {
   // SOQL is its own language, not a SQL superset: define it from a precise keyword
   // set with no identifier quoting, single-quoted strings, and backslash escapes.
   if (databaseType === "salesforce" || dialectName === "soql") {
@@ -403,7 +405,7 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
   const commonKeywords = isClickHouse ? DBX_COMMON_SQL_KEYWORDS.toLowerCase() : DBX_COMMON_SQL_KEYWORDS;
   const baseBuiltin = isSqlServer ? sqlServerBuiltinSyntaxTerms(baseDialect.spec.builtin || "") : baseDialect.spec.builtin || "";
 
-  return langSql.SQLDialect.define({
+  const dialect = langSql.SQLDialect.define({
     ...baseDialect.spec,
     keywords: [baseKeywords, commonKeywords, isClickHouse ? CLICKHOUSE_KEYWORDS : "", isPostgres ? POSTGRES_PLPGSQL_KEYWORDS : "", isSqlServer ? SQLSERVER_KEYWORDS : ""].filter(Boolean).join(" "),
     types: [baseTypes, isClickHouse ? CLICKHOUSE_TYPES : "", isPostgres ? POSTGRES_PLPGSQL_TYPES : ""].filter(Boolean).join(" ") || undefined,
@@ -430,4 +432,5 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
   }).configureLanguage({
     props: SQL_DIALECT_LANGUAGE_PROPS,
   });
+  return withSqlParameterHighlighting(dialect, parameterOptions);
 }

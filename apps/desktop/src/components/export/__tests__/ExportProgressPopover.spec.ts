@@ -29,7 +29,7 @@ vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 
 vi.mock("@/lib/backend/api", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/lib/backend/api")>();
-  return { ...original, revealPathInFileManager: vi.fn() };
+  return { ...original, revealPathInFileManager: vi.fn(), startTransfer: vi.fn() };
 });
 
 import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue";
@@ -878,5 +878,57 @@ describe("ExportProgressPopover file name and reveal action", () => {
     await vi.waitFor(() => {
       expect(useToast().message.value).toContain("Failed to open folder");
     });
+  });
+
+  it("does not offer direct re-execution bypass from the task list and routes via task details (#13621)", async () => {
+    vi.mocked(api.startTransfer).mockResolvedValue(undefined);
+    const tracker = useExportTracker();
+    const onOpen = vi.fn();
+    const task = tracker.startDataTransferTask(
+      {
+        transferId: "popover-transfer",
+        sourceConnectionId: "source",
+        sourceDatabase: "sdb",
+        targetConnectionId: "target",
+        targetDatabase: "tdb",
+        tables: ["customers"],
+        createTable: true,
+        content: "structureAndData",
+        objects: [],
+        mode: "append",
+        targetTableNameCase: "preserve",
+        quoteTargetColumnNames: true,
+        batchSize: 1000,
+        dropTargetBeforeCreate: false,
+        dropTargetConfirmed: false,
+      },
+      "sdb → tdb",
+      { openTask: onOpen },
+    );
+
+    // Complete the task
+    tracker.updateDataTransferTask(task.exportId, {
+      transferId: task.exportId,
+      table: "customers",
+      tableIndex: 1,
+      totalTables: 1,
+      rowsTransferred: 50,
+      totalRows: 50,
+      status: "done",
+      terminal: true,
+      error: null,
+    });
+
+    await mountPopover();
+
+    const reexecuteTitle = i18n.global.t("transfer.reexecute");
+    const reexecuteButton = document.body.querySelector<HTMLButtonElement>(`button[title="${reexecuteTitle}"]`);
+    expect(reexecuteButton).toBeNull();
+
+    const openButton = document.body.querySelector<HTMLButtonElement>('button[title="Open task"]');
+    expect(openButton).not.toBeNull();
+    openButton!.click();
+    expect(onOpen).toHaveBeenCalledWith(task.exportId);
+    expect(api.startTransfer).toHaveBeenCalledTimes(1);
   });
 });

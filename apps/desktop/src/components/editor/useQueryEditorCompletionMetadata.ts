@@ -2,7 +2,7 @@ import type { EditorState, Text } from "@codemirror/state";
 import type { CompletionMetadataScope } from "./queryEditorTypes";
 import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
 import { COMPLETION_METADATA_CONCURRENCY } from "@/stores/connectionStore";
-import { getSqlCompletionContext } from "@/lib/sql/sqlCompletion";
+import { getSqlCompletionContext, oceanBaseCompletionCacheKey } from "@/lib/sql/sqlCompletion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import type { SqlSemanticModel } from "@/lib/sql/semantic/types";
 import { analyzeSqlCompletion, type SqlCompletionAnalysisResult } from "@/lib/sql/sqlCompletionAnalysis";
@@ -34,6 +34,7 @@ interface QueryEditorCompletionMetadataOptions {
   view: ShallowRef<EditorView | null>;
   connectionStore: ReturnType<typeof useConnectionStore>;
   sqlBehaviorDialect: () => QueryEditorProps["dialect"];
+  syntaxDialect?: () => QueryEditorProps["syntaxDialect"];
   remoteLatencyBudgetMs: number;
   maxCompletionTables: number;
   onDemandMinPrefix: number;
@@ -49,6 +50,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
 
   // Completion cache
   let cachedTables: SqlCompletionTable[] = [];
+  let completionCacheGeneration = 0;
 
   const cachedCompletionObjectsByScope = new Map<string, SqlCompletionObject[]>();
 
@@ -121,6 +123,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     const dialect = sqlBehaviorDialect();
     const doc = editorState?.doc;
     const driverProfile = props.connectionId ? connectionStore.getConfig(props.connectionId)?.driver_profile : undefined;
+    const syntaxDialect = options.syntaxDialect?.() ?? props.syntaxDialect;
     if (
       doc &&
       editorCompletionAnalysisCache?.doc === doc &&
@@ -129,7 +132,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
       editorCompletionAnalysisCache.databaseType === props.databaseType &&
       editorCompletionAnalysisCache.dialect === dialect &&
       editorCompletionAnalysisCache.driverProfile === driverProfile &&
-      editorCompletionAnalysisCache.syntaxDialect === props.syntaxDialect
+      editorCompletionAnalysisCache.syntaxDialect === syntaxDialect
     ) {
       return editorCompletionAnalysisCache.result;
     }
@@ -140,7 +143,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
       databaseType: props.databaseType,
       dialect,
       semanticCompletionEnabled: SEMANTIC_SQL_COMPLETION_ENABLED,
-      syntaxDialect: props.syntaxDialect,
+      syntaxDialect,
       driverProfile,
     };
     const result = editorState && shouldUseQueryEditorLargeDocumentModeForSize(editorState.doc.length, editorState.doc.lines) ? completionAnalysisWorker.analyze(request, editorState) : Promise.resolve(analyzeSqlCompletion(request, editorState));
@@ -152,7 +155,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
         databaseType: props.databaseType,
         dialect,
         driverProfile,
-        syntaxDialect: props.syntaxDialect,
+        syntaxDialect,
         result,
       };
     }
@@ -216,6 +219,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
       version: props.completionContextVersion,
       tableQuoted: reference?.nameQuoted,
       schemaQuoted: reference?.schemaQuoted,
+      ...(props.databaseType === "oceanbase-oracle" ? { currentSchema: props.schema } : {}),
     };
   }
 
@@ -245,6 +249,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
   }
 
   function completionCacheKey(table: { name: string; catalog?: string | null; database?: string | null; schema?: string | null; nameQuoted?: boolean; schemaQuoted?: boolean }, scope?: CompletionMetadataScope) {
+    if (props.databaseType === "oceanbase-oracle") return oceanBaseCompletionCacheKey(table, scope?.schema ?? props.schema);
     const schema = table.schema ?? scope?.schema ?? props.schema;
     const scopedDatabase = scope && scope.database !== props.database ? scope.database : undefined;
     const database = supportsDatabaseSchemaQualifierCompletion() ? (table.database ?? scopedDatabase) : undefined;
@@ -361,7 +366,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     // unqualified table name. The query editor commonly has no schema selected
     // when the user is working from a database-level tab, so use the same
     // default as the table/DDL metadata paths instead of returning no columns.
-    const selectedSchema = table.schema ?? scope?.schema ?? props.schema;
+    const selectedSchema = props.databaseType === "oceanbase-oracle" ? table.schema : (table.schema ?? scope?.schema ?? props.schema);
     const effectiveSchema = selectedSchema ?? (props.databaseType === "sqlserver" ? metadataSchemaForConnection(connectionStore.getConfig(props.connectionId ?? ""), currentDatabase, undefined) : undefined);
     if (supportsDatabaseSchemaQualifierCompletion() && table.database) {
       return { database: table.database, schema: effectiveSchema, catalog: table.catalog ?? props.catalog };
@@ -413,14 +418,14 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     return remoteMatches.find((item) => completionTablesMatch(item, table)) ?? null;
   }
 
-  async function ensureColumnsForTable(table: { name: string; database?: string | null; schema?: string | null }, reference?: Pick<SqlCompletionReferencedTable, "nameQuoted" | "schemaQuoted">, scope?: CompletionMetadataScope): Promise<boolean> {
+  async function ensureColumnsForTable(table: { name: string; database?: string | null; schema?: string | null; nameQuoted?: boolean; schemaQuoted?: boolean }, reference: Pick<SqlCompletionReferencedTable, "nameQuoted" | "schemaQuoted"> = table, scope?: CompletionMetadataScope): Promise<boolean> {
     if (isVirtualCompletionTableReference(table)) return false;
-    const cacheKey = completionCacheKey(table, scope);
+    const cacheKey = completionCacheKey({ ...table, ...reference }, scope);
     if (cachedColumnsByTable.has(cacheKey)) return true;
     if (!props.connectionId || props.database == null) return false;
     const target = completionMetadataTarget(table, scope);
     if (!target) return false;
-    const localColumns = connectionStore.lookupLocalCompletionColumns(props.connectionId, target.database, table.name, target.schema, target.catalog, completionColumnRequestContext(reference));
+    const localColumns = props.databaseType === "oceanbase-oracle" && !table.schema ? [] : connectionStore.lookupLocalCompletionColumns(props.connectionId, target.database, table.name, target.schema, target.catalog, completionColumnRequestContext(reference));
     if (localColumns.length > 0) {
       cachedColumnsByTable.set(cacheKey, localColumns);
       loadedColumnsByTable.add(cacheKey.toLowerCase());
@@ -433,7 +438,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     // local/remote table cache and retry with its schema before reporting that
     // star expansion is unavailable. This is especially important for aliased
     // sources because the alias itself must never be sent as the table name.
-    if (columns.length === 0 && !table.schema && !target.schema && !supportsDatabaseQualifierCompletion()) {
+    if (columns.length === 0 && props.databaseType !== "oceanbase-oracle" && !table.schema && !target.schema && !supportsDatabaseQualifierCompletion()) {
       const schemaCandidates: string[] = [];
       const seenSchemas = new Set<string>();
       const addSchema = (schema?: string | null) => {
@@ -543,9 +548,35 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     return Promise.race([remote, new Promise<T>((resolve) => setTimeout(() => resolve(local), COMPLETION_REMOTE_LATENCY_BUDGET_MS))]);
   }
 
+  /**
+   * Warm the active database's table index after a tab/database switch so the
+   * first keystroke can use local metadata instead of waiting for a cold remote
+   * query. Best effort: a failed prefetch must never affect editing.
+   */
+  async function prefetchCompletionTables(): Promise<void> {
+    if (!props.connectionId || props.database == null || usesLocalOnlyCompletionMetadata()) return;
+    const generation = completionCacheGeneration;
+    try {
+      const tables = await connectionStore.listCompletionTables(props.connectionId, props.database, "", Math.max(MAX_COMPLETION_TABLES, 500), undefined, false, props.schema, props.catalog, { activateConnection: false });
+      if (generation !== completionCacheGeneration) return;
+      const scopedTables = tables.map((table) => ({
+        ...table,
+        catalog: table.catalog ?? props.catalog,
+        database: table.database ?? props.database,
+      }));
+      cachedTables = mergeCompletionTables(cachedTables, scopedTables);
+    } catch {
+      // Completion will retry on demand; prefetch is only an optimization.
+    }
+  }
+
   function listCompletionTablesWithLatencyBudget(connectionId: string, database: string, filter: string, limit: number, schema?: string, globalSearch = false, catalog = props.catalog, currentSchema = props.schema): Promise<SqlCompletionTable[]> {
+    const generation = completionCacheGeneration;
     const local = connectionStore.lookupLocalCompletionTables(connectionId, database, filter, limit, globalSearch ? undefined : schema, catalog).map((table) => ({ ...table, catalog: table.catalog ?? catalog, database: table.database ?? database }));
     const remote = connectionStore.listCompletionTables(connectionId, database, filter, limit, schema, globalSearch, currentSchema, catalog).then((tables) => {
+      // A database/schema switch clears the cache while this request is still in
+      // flight; never merge the old result into the new scope.
+      if (generation !== completionCacheGeneration) return [];
       const scopedTables = tables.map((table) => ({ ...table, catalog: table.catalog ?? catalog, database: table.database ?? database }));
       cachedTables = mergeCompletionTables(cachedTables, scopedTables);
       return scopedTables;
@@ -571,7 +602,8 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
   }
 
   function completionObjectScopeKey(scope: CompletionMetadataScope): string {
-    return `${scope.database}:${scope.schema ?? ""}`.toLowerCase();
+    const key = JSON.stringify([scope.database, scope.schema]);
+    return props.databaseType === "oceanbase-oracle" ? key : key.toLowerCase();
   }
 
   function completionObjectsForScope(scope: CompletionMetadataScope): SqlCompletionObject[] {
@@ -579,7 +611,8 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
   }
 
   function completionObjectIdentityKey(object: SqlCompletionObject): string {
-    return `${object.type}:${object.schema ?? ""}:${object.name}:${object.parentName ?? ""}:${object.signature?.trim() ?? ""}`.toLowerCase();
+    const key = JSON.stringify([object.type, object.schema, object.name, object.parentName, object.routineId ?? object.signature?.trim()]);
+    return props.databaseType === "oceanbase-oracle" ? key : key.toLowerCase();
   }
 
   function completionObjectsDiffer(existing: SqlCompletionObject[], incoming: SqlCompletionObject[]): boolean {
@@ -603,6 +636,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
   }
 
   function refreshCompletionCache() {
+    completionCacheGeneration++;
     cancelEditorSqlCompletionAnalysis();
     cachedTables = [];
     cachedCompletionObjectsByScope.clear();
@@ -648,6 +682,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     isMissingTableMetadataError,
     listCompletionColumnsForEditor,
     listCompletionTablesWithLatencyBudget,
+    prefetchCompletionTables,
     allowsOnDemandQualifiedTableCompletion,
     completionPrefixCacheKey,
     cachedPrefixColumnsByTable,

@@ -1,4 +1,4 @@
-// @vitest-environment happy-dom
+﻿// @vitest-environment happy-dom
 
 import { createApp, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -34,7 +34,7 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("vue-i18n", async (original) => ({ ...(await original<typeof import("vue-i18n")>()), useI18n: () => ({ t: (key: string) => key }) }));
 
 vi.mock("@lucide/vue", async () => {
   const { defineComponent, h } = await import("vue");
@@ -214,6 +214,8 @@ vi.mock("@/components/ui/select", async () => {
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: mocks.ensureConnected,
+    connectionStateRevision: () => 0,
+    isCurrentConnectionStateRevision: () => true,
     getConfig: (connectionId: string) => (connectionId === mocks.connection.id ? mocks.connection : undefined),
   }),
 }));
@@ -811,6 +813,28 @@ describe("TableStructureEditor primary key editing", () => {
 });
 
 describe("TableStructureEditor data type options", () => {
+  it("supplies the verified OceanBase built-in list to the column picker", async () => {
+    const root = await mountEditor("oceanbase-oracle", false, { database: "ob-built-in-types" });
+    const picker = root.querySelector<HTMLElement>('[data-searchable-select="true"]');
+    if (!picker) throw new Error("Missing data type picker");
+    const options = JSON.parse(picker.dataset.options ?? "[]") as string[];
+    expect(options).toHaveLength(23);
+    expect(options).toEqual(expect.arrayContaining(["number", "float", "json", "xmltype", "sdo_geometry"]));
+    for (const rejected of ["nclob", "long", "long raw", "bfile", "boolean", "vector"]) expect(options).not.toContain(rejected);
+    expect(picker.dataset.allowCustom).toBe("true");
+  });
+
+  it("keeps other dynamic OceanBase types while excluding rejected recommendations", async () => {
+    const root = await mountEditor("oceanbase-oracle", false, { database: "ob-dynamic-types", dynamicTypes: ["NUMBER", "VECTOR", "CUSTOM_OB_TYPE"] });
+    const picker = root.querySelector<HTMLElement>('[data-searchable-select="true"]');
+    if (!picker) throw new Error("Missing data type picker");
+    await vi.waitFor(() => expect(JSON.parse(picker.dataset.options ?? "[]").slice(0, 2)).toEqual(["NUMBER", "CUSTOM_OB_TYPE"]));
+    const options = JSON.parse(picker.dataset.options ?? "[]") as string[];
+    expect(options).not.toContain("VECTOR");
+    expect(options.filter((option) => option.toLowerCase() === "number")).toEqual(["NUMBER"]);
+    expect(options).toContain("xmltype");
+  });
+
   it("keeps dynamic Dameng types first and deduplicates fallback types case-insensitively", async () => {
     const root = await mountEditor("dameng", false, {
       database: "dynamic-types-5275",

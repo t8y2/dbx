@@ -22,9 +22,11 @@ const props = withDefaults(
     triggerClass?: HTMLAttributes["class"];
     triggerIconClass?: HTMLAttributes["class"];
     listClass?: HTMLAttributes["class"];
+    hideTitle?: boolean;
   }>(),
   {
     disabled: false,
+    hideTitle: false,
     triggerIconClass: "size-4 text-muted-foreground",
   },
 );
@@ -44,6 +46,7 @@ const searchInput = ref<InstanceType<typeof Input>>();
 const listContainer = ref<HTMLDivElement>();
 const collapsedGroupIds = ref<Set<string>>(new Set());
 const highlightIndex = ref(-1);
+let focusRestoreElement: HTMLElement | null = null;
 
 const connectionById = computed(() => new Map(props.connections.map((connection) => [connection.id, connection])));
 
@@ -87,6 +90,15 @@ watch(open, async (value) => {
   if (!value) {
     searchText.value = "";
     highlightIndex.value = -1;
+    const restoreTarget = focusRestoreElement;
+    focusRestoreElement = null;
+    if (restoreTarget) {
+      // Reka's modal popover refocuses the trigger synchronously on close, so
+      // the restore must land on the next tick to win for shortcut-opened
+      // dropdowns.
+      await nextTick();
+      if (restoreTarget.isConnected) restoreTarget.focus();
+    }
     return;
   }
   await nextTick();
@@ -130,12 +142,21 @@ function handleKeydown(event: KeyboardEvent) {
     open.value = false;
   }
 }
+
+defineExpose({
+  openDropdown: () => {
+    if (props.disabled) return false;
+    focusRestoreElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    open.value = true;
+    return true;
+  },
+});
 </script>
 
 <template>
   <Popover v-model:open="open">
     <PopoverTrigger as-child>
-      <Button type="button" variant="ghost" :disabled="disabled" :title="selectedLabel" :class="cn('h-6 w-auto max-w-56 min-w-0 justify-between gap-1 border-0 bg-transparent px-1 text-xs font-normal shadow-none hover:bg-muted/50 focus-visible:ring-0', triggerClass)">
+      <Button type="button" variant="ghost" :disabled="disabled" :title="hideTitle ? undefined : selectedLabel" :class="cn('h-6 w-auto max-w-56 min-w-0 justify-between gap-1 border-0 bg-transparent px-1 text-xs font-normal shadow-none hover:bg-muted/50 focus-visible:ring-0', triggerClass)">
         <slot name="trigger-label" :value="modelValue" :label="selectedLabel">
           <span class="truncate">{{ selectedLabel }}</span>
         </slot>

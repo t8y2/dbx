@@ -1,7 +1,8 @@
 export interface AgentOfflineExportFlowOptions<TResult> {
+  includeJres?: boolean;
   driverKeys: string[];
   chooseDestination: () => Promise<string | null>;
-  exportPackage: (destination: string, driverKeys: string[]) => Promise<TResult>;
+  exportPackage: (destination: string, driverKeys: string[], includeJres?: boolean) => Promise<TResult>;
 }
 
 export interface AgentOfflineExportFlowResult<TResult> {
@@ -21,7 +22,7 @@ export type AgentOfflineExportActionResult = "empty" | "cancelled" | "exported" 
  * Keep destination selection and package creation in one testable workflow.
  * The caller owns the busy state so it can cover the native save dialog too.
  */
-export async function runAgentOfflineExportFlow<TResult>({ driverKeys, chooseDestination, exportPackage }: AgentOfflineExportFlowOptions<TResult>): Promise<AgentOfflineExportFlowResult<TResult> | null> {
+export async function runAgentOfflineExportFlow<TResult>({ driverKeys, includeJres = true, chooseDestination, exportPackage }: AgentOfflineExportFlowOptions<TResult>): Promise<AgentOfflineExportFlowResult<TResult> | null> {
   if (driverKeys.length === 0) return null;
 
   const destination = await chooseDestination();
@@ -29,7 +30,7 @@ export async function runAgentOfflineExportFlow<TResult>({ driverKeys, chooseDes
 
   return {
     destination,
-    result: await exportPackage(destination, [...driverKeys]),
+    result: await exportPackage(destination, [...driverKeys], includeJres),
   };
 }
 
@@ -38,12 +39,12 @@ export async function runAgentOfflineExportFlow<TResult>({ driverKeys, chooseDes
  * This keeps busy-state release and success/error side effects testable as one
  * contract instead of splitting them between the component and export helper.
  */
-export async function runAgentOfflineExportAction<TResult>({ driverKeys, chooseDestination, exportPackage, setBusy, onSuccess, onError }: AgentOfflineExportActionOptions<TResult>): Promise<AgentOfflineExportActionResult> {
+export async function runAgentOfflineExportAction<TResult>({ driverKeys, includeJres = true, chooseDestination, exportPackage, setBusy, onSuccess, onError }: AgentOfflineExportActionOptions<TResult>): Promise<AgentOfflineExportActionResult> {
   if (driverKeys.length === 0) return "empty";
 
   setBusy(true);
   try {
-    const exported = await runAgentOfflineExportFlow({ driverKeys, chooseDestination, exportPackage });
+    const exported = await runAgentOfflineExportFlow({ driverKeys, includeJres, chooseDestination, exportPackage });
     if (!exported) return "cancelled";
 
     await onSuccess(exported);

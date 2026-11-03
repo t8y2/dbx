@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { createApp, nextTick, ref } from "vue";
+import { createApp, defineComponent, h, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,7 +8,13 @@ vi.mock("@/components/ui/CustomContextMenu.vue", () => ({
   default: {
     name: "CustomContextMenuStub",
     props: ["items"],
-    template: `<div class="ctx-menu-stub" :data-menu-items="JSON.stringify(items.map((item) => ({ label: item.label, disabled: item.disabled === true, visible: item.visible })))"><slot /></div>`,
+    mounted() {
+      (this.$el as any).__ctxMenuItems = this.items;
+    },
+    updated() {
+      (this.$el as any).__ctxMenuItems = this.items;
+    },
+    template: `<div class="ctx-menu-stub" :data-menu-items="JSON.stringify(items.flatMap((item) => item.children ?? [item]).map((item) => ({ label: item.label, disabled: item.disabled === true, visible: item.visible })))"><slot /></div>`,
   },
 }));
 
@@ -67,14 +73,18 @@ function mountBar(
   onActivateTab?: (tabId: string) => void,
   specialPageTabs?: { settingsOpen: boolean; settingsActive: boolean; driverStoreOpen: boolean; driverStoreActive: boolean; pluginCenterOpen: boolean; pluginCenterActive: boolean; driverUpdateCount: number },
   toolbarActions?: EditorToolbarActions,
+  onSaveAllTabs?: () => void,
+  extraProps: Record<string, unknown> = {},
 ): Mounted {
   const store = useQueryStore();
   const host = createHost();
   const app = createApp(EditorGroupTabBar, {
     groupId,
+    ...extraProps,
     tabs: tabs.map((id) => store.tabs.find((candidate) => candidate.id === id)!),
     activeTabId,
     "onActivate-tab": onActivateTab,
+    "onSave-all-tabs": onSaveAllTabs,
     specialPageTabs,
   });
   // Reuse the active pinia so the component's internal store is the same
@@ -97,6 +107,9 @@ function mountBar(
             tooltipDatabase: "Database:",
           },
           contextMenu: {
+            splitTab: "Split",
+            batchCloseTabs: "Close multiple tabs",
+            copyTabName: "Copy tab name",
             splitRight: "Split right",
             splitDown: "Split down",
             changeOrientation: "Change orientation",
@@ -105,16 +118,19 @@ function mountBar(
             duplicateTab: "Duplicate",
             copyName: "Copy name",
             closeTab: "Close",
+            reopenClosedTab: "Reopen closed tab",
             closeOtherTabs: "Close other tabs",
             closeLeftTabs: "Close left tabs",
             closeRightTabs: "Close right tabs",
             closeAllTabs: "Close all tabs",
+            saveAllTabs: "Save all tabs",
             pinTab: "Pin",
             unpinTab: "Unpin",
             fullTabTitle: "Full title",
             compactTabTitle: "Compact title",
           },
-          sidebar: { locateActiveTab: "Locate" },
+          sidebar: { locateActiveTab: "Locate", locateSqlFile: "Locate in SQL file list" },
+          sqlFileTree: { locateActiveFile: "Locate current file" },
         },
       },
     }),
@@ -536,6 +552,24 @@ describe("EditorGroupTabBar behavior", () => {
     host.remove();
   });
 
+  it("groups tab actions without dropping split and bulk close commands", async () => {
+    const store = useQueryStore();
+    const id = store.createTab("pg-1", "app", "Query 1", "query");
+    const { app, host } = mountBar(store.groups[0].id, [id], id, pinia);
+    await settle();
+    const items = (tabPill(host, id).closest(".ctx-menu-stub") as any).__ctxMenuItems.filter((item: any) => item.visible !== false);
+    expect(items.map((item: any) => item.label)).toEqual(["Rename", "Duplicate", "Copy tab name", "Split", "", "Pin", "Save all tabs", "Reopen closed tab", "Close", "Close multiple tabs", "", "Full title", "Locate"]);
+    expect(items.find((item: any) => item.label === "Split").children.map((item: any) => item.label)).toEqual(["Split right", "Split down"]);
+    expect(
+      items
+        .find((item: any) => item.label === "Close multiple tabs")
+        .children.filter((item: any) => item.visible !== false)
+        .map((item: any) => item.label),
+    ).toEqual(["Close other tabs", "Close left tabs", "Close right tabs", "Close all tabs"]);
+    app.unmount();
+    host.remove();
+  });
+
   it("disables the split actions while only one tab exists, enabling them once a second tab joins", async () => {
     const store = useQueryStore();
     const onlyId = store.createTab("pg-1", "app", "Query 1", "query");
@@ -651,6 +685,48 @@ describe("EditorGroupTabBar behavior", () => {
     host.remove();
   });
 
+  it("offers save all tabs in tab context menu, disabled when clean and enabled when dirty", async () => {
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const mainGroup = store.groups[0];
+    const actions = createNoopEditorToolbarActions();
+    actions.saveAllTabs = vi.fn();
+    const onSaveAllTabs = vi.fn(() => actions.saveAllTabs());
+    const { app, host } = mountBar(mainGroup.id, [firstId], firstId, pinia, undefined, undefined, actions, onSaveAllTabs);
+    await settle();
+
+    const menuFor = (tabId: string) => {
+      const pill = tabPill(host, tabId);
+      const stub = pill.closest<HTMLElement>(".ctx-menu-stub");
+      return JSON.parse(stub!.dataset.menuItems ?? "[]");
+    };
+
+    const rawMenuFor = (tabId: string) => {
+      const pill = tabPill(host, tabId);
+      const stub = pill.closest<HTMLElement>(".ctx-menu-stub") as any;
+      return (stub?.__ctxMenuItems ?? []) as Array<{ label: string; action?: () => void; disabled?: boolean }>;
+    };
+
+    // Clean tab -> save all tabs is disabled
+    expect(menuFor(firstId).find((item: { label: string }) => item.label === "Save all tabs")).toMatchObject({ disabled: true });
+
+    // Mark tab dirty -> save all tabs is enabled
+    store.tabs[0].sql = "SELECT 1;";
+    await settle();
+    expect(menuFor(firstId).find((item: { label: string }) => item.label === "Save all tabs")).toMatchObject({ disabled: false });
+
+    // Clicking save all tabs menu item emits save-all-tabs once and forwards to toolbar.saveAllTabs once
+    const saveAllItem = rawMenuFor(firstId).find((item) => item.label === "Save all tabs");
+    expect(saveAllItem).toBeDefined();
+    saveAllItem?.action?.();
+
+    expect(onSaveAllTabs).toHaveBeenCalledTimes(1);
+    expect(actions.saveAllTabs).toHaveBeenCalledTimes(1);
+
+    app.unmount();
+    host.remove();
+  });
+
   it("flushes pending grid edits via before-tab-switch before activating another tab", async () => {
     const store = useQueryStore();
     const firstId = store.createTab("pg-1", "app", "Query 1", "query");
@@ -752,5 +828,115 @@ describe("EditorGroupTabBar behavior", () => {
 
     app.unmount();
     host.remove();
+  });
+
+  it("offers a close button on every tab in the collapsed vertical rail", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabPlacement = "left";
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+    const { app, host } = mountBar(store.groups[0].id, [firstId, secondId], firstId, pinia, undefined, undefined, undefined, undefined, { tabBarCollapsed: true });
+    await settle();
+
+    // The rail is icon-only, so both a background tab and the active tab must
+    // expose a close affordance without the user switching to it first (#12942).
+    for (const tabId of [firstId, secondId]) {
+      const closeButtons = tabPill(host, tabId).querySelectorAll<HTMLButtonElement>("button[aria-label='Close']");
+      expect(closeButtons, tabId).toHaveLength(1);
+    }
+
+    tabPill(host, secondId).querySelector<HTMLButtonElement>("button[aria-label='Close']")!.click();
+    await settle();
+    expect(store.tabs.some((tab) => tab.id === secondId)).toBe(false);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("shows locate current file menu item for saved sql tab and emits locate-sql-library-file", async () => {
+    const store = useQueryStore();
+    const queryTabId = store.createTab("pg-1", "app", "Query 1", "query");
+    const savedSqlTabId = store.createTab("pg-1", "app", "Saved Query", "query");
+    store.tabs.find((tab) => tab.id === savedSqlTabId)!.savedSqlId = "saved-sql-1";
+    const mainGroup = store.groups[0];
+
+    const onLocateSqlLibraryFile = vi.fn();
+    const { app, host } = mountBar(mainGroup.id, [queryTabId, savedSqlTabId], queryTabId, pinia, undefined, undefined, undefined, undefined, { "onLocate-sql-library-file": onLocateSqlLibraryFile });
+    await settle();
+
+    const rawMenuFor = (tabId: string) => {
+      const pill = tabPill(host, tabId);
+      const stub = pill.closest<HTMLElement>(".ctx-menu-stub") as any;
+      return (stub?.__ctxMenuItems ?? []) as Array<{ label: string; action?: () => void; visible?: boolean }>;
+    };
+
+    const regularLocateItem = rawMenuFor(queryTabId).find((item) => item.label === "Locate current file");
+    expect(regularLocateItem?.visible).toBe(false);
+
+    const savedSqlLocateItem = rawMenuFor(savedSqlTabId).find((item) => item.label === "Locate current file");
+    expect(savedSqlLocateItem?.visible).toBe(true);
+
+    savedSqlLocateItem?.action?.();
+    expect(onLocateSqlLibraryFile).toHaveBeenCalledTimes(1);
+    expect(onLocateSqlLibraryFile).toHaveBeenCalledWith(expect.objectContaining({ id: savedSqlTabId, savedSqlId: "saved-sql-1" }));
+
+    app.unmount();
+    host.remove();
+  });
+});
+
+describe("active tab reveal scrolling (issue #12010)", () => {
+  // The Settings / Driver Manager / Plugin Center tabs live in the same
+  // scrollable row as regular query tabs. Centering every newly activated tab
+  // re-centered tabs that were already fully visible, which shoved those
+  // trailing special tabs out of the viewport as soon as the user switched back
+  // to the tab before Settings.
+  it("reveals an activated tab without recentering it", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "none";
+    const tabIds = Array.from({ length: 8 }, (_, index) => store.createTab("pg-1", "app", `Query ${index}`, "query"));
+    const mainGroup = store.groups[0]!;
+    const activeTabId = ref(tabIds[0]!);
+    const host = createHost();
+
+    const scrollIntoView = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
+    try {
+      const Root = defineComponent({
+        setup() {
+          return () =>
+            h(EditorGroupTabBar, {
+              groupId: mainGroup.id,
+              tabs: store.tabs.slice(),
+              activeTabId: activeTabId.value,
+            });
+        },
+      });
+      const app = createApp(Root);
+      app.use(pinia);
+      app.use(
+        createI18n({
+          legacy: false,
+          locale: "en",
+          messages: { en: { common: { close: "Close" }, contextMenu: { closeTab: "Close" }, sidebar: { locateActiveTab: "Locate" } } },
+        }),
+      );
+      app.mount(host);
+      await settle();
+
+      scrollIntoView.mockClear();
+      activeTabId.value = tabIds[tabIds.length - 2]!;
+      await settle();
+
+      expect(scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ inline: "nearest" }));
+
+      app.unmount();
+    } finally {
+      scrollIntoView.mockRestore();
+      host.remove();
+    }
   });
 });

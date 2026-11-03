@@ -29,10 +29,13 @@ test("file timing reports sort total work and keep timing phases", () => {
     }),
   ]);
 
-  assert.deepEqual(rows.map(({ file, totalMs, testsMs, collectMs, setupMs }) => ({ file, totalMs, testsMs, collectMs, setupMs })), [
-    { file: "slow.spec.ts", totalMs: 200, testsMs: 60, collectMs: 50, setupMs: 90 },
-    { file: "fast.spec.ts", totalMs: 100, testsMs: 100, collectMs: 0, setupMs: 0 },
-  ]);
+  assert.deepEqual(
+    rows.map(({ file, totalMs, testsMs, collectMs, setupMs }) => ({ file, totalMs, testsMs, collectMs, setupMs })),
+    [
+      { file: "slow.spec.ts", totalMs: 200, testsMs: 60, collectMs: 50, setupMs: 90 },
+      { file: "fast.spec.ts", totalMs: 100, testsMs: 100, collectMs: 0, setupMs: 0 },
+    ],
+  );
   assert.match(consoleReport(rows, 1), /0\.20s  slow\.spec\.ts/);
   assert.doesNotMatch(consoleReport(rows, 1), /fast\.spec\.ts/);
   assert.match(markdownReport(rows, "1\/2"), /Vitest file timings \(1\/2\)/);

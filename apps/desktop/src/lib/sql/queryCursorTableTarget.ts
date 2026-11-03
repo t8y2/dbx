@@ -100,9 +100,18 @@ export function resolveQueryContextCandidateDatabase(candidate: QueryCursorTable
   return database && database !== candidate.database ? { ...candidate, database } : candidate;
 }
 
-export function resolveQueryContextObjectTarget(candidate: QueryCursorTableCandidate, tables: readonly SqlCompletionTable[]): SqlObjectNavigationTarget {
+export function resolveQueryContextObjectTarget(candidate: QueryCursorTableCandidate, tables: readonly SqlCompletionTable[], preferredSchema?: string): SqlObjectNavigationTarget {
   const nameMatches = tables.filter((table) => sameIdentifier(table.name, candidate.tableName));
-  const match = candidate.schema ? (nameMatches.find((table) => sameIdentifier(table.schema, candidate.schema)) ?? nameMatches.find((table) => !table.schema)) : nameMatches[0];
+  // An unqualified name is ambiguous across schemas. When the SQL did not name a
+  // schema, prefer the query tab's schema (or the connection default) instead of
+  // the first cache entry: otherwise a view in the current schema can be resolved
+  // as a same-named table in another schema (#12865). An explicit schema in the
+  // SQL still wins.
+  const match = candidate.schema
+    ? (nameMatches.find((table) => sameIdentifier(table.schema, candidate.schema)) ?? nameMatches.find((table) => !table.schema))
+    : preferredSchema
+      ? (nameMatches.find((table) => sameIdentifier(table.schema, preferredSchema)) ?? nameMatches.find((table) => !table.schema) ?? nameMatches[0])
+      : nameMatches[0];
   return sqlObjectNavigationTarget({
     name: match?.name ?? candidate.tableName,
     database: candidate.database,

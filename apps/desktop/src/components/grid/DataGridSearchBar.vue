@@ -15,8 +15,6 @@ const props = withDefaults(
     matchCount: number;
     currentMatchIndex: number;
     hasDeferredSearchText: boolean;
-    /** 结果里含被截断显示的长值（large_value_cells），搜索只覆盖显示文本。 */
-    valuesTruncated?: boolean;
     replaceAvailable?: boolean;
     replaceBusy?: boolean;
     replaceMatchCount?: number;
@@ -64,7 +62,7 @@ defineExpose({
 
 <template>
   <Transition enter-active-class="transition-opacity duration-150" leave-active-class="transition-opacity duration-100" enter-from-class="opacity-0" leave-to-class="opacity-0">
-    <div v-if="props.open" data-grid-search-bar class="absolute top-1 right-2 z-20 max-w-[calc(100%-1rem)] px-2 py-1 bg-background border rounded-md shadow-md" @keydown.esc.stop.prevent="emit('close')">
+    <div v-if="props.open" data-grid-search-bar class="absolute top-1 right-2 z-20 max-w-[calc(100%-1rem)] px-2 py-1 bg-background focus-within:bg-background-solid border rounded-md shadow-md" @keydown.esc.stop.prevent="emit('close')">
       <div class="flex items-center gap-1 min-w-0">
         <button
           v-if="props.replaceAvailable !== undefined"
@@ -120,11 +118,6 @@ defineExpose({
             <span>{{ suggestion }}</span>
           </div>
         </div>
-        <!-- 截断标记：表格预览对长文本/JSON 值做服务端截断，客户端搜索只能覆盖
-           显示前缀，匹配数可能少于 SQL 查询（#7279）。 -->
-        <span v-if="props.valuesTruncated && (props.matchCount > 0 || props.hasDeferredSearchText)" data-grid-search-truncated-hint class="text-xs text-amber-600 dark:text-amber-400 shrink-0 cursor-help" :title="t('grid.searchTruncatedValuesHint')" :aria-label="t('grid.searchTruncatedValuesHint')"
-          >≈</span
-        >
         <span v-if="props.matchCount > 0" class="text-xs text-muted-foreground shrink-0">{{ props.currentMatchIndex + 1 }}/{{ props.matchCount }}</span>
         <span v-else-if="props.hasDeferredSearchText" class="text-xs text-muted-foreground shrink-0">0</span>
         <button
@@ -171,12 +164,12 @@ defineExpose({
         <button data-grid-replace-all type="button" class="h-6 border rounded px-2 text-xs disabled:opacity-40" :disabled="!props.replaceAvailable || props.replaceBusy || !props.replaceMatchCount" @click="emit('replaceAll')">{{ t("editor.search.replaceAll") }}</button>
       </div>
       <div v-if="replaceOpen" class="flex flex-wrap items-center gap-1 mt-1 text-xs">
-        <select v-model="replaceScope" data-grid-replace-scope class="min-w-0 h-6 max-w-full rounded border bg-background px-1" :aria-label="t('grid.replaceScope')">
+        <select v-model="replaceScope" data-grid-replace-scope class="min-w-0 h-6 max-w-full rounded border bg-background focus:bg-background-solid px-1" :aria-label="t('grid.replaceScope')">
           <option value="loaded">{{ t("grid.replaceLoadedResults") }}</option>
           <option value="column">{{ t("grid.replaceCurrentColumn") }}</option>
           <option value="selection">{{ t("grid.replaceSelectedCells") }}</option>
         </select>
-        <select v-if="replaceScope === 'column'" v-model.number="replaceColumn" data-grid-replace-column class="h-6 min-w-0 flex-1 max-w-48 rounded border bg-background px-1" :aria-label="t('grid.replaceCurrentColumn')">
+        <select v-if="replaceScope === 'column'" v-model.number="replaceColumn" data-grid-replace-column class="h-6 min-w-0 flex-1 max-w-48 rounded border bg-background focus:bg-background-solid px-1" :aria-label="t('grid.replaceCurrentColumn')">
           <option :value="-1" disabled>{{ t("grid.replaceChooseColumn") }}</option>
           <option v-for="(column, index) in props.columns" :key="index" :value="index">{{ column }}</option>
         </select>

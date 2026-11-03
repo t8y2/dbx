@@ -3,6 +3,58 @@ import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes } from "@/li
 import { analyzeEditableQueryEditability, allPrimaryKeysPresent, sourceColumnsForResult, type EditableQueryInfo } from "@/lib/sql/sqlAnalysis";
 
 describe("editable query hidden primary keys", () => {
+  it.each([
+    "APP.ITEMS PIVOT(SUM(AMOUNT) FOR KIND IN (1,2))",
+    "APP.ITEMS t PIVOT(SUM(AMOUNT) FOR KIND IN (1,2))",
+    "APP.ITEMS UNPIVOT(AMOUNT FOR KIND IN (FIRST_AMOUNT,SECOND_AMOUNT))",
+    "APP.ITEMS UNPIVOT INCLUDE NULLS (AMOUNT FOR KIND IN (FIRST_AMOUNT,SECOND_AMOUNT))",
+    "APP.ITEMS t UNKNOWN_SUFFIX(1)",
+  ])("rejects an unparsed source suffix: %s", (source) => {
+    for (const projection of ["*", "t.*", "AMOUNT", "ROWID AS RID, AMOUNT"]) {
+      const sql = `SELECT ${projection} FROM ${source}`;
+      expect(analyzeEditableQueryEditability(sql)).toEqual({ editable: false, reason: "complex-source" });
+      expect(buildQueryWithHiddenPrimaryKeys({ sql, databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"], existingResultNames: ["AMOUNT"], sourceExpressions: { __DBX_ROWID: "ROWIDTOCHAR(ROWID)" } })).toBeUndefined();
+    }
+  });
+
+  it.each(['"PIVOT"', '"UNPIVOT"', '"PARTITION"'])("preserves a quoted keyword alias %s", (alias) => {
+    const sql = `SELECT * FROM APP.ITEMS ${alias}`;
+    expect(analyzeEditableQueryEditability(sql).editable).toBe(true);
+    expect(buildQueryWithHiddenPrimaryKeys({ sql, databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"], existingResultNames: ["AMOUNT"], sourceExpressions: { __DBX_ROWID: "ROWIDTOCHAR(ROWID)" } })?.sql).toBe(`SELECT ${alias}.*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" FROM APP.ITEMS ${alias}`);
+  });
+
+  it("preserves SQL Server table hints in the parsed source shape", () => {
+    for (const source of ["dbo.items WITH (NOLOCK)", "dbo.items t WITH (INDEX (idx_items), NOLOCK)"]) {
+      const sql = `SELECT amount FROM ${source} WHERE amount > 0`;
+      expect(analyzeEditableQueryEditability(sql).editable).toBe(true);
+      expect(buildQueryWithHiddenPrimaryKeys({ sql, databaseType: "sqlserver", primaryKeys: ["id"], existingResultNames: ["amount"] })?.sql).toContain("[id] AS [__DBX_PK_0]");
+    }
+  });
+
+  it.each(["FROM dbo.items t WITH (NOLOCK) JOIN dbo.owners o WITH (NOLOCK) ON t.owner_id = o.id", "FROM dbo.items t LEFT JOIN dbo.owners o ON t.owner_id = o.id", "FROM dbo.items t CROSS JOIN dbo.owners o", 'FROM "APP"."Items" "t" JOIN "APP"."Owners" "o" ON "t"."OWNER_ID" = "o"."ID"'])(
+    "retains direct joined-source mappings: %s",
+    (from) => {
+      const result = analyzeEditableQueryEditability(`SELECT t.amount, o.id ${from}`);
+      expect(result.editable).toBe(true);
+      if (result.editable) expect(result.analysis.sources).toHaveLength(2);
+    },
+  );
+
+  it.each(["PARTITION(P0)", "SUBPARTITION(P0)", "PARTITION FOR (1)"])("does not treat the Oracle table suffix %s as an alias", (suffix) => {
+    expect(buildQueryWithHiddenPrimaryKeys({ sql: `SELECT * FROM APP.ITEMS ${suffix}`, databaseType: "oceanbase-oracle", primaryKeys: ["__DBX_ROWID"], existingResultNames: ["LABEL"], sourceExpressions: { __DBX_ROWID: "ROWIDTOCHAR(ROWID)" } })).toBeUndefined();
+  });
+  it.each(["oracle", "oceanbase-oracle"] as const)("preserves source spelling and projection boundaries for %s star queries", (databaseType) => {
+    for (const [sql, expected] of [
+      ['SELECT * FROM "Owner"."Items" "i"', 'SELECT "i".*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_1" FROM "Owner"."Items" "i"'],
+      ['SELECT "i".* FROM "Owner"."Items" "i"', 'SELECT "i".*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_1" FROM "Owner"."Items" "i"'],
+      ["SELECT /*+ FULL(t) */ * -- columns\nFROM APP.ITEMS t", 'SELECT /*+ FULL(t) */ t.*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_1" -- columns\nFROM APP.ITEMS t'],
+    ]) {
+      const result = buildQueryWithHiddenPrimaryKeys({ sql: sql!, databaseType, primaryKeys: ["__DBX_ROWID"], existingResultNames: ["rowid", "__DBX_PK_0"], sourceExpressions: { __DBX_ROWID: "ROWIDTOCHAR(ROWID)" } });
+      expect(result?.sql).toBe(expected);
+      expect(result?.projections).toEqual([{ sourceName: "__DBX_ROWID", alias: "__DBX_PK_1" }]);
+    }
+  });
+
   it("appends quoted MySQL primary keys without changing the visible projection", () => {
     expect(
       buildQueryWithHiddenPrimaryKeys({

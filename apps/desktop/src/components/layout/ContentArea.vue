@@ -1,23 +1,27 @@
 <script setup lang="ts">
-import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { computed, ref, shallowRef, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab, restoredDataTabReloadFilters } from "@/lib/table/tableDataRefresh";
 import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
 import { extractNeo4jNodeCells, projectNeo4jNodeResult } from "@/lib/neo4j/neo4jNodeResult";
 import { useNeo4jNodeTableResult } from "@/composables/useNeo4jNodeTableResult";
+import type { DataGridExportSheet } from "@/composables/useDataGridExport";
 import { extractGraphCells, graphPropertyFromUpdateResult, type GraphEdge, type GraphNode, type GraphProperty, type GraphResult } from "@/lib/graph/graphResult";
 import { graphAdapterForDatabase } from "@/lib/graph/graphAdapters";
 import { queryResultMessages } from "@/lib/query/queryResultMessages";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
-import { hasQueryOutput as tabHasQueryOutput } from "@/lib/query/queryOutput";
+import { hasFocusableQueryResult, hasQueryOutput as tabHasQueryOutput } from "@/lib/query/queryOutput";
 import { batchResultInsertRequest } from "@/lib/query/queryResultBatchInsert";
 import { batchSqlRecoveryState, type BatchSqlRecoveryAction } from "@/lib/query/batchSqlRecovery";
 import type { CSSProperties } from "vue";
+import { hexToRgba } from "@/lib/common/color";
 import { useI18n } from "vue-i18n";
 import { provideTabUiState } from "@/lib/tabs/tabUiState";
+import { shouldPinResultRunOnClick } from "@/lib/tabs/resultRunPin";
 import {
   Check,
+  ChevronsDown,
   CheckSquare2,
   Columns3,
   Columns3Cog,
@@ -28,6 +32,7 @@ import {
   Search,
   TableProperties,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   Inbox,
   RefreshCcw,
@@ -48,6 +53,7 @@ import {
   ShieldAlert,
   AlignLeft,
   AlignRight,
+  Binary,
   PanelsTopLeft,
   Palette,
   CircleAlert,
@@ -71,12 +77,24 @@ import LightTooltip from "@/components/ui/LightTooltip.vue";
 import HelpTooltip from "@/components/ui/tooltip/HelpTooltip.vue";
 import ColumnInfoPanel from "@/components/editor/ColumnInfoPanel.vue";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
+const PlDebugPanel = defineAsyncComponent(() => import("@/components/debug/PlDebugPanel.vue"));
 import QueryErrorActions from "@/components/common/QueryErrorActions.vue";
 import QueryMessagesView from "@/components/layout/QueryMessagesView.vue";
 import QueryResultToolbarActions from "@/components/layout/QueryResultToolbarActions.vue";
 import ResultSetNavigator from "@/components/layout/ResultSetNavigator.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
 import ProductionWatermark from "@/components/common/ProductionWatermark.vue";
+import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
+import OracleTriggerStatus from "@/components/objects/OracleTriggerStatus.vue";
+import type { OracleTriggerSnapshot, OracleTriggerTarget, OracleTriggerExecutionResult } from "@/lib/database/oracleTriggerPlan";
+const OracleInvalidObjectsDialog = defineAsyncComponent(() => import("@/components/objects/OracleInvalidObjectsDialog.vue"));
+import { objectDependencyTarget, type ObjectDependencyTarget, type ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
+import DataGridFreezeFirstColumnControl from "@/components/grid/DataGridFreezeFirstColumnControl.vue";
+import DataGridStatusSqlControl from "@/components/grid/DataGridStatusSqlControl.vue";
+import DataGridExportOptionsControl from "@/components/grid/DataGridExportOptionsControl.vue";
+import DataGridExportMenu from "@/components/grid/DataGridExportMenu.vue";
+import type { LightDropdownItem } from "@/components/ui/LightDropdown.vue";
+import type { DataGridSqlPreview } from "@/components/grid/dataGridSqlPreview";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
 import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyControl.vue";
 import DataGridColumnWidthModeControl from "@/components/grid/DataGridColumnWidthModeControl.vue";
@@ -105,6 +123,7 @@ function preloadDataGridComponent() {
 
 const QueryEditor = defineAsyncComponent({ loader: () => import("@/components/editor/QueryEditor.vue"), loadingComponent: QueryLoadingState, delay: 0 });
 const DataGrid = defineAsyncComponent(loadDataGridComponent);
+const DataGridSqlPreviewDialog = defineAsyncComponent(() => import("@/components/grid/DataGridSqlPreviewDialog.vue"));
 const QueryResultTransferDialog = defineAsyncComponent(() => import("@/components/transfer/QueryResultTransferDialog.vue"));
 const RedisKeyBrowser = defineAsyncComponent(() => import("@/components/redis/RedisKeyBrowser.vue"));
 const RedisQueryConsoleOutput = defineAsyncComponent(() => import("@/components/redis/RedisQueryConsoleOutput.vue"));
@@ -142,6 +161,7 @@ const MySqlDashboard = defineAsyncComponent(() => import("@/components/admin/MyS
 const PostgresDashboard = defineAsyncComponent(() => import("@/components/admin/PostgresDashboard.vue"));
 const XuguServerDashboard = defineAsyncComponent(() => import("@/components/admin/XuguServerDashboard.vue"));
 const DamengJobAdmin = defineAsyncComponent(() => import("@/components/admin/DamengJobAdmin.vue"));
+const DatabaseJobAdmin = defineAsyncComponent(() => import("@/components/admin/DatabaseJobAdmin.vue"));
 
 const DamengUserAdmin = defineAsyncComponent(() => import("@/components/admin/DamengUserAdmin.vue"));
 const DamengRoleAdmin = defineAsyncComponent(() => import("@/components/admin/DamengRoleAdmin.vue"));
@@ -155,6 +175,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps } from "@/components/layout/querySurfaces";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGridRowNumberMode, type DataGridSearchMode, type ResultRunDisplayMode } from "@/stores/settingsStore";
+import { applySqlKeywordCase, loadSqlKeywordSpans } from "@/lib/sql/sqlKeywordCase";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { canCancelQueryExecution, isActiveResultLoading, queryExecutionLabelKey, shouldShowCancelAction } from "@/lib/sql/queryExecutionState";
@@ -182,12 +203,13 @@ import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
-import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, effectiveDatabaseTypeForConnection, kingbaseSqlDatabaseType } from "@/lib/database/jdbcDialect";
 import { supportsTableImport } from "@/lib/database/databaseFeatureSupport";
 import { chartableColumnIndexes } from "@/lib/dataGrid/chartData";
 import { elasticsearchJsonResponseForResult } from "@/lib/elasticsearch/elasticsearchJsonResponse";
 import { elasticsearchProfileBodyForResult, parseElasticsearchProfile } from "@/lib/elasticsearch/elasticsearchProfile";
 import * as api from "@/lib/backend/api";
+import type { ExportReadControl } from "@/lib/export/snapshotCompletion";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { promptExportSavePath } from "@/lib/export/exportPath";
 import { queryResultExportBaseName } from "@/lib/export/saveTextFile";
@@ -200,26 +222,35 @@ import { useTabScroll } from "@/composables/useTabScroll";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
+import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
+import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
 import { analyzeEditableQuery } from "@/lib/sql/sqlAnalysis";
 import { loadQueryResultTransferSourceDdl } from "@/components/transfer/queryResultTransferSource";
-import { formatDdlForDisplay } from "@/lib/sql/ddlDisplay";
 import { sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
-import type { QueryMessage, QueryResult, QueryTab, RedisResultViewMode, TableInfoTab, TreeNode, VectorCollectionMeta } from "@/types/database";
+import type { QueryMessage, QueryResult, QueryTab, RedisResultViewMode, TableInfoTab, TableStructureEditorDraft, TabOutputView, TreeNode, VectorCollectionMeta } from "@/types/database";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { isOracleFamilyTypeSource } from "@/lib/database/databaseObjectCapabilities";
+import { requestOracleTypeManagement } from "@/lib/table/oracleTypeManagementRequest";
 import { sqlStatementParameterOptionsForCompatibility } from "@/lib/sql/sqlStatementRanges";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { isAiRedisConsoleTarget, type AiConversationBinding } from "@/lib/ai/aiConversationBinding";
 
 type DataGridHandle = DataGridColumnLayoutHandle & {
+  exportMenuItems: LightDropdownItem[];
+  exportWarning: string;
+  selectExportMenuItem: (value: string) => void;
+  loadAllToolbarState: { visible: boolean; disabled: boolean };
+  loadAllRowsAndGoToLast: () => void;
   tableInfoToolbarCapability: DataGridToolbarActionCapability;
   goToColumnToolbarCapability: DataGridToolbarActionCapability;
   onToolbarRefresh: () => Promise<void> | void;
   focusSearch: (target?: Element | null) => boolean;
   focusWhere: () => boolean;
+  focusGrid: () => boolean;
   openGoToColumn: () => boolean;
   openCellDetailSearch: () => boolean;
   nullColumnsHidden: boolean;
@@ -242,7 +273,7 @@ type DataGridHandle = DataGridColumnLayoutHandle & {
   exportJson: () => Promise<void>;
   exportSql: () => Promise<void>;
   exportXlsx: () => Promise<void>;
-  exportResultSheetsXlsx: (sheets: Array<{ sheetName: string; result: QueryResult; sql?: string }>) => Promise<void>;
+  exportResultSheetsXlsx: (sheets: DataGridExportSheet[]) => Promise<void>;
   openXlsx: () => Promise<void>;
 };
 
@@ -280,6 +311,10 @@ const { t } = useI18n();
 const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
 const productionSafetyStore = useProductionSafetyStore();
+function updateStructureDraft(draft: TableStructureEditorDraft | undefined, originTabId?: string) {
+  const tab = originTabId === undefined ? props.activeTab : queryStore.tabs.find((item) => item.id === originTabId);
+  if (tab?.mode === "structure") tab.structureDraft = draft;
+}
 /** Clear a consumed editor reveal request so a later normal tab re-visit doesn't re-jump. */
 function clearEditorRevealRequest(tab: { editorRevealRequest?: unknown }): void {
   if (tab.editorRevealRequest !== undefined) {
@@ -307,13 +342,17 @@ function groupedQueryReadonlyColumnIndexes(tab: QueryTab): number[] | undefined 
   return tab.querySourceColumns.flatMap((column, index) => (column && primaryKeys.has(column) ? [index] : []));
 }
 const settingsStore = useSettingsStore();
+const hideToolbarLabels = computed(() => settingsStore.editorSettings.dataGridHideToolbarLabels);
 const booleanDisplayMode = computed(() => settingsStore.editorSettings.dataGridBooleanDisplayMode);
 const setBooleanDisplayMode = (mode: "checkbox" | "dropdown") => settingsStore.updateEditorSettings({ dataGridBooleanDisplayMode: mode });
+const booleanValueStyle = computed(() => settingsStore.editorSettings.dataGridBooleanValueStyle);
+const setBooleanValueStyle = (style: "true-false" | "zero-one") => settingsStore.updateEditorSettings({ dataGridBooleanValueStyle: style });
 const colorizeDataGridCellTypes = computed(() => settingsStore.editorSettings.colorizeDataGridCellTypes);
 const setColorizeDataGridCellTypes = (value: boolean) => settingsStore.updateEditorSettings({ colorizeDataGridCellTypes: value });
 const { toast } = useToast();
 const DEFAULT_QUERY_RESULTS_PANE_SIZE = 68;
 const ddlRefreshInProgress = ref(false);
+let ddlRefreshGeneration = 0;
 
 onMounted(() => {
   // The watcher below warms the grid for query/data tabs. Keep source-only
@@ -323,6 +362,7 @@ onMounted(() => {
   window.addEventListener("resize", updateStandaloneResultToolbarDimensions);
   window.visualViewport?.addEventListener("resize", updateStandaloneResultToolbarDimensions);
   window.addEventListener("dbx:ui-scale-applied", updateStandaloneResultToolbarDimensions);
+  window.addEventListener("dbx:before-tab-switch", revokeExecutionErrorFocus);
   revealActiveResultRunAfterRender();
 });
 
@@ -358,7 +398,14 @@ const dataGridViewOptionsOpen = ref(false);
 // real overflow; tiers then drop button labels and move secondary actions
 // into the overflow menu instead of crushing the chips away.
 const dataToolbarRef = ref<HTMLElement | null>(null);
-const { tier: dataToolbarTier } = useToolbarOverflow(dataToolbarRef, [() => props.activeTab.id, () => !!props.activeTab.result]);
+const { tier: dataToolbarTier } = useToolbarOverflow(dataToolbarRef, [
+  () => props.activeTab.id,
+  () => !!props.activeTab.result,
+  // The grid exposes these only after the table result mounts; the toolbar's
+  // action set grows at that point, so the row must be re-measured.
+  () => !!dataGridRef.value?.canOpenTableStructureEditor,
+  () => !!dataGridRef.value?.goToColumnToolbarCapability?.visible,
+]);
 const dataToolbarCompact = computed(() => dataToolbarTier.value >= 1);
 const showDataColumnsChip = computed(() => dataToolbarTier.value < 2);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
@@ -402,10 +449,123 @@ const activeResultDatabase = computed(() => activeResultExecutionTarget.value?.d
 const activeResultSchema = computed(() => activeResultExecutionTarget.value?.schema ?? props.activeTab.schema);
 const graphViewKey = computed(() => JSON.stringify([props.activeTab.id, props.activeTab.resultViewGeneration, props.activeTab.activeResultRunId, props.activeTab.activeResultIndex, activeResultConnectionId.value, activeResultDatabase.value]));
 const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(activeResultConnection.value));
+const managedTypeSource = computed(() => isOracleFamilyTypeSource(effectiveDatabaseTypeForConnection(props.activeConnection), props.activeTab.objectSource?.objectType));
+const unfinishedTypeChange = computed(() => !!props.activeTab.typeManagementDraft && props.activeTab.typeManagementDraft.state !== "complete");
+const verifiedTypeDeletion = computed(() => props.activeTab.typeManagementDraft?.state === "complete" && props.activeTab.typeManagementDraft.operation.startsWith("delete"));
+function resumeTypeManagement() {
+  const tab = props.activeTab;
+  const draft = tab.typeManagementDraft;
+  if (!draft) return;
+  void requestOracleTypeManagement({
+    target: draft.target,
+    operation: draft.operation,
+    tabId: tab.id,
+    isCurrent: () => queryStore.tabs.includes(tab) && tab.typeManagementDraft?.planId === draft.planId && tab.connectionId === draft.target.connectionId && tab.database === draft.target.database,
+  }).catch((error) => toast(String(error), 5000));
+}
+function refreshTypeSource() {
+  const tab = props.activeTab;
+  if (queryStore.isTabDirty(tab) && !window.confirm(t("objects.refreshDiscardConfirm"))) return;
+  queryStore.retryObjectSourceTab(tab.id);
+}
+const activeObjectDependencyTarget = computed(() => {
+  const tab = props.activeTab;
+  const details = tab.objectDetails;
+  if (!details || details.connectionId !== tab.connectionId || details.database !== tab.database || details.schema !== (tab.schema || tab.database) || (details.catalog || "") !== (tab.catalog || "")) return undefined;
+  return objectDependencyTarget(details, effectiveDatabaseTypeForConnection(connectionStore.getConfig(details.connectionId)), queryStore.oracleTriggerSourceState(tab.id)?.profile);
+});
+const activeObjectSection = computed<ObjectDetailsSection>(() => (activeObjectDependencyTarget.value ? props.activeTab.objectDetails?.section || "source" : "source"));
+const sourceSectionActive = computed(() => activeObjectSection.value === "source");
+const retainTriggerSourceEditor = computed(() => props.activeTab.objectSource?.objectType === "TRIGGER" && !!queryStore.oracleTriggerSourceState(props.activeTab.id));
+const triggerDiagnosticOpen = ref(false);
+const triggerDiagnosticContext = ref<{ target: Readonly<OracleTriggerTarget>; expectedObjectId?: string; originTabId: string; originRevision?: number }>();
+const triggerDiagnosticConnection = computed(() => (triggerDiagnosticContext.value ? connectionStore.getConfig(triggerDiagnosticContext.value.target.connectionId) : undefined));
+watch(
+  () => props.activeTab.id,
+  () => {
+    triggerDiagnosticOpen.value = false;
+  },
+);
+function openTriggerSourceDiagnostics() {
+  const snapshot = queryStore.oracleTriggerSourceState(props.activeTab.id)?.baseline;
+  if (!snapshot?.exists) return;
+  triggerDiagnosticContext.value = { target: snapshot.target, expectedObjectId: snapshot.metadata.objectId ?? undefined, originTabId: props.activeTab.id, originRevision: queryStore.oracleTriggerSourceState(props.activeTab.id)?.readVersion };
+  triggerDiagnosticOpen.value = true;
+}
+function returnFromTriggerSourceDiagnostics(object: { owner: string; name: string; objectId?: string }, location?: { line: number; position: number }) {
+  const context = triggerDiagnosticContext.value;
+  if (!context || context.originTabId !== props.activeTab.id || context.target.owner !== object.owner || context.target.name !== object.name) return;
+  triggerDiagnosticOpen.value = false;
+  setObjectSection("source");
+  if (location && !queryStore.revealOracleTriggerSourceError(context.originTabId, location, object.objectId)) toast(t("oracleTrigger.errorPositionUnavailable"), 3000);
+}
+function acceptTriggerSourceDiagnosticResult(_target: Readonly<OracleTriggerTarget>, result: OracleTriggerExecutionResult, before: OracleTriggerSnapshot, originTabId?: string, originRevision?: number) {
+  if (originTabId) queryStore.acceptOracleTriggerDiagnosticResult(originTabId, result, before, originRevision);
+}
+function setObjectSection(section: ObjectDetailsSection) {
+  if (props.activeTab.objectDetails) props.activeTab.objectDetails.section = section;
+}
+function openTriggerSourceParent() {
+  const snapshot = queryStore.oracleTriggerSourceState(props.activeTab.id)?.baseline;
+  const parent = snapshot?.metadata.parent;
+  if (!snapshot || !parent) return;
+  emit(
+    "openDependencyObject",
+    { connectionId: snapshot.target.connectionId, database: snapshot.target.database, schema: snapshot.target.owner, catalog: snapshot.target.catalog, name: snapshot.target.name, objectType: "TRIGGER" },
+    { name: parent.name, schema: parent.owner, type: parent.objectType === "VIEW" ? "view" : "table", nameQuoted: true, schemaQuoted: true },
+  );
+}
+function viewObjectDependencySql(context: ObjectDependencyTarget, sql: string) {
+  queryStore.createTab(context.connectionId, context.database, t("objectDependencies.viewSql"), "query", context.schema, sql, context.catalog, { forceNew: true });
+}
 // 表数据工具箱的「导入数据」与侧边栏、对象浏览器共用同一条能力判断：未适配导入的引擎（如 HANA）不出现入口。
 const canOpenTableImport = computed(() => supportsTableImport(activeEffectiveDatabaseType.value));
 const activeVectorConnection = computed(() => connectionStore.getConfig(props.activeTab.connectionId) ?? props.activeConnection);
 const activeDataTabExecutionDatabase = computed(() => dataTabExecutionDatabase(props.activeConnection, props.activeTab.database, activeDataTabTableMeta.value?.catalog));
+const tableSqlPreview = ref<{
+  preview: DataGridSqlPreview;
+  connectionId: string;
+  database: string;
+  schema?: string;
+  catalog?: string;
+} | null>(null);
+
+function viewTableSql(preview: DataGridSqlPreview) {
+  const tab = props.activeTab;
+  if (tab.mode !== "data") return;
+  const meta = activeDataTabTableMeta.value;
+  tableSqlPreview.value = {
+    preview,
+    connectionId: tab.connectionId,
+    // Query tabs need the logical database inside the catalog, not the pool's internal database.
+    database: tab.database,
+    schema: meta?.schema ?? tab.schema,
+    catalog: meta?.catalog ?? tab.catalog,
+  };
+}
+
+async function openTableSqlInNewQuery(sql: string) {
+  const snapshot = tableSqlPreview.value;
+  if (!snapshot?.connectionId || !sql.trim()) return;
+  tableSqlPreview.value = null;
+  // The grid's preview SQL is generated uppercase; a query tab opened from it
+  // should still honor the formatter's keyword case setting (issue #13235).
+  const keywordCase = settingsStore.editorSettings.sqlFormatter.keywordCase;
+  let sqlForTab = sql;
+  if (keywordCase === "lower" || keywordCase === "upper") {
+    const dialect = sqlFormatDialectForDbType(activeEffectiveDatabaseType.value);
+    const spans = await loadSqlKeywordSpans(sql, dialect);
+    if (spans) sqlForTab = applySqlKeywordCase(sql, { from: 0, to: sql.length }, keywordCase, spans);
+  }
+  queryStore.createTab(snapshot.connectionId, snapshot.database, undefined, "query", snapshot.schema, sqlForTab, snapshot.catalog, { forceNew: true, schemaQualifiesSql: true });
+}
+
+watch(
+  () => props.activeTab.id,
+  () => {
+    tableSqlPreview.value = null;
+  },
+);
 const activeSqlStatementParameterOptions = computed(() =>
   sqlStatementParameterOptionsForCompatibility(activeEffectiveDatabaseType.value, activeEffectiveDatabaseType.value === "opengauss" ? connectionStore.databaseCompatibilityMode(activeResultConnectionId.value, activeResultDatabase.value) : undefined),
 );
@@ -465,9 +625,8 @@ function increaseTableFontSize() {
   setTableFontSize(tableFontSize.value + 1);
 }
 
-/** Export file base name for the query result grid: the result's label (nearby
- *  comment or `schema.table`) names exports, matching the result tab (#9894). */
-const activeQueryResultExportBaseName = computed(() => queryResultExportBaseName(props.activeTab.result?.sourceLabel, props.activeTab.title));
+/** Export file base name for the query result grid: prefers result label or tab title based on settings (#9894, #12092). */
+const activeQueryResultExportBaseName = computed(() => queryResultExportBaseName(props.activeTab.result?.sourceLabel, props.activeTab.title, settingsStore.editorSettings.queryResultExportFileNameSource));
 
 const activeTabDimension = computed(() => {
   const tab = props.activeTab;
@@ -479,7 +638,7 @@ const activeTabDimension = computed(() => {
   return meta && "dimension" in meta ? (meta as VectorCollectionMeta).dimension : undefined;
 });
 
-const activeSqlFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(activeEffectiveDatabaseType.value));
+const activeSqlFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(kingbaseSqlDatabaseType(props.activeConnection) ?? activeEffectiveDatabaseType.value));
 
 const editorDialect = computed<"mysql" | "postgres" | "sqlserver">(() => codeMirrorSqlDialect(activeEffectiveDatabaseType.value));
 const editorSyntaxDialect = computed<CodeMirrorSqlDialectName>(() => codeMirrorSqlDialectForConnection(props.activeConnection));
@@ -525,6 +684,21 @@ const activeQueryError = computed(() => {
   return String(result.rows[0]?.[0] ?? "");
 });
 const hasQueryOutput = computed(() => tabHasQueryOutput(props.activeTab));
+function resultRunConnectionId(runId?: string) {
+  const run = props.activeTab.resultRuns?.find((item) => item.id === runId);
+  return run?.multiDbExecution?.kind === "multi-db" ? run.multiDbExecution.target.connectionId : (run?.connectionId ?? props.activeTab.connectionId);
+}
+
+function resultRunColor(runId?: string) {
+  return connectionStore.getConfig(resultRunConnectionId(runId))?.color || "";
+}
+
+function resultRunColorStyle(runId: string, active: boolean): CSSProperties | undefined {
+  const color = resultRunColor(runId);
+  return color ? { borderColor: hexToRgba(color, active ? 0.72 : 0.35), backgroundColor: hexToRgba(color, active ? 0.14 : 0.05) } : undefined;
+}
+
+const activeResultColor = computed(() => (hasQueryOutput.value ? resultRunColor(props.activeTab.activeResultRunId) : ""));
 // 结果集页签/列表的名称是否带库名，由编辑器设置控制（默认带库名）
 const includeResultSourceDatabase = computed(() => settingsStore.editorSettings.showResultSourceDatabase);
 const resultTabNamingMode = computed(() => settingsStore.editorSettings.resultTabNamingMode);
@@ -533,13 +707,15 @@ const visibleResultItems = computed(() =>
   tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined), { includeSourceDatabase: includeResultSourceDatabase.value, namingMode: resultTabNamingMode.value, preferComments: preferResultTabComments.value }),
 );
 const tabularResults = computed(() => tabularResultItems(props.activeTab.results, { includeSourceDatabase: includeResultSourceDatabase.value, namingMode: resultTabNamingMode.value, preferComments: preferResultTabComments.value }));
-const allResultExportSheets = computed(() =>
-  tabularResults.value.map((item) => ({
+const allResultExportSheets = computed(() => {
+  const tabId = props.activeTab.id;
+  return tabularResults.value.map((item) => ({
     sheetName: item.label || t("tabs.resultN", { n: item.n }),
     result: activeEffectiveDatabaseType.value === "neo4j" ? projectNeo4jNodeResult(item.result) : item.result,
     sql: item.index === props.activeTab.activeResultIndex ? queryResultExecutionSql(props.activeTab) : item.result.sourceStatement,
-  })),
-);
+    captureSourceValues: () => queryStore.captureResultLegacyValuesForExport(tabId, item.result),
+  }));
+});
 
 type ResultSetItem = (typeof visibleResultItems.value)[number];
 
@@ -587,7 +763,8 @@ async function exportSelectedResultSheets(items: ResultSetItem[]) {
   if (resultBatchBusy.value) return;
   const dataGrid = dataGridRef.value;
   if (!dataGrid) return;
-  const sheets = items.filter((item) => !item.result.execution_error && !item.result.server_message).map((item) => ({ sheetName: item.label || t("tabs.resultN", { n: item.n }), result: item.result }));
+  const tabId = props.activeTab.id;
+  const sheets = items.filter((item) => !item.result.execution_error && !item.result.server_message).map((item) => ({ sheetName: item.label || t("tabs.resultN", { n: item.n }), result: item.result, captureSourceValues: () => queryStore.captureResultLegacyValuesForExport(tabId, item.result) }));
   if (!sheets.length) return;
   resultBatchBusy.value = true;
   try {
@@ -650,6 +827,18 @@ async function fetchGridResultForExport(onProgress?: (info: { rowsExported: numb
   extractNeo4jNodeCells(result);
   extractGraphCells(result);
   return projectNeo4jNodeResult(result);
+}
+function captureGridResultForExport() {
+  const fetch = queryStore.captureTabResultForExport(props.activeTab.id);
+  const isNeo4j = activeEffectiveDatabaseType.value === "neo4j";
+  if (!fetch) return undefined;
+  return async (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, control?: ExportReadControl) => {
+    const result = await fetch(onProgress, control);
+    if (!result || !isNeo4j) return result;
+    extractNeo4jNodeCells(result);
+    extractGraphCells(result);
+    return projectNeo4jNodeResult(result);
+  };
 }
 async function loadQueryResultSourceDdl(): Promise<string | undefined> {
   if (props.activeTab.mode !== "query") return undefined;
@@ -866,6 +1055,14 @@ function setRedisResultViewMode(mode: RedisResultViewMode) {
   queryStore.updateTabUiState(props.activeTab.id, { redisResultViewMode: mode });
 }
 
+function selectOutputView(tabId: string, view: TabOutputView) {
+  queryStore.updateTabUiState(tabId, {
+    activeOutputView: view,
+    autoSwitchedToMessagesDuringExecution: false,
+  });
+  emit("update:activeOutputView", tabId, view);
+}
+
 function observeStandaloneResultToolbar() {
   standaloneResultToolbarResizeObserver?.disconnect();
   standaloneResultToolbarResizeObserver = undefined;
@@ -992,6 +1189,44 @@ function toggleResultsPane(): boolean {
   return true;
 }
 
+function focusSqlEditor(): boolean {
+  return props.activeTab.mode === "query" && !props.resultOnly && (queryEditorRef.value?.focusEditor?.() ?? false);
+}
+
+const pendingGridFocus = shallowRef<{ tabId: string; result: QueryResult; source: Element | null }>();
+function cancelResultGridFocus() {
+  pendingGridFocus.value = undefined;
+}
+
+function focusResultGrid(): boolean {
+  if (props.editorOnly || !hasFocusableQueryResult(props.activeTab) || activeElasticsearchJsonResponse.value || redisResultViewMode.value !== "grid") return false;
+  pendingGridFocus.value = { tabId: props.activeTab.id, result: props.activeTab.result!, source: document.activeElement };
+  if (!props.resultOnly) resultsPaneOpen.value = true;
+  showElasticsearchRawJson.value = false;
+  selectOutputView(props.activeTab.id, "result");
+  return true;
+}
+
+// The grid is async and may not exist until a collapsed pane or another output
+// view has rendered. Fulfil only the current request, without stealing focus
+// after the user switches tabs, results, or another control.
+watch(
+  [pendingGridFocus, dataGridRef, () => props.activeTab.id, () => props.activeTab.result, () => props.activeOutputView],
+  () => {
+    const request = pendingGridFocus.value;
+    if (!request) return;
+    if (props.activeTab.id !== request.tabId || props.activeTab.result !== request.result || props.activeOutputView !== "result" || (document.activeElement !== request.source && document.activeElement !== document.body)) {
+      cancelResultGridFocus();
+      return;
+    }
+    if (dataGridRef.value) {
+      cancelResultGridFocus();
+      dataGridRef.value.focusGrid();
+    }
+  },
+  { flush: "post" },
+);
+
 /**
  * The "hide results" chevron. In the shared result surface (result-only) the
  * local resultsPaneOpen ref is inert — the pane is always rendered there and
@@ -1101,18 +1336,32 @@ watch(
   () => props.activeTab.liveQueryMessages?.length ?? 0,
   (count, previousCount) => {
     if (count > 0 && !previousCount && props.activeTab.isExecuting && !props.editorOnly && !hasTabularResult.value && (props.activeOutputView === "result" || props.activeOutputView === "summary")) {
+      queryStore.updateTabUiState(props.activeTab.id, {
+        activeOutputView: "messages",
+        autoSwitchedToMessagesDuringExecution: true,
+      });
       emit("update:activeOutputView", props.activeTab.id, "messages");
     }
   },
 );
 
 watch(
-  () => [props.activeTab.id, props.activeTab.result, props.activeTab.results, props.activeTab.isExecuting, props.activeOutputView] as const,
+  () => [props.activeTab.id, props.activeTab.result, props.activeTab.results, props.activeTab.isExecuting, props.activeTab.batchSqlExecution, props.activeOutputView] as const,
   () => {
     // The output view belongs to the shared result surface. An editor-only
     // surface (a background group's editor) must never redirect the global
     // view when its own tab finishes executing.
     if (props.editorOnly) return;
+    // Show statement-by-statement progress only when summary is the configured
+    // default; otherwise this watcher would override the execution entry point's
+    // result-grid selection. Record the switch per run so a user's subsequent
+    // manual view selection survives progress updates.
+    const batchExecution = props.activeTab.batchSqlExecution;
+    if (settingsStore.editorSettings.multiStatementDefaultView === "summary" && batchExecution && batchExecution.finishedAt === undefined && batchExecution.total > 1 && props.activeOutputView === "result" && props.activeTab.uiState?.batchSummaryExecutionId !== batchExecution.executionId) {
+      queryStore.updateTabUiState(props.activeTab.id, { activeOutputView: "summary", batchSummaryExecutionId: batchExecution.executionId });
+      emit("update:activeOutputView", props.activeTab.id, "summary");
+      return;
+    }
     if (props.activeTab.isExecuting) return;
     if (props.activeOutputView === "graph" && !canShowGraphOutput.value) {
       emit("update:activeOutputView", props.activeTab.id, "result");
@@ -1121,6 +1370,7 @@ watch(
     if (hasExecutionSummary.value && (!hasTabularResult.value || props.activeTab.result?.server_message === true) && props.activeOutputView === "result") {
       const result = props.activeTab.result;
       emit("update:activeOutputView", props.activeTab.id, result ? defaultViewForResult(result) : "summary");
+      return;
     }
   },
   { immediate: true },
@@ -1163,20 +1413,62 @@ watch(
   },
 );
 
+let executionCompletion: { tabId: string; sql: string; editor: typeof queryEditorRef.value; cancelCount: number; executionId?: string; revoked: boolean } | undefined;
+
+function revokeExecutionErrorFocus(event: Event) {
+  const detail = (event as CustomEvent<{ fromTabId?: string; tabId?: string }>).detail;
+  if (executionCompletion && (detail?.fromTabId === executionCompletion.tabId || (!detail?.fromTabId && detail?.tabId !== executionCompletion.tabId))) executionCompletion.revoked = true;
+}
+
+onUnmounted(() => {
+  executionCompletion = undefined;
+  window.removeEventListener("dbx:before-tab-switch", revokeExecutionErrorFocus);
+});
+
 watch(
-  () => props.activeTab.isExecuting,
-  (isExecuting, wasExecuting) => {
+  () => [props.activeTab.id, props.activeTab.isExecuting, props.activeTab.executionId, props.activeTab.cancelRequestCount ?? 0, props.activeTab.isCancelling] as const,
+  ([tabId, isExecuting, executionId, cancelCount, isCancelling], [previousTabId, wasExecuting]) => {
+    if (tabId !== previousTabId) {
+      executionCompletion = undefined;
+      return;
+    }
     if (isExecuting && !wasExecuting) {
-      queryEditorRef.value?.beginExecutionViewportTracking();
+      const editor = queryEditorRef.value;
+      executionCompletion = { tabId, sql: props.activeTab.sql, editor, cancelCount, executionId, revoked: false };
+      editor?.beginExecutionViewportTracking();
+    }
+    const completion = executionCompletion;
+    if (completion) {
+      if (isCancelling || cancelCount !== completion.cancelCount) completion.revoked = true;
+      if (isExecuting && executionId) completion.executionId = executionId;
     }
     if (!isExecuting && wasExecuting) {
+      const result = props.activeTab.result;
+      const error = result && isQueryExecutionErrorResult(result);
+      // Errors are only located for an execution tracked from its start; a plain
+      // success still restores the cursor for a completion observed mid-flight.
+      if (!completion && error) return;
       nextTick(() => {
         requestAnimationFrame(() => {
-          queryEditorRef.value?.scrollCursorIntoView();
+          if (props.activeTab.id !== tabId || props.activeTab.isExecuting) return;
+          if (completion) {
+            if (executionCompletion !== completion || queryEditorRef.value !== completion.editor) return;
+            executionCompletion = undefined;
+          } else if (executionCompletion) {
+            return;
+          }
+          if (error) {
+            if (!completion || completion.revoked || !completion.executionId || result.sourceExecutionId !== completion.executionId || props.activeTab.sql !== completion.sql || props.activeTab.result !== result) return;
+            const mapped = sqlErrorEditorOffset(activeResultErrorOffsetOptions());
+            if (mapped) completion.editor?.scrollCursorIntoView(mapped.offset);
+          } else {
+            (completion?.editor ?? queryEditorRef.value)?.scrollCursorIntoView();
+          }
         });
       });
     }
   },
+  { flush: "sync" },
 );
 
 // Table toolbox handlers
@@ -1310,51 +1602,51 @@ function onHandleStructureViewData() {
  */
 async function loadActiveDdlViewer(force: boolean) {
   const tab = props.activeTab;
-  const ddlViewer = tab.ddlViewer;
-  if (!ddlViewer || ddlRefreshInProgress.value) return;
+  if (!tab.ddlViewer) return;
+  const generation = ++ddlRefreshGeneration;
   ddlRefreshInProgress.value = true;
   const pendingLoad = !!tab.ddlLoad;
-  if (pendingLoad) tab.ddlLoad = { startedAt: Date.now() };
+  tab.ddlLoad = { startedAt: Date.now() };
   try {
-    const { ddl } = await loadObjectDdl(
-      {
-        connectionId: tab.connectionId,
-        database: tab.database,
-        schema: ddlViewer.schema || tab.database,
-        tableName: ddlViewer.tableName,
-        objectType: ddlViewer.objectType,
-        catalog: tab.catalog,
-      },
-      { force },
-    );
-    const dialect = ddlViewer.formatDialect ?? activeSqlFormatDialect.value;
-    const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(tab.connectionId) ?? props.activeConnection);
-    const displayed = await formatDdlForDisplay(
-      ddl,
-      {
-        dialect,
-        databaseType,
-        database: tab.database,
-        catalog: tab.catalog,
-        includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
-        quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
-        excludeDdlStorage: settingsStore.editorSettings.excludeDdlStorage,
-      },
-      settingsStore.editorSettings.sqlFormatter,
-    );
-    queryStore.updateSql(tab.id, displayed);
-    tab.originalSql = displayed;
-    if (pendingLoad) tab.ddlLoad = undefined;
-  } catch (error: any) {
-    if (pendingLoad) {
-      tab.ddlLoad = { startedAt: Date.now(), error: error?.message || String(error) };
-    } else {
-      toast(t("contextMenu.ddlRefreshFailed", { message: error?.message || String(error) }), 5000);
+    await queryStore.loadDdlViewerTab(tab.id, force);
+    if (generation === ddlRefreshGeneration && !pendingLoad && tab.ddlLoad?.error) {
+      toast(t("contextMenu.ddlRefreshFailed", { message: tab.ddlLoad.error }), 5000);
+      tab.ddlLoad = undefined;
     }
   } finally {
-    ddlRefreshInProgress.value = false;
+    if (generation === ddlRefreshGeneration) ddlRefreshInProgress.value = false;
   }
 }
+
+watch(
+  [() => props.activeTab.id, () => settingsStore.editorSettings.includeDdlStorage, () => settingsStore.editorSettings.compactDdlSql, () => settingsStore.editorSettings.separateDdlIndexes],
+  (current, previous) => {
+    if (previous && current[0] !== previous[0]) {
+      ddlRefreshGeneration++;
+      ddlRefreshInProgress.value = false;
+    }
+    const tab = props.activeTab;
+    const viewer = tab.ddlViewer;
+    const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(tab.connectionId) ?? props.activeConnection);
+    if (!viewer || (databaseType !== "oracle" && databaseType !== "oceanbase-oracle")) return;
+    const indexChanged = previous && current[0] === previous[0] && current[3] !== previous[3];
+    if (tab.ddlLoad && !tab.ddlLoad.error && !indexChanged) return;
+    if (viewer.displaySource !== undefined && viewer.separateIndexes === settingsStore.editorSettings.separateDdlIndexes && !tab.ddlLoad?.error) {
+      if (indexChanged) {
+        tab.ddlLoad = undefined;
+        ddlRefreshGeneration++;
+        ddlRefreshInProgress.value = false;
+      }
+      const displayed = applyDdlTextPreferences(viewer.displaySource, databaseType, settingsStore.editorSettings);
+      queryStore.updateSql(tab.id, displayed);
+      tab.originalSql = displayed;
+      return;
+    }
+    tab.ddlLoad = { startedAt: Date.now() };
+    void loadActiveDdlViewer(false);
+  },
+  { immediate: true },
+);
 
 function refreshDdlViewer() {
   void loadActiveDdlViewer(true);
@@ -1547,6 +1839,7 @@ async function exportResultArchive() {
 }
 
 async function removeResultRun(runId: string) {
+  if (executionCompletion) executionCompletion.revoked = true;
   const removedActiveRun = props.activeTab.activeResultRunId === runId;
   const removed = await queryStore.removeResultRun(props.activeTab.id, runId);
   if (!removed) return;
@@ -1662,13 +1955,14 @@ function dispatchBeforeResultTabSwitch() {
 }
 
 /**
- * 点击结果标签：切换显示的同时固定该结果（issue #9975）。
- * 未固定的结果会被下一次普通查询复用/覆盖，点击后固定即可保留下来。
+ * 点击结果标签：切换显示的同时切换固定状态（issue #9975、#13306）。
+ * 未固定的结果会被下一次普通查询复用/覆盖，点击后固定即可保留下来；
+ * 点击已固定的结果则直接取消固定，无需再打开右键菜单。
  */
 async function selectResultRunFromTab(runId: string) {
   if (!(await selectResultRun(runId))) return;
   const run = resultRuns.value.find((item) => item.id === runId);
-  if (run && !run.pinned) toggleResultRunPinned(runId);
+  if (shouldPinResultRunOnClick(run, settingsStore.editorSettings.pinResultTabOnClick)) toggleResultRunPinned(runId);
 }
 
 async function focusResultRunByIndex(index: number) {
@@ -1762,22 +2056,31 @@ function handleModRTarget(target: Element): boolean {
 }
 
 function requestQueryEditorExecute() {
+  if (!sourceSectionActive.value) return false;
   return queryEditorRef.value?.requestExecute();
 }
 
+function requestQueryEditorExecuteAll() {
+  return queryEditorRef.value?.requestExecuteAll();
+}
+
 function captureQueryEditorExecutionSnapshot() {
+  if (!sourceSectionActive.value) return;
   return queryEditorRef.value?.captureExecutionSnapshot();
 }
 
 function requestQueryEditorExecuteInNewResultTab() {
+  if (!sourceSectionActive.value) return false;
   return queryEditorRef.value?.requestExecuteInNewResultTab();
 }
 
 function requestQueryEditorPreviewChanges(stackSql?: string) {
+  if (!sourceSectionActive.value) return Promise.resolve(false);
   return queryEditorRef.value?.requestPreviewChanges?.(stackSql);
 }
 
 function shouldBlockQueryEditorExecutionShortcut(event: KeyboardEvent) {
+  if (!sourceSectionActive.value) return true;
   return queryEditorRef.value?.shouldBlockExecutionShortcut?.(event) ?? false;
 }
 
@@ -1922,6 +2225,9 @@ function locateExecutionSummaryError(item: ExecutionSummaryItem) {
 }
 
 defineExpose({
+  focusSqlEditor,
+  focusResultGrid,
+  cancelResultGridFocus,
   focusSearch,
   focusWhere,
   openGoToColumn,
@@ -1931,6 +2237,7 @@ defineExpose({
   refreshQueryEditorCompletionCache,
   handleModRTarget,
   requestQueryEditorExecute,
+  requestQueryEditorExecuteAll,
   captureQueryEditorExecutionSnapshot,
   requestQueryEditorExecuteInNewResultTab,
   requestQueryEditorPreviewChanges,
@@ -1953,6 +2260,17 @@ defineExpose({
 
 <template>
   <div class="production-session-shell flex flex-col min-h-0" :class="[resultOnly ? 'h-full' : 'flex-1', { 'production-session-shell--active': activeProductionContext.active }]">
+    <OracleInvalidObjectsDialog
+      v-if="!resultOnly && triggerDiagnosticContext && triggerDiagnosticConnection"
+      :open="triggerDiagnosticOpen && triggerDiagnosticContext.originRevision === queryStore.oracleTriggerSourceState(triggerDiagnosticContext.originTabId)?.readVersion"
+      :connection="triggerDiagnosticConnection"
+      :database="triggerDiagnosticContext.target.database"
+      :schema="triggerDiagnosticContext.target.owner"
+      :trigger-context="triggerDiagnosticContext"
+      @update:open="triggerDiagnosticOpen = $event"
+      @open-source="returnFromTriggerSourceDiagnostics"
+      @trigger-result="acceptTriggerSourceDiagnosticResult"
+    />
     <div v-if="activeProductionContext.active" class="production-session-strip flex h-7 shrink-0 items-center gap-2 border-b border-red-500/35 bg-red-500/10 px-3 text-xs font-semibold text-red-800 shadow-[inset_0_1px_0_rgb(239_68_68_/_0.28)] dark:text-red-200">
       <ShieldAlert class="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
       <span class="font-mono uppercase tracking-normal">{{ t("production.title") }}</span>
@@ -1963,7 +2281,8 @@ defineExpose({
       <Splitpanes horizontal class="query-output-splitpanes flex-1 min-h-0 overflow-hidden" @resize="onResultsSplitResize" @resized="onResultsResized">
         <Pane v-if="!resultOnly" class="min-h-0" :size="editorPaneSize" :min-size="resultsPaneOpen ? 15 : 100">
           <div class="h-full flex flex-col relative">
-            <div v-if="activeTab.ddlViewer" class="flex h-10 shrink-0 items-center gap-2 border-b px-3">
+            <div v-if="activeTab.ddlViewer" class="flex min-h-10 shrink-0 flex-wrap items-center gap-2 border-b px-3 py-1">
+              <DdlStorageToggle :database-type="activeEffectiveDatabaseType" class="mr-auto" />
               <Button variant="outline" size="sm" :disabled="ddlRefreshInProgress" @click="refreshDdlViewer">
                 <RefreshCcw class="h-4 w-4" :class="ddlRefreshInProgress ? 'animate-spin' : ''" />
                 {{ t("structureEditor.refresh") }}
@@ -1973,93 +2292,123 @@ defineExpose({
                 {{ t("contextMenu.viewData") }}
               </Button>
             </div>
+            <div v-if="managedTypeSource && !activeTab.sourceLoad" class="flex min-h-10 shrink-0 flex-wrap items-center gap-2 border-b px-3 py-1.5" data-type-source-actions>
+              <Button v-if="!activeTab.typeSourceEditing && !unfinishedTypeChange && !verifiedTypeDeletion" variant="outline" size="sm" @click="activeTab.typeSourceEditing = true">{{ t("contextMenu.editObject") }}</Button>
+              <Button v-if="activeTab.typeSourceEditing && !unfinishedTypeChange && !verifiedTypeDeletion" size="sm" @click="emit('saveSql', activeTab.id)">{{ t("objects.typeManagementPreviewSave") }}</Button>
+              <Button v-if="unfinishedTypeChange" variant="outline" size="sm" @click="resumeTypeManagement">{{ t("objects.typeManagementResume") }}</Button>
+              <Button v-if="!unfinishedTypeChange && !verifiedTypeDeletion" variant="outline" size="sm" @click="refreshTypeSource">{{ t("structureEditor.refresh") }}</Button>
+              <span v-if="verifiedTypeDeletion" role="status" class="text-sm text-muted-foreground">{{ t("objects.typeManagementDeleted") }}</span>
+            </div>
             <ProductionWatermark v-if="activeProductionContext.active" />
-            <!-- issue #9035：源码 tab 先出现再加载。pending 期间不挂载编辑器
+            <ObjectDependenciesPanel :target="activeObjectDependencyTarget" :section="activeObjectSection" @update:section="setObjectSection" @view-sql="viewObjectDependencySql" @open-object="(context, target) => emit('openDependencyObject', context, target)">
+              <OracleTriggerStatus
+                v-if="queryStore.oracleTriggerSourceState(activeTab.id)"
+                :snapshot="queryStore.oracleTriggerSourceState(activeTab.id)?.baseline"
+                :result="queryStore.oracleTriggerSourceState(activeTab.id)?.result"
+                :source-issue="queryStore.oracleTriggerSourceState(activeTab.id)?.error"
+                :busy="queryStore.oracleTriggerSourceState(activeTab.id)?.busy"
+                @action="queryStore.runOracleTriggerSourceAction(activeTab.id, $event)"
+                @refresh="queryStore.refreshObjectSourceTab(activeTab.id)"
+                @parent="openTriggerSourceParent"
+                @diagnostics="openTriggerSourceDiagnostics"
+              />
+              <!-- issue #9035：源码 tab 先出现再加载。pending 期间不挂载编辑器
                  （还没有内容可编辑，也省下一次 Monaco 初始化），失败则就地重试。
                  issue #9387：DDL 新标签同样先出 tab 再加载，失败就地显示错误。 -->
-            <QueryLoadingState v-if="activeTab.sourceLoad && !activeTab.sourceLoad.error" class="relative z-0 flex-1" :elapsed-seconds="sourceLoadElapsedSeconds" />
-            <div v-else-if="activeTab.sourceLoad?.error" class="relative z-0 flex flex-1 min-h-0 flex-col items-center justify-center gap-3 px-6 text-sm" data-object-source-load-error>
-              <p class="max-w-[80%] text-center break-words text-destructive">{{ activeTab.sourceLoad.error }}</p>
-              <Button variant="outline" size="sm" class="gap-1.5" @click="queryStore.retryObjectSourceTab(activeTab.id)">
-                <RotateCcw class="h-4 w-4" />
-                {{ t("common.retry") }}
-              </Button>
-            </div>
-            <QueryLoadingState v-else-if="activeTab.ddlLoad && !activeTab.ddlLoad.error" class="relative z-0 flex-1" :elapsed-seconds="ddlLoadElapsedSeconds" />
-            <div v-else-if="activeTab.ddlLoad?.error" class="relative z-0 flex flex-1 min-h-0 flex-col items-center justify-center gap-3 px-6 text-sm" data-ddl-load-error>
-              <p class="max-w-[80%] text-center break-words text-destructive">{{ t("contextMenu.ddlRefreshFailed", { message: activeTab.ddlLoad.error }) }}</p>
-              <Button variant="outline" size="sm" class="gap-1.5" @click="queryStore.retryDdlViewerTab(activeTab.id)">
-                <RotateCcw class="h-4 w-4" />
-                {{ t("common.retry") }}
-              </Button>
-            </div>
-            <QueryEditor
-              v-else
-              ref="queryEditorRef"
-              class="relative z-0 flex-1"
-              :auto-focus="autoFocus !== false"
-              :model-value="activeTab.sql"
-              :tab-id="activeTab.id"
-              :connection-id="activeTab.connectionId"
-              :catalog="activeTab.catalog"
-              :database="activeTab.database"
-              :schema="activeTab.schema"
-              :client-session-id="activeTab.id"
-              :completion-context-version="activeTab.completionContextVersion"
-              :database-type="activeEffectiveDatabaseType"
-              :dialect="editorDialect"
-              :syntax-dialect="editorSyntaxDialect"
-              :format-dialect="activeSqlFormatDialect"
-              :format-request-id="formatSqlRequest?.tabId === activeTab.id ? formatSqlRequest.id : undefined"
-              :compress-request-id="compressSqlRequest?.tabId === activeTab.id ? compressSqlRequest.id : undefined"
-              :execution-error="activeQueryError"
-              :execution-error-sql="activeTab.lastExecutedSql"
-              :execution-error-result="activeQueryError ? activeTab.result : undefined"
-              :result-columns="activeTab.result?.columns"
-              :result-source-statement="activeTab.result?.sourceStatement"
-              :result-source-from="activeTab.result?.sourceFrom"
-              :result-source-to="activeTab.result?.sourceTo"
-              :statement-execution-markers="activeStatementExecutionMarkers"
-              :initial-viewport="activeTab.editorViewport"
-              :initial-selection="activeTab.editorSelection"
-              :reveal-request="activeTab.editorRevealRequest"
-              :force-word-wrap="activeTab.forceWordWrap"
-              :read-only="!!activeTab.ddlViewer"
-              :hide-execution-controls="!!activeTab.ddlViewer"
-              enable-explain-shortcut
-              :can-explain="!activeTab.isExecuting && !activeTab.isExplaining && !!executableSql.trim()"
-              @update:model-value="emit('editorUpdate', activeTab.id, $event)"
-              @selection-change="emit('editorSelectionChange', activeTab.id, $event)"
-              @send-selection-to-ai="emit('sendSelectionToAi', activeTab.id, $event)"
-              @cursor-change="emit('editorCursorChange', activeTab.id, $event)"
-              @preview-changes-available="emit('previewChangesAvailable', activeTab.id, $event)"
-              @viewport-change="(viewport, tabId) => emit('editorViewportChange', tabId ?? activeTab.id, viewport)"
-              @selection-state-change="emit('editorSelectionStateChange', activeTab.id, $event)"
-              @editor-state-flushed="emit('editorStateFlushed', activeTab.id)"
-              @editor-reveal-consumed="clearEditorRevealRequest(activeTab)"
-              @format-error="emit('formatError', activeTab.id)"
-              @execute="emit('execute', activeTab.id, $event)"
-              @execute-in-new-result-tab="emit('executeInNewResultTab', activeTab.id, $event)"
-              @explain="emit('explain', activeTab.id)"
-              @export-query="handleExportQuery"
-              @save="emit('saveSql', props.activeTab.id)"
-              @click-table="onHandleClickTable"
-              @view-table-data="onHandleViewTableData"
-              @edit-table-structure="onHandleEditTableStructure"
-              @view-table-ddl="onHandleViewTableDdl"
-              @open-object-source="onHandleOpenObjectSource"
-              @click-column="onHandleClickColumn"
-              @close-column-panel="onHandleCloseColumnPanel"
-            />
-            <ColumnInfoPanel
-              v-if="showColumnInfo"
-              :columns="columnInfoColumns"
-              :loading="columnInfoLoading"
-              :error="columnInfoError"
-              :database-type="activeEffectiveDatabaseType"
-              :is-gaussdb-m="activeEffectiveDatabaseType === 'gaussdb' && activeResultConnection?.driver_profile?.toLowerCase() === 'gaussdb-m'"
-              @close="closeColumnInfo"
-            />
+              <div v-if="retainTriggerSourceEditor && activeTab.sourceLoad" class="flex shrink-0 items-center gap-2 px-3 py-2 text-sm" data-object-source-refresh-state>
+                <Loader2 v-if="!activeTab.sourceLoad.error" class="h-4 w-4 animate-spin" />
+                <p v-if="activeTab.sourceLoad.error" class="min-w-0 flex-1 break-words text-destructive">{{ activeTab.sourceLoad.error }}</p>
+                <Button v-if="activeTab.sourceLoad.error" variant="outline" size="sm" @click="queryStore.retryObjectSourceTab(activeTab.id)">{{ t("common.retry") }}</Button>
+              </div>
+              <QueryLoadingState v-if="activeTab.sourceLoad && !activeTab.sourceLoad.error && !retainTriggerSourceEditor" class="relative z-0 flex-1" :elapsed-seconds="sourceLoadElapsedSeconds" />
+              <div v-else-if="activeTab.sourceLoad?.error && !retainTriggerSourceEditor" class="relative z-0 flex flex-1 min-h-0 flex-col items-center justify-center gap-3 px-6 text-sm" data-object-source-load-error>
+                <p class="max-w-[80%] text-center break-words text-destructive">{{ activeTab.sourceLoad.error }}</p>
+                <Button variant="outline" size="sm" class="gap-1.5" @click="queryStore.retryObjectSourceTab(activeTab.id)">
+                  <RotateCcw class="h-4 w-4" />
+                  {{ t("common.retry") }}
+                </Button>
+              </div>
+              <QueryLoadingState v-else-if="activeTab.ddlLoad && !activeTab.ddlLoad.error" class="relative z-0 flex-1" :elapsed-seconds="ddlLoadElapsedSeconds" />
+              <div v-else-if="activeTab.ddlLoad?.error" class="relative z-0 flex flex-1 min-h-0 flex-col items-center justify-center gap-3 px-6 text-sm" data-ddl-load-error>
+                <p class="max-w-[80%] text-center break-words text-destructive">{{ t("contextMenu.ddlRefreshFailed", { message: activeTab.ddlLoad.error }) }}</p>
+                <Button variant="outline" size="sm" class="gap-1.5" @click="queryStore.retryDdlViewerTab(activeTab.id)">
+                  <RotateCcw class="h-4 w-4" />
+                  {{ t("common.retry") }}
+                </Button>
+              </div>
+              <QueryEditor
+                v-else
+                ref="queryEditorRef"
+                class="relative z-0 flex-1"
+                :auto-focus="sourceSectionActive && autoFocus !== false"
+                :model-value="activeTab.sql"
+                :tab-id="activeTab.id"
+                :connection-id="activeTab.connectionId"
+                :prefetch-completion="activeTab.mode === 'query' && !activeTab.sourceView"
+                :catalog="activeTab.catalog"
+                :database="activeTab.database"
+                :schema="activeTab.schema"
+                :client-session-id="activeTab.id"
+                :completion-context-version="activeTab.completionContextVersion"
+                :database-type="activeEffectiveDatabaseType"
+                :mongo-query-language="activeTab.mongoQueryLanguage"
+                :dialect="editorDialect"
+                :syntax-dialect="editorSyntaxDialect"
+                :format-dialect="activeSqlFormatDialect"
+                :format-request-id="formatSqlRequest?.tabId === activeTab.id ? formatSqlRequest.id : undefined"
+                :compress-request-id="compressSqlRequest?.tabId === activeTab.id ? compressSqlRequest.id : undefined"
+                :keyword-case-request-id="keywordCaseRequest?.tabId === activeTab.id ? keywordCaseRequest.id : undefined"
+                :keyword-case-request-mode="keywordCaseRequest?.tabId === activeTab.id ? keywordCaseRequest.mode : undefined"
+                :execution-error="activeQueryError"
+                :execution-error-sql="activeTab.lastExecutedSql"
+                :execution-error-result="activeQueryError ? activeTab.result : undefined"
+                :result-columns="activeTab.result?.columns"
+                :result-source-statement="activeTab.result?.sourceStatement"
+                :result-source-from="activeTab.result?.sourceFrom"
+                :result-source-to="activeTab.result?.sourceTo"
+                :statement-execution-markers="activeStatementExecutionMarkers"
+                :initial-viewport="activeTab.editorViewport"
+                :initial-selection="activeTab.editorSelection"
+                :reveal-request="activeTab.editorRevealRequest"
+                :force-word-wrap="activeTab.forceWordWrap"
+                :read-only="!!activeTab.ddlViewer || (managedTypeSource && (!activeTab.typeSourceEditing || unfinishedTypeChange || verifiedTypeDeletion))"
+                :hide-execution-controls="!!activeTab.ddlViewer || managedTypeSource"
+                enable-explain-shortcut
+                :can-explain="!activeTab.isExecuting && !activeTab.isExplaining && hasExecutableSql"
+                :is-executing="activeTab.isExecuting"
+                @update:model-value="emit('editorUpdate', activeTab.id, $event)"
+                @selection-change="emit('editorSelectionChange', activeTab.id, $event)"
+                @send-selection-to-ai="emit('sendSelectionToAi', activeTab.id, $event)"
+                @cursor-change="emit('editorCursorChange', activeTab.id, $event)"
+                @preview-changes-available="emit('previewChangesAvailable', activeTab.id, $event)"
+                @viewport-change="(viewport, tabId) => emit('editorViewportChange', tabId ?? activeTab.id, viewport)"
+                @selection-state-change="emit('editorSelectionStateChange', activeTab.id, $event)"
+                @editor-state-flushed="emit('editorStateFlushed', activeTab.id)"
+                @editor-reveal-consumed="clearEditorRevealRequest(activeTab)"
+                @format-error="emit('formatError', activeTab.id)"
+                @execute="sourceSectionActive && emit('execute', activeTab.id, $event)"
+                @execute-in-new-result-tab="sourceSectionActive && emit('executeInNewResultTab', activeTab.id, $event)"
+                @explain="sourceSectionActive && emit('explain', activeTab.id)"
+                @export-query="handleExportQuery"
+                @save="sourceSectionActive && emit('saveSql', props.activeTab.id)"
+                @click-table="onHandleClickTable"
+                @view-table-data="onHandleViewTableData"
+                @edit-table-structure="onHandleEditTableStructure"
+                @view-table-ddl="onHandleViewTableDdl"
+                @open-object-source="onHandleOpenObjectSource"
+                @click-column="onHandleClickColumn"
+                @close-column-panel="onHandleCloseColumnPanel"
+              />
+              <ColumnInfoPanel
+                v-if="showColumnInfo"
+                :columns="columnInfoColumns"
+                :loading="columnInfoLoading"
+                :error="columnInfoError"
+                :database-type="activeEffectiveDatabaseType"
+                :is-gaussdb-m="activeEffectiveDatabaseType === 'gaussdb' && activeResultConnection?.driver_profile?.toLowerCase() === 'gaussdb-m'"
+                @close="closeColumnInfo"
+              />
+            </ObjectDependenciesPanel>
             <Button v-if="!editorOnly && hasQueryOutput && !resultsPaneOpen" variant="secondary" size="sm" class="absolute bottom-3 right-3 z-20 h-7 gap-1.5 rounded-full border bg-background/95 px-3 text-xs shadow-lg hover:bg-accent" @click="resultsPaneOpen = true">
               <ChevronUp class="h-3.5 w-3.5" />
               {{ t("editor.showResultsPane") }}
@@ -2067,7 +2416,7 @@ defineExpose({
           </div>
         </Pane>
         <Pane v-if="(resultsPaneOpen || resultOnly) && !editorOnly" class="min-h-0" :size="resultOnly ? 100 : resultsPaneSize" :min-size="resultOnly ? 100 : 20">
-          <div class="h-full flex flex-col">
+          <div data-query-result-surface class="h-full flex flex-col">
             <!--
               The shared result surface (resultOnly) is always mounted regardless of
               whether the active tab has run a query yet, and this toolbar is the only
@@ -2105,6 +2454,7 @@ defineExpose({
                           role="presentation"
                           class="group/result-run inline-flex h-7 shrink-0 select-none items-center overflow-hidden rounded-md border transition-colors"
                           :class="run.active ? 'border-border bg-background text-foreground shadow-sm' : 'border-transparent text-muted-foreground hover:border-border/70 hover:bg-background/70 hover:text-foreground'"
+                          :style="resultRunColorStyle(run.id, run.active)"
                           @contextmenu="onContextMenu"
                           @mousedown.middle.stop.prevent="removeResultRun(run.id)"
                         >
@@ -2120,6 +2470,7 @@ defineExpose({
                             @keydown="onResultRunTabKeydown($event, runIndex)"
                             @mousedown.middle.stop.prevent="removeResultRun(run.id)"
                           >
+                            <span v-if="resultRunColor(run.id)" data-result-connection-color class="h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: resultRunColor(run.id) }" aria-hidden="true" />
                             <Pin v-if="run.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
                             {{ run.title || run.sourceLabel || resultRunFallbackLabel(run.sequence) }}
                           </button>
@@ -2141,6 +2492,7 @@ defineExpose({
                   <DropdownMenu>
                     <DropdownMenuTrigger as-child>
                       <Button variant="ghost" size="sm" class="h-6 max-w-48 gap-1 px-2 text-xs">
+                        <span v-if="activeResultColor" data-result-connection-color class="h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: activeResultColor }" aria-hidden="true" />
                         <span class="min-w-0 truncate">{{ activeResultRunItem ? activeResultRunItem.title || activeResultRunItem.sourceLabel || resultRunFallbackLabel(activeResultRunItem.sequence) : t("tabs.resultRuns") }}</span>
                         <ChevronDown class="h-3.5 w-3.5 shrink-0" />
                       </Button>
@@ -2148,6 +2500,7 @@ defineExpose({
                     <DropdownMenuContent align="start" class="w-48">
                       <CustomContextMenu v-for="run in resultRuns" :key="run.id" :items="() => resultRunContextMenuItems(run)" v-slot="{ onContextMenu }">
                         <DropdownMenuItem class="flex items-center gap-2 pr-1" @select="selectResultRunFromTab(run.id)" @contextmenu="onContextMenu" @mousedown.middle.stop.prevent="removeResultRun(run.id)">
+                          <span v-if="resultRunColor(run.id)" data-result-connection-color class="h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: resultRunColor(run.id) }" aria-hidden="true" />
                           <Check v-if="run.active" class="h-3.5 w-3.5 shrink-0" />
                           <span v-else class="h-3.5 w-3.5 shrink-0" />
                           <Pin v-if="run.pinned" class="h-3 w-3 shrink-0 fill-current text-primary" />
@@ -2176,6 +2529,7 @@ defineExpose({
                   :can-export-xlsx="activeOutputView === 'result' && redisResultViewMode === 'grid' && !!activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse"
                   :active-index="activeTab.activeResultIndex ?? 0"
                   :active="activeOutputView === 'result'"
+                  :connection-color="activeResultColor"
                   :display-mode="resultRunDisplayMode"
                   :has-sibling-run-tabs="resultRuns.length > 0"
                   @select="selectResultItem"
@@ -2186,7 +2540,7 @@ defineExpose({
               </template>
               <div class="ml-auto flex shrink-0 items-center gap-1">
                 <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson">
-                  <DataGridColumnLayoutPopover :grid="dataGridRef" trigger-class="px-1.5" />
+                  <DataGridColumnLayoutPopover :grid="dataGridRef" trigger-class="px-1.5" :compact="hideToolbarLabels" />
                   <LightTooltip v-if="dataGridRef?.goToColumnToolbarCapability?.visible" :text="dataGridRef.goToColumnToolbarCapability.tooltip ?? dataGridRef.goToColumnToolbarCapability.label" side="bottom" nowrap>
                     <Button
                       data-toolbar-action="navigation"
@@ -2199,7 +2553,7 @@ defineExpose({
                       @click="dataGridRef.goToColumnToolbarCapability.onTrigger()"
                     >
                       <Columns3 class="h-3.5 w-3.5" />
-                      {{ dataGridRef.goToColumnToolbarCapability.label }}
+                      <span v-if="!hideToolbarLabels">{{ dataGridRef.goToColumnToolbarCapability.label }}</span>
                     </Button>
                   </LightTooltip>
                   <LightTooltip v-if="dataGridRef?.tableInfoToolbarCapability?.visible" :text="t('contextMenu.viewDdl')" side="bottom" nowrap>
@@ -2214,7 +2568,7 @@ defineExpose({
                       @click="dataGridRef.tableInfoToolbarCapability.onTrigger()"
                     >
                       <TableProperties class="h-3.5 w-3.5" />
-                      DDL
+                      <span v-if="!hideToolbarLabels">DDL</span>
                     </Button>
                   </LightTooltip>
                 </template>
@@ -2459,6 +2813,32 @@ defineExpose({
                     </div>
                     <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
                       <div class="min-w-0 flex items-center gap-2 font-medium">
+                        <Binary class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span>{{ t("grid.booleanValueStyle") }}</span>
+                      </div>
+                      <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                        <button
+                          type="button"
+                          class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                          :disabled="booleanDisplayMode === 'checkbox'"
+                          :class="booleanValueStyle === 'true-false' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          @click="setBooleanValueStyle('true-false')"
+                        >
+                          {{ t("grid.booleanValueTrueFalse") }}
+                        </button>
+                        <button
+                          type="button"
+                          class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                          :disabled="booleanDisplayMode === 'checkbox'"
+                          :class="booleanValueStyle === 'zero-one' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                          @click="setBooleanValueStyle('zero-one')"
+                        >
+                          {{ t("grid.booleanValueZeroOne") }}
+                        </button>
+                      </div>
+                    </div>
+                    <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                      <div class="min-w-0 flex items-center gap-2 font-medium">
                         <Palette class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                         <span>{{ t("grid.colorizeDataTypes") }}</span>
                       </div>
@@ -2473,6 +2853,9 @@ defineExpose({
                       <Switch size="sm" :model-value="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" :aria-label="t('grid.hideNullColumns')" @update:model-value="dataGridRef?.toggleAllNullColumns()" />
                     </div>
                     <DataGridEmptyColumnsControl :count="dataGridRef?.allEmptyColumnCount" :column-count="dataGridRef?.displayableColumnCount" />
+                    <DataGridFreezeFirstColumnControl />
+                    <DataGridStatusSqlControl />
+                    <DataGridExportOptionsControl query-result />
                     <DataGridCopyFormatControl
                       :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
                       :current-value="dataGridRef?.defaultCopyPreference ?? ''"
@@ -2503,7 +2886,7 @@ defineExpose({
                 :result-mode="redisResultViewMode"
                 :message-count="resultMessageCount"
                 :compact="standaloneResultToolbarCompact"
-                @select-view="emit('update:activeOutputView', activeTab.id, $event)"
+                @select-view="selectOutputView(activeTab.id, $event)"
                 @select-result-mode="setRedisResultViewMode"
               />
               <QueryResultToolbarActions
@@ -2511,15 +2894,38 @@ defineExpose({
                 :active-view="activeOutputView"
                 :can-show-explain="canShowExplainOutput"
                 :can-show-profile="canShowProfile"
-                :can-export-archive="canExportResultArchive"
+                :can-export-archive="canExportResultArchive && settingsStore.editorSettings.showSaveResult"
                 :archive-exporting="resultArchiveExporting"
-                :compact="standaloneResultToolbarCompact"
+                :compact="standaloneResultToolbarCompact || hideToolbarLabels"
                 :has-result="!!activeTab.result"
-                @select-explain="emit('update:activeOutputView', activeTab.id, 'explain')"
-                @select-profile="emit('update:activeOutputView', activeTab.id, 'profile')"
+                @select-explain="selectOutputView(activeTab.id, 'explain')"
+                @select-profile="selectOutputView(activeTab.id, 'profile')"
                 @export-archive="exportResultArchive"
                 @open-result-view="openPluginResultView"
-              />
+              >
+                <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && dataGridRef">
+                  <DataGridExportMenu
+                    v-if="settingsStore.editorSettings.dataGridExportInToolbar"
+                    :items="dataGridRef.exportMenuItems"
+                    :warning="dataGridRef.exportWarning"
+                    :label="t('grid.export')"
+                    :compact="standaloneResultToolbarCompact || hideToolbarLabels"
+                    :on-select="dataGridRef.selectExportMenuItem"
+                  />
+                  <Button
+                    v-if="settingsStore.editorSettings.dataGridLoadAllInToolbar && dataGridRef.loadAllToolbarState?.visible"
+                    variant="ghost"
+                    size="sm"
+                    class="h-5 shrink-0 gap-1 px-2 text-xs"
+                    :disabled="dataGridRef.loadAllToolbarState.disabled"
+                    :title="t('grid.loadAllAndGoToLastRow')"
+                    :aria-label="t('grid.loadAllAndGoToLastRow')"
+                    @click="dataGridRef.loadAllRowsAndGoToLast()"
+                  >
+                    <ChevronsDown class="h-3.5 w-3.5" /><span v-if="!standaloneResultToolbarCompact && !hideToolbarLabels">{{ t("grid.loadAllRows") }}</span>
+                  </Button>
+                </template>
+              </QueryResultToolbarActions>
             </div>
 
             <div v-if="activeTab.redisMonitorActive" class="flex shrink-0 items-center justify-between border-b px-3 py-1 text-xs text-muted-foreground">
@@ -2555,12 +2961,12 @@ defineExpose({
             />
 
             <div v-else-if="activeOutputView === 'summary'" class="flex flex-1 min-h-0 min-w-0 overflow-auto bg-background">
-              <div v-if="summaryItems.length === 0" class="flex h-full items-center justify-center text-sm text-muted-foreground">
+              <div v-if="summaryItems.length === 0" class="flex flex-1 h-full min-w-0 items-center justify-center text-sm text-muted-foreground">
                 <Loader2 v-if="activeTab.isExecuting" class="mr-2 h-4 w-4 animate-spin" />
                 <template v-if="activeTab.isExecuting">{{ t("executionSummary.executing") }}</template>
                 <template v-else>{{ t("executionSummary.empty") }}</template>
               </div>
-              <div v-else class="flex min-h-full min-w-[46rem] flex-col">
+              <div v-else class="flex flex-1 min-h-full min-w-[46rem] flex-col">
                 <div v-if="batchExecutionProgress" class="z-10 shrink-0 border-b bg-background/95 px-3 py-2 backdrop-blur">
                   <div class="mb-1.5 flex items-center gap-3 text-xs">
                     <span class="font-medium">{{ activeTab.isExecuting ? t("executionSummary.executing") : t("executionSummary.finished") }}</span>
@@ -2675,12 +3081,14 @@ defineExpose({
               <ElasticsearchJsonResponsePanel v-if="activeElasticsearchJsonResponse" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="activeElasticsearchJsonResponse.status" :body="activeElasticsearchJsonResponse.body" />
               <ElasticsearchJsonResponsePanel v-else-if="showElasticsearchRawJson && activeElasticsearchRawBody" ref="elasticsearchJsonResponsePanelRef" class="flex-1 min-h-0" :status="200" :body="activeElasticsearchRawBody" can-show-table @show-table="showElasticsearchRawJson = false" />
               <DataGrid
-                v-else-if="activeTab.result && hasTabularResult"
+                v-else-if="activeTab.result && hasTabularResult && (!activeTab.isExecuting || !isQueryExecutionErrorResult(activeTab.result))"
                 ref="dataGridRef"
+                @open-dependency-object="(context, target) => emit('openDependencyObject', context, target)"
                 :key="activeResultGridInstanceKey"
                 :cache-key="activeResultGridCacheKey"
                 :column-width-cache-key="activeResultGridColumnWidthCacheKey"
                 :pending-state-key="activeResultGridInstanceKey"
+                :tab-id="activeTab.id"
                 :view-generation="activeTab.resultViewGeneration"
                 class="flex-1 min-h-0"
                 :result="activeGridResult!"
@@ -2694,6 +3102,7 @@ defineExpose({
                 :export-sql="activeResultExportSql"
                 :page-sql="activeTab.resultPageSql"
                 :loading="activeResultIsLoading"
+                :busy-started-at="activeTab.isExecuting ? activeTab.queryExecutionStartedAt : undefined"
                 :editable="!hasNeo4jNodes && (!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler)"
                 :source-columns="hasNeo4jNodes ? undefined : activeTab.querySourceColumns"
                 :joined-write-targets="hasNeo4jNodes ? undefined : activeTab.queryWriteTargets"
@@ -2701,6 +3110,7 @@ defineExpose({
                 :has-unique-query-insert-target="!!activeTab.tableMeta && activeTab.queryAnalysis?.multiSource !== true && (activeTab.queryAnalysis?.sources?.length ?? 1) === 1 && (activeTab.queryWriteTargets?.length ?? 1) <= 1"
                 :readonly-column-indexes="hasNeo4jNodes ? undefined : groupedQueryReadonlyColumnIndexes(activeTab)"
                 :result-column-comments="hasNeo4jNodes ? undefined : activeTab.resultColumnComments"
+                :result-column-type-labels="hasNeo4jNodes ? undefined : activeTab.resultColumnTypeLabels"
                 :query-display-source-columns="hasNeo4jNodes ? undefined : activeTab.queryDisplaySourceColumns"
                 :custom-save-handler="mongoQueryResultSaveHandler"
                 :mongo-update-target="mongoQueryResultSaveHandler && activeTab.result.mongo_copy_documents?.length === activeTab.result.rows.length ? activeTab.mongoEditTarget : undefined"
@@ -2731,6 +3141,8 @@ defineExpose({
                 :page-jump-progress="activeTab.resultPageJumpProgress"
                 :on-execute-sql="async (sql: string) => emit('executeSql', activeTab.id, sql)"
                 :full-export-result="fetchGridResultForExport"
+                :capture-full-export-result="captureGridResultForExport"
+                :capture-query-result-export-request="hasNeo4jNodes ? undefined : (queued: boolean) => queryStore.captureQueryResultExportRequest(activeTab.id, queued)"
                 :transfer-query-result="openQueryResultTransfer"
                 :query-result-export-request="
                   hasNeo4jNodes
@@ -2772,7 +3184,7 @@ defineExpose({
                     :result-mode="redisResultViewMode"
                     :message-count="resultMessageCount"
                     :compact="compact"
-                    @select-view="emit('update:activeOutputView', activeTab.id, $event)"
+                    @select-view="selectOutputView(activeTab.id, $event)"
                     @select-result-mode="setRedisResultViewMode"
                   />
                   <template v-if="activeElasticsearchRawBody">
@@ -2794,10 +3206,12 @@ defineExpose({
                       class="inline-flex h-5 shrink-0 items-center gap-1 rounded-sm border border-transparent px-2 text-xs leading-none transition-colors"
                       :class="activeOutputView === 'profile' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'"
                       :aria-pressed="activeOutputView === 'profile'"
-                      @click="emit('update:activeOutputView', activeTab.id, activeOutputView === 'profile' ? 'result' : 'profile')"
+                      :aria-label="t('profile.title')"
+                      :title="t('profile.title')"
+                      @click="selectOutputView(activeTab.id, activeOutputView === 'profile' ? 'result' : 'profile')"
                     >
                       <Gauge class="h-3.5 w-3.5" />
-                      {{ t("profile.title") }}
+                      <span v-if="!hideToolbarLabels">{{ t("profile.title") }}</span>
                     </button>
                   </template>
                 </template>
@@ -2806,15 +3220,31 @@ defineExpose({
                     :active-view="activeOutputView"
                     :can-show-explain="canShowExplainOutput"
                     :can-show-profile="canShowProfile"
-                    :can-export-archive="canExportResultArchive"
+                    :can-export-archive="canExportResultArchive && settingsStore.editorSettings.showSaveResult"
                     :archive-exporting="resultArchiveExporting"
                     :compact="compact"
                     :has-result="!!activeTab.result"
-                    @select-explain="emit('update:activeOutputView', activeTab.id, 'explain')"
-                    @select-profile="emit('update:activeOutputView', activeTab.id, 'profile')"
+                    @select-explain="selectOutputView(activeTab.id, 'explain')"
+                    @select-profile="selectOutputView(activeTab.id, 'profile')"
                     @export-archive="exportResultArchive"
                     @open-result-view="openPluginResultView"
-                  />
+                  >
+                    <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && dataGridRef">
+                      <DataGridExportMenu v-if="settingsStore.editorSettings.dataGridExportInToolbar" :items="dataGridRef.exportMenuItems" :warning="dataGridRef.exportWarning" :label="t('grid.export')" :compact="compact" :on-select="dataGridRef.selectExportMenuItem" />
+                      <Button
+                        v-if="settingsStore.editorSettings.dataGridLoadAllInToolbar && dataGridRef.loadAllToolbarState?.visible"
+                        variant="ghost"
+                        size="sm"
+                        class="h-5 shrink-0 gap-1 px-2 text-xs"
+                        :disabled="dataGridRef.loadAllToolbarState.disabled"
+                        :title="t('grid.loadAllAndGoToLastRow')"
+                        :aria-label="t('grid.loadAllAndGoToLastRow')"
+                        @click="dataGridRef.loadAllRowsAndGoToLast()"
+                      >
+                        <ChevronsDown class="h-3.5 w-3.5" /><span v-if="!compact">{{ t("grid.loadAllRows") }}</span>
+                      </Button>
+                    </template>
+                  </QueryResultToolbarActions>
                 </template>
                 <template v-if="activeTab.result && isQueryExecutionErrorResult(activeTab.result)" #error-actions="{ errorMessage }">
                   <QueryErrorActions
@@ -2830,7 +3260,7 @@ defineExpose({
                 </template>
               </DataGrid>
               <QueryLoadingState
-                v-else-if="!activeTab.result && activeTab.isExecuting"
+                v-else-if="activeTab.isExecuting && (!activeTab.result || !hasTabularResult || isQueryExecutionErrorResult(activeTab.result))"
                 class="flex-1 min-h-0"
                 :label-key="queryExecutionLabelKey(activeTab)"
                 :elapsed-seconds="queryRunningElapsedSeconds"
@@ -2859,44 +3289,51 @@ defineExpose({
     <template v-else-if="activeTab.mode === 'data'">
       <div class="flex-1 min-h-0 flex flex-col">
         <div ref="dataToolbarRef" class="h-9 shrink-0 border-b bg-background/80 px-3 flex items-center gap-2 text-xs overflow-hidden">
-          <!-- No fixed max-w cap on these chips: they must flex (truncate)
-               so long names only clip when the header row itself runs out
-               (#7880). The min-w floor keeps scrollWidth reporting real
-               overflow so the measured tiers condense the row before the
-               chips collapse. -->
-          <button
-            v-if="activeConnection?.name?.trim()"
-            type="button"
-            data-data-header-connection
-            class="inline-flex min-w-12 items-center truncate rounded border border-border bg-muted/30 px-2 py-0.5 text-muted-foreground cursor-pointer hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
-            :title="activeConnection.name"
-            :disabled="!activeTab.connectionId"
-            @click="queryStore.openDatabaseBrowser(activeTab.connectionId)"
-          >
-            {{ activeConnection.name }}
-          </button>
-          <span class="inline-flex min-w-12 items-center truncate rounded border border-border bg-muted/50 px-2 py-0.5 font-medium" :title="activeDataTabTableMeta?.tableName || activeTab.title">
-            {{ activeDataTabTableMeta?.tableName || activeTab.title }}
-          </span>
-          <button
-            type="button"
-            data-data-header-database
-            class="inline-flex min-w-12 items-center truncate rounded border border-border bg-muted/30 px-2 py-0.5 text-muted-foreground cursor-pointer hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
-            :title="[activeDataTabTableMeta?.schema, databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t)].filter(Boolean).join('@')"
-            :disabled="!activeTab.connectionId || !activeTab.database"
-            @click="queryStore.openObjectBrowser(activeTab.connectionId, activeTab.database, activeDataTabTableMeta?.schema, activeDataTabTableMeta?.catalog)"
-          >
-            <template v-if="activeDataTabTableMeta?.schema">{{ activeDataTabTableMeta.schema }}@</template>{{ databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t) }}
-          </button>
-          <span v-if="showDataColumnsChip && activeDataTabTableMeta" class="inline-flex shrink-0 items-center rounded border border-border bg-muted/30 px-2 py-0.5 font-medium text-muted-foreground tabular-nums"> {{ activeDataTabTableMeta.columns.length }} {{ t("tree.columns") }} </span>
-          <span class="ml-auto" />
+          <!-- Context breadcrumb. The connection and database segments are
+               capped so a long connection name can never eat half the row;
+               the table name gets the remaining room and is the only filled
+               segment, which keeps the hierarchy obvious at a glance. -->
+          <div class="flex min-w-[18rem] flex-1 items-center gap-1 overflow-hidden">
+            <button
+              v-if="activeConnection?.name?.trim()"
+              type="button"
+              data-data-header-connection
+              class="inline-flex max-w-[13rem] shrink items-center gap-1 rounded text-muted-foreground cursor-pointer hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+              :class="dataToolbarCompact ? 'w-5 justify-center px-0.5' : 'min-w-[3.5rem] px-1 py-0.5'"
+              :title="activeConnection.name"
+              :aria-label="activeConnection.name"
+              :disabled="!activeTab.connectionId"
+              @click="queryStore.openDatabaseBrowser(activeTab.connectionId)"
+            >
+              <Database class="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
+              <span v-if="!dataToolbarCompact" class="truncate">{{ activeConnection.name }}</span>
+            </button>
+            <span v-if="activeConnection?.name?.trim()" class="shrink-0 text-muted-foreground/40" aria-hidden="true">/</span>
+            <button
+              type="button"
+              data-data-header-database
+              class="inline-flex min-w-[2.5rem] max-w-[12rem] shrink items-center rounded px-1 py-0.5 text-muted-foreground cursor-pointer hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none"
+              :title="[activeDataTabTableMeta?.schema, databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t)].filter(Boolean).join('@')"
+              :disabled="!activeTab.connectionId || !activeTab.database"
+              @click="queryStore.openObjectBrowser(activeTab.connectionId, activeTab.database, activeDataTabTableMeta?.schema, activeDataTabTableMeta?.catalog)"
+            >
+              <span class="truncate"
+                ><template v-if="activeDataTabTableMeta?.schema">{{ activeDataTabTableMeta.schema }}@</template>{{ databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t) }}</span
+              >
+            </button>
+            <ChevronRight class="h-3 w-3 shrink-0 text-muted-foreground/40" aria-hidden="true" />
+            <span class="inline-flex min-w-[6rem] items-center rounded-md bg-muted/60 px-2 py-0.5 font-medium text-foreground" :title="activeDataTabTableMeta?.tableName || activeTab.title">
+              <span class="truncate">{{ activeDataTabTableMeta?.tableName || activeTab.title }}</span>
+            </span>
+            <span v-if="showDataColumnsChip && activeDataTabTableMeta" class="shrink-0 whitespace-nowrap text-muted-foreground tabular-nums">{{ activeDataTabTableMeta.columns.length }} {{ t("tree.columns") }}</span>
+          </div>
           <LightTooltip v-if="dataGridRef?.canOpenTableStructureEditor" :text="t('contextMenu.editStructure')" side="bottom" nowrap>
             <Button data-edit-table-structure variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :aria-label="t('contextMenu.editStructure')" @click="dataGridRef?.openTableStructureEditor('columns')">
               <PencilRuler class="h-3.5 w-3.5" />
-              <span v-if="!dataToolbarCompact">{{ t("contextMenu.editStructure") }}</span>
+              <span v-if="!dataToolbarCompact && !hideToolbarLabels">{{ t("contextMenu.editStructure") }}</span>
             </Button>
           </LightTooltip>
-          <DataGridColumnLayoutPopover v-if="activeTab.result?.columns.length" :grid="dataGridRef" trigger-class="px-1.5" />
+          <DataGridColumnLayoutPopover v-if="activeTab.result?.columns.length" :grid="dataGridRef" trigger-class="px-1.5" :compact="hideToolbarLabels" />
           <LightTooltip v-if="dataGridRef?.goToColumnToolbarCapability?.visible" :text="dataGridRef.goToColumnToolbarCapability.tooltip ?? dataGridRef.goToColumnToolbarCapability.label" side="bottom" nowrap>
             <Button
               data-toolbar-action="navigation"
@@ -2908,16 +3345,24 @@ defineExpose({
               :aria-pressed="dataGridRef.goToColumnToolbarCapability.active"
               @click="dataGridRef.goToColumnToolbarCapability.onTrigger()"
             >
-              <Columns3 class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact">{{ dataGridRef.goToColumnToolbarCapability.label }}</span>
+              <Columns3 class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact && !hideToolbarLabels">{{ dataGridRef.goToColumnToolbarCapability.label }}</span>
             </Button>
           </LightTooltip>
-          <Button v-if="activeTab.result && activeDataTabTableMeta && activeTab.connectionId" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="{ 'bg-accent': dataGridRef?.showDdl }" :title="dataToolbarCompact ? t('grid.tableInfo') : undefined" @click="dataGridRef?.toggleDdl()"
-            ><TableProperties class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact">{{ t("grid.tableInfo") }}</span></Button
+          <Button
+            v-if="activeTab.result && activeDataTabTableMeta && activeTab.connectionId"
+            variant="ghost"
+            size="sm"
+            class="h-5 text-xs px-1.5 shrink-0"
+            :class="{ 'bg-accent': dataGridRef?.showDdl }"
+            :title="dataToolbarCompact || hideToolbarLabels ? t('grid.tableInfo') : undefined"
+            :aria-label="t('grid.tableInfo')"
+            @click="dataGridRef?.toggleDdl()"
+            ><TableProperties class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact && !hideToolbarLabels">{{ t("grid.tableInfo") }}</span></Button
           >
           <DropdownMenu v-if="activeTab.result && activeDataTabTableMeta && activeTab.connectionId">
             <DropdownMenuTrigger as-child>
-              <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :title="t('tableToolbox.title')"
-                ><Toolbox class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact">{{ t("tableToolbox.title") }}</span></Button
+              <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :title="t('tableToolbox.title')" :aria-label="t('tableToolbox.title')"
+                ><Toolbox class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact && !hideToolbarLabels">{{ t("tableToolbox.title") }}</span></Button
               >
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" class="w-max min-w-44 gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-xl">
@@ -2942,7 +3387,7 @@ defineExpose({
                     <DropdownMenuSubContent>
                       <DropdownMenuItem @click="dataGridRef?.exportCsv()"> CSV </DropdownMenuItem>
                       <DropdownMenuItem @click="dataGridRef?.exportJson()"> JSON </DropdownMenuItem>
-                      <DropdownMenuItem @click="dataGridRef?.exportSql()"> SQL INSERT </DropdownMenuItem>
+                      <DropdownMenuItem v-if="!mysqlDataCharsetEnabled(activeConnection)" @click="dataGridRef?.exportSql()"> SQL INSERT </DropdownMenuItem>
                       <DropdownMenuItem @click="dataGridRef?.exportXlsx()"> XLSX </DropdownMenuItem>
                     </DropdownMenuSubContent>
                   </DropdownMenuPortal>
@@ -3161,6 +3606,32 @@ defineExpose({
               </div>
               <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
                 <div class="min-w-0 flex items-center gap-2 font-medium">
+                  <Binary class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>{{ t("grid.booleanValueStyle") }}</span>
+                </div>
+                <div class="grid w-32 grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                  <button
+                    type="button"
+                    class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                    :disabled="booleanDisplayMode === 'checkbox'"
+                    :class="booleanValueStyle === 'true-false' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                    @click="setBooleanValueStyle('true-false')"
+                  >
+                    {{ t("grid.booleanValueTrueFalse") }}
+                  </button>
+                  <button
+                    type="button"
+                    class="h-5 min-w-0 truncate whitespace-nowrap rounded-[5px] px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                    :disabled="booleanDisplayMode === 'checkbox'"
+                    :class="booleanValueStyle === 'zero-one' ? 'bg-background font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                    @click="setBooleanValueStyle('zero-one')"
+                  >
+                    {{ t("grid.booleanValueZeroOne") }}
+                  </button>
+                </div>
+              </div>
+              <div class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                <div class="min-w-0 flex items-center gap-2 font-medium">
                   <Palette class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   <span>{{ t("grid.colorizeDataTypes") }}</span>
                 </div>
@@ -3175,6 +3646,9 @@ defineExpose({
                 <Switch size="sm" :model-value="!!dataGridRef?.nullColumnsHidden" :disabled="!dataGridRef?.canToggleAllNullColumns" :aria-label="t('grid.hideNullColumns')" @update:model-value="dataGridRef?.toggleAllNullColumns()" />
               </div>
               <DataGridEmptyColumnsControl :count="dataGridRef?.allEmptyColumnCount" :column-count="dataGridRef?.displayableColumnCount" />
+              <DataGridFreezeFirstColumnControl />
+              <DataGridStatusSqlControl />
+              <DataGridExportOptionsControl />
               <DataGridCopyFormatControl
                 :current-label="dataGridRef?.defaultCopyPreferenceLabel ?? '-'"
                 :current-value="dataGridRef?.defaultCopyPreference ?? ''"
@@ -3186,8 +3660,9 @@ defineExpose({
           </Popover>
         </div>
         <DataGrid
-          v-if="activeTab.result"
+          v-if="activeTab.result && (!activeTab.isExecuting || !isQueryExecutionErrorResult(activeTab.result))"
           ref="dataGridRef"
+          @open-dependency-object="(context, target) => emit('openDependencyObject', context, target)"
           class="flex-1 min-h-0"
           :key="activeTab.id"
           :cache-key="activeTab.id"
@@ -3201,9 +3676,12 @@ defineExpose({
           :sql="activeTab.sql"
           :page-sql="activeTab.resultPageSql || activeTab.sql"
           :loading="activeTab.isExecuting"
-          :editable="!activeTab.tableMetaPending && (isTableDataEditable(activeEffectiveDatabaseType, activeTableMeta?.primaryKeys ?? [], activeTableMeta?.tableType) || !!influxDbV1DeleteSaveHandler)"
+          :busy-started-at="activeTab.isExecuting ? activeTab.queryExecutionStartedAt : undefined"
+          :editable="!activeTab.tableMetaPending && (isTableDataEditable(activeEffectiveDatabaseType, activeDataTabTableMeta?.primaryKeys ?? [], activeDataTabTableMeta?.tableType) || !!influxDbV1DeleteSaveHandler)"
           :custom-save-handler="influxDbV1DeleteSaveHandler"
+          :tab-id="activeTab.id"
           context="table-data"
+          @view-sql="viewTableSql"
           :initial-where-input="activeTab.whereInput"
           :database-type="activeEffectiveDatabaseType"
           :connection-id="activeTab.connectionId"
@@ -3221,6 +3699,7 @@ defineExpose({
           :total-row-count-loading="activeTab.resultTotalRowCountLoading"
           :on-execute-sql="async (sql: string) => emit('executeSql', activeTab.id, sql)"
           :full-export-result="(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => queryStore.fetchTabResultForExport(activeTab.id, onProgress)"
+          :capture-full-export-result="() => queryStore.captureTabResultForExport(activeTab.id)"
           :export-file-base-name="activeTab.title"
           :show-cancel="shouldShowCancelAction(activeTab)"
           :cancelling="activeTab.isCancelling"
@@ -3483,10 +3962,31 @@ defineExpose({
           :initial-event-open-request-id="activeTab.objectBrowser?.eventOpenRequestId"
           :initial-event-create-request-id="activeTab.objectBrowser?.eventCreateRequestId"
           :initial-object-filter="activeTab.objectBrowser?.initialObjectFilter"
+          :initial-index-create-request-id="activeTab.objectBrowser?.indexCreateRequestId"
+          :initial-view-target="activeTab.objectBrowser?.initialViewTarget"
+          :initial-view-request-id="activeTab.objectBrowser?.initialViewRequestId"
+          @index-request-consumed="
+            (kind) => {
+              if (activeTab.objectBrowser) {
+                if (kind === 'create') activeTab.objectBrowser.indexCreateRequestId = undefined;
+                else {
+                  activeTab.objectBrowser.initialViewTarget = undefined;
+                  activeTab.objectBrowser.initialViewRequestId = undefined;
+                }
+              }
+            }
+          "
           :selected-object-filter="activeTab.objectBrowser?.filter"
           :initial-search-query="activeTab.objectBrowser?.searchQuery"
           :viewport="activeTab.objectBrowser?.viewport"
+          :property-request="activeTab.objectPropertiesRequest"
+          @property-request-consumed="
+            (id) => {
+              if (activeTab.objectPropertiesRequest?.requestId === id) activeTab.objectPropertiesRequest = undefined;
+            }
+          "
           @open-table="emit('openObjectTable', activeTab.id, $event)"
+          @open-dependency-object="(context, target) => emit('openDependencyObject', context, target)"
           @locate-table="onLocateObjectTable"
           @schema-change="emit('objectSchemaChange', activeTab.id, $event)"
           @viewport-change="emit('objectBrowserViewportChange', activeTab.id, $event)"
@@ -3508,18 +4008,24 @@ defineExpose({
           :catalog="activeTab.catalog"
           :schema="activeTab.schema"
           :table-name="activeTab.structureTableName || ''"
+          :origin-tab-id="activeTab.id"
           :table-type="activeTab.structureTableType"
+          :exact-identity="activeTab.structureExactIdentity"
           :initial-tab="activeTab.structureInitialTab"
           :initial-tab-request-id="activeTab.structureInitialTabRequestId"
           :initial-target="activeTab.structureInitialTarget"
           :draft="activeTab.structureDraft"
-          @update:draft="(draft) => (activeTab.structureDraft = draft)"
-          @saved="(commentChanged, createdTableName) => emit('structureEditorSaved', activeTab.id, commentChanged, createdTableName)"
+          @update:draft="updateStructureDraft"
+          @saved="(commentChanged, createdTableName, originTabId) => emit('structureEditorSaved', originTabId || activeTab.id, commentChanged, createdTableName)"
           @close="emit('structureEditorClose', activeTab.id)"
           @open-settings="(initialTab, initialSection) => emit('openSettings', initialTab, initialSection)"
           @view-data="onHandleStructureViewData"
         />
       </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 'pl-debug'">
+      <PlDebugPanel :key="activeTab.id" class="min-h-0 flex-1" />
     </template>
 
     <template v-else-if="activeTab.mode === 'users' && activeConnection">
@@ -3575,7 +4081,10 @@ defineExpose({
     </template>
 
     <template v-else-if="activeTab.mode === 'dameng-jobs' && activeConnection">
-      <DamengJobAdmin :key="activeTab.id" :connection="activeConnection" />
+      <DamengJobAdmin :key="activeTab.id" :connection="activeConnection" :initial-selection="activeTab.nativeJobAdmin" />
+    </template>
+    <template v-else-if="activeTab.mode === 'database-jobs' && activeConnection">
+      <DatabaseJobAdmin :key="activeTab.id" :connection="activeConnection" :initial-selection="activeTab.nativeJobAdmin" />
     </template>
 
     <template v-else-if="activeTab.mode === 'dameng-users' && activeConnection">
@@ -3586,6 +4095,7 @@ defineExpose({
       <DamengRoleAdmin :key="activeTab.id" :connection="activeConnection" />
     </template>
 
+    <DataGridSqlPreviewDialog v-if="tableSqlPreview" :preview="tableSqlPreview.preview" :can-open-query="!!tableSqlPreview.connectionId" @close="tableSqlPreview = null" @open-query="openTableSqlInNewQuery" />
     <Dialog v-model:open="resultRunRenameOpen">
       <DialogContent class="sm:max-w-[400px]">
         <DialogHeader>

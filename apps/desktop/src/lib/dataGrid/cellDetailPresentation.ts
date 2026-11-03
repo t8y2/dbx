@@ -1,9 +1,12 @@
 import { safeJsonFormat } from "@/lib/common/safeJsonFormat";
+import { isBooleanColumnType } from "@/lib/dataGrid/dataGridBooleanColumn";
+import { isHexGeometry, looksLikeWkt, parseWktGeometry } from "@/lib/dataGrid/geometryPreview";
+import type { DatabaseType } from "@/types/database";
 
 export type CellDetailTab = "details" | "hexViewer" | "valueEditor";
 export type ValueEditorAction = "formatJson" | "compactJson" | "setNull" | "restoreOriginal";
 
-export const CELL_DETAIL_JSON_FORMAT_MAX_LENGTH = 50_000;
+export const CELL_DETAIL_JSON_FORMAT_MAX_LENGTH = 500_000;
 
 export interface CellDetailPresentationOptions {
   isEditable: boolean;
@@ -35,6 +38,11 @@ export function visibleCellDetailTabs(options: CellDetailPresentationOptions): C
     tabs.push("valueEditor");
   }
   return tabs;
+}
+
+/** Preview text for the detail surfaces. Boolean columns use the same label as the grid (TRUE/FALSE or 1/0), while rawValue stays untouched for length/copy/edit semantics. */
+export function cellDetailPreviewText(detail: Pick<{ type: string; rawValuePreview: string; displayValuePreview: string }, "type" | "rawValuePreview" | "displayValuePreview">, databaseType?: DatabaseType): string {
+  return isBooleanColumnType(detail.type, databaseType) ? detail.displayValuePreview : detail.rawValuePreview;
 }
 
 export function cellDetailEditorText(value: unknown, _columnType?: string): string {
@@ -78,6 +86,20 @@ export function isGeometryColumnType(columnType: string | undefined): boolean {
     .toLowerCase()
     .split(/[(:\s]/)[0];
   return base === "geometry" || base === "geography";
+}
+
+export function canPreviewCellGeometry(value: unknown, columnType?: string): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return false;
+    if (isHexGeometry(trimmed)) {
+      return isGeometryColumnType(columnType);
+    }
+    if (isGeometryColumnType(columnType)) return true;
+    return looksLikeWkt(trimmed) && !!parseWktGeometry(trimmed);
+  }
+  return isGeometryColumnType(columnType);
 }
 
 export function canFormatCellDetailJson(value: unknown, columnType?: string): boolean {

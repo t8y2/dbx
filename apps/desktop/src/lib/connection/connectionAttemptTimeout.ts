@@ -24,6 +24,7 @@ const DRIVER_STARTUP_FLOOR_TYPES = new Set<DatabaseType>([
   "exasol",
   "oceanbase-oracle",
   "gbase",
+  "gbase8s",
   "access",
   "oracle",
   "h2",

@@ -72,8 +72,7 @@ describe("editor selections reach the AI panel as context (#10058)", () => {
     const body = bodyOf("function clearContextReferences()");
 
     expect(body).toContain("selectedEditorSelections.value = [];");
-    // send() clears it alongside the attachments, or the next turn would resend it.
-    expect(bodyOf("async function send()")).toContain("selectedEditorSelections.value = [];");
+    // Mounted tests cover consuming sent selections without discarding a newer draft.
     // Queuing carries text/mode/action only, so — like every other composer
     // context — the selection must not stay behind looking like it was sent.
     expect(bodyOf("function queueInput()")).toContain("selectedEditorSelections.value = [];");
@@ -107,6 +106,16 @@ describe("external AI entries share one target rule (#10058)", () => {
     expect(body.indexOf("applyDraftBinding(plan.binding);")).toBeLessThan(body.indexOf("if (request.action) triggerAction(request.action, request.instruction);"));
     expect(body).not.toContain("await rebindConversation(");
     expect(source).toContain("openExternalContext,");
+  });
+
+  // #11660: a table mention recorded without its namespace resolves against
+  // whatever database the run ends up with — and mid-retarget the binding still
+  // reads the previous one, so the target the gesture named is the only owner the
+  // panel may record.
+  it("keeps a table mention bound to the namespace the gesture named", () => {
+    const body = bodyOf("function openExternalContext(request: AiExternalContextRequest)");
+
+    expect(body).toContain("mention.database ?? plan.binding.database");
   });
 
   it("routes every external entry in App.vue through the panel's single method", () => {

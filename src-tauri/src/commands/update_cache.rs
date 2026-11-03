@@ -7,6 +7,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+fn default_is_promoted() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DownloadedUpdate {
     pub cache_id: String,
@@ -15,6 +19,14 @@ pub struct DownloadedUpdate {
     pub release_url: String,
     pub release_notes: String,
     pub downloaded_at: u64,
+    #[serde(default)]
+    pub channel: dbx_core::update::UpdateChannel,
+    #[serde(default)]
+    pub release_tag: Option<String>,
+    // Caches written before channel metadata existed were stable updates. Keep
+    // their compatibility metadata consistent with that historical meaning.
+    #[serde(default = "default_is_promoted")]
+    pub is_promoted: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -185,6 +197,22 @@ pub(super) fn root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn legacy_stable_cache_defaults_to_promoted() {
+        let legacy = r#"{
+            "cache_id":"legacy",
+            "version":"0.6.59",
+            "portable_mode":false,
+            "release_url":"",
+            "release_notes":"",
+            "downloaded_at":1
+        }"#;
+        let info: DownloadedUpdate = serde_json::from_str(legacy).unwrap();
+        assert_eq!(info.channel, dbx_core::update::UpdateChannel::Stable);
+        assert!(info.is_promoted);
+        assert!(info.release_tag.is_none());
+    }
+
     // User screenshots only carry the message, so a cache failure has to name
     // the step and the exact path to be actionable.
     #[test]
@@ -239,6 +267,9 @@ mod tests {
                 release_url: String::new(),
                 release_notes: String::new(),
                 downloaded_at: 1,
+                channel: dbx_core::update::UpdateChannel::Stable,
+                release_tag: None,
+                is_promoted: true,
             },
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),
@@ -268,6 +299,9 @@ mod tests {
                 release_url: String::new(),
                 release_notes: String::new(),
                 downloaded_at: 1,
+                channel: dbx_core::update::UpdateChannel::Stable,
+                release_tag: None,
+                is_promoted: true,
             },
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),

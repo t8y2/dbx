@@ -7,6 +7,20 @@ export interface TextContentMatch {
   end: number;
 }
 
+export interface TextContentSearchOptions {
+  caseSensitive?: boolean;
+  useRegex?: boolean;
+}
+
+/** Null denotes an invalid expression; callers can display a localized error. */
+export function createTextContentSearchPattern(query: string, options: TextContentSearchOptions = {}): RegExp | null {
+  try {
+    return new RegExp(options.useRegex ? query : escapeRegExp(query), options.caseSensitive ? "gu" : "giu");
+  } catch {
+    return null;
+  }
+}
+
 export interface TextContentSearchRenderOptions {
   activeMatchIndex?: number;
   matchClass?: string;
@@ -15,12 +29,15 @@ export interface TextContentSearchRenderOptions {
   activeAttribute?: (index: number) => string;
 }
 
-export function findTextContentMatches(text: string, query: string, limit = TEXT_CONTENT_SEARCH_MATCH_LIMIT): TextContentMatch[] {
+export function findTextContentMatches(text: string, query: string, limit = TEXT_CONTENT_SEARCH_MATCH_LIMIT, options: TextContentSearchOptions = {}): TextContentMatch[] {
   if (!query || limit <= 0) return [];
   // Match the original UTF-16 text so Unicode case folding keeps offsets valid.
-  const pattern = new RegExp(escapeRegExp(query), "giu");
+  const pattern = createTextContentSearchPattern(query, options);
+  if (!pattern) return [];
   const matches: TextContentMatch[] = [];
   for (const match of text.matchAll(pattern)) {
+    // matchAll advances safely over zero-width matches, including Unicode text.
+    if (match[0].length === 0) continue;
     matches.push({ start: match.index, end: match.index + match[0].length });
     if (matches.length >= limit) break;
   }

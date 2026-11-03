@@ -105,17 +105,41 @@ pub struct DriverRuntimeRequest {
 
 pub async fn stop_driver_runtime(
     State(state): State<Arc<WebState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<DriverRuntimeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    dbx_core::driver_runtime::stop_driver_runtime(&state.app, &req.runtime_id).await.map_err(AppError::from)?;
+    let key = dbx_core::driver_runtime::runtime_agent_key(&req.runtime_id)
+        .ok_or_else(|| AppError::from("Only agent runtimes can be stopped".to_owned()))?;
+    let permit = super::pl_debug::claim_mutation(
+        &state,
+        &headers,
+        dbx_core::query::pl_debug::PlDebugMutationScope::Driver(key.to_owned()),
+    )
+    .await?;
+    permit.after_debug_cleanup(dbx_core::driver_runtime::stop_driver_runtime(&state.app, &req.runtime_id)).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 pub async fn restart_driver_runtime(
     State(state): State<Arc<WebState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<DriverRuntimeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    dbx_core::driver_runtime::restart_driver_runtime(&state.app, &req.runtime_id).await.map_err(AppError::from)?;
+    if req.runtime_id.starts_with("agent-runtime:") {
+        let key = dbx_core::driver_runtime::runtime_agent_key(&req.runtime_id)
+            .ok_or_else(|| AppError::from("Only agent runtimes can be restarted".to_owned()))?;
+        let permit = super::pl_debug::claim_mutation(
+            &state,
+            &headers,
+            dbx_core::query::pl_debug::PlDebugMutationScope::Driver(key.to_owned()),
+        )
+        .await?;
+        permit
+            .after_debug_cleanup(dbx_core::driver_runtime::restart_driver_runtime(&state.app, &req.runtime_id))
+            .await?;
+    } else {
+        dbx_core::driver_runtime::restart_driver_runtime(&state.app, &req.runtime_id).await?;
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -229,6 +253,7 @@ pub async fn get_agent_java_runtime_config(
 
 pub async fn set_agent_java_runtime_config(
     State(state): State<Arc<WebState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<JavaRuntimeRequest>,
 ) -> Result<Json<JavaRuntimeConfig>, AppError> {
     let am = &state.app.agent_manager;
@@ -244,8 +269,16 @@ pub async fn set_agent_java_runtime_config(
         config.custom_java_path = None;
     }
 
-    am.mutate_state(|local_state| local_state.java_runtime = config.clone()).map_err(AppError::from)?;
-    am.stop_daemons().await;
+    let permit =
+        super::pl_debug::claim_mutation(&state, &headers, dbx_core::query::pl_debug::PlDebugMutationScope::AllRuntimes)
+            .await?;
+    permit
+        .after_debug_cleanup(async {
+            am.mutate_state(|local_state| local_state.java_runtime = config.clone())?;
+            am.stop_daemons().await;
+            Ok(())
+        })
+        .await?;
     Ok(Json(config))
 }
 
@@ -296,8 +329,17 @@ pub async fn import_agents_from_zip(
             })
             .await
             .map_err(AppError::from)?;
-            dbx_core::jdbc::import_offline_jdbc_payload(state.app.plugins.root_dir(), &package_path)
-                .map_err(AppError::from)?;
+            let plugins_root = state.app.plugins.root_dir().to_path_buf();
+            // Blocking on purpose: the embedded plugin install scans and waits
+            // for processes holding the JDBC plugin directory (#12004); the
+            // blocking pool absorbs it.
+            let package_path = package_path.clone();
+            let import = tokio::task::spawn_blocking(move || {
+                dbx_core::jdbc::import_offline_jdbc_payload(&plugins_root, &package_path)
+            })
+            .await
+            .map_err(|err| AppError::internal(err.to_string()))?;
+            import.map_err(AppError::from)?;
             Ok::<_, AppError>(import_result)
         }
         .await;

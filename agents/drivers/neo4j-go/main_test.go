@@ -81,6 +81,53 @@ func TestConfiguredDatabaseUsesConnectionString(t *testing.T) {
 	}
 }
 
+// #11947: Memgraph has a single database named `memgraph`, so the Neo4j default
+// `neo4j` must not be sent — Memgraph fails the session with "Tried to retrieve
+// an unknown database" rather than falling back to its own default.
+func TestMemgraphOmitsTheNeo4jDefaultDatabase(t *testing.T) {
+	memgraph := &connectionRuntime{memgraph: true}
+	if got := (&server{runtime: memgraph}).databaseName(""); got != "" {
+		t.Fatalf("Memgraph without a configured database must send no name, got %q", got)
+	}
+	// A user who did configure one keeps it: Memgraph may grow multi-database
+	// support, and silently ignoring an explicit choice would be worse.
+	if got := (&server{runtime: memgraph}).databaseName("analytics"); got != "analytics" {
+		t.Fatalf("explicit override must win, got %q", got)
+	}
+	if got := (&server{runtime: memgraph, params: connectParams{Database: "mydb"}}).databaseName(""); got != "mydb" {
+		t.Fatalf("configured database must win, got %q", got)
+	}
+	if got := (&server{runtime: memgraph, params: connectParams{ConnectionString: "neo4j://db:7687/archive"}}).databaseName(""); got != "archive" {
+		t.Fatalf("connection-string database must win, got %q", got)
+	}
+
+	// Neo4j itself keeps the default: only Memgraph is special-cased.
+	neo4j := &connectionRuntime{}
+	if got := (&server{runtime: neo4j}).databaseName(""); got != defaultDatabase {
+		t.Fatalf("Neo4j must keep the %q default, got %q", defaultDatabase, got)
+	}
+}
+
+func TestHasConfiguredDatabase(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		params connectParams
+		want   bool
+	}{
+		{name: "nothing configured", params: connectParams{}, want: false},
+		{name: "form field", params: connectParams{Database: "mydb"}, want: true},
+		{name: "connection string query", params: connectParams{ConnectionString: "neo4j://db:7687?database=movies"}, want: true},
+		{name: "connection string path", params: connectParams{ConnectionString: "neo4j://db:7687/archive"}, want: true},
+		{name: "connection string without database", params: connectParams{ConnectionString: "bolt://db:7687"}, want: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := hasConfiguredDatabase(testCase.params); got != testCase.want {
+				t.Fatalf("hasConfiguredDatabase(%+v) = %t, want %t", testCase.params, got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestEffectiveNeo4jSchemeMatchesBuiltURI(t *testing.T) {
 	for _, params := range []connectParams{
 		{Host: "127.0.0.1", Port: 7687},
@@ -178,6 +225,19 @@ func TestIsRoutingUnsupported(t *testing.T) {
 			want: true,
 		},
 		{name: "typed feature error", err: &neo4jdb.FeatureNotSupportedError{Server: "db:7687", Feature: "routing", Reason: "requires cluster setup"}, want: true},
+		// #11947: Memgraph speaks Bolt and accepts `neo4j://`, but refuses the
+		// routing-table procedure with its own wording, so the direct fallback
+		// has to recognise it too.
+		{
+			name: "memgraph single-instance routing refusal",
+			err:  errors.New("Neo4jError: Memgraph.TransientError.MemgraphError.MemgraphError (You cannot fetch routing table from an instance which is not part of a cluster.)"),
+			want: true,
+		},
+		{
+			name: "memgraph routing table wording without neo4j error prefix",
+			err:  errors.New("You cannot fetch routing table from an instance which is not part of a cluster."),
+			want: true,
+		},
 		{name: "typed route-to-database error", err: &neo4jdb.FeatureNotSupportedError{Server: "db:7687", Feature: "route to database", Reason: "requires at least server v4"}, want: false},
 		{name: "unrelated error", err: errors.New("connection refused"), want: false},
 		{name: "nil error", err: nil, want: false},

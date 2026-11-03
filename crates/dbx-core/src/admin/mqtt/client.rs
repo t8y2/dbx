@@ -326,6 +326,8 @@ pub struct MqttClient {
     publish_send_lock: Mutex<()>,
     /// 最近接收的消息缓冲区（保留最近 N 条）
     message_buffer: RwLock<Vec<MqttMessage>>,
+    /// 串行化消息缓冲区与持久化历史之间的复合操作。
+    message_history_operation: Mutex<()>,
     /// 最大缓冲消息数
     max_buffer_size: usize,
     /// 当前订阅生命周期内已见过的保留消息指纹
@@ -419,6 +421,7 @@ impl MqttClient {
             publish_requests: Mutex::new(PublishRequestTracker::default()),
             publish_send_lock: Mutex::new(()),
             message_buffer: RwLock::new(Vec::new()),
+            message_history_operation: Mutex::new(()),
             max_buffer_size: 200,
             seen_retained: RwLock::new(RetainedDedup::new(RETAINED_DEDUP_CAPACITY)),
             event_loop_handle: RwLock::new(None),
@@ -867,6 +870,7 @@ impl MqttClient {
                     } else {
                         saved.push(MqttSavedTopic {
                             topic: pending.topic.clone(),
+                            alias: String::new(),
                             qos: pending.qos,
                             no_local: pending.no_local,
                             enabled: true,
@@ -1030,6 +1034,7 @@ impl MqttClient {
     /// Save or update a subscription configuration without sending a broker request.
     pub async fn save_topic_config(&self, mut config: MqttSavedTopic) -> Result<(), String> {
         config.topic = config.topic.trim().to_string();
+        config.alias = config.alias.trim().to_string();
         validate_topic_filter(&config.topic)?;
         if config.no_local && !matches!(self.config.protocol_version, super::types::MqttProtocolVersion::V5) {
             return Err("MQTT 3.x 不支持 No Local 订阅选项".to_string());
@@ -1052,7 +1057,7 @@ impl MqttClient {
     }
 
     /// 发布消息；QoS 0 等待写入网络，QoS 1/2 分别等待 PUBACK/PUBCOMP。
-    pub async fn publish(&self, request: &MqttPublishRequest) -> Result<(), String> {
+    pub async fn publish(&self, request: &MqttPublishRequest) -> Result<MqttMessage, String> {
         validate_publish_topic(&request.topic)?;
         let payload = if let Some(ref text) = request.payload_text {
             text.as_bytes().to_vec()
@@ -1088,6 +1093,7 @@ impl MqttClient {
             received_at_ms: now_ms,
             direction: MqttMessageDirection::Sent,
         };
+        let published_message = sent_msg.clone();
 
         let _send_guard = self.publish_send_lock.lock().await;
         let (completion, result) = oneshot::channel();
@@ -1097,7 +1103,8 @@ impl MqttClient {
             return Err(error);
         }
         drop(_send_guard);
-        result.await.map_err(|_| "发布确认通道已关闭，请检查 MQTT 连接状态".to_string())?
+        result.await.map_err(|_| "发布确认通道已关闭，请检查 MQTT 连接状态".to_string())??;
+        Ok(published_message)
     }
 
     /// 获取已订阅的 topic 列表
@@ -1130,10 +1137,35 @@ impl MqttClient {
         filtered
     }
 
+    /// Remove one matching message from the live console buffer.
+    pub async fn delete_message(&self, message: &MqttMessage) {
+        let mut buffer = self.message_buffer.write().await;
+        if let Some(index) = buffer.iter().position(|candidate| mqtt_messages_match(candidate, message)) {
+            buffer.remove(index);
+        }
+    }
+
+    pub async fn lock_message_history(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.message_history_operation.lock().await
+    }
+
     /// 清空消息缓冲区
     pub async fn clear_messages(&self) {
         self.message_buffer.write().await.clear();
         self.seen_retained.write().await.clear();
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub async fn test_client_with_messages(messages: Vec<MqttMessage>) -> Arc<Self> {
+        let options = MqttOptionsV4::new("dbx-mqtt-test", "127.0.0.1", 1883);
+        let (backend, event_loop) = AsyncClientV4::new(options, 10);
+        drop(event_loop);
+        let shutdown_notify = Arc::new(Notify::new());
+        let client =
+            Self::new_with_backend(MqttConnectionConfig::default(), MqttBackendClient::V4(backend), shutdown_notify);
+        *client.message_buffer.write().await = messages;
+        client
     }
 
     /// 从 topic 列表构建 topic 树
@@ -1190,6 +1222,16 @@ impl MqttClient {
             }
         }
     }
+}
+
+fn mqtt_messages_match(left: &MqttMessage, right: &MqttMessage) -> bool {
+    left.topic == right.topic
+        && left.payload_base64 == right.payload_base64
+        && left.payload_text == right.payload_text
+        && left.qos == right.qos
+        && left.retain == right.retain
+        && left.received_at_ms == right.received_at_ms
+        && left.direction == right.direction
 }
 
 impl Drop for MqttClient {
@@ -1296,7 +1338,7 @@ fn build_transport(
 }
 
 fn certificate_tls_configuration(auth: &MqttAuth, mode: MqttTlsVerificationMode) -> Result<TlsConfiguration, String> {
-    let MqttAuth::Certificate { ca_cert_path, client_cert_path, client_key_path } = auth else {
+    let MqttAuth::Certificate { ca_cert_path, client_cert_path, client_key_path, .. } = auth else {
         return Err("MQTT 证书认证配置无效".to_string());
     };
     let client_cert_path = client_cert_path.as_deref().filter(|path| !path.trim().is_empty());
@@ -1410,13 +1452,13 @@ impl ServerCertVerifier for NoCertificateVerification {
 }
 
 fn apply_credentials_v4(options: &mut MqttOptionsV4, auth: &MqttAuth) {
-    if let MqttAuth::Password { username, password } = auth {
+    if let Some((username, password)) = auth.credentials() {
         options.set_credentials(username, password);
     }
 }
 
 fn apply_credentials_v5(options: &mut MqttOptionsV5, auth: &MqttAuth) {
-    if let MqttAuth::Password { username, password } = auth {
+    if let Some((username, password)) = auth.credentials() {
         options.set_credentials(username, password);
     }
 }
@@ -1743,8 +1785,41 @@ mod tests {
     }
 
     #[test]
+    fn certificate_auth_preserves_credentials_for_both_protocols() {
+        let auth: MqttAuth = serde_json::from_value(serde_json::json!({
+            "kind": "certificate", "username": "device", "password": "secret",
+            "clientCertPath": "/client.crt", "clientKeyPath": "/client.key"
+        }))
+        .unwrap();
+        let mut v4 = MqttOptionsV4::new("dbx-test", "localhost", 8883);
+        let mut v5 = MqttOptionsV5::new("dbx-test", "localhost", 8883);
+        apply_credentials_v4(&mut v4, &auth);
+        apply_credentials_v5(&mut v5, &auth);
+        let expected = Some(("device".to_string(), "secret".to_string()));
+        assert_eq!(v4.credentials(), expected);
+        assert_eq!(v5.credentials(), expected);
+    }
+
+    #[test]
+    fn certificate_auth_without_credentials_remains_anonymous() {
+        let auth: MqttAuth = serde_json::from_value(serde_json::json!({ "kind": "certificate" })).unwrap();
+        let mut v4 = MqttOptionsV4::new("dbx-test", "localhost", 8883);
+        let mut v5 = MqttOptionsV5::new("dbx-test", "localhost", 8883);
+        apply_credentials_v4(&mut v4, &auth);
+        apply_credentials_v5(&mut v5, &auth);
+        assert_eq!(v4.credentials(), None);
+        assert_eq!(v5.credentials(), None);
+    }
+
+    #[test]
     fn certificate_auth_allows_server_only_tls() {
-        let auth = MqttAuth::Certificate { ca_cert_path: None, client_cert_path: None, client_key_path: None };
+        let auth = MqttAuth::Certificate {
+            username: String::new(),
+            password: String::new(),
+            ca_cert_path: None,
+            client_cert_path: None,
+            client_key_path: None,
+        };
 
         let transport =
             build_transport(MqttTransport::Tcp, Some(MqttTlsVerificationMode::VerifyServerCert), &auth).unwrap();
@@ -1755,11 +1830,15 @@ mod tests {
     #[test]
     fn certificate_auth_requires_client_certificate_and_key_as_a_pair() {
         let missing_cert = MqttAuth::Certificate {
+            username: String::new(),
+            password: String::new(),
             ca_cert_path: None,
             client_cert_path: None,
             client_key_path: Some("client.key".to_string()),
         };
         let missing_key = MqttAuth::Certificate {
+            username: String::new(),
+            password: String::new(),
             ca_cert_path: None,
             client_cert_path: Some("client.crt".to_string()),
             client_key_path: None,

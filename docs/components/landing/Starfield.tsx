@@ -30,6 +30,15 @@ const DIM_RADII = [0.55, 0.75, 0.95, 1.2] as const;
 const BRIGHT_RADII = [1.45, 1.8, 2.15, 2.5] as const;
 const BRIGHT_GLOWS = [5, 7, 9, 11] as const;
 
+// 星空只是不到 4px/s 的漂移和数秒周期的明暗变化：按屏幕刷新率重绘整屏 canvas
+// 不会让动画更顺滑，却会让核显每帧重新上传、合成整屏图层并提交上千次 drawImage，
+// 足以把 3D 引擎打满。15fps 对这种速度的动画在视觉上等价，GPU 负载约为原来的 1/4。
+const TARGET_FPS = 15;
+const FRAME_INTERVAL_MS = 1000 / TARGET_FPS;
+// 原先由 CSS mask 完成的上下淡出，改为按星点位置直接乘进 alpha：
+// 少一层全屏 mask 合成，星点只有几个像素，视觉结果一致。
+const EDGE_FADE_RATIO = 0.08;
+
 function createRandom(seed: number) {
   let state = seed >>> 0;
 
@@ -91,6 +100,11 @@ function starSpriteKey(star: Star) {
   return `${star.color}:${star.radius}:${star.glow}`;
 }
 
+function edgeFade(y: number, height: number) {
+  const band = Math.max(1, height * EDGE_FADE_RATIO);
+  return Math.max(0, Math.min(1, Math.min(y, height - y) / band));
+}
+
 export function Starfield({ className = "" }: StarfieldProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -108,6 +122,7 @@ export function Starfield({ className = "" }: StarfieldProps) {
     let height = 0;
     let scrollOffset = window.scrollY;
     let startedAt = performance.now();
+    let lastDrawAt = Number.NEGATIVE_INFINITY;
 
     const draw = (now: number) => {
       const elapsed = (now - startedAt) / 1000;
@@ -122,8 +137,10 @@ export function Starfield({ className = "" }: StarfieldProps) {
         const scrollParallax = scrollOffset * star.scrollFactor;
         const y = (star.y - elapsed * star.speed * 0.34 - scrollParallax + height * 2) % height;
         const pulse = reducedMotion.matches ? 0.9 : 0.72 + Math.sin(star.phase + elapsed * star.twinkleSpeed) * 0.28;
+        const alpha = star.alpha * pulse * edgeFade(y, height);
+        if (alpha < 0.01) continue;
 
-        context.globalAlpha = star.alpha * pulse;
+        context.globalAlpha = alpha;
         context.drawImage(sprite.canvas, x - sprite.size / 2, y - sprite.size / 2, sprite.size, sprite.size);
       }
 
@@ -132,8 +149,10 @@ export function Starfield({ className = "" }: StarfieldProps) {
     };
 
     const animate = (now: number) => {
-      draw(now);
       animationFrame = window.requestAnimationFrame(animate);
+      if (now - lastDrawAt < FRAME_INTERVAL_MS) return;
+      lastDrawAt = now;
+      draw(now);
     };
 
     const start = () => {
@@ -143,6 +162,7 @@ export function Starfield({ className = "" }: StarfieldProps) {
         draw(startedAt);
         return;
       }
+      lastDrawAt = startedAt - FRAME_INTERVAL_MS;
       animationFrame = window.requestAnimationFrame(animate);
     };
 

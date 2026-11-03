@@ -1,6 +1,11 @@
 import type { QueryResult } from "@/types/database";
 import { mysqlUtf8Literal } from "@/lib/table/mysqlTableEngine";
 
+export interface MysqlTableCharsetMetadata {
+  charset: string;
+  collation: string;
+}
+
 /**
  * Reads the table's default collation. MySQL reports the *effective* collation on every
  * character column and never records whether it was written out explicitly, so a column
@@ -20,4 +25,18 @@ export function parseMysqlTableCollation(result: QueryResult | undefined): strin
   if (index < 0) return "";
   const value = result.rows[0]?.[index];
   return value === null || value === undefined ? "" : String(value).trim();
+}
+
+/**
+ * MySQL does not expose a separate table character-set column in
+ * information_schema.TABLES. The default collation implies the character set
+ * (for example, utf8mb4_0900_ai_ci belongs to utf8mb4).
+ */
+export function parseMysqlTableCharset(result: QueryResult | undefined): MysqlTableCharsetMetadata {
+  const collation = parseMysqlTableCollation(result);
+  const separator = collation.indexOf("_");
+  return {
+    charset: separator > 0 ? collation.slice(0, separator) : "",
+    collation,
+  };
 }

@@ -3,6 +3,7 @@ import { Transaction } from "@codemirror/state";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { createDeferredEditorTask } from "@/lib/editor/deferredEditorTask";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
+import { resetQueryEditorBookmarks } from "@/lib/editor/codemirrorBookmarks";
 import type { ShallowRef, Ref } from "vue";
 import type { QueryEditorProps } from "./queryEditorTypes";
 
@@ -126,6 +127,7 @@ export function useQueryEditorDocumentState(options: QueryEditorDocumentStateOpt
     const cached = tabId === undefined ? undefined : tabStateCache.get(tabId);
     if (!cached) {
       swapEditorDocument(doc);
+      resetQueryEditorBookmarks(currentView);
       // First activation in this editor instance (or a cache-evicted tab, e.g.
       // beyond MAX_CACHED_TAB_STATES): restore the tab's saved cursor and scroll
       // position exactly like the cached-state branch, otherwise the swapped-in

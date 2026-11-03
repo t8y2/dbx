@@ -18,8 +18,11 @@ import {
   isTdengineExistingRowReadonlyColumn,
   isTableDataEditable,
   parseSalesforceColumnExtra,
+  physicalTablePrimaryKeys,
+  uniqueKeyModelColumns,
   supportsDataGridTransaction,
   shouldIncludeSyntheticRowId,
+  showsKeylessEditWarning,
   usesSyntheticRowIdKey,
 } from "@/lib/table/tableEditing";
 import type { ColumnInfo, IndexInfo } from "@/types/database";
@@ -63,6 +66,30 @@ describe("tableEditing", () => {
     expect(editablePrimaryKeys("oracle", [column("ID"), column("NAME")], "TABLE")).toEqual([DBX_ROWID_COLUMN]);
     expect(editablePrimaryKeys("oceanbase-oracle", [column("ID"), column("NAME")], "TABLE")).toEqual([DBX_ROWID_COLUMN]);
     expect(editablePrimaryKeys("oceanbase-oracle", [column("ID", true), column("NAME")], "TABLE")).toEqual(["ID"]);
+  });
+
+  it("requests PostgreSQL CTID only for known unkeyed base-table previews", () => {
+    const columns = [column("ID"), column("VALUE")];
+    expect(editablePrimaryKeys("postgres", columns, "TABLE")).toEqual([]);
+    expect(shouldIncludeSyntheticRowId("postgres", [], "TABLE")).toBe(true);
+    // The sidebar's listTables path reports relkind 'r' as `BASE TABLE`.
+    expect(shouldIncludeSyntheticRowId("postgres", [], "BASE TABLE")).toBe(true);
+    expect(shouldIncludeSyntheticRowId("postgres", ["ID"], "TABLE")).toBe(false);
+    expect(shouldIncludeSyntheticRowId("postgres", [], "PARTITIONED TABLE")).toBe(false);
+    expect(shouldIncludeSyntheticRowId("postgres", [], "VIEW")).toBe(false);
+    expect(shouldIncludeSyntheticRowId("postgres", [])).toBe(false);
+    expect(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN], "TABLE")).toBe(true);
+    expect(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN], "BASE TABLE")).toBe(true);
+    expect(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN], "PARTITIONED TABLE")).toBe(false);
+    expect(isHiddenGridColumn("postgres", DBX_ROWID_COLUMN, [], "TABLE")).toBe(true);
+    expect(isHiddenGridColumn("postgres", DBX_ROWID_COLUMN, [], "BASE TABLE")).toBe(true);
+    // The "no stable row identifier" badge must not contradict a preview that
+    // addresses the selected row through a hidden physical locator.
+    expect(showsKeylessEditWarning("postgres", [], "TABLE")).toBe(false);
+    expect(showsKeylessEditWarning("postgres", [], "BASE TABLE")).toBe(false);
+    expect(showsKeylessEditWarning("postgres", ["ID"], "TABLE")).toBe(false);
+    expect(showsKeylessEditWarning("postgres", [], "VIEW")).toBe(true);
+    expect(showsKeylessEditWarning("mysql", [], "TABLE")).toBe(true);
   });
 
   it("uses Xugu ROWID for ordinary, partitioned, and temporary tables but not views", () => {
@@ -137,6 +164,51 @@ describe("tableEditing", () => {
     expect(editableRowIdentifierColumns("postgres", columns, [index(["missing"])])).toEqual([]);
   });
 
+  it("recognizes Doris/StarRocks composite unique keys with nullable columns as row identifier", () => {
+    // In Doris/StarRocks, UNIQUE KEY columns default to nullable in DDL
+    const columns = [column("id"), column("data_type"), column("name")];
+    const dorisUniqueIndex: IndexInfo = {
+      name: "UNIQUE KEY",
+      columns: ["id", "data_type"],
+      is_unique: true,
+      is_primary: false,
+      index_type: "UNIQUE KEY",
+    };
+
+    expect(editableRowIdentifierColumns("doris", columns, [dorisUniqueIndex])).toEqual(["id", "data_type"]);
+    expect(editableRowIdentifierColumns("starrocks", columns, [dorisUniqueIndex])).toEqual(["id", "data_type"]);
+    // Standard engines like MySQL reject nullable unique index columns
+    expect(editableRowIdentifierColumns("mysql", columns, [dorisUniqueIndex])).toEqual([]);
+
+    // Shows keyless edit warning is false when primaryKeys are resolved
+    expect(showsKeylessEditWarning("doris", ["id", "data_type"], "TABLE")).toBe(false);
+    expect(showsKeylessEditWarning("doris", [], "TABLE")).toBe(true);
+
+    // physicalTablePrimaryKeys resolves the unique key model index for Doris/StarRocks
+    expect(physicalTablePrimaryKeys(columns, [dorisUniqueIndex], "doris")).toEqual(["id", "data_type"]);
+    expect(physicalTablePrimaryKeys(columns, [dorisUniqueIndex], "starrocks")).toEqual(["id", "data_type"]);
+    expect(physicalTablePrimaryKeys(columns, [dorisUniqueIndex], "mysql")).toEqual([]);
+
+    // A Doris key spanning every projected column leaves nothing to update.
+    expect(editableRowIdentifierColumns("doris", columns.slice(0, 2), [dorisUniqueIndex])).toEqual([]);
+  });
+
+  it("prefers the Doris UNIQUE KEY model over a nullable unique *secondary* index", () => {
+    // UNIQUE KEY(k1, k2) with `... UNIQUE INDEX uk_tail(tail) USING INVERTED`
+    const columns = [column("k1"), column("k2"), column("tail")];
+    const modelIndex: IndexInfo = { name: "UNIQUE KEY", columns: ["k1", "k2"], is_unique: true, is_primary: false, index_type: "UNIQUE KEY" };
+    const secondaryIndex: IndexInfo = { name: "uk_tail", columns: ["tail"], is_unique: true, is_primary: false, index_type: "INVERTED" };
+    expect(editableRowIdentifierColumns("doris", columns, [modelIndex, secondaryIndex])).toEqual(["k1", "k2"]);
+    expect(editableRowIdentifierColumns("doris", columns, [secondaryIndex, modelIndex])).toEqual(["k1", "k2"]);
+  });
+
+  it("keys every column like a NULLable UNIQUE KEY model but only makes non-key columns unique", () => {
+    const modelIndex: IndexInfo = { name: "UNIQUE KEY", columns: ["id", "data_type"], is_unique: true, is_primary: false, index_type: "UNIQUE KEY" };
+    expect([...uniqueKeyModelColumns("doris", [modelIndex])]).toEqual(["id", "data_type"]);
+    expect([...uniqueKeyModelColumns("mysql", [modelIndex])]).toEqual([]);
+    expect(uniqueKeyModelColumns("doris", []).size).toBe(0);
+  });
+
   it.each(["oracle", "oceanbase-oracle"] as const)("prefers physical %s indexes over the ROWID fallback", (databaseType) => {
     const columns = [column("OFFER_RELA_ID"), column("ORI_OFFER_ID")].map((value) => ({ ...value, is_nullable: false }));
     const primaryIndex = { ...index(["OFFER_RELA_ID"], false), is_primary: true };
@@ -162,6 +234,23 @@ describe("tableEditing", () => {
     expect(supportsDataGridTransaction("clickhouse")).toBe(false);
     expect(isTableDataEditable("clickhouse", [], "BASE TABLE")).toBe(true);
     expect(canEditExistingTableRows("clickhouse", undefined, [])).toBe(false);
+  });
+
+  it("keeps Databend grid saves out of an explicit transaction", () => {
+    // The Databend JDBC driver reports supportsTransactions() == false, and the
+    // agent rejects an explicit transaction for that reason. A grid save that
+    // opted into executeInTransaction therefore always failed with
+    // "Transactions are not supported by this JDBC driver" (#12003).
+    expect(supportsDataGridTransaction("databend")).toBe(false);
+    // Everything else stays Navicat-style, so inserts and primary-key edits
+    // must keep working through the plain (non-transactional) batch path.
+    expect(isTableDataEditable("databend", ["id"], "TABLE")).toBe(true);
+    expect(canInsertTableRows("databend")).toBe(true);
+    // Navicat-style: update/delete do not require a primary key, and keyless
+    // rows can be addressed by a value predicate.
+    expect(canEditExistingTableRows("databend", undefined, ["id"])).toBe(true);
+    expect(canEditExistingTableRows("databend", undefined, [])).toBe(true);
+    expect(canUseKeylessRowPredicate("databend", [])).toBe(true);
   });
 
   it("uses tbname only when editing TDengine stable rows", () => {
@@ -252,5 +341,25 @@ describe("tableEditing", () => {
       expect(canUseKeylessRowPredicate("salesforce", [])).toBe(false);
       expect(canDeleteExistingTdengineRows("salesforce", ["Id"])).toBe(true);
     });
+  });
+
+  it("supports InterSystems Caché / IRIS table editing and row insertion (#11808)", () => {
+    expect(isTableDataEditable("iris", ["id"], "TABLE")).toBe(true);
+    expect(isTableDataEditable("iris", [], "TABLE")).toBe(true);
+    expect(isTableDataEditable("iris", ["id"], "VIEW")).toBe(false);
+    expect(canInsertTableRows("iris")).toBe(true);
+    expect(canEditExistingTableRows("iris")).toBe(true);
+    expect(supportsDataGridTransaction("iris")).toBe(true);
+    expect(canUseKeylessRowPredicate("iris", [])).toBe(true);
+  });
+
+  it("edits DuckDB table data row by row without a transaction (#12306)", () => {
+    expect(isTableDataEditable("duckdb", ["id"], "TABLE")).toBe(true);
+    expect(isTableDataEditable("duckdb", [], "TABLE")).toBe(true);
+    expect(isTableDataEditable("duckdb", ["id"], "VIEW")).toBe(false);
+    expect(canInsertTableRows("duckdb")).toBe(true);
+    expect(canEditExistingTableRows("duckdb")).toBe(true);
+    expect(supportsDataGridTransaction("duckdb")).toBe(false);
+    expect(canUseKeylessRowPredicate("duckdb", [])).toBe(true);
   });
 });

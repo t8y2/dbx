@@ -24,6 +24,7 @@ import {
   addDriverInstallQueue,
   driverInstallProgressChannel,
   driverInstallProgressPercent,
+  formatDriverInstallProgressText,
   isDriverInstallCanceledError,
   isDriverInstallCancellationTarget,
   isDriverInstallProgressForOperation,
@@ -86,6 +87,7 @@ const driverStoreTab = computed({
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { DriverStorePathInfo } from "@/lib/backend/api";
 import { driverRuntimeProtocolLabel } from "./driverRuntimeDisplay";
+import { showsInstalledJreRows } from "@/lib/driverStore/javaRuntimePanel";
 const settingsStore = useSettingsStore();
 
 type DriverStoreDirKind = "plugin" | "agent";
@@ -182,8 +184,7 @@ async function applyDriverStoreDir(kind: DriverStoreDirKind, newDir: string | nu
     };
     toast(t("driverStore.driverStoreDirSuccess", { target }));
     // Restart the app to use the new paths
-    const { relaunch } = await import("@tauri-apps/plugin-process");
-    relaunch();
+    await api.relaunchApp();
   } catch (e: any) {
     toast(t("driverStore.driverStoreDirMigrationFailed", { error: backendError(e) }), 5000);
   } finally {
@@ -244,15 +245,7 @@ const installedJres = computed(() => {
 });
 
 function formatProgressText(p: DriverInstallProgress | null | undefined): string {
-  if (!p) return "";
-  if (p.step === "jre-extract") return t("driverStore.progressJreExtract");
-  if (p.step === "jdbc-plugin-extract") return t("driverStore.progressJdbcPluginExtract");
-  const label = p.step === "jre" ? t("driverStore.progressDownloadJre") : p.step === "jdbc-plugin" ? t("driverStore.progressDownloadJdbcPlugin") : t("driverStore.progressDownloadDriver");
-  if (!p.total) return `${label}...`;
-  const pct = Math.round(((p.downloaded ?? 0) / p.total) * 100);
-  const dl = formatSize(p.downloaded ?? 0);
-  const total = formatSize(p.total);
-  return `${label}  ${dl} / ${total}  (${pct}%)`;
+  return formatDriverInstallProgressText(p, t);
 }
 
 function getAgentProgressText(dbType: string): string {
@@ -274,12 +267,10 @@ function getAgentProgressPercent(dbType: string): number | null {
   return next ?? lastAgentProgressPercent[dbType] ?? null;
 }
 
-const jdbcPluginProgressNumber = computed(() => {
-  const next = driverInstallProgressPercent(jdbcPluginProgress.value);
-  if (next !== null) {
-    lastJdbcPluginProgressPercent.value = next;
-  }
-  return next ?? lastJdbcPluginProgressPercent.value;
+const jdbcPluginProgressNumber = computed(() => driverInstallProgressPercent(jdbcPluginProgress.value) ?? lastJdbcPluginProgressPercent.value);
+watch(jdbcPluginProgress, (progress) => {
+  const next = driverInstallProgressPercent(progress);
+  if (next !== null) lastJdbcPluginProgressPercent.value = next;
 });
 
 function resetAgentInstallProgress() {
@@ -667,7 +658,7 @@ async function openOfflineExportDialog() {
   }
 }
 
-async function exportOfflinePackage(driverKeys: string[]) {
+async function exportOfflinePackage(driverKeys: string[], includeJres = true) {
   if (isWeb || agentExportImportBlocked.value || driverKeys.length === 0) return;
   const platform = offlineExportPreview.value?.platform ?? "current-platform";
   await runAgentOfflineExportAction({
@@ -683,6 +674,7 @@ async function exportOfflinePackage(driverKeys: string[]) {
         filters: [{ name: "ZIP", extensions: ["zip"] }],
       });
     },
+    includeJres,
     exportPackage: api.exportAgentsOffline,
     onSuccess: ({ destination, result }) => {
       offlineExportDialogOpen.value = false;
@@ -1604,7 +1596,7 @@ watch(driverStoreTab, (tab) => {
                 </Button>
               </div>
 
-              <div v-if="installedJres.length > 0" class="divide-y rounded-lg border bg-background/50">
+              <div v-if="showsInstalledJreRows(javaRuntimeConfig.mode, installedJres.length)" class="divide-y rounded-lg border bg-background/50">
                 <div v-for="jre in installedJres" :key="jre.key" class="flex items-center justify-between gap-3 px-3 py-2.5">
                   <div class="min-w-0">
                     <div class="text-sm font-medium">{{ t("driverStore.jreRuntimeTitle", { jre: jre.key }) }}</div>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveVisibleDatabaseSaveAction } from "../visibleDatabasesDialogState";
+import { resolveVisibleDatabaseSaveAction, visibleDatabasePatternsWithoutMatchAll } from "../visibleDatabasesDialogState";
 
 const allNames = ["data_upload_mid", "ops", "mysql", "performance_schema", "sys"];
 const defaultVisibleNames = ["data_upload_mid", "ops"];
@@ -33,6 +33,32 @@ describe("visibleDatabasesDialogState", () => {
 
   it("keeps an explicit list when system databases are selected on purpose", () => {
     expect(resolve(["data_upload_mid", "ops", "mysql"])).toEqual({ type: "set", databaseNames: ["data_upload_mid", "ops", "mysql"], patterns: [] });
+  });
+
+  it("persists a match-all wildcard when every database, including system ones, is selected", () => {
+    // “显示系统库”后全选：不能存库名快照（新增库会丢失），也不能按未筛选保存
+    // （默认视图又会隐藏系统库），用全匹配通配符保持动态的全量可见。
+    expect(resolve([...allNames])).toEqual({ type: "set", databaseNames: undefined, patterns: ["%"] });
+    expect(resolve([...allNames], { configuredPatterns: ["%"] })).toEqual({ type: "none" });
+    expect(resolve([...allNames], { configured: [...allNames] })).toEqual({ type: "set", databaseNames: undefined, patterns: ["%"] });
+  });
+
+  it("drops the internal match-all wildcard before resolving the user's patterns", () => {
+    expect(visibleDatabasePatternsWithoutMatchAll(["%", "log_%"])).toEqual(["log_%"]);
+    expect(visibleDatabasePatternsWithoutMatchAll(undefined)).toEqual([]);
+  });
+
+  it("keeps clearing when all names are already the default visible set", () => {
+    expect(
+      resolveVisibleDatabaseSaveAction({
+        selection: new Set(["data_upload_mid", "ops"]),
+        allNames: ["data_upload_mid", "ops"],
+        defaultVisibleNames: ["data_upload_mid", "ops"],
+        configured: ["data_upload_mid", "ops"],
+        configuredPatterns: undefined,
+        patterns: [],
+      }),
+    ).toEqual({ type: "clear" });
   });
 
   it("keeps the list while wildcard patterns are active because the two are unioned", () => {

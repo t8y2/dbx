@@ -111,7 +111,8 @@ describe("EditorToolbar commit/rollback visibility", () => {
         isExplaining: false,
       },
       activeConnection: connectionStore.getConfig("conn-1"),
-      executableSql: "SELECT 1",
+      hasExecutableSql: true,
+      executableSqlMayContainDml: false,
       explainMode: "explain",
       blockDangerousRedisCommands: false,
       sqlKeywordCase: "preserve",
@@ -150,6 +151,22 @@ describe("EditorToolbar commit/rollback visibility", () => {
 
   it("shows Commit/Rollback once the MySQL sticky session is dirty", async () => {
     const host = await mountToolbar({ dbType: "mysql", stickyProvenReadOnlyState: true, txnPossiblyDirty: true, txnSessionId: "txn-1" });
+
+    expect(host.querySelector(commitSelector)).not.toBeNull();
+    expect(host.querySelector(rollbackSelector)).not.toBeNull();
+    host.remove();
+  });
+
+  it("hides Commit/Rollback for a clean GaussDB sticky manual session", async () => {
+    const host = await mountToolbar({ dbType: "gaussdb", stickyProvenReadOnlyState: true, txnPossiblyDirty: false, txnSessionId: "txn-1" });
+
+    expect(host.querySelector(commitSelector)).toBeNull();
+    expect(host.querySelector(rollbackSelector)).toBeNull();
+    host.remove();
+  });
+
+  it("shows Commit/Rollback once the GaussDB sticky session is dirty", async () => {
+    const host = await mountToolbar({ dbType: "gaussdb", stickyProvenReadOnlyState: true, txnPossiblyDirty: true, txnSessionId: "txn-1" });
 
     expect(host.querySelector(commitSelector)).not.toBeNull();
     expect(host.querySelector(rollbackSelector)).not.toBeNull();

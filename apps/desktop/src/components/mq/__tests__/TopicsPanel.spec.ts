@@ -169,6 +169,21 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe("TopicsPanel optional management capabilities", () => {
+  it("disables create/delete and avoids Broker discovery when unsupported", async () => {
+    backend.mqListTopics.mockResolvedValue([{ name: "TopicA", shortName: "TopicA", persistent: true, partitioned: false, messageType: "NORMAL" }]);
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(TopicsPanel, { connectionId: "proxy", tenant: "_flat_mq", namespace: "_flat_mq", mqSystemKind: "rocketmq", supportsCreateTopic: false, supportsDeleteTopic: false, supportsTopicStats: false, supportsBrokerAdmin: false });
+    app.mount(root);
+    await flushUi();
+    expect(backend.mqGetClusterInfo).not.toHaveBeenCalled();
+    const buttons = [...root.querySelectorAll<HTMLButtonElement>("button")];
+    expect(buttons.find((button) => button.textContent?.includes("mqTopics.createTopic"))?.disabled).toBe(true);
+    expect(buttons.find((button) => button.textContent?.trim() === "mqTopics.delete")?.disabled).toBe(true);
+  });
+});
+
 describe("TopicsPanel RabbitMQ queue messages", () => {
   it("shows ready message counts and toggles descending and ascending sorting", async () => {
     const panel = await mountRabbitMqPanel();

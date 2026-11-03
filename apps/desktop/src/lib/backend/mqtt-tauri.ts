@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { MqttMessage } from "@/types/mqtt";
 
 export async function mqttGetBrokerInfo(connectionId: string) {
   return invoke("mqtt_get_broker_info", { connectionId });
@@ -8,8 +9,8 @@ export async function mqttSubscribe(connectionId: string, topic: string, qos?: s
   return invoke("mqtt_subscribe", { connectionId, topic, qos: qos ?? null, noLocal: noLocal ?? false });
 }
 
-export async function mqttSaveTopicConfig(connectionId: string, topic: string, qos: string, noLocal: boolean, enabled = false) {
-  return invoke("mqtt_save_topic_config", { connectionId, config: { topic, qos, noLocal, enabled } });
+export async function mqttSaveTopicConfig(connectionId: string, topic: string, qos: string, noLocal: boolean, enabled = false, alias = "") {
+  return invoke("mqtt_save_topic_config", { connectionId, config: { topic, qos, noLocal, enabled, alias: alias.trim() } });
 }
 
 export async function mqttDeleteTopicConfig(connectionId: string, topic: string) {
@@ -42,4 +43,8 @@ export async function mqttGetMessages(connectionId: string, topicFilter?: string
 
 export async function mqttClearMessages(connectionId: string) {
   return invoke("mqtt_clear_messages", { connectionId });
+}
+
+export async function mqttDeleteMessage(connectionId: string, message: MqttMessage) {
+  return invoke("mqtt_delete_message", { connectionId, message });
 }

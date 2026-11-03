@@ -7,7 +7,7 @@ const databaseNode = { type: "database" as const, database: "dcss" };
 
 describe("database namespace creation targets", () => {
   it("offers Create Database (not Create Schema) for GBase 8s", () => {
-    const gbase8s = { db_type: "gbase", driver_profile: "gbase8s" } as Conn;
+    const gbase8s = { db_type: "gbase8s", driver_profile: "gbase8s" } as Conn;
 
     expect(connectionNamespaceCreationTarget(gbase8s)).toBe("database");
     expect(databaseNodeNamespaceCreationTarget(gbase8s, databaseNode)).toBeNull();

@@ -36,6 +36,9 @@ pub async fn start_table_export(
     Json(body): Json<StartExportRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let mut req = body.request;
+    dbx_core::query::mysql_data_charset_policy::check_export(&state.app, &req.connection_id, &req.format)
+        .await
+        .map_err(AppError::from)?;
     let export_id = req.export_id.clone();
 
     // Generate temp file path for web export output

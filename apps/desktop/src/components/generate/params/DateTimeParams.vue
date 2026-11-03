@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { RefreshCw } from "@lucide/vue";
+import { generateTimeInRange } from "@/lib/dataGrid/generatorTimeRange";
 import type { GeneratorParams } from "@/lib/dataGrid/dataGenerate";
 
 const props = defineProps<{ params: GeneratorParams }>();
@@ -30,12 +31,7 @@ const previewVal = computed(() => {
   if (!props.params.allDay) {
     return formatLocalDate(d);
   }
-  const sh = parseInt(props.params.startTime ?? "00") || 0;
-  const sm = parseInt(props.params.endTime ?? "23") || 23;
-  const h = Math.floor(Math.random() * (sm - sh + 1)) + sh;
-  const m = Math.floor(Math.random() * 60);
-  const s = Math.floor(Math.random() * 60);
-  return `${formatLocalDate(d)} ${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${formatLocalDate(d)} ${generateTimeInRange(props.params.startTime, props.params.endTime)}`;
 });
 
 const weekdayLabels = computed(() => (["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const).map((d) => t(`dataGenerate.weekdayShort.${d}`)));

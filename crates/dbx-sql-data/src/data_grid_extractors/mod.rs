@@ -3,18 +3,24 @@ use std::borrow::Cow;
 use std::io::{self, Write};
 
 mod contract;
+mod copy_formats;
 mod delimited;
 mod document;
 mod json;
 mod raw;
 mod sql;
 
+use crate::data_grid_sql::unique_column_info_match;
 pub use contract::*;
+use copy_formats::{write_dbunit, write_php};
 use delimited::{write_dsv, write_one_row};
 use document::{write_html, write_markdown, write_pretty, write_xml};
 use json::{write_json, write_json_lines};
 use raw::write_raw;
-use sql::{write_sql_in_list, write_sql_inserts, write_sql_select, write_sql_updates, write_where_clause};
+use sql::{
+    write_sql_deletes_inserts, write_sql_in_list, write_sql_inserts, write_sql_select, write_sql_updates,
+    write_where_clause,
+};
 
 const DATA_GRID_EXTRACTOR_MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
 const DATA_GRID_EXTRACTOR_MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
@@ -136,22 +142,13 @@ fn build_context(request: &DataGridExtractRequest) -> Result<ExtractContext<'_>,
             })?;
         }
     }
-    let column_info_by_name = request
-        .table_meta
-        .as_ref()
-        .and_then(|table_meta| table_meta.columns.as_ref())
-        .map(|columns| {
-            columns
-                .iter()
-                .map(|info| (normalized_name(info.name.as_str()).to_ascii_uppercase(), info))
-                .collect::<std::collections::HashMap<_, _>>()
-        })
-        .unwrap_or_default();
+    let column_info =
+        request.table_meta.as_ref().and_then(|table_meta| table_meta.columns.as_deref()).unwrap_or_default();
     let selected_column_info = selected_columns
         .iter()
         .map(|column| {
             let source_name = column.source_name.as_deref().unwrap_or(&column.display_name);
-            column_info_by_name.get(&normalized_name(source_name).to_ascii_uppercase()).copied()
+            unique_column_info_match(request.database_type, column_info, source_name)
         })
         .collect();
     Ok(ExtractContext { request, selected_columns, selected_source_indexes, selected_column_info })
@@ -172,10 +169,17 @@ fn validate_request_budget(request: &DataGridExtractRequest) -> Result<(), DataG
         .fold(0usize, |size, column| {
             size.saturating_add(column.display_name.len())
                 .saturating_add(column.source_name.as_deref().map_or(0, str::len))
+                .saturating_add(column.description.as_deref().map_or(0, str::len))
         })
         .saturating_add(request.options.dsv.column_separator.len())
         .saturating_add(request.options.dsv.row_separator.len())
         .saturating_add(request.options.dsv.null_text.len())
+        .saturating_add(request.options.dsv.line_feed_escape_string.len())
+        .saturating_add(request.source_table_name.as_deref().map_or(0, str::len))
+        .saturating_add(request.options.dbunit.table_name.len())
+        .saturating_add(request.options.dbunit.null_value_string.len())
+        .saturating_add(request.options.php.variable_name.len())
+        .saturating_add(request.options.php.row_delimiter.len())
         .saturating_add(estimated_table_meta_bytes(request.table_meta.as_ref()));
     if estimated_bytes > DATA_GRID_EXTRACTOR_MAX_INPUT_BYTES {
         return Err(input_too_large_error());
@@ -264,28 +268,51 @@ fn write_extraction(
             Ok(text_metadata("text/plain", "txt"))
         }
         DataGridExtractorId::Tsv | DataGridExtractorId::TsvWithHeaders => {
-            let options = DataGridDsvOptions {
-                column_separator: "\t".to_string(),
-                include_column_header: extractor == DataGridExtractorId::TsvWithHeaders,
-                ..context.request.options.dsv.clone()
-            };
-            // TSV is split on the tab separator with no quote state machine, so a
-            // value that merely contains a double quote must not be escaped.
+            let mut options = context.request.options.dsv.clone();
+            options.column_separator = "\t".to_string();
+            // TSV shares the CSV/DSV header, NULL-text and advanced options
+            // (#13305): only the separator is pinned and quoting stays off,
+            // because TSV is split on the tab separator with no quote state
+            // machine, so a value that merely contains a double quote must
+            // not be escaped. The plain Tsv id is also the implicit default of
+            // smart copy/cut, so it stays on the legacy shape (no header rows,
+            // no formula escaping, no number formatting) instead of inheriting
+            // options a user saved while configuring CSV/DSV; only the explicit
+            // TsvWithHeaders id honors them.
+            if extractor == DataGridExtractorId::Tsv {
+                options.header_position = DataGridHeaderPosition::Legacy;
+                options.header_format = DataGridHeaderFormat::Name;
+                options.header_case = DataGridHeaderCase::Preserve;
+                options.escape_formulas = false;
+                options.format_numbers = DataGridNumberFormat::Inherit;
+                options.line_feed_escape_string.clear();
+            }
+            options.include_column_header = extractor == DataGridExtractorId::TsvWithHeaders
+                && options.header_position == DataGridHeaderPosition::Legacy;
+            options.quote_numeric_strings = false;
             write_dsv(context, output, &options, false)?;
             Ok(text_metadata("text/tab-separated-values", "tsv"))
         }
         DataGridExtractorId::Csv | DataGridExtractorId::CsvWithHeaders => {
             let options = DataGridDsvOptions {
                 column_separator: ",".to_string(),
-                include_column_header: extractor == DataGridExtractorId::CsvWithHeaders,
+                include_column_header: extractor == DataGridExtractorId::CsvWithHeaders
+                    && context.request.options.dsv.header_position == DataGridHeaderPosition::Legacy,
                 ..context.request.options.dsv.clone()
             };
             write_dsv(context, output, &options, true)?;
             Ok(text_metadata("text/csv", "csv"))
         }
         DataGridExtractorId::PipeSeparated => {
-            let options =
-                DataGridDsvOptions { column_separator: "|".to_string(), ..context.request.options.dsv.clone() };
+            let mut options = context.request.options.dsv.clone();
+            options.column_separator = "|".to_string();
+            options.quote_numeric_strings = false;
+            options.header_position = DataGridHeaderPosition::Legacy;
+            options.header_format = DataGridHeaderFormat::Name;
+            options.header_case = DataGridHeaderCase::Preserve;
+            options.escape_formulas = false;
+            options.line_feed_escape_string.clear();
+            options.array_format = DataGridArrayFormat::Preserve;
             write_dsv(context, output, &options, false)?;
             Ok(text_metadata("text/plain", "txt"))
         }
@@ -320,6 +347,7 @@ fn write_extraction(
             Ok(text_metadata("application/sql", "sql"))
         }
         DataGridExtractorId::SqlInserts => write_sql_inserts(context, output),
+        DataGridExtractorId::SqlDeletesInserts => write_sql_deletes_inserts(context, output),
         DataGridExtractorId::SqlUpdates => write_sql_updates(context, output),
         DataGridExtractorId::SqlSelect => {
             write_sql_select(context, output)?;
@@ -344,6 +372,14 @@ fn write_extraction(
         DataGridExtractorId::Pretty => {
             write_pretty(context, output)?;
             Ok(text_metadata("text/plain", "txt"))
+        }
+        DataGridExtractorId::Dbunit => {
+            write_dbunit(context, output)?;
+            Ok(text_metadata("application/xml", "xml"))
+        }
+        DataGridExtractorId::Php => {
+            let warnings = write_php(context, output)?;
+            Ok(WriteMetadata { mime_type: "text/x-php", file_extension: "php", omitted_columns: Vec::new(), warnings })
         }
     }
 }

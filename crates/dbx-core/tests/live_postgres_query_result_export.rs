@@ -44,6 +44,8 @@ fn live_postgres_config(
         connect_timeout_secs: 10,
         query_timeout_secs: 30,
         idle_timeout_secs: 60,
+        manual_transaction_timeout_secs: 300,
+        idle_disconnect_secs: 0,
         keepalive_interval_secs: 0,
         ssl: false,
         ca_cert_path: String::new(),
@@ -80,9 +82,12 @@ fn live_postgres_config(
         read_only: false,
         is_production: false,
         production_databases: vec![],
+        production_badge_scope: None,
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
         show_database_links: None,
+        show_native_jobs: None,
+        show_user_admin: None,
         database_info: None,
     }
 }
@@ -166,7 +171,7 @@ async fn live_postgres_query_result_export_uses_single_streamed_query() {
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
-        exclude_primary_keys: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
     };
     let done_seen = AtomicBool::new(false);
@@ -258,7 +263,7 @@ async fn live_postgres_query_result_xlsx_preserves_temporal_cell_types() {
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
-        exclude_primary_keys: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
     };
 
@@ -339,7 +344,7 @@ async fn live_postgres_numeric_xlsx_ignores_fractional_trailing_zeros() {
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: true,
-        exclude_primary_keys: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
     };
 
@@ -425,7 +430,7 @@ async fn live_postgres_truncated_batch_result_export_replays_safe_temp_setup() {
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
-        exclude_primary_keys: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
     };
     let csv_rows = AtomicU64::new(0);
@@ -515,7 +520,7 @@ async fn live_postgres_xlsx_export_can_outlive_query_timeout_while_rows_keep_arr
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
-        exclude_primary_keys: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
     };
     let rows_exported = AtomicU64::new(0);
@@ -594,7 +599,7 @@ async fn live_postgres_stream_still_times_out_without_progress_and_recovers() {
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
-        exclude_primary_keys: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
     };
     let started_at = Instant::now();

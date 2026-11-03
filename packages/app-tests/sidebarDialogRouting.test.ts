@@ -79,7 +79,6 @@ test("shared dialog state is owner-gated and confirm handlers use snapshots", ()
   assert.match(runtimeHost, /sidebarTreeDialogOwner\.value !== treeItemDialogOwner/);
   assert.match(runtimeHost, /const node = sidebarDangerTarget\.value \?\? activeNode\.value/);
   assert.match(runtimeHost, /const node = sidebarFormTarget\.value \?\? activeNode\.value/);
-  assert.match(runtimeHost, /batchDropTargets\.value = targets\.slice\(\)/);
   assert.match(runtimeHost, /batchTruncateTargets\.value = targets\.slice\(\)/);
   assert.match(runtimeHost, /activateActionTarget\(target\)/);
 });

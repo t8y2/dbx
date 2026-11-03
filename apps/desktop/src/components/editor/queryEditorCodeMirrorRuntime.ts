@@ -37,6 +37,8 @@ interface CodeMirrorBindings {
   buildSqlSignatureExtension: (() => import("@codemirror/state").Extension) | null;
   buildSqlCompletionExtension: (() => import("@codemirror/state").Extension) | null;
   buildSqlLanguageExtension: (() => import("@codemirror/state").Extension) | null;
+  /** Parses one bounded statement or window with the full Lezer grammar, for documents past the syntax budget. */
+  parseSqlWindowTree: ((text: string) => import("@/lib/editor/codemirrorSqlWindowTree").SqlWindowTree) | null;
   buildSqlSemanticHighlightExtension: (() => import("@codemirror/state").Extension) | null;
   codeMirrorSnippetCompletion: typeof import("@codemirror/autocomplete").snippetCompletion;
   codeMirrorCompletionStatus: typeof import("@codemirror/autocomplete").completionStatus | null;
@@ -92,67 +94,69 @@ interface CodeMirrorBindings {
 }
 
 type ReadyCodeMirrorBindings = CodeMirrorBindings & {
-  [Key in
-    | "editorViewModule"
-    | "hoverCloseEffect"
-    | "codeMirrorLineNumbers"
-    | "codeMirrorPrec"
-    | "codeMirrorEditorSelection"
-    | "codeMirrorSnippetCompletion"
-    | "fontThemeComp"
-    | "codeMirrorTheme"
-    | "wordWrapComp"
-    | "showWhitespaceComp"
-    | "lineNumbersComp"
-    | "vimModeComp"
-    | "closeBracketsComp"
-    | "sqlLanguageComp"
-    | "sqlSemanticHighlightComp"
-    | "sqlSignatureComp"
-    | "codeMirrorCloseBrackets"
-    | "codeMirrorCloseBracketsKeymap"
-    | "readOnlyComp"
-    | "runGutterComp"
-    | "runKeymapComp"
-    | "historyResetComp"
-    | "defaultKeymapComp"
-    | "completionComp"
-    | "diagnosticComp"
-    | "previewRangeComp"
-    | "indentComp"
-    | "setSqlDiagnosticsEffect"
-    | "statementBoundariesRefreshEffect"
-    | "codeMirrorCompletionStatus"
-    | "codeMirrorAcceptCompletion"
-    | "codeMirrorCurrentCompletions"
-    | "codeMirrorSelectedCompletion"
-    | "codeMirrorSelectedCompletionIndex"
-    | "codeMirrorSetSelectedCompletion"
-    | "codeMirrorMoveCompletionSelection"
-    | "codeMirrorSelectFirstCompletion"
-    | "codeMirrorCloseCompletion"
-    | "codeMirrorStartCompletion"
-    | "codeMirrorInsertCompletionText"
-    | "codeMirrorNextSnippetField"
-    | "codeMirrorIndentMore"
-    | "codeMirrorIndentLess"
-    | "codeMirrorCopyLineDown"
-    | "codeMirrorCopyLineUp"
-    | "codeMirrorDeleteLine"
-    | "codeMirrorMoveLineUp"
-    | "codeMirrorMoveLineDown"
-    | "codeMirrorUndo"
-    | "codeMirrorRedo"
-    | "codeMirrorHistory"
-    | "codeMirrorSelectAll"
-    | "codeMirrorInsertNewlineKeepIndent"
-    | "codeMirrorToggleLineComment"
-    | "codeMirrorToggleBlockComment"
-    | "codeMirrorDefaultKeymap"
-    | "codeMirrorToggleFold"
-    | "codeMirrorFoldAll"
-    | "codeMirrorUnfoldAll"
-    | "codeMirrorIndentUnit"]: NonNullable<CodeMirrorBindings[Key]>;
+  [
+    Key in
+      | "editorViewModule"
+      | "hoverCloseEffect"
+      | "codeMirrorLineNumbers"
+      | "codeMirrorPrec"
+      | "codeMirrorEditorSelection"
+      | "codeMirrorSnippetCompletion"
+      | "fontThemeComp"
+      | "codeMirrorTheme"
+      | "wordWrapComp"
+      | "showWhitespaceComp"
+      | "lineNumbersComp"
+      | "vimModeComp"
+      | "closeBracketsComp"
+      | "sqlLanguageComp"
+      | "sqlSemanticHighlightComp"
+      | "sqlSignatureComp"
+      | "codeMirrorCloseBrackets"
+      | "codeMirrorCloseBracketsKeymap"
+      | "readOnlyComp"
+      | "runGutterComp"
+      | "runKeymapComp"
+      | "historyResetComp"
+      | "defaultKeymapComp"
+      | "completionComp"
+      | "diagnosticComp"
+      | "previewRangeComp"
+      | "indentComp"
+      | "setSqlDiagnosticsEffect"
+      | "statementBoundariesRefreshEffect"
+      | "codeMirrorCompletionStatus"
+      | "codeMirrorAcceptCompletion"
+      | "codeMirrorCurrentCompletions"
+      | "codeMirrorSelectedCompletion"
+      | "codeMirrorSelectedCompletionIndex"
+      | "codeMirrorSetSelectedCompletion"
+      | "codeMirrorMoveCompletionSelection"
+      | "codeMirrorSelectFirstCompletion"
+      | "codeMirrorCloseCompletion"
+      | "codeMirrorStartCompletion"
+      | "codeMirrorInsertCompletionText"
+      | "codeMirrorNextSnippetField"
+      | "codeMirrorIndentMore"
+      | "codeMirrorIndentLess"
+      | "codeMirrorCopyLineDown"
+      | "codeMirrorCopyLineUp"
+      | "codeMirrorDeleteLine"
+      | "codeMirrorMoveLineUp"
+      | "codeMirrorMoveLineDown"
+      | "codeMirrorUndo"
+      | "codeMirrorRedo"
+      | "codeMirrorHistory"
+      | "codeMirrorSelectAll"
+      | "codeMirrorInsertNewlineKeepIndent"
+      | "codeMirrorToggleLineComment"
+      | "codeMirrorToggleBlockComment"
+      | "codeMirrorDefaultKeymap"
+      | "codeMirrorToggleFold"
+      | "codeMirrorFoldAll"
+      | "codeMirrorUnfoldAll"
+      | "codeMirrorIndentUnit"
+  ]: NonNullable<CodeMirrorBindings[Key]>;
 };
 
 export function createQueryEditorCodeMirrorRuntime() {
@@ -191,6 +195,7 @@ export function createQueryEditorCodeMirrorRuntime() {
     buildSqlSignatureExtension: null,
     buildSqlCompletionExtension: null,
     buildSqlLanguageExtension: null,
+    parseSqlWindowTree: null,
     buildSqlSemanticHighlightExtension: null,
     codeMirrorSnippetCompletion: undefined!,
     codeMirrorCompletionStatus: null,

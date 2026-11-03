@@ -156,20 +156,7 @@ async function ensureMongoContainer(options) {
     await run("docker", ["inspect", options.container]);
     await run("docker", ["start", options.container]);
   } catch {
-    await run("docker", [
-      "run",
-      "-d",
-      "--name",
-      options.container,
-      "--platform",
-      "linux/amd64",
-      "-p",
-      `${options.host}:${options.port}:27017`,
-      options.image,
-      "--nojournal",
-      "--wiredTigerCacheSizeGB",
-      "0.5",
-    ]);
+    await run("docker", ["run", "-d", "--name", options.container, "--platform", "linux/amd64", "-p", `${options.host}:${options.port}:27017`, options.image, "--nojournal", "--wiredTigerCacheSizeGB", "0.5"]);
   }
 
   const deadline = Date.now() + 30_000;
@@ -200,9 +187,7 @@ async function seedMongo(options) {
     return { skipped: true, count: current, elapsedMs: 0 };
   }
   if (!options.seed && !options.forceSeed) {
-    throw new Error(
-      `Collection count is ${current}, expected ${options.expectedCount}. Re-run with --seed to create the benchmark dataset.`,
-    );
+    throw new Error(`Collection count is ${current}, expected ${options.expectedCount}. Re-run with --seed to create the benchmark dataset.`);
   }
 
   const startedAt = performance.now();
@@ -408,9 +393,7 @@ function printReport(result) {
   console.log("| Case | Value | Payload | Min | P50 | P90 | Max | Avg |");
   console.log("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
   for (const row of result.measurements) {
-    console.log(
-      `| ${row.label} | ${row.value} | ${formatBytes(row.payloadBytes)} | ${formatMs(row.minMs)} | ${formatMs(row.p50Ms)} | ${formatMs(row.p90Ms)} | ${formatMs(row.maxMs)} | ${formatMs(row.avgMs)} |`,
-    );
+    console.log(`| ${row.label} | ${row.value} | ${formatBytes(row.payloadBytes)} | ${formatMs(row.minMs)} | ${formatMs(row.p50Ms)} | ${formatMs(row.p90Ms)} | ${formatMs(row.maxMs)} | ${formatMs(row.avgMs)} |`);
   }
 }
 

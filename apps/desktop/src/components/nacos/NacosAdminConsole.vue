@@ -54,7 +54,7 @@ import { clipboardLineEndings, copyToClipboard, readTextFromClipboard } from "@/
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
-import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoomCommitScheduler, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
+import { clampEditorFontSize, createEditorWheelZoomController, createEditorZoomCommitScheduler } from "@/lib/editor/editorZoom";
 import { replaceFallbackKey } from "@/lib/editor/queryEditorSearchKeymap";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -221,7 +221,7 @@ const configEditorZoomCommitScheduler = createEditorZoomCommitScheduler((fontSiz
   if (settingsStore.editorSettings.fontSize === fontSize) return;
   settingsStore.updateEditorSettings({ fontSize });
 });
-const configEditorWheelZoomGestureGuard = createEditorWheelZoomGestureGuard();
+const configEditorWheelZoom = createEditorWheelZoomController();
 const knownConfigFormats = ref<Record<string, string>>({});
 const selectedConfigKeys = ref<string[]>([]);
 const searchOpen = ref(false);
@@ -646,9 +646,9 @@ async function mountConfigEditor() {
           return selectLineEnds(eventView);
         },
         wheel(event, eventView) {
-          if (!configEditorWheelZoomGestureGuard.accepts(event)) return false;
+          const next = configEditorWheelZoom.nextFontSize(configEditorFontSize.value, event);
+          if (next === null) return false;
           event.preventDefault();
-          const next = fontSizeFromWheelDelta(configEditorFontSize.value, event.deltaY);
           if (next !== configEditorFontSize.value) {
             configEditorFontSize.value = next;
             eventView.dispatch({

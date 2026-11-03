@@ -1,4 +1,5 @@
 import type { ConnectionConfig, PluginFormField, PluginFormFieldValue } from "@/types/database";
+import { isSavedCredential } from "@/lib/security/passwordViewer";
 import { pluginFieldIsRequired } from "@/lib/plugins/pluginFieldConditions";
 
 type PasswordAuthenticationConfig = Pick<ConnectionConfig, "db_type" | "driver_profile" | "url_params">;
@@ -29,7 +30,7 @@ export function connectionUsesPasswordlessAuthentication(config: PasswordAuthent
 }
 
 export function connectionNeedsPasswordPrompt(config: ConnectionConfig): boolean {
-  return config.save_password === false && !config.password && !connectionUsesPasswordlessAuthentication(config);
+  return config.save_password === false && (!config.password || isSavedCredential(config.password)) && !connectionUsesPasswordlessAuthentication(config);
 }
 
 /**

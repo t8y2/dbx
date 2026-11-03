@@ -14,18 +14,14 @@ test("forwards arguments and provides the bundled SDK root", () => {
   const stage = spawnSync(process.execPath, [stageSdk], { encoding: "utf8" });
   assert.equal(stage.status, 0, stage.stderr);
   try {
-    const result = spawnSync(
-      process.execPath,
-      [launcher, "-e", "process.stdout.write(process.env.DBX_PLUGIN_SDK_ROOT || '')"],
-      {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          DBX_PLUGIN_CLI_BINARY: process.execPath,
-          DBX_PLUGIN_SDK_ROOT: "",
-        },
+    const result = spawnSync(process.execPath, [launcher, "-e", "process.stdout.write(process.env.DBX_PLUGIN_SDK_ROOT || '')"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        DBX_PLUGIN_CLI_BINARY: process.execPath,
+        DBX_PLUGIN_SDK_ROOT: "",
       },
-    );
+    });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, sdkRoot);
     assert.ok(existsSync(join(sdkRoot, "plugins", "sdk", "rust", "dbx-plugin-sdk", "Cargo.toml")));
@@ -36,18 +32,14 @@ test("forwards arguments and provides the bundled SDK root", () => {
 });
 
 test("preserves an explicit SDK root", () => {
-  const result = spawnSync(
-    process.execPath,
-    [launcher, "-e", "process.stdout.write(process.env.DBX_PLUGIN_SDK_ROOT || '')"],
-    {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        DBX_PLUGIN_CLI_BINARY: process.execPath,
-        DBX_PLUGIN_SDK_ROOT: "/custom/dbx-plugin-sdk",
-      },
+  const result = spawnSync(process.execPath, [launcher, "-e", "process.stdout.write(process.env.DBX_PLUGIN_SDK_ROOT || '')"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      DBX_PLUGIN_CLI_BINARY: process.execPath,
+      DBX_PLUGIN_SDK_ROOT: "/custom/dbx-plugin-sdk",
     },
-  );
+  });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "/custom/dbx-plugin-sdk");
 });

@@ -175,3 +175,35 @@ describe("SQL risk dialect lexer rules", () => {
     expect(classifySqlRisk(sql).risk).toBe("write");
   });
 });
+
+describe("SQL risk SET statement classification", () => {
+  it("treats safe variable assignments and session switches as read", () => {
+    expect(classifySqlRisk("SET @begin_id = 0", { dialect: "mysql" }).risk).toBe("read");
+    expect(classifySqlRisk("SET @end_id = @begin_id + 100000;", { dialect: "mysql" }).risk).toBe("read");
+    expect(classifySqlRisk("SET @begin_id = 0;\nSET @end_id = @begin_id + 100000;", { dialect: "mysql" }).risk).toBe("read");
+    expect(classifySqlRisk("SET @var := 1", { dialect: "mysql" }).risk).toBe("read");
+    expect(classifySqlRisk("SET @@session.sort_buffer_size = 1000", { dialect: "mysql" }).risk).toBe("read");
+    expect(classifySqlRisk("SET @@sort_buffer_size = 1000", { dialect: "mysql" }).risk).toBe("read");
+    expect(classifySqlRisk("SET SESSION sort_buffer_size = 1000", { dialect: "mysql" }).risk).toBe("read");
+    expect(classifySqlRisk("SET NAMES utf8mb4", { dialect: "mysql" }).risk).toBe("read");
+    expect(classifySqlRisk("SET CHARSET utf8mb4", { dialect: "mysql" }).risk).toBe("read");
+    expect(classifySqlRisk("SET CHARACTER SET utf8mb4", { dialect: "mysql" }).risk).toBe("read");
+    expect(classifySqlRisk('SET search_path TO public, "$user"', { dialect: "postgres" }).risk).toBe("read");
+    expect(classifySqlRisk("SET search_path = public", { dialect: "postgres" }).risk).toBe("read");
+    expect(classifySqlRisk("SET TIME ZONE 'UTC'", { dialect: "postgres" }).risk).toBe("read");
+    expect(classifySqlRisk("SET @val = REPLACE('hello', 'l', 'w')", { dialect: "mysql" }).risk).toBe("read");
+  });
+
+  it("treats global, persist, password and DML/DDL-containing SET statements as unsafe", () => {
+    expect(classifySqlRisk("SET GLOBAL max_connections = 100", { dialect: "mysql" }).risk).toBe("write");
+    expect(classifySqlRisk("SET @@global.max_connections = 100", { dialect: "mysql" }).risk).toBe("write");
+    expect(classifySqlRisk("SET PERSIST max_connections = 100", { dialect: "mysql" }).risk).toBe("write");
+    expect(classifySqlRisk("SET @@persist.max_connections = 100", { dialect: "mysql" }).risk).toBe("write");
+    expect(classifySqlRisk("SET PASSWORD = 'secret'", { dialect: "mysql" }).risk).toBe("write");
+    expect(classifySqlRisk("SET PASSWORD FOR 'user'@'localhost' = 'secret'", { dialect: "mysql" }).risk).toBe("write");
+    expect(classifySqlRisk("SET @x = (DELETE FROM users)", { dialect: "mysql" }).risk).toBe("write");
+    expect(classifySqlRisk("SET @x = (UPDATE users SET a = 1)", { dialect: "mysql" }).risk).toBe("write");
+    expect(classifySqlRisk("SET @x = (DROP TABLE users)", { dialect: "mysql" }).risk).toBe("ddl");
+    expect(classifySqlRisk("SET SHOWPLAN_ALL ON", { dialect: "sqlserver" }).risk).toBe("unknown");
+  });
+});

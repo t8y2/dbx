@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 30
 dbType: sqlite
+compareModes: [schema, data]
+transferSupportLevel: verified
 rustVariant: Sqlite
 label: SQLite
 dialect: SQLite

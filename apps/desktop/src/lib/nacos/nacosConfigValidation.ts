@@ -110,7 +110,7 @@ function validateHtml(text: string): NacosConfigDiagnostic | null {
   if (syntaxError) return syntaxError;
 
   const stack: HtmlOpenTag[] = [];
-  for (let offset = 0; offset < text.length; ) {
+  for (let offset = 0; offset < text.length;) {
     if (text[offset] !== "<") {
       offset += 1;
       continue;

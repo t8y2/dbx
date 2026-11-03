@@ -308,4 +308,78 @@ describe("SearchableSelect trigger", () => {
     expect(tabEvent.defaultPrevented).toBe(true);
     expect(emitted.modelValue).toEqual(["int"]);
   });
+
+  it("restores focus to the element focused before openDropdown once the popover closes", async () => {
+    const root = document.createElement("div");
+    const editorInput = document.createElement("textarea");
+    document.body.append(editorInput, root);
+    const app = createApp(SearchableSelect, {
+      modelValue: "Point",
+      options: ["Point", "LineString"],
+      placeholder: "type",
+      searchPlaceholder: "search",
+      emptyText: "empty",
+    });
+    mountedApps.push(app);
+    const instance = app.mount(root) as unknown as { openDropdown: () => boolean };
+
+    editorInput.focus();
+    expect(document.activeElement).toBe(editorInput);
+    expect(instance.openDropdown()).toBe(true);
+    await nextTick();
+
+    const input = document.body.querySelector<HTMLInputElement>("input")!;
+    expect(document.activeElement).toBe(input);
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await nextTick();
+    await nextTick();
+
+    expect(document.activeElement).toBe(editorInput);
+  });
+
+  it("skips the focus restore when the captured element left the document before close", async () => {
+    const root = document.createElement("div");
+    const editorInput = document.createElement("textarea");
+    document.body.append(editorInput, root);
+    const app = createApp(SearchableSelect, {
+      modelValue: "Point",
+      options: ["Point", "LineString"],
+      placeholder: "type",
+      searchPlaceholder: "search",
+      emptyText: "empty",
+    });
+    mountedApps.push(app);
+    const instance = app.mount(root) as unknown as { openDropdown: () => boolean };
+
+    editorInput.focus();
+    expect(instance.openDropdown()).toBe(true);
+    await nextTick();
+
+    editorInput.remove();
+    const input = document.body.querySelector<HTMLInputElement>("input")!;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await nextTick();
+    await nextTick();
+
+    expect(document.activeElement).not.toBe(editorInput);
+  });
+
+  it("does not restore focus for dropdowns not opened via openDropdown", async () => {
+    const { root } = mountSelect();
+    const editorInput = document.createElement("textarea");
+    document.body.append(editorInput);
+    editorInput.focus();
+
+    const trigger = root.querySelector("button")!;
+    trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    await nextTick();
+
+    const input = document.body.querySelector<HTMLInputElement>("input")!;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    await nextTick();
+    await nextTick();
+
+    expect(document.activeElement).not.toBe(editorInput);
+  });
 });

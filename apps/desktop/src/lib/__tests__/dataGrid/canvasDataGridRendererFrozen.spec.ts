@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { canvasDataGridActionOverlayWidth, canvasDataGridActionReservedWidth, drawCanvasDataGrid, resolveCanvasBackingStoreMetrics, type DrawCanvasDataGridOptions } from "@/lib/dataGrid/canvasDataGridRenderer";
+import { canvasDataGridActionOverlayWidth, canvasDataGridActionReservedWidth, drawCanvasDataGrid, resolveCanvasBackingStoreMetrics, resolveCanvasDataGridPixelRatio, type DrawCanvasDataGridOptions } from "@/lib/dataGrid/canvasDataGridRenderer";
 
 function createMockCanvas(width = 800, height = 400) {
   const canvas = document.createElement("canvas");
@@ -109,6 +109,29 @@ describe("drawCanvasDataGrid with frozen columns", () => {
     });
   });
 
+  it.each([
+    [1.2, 1.2, 960, 480],
+    [1.25, 1.25, 1000, 500],
+    [2.4, 1.2, 1920, 960],
+    [0.8, 0.8, 800, 400],
+    [6, 1.5, 3200, 1600],
+  ])("uses Linux's zoom-inclusive DPR %s at UI scale %s without resampling twice", (devicePixelRatio, uiScale, pixelWidth, pixelHeight) => {
+    const pixelRatio = resolveCanvasDataGridPixelRatio({ devicePixelRatio, uiScale, platform: "linux" });
+    // WebKitGTK lacks devicePixelContentBoxSize, so the nominal fallback must
+    // itself produce the correct bitmap dimensions.
+    const metrics = resolveCanvasBackingStoreMetrics({ width: 800, height: 400, pixelRatio });
+    expect(metrics).toMatchObject({ pixelWidth, pixelHeight, measured: false });
+  });
+
+  it.each(["macos", "windows", "unknown"] as const)("avoids applying UI zoom twice on %s", (platform) => {
+    expect(resolveCanvasDataGridPixelRatio({ devicePixelRatio: 2, uiScale: 1.2, platform })).toBe(2);
+  });
+
+  it("does not allocate an extra pixel for WebKitGTK's floating-point zoom ratio", () => {
+    const pixelRatio = resolveCanvasDataGridPixelRatio({ devicePixelRatio: 1.2000000476837158, uiScale: 1.2, platform: "linux" });
+    expect(resolveCanvasBackingStoreMetrics({ width: 800, height: 400, pixelRatio })).toEqual({ pixelWidth: 960, pixelHeight: 480, scaleX: 1.2, scaleY: 1.2, measured: false });
+  });
+
   it.each([1, 1.125, 1.1875, 1.2345])("keeps the exact observed density when the nominal ratio is %s", (pixelRatio) => {
     expect(
       resolveCanvasBackingStoreMetrics({
@@ -146,6 +169,39 @@ describe("drawCanvasDataGrid with frozen columns", () => {
     expect(resolveCanvasBackingStoreMetrics({ width: 801, height: 399, pixelRatio: 5 })).toEqual({ pixelWidth: 3204, pixelHeight: 1596, scaleX: 4, scaleY: 4, measured: false });
   });
 
+  it("resolves crisp 1:1 backing store metrics under fractional webview zoom when devicePixelSize is not supported", () => {
+    // WebKitGTK on Linux and WKWebView on macOS do not support devicePixelContentBoxSize,
+    // so devicePixelSize is null/undefined. The backing store must match the webview's
+    // devicePixelRatio (which already incorporates uiScale / zoom level) 1:1.
+    const metrics125 = resolveCanvasBackingStoreMetrics({
+      width: 1000,
+      height: 600,
+      pixelRatio: 1.25,
+      devicePixelSize: null,
+    });
+    expect(metrics125).toEqual({
+      pixelWidth: 1250,
+      pixelHeight: 750,
+      scaleX: 1.25,
+      scaleY: 1.25,
+      measured: false,
+    });
+
+    const metrics150 = resolveCanvasBackingStoreMetrics({
+      width: 1000,
+      height: 600,
+      pixelRatio: 1.5,
+      devicePixelSize: null,
+    });
+    expect(metrics150).toEqual({
+      pixelWidth: 1500,
+      pixelHeight: 900,
+      scaleX: 1.5,
+      scaleY: 1.5,
+      measured: false,
+    });
+  });
+
   it("reports a completed draw only after obtaining a Canvas context", () => {
     const canvas = createMockCanvas();
     const options = createBaseOptions({ canvas, rowCount: 0, rowAt: () => undefined });
@@ -166,6 +222,91 @@ describe("drawCanvasDataGrid with frozen columns", () => {
     expect(fillRect).not.toHaveBeenCalled();
     expect(drawCanvasDataGrid(options)).toBe(true);
     expect(fillRect).toHaveBeenCalled();
+  });
+
+  it.each([1, 1.2, 1.25, 2])("snaps glyph baselines, including italic NULL and semibold row numbers, at density %s", (pixelRatio) => {
+    const canvas = createMockCanvas();
+    const painted: { text: string; y: number; font: string; baseline: string }[] = [];
+    const state = { font: "", textBaseline: "middle" };
+    const offsetForFont = () => (state.font.includes("italic") ? 6.125 : state.font.includes("600") ? 4.75 : 5.25);
+    const ctx = new Proxy(state, {
+      get: (target, key) => {
+        if (key === "measureText") return () => ({ width: 10, actualBoundingBoxAscent: state.textBaseline === "alphabetic" ? 5 + offsetForFont() : 5 });
+        if (key === "fillText") return (text: string, _x: number, y: number) => painted.push({ text, y, font: state.font, baseline: state.textBaseline });
+        return key in target ? target[key as keyof typeof target] : () => {};
+      },
+      set: (target, key, value) => Reflect.set(target, key, value),
+    }) as unknown as CanvasRenderingContext2D;
+    vi.spyOn(canvas, "getContext").mockReturnValue(ctx);
+    const options = createBaseOptions({
+      canvas,
+      pixelRatio,
+      scroller: createMockScroller(0, 3.5),
+      rowCount: 2,
+      rowAt: (index) => ({ ...createMockRow(index, index, ["用户名称", null, "1234567890"]), status: index === 1 ? "edited" : "clean" }),
+      formatCell: (value) => (value === null ? "NULL" : String(value)),
+    });
+
+    expect(drawCanvasDataGrid(options)).toBe(true);
+    expect(painted).toHaveLength(8);
+    expect(painted.some((call) => call.font.includes("italic"))).toBe(true);
+    expect(painted.some((call) => call.font.includes("600"))).toBe(true);
+    for (const call of painted) {
+      expect(call.baseline).toBe("alphabetic");
+      expect(call.y * pixelRatio).toBeCloseTo(Math.round(call.y * pixelRatio));
+    }
+    // The old middle anchor was already snapped; its 5.25px font offset
+    // still put the glyph baseline between device pixels.
+    const centerY = Math.round((Math.round(13 * pixelRatio) / pixelRatio - 3.5) * pixelRatio) / pixelRatio;
+    expect(painted[0]?.y).toBe(Math.round((centerY + 5.25) * pixelRatio) / pixelRatio);
+  });
+
+  it("remeasures baseline offsets after font readiness invalidates the render style", () => {
+    const canvas = createMockCanvas();
+    const state = { font: "", textBaseline: "middle" };
+    let baselineOffset = 5.25;
+    const painted: number[] = [];
+    const measureText = vi.fn(() => ({ width: 10, actualBoundingBoxAscent: state.textBaseline === "alphabetic" ? 5 + baselineOffset : 5 }));
+    const ctx = new Proxy(state, {
+      get: (target, key) => {
+        if (key === "measureText") return measureText;
+        if (key === "fillText") return (_text: string, _x: number, y: number) => painted.push(y);
+        return key in target ? target[key as keyof typeof target] : () => {};
+      },
+      set: (target, key, value) => Reflect.set(target, key, value),
+    }) as unknown as CanvasRenderingContext2D;
+    vi.spyOn(canvas, "getContext").mockReturnValue(ctx);
+    const options = createBaseOptions({ canvas, rowCount: 1, styleKey: "font-pending" });
+    drawCanvasDataGrid(options);
+    expect(painted[0]).toBe(18);
+    const measuredBefore = measureText.mock.calls.length;
+    painted.length = 0;
+    baselineOffset = 6.75;
+    drawCanvasDataGrid(options);
+    expect(painted[0]).toBe(18);
+    expect(measureText.mock.calls.length).toBe(measuredBefore);
+
+    painted.length = 0;
+    drawCanvasDataGrid({ ...options, styleKey: "font-ready" });
+    expect(painted[0]).toBe(20);
+    expect(measureText.mock.calls.length).toBeGreaterThan(measuredBefore);
+  });
+
+  it("keeps middle alignment when the engine lacks actual glyph metrics", () => {
+    const canvas = createMockCanvas();
+    const state = { font: "", textBaseline: "middle" };
+    const baselines: string[] = [];
+    const ctx = new Proxy(state, {
+      get: (target, key) => {
+        if (key === "measureText") return () => ({ width: 10 });
+        if (key === "fillText") return () => baselines.push(state.textBaseline);
+        return key in target ? target[key as keyof typeof target] : () => {};
+      },
+      set: (target, key, value) => Reflect.set(target, key, value),
+    }) as unknown as CanvasRenderingContext2D;
+    vi.spyOn(canvas, "getContext").mockReturnValue(ctx);
+    expect(drawCanvasDataGrid(createBaseOptions({ canvas, rowCount: 1 }))).toBe(true);
+    expect(baselines).toEqual(["middle", "middle", "middle", "middle"]);
   });
 
   it("draws without errors when frozenColumnCount is 0", () => {
@@ -273,6 +414,43 @@ describe("drawCanvasDataGrid with frozen columns", () => {
       nullHighlightKeys: nullKeys,
     });
     expect(() => drawCanvasDataGrid(options)).not.toThrow();
+  });
+
+  it("keeps the row-number gutter unhighlighted when select-all owns the selection", () => {
+    const fills: { fillStyle: string; x: number; width: number }[] = [];
+    let fillStyle = "";
+    const context = new Proxy(
+      {},
+      {
+        get: (_target, key) => {
+          if (key === "fillRect") return (x: number, _y: number, width: number) => fills.push({ fillStyle, x, width });
+          if (key === "measureText") return () => ({ width: 0 });
+          return () => {};
+        },
+        set: (_target, key, value) => {
+          if (key === "fillStyle") fillStyle = String(value);
+          return true;
+        },
+      },
+    ) as unknown as CanvasRenderingContext2D;
+
+    const rowNumberFills = (selectingAll: boolean) => {
+      fills.length = 0;
+      const canvas = createMockCanvas();
+      vi.spyOn(canvas, "getContext").mockReturnValue(context);
+      drawCanvasDataGrid(
+        createBaseOptions({
+          canvas,
+          selectingAll,
+          selectionFrames: [{ startRow: 0, endRow: 2, startCol: 0, endCol: 2 }],
+        }),
+      );
+      return fills.filter((fill) => fill.x === 0 && fill.width === 40).map((fill) => fill.fillStyle);
+    };
+
+    // theme.cellSelected is the row-number "covered by selection" tint; select-all must not use it.
+    expect(rowNumberFills(false)).toContain("rgb(179, 208, 254)");
+    expect(rowNumberFills(true)).not.toContain("rgb(179, 208, 254)");
   });
 
   it("draws with custom crosshair row and column colors", () => {

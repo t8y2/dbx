@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { beforeEach, test, vi } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { decodeSchemaTreeCache, encodeSchemaTreeCache, encodeTableSearchIndexManifest, type TableSearchIndexManifestEntry } from "../../apps/desktop/src/lib/metadata/schemaTreeCache.ts";
 import type { ConnectionConfig, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 const MANIFEST_CACHE_KEY = "dbx:sidebar-table-search-index-manifest-v1";
 
-const { loadSchemaCacheMock, saveSchemaCacheMock, deleteSchemaCachePrefixMock, saveConnectionsMock, listTablesMock, checkConnectionHealthMock, persistedCache } = vi.hoisted(() => {
+const { loadSchemaCacheMock, saveSchemaCacheMock, deleteSchemaCachePrefixMock, saveConnectionsMock, listTablesMock, listObjectsMock, cancelQueryMock, checkConnectionHealthMock, persistedCache } = vi.hoisted(() => {
   const persisted = new Map<string, unknown>();
   return {
     loadSchemaCacheMock: vi.fn(async (cacheKey: string) => persisted.get(cacheKey) ?? null),
@@ -20,6 +20,8 @@ const { loadSchemaCacheMock, saveSchemaCacheMock, deleteSchemaCachePrefixMock, s
     }),
     saveConnectionsMock: vi.fn(async () => undefined),
     listTablesMock: vi.fn(),
+    listObjectsMock: vi.fn(),
+    cancelQueryMock: vi.fn(async () => true),
     checkConnectionHealthMock: vi.fn(async () => undefined),
     persistedCache: persisted,
   };
@@ -34,11 +36,143 @@ vi.mock("../../apps/desktop/src/lib/backend/api", async (importOriginal) => {
     deleteSchemaCachePrefix: deleteSchemaCachePrefixMock,
     saveConnections: saveConnectionsMock,
     listTables: listTablesMock,
+    listObjects: listObjectsMock,
+    cancelQuery: cancelQueryMock,
     checkConnectionHealth: checkConnectionHealthMock,
   };
 });
 
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
+import { useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
+import type { ObjectInfo } from "../../apps/desktop/src/types/database.ts";
+
+async function withRemoteSearchFixture(run: (store: ReturnType<typeof useConnectionStore>, group: TreeNode, controller: AbortController) => Promise<void>) {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection(conn("conn-1"));
+    useSettingsStore().desktopSettings.sidebar_table_page_size = 2;
+    const group: TreeNode = { id: "conn-1:app:public:__procedures", label: "Procedures", type: "group-procedures", connectionId: "conn-1", database: "app", schema: "public", children: [], isExpanded: false };
+    await run(store, group, new AbortController());
+  } finally {
+    restoreStorage();
+  }
+}
+
+test.each(["PROCEDURE", "FUNCTION"])("remote fallback finds an unexpanded %s without replacing live children", async (kind) => {
+  await withRemoteSearchFixture(async (store, group, controller) => {
+    if (kind === "FUNCTION") {
+      group.type = "group-functions";
+      group.id = "conn-1:app:public:__functions";
+    }
+    listObjectsMock.mockResolvedValue([{ name: "late_routine", object_type: kind, schema: "public" }]);
+    const result = await store.searchSidebarObjects(group, "late", controller.signal);
+    expect(result.map((node) => [node.label, node.type])).toEqual([["late_routine", kind.toLowerCase()]]);
+    expect(listObjectsMock.mock.calls[0].slice(0, 7)).toEqual(["conn-1", "app", "public", [kind], "late", 2, 0]);
+    expect(group.children).toEqual([]);
+    expect(group.isExpanded).toBe(false);
+    expect(listTablesMock).not.toHaveBeenCalled();
+  });
+});
+
+test.each(["PROCEDURE", "FUNCTION"])("remote fallback finds %s past the first page and revalidates cached filtered pages", async (kind) => {
+  await withRemoteSearchFixture(async (store, group, controller) => {
+    if (kind === "FUNCTION") {
+      group.type = "group-functions";
+      group.id = "conn-1:app:public:__functions";
+    }
+    const rows = ["target_a", "target_b", "target_z"].map((name) => ({ name, object_type: kind, schema: "public" }));
+    group.children = [{ id: "first", label: "unrelated_first_page", type: kind === "FUNCTION" ? "function" : "procedure" }];
+    listObjectsMock.mockImplementation(async (_connection, _database, _schema, _types, _query, limit, offset) => rows.slice(offset, offset + limit));
+    expect((await store.searchSidebarObjects(group, "target", controller.signal)).map((node) => node.label)).toEqual(rows.map((row) => row.name));
+    expect(listObjectsMock.mock.calls.map((call) => call[6])).toEqual([0, 2]);
+    await store.searchSidebarObjects(group, "target", controller.signal);
+    expect(listObjectsMock.mock.calls.map((call) => call[6])).toEqual([0, 2, 0, 2]);
+    expect(group.children[0].label).toBe("unrelated_first_page");
+  });
+});
+
+test("remote fallback publishes a cached first page before loading a missing page", async () => {
+  await withRemoteSearchFixture(async (store, group) => {
+    const firstPage = ["Photos", "Photos_Album"].map((name) => ({ name, object_type: "PROCEDURE", schema: "public" }));
+    const seedController = new AbortController();
+    listObjectsMock.mockResolvedValueOnce(firstPage);
+    const seeded = store.searchSidebarObjects(group, "photos", seedController.signal, () => seedController.abort());
+    await expect(seeded).resolves.toEqual([]);
+
+    let finishMissingPage!: (objects: ObjectInfo[]) => void;
+    listObjectsMock
+      .mockImplementationOnce(
+        () =>
+          new Promise<ObjectInfo[]>((resolve) => {
+            finishMissingPage = resolve;
+          }),
+      )
+      .mockResolvedValueOnce([{ name: "Photos_Gallery", object_type: "PROCEDURE", schema: "public" }]);
+    const progress: string[][] = [];
+    const pending = store.searchSidebarObjects(group, "photos", new AbortController().signal, (children) => progress.push(children.map((child) => child.label)));
+
+    expect(progress).toEqual([["Photos", "Photos_Album"]]);
+    expect(listObjectsMock.mock.calls.at(-1)?.[6]).toBe(0);
+    finishMissingPage(firstPage);
+    expect((await pending).map((child) => child.label)).toEqual(["Photos", "Photos_Album", "Photos_Gallery"]);
+    expect(progress.at(-1)).toEqual(["Photos", "Photos_Album", "Photos_Gallery"]);
+  });
+});
+
+test("filtered cache is isolated by query and catalog and invalidated after an object change", async () => {
+  await withRemoteSearchFixture(async (store, group, controller) => {
+    listObjectsMock.mockResolvedValue([]);
+    await store.searchSidebarObjects(group, "first", controller.signal);
+    await store.searchSidebarObjects(group, "second", controller.signal);
+    await store.searchSidebarObjects({ ...group, catalog: "other" }, "first", controller.signal);
+    expect(listObjectsMock).toHaveBeenCalledTimes(3);
+    store.invalidateMetadataCache("conn-1", "app", "public", "routine");
+    await store.searchSidebarObjects(group, "first", controller.signal);
+    expect(listObjectsMock).toHaveBeenCalledTimes(4);
+  });
+});
+
+test("aborts the backend execution, rejects late responses, and never caches cancelled pages", async () => {
+  await withRemoteSearchFixture(async (store, group, controller) => {
+    let resolve!: (objects: ObjectInfo[]) => void;
+    listObjectsMock.mockImplementationOnce(
+      () =>
+        new Promise<ObjectInfo[]>((complete) => {
+          resolve = complete;
+        }),
+    );
+    const pending = store.searchSidebarObjects(group, "old", controller.signal);
+    const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    controller.abort();
+    expect(cancelQueryMock).toHaveBeenCalledExactlyOnceWith(listObjectsMock.mock.calls[0][9]);
+    resolve([{ name: "old_result", object_type: "PROCEDURE" }]);
+    await rejected;
+    listObjectsMock.mockResolvedValue([]);
+    await store.searchSidebarObjects(group, "old", new AbortController().signal);
+    expect(listObjectsMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+test("simple-display fallback excludes table/view types and retains routine identity", async () => {
+  await withRemoteSearchFixture(async (store, group, controller) => {
+    const schema: TreeNode = { ...group, id: "conn-1:app:public", type: "schema" };
+    listObjectsMock.mockResolvedValue([{ name: "routine", object_type: "FUNCTION", signature: "integer", schema: "public" }]);
+    const result = await store.searchSidebarObjects(schema, "routine", controller.signal);
+    expect(result[0]).toMatchObject({ type: "function", objectName: "routine", signature: "integer" });
+    expect(listObjectsMock.mock.calls[0][3]).not.toEqual(expect.arrayContaining(["TABLE"]));
+    expect(listObjectsMock.mock.calls[0][3]).not.toEqual(expect.arrayContaining(["VIEW"]));
+  });
+});
+
+test("remote fallback never reconnects an offline datasource", async () => {
+  await withRemoteSearchFixture(async (store, group, controller) => {
+    store.connectedIds.delete("conn-1");
+    expect(await store.searchSidebarObjects(group, "routine", controller.signal)).toEqual([]);
+    expect(listObjectsMock).not.toHaveBeenCalled();
+  });
+});
 
 beforeEach(() => {
   loadSchemaCacheMock.mockReset();
@@ -46,6 +180,8 @@ beforeEach(() => {
   deleteSchemaCachePrefixMock.mockReset();
   saveConnectionsMock.mockReset();
   listTablesMock.mockReset();
+  listObjectsMock.mockReset();
+  cancelQueryMock.mockClear();
   checkConnectionHealthMock.mockReset();
   persistedCache.clear();
   loadSchemaCacheMock.mockImplementation(async (cacheKey: string) => persistedCache.get(cacheKey) ?? null);
@@ -523,6 +659,154 @@ test("refreshSidebarTableSearchIndex is the only path that paginates listTables"
     const scopes = await store.loadSidebarTableSearchIndexScopes();
     assert.equal(scopes.length, 1);
     assert.equal(scopes[0]?.entries.length, 501);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("global and per-database searches share one build, then reuse memory and persisted indexes", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection(conn("conn-1"));
+    store.connectedIds.add("conn-1");
+    const { root, groups } = connectionNodeWithTableGroups("app");
+    store.treeNodes.push(root);
+    const rows = Array.from({ length: 501 }, (_, index) => ({ name: `table_${index}`, table_type: "TABLE" }));
+    listTablesMock.mockImplementation(async (_connectionId: string, _database: string, _schema: string, _filter: unknown, limit: number, offset: number) => rows.slice(offset, offset + limit));
+    const global = store.ensureSidebarTableSearchIndex(groups.app.id, "t", undefined, { connectedOnly: true });
+    const local = store.ensureSidebarTableSearchIndex(groups.app.id, "table");
+    expect(await global).toEqual(rows);
+    expect(await local).toEqual(rows);
+    const buildRequests = listTablesMock.mock.calls.length;
+    const cacheReads = loadSchemaCacheMock.mock.calls.length;
+    expect(buildRequests).toBe(Math.ceil(rows.length / listTablesMock.mock.calls[0][4]));
+    for (const query of ["ta", "table_500", "missing", "table"]) {
+      expect(await store.ensureSidebarTableSearchIndex(groups.app.id, query)).toEqual(rows);
+    }
+    expect(listTablesMock).toHaveBeenCalledTimes(buildRequests);
+    expect(loadSchemaCacheMock).toHaveBeenCalledTimes(cacheReads);
+    expect(groups.app.children).toEqual([]);
+
+    setActivePinia(createPinia());
+    const restarted = useConnectionStore();
+    restarted.addEphemeralConnection(conn("conn-1"));
+    restarted.treeNodes.push(connectionNodeWithTableGroups("app").root);
+    expect(await restarted.ensureSidebarTableSearchIndex(groups.app.id, "table_500", undefined, { connectedOnly: true })).toEqual(rows);
+    expect(listTablesMock).toHaveBeenCalledTimes(buildRequests);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("global search never builds an index for a disconnected datasource", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection(conn("conn-1"));
+    store.connectedIds.delete("conn-1");
+    const { root, groups } = connectionNodeWithTableGroups("app");
+    store.treeNodes.push(root);
+    expect(await store.ensureSidebarTableSearchIndex(groups.app.id, "table", undefined, { connectedOnly: true })).toBeNull();
+    expect(listTablesMock).not.toHaveBeenCalled();
+    expect(checkConnectionHealthMock).not.toHaveBeenCalled();
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("keeps a completed index in memory when persistence is unavailable", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection(conn("conn-1"));
+    const { root, groups } = connectionNodeWithTableGroups("app");
+    store.treeNodes.push(root);
+    const rows = [{ name: "orders", table_type: "TABLE" }];
+    listTablesMock.mockResolvedValue(rows);
+    saveSchemaCacheMock.mockRejectedValue(new Error("disk full"));
+    expect(await store.ensureSidebarTableSearchIndex(groups.app.id, "ord")).toEqual(rows);
+    expect(await store.ensureSidebarTableSearchIndex(groups.app.id, "orders")).toEqual(rows);
+    expect(listTablesMock).toHaveBeenCalledTimes(1);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test.each(["group-views", "group-materialized-views"] as const)("indexes and invalidates %s independently from tables", async (nodeType) => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection(conn("conn-1"));
+    const { root, groups } = connectionNodeWithTableGroups("app");
+    const views: TreeNode = { ...groups.app, id: `${groups.app.id}:views`, type: nodeType };
+    root.children![0].children!.push(views);
+    store.treeNodes.push(root);
+    listTablesMock.mockResolvedValue([{ name: "orders_view", table_type: nodeType === "group-views" ? "VIEW" : "MATERIALIZED_VIEW" }]);
+    const indexed = await store.ensureSidebarTableSearchIndex(views.id, "orders");
+    expect(indexed?.[0].name).toBe("orders_view");
+    expect(listTablesMock.mock.calls[0][6]).toEqual([nodeType === "group-views" ? "VIEW" : "MATERIALIZED_VIEW"]);
+    await store.refreshTreeNode(views);
+    expect(await store.loadSidebarTableSearchIndex(views.id)).toBeNull();
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("refresh invalidates a first build before it has registered a persisted scope", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection(conn("conn-1"));
+    const { root, groups } = connectionNodeWithTableGroups("app");
+    store.treeNodes.push(root);
+    let finishOld!: (rows: Array<{ name: string; table_type: string }>) => void;
+    const fresh = [{ name: "renamed_orders", table_type: "TABLE" }];
+    listTablesMock
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishOld = resolve;
+          }),
+      )
+      .mockResolvedValue(fresh);
+    const oldBuild = store.ensureSidebarTableSearchIndex(groups.app.id, "ord");
+    await vi.waitFor(() => expect(listTablesMock).toHaveBeenCalledTimes(1));
+    await store.refreshTreeNode(groups.app);
+    const replacement = await store.ensureSidebarTableSearchIndex(groups.app.id, "renamed");
+    finishOld([{ name: "old_orders", table_type: "TABLE" }]);
+    expect(await oldBuild).toEqual([]);
+    expect(replacement).toEqual(fresh);
+    expect(await store.loadSidebarTableSearchIndex(groups.app.id)).toEqual(fresh);
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("build deduplication distinguishes identical node ids in different catalogs", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection(conn("conn-1"));
+    const { root, groups } = connectionNodeWithTableGroups("app");
+    const first = { ...groups.app, catalog: "hive" };
+    const second = { ...groups.app, catalog: "iceberg" };
+    root.children = [first, second];
+    store.treeNodes.push(root);
+    listTablesMock.mockImplementation(async (...args: unknown[]) => [{ name: `${args[7]}_orders`, table_type: "TABLE" }]);
+    const results = await Promise.all([first, second].map((node) => store.ensureSidebarTableSearchIndex(node.id, "orders", { connectionId: "conn-1", database: "app", schema: "public", catalog: node.catalog, nodeType: node.type })));
+    expect(results.map((entries) => entries?.[0].name)).toEqual(["hive_orders", "iceberg_orders"]);
+    expect(listTablesMock).toHaveBeenCalledTimes(2);
+    await store.refreshTreeNode(first);
+    const identity = { connectionId: "conn-1", database: "app", schema: "public", nodeType: first.type };
+    expect(await store.loadSidebarTableSearchIndex(first.id, { ...identity, catalog: first.catalog })).toBeNull();
+    expect(await store.loadSidebarTableSearchIndex(second.id, { ...identity, catalog: second.catalog })).toEqual(results[1]);
   } finally {
     restoreStorage();
   }

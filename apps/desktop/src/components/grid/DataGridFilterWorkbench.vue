@@ -41,10 +41,18 @@ const emit = defineEmits<{
   toggleValueSuggestion: [option: DataGridLocalFilterOption];
   toggleAllValueSuggestions: [];
   applyValueSuggestions: [];
+  customModeOrder: [];
 }>();
 
 const { t } = useI18n();
 const rulesScrollerRef = ref<HTMLElement>();
+const filterBuilderRef = ref<InstanceType<typeof DataGridFilterBuilder>>();
+
+function focusRuleValue(ruleId: string) {
+  filterBuilderRef.value?.focusFilterRuleValue(ruleId);
+}
+
+defineExpose({ focusRuleValue });
 const previewText = computed(() => props.sqlPreview || t("grid.filterSqlPreviewEmpty"));
 
 onMounted(() => emit("ensureRule"));
@@ -66,6 +74,7 @@ watch(
   <section data-grid-filter-workbench class="shrink-0 border-b bg-muted/10 text-foreground">
     <div ref="rulesScrollerRef" data-filter-rules-scroll class="filter-rules-scroll min-h-11 overflow-auto px-3 py-2">
       <DataGridFilterBuilder
+        ref="filterBuilderRef"
         class="min-w-[560px]"
         :rules="rules"
         :show-apply-only="true"
@@ -96,6 +105,7 @@ watch(
         @toggle-value-suggestion="emit('toggleValueSuggestion', $event)"
         @toggle-all-value-suggestions="emit('toggleAllValueSuggestions')"
         @apply-value-suggestions="emit('applyValueSuggestions')"
+        @custom-mode-order="emit('customModeOrder')"
       />
     </div>
 

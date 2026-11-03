@@ -1329,3 +1329,16 @@ export const dataDictionaryAz = {
   preview: "Preview",
   previewFailed: "Could not preview: {error}",
 };
+
+// Polish interface overrides; retains all keys from the canonical English object.
+export const dataDictionaryPl = {
+  ...dataDictionaryEn,
+  title: "Eksportuj słownik danych",
+  includeIndexes: "Uwzględnij indeksy i klucze obce",
+  loading: "Odczytywanie struktury…",
+  exporting: "Eksportowanie…",
+  exportFailed: "Nie udało się wyeksportować: {error}",
+  loadFailed: "Nie udało się odczytać struktury: {error}",
+  warningTableSkipped: "Pominięto {table}: {reason}",
+  objectUnavailable: "Nie znaleziono obiektu albo nie jest dostępny",
+};

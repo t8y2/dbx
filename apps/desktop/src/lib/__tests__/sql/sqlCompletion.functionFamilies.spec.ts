@@ -81,6 +81,18 @@ describe("SQL function completion across dialects", () => {
     expect(functionItem("DATE_FORMAT", "goldendb")).toMatchObject({ type: "function" });
     expect(functionItem("GROUP_CONCAT", "goldendb")).toMatchObject({ type: "function" });
     expect(functionItem("IFNULL", "goldendb")).toMatchObject({ type: "function" });
+    expect(functionItem("DATE_FORMAT", "gbase")).toMatchObject({ type: "function" });
+    expect(functionItem("DATE_ADD", "gbase")).toMatchObject({ type: "function" });
+  });
+
+  it("inserts MySQL syntax-sensitive functions through their templates", () => {
+    expect(functionItem("DATE_ADD", "mysql")?.apply).toBe("DATE_ADD(${date}, INTERVAL ${expr} ${unit})");
+    expect(functionItem("DATE_SUB", "mysql")?.apply).toBe("DATE_SUB(${date}, INTERVAL ${expr} ${unit})");
+    expect(functionItem("ADDDATE", "mysql")?.apply).toBe("ADDDATE(${date}, INTERVAL ${expr} ${unit})");
+    expect(functionItem("POSITION", "mysql")?.apply).toBe("POSITION(${substring} IN ${string})");
+    expect(functionItem("EXTRACT", "mysql")?.apply).toBe("EXTRACT(${unit} FROM ${date})");
+    expect(functionItem("TIMESTAMPADD", "mysql")).toMatchObject({ type: "function" });
+    expect(functionItem("REGEXP_LIKE", "mysql")).toMatchObject({ type: "function" });
   });
 
   it("keeps dialect-specific functions out of other dialects", () => {

@@ -1045,6 +1045,7 @@ fn reject_unknown_manifest_fields(manifest: &Value) -> Result<(), String> {
         "engines",
         "permissions",
         "entrypoints",
+        "capabilities",
         "contributions",
         "localizations",
     ];

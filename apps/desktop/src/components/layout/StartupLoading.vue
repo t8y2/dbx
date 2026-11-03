@@ -4,7 +4,7 @@ import { useI18n } from "vue-i18n";
 const props = defineProps<{ label?: string; error?: unknown; retry?: () => void }>();
 const { t } = useI18n();
 
-function retry() {
+function handleRetry() {
   if (props.retry) props.retry();
   else window.location.reload();
 }
@@ -15,7 +15,7 @@ function retry() {
     <span class="text-xl font-semibold tracking-tight" aria-hidden="true">DBX</span>
     <span v-if="!error" class="startup-spinner" aria-hidden="true" />
     <p class="text-sm text-muted-foreground">{{ label || t(error ? "startup.loadFailed" : "startup.loading") }}</p>
-    <button v-if="error" class="rounded border border-border px-4 py-2 text-sm hover:bg-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring" @click="retry">{{ t("common.retry") }}</button>
+    <button v-if="error" class="rounded border border-border px-4 py-2 text-sm hover:bg-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring" @click="handleRetry">{{ t("common.retry") }}</button>
   </div>
 </template>
 

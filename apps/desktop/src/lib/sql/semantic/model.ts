@@ -1,6 +1,6 @@
 import { sqlSemanticDialectFor, type SqlSemanticDialectAdapter } from "@/lib/sql/semantic/dialect";
 import { findActiveSqlStatementSpan, isSuppressedSqlSemanticContext, tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
-import { resolveSqlStatementWindow } from "@/lib/sql/sqlSyntaxTreeWindow";
+import { resolveSqlStatementWindow } from "@/lib/sql/sqlStatementWindow";
 import type {
   SqlSemanticBuildOptions,
   SqlSemanticClauseSpans,

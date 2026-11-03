@@ -446,7 +446,7 @@ export function formatTemporalRowsForExport<T extends CellValue>(rows: readonly 
   if (!normalizedPattern) return rows.map((row) => [...row]);
   return rows.map((row) =>
     row.map((value, index) => {
-      if (!isTemporalColumnType(columnTypes[index])) return value;
+      if (value === null || !isTemporalColumnType(columnTypes[index])) return value;
       return formatTemporalValueForExport(value, normalizedPattern) as T;
     }),
   );

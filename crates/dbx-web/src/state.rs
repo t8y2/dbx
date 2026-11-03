@@ -37,6 +37,8 @@ pub struct WebState {
     pub notes_roots: Vec<PathBuf>,
     pub public_base_path: String,
     pub password_disabled: bool,
+    /// Whether the web UI may reveal saved connection passwords.
+    pub password_viewer_enabled: bool,
     /// `DBX_DEMO_MODE`：公网演示部署的封锁开关（见 `demo` 模块）。
     pub demo_mode: bool,
     pub password_hash: RwLock<Option<String>>,
@@ -72,6 +74,7 @@ impl WebState {
             notes_roots: Vec::new(),
             public_base_path: "/".to_string(),
             password_disabled: false,
+            password_viewer_enabled: true,
             demo_mode: false,
             password_hash: RwLock::new(None),
             sessions: RwLock::new(HashSet::new()),

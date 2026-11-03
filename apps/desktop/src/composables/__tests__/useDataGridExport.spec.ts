@@ -2595,7 +2595,8 @@ describe("useDataGridExport prepared row statements", () => {
         ["2", "two"],
       ],
       expect.anything(),
-      expect.anything(), false,
+      expect.anything(),
+      false,
     );
   });
 
@@ -2630,7 +2631,8 @@ describe("useDataGridExport prepared row statements", () => {
         ["2", "two"],
       ],
       expect.anything(),
-      expect.anything(), false,
+      expect.anything(),
+      false,
     );
   });
 
@@ -2856,7 +2858,8 @@ describe("useDataGridExport prepared row statements", () => {
         ["Bob", "bob@example.com"],
       ],
       expect.anything(),
-      expect.anything(), false,
+      expect.anything(),
+      false,
     );
   });
 });

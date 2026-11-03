@@ -830,6 +830,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "data-redis-database-display-limit", category: "data", titleKey: "settings.redisDatabaseDisplayLimit", descriptionKey: "settings.redisDatabaseDisplayLimitDescription", targetId: "data" },
   { id: "data-csv-quote-mode", category: "data", titleKey: "settings.csvQuoteMode", descriptionKey: "settings.csvQuoteModeDescription", targetId: "data", keywordKeys: ["settings.csvQuoteModeAll", "settings.csvQuoteModeNecessary"] },
   { id: "data-csv-null-mode", category: "data", titleKey: "settings.csvNullMode", descriptionKey: "settings.csvNullModeDescription", targetId: "data", keywordKeys: ["settings.csvNullModeMarker", "settings.csvNullModeEmpty"] },
+  { id: "data-csv-without-bom", category: "data", titleKey: "settings.csvWithoutBom", targetId: "data" },
   { id: "formatter-sql-formatter-json-mode", category: "formatter", titleKey: "settings.sqlFormatterJsonMode", targetId: "formatter-json", route: { formatterMode: "json" } },
   { id: "formatter-sql-formatter-advanced-options", category: "formatter", titleKey: "settings.sqlFormatterAdvancedOptions", targetId: "formatter", route: { formatterMode: "form" } },
   { id: "ai-restore-last-conversation", category: "ai", titleKey: "ai.restoreLastConversation", descriptionKey: "ai.restoreLastConversationDescription", targetId: "ai" },

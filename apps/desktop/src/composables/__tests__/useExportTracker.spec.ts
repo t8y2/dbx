@@ -601,7 +601,7 @@ describe("SQL-file failure details", () => {
   it("stores target connection, database, schema, and previews when provided in options", () => {
     const tracker = useExportTracker();
     const onOpen = vi.fn();
-    const previews = [{ fileName: "test.sql", filePath: "/tmp/test.sql", preview: "SELECT 1;", sizeBytes: 10, lineCount: 1 }];
+    const previews: api.SqlFilePreview[] = [{ fileName: "test.sql", filePath: "/tmp/test.sql", preview: "SELECT 1;", sizeBytes: 10, canExecuteWithoutSelectedDatabase: false }];
     const task = tracker.addSqlFileTask("sql-options-id", "test.sql", "/tmp/test.sql", {
       onOpen,
       targetConnectionId: "conn-1",

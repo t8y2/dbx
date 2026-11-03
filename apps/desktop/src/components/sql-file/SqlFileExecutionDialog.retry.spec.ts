@@ -800,6 +800,42 @@ describe("SqlFileExecutionDialog retries", () => {
     expect(root!.textContent).not.toContain("sqlFile.status.done");
   });
 
+  it("restores task details with fallback preview when task has no sqlFilePreviews", async () => {
+    const onOpenChange = vi.fn();
+    const { taskId } = await mountDialogWrapper(true, null, onOpenChange);
+
+    mocks.trackerTasks.push(
+      reactive({
+        exportId: "legacy-task-1",
+        kind: "sql-file",
+        tableName: "legacy.sql",
+        format: "sql",
+        filePath: "/tmp/legacy.sql",
+        rowsExported: 0,
+        totalRows: null,
+        status: "Done",
+        errorMessage: null,
+        statementIndex: 5,
+        successCount: 5,
+        failureCount: 0,
+        affectedRows: 12,
+        elapsedMs: 350,
+        statementSummary: "SELECT 1;",
+        sqlFileFailures: [],
+        sqlFileFailuresOmitted: 0,
+        targetConnectionId: "conn-1",
+        targetDatabase: "db1",
+        totalBytes: 1024,
+      }),
+    );
+
+    taskId.value = "legacy-task-1";
+    await nextTick();
+
+    await vi.waitFor(() => expect(root!.textContent).toContain("sqlFile.status.done"));
+    expect(root!.textContent).toContain("12");
+  });
+
   it("cancels the active ordinary run and allows a fresh retry", async () => {
     await mountReadyDialog();
     const gate = deferred();

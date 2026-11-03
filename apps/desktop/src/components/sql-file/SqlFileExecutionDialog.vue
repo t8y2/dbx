@@ -1162,7 +1162,7 @@ function restoreExecutionFromTask(task: ExportTask) {
         filePath: fallbackPath,
         preview: "",
         sizeBytes: task.totalBytes ?? 0,
-        lineCount: 0,
+        canExecuteWithoutSelectedDatabase: false,
       },
     ];
     activePreviewPath.value = fallbackPath;

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import pathlib
+import re
 import sys
 import threading
 
@@ -59,7 +60,10 @@ def handle(request):
         else:
             types = [t.upper() for t in (params.get('object_types') or params.get('objectTypes') or [])]
             if 'TABLE' in types:
-                objects = [{'name': 'ORDERS', 'schema': params['schema'], 'object_type': 'TABLE'}]
+                if (root / 'paged-tables').exists():
+                    objects = [{'name': 'ORD_%02d' % i, 'schema': params['schema'], 'object_type': 'TABLE'} for i in range(40)]
+                else:
+                    objects = [{'name': 'ORDERS', 'schema': params['schema'], 'object_type': 'TABLE'}]
             else:
                 objects = [{'name': 'Ix%d' % i, 'schema': params['schema'], 'object_type': 'INDEX',
                             'parent_schema': ' Other Owner ', 'parent_name': ' T(a) '} for i in range(5)]
@@ -87,9 +91,30 @@ def handle(request):
                     error = rpc_error(mode)
                 elif mode == 'fallback' and ('TABLE_USED_PAGES' in params['sql'] or 'DBA_OB_TABLET_REPLICAS' in params['sql']):
                     error = rpc_error('sql')
+                elif 'FROM ALL_OBJECTS' in params.get('sql', ''):
+                    sql = params['sql']
+                    if (root / 'paged-tables').exists():
+                        all_rows = [['ORD_%02d' % i, 'TABLE', 'HR', 'Customer orders %02d' % i, None, None] for i in range(40)]
+                    else:
+                        all_rows = [['ORDERS', 'TABLE', 'HR', 'Customer orders table', None, None]]
+                    if 'DBX_RN >' in sql:
+                        m_rn = re.search(r'DBX_RN > (\d+)', sql)
+                        m_row = re.search(r'ROWNUM <= (\d+)', sql)
+                        start = int(m_rn.group(1)) if m_rn else 0
+                        end = int(m_row.group(1)) if m_row else len(all_rows)
+                        rows = all_rows[start:end]
+                    else:
+                        rows = all_rows
+                    result = {'columns': ['OBJECT_NAME', 'OBJECT_TYPE', 'OWNER', 'COMMENTS', 'PARENT_SCHEMA', 'PARENT_NAME'],
+                              'rows': rows,
+                              'affected_rows': 0, 'execution_time_ms': 0}
                 elif 'ALL_TAB_COMMENTS' in params.get('sql', ''):
+                    if (root / 'paged-tables').exists():
+                        rows = [['ORD_%02d' % i, 'Customer orders %02d' % i] for i in range(40)]
+                    else:
+                        rows = [['ORDERS', 'Customer orders table']]
                     result = {'columns': ['TABLE_NAME', 'COMMENTS'],
-                              'rows': [['ORDERS', 'Customer orders table']],
+                              'rows': rows,
                               'affected_rows': 0, 'execution_time_ms': 0}
                 else:
                     result = {'columns': ['TABLE_NAME', 'OWNER', 'NUM_ROWS', 'TOTAL_BYTES'],

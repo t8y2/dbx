@@ -205,21 +205,22 @@ pub(super) async fn list_objects(
             }) =>
         {
             let timeout = agent_metadata_timeout(config);
-            let is_oracle = config.is_some_and(|config| config.db_type == DatabaseType::Oracle);
-            let filter_locally_after_oracle_comments = is_oracle
+            let is_default_oracle = config.is_some_and(is_default_oracle_agent_config);
+            let filter_locally_after_oracle_comments = is_default_oracle
                 && !object_types_only_custom_types(object_types)
                 && !object_types.is_some_and(|types| types.len() == 1 && types[0].eq_ignore_ascii_case("INDEX"))
                 && filter.is_some_and(|filter| !filter.trim().is_empty());
             let agent_filter = if filter_locally_after_oracle_comments { None } else { filter };
             let agent_limit = if filter_locally_after_oracle_comments || local_filter { None } else { page_limit };
             let agent_offset = if filter_locally_after_oracle_comments || local_filter { None } else { page_offset };
-            let objects = if config
+            let (objects, paging_applied) = if config
                 .is_some_and(|config| config.db_type == DatabaseType::Oracle && !is_default_oracle_agent_config(config))
             {
-                agent_reader(client, database, schema, timeout)
+                let objects = agent_reader(client, database, schema, timeout)
                     .await
                     .list_objects(schema, filter, page_limit, page_offset, object_types)
-                    .await?
+                    .await?;
+                (objects, !local_filter)
             } else {
                 let mut guard = client.lock().await;
                 let mut objects: Vec<db::ObjectInfo> = guard
@@ -234,12 +235,11 @@ pub(super) async fn list_objects(
                         timeout,
                     )
                     .await?;
-                if is_oracle {
+                if is_default_oracle {
                     load_oracle_table_comments_for_objects(&mut guard, database, schema, &mut objects, timeout).await?;
                 }
-                objects
+                (objects, !local_filter && !filter_locally_after_oracle_comments)
             };
-            let paging_applied = !local_filter && !filter_locally_after_oracle_comments;
             Ok(Some(ObjectListOutcome { objects, paging_applied }))
         }
         Some(PoolKind::Mysql(pool, MysqlMode::OceanBaseOracle)) => {

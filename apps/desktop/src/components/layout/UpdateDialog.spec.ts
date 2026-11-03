@@ -169,6 +169,22 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
+describe("UpdateDialog initial focus", () => {
+  it("focuses the dialog container on open and reopen instead of a tab or action", async () => {
+    const { state } = await mountDialog(0);
+
+    expect(document.activeElement).toBe(document.querySelector('[role="dialog"]'));
+    expect(document.querySelector('[data-update-tab="app"]')?.getAttribute("aria-selected")).toBe("true");
+
+    state.open = false;
+    await flushDialog();
+    state.open = true;
+    await flushDialog();
+
+    expect(document.activeElement).toBe(document.querySelector('[role="dialog"]'));
+  });
+});
+
 describe("UpdateDialog web runtime", () => {
   it("keeps web updates as Docker instructions without desktop install controls", async () => {
     runtimeState.tauri = false;

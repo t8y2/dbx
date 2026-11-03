@@ -220,6 +220,15 @@ function handleOpenChange(nextOpen: boolean) {
   open.value = false;
 }
 
+function handleOpenAutoFocus(event: Event) {
+  // Opening the center should not make a tab or update action look selected by
+  // keyboard focus. Keep focus inside the dialog; Tab still reaches its controls.
+  if (event.target instanceof HTMLElement) {
+    event.preventDefault();
+    event.target.focus({ preventScroll: true });
+  }
+}
+
 function openExternalUrl(url: string) {
   if (isTauriRuntime()) {
     import("@tauri-apps/plugin-shell").then(({ open }) => open(url));
@@ -327,6 +336,7 @@ watch(
       class="sm:max-w-[700px]"
       :class="'flex max-h-[min(720px,calc(var(--dbx-viewport-height)-48px))] flex-col gap-0 overflow-hidden p-0'"
       :show-close-button="!isCloseBlocked"
+      @open-auto-focus="handleOpenAutoFocus"
       @interact-outside="
         (e: Event) => {
           if (blocksImplicitDismiss) e.preventDefault();
@@ -363,7 +373,7 @@ watch(
               :aria-selected="selectedTab === tab.id"
               :data-state="selectedTab === tab.id ? 'active' : 'inactive'"
               :data-update-tab="tab.id"
-              class="relative inline-flex h-full select-none items-center gap-1.5 whitespace-nowrap px-2.5 text-sm font-medium transition-colors after:absolute after:inset-x-2.5 after:bottom-0 after:h-0.5 after:rounded-full after:bg-foreground after:opacity-0 after:transition-opacity hover:text-foreground focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50"
+              class="relative inline-flex h-full select-none items-center gap-1.5 whitespace-nowrap px-2.5 text-sm font-medium transition-colors after:absolute after:inset-x-2.5 after:bottom-0 after:h-0.5 after:rounded-full after:bg-foreground after:opacity-0 after:transition-opacity hover:text-foreground focus-visible:outline-1 focus-visible:-outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50"
               :class="selectedTab === tab.id ? 'text-foreground after:opacity-100' : 'text-foreground/60'"
               @click="selectTab(tab.id)"
             >

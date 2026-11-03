@@ -582,7 +582,9 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       .catch(fail);
   });
   const stopChannelWatch = watch(updateChannel, (channel, previous) => {
-    if (disposed || channel === previous || isIgnoringUpdate.value) return;
+    // Startup restores persisted settings after this composable is created.
+    // initialize() owns the first silent check; hydration is not a user switch.
+    if (!initialized || disposed || channel === previous || isIgnoringUpdate.value) return;
     void changeUpdateChannel(channel).catch(fail);
   });
   // Hiding the toolbar entry mid-session must also stop background activity,

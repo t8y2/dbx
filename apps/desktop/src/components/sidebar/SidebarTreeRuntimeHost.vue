@@ -4008,12 +4008,16 @@ const canRenameObject = computed(() => {
   return !!objectType && (supportsObjectRename(currentDatabaseType(), objectType) || (databaseTypeForNode(node) === "oceanbase-oracle" && (objectType === "PROCEDURE" || objectType === "FUNCTION")) || supportsSourceBackedRoutineRename(currentDatabaseType(), objectType as any));
 });
 
+// Target whose name the rename dialog last showed. Kept apart from currentSidebarViewRenameTargetKey,
+// which follows the selected node even while the dialog is closed.
+let renameObjectDialogTargetKey = "";
 function openRenameObjectDialog() {
   claimTreeItemDialogOwnership();
   routeTreeItemDialogController();
   const node = sidebarFormTarget.value ?? activeNode.value;
   const targetKey = JSON.stringify([node.connectionId, node.database, node.schema || node.database, node.type, node.objectName || node.label, databaseTypeForNode(node)]);
-  if (targetKey !== currentSidebarViewRenameTargetKey) renameObjectName.value = node.objectName || node.label;
+  if (targetKey !== renameObjectDialogTargetKey) renameObjectName.value = node.objectName || node.label;
+  renameObjectDialogTargetKey = targetKey;
   renameObjectError.value = "";
   renameObjectPreviewSql.value = "";
   viewRenamePlan.value = undefined;
@@ -4046,6 +4050,7 @@ function openRenameDatabaseDialog() {
   claimTreeItemDialogOwnership();
   routeTreeItemDialogController();
   renameObjectName.value = activeNode.value.label;
+  renameObjectDialogTargetKey = "";
   renameObjectError.value = "";
   renameObjectPreviewSql.value = "";
   viewRenamePlan.value = undefined;

@@ -534,4 +534,71 @@ describe("DataGrid go-to-column shortcut", () => {
     expect(bubbled).toHaveBeenCalledOnce();
     expect(host.querySelector("[data-column-lookup-panel]")).toBeNull();
   });
+
+  it("toggles case of search text in the go-to-column panel on Mod+Shift+U", async () => {
+    const { host } = mountGrid({ columns: ["id", "name", "created_at"] });
+    await settle();
+    const root = gridRoot(host);
+    root.focus();
+    goToColumnEvent(root);
+    await settle();
+
+    const input = document.activeElement as HTMLInputElement;
+    input.value = "created_at";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+
+    // Partial selection: "created"
+    input.setSelectionRange(0, 7);
+    const toggleEvent1 = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+      shiftKey: true,
+      key: "u",
+      code: "KeyU",
+    });
+    input.dispatchEvent(toggleEvent1);
+    await settle();
+
+    expect(toggleEvent1.defaultPrevented).toBe(true);
+    expect(input.value).toBe("CREATED_at");
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe(7);
+
+    // Toggle again -> lowercase
+    const toggleEvent2 = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+      shiftKey: true,
+      key: "u",
+      code: "KeyU",
+    });
+    input.dispatchEvent(toggleEvent2);
+    await settle();
+
+    expect(toggleEvent2.defaultPrevented).toBe(true);
+    expect(input.value).toBe("created_at");
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe(7);
+
+    // Without selection (cursor at end)
+    input.setSelectionRange(10, 10);
+    const toggleEvent3 = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+      shiftKey: true,
+      key: "u",
+      code: "KeyU",
+    });
+    input.dispatchEvent(toggleEvent3);
+    await settle();
+
+    expect(toggleEvent3.defaultPrevented).toBe(true);
+    expect(input.value).toBe("CREATED_AT");
+    expect(input.selectionStart).toBe(10);
+    expect(input.selectionEnd).toBe(10);
+  });
 });

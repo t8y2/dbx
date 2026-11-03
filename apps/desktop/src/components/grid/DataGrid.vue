@@ -248,8 +248,10 @@ import {
   isGoToPreviousPageShortcut,
   isModRShortcut,
   isSaveShortcut,
+  isToggleCaseShortcut,
   isToggleTransposeShortcut,
 } from "@/lib/editor/keyboardShortcuts";
+import { applySelectionCaseToInput, vSelectionCaseSupport } from "@/directives/vSelectionCaseSupport";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 import {
   canFetchNextDataGridSegment,
@@ -2746,6 +2748,11 @@ function onGoToColumnKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     goToColumnOpen.value = false;
     goToColumnSearch.value = "";
+  } else if (isToggleCaseShortcut(event, settingsStore.editorSettings.shortcuts)) {
+    if (goToColumnSearchInput.value && applySelectionCaseToInput(goToColumnSearchInput.value, "toggle")) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
   }
 }
 
@@ -17045,6 +17052,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               <input
                 ref="goToColumnSearchInput"
                 v-model="goToColumnSearch"
+                v-selection-case-support
                 :placeholder="t('grid.searchColumn')"
                 :aria-label="t('grid.searchColumn')"
                 class="h-8 w-full rounded-md border bg-transparent pl-7 pr-28 text-xs outline-none focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25"

@@ -9,6 +9,7 @@ import { collectEditorSearchMatches, countEditorSearchMatches, createEditorSearc
 import { appendSearchMatchSelection, findSearchMatch, isSearchAddSelectionModifier, selectionRangesForSearchMatches, type EditorSearchSelectionDirection } from "@/lib/editor/editorSearchSelection";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { vNamingStyleSupport } from "@/directives/vNamingStyleSupport";
+import { vSelectionCaseSupport } from "@/directives/vSelectionCaseSupport";
 
 const props = defineProps<{
   view: EditorView | null;
@@ -523,6 +524,7 @@ defineExpose({
             ref="searchInputRef"
             v-model="searchText"
             v-naming-style-support
+            v-selection-case-support
             autocapitalize="off"
             autocorrect="off"
             spellcheck="false"
@@ -587,6 +589,7 @@ defineExpose({
             ref="replaceInputRef"
             v-model="replaceText"
             v-naming-style-support
+            v-selection-case-support
             autocapitalize="off"
             autocorrect="off"
             spellcheck="false"

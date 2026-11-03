@@ -8,6 +8,9 @@ import {
   isCaretBrowsingShortcut,
   shouldBlockCaretBrowsing,
   isConvertNamingStyleShortcut,
+  isToggleCaseShortcut,
+  isUppercaseShortcut,
+  isLowercaseShortcut,
   isEditCellShortcut,
   isEditSidebarTableStructureShortcut,
   isEditTableStructureShortcut,
@@ -157,6 +160,24 @@ describe("keyboard shortcut matching", () => {
     // Custom settings are honored.
     expect(isConvertNamingStyleShortcut({ key: "n", code: "KeyN", altKey: true, shiftKey: true }, { convertNamingStyle: "Shift+Alt+N" }, "Win32")).toBe(true);
     expect(isConvertNamingStyleShortcut({ key: "c", code: "KeyC", altKey: true, shiftKey: true }, { convertNamingStyle: "Shift+Alt+N" }, "Win32")).toBe(false);
+  });
+
+  it("matches case conversion shortcuts across platforms and settings", () => {
+    // Toggle case: default Mod+Shift+U
+    expect(isToggleCaseShortcut({ key: "U", code: "KeyU", ctrlKey: true, shiftKey: true }, undefined, "Win32")).toBe(true);
+    expect(isToggleCaseShortcut({ key: "U", code: "KeyU", metaKey: true, shiftKey: true }, undefined, "MacIntel")).toBe(true);
+    expect(isToggleCaseShortcut({ key: "U", code: "KeyU", ctrlKey: true, shiftKey: true, altKey: true }, undefined, "Win32")).toBe(false);
+    expect(isToggleCaseShortcut({ key: "k", code: "KeyK", ctrlKey: true, shiftKey: true }, { toggleCaseSelection: "Mod+Shift+K" }, "Win32")).toBe(true);
+
+    // Uppercase: default Shift+Alt+U
+    expect(isUppercaseShortcut({ key: "¨", code: "KeyU", altKey: true, shiftKey: true }, undefined, "MacIntel")).toBe(true);
+    expect(isUppercaseShortcut({ key: "u", code: "KeyU", altKey: true, shiftKey: true }, undefined, "Win32")).toBe(true);
+    expect(isUppercaseShortcut({ key: "u", code: "KeyU", altKey: true, shiftKey: true, ctrlKey: true }, undefined, "Win32")).toBe(false);
+
+    // Lowercase: default Shift+Alt+L
+    expect(isLowercaseShortcut({ key: "Ò", code: "KeyL", altKey: true, shiftKey: true }, undefined, "MacIntel")).toBe(true);
+    expect(isLowercaseShortcut({ key: "l", code: "KeyL", altKey: true, shiftKey: true }, undefined, "Win32")).toBe(true);
+    expect(isLowercaseShortcut({ key: "l", code: "KeyL", altKey: true, shiftKey: true, metaKey: true }, undefined, "MacIntel")).toBe(false);
   });
 
   it("keeps Control distinct from Command when recording macOS shortcuts", () => {

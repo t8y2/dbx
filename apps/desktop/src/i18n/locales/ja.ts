@@ -2282,6 +2282,9 @@ export default withEnglishFallback({
       revealRaw: "生テキストを表示",
       apply: "適用",
     },
+    sshTotpSecret: "TOTP シークレット",
+    sshTotpSecretPlaceholder: "Base32 シークレット（例: JBSWY3DPEHPK3PXP）",
+    sshTotpSecretHint: "任意。入力すると、DBX が 6 桁のワンタイムパスワードを自動計算するため、毎回手動で入力する必要はありません。MCP 接続で二段階認証が必要な踏み台サーバーを使用する場合は必須です。",
   },
   editor: {
     duckdbDraining: "前回の DuckDB クエリはまだ停止処理中です。しばらくしてから再試行してください。",

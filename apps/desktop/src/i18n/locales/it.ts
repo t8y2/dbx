@@ -2263,6 +2263,9 @@ export default withEnglishFallback({
       revealRaw: "Mostra testo non elaborato",
       apply: "Applica",
     },
+    sshTotpSecret: "Chiave TOTP",
+    sshTotpSecretPlaceholder: "Chiave Base32, ad esempio JBSWY3DPEHPK3PXP",
+    sshTotpSecretHint: "Opzionale. Dopo la compilazione, DBX calcolerà autonomamente il codice OTP a 6 cifre, senza doverlo inserire manualmente ogni volta. Obbligatorio per le connessioni MCP a bastion host che richiedono l'autenticazione a due fattori.",
   },
   editor: {
     duckdbDraining: "La query DuckDB precedente è ancora in fase di arresto. Riprova a breve.",

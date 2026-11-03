@@ -363,7 +363,7 @@ watch(
               :aria-selected="selectedTab === tab.id"
               :data-state="selectedTab === tab.id ? 'active' : 'inactive'"
               :data-update-tab="tab.id"
-              class="relative inline-flex h-full select-none items-center gap-1.5 whitespace-nowrap px-2.5 text-sm font-medium transition-colors after:absolute after:inset-x-2.5 after:bottom-0 after:h-0.5 after:rounded-full after:bg-foreground after:opacity-0 after:transition-opacity hover:text-foreground focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50"
+              class="relative inline-flex h-full select-none items-center gap-1.5 whitespace-nowrap px-2.5 text-sm font-medium transition-colors after:absolute after:inset-x-2.5 after:bottom-0 after:h-0.5 after:rounded-full after:bg-foreground after:opacity-0 after:transition-opacity hover:text-foreground focus-visible:outline-1 focus-visible:-outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50"
               :class="selectedTab === tab.id ? 'text-foreground after:opacity-100' : 'text-foreground/60'"
               @click="selectTab(tab.id)"
             >

@@ -6717,6 +6717,13 @@ export async function cancelMongodbExport(exportId: string): Promise<boolean> {
 }
 
 // --- Database Export ---
+/** An object picked in the object browser for "export selected". */
+export interface DatabaseExportSelectedObject {
+  objectType: string;
+  name: string;
+  signature?: string;
+}
+
 export interface DatabaseExportRequest {
   exportId: string;
   connectionId: string;
@@ -6724,6 +6731,8 @@ export interface DatabaseExportRequest {
   schema: string;
   filePath: string;
   selectedTables?: string[];
+  /** Typed object browser selection; takes precedence over `selectedTables`, and an empty list is rejected. */
+  selectedObjects?: DatabaseExportSelectedObject[];
   excludedTables?: string[];
   includeStructure: boolean;
   includeData: boolean;

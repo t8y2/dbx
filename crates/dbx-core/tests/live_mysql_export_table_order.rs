@@ -92,6 +92,7 @@ async fn live_mysql_database_export_table_order_is_not_alphabetical_when_fk_reor
         schema: database.clone(),
         file_path: file_path.to_string_lossy().to_string(),
         selected_tables: Vec::new(),
+        selected_objects: None,
         excluded_tables: Vec::new(),
         include_structure: true,
         include_data: false,

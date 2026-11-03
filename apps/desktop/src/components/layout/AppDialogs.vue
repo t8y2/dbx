@@ -357,6 +357,7 @@ watch(
     :prefill-schema="dialogs.databaseExportPrefillSchema.value"
     :prefill-table="dialogs.databaseExportPrefillTable.value"
     :prefill-tables="dialogs.databaseExportPrefillTables.value"
+    :prefill-objects="dialogs.databaseExportPrefillObjects.value"
     :prefill-all-databases="dialogs.databaseExportAllDatabases.value"
     @open-connection-settings="emit('openConnectionSettings', $event, 'advanced')"
   />

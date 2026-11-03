@@ -34,7 +34,7 @@ use crate::sql_dialect::{
     uses_single_row_insert_statements, uses_synthetic_row_id, uses_xugu_row_id, TablePaginationStrategy,
 };
 use crate::value_literals::{format_ch_array_sql_literal, format_pg_array_sql_literal};
-use dbx_types::types::is_opaque_aggregate_state_type;
+use dbx_types::types::{is_opaque_aggregate_state_type, SpatialColumn};
 
 const DBX_ROWID_COLUMN: &str = "__DBX_ROWID";
 pub const DBX_NEO4J_ELEMENT_ID_COLUMN: &str = "__DBX_ELEMENT_ID";
@@ -186,6 +186,10 @@ pub struct DataGridCopyInsertStatementOptions {
     pub include_database_name: bool,
     #[serde(default)]
     pub insert_mode: DataGridCopyInsertMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_columns: Option<Vec<SpatialColumn>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_values: Option<Vec<Vec<Option<u32>>>>,
 }
 
 fn default_include_database_name() -> bool {
@@ -596,14 +600,14 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
     build_data_grid_copy_insert_statement_with_formatters(
         options,
         |reference| reference,
-        format_grid_copy_insert_sql_literal,
+        format_grid_copy_insert_sql_literal_with_spatial,
     )
 }
 
 pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
     options: DataGridCopyInsertStatementOptions,
     format_reference: impl Fn(String) -> String,
-    format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>) -> String,
+    format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>, Option<u32>) -> String,
 ) -> Option<String> {
     build_data_grid_copy_insert_statements_with_formatters(options, format_reference, format_literal)
         .map(|statements| statements.join("\n"))
@@ -612,8 +616,10 @@ pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
 pub(crate) fn build_data_grid_copy_insert_statements_with_formatters(
     options: DataGridCopyInsertStatementOptions,
     format_reference: impl Fn(String) -> String,
-    format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>) -> String,
+    format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>, Option<u32>) -> String,
 ) -> Option<Vec<String>> {
+    let spatial_columns: std::collections::HashMap<usize, Option<u32>> =
+        options.spatial_columns.unwrap_or_default().into_iter().map(|col| (col.column_index, col.srid)).collect();
     let save_columns = effective_copy_columns(options.source_columns.as_deref(), &options.columns);
     let column_info = options.table_meta.as_ref().and_then(|meta| meta.columns.as_deref()).unwrap_or(&[]);
     let primary_keys = options.table_meta.as_ref().map(|meta| meta.primary_keys.as_slice()).unwrap_or_default();
@@ -623,8 +629,23 @@ pub(crate) fn build_data_grid_copy_insert_statements_with_formatters(
         .enumerate()
         .filter_map(|(index, column)| Some((column.as_deref()?, index)))
         .map(|(column, index)| {
-            let fallback_type =
-                options.column_types.as_deref().and_then(|types| types.get(index)).and_then(|value| value.as_deref());
+            let fallback_type = options
+                .column_types
+                .as_deref()
+                .and_then(|types| types.get(index))
+                .and_then(|value| value.as_deref())
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    if spatial_columns.contains_key(&index) {
+                        match options.database_type {
+                            Some(DatabaseType::Xugu) => Some("GEOMETRY"),
+                            Some(DatabaseType::SqlServer) => Some("geometry"),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                });
             (column, index, copy_column_info(options.database_type, column_info, column, fallback_type))
         })
         .filter(|(column, _, info)| {
@@ -740,17 +761,27 @@ pub(crate) fn build_data_grid_copy_insert_statements_with_formatters(
     let value_rows = options
         .rows
         .iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(row_index, row)| {
             format!(
                 "({})",
                 insert_columns
                     .iter()
                     .map(|(_, index, info)| {
+                        let spatial_srid = options
+                            .spatial_values
+                            .as_ref()
+                            .and_then(|values| values.get(row_index))
+                            .and_then(|row| row.get(*index))
+                            .copied()
+                            .flatten()
+                            .or_else(|| spatial_columns.get(index).copied().flatten());
                         format_literal(
                             row.get(*index).unwrap_or(&Value::Null),
                             options.database_type,
                             info.as_ref(),
                             options.identifier_quote.as_deref(),
+                            spatial_srid,
                         )
                     })
                     .collect::<Vec<_>>()
@@ -2655,11 +2686,22 @@ pub fn normalize_data_grid_save_error(database_type: Option<DatabaseType>, error
     error.to_string()
 }
 
+#[allow(dead_code)]
 pub(crate) fn format_grid_copy_insert_sql_literal(
     value: &Value,
     database_type: Option<DatabaseType>,
     column_info: Option<&DataGridColumnInfo>,
     identifier_quote: Option<&str>,
+) -> String {
+    format_grid_copy_insert_sql_literal_with_spatial(value, database_type, column_info, identifier_quote, None)
+}
+
+pub(crate) fn format_grid_copy_insert_sql_literal_with_spatial(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    identifier_quote: Option<&str>,
+    spatial_srid: Option<u32>,
 ) -> String {
     if is_oracle_temporal_literal_database(database_type) {
         if let Some(text) = value.as_str() {
@@ -2670,7 +2712,7 @@ pub(crate) fn format_grid_copy_insert_sql_literal(
             }
         }
     }
-    format_grid_assignment_sql_literal(value, database_type, column_info, identifier_quote)
+    format_grid_assignment_sql_literal_with_spatial(value, database_type, column_info, identifier_quote, spatial_srid)
 }
 
 fn format_grid_assignment_sql_literal(
@@ -2678,6 +2720,16 @@ fn format_grid_assignment_sql_literal(
     database_type: Option<DatabaseType>,
     column_info: Option<&DataGridColumnInfo>,
     identifier_quote: Option<&str>,
+) -> String {
+    format_grid_assignment_sql_literal_with_spatial(value, database_type, column_info, identifier_quote, None)
+}
+
+fn format_grid_assignment_sql_literal_with_spatial(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    identifier_quote: Option<&str>,
+    spatial_srid: Option<u32>,
 ) -> String {
     if is_oceanbase_blob_column(database_type, column_info) {
         if value.is_null() {
@@ -2700,14 +2752,15 @@ fn format_grid_assignment_sql_literal(
         }
     }
     if (value.is_array() || value.is_object()) && is_json_document_column(column_info) {
-        return format_grid_sql_literal_with_identifier_quote(
+        return format_grid_sql_literal_with_spatial(
             &Value::String(value.to_string()),
             database_type,
             column_info,
             identifier_quote,
+            spatial_srid,
         );
     }
-    format_grid_sql_literal_with_identifier_quote(value, database_type, column_info, identifier_quote)
+    format_grid_sql_literal_with_spatial(value, database_type, column_info, identifier_quote, spatial_srid)
 }
 
 fn format_oracle_lob_assignment_literal(text: &str, constructor: &str) -> String {
@@ -2778,6 +2831,16 @@ pub fn format_grid_sql_literal_with_identifier_quote(
     database_type: Option<DatabaseType>,
     column_info: Option<&DataGridColumnInfo>,
     identifier_quote: Option<&str>,
+) -> String {
+    format_grid_sql_literal_with_spatial(value, database_type, column_info, identifier_quote, None)
+}
+
+pub fn format_grid_sql_literal_with_spatial(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    identifier_quote: Option<&str>,
+    spatial_srid: Option<u32>,
 ) -> String {
     if value.is_null() {
         return "NULL".to_string();
@@ -2905,8 +2968,11 @@ pub fn format_grid_sql_literal_with_identifier_quote(
             {
                 return text;
             }
-            let (wkt, srid) = extract_sqlserver_spatial_wkt_and_srid(&text);
-            let srid = srid.unwrap_or(if spatial_type == "geography" { 4326 } else { 0 });
+            let (wkt, marker_srid) = extract_sqlserver_spatial_wkt_and_srid(&text);
+            let srid = marker_srid
+                .or(spatial_srid)
+                .filter(|&srid| srid != 0 || spatial_type != "geography")
+                .unwrap_or(if spatial_type == "geography" { 4326 } else { 0 });
             let escaped = wkt.replace('\'', "''");
             return format!("{spatial_type}::STGeomFromText('{escaped}', {srid})");
         }
@@ -5990,6 +6056,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             statement.as_deref(),
@@ -6042,6 +6110,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(statement.as_deref(), Some("INSERT INTO \"public\".\"users\" (\"name\") VALUES ('Ada');"));
@@ -6089,6 +6159,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             statement.as_deref(),
@@ -6146,6 +6218,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(statement.as_deref(), Some("INSERT INTO `users` (`label`) VALUES ('Ada');"));
     }
@@ -6217,6 +6291,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             statement.as_deref(),
@@ -6262,6 +6338,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(statement.as_deref(), Some("INSERT INTO \"public\".\"countries\" (\"label\") VALUES ('Andorra');"));
     }
@@ -6294,6 +6372,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert!(statement.is_none());
@@ -6345,6 +6425,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -6374,6 +6456,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(statement.as_deref(), Some("INSERT INTO \"quoted_ids\" (\"id\") VALUES ('lowercase');"));
@@ -6407,6 +6491,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -6436,6 +6522,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(statement.as_deref(), Some("INSERT INTO `users` (`login_name`) VALUES ('ada');"));
     }
@@ -6454,6 +6542,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -6476,6 +6566,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES ('[1,2,3]');"));
@@ -6495,6 +6587,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES ('[]');"));
@@ -6514,6 +6608,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES ('{\"a\":1}');"));
@@ -6631,6 +6727,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -6660,6 +6758,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::RowByRow,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             statement.as_deref(),
@@ -6690,6 +6790,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -6724,6 +6826,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode,
+            spatial_columns: None,
+            spatial_values: None,
         }
     }
 
@@ -6829,6 +6933,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             insert.as_deref(),
@@ -6898,6 +7004,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -6936,6 +7044,8 @@ mod tests {
             include_computed_columns,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         };
 
         assert_eq!(
@@ -7002,6 +7112,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -8450,6 +8562,8 @@ mod tests {
                         include_computed_columns: false,
                         include_database_name: false,
                         insert_mode: DataGridCopyInsertMode::RowByRow,
+                        spatial_columns: None,
+                        spatial_values: None,
                     })
                     .unwrap();
                     assert!(statement.contains(literal), "{database_type:?}: {statement}");
@@ -9526,6 +9640,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -11424,6 +11540,129 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_spatial_columns_format_with_spatial_srid() {
+        let geom_col = column("shape", "geometry", true, None);
+        let geog_col = column("location", "geography", true, None);
+        assert_eq!(
+            format_grid_sql_literal_with_spatial(
+                &json!("POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some(&geom_col),
+                None,
+                Some(3857)
+            ),
+            "geometry::STGeomFromText('POINT (1 2)', 3857)"
+        );
+        assert_eq!(
+            format_grid_sql_literal_with_spatial(
+                &json!("POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some(&geog_col),
+                None,
+                Some(4269)
+            ),
+            "geography::STGeomFromText('POINT (1 2)', 4269)"
+        );
+        // Geography ignores 0 and falls back to 4326
+        assert_eq!(
+            format_grid_sql_literal_with_spatial(
+                &json!("POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some(&geog_col),
+                None,
+                Some(0)
+            ),
+            "geography::STGeomFromText('POINT (1 2)', 4326)"
+        );
+    }
+
+    #[test]
+    fn sqlserver_spatial_copy_insert_with_real_driver_mixed_srid() {
+        let geom_col = column("geom", "geometry", true, None);
+        let geog_col = column("geog", "geography", true, None);
+        let options = DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: Some("test_db".to_string()),
+                schema: Some("dbo".to_string()),
+                table_name: "spatial_table".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![geom_col, geog_col]),
+            }),
+            columns: vec!["geom".to_string(), "geog".to_string()],
+            column_types: Some(vec![Some("geometry".to_string()), Some("geography".to_string())]),
+            source_columns: None,
+            // Real driver result shape: plain WKT in cells, per-cell SRIDs in spatial_values
+            rows: vec![
+                vec![json!("POINT (1 2)"), json!("POINT (10 20)")],
+                vec![json!("POINT (3 4)"), json!("POINT (30 40)")],
+                vec![json!("POINT (5 6)"), json!("POINT (50 60)")],
+            ],
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: Some(vec![
+                SpatialColumn { column_index: 0, srid: Some(0) },
+                SpatialColumn { column_index: 1, srid: Some(4326) },
+            ]),
+            spatial_values: Some(vec![
+                vec![Some(3857), Some(4326)],
+                vec![Some(2154), Some(4269)],
+                vec![None, None], // column fallback: 0 for geometry, 4326 for geography
+            ]),
+        };
+
+        let statement = build_data_grid_copy_insert_statement(options);
+        assert_eq!(
+            statement.as_deref(),
+            Some(
+                "INSERT INTO [test_db].[dbo].[spatial_table] ([geom], [geog]) VALUES\n(geometry::STGeomFromText('POINT (1 2)', 3857), geography::STGeomFromText('POINT (10 20)', 4326)),\n(geometry::STGeomFromText('POINT (3 4)', 2154), geography::STGeomFromText('POINT (30 40)', 4269)),\n(geometry::STGeomFromText('POINT (5 6)', 0), geography::STGeomFromText('POINT (50 60)', 4326));"
+            )
+        );
+    }
+
+    #[test]
+    fn sqlserver_spatial_copy_insert_recovers_missing_type_and_cell_srid() {
+        let options = DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: Some("test_db".to_string()),
+                schema: Some("dbo".to_string()),
+                table_name: "spatial_table".to_string(),
+                primary_keys: vec![],
+                columns: None,
+            }),
+            columns: vec!["geom".to_string(), "geog".to_string(), "untyped_geom".to_string()],
+            column_types: Some(vec![Some("geometry".to_string()), Some("geography".to_string()), None]),
+            source_columns: None,
+            rows: vec![vec![json!("POINT (1 2)"), json!("POINT (3 4)"), json!("POINT (5 6)")]],
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: Some(vec![
+                SpatialColumn { column_index: 0, srid: Some(0) },
+                SpatialColumn { column_index: 1, srid: Some(4326) },
+                SpatialColumn { column_index: 2, srid: Some(3857) },
+            ]),
+            spatial_values: Some(vec![vec![Some(0), Some(4326), Some(3857)]]),
+        };
+
+        let statement = build_data_grid_copy_insert_statement(options);
+        assert_eq!(
+            statement.as_deref(),
+            Some(
+                "INSERT INTO [test_db].[dbo].[spatial_table] ([geom], [geog], [untyped_geom]) VALUES (geometry::STGeomFromText('POINT (1 2)', 0), geography::STGeomFromText('POINT (3 4)', 4326), geometry::STGeomFromText('POINT (5 6)', 3857));"
+            )
+        );
+    }
+
+    #[test]
     fn sqlserver_literals_preserve_backslashes_before_line_breaks() {
         assert_eq!(
             format_grid_sql_literal(&json!("line1\\\nline2"), Some(DatabaseType::SqlServer), None),
@@ -12381,6 +12620,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             copy_insert.as_deref(),
@@ -13100,6 +13341,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         })
         .is_none());
 

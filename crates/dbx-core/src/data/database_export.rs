@@ -6967,6 +6967,46 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_spatial_export_with_real_driver_mixed_srid() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            schema: Some("dbo".to_string()),
+            table_name: Some("spatial_data".to_string()),
+            qualified_table_name: None,
+            columns: vec!["geom".to_string(), "geog".to_string()],
+            column_types: vec![Some("geometry".to_string()), Some("geography".to_string())],
+            column_extras: vec![None, None],
+            spatial_columns: vec![
+                SpatialColumn { column_index: 0, srid: Some(0) },
+                SpatialColumn { column_index: 1, srid: Some(4326) },
+            ],
+            // Real driver result shape: rows contain plain WKT without SRID prefix,
+            // while spatial_values holds per-cell SRIDs.
+            spatial_values: vec![
+                vec![Some(3857), Some(4326)],
+                vec![Some(2154), Some(4269)],
+                vec![None, None], // column fallback: 0 for geometry, 4326 for geography
+            ],
+            rows: vec![
+                vec![json!("POINT (1 2)"), json!("POINT (10 20)")],
+                vec![json!("POINT (3 4)"), json!("POINT (30 40)")],
+                vec![json!("POINT (5 6)"), json!("POINT (50 60)")],
+            ],
+            batch_size: None,
+            preserve_original_language: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO [dbo].[spatial_data] ([geom], [geog]) VALUES (geometry::STGeomFromText('POINT (1 2)', 3857), geography::STGeomFromText('POINT (10 20)', 4326)),\n(geometry::STGeomFromText('POINT (3 4)', 2154), geography::STGeomFromText('POINT (30 40)', 4269)),\n(geometry::STGeomFromText('POINT (5 6)', 0), geography::STGeomFromText('POINT (50 60)', 4326));".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn sqlserver_spatial_metadata_recovers_missing_type_and_cell_srid() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::SqlServer),

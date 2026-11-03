@@ -2007,6 +2007,7 @@ pub fn run() {
             #[cfg(not(target_os = "linux"))]
             {
                 window_state_guard::restore_main_window_state(app.handle());
+                window_state_guard::track_main_window_geometry(app.handle());
 
                 if should_show_main_window_before_setup_tasks() {
                     prepare_main_window_for_display(app.handle());
@@ -2076,6 +2077,7 @@ pub fn run() {
                 // preference first so a disabled frame is never briefly shown during startup.
                 create_linux_main_window(app, desktop_settings.linux_floating_frame_enabled)?;
                 window_state_guard::restore_main_window_state(app.handle());
+                window_state_guard::track_main_window_geometry(app.handle());
 
                 if should_show_main_window_before_setup_tasks() {
                     prepare_main_window_for_display(app.handle());

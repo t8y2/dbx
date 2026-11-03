@@ -30,6 +30,8 @@ pub struct TableCsvExportOptions {
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub csv_quote_mode: CsvQuoteMode,
+    #[serde(default)]
+    pub csv_without_bom: bool,
     /// CSV 里 NULL 写成什么。默认 `\N`；空字符串表示关闭该字面量，
     /// 退回「NULL 写成空字段」的旧行为（此时 NULL 与空字符串无法区分）。
     #[serde(default = "default_csv_null_literal")]
@@ -69,7 +71,9 @@ pub async fn export_table_data_csv_core(state: &AppState, options: TableCsvExpor
     }
     let mut writer =
         BufWriter::new(File::create(&options.file_path).map_err(|err| format!("Failed to write CSV file: {err}"))?);
-    writer.write_all("\u{FEFF}".as_bytes()).map_err(|err| err.to_string())?;
+    if !options.csv_without_bom {
+        writer.write_all("\u{FEFF}".as_bytes()).map_err(|err| err.to_string())?;
+    }
     let client_session_id =
         (database_type == DatabaseType::Cassandra).then(|| format!("table-export:{}", uuid::Uuid::new_v4()));
     let export_options = &options;
@@ -212,6 +216,7 @@ mod tests {
             page_size: Some(page_size),
             timeout_secs: Some(30),
             csv_quote_mode: CsvQuoteMode::default(),
+            csv_without_bom: false,
             null_literal: String::new(),
         }
     }
@@ -624,6 +629,7 @@ mod tests {
                 page_size: None,
                 timeout_secs: None,
                 csv_quote_mode: CsvQuoteMode::default(),
+                csv_without_bom: false,
                 null_literal: String::new(),
             },
         )

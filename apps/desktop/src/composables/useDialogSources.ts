@@ -1,5 +1,5 @@
 import { ref, watch } from "vue";
-import type { SqlFilePreview } from "@/lib/backend/api";
+import type { DatabaseExportSelectedObject, SqlFilePreview } from "@/lib/backend/api";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
@@ -110,6 +110,7 @@ const databaseExportPrefillDatabase = ref("");
 const databaseExportPrefillSchema = ref("");
 const databaseExportPrefillTable = ref("");
 const databaseExportPrefillTables = ref<string[]>([]);
+const databaseExportPrefillObjects = ref<DatabaseExportSelectedObject[]>([]);
 const databaseExportAllDatabases = ref(false);
 
 let watchersRegistered = false;
@@ -404,6 +405,7 @@ export function useDialogSources() {
           databaseExportPrefillSchema.value = v.schema ?? "";
           databaseExportPrefillTable.value = v.tableName ?? "";
           databaseExportPrefillTables.value = v.tableNames ?? [];
+          databaseExportPrefillObjects.value = v.objects ?? [];
           databaseExportAllDatabases.value = v.allDatabases ?? false;
           showDatabaseExportDialog.value = true;
           connectionStore.databaseExportSource = null;
@@ -705,6 +707,7 @@ export function useDialogSources() {
     databaseExportPrefillSchema,
     databaseExportPrefillTable,
     databaseExportPrefillTables,
+    databaseExportPrefillObjects,
     databaseExportAllDatabases,
     onExportClick,
     onExportConfirm,

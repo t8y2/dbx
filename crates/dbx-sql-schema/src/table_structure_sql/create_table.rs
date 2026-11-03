@@ -15,7 +15,8 @@ use super::transwarp;
 use super::triggers::{build_trigger_sql_for_new_table, build_trigger_sql_with_operations};
 use super::types::{TableStructureSqlOptions, TableStructureSqlPlan, TableStructureSqlResult};
 use super::util::{
-    clean, format_default_for_sql, normalize_default, qualified_new_table, quote_ident, quote_new_ident, quote_string,
+    clean, format_default_for_sql, mysql_temporal_default_carries_on_update, normalize_default, qualified_new_table,
+    quote_ident, quote_new_ident, quote_string,
 };
 use super::validation::{
     validate_columns, validate_concurrent_index_scope, validate_dameng_identity, validate_mysql_literal_defaults,
@@ -327,7 +328,10 @@ fn build_create_table_sql_impl(
         }
         if generated_clause.is_none() {
             if let Some(on_update) = column.extra.as_ref().and_then(|e| e.on_update_current_timestamp).filter(|v| *v) {
-                if on_update && dialect == StructureDialect::Mysql {
+                if on_update
+                    && dialect == StructureDialect::Mysql
+                    && !mysql_temporal_default_carries_on_update(&default_value)
+                {
                     parts.push(mysql_on_update_current_timestamp_clause(&column.data_type));
                 }
             }

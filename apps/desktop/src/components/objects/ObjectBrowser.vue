@@ -5265,7 +5265,7 @@ function objectPageAnchor(object: ObjectInfo): string {
   return exactOracleTriggerMetadata(object.trigger) ? tablePageRowAnchorKey(object.name, object.schema, undefined, object.trigger) : JSON.stringify([object.schema, object.name, object.object_type, object.signature]);
 }
 
-async function loadObjectPage(append: boolean, options?: { preserveExistingRows?: boolean }) {
+async function loadObjectPage(append: boolean, options?: { preserveExistingRows?: boolean; details?: boolean }) {
   if (append && (loadingObjects.value || refreshingObjects.value || loadingMoreObjects.value || !hasMoreObjects.value)) return;
   const schema = exactIndexList.value ? indexParentSchema() : needsSchema.value ? objectListSchemaForConnection(props.connection, selectedSchema.value) : props.database;
   const request = objectBrowserRowsLoadGuard.start(objectBrowserRowsCacheScope(schema));

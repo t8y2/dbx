@@ -235,7 +235,8 @@ async fn list_database_storage_once(
             .collect::<Vec<_>>();
         let pool = state.pool_handle(connection_id).await;
         if let Some(PoolKind::Mysql(pool, MysqlMode::Normal | MysqlMode::Bare)) = pool {
-            return db::mysql::list_database_storage(&pool, &requested).await;
+            let budget = mysql_browser_explicit_budget(config.as_ref().expect("native mysql config verified above"));
+            return db::mysql::list_database_storage_with_budget(&pool, &requested, budget).await;
         }
         return Ok(Vec::new());
     }
@@ -7797,6 +7798,18 @@ pub async fn list_objects_core(
     .await
 }
 
+/// Mirrors the frontend `metadataLoadBudgetMs`: explicit user-initiated metadata reads
+/// (details / storage) follow the session query timeout instead of the snappy 5s
+/// browsing budget, and stay bounded even when server timeouts are disabled (0).
+fn mysql_browser_explicit_budget(config: &ConnectionConfig) -> Duration {
+    let timeout_secs = config.effective_query_timeout_secs();
+    if timeout_secs == 0 {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs((timeout_secs + 5).max(15))
+    }
+}
+
 fn is_native_mysql_browser_config(config: &ConnectionConfig) -> bool {
     config.db_type == DatabaseType::Mysql
         && config
@@ -7830,6 +7843,11 @@ pub async fn list_objects_core_with_loading_options(
             clone_metadata_pool(state, &pool_key).await,
             Some(PoolKind::Mysql(_, MysqlMode::Normal | MysqlMode::Bare))
         ) {
+            let budget = if lightweight {
+                Duration::from_secs(5)
+            } else {
+                mysql_browser_explicit_budget(config.as_ref().expect("native mysql config verified above"))
+            };
             return retry_metadata_connection(state, connection_id, Some(database), || async {
                 let pool_key =
                     state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
@@ -7847,6 +7865,7 @@ pub async fn list_objects_core_with_loading_options(
                     if can_page { limit } else { None },
                     if can_page { offset } else { None },
                     lightweight,
+                    budget,
                 )
                 .await?;
                 Ok(filter_object_infos(

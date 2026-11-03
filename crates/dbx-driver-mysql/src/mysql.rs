@@ -3453,7 +3453,7 @@ async fn cancel_browser_metadata_connection(conn: mysql_async::Conn, timeout: Du
 }
 
 async fn browser_metadata_rows(pool: &MySqlPool, sql: &str) -> Result<Vec<mysql_async::Row>, String> {
-    browser_metadata_rows_with_fresh_statistics(pool, sql, false).await
+    browser_metadata_rows_with_budget(pool, sql, false, BROWSER_METADATA_TIMEOUT).await
 }
 
 async fn browser_metadata_rows_with_fresh_statistics(
@@ -3461,12 +3461,20 @@ async fn browser_metadata_rows_with_fresh_statistics(
     sql: &str,
     fresh_statistics: bool,
 ) -> Result<Vec<mysql_async::Row>, String> {
+    browser_metadata_rows_with_budget(pool, sql, fresh_statistics, BROWSER_METADATA_TIMEOUT).await
+}
+
+/// `budget` bounds interactive browsing (enumeration keeps the snappy default) and
+/// user-initiated reads (details/storage), which pass the session-derived budget.
+async fn browser_metadata_rows_with_budget(
+    pool: &MySqlPool,
+    sql: &str,
+    fresh_statistics: bool,
+    budget: Duration,
+) -> Result<Vec<mysql_async::Row>, String> {
     let conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
-    let mut guard = BrowserMetadataConnection {
-        conn: Some(conn),
-        cancel_timeout: pool.checkout_timeout().min(BROWSER_METADATA_TIMEOUT),
-    };
-    let result = tokio::time::timeout(BROWSER_METADATA_TIMEOUT, async {
+    let mut guard = BrowserMetadataConnection { conn: Some(conn), cancel_timeout: pool.checkout_timeout().min(budget) };
+    let result = tokio::time::timeout(budget, async {
         let conn = guard.conn.as_mut().expect("metadata connection is held until completion");
         if fresh_statistics {
             enable_fresh_table_statistics(conn, "reading object statistics").await;
@@ -3483,9 +3491,12 @@ async fn browser_metadata_rows_with_fresh_statistics(
         }
         Err(_) => {
             let cancellation = guard.cancel().await;
+            let budget_secs = budget.as_secs();
             Err(match cancellation {
-                Ok(()) => "MySQL browser metadata timed out after 5s; query cancelled".to_string(),
-                Err(error) => format!("MySQL browser metadata timed out after 5s; cancellation failed: {error}"),
+                Ok(()) => format!("MySQL browser metadata timed out after {budget_secs}s; query cancelled"),
+                Err(error) => {
+                    format!("MySQL browser metadata timed out after {budget_secs}s; cancellation failed: {error}")
+                }
             })
         }
     }
@@ -3499,8 +3510,16 @@ fn database_storage_sql(databases: &[String]) -> Option<String> {
 }
 
 pub async fn list_database_storage(pool: &MySqlPool, databases: &[String]) -> Result<Vec<DatabaseStorageInfo>, String> {
+    list_database_storage_with_budget(pool, databases, BROWSER_METADATA_TIMEOUT).await
+}
+
+pub async fn list_database_storage_with_budget(
+    pool: &MySqlPool,
+    databases: &[String],
+    budget: Duration,
+) -> Result<Vec<DatabaseStorageInfo>, String> {
     let Some(sql) = database_storage_sql(databases) else { return Ok(Vec::new()) };
-    let rows = browser_metadata_rows(pool, &sql).await?;
+    let rows = browser_metadata_rows_with_budget(pool, &sql, false, budget).await?;
     let sizes = rows
         .iter()
         .map(|row| (get_str_by_name(row, "TABLE_SCHEMA"), get_opt_i64(row, "SIZE_BYTES")))
@@ -4945,22 +4964,27 @@ pub async fn list_objects_for_browser(
     limit: Option<usize>,
     offset: Option<usize>,
     lightweight: bool,
+    budget: Duration,
 ) -> Result<PagedObjectList, String> {
     let paging_applied = limit.is_some() && object_query_supports_paging(object_types);
     let (query_limit, query_offset) = if paging_applied { (limit, offset) } else { (None, None) };
     let mut objects = Vec::new();
     if wants_table_objects(object_types) {
         let sql = list_tables_objects_sql_with_loading(database, object_types, query_limit, query_offset, lightweight);
-        match browser_metadata_rows(pool, &sql).await {
+        match browser_metadata_rows_with_budget(pool, &sql, false, budget).await {
             Ok(rows) if !rows.is_empty() => objects.extend(rows.iter().map(|row| row_to_object(row, database))),
             Err(error) if error.contains("timed out") => return Err(error),
             _ => {
                 // SHOW fallback must not reintroduce SHOW TABLE STATUS into name enumeration.
-                let rows = browser_metadata_rows(pool, &logical_show_full_tables_sql(database)).await?;
+                let rows =
+                    browser_metadata_rows_with_budget(pool, &logical_show_full_tables_sql(database), false, budget)
+                        .await?;
                 let status = if lightweight {
                     HashMap::new()
                 } else {
-                    let rows = browser_metadata_rows(pool, &show_table_status_sql(database, None)).await?;
+                    let rows =
+                        browser_metadata_rows_with_budget(pool, &show_table_status_sql(database, None), false, budget)
+                            .await?;
                     table_status_from_rows(&rows)
                 };
                 let mut fallback = table_infos_to_objects(table_infos_from_show_rows(&rows), &status, database);
@@ -4971,11 +4995,11 @@ pub async fn list_objects_for_browser(
     }
     if wants_routine_objects(object_types) {
         let sql = list_routines_sql(database, object_types, query_limit, query_offset);
-        let rows = match browser_metadata_rows(pool, &sql).await {
+        let rows = match browser_metadata_rows_with_budget(pool, &sql, false, budget).await {
             Ok(rows) => Ok(rows),
             Err(error) if error.contains("timed out") => Err(error),
             Err(_) => {
-                browser_metadata_rows(
+                browser_metadata_rows_with_budget(
                     pool,
                     &list_routines_sql_for_query(
                         database,
@@ -4984,12 +5008,17 @@ pub async fn list_objects_for_browser(
                         query_offset,
                         RoutineMetadataQuery::Legacy,
                     ),
+                    false,
+                    budget,
                 )
                 .await
             }
         };
         match rows {
             Ok(rows) => objects.extend(rows.iter().map(|row| row_to_object(row, database))),
+            // A timeout must surface through the refresh-error channel instead of silently
+            // dropping routines from the browser; other failures keep the graceful skip.
+            Err(error) if error.contains("timed out") => return Err(error),
             Err(error) => log::warn!("Skipping browser routines: {error}"),
         }
     }
@@ -5000,8 +5029,9 @@ pub async fn list_objects_for_browser(
     .into_iter()
     .flatten()
     {
-        match browser_metadata_rows(pool, &sql).await {
+        match browser_metadata_rows_with_budget(pool, &sql, false, budget).await {
             Ok(rows) => objects.extend(rows.iter().map(|row| row_to_object(row, database))),
+            Err(error) if error.contains("timed out") => return Err(error),
             Err(error) => log::warn!("Skipping supplemental browser objects: {error}"),
         }
     }
@@ -9184,7 +9214,10 @@ mod tests {
         let pool = MySqlPool::new_with_checkout_timeout(opts, 2, Duration::from_secs(5));
         let types = vec!["TABLE".to_string(), "VIEW".to_string()];
         let start = Instant::now();
-        let light = list_objects_for_browser(&pool, &database, Some(&types), None, None, true).await.unwrap();
+        let light =
+            list_objects_for_browser(&pool, &database, Some(&types), None, None, true, BROWSER_METADATA_TIMEOUT)
+                .await
+                .unwrap();
         eprintln!("light objects={} elapsed_ms={}", light.objects.len(), start.elapsed().as_millis());
         assert!(!light.objects.is_empty());
         assert!(light
@@ -9192,14 +9225,20 @@ mod tests {
             .iter()
             .all(|object| object.comment.is_none() && object.created_at.is_none() && object.updated_at.is_none()));
         let start = Instant::now();
-        let full = list_objects_for_browser(&pool, &database, Some(&types), None, None, false).await.unwrap();
+        let full =
+            list_objects_for_browser(&pool, &database, Some(&types), None, None, false, BROWSER_METADATA_TIMEOUT)
+                .await
+                .unwrap();
         eprintln!("full objects={} elapsed_ms={}", full.objects.len(), start.elapsed().as_millis());
         assert_eq!(
             light.objects.iter().map(|object| (&object.name, &object.object_type)).collect::<Vec<_>>(),
             full.objects.iter().map(|object| (&object.name, &object.object_type)).collect::<Vec<_>>()
         );
         assert!(full.objects.iter().any(|object| object.created_at.is_some()));
-        let page = list_objects_for_browser(&pool, &database, Some(&types), Some(7), Some(14), true).await.unwrap();
+        let page =
+            list_objects_for_browser(&pool, &database, Some(&types), Some(7), Some(14), true, BROWSER_METADATA_TIMEOUT)
+                .await
+                .unwrap();
         assert!(page.paging_applied);
         assert_eq!(
             page.objects.iter().map(|object| &object.name).collect::<Vec<_>>(),

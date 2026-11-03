@@ -1,3 +1,4 @@
+import { normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import type { EditorSettings } from "@/stores/settingsStore";
 import { normalizeBackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
@@ -150,6 +151,8 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sidebarObjectInfoMode",
   "sidebarAllowHorizontalScroll",
   "sidebarShowConnectionEndpoints",
+  "sidebarHoverEnabled",
+  "sidebarHoverDelay",
   "sidebarShowTooltips",
   "sidebarIndent",
   "sidebarFontSize",
@@ -209,6 +212,7 @@ export function normalizeQueryResultMaxRowsDraft(value: unknown): number {
 }
 
 function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unknown {
+  if (key === "sidebarHoverDelay") return normalizeSidebarHoverDelay(value);
   if (key === "pageSize" || key === "tableOpenPageSize") return normalizeTableOpenPageSizeDraft(value);
   if (key === "queryResultMaxRows") return normalizeQueryResultMaxRowsDraft(value);
   if (key === "externalSqlEditorMaxMb") return normalizeExternalSqlEditorMaxMb(value);

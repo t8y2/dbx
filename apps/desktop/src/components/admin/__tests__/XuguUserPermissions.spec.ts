@@ -151,7 +151,7 @@ describe("XuguUserPermissions", () => {
     configureCompleteCatalogs();
     const container = await mountPage();
 
-    expect(mocks.ensureConnected).toHaveBeenCalledWith("xugu-connection");
+    expect(mocks.ensureConnected).toHaveBeenCalledWith("xugu-connection", { skipIfClosedByUser: true });
     expect(mocks.executeQuery.mock.calls.every(([, database]) => database === "SYSTEM")).toBe(true);
     expect(container.textContent).toContain("xuguUserPermissions.scopeSystem");
 

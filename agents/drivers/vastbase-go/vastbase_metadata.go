@@ -153,13 +153,14 @@ func (s *server) connectionInfo() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	var database, username, version, schema string
+	var database, username, version string
+	var schema sql.NullString
 	err = db.QueryRow("SELECT current_database(), current_user, version(), current_schema()").Scan(&database, &username, &version, &schema)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{
-		"database": database, "username": username, "version": version, "schema": schema,
+		"database": database, "username": username, "version": version, "schema": schema.String,
 		"compatibilityMode": s.mode.compatibilityMode, "compatibilityModeRaw": s.mode.compatibilityModeRaw,
 		"mysql_compat_mode": s.mode.mysqlCompat,
 		"identifierQuote":   s.identifierQuote(),
@@ -1867,6 +1868,14 @@ func (s *server) getTableDDL(schema, table string) (string, error) {
 	columns, err := s.getColumns(effective, table)
 	if err != nil {
 		return "", err
+	}
+	if len(columns) == 0 {
+		if visibleColumns, fallbackErr := s.getColumns("", table); fallbackErr == nil && len(visibleColumns) > 0 {
+			columns = visibleColumns
+			if columns[0].ResolvedSchema != nil && *columns[0].ResolvedSchema != "" {
+				effective = *columns[0].ResolvedSchema
+			}
+		}
 	}
 	tableComment, _ := s.getTableComment(effective, table)
 	ddl := renderTableDDL(effective, table, columns, tableComment)

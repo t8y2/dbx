@@ -293,3 +293,39 @@ test("numeric right-align disabled applies left-align style across cross-databas
   });
   assert.doesNotMatch(text, /s="2"/);
 });
+
+test("header comment rows render names on row 1, comments on row 2, data from row 3", () => {
+  const workbook = buildXlsxWorkbook({
+    sheetName: "Comments",
+    columns: ["id", "name"],
+    columnComments: ["Identifier", null],
+    rows: [
+      [1, "Ada"],
+      [2, "Bob"],
+    ],
+    headerCommentRows: true,
+  });
+  const sheet = readStoredZipEntry(workbook, "xl/worksheets/sheet1.xml");
+
+  assert.match(sheet, /ySplit="2" topLeftCell="A3"/);
+  assert.match(sheet, /<row r="1"><c r="A1"[^>]*><is><t[^>]*>id<\/t><\/is><\/c><c r="B1"[^>]*><is><t[^>]*>name<\/t><\/is><\/c><\/row>/);
+  assert.match(sheet, /<row r="2"><c r="A2"[^>]*><is><t[^>]*>Identifier<\/t><\/is><\/c><c r="B2"[^>]*\/><\/row>/);
+  assert.match(sheet, /<c r="A3"><v>1<\/v><\/c>/);
+  assert.match(sheet, /<c r="A4"><v>2<\/v><\/c>/);
+  assert.doesNotMatch(sheet, /<c r="A1"[^>]*><is><t[^>]*>Identifier<\/t>/);
+});
+
+test("header comment rows are skipped when every comment is empty", () => {
+  const workbook = buildXlsxWorkbook({
+    sheetName: "NoComments",
+    columns: ["id"],
+    columnComments: [null],
+    rows: [[1]],
+    headerCommentRows: true,
+  });
+  const sheet = readStoredZipEntry(workbook, "xl/worksheets/sheet1.xml");
+
+  assert.match(sheet, /ySplit="1" topLeftCell="A2"/);
+  assert.match(sheet, /<c r="A2"><v>1<\/v><\/c>/);
+  assert.doesNotMatch(sheet, /<row r="2"><c r="A2"[^>]*><is><t[^>]*>/);
+});

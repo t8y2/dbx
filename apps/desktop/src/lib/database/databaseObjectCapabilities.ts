@@ -1,6 +1,7 @@
 import type { DatabaseType } from "@/types/database";
+import type { OracleRoutineKind } from "@/types/schemaDiff";
 
-export type SidebarObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT" | "SEQUENCE" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
+export type SidebarObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "FUNCTION_INTERNAL" | "FUNCTION_UDF" | "TRIGGER" | "EVENT" | "SEQUENCE" | "INDEX" | "SYNONYM" | "JOB" | "PACKAGE" | "PACKAGE_BODY" | "TYPE" | "TYPE_BODY";
 
 export interface DatabaseObjectCapabilities {
   sidebarObjects: SidebarObjectKind[];
@@ -33,11 +34,16 @@ const KINGBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VI
 const VASTBASE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "TYPE"];
 
 const POSTGRES_LIKE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION"];
-const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY"];
-const OCEANBASE_ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY"];
-const DAMENG_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "PACKAGE", "PACKAGE_BODY"];
+const ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "INDEX", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
+const OCEANBASE_ORACLE_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "INDEX", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
+const DAMENG_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "INDEX", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
+
+export function supportsSchemaIndexManagement(dbType?: DatabaseType): boolean {
+  return dbType === "oracle" || dbType === "oceanbase-oracle" || dbType === "dameng";
+}
 const XUGU_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY", "TYPE", "TYPE_BODY"];
-const PACKAGE_MEMBER_EXPANSION_DATABASES = new Set<DatabaseType>(["oracle", "xugu"]);
+const FIREBIRD_OBJECTS: SidebarObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION_INTERNAL", "FUNCTION_UDF", "TRIGGER", "SEQUENCE", "INDEX", "PACKAGE"];
+const PACKAGE_MEMBER_EXPANSION_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "xugu"]);
 
 const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   // postgres
@@ -56,6 +62,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["dameng", DAMENG_OBJECTS],
   ["oceanbase-oracle", OCEANBASE_ORACLE_OBJECTS],
   ["xugu", XUGU_OBJECTS],
+  ["firebird", FIREBIRD_OBJECTS],
   ["mysql", MYSQL_OBJECTS],
   // Explicit entry so schema-diff routine gating can opt in without relying on the
   // unknown-type ROUTINE_OBJECTS fallback. Keep the same object set the fallback
@@ -68,6 +75,10 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["cloudflare-d1", TABLE_VIEW_OBJECTS],
   ["duckdb", TABLE_VIEW_OBJECTS],
   ["clickhouse", TABLE_VIEW_OBJECTS],
+  ["gbase8s", TABLE_VIEW_OBJECTS],
+  // Informix lists procedures/functions from sysprocedures natively, so keep
+  // the routine-capable set here instead of the TABLE/VIEW-only one.
+  ["informix", ROUTINE_OBJECTS],
   // Doris: backend listing path still uses the generic SHOW TABLES path (see
   // `list_tables_once` for `PoolKind::Mysql` in crates/dbx-core/src/schema/mod.rs)
   // and lacks a MV classifier. Keep Doris on TABLE_VIEW_OBJECTS until a
@@ -110,11 +121,11 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
 ]);
 /**
  * Whether a kind is readable as object source for the given connection type.
- * TYPE/TYPE_BODY only have a real source implementation on Xugu; PostgreSQL-
- * family databases list types without a CREATE TYPE getter this cycle.
+ * TYPE/TYPE_BODY have source getters on Oracle-family databases and Xugu;
+ * PostgreSQL-family databases list types without a CREATE TYPE getter.
  */
 function isSourceReadableObjectKind(kind: SidebarObjectKind, dbType?: DatabaseType): boolean {
-  if (kind === "TABLE") return false;
+  if (kind === "TABLE" || kind === "INDEX") return false;
   if (kind === "TYPE" || kind === "TYPE_BODY") return supportsTypeObjectSource(dbType);
   return true;
 }
@@ -131,7 +142,7 @@ export function databaseObjectCapabilities(dbType?: DatabaseType, compatibilityM
 const SCHEMA_DIFF_ROUTINE_KINDS = ["PROCEDURE", "FUNCTION"] as const;
 
 /** Same-dialect families with verified list_objects + get_object_source (or PG catalog) paths. */
-const SCHEMA_DIFF_ROUTINE_FAMILY = new Map<DatabaseType, "postgres" | "mysql" | "sqlserver">([
+const SCHEMA_DIFF_ROUTINE_FAMILY = new Map<DatabaseType, "postgres" | "mysql" | "sqlserver" | "oracle" | "oceanbase-oracle">([
   ["postgres", "postgres"],
   ["opengauss", "postgres"],
   ["gaussdb", "postgres"],
@@ -143,7 +154,15 @@ const SCHEMA_DIFF_ROUTINE_FAMILY = new Map<DatabaseType, "postgres" | "mysql" | 
   ["redshift", "postgres"],
   ["mysql", "mysql"],
   ["sqlserver", "sqlserver"],
+  ["oracle", "oracle"],
+  ["oceanbase-oracle", "oceanbase-oracle"],
 ]);
+
+/** Only the new Oracle JDBC path consumes inferred product identity here; do
+ * not broaden the existing generic-JDBC or other engine comparison contracts. */
+export function schemaDiffRoutineProductType(rawType?: string, productType?: string): DatabaseType | undefined {
+  return (rawType === "jdbc" && (productType === "oracle" || productType === "oceanbase-oracle") ? productType : rawType) as DatabaseType | undefined;
+}
 
 /**
  * Schema Diff routine compare is limited to an allowlist of same-dialect families.
@@ -156,19 +175,23 @@ export function supportsSchemaDiffRoutines(dbType?: DatabaseType): boolean {
   return SCHEMA_DIFF_ROUTINE_KINDS.some((kind) => sidebarObjects.includes(kind) && sourceReadable.includes(kind));
 }
 
-export function schemaDiffRoutineObjectTypes(dbType?: DatabaseType): Array<"PROCEDURE" | "FUNCTION"> {
+export function schemaDiffRoutineObjectTypes(dbType?: DatabaseType, requestedKinds: readonly OracleRoutineKind[] = SCHEMA_DIFF_ROUTINE_KINDS): OracleRoutineKind[] {
   if (!supportsSchemaDiffRoutines(dbType)) return [];
   const { sidebarObjects, sourceReadable } = databaseObjectCapabilities(dbType);
-  return SCHEMA_DIFF_ROUTINE_KINDS.filter((kind) => sidebarObjects.includes(kind) && sourceReadable.includes(kind));
+  const kinds: OracleRoutineKind[] = dbType === "oracle" || dbType === "oceanbase-oracle" ? [...SCHEMA_DIFF_ROUTINE_KINDS, "PACKAGE", "PACKAGE_BODY"] : [...SCHEMA_DIFF_ROUTINE_KINDS];
+  return kinds.filter((kind) => requestedKinds.includes(kind) && sidebarObjects.includes(kind) && sourceReadable.includes(kind));
 }
 
-export function schemaDiffRoutineObjectTypesIntersection(sourceDbType?: DatabaseType, targetDbType?: DatabaseType): Array<"PROCEDURE" | "FUNCTION"> {
+export function schemaDiffRoutineObjectTypesIntersection(sourceDbType?: DatabaseType, targetDbType?: DatabaseType, requestedKinds?: readonly OracleRoutineKind[]): OracleRoutineKind[] {
   if (!sourceDbType || !targetDbType) return [];
   const sourceFamily = SCHEMA_DIFF_ROUTINE_FAMILY.get(sourceDbType);
   const targetFamily = SCHEMA_DIFF_ROUTINE_FAMILY.get(targetDbType);
-  if (!sourceFamily || sourceFamily !== targetFamily) return [];
-  const sourceTypes = new Set(schemaDiffRoutineObjectTypes(sourceDbType));
-  return schemaDiffRoutineObjectTypes(targetDbType).filter((kind) => sourceTypes.has(kind));
+  if (!sourceFamily || !targetFamily) return [];
+  const sourceTypes = new Set(schemaDiffRoutineObjectTypes(sourceDbType, requestedKinds));
+  const shared = schemaDiffRoutineObjectTypes(targetDbType, requestedKinds).filter((kind) => sourceTypes.has(kind));
+  if (sourceFamily === targetFamily) return shared;
+  if ((sourceFamily === "oracle" || sourceFamily === "oceanbase-oracle") && (targetFamily === "oracle" || targetFamily === "oceanbase-oracle")) return shared.filter((kind) => kind === "PACKAGE" || kind === "PACKAGE_BODY");
+  return [];
 }
 
 export function sidebarObjectKindsForDatabase(dbType?: DatabaseType, compatibilityMode?: string): SidebarObjectKind[] {
@@ -187,7 +210,15 @@ export function sidebarObjectKindsForDatabase(dbType?: DatabaseType, compatibili
  * before dispatching getObjectSource.
  */
 export function supportsTypeObjectSource(dbType?: DatabaseType): boolean {
-  return dbType === "xugu";
+  return dbType === "oracle" || dbType === "oceanbase-oracle" || dbType === "dameng" || dbType === "xugu";
+}
+
+export function supportsOracleFamilyTypeManagement(dbType?: DatabaseType): boolean {
+  return dbType === "oracle" || dbType === "oceanbase-oracle" || dbType === "dameng";
+}
+
+export function isOracleFamilyTypeSource(dbType: DatabaseType | undefined, objectType: string | undefined): boolean {
+  return supportsOracleFamilyTypeManagement(dbType) && (objectType === "TYPE" || objectType === "TYPE_BODY");
 }
 
 export type CustomTypeCapabilities = {
@@ -196,7 +227,9 @@ export type CustomTypeCapabilities = {
   ddl: boolean;
 };
 
-const VERIFIED_CUSTOM_TYPE_DATABASES = new Set<DatabaseType>(["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"]);
+const VERIFIED_CUSTOM_TYPE_DATABASES = new Set<DatabaseType>(["postgres", "opengauss", "gaussdb", "kingbase", "vastbase", "oracle", "oceanbase-oracle", "dameng"]);
+const ORACLE_TYPE_ATTRIBUTE_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "dameng"]);
+const CUSTOM_TYPE_DDL_DATABASES = new Set<DatabaseType>(["postgres", "opengauss", "gaussdb", "kingbase", "vastbase"]);
 
 /**
  * Whether a connection may open read-only custom type details (phase 2).
@@ -205,7 +238,12 @@ const VERIFIED_CUSTOM_TYPE_DATABASES = new Set<DatabaseType>(["postgres", "openg
  */
 export function customTypeCapabilities(dbType?: DatabaseType): CustomTypeCapabilities {
   const supported = !!dbType && VERIFIED_CUSTOM_TYPE_DATABASES.has(dbType);
-  return { details: supported, members: supported, ddl: supported };
+  const hasDdl = !!dbType && CUSTOM_TYPE_DDL_DATABASES.has(dbType);
+  return { details: supported, members: supported, ddl: hasDdl };
+}
+
+export function supportsOracleTypeAttributeExpansion(dbType?: DatabaseType): boolean {
+  return !!dbType && ORACLE_TYPE_ATTRIBUTE_DATABASES.has(dbType);
 }
 
 export function supportsPackageMemberExpansion(dbType?: DatabaseType, compatibilityMode?: string): boolean {
@@ -215,6 +253,8 @@ export function supportsPackageMemberExpansion(dbType?: DatabaseType, compatibil
 export function normalizeSidebarObjectKind(type: string): SidebarObjectKind {
   const value = type.toUpperCase();
   const normalized = value.replace(/[\s-]+/g, "_");
+  if (normalized.includes("FUNCTION_INTERNAL")) return "FUNCTION_INTERNAL";
+  if (normalized.includes("FUNCTION_UDF")) return "FUNCTION_UDF";
   if (normalized.includes("PACKAGE_BODY")) return "PACKAGE_BODY";
   if (normalized.includes("TYPE_BODY")) return "TYPE_BODY";
   if (normalized.includes("PACKAGE")) return "PACKAGE";
@@ -228,5 +268,6 @@ export function normalizeSidebarObjectKind(type: string): SidebarObjectKind {
   if (value.includes("JOB")) return "JOB";
   if (value.includes("PROC")) return "PROCEDURE";
   if (value.includes("FUNC")) return "FUNCTION";
+  if (value.includes("INDEX")) return "INDEX";
   return "TABLE";
 }

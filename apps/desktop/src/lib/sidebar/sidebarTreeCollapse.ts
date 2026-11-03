@@ -15,3 +15,7 @@ export function collapseExpandedTreeNodes(nodes: TreeNode[]): number {
 
   return collapsedCount;
 }
+export function collapseSubtreeDescendants(node: TreeNode): number {
+  if (!node.children?.length) return 0;
+  return collapseExpandedTreeNodes(node.children);
+}

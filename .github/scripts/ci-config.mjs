@@ -1,14 +1,7 @@
 export const rustGroups = {
-  foundation: [
-    "dbx-types", "dbx-platform", "dbx-sql-core", "dbx-sql-dialect", "dbx-sql-data", "dbx-sql-schema", "dbx-sql",
-    "dbx-formats", "dbx-ai-provider", "dbx-plugin-runtime",
-  ],
-  drivers: [
-    "dbx-driver-support", "dbx-driver-agent", "dbx-driver-elasticsearch", "dbx-driver-mongodb",
-    "dbx-driver-mysql", "dbx-driver-postgres", "dbx-driver-redis", "dbx-driver-sqlserver", "dbx-drivers",
-    "dbx-sqlite-worker",
-  ],
-  application: ["dbx", "dbx-core", "dbx-web", "dbx-cli", "dbx-mcp"],
+  foundation: ["dbx-types", "dbx-platform", "dbx-sql-core", "dbx-sql-dialect", "dbx-sql-data", "dbx-sql-schema", "dbx-sql", "dbx-formats", "dbx-ai-provider", "dbx-plugin-runtime"],
+  drivers: ["dbx-driver-support", "dbx-driver-agent", "dbx-driver-elasticsearch", "dbx-driver-mongodb", "dbx-driver-mysql", "dbx-driver-postgres", "dbx-driver-redis", "dbx-driver-sqlserver", "dbx-drivers", "dbx-sqlite-worker"],
+  application: ["dbx", "dbx-core", "dbx-web", "dbx-cli", "dbx-mcp", "dbx-tauri-consul", "dbx-tauri-schema"],
 };
 
 export const goAgents = [
@@ -20,6 +13,7 @@ export const goAgents = [
   { driver: "cassandra-go", binary: "cassandra", race: false },
   { driver: "hive-go", binary: "hive", race: false },
   { driver: "vastbase-go", binary: "vastbase", race: false },
+  { driver: "kingbase-go", binary: "kingbase", race: false },
   { driver: "neo4j-go", binary: "neo4j", race: false },
   { driver: "nebula-go", binary: "nebula", race: false },
   { driver: "iotdb", binary: "iotdb", race: false },
@@ -32,7 +26,9 @@ export const integrationCases = [
   { driver: "zookeeper", scenario: "zookeeper-sasl", version: "3.7.0" },
   ...["4.9.8", "5.3.1"].map((version) => ({ driver: "rocketmq", scenario: "rocketmq", version })),
   ...["2.4.0.14", "2.6.0.34", "3.0.7.1", "3.3.6.13", "3.4.2.2"].map((version) => ({
-    driver: "tdengine", scenario: "tdengine", version,
+    driver: "tdengine",
+    scenario: "tdengine",
+    version,
     image: `tdengine/${version === "3.4.2.2" ? "tsdb" : "tdengine"}:${version}`,
   })),
   ...["3.11.19", "5.0.6"].map((version) => ({ driver: "cassandra-go", scenario: "cassandra", version })),

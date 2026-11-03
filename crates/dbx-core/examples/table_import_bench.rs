@@ -103,6 +103,7 @@ fn write_xlsx(path: &Path, row_count: usize, column_count: usize) -> Result<(), 
         rows: (0..row_count).map(|row_index| row(row_index, column_count)).collect(),
         numeric_column_right_align: false,
         auto_filter: None,
+        header_comment_rows: false,
     })?;
     fs::write(path, workbook).map_err(|error| error.to_string())
 }
@@ -114,6 +115,7 @@ fn mappings(data: &ParsedImportFile) -> Vec<TableImportColumnMapping> {
             source_column: column.clone(),
             target_column: column.clone(),
             target_data_type: None,
+            generator: None,
         })
         .collect()
 }

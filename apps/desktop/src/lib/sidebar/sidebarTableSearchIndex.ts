@@ -16,8 +16,12 @@ import type { TableInfo } from "@/types/database";
  * scope is in flight, further requests reuse the same promise instead of
  * spawning a duplicate scan. Entries are removed once the build settles
  * (success or failure) so a later search can retry.
+ *
+ * A build may resolve `null` when it declines to index the scope (the
+ * connection was closed by the user in this session): the callers then fall
+ * back to filtering the already-loaded children.
  */
-const inFlightSidebarTableSearchBuilds = new Map<string, Promise<TableInfo[]>>();
+const inFlightSidebarTableSearchBuilds = new Map<string, Promise<TableInfo[] | null>>();
 
 /**
  * Stop a later explicit refresh from reusing a build that started before the
@@ -28,10 +32,10 @@ export function invalidateSidebarTableSearchBuild(scopeKey: string): void {
   inFlightSidebarTableSearchBuilds.delete(scopeKey);
 }
 
-function dedupeInFlightBuild(scopeKey: string, build: () => Promise<TableInfo[]>): Promise<TableInfo[]> {
+function dedupeInFlightBuild(scopeKey: string, build: () => Promise<TableInfo[] | null>): Promise<TableInfo[] | null> {
   const existing = inFlightSidebarTableSearchBuilds.get(scopeKey);
   if (existing) return existing;
-  let pending!: Promise<TableInfo[]>;
+  let pending!: Promise<TableInfo[] | null>;
   pending = (async () => {
     try {
       return await build();
@@ -55,8 +59,10 @@ function dedupeInFlightBuild(scopeKey: string, build: () => Promise<TableInfo[]>
  *   the in-flight lock so double-clicks cannot start duplicate full builds.
  * - A persisted index is reused without rebuilding; a missing one is built
  *   through the lock, and concurrent callers share the same build promise.
+ * - A build may decline to index (`null`, e.g. the connection was closed by the
+ *   user): callers then fall back to filtering the loaded children only.
  */
-export async function loadOrBuildSidebarTableSearchIndex(scopeKey: string, query: string, read: () => Promise<TableInfo[] | null>, build: () => Promise<TableInfo[]>, refresh = false): Promise<TableInfo[] | null> {
+export async function loadOrBuildSidebarTableSearchIndex(scopeKey: string, query: string, read: () => Promise<TableInfo[] | null>, build: () => Promise<TableInfo[] | null>, refresh = false): Promise<TableInfo[] | null> {
   if (!refresh && !query.trim()) return null;
   if (refresh) return dedupeInFlightBuild(scopeKey, build);
   const entries = await read();

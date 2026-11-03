@@ -7,9 +7,13 @@ pub(in crate::schema) async fn list_databases(
     config: Option<&ConnectionConfig>,
 ) -> Result<Vec<db::DatabaseInfo>, String> {
     match pool {
-        PoolKind::Mysql(p, _) if config.is_some_and(db::mysql_compatible::uses_show_metadata) => db::mysql::list_databases_show(p)
-            .await
-            .map(|databases| filter_mysql_system_databases_for_config(databases, config)),
+        PoolKind::Mysql(p, _)
+            if config.is_some_and(|c| db::mysql_compatible::uses_show_metadata(c) || super::super::is_mycat_config(c)) =>
+        {
+            db::mysql::list_databases_show(p)
+                .await
+                .map(|databases| filter_mysql_system_databases_for_config(databases, config))
+        }
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => db::ob_oracle::list_databases(p).await,
         PoolKind::Mysql(p, _) => db::mysql::list_databases(p).await,
         PoolKind::Postgres(p) => db::postgres::list_databases(p).await,
@@ -36,7 +40,9 @@ pub(in crate::schema) async fn list_tables(
     schema: &str,
 ) -> Result<Vec<db::TableInfo>, String> {
     match pool {
-        PoolKind::Mysql(p, _) if config.is_some_and(db::mysql_compatible::uses_show_metadata) => {
+        PoolKind::Mysql(p, _)
+            if config.is_some_and(|c| db::mysql_compatible::uses_show_metadata(c) || super::super::is_mycat_config(c)) =>
+        {
             db::mysql::list_tables_show(p, database).await
         }
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => {
@@ -287,6 +293,9 @@ pub(in crate::schema) async fn object_source(
     object_type: &db::ObjectSourceKind,
 ) -> Result<Option<String>, String> {
     match pool {
+        PoolKind::Mysql(pool, mode) if *mode == MysqlMode::OceanBaseOracle => {
+            super::super::db::ob_oracle::get_object_source(pool, schema, name, object_type).await.map(Some)
+        }
         PoolKind::Mysql(pool, _) => super::super::mysql_object_source(
             pool,
             super::super::mysql_table_metadata_catalog(database, schema),

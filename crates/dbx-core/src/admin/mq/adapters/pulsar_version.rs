@@ -121,6 +121,12 @@ impl PulsarApiProfile {
     pub fn capabilities(&self) -> MqCapabilities {
         match self.version {
             PulsarVersion::V3_1 => MqCapabilities {
+                supports_list_topics: true,
+                supports_create_topic: true,
+                supports_delete_topic: true,
+                supports_topic_stats: true,
+                supports_broker_admin: true,
+                supports_producer_listing: true,
                 supports_tenants: true,
                 supports_namespaces: true,
                 supports_partitioned_topics: true,

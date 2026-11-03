@@ -43,8 +43,11 @@ export const DATA_GRID_DARK_SEARCH_COLORS = {
   current: "rgb(116, 87, 0)",
   currentBorder: "rgb(239, 177, 0)",
 } as const;
-export const DATA_GRID_LIGHT_ACTIVE_ROW_BG = "rgb(244, 248, 255)";
-export const DATA_GRID_DARK_ACTIVE_ROW_BG = "rgb(25, 34, 46)";
+// 活动行底色：需在白底/斑马纹上清晰可辨（避免看岔行，#11649），同时仍比选中格底色
+// （cellSelectedSingle）浅，使行内被点击的单元格依然突出。网格组件样式里的
+// --data-grid-cell-active-bg / --data-grid-row-number-active-bg 需与此保持一致。
+export const DATA_GRID_LIGHT_ACTIVE_ROW_BG = "rgb(219, 234, 254)";
+export const DATA_GRID_DARK_ACTIVE_ROW_BG = "rgb(27, 46, 70)";
 // 十字行/列底色：混入背景的实色（color-mix(in srgb, var(--primary) P%, var(--background))），
 // 而非透明叠加——铺在浅底上的半透明色会被冲淡到几乎不可见，对比度不足正 jira #7276 的核心痛点。
 // 行/列占 primary 34%/50%（CSS 方向：P% primary + 其余 background）；现有 28%/40% 在浅色
@@ -58,6 +61,12 @@ export const DATA_GRID_DARK_CROSSHAIR_ROW_BG = "rgb(75, 84, 98)";
 export const DATA_GRID_DARK_CROSSHAIR_COL_BG = "rgb(98, 111, 130)";
 export const DATA_GRID_LIGHT_STRIPED_ROW_BG = "rgb(240, 240, 240)";
 export const DATA_GRID_DARK_STRIPED_ROW_BG = "rgb(40, 40, 43)";
+// 新增行（未落库的待插入行）整行底色，必须与普通行、斑马纹行「一眼可辨」（#11634）：
+// 用与行号列 --data-grid-row-number-new-bg 同族的 emerald，但强度更低（10% vs 15%），
+// 使整行有绿调的同时，行号标记（填写后才出现）仍然比行底色更醒目。取值与网格组件的
+// --data-grid-row-new-bg（含 color-mix 变体）保持一致。
+export const DATA_GRID_LIGHT_NEW_ROW_BG = "rgb(231, 248, 242)";
+export const DATA_GRID_DARK_NEW_ROW_BG = "rgb(19, 37, 33)";
 export const DATA_GRID_DARK_ROW_NUMBER_BG = "rgb(35, 37, 42)";
 const DATA_GRID_DARK_ROW_NUMBER_NEW_BG = "rgb(33, 45, 40)";
 const DATA_GRID_DARK_ROW_NUMBER_EDITED_BG = "rgb(48, 41, 28)";
@@ -270,7 +279,7 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
   const accent = cssVarColor(getVar, "--accent", isDark ? "rgb(46, 47, 51)" : "rgb(245, 245, 245)");
   const activeSurface = dataGridActiveRowBackground(isDark);
   const rowMuted = isDark ? DATA_GRID_DARK_STRIPED_ROW_BG : DATA_GRID_LIGHT_STRIPED_ROW_BG;
-  const rowNew = isDark ? "rgb(51, 51, 55)" : "rgb(243, 243, 243)";
+  const rowNew = isDark ? DATA_GRID_DARK_NEW_ROW_BG : DATA_GRID_LIGHT_NEW_ROW_BG;
   const rowDeleted = isDark ? "rgb(55, 31, 32)" : "rgb(255, 244, 244)";
   const cellActive = activeSurface;
   // 浅/深都读 CSS 变量（--data-grid-cell-crosshair-*-bg 从 --primary 派生），保证 DOM 与

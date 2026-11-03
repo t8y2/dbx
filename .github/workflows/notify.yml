@@ -3,13 +3,15 @@ name: Notifications
 on:
   # issues:
   #   types: [opened]
-  pull_request_target:
-    types: [opened, closed]
+  # pull_request_target:
+  #   types: [closed]
+  workflow_dispatch:
   # Release 不在此通知：桌面正式版由 publish-packages.yml 在转正后发飞书卡片；
   # 组件包（agents-v*/packages-v*）发布不进群。
 
 jobs:
   notify:
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - name: Build message

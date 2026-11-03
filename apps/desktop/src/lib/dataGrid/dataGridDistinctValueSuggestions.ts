@@ -5,10 +5,12 @@ import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import type { ColumnInfo } from "@/types/database";
 
 export type DataGridDistinctValueSuggestionTarget = "value" | "end";
+export type DataGridDistinctValueSource = "database" | "page";
 
 export interface DataGridDistinctValueSuggestionState {
   ruleId?: string;
   target?: DataGridDistinctValueSuggestionTarget;
+  source?: DataGridDistinctValueSource;
   search: string;
   options: DataGridLocalFilterOption[];
   loading: boolean;
@@ -16,6 +18,7 @@ export interface DataGridDistinctValueSuggestionState {
   limited: boolean;
   limit: number;
   selectedKeys: Set<string>;
+  canUseServerFilter?: boolean;
 }
 
 export function dataGridDistinctValueKey(value: CellValue, columnInfo?: Pick<ColumnInfo, "data_type">): string {

@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 410
 dbType: exasol
+compareModes: [schema, data]
 rustVariant: Exasol
 label: Exasol
 dialect: Exasol

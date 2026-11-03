@@ -433,6 +433,36 @@ func TestKyuubiIdentifierQuoteFollowsPreservedEngineType(t *testing.T) {
 			identifierQuote: trinoIdentifierQuote,
 		},
 		{
+			name: "URL param without hash selects Trino",
+			params: connectParams{
+				Host:         "kyuubi.example.com",
+				DatabaseType: "kyuubi",
+				URLParams:    "kyuubi.engine.type=TRINO",
+			},
+			configuration:   "set:hivevar:kyuubi.engine.type",
+			identifierQuote: trinoIdentifierQuote,
+		},
+		{
+			name: "Semicolon with hash selects Trino",
+			params: connectParams{
+				Host:         "kyuubi.example.com",
+				DatabaseType: "kyuubi",
+				URLParams:    ";#kyuubi.engine.type=trino",
+			},
+			configuration:   "set:hivevar:kyuubi.engine.type",
+			identifierQuote: trinoIdentifierQuote,
+		},
+		{
+			name: "Session params with auth selects Trino",
+			params: connectParams{
+				Host:         "kyuubi.example.com",
+				DatabaseType: "kyuubi",
+				URLParams:    "auth=NOSASL;kyuubi.engine.type=TRINO",
+			},
+			configuration:   "set:hivevar:kyuubi.engine.type",
+			identifierQuote: trinoIdentifierQuote,
+		},
+		{
 			name: "Kyuubi Spark keeps Hive quote",
 			params: connectParams{
 				Host:         "kyuubi.example.com",

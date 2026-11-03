@@ -563,6 +563,12 @@ fn accepts_current_app_when_min_version_is_not_newer() {
 }
 
 #[test]
+fn accepts_promoted_beta_for_same_base_minimum_version() {
+    assert!(is_app_version_compatible("0.6.60", "0.6.60-beta.20261029.1"));
+    assert!(!is_app_version_compatible("0.6.61", "0.6.60-beta.20261029.1"));
+}
+
+#[test]
 fn atomic_replace_moves_download_into_place() {
     let dir = test_path("atomic");
     std::fs::create_dir_all(&dir).unwrap();
@@ -1476,10 +1482,19 @@ fn write_test_agent_jar(path: &std::path::Path) {
     std::fs::write(path, test_agent_jar_bytes()).unwrap();
 }
 
+#[test]
+fn agent_jar_fixture_uses_a_fixed_entry_timestamp() {
+    let bytes = test_agent_jar_bytes();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    assert_eq!(archive.by_name("META-INF/MANIFEST.MF").unwrap().last_modified(), Some(zip::DateTime::default()));
+}
+
 fn test_agent_jar_bytes() -> Vec<u8> {
     let cursor = std::io::Cursor::new(Vec::new());
     let mut zip = zip::ZipWriter::new(cursor);
-    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default());
     // The production validator rejects corrupt driver artifacts by requiring a real JAR manifest.
     zip.start_file("META-INF/MANIFEST.MF", options).unwrap();
     std::io::Write::write_all(&mut zip, b"Manifest-Version: 1.0\nMain-Class: com.dbx.agent.TestAgent\n\n").unwrap();

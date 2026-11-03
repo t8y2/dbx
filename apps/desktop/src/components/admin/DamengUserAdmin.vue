@@ -180,7 +180,7 @@ const canCreateUser = computed(() => createUsername.value.trim() !== "" && creat
 const canChangePassword = computed(() => passwordValue.value !== "" && passwordValue.value === passwordConfirm.value);
 
 async function ensureConnection() {
-  await connectionStore.ensureConnected(props.connection.id);
+  await connectionStore.ensureConnected(props.connection.id, { skipIfClosedByUser: true });
 }
 
 async function refreshConnectionTree() {

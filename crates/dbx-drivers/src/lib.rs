@@ -2,7 +2,7 @@
 
 pub use dbx_sql_data::query_result_sql;
 
-pub use dbx_driver_support::{runtime_config, ssh_config};
+pub use dbx_driver_support::{query_messages, runtime_config, ssh_config};
 pub use dbx_platform::download::DownloadSource;
 pub use dbx_platform::{path_utils, process};
 pub use dbx_sql_core::{mysql_ddl_normalize, mysql_event_sql, sql, sql_error_position, sqlserver_temporal};

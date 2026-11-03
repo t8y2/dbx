@@ -30,7 +30,7 @@ use data_grid_salesforce_sql::{
 
 use crate::models::connection::DatabaseType;
 use crate::sql_dialect::{
-    firebird_rows_clause, quote_table_identifier, table_pagination_strategy, uses_oracle_row_id,
+    firebird_rows_clause, quote_table_identifier, table_pagination_strategy, uses_oracle_row_id, uses_postgres_ctid,
     uses_single_row_insert_statements, uses_synthetic_row_id, uses_xugu_row_id, TablePaginationStrategy,
 };
 use crate::value_literals::{format_ch_array_sql_literal, format_pg_array_sql_literal};
@@ -45,16 +45,36 @@ const DATA_GRID_COLUMN_DISTINCT_VALUES_MAX_LIMIT: usize = 1000;
 const KEYLESS_GUARD_COUNT_ALIAS: &str = "dbx_keyless_row_matches";
 const KEYLESS_AMBIGUOUS_ROW_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key, so the row is identified by matching every column value, and more than one row in the table matches that condition. Add a primary key or unique index, or make the rows distinguishable, before editing.";
 const KEYLESS_UNIDENTIFIABLE_ROW_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key and none of the result columns map to a table column, so there is no condition that can target a single row. Add a primary key, or edit the table directly, before saving.";
+const POSTGRES_CTID_UNIDENTIFIABLE_ROW_ERROR: &str = "Cannot safely update or delete this PostgreSQL row because its hidden row identifier is missing or invalid. Refresh the table data before saving.";
+const POSTGRES_CTID_STALE_ROW_ERROR: &str = "Cannot safely update or delete this PostgreSQL row: it no longer matches the physical row that was loaded. Another session may have changed or deleted it. Refresh the table data and try again.";
 /// Dameng rejects every comparison against its binary LOB types with
 /// `Data type mismatch` (SQLSTATE 22000, code -6105), and spatial columns are
 /// BLOB-backed and behave the same, so a keyless row predicate — which matches
 /// every result column value — cannot carry one of them.
 const DAMENG_KEYLESS_BINARY_LOB_ERROR: &str = "Cannot safely update or delete this row: the table has no primary key, and Dameng cannot compare binary LOB values, so Dbx cannot build a condition that targets it. Add a primary key or unique index, or exclude the binary LOB column from the query, before editing.";
 
+/// Row budget for one statement. It binds only the predicate shapes that cannot
+/// merge into an `IN` run (a compound key stays one OR-ed part per row) and the
+/// deleted-rows rollback INSERT value tuples; merged `IN` runs are bounded by
+/// `MYSQL_DATA_GRID_BATCH_MAX_VALUES` and by the text budget instead, so the
+/// three budgets each cover a different shape.
 const MYSQL_DATA_GRID_BATCH_MAX_ROWS: usize = 500;
 const MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES: usize = 256 * 1024;
+/// Per-statement ceiling on the literal values a batched MySQL UPDATE/DELETE may
+/// carry. MySQL charges the range optimizer ≈230 bytes per `IN` literal (every
+/// `IN` value counts as a predicate combined with `OR`), so 10k values ≈ 2.3 MiB
+/// of the 8 MiB default `range_optimizer_max_mem_size` — about 3.6× headroom.
+/// The 256 KiB text budget alone is not enough: short integer keys are ≈7 bytes
+/// of text each, so it would let a statement reach ≈8.6 MiB and silently abandon
+/// the range scan (warning 3170, or a hard error under `sql_safe_updates`).
+/// Keeping 500 values per flush would instead re-join the runs into the same
+/// oversized statement, which is why the cap counts values rather than rows.
+const MYSQL_DATA_GRID_BATCH_MAX_VALUES: usize = 10_000;
 const ORACLE_SQL_LITERAL_MAX_BYTES: usize = 4000;
 const ORACLE_LOB_LITERAL_CHUNK_BYTES: usize = 3900;
+/// SQL Server types an `N'..' + NCHAR(n) + N'..'` chain of non-`max` operands as
+/// `nvarchar(4000)`; a longer concatenation result is truncated without an error.
+const SQLSERVER_NVARCHAR_LITERAL_MAX_CHARS: usize = 4000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -159,7 +179,7 @@ pub struct DataGridCopyInsertStatementOptions {
     #[serde(default)]
     pub rows: Vec<Vec<Value>>,
     #[serde(default)]
-    pub exclude_primary_keys: bool,
+    pub primary_key_mode: DataGridPrimaryKeyMode,
     #[serde(default)]
     pub include_computed_columns: bool,
     #[serde(default = "default_include_database_name")]
@@ -179,6 +199,16 @@ pub enum DataGridCopyInsertMode {
     #[default]
     Merged,
     RowByRow,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum DataGridPrimaryKeyMode {
+    #[default]
+    Include,
+    ExcludeGenerated,
+    ExcludeAll,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -357,12 +387,21 @@ pub struct HiveTablePropertiesSqlOptions {
 /// `message` unless the returned count is at most `max_matched_rows`, and also
 /// refused when the count cannot be obtained at all — an unverified keyless
 /// write is exactly the ambiguous write this guard exists to prevent.
+///
+/// A predicate built from a physical row locator (PostgreSQL `tableoid`/`ctid`)
+/// also sets `min_matched_rows`: that locator only stays valid while the row is
+/// unchanged, so a count of zero means the row moved and must be reported with
+/// `min_message` instead of silently updating nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DataGridSaveGuard {
     pub sql: String,
     pub max_matched_rows: u32,
+    #[serde(default)]
+    pub min_matched_rows: u32,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,6 +416,8 @@ pub struct DataGridSavePreparation {
     /// Checks the caller must run — and pass — before executing `statements`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keyless_guards: Vec<DataGridSaveGuard>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bound_statements: Vec<dbx_types::types::BlobBoundStatement>,
 }
 
 pub fn prepare_data_grid_save(options: DataGridSaveStatementOptions) -> DataGridSavePreparation {
@@ -399,6 +440,7 @@ pub fn prepare_data_grid_save_for_driver_profile(
                 &options.table_meta,
             ),
             keyless_guards: Vec::new(),
+            bound_statements: Vec::new(),
         };
     }
 
@@ -417,15 +459,22 @@ pub fn prepare_data_grid_save_for_driver_profile(
             rollback_statements,
             execution_schema: None,
             keyless_guards,
+            bound_statements: Vec::new(),
         };
     }
-    let statements = build_data_grid_save_statements(&options, driver_profile, &mut keyless_guards);
+    let mut bound_statements = Vec::new();
+    let statements =
+        build_data_grid_save_statements(&options, driver_profile, &mut keyless_guards, &mut bound_statements);
+    if !bound_statements.iter().any(|statement| !statement.blob_parameters.is_empty()) {
+        bound_statements.clear();
+    }
     DataGridSavePreparation {
         validation_error: None,
         statements,
         rollback_statements: build_data_grid_rollback_statements(&options, driver_profile),
         execution_schema: data_grid_save_execution_schema(options.database_type, driver_profile, &options.table_meta),
         keyless_guards,
+        bound_statements,
     }
 }
 
@@ -476,6 +525,14 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
     }
 
     if writable_indexes.is_empty() {
+        return Vec::new();
+    }
+    if options.rows.iter().any(|row| {
+        writable_indexes.iter().any(|(_, index, info)| {
+            is_oceanbase_blob_column(options.database_type, *info)
+                && row.get(*index).is_some_and(|value| !value.is_null() && oceanbase_blob_hex(value).is_none())
+        })
+    }) {
         return Vec::new();
     }
 
@@ -548,13 +605,19 @@ pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
     format_reference: impl Fn(String) -> String,
     format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>) -> String,
 ) -> Option<String> {
+    build_data_grid_copy_insert_statements_with_formatters(options, format_reference, format_literal)
+        .map(|statements| statements.join("\n"))
+}
+
+pub(crate) fn build_data_grid_copy_insert_statements_with_formatters(
+    options: DataGridCopyInsertStatementOptions,
+    format_reference: impl Fn(String) -> String,
+    format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>) -> String,
+) -> Option<Vec<String>> {
     let save_columns = effective_copy_columns(options.source_columns.as_deref(), &options.columns);
     let column_info = options.table_meta.as_ref().and_then(|meta| meta.columns.as_deref()).unwrap_or(&[]);
-    let primary_key_set: Vec<String> = options
-        .table_meta
-        .as_ref()
-        .map(|meta| meta.primary_keys.iter().map(|primary_key| normalize_column_name(primary_key)).collect())
-        .unwrap_or_default();
+    let primary_keys = options.table_meta.as_ref().map(|meta| meta.primary_keys.as_slice()).unwrap_or_default();
+    let known_columns: Vec<String> = save_columns.iter().flatten().cloned().collect();
     let insertable_columns: Vec<(&str, usize, Option<DataGridColumnInfo>)> = save_columns
         .iter()
         .enumerate()
@@ -562,7 +625,7 @@ pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
         .map(|(column, index)| {
             let fallback_type =
                 options.column_types.as_deref().and_then(|types| types.get(index)).and_then(|value| value.as_deref());
-            (column, index, copy_column_info(column_info, column, fallback_type))
+            (column, index, copy_column_info(options.database_type, column_info, column, fallback_type))
         })
         .filter(|(column, _, info)| {
             !is_grid_insert_omitted_column(
@@ -573,16 +636,18 @@ pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
             )
         })
         .collect();
-    // "Exclude primary keys" keeps manually-assigned key columns: dropping a
-    // non-auto-generated PK member loses data and yields an INSERT that cannot
-    // satisfy NOT NULL. Only auto-generated (auto_increment/identity) keys are
-    // excluded, matching DBeaver's SQLGeneratorInsert excludeAutoGeneratedColumn.
     let insert_columns: Vec<(&str, usize, Option<DataGridColumnInfo>)> = insertable_columns
         .iter()
         .filter(|(column, _, info)| {
-            !options.exclude_primary_keys
-                || !primary_key_set.contains(&normalize_column_name(column))
-                || !info.as_ref().is_some_and(is_auto_generated_column)
+            let is_primary_key =
+                is_primary_key_column(options.database_type, primary_keys, column, column_info, &known_columns);
+            match options.primary_key_mode {
+                DataGridPrimaryKeyMode::Include => true,
+                DataGridPrimaryKeyMode::ExcludeGenerated => {
+                    !is_primary_key || !info.as_ref().is_some_and(is_auto_generated_column)
+                }
+                DataGridPrimaryKeyMode::ExcludeAll => !is_primary_key,
+            }
         })
         .cloned()
         .collect();
@@ -595,6 +660,14 @@ pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
     }
 
     if insert_columns.is_empty() || options.rows.is_empty() {
+        return None;
+    }
+    if options.rows.iter().any(|row| {
+        insert_columns.iter().any(|(_, index, info)| {
+            is_oceanbase_blob_column(options.database_type, info.as_ref())
+                && row.get(*index).is_some_and(|value| !value.is_null() && oceanbase_blob_hex(value).is_none())
+        })
+    }) {
         return None;
     }
 
@@ -688,7 +761,17 @@ pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
     let statements = if options.insert_mode == DataGridCopyInsertMode::RowByRow
         || options.database_type.is_some_and(uses_single_row_insert_statements)
     {
-        value_rows.iter().map(|values| format!("INSERT INTO {table} ({columns}) VALUES {values};")).collect::<Vec<_>>()
+        value_rows
+            .iter()
+            .map(|values| {
+                let sql = format!("INSERT INTO {table} ({columns}) VALUES {values}");
+                if options.database_type == Some(DatabaseType::OceanbaseOracle) {
+                    data_grid_statement(options.database_type, sql)
+                } else {
+                    format!("{sql};")
+                }
+            })
+            .collect::<Vec<_>>()
     } else {
         vec![format!(
             "INSERT INTO {table} ({columns}) VALUES{}{};",
@@ -699,23 +782,39 @@ pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
     // SQL Server and Dameng reject explicit values for identity columns unless the
     // statement runs between `SET IDENTITY_INSERT <table> ON` and `OFF` (SQL Server
     // error 544), so a copied INSERT that carries the identity column must ship the
-    // wrapper. Each statement is wrapped on its own so row-by-row copies stay
-    // individually executable, matching the SQL export path.
-    let needs_identity_insert_wrapper =
-        matches!(options.database_type, Some(DatabaseType::SqlServer | DatabaseType::Dameng))
-            && insert_columns.iter().any(|(_, _, info)| info.as_ref().is_some_and(is_auto_generated_column));
+    // wrapper. Dameng AUTO_INCREMENT columns are not IDENTITY columns (DM error -2717)
+    // and must not be wrapped. Each statement is wrapped on its own so row-by-row
+    // copies stay individually executable, matching the SQL export path.
+    let needs_identity_insert_wrapper = match options.database_type {
+        Some(DatabaseType::SqlServer) => insert_columns.iter().any(|(_, _, info)| {
+            info.as_ref().is_some_and(|col| {
+                col.extra.as_deref().is_some_and(|extra| extra.to_ascii_lowercase().contains("identity"))
+                    || is_auto_generated_column(col)
+            })
+        }),
+        Some(DatabaseType::Dameng) => insert_columns.iter().any(|(_, _, info)| {
+            info.as_ref().is_some_and(|col| {
+                col.extra.as_deref().is_some_and(|extra| {
+                    let normalized = extra.to_ascii_lowercase();
+                    normalized.contains("identity")
+                        && !normalized.contains("auto_increment")
+                        && !normalized.contains("autoincrement")
+                })
+            })
+        }),
+        _ => false,
+    };
     if needs_identity_insert_wrapper {
         return Some(
             statements
-                .iter()
+                .into_iter()
                 .map(|statement| {
                     format!("SET IDENTITY_INSERT {table} ON;\n{statement}\nSET IDENTITY_INSERT {table} OFF;")
                 })
-                .collect::<Vec<_>>()
-                .join("\n"),
+                .collect(),
         );
     }
-    Some(statements.join("\n"))
+    Some(statements)
 }
 
 pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterConditionOptions) -> Option<String> {
@@ -1278,6 +1377,9 @@ fn build_neo4j_data_grid_column_distinct_values_sql(options: &DataGridColumnDist
 }
 
 fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if let Some(error) = validate_oceanbase_blob_save(options) {
+        return Some(error);
+    }
     if let Some(error) = validate_opaque_aggregate_state_write(options) {
         return Some(error);
     }
@@ -1297,6 +1399,9 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
         return Some(error);
     }
     if let Some(error) = validate_existing_row_primary_keys(options) {
+        return Some(error);
+    }
+    if let Some(error) = validate_postgres_ctid_row_identifier(options) {
         return Some(error);
     }
     if let Some(error) = validate_oracle_keyless_lob_predicate(options) {
@@ -1441,6 +1546,31 @@ fn validate_existing_row_primary_keys(options: &DataGridSaveStatementOptions) ->
         }
     }
 
+    None
+}
+
+fn validate_postgres_ctid_row_identifier(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if !uses_postgres_ctid(options.database_type)
+        || !options.table_meta.primary_keys.is_empty()
+        || (options.dirty_rows.is_empty() && options.deleted_rows.is_empty())
+    {
+        return None;
+    }
+
+    let save_columns = effective_columns(options);
+    // Without the hidden locator in the projection there is nothing to check;
+    // the save falls back to its previous keyless behaviour.
+    let row_id_index = find_column_index(options.database_type, &save_columns, DBX_ROWID_COLUMN)?;
+    for row_index in
+        options.dirty_rows.iter().map(|(row_index, _)| *row_index).chain(options.deleted_rows.iter().copied())
+    {
+        let Some(row) = options.rows.get(row_index) else {
+            continue;
+        };
+        if row.get(row_id_index).and_then(parse_postgres_ctid_row_id).is_none() {
+            return Some(POSTGRES_CTID_UNIDENTIFIABLE_ROW_ERROR.to_string());
+        }
+    }
     None
 }
 
@@ -1614,6 +1744,13 @@ fn validate_inserted_primary_keys(options: &DataGridSaveStatementOptions) -> Opt
     None
 }
 
+/// One predicate this save sends, plus whether it addresses a physical row
+/// locator that must still match a row rather than merely "at most one".
+struct GuardedPredicate {
+    sql: String,
+    requires_match: bool,
+}
+
 /// Builds the statements the save executes, and alongside them the server-side
 /// guards for every keyless predicate those statements actually send. The guard
 /// is derived from the same `where_clause` value the UPDATE/DELETE carries, so
@@ -1623,6 +1760,7 @@ fn build_data_grid_save_statements(
     options: &DataGridSaveStatementOptions,
     driver_profile: Option<&str>,
     keyless_guards: &mut Vec<DataGridSaveGuard>,
+    bound_statements: &mut Vec<dbx_types::types::BlobBoundStatement>,
 ) -> Vec<String> {
     if options.database_type == Some(DatabaseType::Tdengine) {
         return build_tdengine_data_grid_save_statements(options);
@@ -1634,6 +1772,9 @@ fn build_data_grid_save_statements(
         return build_iotdb_data_grid_save_statements(options);
     }
 
+    let starrocks = options.database_type == Some(DatabaseType::StarRocks)
+        || (options.database_type == Some(DatabaseType::Mysql)
+            && driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("starrocks")));
     let save_columns = effective_columns(options);
     let column_info = options.table_meta.columns.as_deref().unwrap_or(&[]);
     let schema = crate::sql_dialect::table_data_schema(
@@ -1647,13 +1788,18 @@ fn build_data_grid_save_statements(
         options.table_meta.primary_keys.iter().map(|primary_key| normalize_column_name(primary_key)).collect();
 
     let guards_keyless_predicates = primary_key_set.is_empty() && uses_keyless_row_predicate(options.database_type);
-    let mut guarded_predicates: Vec<String> = Vec::new();
-    let guard_predicate = |predicate: &str, guarded: &mut Vec<String>| {
+    // With the hidden locator present every generated predicate addresses one
+    // physical row, so its guard must match exactly one row rather than "at most one".
+    let postgres_ctid_locator = guards_keyless_predicates
+        && uses_postgres_ctid(options.database_type)
+        && find_column_index(options.database_type, &save_columns, DBX_ROWID_COLUMN).is_some();
+    let mut guarded_predicates: Vec<GuardedPredicate> = Vec::new();
+    let guard_predicate = |predicate: &str, guarded: &mut Vec<GuardedPredicate>| {
         if !guards_keyless_predicates || predicate.trim().is_empty() {
             return;
         }
-        if !guarded.iter().any(|existing| existing == predicate) {
-            guarded.push(predicate.to_string());
+        if !guarded.iter().any(|existing| existing.sql == predicate) {
+            guarded.push(GuardedPredicate { sql: predicate.to_string(), requires_match: postgres_ctid_locator });
         }
     };
 
@@ -1692,7 +1838,7 @@ fn build_data_grid_save_statements(
         if sets.is_empty() {
             continue;
         }
-        let where_clause = build_primary_key_where(
+        let mut predicate = build_primary_key_predicate(
             options.database_type,
             &options.table_meta.primary_keys,
             &save_columns,
@@ -1700,27 +1846,41 @@ fn build_data_grid_save_statements(
             column_info,
             options.identifier_quote.as_deref(),
         );
-        guard_predicate(&where_clause, &mut guarded_predicates);
+        let guarded_lob = append_oceanbase_lob_save_guards(
+            options,
+            &save_columns,
+            row,
+            changes.iter().map(|(index, _)| *index),
+            &mut predicate.sql,
+        );
+        if guarded_lob {
+            // An appended `AND ...` guard makes the clause more than the plain
+            // equality it started as; never merge a guarded predicate.
+            predicate.plain = None;
+        }
+        guard_predicate(&predicate.sql, &mut guarded_predicates);
         if batch_mysql_writes {
             if update_sets.as_deref().is_some_and(|current| current != sets) {
                 let current_sets = update_sets.take().unwrap_or_default();
-                push_mysql_predicate_batches(
+                push_mysql_key_predicate_batches(
                     &mut statements,
                     &format!("UPDATE {table} SET {current_sets} WHERE "),
                     std::mem::take(&mut update_predicates),
                 );
             }
             update_sets = Some(sets);
-            update_predicates.push(where_clause);
+            update_predicates.push(predicate);
         } else {
-            statements.push(data_grid_statement(
-                options.database_type,
-                data_grid_update_sql(options.database_type, &table, &sets, &where_clause),
-            ));
+            let statement = data_grid_update_sql(options.database_type, &table, &sets, &predicate.sql);
+            statements.push(data_grid_save_statement(options.database_type, statement, guarded_lob, bound_statements));
         }
     }
     if let Some(sets) = update_sets {
-        push_mysql_predicate_batches(&mut statements, &format!("UPDATE {table} SET {sets} WHERE "), update_predicates);
+        push_mysql_key_predicate_batches(
+            &mut statements,
+            &format!("UPDATE {table} SET {sets} WHERE "),
+            update_predicates,
+        );
     }
 
     let mut delete_predicates = Vec::new();
@@ -1728,7 +1888,7 @@ fn build_data_grid_save_statements(
         let Some(row) = options.rows.get(*row_index) else {
             continue;
         };
-        let where_clause = build_primary_key_where(
+        let mut predicate = build_primary_key_predicate(
             options.database_type,
             &options.table_meta.primary_keys,
             &save_columns,
@@ -1736,18 +1896,21 @@ fn build_data_grid_save_statements(
             column_info,
             options.identifier_quote.as_deref(),
         );
-        guard_predicate(&where_clause, &mut guarded_predicates);
+        let guarded_lob =
+            append_oceanbase_lob_save_guards(options, &save_columns, row, 0..save_columns.len(), &mut predicate.sql);
+        if guarded_lob {
+            predicate.plain = None;
+        }
+        guard_predicate(&predicate.sql, &mut guarded_predicates);
         if batch_mysql_writes {
-            delete_predicates.push(where_clause);
+            delete_predicates.push(predicate);
         } else {
-            statements.push(data_grid_statement(
-                options.database_type,
-                data_grid_delete_sql(options.database_type, &table, &where_clause),
-            ));
+            let statement = data_grid_delete_sql(options.database_type, &table, &predicate.sql);
+            statements.push(data_grid_save_statement(options.database_type, statement, guarded_lob, bound_statements));
         }
     }
     if !delete_predicates.is_empty() {
-        push_mysql_delete_batches(&mut statements, &format!("DELETE FROM {table} WHERE "), delete_predicates);
+        push_mysql_key_predicate_batches(&mut statements, &format!("DELETE FROM {table} WHERE "), delete_predicates);
     }
 
     for row in &options.new_rows {
@@ -1774,7 +1937,7 @@ fn build_data_grid_save_statements(
                     false,
                 )
             })
-            .filter(|(_, value)| !value.is_null())
+            .filter(|(_, value)| starrocks || !value.is_null())
             .collect();
         if insert_pairs.is_empty() {
             if options.database_type == Some(DatabaseType::Mysql) {
@@ -1791,6 +1954,33 @@ fn build_data_grid_save_statements(
         let values = insert_pairs
             .iter()
             .map(|(column, value)| {
+                // A new-row NULL means unset. Keep StarRocks defaulted keys in the
+                // target list, and still emit an INSERT when every value is unset.
+                if starrocks && value.is_null() {
+                    let info = column_info_for(column_info, column);
+                    let default = info.and_then(|info| info.column_default.as_deref());
+                    if let Some(default) = default {
+                        // StarRocks can reject UUID defaults through VALUES(DEFAULT).
+                        // Only emit known functions, never arbitrary metadata as SQL.
+                        let normalized = default
+                            .chars()
+                            .filter(|ch| !ch.is_ascii_whitespace())
+                            .collect::<String>()
+                            .to_ascii_lowercase();
+                        let mut expression = normalized.as_str();
+                        while let Some(inner) = expression.strip_prefix('(').and_then(|value| value.strip_suffix(')')) {
+                            expression = inner;
+                        }
+                        match expression {
+                            "uuid()" => return "uuid()".to_string(),
+                            "uuid_numeric()" => return "uuid_numeric()".to_string(),
+                            _ => {}
+                        }
+                    } else if info.is_some_and(|info| info.is_nullable) {
+                        return "NULL".to_string();
+                    }
+                    return "DEFAULT".to_string();
+                }
                 format_grid_save_sql_literal(
                     value,
                     options.database_type,
@@ -1800,20 +1990,24 @@ fn build_data_grid_save_statements(
             })
             .collect::<Vec<_>>()
             .join(", ");
-        statements.push(data_grid_statement(
+        statements.push(data_grid_save_statement(
             options.database_type,
             if options.database_type == Some(DatabaseType::Transwarp) {
                 format!("INSERT INTO {table} ({columns}) SELECT {values}")
             } else {
                 format!("INSERT INTO {table} ({columns}) VALUES ({values})")
             },
+            false,
+            bound_statements,
         ));
     }
 
     keyless_guards.extend(guarded_predicates.into_iter().map(|predicate| DataGridSaveGuard {
-        sql: format!("SELECT COUNT(*) AS {KEYLESS_GUARD_COUNT_ALIAS} FROM {table} WHERE ({predicate})"),
+        sql: format!("SELECT COUNT(*) AS {KEYLESS_GUARD_COUNT_ALIAS} FROM {table} WHERE ({})", predicate.sql),
         max_matched_rows: 1,
+        min_matched_rows: u32::from(predicate.requires_match),
         message: KEYLESS_AMBIGUOUS_ROW_ERROR.to_string(),
+        min_message: predicate.requires_match.then(|| POSTGRES_CTID_STALE_ROW_ERROR.to_string()),
     }));
 
     statements
@@ -1845,9 +2039,14 @@ fn build_data_grid_rollback_statements(
     );
     let table = data_grid_save_table_name(options, schema);
     let mut statements = Vec::new();
+    let postgres_ctid_identity = uses_postgres_ctid(options.database_type)
+        && options.table_meta.primary_keys.is_empty()
+        && find_column_index(options.database_type, &save_columns, DBX_ROWID_COLUMN).is_some();
 
     for row in &options.new_rows {
-        let where_clause = if options.database_type == Some(DatabaseType::Mysql) {
+        // Server-generated keys are unknown; never invent an undo predicate from
+        // the unset draft values. Reuse the existing key-based rollback guard.
+        let where_clause = if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::StarRocks)) {
             build_mysql_insert_rollback_where(options, &save_columns, row, column_info)
         } else {
             let where_clause = build_save_row_where(
@@ -1979,24 +2178,41 @@ fn build_data_grid_rollback_statements(
         if sets.is_empty() {
             continue;
         }
-        let mut predicates = vec![build_primary_key_where(
-            options.database_type,
-            &options.table_meta.primary_keys,
-            &save_columns,
-            &after_row,
-            column_info,
-            options.identifier_quote.as_deref(),
-        )];
-        predicates.extend(writable_changes.iter().map(|((_, value), column)| {
-            build_save_column_predicate(
+        let rollback_identity = if postgres_ctid_identity {
+            let row_predicate = build_save_row_where(
                 options.database_type,
-                column,
-                value,
-                column_info_for(column_info, column),
-                true,
+                &save_columns,
+                &after_row,
+                column_info,
+                options.identifier_quote.as_deref(),
+            );
+            if row_predicate.is_empty() {
+                continue;
+            }
+            format!("({row_predicate}) AND (SELECT COUNT(*) FROM {table} WHERE ({row_predicate})) = 1")
+        } else {
+            build_primary_key_where(
+                options.database_type,
+                &options.table_meta.primary_keys,
+                &save_columns,
+                &after_row,
+                column_info,
                 options.identifier_quote.as_deref(),
             )
-        }));
+        };
+        let mut predicates = vec![rollback_identity];
+        if !postgres_ctid_identity {
+            predicates.extend(writable_changes.iter().map(|((_, value), column)| {
+                build_save_column_predicate(
+                    options.database_type,
+                    column,
+                    value,
+                    column_info_for(column_info, column),
+                    true,
+                    options.identifier_quote.as_deref(),
+                )
+            }));
+        }
         statements.push(data_grid_statement(
             options.database_type,
             format!(
@@ -2014,98 +2230,107 @@ fn supports_mysql_data_grid_batch(options: &DataGridSaveStatementOptions) -> boo
     options.database_type == Some(DatabaseType::Mysql) && !options.table_meta.primary_keys.is_empty()
 }
 
-fn push_mysql_predicate_batches(statements: &mut Vec<String>, prefix: &str, predicates: Vec<String>) {
-    push_mysql_joined_batches(statements, prefix, predicates, " OR ", true);
+/// One row key predicate of a batched MySQL UPDATE/DELETE.
+struct MysqlKeyPredicate {
+    /// Exactly the text the statement carries when this predicate cannot be
+    /// merged — the same OR-form clause an unbatched statement would use.
+    sql: String,
+    /// Present only when `sql` is provably one plain non-NULL equality on a
+    /// single column, so it may be merged into an `IN` list.
+    plain: Option<MysqlPlainEquality>,
 }
 
-/// Render a batch of delete predicates for MySQL. Rows deleted through the grid
-/// usually differ only in a single primary-key equality predicate, so equal-key
-/// runs collapse into `id IN (...)` instead of a chain of ORs (#8857). Anything
-/// that is not a plain `column = literal` equality (compound keys, NULL checks,
-/// BINARY comparisons, ...) falls back to the OR form, which stays correct for
-/// every predicate shape.
-fn push_mysql_delete_batches(statements: &mut Vec<String>, prefix: &str, predicates: Vec<String>) {
+/// A provably plain `` `column` = literal `` key equality. Both pieces are
+/// already rendered — the dialect-quoted identifier and the formatted literal —
+/// and are accepted only after the clause they came from was checked to be
+/// exactly `"{column} = {literal}"` (`plain_equality_from_clause`).
+#[derive(Clone)]
+struct MysqlPlainEquality {
+    column: String,
+    literal: String,
+}
+
+/// A rendered part of a batched MySQL statement, with the weight the
+/// per-statement value budget has to account for it.
+struct MysqlBatchPart {
+    sql: String,
+    /// Literal values this part contributes to the statement's value budget. An
+    /// `IN` run contributes one per literal, a standalone predicate one; an
+    /// INSERT value tuple contributes nothing because that budget exists only to
+    /// bound range-optimizer memory on key predicates.
+    values: usize,
+}
+
+/// Render the batched `WHERE` parts of a MySQL save. Runs of rows that differ
+/// only in a single primary-key value collapse into `` `id` IN (...) `` instead
+/// of a chain of ORs (#8857), which is the form a DBA is willing to run.
+/// Anything that is not provably one plain non-NULL `column = literal` equality
+/// — compound keys, `IS NULL`, BINARY/JSON comparisons, BLOB-guarded keys —
+/// falls back to its own text, which stays correct for every predicate shape.
+///
+/// The merge is streaming: a non-mergeable predicate flushes the open run in
+/// place, so the order the caller built the predicates in is preserved rather
+/// than regrouped (`SET A → SET B → SET A` stays three statements).
+///
+/// Whether a predicate is "plain" is decided by the code that rendered it
+/// (`build_primary_key_predicate`), and only after that rendering was checked to
+/// reproduce the clause character for character. That check is why a future
+/// change in `build_column_predicate` cannot silently widen a batch: a new
+/// wrapper or comparison stops matching and the predicate keeps its OR form.
+fn push_mysql_key_predicate_batches(statements: &mut Vec<String>, prefix: &str, predicates: Vec<MysqlKeyPredicate>) {
     const IN_JOINER: &str = ", ";
 
     struct InRun {
-        column: Option<String>,
+        column: String,
         values: Vec<String>,
         bytes: usize,
     }
 
-    fn flush_in(run: &mut InRun, batches: &mut Vec<String>) {
-        if let Some(column) = run.column.take() {
-            if run.values.len() == 1 {
-                batches.push(format!("{column} = {}", run.values[0]));
-            } else {
-                batches.push(format!("{column} IN ({})", run.values.join(IN_JOINER)));
-            }
-            run.values.clear();
-            run.bytes = 0;
+    fn flush_run(run: &mut InRun, parts: &mut Vec<MysqlBatchPart>) {
+        if run.values.len() == 1 {
+            parts.push(MysqlBatchPart { sql: format!("{} = {}", run.column, run.values[0]), values: 1 });
+        } else {
+            parts.push(MysqlBatchPart {
+                sql: format!("{} IN ({})", run.column, run.values.join(IN_JOINER)),
+                values: run.values.len(),
+            });
         }
+        run.values.clear();
+        run.bytes = 0;
     }
 
-    let mut in_run = InRun { column: None, values: Vec::new(), bytes: 0 };
-    let mut in_batches: Vec<String> = Vec::new();
-    let mut pending_batches: Vec<String> = Vec::new();
-
-    for predicate in &predicates {
-        match parse_mysql_equality_predicate(predicate) {
-            Some((column, literal)) => {
-                let literal_bytes = literal.len() + IN_JOINER.len();
-                let column_switch = in_run.column.as_deref().is_some_and(|existing| existing != column);
-                let over_budget = in_run.bytes + literal_bytes > MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES;
-                let over_rows = in_run.values.len() >= MYSQL_DATA_GRID_BATCH_MAX_ROWS;
-                if column_switch || over_budget || over_rows {
-                    flush_in(&mut in_run, &mut in_batches);
-                }
-                if in_run.column.is_none() {
-                    in_run.column = Some(column);
-                }
-                in_run.bytes += literal_bytes;
-                in_run.values.push(literal);
+    let mut parts: Vec<MysqlBatchPart> = Vec::new();
+    let mut run: Option<InRun> = None;
+    for predicate in predicates {
+        let Some(plain) = predicate.plain else {
+            if let Some(open) = run.as_mut() {
+                flush_run(open, &mut parts);
             }
-            None => {
-                flush_in(&mut in_run, &mut in_batches);
-                pending_batches.push(predicate.clone());
+            run = None;
+            parts.push(MysqlBatchPart { sql: predicate.sql, values: 1 });
+            continue;
+        };
+        let literal_bytes = plain.literal.len() + IN_JOINER.len();
+        let starts_new_run = run.as_ref().is_some_and(|open| {
+            open.column != plain.column
+                || open.bytes + literal_bytes > MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES
+                || open.values.len() >= MYSQL_DATA_GRID_BATCH_MAX_VALUES
+        });
+        if starts_new_run {
+            if let Some(open) = run.as_mut() {
+                flush_run(open, &mut parts);
             }
+            run = None;
         }
+        let open = run.get_or_insert_with(|| InRun { column: plain.column, values: Vec::new(), bytes: 0 });
+        open.bytes += literal_bytes;
+        open.values.push(plain.literal);
     }
-    flush_in(&mut in_run, &mut in_batches);
+    if let Some(open) = run.as_mut() {
+        flush_run(open, &mut parts);
+    }
 
-    let mut batches = pending_batches;
-    batches.extend(in_batches);
-    if batches.len() == 1 {
-        statements.push(format!("{prefix}{};", batches.remove(0)));
-    } else if !batches.is_empty() {
-        push_mysql_predicate_batches(statements, prefix, batches);
-    }
-}
-
-/// Recognize predicates shaped exactly like `` `column` = literal `` (with or
-/// without backticks) so they can merge into an IN list. Anything else —
-/// compound-key AND chains, IS NULL, BINARY comparisons — returns None.
-fn parse_mysql_equality_predicate(predicate: &str) -> Option<(String, String)> {
-    let mut trimmed = predicate;
-    while let Some(inner) = trimmed.strip_prefix('(').and_then(|inner| inner.strip_suffix(')')) {
-        trimmed = inner;
-    }
-    let separator = trimmed.find(" = ")?;
-    let column = trimmed.get(..separator)?.trim().to_string();
-    if !column.starts_with('`') || !column.ends_with('`') || column.len() < 3 {
-        return None;
-    }
-    let literal = trimmed.get(separator + 3..)?.trim().to_string();
-    if literal.is_empty() || literal.eq_ignore_ascii_case("null") {
-        return None;
-    }
-    // Compound-key predicates contain further AND/OR/IS clauses after the first
-    // equality; merging those into an IN list would change the row targeting.
-    let upper = literal.to_ascii_uppercase();
-    if upper.contains(" AND ") || upper.contains(" OR ") || upper.starts_with("IS ") {
-        return None;
-    }
-    Some((column, literal))
+    push_mysql_joined_batches(statements, prefix, parts, " OR ", true, Some(MYSQL_DATA_GRID_BATCH_MAX_VALUES));
 }
 
 fn push_mysql_values_insert_batches(
@@ -2117,24 +2342,34 @@ fn push_mysql_values_insert_batches(
     push_mysql_joined_batches(
         statements,
         &format!("INSERT INTO {table} ({columns}) VALUES "),
-        value_tuples,
+        value_tuples.into_iter().map(|tuple| MysqlBatchPart { sql: tuple, values: 0 }).collect(),
         ", ",
         false,
+        // Row values are not key predicates; the value budget does not apply.
+        None,
     );
 }
 
+/// Joins the parts of a MySQL statement, splitting whenever the open batch
+/// reaches the row budget, the SQL byte budget, or — when `max_values` is set —
+/// the per-statement value budget (see `MYSQL_DATA_GRID_BATCH_MAX_VALUES`).
 fn push_mysql_joined_batches(
     statements: &mut Vec<String>,
     prefix: &str,
-    parts: Vec<String>,
+    parts: Vec<MysqlBatchPart>,
     separator: &str,
     wrap_multiple_parts: bool,
+    max_values: Option<usize>,
 ) {
-    let mut batch = Vec::new();
+    let mut batch: Vec<MysqlBatchPart> = Vec::new();
+    let mut batch_values = 0usize;
     for part in parts {
         let next_len = joined_batch_sql_len(prefix, &batch, &part, separator, wrap_multiple_parts);
+        let over_values = max_values.is_some_and(|max| batch_values + part.values > max);
         if !batch.is_empty()
-            && (batch.len() >= MYSQL_DATA_GRID_BATCH_MAX_ROWS || next_len > MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES)
+            && (batch.len() >= MYSQL_DATA_GRID_BATCH_MAX_ROWS
+                || next_len > MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES
+                || over_values)
         {
             push_mysql_joined_batch_statement(
                 statements,
@@ -2143,7 +2378,9 @@ fn push_mysql_joined_batches(
                 separator,
                 wrap_multiple_parts,
             );
+            batch_values = 0;
         }
+        batch_values += part.values;
         batch.push(part);
     }
     if !batch.is_empty() {
@@ -2153,35 +2390,36 @@ fn push_mysql_joined_batches(
 
 fn joined_batch_sql_len(
     prefix: &str,
-    current: &[String],
-    next: &str,
+    current: &[MysqlBatchPart],
+    next: &MysqlBatchPart,
     separator: &str,
     wrap_multiple_parts: bool,
 ) -> usize {
     let part_bytes = |part: &str| part.len() + usize::from(wrap_multiple_parts) * 2;
     if current.is_empty() {
-        return prefix.len() + next.len() + 1;
+        return prefix.len() + next.sql.len() + 1;
     }
     let current_bytes = if current.len() == 1 && wrap_multiple_parts {
-        current[0].len()
+        current[0].sql.len()
     } else {
-        current.iter().map(|part| part_bytes(part)).sum::<usize>() + separator.len() * current.len().saturating_sub(1)
+        current.iter().map(|part| part_bytes(&part.sql)).sum::<usize>()
+            + separator.len() * current.len().saturating_sub(1)
     };
     let existing_adjustment = if current.len() == 1 && wrap_multiple_parts { 2 } else { 0 };
-    prefix.len() + current_bytes + existing_adjustment + separator.len() + part_bytes(next) + 1
+    prefix.len() + current_bytes + existing_adjustment + separator.len() + part_bytes(&next.sql) + 1
 }
 
 fn push_mysql_joined_batch_statement(
     statements: &mut Vec<String>,
     prefix: &str,
-    parts: Vec<String>,
+    parts: Vec<MysqlBatchPart>,
     separator: &str,
     wrap_multiple_parts: bool,
 ) {
     let body = if parts.len() == 1 || !wrap_multiple_parts {
-        parts.join(separator)
+        parts.into_iter().map(|part| part.sql).collect::<Vec<_>>().join(separator)
     } else {
-        parts.into_iter().map(|part| format!("({part})")).collect::<Vec<_>>().join(separator)
+        parts.into_iter().map(|part| format!("({})", part.sql)).collect::<Vec<_>>().join(separator)
     };
     statements.push(format!("{prefix}{body};"));
 }
@@ -2239,7 +2477,7 @@ fn resolve_hive_target_column(table_meta: &DataGridTableMeta, result_column: &st
     let Some(columns) = table_meta.columns.as_deref() else {
         return result_column.to_string();
     };
-    if let Some(column) = unique_column_info_match(columns, result_column) {
+    if let Some(column) = unique_column_info_match(Some(DatabaseType::Hive), columns, result_column) {
         return column.name.clone();
     }
     let Some(unqualified) = last_qualified_identifier_component(result_column) else {
@@ -2247,13 +2485,20 @@ fn resolve_hive_target_column(table_meta: &DataGridTableMeta, result_column: &st
     };
     // Hive JDBC may expose SELECT * labels as `table.column`. Resolve them through
     // target metadata, while exact matching above preserves real dotted column names.
-    unique_column_info_match(columns, &unqualified)
+    unique_column_info_match(Some(DatabaseType::Hive), columns, &unqualified)
         .map_or_else(|| result_column.to_string(), |column| column.name.clone())
 }
 
-fn unique_column_info_match<'a>(columns: &'a [DataGridColumnInfo], name: &str) -> Option<&'a DataGridColumnInfo> {
+pub(crate) fn unique_column_info_match<'a>(
+    database_type: Option<DatabaseType>,
+    columns: &'a [DataGridColumnInfo],
+    name: &str,
+) -> Option<&'a DataGridColumnInfo> {
     if let Some(column) = columns.iter().find(|column| column.name == name) {
         return Some(column);
+    }
+    if matches!(database_type, Some(DatabaseType::Postgres | DatabaseType::Redshift)) {
+        return None;
     }
     let normalized = normalize_column_name(name);
     let mut matches = columns.iter().filter(|column| normalize_column_name(&column.name) == normalized);
@@ -2371,11 +2616,12 @@ fn effective_copy_columns(source_columns: Option<&[Option<String>]>, columns: &[
 }
 
 fn copy_column_info(
+    database_type: Option<DatabaseType>,
     column_info: &[DataGridColumnInfo],
     column: &str,
     fallback_type: Option<&str>,
 ) -> Option<DataGridColumnInfo> {
-    if let Some(info) = column_info_for(column_info, column) {
+    if let Some(info) = unique_column_info_match(database_type, column_info, column) {
         return Some(info.clone());
     }
     fallback_type.map(|data_type| DataGridColumnInfo {
@@ -2433,9 +2679,22 @@ fn format_grid_assignment_sql_literal(
     column_info: Option<&DataGridColumnInfo>,
     identifier_quote: Option<&str>,
 ) -> String {
+    if is_oceanbase_blob_column(database_type, column_info) {
+        if value.is_null() {
+            return "NULL".to_string();
+        }
+        if let Some(hex) = oceanbase_blob_hex(value) {
+            return if hex.is_empty() { "EMPTY_BLOB()".to_string() } else { format!("TO_BLOB(HEXTORAW('{hex}'))") };
+        }
+        // Invalid input must fail in SQL rather than storing the display text as bytes.
+        return "TO_BLOB(HEXTORAW('invalid BLOB hex'))".to_string();
+    }
     if matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle)) {
         if let Some(constructor) = column_info.and_then(|column| oracle_character_lob_constructor(&column.data_type)) {
             if let Some(text) = value.as_str() {
+                if database_type == Some(DatabaseType::OceanbaseOracle) && text.is_empty() && constructor == "TO_CLOB" {
+                    return "EMPTY_CLOB()".to_string();
+                }
                 return format_oracle_lob_assignment_literal(text, constructor);
             }
         }
@@ -2584,10 +2843,22 @@ pub fn format_grid_sql_literal_with_identifier_quote(
             return timestamp.to_string();
         }
     }
+    if column_info.map(|column| is_uuid_column_type(&column.data_type)).unwrap_or(false) {
+        if let Some(literal) = format_hex_uuid_literal(&text) {
+            return literal;
+        }
+    }
     if is_mysql_binary_literal_column(database_type, column_info) {
         if let Some(literal) = format_mysql_binary_literal_text(&text) {
             // DBX result values expose binary columns as prefixed hex; keep them
             // as MySQL hex literals so copied INSERT/UPDATE SQL round-trips bytes.
+            return literal;
+        }
+    }
+    if is_sqlserver_binary_literal_column(database_type, column_info) {
+        if let Some(literal) = format_sqlserver_binary_literal_text(&text) {
+            // SQL Server timestamp/rowversion values are binary counters, not
+            // Unicode strings. Keyless row predicates must compare their bytes.
             return literal;
         }
     }
@@ -2778,10 +3049,19 @@ fn format_sqlserver_unicode_literal(text: &str) -> String {
         parts.push(format!("N'{}'", segment.replace('\'', "''")));
     }
     if parts.is_empty() {
-        "N''".to_string()
-    } else {
-        parts.join(" + ")
+        return "N''".to_string();
     }
+    // SQL Server types a `+` chain of ordinary literals and `NCHAR(n)` as
+    // `nvarchar(4000)`, and silently truncates a longer result instead of
+    // failing, so a long value needs an `nvarchar(max)` operand to survive
+    // (issue #12202). A single literal needs no anchor: SQL Server already types
+    // a literal longer than 4000 characters as `nvarchar(max)`. Each emitted
+    // character of the chain is one UTF-16 code unit of `text`, so the value's
+    // own length is the length of the concatenation.
+    if parts.len() > 1 && text.encode_utf16().count() > SQLSERVER_NVARCHAR_LITERAL_MAX_CHARS {
+        parts.insert(0, "CAST(N'' AS NVARCHAR(MAX))".to_string());
+    }
+    parts.join(" + ")
 }
 
 fn is_sqlite_literal_database(database_type: Option<DatabaseType>) -> bool {
@@ -2814,6 +3094,7 @@ fn keeps_literal_backslashes(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
+                | DatabaseType::Gbase8c
                 | DatabaseType::Kwdb
         )
     )
@@ -2848,7 +3129,7 @@ fn is_oracle_temporal_literal_database(database_type: Option<DatabaseType>) -> b
     matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
 }
 
-fn format_oracle_temporal_literal(text: &str, data_type: Option<&str>) -> Option<String> {
+pub fn format_oracle_temporal_literal(text: &str, data_type: Option<&str>) -> Option<String> {
     let kind = oracle_temporal_column_kind(data_type?)?;
     let parts = regex_like_oracle_temporal(text)?;
     let fraction = parts.fraction.as_deref().unwrap_or_default();
@@ -2916,6 +3197,27 @@ fn regex_like_oracle_temporal(text: &str) -> Option<Rfc3339Parts> {
     if let Some(parts) = regex_like_rfc3339(text) {
         return Some(parts);
     }
+    if let Some((datetime, zone)) = text.rsplit_once(' ') {
+        let bytes = zone.as_bytes();
+        let normalized_zone = if is_timezone_offset(zone) {
+            Some(zone.to_string())
+        } else if bytes.len() == 5
+            && matches!(bytes[0], b'+' | b'-')
+            && bytes[1].is_ascii_digit()
+            && bytes[2] == b':'
+            && bytes[3].is_ascii_digit()
+            && bytes[4].is_ascii_digit()
+        {
+            Some(format!("{}0{}", &zone[..1], &zone[1..]))
+        } else {
+            None
+        };
+        if let Some(zone) = normalized_zone {
+            let mut parts = regex_like_local_datetime(datetime)?;
+            parts.zone = zone;
+            return Some(parts);
+        }
+    }
     regex_like_local_datetime(text)
 }
 
@@ -2924,7 +3226,7 @@ fn regex_like_local_datetime(text: &str) -> Option<Rfc3339Parts> {
     if bytes.len() < 10 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
         return None;
     }
-    let date = &text[0..10];
+    let date = text.get(0..10)?;
     if bytes.len() == 10 {
         return Some(Rfc3339Parts {
             date: date.to_string(),
@@ -2940,8 +3242,8 @@ fn regex_like_local_datetime(text: &str) -> Option<Rfc3339Parts> {
     if bytes.len() < 19 || bytes.get(13) != Some(&b':') || bytes.get(16) != Some(&b':') {
         return None;
     }
-    let time = &text[11..19];
-    let rest = &text[19..];
+    let time = text.get(11..19)?;
+    let rest = text.get(19..)?;
     let fraction = if let Some(rest) = rest.strip_prefix('.') {
         let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
         if digit_count == 0 || digit_count > 9 || digit_count != rest.len() {
@@ -3015,6 +3317,53 @@ fn is_mysql_binary_column_type(data_type: &str) -> bool {
     matches!(base, "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob")
 }
 
+fn is_uuid_column_type(data_type: &str) -> bool {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ']).next().unwrap_or("").trim();
+    matches!(base, "uuid" | "uniqueidentifier")
+}
+
+fn format_hex_uuid_literal(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let hex = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X"))?;
+    if !hex.is_ascii() {
+        return None;
+    }
+    let hex_bytes = hex.as_bytes();
+    if hex_bytes.len() == 72 && hex_bytes.iter().all(|b| b.is_ascii_hexdigit()) {
+        let mut bytes = Vec::with_capacity(36);
+        for chunk in hex_bytes.chunks_exact(2) {
+            let s = std::str::from_utf8(chunk).ok()?;
+            let byte = u8::from_str_radix(s, 16).ok()?;
+            bytes.push(byte);
+        }
+        if bytes.len() == 36
+            && bytes.iter().enumerate().all(|(idx, &b)| {
+                if idx == 8 || idx == 13 || idx == 18 || idx == 23 {
+                    b == b'-'
+                } else {
+                    b.is_ascii_hexdigit()
+                }
+            })
+        {
+            let uuid_str = std::str::from_utf8(&bytes).ok()?;
+            return Some(format!("'{uuid_str}'"));
+        }
+    }
+    if hex_bytes.len() == 32 && hex_bytes.iter().all(|b| b.is_ascii_hexdigit()) {
+        let lower = hex.to_ascii_lowercase();
+        return Some(format!(
+            "'{}-{}-{}-{}-{}'",
+            &lower[0..8],
+            &lower[8..12],
+            &lower[12..16],
+            &lower[16..20],
+            &lower[20..32]
+        ));
+    }
+    None
+}
+
 fn format_mysql_binary_literal_text(text: &str) -> Option<String> {
     let trimmed = text.trim();
     let hex = trimmed.strip_prefix("0x")?;
@@ -3025,12 +3374,40 @@ fn format_mysql_binary_literal_text(text: &str) -> Option<String> {
     }
 }
 
+fn is_sqlserver_binary_literal_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> bool {
+    database_type == Some(DatabaseType::SqlServer)
+        && column_info.is_some_and(|column| {
+            let normalized = column.data_type.trim().trim_matches('"').to_ascii_lowercase();
+            let base = normalized.split(['(', ' ', '\t', '\n']).next().unwrap_or("");
+            matches!(base, "binary" | "varbinary" | "timestamp" | "rowversion")
+        })
+}
+
+fn format_sqlserver_binary_literal_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let hex = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X"))?;
+    if hex.len() % 2 == 0 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(format!("0x{hex}"))
+    } else {
+        None
+    }
+}
+
 fn is_postgres_binary_literal_column(
     database_type: Option<DatabaseType>,
     column_info: Option<&DataGridColumnInfo>,
 ) -> bool {
     database_type == Some(DatabaseType::Postgres)
-        && column_info.is_some_and(|column| column.data_type.trim().eq_ignore_ascii_case("bytea"))
+        && column_info.is_some_and(|column| {
+            let data_type = column.data_type.trim();
+            // accept an optional single schema qualifier (pg_catalog.bytea) so the write-back
+            // literal path stays aligned with the frontend BYTEA_TYPE_RE edit gate
+            let bytea_name = data_type.split_once('.').map_or(data_type, |(_, name)| name);
+            bytea_name.eq_ignore_ascii_case("bytea")
+        })
 }
 
 fn format_postgres_binary_literal_text(text: &str) -> Option<String> {
@@ -3190,8 +3567,8 @@ fn regex_like_rfc3339(text: &str) -> Option<Rfc3339Parts> {
         return None;
     }
     let date = &text[0..10];
-    let time = &text[11..19];
-    let rest = &text[19..];
+    let time = text.get(11..19)?;
+    let rest = text.get(19..)?;
     let (fraction, zone) = if let Some(rest) = rest.strip_prefix('.') {
         let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
         if digit_count == 0 || digit_count > 9 {
@@ -3265,8 +3642,8 @@ fn parse_tdengine_timestamp(text: &str) -> Option<(String, String, Option<String
         return None;
     }
     let date = text[0..10].to_string();
-    let time = text[11..19].to_string();
-    let rest = &text[19..];
+    let time = text.get(11..19)?.to_string();
+    let rest = text.get(19..)?;
     if rest.is_empty() {
         return Some((date, time, None));
     }
@@ -3306,26 +3683,96 @@ fn build_primary_key_where(
     column_info: &[DataGridColumnInfo],
     identifier_quote: Option<&str>,
 ) -> String {
+    build_primary_key_predicate(database_type, primary_keys, columns, row, column_info, identifier_quote).sql
+}
+
+/// Builds a row's key `WHERE` clause and, for a single-column key, the structured
+/// equality the MySQL batching may merge into an `IN` list. Both come out of the
+/// same rendering call, so the merge decision can never be made against a clause
+/// that differs from the one the statement carries.
+fn build_primary_key_predicate(
+    database_type: Option<DatabaseType>,
+    primary_keys: &[String],
+    columns: &[Option<String>],
+    row: &[Value],
+    column_info: &[DataGridColumnInfo],
+    identifier_quote: Option<&str>,
+) -> MysqlKeyPredicate {
     if primary_keys.is_empty() && uses_keyless_row_predicate(database_type) {
-        return build_row_where(database_type, columns, row, column_info, identifier_quote);
+        if uses_postgres_ctid(database_type) {
+            if let Some(row_id_index) = find_column_index(database_type, columns, DBX_ROWID_COLUMN) {
+                // `validate_postgres_ctid_row_identifier` already refused every
+                // touched row whose locator does not parse, so this fallback only
+                // keeps a malformed caller from generating an unguarded write.
+                return MysqlKeyPredicate {
+                    sql: build_postgres_ctid_predicate(row.get(row_id_index).unwrap_or(&Value::Null))
+                        .unwrap_or_else(|| "FALSE".to_string()),
+                    // A physical row locator is a single equality set, not a
+                    // mergeable plain column equality, and PostgreSQL never
+                    // batches grid writes anyway.
+                    plain: None,
+                };
+            }
+        }
+        // A keyless row predicate matches every column value: never one plain
+        // equality, and never batched (`supports_mysql_data_grid_batch`).
+        return MysqlKeyPredicate {
+            sql: build_row_where(database_type, columns, row, column_info, identifier_quote),
+            plain: None,
+        };
     }
-    primary_keys
-        .iter()
-        .map(|primary_key| {
-            let value = row
-                .get(find_column_index(database_type, columns, primary_key).unwrap_or(usize::MAX))
-                .unwrap_or(&Value::Null);
-            build_column_predicate(
-                database_type,
-                primary_key,
-                value,
-                column_info_for(column_info, primary_key),
-                false,
-                identifier_quote,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" AND ")
+
+    let single_key = primary_keys.len() == 1;
+    let mut plain = None;
+    let mut parts = Vec::with_capacity(primary_keys.len());
+    for primary_key in primary_keys {
+        let value = row
+            .get(find_column_index(database_type, columns, primary_key).unwrap_or(usize::MAX))
+            .unwrap_or(&Value::Null);
+        let (part, part_plain) = build_column_predicate_with_plain(
+            database_type,
+            primary_key,
+            value,
+            column_info_for(column_info, primary_key),
+            false,
+            identifier_quote,
+        );
+        parts.push(part);
+        if single_key {
+            plain = part_plain;
+        }
+    }
+    let sql = parts.join(" AND ");
+    let plain = plain.and_then(|plain| plain_equality_from_clause(&sql, plain));
+    MysqlKeyPredicate { sql, plain }
+}
+
+/// Accepts the structured equality only when re-rendering it as
+/// `{column} = {literal}` reproduces the clause about to be sent, modulo the
+/// outer parentheses a batched part may add. `build_column_predicate` stays the
+/// single source of truth for that text: if a future branch there renders another
+/// form (a new wrapper, a different comparison), this check fails and the
+/// predicate keeps the OR form instead of silently merging into an `IN` list that
+/// targets rows the clause alone would not.
+fn plain_equality_from_clause(clause: &str, plain: MysqlPlainEquality) -> Option<MysqlPlainEquality> {
+    // Keep the retired text parser's explicit rejection of a bare `NULL` literal.
+    // A NULL key value already leaves through the `IS NULL` branch, so this only
+    // guards a formatter change that would emit the keyword for a real value:
+    // `col = NULL` and `col IN (NULL)` both match nothing, but an `IN (NULL, ...)`
+    // list would still read as a bug in the SQL a DBA has to approve.
+    if plain.literal.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    let expected = format!("{} = {}", plain.column, plain.literal);
+    (strip_outer_parentheses(clause) == expected).then_some(plain)
+}
+
+fn strip_outer_parentheses(text: &str) -> &str {
+    let mut trimmed = text.trim();
+    while let Some(inner) = trimmed.strip_prefix('(').and_then(|inner| inner.strip_suffix(')')) {
+        trimmed = inner;
+    }
+    trimmed
 }
 
 fn build_row_where(
@@ -3392,23 +3839,54 @@ pub fn build_column_predicate(
     use_binary_text_comparison: bool,
     identifier_quote: Option<&str>,
 ) -> String {
+    build_column_predicate_with_plain(
+        database_type,
+        column,
+        value,
+        column_info,
+        use_binary_text_comparison,
+        identifier_quote,
+    )
+    .0
+}
+
+/// Renders one key predicate and, alongside it, the structured
+/// `` (identifier, literal) `` pair when the rendering is the plain
+/// `column = literal` equality. The pair is a *claim* about the text returned
+/// here, not an independent derivation: callers must confirm it still reproduces
+/// that text (`plain_equality_from_clause`) before merging anything.
+fn build_column_predicate_with_plain(
+    database_type: Option<DatabaseType>,
+    column: &str,
+    value: &Value,
+    column_info: Option<&DataGridColumnInfo>,
+    use_binary_text_comparison: bool,
+    identifier_quote: Option<&str>,
+) -> (String, Option<MysqlPlainEquality>) {
     let ident = predicate_ident(database_type, column, identifier_quote);
     if value.is_null() {
-        format!("{ident} IS NULL")
-    } else if use_binary_text_comparison && uses_mysql_binary_text_predicate(database_type, value, column_info) {
-        format!(
-            "BINARY {ident} = {}",
-            format_grid_assignment_sql_literal(value, database_type, column_info, identifier_quote)
-        )
-    } else {
-        let literal = format_grid_assignment_sql_literal(value, database_type, column_info, identifier_quote);
-        if use_binary_text_comparison {
-            if let Some(predicate) = postgres_keyless_json_predicate(database_type, &ident, &literal, column_info) {
-                return predicate;
-            }
-        }
-        format!("{ident} = {}", mysql_json_predicate_literal(literal, database_type, column_info))
+        return (format!("{ident} IS NULL"), None);
     }
+    if let Some(predicate) = oceanbase_lob_predicate(database_type, &ident, value, column_info) {
+        return (predicate, None);
+    }
+    if use_binary_text_comparison && uses_mysql_binary_text_predicate(database_type, value, column_info) {
+        return (
+            format!(
+                "BINARY {ident} = {}",
+                format_grid_assignment_sql_literal(value, database_type, column_info, identifier_quote)
+            ),
+            None,
+        );
+    }
+    let literal = format_grid_assignment_sql_literal(value, database_type, column_info, identifier_quote);
+    if use_binary_text_comparison {
+        if let Some(predicate) = postgres_keyless_json_predicate(database_type, &ident, &literal, column_info) {
+            return (predicate, None);
+        }
+    }
+    let sql = format!("{ident} = {}", mysql_json_predicate_literal(literal.clone(), database_type, column_info));
+    (sql, Some(MysqlPlainEquality { column: ident, literal }))
 }
 
 fn build_save_column_predicate(
@@ -3422,6 +3900,8 @@ fn build_save_column_predicate(
     let ident = predicate_ident(database_type, column, identifier_quote);
     if value.is_null() || empty_string_saves_as_null(value, column_info) {
         format!("{ident} IS NULL")
+    } else if let Some(predicate) = oceanbase_lob_predicate(database_type, &ident, value, column_info) {
+        predicate
     } else if use_binary_text_comparison && uses_mysql_binary_text_predicate(database_type, value, column_info) {
         format!(
             "BINARY {ident} = {}",
@@ -3436,6 +3916,137 @@ fn build_save_column_predicate(
         }
         format!("{ident} = {}", mysql_json_predicate_literal(literal, database_type, column_info))
     }
+}
+
+fn oceanbase_lob_predicate(
+    database_type: Option<DatabaseType>,
+    ident: &str,
+    value: &Value,
+    column_info: Option<&DataGridColumnInfo>,
+) -> Option<String> {
+    if is_oceanbase_blob_column(database_type, column_info) {
+        if value.is_null() {
+            return Some(format!("{ident} IS NULL"));
+        }
+        let Some(hex) = oceanbase_blob_hex(value) else {
+            return Some("1 = 0".to_string());
+        };
+        if hex.len() > 4000 {
+            // Reuse the temporary BLOB bind in oceanbase_blob_statement instead of
+            // compiling one RAW predicate per 1000 bytes of the original value.
+            return Some(format!(
+                "(DBMS_LOB.GETLENGTH({ident}) = {} AND DBMS_LOB.COMPARE({ident}, TO_BLOB(HEXTORAW('{hex}'))) = 0)",
+                hex.len() / 2
+            ));
+        }
+        let mut predicates = vec![format!("DBMS_LOB.GETLENGTH({ident}) = {}", hex.len() / 2)];
+        for (index, chunk) in hex.as_bytes().chunks(2000).enumerate() {
+            let chunk = std::str::from_utf8(chunk).expect("validated ASCII hex");
+            predicates.push(format!(
+                "DBMS_LOB.SUBSTR({ident}, {}, {}) = HEXTORAW('{chunk}')",
+                chunk.len() / 2,
+                index * 1000 + 1
+            ));
+        }
+        return Some(format!("({})", predicates.join(" AND ")));
+    }
+    if database_type != Some(DatabaseType::OceanbaseOracle)
+        || column_info.and_then(|column| oracle_character_lob_constructor(&column.data_type)) != Some("TO_CLOB")
+    {
+        return None;
+    }
+    if value.is_null() {
+        return Some(format!("{ident} IS NULL"));
+    }
+    let text = value.as_str()?;
+    let mut predicates = vec![format!("DBMS_LOB.GETLENGTH({ident}) = {}", text.chars().count())];
+    let mut offset = 1;
+    let mut chunk = String::new();
+    let mut count = 0;
+    for ch in text.chars() {
+        if chunk.len() + oracle_sql_literal_char_len(ch) > 2000 {
+            predicates.push(format!(
+                "UTL_RAW.CAST_TO_RAW(DBMS_LOB.SUBSTR({ident}, {count}, {offset})) = UTL_RAW.CAST_TO_RAW('{chunk}')"
+            ));
+            offset += count;
+            chunk.clear();
+            count = 0;
+        }
+        append_oracle_sql_literal_char(&mut chunk, ch);
+        count += 1;
+    }
+    if count > 0 {
+        predicates.push(format!(
+            "UTL_RAW.CAST_TO_RAW(DBMS_LOB.SUBSTR({ident}, {count}, {offset})) = UTL_RAW.CAST_TO_RAW('{chunk}')"
+        ));
+    }
+    Some(format!("({})", predicates.join(" AND ")))
+}
+
+fn append_oceanbase_lob_save_guards(
+    options: &DataGridSaveStatementOptions,
+    columns: &[Option<String>],
+    row: &[Value],
+    indexes: impl Iterator<Item = usize>,
+    where_clause: &mut String,
+) -> bool {
+    let mut guarded = false;
+    let column_info = options.table_meta.columns.as_deref().unwrap_or(&[]);
+    for index in indexes {
+        let Some(column) = columns.get(index).and_then(|column| column.as_deref()) else {
+            continue;
+        };
+        let ident = predicate_ident(options.database_type, column, options.identifier_quote.as_deref());
+        if let Some(predicate) = oceanbase_lob_predicate(
+            options.database_type,
+            &ident,
+            row.get(index).unwrap_or(&Value::Null),
+            column_info_for(column_info, column),
+        ) {
+            if !where_clause.is_empty() {
+                where_clause.push_str(" AND ");
+            }
+            where_clause.push_str(&predicate);
+            guarded = true;
+        }
+    }
+    guarded
+}
+
+fn data_grid_save_statement(
+    database_type: Option<DatabaseType>,
+    sql: String,
+    guard_row_count: bool,
+    bound: &mut Vec<dbx_types::types::BlobBoundStatement>,
+) -> String {
+    let preview = if guard_row_count {
+        oceanbase_guarded_lob_statement(sql.clone())
+    } else {
+        data_grid_statement(database_type, sql.clone())
+    };
+    if database_type == Some(DatabaseType::OceanbaseOracle) {
+        let (rewritten, blobs) = oceanbase_blob_literals(&sql, true);
+        let execution_sql = if blobs.is_empty() {
+            preview.clone()
+        } else if guard_row_count {
+            format!("BEGIN\n{rewritten};\nIF SQL%ROWCOUNT <> 1 THEN RAISE_APPLICATION_ERROR(-20001, 'LOB target changed or missing; reload before saving'); END IF;\nEND;")
+        } else {
+            rewritten
+        };
+        bound.push(dbx_types::types::BlobBoundStatement {
+            preview_sql: preview.clone(),
+            sql: execution_sql,
+            blob_parameters: blobs.into_iter().map(str::to_string).collect(),
+        });
+    }
+    preview
+}
+
+fn oceanbase_guarded_lob_statement(sql: String) -> String {
+    if let Some(statement) = oceanbase_blob_statement(&sql, true) {
+        return statement;
+    }
+    format!("BEGIN\n{sql};\nIF SQL%ROWCOUNT <> 1 THEN\nRAISE_APPLICATION_ERROR(-20001, 'LOB target changed or missing; reload before saving');\nEND IF;\nEND;")
 }
 
 fn postgres_keyless_json_predicate(
@@ -3470,12 +4081,181 @@ fn mysql_json_predicate_literal(
     }
 }
 
-fn data_grid_statement(database_type: Option<DatabaseType>, sql: String) -> String {
+pub(crate) fn data_grid_statement(database_type: Option<DatabaseType>, sql: String) -> String {
+    if database_type == Some(DatabaseType::OceanbaseOracle) {
+        if let Some(statement) = oceanbase_blob_statement(&sql, false) {
+            return statement;
+        }
+    }
     if database_type == Some(DatabaseType::ManticoreSearch) {
         sql
     } else {
         format!("{sql};")
     }
+}
+
+fn is_oceanbase_blob_column(database_type: Option<DatabaseType>, column_info: Option<&DataGridColumnInfo>) -> bool {
+    database_type == Some(DatabaseType::OceanbaseOracle)
+        && column_info.is_some_and(|column| column.data_type.trim().eq_ignore_ascii_case("BLOB"))
+}
+
+fn oceanbase_blob_hex(value: &Value) -> Option<&str> {
+    let hex = value.as_str()?.strip_prefix("0x")?;
+    (hex.len() % 2 == 0 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(hex)
+}
+
+/// Reuse grid LOB constructors without applying save-time transaction or row guards.
+pub fn format_oracle_lob_export_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    data_type: Option<&str>,
+) -> Result<Option<String>, String> {
+    if !is_oracle_temporal_literal_database(database_type) {
+        return Ok(None);
+    }
+    let Some(data_type) = data_type else { return Ok(None) };
+    let blob = database_type == Some(DatabaseType::OceanbaseOracle) && data_type.trim().eq_ignore_ascii_case("BLOB");
+    if !blob && oracle_character_lob_constructor(data_type).is_none() {
+        return Ok(None);
+    }
+    if !blob && value.as_str() == Some("") {
+        return Ok(Some("EMPTY_CLOB()".to_string()));
+    }
+    if blob && !value.is_null() && oceanbase_blob_hex(value).is_none() {
+        return Err(
+            "OceanBase BLOB export requires NULL or 0x followed by complete hexadecimal byte pairs.".to_string()
+        );
+    }
+    let column = DataGridColumnInfo {
+        name: String::new(),
+        data_type: data_type.to_string(),
+        is_nullable: true,
+        is_primary_key: false,
+        column_default: None,
+        extra: None,
+    };
+    Ok(Some(format_grid_assignment_sql_literal(value, database_type, Some(&column), None)))
+}
+
+fn validate_oceanbase_blob_save(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if options.database_type != Some(DatabaseType::OceanbaseOracle) {
+        return None;
+    }
+    let columns = effective_columns(options);
+    let info = options.table_meta.columns.as_deref().unwrap_or(&[]);
+    let valid = |index: usize, value: &Value| {
+        !is_oceanbase_blob_column(
+            options.database_type,
+            columns.get(index).and_then(|column| column.as_deref()).and_then(|column| column_info_for(info, column)),
+        ) || value.is_null()
+            || oceanbase_blob_hex(value).is_some()
+    };
+    for (row_index, changes) in &options.dirty_rows {
+        for (index, value) in changes {
+            if !valid(*index, value)
+                || options
+                    .rows
+                    .get(*row_index)
+                    .is_some_and(|row| !valid(*index, row.get(*index).unwrap_or(&Value::Null)))
+            {
+                return Some("OceanBase BLOB values must be NULL or 0x followed by complete hexadecimal byte pairs; reload the original value before saving.".to_string());
+            }
+        }
+    }
+    for row in options.deleted_rows.iter().filter_map(|index| options.rows.get(*index)).chain(options.new_rows.iter()) {
+        if row.iter().enumerate().any(|(index, value)| !valid(index, value)) {
+            return Some("OceanBase BLOB values must be NULL or 0x followed by complete hexadecimal byte pairs; reload the original value before saving.".to_string());
+        }
+    }
+    None
+}
+
+// Only rewrite our generated BLOB literal outside quoted strings/identifiers. The SQL text
+// uses binds so temporary PL variables cannot resolve to an identically named table column.
+pub fn oceanbase_blob_statement(sql: &str, guard_row_count: bool) -> Option<String> {
+    let (rewritten, blobs) = oceanbase_blob_literals(sql, false);
+    if blobs.is_empty() {
+        return None;
+    }
+    oceanbase_temporary_blob_statement(&rewritten, &blobs, guard_row_count)
+}
+
+fn oceanbase_blob_literals(sql: &str, positional: bool) -> (String, Vec<&str>) {
+    const PREFIX: &str = "TO_BLOB(HEXTORAW('";
+    let sql = sql.trim_end_matches(';');
+    let mut rewritten = String::new();
+    let mut blobs = Vec::new();
+    let mut index = 0;
+    while index < sql.len() {
+        let rest = &sql[index..];
+        if let Some(hex_start) = rest.strip_prefix(PREFIX) {
+            if let Some(end) = hex_start.find("'))") {
+                let hex = &hex_start[..end];
+                if hex.len() > 4000 && hex.len() % 2 == 0 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    rewritten.push_str(&if positional { "?".to_string() } else { format!(":dbx_lob_{}", blobs.len()) });
+                    blobs.push(hex);
+                    index += PREFIX.len() + end + 3;
+                    continue;
+                }
+            }
+        }
+        let ch = rest.chars().next().expect("nonempty SQL remainder");
+        rewritten.push(ch);
+        index += ch.len_utf8();
+        if ch == '\'' || ch == '"' {
+            while index < sql.len() {
+                let quoted = sql[index..].chars().next().expect("nonempty quoted remainder");
+                rewritten.push(quoted);
+                index += quoted.len_utf8();
+                if quoted == ch {
+                    if sql[index..].starts_with(ch) {
+                        rewritten.push(ch);
+                        index += ch.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    (rewritten, blobs)
+}
+
+fn oceanbase_temporary_blob_statement(rewritten: &str, blobs: &[&str], guard_row_count: bool) -> Option<String> {
+    let mut statement = "DECLARE\ndbx_sql CLOB;\n".to_string();
+    let mut cleanup = String::new();
+    for index in 0..blobs.len() {
+        statement.push_str(&format!("dbx_lob_{index} BLOB;\n"));
+        cleanup.push_str(&format!(
+            "IF DBMS_LOB.ISTEMPORARY(dbx_lob_{index}) = 1 THEN DBMS_LOB.FREETEMPORARY(dbx_lob_{index}); END IF;\n"
+        ));
+    }
+    statement.push_str("BEGIN\ndbx_sql := ");
+    statement.push_str(&format_oracle_lob_assignment_literal(rewritten, "TO_CLOB"));
+    statement.push_str(";\n");
+    for (index, hex) in blobs.iter().enumerate() {
+        statement.push_str(&format!("DBMS_LOB.CREATETEMPORARY(dbx_lob_{index}, TRUE, DBMS_LOB.CALL);\n"));
+        for chunk in hex.as_bytes().chunks(2000) {
+            let chunk = std::str::from_utf8(chunk).expect("validated ASCII hex");
+            statement.push_str(&format!(
+                "DBMS_LOB.WRITEAPPEND(dbx_lob_{index}, {}, HEXTORAW('{chunk}'));\n",
+                chunk.len() / 2
+            ));
+        }
+    }
+    statement.push_str(&format!(
+        "EXECUTE IMMEDIATE dbx_sql USING {};\n",
+        (0..blobs.len()).map(|index| format!("dbx_lob_{index}")).collect::<Vec<_>>().join(", ")
+    ));
+    if guard_row_count {
+        statement.push_str("IF SQL%ROWCOUNT <> 1 THEN RAISE_APPLICATION_ERROR(-20001, 'LOB target changed or missing; reload before saving'); END IF;\n");
+    }
+    cleanup.push_str("IF DBMS_LOB.ISTEMPORARY(dbx_sql) = 1 THEN DBMS_LOB.FREETEMPORARY(dbx_sql); END IF;\n");
+    statement.push_str(&cleanup);
+    statement.push_str("EXCEPTION WHEN OTHERS THEN\n");
+    statement.push_str(&cleanup);
+    statement.push_str("RAISE;\nEND;");
+    Some(statement)
 }
 
 fn data_grid_update_sql(database_type: Option<DatabaseType>, table: &str, sets: &str, where_clause: &str) -> String {
@@ -3486,7 +4266,7 @@ fn data_grid_update_sql(database_type: Option<DatabaseType>, table: &str, sets: 
     }
 }
 
-fn data_grid_delete_sql(database_type: Option<DatabaseType>, table: &str, where_clause: &str) -> String {
+pub(crate) fn data_grid_delete_sql(database_type: Option<DatabaseType>, table: &str, where_clause: &str) -> String {
     if database_type == Some(DatabaseType::ClickHouse) {
         format!("ALTER TABLE {table} DELETE WHERE {where_clause}")
     } else {
@@ -3564,6 +4344,37 @@ fn oracle_character_lob_constructor(data_type: &str) -> Option<&'static str> {
 
 fn is_synthetic_row_id(database_type: Option<DatabaseType>, name: Option<&str>) -> bool {
     uses_synthetic_row_id(database_type) && name.is_some_and(|name| name.eq_ignore_ascii_case(DBX_ROWID_COLUMN))
+}
+
+fn parse_postgres_ctid_row_id(value: &Value) -> Option<(u32, String, u32)> {
+    let value = value.as_str()?;
+    let (table_oid, rest) = value.split_once(':')?;
+    if table_oid.is_empty() || !table_oid.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let table_oid = table_oid.parse::<u32>().ok()?;
+    let (ctid, xmin) = rest.split_once(':')?;
+    let ctid = ctid.strip_prefix('(')?.strip_suffix(')')?;
+    let (block, offset) = ctid.split_once(',')?;
+    if block.is_empty()
+        || offset.is_empty()
+        || !block.bytes().all(|byte| byte.is_ascii_digit())
+        || !offset.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let block = block.parse::<u32>().ok()?;
+    let offset = offset.parse::<u16>().ok()?;
+    if xmin.is_empty() || !xmin.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let xmin = xmin.parse::<u32>().ok()?;
+    Some((table_oid, format!("({block},{offset})"), xmin))
+}
+
+fn build_postgres_ctid_predicate(value: &Value) -> Option<String> {
+    let (table_oid, ctid, xmin) = parse_postgres_ctid_row_id(value)?;
+    Some(format!("tableoid = '{table_oid}'::oid AND ctid = '{ctid}'::tid AND xmin = '{xmin}'::xid"))
 }
 
 pub fn is_neo4j_element_id(database_type: Option<DatabaseType>, name: Option<&str>) -> bool {
@@ -3772,6 +4583,44 @@ fn normalize_column_name(name: &str) -> String {
     name.to_ascii_uppercase()
 }
 
+pub(crate) fn is_primary_key_column(
+    database_type: Option<DatabaseType>,
+    primary_keys: &[String],
+    column_name: &str,
+    column_info: &[DataGridColumnInfo],
+    known_columns: &[String],
+) -> bool {
+    if primary_keys.iter().any(|primary_key| primary_key == column_name) {
+        return true;
+    }
+
+    let normalized = normalize_column_name(column_name);
+    let matching_metadata: Vec<&DataGridColumnInfo> =
+        column_info.iter().filter(|column| normalize_column_name(&column.name) == normalized).collect();
+    let exact_metadata = matching_metadata.iter().find(|column| column.name == column_name);
+    if exact_metadata.is_some_and(|metadata| metadata.is_primary_key) {
+        return true;
+    }
+    if matches!(database_type, Some(DatabaseType::Postgres | DatabaseType::Redshift)) {
+        return false;
+    }
+    if matching_metadata.len() == 1 {
+        let metadata = matching_metadata[0];
+        return metadata.is_primary_key
+            || primary_keys.iter().filter(|primary_key| normalize_column_name(primary_key) == normalized).count() == 1;
+    }
+    if matching_metadata.len() > 1 {
+        return false;
+    }
+
+    let visible_spellings: std::collections::HashSet<&str> =
+        known_columns.iter().filter(|column| normalize_column_name(column) == normalized).map(String::as_str).collect();
+    if visible_spellings.len() > 1 {
+        return false;
+    }
+    primary_keys.iter().filter(|primary_key| normalize_column_name(primary_key) == normalized).count() == 1
+}
+
 fn null_write_error(column: &str) -> String {
     format!("Column \"{column}\" does not allow NULL.")
 }
@@ -3782,6 +4631,9 @@ fn clickhouse_no_mutable_columns_error() -> String {
 
 fn predicate_ident(database_type: Option<DatabaseType>, name: &str, identifier_quote: Option<&str>) -> String {
     if is_synthetic_row_id(database_type, Some(name)) {
+        if uses_postgres_ctid(database_type) {
+            return "(tableoid::text || ':' || ctid::text || ':' || xmin::text)".to_string();
+        }
         if uses_xugu_row_id(database_type) {
             return "ROWID".to_string();
         }
@@ -3916,6 +4768,7 @@ fn is_postgres_like_pattern_database(database_type: Option<DatabaseType>) -> boo
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
+                | DatabaseType::Gbase8c
                 | DatabaseType::OpenGauss
         )
     )
@@ -4047,6 +4900,7 @@ fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Kingbase
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
+                | DatabaseType::Gbase8c
                 | DatabaseType::Vastbase
                 | DatabaseType::Goldendb
                 | DatabaseType::Yashandb
@@ -4061,6 +4915,7 @@ fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Questdb
                 | DatabaseType::OceanbaseOracle
                 | DatabaseType::Gbase
+                | DatabaseType::Gbase8s
                 | DatabaseType::Access
                 | DatabaseType::H2
                 | DatabaseType::Snowflake
@@ -4097,6 +4952,29 @@ mod tests {
         }
     }
 
+    fn sundb_people_save_options() -> DataGridSaveStatementOptions {
+        let mut options = mysql_people_save_options(1);
+        options.database_type = Some(DatabaseType::Sundb);
+        // SUNDB resolves unquoted names case-insensitively (folding to uppercase), so the
+        // grid must not quote them: a quoted `"rs_salest_budget"` preserved the case and
+        // matched nothing (#11986).
+        options.table_meta.table_name = "rs_salest_budget".to_string();
+        options.table_meta.schema = None;
+        options.dirty_rows = vec![(0, vec![(1, json!("blocked"))])];
+        options
+    }
+
+    #[test]
+    fn sundb_grid_save_leaves_simple_identifiers_unquoted() {
+        let statements =
+            build_data_grid_save_statements(&sundb_people_save_options(), None, &mut Vec::new(), &mut Vec::new());
+
+        assert_eq!(statements.len(), 1);
+        assert!(statements[0].starts_with("UPDATE rs_salest_budget SET "), "{}", statements[0]);
+        assert!(statements[0].contains("WHERE id = 1"), "{}", statements[0]);
+        assert!(!statements[0].contains("\"rs_salest_budget\""), "{}", statements[0]);
+    }
+
     fn mysql_people_save_options(row_count: usize) -> DataGridSaveStatementOptions {
         DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Mysql),
@@ -4118,6 +4996,81 @@ mod tests {
             new_rows: vec![],
             include_database_name: false,
         }
+    }
+
+    #[test]
+    fn starrocks_insert_uses_server_defaults_for_unset_uuid_columns() {
+        for (database_type, profile) in [(DatabaseType::StarRocks, None), (DatabaseType::Mysql, Some("starrocks"))] {
+            for default in ["uuid()", "(uuid())", " (( UUID ( ) )) ", "uuid_numeric()", "(UUID_NUMERIC())"] {
+                let mut options = mysql_people_save_options(0);
+                options.database_type = Some(database_type);
+                let id = &mut options.table_meta.columns.as_mut().unwrap()[0];
+                id.data_type =
+                    if default.to_ascii_lowercase().contains("numeric") { "largeint" } else { "varchar(36)" }.into();
+                id.column_default = Some(default.into());
+                options.new_rows = vec![vec![Value::Null, json!("new")], vec![Value::Null, Value::Null]];
+                let function =
+                    if default.to_ascii_lowercase().contains("numeric") { "uuid_numeric()" } else { "uuid()" };
+                let result = prepare_data_grid_save_for_driver_profile(options, profile);
+                assert_eq!(result.validation_error, None);
+                assert_eq!(result.statements.len(), 2);
+                assert!(result.rollback_statements.is_empty());
+                assert!(
+                    result.statements[0].contains(&format!("(`id`, `status`) VALUES ({function}, 'new')")),
+                    "{:?}",
+                    result.statements
+                );
+                assert!(
+                    result.statements[1].contains(&format!("(`id`, `status`) VALUES ({function}, NULL)")),
+                    "{:?}",
+                    result.statements
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn starrocks_insert_uuid_key_with_timestamp_default() {
+        let mut options = mysql_people_save_options(0);
+        options.database_type = Some(DatabaseType::StarRocks);
+        options.table_meta.schema = None;
+        options.table_meta.table_name = "test2".into();
+        options.columns = vec!["id".into(), "name".into(), "create_at".into()];
+        let mut id = column("id", "varchar(255)", false, None);
+        id.column_default = Some("(uuid())".into());
+        let mut timestamp = column("create_at", "datetime", true, None);
+        timestamp.column_default = Some("CURRENT_TIMESTAMP".into());
+        options.table_meta.columns = Some(vec![id, column("name", "varchar(255)", true, None), timestamp]);
+        options.new_rows = vec![vec![Value::Null, json!("11"), Value::Null]];
+        let result = prepare_data_grid_save(options.clone());
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["INSERT INTO `test2` (`id`, `name`, `create_at`) VALUES (uuid(), '11', DEFAULT);"]
+        );
+        assert!(result.rollback_statements.is_empty());
+
+        for default in ["'uuid()'", "'fixed-id'", "uuid(); SELECT 1"] {
+            options.table_meta.columns.as_mut().unwrap()[0].column_default = Some(default.into());
+            let result = prepare_data_grid_save(options.clone());
+            assert_eq!(result.validation_error, None);
+            assert!(result.statements[0].contains("VALUES (DEFAULT, '11', DEFAULT)"));
+        }
+    }
+
+    #[test]
+    fn starrocks_insert_preserves_explicit_uuid_values_and_mysql_omission() {
+        let mut options = mysql_people_save_options(0);
+        options.database_type = Some(DatabaseType::StarRocks);
+        options.table_meta.columns.as_mut().unwrap()[0].column_default = Some("uuid()".into());
+        options.new_rows = vec![vec![json!("manual-id"), json!("new")]];
+        let result = prepare_data_grid_save(options.clone());
+        assert_eq!(result.validation_error, None);
+        assert!(result.statements[0].contains("VALUES ('manual-id', 'new')"));
+        options.database_type = Some(DatabaseType::Mysql);
+        options.new_rows = vec![vec![Value::Null, json!("new")]];
+        let result = prepare_data_grid_save(options);
+        assert!(result.statements[0].contains("(`status`) VALUES ('new')"));
     }
 
     /// A MySQL grid tab keeps its namespace in `table_meta.database` (not
@@ -4614,6 +5567,97 @@ mod tests {
     }
 
     #[test]
+    fn iris_keyless_save_uses_full_row_predicate() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Iris),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("SQLUser".to_string()),
+                table_name: "Unkeyed".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![
+                    column("DocId", "integer", false, None),
+                    column("Title", "varchar(64)", true, None),
+                ]),
+            },
+            columns: vec!["DocId".to_string(), "Title".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(7), json!("draft")]],
+            dirty_rows: vec![(0, vec![(1, json!("final"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec!["UPDATE SQLUser.Unkeyed SET Title = 'final' WHERE DocId = 7 AND Title = 'draft';"]
+        );
+    }
+
+    #[test]
+    fn iris_keyless_save_rejects_unidentifiable_rows() {
+        // Mirrors the computed-column case: when no result column maps to a
+        // table column the row predicate is empty and the save must stay
+        // disabled instead of emitting a dangling WHERE.
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Iris),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("SQLUser".to_string()),
+                table_name: "Unkeyed".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("DocId", "integer", true, None), column("Title", "varchar(64)", true, None)]),
+            },
+            columns: vec!["expr".to_string(), "display".to_string()],
+            source_columns: Some(vec![None, None]),
+            rows: vec![vec![json!("x"), json!("draft")]],
+            dirty_rows: vec![(0, vec![(1, json!("final"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+
+        assert!(result.validation_error.is_some(), "{:?}", result.validation_error);
+        assert!(result.statements.is_empty());
+    }
+
+    #[test]
+    fn iris_identity_columns_are_omitted_from_new_row_inserts() {
+        let row_id = column("PAPMI_RowId", "integer", false, Some("identity"));
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Iris),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("SQLUser".to_string()),
+                table_name: "PA_PatMas".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![row_id, column("PAPMI_ID", "varchar(32)", false, None)]),
+            },
+            columns: vec!["PAPMI_RowId".to_string(), "PAPMI_ID".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, json!("new-id")]],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["INSERT INTO SQLUser.PA_PatMas (PAPMI_ID) VALUES ('new-id');"]);
+    }
+
+    #[test]
     fn iris_data_grid_save_quotes_only_delimited_identifiers_across_mutations() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Iris),
@@ -4898,7 +5942,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("ada"), json!("Ada")], vec![json!(2), json!("linus"), json!("Linus")]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeGenerated,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -4950,7 +5994,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("Ada")]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeGenerated,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -4997,7 +6041,7 @@ mod tests {
                 Some("NAME".to_string()),
             ]),
             rows: vec![vec![json!("A-1"), json!("A-1"), json!("Ada")]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5054,7 +6098,7 @@ mod tests {
                 Some("display_name_upper".to_string()),
             ]),
             rows: vec![vec![json!(1), json!("Ada"), json!("ADA")]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeGenerated,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5084,7 +6128,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_insert_primary_key_exclusion_keeps_manual_composite_key_members() {
+    fn copy_insert_generated_primary_key_exclusion_keeps_manual_composite_key_members() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Mysql),
             identifier_quote: None,
@@ -5125,7 +6169,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("2026-08-18"), json!("sweater")]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeGenerated,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5137,7 +6181,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_insert_primary_key_exclusion_keeps_manual_primary_keys() {
+    fn copy_insert_primary_key_exclusion_removes_manual_primary_keys() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Postgres),
             identifier_quote: None,
@@ -5170,21 +6214,165 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!("AD"), json!("Andorra")]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeAll,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
+        assert_eq!(statement.as_deref(), Some("INSERT INTO \"public\".\"countries\" (\"label\") VALUES ('Andorra');"));
+    }
+
+    #[test]
+    fn copy_insert_primary_key_exclusion_matches_unique_case_insensitive_mysql_primary_key_names() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Mysql),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "users".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![DataGridColumnInfo {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    is_nullable: false,
+                    is_primary_key: false,
+                    column_default: None,
+                    extra: None,
+                }]),
+            }),
+            columns: vec!["id".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!(1)]],
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeAll,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert!(statement.is_none());
+    }
+
+    #[test]
+    fn copy_insert_primary_key_exclusion_preserves_case_distinct_postgres_columns() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "quoted_ids".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![
+                    DataGridColumnInfo {
+                        name: "ID".to_string(),
+                        data_type: "text".to_string(),
+                        is_nullable: false,
+                        is_primary_key: true,
+                        column_default: None,
+                        extra: None,
+                    },
+                    DataGridColumnInfo {
+                        name: "id".to_string(),
+                        data_type: "text".to_string(),
+                        is_nullable: false,
+                        is_primary_key: false,
+                        column_default: None,
+                        extra: None,
+                    },
+                    DataGridColumnInfo {
+                        name: "name".to_string(),
+                        data_type: "text".to_string(),
+                        is_nullable: false,
+                        is_primary_key: false,
+                        column_default: None,
+                        extra: None,
+                    },
+                ]),
+            }),
+            columns: vec!["ID".to_string(), "id".to_string(), "name".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!("key"), json!("lowercase"), json!("Ada")]],
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeAll,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
         assert_eq!(
             statement.as_deref(),
-            Some("INSERT INTO \"public\".\"countries\" (\"code\", \"label\") VALUES ('AD', 'Andorra');")
+            Some("INSERT INTO \"public\".\"quoted_ids\" (\"id\", \"name\") VALUES ('lowercase', 'Ada');")
         );
     }
 
     #[test]
-    fn copy_insert_primary_key_exclusion_keeps_unknown_metadata_primary_keys() {
-        // Without column metadata we cannot prove the key is auto-generated;
-        // keep it rather than silently dropping NOT NULL data.
+    fn copy_insert_primary_key_exclusion_uses_exact_postgres_names_without_column_metadata() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "quoted_ids".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: None,
+            }),
+            columns: vec!["id".to_string()],
+            column_types: None,
+            source_columns: None,
+            rows: vec![vec![json!("lowercase")]],
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeAll,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(statement.as_deref(), Some("INSERT INTO \"quoted_ids\" (\"id\") VALUES ('lowercase');"));
+    }
+
+    #[test]
+    fn copy_insert_uses_exact_postgres_column_metadata_for_case_distinct_columns() {
+        let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "quoted_ids".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![DataGridColumnInfo {
+                    name: "ID".to_string(),
+                    data_type: "jsonb".to_string(),
+                    is_nullable: false,
+                    is_primary_key: true,
+                    column_default: None,
+                    extra: Some("identity".to_string()),
+                }]),
+            }),
+            columns: vec!["id".to_string()],
+            column_types: Some(vec![Some("text".to_string())]),
+            source_columns: None,
+            rows: vec![vec![json!({"value": "lowercase"})]],
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeGenerated,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+        });
+
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO \"quoted_ids\" (\"id\") VALUES ('{\"value\":\"lowercase\"}');")
+        );
+    }
+
+    #[test]
+    fn copy_insert_primary_key_exclusion_removes_keys_without_column_metadata() {
         let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::Mysql),
             identifier_quote: None,
@@ -5200,12 +6388,12 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("ada")]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeAll,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
         });
-        assert_eq!(statement.as_deref(), Some("INSERT INTO `users` (`id`, `login_name`) VALUES (1, 'ada');"));
+        assert_eq!(statement.as_deref(), Some("INSERT INTO `users` (`login_name`) VALUES ('ada');"));
     }
 
     #[test]
@@ -5218,7 +6406,7 @@ mod tests {
             column_types: Some(vec![Some("number".to_string()), Some("boolean".to_string()), Some("json".to_string())]),
             source_columns: None,
             rows: vec![vec![json!(7), json!(true), json!(r#"{"name":"Ada","roles":["admin"]}"#)]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5240,7 +6428,7 @@ mod tests {
             column_types: Some(vec![Some("json".to_string())]),
             source_columns: None,
             rows: vec![vec![json!([1, 2, 3])]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5259,7 +6447,7 @@ mod tests {
             column_types: Some(vec![Some("json".to_string())]),
             source_columns: None,
             rows: vec![vec![json!([])]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5278,7 +6466,7 @@ mod tests {
             column_types: Some(vec![Some("json".to_string())]),
             source_columns: None,
             rows: vec![vec![json!({"a": 1})]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5395,7 +6583,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!("ada"), json!("Ada")]],
-            exclude_primary_keys: true,
+            primary_key_mode: DataGridPrimaryKeyMode::ExcludeGenerated,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5424,7 +6612,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("ada"), json!("Ada")], vec![json!(2), json!("linus"), json!("Linus")]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::RowByRow,
@@ -5454,7 +6642,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("Ada")], vec![json!(2), json!("Linus")]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5488,7 +6676,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows,
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode,
@@ -5555,6 +6743,24 @@ mod tests {
     }
 
     #[test]
+    fn dameng_copy_insert_omits_identity_wrapper_for_auto_increment_columns() {
+        let mut options = sqlserver_identity_copy_insert_options(
+            vec![vec![json!(1), json!("t_destype")]],
+            DataGridCopyInsertMode::Merged,
+        );
+        options.database_type = Some(DatabaseType::Dameng);
+        options.table_meta.as_mut().unwrap().columns = Some(vec![
+            column("table_id", "bigint", false, Some("auto_increment")),
+            column("table_name", "varchar", true, None),
+        ]);
+        let statement = build_data_grid_copy_insert_statement(options);
+        assert_eq!(
+            statement.as_deref(),
+            Some("INSERT INTO \"dbo\".\"gen_table\" (\"table_id\", \"table_name\") VALUES (1, 't_destype');")
+        );
+    }
+
+    #[test]
     fn mysql_copy_statements_preserve_blob_hex_literals() {
         let table_meta = DataGridTableMeta {
             catalog: None,
@@ -5575,7 +6781,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: rows.clone(),
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5644,7 +6850,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("Hello"), json!("'hello':1A")]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5682,7 +6888,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(7), json!("ok"), json!("0x00000000000007D1"), json!(42)]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -5748,7 +6954,7 @@ mod tests {
             ]),
             source_columns: None,
             rows: vec![vec![json!(1), json!("2022-08-25T09:58:43Z"), json!("2022-08-25T09:58:43Z")]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -6057,6 +7263,25 @@ mod tests {
         assert_eq!(equals(Some(DatabaseType::Neo4j), "score", json!(7)), Some("n.`score` = 7".to_string()));
         assert_eq!(equals(None, DBX_ROWID_COLUMN, json!("row-id")), Some("\"__DBX_ROWID\" = 'row-id'".to_string()));
         assert_eq!(equals(Some(DatabaseType::VictoriaMetrics), DBX_ROWID_COLUMN, json!("row-id")), None);
+    }
+
+    #[test]
+    fn builds_postgres_ctid_context_filter_conditions() {
+        let condition = build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            column_name: DBX_ROWID_COLUMN.to_string(),
+            mode: DataGridContextFilterMode::Equals,
+            value: json!("16384:(0,1):742"),
+            values: Vec::new(),
+            end_value: None,
+            column_info: None,
+        });
+
+        assert_eq!(
+            condition.as_deref(),
+            Some("(tableoid::text || ':' || ctid::text || ':' || xmin::text) = '16384:(0,1):742'")
+        );
     }
 
     #[test]
@@ -7035,6 +8260,34 @@ mod tests {
     }
 
     #[test]
+    fn keeps_temporal_like_text_with_multibyte_seconds_verbatim() {
+        let date = column("event_day", "DATE", true, None);
+        let text = "2026-05-12 00:00:0５";
+        for (database_type, column_info) in
+            [(DatabaseType::Mysql, None), (DatabaseType::Tdengine, None), (DatabaseType::Oracle, Some(&date))]
+        {
+            assert_eq!(
+                format_grid_sql_literal(&json!(text), Some(database_type), column_info),
+                format!("'{text}'"),
+                "{database_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_temporal_like_text_with_multibyte_date_field_verbatim() {
+        let date = column("event_day", "DATE", true, None);
+        let text = "2026-05-１２ 00:00:00";
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            assert_eq!(
+                format_grid_sql_literal(&json!(text), Some(database_type), Some(&date)),
+                format!("'{text}'"),
+                "{database_type:?}"
+            );
+        }
+    }
+
+    #[test]
     fn formats_sqlserver_datetime_copy_literals_with_supported_precision() {
         let datetime = column("date1", "datetime", true, None);
         let datetime2 = column("date2", "datetime2(7)", true, None);
@@ -7109,6 +8362,60 @@ mod tests {
     }
 
     #[test]
+    fn copy_insert_preserves_oracle_agent_timezone_values_and_nulls() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            for (data_type, value, literal) in [
+                (
+                    "TIMESTAMP WITH TIME ZONE",
+                    "2026-10-09 13:14:15 +8:00",
+                    "TO_TIMESTAMP_TZ('2026-10-09 13:14:15 +08:00', 'YYYY-MM-DD HH24:MI:SS TZH:TZM')",
+                ),
+                (
+                    "TIMESTAMP(6) WITH TIME ZONE",
+                    "2026-10-09 13:14:15.123456 +8:00",
+                    "TO_TIMESTAMP_TZ('2026-10-09 13:14:15.123456 +08:00', 'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')",
+                ),
+                (
+                    "timestamp(9) with time zone",
+                    "2026-10-09 13:14:15.123456789 -5:30",
+                    "TO_TIMESTAMP_TZ('2026-10-09 13:14:15.123456789 -05:30', 'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')",
+                ),
+                (
+                    "TIMESTAMP(3) WITH TIME ZONE",
+                    "2026-10-09 13:14:15.123 +00:00",
+                    "TO_TIMESTAMP_TZ('2026-10-09 13:14:15.123 +00:00', 'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')",
+                ),
+            ] {
+                for has_table_columns in [true, false] {
+                    let statement = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
+                        database_type: Some(database_type),
+                        identifier_quote: None,
+                        table_meta: Some(DataGridTableMeta {
+                            catalog: None,
+                            database: None,
+                            schema: None,
+                            table_name: "tz_roundtrip".to_string(),
+                            primary_keys: vec![],
+                            columns: has_table_columns.then(|| vec![column("Z", data_type, true, None)]),
+                        }),
+                        columns: vec!["Z".to_string()],
+                        column_types: Some(vec![Some(data_type.to_string())]),
+                        source_columns: None,
+                        rows: vec![vec![json!(value)], vec![Value::Null]],
+                        primary_key_mode: DataGridPrimaryKeyMode::Include,
+                        include_computed_columns: false,
+                        include_database_name: false,
+                        insert_mode: DataGridCopyInsertMode::RowByRow,
+                    })
+                    .unwrap();
+                    assert!(statement.contains(literal), "{database_type:?}: {statement}");
+                    assert!(statement.contains("VALUES (NULL)"), "{statement}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn formats_oracle_temporal_literals_from_editor_values_without_nls_parsing() {
         let timestamp = column("created_at", "TIMESTAMP(6)", true, None);
         let date = column("event_day", "DATE", true, None);
@@ -7137,6 +8444,208 @@ mod tests {
             format_grid_sql_literal(&json!("2022-08-25T00:00:00Z"), Some(DatabaseType::Oracle), Some(&date)),
             "DATE '2022-08-25'"
         );
+    }
+
+    #[test]
+    fn prepares_oceanbase_blob_bytes_and_snapshot_guards() {
+        let blob = column("CONTENT", "BLOB", true, None);
+        let database_type = Some(DatabaseType::OceanbaseOracle);
+        assert_eq!(format_grid_assignment_sql_literal(&json!("0x"), database_type, Some(&blob), None), "EMPTY_BLOB()");
+        assert_eq!(format_grid_assignment_sql_literal(&Value::Null, database_type, Some(&blob), None), "NULL");
+        assert_eq!(
+            format_grid_assignment_sql_literal(&json!("0x00ff"), database_type, Some(&blob), None),
+            "TO_BLOB(HEXTORAW('00ff'))"
+        );
+        assert_eq!(
+            build_column_predicate(database_type, "CONTENT", &json!("0x"), Some(&blob), true, None),
+            "(DBMS_LOB.GETLENGTH(\"CONTENT\") = 0)"
+        );
+        let original = format!("0x{}ff", "00".repeat(1000));
+        let new_value = format!("0x{}80", "00ff".repeat(1500));
+        let mut options = DataGridSaveStatementOptions {
+            database_type,
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".into()),
+                table_name: "FILES".into(),
+                primary_keys: vec!["ID".into()],
+                columns: Some(vec![column("ID", "NUMBER", false, None), blob]),
+            },
+            columns: vec!["ID".into(), "CONTENT".into()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!(original)]],
+            dirty_rows: vec![(0, vec![(1, json!(new_value))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        };
+        let prepared = prepare_data_grid_save(options.clone());
+        assert_eq!(prepared.validation_error, None);
+        let sql = &prepared.statements[0];
+        assert!(sql.starts_with("DECLARE\n"));
+        assert!(sql.contains("CREATETEMPORARY(dbx_lob_0"));
+        assert_eq!(sql.matches("WRITEAPPEND(dbx_lob_0").count(), 4);
+        assert!(sql.contains("WRITEAPPEND(dbx_lob_0, 1, HEXTORAW('80'))"));
+        assert!(sql.contains("EXECUTE IMMEDIATE dbx_sql USING dbx_lob_0"));
+        assert!(sql.contains("DBMS_LOB.SUBSTR(\"CONTENT\", 1, 1001) = HEXTORAW(''ff'')"));
+        assert!(sql.contains("SQL%ROWCOUNT <> 1"));
+        assert_eq!(sql.matches("FREETEMPORARY(dbx_lob_0)").count(), 2);
+        assert!(prepared.rollback_statements[0].contains("DBMS_LOB.GETLENGTH(\"CONTENT\") = 3001"));
+        options.dirty_rows[0].1[0].1 = json!("0x123");
+        let invalid = prepare_data_grid_save(options);
+        assert!(invalid.validation_error.is_some());
+        assert!(invalid.statements.is_empty());
+    }
+
+    #[test]
+    fn oceanbase_large_blob_baseline_uses_one_exact_bound_comparison() {
+        let original = format!("0x{}80", "00ff".repeat(524291)); // 1 MiB + 7 bytes
+        let prepared = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".into()),
+                table_name: "FILES".into(),
+                primary_keys: vec!["ID".into()],
+                columns: Some(vec![column("ID", "NUMBER", false, None), column("CONTENT", "BLOB", true, None)]),
+            },
+            columns: vec!["ID".into(), "CONTENT".into()],
+            source_columns: None,
+            rows: vec![vec![json!(6), json!(original)]],
+            dirty_rows: vec![(0, vec![(1, json!("0x00ff80"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+        assert_eq!(prepared.validation_error, None);
+        let sql = &prepared.statements[0];
+        assert_eq!(sql.matches("DBMS_LOB.COMPARE").count(), 1);
+        assert!(!sql.contains("DBMS_LOB.SUBSTR"));
+        assert!(sql.contains("DBMS_LOB.COMPARE(\"CONTENT\", :dbx_lob_0) = 0"));
+        assert!(sql.contains("DBMS_LOB.GETLENGTH(\"CONTENT\") = 1048583"));
+        assert!(sql.contains("EXECUTE IMMEDIATE dbx_sql USING dbx_lob_0"));
+        assert!(sql.contains("SQL%ROWCOUNT <> 1"));
+        assert_eq!(sql.matches("FREETEMPORARY(dbx_lob_0)").count(), 2);
+        let bound = &prepared.bound_statements[0];
+        assert_eq!(bound.preview_sql, *sql);
+        assert!(bound.sql.len() < 512);
+        assert!(!bound.sql.contains("WRITEAPPEND"));
+        assert!(bound.sql.contains("DBMS_LOB.COMPARE(\"CONTENT\", ?) = 0"));
+        assert_eq!(bound.blob_parameters.len(), 1);
+        assert_eq!(bound.blob_parameters[0].len(), 1048583 * 2);
+    }
+
+    #[test]
+    fn oceanbase_blob_statement_keeps_literal_text_and_identifiers_opaque() {
+        let hex = "abcd".repeat(1001);
+        let sql = format!("UPDATE \"TO_BLOB(HEXTORAW('fake'))\" SET \"B\" = TO_BLOB(HEXTORAW('{hex}')), \"T\" = 'TO_BLOB(HEXTORAW(''{hex}''))' WHERE \"ID\" = 1");
+        let statement = oceanbase_blob_statement(&sql, false).unwrap();
+        assert_eq!(statement.matches("CREATETEMPORARY(").count(), 1);
+        assert!(statement.contains("USING dbx_lob_0"));
+        assert!(!statement.contains("dbx_lob_1"));
+        assert!(!statement.contains("SQL%ROWCOUNT <> 1"));
+        assert_eq!(oceanbase_blob_statement("UPDATE T SET B = TO_BLOB(HEXTORAW('00ff'))", false), None);
+        assert_eq!(
+            oceanbase_blob_statement(&format!("UPDATE T SET TXT = 'TO_BLOB(HEXTORAW(''{hex}''))'"), false),
+            None
+        );
+    }
+
+    #[test]
+    fn oceanbase_bound_blobs_keep_new_and_original_values_in_sql_order() {
+        let old_a = "11".repeat(2049);
+        let old_b = "22".repeat(2050);
+        let new_a = "33".repeat(2051);
+        let new_b = "44".repeat(2052);
+        let mut options = DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::OceanbaseOracle),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".into()),
+                table_name: "FILES".into(),
+                primary_keys: vec!["ID".into()],
+                columns: Some(vec![
+                    column("ID", "NUMBER", false, None),
+                    column("A", "BLOB", true, None),
+                    column("B", "BLOB", true, None),
+                ]),
+            },
+            columns: vec!["ID".into(), "A".into(), "B".into()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!(format!("0x{old_a}")), json!(format!("0x{old_b}"))]],
+            dirty_rows: vec![(0, vec![(1, json!(format!("0x{new_a}"))), (2, json!(format!("0x{new_b}")))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        };
+        let prepared = prepare_data_grid_save(options.clone());
+        let bound = &prepared.bound_statements[0];
+        assert_eq!(bound.blob_parameters, vec![new_a, new_b, old_a.clone(), old_b.clone()]);
+        assert_eq!(bound.sql.matches('?').count(), 4);
+        assert!(bound.sql.contains("SQL%ROWCOUNT <> 1"));
+        for (value, literal) in [(Value::Null, "NULL"), (json!("0x"), "EMPTY_BLOB()")] {
+            options.dirty_rows = vec![(0, vec![(1, value)])];
+            let prepared = prepare_data_grid_save(options.clone());
+            assert_eq!(prepared.bound_statements[0].blob_parameters, vec![old_a.clone()]);
+            assert!(prepared.bound_statements[0].sql.contains(&format!("\"A\" = {literal}")));
+        }
+    }
+
+    #[test]
+    fn prepares_oceanbase_clob_guards_and_preserves_empty_lob() {
+        let clob = column("BODY", "CLOB", true, None);
+        let database_type = Some(DatabaseType::OceanbaseOracle);
+        assert_eq!(format_grid_assignment_sql_literal(&json!(""), database_type, Some(&clob), None), "EMPTY_CLOB()");
+        assert_eq!(
+            build_column_predicate(database_type, "BODY", &json!(""), Some(&clob), true, None),
+            "(DBMS_LOB.GETLENGTH(\"BODY\") = 0)"
+        );
+        assert_eq!(
+            build_column_predicate(database_type, "BODY", &Value::Null, Some(&clob), true, None),
+            "\"BODY\" IS NULL"
+        );
+        let text = format!("{}'尾", "😀".repeat(501));
+        let predicate = build_column_predicate(database_type, "BODY", &json!(text), Some(&clob), true, None);
+        assert!(predicate.contains("GETLENGTH(\"BODY\") = 503"));
+        assert!(predicate.contains("SUBSTR(\"BODY\", 500, 1)"));
+        assert!(predicate.contains("SUBSTR(\"BODY\", 3, 501)"));
+        assert!(predicate.contains("😀''尾"));
+        assert!(!predicate.contains("DBMS_LOB.COMPARE"));
+
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type,
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("APP".into()),
+                table_name: "DOCS".into(),
+                primary_keys: vec!["ID".into()],
+                columns: Some(vec![column("ID", "NUMBER", false, None), clob]),
+            },
+            columns: vec!["ID".into(), "BODY".into()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("original")]],
+            dirty_rows: vec![(0, vec![(1, json!("edited"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+        assert_eq!(result.validation_error, None);
+        assert!(result.statements[0].contains("\"BODY\" = 'edited'"));
+        assert!(result.statements[0].contains("UTL_RAW.CAST_TO_RAW('original')"));
+        assert!(result.statements[0].contains("SQL%ROWCOUNT <> 1"));
+        assert!(result.rollback_statements[0].contains("UTL_RAW.CAST_TO_RAW('edited')"));
     }
 
     #[test]
@@ -7969,7 +9478,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(1), json!("login")]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -8394,7 +9903,13 @@ mod tests {
             ],
             source_columns: None,
             rows: vec![
-                vec![json!("*AAABk1AAEAAAAAgAAA"), json!("task-1"), json!("response"), json!("0011"), json!("archive")],
+                vec![
+                    json!("*AAABk1AAEAAAAAgAAA"),
+                    json!("task-1"),
+                    json!("response"),
+                    json!("0x0011"),
+                    json!("archive"),
+                ],
                 vec![json!("*AAABk1AAEAAAAAgAAB"), json!("task-2"), Value::Null, Value::Null, Value::Null],
             ],
             dirty_rows: vec![],
@@ -8404,13 +9919,13 @@ mod tests {
         });
 
         assert_eq!(result.validation_error, None);
-        assert_eq!(
-            result.statements,
-            vec![
-                "DELETE FROM \"APP\".\"DATA_REPORT_SUB_TASK\" WHERE ROWIDTOCHAR(ROWID) = '*AAABk1AAEAAAAAgAAA';",
-                "DELETE FROM \"APP\".\"DATA_REPORT_SUB_TASK\" WHERE ROWIDTOCHAR(ROWID) = '*AAABk1AAEAAAAAgAAB';",
-            ]
-        );
+        assert_eq!(result.statements.len(), 2);
+        assert!(result.statements[0].contains("ROWIDTOCHAR(ROWID) = '*AAABk1AAEAAAAAgAAA'"));
+        assert!(result.statements[0].contains("DBMS_LOB.GETLENGTH(\"SMC_RESPONSE\") = 8"));
+        assert!(result.statements[0].contains("UTL_RAW.CAST_TO_RAW('response')"));
+        assert!(result.statements[1].contains("ROWIDTOCHAR(ROWID) = '*AAABk1AAEAAAAAgAAB'"));
+        assert!(result.statements[1].contains("\"SMC_RESPONSE\" IS NULL"));
+        assert!(result.statements.iter().all(|statement| statement.contains("SQL%ROWCOUNT <> 1")));
     }
 
     #[test]
@@ -8442,7 +9957,9 @@ mod tests {
         });
 
         assert_eq!(result.validation_error, None);
-        assert_eq!(result.statements, vec!["DELETE FROM \"APP\".\"DOCUMENTS\" WHERE \"ID\" = 42;"]);
+        assert_eq!(result.statements.len(), 1);
+        assert!(result.statements[0].contains("WHERE \"ID\" = 42 AND (DBMS_LOB.GETLENGTH(\"BODY\") = 4"));
+        assert!(result.statements[0].contains("SQL%ROWCOUNT <> 1"));
     }
 
     #[test]
@@ -8643,6 +10160,32 @@ mod tests {
         }
     }
 
+    fn postgres_ctid_options() -> DataGridSaveStatementOptions {
+        DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("public".to_string()),
+                table_name: "duplicate_rows".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![column("id", "integer", false, None), column("value", "text", true, None)]),
+            },
+            columns: vec![DBX_ROWID_COLUMN.to_string(), "id".to_string(), "value".to_string()],
+            source_columns: None,
+            rows: vec![
+                vec![json!("16384:(0,1):742"), json!(1), json!("same")],
+                vec![json!("16384:(0,2):743"), json!(1), json!("same")],
+            ],
+            dirty_rows: vec![(0, vec![(2, json!("updated"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        }
+    }
+
     /// The predicate a guard counts must be byte-identical to the one its
     /// statement carries, otherwise the safety decision is made against a
     /// different set of columns or values than the mutation actually uses.
@@ -8694,10 +10237,71 @@ mod tests {
                 sql: r#"SELECT COUNT(*) AS dbx_keyless_row_matches FROM "daily_stats" WHERE ("stat_date" = '2026-09-07' AND "period" IS NULL)"#
                     .to_string(),
                 max_matched_rows: 1,
+                min_matched_rows: 0,
                 message: KEYLESS_AMBIGUOUS_ROW_ERROR.to_string(),
+                min_message: None,
             }]
         );
         assert_guards_cover_statement_predicates(&result);
+    }
+
+    #[test]
+    fn uses_postgres_tableoid_and_ctid_to_edit_one_duplicate_row() {
+        let update = prepare_data_grid_save(postgres_ctid_options());
+
+        assert_eq!(update.validation_error, None);
+        assert_eq!(
+            update.statements,
+            vec![
+                r#"UPDATE "public"."duplicate_rows" SET "value" = 'updated' WHERE tableoid = '16384'::oid AND ctid = '(0,1)'::tid AND xmin = '742'::xid;"#
+            ]
+        );
+        assert_eq!(update.keyless_guards.len(), 1);
+        assert_eq!(
+            update.keyless_guards[0].sql,
+            r#"SELECT COUNT(*) AS dbx_keyless_row_matches FROM "public"."duplicate_rows" WHERE (tableoid = '16384'::oid AND ctid = '(0,1)'::tid AND xmin = '742'::xid)"#
+        );
+        // A physical locator must still address one row: zero matches means the
+        // row moved, which the frontend reports instead of "deleted successfully".
+        assert_eq!(update.keyless_guards[0].min_matched_rows, 1);
+        assert_eq!(update.keyless_guards[0].min_message.as_deref(), Some(POSTGRES_CTID_STALE_ROW_ERROR));
+        assert_guards_cover_statement_predicates(&update);
+
+        // CTID changes after UPDATE, so history rollback uses the new full-row
+        // values and only proceeds if that predicate still identifies one row.
+        assert_eq!(
+            update.rollback_statements,
+            vec![
+                r#"UPDATE "public"."duplicate_rows" SET "value" = 'same' WHERE ("id" = 1 AND "value" = 'updated') AND (SELECT COUNT(*) FROM "public"."duplicate_rows" WHERE ("id" = 1 AND "value" = 'updated')) = 1;"#
+            ]
+        );
+
+        let mut delete_options = postgres_ctid_options();
+        delete_options.dirty_rows.clear();
+        delete_options.deleted_rows = vec![0];
+        let delete = prepare_data_grid_save(delete_options);
+        assert_eq!(
+            delete.statements,
+            vec![
+                r#"DELETE FROM "public"."duplicate_rows" WHERE tableoid = '16384'::oid AND ctid = '(0,1)'::tid AND xmin = '742'::xid;"#
+            ]
+        );
+        assert_eq!(delete.keyless_guards.len(), 1);
+        assert_eq!(delete.keyless_guards[0].min_matched_rows, 1);
+        assert_eq!(delete.keyless_guards[0].min_message.as_deref(), Some(POSTGRES_CTID_STALE_ROW_ERROR));
+        assert_guards_cover_statement_predicates(&delete);
+    }
+
+    #[test]
+    fn rejects_invalid_postgres_ctid_before_building_mutations() {
+        let mut options = postgres_ctid_options();
+        options.rows[0][0] = json!("not-a-ctid");
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error.as_deref(), Some(POSTGRES_CTID_UNIDENTIFIABLE_ROW_ERROR));
+        assert!(result.statements.is_empty());
+        assert!(result.keyless_guards.is_empty());
     }
 
     #[test]
@@ -8815,6 +10419,15 @@ mod tests {
         );
     }
 
+    /// A predicate the save already proved plain: the same `(column, literal)`
+    /// pair `build_primary_key_predicate` produces, for direct batcher tests.
+    fn mysql_plain_predicate(sql: &str, column: &str, literal: &str) -> MysqlKeyPredicate {
+        MysqlKeyPredicate {
+            sql: sql.to_string(),
+            plain: Some(MysqlPlainEquality { column: column.to_string(), literal: literal.to_string() }),
+        }
+    }
+
     #[test]
     fn batches_mysql_updates_with_identical_values() {
         let mut options = mysql_people_save_options(3);
@@ -8824,11 +10437,335 @@ mod tests {
         let result = prepare_data_grid_save(options);
 
         assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `app`.`people` SET `status` = NULL WHERE `id` IN (1, 2, 3);"]);
+        assert_eq!(result.rollback_statements.len(), 3);
+    }
+
+    #[test]
+    fn keeps_single_dirty_mysql_row_as_plain_equality() {
+        let mut options = mysql_people_save_options(1);
+        options.dirty_rows = vec![(0, vec![(1, Value::Null)])];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `app`.`people` SET `status` = NULL WHERE `id` = 1;"]);
+    }
+
+    #[test]
+    fn preserves_mysql_update_order_when_mergeable_and_unmergeable_predicates_mix() {
+        // Renders past the save path: a NULL key row is rejected by
+        // `validate_existing_row_primary_keys`, but the batcher itself must still
+        // flush an open run in place instead of regrouping, so the order the save
+        // built (IN-able, unmergeable, IN-able) survives.
+        let mut statements = Vec::new();
+        push_mysql_key_predicate_batches(
+            &mut statements,
+            "UPDATE `app`.`people` SET `id` = 10 WHERE ",
+            vec![
+                mysql_plain_predicate("`id` = 1", "`id`", "1"),
+                MysqlKeyPredicate { sql: "`id` IS NULL".to_string(), plain: None },
+                mysql_plain_predicate("`id` = 3", "`id`", "3"),
+            ],
+        );
+
+        assert_eq!(
+            statements,
+            vec!["UPDATE `app`.`people` SET `id` = 10 WHERE (`id` = 1) OR (`id` IS NULL) OR (`id` = 3);"]
+        );
+    }
+
+    #[test]
+    fn keeps_null_mysql_key_predicates_out_of_the_in_run() {
+        // A NULL key cannot be merged (`col IN (NULL)` never matches, unlike
+        // `col = NULL`), so it stays its own part and never joins a neighbour run.
+        let mut statements = Vec::new();
+        push_mysql_key_predicate_batches(
+            &mut statements,
+            "UPDATE `app`.`people` SET `id` = 1 WHERE ",
+            vec![
+                mysql_plain_predicate("`id` = 1", "`id`", "1"),
+                mysql_plain_predicate("`id` = 2", "`id`", "2"),
+                MysqlKeyPredicate { sql: "`id` IS NULL".to_string(), plain: None },
+                mysql_plain_predicate("`id` = 3", "`id`", "3"),
+                mysql_plain_predicate("`id` = 4", "`id`", "4"),
+            ],
+        );
+
+        assert_eq!(
+            statements,
+            vec!["UPDATE `app`.`people` SET `id` = 1 WHERE (`id` IN (1, 2)) OR (`id` IS NULL) OR (`id` IN (3, 4));"]
+        );
+    }
+
+    #[test]
+    fn merges_mysql_string_keys_containing_sql_keywords() {
+        // The retired text parser rejected any literal containing " AND " / " OR "
+        // / starting with "IS "; the structured check proves these are plain
+        // equalities, so both paths merge them now.
+        let mut options = mysql_people_save_options(0);
+        options.table_meta.columns = Some(vec![column("id", "varchar(32)", false, None)]);
+        options.columns = vec!["id".to_string()];
+        options.table_meta.primary_keys = vec!["id".to_string()];
+        options.rows = vec![vec![json!("a AND b")], vec![json!("c OR d")], vec![json!("IS x")]];
+        options.dirty_rows =
+            vec![(0, vec![(0, json!("new"))]), (1, vec![(0, json!("new"))]), (2, vec![(0, json!("new"))])];
+        options.deleted_rows = vec![];
+
+        let updates = prepare_data_grid_save(options.clone());
+
+        assert_eq!(updates.validation_error, None);
+        assert_eq!(
+            updates.statements,
+            vec!["UPDATE `app`.`people` SET `id` = 'new' WHERE `id` IN ('a AND b', 'c OR d', 'IS x');"]
+        );
+
+        let deletes = prepare_data_grid_save(DataGridSaveStatementOptions {
+            dirty_rows: vec![],
+            deleted_rows: vec![0, 1, 2],
+            ..options
+        });
+        assert_eq!(deletes.validation_error, None);
+        assert_eq!(deletes.statements, vec!["DELETE FROM `app`.`people` WHERE `id` IN ('a AND b', 'c OR d', 'IS x');"]);
+    }
+
+    #[test]
+    fn merges_mysql_string_keys_with_quotes_and_backslashes() {
+        let mut options = mysql_people_save_options(0);
+        options.table_meta.columns = Some(vec![column("id", "varchar(32)", false, None)]);
+        options.columns = vec!["id".to_string()];
+        options.table_meta.primary_keys = vec!["id".to_string()];
+        options.rows = vec![vec![json!("O'Reilly")], vec![json!("back\\slash")]];
+        options.dirty_rows = vec![(0, vec![(0, json!("new"))]), (1, vec![(0, json!("new"))])];
+
+        let result = prepare_data_grid_save(options);
+
+        // The literals keep the formatter's escaping; only the predicate shape changed.
+        assert_eq!(result.validation_error, None);
         assert_eq!(
             result.statements,
-            vec!["UPDATE `app`.`people` SET `status` = NULL WHERE (`id` = 1) OR (`id` = 2) OR (`id` = 3);"]
+            vec!["UPDATE `app`.`people` SET `id` = 'new' WHERE `id` IN ('O''Reilly', 'back\\\\slash');"]
         );
-        assert_eq!(result.rollback_statements.len(), 3);
+    }
+
+    #[test]
+    fn keeps_null_mysql_key_predicates_out_of_the_in_run_after_a_rejected_save() {
+        // A NULL key value never reaches the batcher: the save refuses the write
+        // outright, which is also why `col IN (NULL)` cannot silently over-match.
+        let mut options = mysql_people_save_options(0);
+        options.table_meta.columns = Some(vec![column("id", "bigint", true, None)]);
+        options.columns = vec!["id".to_string()];
+        options.table_meta.primary_keys = vec!["id".to_string()];
+        options.rows = vec![vec![json!(1)], vec![Value::Null], vec![json!(3)]];
+        options.dirty_rows = vec![(0, vec![(0, json!(10))]), (1, vec![(0, json!(11))]), (2, vec![(0, json!(12))])];
+
+        let result = prepare_data_grid_save(options);
+
+        assert!(result.statements.is_empty());
+        assert!(
+            result.validation_error.unwrap_or_default().contains("has no value in the query result"),
+            "a NULL key must be refused instead of merging into an IN list"
+        );
+    }
+
+    #[test]
+    fn keeps_guarded_mysql_predicates_out_of_the_in_run() {
+        // A clause that carries an extra `AND` guard is not a plain equality even
+        // when its first half looks like one; merging it would widen the batch.
+        let mut statements = Vec::new();
+        push_mysql_key_predicate_batches(
+            &mut statements,
+            "DELETE FROM `app`.`people` WHERE ",
+            vec![
+                mysql_plain_predicate("`id` = 1", "`id`", "1"),
+                MysqlKeyPredicate { sql: "`id` = 2 AND `payload` = 'x'".to_string(), plain: None },
+                mysql_plain_predicate("`id` = 3", "`id`", "3"),
+            ],
+        );
+
+        assert_eq!(
+            statements,
+            vec!["DELETE FROM `app`.`people` WHERE (`id` = 1) OR (`id` = 2 AND `payload` = 'x') OR (`id` = 3);"]
+        );
+    }
+
+    #[test]
+    fn keeps_compound_key_mysql_updates_in_or_form() {
+        let mut options = mysql_people_save_options(2);
+        options.table_meta.primary_keys = vec!["id".to_string(), "status".to_string()];
+        options.dirty_rows = vec![(0, vec![(1, json!("x"))]), (1, vec![(1, json!("x"))])];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "UPDATE `app`.`people` SET `status` = 'x' WHERE (`id` = 1 AND `status` = 'active') OR (`id` = 2 AND `status` = 'active');"
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_plain_report_when_the_rendered_clause_differs_from_the_pair() {
+        let mysql = Some(DatabaseType::Mysql);
+        // Sanity: the ordinary MySQL key is plain.
+        let predicate = build_primary_key_predicate(
+            mysql,
+            &["id".to_string()],
+            &[Some("id".to_string())],
+            &[json!(1)],
+            &[column("id", "int", false, None)],
+            None,
+        );
+        assert_eq!(predicate.sql, "`id` = 1");
+        assert!(predicate.plain.is_some());
+
+        // MySQL JSON columns already wrap the literal (`CAST(... AS JSON)`). Any
+        // future branch that renders another form must stop being mergeable,
+        // because the pair no longer reproduces the clause.
+        let json_predicate = build_primary_key_predicate(
+            mysql,
+            &["payload".to_string()],
+            &[Some("payload".to_string())],
+            &[json!(r#"{"a":1}"#)],
+            &[column("payload", "json", false, None)],
+            None,
+        );
+        assert!(json_predicate.sql.contains("CAST("), "{}", json_predicate.sql);
+        assert!(json_predicate.plain.is_none(), "a wrapped literal must stay in the OR form");
+    }
+
+    #[test]
+    fn plain_equality_check_ignores_outer_parentheses_only() {
+        let plain = |column: &str, literal: &str| MysqlPlainEquality {
+            column: column.to_string(),
+            literal: literal.to_string(),
+        };
+
+        assert!(plain_equality_from_clause("`id` = 1", plain("`id`", "1")).is_some());
+        assert!(plain_equality_from_clause("(`id` = 1)", plain("`id`", "1")).is_some());
+        // An appended guard, a compound key or a different comparison must not pass.
+        assert!(plain_equality_from_clause("`id` = 1 AND `status` = 'x'", plain("`id`", "1")).is_none());
+        assert!(plain_equality_from_clause("BINARY `id` = 1", plain("`id`", "1")).is_none());
+        assert!(plain_equality_from_clause("`id` IS NULL", plain("`id`", "1")).is_none());
+        assert!(plain_equality_from_clause("`id` = CAST('1' AS JSON)", plain("`id`", "1")).is_none());
+        // A bare NULL keyword is never merged, matching the retired parser.
+        assert!(plain_equality_from_clause("`id` = NULL", plain("`id`", "NULL")).is_none());
+        assert!(plain_equality_from_clause("`id` = null", plain("`id`", "null")).is_none());
+    }
+
+    #[test]
+    fn splits_mysql_batches_above_the_value_budget() {
+        let row_count = MYSQL_DATA_GRID_BATCH_MAX_VALUES + 1;
+        let mut options = mysql_people_save_options(row_count);
+        options.dirty_rows = (0..row_count).map(|index| (index, vec![(1, json!("archived"))])).collect();
+
+        let updates = prepare_data_grid_save(options.clone());
+
+        assert_eq!(updates.validation_error, None);
+        assert_eq!(updates.statements.len(), 2);
+        // The first statement holds exactly the value budget, so the last value
+        // it carries is the budget itself and the leftover opens the next one.
+        assert!(updates.statements[0].contains("`id` IN ("));
+        assert!(updates.statements[0].ends_with(&format!("{});", MYSQL_DATA_GRID_BATCH_MAX_VALUES)));
+        assert!(!updates.statements[0].contains(&format!(", {row_count})")));
+        assert!(updates.statements[1].ends_with(&format!("WHERE `id` = {row_count};")));
+
+        // The same budget applies to DELETE, which already emits IN lists today.
+        let deletes = prepare_data_grid_save(DataGridSaveStatementOptions {
+            dirty_rows: vec![],
+            deleted_rows: (0..row_count).collect(),
+            ..options
+        });
+
+        assert_eq!(deletes.validation_error, None);
+        assert_eq!(deletes.statements.len(), 2);
+        assert!(deletes.statements[0].ends_with(&format!("{});", MYSQL_DATA_GRID_BATCH_MAX_VALUES)));
+        assert!(deletes.statements[1].ends_with(&format!("WHERE `id` = {row_count};")));
+    }
+
+    #[test]
+    fn mysql_data_grid_update_respects_target_sql_size() {
+        // Keys long enough that two of them fit the text budget but not three, so
+        // the merged run still has to split even though all rows share one SET.
+        let key_length = 101_000;
+        let mut options = mysql_people_save_options(3);
+        options.rows[0][0] = json!("a".repeat(key_length));
+        options.rows[1][0] = json!("b".repeat(key_length));
+        options.rows[2][0] = json!("c".repeat(key_length));
+        options.dirty_rows = vec![
+            (0, vec![(1, json!("archived"))]),
+            (1, vec![(1, json!("archived"))]),
+            (2, vec![(1, json!("archived"))]),
+        ];
+
+        let result = prepare_data_grid_save(options);
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements.len(), 2);
+        assert!(result.statements[0].contains("`id` IN ("), "{}", &result.statements[0][..80]);
+        assert!(result.statements.iter().all(|statement| statement.contains("'archived'")));
+        assert!(result.statements.iter().all(|statement| statement.len() <= MYSQL_DATA_GRID_BATCH_TARGET_SQL_BYTES));
+    }
+
+    #[test]
+    fn splits_mysql_in_runs_when_the_plain_column_changes() {
+        // The save path never mixes key columns inside one SET group, so this is
+        // only reachable from a direct caller — but merging across columns would
+        // rewrite `id = 1 OR code = 'a'` into a list that matches the wrong rows,
+        // so the column change must break the run.
+        let mut statements = Vec::new();
+        push_mysql_key_predicate_batches(
+            &mut statements,
+            "UPDATE `app`.`people` SET `status` = 'x' WHERE ",
+            vec![
+                mysql_plain_predicate("`id` = 1", "`id`", "1"),
+                mysql_plain_predicate("`code` = 'a'", "`code`", "'a'"),
+                mysql_plain_predicate("`id` = 2", "`id`", "2"),
+            ],
+        );
+
+        assert_eq!(
+            statements,
+            vec!["UPDATE `app`.`people` SET `status` = 'x' WHERE (`id` = 1) OR (`code` = 'a') OR (`id` = 2);"]
+        );
+    }
+
+    #[test]
+    fn keeps_non_mysql_batched_updates_in_or_form() {
+        for (database_type, quote) in [(DatabaseType::Postgres, '"'), (DatabaseType::StarRocks, '`')] {
+            let mut options = mysql_people_save_options(2);
+            options.database_type = Some(database_type);
+            options.table_meta.primary_keys = vec!["id".to_string()];
+            options.dirty_rows = vec![(0, vec![(1, Value::Null)]), (1, vec![(1, Value::Null)])];
+
+            let result = prepare_data_grid_save_for_driver_profile(options, None);
+
+            assert_eq!(result.validation_error, None);
+            assert_eq!(
+                result.statements,
+                vec![
+                    format!("UPDATE {quote}app{quote}.{quote}people{quote} SET {quote}status{quote} = NULL WHERE {quote}id{quote} = 1;"),
+                    format!("UPDATE {quote}app{quote}.{quote}people{quote} SET {quote}status{quote} = NULL WHERE {quote}id{quote} = 2;"),
+                ],
+                "{database_type:?} must keep one statement per row"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_mysql_batching_for_starrocks_driver_profiles() {
+        // The batch gate stays `DatabaseType::Mysql`; a MySQL connection whose
+        // driver profile is "starrocks" must keep the same batching (and the same
+        // IN form the DELETE path already emits there).
+        let mut options = mysql_people_save_options(2);
+        options.dirty_rows = vec![(0, vec![(1, Value::Null)]), (1, vec![(1, Value::Null)])];
+
+        let result = prepare_data_grid_save_for_driver_profile(options, Some("starrocks"));
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["UPDATE `app`.`people` SET `status` = NULL WHERE `id` IN (1, 2);"]);
     }
 
     #[test]
@@ -9145,6 +11082,73 @@ mod tests {
     }
 
     #[test]
+    fn uuid_column_literals_decode_prefixed_hex_values() {
+        let uuid_col = column("id", "uuid", false, None);
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("0x30316130353762662d326262642d373061362d623363332d353665623430396130663935"),
+                Some(DatabaseType::Mysql),
+                Some(&uuid_col)
+            ),
+            "'01a057bf-2bbd-70a6-b3c3-56eb409a0f95'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("0x01a057bf2bbd70a6b3c356eb409a0f95"),
+                Some(DatabaseType::Mysql),
+                Some(&uuid_col)
+            ),
+            "'01a057bf-2bbd-70a6-b3c3-56eb409a0f95'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("01a057bf-2bbd-70a6-b3c3-56eb409a0f95"),
+                Some(DatabaseType::Mysql),
+                Some(&uuid_col)
+            ),
+            "'01a057bf-2bbd-70a6-b3c3-56eb409a0f95'"
+        );
+    }
+
+    #[test]
+    fn uuid_column_literals_handle_malformed_unicode_safely() {
+        let uuid_col = column("id", "uuid", false, None);
+
+        // 3-byte UTF-8 char '你' + 69 ASCII chars = 72 bytes. Slicing at byte index 2 must not panic.
+        let malformed_72_bytes = format!("0x你{}", "0".repeat(69));
+        assert_eq!(malformed_72_bytes.len(), 2 + 3 + 69); // 74 bytes with prefix '0x'
+        assert_eq!(format_hex_uuid_literal(&malformed_72_bytes), None);
+        // format_grid_sql_literal falls back safely to quoted string without panicking
+        assert_eq!(
+            format_grid_sql_literal(&json!(malformed_72_bytes), Some(DatabaseType::Mysql), Some(&uuid_col)),
+            format!("'{}'", malformed_72_bytes.replace('\\', "\\\\").replace('\'', "\\'"))
+        );
+
+        // 10 3-byte UTF-8 chars (30 bytes) + 2 ASCII chars = 32 bytes
+        let malformed_32_bytes = format!("0x{}00", "你".repeat(10));
+        assert_eq!(format_hex_uuid_literal(&malformed_32_bytes), None);
+
+        // Non-hex ASCII chars
+        let non_hex_72 = format!("0x{}", "g".repeat(72));
+        assert_eq!(format_hex_uuid_literal(&non_hex_72), None);
+        let non_hex_32 = format!("0x{}", "z".repeat(32));
+        assert_eq!(format_hex_uuid_literal(&non_hex_32), None);
+    }
+
+    #[test]
+    fn binary_columns_preserve_canonical_hex_for_ascii_uuid() {
+        let binary_col = column("payload", "binary(36)", false, None);
+        let varbinary_col = column("payload", "varbinary(36)", false, None);
+        let hex = "0x30316130353762662d326262642d373061362d623363332d353665623430396130663935";
+
+        // MySQL binary columns emit the canonical 0x<hex> literal unchanged;
+        // the important part of the fix is that content-shape UUID guessing
+        // no longer turns this into a quoted '01a057bf-...' UUID string.
+        assert_eq!(format_grid_sql_literal(&json!(hex), Some(DatabaseType::Mysql), Some(&binary_col)), hex);
+        assert_eq!(format_grid_sql_literal(&json!(hex), Some(DatabaseType::Mysql), Some(&varbinary_col)), hex);
+    }
+
+    #[test]
     fn postgres_bytea_literals_decode_prefixed_hex_values() {
         let bytea = column("payload", "bytea", true, None);
         let text = column("label", "text", true, None);
@@ -9159,6 +11163,25 @@ mod tests {
         );
         assert_eq!(format_grid_sql_literal(&json!("0xabc"), Some(DatabaseType::Postgres), Some(&bytea)), "'0xabc'");
         assert_eq!(format_grid_sql_literal(&json!("0x00ab"), Some(DatabaseType::Postgres), Some(&text)), "'0x00ab'");
+    }
+
+    #[test]
+    fn postgres_bytea_literal_gate_accepts_schema_qualified_and_rejects_arrays() {
+        let qualified = column("payload", "pg_catalog.bytea", true, None);
+        let array = column("payload", "bytea[]", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(&json!("0x00aBff"), Some(DatabaseType::Postgres), Some(&qualified)),
+            "decode('00aBff', 'hex')"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("0x00aBff"), Some(DatabaseType::Postgres), Some(&array)),
+            "'0x00aBff'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("0x00aBff"), Some(DatabaseType::Gaussdb), Some(&qualified)),
+            "'0x00aBff'"
+        );
     }
 
     #[test]
@@ -9246,6 +11269,82 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_binary_literals_preserve_prefixed_hex_values() {
+        for data_type in ["timestamp", "ROWVERSION", "binary(8)", "VARBINARY(MAX)"] {
+            let binary = column("version", data_type, true, None);
+            for (value, expected) in [
+                ("0x0000000000639f1c", "0x0000000000639f1c"),
+                ("0x00aBff", "0x00aBff"),
+                ("0X00aBff", "0x00aBff"),
+                ("0x", "0x"),
+            ] {
+                assert_eq!(
+                    format_grid_sql_literal(&json!(value), Some(DatabaseType::SqlServer), Some(&binary)),
+                    expected,
+                    "{data_type}: {value}"
+                );
+            }
+            assert_eq!(format_grid_sql_literal(&Value::Null, Some(DatabaseType::SqlServer), Some(&binary)), "NULL");
+        }
+    }
+
+    #[test]
+    fn sqlserver_binary_literals_keep_invalid_hex_and_text_columns_quoted() {
+        let binary = column("version", "timestamp", true, None);
+        for (value, expected) in [
+            ("0x0g", "N'0x0g'"),
+            ("0x123", "N'0x123'"),
+            ("0x你", "N'0x你'"),
+            ("0x00; DELETE FROM users", "N'0x00; DELETE FROM users'"),
+            ("0x00' OR 1=1--", "N'0x00'' OR 1=1--'"),
+        ] {
+            assert_eq!(format_grid_sql_literal(&json!(value), Some(DatabaseType::SqlServer), Some(&binary)), expected);
+        }
+        for data_type in ["nvarchar(50)", "datetime2", "timestamped", "notbinary"] {
+            let text = column("value", data_type, true, None);
+            assert_eq!(
+                format_grid_sql_literal(&json!("0x00ab"), Some(DatabaseType::SqlServer), Some(&text)),
+                "N'0x00ab'"
+            );
+        }
+        assert_eq!(format_grid_sql_literal(&json!("0x00ab"), Some(DatabaseType::SqlServer), None), "N'0x00ab'");
+        for database_type in [DatabaseType::Postgres, DatabaseType::Mysql] {
+            assert_eq!(format_grid_sql_literal(&json!("0x00ab"), Some(database_type), Some(&binary)), "'0x00ab'");
+        }
+    }
+
+    #[test]
+    fn sqlserver_keyless_save_uses_binary_rowversion_predicates() {
+        // Table metadata calls this timestamp/rowversion; TDS result metadata
+        // may instead report binary/varbinary. Both must preserve the bytes.
+        for data_type in ["timestamp", "rowversion", "binary(8)", "varbinary(8)"] {
+            let mut options = mysql_people_save_options(2);
+            options.database_type = Some(DatabaseType::SqlServer);
+            options.table_meta.schema = Some("dbo".into());
+            options.table_meta.primary_keys.clear();
+            options.table_meta.columns.as_mut().unwrap().push(column("version", data_type, false, None));
+            options.columns.push("version".into());
+            options.rows[0].push(json!("0x0000000000639f1c"));
+            options.rows[1].push(json!("0x0000000000639f1d"));
+            options.dirty_rows = vec![(0, vec![(1, json!("blocked"))])];
+            options.deleted_rows = vec![1];
+
+            let result = prepare_data_grid_save(options);
+            assert_eq!(result.validation_error, None);
+            assert_eq!(
+                result.statements,
+                vec![
+                    "UPDATE [dbo].[people] SET [status] = N'blocked' WHERE [id] = 1 AND [status] = N'active' AND [version] = 0x0000000000639f1c;",
+                    "DELETE FROM [dbo].[people] WHERE [id] = 2 AND [status] = N'active' AND [version] = 0x0000000000639f1d;",
+                ],
+                "{data_type}"
+            );
+            assert_eq!(result.keyless_guards.len(), 2);
+            assert_guards_cover_statement_predicates(&result);
+        }
+    }
+
+    #[test]
     fn sqlserver_literals_do_not_double_escape_backslashes() {
         assert_eq!(format_grid_sql_literal(&json!(r".\SQL2016"), Some(DatabaseType::SqlServer), None), r"N'.\SQL2016'");
         assert_eq!(
@@ -9264,6 +11363,26 @@ mod tests {
             format_grid_sql_literal(&json!("line1\\\r\nline2"), Some(DatabaseType::SqlServer), None),
             r"N'line1\' + NCHAR(13) + NCHAR(10) + N'line2'"
         );
+    }
+
+    #[test]
+    fn sqlserver_long_multiline_literals_anchor_nvarchar_max() {
+        // A `+` chain of non-`max` operands is typed nvarchar(4000) by SQL Server, which
+        // silently truncates a longer result, so a long value must be anchored on
+        // nvarchar(max) or the copied statement loses everything past 4000 characters
+        // (issue #12202).
+        let long_value = format!("{}\n{}", "a".repeat(3000), "b".repeat(3000));
+        let literal = format_grid_sql_literal(&json!(long_value), Some(DatabaseType::SqlServer), None);
+        assert!(literal.starts_with("CAST(N'' AS NVARCHAR(MAX)) + N'"), "{literal}");
+        assert!(literal.contains(" + NCHAR(10) + N'"), "{literal}");
+
+        // A value that fits in nvarchar(4000) keeps the plain chain.
+        let short_value = format_grid_sql_literal(&json!("line1\nline2"), Some(DatabaseType::SqlServer), None);
+        assert_eq!(short_value, r"N'line1' + NCHAR(10) + N'line2'");
+
+        // A single long literal is already nvarchar(max) by SQL Server's own rules.
+        let single_line = format_grid_sql_literal(&json!("a".repeat(5000)), Some(DatabaseType::SqlServer), None);
+        assert_eq!(single_line, format!("N'{}'", "a".repeat(5000)));
     }
 
     #[test]
@@ -10188,7 +12307,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!(2), json!("new")]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
@@ -10907,7 +13026,7 @@ mod tests {
             column_types: None,
             source_columns: None,
             rows: vec![vec![json!("before"), json!("0x00ff")]],
-            exclude_primary_keys: false,
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,

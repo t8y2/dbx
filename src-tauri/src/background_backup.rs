@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 pub struct BackgroundBackup {
     pub service: BackupService,
     data_dir: PathBuf,
+    app_identifier: String,
     stop: CancellationToken,
     worker: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     lease: PathBuf,
@@ -29,7 +30,7 @@ pub struct BackgroundStatus {
 }
 
 impl BackgroundBackup {
-    pub fn new(state: Arc<AppState>, data_dir: PathBuf) -> Result<Self, String> {
+    pub fn new(state: Arc<AppState>, data_dir: PathBuf, app_identifier: String) -> Result<Self, String> {
         let service = BackupService::new(state, &data_dir, None);
         let stop = CancellationToken::new();
         let directory = data_dir.join("database-backups");
@@ -73,7 +74,7 @@ impl BackgroundBackup {
                 }
             }
         });
-        Ok(Self { service, data_dir, stop, worker: tokio::sync::Mutex::new(Some(worker)), lease })
+        Ok(Self { service, data_dir, app_identifier, stop, worker: tokio::sync::Mutex::new(Some(worker)), lease })
     }
 
     pub async fn shutdown(&self) {
@@ -85,7 +86,7 @@ impl BackgroundBackup {
     }
 
     pub fn resume(&self) -> Result<(), String> {
-        resume_registration(&self.data_dir, register)
+        resume_registration(&self.data_dir, |data_dir| register(data_dir, &self.app_identifier))
     }
 }
 
@@ -110,12 +111,13 @@ pub async fn database_backup_background(
     enabled: Option<bool>,
 ) -> Result<BackgroundStatus, String> {
     let data_dir = state.data_dir.clone();
+    let app_identifier = state.app_identifier.clone();
     tokio::task::spawn_blocking(move || {
         if let Some(enabled) = enabled {
             if enabled {
                 std::fs::create_dir_all(data_dir.join("database-backups")).map_err(|e| e.to_string())?;
                 std::fs::write(marker(&data_dir), b"1").map_err(|e| e.to_string())?;
-                if let Err(error) = register(&data_dir) {
+                if let Err(error) = register(&data_dir, &app_identifier) {
                     let _ = std::fs::remove_file(marker(&data_dir));
                     return Err(error);
                 }
@@ -160,7 +162,7 @@ fn run(command: &mut Command) -> Result<(), String> {
     }
 }
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 fn xml(value: &str) -> String {
     value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
 }
@@ -229,7 +231,7 @@ fn current_user_sid() -> Result<String, String> {
 }
 
 #[cfg(windows)]
-fn register(data_dir: &Path) -> Result<(), String> {
+fn register(data_dir: &Path, _app_identifier: &str) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let user_id = current_user_sid()?;
     let task = name(data_dir);
@@ -269,16 +271,23 @@ fn launch_agent(data_dir: &Path) -> Result<(String, PathBuf, String), String> {
     Ok((label, path, format!("gui/{uid}")))
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn launch_agent_plist(label: &str, executable: &Path, data_dir: &Path, app_identifier: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>{}</string><key>AssociatedBundleIdentifiers</key><array><string>{}</string></array><key>ProgramArguments</key><array><string>{}</string><string>--managed-backup-worker</string><string>--data-dir</string><string>{}</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>30</integer></dict></plist>"#,
+        xml(label),
+        xml(app_identifier),
+        xml(&executable.to_string_lossy()),
+        xml(&data_dir.to_string_lossy())
+    )
+}
+
 #[cfg(target_os = "macos")]
-fn register(data_dir: &Path) -> Result<(), String> {
+fn register(data_dir: &Path, app_identifier: &str) -> Result<(), String> {
     let (label, path, domain) = launch_agent(data_dir)?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let content = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>{}</string><key>ProgramArguments</key><array><string>{}</string><string>--managed-backup-worker</string><string>--data-dir</string><string>{}</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>30</integer></dict></plist>"#,
-        xml(&label),
-        xml(&exe.to_string_lossy()),
-        xml(&data_dir.to_string_lossy())
-    );
+    // Associate this legacy LaunchAgent with the app bundle that registered it.
+    let content = launch_agent_plist(&label, &exe, data_dir, app_identifier);
     std::fs::create_dir_all(path.parent().ok_or("Invalid LaunchAgent path")?).map_err(|e| e.to_string())?;
     std::fs::write(&path, content).map_err(|e| e.to_string())?;
     if Command::new("launchctl")
@@ -286,6 +295,7 @@ fn register(data_dir: &Path) -> Result<(), String> {
         .output()
         .is_ok_and(|o| o.status.success())
     {
+        // Keep an active backup worker running; the updated plist is picked up on the next load.
         return Ok(());
     }
     run(Command::new("launchctl").args(["bootstrap", &domain]).arg(&path))
@@ -318,7 +328,7 @@ fn service_executable(env: &tauri::Env) -> Result<PathBuf, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn register(data_dir: &Path) -> Result<(), String> {
+fn register(data_dir: &Path, _app_identifier: &str) -> Result<(), String> {
     let path = unit_path(data_dir)?;
     let exe = service_executable(&tauri::Env::default())?;
     if data_dir.to_string_lossy().chars().chain(exe.to_string_lossy().chars()).any(char::is_control) {
@@ -427,6 +437,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn launch_agent_is_associated_with_its_registering_app_bundle() {
+        let plist = launch_agent_plist(
+            "app.dbx.backup-test",
+            Path::new("/Applications/DBX Dev.app/Contents/MacOS/dbx"),
+            Path::new("/tmp/dbx&test"),
+            "com.dbx.app.dev.issue-11332",
+        );
+
+        assert!(plist.contains(
+            "<key>AssociatedBundleIdentifiers</key><array><string>com.dbx.app.dev.issue-11332</string></array>"
+        ));
+        assert!(plist.contains("/Applications/DBX Dev.app/Contents/MacOS/dbx"));
+        assert!(plist.contains("/tmp/dbx&amp;test"));
+    }
+
+    #[test]
     fn native_service_uses_the_current_binary() {
         let mut env = tauri::Env::default();
         env.args_os.clear();
@@ -501,6 +527,7 @@ mod tests {
         let backup = BackgroundBackup {
             service: BackupService::new(state, directory.path(), None),
             data_dir: directory.path().to_path_buf(),
+            app_identifier: "com.dbx.app".to_string(),
             stop: stop.clone(),
             worker: tokio::sync::Mutex::new(Some(worker)),
             lease: lease.clone(),

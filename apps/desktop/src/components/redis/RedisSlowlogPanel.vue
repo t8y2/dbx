@@ -59,7 +59,7 @@ const showClientColumns = computed(() => {
 onMounted(async () => {
   if (connectionMode.value === "cluster") {
     try {
-      await connectionStore.ensureConnected(props.connectionId);
+      await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
       nodes.value = await api.redisClusterMasterNodes(props.connectionId);
     } catch (e) {
       console.warn("[DBX] ensureConnected failed for", props.connectionId, e);

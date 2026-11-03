@@ -4,6 +4,7 @@ export interface MigrationPreflight {
   migrationId: string;
   state: MigrationState;
   needsMigration: boolean;
+  keyRecoveryRequired: boolean;
   keyProviderAvailable: boolean;
   keyStatus?: MigrationKeyStatus;
   keyCreationAllowed?: boolean;

@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { acceptSelectedCompletionWithRetry, acceptSelectedOrFirstCompletion } from "@/lib/editor/queryEditorCompletionAcceptance";
 import { createQueryEditorEscapeHandler } from "@/lib/editor/queryEditorEscape";
 import { DEFAULT_SHORTCUT_SETTINGS, normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
+import { excludedCompletionLabelSet, filterExcludedCompletions } from "@/lib/editor/excludedCompletions";
 
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 
@@ -68,6 +69,7 @@ function createHarness(options: {
   databaseType?: string;
   completionStatus: (state: MockState) => "active" | "pending" | null;
   selectedCompletion?: (state: MockState) => { type?: string } | null;
+  currentCompletions?: (state: MockState) => { type?: string }[];
   acceptCompletion?: (view: MockView) => boolean;
   selectedCompletionIndex?: (state: MockState) => number | null;
   selectFirstCompletion?: (view: MockView) => boolean;
@@ -116,6 +118,7 @@ function createHarness(options: {
   const factory = new Function(
     "codeMirrorCompletionStatus",
     "codeMirrorSelectedCompletion",
+    "codeMirrorCurrentCompletions",
     "isBatchColumnSelectionCompletionActive",
     "codeMirrorAcceptCompletion",
     "codeMirrorSelectedCompletionIndex",
@@ -138,6 +141,7 @@ function createHarness(options: {
   return factory(
     options.completionStatus,
     options.selectedCompletion ?? (() => ({ type: "column" })),
+    options.currentCompletions ?? (() => undefined),
     (status: "active" | "pending" | null) => status === "active",
     options.acceptCompletion ?? (() => false),
     options.selectedCompletionIndex ?? (() => 0),
@@ -285,7 +289,9 @@ describe("QueryEditor completion Tab keymap", () => {
     const javascript = ts.transpileModule(extractFunction("buildCompletionResult"), {
       compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
     }).outputText;
-    const buildCompletionResult = new Function("completionOptionForItem", `${javascript}\nreturn buildCompletionResult;`)(() => ({ label: "created_at" })) as (items: Array<{ label: string }>, from: number) => { filter?: boolean; options: Array<{ label: string }>; from: number } | null;
+    const buildCompletionResult = new Function("completionOptionForItem", "filterExcludedCompletions", "excludedCompletionLabelSet", "settingsStore", `${javascript}\nreturn buildCompletionResult;`)(() => ({ label: "created_at" }), filterExcludedCompletions, excludedCompletionLabelSet, {
+      editorSettings: { excludedCompletionItems: [] },
+    }) as (items: Array<{ label: string }>, from: number) => { filter?: boolean; options: Array<{ label: string }>; from: number } | null;
 
     const result = buildCompletionResult([{ label: "created_at" }], 0);
 
@@ -294,13 +300,16 @@ describe("QueryEditor completion Tab keymap", () => {
   });
 
   it("keeps ASCII single-character filtering while allowing Han pinyin matches", () => {
-    const source = [extractFunction("isBatchColumnSelectionAction"), extractFunction("completionItemsForBypassedFilter"), extractFunction("shouldBypassCompletionFilter"), extractFunction("buildCompletionResult")].join("\n");
+    const source = [extractFunction("isBatchColumnSelectionAction"), extractFunction("itemHasHanText"), extractFunction("completionItemsForBypassedFilter"), extractFunction("shouldBypassCompletionFilter"), extractFunction("buildCompletionResult")].join("\n");
     const javascript = ts.transpileModule(source, {
       compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
     }).outputText;
-    const buildCompletionResult = new Function("completionOptionForItem", "completionMatchRanges", `${javascript}\nreturn buildCompletionResult;`)(
+    const buildCompletionResult = new Function("completionOptionForItem", "completionMatchRanges", "filterExcludedCompletions", "excludedCompletionLabelSet", "settingsStore", `${javascript}\nreturn buildCompletionResult;`)(
       (item: { label: string }) => item,
       () => [],
+      filterExcludedCompletions,
+      excludedCompletionLabelSet,
+      { editorSettings: { excludedCompletionItems: [] } },
     ) as (items: Array<{ label: string }>, from: number, validFor?: RegExp, prefix?: string) => { filter?: boolean; options: Array<{ label: string }> } | null;
 
     const result = buildCompletionResult([{ label: "amount" }, { label: "memo" }, { label: "明细" }], 0, undefined, "m");
@@ -310,7 +319,7 @@ describe("QueryEditor completion Tab keymap", () => {
   });
 
   it("bypasses CodeMirror filtering for Han substring matches", () => {
-    const javascript = ts.transpileModule(extractFunction("shouldBypassCompletionFilter"), {
+    const javascript = ts.transpileModule([extractFunction("itemHasHanText"), extractFunction("shouldBypassCompletionFilter")].join("\n"), {
       compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
     }).outputText;
     const shouldBypassCompletionFilter = new Function(`${javascript}\nreturn shouldBypassCompletionFilter;`)() as (prefix: string, items: Array<{ label: string }>) => boolean;
@@ -559,7 +568,7 @@ describe("QueryEditor completion Tab keymap", () => {
   });
 
   it("triggers completion on Alt+/ through the manual shortcut and skips while composing", () => {
-    const source = [extractDeclaration(/const COMPLETION_DEBOUNCE_DELAY_MS = \d+;/, "completion debounce delay"), "let imeCompositionActive = false;", extractFunction("isEditorComposing"), extractFunction("triggerSqlCompletion")].join("\n");
+    const source = [extractDeclaration(/const COMPLETION_DEBOUNCE_DELAY_MS = \d+;/, "completion debounce delay"), "let imeCompositionActive = false;", "let imeCompositionRecovered = false;", extractFunction("isEditorComposing"), extractFunction("triggerSqlCompletion")].join("\n");
     const javascript = ts.transpileModule(source, {
       compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
     }).outputText;
@@ -650,6 +659,49 @@ describe("QueryEditor SQL Server completion Space keymap", () => {
     });
 
     expect(harness.acceptSqlServerCompletionOnSpace(createView())).toBe(false);
+    expect(acceptCompletion).not.toHaveBeenCalled();
+  });
+
+  it("accepts the first unselected keyword completion on Space", () => {
+    const acceptCompletion = vi.fn(() => true);
+    const selectFirstCompletion = vi.fn(() => true);
+    const harness = createHarness({
+      databaseType: "sqlserver",
+      completionStatus: () => "active",
+      selectedCompletion: () => null,
+      currentCompletions: () => [{ type: "keyword" }],
+      selectedCompletionIndex: () => null,
+      selectFirstCompletion,
+      acceptCompletion,
+    });
+    const view = createView("select");
+
+    expect(harness.acceptSqlServerCompletionOnSpace(view)).toBe(true);
+    expect(selectFirstCompletion).toHaveBeenCalledWith(view);
+    expect(acceptCompletion).toHaveBeenCalledWith(view);
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 6, insert: " " },
+      selection: { anchor: 7 },
+      scrollIntoView: true,
+    });
+  });
+
+  it("does not accept on Space when the first unselected completion is not a keyword/table/column", () => {
+    const acceptCompletion = vi.fn(() => true);
+    const selectFirstCompletion = vi.fn(() => true);
+    const harness = createHarness({
+      databaseType: "sqlserver",
+      completionStatus: () => "active",
+      selectedCompletion: () => null,
+      currentCompletions: () => [{ type: "function" }],
+      selectedCompletionIndex: () => null,
+      selectFirstCompletion,
+      acceptCompletion,
+    });
+    const view = createView("count");
+
+    expect(harness.acceptSqlServerCompletionOnSpace(view)).toBe(false);
+    expect(selectFirstCompletion).not.toHaveBeenCalled();
     expect(acceptCompletion).not.toHaveBeenCalled();
   });
 });

@@ -41,9 +41,30 @@ pub enum ConnectionLivenessMessage {
     Resync,
 }
 
+/// A message on the connection-idle-closed channel (#12112).
+///
+/// Published when a connection's pools were closed because the connection stayed idle
+/// longer than its own `idle_disconnect_secs`. One shape for both shells and both
+/// transports, so the frontend parses the same payload everywhere: the desktop shell
+/// forwards it as the `dbx:connection-idle-closed` event, the web shell streams it over
+/// SSE. `connectionId` is camelCase in JSON to match the frontend type.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionIdleClosedEvent {
+    pub connection_id: String,
+    /// 关闭发生的墙钟时间（Unix 毫秒）。
+    ///
+    /// 前端用它识别「迟到事件」：SSE / 事件通道都有缓冲，事件可能在本连接已经重新建立
+    /// 之后才到达；此时这次断开描述的已经是上一个会话，前端应忽略，否则会连带关掉刚建好
+    /// 的新会话。用墙钟而非 `Instant` 是因为要跨进程（web 端是浏览器与服务端）比较。
+    pub closed_at_ms: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseConnectionInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,6 +143,15 @@ pub struct RedisKeyGrouping {
     pub rules: Vec<RedisKeyGroupRule>,
 }
 
+/// Sidebar marker presentation only; never changes production safety assessment.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionBadgeScope {
+    Connection,
+    Database,
+    Table,
+}
+
 #[derive(Clone, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     pub id: String,
@@ -155,6 +185,13 @@ pub struct ConnectionConfig {
     /// Frontend navigation preference: exhaust the paginated Tables group when opened.
     #[serde(default, skip_serializing_if = "is_false")]
     pub sidebar_auto_load_all_tables: bool,
+    /// Sidebar preference. Absent means shown; only an explicit opt-out is stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_database_links: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_native_jobs: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_user_admin: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     /// SQL statements executed right after the connection is established
@@ -175,6 +212,14 @@ pub struct ConnectionConfig {
     pub query_timeout_secs: u64,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    #[serde(default = "default_manual_transaction_timeout_secs")]
+    pub manual_transaction_timeout_secs: u64,
+    /// 连接空闲自动断开阈值（秒）：该连接连续多少秒没有任何查询活动，就关闭其名下
+    /// 全部连接池。0 表示不启用（opt-in），旧配置缺字段时反序列化即为 0，行为不变。
+    /// 注意：与上面的 `idle_timeout_secs`（连接池内空闲物理连接的回收）语义不同，
+    /// 两者并存但互不影响。
+    #[serde(default = "default_idle_disconnect_secs")]
+    pub idle_disconnect_secs: u64,
     #[serde(default = "default_keepalive_interval_secs")]
     pub keepalive_interval_secs: u64,
     #[serde(default)]
@@ -281,6 +326,8 @@ pub struct ConnectionConfig {
     /// Database-level production markers for multi-database connections.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub production_databases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_badge_scope: Option<ProductionBadgeScope>,
     /// Metadata captured from the latest successful connection test for this saved config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_info: Option<DatabaseConnectionInfo>,
@@ -450,6 +497,12 @@ pub struct SshTunnelConfig {
     pub connect_timeout_secs: u64,
     #[serde(default)]
     pub expose_lan: bool,
+    /// Fixed local port for the connection's primary tunnel when this is the
+    /// last transport layer. Unset means a random free port. A shared tunnel
+    /// profile (`profile_id`) supplies its own configuration, so a fixed port
+    /// is not applied to a layer that references one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_port: Option<u16>,
     #[serde(default)]
     pub use_ssh_agent: bool,
     /// Custom SSH agent socket path (e.g. `~/.ssh/agent.sock`).
@@ -457,6 +510,10 @@ pub struct SshTunnelConfig {
     /// the `SSH_AUTH_SOCK` environment variable.
     #[serde(default)]
     pub ssh_agent_sock_path: String,
+    /// SHA-256 fingerprint (`SHA256:...`) of the one agent identity to use.
+    /// Empty means every identity the agent reports is tried, in order.
+    #[serde(default)]
+    pub ssh_agent_key_fingerprint: String,
     /// Login method: `"password"`, `"key"`, `"key+password"`, `"agent"`, or `"none"`.
     /// Empty string means an older saved connection predating this field —
     /// the backend falls back to probing key > password > agent based on
@@ -529,11 +586,21 @@ pub struct HttpTunnelConfig {
     pub url: String,
     #[serde(default)]
     pub token: String,
+    #[serde(default)]
+    pub protocol: HttpTunnelProtocol,
     #[serde(default = "default_http_tunnel_connect_timeout_secs")]
     pub connect_timeout_secs: u64,
     /// See [`SshTunnelConfig::profile_id`].
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub profile_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpTunnelProtocol {
+    #[default]
+    DbxTcp,
+    NavicatMysql,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -579,6 +646,22 @@ pub fn default_idle_timeout_secs() -> u64 {
     60
 }
 
+/// Seconds a manual transaction may sit without executing a statement before DBX
+/// rolls it back.
+pub const DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS: u64 = 300;
+pub const MIN_MANUAL_TRANSACTION_TIMEOUT_SECS: u64 = 30;
+pub const MAX_MANUAL_TRANSACTION_TIMEOUT_SECS: u64 = 86_400;
+
+pub fn default_manual_transaction_timeout_secs() -> u64 {
+    DEFAULT_MANUAL_TRANSACTION_TIMEOUT_SECS
+}
+
+/// 「连接空闲自动断开」阈值的默认值：0 表示默认不启用（opt-in）。
+/// 独立于 `default_idle_timeout_secs`，避免老配置被赋予超时关闭语义。
+pub fn default_idle_disconnect_secs() -> u64 {
+    0
+}
+
 pub fn default_keepalive_interval_secs() -> u64 {
     30
 }
@@ -609,6 +692,53 @@ pub enum ProxyType {
 }
 
 include!(concat!(env!("OUT_DIR"), "/database_type.rs"));
+
+/// A dialect fact that is safe to retain on a connection response after its URL is redacted.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum JdbcDialectHint {
+    OceanbaseOracle,
+    Oracle,
+}
+
+/// Connection data returned to a client, with response-only metadata flattened into the JSON.
+/// This type is never used for persistence, runtime configuration, or request deserialization.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ConnectionResponse {
+    #[serde(flatten)]
+    pub config: ConnectionConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jdbc_dialect: Option<JdbcDialectHint>,
+}
+
+impl ConnectionResponse {
+    pub fn from_config(config: ConnectionConfig) -> Self {
+        let jdbc_dialect = jdbc_dialect_hint(&config);
+        Self { config, jdbc_dialect }
+    }
+
+    pub fn with_jdbc_dialect(config: ConnectionConfig, jdbc_dialect: Option<JdbcDialectHint>) -> Self {
+        Self { config, jdbc_dialect }
+    }
+}
+
+/// Derive only the approved non-sensitive mode identity from an explicit JDBC URL.
+pub fn jdbc_dialect_hint(config: &ConnectionConfig) -> Option<JdbcDialectHint> {
+    if config.db_type != DatabaseType::Jdbc {
+        return None;
+    }
+    let url = config.connection_string.as_deref()?.trim();
+    if url
+        .get(.."jdbc:oceanbase:oracle://".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("jdbc:oceanbase:oracle://"))
+    {
+        return Some(JdbcDialectHint::OceanbaseOracle);
+    }
+    if url.get(.."jdbc:oracle:".len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case("jdbc:oracle:")) {
+        return Some(JdbcDialectHint::Oracle);
+    }
+    None
+}
 
 #[derive(Deserialize)]
 struct ConnectionConfigData {
@@ -643,6 +773,12 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub sidebar_auto_load_all_tables: bool,
     #[serde(default)]
+    pub show_database_links: Option<bool>,
+    #[serde(default)]
+    pub show_native_jobs: Option<bool>,
+    #[serde(default)]
+    pub show_user_admin: Option<bool>,
+    #[serde(default)]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     #[serde(default)]
     pub init_script: Option<String>,
@@ -658,6 +794,10 @@ struct ConnectionConfigData {
     pub query_timeout_secs: u64,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    #[serde(default = "default_manual_transaction_timeout_secs")]
+    pub manual_transaction_timeout_secs: u64,
+    #[serde(default = "default_idle_disconnect_secs")]
+    pub idle_disconnect_secs: u64,
     #[serde(default = "default_keepalive_interval_secs")]
     pub keepalive_interval_secs: u64,
     #[serde(default)]
@@ -734,6 +874,8 @@ struct ConnectionConfigData {
     pub is_production: bool,
     #[serde(default)]
     pub production_databases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub production_badge_scope: Option<ProductionBadgeScope>,
     #[serde(default)]
     pub database_info: Option<DatabaseConnectionInfo>,
 }
@@ -760,6 +902,9 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             visible_schemas: data.visible_schemas,
             show_system_schemas: data.show_system_schemas,
             sidebar_auto_load_all_tables: data.sidebar_auto_load_all_tables,
+            show_database_links: data.show_database_links,
+            show_native_jobs: data.show_native_jobs,
+            show_user_admin: data.show_user_admin,
             attached_databases: data.attached_databases,
             init_script: data.init_script,
             color: data.color,
@@ -768,6 +913,8 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             connect_timeout_secs: data.connect_timeout_secs,
             query_timeout_secs: data.query_timeout_secs,
             idle_timeout_secs: data.idle_timeout_secs,
+            manual_transaction_timeout_secs: data.manual_transaction_timeout_secs,
+            idle_disconnect_secs: data.idle_disconnect_secs,
             keepalive_interval_secs: data.keepalive_interval_secs,
             ssl: data.ssl,
             ca_cert_path: data.ca_cert_path,
@@ -806,6 +953,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             read_only: data.read_only,
             is_production: data.is_production,
             production_databases: data.production_databases,
+            production_badge_scope: data.production_badge_scope,
             database_info: data.database_info,
         }
     }
@@ -818,6 +966,7 @@ impl<'de> Deserialize<'de> for ConnectionConfig {
     {
         let mut value = Value::deserialize(deserializer)?;
         migrate_legacy_transport_layers(&mut value);
+        migrate_legacy_gbase8s_profile(&mut value);
         let data = ConnectionConfigData::deserialize(value).map_err(serde::de::Error::custom)?;
         if let Some(grouping) = &data.redis_key_grouping {
             let mut ids = std::collections::HashSet::new();
@@ -837,6 +986,20 @@ impl<'de> Deserialize<'de> for ConnectionConfig {
             }
         }
         Ok(data.into())
+    }
+}
+
+/// GBase 8s used to be the `gbase8s` driver profile of the MySQL-based `gbase` type. It is its own
+/// `gbase8s` type now (Informix dialect), so saved and in-flight configs are rewritten on load.
+fn migrate_legacy_gbase8s_profile(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let is_gbase = object.get("db_type").and_then(Value::as_str) == Some("gbase");
+    let is_8s_profile =
+        object.get("driver_profile").and_then(Value::as_str).is_some_and(|p| p.eq_ignore_ascii_case("gbase8s"));
+    if is_gbase && is_8s_profile {
+        object.insert("db_type".to_string(), Value::String("gbase8s".to_string()));
     }
 }
 
@@ -976,6 +1139,17 @@ impl ConnectionConfig {
         }
     }
 
+    /// Idle window of a manual transaction. `0` (legacy or unset payloads) falls
+    /// back to the default instead of rolling back immediately.
+    pub fn effective_manual_transaction_timeout_secs(&self) -> u64 {
+        if self.manual_transaction_timeout_secs == 0 {
+            default_manual_transaction_timeout_secs()
+        } else {
+            self.manual_transaction_timeout_secs
+                .clamp(MIN_MANUAL_TRANSACTION_TIMEOUT_SECS, MAX_MANUAL_TRANSACTION_TIMEOUT_SECS)
+        }
+    }
+
     pub fn effective_query_timeout_secs(&self) -> u64 {
         if self.query_timeout_secs == 0 {
             // An explicit 0 is the UI's "no limit"; a floor must not impose one.
@@ -1006,6 +1180,9 @@ impl ConnectionConfig {
             DatabaseType::Kingbase | DatabaseType::Vastbase => Some("postgres"),
             DatabaseType::Highgo => Some("highgo"),
             DatabaseType::Uxdb => Some("uxdb"),
+            // GBase 8c keeps the PostgreSQL-shaped `postgres` maintenance database
+            // (measured on GBase8cV6 1.0.0B20), so an empty database field resolves to it.
+            DatabaseType::Gbase8c => Some("postgres"),
             DatabaseType::Yashandb => Some("yasdb"),
             DatabaseType::Oracle
                 if !self.oracle_connection_type.as_deref().is_some_and(|mode| mode.eq_ignore_ascii_case("tns")) =>
@@ -1070,12 +1247,20 @@ impl ConnectionConfig {
             config.driver_profile = Some("mongodb".to_string());
             config.driver_label = Some("MongoDB".to_string());
         }
-        if config.db_type == DatabaseType::SqlServer
-            && sqlserver_legacy_compatibility_param(config.url_params.as_deref())
-        {
-            config.driver_profile = Some("sqlserver-legacy".to_string());
-            config.driver_label = Some("SQL Server legacy compatibility component".to_string());
-            config.url_params = without_sqlserver_legacy_compatibility_param(config.url_params.as_deref());
+        if config.db_type == DatabaseType::SqlServer {
+            let (normalized_host, parsed_port) = normalize_sqlserver_host_port(&config.host);
+            config.host = normalized_host;
+            if let Some(port) = parsed_port {
+                config.port = port;
+                let mut ext = config.external_config.as_ref().and_then(|v| v.as_object()).cloned().unwrap_or_default();
+                ext.insert("portExplicit".to_string(), serde_json::Value::Bool(true));
+                config.external_config = Some(serde_json::Value::Object(ext));
+            }
+            if sqlserver_legacy_compatibility_param(config.url_params.as_deref()) {
+                config.driver_profile = Some("sqlserver-legacy".to_string());
+                config.driver_label = Some("SQL Server legacy compatibility component".to_string());
+                config.url_params = without_sqlserver_legacy_compatibility_param(config.url_params.as_deref());
+            }
         }
         if config.db_type == DatabaseType::Mysql
             && config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("tdengine"))
@@ -1210,6 +1395,7 @@ impl ConnectionConfig {
             DatabaseType::Highgo => format!("highgo://{host}:{port}{db_part}"),
             DatabaseType::Uxdb => format!("uxdb://{host}:{port}{db_part}"),
             DatabaseType::Vastbase => format!("vastbase://{host}:{port}{db_part}"),
+            DatabaseType::Gbase8c => format!("gbase8c://{host}:{port}{db_part}"),
             DatabaseType::Goldendb => format!("goldendb://{host}:{port}{db_part}"),
             DatabaseType::Gaussdb => {
                 if is_multi_host(raw_host) {
@@ -1240,6 +1426,7 @@ impl ConnectionConfig {
             DatabaseType::Ignite => format!("ignite://{host}:{port}{db_part}"),
             DatabaseType::Ignite3 => format!("ignite3://{host}:{port}{db_part}"),
             DatabaseType::Gbase => format!("gbase://{host}:{port}{db_part}"),
+            DatabaseType::Gbase8s => format!("gbase8s://{host}:{port}{db_part}"),
             DatabaseType::H2 => format!("h2://{host}:{port}{db_part}"),
             DatabaseType::Snowflake => format!("snowflake://{host}/{db_part}"),
             DatabaseType::Trino => format!("trino://{host}:{port}{db_part}"),
@@ -1409,6 +1596,9 @@ impl ConnectionConfig {
             DatabaseType::Vastbase => {
                 format!("vastbase://{}:{}@{host}:{port}{db_part}", username, password)
             }
+            DatabaseType::Gbase8c => {
+                format!("gbase8c://{}:{}@{host}:{port}{db_part}", username, password)
+            }
             DatabaseType::Goldendb => {
                 format!("goldendb://{}:{}@{host}:{port}{db_part}", username, password)
             }
@@ -1467,6 +1657,9 @@ impl ConnectionConfig {
             }
             DatabaseType::Gbase => {
                 format!("gbase://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::Gbase8s => {
+                format!("gbase8s://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::H2 => {
                 format!("h2://{}:{}@{host}:{port}{db_part}", username, password)
@@ -2966,6 +3159,58 @@ fn gaussdb_single_host_port(host: &str, default_port: u16) -> (String, u16) {
     (bracket_ipv6(host), default_port)
 }
 
+pub fn normalize_sqlserver_host_port(raw_host: &str) -> (String, Option<u16>) {
+    let parse_port = |value: &str| {
+        let value = value.trim();
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        value.parse::<u16>().ok().filter(|port| *port > 0)
+    };
+    let trimmed = raw_host.trim();
+    if trimmed.is_empty() {
+        return (String::new(), None);
+    }
+
+    let without_tcp = if trimmed.to_ascii_lowercase().starts_with("tcp:") { trimmed[4..].trim() } else { trimmed };
+
+    // Bracketed IPv6: [fe80::1],9005 or [::1]:9005 or [::1]
+    if without_tcp.starts_with('[') {
+        if let Some(close) = without_tcp.find(']') {
+            let bracketed = &without_tcp[..=close];
+            let remainder = without_tcp[close + 1..].trim();
+            if let Some(port_str) = remainder.strip_prefix(',').or_else(|| remainder.strip_prefix(':')) {
+                if let Some(port) = parse_port(port_str) {
+                    return (bracketed.to_string(), Some(port));
+                }
+            }
+            return (if remainder.is_empty() { bracketed } else { without_tcp }.to_string(), None);
+        }
+    }
+
+    // Comma-separated port: host,port or host\instance,port
+    if let Some((server_part, port_part)) = without_tcp.rsplit_once(',') {
+        let candidate_host = server_part.trim();
+        let candidate_port = port_part.trim();
+        if let Some(port) = parse_port(candidate_port) {
+            return (candidate_host.to_string(), Some(port));
+        }
+    }
+
+    // Colon-separated port: host:port (single colon only to avoid unbracketed IPv6)
+    if without_tcp.matches(':').count() == 1 {
+        if let Some((server_part, port_part)) = without_tcp.rsplit_once(':') {
+            let candidate_host = server_part.trim();
+            let candidate_port = port_part.trim();
+            if let Some(port) = parse_port(candidate_port) {
+                return (candidate_host.to_string(), Some(port));
+            }
+        }
+    }
+
+    (without_tcp.to_string(), None)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2994,9 +3239,42 @@ mod tests {
     use super::{
         database_info_from_protocol_value, default_query_timeout_secs, default_redis_key_separator,
         default_ssh_connect_timeout_secs, sqlserver_legacy_compatibility_param,
-        without_sqlserver_legacy_compatibility_param, ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo,
-        DatabaseType, IdentifierCase, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
+        without_sqlserver_legacy_compatibility_param, ConnectionConfig, ConnectionResponse, ConnectionTestResult,
+        DatabaseConnectionInfo, DatabaseType, IdentifierCase, ProductionBadgeScope, ProxyTunnelConfig, ProxyType,
+        TransportLayerConfig,
     };
+
+    #[test]
+    fn connection_response_derives_approved_hints_from_explicit_jdbc_url() {
+        let mut config = mysql_config("root", "", None);
+        config.db_type = DatabaseType::Jdbc;
+        config.connection_string = Some(" JDBC:OCEANBASE:ORACLE://host/service ".into());
+        let response = ConnectionResponse::from_config(config.clone());
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["jdbc_dialect"], "oceanbase-oracle");
+        assert_eq!(value["db_type"], "jdbc");
+        assert_eq!(response.config, config);
+
+        config.connection_string = Some("jdbc:oracle:thin:@host/service".into());
+        let oracle_response = ConnectionResponse::from_config(config.clone());
+        let oracle_value = serde_json::to_value(&oracle_response).unwrap();
+        assert_eq!(oracle_value["jdbc_dialect"], "oracle");
+        assert_eq!(oracle_value["db_type"], "jdbc");
+
+        config.connection_string = Some("jdbc:mysql://host:3306/service".into());
+        assert!(serde_json::to_value(ConnectionResponse::from_config(config.clone()))
+            .unwrap()
+            .get("jdbc_dialect")
+            .is_none());
+        config.connection_string = Some("jdbc:oceanbase:oracle://host/service".into());
+        config.db_type = DatabaseType::Oracle;
+        assert!(serde_json::to_value(ConnectionResponse::from_config(config)).unwrap().get("jdbc_dialect").is_none());
+
+        let mut legacy = serde_json::to_value(&response.config).unwrap();
+        legacy["jdbc_dialect"] = serde_json::json!("oceanbase-oracle");
+        let restored: ConnectionConfig = serde_json::from_value(legacy).unwrap();
+        assert!(serde_json::to_value(restored).unwrap().get("jdbc_dialect").is_none());
+    }
 
     #[test]
     fn default_query_timeout_is_sixty_seconds() {
@@ -3033,7 +3311,8 @@ mod tests {
                 "productName": "H2",
                 "currentDatabase": "app",
                 "serverCharset": "utf8mb4",
-                "jdbcVersion": "4.2"
+                "jdbcVersion": "4.2",
+                "compatibilityMode": "oracle"
             }
         }))
         .unwrap();
@@ -3041,7 +3320,35 @@ mod tests {
         assert_eq!(parsed.current_database.as_deref(), Some("app"));
         assert_eq!(parsed.server_charset.as_deref(), Some("utf8mb4"));
         assert_eq!(parsed.jdbc_version.as_deref(), Some("4.2"));
+        assert_eq!(parsed.compatibility_mode.as_deref(), Some("oracle"));
         assert_eq!(database_info_from_protocol_value(&serde_json::json!({ "ok": true })), None);
+    }
+
+    #[test]
+    fn legacy_gbase8s_profile_connections_load_as_the_gbase8s_type() {
+        let config = |db_type: &str, driver_profile: Option<&str>| {
+            let mut value = serde_json::json!({
+                "id": "id",
+                "name": "GBase",
+                "db_type": db_type,
+                "host": "localhost",
+                "port": 9088,
+                "username": "gbasedbt",
+                "password": "",
+                "database": "app"
+            });
+            if let Some(profile) = driver_profile {
+                value["driver_profile"] = serde_json::json!(profile);
+            }
+            serde_json::from_value::<ConnectionConfig>(value).unwrap()
+        };
+
+        assert_eq!(config("gbase", Some("gbase8s")).db_type, DatabaseType::Gbase8s);
+        assert_eq!(config("gbase", Some("GBASE8S")).db_type, DatabaseType::Gbase8s);
+        assert_eq!(config("gbase8s", Some("gbase8s")).db_type, DatabaseType::Gbase8s);
+        assert_eq!(config("gbase", Some("gbase8a")).db_type, DatabaseType::Gbase);
+        assert_eq!(config("gbase", None).db_type, DatabaseType::Gbase);
+        assert_eq!(config("informix", Some("gbase8s")).db_type, DatabaseType::Informix);
     }
 
     #[test]
@@ -3089,6 +3396,71 @@ mod tests {
         assert!(serde_json::to_value(configured).unwrap()["sidebar_auto_load_all_tables"].as_bool().unwrap());
     }
 
+    #[test]
+    fn production_badge_scope_legacy_and_all_options_round_trip() {
+        let mut value = serde_json::to_value(mysql_config("root", "", Some("app"))).unwrap();
+        value["is_production"] = serde_json::json!(true);
+        value["production_databases"] = serde_json::json!(["app"]);
+        let legacy: ConnectionConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(legacy.production_badge_scope, None);
+        assert!(serde_json::to_value(legacy).unwrap().get("production_badge_scope").is_none());
+        for (name, expected) in [
+            ("connection", ProductionBadgeScope::Connection),
+            ("database", ProductionBadgeScope::Database),
+            ("table", ProductionBadgeScope::Table),
+        ] {
+            value["production_badge_scope"] = serde_json::json!(name);
+            let config: ConnectionConfig = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(config.production_badge_scope, Some(expected));
+            assert!(config.is_production);
+            assert_eq!(config.production_databases, vec!["app"]);
+            let serialized = serde_json::to_value(&config).unwrap();
+            assert_eq!(serialized["production_badge_scope"], name);
+            assert_eq!(
+                serde_json::from_value::<ConnectionConfig>(serialized).unwrap().production_badge_scope,
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn show_database_links_opt_out_round_trips() {
+        let mut value = serde_json::json!({
+            "id": "id",
+            "name": "Oracle",
+            "db_type": "oracle",
+            "host": "localhost",
+            "port": 1521,
+            "username": "system",
+            "password": "",
+            "database": "FREEPDB1"
+        });
+        let legacy: ConnectionConfig = serde_json::from_value(value.clone()).unwrap();
+        assert!(serde_json::to_value(legacy).unwrap().get("show_database_links").is_none());
+
+        value["show_database_links"] = serde_json::json!(false);
+        let hidden: ConnectionConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(serde_json::to_value(hidden).unwrap()["show_database_links"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn sidebar_visibility_preferences_round_trip() {
+        let base = serde_json::json!({
+            "id": "sidebar", "name": "Sidebar", "db_type": "oracle", "host": "localhost",
+            "port": 1521, "username": "test", "password": ""
+        });
+        for field in ["show_database_links", "show_native_jobs", "show_user_admin"] {
+            let legacy: ConnectionConfig = serde_json::from_value(base.clone()).unwrap();
+            assert!(serde_json::to_value(legacy).unwrap().get(field).is_none());
+            for visible in [true, false] {
+                let mut value = base.clone();
+                value[field] = serde_json::json!(visible);
+                let config: ConnectionConfig = serde_json::from_value(value).unwrap();
+                assert_eq!(serde_json::to_value(config).unwrap()[field], serde_json::json!(visible));
+            }
+        }
+    }
+
     fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
             oracle_oci_nls_lang: None,
@@ -3113,6 +3485,9 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -3120,6 +3495,8 @@ mod tests {
             connect_timeout_secs: super::default_connect_timeout_secs(),
             query_timeout_secs: default_query_timeout_secs(),
             idle_timeout_secs: super::default_idle_timeout_secs(),
+            manual_transaction_timeout_secs: super::default_manual_transaction_timeout_secs(),
+            idle_disconnect_secs: super::default_idle_disconnect_secs(),
             keepalive_interval_secs: super::default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
@@ -3156,6 +3533,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         }
     }
@@ -3504,6 +3882,31 @@ mod tests {
     }
 
     #[test]
+    fn missing_idle_disconnect_defaults_to_zero() {
+        // 老配置没有 idle_disconnect_secs 字段时，必须反序列化为 0（不启用），
+        // 保证既有连接不会被赋予空闲超时自动关闭的行为。
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "id",
+            "name": "name",
+            "db_type": "mysql",
+            "host": "10.1.2.3",
+            "port": 3306,
+            "username": "root",
+            "password": "",
+            "database": null
+        }))
+        .unwrap();
+
+        assert_eq!(config.idle_disconnect_secs, 0);
+        // 显式配置后能正常往返，且不影响并存的 idle_timeout_secs。
+        let mut value = serde_json::to_value(&config).unwrap();
+        value["idle_disconnect_secs"] = serde_json::json!(120);
+        let configured: ConnectionConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(configured.idle_disconnect_secs, 120);
+        assert_eq!(configured.idle_timeout_secs, super::default_idle_timeout_secs());
+    }
+
+    #[test]
     fn legacy_ssh_tunnels_migrate_to_ordered_transport_layers() {
         let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
             "id": "id",
@@ -3606,6 +4009,40 @@ mod tests {
     }
 
     #[test]
+    fn ssh_layer_local_port_is_optional_and_round_trips() {
+        let cases = [(serde_json::json!({}), None), (serde_json::json!({ "local_port": 4059 }), Some(4059_u16))];
+        for (layer_fields, expected) in cases {
+            let mut layer =
+                serde_json::json!({ "type": "ssh", "id": "ssh-1", "host": "bastion", "port": 22, "user": "deploy" });
+            layer.as_object_mut().unwrap().extend(layer_fields.as_object().unwrap().clone());
+            let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+                "id": "id",
+                "name": "name",
+                "db_type": "mysql",
+                "host": "10.1.2.3",
+                "port": 3306,
+                "username": "root",
+                "password": "",
+                "database": null,
+                "transport_layers": [layer]
+            }))
+            .unwrap();
+            let TransportLayerConfig::Ssh(ssh) = &config.transport_layers[0] else {
+                panic!("expected ssh layer");
+            };
+            assert_eq!(ssh.local_port, expected);
+
+            let saved = serde_json::to_value(&config).unwrap();
+            match expected {
+                Some(port) => assert_eq!(saved["transport_layers"][0]["local_port"], port),
+                None => assert!(saved["transport_layers"][0].get("local_port").is_none()),
+            }
+            let restored: ConnectionConfig = serde_json::from_value(saved).unwrap();
+            assert_eq!(restored.transport_layers, config.transport_layers);
+        }
+    }
+
+    #[test]
     fn query_timeout_zero_disables_timeout() {
         let mut config = mysql_config("root", "", None);
         config.query_timeout_secs = 0;
@@ -3650,6 +4087,28 @@ mod tests {
         config.query_timeout_secs = 0;
 
         assert_eq!(config.effective_query_timeout_secs(), 0);
+    }
+
+    #[test]
+    fn manual_transaction_timeout_defaults_when_absent_or_zero_and_is_clamped() {
+        let mut config = mysql_config("root", "", None);
+        assert_eq!(config.effective_manual_transaction_timeout_secs(), 300);
+
+        // Payloads saved before the setting existed deserialize to the default.
+        let mut json = serde_json::to_value(&config).unwrap();
+        json.as_object_mut().unwrap().remove("manual_transaction_timeout_secs");
+        let legacy: ConnectionConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.manual_transaction_timeout_secs, 300);
+
+        // 0 must never mean "roll back immediately".
+        config.manual_transaction_timeout_secs = 0;
+        assert_eq!(config.effective_manual_transaction_timeout_secs(), 300);
+        config.manual_transaction_timeout_secs = 1;
+        assert_eq!(config.effective_manual_transaction_timeout_secs(), super::MIN_MANUAL_TRANSACTION_TIMEOUT_SECS);
+        config.manual_transaction_timeout_secs = 1_800;
+        assert_eq!(config.effective_manual_transaction_timeout_secs(), 1_800);
+        config.manual_transaction_timeout_secs = u64::MAX;
+        assert_eq!(config.effective_manual_transaction_timeout_secs(), super::MAX_MANUAL_TRANSACTION_TIMEOUT_SECS);
     }
 
     #[test]
@@ -3922,6 +4381,64 @@ mod tests {
         assert_eq!(canonical.driver_profile.as_deref(), Some("sqlserver"));
         assert_eq!(canonical.driver_label.as_deref(), Some("SQL Server"));
         assert_eq!(canonical.url_params.as_deref(), Some("applicationName=dbx&encrypt=false"));
+    }
+
+    #[test]
+    fn normalize_sqlserver_host_port_handles_commas_colons_and_tcp_prefix() {
+        assert_eq!(super::normalize_sqlserver_host_port("gg.test.com,9005"), ("gg.test.com".to_string(), Some(9005)));
+        assert_eq!(
+            super::normalize_sqlserver_host_port("tcp:gg.test.com,9005"),
+            ("gg.test.com".to_string(), Some(9005))
+        );
+        assert_eq!(super::normalize_sqlserver_host_port("tcp:gg.test.com"), ("gg.test.com".to_string(), None));
+        assert_eq!(super::normalize_sqlserver_host_port("gg.test.com:9005"), ("gg.test.com".to_string(), Some(9005)));
+        assert_eq!(
+            super::normalize_sqlserver_host_port(" 192.168.1.100, 14333 "),
+            ("192.168.1.100".to_string(), Some(14333))
+        );
+        assert_eq!(
+            super::normalize_sqlserver_host_port(r"192.168.1.10\SQL2022,14333"),
+            (r"192.168.1.10\SQL2022".to_string(), Some(14333))
+        );
+        assert_eq!(
+            super::normalize_sqlserver_host_port(r"tcp:192.168.1.10\SQL2022"),
+            (r"192.168.1.10\SQL2022".to_string(), None)
+        );
+        assert_eq!(super::normalize_sqlserver_host_port("[::1],9005"), ("[::1]".to_string(), Some(9005)));
+        assert_eq!(super::normalize_sqlserver_host_port("[::1]:9005"), ("[::1]".to_string(), Some(9005)));
+        assert_eq!(super::normalize_sqlserver_host_port("[fe80::1]"), ("[fe80::1]".to_string(), None));
+        assert_eq!(super::normalize_sqlserver_host_port("localhost"), ("localhost".to_string(), None));
+        assert_eq!(super::normalize_sqlserver_host_port(""), ("".to_string(), None));
+    }
+
+    #[test]
+    fn sqlserver_canonicalized_normalizes_host_with_port_and_sets_explicit_flag() {
+        let mut config = mysql_config("sa", "secret", Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        config.host = "gg.test.com,9005".to_string();
+        config.port = 1433;
+
+        let canonical = config.canonicalized();
+        assert_eq!(canonical.host, "gg.test.com");
+        assert_eq!(canonical.port, 9005);
+        assert!(canonical.sqlserver_port_explicit());
+
+        let mut tcp_config = mysql_config("sa", "secret", Some("master"));
+        tcp_config.db_type = DatabaseType::SqlServer;
+        tcp_config.host = "tcp:sql.example.com,1444".to_string();
+        tcp_config.port = 1433;
+
+        let canonical_tcp = tcp_config.canonicalized();
+        assert_eq!(canonical_tcp.host, "sql.example.com");
+        assert_eq!(canonical_tcp.port, 1444);
+        assert!(canonical_tcp.sqlserver_port_explicit());
+    }
+
+    #[test]
+    fn sqlserver_invalid_endpoint_text_is_not_silently_retargeted() {
+        for host in ["[::1],70000", "[::1]:oops", "[::1]:0", "[::1]unexpected", "server:1e3", "server,0x599"] {
+            assert_eq!(super::normalize_sqlserver_host_port(host), (host.to_string(), None));
+        }
     }
 
     #[test]

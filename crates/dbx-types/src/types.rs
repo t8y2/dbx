@@ -1,6 +1,53 @@
+use crate::models::connection::DatabaseType;
 use serde::{Deserialize, Serialize};
 
+/// Agent drivers can serialize an empty native slice as JSON `null` instead of
+/// `[]` (for example a Vastbase `UPDATE ... FROM` that returns no result
+/// columns). A present `null` must deserialize as an empty vector: one driver's
+/// serialization detail must not fail the whole agent call with
+/// "invalid type: null, expected a sequence".
+fn deserialize_vec_or_default<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// A data-grid statement whose BLOB values travel outside the executable SQL.
+/// The preview must match the caller's reviewed SQL before any statement runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlobBoundStatement {
+    pub preview_sql: String,
+    pub sql: String,
+    pub blob_parameters: Vec<String>,
+}
+
+pub fn validate_blob_bound_statements(previews: &[String], bound: &[BlobBoundStatement]) -> Result<(), String> {
+    if previews.len() != bound.len()
+        || previews.iter().zip(bound).any(|(preview, statement)| preview != &statement.preview_sql)
+    {
+        return Err("The reviewed SQL changed; regenerate the BLOB save preview before saving.".into());
+    }
+    if bound.iter().any(|statement| {
+        statement.sql.trim().is_empty()
+            || statement.blob_parameters.is_empty() && statement.sql != statement.preview_sql
+            || statement
+                .blob_parameters
+                .iter()
+                .any(|hex| hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    }) {
+        return Err("Invalid BLOB statement parameters.".into());
+    }
+    Ok(())
+}
+
 pub use crate::mysql_event::MysqlEventInfo;
+pub use crate::oracle_trigger::{
+    MetadataIdentityMode, MetadataReadOptions, OracleTriggerDefinition, OracleTriggerError, OracleTriggerMetadata,
+    OracleTriggerParent, OracleTriggerReadState,
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DatabaseInfo {
@@ -263,6 +310,8 @@ pub struct ObjectSource {
     pub editable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine_parameters: Option<Vec<RoutineParameterMetadata>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<TriggerInfo>,
 }
 
 /// Provenance for structured metadata fields that are optional in [`ColumnInfo`].
@@ -291,6 +340,10 @@ pub struct ColumnInfo {
     pub data_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_object_type: Option<String>,
     pub is_nullable: bool,
     pub column_default: Option<String>,
     pub is_primary_key: bool,
@@ -423,6 +476,8 @@ pub struct CompletionAssistantCandidate {
     pub comment: Option<String>,
     pub data_type: Option<String>,
     pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routine_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -540,32 +595,73 @@ impl QueryMessage {
 pub struct LargeValueCell {
     pub row_index: usize,
     pub column_index: usize,
+    /// With `value_ref`, zero can mean an unknown byte size, not an empty value.
     pub original_bytes: usize,
+    /// Opaque original-result locator. Absent for legacy preview/re-query drivers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_ref: Option<String>,
+    /// A server-truncated carrier cannot be strictly decoded until explicitly
+    /// fetching the complete value. The preview is not presentation data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_decode: Option<bool>,
+}
+
+/// Original, complete key cells retained before presentation-only decoding.
+/// These are internal read locators, never inverse-encoded displayed values.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct OriginalKeyCell {
+    pub row_index: usize,
+    pub column_index: usize,
+    pub value: serde_json::Value,
+}
+
+impl Serialize for OriginalKeyCell {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("OriginalKeyCell", 3)?;
+        state.serialize_field("row_index", &self.row_index)?;
+        state.serialize_field("column_index", &self.column_index)?;
+        // Original locators already use the driver's lossless representation
+        // (MySQL DECIMAL/BIGINT are strings), not the display column's type.
+        state.serialize_field("value", &JsSafeCell(&self.value, None))?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct QueryResult {
+    #[serde(default, rename = "large_value_cells", deserialize_with = "deserialize_vec_or_default")]
+    pub deferred_large_value_cells: Vec<LargeValueCell>,
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub columns: Vec<String>,
     /// Database type name for each column, parallel to `columns`. May be empty
     /// when a driver cannot supply types (e.g. schemaless stores or fallback
     /// query paths); consumers must tolerate a shorter/empty vector.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub column_types: Vec<String>,
     /// Sortable for each column. Parallel to `columns`. Optional and may
     /// be shorter/empty when a driver cannot supply sortable information.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub column_sortables: Vec<bool>,
     /// Spatial reference metadata for geometry/geography cells. Kept outside
     /// `rows` so displayed, copied, exported, and edited values remain WKT.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default", skip_serializing_if = "Vec::is_empty")]
     pub spatial_columns: Vec<SpatialColumn>,
     /// Per-cell SRID metadata, parallel to `rows`: `spatial_values[row][column]`
     /// is the SRID of that cell's geometry value (`None` for non-spatial cells
     /// or unknown SRID). Unlike `spatial_columns` (a column-level hint), every
     /// geometry value keeps its own SRID so mixed-SRID results stay correct.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default", skip_serializing_if = "Vec::is_empty")]
     pub spatial_values: Vec<Vec<Option<u32>>>,
+    #[serde(default, deserialize_with = "deserialize_vec_or_default")]
     pub rows: Vec<Vec<serde_json::Value>>,
+    /// Sparse original key values for internal full-value reads. Empty means
+    /// no authoritative locator metadata, not permission to guess decoded keys.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_key_cells: Vec<OriginalKeyCell>,
     pub affected_rows: u64,
     pub execution_time_ms: u128,
     /// OceanBase SQL Audit EXECUTE_TIME in microseconds. Absent when the
@@ -589,7 +685,7 @@ pub struct QueryResult {
     /// Messages emitted by the database server while executing the statement
     /// (notices, warnings, info messages). Empty for drivers that do not
     /// capture server messages.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "deserialize_vec_or_default", skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<QueryMessage>,
 }
 
@@ -614,6 +710,7 @@ impl Serialize for QueryResult {
         let field_count = 9
             + usize::from(!self.spatial_columns.is_empty())
             + usize::from(!self.spatial_values.is_empty())
+            + usize::from(!self.raw_key_cells.is_empty())
             + usize::from(self.elasticsearch_raw_body.is_some())
             + usize::from(self.server_execute_time_us.is_some())
             + usize::from(self.query_timings_ms.is_some())
@@ -628,7 +725,10 @@ impl Serialize for QueryResult {
         if !self.spatial_values.is_empty() {
             state.serialize_field("spatial_values", &self.spatial_values)?;
         }
-        state.serialize_field("rows", &JsSafeRows(&self.rows))?;
+        state.serialize_field("rows", &JsSafeRows(&self.rows, &self.column_types))?;
+        if !self.raw_key_cells.is_empty() {
+            state.serialize_field("raw_key_cells", &self.raw_key_cells)?;
+        }
         state.serialize_field("affected_rows", &self.affected_rows)?;
         state.serialize_field("execution_time_ms", &self.execution_time_ms)?;
         if let Some(server_execute_time_us) = &self.server_execute_time_us {
@@ -650,9 +750,9 @@ impl Serialize for QueryResult {
     }
 }
 
-/// Serializes result rows with [`JsSafeCell`] wrapping so unsafe integers
-/// become strings without cloning the row data.
-struct JsSafeRows<'a>(&'a [Vec<serde_json::Value>]);
+/// Serializes result rows with [`JsSafeCell`] wrapping so values which cannot
+/// round-trip through JavaScript without losing precision become strings.
+struct JsSafeRows<'a>(&'a [Vec<serde_json::Value>], &'a [String]);
 
 impl Serialize for JsSafeRows<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -663,13 +763,13 @@ impl Serialize for JsSafeRows<'_> {
 
         let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
         for row in self.0 {
-            seq.serialize_element(&JsSafeCells(row))?;
+            seq.serialize_element(&JsSafeCells(row, self.1))?;
         }
         seq.end()
     }
 }
 
-struct JsSafeCells<'a>(&'a [serde_json::Value]);
+struct JsSafeCells<'a>(&'a [serde_json::Value], &'a [String]);
 
 impl Serialize for JsSafeCells<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -679,17 +779,17 @@ impl Serialize for JsSafeCells<'_> {
         use serde::ser::SerializeSeq;
 
         let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
-        for cell in self.0 {
-            seq.serialize_element(&JsSafeCell(cell))?;
+        for (index, cell) in self.0.iter().enumerate() {
+            seq.serialize_element(&JsSafeCell(cell, self.1.get(index).map(String::as_str)))?;
         }
         seq.end()
     }
 }
 
-/// Serializes one cell, replacing unsafe integer numbers with their decimal
-/// string form and recursing into arrays/objects the same way
-/// `db::json_value_for_js` does.
-struct JsSafeCell<'a>(&'a serde_json::Value);
+/// Serializes one cell, replacing unsafe integers and non-round-trippable exact
+/// decimal values with strings. Nested JSON values retain their existing
+/// normalization behavior.
+struct JsSafeCell<'a>(&'a serde_json::Value, Option<&'a str>);
 
 impl Serialize for JsSafeCell<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -700,6 +800,10 @@ impl Serialize for JsSafeCell<'_> {
 
         match self.0 {
             serde_json::Value::Number(number) => {
+                let value = number.as_str();
+                if self.1.is_some_and(is_exact_decimal_type) && !decimal_round_trips_through_f64(value) {
+                    return serializer.serialize_str(value);
+                }
                 if let Some(value) = number.as_i64() {
                     if !(-crate::json::JS_MAX_SAFE_INTEGER..=crate::json::JS_MAX_SAFE_INTEGER).contains(&value) {
                         return serializer.serialize_str(&value.to_string());
@@ -720,14 +824,14 @@ impl Serialize for JsSafeCell<'_> {
                 use serde::ser::SerializeSeq;
                 let mut seq = serializer.serialize_seq(Some(values.len()))?;
                 for value in values {
-                    seq.serialize_element(&JsSafeCell(value))?;
+                    seq.serialize_element(&JsSafeCell(value, None))?;
                 }
                 seq.end()
             }
             serde_json::Value::Object(entries) => {
                 let mut map = serializer.serialize_map(Some(entries.len()))?;
                 for (key, value) in entries {
-                    map.serialize_entry(key, &JsSafeCell(value))?;
+                    map.serialize_entry(key, &JsSafeCell(value, None))?;
                 }
                 map.end()
             }
@@ -736,8 +840,87 @@ impl Serialize for JsSafeCell<'_> {
     }
 }
 
+fn is_exact_decimal_type(data_type: &str) -> bool {
+    let normalized = data_type.trim().to_ascii_lowercase();
+    let normalized = normalized.strip_suffix(" unsigned").unwrap_or(&normalized).trim_end();
+    let base_end = normalized
+        .find(|character: char| character == '(' || character == '[' || character.is_whitespace())
+        .unwrap_or(normalized.len());
+    let base = &normalized[..base_end];
+    if !matches!(
+        base,
+        "decimal"
+            | "numeric"
+            | "number"
+            | "dec"
+            | "fixed"
+            | "money"
+            | "smallmoney"
+            | "bigdecimal"
+            | "bignumeric"
+            | "big_numeric"
+    ) {
+        return false;
+    }
+    let suffix = normalized[base_end..].trim();
+    if suffix.is_empty() {
+        return true;
+    }
+    suffix.starts_with('(')
+        && suffix.ends_with(')')
+        && suffix[1..suffix.len() - 1]
+            .chars()
+            .all(|character| character.is_ascii_digit() || character == ',' || character.is_whitespace())
+}
+
+fn decimal_round_trips_through_f64(value: &str) -> bool {
+    let Ok(number) = value.parse::<f64>() else { return false };
+    if !number.is_finite() || (number == 0.0 && canonical_decimal(value).is_some_and(|decimal| decimal.digits != "0")) {
+        return false;
+    }
+    canonical_decimal(value)
+        .is_some_and(|original| canonical_decimal(&number.to_string()).is_some_and(|round_trip| original == round_trip))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CanonicalDecimal {
+    negative: bool,
+    digits: String,
+    exponent: i64,
+}
+
+fn canonical_decimal(value: &str) -> Option<CanonicalDecimal> {
+    let (mantissa, exponent) = value
+        .split_once(['e', 'E'])
+        .map(|(mantissa, exponent)| Some((mantissa, exponent.parse::<i64>().ok()?)))
+        .unwrap_or_else(|| Some((value, 0)))?;
+    let (negative, unsigned) = match mantissa.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, mantissa.strip_prefix('+').unwrap_or(mantissa)),
+    };
+    let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    if integer.is_empty() && fraction.is_empty()
+        || !integer.bytes().chain(fraction.bytes()).all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let mut digits = format!("{integer}{fraction}");
+    let first_significant = digits.bytes().position(|digit| digit != b'0');
+    let Some(first_significant) = first_significant else {
+        return Some(CanonicalDecimal { negative: false, digits: "0".to_string(), exponent: 0 });
+    };
+    digits.drain(..first_significant);
+    let trailing_zero_count = digits.bytes().rev().take_while(|digit| *digit == b'0').count();
+    digits.truncate(digits.len() - trailing_zero_count);
+    let exponent = exponent.checked_sub(fraction.len() as i64)?.checked_add(trailing_zero_count as i64)?;
+    Some(CanonicalDecimal { negative, digits, exponent })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexInfo {
+    /// Dictionary-derived index owner, independent of the parent table owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     pub name: String,
     pub columns: Vec<String>,
     pub is_unique: bool,
@@ -751,6 +934,16 @@ pub struct IndexInfo {
     /// introspection source doesn't track this (provenance unknown for that dialect/path).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub key_is_expression: Vec<bool>,
+    /// Parallel to `columns`: Oracle-family key order (`ASC` or `DESC`). Empty when
+    /// the source does not expose direction metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub key_directions: Vec<String>,
+    /// Oracle-family index visibility (`VISIBLE` or `INVISIBLE`), when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
+    /// True only when the source returned aligned expression, direction and visibility metadata.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub key_metadata_complete: bool,
     /// Parallel to `columns`: operator class name for each key column, if non-default.
     /// For example, a GIN trigram index on a varchar column will have `"gin_trgm_ops"`.
     /// `None` means the default operator class is used (can be omitted in DDL).
@@ -806,6 +999,8 @@ pub struct TriggerInfo {
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statement: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_metadata: Option<OracleTriggerMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -835,6 +1030,44 @@ pub struct ConstraintInfo {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub valid: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_metadata: Option<OracleConstraintMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleConstraintMetadata {
+    pub metadata_complete: bool,
+    pub owner: String,
+    pub constraint_type: Option<String>,
+    pub status: Option<String>,
+    pub validated: Option<String>,
+    pub deferrable: Option<String>,
+    pub deferred: Option<String>,
+    pub rely: Option<String>,
+    pub index_owner: Option<String>,
+    pub index_name: Option<String>,
+    pub index_sharing: Option<String>,
+    pub index: Option<OracleConstraintIndexMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleConstraintIndexMetadata {
+    pub metadata_complete: bool,
+    pub owner: String,
+    pub table_owner: String,
+    pub table_name: String,
+    pub index_type: String,
+    pub uniqueness: String,
+    pub status: String,
+    pub partitioned: bool,
+    pub visibility: String,
+    pub secondary: Option<String>,
+    pub columns: Vec<String>,
+    pub directions: Vec<String>,
+    pub key_is_expression: Vec<bool>,
+    pub included_columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1004,6 +1237,9 @@ pub enum CustomTypeKind {
     Enum,
     Range,
     Multirange,
+    Object,
+    Collection,
+    Other,
 }
 
 impl CustomTypeKind {
@@ -1015,6 +1251,9 @@ impl CustomTypeKind {
             Self::Enum => "enum",
             Self::Range => "range",
             Self::Multirange => "multirange",
+            Self::Object => "object",
+            Self::Collection => "collection",
+            Self::Other => "other",
         }
     }
 }
@@ -1093,6 +1332,387 @@ pub struct CustomTypeDdl {
     pub warnings: Vec<String>,
 }
 
+/// Completeness of one Oracle-family dictionary section, within the current
+/// user's visible scope. An unavailable section retains its read error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypeMetadataState {
+    Available,
+    Incomplete,
+    Unavailable,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypeMetadataRead {
+    pub state: TypeMetadataState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeAttribute {
+    pub name: String,
+    pub ordinal: Option<i32>,
+    pub type_owner: Option<String>,
+    pub type_name: Option<String>,
+    pub type_modifier: Option<String>,
+    pub length: Option<i64>,
+    pub precision: Option<i32>,
+    pub scale: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeMethodParameter {
+    pub name: Option<String>,
+    pub ordinal: Option<i32>,
+    pub mode: Option<String>,
+    pub type_owner: Option<String>,
+    pub type_name: Option<String>,
+    pub type_modifier: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeMethod {
+    pub name: String,
+    pub number: Option<i32>,
+    pub kind: Option<String>,
+    pub parameter_count: Option<u32>,
+    pub result_count: Option<u32>,
+    pub parameters: Vec<OracleTypeMethodParameter>,
+    pub results: Vec<OracleTypeMethodParameter>,
+    pub parameters_read: TypeMetadataRead,
+    pub results_read: TypeMetadataRead,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeCollection {
+    pub kind: Option<String>,
+    pub upper_bound: Option<i64>,
+    pub element_owner: Option<String>,
+    pub element_name: Option<String>,
+    pub element_modifier: Option<String>,
+    pub length: Option<i64>,
+    pub precision: Option<i32>,
+    pub scale: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeMetadata {
+    pub status: Option<String>,
+    pub type_code: Option<String>,
+    pub is_final: Option<bool>,
+    pub instantiable: Option<bool>,
+    pub supertype_owner: Option<String>,
+    pub supertype_name: Option<String>,
+    pub attribute_count: Option<u32>,
+    pub method_count: Option<u32>,
+    /// `false` means no body in this successful dictionary read, not globally absent.
+    pub body_visible: Option<bool>,
+    pub body_status: Option<String>,
+    pub properties_read: TypeMetadataRead,
+    pub body_read: TypeMetadataRead,
+    pub attributes_read: TypeMetadataRead,
+    pub methods_read: TypeMetadataRead,
+    pub collection_read: TypeMetadataRead,
+    pub attributes: Vec<OracleTypeAttribute>,
+    pub methods: Vec<OracleTypeMethod>,
+    pub collection: Option<OracleTypeCollection>,
+}
+
+/// A readback value used by the controlled Oracle-family TYPE manager. `None`
+/// is kept distinct from an empty value when the relevant dictionary read is
+/// incomplete or unavailable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeManagementSnapshot {
+    pub target: OracleTypeManagementTarget,
+    /// Catalogues queried by this snapshot are limited to the current user's visible scope.
+    pub visibility_scope: String,
+    pub acting_user: Option<String>,
+    pub acting_user_read: TypeMetadataRead,
+    pub details: Option<CustomTypeDetails>,
+    pub details_read: TypeMetadataRead,
+    pub type_source: Option<String>,
+    pub type_source_read: TypeMetadataRead,
+    pub body_source: Option<String>,
+    pub body_source_read: TypeMetadataRead,
+    pub objects: Vec<OracleTypeManagementObject>,
+    pub dependencies: Vec<OracleTypeManagementDependency>,
+    pub dependencies_read: TypeMetadataRead,
+    pub persistent_references: Vec<OracleTypeManagementReference>,
+    pub persistent_references_read: TypeMetadataRead,
+    pub direct_privileges: Vec<OracleTypeManagementPrivilege>,
+    pub privileges_read: TypeMetadataRead,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OracleTypeManagementSqlOperation {
+    SaveSpec,
+    SaveBody,
+    DropSpec,
+    DropBody,
+    GrantExecute,
+    GrantPrivilege,
+    RebuildSource,
+    CompileSpec,
+    CompileTrigger,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeManagementSqlInput {
+    pub database_type: DatabaseType,
+    pub operation: OracleTypeManagementSqlOperation,
+    pub owner: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grantee: Option<String>,
+    #[serde(default)]
+    pub grantable: bool,
+    #[serde(default)]
+    pub object_type: Option<ObjectSourceKind>,
+    #[serde(default)]
+    pub privilege: Option<String>,
+    #[serde(default)]
+    pub trigger_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeManagementSqlResult {
+    pub statements: Vec<String>,
+    pub source_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeManagementTarget {
+    pub connection_id: String,
+    pub database: String,
+    pub owner: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeManagementObjectKey {
+    pub owner: String,
+    pub name: String,
+    pub object_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeManagementSnapshotRequest {
+    pub target: OracleTypeManagementTarget,
+    #[serde(default)]
+    pub known_objects: Vec<OracleTypeManagementObjectKey>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeManagementObject {
+    pub owner: String,
+    pub name: String,
+    pub object_type: String,
+    pub exists: Option<bool>,
+    pub object_id: Option<String>,
+    pub status: Option<String>,
+    pub status_read: TypeMetadataRead,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_enabled_read: Option<TypeMetadataRead>,
+    pub source: Option<String>,
+    pub source_read: TypeMetadataRead,
+    pub source_fingerprint: Option<String>,
+    pub errors: Vec<OracleTypeManagementError>,
+    pub errors_read: TypeMetadataRead,
+    #[serde(default)]
+    pub direct_privileges: Vec<OracleTypeManagementPrivilege>,
+    pub privileges_read: TypeMetadataRead,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeManagementError {
+    pub line: u32,
+    pub position: u32,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeManagementDependency {
+    pub owner: String,
+    pub name: String,
+    pub object_type: String,
+    pub referenced_owner: String,
+    pub referenced_name: String,
+    pub referenced_type: String,
+    pub referenced_link: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeManagementReference {
+    pub owner: String,
+    pub table_name: String,
+    pub column_name: Option<String>,
+    pub data_type_owner: Option<String>,
+    pub data_type: Option<String>,
+    pub table_status: Option<String>,
+    pub table_read_only: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeManagementPrivilege {
+    pub grantee: String,
+    pub privilege: String,
+    pub grantable: Option<bool>,
+    pub hierarchy: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grantor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privilege_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privilege_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_id: Option<String>,
+}
+
+/// Exact durable scalar relations used only by a TYPE migration. No business rows
+/// are serialized into this manifest or returned by the verification endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeDataRelationKey {
+    pub owner: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeDataField {
+    pub source_path: Vec<String>,
+    #[serde(default)]
+    pub object_null: bool,
+    pub old_column: String,
+    pub expected_column: String,
+    pub target_path: Vec<String>,
+    #[serde(default)]
+    pub target_object_null: bool,
+    #[serde(default)]
+    pub unchanged: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeDataMappingInput {
+    pub id: String,
+    pub source: OracleTypeDataRelationKey,
+    pub old: OracleTypeDataRelationKey,
+    pub expected: OracleTypeDataRelationKey,
+    pub target: OracleTypeDataRelationKey,
+    pub fields: Vec<OracleTypeDataField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeDataProjection {
+    pub path: Vec<String>,
+    pub object_null: bool,
+    pub data_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeDataRelation {
+    pub relation: OracleTypeDataRelationKey,
+    pub object_id: String,
+    pub read_only: Option<bool>,
+    /// Directly inspectable metadata, not a digest of ordinary definitions.
+    pub structure: String,
+    pub projection: Vec<OracleTypeDataProjection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeDataBaseline {
+    pub relation: OracleTypeDataRelation,
+    pub row_count: u32,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeDataManifest {
+    pub mapping: OracleTypeDataMappingInput,
+    pub original: OracleTypeDataBaseline,
+    pub old: OracleTypeDataBaseline,
+    pub expected: OracleTypeDataBaseline,
+    #[serde(default)]
+    pub prepared_target: Option<OracleTypeDataBaseline>,
+    #[serde(default)]
+    pub verified_target: Option<OracleTypeDataBaseline>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeDataRequest {
+    pub target: OracleTypeManagementTarget,
+    pub action: String,
+    #[serde(default)]
+    pub relation: Option<OracleTypeDataRelationKey>,
+    #[serde(default)]
+    pub mapping: Option<OracleTypeDataMappingInput>,
+    #[serde(default)]
+    pub manifest: Option<OracleTypeDataManifest>,
+    #[serde(default)]
+    pub sql: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeDataResult {
+    pub relation: Option<OracleTypeDataRelation>,
+    pub manifest: Option<OracleTypeDataManifest>,
+    pub insert_sql: Option<String>,
+}
+
+/// Native ALTER TYPE never exports UDT values or requires user-prepared baselines.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeEvolutionManifest {
+    pub target: OracleTypeManagementTarget,
+    pub source_before: String,
+    pub source_after: String,
+    pub statements: Vec<String>,
+    /// Inspectable identity/restriction metadata and row counts, not a data hash.
+    pub metadata: String,
+    pub phase: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeEvolutionRequest {
+    pub target: OracleTypeManagementTarget,
+    pub source_before: String,
+    pub source_after: String,
+    #[serde(default)]
+    pub manifest: Option<OracleTypeEvolutionManifest>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomTypeDetails {
@@ -1105,10 +1725,55 @@ pub struct CustomTypeDetails {
     pub properties: CustomTypeProperties,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ddl: Option<CustomTypeDdl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle_metadata: Option<OracleTypeMetadata>,
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn custom_type_details_accepts_old_pg_json_without_oracle_metadata() {
+        let old = serde_json::json!({
+            "name": "state", "schema": "public", "kind": "enum", "comment": null,
+            "members": [{"name": "", "dataType": "", "ordinal": 1, "enumValue": "ready"}],
+            "properties": {}, "ddl": {"sql": "CREATE TYPE state AS ENUM ('ready');", "complete": true}
+        });
+        let details: super::CustomTypeDetails = serde_json::from_value(old).unwrap();
+        assert!(details.oracle_metadata.is_none());
+        assert!(details.ddl.as_ref().unwrap().complete);
+        assert_eq!(details.members[0].enum_value.as_deref(), Some("ready"));
+        let serialized = serde_json::to_value(details).unwrap();
+        assert!(serialized.get("oracleMetadata").is_none());
+        for (kind, label) in [
+            (super::CustomTypeKind::Object, "object"),
+            (super::CustomTypeKind::Collection, "collection"),
+            (super::CustomTypeKind::Other, "other"),
+        ] {
+            assert_eq!(kind.as_str(), label);
+            assert_eq!(serde_json::to_value(kind).unwrap(), label);
+            assert_eq!(serde_json::from_value::<super::CustomTypeKind>(serde_json::json!(label)).unwrap(), kind);
+        }
+    }
+
+    #[test]
+    fn blob_bindings_refuse_edited_previews_and_invalid_later_parameters() {
+        let previews = vec!["first reviewed save".to_string(), "second reviewed save".to_string()];
+        let mut bound = previews
+            .iter()
+            .map(|preview| super::BlobBoundStatement {
+                preview_sql: preview.clone(),
+                sql: "BEGIN UPDATE T SET B=?; END;".into(),
+                blob_parameters: vec!["00ff".into()],
+            })
+            .collect::<Vec<_>>();
+        assert!(super::validate_blob_bound_statements(&previews, &bound).is_ok());
+        bound[1].blob_parameters[0] = "xyz".into();
+        assert!(super::validate_blob_bound_statements(&previews, &bound).is_err());
+        bound[1].blob_parameters[0] = "00ff".into();
+        bound[1].preview_sql = "user edited SQL".into();
+        assert!(super::validate_blob_bound_statements(&previews, &bound).is_err());
+        assert!(super::validate_blob_bound_statements(&previews, &bound[..1]).is_err());
+    }
     use super::{
         is_opaque_aggregate_state_type, CompletionAssistantCandidate, CompletionAssistantCandidateKind, ObjectInfo,
         ObjectSource, ObjectSourceKind, QueryMessage, RoutineParameterMode, SpatialColumn, SpatialColumnBuilder,
@@ -1382,12 +2047,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn query_result_receives_deferred_cells_without_serializing_a_second_metadata_field() {
+        for original_bytes in [0, 67108864] {
+            let mut wire = serde_json::to_value(bigint_result_sample()).unwrap();
+            wire["large_value_cells"] = serde_json::json!([{
+                "row_index": 0, "column_index": 0, "original_bytes": original_bytes, "value_ref": "original-lob"
+            }]);
+            let result: super::QueryResult = serde_json::from_value(wire).unwrap();
+            assert_eq!(result.deferred_large_value_cells.len(), 1);
+            assert_eq!(result.deferred_large_value_cells[0].value_ref.as_deref(), Some("original-lob"));
+            assert_eq!(result.deferred_large_value_cells[0].original_bytes, original_bytes);
+            let serialized = serde_json::to_value(&result).unwrap();
+            assert!(serialized.get("large_value_cells").is_none());
+            assert!(serialized.get("deferred_large_value_cells").is_none());
+        }
+    }
+
     fn bigint_result_sample() -> super::QueryResult {
         super::QueryResult {
             columns: vec!["id".to_string()],
             column_types: vec!["bigint".to_string()],
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: Vec::new(),
+            raw_key_cells: Vec::new(),
             spatial_values: Vec::new(),
             rows: vec![vec![
                 serde_json::json!(1391198305898897409i64),
@@ -1408,6 +2092,24 @@ mod tests {
             elasticsearch_raw_body: None,
             messages: Vec::new(),
         }
+    }
+
+    #[test]
+    fn raw_key_cells_are_optional_and_preserve_javascript_integer_fidelity() {
+        let mut result = bigint_result_sample();
+        assert!(serde_json::to_value(&result).unwrap().get("raw_key_cells").is_none());
+        result.raw_key_cells = vec![super::OriginalKeyCell {
+            row_index: 0,
+            column_index: 0,
+            value: serde_json::json!(1391198305898897409i64),
+        }];
+        let wire = serde_json::to_value(&result).unwrap();
+        assert_eq!(wire["raw_key_cells"][0]["value"], "1391198305898897409");
+        let restored: super::QueryResult = serde_json::from_value(wire).unwrap();
+        assert_eq!(restored.raw_key_cells[0].value, "1391198305898897409");
+        let mut old_wire = serde_json::to_value(bigint_result_sample()).unwrap();
+        old_wire.as_object_mut().unwrap().remove("raw_key_cells");
+        assert!(serde_json::from_value::<super::QueryResult>(old_wire).unwrap().raw_key_cells.is_empty());
     }
 
     /// #7832: integers beyond JavaScript's ±(2^53 - 1) safe range must cross
@@ -1447,6 +2149,158 @@ mod tests {
         let wire = serde_json::to_string(&result).unwrap();
         let deserialized: super::QueryResult = serde_json::from_str(&wire).unwrap();
         assert_eq!(serde_json::to_value(&deserialized.rows).unwrap(), expected);
+    }
+
+    #[test]
+    fn query_result_preserves_precision_sensitive_exact_numeric_cells_for_js() {
+        for value in [
+            "9007199254740993.123456789012",
+            "-9007199254740993.123456789012",
+            "0.1234567890123456789012345",
+            "1.234567890123456789e30",
+            "12345678901234567",
+            "1e400",
+            "1e-400",
+        ] {
+            let mut result = bigint_result_sample();
+            result.columns = vec!["AMOUNT".to_string()];
+            result.column_types = vec!["NUMBER(38,12)".to_string()];
+            result.rows = vec![vec![serde_json::from_str(value).unwrap()]];
+            let rows_before = result.rows.clone();
+
+            let number_token = result.rows[0][0].as_number().unwrap().as_str();
+            let wire = serde_json::to_string(&result).unwrap();
+            let serialized: serde_json::Value = serde_json::from_str(&wire).unwrap();
+            assert_eq!(serialized["rows"][0][0], number_token, "{value}");
+            assert_eq!(result.rows, rows_before, "serialization must not mutate in-memory rows");
+
+            let decoded: super::QueryResult = serde_json::from_str(&wire).unwrap();
+            assert_eq!(serde_json::to_value(&decoded).unwrap()["rows"][0][0], serialized["rows"][0][0]);
+        }
+    }
+
+    #[test]
+    fn query_result_precision_wire_matches_shared_javascript_fixture() {
+        let mut result = bigint_result_sample();
+        result.columns = vec!["AMOUNT".to_string()];
+        result.column_types = vec!["NUMBER(38,12)".to_string()];
+        result.column_sortables.clear();
+        result.rows = vec![vec![serde_json::from_str("9007199254740993.123456789012").unwrap()]];
+
+        let serialized = serde_json::to_string(&result).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../apps/desktop/src/lib/__tests__/dataGrid/fixtures/exactDecimalQueryResult.json"
+        ))
+        .unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&serialized).unwrap(), expected);
+    }
+
+    #[test]
+    fn query_result_keeps_exact_decimals_as_numbers_when_binary64_decimal_roundtrip_is_safe() {
+        for value in [
+            "0.1",
+            "123.45",
+            "1.25e-7",
+            "1234567890123456.5",
+            "1234567890123456",
+            "123.4500",
+            "1.2345e2",
+            "1234567890123456.0",
+            "0e-400",
+        ] {
+            let mut result = bigint_result_sample();
+            result.columns = vec!["AMOUNT".to_string()];
+            result.column_types = vec!["DECIMAL(38,12)".to_string()];
+            result.rows = vec![vec![serde_json::from_str(value).unwrap()]];
+
+            let serialized = serde_json::to_value(&result).unwrap();
+            assert!(serialized["rows"][0][0].is_number(), "{value}: {serialized}");
+        }
+
+        let mut result = bigint_result_sample();
+        result.column_types = vec!["DECIMAL".to_string()];
+        result.rows = vec![vec![serde_json::from_str("10000000000000000").unwrap()]];
+        assert_eq!(serde_json::to_value(result).unwrap()["rows"][0][0], "10000000000000000");
+    }
+
+    #[test]
+    fn query_result_exact_decimal_guard_is_type_scoped_and_tolerates_missing_metadata() {
+        let original = "9007199254740993.123456789012";
+        for column_type in [
+            "decimal",
+            "numeric(38,12)",
+            "number (38, 12)",
+            "dec",
+            "fixed",
+            "money",
+            "smallmoney",
+            "bigdecimal",
+            "bignumeric",
+            "big_numeric",
+            "decimal(38,12) unsigned",
+        ] {
+            let mut result = bigint_result_sample();
+            result.column_types = vec![column_type.to_string()];
+            result.rows = vec![vec![serde_json::from_str(original).unwrap()]];
+            assert_eq!(serde_json::to_value(&result).unwrap()["rows"][0][0], original, "{column_type}");
+        }
+
+        for column_type in [
+            "FLOAT",
+            "DOUBLE PRECISION",
+            "REAL",
+            "BINARY_FLOAT",
+            "BINARY_DOUBLE",
+            "NUMBER[]",
+            "JSON",
+            "my_numeric_domain",
+        ] {
+            let mut result = bigint_result_sample();
+            result.column_types = vec![column_type.to_string()];
+            result.rows = vec![vec![serde_json::from_str(original).unwrap()]];
+
+            let serialized = serde_json::to_value(&result).unwrap();
+            assert!(serialized["rows"][0][0].is_number(), "{column_type}");
+        }
+
+        for column_types in [Vec::new(), vec!["NUMBER".to_string()]] {
+            let mut result = bigint_result_sample();
+            result.columns = vec!["AMOUNT".into(), "NOTE".into()];
+            result.column_types = column_types;
+            result.rows = vec![
+                vec![serde_json::from_str(original).unwrap(), serde_json::json!("text")],
+                vec![serde_json::Value::Null, serde_json::json!("unchanged")],
+            ];
+
+            let serialized = serde_json::to_value(&result).unwrap();
+            let exact_cell_expected = if result.column_types.is_empty() {
+                serde_json::from_str::<serde_json::Value>(original).unwrap()
+            } else {
+                serde_json::json!(original)
+            };
+            assert_eq!(serialized["rows"][0][0], exact_cell_expected);
+            assert_eq!(serialized["rows"][0][1], "text");
+            assert_eq!(serialized["rows"][1][0], serde_json::Value::Null);
+        }
+
+        let mut result = bigint_result_sample();
+        result.column_types = vec!["NUMBER".to_string()];
+        result.rows = vec![vec![serde_json::json!(original)]];
+        assert_eq!(serde_json::to_value(result).unwrap()["rows"][0][0], original);
+    }
+
+    #[test]
+    fn query_result_uses_column_type_only_for_top_level_cells() {
+        let mut result = bigint_result_sample();
+        result.column_types = vec!["NUMBER".to_string()];
+        result.rows = vec![vec![serde_json::from_str(
+            r#"{"decimal":9007199254740993.123456789012,"id":2026081810175800100000000000}"#,
+        )
+        .unwrap()]];
+
+        let serialized = serde_json::to_value(&result).unwrap();
+        assert!(serialized["rows"][0][0]["decimal"].is_number());
+        assert_eq!(serialized["rows"][0][0]["id"], "2026081810175800100000000000");
     }
 
     #[test]
@@ -1566,5 +2420,51 @@ mod tests {
         let deserialized: super::QueryResult =
             serde_json::from_value(serde_json::to_value(bigint_result_sample()).unwrap()).unwrap();
         assert_eq!(deserialized.rows[0][0], serde_json::json!("1391198305898897409"));
+    }
+
+    /// Agent drivers may serialize empty native slices as JSON `null` (seen on
+    /// Vastbase `UPDATE ... FROM`, #11668). A present null must mean "empty",
+    /// not a contract violation.
+    #[test]
+    fn query_result_treats_null_vectors_from_agents_as_empty() {
+        let deserialized: super::QueryResult = serde_json::from_value(serde_json::json!({
+            "columns": null,
+            "column_types": null,
+            "column_sortables": null,
+            "spatial_columns": null,
+            "spatial_values": null,
+            "rows": null,
+            "affected_rows": 3,
+            "execution_time_ms": 7,
+            "messages": null
+        }))
+        .expect("null vectors should deserialize as empty");
+
+        assert!(deserialized.columns.is_empty());
+        assert!(deserialized.column_types.is_empty());
+        assert!(deserialized.column_sortables.is_empty());
+        assert!(deserialized.spatial_columns.is_empty());
+        assert!(deserialized.spatial_values.is_empty());
+        assert!(deserialized.rows.is_empty());
+        assert!(deserialized.messages.is_empty());
+        assert_eq!(deserialized.affected_rows, 3);
+        assert_eq!(deserialized.execution_time_ms, 7);
+    }
+
+    #[test]
+    fn query_result_still_deserializes_real_columns_and_rows() {
+        let deserialized: super::QueryResult = serde_json::from_value(serde_json::json!({
+            "columns": ["id", "name"],
+            "column_types": ["int4", "text"],
+            "column_sortables": [true, true],
+            "rows": [[1, "a"]],
+            "affected_rows": 1,
+            "execution_time_ms": 2
+        }))
+        .unwrap();
+
+        assert_eq!(deserialized.columns, ["id", "name"]);
+        assert_eq!(deserialized.rows.len(), 1);
+        assert_eq!(deserialized.rows[0][1], serde_json::json!("a"));
     }
 }

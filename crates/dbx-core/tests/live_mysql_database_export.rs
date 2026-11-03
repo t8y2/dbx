@@ -78,6 +78,9 @@ async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
                 selected_tables: Some(vec![SqlFileTable { database: Some(database.clone()), name: "chosen".into() }]),
                 part_cooldown_ms: 0,
                 skip_relational_constraints: false,
+                failure_log_enabled: true,
+                resolve_includes: false,
+                encoding: Default::default(),
             };
             execute_sql_file_path(&state, &request, &path, CancellationToken::new(), std::time::Instant::now(), |_| {}).await?;
             let rows = execute_sql_statement(&state, &connection_id, &database, "SELECT id, LENGTH(body) FROM chosen", None, None).await?;
@@ -95,6 +98,9 @@ async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
             selected_tables: Some(vec![SqlFileTable { database: None, name: "chosen".into() }]),
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
+            failure_log_enabled: true,
+            resolve_includes: false,
+            encoding: Default::default(),
         };
         let mut events = Vec::new();
         assert!(execute_sql_file_path(&state, &request, &path, CancellationToken::new(), std::time::Instant::now(), |event| events.push(event)).await.is_err());
@@ -150,6 +156,7 @@ async fn live_mysql_database_export_restores_dependent_views() {
         include_create_database: true,
         drop_table_if_exists: true,
         omit_auto_increment: false,
+        omit_database_qualifier: false,
         preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,
@@ -183,6 +190,9 @@ async fn live_mysql_database_export_restores_dependent_views() {
             selected_tables: None,
             part_cooldown_ms: 0,
             skip_relational_constraints: false,
+            failure_log_enabled: true,
+            resolve_includes: false,
+            encoding: Default::default(),
         };
         execute_sql_file_path(
             &state,
@@ -294,6 +304,7 @@ async fn run_live_mysql_database_export_handles_many_tables_including_empty_tabl
                 include_create_database: false,
                 drop_table_if_exists: false,
                 omit_auto_increment: false,
+                omit_database_qualifier: false,
                 preserve_original_language: false,
                 fail_on_error: false,
                 prevent_overwrite: false,
@@ -392,6 +403,7 @@ async fn live_mysql_database_export_creates_missing_destination_directory() {
         include_create_database: true,
         drop_table_if_exists: true,
         omit_auto_increment: false,
+        omit_database_qualifier: false,
         preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,
@@ -472,6 +484,7 @@ async fn live_mysql_database_export_refuses_to_recreate_a_destination_that_disap
         include_create_database: true,
         drop_table_if_exists: true,
         omit_auto_increment: false,
+        omit_database_qualifier: false,
         preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,
@@ -563,6 +576,7 @@ async fn live_mysql_database_export_refuses_a_destination_that_vanished_before_i
         include_create_database: true,
         drop_table_if_exists: true,
         omit_auto_increment: false,
+        omit_database_qualifier: false,
         preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,

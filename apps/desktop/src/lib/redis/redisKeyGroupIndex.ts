@@ -104,7 +104,7 @@ export class RedisKeyGroupIndex {
   }
 
   async append(keys: readonly RedisKeyInfo[], work: GroupWork): Promise<boolean> {
-    for (let offset = this.consumed; offset < keys.length; ) {
+    for (let offset = this.consumed; offset < keys.length;) {
       if (!work.current()) return false;
       const end = Math.min(offset + CHUNK, keys.length);
       for (; offset < end; offset++) {

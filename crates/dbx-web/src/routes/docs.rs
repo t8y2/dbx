@@ -194,8 +194,9 @@ pub async fn export_html(Json(request): Json<DocsExportRequest>) -> Result<Json<
 mod tests {
     use super::*;
     use dbx_core::models::connection::{
-        default_connect_timeout_secs, default_idle_timeout_secs, default_keepalive_interval_secs,
-        default_query_timeout_secs, DatabaseType,
+        default_connect_timeout_secs, default_idle_disconnect_secs, default_idle_timeout_secs,
+        default_keepalive_interval_secs, default_manual_transaction_timeout_secs, default_query_timeout_secs,
+        DatabaseType,
     };
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
@@ -225,6 +226,9 @@ mod tests {
             visible_schemas: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
+            show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -232,6 +236,8 @@ mod tests {
             connect_timeout_secs: default_connect_timeout_secs(),
             query_timeout_secs: default_query_timeout_secs(),
             idle_timeout_secs: default_idle_timeout_secs(),
+            manual_transaction_timeout_secs: default_manual_transaction_timeout_secs(),
+            idle_disconnect_secs: default_idle_disconnect_secs(),
             keepalive_interval_secs: default_keepalive_interval_secs(),
             ssl: false,
             ca_cert_path: String::new(),
@@ -270,6 +276,7 @@ mod tests {
             read_only: false,
             is_production: false,
             production_databases: vec![],
+            production_badge_scope: None,
             database_info: None,
         }
     }

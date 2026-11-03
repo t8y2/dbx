@@ -4,34 +4,21 @@ import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const packageDirectory = resolve(process.argv[2] ?? "/tmp/dbx-pack-check");
-const expectedPackages = [
-  "@dbx-app/cli",
-  "@dbx-app/mcp-server",
-  "@dbx-app/plugin-cli",
-];
+const expectedPackages = ["@dbx-app/cli", "@dbx-app/mcp-server", "@dbx-app/plugin-cli"];
 const tarballs = readdirSync(packageDirectory)
   .filter((file) => file.endsWith(".tgz"))
   .map((file) => join(packageDirectory, file))
   .sort();
 
 if (tarballs.length !== expectedPackages.length) {
-  throw new Error(
-    `Expected ${expectedPackages.length} package tarballs, found ${tarballs.length}: ${tarballs.map(basename).join(", ")}`,
-  );
+  throw new Error(`Expected ${expectedPackages.length} package tarballs, found ${tarballs.length}: ${tarballs.map(basename).join(", ")}`);
 }
 
 const installDirectory = mkdtempSync(join(tmpdir(), "dbx-package-install-"));
-writeFileSync(
-  join(installDirectory, "package.json"),
-  `${JSON.stringify({ name: "dbx-package-install-check", private: true }, null, 2)}\n`,
-);
+writeFileSync(join(installDirectory, "package.json"), `${JSON.stringify({ name: "dbx-package-install-check", private: true }, null, 2)}\n`);
 
 // Installing every release tarball together verifies workspace dependencies are publishable and semver-compatible.
-const install = spawnSync(
-  "npm",
-  ["install", "--ignore-scripts", "--no-audit", "--no-fund", ...tarballs],
-  { cwd: installDirectory, stdio: "inherit" },
-);
+const install = spawnSync("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", ...tarballs], { cwd: installDirectory, stdio: "inherit" });
 if (install.status !== 0) {
   process.exit(install.status ?? 1);
 }

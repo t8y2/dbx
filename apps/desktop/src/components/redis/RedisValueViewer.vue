@@ -5,7 +5,7 @@ import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
 import { DynamicScroller, DynamicScrollerItem, RecycleScroller } from "vue-virtual-scroller";
-import { Check, ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, X, FileArchive, Download } from "@lucide/vue";
+import { ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, Pause, X, FileArchive, Download } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -14,11 +14,18 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import DateTimePicker from "@/components/ui/date-time-picker/DateTimePicker.vue";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import AutoRefreshControl from "@/components/common/AutoRefreshControl.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+import { redisDeleteValueItemPreview } from "@/lib/redis/redisCommandPreview";
+import { jsonTreeSearchParts, type JsonTreeSearchMatch } from "@/lib/common/jsonTreeSearch";
+import { createTextContentSearchPattern, type TextContentMatch } from "@/lib/common/textContentSearch";
+import { startRedisContentSearch } from "@/lib/redis/redisContentSearchJob";
 import JsonTree from "@/components/common/JsonTree.vue";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import * as api from "@/lib/backend/api";
+import { getActivePinia } from "pinia";
+import { useConnectionStore } from "@/stores/connectionStore";
 import type { RedisBlob, RedisHashItem, RedisKeyInfo, RedisListItem, RedisSetItem, RedisStreamConsumer, RedisStreamEntry, RedisStreamGroup, RedisStreamPendingEntry, RedisValue, RedisZsetItem } from "@/lib/backend/api";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
@@ -40,7 +47,6 @@ import {
   parseRedisJsonDetail,
   REDIS_VALUE_FORMAT_DISPLAY_ORDER,
   redisBlobText,
-  redisCollectionPageItems,
   redisJsonValueText,
   normalizeRedisJsonDraft,
   redisClipboardSafeText,
@@ -64,15 +70,18 @@ import {
   type RedisValueFormat,
 } from "@/lib/redis/redisValuePresentation";
 import { decompressRedisValue, decodeBase64RedisValue, decodePickle, decodeProtobuf, isGzipMagic, type RedisDecompressAlgorithm } from "@/lib/redis/codec";
-import { canFullHighlightRedisText, findRedisTextMatches, nextRedisSearchMatchIndex, REDIS_VALUE_SEARCH_MATCH_LIMIT, renderRedisTextSearchHtml, redisValueSearchStatus } from "@/lib/redis/redisValueSearch";
+import { nextRedisSearchMatchIndex, REDIS_VALUE_SEARCH_MATCH_LIMIT, redisValueSearchStatus } from "@/lib/redis/redisValueSearch";
 import TextContentSearchBar from "@/components/common/TextContentSearchBar.vue";
 import RedisHorizontalScrollbar from "@/components/redis/RedisHorizontalScrollbar.vue";
+import RedisPluginCodecView from "@/components/redis/RedisPluginCodecView.vue";
 import { decodeJsonUnicodeEscapes, formatJsonSource, mapDisplayToRaw } from "@/lib/common/safeJsonFormat";
 import { unixSecondsToCalendarDateTime } from "@/components/ui/date-time-picker/dateTimePicker";
 import { applyRedisExpiryPolicy, type RedisExpiryMode, redisExpiryModeForTtl, validateRedisExpiry } from "@/lib/redis/redisExpiry";
+import { redisValuePreviewLimitBytes } from "@/lib/redis/redisValuePreviewLimit";
 import { redisKeyRawToText, redisKeyTextToDisplay, redisKeyTextToRaw } from "@/lib/redis/redisCommandSession";
 import { formatBytes } from "@/lib/database/serverMetrics";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { emptyRedisCollectionSearchState, RedisCollectionSearchController, type RedisCollectionScope } from "@/lib/redis/redisCollectionSearchController";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
@@ -85,6 +94,7 @@ const props = defineProps<{
   keyDisplay: string;
   keyRaw: string;
   metadata?: RedisKeyInfo | null;
+  previewLimitKiB?: number;
 }>();
 
 const redisExpiryTransport = {
@@ -107,6 +117,8 @@ const REDIS_COLLECTION_ROW_HEIGHT = 32;
 const REDIS_STREAM_MIN_ROW_HEIGHT = 96;
 const data = ref<RedisValue | null>(null);
 const loading = ref(false);
+/** The last failed read. Without it a failed first read leaves the panel empty. */
+const loadError = ref("");
 const downloadingLargeValue = ref(false);
 const loadingMore = ref(false);
 const showRenameKeyDialog = ref(false);
@@ -116,6 +128,7 @@ const renameKeyError = ref("");
 const renameKeyInitialName = ref("");
 const renameKeyInitialRaw = ref("");
 let loadRequestId = 0;
+let loadedPreviewLimitBytes: number | undefined;
 const streamTab = ref<"entries" | "groups">("entries");
 const streamEntries = ref<RedisStreamEntry[]>([]);
 const streamEntriesCursor = ref<string | undefined>();
@@ -157,6 +170,8 @@ const savingJson = ref(false);
 const newField = ref("");
 const newValue = ref("");
 const newScore = ref("");
+// Queue side for pushing into a list: "right" (RPUSH, historical default) or "left" (LPUSH).
+const listPushSide = ref<"left" | "right">("right");
 const showDeleteConfirm = ref(false);
 const showMemberDetail = ref(false);
 const editingTtl = ref(false);
@@ -200,6 +215,9 @@ const stringValueView = ref<RedisValueFormat>(readStoredRedisValueFormat() ?? "u
 const memberValueView = ref<RedisValueFormat>(readStoredRedisValueFormat() ?? "utf8");
 const stringValueCodec = ref<RedisValueCodec>(readStoredRedisValueCodec() ?? "none");
 const memberValueCodec = ref<RedisValueCodec>(readStoredRedisValueCodec() ?? "none");
+const stringPluginCodecView = ref(false);
+const memberPluginCodecView = ref(false);
+const pluginCodecContext = computed(() => ({ db: props.db, keyRaw: props.keyRaw, redisType: data.value?.data.kind ?? "string" }));
 const redisJsonWordWrap = ref(readRedisJsonWordWrap());
 const redisJsonUnicodeMode = ref(readRedisJsonUnicodeMode());
 const redisJsonDecoded = computed(() => redisJsonUnicodeMode.value === "decoded");
@@ -407,21 +425,36 @@ const zsetSortDir = ref<"asc" | "desc">("asc");
  */
 const valueSearchOpen = ref(false);
 const valueSearchQuery = ref("");
+const valueReplaceText = ref("");
+const valueSearchBusy = ref(false);
+const valueSearchFailed = ref(false);
+const valueSearchCaseSensitive = ref(false);
+const valueSearchUseRegex = ref(false);
+const valueSearchOptions = computed(() => ({ caseSensitive: valueSearchCaseSensitive.value, useRegex: valueSearchUseRegex.value }));
+const valueSearchError = computed(() => (valueSearchUseRegex.value && valueSearchQuery.value && !createTextContentSearchPattern(valueSearchQuery.value, valueSearchOptions.value) ? t("dataGenerate.invalidRegex") : valueSearchFailed.value ? t("editor.search.searchFailed") : ""));
 const valueSearchMatchIndex = ref(0);
 const valueSearchHasNavigated = ref(false);
 const collectionSearchQuery = ref("");
 const activeCollectionSearchQuery = ref("");
 const searchLoading = ref(false);
+const collectionSearchState = shallowRef(emptyRedisCollectionSearchState());
+let collectionBrowseSnapshot: { items: RedisCollectionItem[]; cursor: number | undefined } | undefined;
+let collectionSearchIntentRevision = 0;
 const valueSearchBarRef = ref<{ focusInput: (select?: boolean) => void } | null>(null);
-type JsonEditorHandle = { openSearch: () => boolean; selectRange?: (from: number, to: number, options?: { focus?: boolean }) => boolean };
+type JsonEditorHandle = { replaceRanges?: (text: string, changes: { from: number; to: number; insert: string }[]) => boolean; hasFocus?: () => boolean; openSearch: () => boolean; selectRange?: (from: number, to: number, options?: { focus?: boolean }) => boolean };
 const stringJsonEditorRef = ref<JsonEditorHandle | null>(null);
 const redisJsonEditorRef = ref<JsonEditorHandle | null>(null);
 const memberJsonEditorRef = ref<JsonEditorHandle | null>(null);
-const stringTextareaRef = ref<HTMLTextAreaElement | null>(null);
-const memberTextareaRef = ref<HTMLTextAreaElement | null>(null);
+const stringTextEditorRef = ref<JsonEditorHandle | null>(null);
+const memberTextEditorRef = ref<JsonEditorHandle | null>(null);
+const searchPreviewRef = ref<JsonEditorHandle | null>(null);
+type SearchTreeHandle = { revealSearchMatch: () => Promise<void> };
+const stringSearchTreeRef = ref<SearchTreeHandle | null>(null);
+const memberSearchTreeRef = ref<SearchTreeHandle | null>(null);
 const valueViewerSearchActive = ref(false);
 
 function toggleHashSort(column: "field" | "value") {
+  stopCollectionSearch();
   if (hashSortBy.value === column && hashSortDir.value === "desc") {
     hashSortBy.value = null;
   } else if (hashSortBy.value === column) {
@@ -437,7 +470,7 @@ async function toggleZsetSort() {
   const previousDirection = zsetSortDir.value;
   zsetSortDir.value = previousDirection === "asc" ? "desc" : "asc";
   try {
-    await reloadPreservingCollectionSearch({ notifyParent: false });
+    if (!(await reloadPreservingCollectionSearch({ notifyParent: false }))) zsetSortDir.value = previousDirection;
   } catch (error) {
     zsetSortDir.value = previousDirection;
     toast(errorMessage(error), 3000);
@@ -613,7 +646,7 @@ const memberDecodedText = computed<string | null>(() => {
 
 /** Raw fallback shown while a decompress codec fails: keep the original content visible, never an error string in its place. */
 const decompressedRawFallbackText = computed(() => {
-  if (isDecompressCodec(stringValueCodec.value) && stringValueDetail.value) {
+  if (!showMemberDetail.value && isDecompressCodec(stringValueCodec.value) && stringValueDetail.value) {
     return detailTextForFormat(stringValueDetail.value, stringValueDetail.value.defaultFormat);
   }
   if (isDecompressCodec(memberValueCodec.value) && selectedMemberDetail.value) {
@@ -630,7 +663,7 @@ const isBinaryStringValue = computed(() => Boolean(stringValueDetail.value?.bina
 const selectedMemberCanEdit = computed(() => selectedMemberContext.value?.canEdit ?? false);
 // kvrocks 位图不是字符串，写回会成为字符串，因此位图详情只读
 const canEditCurrentStringFormat = computed(() => !isBitmapKind.value && !isStringValueTruncated.value && Boolean(stringValueDetail.value?.editable) && (stringValueView.value === "utf8" || stringValueView.value === "json"));
-const showStringEditActions = computed(() => canEditCurrentStringFormat.value);
+const showStringEditActions = computed(() => !stringPluginCodecView.value && canEditCurrentStringFormat.value);
 const originalStringEditValue = computed(() => (stringBlob.value ? rawRedisValueText(stringBlob.value) : ""));
 const stringJsonRawBaseline = ref("");
 const stringJsonDraftBaseline = ref("");
@@ -831,23 +864,114 @@ const zsetRows = computed<RedisCollectionRow<RedisZsetItem>[]>(() =>
   })),
 );
 
-const usesJsonEditorForMain = computed(() => (isStringLikeKind.value && stringValueView.value === "json" && Boolean(stringValueDetail.value?.json)) || redisKind.value === "json");
-const usesJsonEditorForMember = computed(() => isEditingHashJson.value);
 /** True when Ctrl+F content find applies (STRING, RedisJSON, or open member detail). */
-const valueSearchSupported = computed(() => showMemberDetail.value || isStringLikeKind.value || redisKind.value === "json");
-const contentSearchText = computed(() => {
-  if (showMemberDetail.value) {
-    if (isEditingMember.value || isEditingHashJson.value) return memberEditValue.value;
-    return memberDecodedText.value ?? detailTextForFormat(selectedMemberDetail.value, memberValueView.value);
-  }
-  if (redisKind.value === "json") return editValue.value;
-  if (!isStringLikeKind.value || !stringValueDetail.value) return "";
-  if (stringValueCodec.value !== "none") return stringDecodedText.value ?? "";
-  if (stringValueView.value === "json" && stringValueDetail.value.json) return editValue.value;
-  if (stringValueView.value === "utf8" && canEditCurrentStringFormat.value) return editValue.value;
-  return detailTextForFormat(stringValueDetail.value, stringValueView.value);
+const valueSearchSupported = computed(() => !(showMemberDetail.value ? memberPluginCodecView.value : stringPluginCodecView.value) && (showMemberDetail.value || isStringLikeKind.value || redisKind.value === "json"));
+// Resolve exactly the surface rendered by the active codec/view, including fallbacks.
+const activeSearchTree = computed(() => {
+  const member = showMemberDetail.value;
+  if (member && (isEditingMember.value || isEditingHashJson.value)) return null;
+  const view = member ? memberValueView.value : stringValueView.value;
+  const codec = member ? memberValueCodec.value : stringValueCodec.value;
+  const detail = member ? selectedMemberDetail.value : stringValueDetail.value;
+  if (view !== "json" || !detail || (!member && codec === "none")) return null;
+  if (member && codec === "none" && detail.json) return detail.json;
+  const structured = member ? activeStructuredMemberDetail.value : activeStructuredStringDetail.value;
+  if (structured) return structured;
+  const base64 = member ? memberBase64Detail.value : stringBase64Detail.value;
+  if (codec === "base64" && base64?.json) return base64.json;
+  if (isDecompressCodec(codec) && decompressedState.value.status === "success") return decompressedJsonDetail.value;
+  return null;
 });
-const contentSearchMatches = computed(() => findRedisTextMatches(contentSearchText.value, valueSearchQuery.value));
+const displayedSearchText = computed(() => {
+  const member = showMemberDetail.value;
+  if (member && (isEditingMember.value || isEditingHashJson.value)) return memberEditValue.value;
+  if (!member && redisKind.value === "json") return editValue.value;
+  const detail = member ? selectedMemberDetail.value : stringValueDetail.value;
+  if (!detail) return "";
+  const view = member ? memberValueView.value : stringValueView.value;
+  const codec = member ? memberValueCodec.value : stringValueCodec.value;
+  const mismatch = member ? memberCodecMismatch.value : stringCodecMismatch.value;
+  // Codec mismatch takes precedence over the view controls in the renderer.
+  if (mismatch) return detailTextForFormat(detail, detail.defaultFormat);
+  if (view === "hex" || view === "base64") return detailTextForFormat(detail, view);
+  if (isDecompressCodec(codec)) {
+    if (decompressedState.value.status === "loading") return "";
+    if (decompressedState.value.status !== "success") return detailTextForFormat(detail, detail.defaultFormat);
+  }
+  const decoded = member ? memberDecodedText.value : stringDecodedText.value;
+  if (decoded !== null) return decoded;
+  if (!member && codec === "none" && ((view === "json" && detail.json) || (view === "utf8" && canEditCurrentStringFormat.value))) return editValue.value;
+  return detailTextForFormat(detail, view);
+});
+// CodeMirror normalizes line endings; offsets must use the same document representation.
+const contentSearchText = computed(() => displayedSearchText.value.replace(/\r\n?/g, "\n"));
+const contentSearchMatches = shallowRef<(TextContentMatch | JsonTreeSearchMatch)[]>([]);
+const treeSearchMatches = computed(() => (activeSearchTree.value ? (contentSearchMatches.value as JsonTreeSearchMatch[]) : []));
+let contentSearchJob: ReturnType<typeof startRedisContentSearch> | undefined;
+let contentSearchRevision = 0;
+let nextReplacementOffset: number | undefined;
+watch(
+  [contentSearchText, activeSearchTree, valueSearchQuery, valueSearchCaseSensitive, valueSearchUseRegex, valueSearchOpen],
+  async () => {
+    const revision = ++contentSearchRevision;
+    contentSearchJob?.cancel();
+    contentSearchMatches.value = [];
+    valueSearchFailed.value = false;
+    valueSearchBusy.value = false;
+    if (!valueSearchOpen.value || !valueSearchQuery.value || valueSearchError.value) return;
+    valueSearchBusy.value = true;
+    contentSearchJob = startRedisContentSearch({ text: contentSearchText.value, treeParts: activeSearchTree.value ? [...jsonTreeSearchParts(activeSearchTree.value.value)] : undefined, query: valueSearchQuery.value, options: valueSearchOptions.value });
+    const result = await contentSearchJob.result;
+    if (revision !== contentSearchRevision || !result) return;
+    valueSearchBusy.value = false;
+    valueSearchFailed.value = Boolean(result.error);
+    contentSearchMatches.value = result.matches;
+    if (nextReplacementOffset !== undefined) {
+      const nextIndex = result.matches.findIndex((match) => match.start >= nextReplacementOffset!);
+      valueSearchMatchIndex.value = Math.max(0, nextIndex);
+      nextReplacementOffset = undefined;
+    }
+    if (!activeContentEditor()?.hasFocus?.()) void scrollContentSearchMatchIntoView();
+  },
+  { flush: "sync" },
+);
+onBeforeUnmount(() => {
+  contentSearchRevision++;
+  contentSearchJob?.cancel();
+});
+const valueCanReplace = computed(() => {
+  if (activeSearchTree.value) return false;
+  if (showMemberDetail.value) return (isEditingMember.value || isEditingHashJson.value) && !savingMember.value;
+  if (redisKind.value === "json") return !savingJson.value;
+  return stringValueCodec.value === "none" && canEditCurrentStringFormat.value && !savingString.value && (stringValueView.value === "utf8" || stringValueView.value === "json");
+});
+async function replaceValueMatches(all: boolean) {
+  if (!valueCanReplace.value || valueSearchBusy.value || !contentSearchMatches.value.length) return;
+  const revision = ++contentSearchRevision;
+  const editor = activeContentEditor();
+  const text = contentSearchText.value;
+  contentSearchJob?.cancel();
+  valueSearchBusy.value = true;
+  contentSearchJob = startRedisContentSearch({ text, query: valueSearchQuery.value, options: valueSearchOptions.value, replacement: valueReplaceText.value, range: all ? undefined : contentSearchMatches.value[contentSearchActiveIndex.value] });
+  const result = await contentSearchJob.result;
+  if (revision !== contentSearchRevision || !result) return;
+  valueSearchBusy.value = false;
+  valueSearchFailed.value = Boolean(result.error);
+  if (!result.error && result.changes?.length && valueCanReplace.value && editor === activeContentEditor() && text === contentSearchText.value) {
+    const change = result.changes[0];
+    nextReplacementOffset = all ? undefined : change.from + change.insert.replace(/\r\n?/g, "\n").length;
+    if (!editor?.replaceRanges?.(text, result.changes)) {
+      nextReplacementOffset = undefined;
+      return;
+    }
+    // An unchanged value does not trigger the search watcher. Advance using
+    // the existing matches rather than leaving navigation pending indefinitely.
+    if (contentSearchText.value === text) {
+      nextReplacementOffset = undefined;
+      if (!all) moveContentSearchMatch(1);
+    }
+  }
+}
 const contentSearchMatchLimited = computed(() => contentSearchMatches.value.length >= REDIS_VALUE_SEARCH_MATCH_LIMIT);
 const contentSearchActiveIndex = computed(() => {
   if (contentSearchMatches.value.length === 0) return 0;
@@ -855,16 +979,22 @@ const contentSearchActiveIndex = computed(() => {
 });
 const valueSearchStatus = computed(() => redisValueSearchStatus(contentSearchActiveIndex.value, contentSearchMatches.value.length, contentSearchMatchLimited.value));
 const valueSearchMatchCount = computed(() => contentSearchMatches.value.length);
-const contentSearchHighlightedHtml = computed(() => {
-  if (!valueSearchOpen.value || !valueSearchQuery.value) return "";
-  return renderRedisTextSearchHtml(contentSearchText.value, valueSearchQuery.value, contentSearchActiveIndex.value);
+const contentSearchHighlights = computed(() => (valueSearchOpen.value && !activeSearchTree.value ? contentSearchMatches.value.map((match, index) => ({ from: match.start, to: match.end, active: index === contentSearchActiveIndex.value })) : []));
+const stringSearchHighlights = computed(() => (showMemberDetail.value ? [] : contentSearchHighlights.value));
+const memberSearchHighlights = computed(() => (showMemberDetail.value ? contentSearchHighlights.value : []));
+const showSearchPreview = computed(() => {
+  const codec = showMemberDetail.value ? memberValueCodec.value : stringValueCodec.value;
+  const view = showMemberDetail.value ? memberValueView.value : stringValueView.value;
+  const decoding = isDecompressCodec(codec) && decompressedState.value.status === "loading" && view !== "hex" && view !== "base64";
+  return valueSearchOpen.value && Boolean(valueSearchQuery.value) && !activeSearchTree.value && !decoding;
 });
-const canHighlightContentSearch = computed(() => valueSearchOpen.value && Boolean(valueSearchQuery.value) && canFullHighlightRedisText(contentSearchText.value.length));
-const canHighlightStringSurface = computed(() => canHighlightContentSearch.value && !showMemberDetail.value);
-const canHighlightMemberSurface = computed(() => canHighlightContentSearch.value && showMemberDetail.value);
+const searchPreviewNotice = computed(() => {
+  if (showMemberDetail.value ? memberCodecMismatch.value : stringCodecMismatch.value) return t("redis.codecMismatch");
+  const codec = showMemberDetail.value ? memberValueCodec.value : stringValueCodec.value;
+  const view = showMemberDetail.value ? memberValueView.value : stringValueView.value;
+  return isDecompressCodec(codec) && view !== "hex" && view !== "base64" ? decompressedFailureMessage.value : "";
+});
 
-let collectionSearchTimer: ReturnType<typeof setTimeout> | null = null;
-let collectionSearchRequestId = 0;
 let hashResizeStartX = 0;
 let hashResizeStartWidth = 0;
 let zsetResizeStartX = 0;
@@ -876,7 +1006,10 @@ function shouldPauseAutoValueRefresh(): boolean {
   return showMemberDetail.value || editingZsetMemberKey.value !== null || showHashFieldTtlDialog.value || valueSearchOpen.value || Boolean(collectionSearchQuery.value.trim()) || Boolean(activeCollectionSearchQuery.value) || searchLoading.value || loadingMore.value || hasExpandedCollectionPage;
 }
 
-type PendingDelete = { kind: "key" } | { kind: "hash"; field: string } | { kind: "list"; index: number } | { kind: "set"; member: string } | { kind: "zset"; member: string };
+const connectionStore = getActivePinia() ? useConnectionStore() : undefined;
+const isClusterMode = computed(() => connectionStore?.getConfig(props.connectionId)?.redis_connection_mode === "cluster");
+
+type PendingDelete = { kind: "key" } | { kind: "hash"; field: RedisBlob | string } | { kind: "list"; index: number } | { kind: "set"; member: RedisBlob | string } | { kind: "zset"; member: RedisBlob | string };
 const pendingDelete = ref<PendingDelete | null>(null);
 
 type RedisMemberContext =
@@ -1194,53 +1327,103 @@ function collectionCountLabel(kind: "items" | "fields" | "members", loaded: numb
 /** True for the collection kinds whose toolbar offers a server-filtered member search. */
 const collectionSearchSupported = computed(() => redisKind.value === "hash" || redisKind.value === "list" || redisKind.value === "set" || redisKind.value === "zset");
 
-function onCollectionSearchInput() {
-  if (collectionSearchTimer) clearTimeout(collectionSearchTimer);
-  collectionSearchTimer = setTimeout(() => void onCollectionSearch(), 400);
+const collectionSearchController = new RedisCollectionSearchController({
+  fetchPage: ({ scope, cursor, query }) => api.redisLoadMore(scope.connectionId, scope.db, scope.keyRaw, scope.kind, cursor, 200, query || undefined, scope.sortDirection),
+  changed: (state) => {
+    collectionSearchState.value = state;
+    activeCollectionSearchQuery.value = state.query;
+    searchLoading.value = Boolean(state.query) && state.status === "searching";
+    loadingMore.value = !state.query && state.status === "searching";
+    if (state.status !== "idle") {
+      collectionItems.value = state.items;
+      scanCursor.value = state.cursor ?? undefined;
+    }
+  },
+});
+
+function collectionScope(): RedisCollectionScope | undefined {
+  const kind = redisKind.value;
+  if (kind !== "hash" && kind !== "list" && kind !== "set" && kind !== "zset") return;
+  return { connectionId: props.connectionId, db: props.db, keyRaw: props.keyRaw, kind, sortDirection: kind === "zset" ? zsetSortDir.value : undefined };
+}
+
+const collectionSearchStatusText = computed(() => {
+  const state = collectionSearchState.value;
+  if (state.status === "failed") return t("redis.collectionSearchFailed", { error: errorMessage(state.error) });
+  if (state.pauseReason === "stalled") return t("redis.collectionSearchStalled");
+  if (state.status === "complete") return t(state.items.length ? "redis.collectionSearchComplete" : "redis.collectionSearchEmpty");
+  if (state.status === "partial") return t("redis.collectionSearchPartial");
+  if (state.pauseReason === "stopped") return t("redis.collectionSearchStopped");
+  if (state.status === "paused") return t("redis.collectionSearchPaused");
+  return t("redis.collectionSearching");
+});
+
+const collectionSearchPlaceholder = computed(() => t(redisKind.value === "hash" ? "redis.searchFields" : redisKind.value === "list" ? "redis.searchItems" : "redis.searchMembers"));
+const canContinueCollectionSearch = computed(() => Boolean(activeCollectionSearchQuery.value) && collectionSearchState.value.cursor != null && !searchLoading.value);
+
+function resetCollectionSearchResults() {
+  collectionSearchController.cancelSearch();
+  if (collectionBrowseSnapshot) {
+    collectionItems.value = collectionBrowseSnapshot.items;
+    scanCursor.value = collectionBrowseSnapshot.cursor;
+    collectionBrowseSnapshot = undefined;
+  }
+  if (!hasRetainedMemberDraft.value) clearSelectedMember();
+}
+
+function onCollectionSearchInput(event: Event) {
+  // Editing is a draft, not a submitted search. Invalidate any old request now.
+  // Capture before the Input wrapper's passive v-model watcher or a reload unmount.
+  collectionSearchQuery.value = (event.target as HTMLInputElement).value;
+  collectionSearchIntentRevision++;
+  resetCollectionSearchResults();
+}
+
+function cancelCollectionSearch() {
+  collectionSearchIntentRevision++;
+  collectionSearchQuery.value = "";
+  resetCollectionSearchResults();
+}
+
+function stopCollectionSearch() {
+  collectionSearchController.stop();
 }
 
 function onCollectionSearchKeydown(event: KeyboardEvent) {
+  if (event.isComposing) return;
   if (event.key === "Enter") {
-    if (collectionSearchTimer) clearTimeout(collectionSearchTimer);
-    collectionSearchTimer = null;
-    void onCollectionSearch();
+    event.preventDefault();
+    if (!loading.value && !searchLoading.value) void (canContinueCollectionSearch.value ? collectionSearchController.start() : onCollectionSearch());
     return;
   }
   if (event.key === "Escape") {
-    if (collectionSearchTimer) clearTimeout(collectionSearchTimer);
-    collectionSearchTimer = null;
-    collectionSearchQuery.value = "";
-    void onCollectionSearch();
+    event.preventDefault();
+    cancelCollectionSearch();
   }
 }
 
 async function onCollectionSearch() {
+  const scope = collectionScope();
   const query = collectionSearchQuery.value.trim();
-  const keyType = redisKind.value;
-  if (!collectionSearchSupported.value) return;
-  const requestId = ++collectionSearchRequestId;
-  searchLoading.value = true;
-  try {
-    const sortDirection = keyType === "zset" ? zsetSortDir.value : undefined;
-    const result = await api.redisLoadMore(props.connectionId, props.db, props.keyRaw, keyType, 0, 200, query || undefined, sortDirection);
-    if (requestId !== collectionSearchRequestId || result.kind !== keyType) return;
-    activeCollectionSearchQuery.value = query;
-    collectionItems.value = result.items;
-    scanCursor.value = result.scan_cursor ?? undefined;
-    if (!hasRetainedMemberDraft.value) clearSelectedMember();
-  } finally {
-    if (requestId === collectionSearchRequestId) searchLoading.value = false;
-  }
+  if (!scope || loading.value || !query) return;
+  collectionSearchIntentRevision++;
+  if (!activeCollectionSearchQuery.value) collectionBrowseSnapshot = { items: collectionItems.value, cursor: scanCursor.value };
+  collectionSearchController.prepare(scope, query);
+  if (!hasRetainedMemberDraft.value) clearSelectedMember();
+  await collectionSearchController.start();
 }
 
 /** `load()` clears the search box, so anything that reloads mid-search has to re-apply the query. */
 async function reloadPreservingCollectionSearch(options: { notifyParent?: boolean } = {}) {
-  const query = activeCollectionSearchQuery.value || collectionSearchQuery.value.trim();
-  await load({ ...options, selectDefaultMember: false });
+  const query = activeCollectionSearchQuery.value;
+  const draft = collectionSearchQuery.value;
+  const revision = collectionSearchIntentRevision;
+  if (!(await load({ ...options, selectDefaultMember: false, shouldApply: () => revision === collectionSearchIntentRevision }))) return false;
+  collectionSearchQuery.value = draft;
   if (query) {
-    collectionSearchQuery.value = query;
     await onCollectionSearch();
   }
+  return true;
 }
 
 function readRedisJsonWordWrap(): boolean {
@@ -1346,6 +1529,10 @@ function rememberRedisValueCodec(codec: RedisValueCodec) {
 
 function formatJsonText(raw: string, decodeUnicode: boolean): string | null {
   try {
+    const detail = parseRedisJsonDetail(raw);
+    if (detail) {
+      return decodeUnicode ? decodeJsonUnicodeEscapes(detail.formattedText) : detail.formattedText;
+    }
     // Keep Redis JSON baselines source-preserving (duplicate keys, number text),
     // then apply the display-only unicode decode when the user chose "decoded".
     const formatted = formatJsonSource(raw, 2);
@@ -1438,6 +1625,7 @@ function setStringValueFormat(format: RedisValueFormat) {
 
 function setStringValueCodec(codec: RedisValueCodec) {
   if (isStringValueTruncated.value && codec !== "none") return;
+  stringPluginCodecView.value = false;
   stringValueCodec.value = codec;
   rememberRedisValueCodec(codec);
 }
@@ -1465,6 +1653,7 @@ function setMemberValueFormat(format: RedisValueFormat) {
 }
 
 function setMemberValueCodec(codec: RedisValueCodec) {
+  memberPluginCodecView.value = false;
   memberValueCodec.value = codec;
   rememberRedisValueCodec(codec);
 }
@@ -1582,7 +1771,7 @@ function rawRedisValueText(value: unknown): string {
   return formatRedisMemberDetail(value).rawText;
 }
 
-const deleteDetails = computed(() => {
+const deleteDetailsText = computed(() => {
   const pending = pendingDelete.value;
   if (!pending) return "";
   const key = formatValue(props.keyDisplay);
@@ -1593,16 +1782,30 @@ const deleteDetails = computed(() => {
   return t("dangerDialog.redisSetMemberDetails", { key, member: formatValue(pending.member) });
 });
 
+const deleteSql = computed(() => {
+  const pending = pendingDelete.value;
+  if (!pending) return "";
+  return redisDeleteValueItemPreview(props.keyRaw, pending, {
+    raw: true,
+    database: props.db,
+    isCluster: isClusterMode.value,
+  });
+});
+
 async function load(options: { background?: boolean; notifyParent?: boolean; preserveDraft?: boolean; selectDefaultMember?: boolean; shouldApply?: () => boolean } = {}): Promise<boolean> {
   const background = options.background ?? false;
   const notifyParent = options.notifyParent ?? true;
   const shouldSelectDefaultMember = options.selectDefaultMember ?? true;
   const requestId = ++loadRequestId;
+  if (!background) stopCollectionSearch();
+  const loadScope = { connectionId: props.connectionId, db: props.db, keyRaw: props.keyRaw, previewLimitBytes: redisValuePreviewLimitBytes(props.previewLimitKiB) };
   if (!background) loading.value = true;
   try {
-    let loadedValue = await api.redisGetValue(props.connectionId, props.db, props.keyRaw);
+    let loadedValue = await api.redisGetValue(loadScope.connectionId, loadScope.db, loadScope.keyRaw, loadScope.previewLimitBytes);
+    if (requestId !== loadRequestId || !redisValueViewerIsActive || (options.shouldApply && !options.shouldApply())) return false;
     if (loadedValue.data.kind === "zset" && zsetSortDir.value === "desc") {
-      const sortedPage = await api.redisLoadMore(props.connectionId, props.db, props.keyRaw, "zset", 0, 200, undefined, "desc");
+      const sortedPage = await collectionSearchController.readPage({ ...loadScope, kind: "zset", sortDirection: "desc" }, 0, "", () => requestId === loadRequestId && (!options.shouldApply || options.shouldApply()));
+      if (!sortedPage) return false;
       if (sortedPage.kind === "zset") {
         loadedValue = {
           ...loadedValue,
@@ -1614,7 +1817,7 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
         };
       }
     }
-    if (requestId !== loadRequestId || (options.shouldApply && !options.shouldApply())) return false;
+    if (requestId !== loadRequestId || !redisValueViewerIsActive || (options.shouldApply && !options.shouldApply())) return false;
 
     // Redis reports a key that expired between refreshes as a `none` value.
     // Tell the browser to remove it instead of rendering a stale detail shell.
@@ -1645,14 +1848,14 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
       return false;
     }
 
-    if (collectionSearchTimer) clearTimeout(collectionSearchTimer);
-    collectionSearchTimer = null;
-    collectionSearchRequestId++;
+    collectionBrowseSnapshot = undefined;
+    collectionSearchController.reset();
     collectionSearchQuery.value = "";
     activeCollectionSearchQuery.value = "";
     searchLoading.value = false;
     resetValueSearch();
     data.value = loadedValue;
+    loadedPreviewLimitBytes = loadScope.previewLimitBytes;
     syncCountdownTtl(loadedValue.ttl);
     if (notifyParent) emit("loaded", loadedValue);
     scanCursor.value = redisValueCollectionScanCursor(loadedValue);
@@ -1674,7 +1877,10 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
       // kvrocks 位图复用字符串的预览/编码渲染链路；位图不允许 JSON 视图与编辑，
       // 因为它并不是字符串（写回会改变服务端类型）。
       const allowJsonText = loadedValue.data.kind === "string";
-      if (loadedValue.data.truncated) stringValueCodec.value = "none";
+      if (loadedValue.data.truncated) {
+        stringValueCodec.value = "none";
+        stringPluginCodecView.value = false;
+      }
       const detail = formatRedisMemberDetail(loadedValue.data.content, { allowJsonText });
       // Issue #10922: detected JSON opens pretty-printed, detected structured
       // codecs open decoded — unless the user pinned an explicit format/codec.
@@ -1714,22 +1920,42 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
   }
 }
 
+/**
+ * Load the key and keep a failed read visible.
+ *
+ * `load()` rethrows so its callers can react to the failure, but the first
+ * read of a key has no caller waiting for it: the panel stayed empty and the
+ * failure only reached the debug log. The error is kept in the panel and
+ * reported once, so a server that rejects the read is visible instead of
+ * looking like an empty value.
+ */
+async function loadForDisplay(options: { background?: boolean; notifyParent?: boolean; preserveDraft?: boolean; selectDefaultMember?: boolean; shouldApply?: () => boolean } = {}): Promise<boolean> {
+  loadError.value = "";
+  try {
+    return await load(options);
+  } catch (error) {
+    loadError.value = errorMessage(error);
+    toast(loadError.value, 4000);
+    return false;
+  }
+}
+
+function retryValueLoad() {
+  void loadForDisplay();
+}
+
 async function loadMore() {
   if (!data.value || !hasMore.value || loadingMore.value || searchLoading.value) return;
   if (!collectionSearchSupported.value) return;
-  const keyType = redisKind.value;
-  const filter = activeCollectionSearchQuery.value || undefined;
-  const requestId = collectionSearchRequestId;
-  loadingMore.value = true;
-  try {
-    const sortDirection = keyType === "zset" ? zsetSortDir.value : undefined;
-    const result = await api.redisLoadMore(props.connectionId, props.db, props.keyRaw, keyType, scanCursor.value!, 200, filter, sortDirection);
-    if (requestId !== collectionSearchRequestId) return;
-    const newItems = redisCollectionPageItems(result);
-    collectionItems.value = [...collectionItems.value, ...newItems];
-    scanCursor.value = result.scan_cursor ?? undefined;
-  } finally {
-    loadingMore.value = false;
+  const scope = collectionScope();
+  if (!scope) return;
+  if (activeCollectionSearchQuery.value) {
+    await collectionSearchController.start();
+  } else {
+    await collectionSearchController.browse(scope, collectionItems.value, scanCursor.value!);
+    if (collectionSearchState.value.status === "failed" && collectionSearchState.value.error) {
+      toast(errorMessage(collectionSearchState.value.error), 3000);
+    }
   }
 }
 
@@ -1739,7 +1965,7 @@ async function saveString() {
   let value = editValue.value;
   // Compact whenever this draft is/was JSON-edited, even if the user switched tabs before Save.
   if (stringValueView.value === "json" || stringDraftFormat.value === "json") {
-    const normalized = normalizeRedisJsonDraft(jsonDraftForSave(stringJsonRawBaseline.value, value));
+    const normalized = normalizeRedisJsonDraft(jsonDraftForSave(stringJsonRawBaseline.value, value), stringValueDetail.value?.json?.serializedLevel);
     if (!normalized.ok) {
       toast(t("redis.jsonFormatError"), 3000);
       return;
@@ -2165,7 +2391,7 @@ function startEditMember() {
     memberFieldEditValue.value = selectedMemberContext.value.field ?? "";
   }
   isEditingMember.value = true;
-  nextTick(() => memberTextareaRef.value?.focus());
+  // The text editor applies autofocus after its asynchronous initialization.
 }
 
 function cancelEditMember() {
@@ -2188,7 +2414,7 @@ async function saveMemberEdit() {
   let writeValue = memberEditValue.value;
   // Hash JSON drafts may still be open under UTF-8 after a format switch; keep compact writes.
   if (savingHashJson) {
-    const normalized = normalizeRedisJsonDraft(jsonDraftForSave(memberJsonRawBaseline.value, writeValue));
+    const normalized = normalizeRedisJsonDraft(jsonDraftForSave(memberJsonRawBaseline.value, writeValue), selectedMemberDetail.value?.json?.serializedLevel);
     if (!normalized.ok) {
       toast(t("redis.jsonFormatError"), 3000);
       return;
@@ -2363,19 +2589,19 @@ function resolveSelectedMember(context: RedisMemberContext): { title: string; va
   }
 }
 
-function requestHashDel(field: string | null) {
+function requestHashDel(field: RedisBlob | string | null) {
   if (!field) return;
   pendingDelete.value = { kind: "hash", field };
   showDeleteConfirm.value = true;
 }
 
-function requestSetRemove(member: string | null) {
+function requestSetRemove(member: RedisBlob | string | null) {
   if (!member) return;
   pendingDelete.value = { kind: "set", member };
   showDeleteConfirm.value = true;
 }
 
-function requestZsetRemove(member: string | null) {
+function requestZsetRemove(member: RedisBlob | string | null) {
   if (!member) return;
   pendingDelete.value = { kind: "zset", member };
   showDeleteConfirm.value = true;
@@ -2583,7 +2809,7 @@ async function listPush() {
     toast(t("redis.valueRequired"), 3000);
     return;
   }
-  await api.redisListPush(props.connectionId, props.db, props.keyRaw, newValue.value);
+  await api.redisListPush(props.connectionId, props.db, props.keyRaw, newValue.value, undefined, listPushSide.value);
   newValue.value = "";
   await load();
 }
@@ -2628,14 +2854,19 @@ async function applyZsetRemove(member: string) {
   await load();
 }
 
+function extractMemberText(val: RedisBlob | string): string {
+  if (typeof val === "string") return val;
+  return redisBlobText(val) ?? "";
+}
+
 async function confirmDelete() {
   const pending = pendingDelete.value;
   if (!pending) return;
   if (pending.kind === "key") await applyDeleteKey();
-  else if (pending.kind === "hash") await applyHashDel(pending.field);
+  else if (pending.kind === "hash") await applyHashDel(extractMemberText(pending.field));
   else if (pending.kind === "list") await applyListRemove(pending.index);
-  else if (pending.kind === "set") await applySetRemove(pending.member);
-  else if (pending.kind === "zset") await applyZsetRemove(pending.member);
+  else if (pending.kind === "set") await applySetRemove(extractMemberText(pending.member));
+  else if (pending.kind === "zset") await applyZsetRemove(extractMemberText(pending.member));
   pendingDelete.value = null;
 }
 
@@ -2689,41 +2920,30 @@ function activateValueSearchMatch(delta: -1 | 1) {
   moveContentSearchMatch(delta);
 }
 
-/** Scroll value body to the active match without stealing focus from the find input. */
-function scrollTextareaToMatch(textarea: HTMLTextAreaElement, match: { start: number; end: number }) {
-  const lineHeight = Number.parseFloat(getComputedStyle(textarea).lineHeight || "20") || 20;
-  const textBefore = textarea.value.slice(0, match.start);
-  const line = textBefore.split("\n").length - 1;
-  textarea.scrollTop = Math.max(0, line * lineHeight - textarea.clientHeight / 3);
+function activeContentEditor(): JsonEditorHandle | null {
+  if (showMemberDetail.value) {
+    if (isEditingMember.value) return memberTextEditorRef.value;
+    return isEditingHashJson.value ? memberJsonEditorRef.value : searchPreviewRef.value;
+  }
+  if (redisKind.value === "json") return redisJsonEditorRef.value;
+  if (stringValueCodec.value === "none") {
+    if (stringValueView.value === "json" && stringValueDetail.value?.json) return stringJsonEditorRef.value;
+    if (stringValueView.value === "utf8" && canEditCurrentStringFormat.value) return stringTextEditorRef.value;
+  }
+  return searchPreviewRef.value;
 }
 
-/**
- * Never focus the value body here — the find panel must keep the caret so typing stays in the search box.
- * Enter / prev / next only change the active match index and scroll the body into view.
- */
+/** Navigate within the active surface without moving focus out of the find input. */
 async function scrollContentSearchMatchIntoView() {
   await nextTick();
+  if (activeSearchTree.value) {
+    await (showMemberDetail.value ? memberSearchTreeRef.value : stringSearchTreeRef.value)?.revealSearchMatch();
+    return;
+  }
   const match = contentSearchMatches.value[contentSearchActiveIndex.value];
   if (!match) return;
-
-  // CM: update selection + scroll, but do not focus (keeps find input active).
-  if (showMemberDetail.value) {
-    if (usesJsonEditorForMember.value && memberJsonEditorRef.value?.selectRange?.(match.start, match.end, { focus: false })) return;
-    if (isEditingMember.value && memberTextareaRef.value) {
-      scrollTextareaToMatch(memberTextareaRef.value, match);
-      return;
-    }
-  } else if (redisKind.value === "json") {
-    if (redisJsonEditorRef.value?.selectRange?.(match.start, match.end, { focus: false })) return;
-  } else {
-    if (usesJsonEditorForMain.value && stringJsonEditorRef.value?.selectRange?.(match.start, match.end, { focus: false })) return;
-    if (stringValueView.value === "utf8" && canEditCurrentStringFormat.value && stringTextareaRef.value) {
-      scrollTextareaToMatch(stringTextareaRef.value, match);
-      return;
-    }
-  }
-
-  document.querySelector<HTMLElement>('[data-document-search-active="true"]')?.scrollIntoView({ block: "center", inline: "nearest" });
+  const editor = activeContentEditor();
+  editor?.selectRange?.(match.start, match.end, { focus: false });
 }
 
 /** Ctrl/Cmd+F on STRING body or member detail → floating find. */
@@ -2738,26 +2958,39 @@ function handleValueViewerPointerDown(event: PointerEvent) {
   valueViewerSearchActive.value = target instanceof Element && !!target.closest("[data-redis-value-viewer], [data-redis-value-search], [data-text-content-search], [data-draggable-search-panel], [data-redis-member-detail]");
 }
 
-watch(valueSearchQuery, () => {
+watch([valueSearchQuery, valueSearchCaseSensitive, valueSearchUseRegex], () => {
+  nextReplacementOffset = undefined;
   // Typing: recompute matches/highlights; keep caret in the find input.
   valueSearchMatchIndex.value = 0;
   valueSearchHasNavigated.value = false;
   if (valueSearchOpen.value) void scrollContentSearchMatchIntoView();
 });
 
-watch(contentSearchText, () => {
+watch([contentSearchText, activeSearchTree], () => {
   valueSearchMatchIndex.value = 0;
   valueSearchHasNavigated.value = false;
-  if (valueSearchOpen.value) void scrollContentSearchMatchIntoView();
+  if (valueSearchOpen.value && !activeContentEditor()?.hasFocus?.()) void scrollContentSearchMatchIntoView();
 });
 
 watch(
   () => [props.connectionId, props.db, props.keyRaw],
   () => {
+    loadRequestId++;
+    collectionBrowseSnapshot = undefined;
+    collectionSearchController.reset();
+    collectionSearchQuery.value = "";
     resetValueSearch();
     valueViewerSearchActive.value = false;
     resetStreamEntries();
     resetStreamMonitoring();
+  },
+);
+
+watch(
+  () => props.previewLimitKiB,
+  () => {
+    // Apply the new limit immediately, but never replace an edited value.
+    if (redisValueViewerIsActive && !hasUnsavedRedisDraft.value) void loadForDisplay();
   },
 );
 
@@ -2789,7 +3022,7 @@ watch(showMemberDetail, (open) => {
 onMounted(() => {
   window.addEventListener("pointerdown", handleValueViewerPointerDown, true);
   document.addEventListener("visibilitychange", handleDocumentVisibilityChange);
-  void load();
+  void loadForDisplay();
   void createShikiJsonHighlighter({
     appearance: () => redisJsonAppearance.value,
   })
@@ -2802,20 +3035,24 @@ onMounted(() => {
 });
 onActivated(() => {
   redisValueViewerIsActive = true;
+  collectionSearchController.setActive(true);
+  if (!loading.value && (!data.value || (loadedPreviewLimitBytes !== redisValuePreviewLimitBytes(props.previewLimitKiB) && !hasUnsavedRedisDraft.value))) void loadForDisplay();
   startRefreshTimers();
 });
 onDeactivated(() => {
   redisValueViewerIsActive = false;
+  collectionSearchController.setActive(false);
   stopRefreshTimers();
 });
 onBeforeUnmount(() => {
+  loadRequestId++;
+  collectionSearchController.dispose();
   window.removeEventListener("pointerdown", handleValueViewerPointerDown, true);
   document.removeEventListener("visibilitychange", handleDocumentVisibilityChange);
   redisValueViewerIsActive = false;
   stopRefreshTimers();
   stopResizeHashColumns();
   stopResizeZsetColumns();
-  if (collectionSearchTimer) clearTimeout(collectionSearchTimer);
 });
 
 defineExpose({ focusSearch });
@@ -2823,13 +3060,22 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
 </script>
 
 <template>
-  <div data-redis-value-viewer class="relative h-full flex flex-col overflow-hidden" :style="editorFontFamilyStyle">
+  <div data-redis-value-viewer :class="{ 'redis-value-viewer--dark': isDark }" class="relative h-full flex flex-col overflow-hidden" :style="editorFontFamilyStyle">
     <!-- STRING body find — mounted inside the value pane (not teleported out of focus). -->
     <TextContentSearchBar
       v-if="valueSearchOpen && data && valueSearchSupported && !showMemberDetail"
       ref="valueSearchBarRef"
       v-model="valueSearchQuery"
-      :status="valueSearchStatus"
+      v-model:case-sensitive="valueSearchCaseSensitive"
+      v-model:use-regex="valueSearchUseRegex"
+      show-search-options
+      v-model:replace-text="valueReplaceText"
+      :allow-replace="valueCanReplace"
+      :busy="valueSearchBusy"
+      @replace="replaceValueMatches(false)"
+      @replace-all="replaceValueMatches(true)"
+      :error="valueSearchError"
+      :status="valueSearchBusy ? t('common.loading') : valueSearchStatus"
       :match-count="valueSearchMatchCount"
       :show-navigation="true"
       :placeholder="t('editor.search.find')"
@@ -2848,41 +3094,24 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
       <div class="shrink-0 border-b bg-background">
         <div class="flex h-9 items-center gap-2 px-4">
           <span class="dbx-editor-font-family min-w-0 flex-1 truncate text-sm font-semibold">{{ formatValue(data.key_display) }}</span>
-          <div class="flex h-7 shrink-0 overflow-hidden rounded-md border">
-            <Button data-redis-value-refresh variant="ghost" size="icon" class="h-7 w-7 rounded-none animate-none" :disabled="loading || refreshingValue || hasUnsavedRedisDraft" :title="t('grid.refresh')" :aria-label="t('grid.refresh')" @click="refreshValueAndStreamGroups">
-              <RefreshCw class="h-3.5 w-3.5 animate-none" />
-            </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger as-child>
-                <Button
-                  data-redis-auto-refresh-menu
-                  variant="ghost"
-                  size="icon"
-                  class="h-7 w-5 rounded-none border-l px-0"
-                  :class="autoRefreshEnabled ? 'bg-primary/10 text-primary hover:bg-primary/15' : ''"
-                  :title="autoRefreshEnabled ? `${t('redis.autoRefresh')}: ${autoRefreshIntervalSeconds}s` : t('redis.autoRefresh')"
-                  :aria-label="autoRefreshEnabled ? `${t('redis.autoRefresh')}: ${autoRefreshIntervalSeconds}s` : t('redis.autoRefresh')"
-                >
-                  <ChevronDown class="h-3 w-3" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" class="w-40">
-                <DropdownMenuLabel>{{ t("redis.autoRefresh") }}</DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem class="gap-2" @select="disableAutoRefresh">
-                  <Check v-if="!autoRefreshEnabled" class="h-3.5 w-3.5" />
-                  <span v-else class="h-3.5 w-3.5" />
-                  {{ t("serverDashboard.off") }}
-                </DropdownMenuItem>
-                <DropdownMenuItem v-for="interval in REDIS_AUTO_REFRESH_INTERVAL_OPTIONS" :key="interval" class="gap-2" @select="selectAutoRefreshInterval(interval)">
-                  <Check v-if="autoRefreshEnabled && autoRefreshIntervalSeconds === interval" class="h-3.5 w-3.5" />
-                  <span v-else class="h-3.5 w-3.5" />
-                  {{ interval }}s
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="isStringValueTruncated" :title="isStringValueTruncated ? t('redis.largeStringPreviewActionUnavailable') : t('grid.copyValue')" :aria-label="t('grid.copyValue')" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
+          <AutoRefreshControl
+            :enabled="autoRefreshEnabled"
+            :interval-seconds="autoRefreshIntervalSeconds"
+            :intervals="REDIS_AUTO_REFRESH_INTERVAL_OPTIONS"
+            :loading="refreshingValue"
+            :manual-disabled="loading || hasUnsavedRedisDraft"
+            :label="t('redis.autoRefresh')"
+            :off-label="t('serverDashboard.off')"
+            :refresh-label="t('grid.refresh')"
+            :refresh-button-attrs="{ 'data-redis-value-refresh': '' }"
+            :menu-trigger-attrs="{ 'data-redis-auto-refresh-menu': '' }"
+            @refresh="refreshValueAndStreamGroups"
+            @disable="disableAutoRefresh"
+            @select="selectAutoRefreshInterval"
+          />
+          <Button v-if="!stringPluginCodecView" variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="isStringValueTruncated" :title="isStringValueTruncated ? t('redis.largeStringPreviewActionUnavailable') : t('grid.copyValue')" :aria-label="t('grid.copyValue')" @click="copyValue"
+            ><Copy class="h-3.5 w-3.5"
+          /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="isStringValueTruncated" :title="isStringValueTruncated ? t('redis.largeStringPreviewActionUnavailable') : t('redis.copyInsertStatement')" :aria-label="t('redis.copyInsertStatement')" @click="copyInsertStatement"
             ><ClipboardCopy class="h-3.5 w-3.5"
           /></Button>
@@ -2919,6 +3148,33 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
         </div>
       </div>
 
+      <div v-if="collectionSearchSupported" data-redis-collection-search class="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-2 text-xs">
+        <div class="relative min-w-40 max-w-sm flex-1">
+          <Search class="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+          <Input v-model="collectionSearchQuery" class="h-7 w-full pl-6 text-xs" :placeholder="collectionSearchPlaceholder" :aria-label="collectionSearchPlaceholder" :title="t('redis.collectionSearchSubmitHint')" @input="onCollectionSearchInput" @keydown="onCollectionSearchKeydown" />
+        </div>
+        <Button
+          v-if="searchLoading"
+          data-redis-search-stop
+          variant="outline"
+          size="sm"
+          class="h-7 shrink-0 border-amber-600 bg-amber-50 text-xs text-amber-800 hover:bg-amber-100 hover:text-amber-900 active:bg-amber-200 active:text-amber-900 dark:border-amber-400 dark:bg-amber-950 dark:text-amber-300 dark:hover:bg-amber-900 dark:hover:text-amber-200 dark:active:bg-amber-800 dark:active:text-amber-100"
+          @click="stopCollectionSearch"
+          ><Pause class="h-3.5 w-3.5" aria-hidden="true" />{{ t("redis.collectionSearchStop") }}</Button
+        >
+        <Button v-else-if="canContinueCollectionSearch" data-redis-search-continue size="sm" class="h-7 shrink-0 text-xs" :disabled="loading" @click="collectionSearchController.start()">{{
+          t(collectionSearchState.status === "failed" ? "redis.collectionSearchRetry" : "redis.collectionSearchContinue")
+        }}</Button>
+        <Button v-else data-redis-search-submit size="sm" class="h-7 shrink-0 text-xs" :disabled="loading || !collectionSearchQuery.trim()" @click="onCollectionSearch">{{ t("redis.collectionSearchSubmit") }}</Button>
+        <Button v-if="collectionSearchQuery || activeCollectionSearchQuery" data-redis-search-cancel variant="ghost" size="sm" class="h-7 shrink-0 text-xs text-muted-foreground hover:text-foreground" @click="cancelCollectionSearch"
+          ><X class="h-3.5 w-3.5" aria-hidden="true" />{{ t("redis.collectionSearchCancel") }}</Button
+        >
+        <div v-if="activeCollectionSearchQuery" class="flex basis-full items-center gap-1.5 text-muted-foreground">
+          <Loader2 v-if="searchLoading" class="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
+          <span role="status" aria-live="polite">{{ collectionSearchStatusText }}</span>
+        </div>
+      </div>
+
       <!-- String / kvrocks Bitmap（位图同样按字节预览，但只读） -->
       <div v-if="(isStringLikeKind || isBitmapKind) && stringValueDetail" class="flex-1 flex flex-col overflow-hidden">
         <div class="flex h-9 items-center gap-2 border-b px-4 text-xs shrink-0">
@@ -2930,24 +3186,25 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               variant="ghost"
               size="sm"
               class="h-6 shrink-0 rounded-[5px] px-2 text-xs"
-              :class="{ 'bg-background shadow-sm': stringValueCodec === codec }"
+              :class="{ 'bg-background shadow-sm': !stringPluginCodecView && stringValueCodec === codec }"
               :disabled="isStringValueTruncated && codec !== 'none'"
               :title="isStringValueTruncated && codec !== 'none' ? t('redis.largeStringPreviewActionUnavailable') : undefined"
               @click="setStringValueCodec(codec)"
             >
               {{ redisCodecLabel(codec) }}
             </Button>
+            <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': stringPluginCodecView }" :disabled="isStringValueTruncated || hasUnsavedRedisDraft" @click="stringPluginCodecView = true">{{ t("redis.pluginCodecLabel") }}</Button>
           </RedisHorizontalScrollbar>
           <Badge v-if="stringValueDetectionLabel" variant="outline" class="shrink-0 text-xs text-muted-foreground" :title="t('redis.detectedBadgeTitle')" :aria-label="t('redis.detectedBadgeTitle')">{{ stringValueDetectionLabel }}</Badge>
           <FileArchive v-if="!isStringValueTruncated && stringGzipBadge && stringValueCodec === 'none'" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')" />
           <span class="flex-1" />
-          <label v-if="isTextRedisFormat(stringValueView) || activeStructuredStringDetail || isDecompressCodec(stringValueCodec)" class="flex items-center gap-1.5 text-muted-foreground">
+          <label v-if="!stringPluginCodecView && (isTextRedisFormat(stringValueView) || activeStructuredStringDetail || isDecompressCodec(stringValueCodec))" class="flex items-center gap-1.5 text-muted-foreground">
             <WrapText class="h-3.5 w-3.5" />
             {{ t("redis.wordWrap") }}
             <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
           </label>
         </div>
-        <div class="flex h-9 items-center gap-2 border-b px-4 text-xs shrink-0">
+        <div v-if="!stringPluginCodecView" class="flex h-9 items-center gap-2 border-b px-4 text-xs shrink-0">
           <span class="shrink-0 text-muted-foreground">{{ t("redis.viewRowLabel") }}</span>
           <RedisHorizontalScrollbar>
             <Button
@@ -2969,9 +3226,11 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': redisJsonDecoded }" @click="setRedisJsonUnicodeMode('decoded')">{{ t("redis.jsonViewDecoded") }}</Button>
           </div>
         </div>
+        <RedisPluginCodecView v-if="stringPluginCodecView && !isStringValueTruncated" :raw-base64="stringValueDetail.base64Text" :context="pluginCodecContext" />
         <RedisJsonEditor
-          v-if="stringValueView === 'json' && stringValueDetail.json && stringValueCodec === 'none'"
+          v-else-if="stringValueView === 'json' && stringValueDetail.json && stringValueCodec === 'none'"
           ref="stringJsonEditorRef"
+          :search-highlights="stringSearchHighlights"
           v-model="editValue"
           class="min-h-0 flex-1"
           :save-disabled="savingString || !stringValueChanged"
@@ -2980,12 +3239,52 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           :enable-builtin-find="false"
           @save="saveString"
         />
+        <RedisJsonEditor
+          v-else-if="stringValueView === 'utf8' && canEditCurrentStringFormat && stringValueCodec === 'none'"
+          ref="stringTextEditorRef"
+          v-model="editValue"
+          language="text"
+          presentation="viewer"
+          :line-numbers="false"
+          class="min-h-0 flex-1"
+          :read-only="savingString"
+          :word-wrap="redisJsonWordWrap"
+          :search-highlights="stringSearchHighlights"
+          :enable-builtin-find="false"
+          :save-disabled="savingString || !stringValueChanged"
+          @save="saveString"
+        />
+        <div v-else-if="showSearchPreview && !showMemberDetail" class="min-h-0 flex-1 flex flex-col overflow-hidden">
+          <RedisJsonEditor ref="searchPreviewRef" :model-value="contentSearchText" language="text" :line-numbers="false" read-only presentation="viewer" class="min-h-0 flex-1" :word-wrap="redisJsonWordWrap" :search-highlights="stringSearchHighlights" :enable-builtin-find="false" />
+          <div v-if="searchPreviewNotice" class="flex shrink-0 items-center gap-2 border-t px-4 py-2 text-xs text-muted-foreground">
+            <span>{{ searchPreviewNotice }}</span>
+            <Button v-if="!(showMemberDetail ? memberCodecMismatch : stringCodecMismatch) && decompressedState.status === 'error' && decompressedState.reason !== 'limit'" variant="outline" size="sm" @click="retryDecompressAsDeflate">{{ t("redis.decompressedRetryAsDeflate") }}</Button>
+          </div>
+        </div>
         <div v-else-if="activeStructuredStringDetail && stringValueView !== 'hex' && stringValueView !== 'base64'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
-          <JsonTree v-if="stringValueView === 'json'" :value="activeStructuredStringDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
+          <JsonTree
+            ref="stringSearchTreeRef"
+            :search-matches="!showMemberDetail ? treeSearchMatches : []"
+            :active-search-index="contentSearchActiveIndex"
+            v-if="stringValueView === 'json'"
+            :value="activeStructuredStringDetail.value"
+            :word-wrap="redisJsonWordWrap"
+            :highlight-json="highlightRedisJson"
+            virtualized
+          />
           <pre v-else class="w-full min-w-0 max-w-full" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'">{{ stringDecodedText }}</pre>
         </div>
-        <div v-else-if="stringValueCodec === 'base64' && stringBase64Detail" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
-          <JsonTree v-if="stringValueView === 'json' && stringBase64Detail.json" :value="stringBase64Detail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
+        <div v-else-if="stringValueCodec === 'base64' && stringBase64Detail && stringValueView !== 'hex' && stringValueView !== 'base64'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
+          <JsonTree
+            ref="stringSearchTreeRef"
+            :search-matches="!showMemberDetail ? treeSearchMatches : []"
+            :active-search-index="contentSearchActiveIndex"
+            v-if="stringValueView === 'json' && stringBase64Detail.json"
+            :value="stringBase64Detail.json.value"
+            :word-wrap="redisJsonWordWrap"
+            :highlight-json="highlightRedisJson"
+            virtualized
+          />
           <pre v-else class="w-full min-w-0 max-w-full" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'">{{ stringDecodedText }}</pre>
         </div>
         <div v-else-if="stringCodecMismatch" class="min-h-0 flex-1 flex flex-col overflow-hidden">
@@ -2997,11 +3296,9 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <span>{{ t("grid.hexViewer") }}</span>
             <span>{{ t("grid.hexViewerByteCount", { count: stringValueDetail.byteCount }) }}</span>
           </div>
-          <pre v-if="stringValueDetail.hexRows.length > 0 && canHighlightStringSurface" class="dbx-editor-font-family w-full min-w-0 max-w-full select-all whitespace-pre-wrap break-all" v-html="contentSearchHighlightedHtml" />
-          <pre v-else-if="stringValueDetail.hexRows.length > 0" class="dbx-editor-font-family w-full min-w-0 max-w-full select-all whitespace-pre-wrap break-all">{{ detailTextForFormat(stringValueDetail, "hex") }}</pre>
+          <pre v-if="stringValueDetail.hexRows.length > 0" class="dbx-editor-font-family w-full min-w-0 max-w-full select-all whitespace-pre-wrap break-all">{{ detailTextForFormat(stringValueDetail, "hex") }}</pre>
           <div v-else class="text-muted-foreground">{{ t("grid.hexViewerEmpty") }}</div>
         </div>
-        <pre v-else-if="stringValueView === 'base64' && canHighlightStringSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6 whitespace-pre-wrap break-all" v-html="contentSearchHighlightedHtml" />
         <pre v-else-if="stringValueView === 'base64'" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6 whitespace-pre-wrap break-all">{{ stringValueDetail.base64Text }}</pre>
         <div v-else-if="isDecompressCodec(stringValueCodec)" class="min-h-0 flex-1 flex flex-col overflow-hidden">
           <div v-if="decompressedState.status === 'loading'" class="flex min-h-0 flex-1 items-center justify-center gap-2 text-muted-foreground">
@@ -3010,7 +3307,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           </div>
           <div v-else-if="decompressedState.status === 'success'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background">
             <div v-if="stringValueView === 'json' && decompressedJsonDetail" class="h-full p-4">
-              <JsonTree :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
+              <JsonTree ref="stringSearchTreeRef" :search-matches="!showMemberDetail ? treeSearchMatches : []" :active-search-index="contentSearchActiveIndex" :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
             </div>
             <pre v-else class="w-full min-w-0 max-w-full p-4 text-sm leading-6" :class="detailTextClass('utf8')">{{ stringDecodedText }}</pre>
           </div>
@@ -3032,16 +3329,6 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             </div>
           </template>
         </div>
-        <textarea
-          v-else-if="stringValueView === 'utf8' && canEditCurrentStringFormat && stringValueCodec === 'none'"
-          ref="stringTextareaRef"
-          v-model="editValue"
-          class="dbx-editor-font-family flex-1 resize-none bg-background p-4 text-sm outline-none"
-          :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
-          :readonly="!canEditCurrentStringFormat || savingString"
-          spellcheck="false"
-        />
-        <pre v-else-if="canHighlightStringSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass(stringValueView)" v-html="contentSearchHighlightedHtml" />
         <pre v-else class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass(stringValueView)">{{ detailTextForFormat(stringValueDetail, stringValueView) }}</pre>
         <div v-if="isStringValueTruncated" data-redis-large-string-preview class="flex shrink-0 items-center gap-2 border-t bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
           <Eye class="h-3.5 w-3.5 shrink-0" />
@@ -3085,7 +3372,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
           </label>
         </div>
-        <RedisJsonEditor ref="redisJsonEditorRef" v-model="editValue" class="min-h-0 flex-1" :save-disabled="savingJson || !redisJsonValueChanged" :read-only="savingJson" :word-wrap="redisJsonWordWrap" :enable-builtin-find="false" @save="saveJson" />
+        <RedisJsonEditor :search-highlights="stringSearchHighlights" ref="redisJsonEditorRef" v-model="editValue" class="min-h-0 flex-1" :save-disabled="savingJson || !redisJsonValueChanged" :read-only="savingJson" :word-wrap="redisJsonWordWrap" :enable-builtin-find="false" @save="saveJson" />
         <div v-if="redisJsonValueChanged" class="px-4 py-2 border-t flex justify-end gap-2 shrink-0">
           <Button variant="ghost" size="sm" :disabled="savingJson" @click="discardRedisJsonEdit">{{ t("grid.discard") }}</Button>
           <Button size="sm" :disabled="savingJson" @click="saveJson"><Loader2 v-if="savingJson" class="w-3 h-3 mr-1 animate-spin" /><Save v-else class="w-3 h-3 mr-1" /> {{ t("grid.save") }}</Button>
@@ -3096,12 +3383,17 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
       <div v-else-if="redisKind === 'list'" class="flex-1 flex flex-col overflow-hidden">
         <div class="flex items-center gap-2 px-4 py-1.5 border-b shrink-0">
           <span class="text-xs text-muted-foreground shrink-0">{{ collectionCountLabel("items", listRows.length, activeCollectionSearchQuery ? null : collectionTotal) }}</span>
-          <div class="relative flex-1 max-w-60">
-            <Search class="pointer-events-none absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground/80" />
-            <Input v-model="collectionSearchQuery" class="h-6 w-full pl-5 pr-2 text-xs" :placeholder="t('redis.searchItems')" @input="onCollectionSearchInput" @keydown="onCollectionSearchKeydown" />
-          </div>
           <span class="flex-1" />
           <Input v-model="newValue" class="h-6 w-40 text-xs" :placeholder="t('redis.valuePlaceholder')" @keydown.enter="listPush" />
+          <Select v-model="listPushSide">
+            <SelectTrigger class="h-6 w-auto min-w-[120px] gap-1 px-2 text-xs" :aria-label="t('redis.pushSide')">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="right" class="text-xs">{{ t("redis.pushSideRight") }}</SelectItem>
+              <SelectItem value="left" class="text-xs">{{ t("redis.pushSideLeft") }}</SelectItem>
+            </SelectContent>
+          </Select>
           <Button variant="ghost" size="sm" class="h-6 text-xs" @click="listPush"><Plus class="w-3 h-3 mr-1" />{{ t("redis.pushAction") }}</Button>
         </div>
         <div class="grid grid-cols-[60px_1fr_84px] border-b bg-muted/50 shrink-0">
@@ -3130,10 +3422,10 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             </div>
           </template>
           <template #after>
-            <div v-if="hasMore" class="p-2">
+            <div v-if="hasMore && !activeCollectionSearchQuery" class="p-2">
               <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loadingMore || searchLoading" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
-                {{ t("redis.loadMoreKeys") }}
+                {{ t("redis.fetchMoreKeys") }}
               </Button>
             </div>
           </template>
@@ -3144,10 +3436,6 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
       <div v-else-if="redisKind === 'set'" class="flex-1 flex flex-col overflow-hidden">
         <div class="flex items-center gap-2 px-4 py-1.5 border-b shrink-0">
           <span class="text-xs text-muted-foreground shrink-0">{{ collectionCountLabel("items", setRows.length, activeCollectionSearchQuery ? null : collectionTotal) }}</span>
-          <div class="relative flex-1 max-w-60">
-            <Search class="pointer-events-none absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground/80" />
-            <Input v-model="collectionSearchQuery" class="h-6 w-full pl-5 pr-2 text-xs" :placeholder="t('redis.searchMembers')" @input="onCollectionSearchInput" @keydown="onCollectionSearchKeydown" />
-          </div>
           <span class="flex-1" />
           <Input v-model="newValue" class="h-6 w-40 text-xs" :placeholder="t('redis.memberPlaceholder')" @keydown.enter="setAdd" />
           <Button variant="ghost" size="sm" class="h-6 text-xs" @click="setAdd"><Plus class="w-3 h-3 mr-1" />{{ t("redis.addAction") }}</Button>
@@ -3176,15 +3464,15 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
                   ><Eye class="w-3 h-3"
                 /></Button>
                 <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100" :title="t('redis.copyMember')" @click.stop="copyMember(row.value.member)"><Copy class="w-3 h-3" /></Button>
-                <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" :disabled="!canDeleteSetItem(row.value)" @click.stop="requestSetRemove(redisBlobText(row.value.member))"><Trash2 class="w-3 h-3" /></Button>
+                <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" :disabled="!canDeleteSetItem(row.value)" @click.stop="requestSetRemove(row.value.member)"><Trash2 class="w-3 h-3" /></Button>
               </div>
             </div>
           </template>
           <template #after>
-            <div v-if="hasMore" class="p-2">
+            <div v-if="hasMore && !activeCollectionSearchQuery" class="p-2">
               <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loadingMore || searchLoading" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
-                {{ t("redis.loadMoreKeys") }}
+                {{ t("redis.fetchMoreKeys") }}
               </Button>
             </div>
           </template>
@@ -3195,10 +3483,6 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
       <div v-else-if="redisKind === 'hash'" ref="hashTableRef" class="flex-1 flex flex-col overflow-hidden">
         <div class="flex items-center gap-2 px-4 py-1.5 border-b shrink-0">
           <span class="text-xs text-muted-foreground shrink-0">{{ collectionCountLabel("fields", hashCollectionRows.length, activeCollectionSearchQuery ? null : collectionTotal) }}</span>
-          <div class="relative flex-1 max-w-60">
-            <Search class="pointer-events-none absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground/80" />
-            <Input v-model="collectionSearchQuery" class="h-6 w-full pl-5 pr-2 text-xs" :placeholder="t('redis.searchFields')" @input="onCollectionSearchInput" @keydown="onCollectionSearchKeydown" />
-          </div>
           <span class="flex-1" />
           <Input v-model="newField" class="h-6 w-24 text-xs" :placeholder="t('redis.fieldPlaceholder')" />
           <Input v-model="newValue" class="h-6 w-32 text-xs" :placeholder="t('redis.valuePlaceholder')" @keydown.enter="hashSet" />
@@ -3269,15 +3553,15 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </div>
-                <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" :disabled="!canDeleteHashItem(row.value)" @click.stop="requestHashDel(redisBlobText(row.value.field))"><Trash2 class="w-3 h-3" /></Button>
+                <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" :disabled="!canDeleteHashItem(row.value)" @click.stop="requestHashDel(row.value.field)"><Trash2 class="w-3 h-3" /></Button>
               </div>
             </div>
           </template>
           <template #after>
-            <div v-if="hasMore" class="p-2">
+            <div v-if="hasMore && !activeCollectionSearchQuery" class="p-2">
               <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loadingMore || searchLoading" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
-                {{ t("redis.loadMoreKeys") }}
+                {{ t("redis.fetchMoreKeys") }}
               </Button>
             </div>
           </template>
@@ -3288,10 +3572,6 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
       <div v-else-if="redisKind === 'zset'" ref="zsetTableRef" class="flex-1 flex flex-col overflow-hidden">
         <div class="flex items-center gap-2 px-4 py-1.5 border-b shrink-0">
           <span class="text-xs text-muted-foreground shrink-0">{{ collectionCountLabel("members", zsetRows.length, activeCollectionSearchQuery ? null : collectionTotal) }}</span>
-          <div class="relative flex-1 max-w-60">
-            <Search class="pointer-events-none absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground/80" />
-            <Input v-model="collectionSearchQuery" class="h-6 w-full pl-5 pr-2 text-xs" :placeholder="t('redis.searchMembers')" @input="onCollectionSearchInput" @keydown="onCollectionSearchKeydown" />
-          </div>
           <span class="flex-1" />
           <Input v-model="newScore" class="h-6 w-20 text-xs" :placeholder="t('redis.scorePlaceholder')" />
           <Input v-model="newValue" class="h-6 w-32 text-xs" :placeholder="t('redis.memberPlaceholder')" @keydown.enter="zsetAdd" />
@@ -3347,16 +3627,16 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
                     ><Pencil class="w-3 h-3"
                   /></Button>
                   <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100" :title="t('redis.copyMember')" @click="copyMember(row.value.member)"><Copy class="w-3 h-3" /></Button>
-                  <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" :disabled="!canDeleteZsetItem(row.value)" @click="requestZsetRemove(redisBlobText(row.value.member))"><Trash2 class="w-3 h-3" /></Button>
+                  <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" :disabled="!canDeleteZsetItem(row.value)" @click="requestZsetRemove(row.value.member)"><Trash2 class="w-3 h-3" /></Button>
                 </template>
               </div>
             </div>
           </template>
           <template #after>
-            <div v-if="hasMore" class="p-2">
+            <div v-if="hasMore && !activeCollectionSearchQuery" class="p-2">
               <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loadingMore || searchLoading" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
-                {{ t("redis.loadMoreKeys") }}
+                {{ t("redis.fetchMoreKeys") }}
               </Button>
             </div>
           </template>
@@ -3644,7 +3924,13 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
       </div>
     </template>
 
-    <DangerConfirmDialog v-model:open="showDeleteConfirm" :message="t('dangerDialog.deleteMessage')" :details="deleteDetails" :confirm-label="t('dangerDialog.deleteConfirm')" @confirm="confirmDelete" />
+    <!-- 读取失败：面板不能是空白，必须把失败原因显示出来并允许重试（issue #13114）。 -->
+    <div v-else-if="loadError" data-redis-value-load-error class="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
+      <div class="text-sm text-destructive break-words">{{ loadError }}</div>
+      <Button data-redis-value-load-retry variant="outline" size="sm" :disabled="loading" @click="retryValueLoad">{{ t("grid.refresh") }}</Button>
+    </div>
+
+    <DangerConfirmDialog v-model:open="showDeleteConfirm" :message="t('dangerDialog.deleteMessage')" :details-text="deleteDetailsText" :sql="deleteSql" :confirm-label="t('dangerDialog.deleteConfirm')" @confirm="confirmDelete" />
 
     <Dialog :open="showRenameKeyDialog" @update:open="handleRenameKeyDialogOpenChange">
       <DialogContent class="sm:max-w-md" :show-close-button="!renamingKey" :style="editorFontFamilyStyle">
@@ -3698,7 +3984,15 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
     </Dialog>
 
     <Dialog :open="showMemberDetail" @update:open="handleMemberDetailOpenChange">
-      <DialogContent data-redis-member-detail class="relative flex h-[min(760px,85vh)] w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[960px]" :style="editorFontFamilyStyle" @close-auto-focus="finishMemberDetailClose" @pointer-down-outside.prevent @interact-outside.prevent>
+      <DialogContent
+        data-redis-member-detail
+        :class="{ 'redis-value-viewer--dark': isDark }"
+        class="relative flex h-[min(760px,85vh)] w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[960px]"
+        :style="editorFontFamilyStyle"
+        @close-auto-focus="finishMemberDetailClose"
+        @pointer-down-outside.prevent
+        @interact-outside.prevent
+      >
         <!--
           Inside DialogContent (focus trap). absolute — not fixed — so dialog
           transform/overflow do not break hit-testing or caret.
@@ -3707,7 +4001,16 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           v-if="valueSearchOpen && showMemberDetail"
           ref="valueSearchBarRef"
           v-model="valueSearchQuery"
-          :status="valueSearchStatus"
+          v-model:case-sensitive="valueSearchCaseSensitive"
+          v-model:use-regex="valueSearchUseRegex"
+          show-search-options
+          v-model:replace-text="valueReplaceText"
+          :allow-replace="valueCanReplace"
+          :busy="valueSearchBusy"
+          @replace="replaceValueMatches(false)"
+          @replace-all="replaceValueMatches(true)"
+          :error="valueSearchError"
+          :status="valueSearchBusy ? t('common.loading') : valueSearchStatus"
           :match-count="valueSearchMatchCount"
           :show-navigation="true"
           :placeholder="t('editor.search.find')"
@@ -3729,24 +4032,40 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           </DialogTitle>
         </DialogHeader>
         <template v-if="isEditingMember">
-          <textarea ref="memberTextareaRef" data-redis-member-utf8-editor v-model="memberEditValue" class="dbx-editor-font-family min-h-0 flex-1 resize-none bg-background p-5 text-[13px] leading-6 outline-none" :readonly="savingMember" spellcheck="false" />
+          <RedisJsonEditor
+            ref="memberTextEditorRef"
+            presentation="viewer"
+            data-redis-member-utf8-editor
+            v-model="memberEditValue"
+            language="text"
+            :line-numbers="false"
+            autofocus
+            class="min-h-0 flex-1"
+            :read-only="savingMember"
+            :word-wrap="redisJsonWordWrap"
+            :search-highlights="memberSearchHighlights"
+            :enable-builtin-find="false"
+            :save-disabled="savingMember || !memberValueChanged"
+            @save="saveMemberEdit"
+          />
         </template>
         <template v-else>
           <div class="flex h-9 items-center gap-2 border-b px-5 text-xs">
             <span class="shrink-0 text-muted-foreground">{{ t("redis.codecRowLabel") }}</span>
             <RedisHorizontalScrollbar>
-              <Button v-for="codec in REDIS_VALUE_CODEC_ORDER" :key="codec" variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': memberValueCodec === codec }" @click="setMemberValueCodec(codec)">
+              <Button v-for="codec in REDIS_VALUE_CODEC_ORDER" :key="codec" variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': !memberPluginCodecView && memberValueCodec === codec }" @click="setMemberValueCodec(codec)">
                 {{ redisCodecLabel(codec) }}
               </Button>
+              <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': memberPluginCodecView }" :disabled="hasUnsavedRedisDraft" @click="memberPluginCodecView = true">{{ t("redis.pluginCodecLabel") }}</Button>
             </RedisHorizontalScrollbar>
             <span class="flex-1" />
-            <label v-if="isTextRedisFormat(memberValueView) || activeStructuredMemberDetail || isDecompressCodec(memberValueCodec)" class="flex items-center gap-1.5 text-muted-foreground">
+            <label v-if="!memberPluginCodecView && (isTextRedisFormat(memberValueView) || activeStructuredMemberDetail || isDecompressCodec(memberValueCodec))" class="flex items-center gap-1.5 text-muted-foreground">
               <WrapText class="h-3.5 w-3.5" />
               {{ t("redis.wordWrap") }}
               <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
             </label>
           </div>
-          <div class="flex h-9 items-center gap-2 border-b px-5 text-xs">
+          <div v-if="!memberPluginCodecView" class="flex h-9 items-center gap-2 border-b px-5 text-xs">
             <span class="shrink-0 text-muted-foreground">{{ t("redis.viewRowLabel") }}</span>
             <RedisHorizontalScrollbar>
               <Button
@@ -3768,16 +4087,65 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': redisJsonDecoded }" @click="setRedisJsonUnicodeMode('decoded')">{{ t("redis.jsonViewDecoded") }}</Button>
             </div>
           </div>
-          <RedisJsonEditor v-if="isEditingHashJson" ref="memberJsonEditorRef" v-model="memberEditValue" class="min-h-0 flex-1" :save-disabled="savingMember || !memberValueChanged" :read-only="savingMember" :word-wrap="redisJsonWordWrap" :enable-builtin-find="false" @save="saveMemberEdit" />
+          <RedisPluginCodecView v-if="memberPluginCodecView" :raw-base64="selectedMemberDetail.base64Text" :context="pluginCodecContext" />
+          <RedisJsonEditor
+            :search-highlights="memberSearchHighlights"
+            v-else-if="isEditingHashJson"
+            ref="memberJsonEditorRef"
+            v-model="memberEditValue"
+            class="min-h-0 flex-1"
+            :save-disabled="savingMember || !memberValueChanged"
+            :read-only="savingMember"
+            :word-wrap="redisJsonWordWrap"
+            :enable-builtin-find="false"
+            @save="saveMemberEdit"
+          />
+          <div v-else-if="showSearchPreview" class="min-h-0 flex-1 flex flex-col overflow-hidden">
+            <RedisJsonEditor
+              ref="searchPreviewRef"
+              :model-value="contentSearchText"
+              language="text"
+              :line-numbers="false"
+              read-only
+              presentation="viewer"
+              class="min-h-0 flex-1"
+              :word-wrap="redisJsonWordWrap"
+              :search-highlights="memberSearchHighlights"
+              :enable-builtin-find="false"
+              @dblclick="memberValueView === 'utf8' && memberValueCodec === 'none' && canEditCurrentMemberFormat && startEditMember()"
+            />
+            <div v-if="searchPreviewNotice" class="flex shrink-0 items-center gap-2 border-t px-4 py-2 text-xs text-muted-foreground">
+              <span>{{ searchPreviewNotice }}</span>
+              <Button v-if="!(showMemberDetail ? memberCodecMismatch : stringCodecMismatch) && decompressedState.status === 'error' && decompressedState.reason !== 'limit'" variant="outline" size="sm" @click="retryDecompressAsDeflate">{{ t("redis.decompressedRetryAsDeflate") }}</Button>
+            </div>
+          </div>
           <div v-else-if="memberValueView === 'json' && selectedMemberDetail.json && memberValueCodec === 'none'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
-            <JsonTree :value="selectedMemberDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
+            <JsonTree ref="memberSearchTreeRef" :search-matches="showMemberDetail ? treeSearchMatches : []" :active-search-index="contentSearchActiveIndex" :value="selectedMemberDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
           </div>
           <div v-else-if="activeStructuredMemberDetail && memberValueView !== 'hex' && memberValueView !== 'base64'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
-            <JsonTree v-if="memberValueView === 'json'" :value="activeStructuredMemberDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
+            <JsonTree
+              ref="memberSearchTreeRef"
+              :search-matches="showMemberDetail ? treeSearchMatches : []"
+              :active-search-index="contentSearchActiveIndex"
+              v-if="memberValueView === 'json'"
+              :value="activeStructuredMemberDetail.value"
+              :word-wrap="redisJsonWordWrap"
+              :highlight-json="highlightRedisJson"
+              virtualized
+            />
             <pre v-else class="w-full min-w-0 max-w-full" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'">{{ memberDecodedText }}</pre>
           </div>
-          <div v-else-if="memberValueCodec === 'base64' && memberBase64Detail" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
-            <JsonTree v-if="memberValueView === 'json' && memberBase64Detail.json" :value="memberBase64Detail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
+          <div v-else-if="memberValueCodec === 'base64' && memberBase64Detail && memberValueView !== 'hex' && memberValueView !== 'base64'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
+            <JsonTree
+              ref="memberSearchTreeRef"
+              :search-matches="showMemberDetail ? treeSearchMatches : []"
+              :active-search-index="contentSearchActiveIndex"
+              v-if="memberValueView === 'json' && memberBase64Detail.json"
+              :value="memberBase64Detail.json.value"
+              :word-wrap="redisJsonWordWrap"
+              :highlight-json="highlightRedisJson"
+              virtualized
+            />
             <pre v-else class="w-full min-w-0 max-w-full" :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'">{{ memberDecodedText }}</pre>
           </div>
           <div v-else-if="memberCodecMismatch" class="min-h-0 flex-1 flex flex-col overflow-hidden">
@@ -3789,11 +4157,9 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               <span>{{ t("grid.hexViewer") }}</span>
               <span>{{ t("grid.hexViewerByteCount", { count: selectedMemberDetail.byteCount }) }}</span>
             </div>
-            <pre v-if="selectedMemberDetail.hexRows.length > 0 && canHighlightMemberSurface" class="dbx-editor-font-family w-full min-w-0 max-w-full select-all whitespace-pre-wrap break-all" v-html="contentSearchHighlightedHtml" />
-            <pre v-else-if="selectedMemberDetail.hexRows.length > 0" class="dbx-editor-font-family w-full min-w-0 max-w-full select-all whitespace-pre-wrap break-all">{{ detailTextForFormat(selectedMemberDetail, "hex") }}</pre>
+            <pre v-if="selectedMemberDetail.hexRows.length > 0" class="dbx-editor-font-family w-full min-w-0 max-w-full select-all whitespace-pre-wrap break-all">{{ detailTextForFormat(selectedMemberDetail, "hex") }}</pre>
             <div v-else class="text-muted-foreground">{{ t("grid.hexViewerEmpty") }}</div>
           </div>
-          <pre v-else-if="memberValueView === 'base64' && canHighlightMemberSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6 whitespace-pre-wrap break-all" v-html="contentSearchHighlightedHtml" />
           <pre v-else-if="memberValueView === 'base64'" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6 whitespace-pre-wrap break-all">{{ selectedMemberDetail.base64Text }}</pre>
           <div v-else-if="isDecompressCodec(memberValueCodec)" class="min-h-0 flex-1 flex flex-col overflow-hidden">
             <div v-if="decompressedState.status === 'loading'" class="flex min-h-0 flex-1 items-center justify-center gap-2 text-muted-foreground">
@@ -3802,7 +4168,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             </div>
             <div v-else-if="decompressedState.status === 'success'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background">
               <div v-if="memberValueView === 'json' && decompressedJsonDetail" class="h-full p-5">
-                <JsonTree :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
+                <JsonTree ref="memberSearchTreeRef" :search-matches="showMemberDetail ? treeSearchMatches : []" :active-search-index="contentSearchActiveIndex" :value="decompressedJsonDetail.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
               </div>
               <pre v-else class="w-full min-w-0 max-w-full p-5 text-[13px] leading-6" :class="detailTextClass('utf8')">{{ memberDecodedText }}</pre>
             </div>
@@ -3825,10 +4191,8 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             </template>
           </div>
           <div v-else-if="memberValueView === 'utf8' && canEditCurrentMemberFormat && memberValueCodec === 'none'" data-redis-member-utf8-viewer class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background text-[13px] leading-6 cursor-text" @dblclick.self.prevent="startEditMember">
-            <pre v-if="canHighlightMemberSurface" data-redis-member-utf8-text class="inline-block min-w-0 p-5 align-top select-text" :class="[detailTextClass('utf8'), redisJsonWordWrap ? 'max-w-full' : 'min-w-max']" v-html="contentSearchHighlightedHtml" />
-            <pre v-else data-redis-member-utf8-text class="inline-block min-w-0 p-5 align-top select-text" :class="[detailTextClass('utf8'), redisJsonWordWrap ? 'max-w-full' : 'min-w-max']">{{ detailTextForFormat(selectedMemberDetail, "utf8") }}</pre>
+            <pre data-redis-member-utf8-text class="inline-block min-w-0 p-5 align-top select-text" :class="[detailTextClass('utf8'), redisJsonWordWrap ? 'max-w-full' : 'min-w-max']">{{ detailTextForFormat(selectedMemberDetail, "utf8") }}</pre>
           </div>
-          <pre v-else-if="canHighlightMemberSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6" :class="detailTextClass(memberValueView)" v-html="contentSearchHighlightedHtml" />
           <pre v-else class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-5 text-[13px] leading-6" :class="detailTextClass(memberValueView)">{{ detailTextForFormat(selectedMemberDetail, memberValueView) }}</pre>
         </template>
         <DialogFooter class="mx-0 mb-0 shrink-0 border-t px-5 py-3">
@@ -3842,7 +4206,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               {{ t("grid.save") }}
             </Button>
           </template>
-          <template v-else-if="isEditingHashJson">
+          <template v-else-if="!memberPluginCodecView && isEditingHashJson">
             <Button variant="ghost" :disabled="savingMember || !memberValueChanged" @click="discardHashJsonEdit">
               {{ t("grid.discard") }}
             </Button>
@@ -3852,11 +4216,11 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               {{ t("grid.save") }}
             </Button>
           </template>
-          <Button v-else-if="canEditCurrentMemberFormat" variant="outline" @click="startEditMember">
+          <Button v-else-if="!memberPluginCodecView && canEditCurrentMemberFormat" variant="outline" @click="startEditMember">
             <Pencil class="h-4 w-4" />
             {{ t("redis.editMember") }}
           </Button>
-          <Button variant="outline" @click="copyText(redisClipboardSafeText(memberCopyText))">
+          <Button v-if="!memberPluginCodecView" variant="outline" @click="copyText(redisClipboardSafeText(memberCopyText))">
             <Copy class="h-4 w-4" />
             {{ t("redis.copyMember") }}
           </Button>
@@ -3882,13 +4246,13 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
   outline: 1px solid #d97706;
 }
 
-:global(.dark) :deep(.document-search-match),
-:global(.dark) :deep(.redis-value-search-match) {
+.redis-value-viewer--dark :deep(.document-search-match),
+.redis-value-viewer--dark :deep(.redis-value-search-match) {
   background: #854d0e;
 }
 
-:global(.dark) :deep(.document-search-match-active),
-:global(.dark) :deep(.redis-value-search-match-active) {
+.redis-value-viewer--dark :deep(.document-search-match-active),
+.redis-value-viewer--dark :deep(.redis-value-search-match-active) {
   background: #fbbf24;
   color: #111827;
 }

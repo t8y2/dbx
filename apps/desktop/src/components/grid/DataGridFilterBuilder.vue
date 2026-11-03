@@ -12,7 +12,7 @@ import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStor
 import { resolveDataGridFilterRuleDropPlacement } from "@/lib/dataGrid/dataGridFilterRuleDrag";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
-import type { DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
+import type { DataGridDistinctValueSource, DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
 import type { DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 
 const { t } = useI18n();
@@ -58,10 +58,12 @@ const emit = defineEmits<{
   openValueSuggestions: [id: string, target: DataGridDistinctValueSuggestionTarget];
   closeValueSuggestions: [];
   updateValueSuggestionSearch: [value: string];
+  updateValueSuggestionSource: [source: DataGridDistinctValueSource];
   selectValueSuggestion: [option: DataGridLocalFilterOption];
   toggleValueSuggestion: [option: DataGridLocalFilterOption];
   toggleAllValueSuggestions: [];
   applyValueSuggestions: [];
+  customModeOrder: [];
 }>();
 const columnSearchInputs = new Map<string, HTMLInputElement>();
 const filterRuleElements = new Map<string, HTMLElement>();
@@ -69,6 +71,7 @@ const filterBuilderRootRef = ref<HTMLElement>();
 const pendingValueFocus = new Set<string>();
 const pendingKeyboardAddFocus = new Set<string>();
 const openColumnSelectIds = ref(new Set<string>());
+const openModeSelectIds = ref(new Set<string>());
 const activeColumnIndexes = ref<Record<string, number>>({});
 const focusedValueRuleId = ref<string>();
 const valueShortcutHintRuleId = ref<string>();
@@ -360,6 +363,22 @@ function setColumnSelectOpen(id: string, open: boolean) {
   openColumnSelectIds.value = next;
 }
 
+function setModeSelectOpen(id: string, open: boolean) {
+  const next = new Set(openModeSelectIds.value);
+  if (open) {
+    next.clear();
+    next.add(id);
+  } else {
+    next.delete(id);
+  }
+  openModeSelectIds.value = next;
+}
+
+function openCustomModeOrder(id: string) {
+  setModeSelectOpen(id, false);
+  emit("customModeOrder");
+}
+
 async function handleColumnSelectOpen(rule: DataGridStructuredFilterRule, open: boolean) {
   setColumnSelectOpen(rule.id, open);
   if (!open) return;
@@ -378,7 +397,7 @@ async function openFirstEmptyRuleColumnSearch() {
   if (rule) await handleColumnSelectOpen(rule, true);
 }
 
-defineExpose({ openFirstEmptyRuleColumnSearch });
+defineExpose({ openFirstEmptyRuleColumnSearch, focusFilterRuleValue });
 
 function handleColumnCloseAutoFocus(id: string, event: Event) {
   if (pendingKeyboardAddFocus.delete(id)) {
@@ -626,13 +645,15 @@ function blurValueRule(id: string) {
               </template>
             </SelectContent>
           </Select>
-          <Select :model-value="rule.mode" :disabled="rule.disabled" @update:model-value="(value: any) => emit('updateRule', rule.id, { mode: value as DataGridContextFilterMode })">
+          <Select :model-value="rule.mode" :open="openModeSelectIds.has(rule.id)" :disabled="rule.disabled" @update:model-value="(value: any) => emit('updateRule', rule.id, { mode: value as DataGridContextFilterMode })" @update:open="(open: boolean) => setModeSelectOpen(rule.id, open)">
             <SelectTrigger size="sm" class="w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate" :class="props.layout === 'text' ? 'h-6 rounded-none border-0 bg-transparent px-1 shadow-none focus-visible:ring-0' : 'h-7'"
               ><SelectValue
             /></SelectTrigger>
             <SelectContent
-              ><SelectItem v-for="option in props.modeOptions" :key="option.value" :value="option.value" class="rounded-none">{{ t(option.labelKey) }}</SelectItem></SelectContent
-            >
+              ><SelectItem v-for="option in props.modeOptions" :key="option.value" :value="option.value" class="rounded-none">{{ t(option.labelKey) }}</SelectItem>
+              <div class="my-1 border-t" />
+              <button type="button" class="flex w-full cursor-pointer items-center px-2 py-1.5 text-left text-xs text-muted-foreground outline-none hover:bg-accent hover:text-accent-foreground" @pointerdown.stop @click="openCustomModeOrder(rule.id)">{{ t("grid.filterModeOrderCustom") }}</button>
+            </SelectContent>
           </Select>
           <div v-if="props.layout === 'text'" class="flex min-w-0 items-center gap-1" :class="rule.disabled ? 'text-muted-foreground' : ''">
             <template v-if="filterModeUsesRange(rule.mode)">
@@ -655,8 +676,11 @@ function blurValueRule(id: string) {
                 :error="props.valueSuggestions.error"
                 :limited="props.valueSuggestions.limited"
                 :limit="props.valueSuggestions.limit"
+                :source="props.valueSuggestions.source"
+                :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
                 @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
                 @update:search="emit('updateValueSuggestionSearch', $event)"
+                @update:source="emit('updateValueSuggestionSource', $event)"
                 @select="emit('selectValueSuggestion', $event)"
               />
               <span class="shrink-0 text-[10px] text-muted-foreground">—</span>
@@ -678,8 +702,11 @@ function blurValueRule(id: string) {
                 :error="props.valueSuggestions.error"
                 :limited="props.valueSuggestions.limited"
                 :limit="props.valueSuggestions.limit"
+                :source="props.valueSuggestions.source"
+                :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
                 @update:open="updateValueSuggestionsOpen(rule, 'end', $event)"
                 @update:search="emit('updateValueSuggestionSearch', $event)"
+                @update:source="emit('updateValueSuggestionSource', $event)"
                 @select="emit('selectValueSuggestion', $event)"
               />
             </template>
@@ -703,10 +730,13 @@ function blurValueRule(id: string) {
                 :error="props.valueSuggestions.error"
                 :limited="props.valueSuggestions.limited"
                 :limit="props.valueSuggestions.limit"
+                :source="props.valueSuggestions.source"
+                :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
                 :multiple="true"
                 :selected-keys="props.valueSuggestions.selectedKeys"
                 @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
                 @update:search="emit('updateValueSuggestionSearch', $event)"
+                @update:source="emit('updateValueSuggestionSource', $event)"
                 @toggle="emit('toggleValueSuggestion', $event)"
                 @toggle-all="emit('toggleAllValueSuggestions')"
                 @apply="emit('applyValueSuggestions')"
@@ -732,8 +762,11 @@ function blurValueRule(id: string) {
                 :error="props.valueSuggestions.error"
                 :limited="props.valueSuggestions.limited"
                 :limit="props.valueSuggestions.limit"
+                :source="props.valueSuggestions.source"
+                :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
                 @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
                 @update:search="emit('updateValueSuggestionSearch', $event)"
+                @update:source="emit('updateValueSuggestionSource', $event)"
                 @select="emit('selectValueSuggestion', $event)"
               />
             </template>
@@ -762,8 +795,11 @@ function blurValueRule(id: string) {
               :error="props.valueSuggestions.error"
               :limited="props.valueSuggestions.limited"
               :limit="props.valueSuggestions.limit"
+              :source="props.valueSuggestions.source"
+              :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
               @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
               @update:search="emit('updateValueSuggestionSearch', $event)"
+              @update:source="emit('updateValueSuggestionSource', $event)"
               @select="emit('selectValueSuggestion', $event)"
             />
             <Input
@@ -787,8 +823,11 @@ function blurValueRule(id: string) {
               :error="props.valueSuggestions.error"
               :limited="props.valueSuggestions.limited"
               :limit="props.valueSuggestions.limit"
+              :source="props.valueSuggestions.source"
+              :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
               @update:open="updateValueSuggestionsOpen(rule, 'end', $event)"
               @update:search="emit('updateValueSuggestionSearch', $event)"
+              @update:source="emit('updateValueSuggestionSource', $event)"
               @select="emit('selectValueSuggestion', $event)"
             />
           </div>
@@ -813,10 +852,13 @@ function blurValueRule(id: string) {
               :error="props.valueSuggestions.error"
               :limited="props.valueSuggestions.limited"
               :limit="props.valueSuggestions.limit"
+              :source="props.valueSuggestions.source"
+              :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
               :multiple="true"
               :selected-keys="props.valueSuggestions.selectedKeys"
               @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
               @update:search="emit('updateValueSuggestionSearch', $event)"
+              @update:source="emit('updateValueSuggestionSource', $event)"
               @toggle="emit('toggleValueSuggestion', $event)"
               @toggle-all="emit('toggleAllValueSuggestions')"
               @apply="emit('applyValueSuggestions')"
@@ -845,8 +887,11 @@ function blurValueRule(id: string) {
               :error="props.valueSuggestions.error"
               :limited="props.valueSuggestions.limited"
               :limit="props.valueSuggestions.limit"
+              :source="props.valueSuggestions.source"
+              :can-use-server-filter="props.valueSuggestions.canUseServerFilter"
               @update:open="updateValueSuggestionsOpen(rule, 'value', $event)"
               @update:search="emit('updateValueSuggestionSearch', $event)"
+              @update:source="emit('updateValueSuggestionSource', $event)"
               @select="emit('selectValueSuggestion', $event)"
             />
           </div>

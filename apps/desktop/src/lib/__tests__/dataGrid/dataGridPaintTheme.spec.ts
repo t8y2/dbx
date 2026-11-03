@@ -39,7 +39,7 @@ function contrastRatio(a: string, b: string): number {
 }
 
 describe("data grid paint theme", () => {
-  it("uses a subtle active-row surface fallback in both color schemes", () => {
+  it("uses the active-row surface fallback in both color schemes", () => {
     expect(dataGridActiveRowBackground(false)).toBe(DATA_GRID_LIGHT_ACTIVE_ROW_BG);
     expect(dataGridActiveRowBackground(true)).toBe(DATA_GRID_DARK_ACTIVE_ROW_BG);
 
@@ -48,6 +48,20 @@ describe("data grid paint theme", () => {
     expect(resolveDataGridPaintTheme({ getVar: emptyCssVariable, isDark: false }).rowNumberActive).toBe(DATA_GRID_LIGHT_ACTIVE_ROW_BG);
     expect(resolveDataGridPaintTheme({ getVar: emptyCssVariable, isDark: true }).cellActive).toBe(DATA_GRID_DARK_ACTIVE_ROW_BG);
     expect(resolveDataGridPaintTheme({ getVar: emptyCssVariable, isDark: true }).rowNumberActive).toBe(DATA_GRID_DARK_ACTIVE_ROW_BG);
+  });
+
+  it("keeps the active row clearly visible yet lighter than the selected cell (#11649)", () => {
+    const emptyCssVariable = () => "";
+
+    for (const isDark of [false, true]) {
+      const theme = resolveDataGridPaintTheme({ getVar: emptyCssVariable, isDark });
+
+      // 活动行需与普通行底色拉开差距，避免看岔行
+      expect(contrastRatio(theme.background, theme.cellActive)).toBeGreaterThanOrEqual(1.15);
+      // 行内被点击的单元格仍须从活动行中凸显出来
+      expect(theme.cellActive).not.toBe(theme.cellSelected);
+      expect(contrastRatio(theme.cellActive, theme.cellSelectedSingle)).toBeGreaterThanOrEqual(1.1);
+    }
   });
 
   it("resolves crosshair row/col fills in both color schemes", () => {

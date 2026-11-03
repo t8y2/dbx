@@ -105,7 +105,8 @@ describe("queryStore plugin tab close connection lifecycle", () => {
 
     queryStore.closeTab(pluginTabId);
     await vi.waitFor(() => expect(disconnectSpy).toHaveBeenCalledTimes(1));
-    expect(disconnectSpy).toHaveBeenCalledWith("conn-plugin");
+    // 系统侧释放：不写"用户已关闭"标记，否则用户重新打开该插件页签会连不上。
+    expect(disconnectSpy).toHaveBeenCalledWith("conn-plugin", { markClosedByUser: false });
   });
 
   it("waits for the last plugin-owned workbench and filesystem tab before disconnecting", async () => {
@@ -129,7 +130,7 @@ describe("queryStore plugin tab close connection lifecycle", () => {
 
     queryStore.closeTab(filesystemId);
     await vi.waitFor(() => expect(disconnectSpy).toHaveBeenCalledTimes(1));
-    expect(disconnectSpy).toHaveBeenCalledWith("conn-plugin");
+    expect(disconnectSpy).toHaveBeenCalledWith("conn-plugin", { markClosedByUser: false });
   });
 
   it("does not let another plugin disconnect a plugin-owned connection it only borrows", async () => {

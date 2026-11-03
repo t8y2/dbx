@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 530
 dbType: impala
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: Impala
 label: Apache Impala
 runtimeMode: agent

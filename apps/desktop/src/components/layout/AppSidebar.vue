@@ -2,20 +2,24 @@
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { Upload, Download, ArrowDownUp, FolderPlus, FolderOpen, RefreshCw, ChevronsLeft, ChevronsDownUp, Trash2, FolderInput, Check, Minus, Square, X } from "@lucide/vue";
+import { Upload, Download, ArrowDownUp, FolderPlus, FolderOpen, RefreshCw, ChevronsLeft, ChevronsDownUp, Trash2, FolderInput, Check, Minus, Square, X, Server } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
+import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import PluginShortcutBar from "@/components/plugins/PluginShortcutBar.vue";
 import { useSettingsStore } from "@/stores/settingsStore";
 import ConnectionTree from "@/components/sidebar/ConnectionTree.vue";
 import { applyConnectionMultiSelection, emptyConnectionMultiSelection, isExitConnectionMultiSelectionShortcut } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import type { QueryTab, TreeNode } from "@/types/database";
+import type { ObjectDependencyTarget } from "@/lib/database/objectDependencyDetails";
+import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 
 defineProps<{
   sidebarWidth: number;
@@ -23,18 +27,21 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
-  import: [source: "dbx" | "navicat" | "dbeaver" | "datagrip"];
+  import: [source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis"];
   export: [];
   startResize: [event: PointerEvent];
   collapse: [];
   "open-settings": [initialTab: string];
+  "open-connection-settings": [connectionId: string];
   "add-to-ai": [nodes: TreeNode | TreeNode[]];
+  "open-dependency-object": [context: ObjectDependencyTarget, target: SqlObjectNavigationTarget];
 }>();
 
-type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
+type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const connectionTreeRef = ref<InstanceType<typeof ConnectionTree>>();
@@ -47,6 +54,8 @@ const importSourceItems = computed(() => [
   { value: "navicat", label: t("sidebar.importNavicat") },
   { value: "dbeaver", label: t("sidebar.importDbeaver") },
   { value: "datagrip", label: t("sidebar.importDatagrip") },
+  { value: "rdm", label: t("sidebar.importRdm"), tooltip: "RedisDesktopManager" },
+  { value: "another-redis", label: t("sidebar.importAnotherRedis"), tooltip: "Another Redis Desktop Manager" },
 ]);
 const connectionTransferItems = computed(() => [
   ...importSourceItems.value.map((item) => ({
@@ -62,6 +71,17 @@ const connectionTransferItems = computed(() => [
   },
 ]);
 const connectionTransferLabel = computed(() => t("sidebar.importExport"));
+const activeWindowConnection = computed(() => {
+  const tab = queryStore.tabs.find((item) => item.id === queryStore.activeTabId);
+  const connectionId = tab?.connectionId || connectionStore.activeConnectionId;
+  return connectionId ? connectionStore.getConfig(connectionId) : undefined;
+});
+const activeConnectionEndpoint = computed(() => {
+  const connection = activeWindowConnection.value;
+  if (!connection) return "";
+  const host = connection.host?.trim();
+  return host ? `${host}:${connection.port}` : "";
+});
 const connectionIdSet = computed(() => new Set(connectionStore.connections.map((connection) => connection.id)));
 const allConnectionIds = computed(() => connectionStore.connections.map((connection) => connection.id));
 const selectedConnectionIds = computed(() => (connectionStore.connectionMultiSelectActive ? connectionStore.selectedTreeNodeIds.filter((id) => connectionIdSet.value.has(id)) : []));
@@ -162,7 +182,8 @@ async function confirmDeleteSelectedConnections() {
     await connectionStore.removeConnections(ids);
     for (const connectionId of ids) {
       // 页签已由 removeConnections 按「删除连接」策略处理，这里只清会话。
-      connectionStore.disconnect(connectionId, { skipTabHandling: true }).catch((error) => {
+      // 删除是终态，不该留下"用户已关闭"标记（配置都没了）。
+      connectionStore.disconnect(connectionId, { skipTabHandling: true, markClosedByUser: false }).catch((error) => {
         console.warn("[DBX][connection:delete:disconnect-failed]", { connectionId, error });
       });
     }
@@ -202,12 +223,26 @@ function confirmCreateSelectedGroup() {
   showCreateSelectedGroupDialog.value = false;
 }
 
-defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections });
+function openTableStructureForSelection(): boolean {
+  return connectionTreeRef.value?.openTableStructureForSelection?.() ?? false;
+}
+
+const refreshShortcutLabel = computed(() => formatShortcut(settingsStore.editorSettings.shortcuts.refreshData));
+
+function refreshSidebar(): boolean {
+  return connectionTreeRef.value?.refreshSidebar?.() ?? false;
+}
+
+async function focusSelectedNode() {
+  await connectionTreeRef.value?.focusSelectedNode?.();
+}
+
+defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections, focusSelectedNode, openTableStructureForSelection, refreshSidebar, refreshTree });
 </script>
 
 <template>
-  <div data-app-sidebar class="app-sidebar-panel h-full shrink-0 relative select-none" :class="classicLayout ? '' : 'rounded-md border border-border/80 bg-background'" :style="{ width: sidebarWidth + 'px' }" @keydown="onSidebarKeydown">
-    <div class="h-full flex flex-col overflow-hidden">
+  <div data-app-sidebar class="app-sidebar-panel h-full shrink-0 relative select-none" :class="classicLayout ? '' : 'dbx-panel bg-background'" :style="{ width: sidebarWidth + 'px' }" @keydown="onSidebarKeydown">
+    <div class="h-full flex flex-col overflow-hidden rounded-[inherit]">
       <div class="app-sidebar-toolbar flex items-center gap-px px-3 text-xs font-medium text-muted-foreground border-b bg-muted/20" :class="classicLayout ? 'h-9' : 'h-10'">
         <span v-if="showConnectionMultiSelectToolbar" class="flex min-w-0 self-stretch items-center" data-tauri-drag-region>
           <span class="truncate" data-tauri-drag-region>{{ t("sidebar.connections") }}</span>
@@ -289,7 +324,7 @@ defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections }
               </Button>
             </LightTooltip>
             <LightTooltip :text="t('contextMenu.refreshChildren')" side="bottom" :delay="0" :close-delay="0" nowrap>
-              <Button variant="ghost" size="icon" class="h-5 w-5" @click="refreshTree">
+              <Button variant="ghost" size="icon" class="h-5 w-5" :aria-keyshortcuts="refreshShortcutLabel || undefined" @click="refreshTree">
                 <RefreshCw class="h-3 w-3" />
               </Button>
             </LightTooltip>
@@ -301,8 +336,18 @@ defineExpose({ focusSearch, locateTabInSidebar, disconnectAllActiveConnections }
           </span>
         </template>
       </div>
-      <div class="flex-1 min-h-0">
-        <ConnectionTree ref="connectionTreeRef" @open-settings="(initialTab) => emit('open-settings', initialTab)" @add-to-ai="(nodes) => emit('add-to-ai', nodes)" />
+      <div data-sidebar-connection-tree class="flex-1 min-h-0">
+        <ConnectionTree
+          ref="connectionTreeRef"
+          @open-settings="(initialTab) => emit('open-settings', initialTab)"
+          @open-connection-settings="(connectionId) => emit('open-connection-settings', connectionId)"
+          @add-to-ai="(nodes) => emit('add-to-ai', nodes)"
+          @open-dependency-object="(context, target) => emit('open-dependency-object', context, target)"
+        />
+      </div>
+      <div v-if="activeConnectionEndpoint" data-sidebar-connection-endpoint class="flex shrink-0 items-center gap-1.5 border-t border-border/60 px-2.5 py-1.5 text-[11px] leading-none text-muted-foreground" :title="activeWindowConnection?.name">
+        <Server class="h-3 w-3 shrink-0" />
+        <span class="min-w-0 truncate font-mono">{{ activeConnectionEndpoint }}</span>
       </div>
       <PluginShortcutBar v-if="settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position === 'sidebar-bottom'" position="sidebar-bottom" />
     </div>

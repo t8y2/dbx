@@ -1821,7 +1821,7 @@ watch(
     clearSelectedKey();
     clearMultiSelection();
     try {
-      await connectionStore.ensureConnected(props.connectionId);
+      await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
     } catch {
       // Connection failed — loadKeys will show the error state
     }
@@ -1868,7 +1868,7 @@ watch(editKey, () => {
 onMounted(() => {
   initialLoadPromise = (async () => {
     try {
-      await connectionStore.ensureConnected(props.connectionId);
+      await connectionStore.ensureConnected(props.connectionId, { skipIfClosedByUser: true });
     } catch (e) {
       console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
     }

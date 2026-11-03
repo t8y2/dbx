@@ -23,6 +23,39 @@
         background-color: rgb(19 20 22);
       }
 
+      /* Linux floating frame (see create_linux_main_window). Lives here, not in the app
+       * bundle, so the margin, rounded corners and shadow exist from the very first paint.
+       * #root is the frame: `contain: layout` makes it the containing block of the
+       * position:fixed startup/app layers. Keep the 20px in sync with LinuxResizeHandles. */
+      html.dbx-linux-floating,
+      html.dbx-linux-floating body {
+        background: transparent !important;
+      }
+
+      html.dbx-linux-floating #root {
+        position: fixed;
+        inset: 20px;
+        /* globals.css sets html, body, #root to 100%, which would override inset */
+        width: auto;
+        height: auto;
+        contain: layout;
+        overflow: hidden;
+        border-radius: 12px;
+        box-shadow:
+          0 0 0 1px rgb(0 0 0 / 0.14),
+          0 3px 12px rgb(0 0 0 / 0.16);
+      }
+
+      html.dark.dbx-linux-floating #root {
+        box-shadow:
+          0 0 0 1px rgb(255 255 255 / 0.1),
+          0 3px 12px rgb(0 0 0 / 0.45);
+      }
+
+      html.dbx-linux-floating #startup-loading {
+        min-height: 100%;
+      }
+
       #startup-loading {
         display: flex;
         flex-direction: column;
@@ -69,6 +102,10 @@
         }
       }
     </style>
+    <script>
+      // Injected by the Rust side only for the main window when a compositor is running.
+      if (window.__DBX_LINUX_FLOATING__) document.documentElement.classList.add("dbx-linux-floating");
+    </script>
     <script data-dbx-startup-theme>
       (() => {
         const root = document.documentElement;

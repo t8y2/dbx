@@ -2,13 +2,17 @@ pub fn format_pg_array_sql_literal(arr: &[serde_json::Value]) -> String {
     if arr.is_empty() {
         return "'{}'".to_string();
     }
-    let elements: Vec<String> = arr.iter().map(format_pg_array_element).collect();
-    let inner = format!("{{{}}}", elements.join(","));
+    let inner = format_pg_array_text(arr);
     // The array text already carries its own backslash escapes, so doubling
     // them is only valid inside an escape string constant (E'...'); a plain
     // '...' literal keeps backslashes verbatim under the default
     // standard_conforming_strings = on.
     quote_postgres_string_literal(&inner)
+}
+
+pub fn format_pg_array_text(arr: &[serde_json::Value]) -> String {
+    let elements: Vec<String> = arr.iter().map(format_pg_array_element).collect();
+    format!("{{{}}}", elements.join(","))
 }
 
 pub fn format_pg_array_element(val: &serde_json::Value) -> String {

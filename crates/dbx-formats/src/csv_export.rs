@@ -37,6 +37,9 @@ pub fn default_csv_null_literal() -> String {
 /// 表格应用按公式执行（数据外泄）。DataGrip 导出 CSV 时采用同一惯例。
 /// 数值列不受影响（Number 分支不走文本路径）。
 ///
+/// `@` 只在后面跟着 ASCII 记号时才触发（见 [`at_sign_begins_excel_formula`]）：
+/// `@冯十二` 这类 `@` + 非 ASCII 文本没有可执行的公式面，加 `'` 只会污染内容。
+///
 /// 前缀的写入/剥离必须保持每单元格一次的对称对：[`push_formula_guard`] 与
 /// [`strip_formula_guard`]。guard 绝不能放进 [`push_csv_escaped_content`] 这类
 /// 片段级写入路径——serde_json 的 `Display` 会把对象/数组拆成多个片段经
@@ -47,15 +50,31 @@ const FORMULA_TRIGGER_BYTES: &[u8] = b"=+-@\t\r";
 const EXCEL_SIGNIFICANT_DIGIT_LIMIT: usize = 15;
 
 /// 文本是否需要公式中和：跳过前导空格（OWASP 标注的 `" =cmd"` 前导空白绕过）
-/// 后，首字节是触发字符即命中；唯一例外是 `-` 开头且**整串**构成 Excel 可无损
-/// 解析的十进制字面量的文本（见 [`is_excel_exact_decimal_literal`]）。
+/// 后，首字节是触发字符即命中；例外有两个：
+/// - `-` 开头且**整串**构成 Excel 可无损解析的十进制字面量（见
+///   [`is_excel_exact_decimal_literal`]）；
+/// - `@` 开头但后面不是 ASCII 记号，在 Excel 里没有可求值的表达式（见
+///   [`at_sign_begins_excel_formula`]）。
 pub fn needs_formula_guard(value: &str) -> bool {
     let rest = value.trim_start_matches(' ');
     match rest.as_bytes().first() {
         Some(b'-') if is_excel_exact_decimal_literal(&rest[1..]) => false,
+        Some(b'@') if !at_sign_begins_excel_formula(&rest[1..]) => false,
         Some(byte) if FORMULA_TRIGGER_BYTES.contains(byte) => true,
         _ => false,
     }
+}
+
+/// `@` 之后是否还有 ASCII 记号：Excel 的 `@`（AppleWorks 兼容触发符，现代 Excel
+/// 里是隐式交集运算符）要绑定到 ASCII 的函数名、单元格引用、数字或运算符才构成
+/// 可求值的表达式——`=@WEBSERVICE("https://evil")` 会真的发起请求，`@SUM(1)`、
+/// `@A1` 也都会求值，这些值必须继续中和。
+///
+/// 反过来，`@` 后直接跟非 ASCII 文本（Oracle 里 `@冯十二` 这类 `@` 开头的文本很
+/// 常见）或 `@` 后字符串就结束时，`@` 没有可绑定的记号，Excel 最多落到 `#NAME?`，
+/// 不存在公式执行面；此时前置 `'` 只会污染导出文件和复制内容，而不提供任何防护。
+fn at_sign_begins_excel_formula(rest: &str) -> bool {
+    rest.as_bytes().first().is_some_and(u8::is_ascii)
 }
 
 /// 整串是否为 Excel 能原样保留的十进制字面量：`[+-]? 数字 [. 数字]`（无指数
@@ -73,17 +92,16 @@ pub fn needs_formula_guard(value: &str) -> bool {
 fn is_excel_exact_decimal_literal(value: &str) -> bool {
     let bytes = value.as_bytes();
     let digits = if matches!(bytes.first(), Some(b'+') | Some(b'-')) { &bytes[1..] } else { bytes };
-    match digits.iter().position(|&byte| byte == b'.') {
-        Some(dot) => is_exact_digit_run(&digits[..dot]) && is_exact_digit_run(&digits[dot + 1..]),
-        None => is_exact_digit_run(digits),
-    }
-}
-
-/// 整段是否为非空纯 ASCII 数字，且有效数字（去前导零）不超过 Excel 精度上限。
-fn is_exact_digit_run(bytes: &[u8]) -> bool {
-    !bytes.is_empty()
-        && bytes.iter().all(u8::is_ascii_digit)
-        && bytes.iter().skip_while(|&&byte| byte == b'0').count() <= EXCEL_SIGNIFICANT_DIGIT_LIMIT
+    let valid_digits = |part: &[u8]| !part.is_empty() && part.iter().all(u8::is_ascii_digit);
+    let valid = match digits.iter().position(|&byte| byte == b'.') {
+        Some(dot) => valid_digits(&digits[..dot]) && valid_digits(&digits[dot + 1..]),
+        None => valid_digits(digits),
+    };
+    // Count the whole decimal together: fractional zeros are significant once
+    // the first nonzero digit has appeared in either part.
+    valid
+        && digits.iter().filter(|&&byte| byte != b'.').skip_while(|&&byte| byte == b'0').count()
+            <= EXCEL_SIGNIFICANT_DIGIT_LIMIT
 }
 
 /// 在单元格值开头写入公式中和前缀，每单元格调用一次：
@@ -752,6 +770,41 @@ mod tests {
     }
 
     #[test]
+    fn at_sign_before_non_ascii_text_keeps_its_plain_form() {
+        // 回归：`@` + 非 ASCII 文本（Oracle 里 `@冯十二` 这类）曾被当成公式触发符
+        // 写成 `'@冯十二`。`@` 后没有 ASCII 记号时 Excel 没有可求值的表达式；
+        // `@` 后跟着 ASCII 记号的形态（函数调用、引用、数字）仍是公式面，继续守卫。
+        let out = format_csv(
+            &["v".to_string()],
+            &[
+                vec![json!("@冯十二")],
+                vec![json!("@张三@李四")],
+                vec![json!("@")],
+                vec![json!("@🐴")],
+                vec![json!("@ 冯十二")],
+                vec![json!("@WEBSERVICE(\"https://evil\")")],
+                vec![json!("@SUM(1)")],
+                vec![json!("@A1")],
+            ],
+        );
+        assert_eq!(
+            out,
+            concat!(
+                "\"v\"\n",
+                "\"@冯十二\"\n",
+                "\"@张三@李四\"\n",
+                "\"@\"\n",
+                "\"@🐴\"\n",
+                // `@` 后是 ASCII 空格，仍按触发符处理（保守）
+                "\"'@ 冯十二\"\n",
+                "\"'@WEBSERVICE(\"\"https://evil\"\")\"\n",
+                "\"'@SUM(1)\"\n",
+                "\"'@A1\""
+            )
+        );
+    }
+
+    #[test]
     fn negative_decimal_text_cells_keep_their_plain_numeric_form() {
         // 回归：DECIMAL/NUMERIC/BIGINT 负值以文本下发（PG numeric、MySQL DECIMAL
         // 都返回字符串），曾因 `-` 触发符被写成 `'-1`，复制/导出内容被污染。
@@ -785,6 +838,26 @@ mod tests {
                 "\"'-cmd\""
             )
         );
+    }
+
+    #[test]
+    fn negative_decimal_precision_counts_digits_across_the_decimal_point() {
+        for (value, guarded) in [
+            ("-123456789012345.6", true),
+            ("-12345678.12345678", true),
+            ("-12345678.01234567", true),
+            ("-12345678.1234567", false),
+            ("-00012345678.1234567", false),
+            ("-0.000000000000000123456789012345", false),
+            ("-0.0000000000000001234567890123456", true),
+            ("-0.00000000000000000000", false),
+        ] {
+            let expected = format!("{}{value}", if guarded { "'" } else { "" });
+            let rows = [vec![json!(value)]];
+            assert_eq!(format_csv(&["v".to_string()], &rows), format!("\"v\"\n\"{expected}\""), "CSV: {value}");
+            assert_eq!(format_tsv(&["v".to_string()], &rows), format!("v\n{expected}"), "TSV: {value}");
+            assert_eq!(super::strip_formula_guard(&expected), value);
+        }
     }
 
     #[test]

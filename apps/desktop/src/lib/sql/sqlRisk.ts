@@ -55,6 +55,73 @@ export function usesMysqlLexerRules(dialect?: DatabaseType | string): boolean {
   return typeof dialect === "string" && MYSQL_LEXER_DATABASE_TYPES.has(dialect.trim().toLowerCase());
 }
 
+/**
+ * PostgreSQL-family engines also read a backslash as an escape inside `E'...'`
+ * literals, even though `standard_conforming_strings` keeps ordinary `'...'`
+ * literals backslash-literal. The `E`/`e` must start its own token, so
+ * `DATE'2020-01-01'` and `x$e'...'` stay ordinary strings. Mirrors the
+ * `postgres_escape_strings` rule of `SqlScanLexerRules` in
+ * `crates/dbx-core/src/safety/production_safety.rs`.
+ */
+const POSTGRES_ESCAPE_STRING_DATABASE_TYPES = new Set<string>(["postgres", "opengauss", "gaussdb", "vastbase", "kingbase", "highgo", "uxdb", "kwdb"]);
+
+export function usesPostgresEscapeStrings(dialect?: DatabaseType | string): boolean {
+  return typeof dialect === "string" && POSTGRES_ESCAPE_STRING_DATABASE_TYPES.has(dialect.trim().toLowerCase());
+}
+
+/**
+ * True when the `E'`/`e'` introducer before `quoteIndex` starts its own token,
+ * so `DATE'2020-01-01'` and `x$e'...'` stay ordinary strings. Mirrors
+ * `ends_with_escape_string_prefix` in `crates/dbx-core/src/safety/production_safety.rs`.
+ */
+export function endsWithEscapeStringPrefix(sql: string, quoteIndex: number): boolean {
+  const introducer = sql[quoteIndex - 1];
+  if (introducer !== "E" && introducer !== "e") return false;
+  const before = sql[quoteIndex - 2];
+  return before === undefined || !/[\p{L}\p{N}_$]/u.test(before);
+}
+
+/**
+ * Oracle alternative quoting: `q'...'` / `nq'...'` literals delimited by
+ * `[`/`]`, `{`/`}`, `(`/`)`, `<`/`>` or a self-delimiting character, where the
+ * quote character may appear inside the literal unchanged. Mirrors
+ * `skipOracleAlternativeQuoted` in `apps/desktop/src/lib/sql/sqlParameters.ts`
+ * and the Oracle branch of `tokenizeSqlSemantic`.
+ */
+const ORACLE_ALTERNATIVE_QUOTE_DATABASE_TYPES = new Set<string>(["oracle", "oceanbase-oracle"]);
+
+export function usesOracleAlternativeQuotes(dialect?: DatabaseType | string): boolean {
+  return typeof dialect === "string" && ORACLE_ALTERNATIVE_QUOTE_DATABASE_TYPES.has(dialect.trim().toLowerCase());
+}
+
+/**
+ * Returns the index past the closing quote of the alternative-quoted literal
+ * starting at `index` (the `q`/`n` of `q'...'` / `nq'...'`), or `undefined`
+ * when this is not such a literal. The introducer must start its own token, so
+ * `aq'...'` and `q '...'` stay ordinary strings.
+ */
+export function readOracleAlternativeQuoteEnd(sql: string, index: number): number | undefined {
+  let quoteIndex = index;
+  const first = sql[quoteIndex]?.toLowerCase();
+  if (first === "n") {
+    if (sql[quoteIndex + 1]?.toLowerCase() !== "q") return undefined;
+    quoteIndex += 1;
+  } else if (first !== "q") {
+    return undefined;
+  }
+  if (sql[quoteIndex + 1] !== "'") return undefined;
+  const previous = sql[index - 1];
+  if (previous !== undefined && /[\p{L}\p{N}_$#]/u.test(previous)) return undefined;
+
+  const openerCodePoint = sql.codePointAt(quoteIndex + 2);
+  if (openerCodePoint === undefined) return undefined;
+  const opener = String.fromCodePoint(openerCodePoint);
+  if (/\s/.test(opener)) return undefined;
+  const closer = ({ "[": "]", "{": "}", "(": ")", "<": ">" } as Record<string, string>)[opener] ?? opener;
+  const end = sql.indexOf(closer + "'", quoteIndex + 2 + opener.length);
+  return end === -1 ? sql.length : end + closer.length + 1;
+}
+
 const RISK_ORDER: Record<SqlRiskLevel, number> = {
   read: 0,
   write: 1,
@@ -184,6 +251,8 @@ export function isSqlRiskMutation(risk: SqlRiskLevel): boolean {
 
 export function sqlSafetyText(sql: string, dialect?: DatabaseType | string): string {
   const mysqlLexer = usesMysqlLexerRules(dialect);
+  const postgresEscapeStrings = usesPostgresEscapeStrings(dialect);
+  const oracleAlternativeQuotes = usesOracleAlternativeQuotes(dialect);
   let output = "";
   let index = 0;
 
@@ -227,8 +296,18 @@ export function sqlSafetyText(sql: string, dialect?: DatabaseType | string): str
       continue;
     }
 
+    if (oracleAlternativeQuotes && (char === "q" || char === "Q" || char === "n" || char === "N")) {
+      const alternativeQuoteEnd = readOracleAlternativeQuoteEnd(sql, index);
+      if (alternativeQuoteEnd !== undefined) {
+        index = alternativeQuoteEnd;
+        output += " ";
+        continue;
+      }
+    }
+
     if (char === "'") {
-      index = readQuotedEnd(sql, index, "'", "'", mysqlLexer);
+      const backslashEscapes = mysqlLexer || (postgresEscapeStrings && endsWithEscapeStringPrefix(sql, index));
+      index = readQuotedEnd(sql, index, "'", "'", backslashEscapes);
       output += " ";
       continue;
     }
@@ -284,6 +363,7 @@ function classifyTokens(tokens: SqlRiskToken[]): SqlRiskStatementAssessment {
   }
 
   if (firstKeyword === "use") return { risk: "read", firstKeyword };
+  if (firstKeyword === "set") return { risk: classifySetTokens(useful), firstKeyword };
   if (WRITE_KEYWORDS.has(firstKeyword)) return { risk: "write", firstKeyword };
   if (DDL_KEYWORDS.has(firstKeyword)) return { risk: "ddl", firstKeyword };
   if (TRANSACTION_KEYWORDS.has(firstKeyword)) return { risk: "transaction", firstKeyword };
@@ -312,6 +392,54 @@ function classifyPragmaTokens(tokens: SqlRiskToken[]): SqlRiskLevel {
   const name = tokens.find((token, index) => index > 0 && /^[a-z_]/i.test(token.text))?.normalized;
   if (name && SAFE_READ_PRAGMA_NAMES.has(name) && !tokens.some((token) => token.text === "=")) return "read";
   return "write";
+}
+
+function classifySetTokens(tokens: SqlRiskToken[]): SqlRiskLevel {
+  const setIndex = tokens.findIndex((token) => token.normalized === "set");
+  const afterSet = setIndex >= 0 ? tokens.slice(setIndex + 1) : tokens;
+
+  // Verify there are no write/ddl/transaction verbs in subqueries or clauses.
+  // Scalar function calls like replace(...) and insert(...) are allowed.
+  const innerRisk = highestRiskInSetTokens(afterSet);
+  if (innerRisk) return innerRisk;
+
+  let hasAssignment = false;
+  for (const token of afterSet) {
+    const norm = token.normalized;
+    if (norm === "password") return "write";
+    if (norm === "global" || norm === "persist" || norm === "persist_only") return "write";
+    if (norm.startsWith("@@global") || norm.startsWith("@@persist")) return "write";
+    if (norm === "outfile" || norm === "dumpfile") return "write";
+    if (norm === "call" || norm === "exec" || norm === "execute") return "write";
+    if (token.text === "=" || token.text === ":=" || norm === "to") {
+      hasAssignment = true;
+    }
+  }
+
+  if (hasAssignment) return "read";
+
+  const first = afterSet[0]?.normalized;
+  const second = afterSet[1]?.normalized;
+  if (first === "names" || first === "charset") return "read";
+  if (first === "character" && second === "set") return "read";
+  if (first === "time" && second === "zone") return "read";
+
+  return "unknown";
+}
+
+function highestRiskInSetTokens(tokens: SqlRiskToken[]): SqlRiskLevel | undefined {
+  let result: SqlRiskLevel | undefined;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (!token) continue;
+    const norm = token.normalized;
+    if ((norm === "replace" || norm === "insert") && tokens[i + 1]?.text === "(") {
+      continue;
+    }
+    const risk = WRITE_KEYWORDS.has(norm) ? "write" : DDL_KEYWORDS.has(norm) ? "ddl" : TRANSACTION_KEYWORDS.has(norm) ? "transaction" : undefined;
+    if (risk && (!result || RISK_ORDER[risk] > RISK_ORDER[result])) result = risk;
+  }
+  return result;
 }
 
 function highestRiskInTokens(tokens: SqlRiskToken[]): SqlRiskLevel | undefined {

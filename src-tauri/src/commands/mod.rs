@@ -1,14 +1,17 @@
 pub mod agents;
 pub mod ai;
 pub mod ai_multi_config;
+pub mod app_relaunch;
 pub mod app_settings;
 pub mod background_image;
+pub mod cc_switch;
 pub mod cloud_sync;
 pub mod config_cmd;
 pub mod connection;
 #[allow(dead_code, unused_imports)]
 mod connection_secrets;
 pub mod csv_export;
+pub mod dameng_dump;
 pub mod data_compare;
 pub mod database_export;
 pub mod deep_link;
@@ -38,6 +41,7 @@ pub mod mq_cmd;
 #[cfg(feature = "mq-admin")]
 pub mod mqtt_cmd;
 pub mod nacos_cmd;
+pub mod pl_debug;
 pub mod plugin_download;
 pub mod plugin_download_file;
 pub mod plugin_file;
@@ -54,6 +58,7 @@ pub mod salesforce_oauth;
 pub mod saved_sql;
 pub mod schema_cache;
 pub mod schema_diff;
+pub mod shortcut_recording;
 pub mod sql_file;
 pub mod sqlite_backup;
 pub mod ssh_config;

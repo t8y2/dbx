@@ -474,6 +474,7 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
         timeout_secs: Some(30),
         keyset_optimization_enabled: false,
         client_session_id: None,
+        txn_session_id: None,
         execution_id: Some(format!("live-mysql-query-export-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
@@ -484,10 +485,11 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
         selected_columns: None,
         export_column_extras: None,
         column_comments: None,
+        header_comment_rows: false,
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
-        exclude_primary_keys: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
     };
     let done_seen = AtomicBool::new(false);
@@ -571,6 +573,7 @@ async fn live_mysql_csv_temporal_export_round_trip_preserves_dbx_force_text_valu
         timeout_secs: Some(30),
         keyset_optimization_enabled: false,
         client_session_id: None,
+        txn_session_id: None,
         execution_id: Some(format!("live-mysql-issue-8803-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
@@ -581,10 +584,11 @@ async fn live_mysql_csv_temporal_export_round_trip_preserves_dbx_force_text_valu
         selected_columns: None,
         export_column_extras: None,
         column_comments: None,
+        header_comment_rows: false,
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
-        exclude_primary_keys: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
     };
     export_query_result_core(&state, &request, None, |_| {}).await.expect("export fixture");
@@ -598,6 +602,7 @@ async fn live_mysql_csv_temporal_export_round_trip_preserves_dbx_force_text_valu
             source_column: column.clone(),
             target_column: column.clone(),
             target_data_type: None,
+            generator: None,
         })
         .collect::<Vec<_>>();
     let batch = build_import_insert_batch_from_rows(
@@ -692,6 +697,7 @@ async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arrivi
         timeout_secs: Some(1),
         keyset_optimization_enabled: false,
         client_session_id: None,
+        txn_session_id: None,
         execution_id: Some(format!("live-mysql-query-export-timeout-{suffix}")),
         date_time_format: None,
         csv_quote_mode: Default::default(),
@@ -702,10 +708,11 @@ async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arrivi
         selected_columns: None,
         export_column_extras: None,
         column_comments: None,
+        header_comment_rows: false,
         auto_filter: None,
         identifier_quote: None,
         numeric_column_right_align: false,
-        exclude_primary_keys: false,
+        primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
     };
     let rows_exported = AtomicU64::new(0);
@@ -949,7 +956,9 @@ async fn live_mysql_query_cancel_kills_running_sleep() {
     });
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    dbx_core::db::mysql::kill_query_with_opts(kill_opts, connection_id).await.unwrap();
+    dbx_core::db::mysql::kill_query_with_opts(kill_opts, connection_id, dbx_core::db::connection_timeout())
+        .await
+        .unwrap();
 
     let started = std::time::Instant::now();
     let result = query.await.unwrap();
@@ -1370,6 +1379,9 @@ INSERT INTO install_check (id) VALUES (1), (2);
         selected_tables: None,
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
+        failure_log_enabled: true,
+        resolve_includes: false,
+        encoding: Default::default(),
     };
 
     let _ = execute_sql_statement(
@@ -1460,6 +1472,9 @@ INSERT INTO children (parent_id) VALUES (LAST_INSERT_ID());
         selected_tables: None,
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
+        failure_log_enabled: true,
+        resolve_includes: false,
+        encoding: Default::default(),
     };
 
     let _ = execute_sql_statement(
@@ -1534,6 +1549,9 @@ async fn live_sql_file_import_preserves_raw_mysql_binary_literal_bytes() {
         selected_tables: None,
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
+        failure_log_enabled: true,
+        resolve_includes: false,
+        encoding: Default::default(),
     };
 
     tokio::fs::write(&request.file_path, script).await.unwrap();

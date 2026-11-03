@@ -8,6 +8,8 @@ import { isUpdatePreviewMockEnabled, previewDriverUpdates, previewJdbcUpdate, pr
 import type { ComponentUpdateCategory } from "@/lib/updates/componentUpdateOrchestration";
 import type { AgentDriverInfo, AgentUpdateBlocker, McpServerStatus } from "@/lib/backend/tauri";
 import type { JdbcPluginStatus } from "@/types/database";
+import { uuid } from "@/lib/common/utils";
+import { isDriverInstallProgressForOperation, updatePerDriverProgress, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 
 export type { ComponentUpdateCategory } from "@/lib/updates/componentUpdateOrchestration";
 
@@ -56,6 +58,9 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
   const updating = ref(false);
   const updatingCategory = ref<ComponentUpdateCategory | null>(null);
   const lastError = ref("");
+  const driverBatchCompleted = ref(0);
+  const driverBatchTotal = ref(0);
+  const driverProgressMap = ref<Record<string, DriverInstallProgress>>({});
 
   const driverUpdates = computed(() => drivers.value.filter((driver) => driver.update_available));
   const pluginUpdates = computed(() => pluginListings.value.filter((listing) => listing.status === "update"));
@@ -143,9 +148,36 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
       result.blockedDrivers = blockers;
       return;
     }
-    const upgraded = await api.upgradeAllAgents();
-    result.drivers += upgraded.upgraded;
-    if (upgraded.failed.length) result.failed.push(...upgraded.failed.map((item) => `${item.db_type}: ${item.error}`));
+    const operationId = uuid();
+    driverBatchCompleted.value = 0;
+    driverBatchTotal.value = updatable.length;
+    driverProgressMap.value = {};
+
+    let unlisten: (() => void) | null = null;
+    try {
+      if (typeof api.listenAgentInstallProgress === "function") {
+        unlisten = await api.listenAgentInstallProgress((payload) => {
+          const incoming = payload as DriverInstallProgress;
+          if (!isDriverInstallProgressForOperation(incoming, operationId)) return;
+          if (incoming.total_drivers) {
+            driverBatchTotal.value = incoming.total_drivers;
+          }
+          if (incoming.step === "done" && incoming.db_type) {
+            driverBatchCompleted.value++;
+          }
+          updatePerDriverProgress(driverProgressMap.value, incoming);
+          driverProgressMap.value = { ...driverProgressMap.value };
+        });
+      }
+      const upgraded = await api.upgradeAllAgents(operationId);
+      result.drivers += upgraded.upgraded;
+      if (upgraded.failed.length) result.failed.push(...upgraded.failed.map((item) => `${item.db_type}: ${item.error}`));
+    } finally {
+      unlisten?.();
+      driverProgressMap.value = {};
+      driverBatchCompleted.value = 0;
+      driverBatchTotal.value = 0;
+    }
   }
 
   async function updateJdbc(result: ComponentUpdateResult) {
@@ -215,6 +247,10 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
     if (!options.isDesktop) return result;
     if (activeUpdatePromise) return activeUpdatePromise;
     updating.value = true;
+    // 作废更新窗口开始前发出的刷新：旧的 refreshPromise 带的是升级前快照，
+    // 必须一并清掉，否则更新流程会复用它而拿不到安装后的权威状态。
+    refreshVersion += 1;
+    refreshPromise = null;
     const operation = (async () => {
       await refresh();
       const initialCheckError = lastError.value;
@@ -229,6 +265,9 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
       return await operation;
     } finally {
       if (activeUpdatePromise === operation) activeUpdatePromise = null;
+      // 安装结束后同样作废在途刷新，确保权威状态不会被旧快照覆盖。
+      refreshVersion += 1;
+      refreshPromise = null;
       updating.value = false;
       updatingCategory.value = null;
     }
@@ -263,6 +302,9 @@ export function useComponentUpdates(options: { isDesktop: boolean }) {
     updatingCategory,
     lastError,
     driverUpdateCount,
+    driverBatchCompleted,
+    driverBatchTotal,
+    driverProgressMap,
     jdbcUpdateAvailable,
     mcpUpdateAvailable,
     pluginUpdateCount,

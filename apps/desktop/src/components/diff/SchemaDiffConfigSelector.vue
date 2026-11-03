@@ -6,7 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Download, Upload, Plus, Trash2, Copy, FileDown } from "@lucide/vue";
+import { Download, Upload, Plus, Trash2, Copy, Pencil } from "@lucide/vue";
 import type { SchemaDiffConfig } from "@/types/schemaDiff";
 
 const props = defineProps<{
@@ -129,31 +129,31 @@ const activeConfig = computed(() => props.configs.find((c) => c.id === props.act
       </SelectContent>
     </Select>
 
-    <Button variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.newConfig')" @click="handleCreate">
+    <Button variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.newConfig')" :aria-label="t('schemaDiff.newConfig')" data-testid="schema-diff-config-create" @click="handleCreate">
       <Plus class="h-4 w-4" />
     </Button>
 
-    <Button v-if="activeConfig" variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.renameConfig')" @click="startRename(activeConfig)">
+    <Button v-if="activeConfig" variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.renameConfig')" :aria-label="t('schemaDiff.renameConfig')" data-testid="schema-diff-config-rename" @click="startRename(activeConfig)">
+      <Pencil class="h-4 w-4" />
+    </Button>
+
+    <Button v-if="activeConfig" variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.duplicateConfig')" :aria-label="t('schemaDiff.duplicateConfig')" data-testid="schema-diff-config-duplicate" @click="emit('duplicate', activeConfig.id)">
       <Copy class="h-4 w-4" />
     </Button>
 
-    <Button v-if="activeConfig" variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.duplicateConfig')" @click="emit('duplicate', activeConfig.id)">
-      <FileDown class="h-4 w-4" />
-    </Button>
-
-    <Button v-if="activeConfig && configs.length > 1" variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.deleteConfig')" @click="activeConfig && emit('delete', activeConfig.id)">
+    <Button v-if="activeConfig && configs.length > 1" variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.deleteConfig')" :aria-label="t('schemaDiff.deleteConfig')" data-testid="schema-diff-config-delete" @click="activeConfig && emit('delete', activeConfig.id)">
       <Trash2 class="h-4 w-4" />
     </Button>
 
-    <Button variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.exportConfig')" @click="onExport">
+    <Button variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.exportConfig')" :aria-label="t('schemaDiff.exportConfig')" @click="onExport">
       <Upload class="h-4 w-4" />
     </Button>
 
-    <Button variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.importConfig')" @click="importDialogOpen = true">
+    <Button variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.importConfig')" :aria-label="t('schemaDiff.importConfig')" @click="importDialogOpen = true">
       <Download class="h-4 w-4" />
     </Button>
 
-    <Button variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.exportAllConfigs')" @click="onExportAll">
+    <Button variant="outline" size="icon" class="h-8 w-8" :title="t('schemaDiff.exportAllConfigs')" :aria-label="t('schemaDiff.exportAllConfigs')" @click="onExportAll">
       <Upload class="h-4 w-4" />
     </Button>
 
@@ -165,11 +165,11 @@ const activeConfig = computed(() => props.configs.find((c) => c.id === props.act
         </DialogHeader>
         <div class="py-4">
           <Label class="text-sm">{{ t("schemaDiff.configName") }}</Label>
-          <Input v-model="renameValue" class="mt-2" @keydown.enter="confirmRename" />
+          <Input v-model="renameValue" class="mt-2" data-testid="schema-diff-config-rename-input" autofocus @keydown.enter="confirmRename" />
         </div>
         <DialogFooter>
           <Button variant="outline" @click="renameDialogOpen = false">{{ t("common.cancel") }}</Button>
-          <Button @click="confirmRename">{{ t("common.save") }}</Button>
+          <Button data-testid="schema-diff-config-rename-save" @click="confirmRename">{{ t("common.save") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

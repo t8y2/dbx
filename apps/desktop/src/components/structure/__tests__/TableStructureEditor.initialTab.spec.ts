@@ -1,4 +1,4 @@
-// @vitest-environment happy-dom
+﻿// @vitest-environment happy-dom
 
 import { createApp, nextTick, type App } from "vue";
 import { EditorView } from "@codemirror/view";
@@ -31,7 +31,7 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("vue-i18n", async (original) => ({ ...(await original<typeof import("vue-i18n")>()), useI18n: () => ({ t: (key: string) => key }) }));
 
 vi.mock("@lucide/vue", async () => {
   const { defineComponent, h } = await import("vue");
@@ -253,6 +253,8 @@ vi.mock("@/components/editor/EditorSearchPanel.vue", async () => {
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: mocks.ensureConnected,
+    connectionStateRevision: () => 0,
+    isCurrentConnectionStateRevision: () => true,
     getConfig: (connectionId: string) => (connectionId === mocks.connection.id ? mocks.connection : undefined),
   }),
 }));
@@ -400,5 +402,42 @@ describe("TableStructureEditor initial tab", () => {
     const root = await mountStructureEditor({ initialTab: "foreignKeys", initialTabRequestId: 1 });
 
     expect(root.textContent).toContain("structureEditor.addForeignKey");
+  });
+
+  it.each(["triggers", "ddl", "foreignKeys"])("restores the fields horizontal scrollbar after visiting %s", async (tab) => {
+    const scrollWidthDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollWidth");
+    const clientWidthDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
+    try {
+      Object.defineProperty(HTMLElement.prototype, "scrollWidth", {
+        configurable: true,
+        get() {
+          if (this.classList?.contains("structure-column-virtual-scroller")) return 1200;
+          return scrollWidthDescriptor?.get?.call(this) ?? 0;
+        },
+      });
+      Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+        configurable: true,
+        get() {
+          if (this.classList?.contains("structure-column-virtual-scroller")) return 400;
+          return clientWidthDescriptor?.get?.call(this) ?? 0;
+        },
+      });
+
+      const root = await mountStructureEditor();
+      await vi.waitFor(() => expect(root.querySelector(".structure-horizontal-scrollbar")).not.toBeNull());
+
+      root.querySelector<HTMLButtonElement>(`[data-tab-trigger="${tab}"]`)!.click();
+      await settle();
+      expect(root.querySelector(".structure-horizontal-scrollbar")).toBeNull();
+
+      root.querySelector<HTMLButtonElement>('[data-tab-trigger="columns"]')?.click();
+      await settle();
+      expect(root.querySelector(".structure-horizontal-scrollbar")).not.toBeNull();
+    } finally {
+      if (scrollWidthDescriptor) Object.defineProperty(HTMLElement.prototype, "scrollWidth", scrollWidthDescriptor);
+      else delete (HTMLElement.prototype as { scrollWidth?: number }).scrollWidth;
+      if (clientWidthDescriptor) Object.defineProperty(HTMLElement.prototype, "clientWidth", clientWidthDescriptor);
+      else delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
+    }
   });
 });

@@ -4,10 +4,13 @@ import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { normalizeExternalSqlEditorMaxMb } from "@/lib/sql/sqlFileOpen";
 import { normalizeCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { normalizeExcludedCompletionItems } from "@/lib/editor/excludedCompletions";
 import { normalizeSqlTableCompletionSchemaQualification } from "@/lib/sql/sqlCompletionSchemaQualification";
 import { normalizeTableHoverLookupMode } from "@/lib/editor/hoverTableLookup";
 import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 import { normalizeCsvNullMode } from "@/lib/export/csvNullMode";
+import { normalizeAiSqlApplyTargetMode } from "@/lib/ai/aiSqlTargetTab";
+import { normalizeConnectTimeoutSecs, normalizeQueryTimeoutSecs } from "@/lib/connection/timeoutLimits";
 
 export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "fontFamily",
@@ -15,6 +18,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "tableFontFamily",
   "uiFontFamily",
   "uiScale",
+  "fontSmoothing",
   "theme",
   "backgroundImage",
   "customThemes",
@@ -27,11 +31,14 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "showLineNumbers",
   "showCurrentStatementFrame",
   "showInsertValueHints",
+  "showConnectionGroupPath",
   "autoAliasTables",
+  "batchColumnSelectionIncludeComments",
   "tableCompletionSchemaQualification",
   "insertSpaceAfterCompletion",
   "sqlServerSpaceConfirmsCompletion",
   "functionCompletionIncludeParams",
+  "sequenceCompletionEnabled",
   "snippetTriggerKey",
   "sortCompletionColumnsAlphabetically",
   "selectFirstCompletionOnOpen",
@@ -39,6 +46,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "showWhitespace",
   "ddlOpenMode",
   "vimModeEnabled",
+  "caretBrowsingEnabled",
   "doubleClickStringSelectionMode",
   "autoCloseBrackets",
   "restoreSqlFromSourcePasteEnabled",
@@ -47,22 +55,28 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "confirmUnsavedSqlClose",
   "appCloseUnsavedTabsMode",
   "savedSqlOpenTargetMode",
+  "aiSqlApplyTargetMode",
   "welcomePageMode",
   "appLayout",
   "webLogoPosition",
   "tabLayout",
   "tabPlacement",
   "colorizeConnectionTabs",
+  "colorizeConnectionTabsScope",
   "tabGroupMode",
   "tabSortMode",
   "tabMaxWidth",
+  "tabDoubleClickAction",
+  "tabGroupRows",
   "showColumnCommentsInHeader",
+  "dataGridColumnCommentsInInfoArea",
   "showColumnTypesInHeader",
   "showColumnHeaderTooltips",
   "showResultSourceDatabase",
   "resultTabNamingMode",
   "resultTabPreferComments",
   "dataGridShowTransposeFieldMetadata",
+  "dataGridTransposeMetadataInInfoColumn",
   "colorizeDataGridCellTypes",
   "dataGridTypeColorSchemes",
   "activeDataGridTypeColorSchemeId",
@@ -74,6 +88,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "dataGridKeepFilterEditorExpanded",
   "dataGridTextFilterPanelHeight",
   "defaultAutoKeepResults",
+  "pinResultTabOnClick",
   "multiStatementDefaultView",
   "defaultExplainView",
   "dataGridAutoTransposeSingleRow",
@@ -114,8 +129,10 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "disconnectTabHandlingMode",
   "deleteConnectionTabHandlingMode",
   "rememberConnectionDatabaseOnDelete",
+  "deepLinkConnectionConfirmMode",
   "dataTabReuseMode",
   "openDataTabsNextToActive",
+  "openTablesInDetachedWindow",
   "prefillNewQueryWithSelect",
   "openQueryOnConnectionOpen",
   "generateSqlIncludeDatabaseName",
@@ -132,6 +149,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "autoUpdatePlugins",
   "sidebarObjectInfoMode",
   "sidebarAllowHorizontalScroll",
+  "sidebarShowConnectionEndpoints",
   "sidebarShowTooltips",
   "sidebarIndent",
   "sidebarFontSize",
@@ -143,9 +161,12 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "redisDatabaseDisplayLimit",
   "exportBatchSize",
   "preferredExportPath",
+  "damengClientBinDir",
   "autoOpenExportFolder",
+  "applyColumnFormattersOnExport",
   "csvQuoteMode",
   "csvNullMode",
+  "queryResultExportFileNameSource",
   "exportRowLimitEnabled",
   "exportRowLimit",
   "queryExportKeysetOptimizationEnabled",
@@ -153,6 +174,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "globalDateTimeExportFormat",
   "globalDateTimeImportFormat",
   "updateDownloadSource",
+  "updateChannel",
   "toolbarItems",
   "snippets",
   "sqlShortcuts",
@@ -160,9 +182,13 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sqlVariableSyntaxOverrides",
   "continueOnErrorOnBatch",
   "clickTableNavigationTarget",
+  "objectBrowserAutoOpenDetailPanel",
   "completionTriggerMode",
+  "excludedCompletionItems",
   "defaultTransactionMode",
   "keepExplicitTransactionInAutoCommit",
+  "globalConnectTimeoutSecs",
+  "globalQueryTimeoutSecs",
 ] as const satisfies readonly (keyof EditorSettings)[];
 
 export type EditorSettingsDraftKey = (typeof EDITOR_SETTINGS_DRAFT_KEYS)[number];
@@ -187,13 +213,21 @@ function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unkn
   if (key === "queryResultMaxRows") return normalizeQueryResultMaxRowsDraft(value);
   if (key === "externalSqlEditorMaxMb") return normalizeExternalSqlEditorMaxMb(value);
   if (key === "completionTriggerMode") return normalizeCompletionTriggerMode(value);
+  if (key === "excludedCompletionItems") return normalizeExcludedCompletionItems(value);
   if (key === "tableCompletionSchemaQualification") return normalizeSqlTableCompletionSchemaQualification(value);
   if (key === "tableHoverLookupMode") return normalizeTableHoverLookupMode(value);
   if (key === "redisKeyTemplates") return normalizeRedisKeyTemplates(value);
   if (key === "csvNullMode") return normalizeCsvNullMode(value);
   if (key === "backgroundImage") return normalizeBackgroundImageSettings(value);
   if (key === "snippetTriggerKey") return value === "space" || value === "both" ? value : "tab";
+  if (key === "tabDoubleClickAction") return value === "close" ? "close" : "default";
   if (key === "webLogoPosition") return value === "right" || value === "hidden" ? value : "left";
+  if (key === "aiSqlApplyTargetMode") return normalizeAiSqlApplyTargetMode(value);
+  if (key === "colorizeConnectionTabsScope") return value === "active" ? "active" : "all";
+  // 全局连接/查询超时与连接编辑对话框「全局」档共用同一落盘口径（1~300 / 0~3600，0=不限），
+  // 草稿比较与回填都走同一 normalize，避免输入框残留越界值导致面板卡在“未保存”。
+  if (key === "globalConnectTimeoutSecs") return normalizeConnectTimeoutSecs(value);
+  if (key === "globalQueryTimeoutSecs") return normalizeQueryTimeoutSecs(value);
   return value;
 }
 

@@ -64,7 +64,7 @@ describe("PluginFilesystemTab restore self-heal", () => {
   it("self-heals a restored tab: silent ensureConnected instead of the reload prompt", async () => {
     await mountTab();
 
-    expect(mocks.ensureConnected).toHaveBeenCalledWith("conn-1", { allowPasswordPrompt: false });
+    expect(mocks.ensureConnected).toHaveBeenCalledWith("conn-1", { allowPasswordPrompt: false, skipIfClosedByUser: true });
     expect(root.textContent).not.toContain("pluginPlatform.reloadRequired");
   });
 

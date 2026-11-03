@@ -1,6 +1,7 @@
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
-import { assessProductionSql, productionContextForDatabase } from "@/lib/database/productionSafety";
+import { assessProductionSql, productionContextForDatabase, productionDatabases } from "@/lib/database/productionSafety";
 import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
+import { assessProductionSqlInBackground } from "./productionSafetyWorker";
 import type { ConnectionConfig } from "@/types/database";
 
 export interface ProductionSqlExecutionGuardOptions<T> {
@@ -8,14 +9,19 @@ export interface ProductionSqlExecutionGuardOptions<T> {
   database?: string | null;
   sql: string;
   source?: string;
+  /** Allows the owning editor to cancel only its pending confirmation on close/switch. */
+  scopeId?: string;
   execute: () => Promise<T>;
+  /** Offload large generated scripts while preserving the same safety assessment. */
+  analyzeInBackground?: boolean;
 }
 
 export async function executeWithProductionSqlGuard<T>(options: ProductionSqlExecutionGuardOptions<T>): Promise<T | undefined> {
-  if (!(await ensureReadOnlyWriteAccess({ connection: options.connection, sql: options.sql, source: options.source }))) {
+  const backgroundAssessment = options.analyzeInBackground && options.sql.length > 64 * 1024 ? await assessProductionSqlInBackground({ sql: options.sql, connection: options.connection, database: options.database }) : undefined;
+  if (!(await ensureReadOnlyWriteAccess({ connection: options.connection, sql: options.sql, source: options.source, treatAsMutation: backgroundAssessment?.isMutation }))) {
     return undefined;
   }
-  const assessment = assessProductionSql(options.sql, options.connection, options.database);
+  const assessment = backgroundAssessment ?? assessProductionSql(options.sql, options.connection, options.database);
   if (assessment.active && assessment.isMutation) {
     // Centralize production write confirmation so secondary tool surfaces cannot
     // bypass the same explicit review step used by the SQL editor.
@@ -25,6 +31,7 @@ export async function executeWithProductionSqlGuard<T>(options: ProductionSqlExe
       database: options.database ?? undefined,
       productionDatabases: assessment.databases,
       source: options.source,
+      scopeId: options.scopeId,
     });
     if (!confirmed) return undefined;
   }
@@ -37,6 +44,8 @@ export interface ProductionContextExecutionGuardOptions<T> {
   /** Review text shown in the production confirmation dialog (SQL or shell preview). */
   reviewText: string;
   source?: string;
+  /** Use every production marker for connection-wide mutations; omitted keeps the existing database scope. */
+  scope?: "database" | "connection";
   execute: () => Promise<T>;
 }
 
@@ -48,12 +57,19 @@ export async function executeWithProductionContextGuard<T>(options: ProductionCo
   if (!(await ensureReadOnlyWriteAccess({ connection: options.connection, sql: options.reviewText, source: options.source, treatAsMutation: true }))) {
     return undefined;
   }
-  const productionContext = productionContextForDatabase(options.connection, options.database);
+  const productionContext =
+    options.scope === "connection"
+      ? (() => {
+          const databases = productionDatabases(options.connection);
+          const active = Boolean(options.connection?.is_production || databases.length > 0);
+          return { active, reason: active ? ("connection" as const) : undefined, databases };
+        })()
+      : productionContextForDatabase(options.connection, options.database);
   if (productionContext.active) {
     const confirmed = await useProductionSafetyStore().requestConfirmation({
       sql: options.reviewText,
       connectionName: options.connection?.name,
-      database: options.database ?? undefined,
+      database: options.scope === "connection" ? undefined : (options.database ?? undefined),
       productionDatabases: productionContext.databases,
       source: options.source,
     });

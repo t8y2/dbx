@@ -68,7 +68,7 @@ describe("mergeMultiSourceResults", () => {
       ["a", "Alice", 10, "north"],
       ["b", "Bob", 20, null],
     ]);
-    expect(merged.summaries).toEqual([{ columnIndex: 2, column: "amount", sum: 30, count: 2 }]);
+    expect(merged.summaries).toEqual([{ columnIndex: 2, column: "amount", sum: "30", count: 2 }]);
     expect(merged.sources.map((source) => source.columnCount)).toEqual([3, 2]);
     expect(first.columns).toEqual(["name", "__DBX_PK_0", "amount", "region"]);
     expect(first.rows).toEqual([["Alice", 17, 10, "north"]]);
@@ -88,7 +88,7 @@ describe("mergeMultiSourceResults", () => {
       ["a", 1, 2, 3],
       ["b", 4, 5, 6],
     ]);
-    expect(merged.summaries.map((summary) => summary.sum)).toEqual([5, 7, 9]);
+    expect(merged.summaries.map((summary) => summary.sum)).toEqual(["5", "7", "9"]);
   });
 
   it("skips sources without a tabular payload instead of failing", () => {
@@ -148,8 +148,8 @@ describe("mergeMultiSourceResults", () => {
     );
 
     expect(merged.summaries).toEqual([
-      { columnIndex: 1, column: "id", sum: 3, count: 2 },
-      { columnIndex: 2, column: "amount", sum: 42.5, count: 2 },
+      { columnIndex: 1, column: "id", sum: "3", count: 2 },
+      { columnIndex: 2, column: "amount", sum: "42.5", count: 2 },
     ]);
   });
 
@@ -189,7 +189,25 @@ describe("summarizeNumericColumns", () => {
           ["", 3],
         ],
       ),
-    ).toEqual([{ columnIndex: 0, column: "a", sum: 1, count: 1 }]);
+    ).toEqual([{ columnIndex: 0, column: "a", sum: "1", count: 1 }]);
+  });
+
+  it("sums BIGINT and DECIMAL text exactly instead of through a double", () => {
+    expect(
+      summarizeNumericColumns(
+        ["big", "ubig", "dec4"],
+        [
+          ["1762018465054523393", "18446744073709551615", "1234567890123456.7891"],
+          ["9007199254740993", "1", "0.0001"],
+          ["1762018465054523393", "2", "9876543210987654.3219"],
+          ["-1", "9007199254740993", "0.0003"],
+        ],
+      ).map((summary) => summary.sum),
+    ).toEqual(["3533044129363787778", "18455751272964292611", "11111111101111111.1114"]);
+  });
+
+  it("adds numbers by their displayed text and other numeric text by its value", () => {
+    expect(summarizeNumericColumns(["n"], [[0.1], [0.2], ["0x10"], [" 1e3 "]])).toEqual([{ columnIndex: 0, column: "n", sum: "1016.3", count: 4 }]);
   });
 
   it("never sums boolean or all-empty columns", () => {

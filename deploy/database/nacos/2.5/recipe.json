@@ -1,10 +1,10 @@
 {
   "database": "nacos",
   "name": "Nacos",
-  "version": "2.5.2",
+  "version": "2.5.4",
   "displayVersion": "2.5",
   "deepLinkType": "nacos-v2",
-  "image": "docker.cnb.cool/znb/images/nacos-server:v2.5.2",
+  "image": "docker.cnb.cool/znb/images/nacos-server:v2.5.4",
   "platforms": ["linux/amd64", "linux/arm64"],
   "service": "database",
   "defaultPort": 8848,

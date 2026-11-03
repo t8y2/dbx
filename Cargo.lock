@@ -263,6 +263,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcstr"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03918c3dbd7701a85c6b9887732e2921175f26c350b4563841d0958c21d57e6d"
+
+[[package]]
 name = "argon2"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -279,6 +285,27 @@ name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
+name = "ashpd"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2f3f79755c74fd155000314eb349864caa787c6592eace6c6882dad873d9c39"
+dependencies = [
+ "enumflags2",
+ "futures-channel",
+ "futures-util",
+ "rand 0.9.5",
+ "raw-window-handle",
+ "serde",
+ "serde_repr",
+ "tokio",
+ "url",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "zbus 5.18.0",
+]
 
 [[package]]
 name = "async-broadcast"
@@ -1527,9 +1554,9 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "combine"
-version = "4.6.7"
+version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
+checksum = "cfc320937d09e6de266b31b9afb480f197d7a861be86be7cb2ea7e5d1bfffc5e"
 dependencies = [
  "bytes",
  "futures-core",
@@ -2137,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.38"
+version = "0.6.65"
 dependencies = [
  "anyhow",
  "axum",
@@ -2147,13 +2174,16 @@ dependencies = [
  "csv",
  "dbx-core",
  "dbx-mcp",
+ "dbx-platform",
  "dbx-tauri-consul",
  "dbx-tauri-schema",
  "deadpool-postgres",
  "font-kit",
  "futures",
  "grep",
+ "gtk",
  "ignore",
+ "libc",
  "libloading 0.8.9",
  "log",
  "minisign-verify",
@@ -2184,7 +2214,6 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-log",
  "tauri-plugin-opener",
- "tauri-plugin-process",
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
@@ -2195,6 +2224,9 @@ dependencies = [
  "tokio-postgres",
  "tokio-util",
  "uuid",
+ "webview2-com",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
  "windows-sys 0.61.2",
  "wry",
  "zip",
@@ -2220,7 +2252,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.112"
+version = "0.4.138"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2378,12 +2410,14 @@ dependencies = [
  "dbx-sql-core",
  "dbx-sql-dialect",
  "dbx-types",
+ "encoding_rs",
  "futures",
  "log",
  "mysql_async",
  "mysql_common",
  "percent-encoding",
  "rust_decimal",
+ "rustls 0.23.43",
  "serde_json",
  "sqlparser",
  "tokio",
@@ -2405,7 +2439,6 @@ dependencies = [
  "log",
  "openssl",
  "percent-encoding",
- "portpicker",
  "postgres-openssl",
  "rustls 0.23.43",
  "rustls-pemfile 2.2.0",
@@ -2428,7 +2461,9 @@ dependencies = [
  "base64 0.22.1",
  "dbx-driver-support",
  "dbx-types",
+ "futures-util",
  "redis",
+ "rustls 0.23.43",
  "serde",
  "serde_json",
  "tokio",
@@ -2460,10 +2495,12 @@ dependencies = [
 name = "dbx-driver-support"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "dbx-platform",
  "dbx-types",
  "glob",
+ "log",
  "portpicker",
  "reqwest 0.12.28",
  "russh",
@@ -2481,6 +2518,7 @@ name = "dbx-drivers"
 version = "0.1.0"
 dependencies = [
  "aws-sdk-dynamodb",
+ "axum",
  "base64 0.22.1",
  "bytes",
  "chrono",
@@ -2557,7 +2595,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.112"
+version = "0.4.138"
 dependencies = [
  "async-trait",
  "axum",
@@ -2593,6 +2631,7 @@ dependencies = [
  "futures",
  "nix 0.31.3",
  "reqwest 0.12.28",
+ "semver",
  "serde",
  "tokio",
  "uuid",
@@ -2741,7 +2780,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.38"
+version = "0.6.65"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -5892,7 +5931,7 @@ dependencies = [
  "darling 0.23.0",
  "heck 0.5.0",
  "manyhow",
- "num-bigint",
+ "num-bigint 0.4.8",
  "proc-macro-crate 3.5.0",
  "proc-macro2",
  "quote",
@@ -5947,7 +5986,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "mysql-common-derive",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "regex",
  "rust_decimal",
@@ -6098,7 +6137,7 @@ version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35bd024e8b2ff75562e5f34e7f4905839deb4b22955ef5e73d2fea1b9813cb23"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-complex",
  "num-integer",
  "num-iter",
@@ -6111,6 +6150,16 @@ name = "num-bigint"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-bigint"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
 dependencies = [
  "num-integer",
  "num-traits",
@@ -6172,7 +6221,7 @@ version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
 ]
@@ -7071,6 +7120,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pollster"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
+
+[[package]]
 name = "poly1305"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7627,22 +7682,24 @@ dependencies = [
 
 [[package]]
 name = "redis"
-version = "0.32.7"
+version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "014cc767fefab6a3e798ca45112bccad9c6e0e218fbd49720042716c73cfef44"
+checksum = "ed5b98ae99461e02895c3a96a25dbe4d852a3d5e5b815d31d5d9e4b5344d99e9"
 dependencies = [
+ "arcstr",
+ "async-lock",
  "bytes",
  "cfg-if",
  "combine",
  "crc16",
- "futures-sink",
+ "futures-channel",
  "futures-util",
  "itoa",
  "log",
- "num-bigint",
+ "num-bigint 0.5.1",
  "percent-encoding",
  "pin-project-lite",
- "rand 0.9.5",
+ "rand 0.10.2",
  "rustls 0.23.43",
  "rustls-native-certs 0.8.4",
  "ryu",
@@ -7652,6 +7709,7 @@ dependencies = [
  "tokio-rustls 0.26.4",
  "tokio-util",
  "url",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -7849,18 +7907,18 @@ version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a15ad77d9e70a92437d8f74c35d99b4e4691128df018833e99f90bcd36152672"
 dependencies = [
+ "ashpd",
  "block2",
  "dispatch2",
- "glib-sys",
- "gobject-sys",
- "gtk-sys",
  "js-sys",
  "log",
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",
  "objc2-foundation",
+ "pollster",
  "raw-window-handle",
+ "urlencoding",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -8055,7 +8113,7 @@ dependencies = [
  "md5",
  "ml-kem",
  "module-lattice",
- "num-bigint",
+ "num-bigint 0.4.8",
  "p256",
  "p384",
  "p521",
@@ -8513,6 +8571,12 @@ dependencies = [
  "serde_derive_internals 0.30.0",
  "syn 3.0.3",
 ]
+
+[[package]]
+name = "scoped-tls"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
 
 [[package]]
 name = "scopeguard"
@@ -9055,7 +9119,7 @@ version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "thiserror 2.0.19",
  "time",
@@ -9778,16 +9842,6 @@ dependencies = [
  "url",
  "windows 0.61.3",
  "zbus 5.18.0",
-]
-
-[[package]]
-name = "tauri-plugin-process"
-version = "2.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d55511a7bf6cd70c8767b02c97bf8134fa434daf3926cfc1be0a0f94132d165a"
-dependencies = [
- "tauri",
- "tauri-plugin",
 ]
 
 [[package]]
@@ -10856,6 +10910,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
+
+[[package]]
 name = "urlpattern"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11114,6 +11174,7 @@ dependencies = [
  "cc",
  "downcast-rs",
  "rustix",
+ "scoped-tls",
  "smallvec",
  "wayland-sys",
 ]
@@ -11172,6 +11233,8 @@ version = "0.31.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8eab23fefc9e41f8e841df4a9c707e8a8c4ed26e944ef69297184de2785e3be"
 dependencies = [
+ "dlib",
+ "log",
  "pkg-config",
 ]
 
@@ -12113,6 +12176,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "xxhash-rust"
+version = "0.8.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
+
+[[package]]
 name = "yeslogic-fontconfig-sys"
 version = "6.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12204,6 +12273,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",
@@ -12474,6 +12544,7 @@ dependencies = [
  "endi",
  "enumflags2",
  "serde",
+ "url",
  "winnow 1.0.4",
  "zvariant_derive 5.13.1",
  "zvariant_utils 3.5.0",

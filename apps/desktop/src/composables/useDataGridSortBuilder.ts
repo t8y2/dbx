@@ -24,6 +24,26 @@ type UseDataGridSortBuilderOptions = {
 const SORT_BUILDER_CACHE_MAX_ENTRIES = 128;
 const sortBuilderCache = new Map<string, DataGridSortBuilderCacheEntry>();
 
+function saveCacheEntry(key: string, entry: DataGridSortBuilderCacheEntry) {
+  sortBuilderCache.delete(key);
+  sortBuilderCache.set(key, { appliedOrderBy: entry.appliedOrderBy, rules: cloneRules(entry.rules) });
+  while (sortBuilderCache.size > SORT_BUILDER_CACHE_MAX_ENTRIES) {
+    const oldest = sortBuilderCache.keys().next().value;
+    if (oldest === undefined) break;
+    sortBuilderCache.delete(oldest);
+  }
+}
+
+export function copyDataGridSortBuilderStatesForTab(sourceTabId: string, targetTabId: string) {
+  if (sourceTabId === targetTabId) return;
+  for (const [key, entry] of [...sortBuilderCache.entries()]) {
+    const { cacheKey, scopeKey } = JSON.parse(key) as { cacheKey: string; scopeKey: string };
+    if (cacheKey === sourceTabId || cacheKey.startsWith(`${sourceTabId}-`)) {
+      saveCacheEntry(JSON.stringify({ cacheKey: `${targetTabId}${cacheKey.slice(sourceTabId.length)}`, scopeKey }), entry);
+    }
+  }
+}
+
 function cloneRules(rules: readonly DataGridStructuredSortRule[]): DataGridStructuredSortRule[] {
   return rules.map((rule) => ({ ...rule }));
 }
@@ -72,13 +92,7 @@ export function useDataGridSortBuilder(options: UseDataGridSortBuilderOptions) {
   function persist() {
     const key = entryKey();
     if (!key) return;
-    sortBuilderCache.delete(key);
-    sortBuilderCache.set(key, { appliedOrderBy: appliedOrderByInput.value, rules: cloneRules(rules.value) });
-    while (sortBuilderCache.size > SORT_BUILDER_CACHE_MAX_ENTRIES) {
-      const oldest = sortBuilderCache.keys().next().value;
-      if (oldest === undefined) break;
-      sortBuilderCache.delete(oldest);
-    }
+    saveCacheEntry(key, { appliedOrderBy: appliedOrderByInput.value, rules: rules.value });
   }
 
   function restore() {

@@ -32,7 +32,7 @@
 //! statement or a JSON document would corrupt it.
 
 use dbx_formats::csv_export::needs_formula_guard;
-use dbx_sql::data_grid_extractors::{DataGridExtractRequest, DataGridExtractorId};
+use dbx_sql::data_grid_extractors::{DataGridExtractRequest, DataGridExtractorId, DataGridHeaderFormat};
 use serde_json::Value;
 
 /// Extractors whose output is pasted straight into a spreadsheet cell grid.
@@ -64,13 +64,16 @@ fn is_spreadsheet_extractor(extractor: DataGridExtractorId) -> bool {
         | DataGridExtractorId::JsonLines
         | DataGridExtractorId::SqlInList
         | DataGridExtractorId::SqlInserts
+        | DataGridExtractorId::SqlDeletesInserts
         | DataGridExtractorId::SqlUpdates
         | DataGridExtractorId::SqlSelect
         | DataGridExtractorId::WhereClause
         | DataGridExtractorId::Markdown
         | DataGridExtractorId::Html
         | DataGridExtractorId::Xml
-        | DataGridExtractorId::Pretty => false,
+        | DataGridExtractorId::Pretty
+        | DataGridExtractorId::Dbunit
+        | DataGridExtractorId::Php => false,
     }
 }
 
@@ -82,6 +85,12 @@ fn is_spreadsheet_extractor(extractor: DataGridExtractorId) -> bool {
 /// (drivers deliver DECIMAL/NUMERIC/BIGINT as strings) are also left alone: the shared
 /// [`needs_formula_guard`] predicate exempts whole-string numeric literals, so a
 /// copied `-1` stays `-1` while `-2+1+cmd|…` stays neutralized.
+///
+/// Text that starts with `@` but is not followed by an ASCII token is left alone too:
+/// `@` only forms an Excel expression when an ASCII name, reference, number or operator
+/// follows it (`@WEBSERVICE("…")`, `@SUM(1)`, `@A1` are all still neutralized), while
+/// `@冯十二` -- the shape Oracle data commonly has -- cannot evaluate and must reach the
+/// clipboard verbatim instead of gaining a visible apostrophe.
 pub fn neutralize_spreadsheet_formulas(mut request: DataGridExtractRequest) -> DataGridExtractRequest {
     if !is_spreadsheet_extractor(request.extractor) {
         return request;
@@ -91,6 +100,15 @@ pub fn neutralize_spreadsheet_formulas(mut request: DataGridExtractRequest) -> D
     for column in &mut request.columns {
         if needs_formula_guard(&column.display_name) {
             column.display_name.insert(0, '\'');
+        }
+        if request.options.dsv.header_format == DataGridHeaderFormat::Description
+            || request.options.dsv.header_format == DataGridHeaderFormat::NameAndDescriptionTwoRows
+        {
+            if let Some(description) = &mut column.description {
+                if needs_formula_guard(description) {
+                    description.insert(0, '\'');
+                }
+            }
         }
     }
 
@@ -129,10 +147,13 @@ mod tests {
             database_type: None,
             identifier_quote: None,
             table_meta: None,
+            source_table_name: None,
             columns: vec![DataGridExtractColumn {
                 display_name: "value".to_string(),
                 source_name: Some("value".to_string()),
                 source_index: 0,
+                data_type: None,
+                description: None,
             }],
             selected_column_indexes: vec![0],
             rows,
@@ -269,6 +290,35 @@ mod tests {
     }
 
     #[test]
+    fn at_sign_before_non_ascii_text_is_copied_verbatim() {
+        // 回归：Oracle 文本列里 `@` 开头的值（`@冯十二`）复制整列时曾被写成 `'@冯十二`。
+        // `@` 后没有 ASCII 记号时 Excel 里没有可求值的表达式；`@` + ASCII 记号
+        // （函数调用、引用、数字）仍是公式执行面，必须继续中和。
+        for extractor in [DataGridExtractorId::Tsv, DataGridExtractorId::Csv, DataGridExtractorId::PipeSeparated] {
+            let out = neutralize(
+                extractor,
+                vec![vec![json!("@冯十二"), json!("@"), json!("@张三@李四"), json!("@SUM(1)"), json!("@A1")]],
+            );
+            assert_eq!(out[0], json!("@冯十二"), "extractor {extractor:?}");
+            assert_eq!(out[1], json!("@"), "extractor {extractor:?}");
+            assert_eq!(out[2], json!("@张三@李四"), "extractor {extractor:?}");
+            assert_eq!(out[3], json!("'@SUM(1)"), "extractor {extractor:?}");
+            assert_eq!(out[4], json!("'@A1"), "extractor {extractor:?}");
+        }
+    }
+
+    #[test]
+    fn grid_tsv_copy_of_an_at_prefixed_text_stays_verbatim() {
+        // 端到端：复现反馈的整列复制形态（多格复制 → TSV），`@冯十二` 必须原样输出。
+        let guarded = neutralize_spreadsheet_formulas(request(
+            DataGridExtractorId::Tsv,
+            vec![vec![json!("张三1")], vec![json!("@冯十二")]],
+        ));
+        let result = dbx_sql::data_grid_extractors::extract_data_grid_selection(guarded).expect("TSV extraction");
+        assert_eq!(result.text, "张三1\n@冯十二");
+    }
+
+    #[test]
     fn spreadsheet_headers_are_neutralized() {
         for extractor in [DataGridExtractorId::TsvWithHeaders, DataGridExtractorId::CsvWithHeaders] {
             let mut request = request(extractor, vec![vec![json!(1)]]);
@@ -276,6 +326,21 @@ mod tests {
             let guarded = neutralize_spreadsheet_formulas(request);
             assert_eq!(guarded.columns[0].display_name, "'-total", "extractor {extractor:?}");
         }
+    }
+
+    #[test]
+    fn description_headers_are_guarded_only_when_they_are_the_effective_header() {
+        let mut request = request(DataGridExtractorId::CsvWithHeaders, vec![vec![json!(1)]]);
+        request.columns[0].display_name = "value".into();
+        request.columns[0].description = Some("=SUM(A1)".into());
+        request.options.dsv.header_format = DataGridHeaderFormat::Description;
+        let guarded = neutralize_spreadsheet_formulas(request.clone());
+        assert_eq!(guarded.columns[0].description.as_deref(), Some("'=SUM(A1)"));
+        assert_eq!(dbx_sql::data_grid_extractors::extract_data_grid_selection(guarded).unwrap().text, "'=SUM(A1)\n1");
+
+        request.options.dsv.header_format = DataGridHeaderFormat::Both;
+        let guarded = neutralize_spreadsheet_formulas(request);
+        assert_eq!(guarded.columns[0].description.as_deref(), Some("=SUM(A1)"));
     }
 
     #[test]
@@ -300,6 +365,8 @@ mod tests {
                 display_name: "formula".to_string(),
                 source_name: Some("formula".to_string()),
                 source_index: 1,
+                data_type: None,
+                description: None,
             });
             let guarded = neutralize_spreadsheet_formulas(request);
             let result = dbx_sql::data_grid_extractors::extract_data_grid_selection(guarded)

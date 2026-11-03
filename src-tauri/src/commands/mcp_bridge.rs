@@ -1,10 +1,13 @@
+use dbx_core::mcp_access::{McpAccessLevel, McpCallDecision, McpConfirmPolicy};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 
 use super::connection::AppState;
 
@@ -32,6 +35,144 @@ struct ExecuteQueryRequest {
     database: Option<String>,
     sql: String,
     schema: Option<String>,
+    approval_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SqlApprovalRequest {
+    connection_id: String,
+    database: String,
+    sql: String,
+}
+
+#[derive(Deserialize)]
+struct ConsumeSqlApprovalRequest {
+    token: String,
+    connection_id: String,
+    database: String,
+    sql: String,
+}
+
+#[derive(Clone, Serialize)]
+struct SqlApprovalEvent {
+    allow_timed: bool,
+    id: String,
+    connection_name: String,
+    database: String,
+    sql: String,
+}
+
+/// A high-risk non-SQL tool call awaiting confirmation (plugin tool declared
+/// `full`, dangerous Redis command). Mirrors `dbx_mcp::approval::ToolApprovalRequest`.
+#[derive(Deserialize)]
+struct ToolApprovalRequest {
+    kind: String,
+    tool: String,
+    #[serde(default)]
+    plugin: Option<String>,
+    #[serde(default)]
+    connection_id: Option<String>,
+    #[serde(default)]
+    database: Option<String>,
+    detail: String,
+}
+
+/// Payload of the `mcp-tool-approval` event. Tool confirmations are one-shot:
+/// unlike SQL there is no exact statement to bind a timed grant to.
+#[derive(Clone, Serialize)]
+struct ToolApprovalEvent {
+    id: String,
+    kind: String,
+    tool: String,
+    plugin: Option<String>,
+    connection_name: Option<String>,
+    database: Option<String>,
+    detail: String,
+}
+
+#[derive(Clone, Copy)]
+enum SqlApprovalDecision {
+    Once,
+    Hour,
+    Day,
+    Deny,
+}
+
+struct SqlApprovalGrant {
+    connection: crate::models::connection::ConnectionConfig,
+    database: String,
+    sql: String,
+    expires_at: Instant,
+}
+
+struct TimedSqlApproval {
+    connection: crate::models::connection::ConnectionConfig,
+    expires_at: Instant,
+}
+
+impl TimedSqlApproval {
+    fn valid_for(&self, connection: &crate::models::connection::ConnectionConfig, now: Instant) -> bool {
+        self.expires_at > now && self.connection == *connection
+    }
+}
+
+#[derive(Default)]
+struct SqlApprovals {
+    generation: u64,
+    pending: HashMap<String, oneshot::Sender<SqlApprovalDecision>>,
+    tokens: HashMap<String, SqlApprovalGrant>,
+    timed: HashMap<(String, String), TimedSqlApproval>,
+}
+
+static SQL_APPROVALS: OnceLock<Mutex<SqlApprovals>> = OnceLock::new();
+
+fn sql_approvals() -> &'static Mutex<SqlApprovals> {
+    SQL_APPROVALS.get_or_init(|| Mutex::new(SqlApprovals::default()))
+}
+
+pub(crate) fn clear_mcp_sql_approvals() {
+    if let Ok(mut approvals) = sql_approvals().lock() {
+        approvals.generation = approvals.generation.wrapping_add(1);
+        approvals.timed.clear();
+        approvals.tokens.clear();
+        approvals.pending.clear();
+    }
+}
+
+#[tauri::command]
+pub fn respond_mcp_sql_approval(window: tauri::Window, id: String, decision: String) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("Only the main DBX window can approve MCP SQL.".to_string());
+    }
+    let decision = match decision.as_str() {
+        "once" => SqlApprovalDecision::Once,
+        "hour" => SqlApprovalDecision::Hour,
+        "day" => SqlApprovalDecision::Day,
+        "deny" => SqlApprovalDecision::Deny,
+        _ => return Err("Invalid MCP SQL approval decision.".to_string()),
+    };
+    let sender = sql_approvals()
+        .lock()
+        .map_err(|_| "MCP approval state unavailable")?
+        .pending
+        .remove(&id)
+        .ok_or_else(|| "MCP approval request expired.".to_string())?;
+    sender.send(decision).map_err(|_| "MCP approval request expired.".to_string())
+}
+
+fn take_sql_approval(
+    token: Option<&str>,
+    connection: &crate::models::connection::ConnectionConfig,
+    database: &str,
+    sql: &str,
+) -> bool {
+    let Some(token) = token else { return false };
+    let Ok(mut state) = sql_approvals().lock() else { return false };
+    let Some(grant) = state.tokens.remove(token) else { return false };
+    grant.expires_at > Instant::now()
+        && grant.connection == *connection
+        && grant.database == database
+        && grant.sql == sql
 }
 
 #[derive(Deserialize)]
@@ -276,6 +417,12 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>, data_dir: PathBuf) {
                     handle_redis_execute_command_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/execute-query") {
                     handle_execute_query_data(&st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /approve-high-risk-sql") {
+                    handle_sql_approval(&app, &st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /approve-high-risk-tool") {
+                    handle_tool_approval(&app, &st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /consume-high-risk-sql-approval") {
+                    handle_consume_sql_approval(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /execute-query") {
                     handle_execute_query(&app, &st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /reload-connections") {
@@ -415,17 +562,152 @@ fn find_config_by_name<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        bridge_request_is_local_client, effective_database_execution_policy, ensure_connection_in_mcp_scope,
-        ensure_mcp_connection_sql_write_allowed, ensure_mcp_execute_and_show_supported,
+        bridge_request_is_local_client, clear_mcp_sql_approvals, effective_database_execution_policy,
+        ensure_connection_in_mcp_scope, ensure_mcp_connection_sql_write_allowed, ensure_mcp_execute_and_show_supported,
         ensure_mcp_mongo_pipeline_target_allowed_by_id, ensure_mcp_sql_database_switch_allowed,
         is_terminal_routed_exec, mongo_filter_is_effectively_unbounded, mongo_pipeline_has_write_stage,
         parse_content_length, plugin_connection_summaries, plugin_connection_summary, read_bridge_request,
         resolve_call_plugin_target, resolve_connection, resolve_mongo_database, resolve_mongo_target_values,
-        write_port_file, AppState,
+        sql_approvals, take_sql_approval, write_port_file, AppState, SqlApprovalGrant, TimedSqlApproval,
     };
     use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
     use dbx_core::storage::{McpConnectionPolicy, McpDatabasePolicy, McpDatabaseScope, McpGlobalPolicy};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn tool_approval_bridge_keeps_resource_overrides_under_global_read() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&root.path().join("storage.db")).await.unwrap();
+        let config = mysql_config(false);
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, root.path().join("plugins")));
+        let mut policy = McpGlobalPolicy { read_only: true, prompt_high_risk_sql: true, ..Default::default() };
+        policy.connection_policies.push(serde_json::from_value(serde_json::json!({
+            "connectionId": config.id, "readOnly": false, "executionModeConfigured": true, "executionModePolicyVersion": 1
+        })).unwrap());
+        state.storage.save_mcp_global_policy(&policy).await.unwrap();
+        let mut request = super::ToolApprovalRequest {
+            kind: "product_tool".into(),
+            tool: "dbx_nacos_delete_config".into(),
+            plugin: None,
+            connection_id: Some(config.id.clone()),
+            database: Some("dev".into()),
+            detail: "test".into(),
+        };
+        // The server has checked the resource-level grant; the bridge must not
+        // replace that resolved decision with the unrelated global default.
+        assert_eq!(super::tool_approval_target(&state, &request).await.unwrap(), Some(config.name.clone()));
+        request.connection_id = None;
+        assert!(super::tool_approval_target(&state, &request).await.is_err());
+        request.connection_id = Some(config.id.clone());
+        let mut protected = config.clone();
+        protected.read_only = true;
+        state.storage.save_connections(std::slice::from_ref(&protected)).await.unwrap();
+        assert!(super::tool_approval_target(&state, &request).await.unwrap_err().contains("CONNECTION_READ_ONLY"));
+        protected.read_only = false;
+        protected.is_production = true;
+        state.storage.save_connections(std::slice::from_ref(&protected)).await.unwrap();
+        assert!(super::tool_approval_target(&state, &request).await.unwrap_err().contains("PRODUCTION_WRITE_BLOCKED"));
+        policy.prompt_high_risk_sql = false;
+        state.storage.save_mcp_global_policy(&policy).await.unwrap();
+        assert!(super::tool_approval_target(&state, &request).await.unwrap_err().contains("TOOL_BLOCKED"));
+    }
+
+    #[tokio::test]
+    async fn call_safety_bridge_requires_confirmation_without_elevating_permissions() {
+        use dbx_core::mcp_access::McpConfirmPolicy;
+        let root = tempfile::tempdir().unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&root.path().join("storage.db")).await.unwrap();
+        let config = mysql_config(false);
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, root.path().join("plugins")));
+        for full in [false, true] {
+            for approved in [false, true] {
+                let policy = McpGlobalPolicy {
+                    allow_dangerous_sql: full,
+                    call_confirmation: Some(McpConfirmPolicy::HighRisk),
+                    ..Default::default()
+                };
+                state.storage.save_mcp_global_policy(&policy).await.unwrap();
+                let result =
+                    super::ensure_mcp_sql_allowed_with_approval(&state, &config, "app", "DROP TABLE items", approved)
+                        .await;
+                assert_eq!(result.is_ok(), full && approved, "full={full} approved={approved}: {result:?}");
+                assert!(super::ensure_mcp_sql_allowed_with_approval(&state, &config, "app", "SELECT 1", false)
+                    .await
+                    .is_ok());
+            }
+        }
+        // The legacy boolean keeps its former meaning, including no prompt at Full.
+        for full in [false, true] {
+            state
+                .storage
+                .save_mcp_global_policy(&McpGlobalPolicy {
+                    allow_dangerous_sql: full,
+                    prompt_high_risk_sql: true,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert!(super::ensure_mcp_sql_allowed_with_approval(&state, &config, "app", "DROP TABLE items", true)
+                .await
+                .is_ok());
+            assert_eq!(
+                super::ensure_mcp_sql_allowed_with_approval(&state, &config, "app", "DROP TABLE items", false)
+                    .await
+                    .is_ok(),
+                full
+            );
+        }
+    }
+
+    #[test]
+    fn sql_approval_token_is_single_use_and_bound_to_target_and_text() {
+        let token = uuid::Uuid::new_v4().to_string();
+        let mut config = mysql_config(false);
+        config.id = "mysql".to_string();
+        let insert = |expires_at| {
+            sql_approvals().lock().unwrap().tokens.insert(
+                token.clone(),
+                SqlApprovalGrant {
+                    connection: config.clone(),
+                    database: "app".to_string(),
+                    sql: "DROP TABLE t".to_string(),
+                    expires_at,
+                },
+            );
+        };
+        insert(Instant::now() + Duration::from_secs(60));
+        assert!(!take_sql_approval(Some(&token), &config, "other", "DROP TABLE t"));
+        assert!(!take_sql_approval(Some(&token), &config, "app", "DROP TABLE t"));
+        insert(Instant::now() - Duration::from_secs(1));
+        assert!(!take_sql_approval(Some(&token), &config, "app", "DROP TABLE t"));
+        insert(Instant::now() + Duration::from_secs(60));
+        let mut changed = config.clone();
+        changed.host = "other-host".to_string();
+        assert!(!take_sql_approval(Some(&token), &changed, "app", "DROP TABLE t"));
+        insert(Instant::now() + Duration::from_secs(60));
+        assert!(take_sql_approval(Some(&token), &config, "app", "DROP TABLE t"));
+        assert!(!take_sql_approval(Some(&token), &config, "app", "DROP TABLE t"));
+        insert(Instant::now() + Duration::from_secs(60));
+        let generation = sql_approvals().lock().unwrap().generation;
+        clear_mcp_sql_approvals();
+        assert_ne!(sql_approvals().lock().unwrap().generation, generation);
+        assert!(!take_sql_approval(Some(&token), &config, "app", "DROP TABLE t"));
+    }
+
+    #[test]
+    fn timed_sql_approval_does_not_follow_a_connection_edit() {
+        let config = mysql_config(false);
+        let grant =
+            TimedSqlApproval { connection: config.clone(), expires_at: Instant::now() + Duration::from_secs(60) };
+        assert!(grant.valid_for(&config, Instant::now()));
+        let mut changed = config.clone();
+        changed.host = "other-host".to_string();
+        assert!(!grant.valid_for(&changed, Instant::now()));
+        assert!(!grant.valid_for(&config, grant.expires_at));
+    }
 
     fn mysql_config(read_only: bool) -> ConnectionConfig {
         serde_json::from_value(serde_json::json!({
@@ -991,7 +1273,7 @@ async fn resolve_connection(
 async fn load_mcp_policy(state: &Arc<AppState>) -> Result<McpGlobalPolicy, String> {
     state
         .storage
-        .load_mcp_global_policy()
+        .load_enforced_mcp_policy()
         .await
         .map(|state| state.policy())
         .map_err(|error| mcp_policy_unavailable(error.to_string()))
@@ -1460,6 +1742,16 @@ async fn ensure_mcp_sql_allowed(
     database: &str,
     sql: &str,
 ) -> Result<(), String> {
+    ensure_mcp_sql_allowed_with_approval(state, config, database, sql, false).await
+}
+
+async fn ensure_mcp_sql_allowed_with_approval(
+    state: &Arc<AppState>,
+    config: &crate::models::connection::ConnectionConfig,
+    database: &str,
+    sql: &str,
+    approved: bool,
+) -> Result<(), String> {
     let (policy, group_paths) = load_mcp_policy_context(state).await?;
     let group_path = group_paths.get(&config.id);
     ensure_connection_in_mcp_scope_with_groups(&policy, group_path, &config.id)?;
@@ -1480,7 +1772,10 @@ async fn ensure_mcp_sql_allowed(
         }
     }
     ensure_mcp_sql_database_switch_allowed(config.db_type, sql)?;
-    let is_write = dbx_core::query_execution_sql::is_write_sql_for_database(sql, config.db_type);
+    let risk = dbx_core::sql_risk::classify_sql_risk_for_database(sql, config.db_type)
+        .map_err(|error| format!("SQL_BLOCKED: {error}"))?;
+    let is_write = risk != dbx_core::sql_risk::SqlRisk::ReadOnly
+        || dbx_core::query_execution_sql::is_write_sql_for_database(sql, config.db_type);
     dbx_core::mcp_policy::ensure_sql_database_execution_scope(&policy, config, database, sql)?;
     let group_ids = group_path.map(|path| path.ids.as_slice()).unwrap_or_default();
     let (read_only, allow_dangerous_sql) =
@@ -1490,14 +1785,302 @@ async fn ensure_mcp_sql_allowed(
             "MCP_READ_ONLY: MCP execution permission for database '{database}' is read-only. SQL write blocked."
         ));
     }
-    if !allow_dangerous_sql && dbx_core::sql_risk::is_dangerous_sql_for_database(sql, config.db_type) {
-        return Err("SQL_BLOCKED: High-risk SQL is disabled in DBX MCP settings.".to_string());
+    let high_risk = risk == dbx_core::sql_risk::SqlRisk::Ddl
+        || dbx_core::sql_risk::is_dangerous_sql_for_database(sql, config.db_type);
+    if high_risk {
+        match policy.confirmation_policy().decide(
+            McpAccessLevel::from_flags(read_only, allow_dangerous_sql),
+            McpAccessLevel::Full,
+            true,
+        ) {
+            McpCallDecision::Deny => {
+                return Err("SQL_BLOCKED: High-risk SQL is disabled in DBX MCP settings.".to_string())
+            }
+            McpCallDecision::Confirm if !approved => {
+                return Err("SQL_BLOCKED: This high-risk call requires confirmation.".to_string())
+            }
+            _ => {}
+        }
     }
     ensure_mcp_connection_sql_write_allowed(config, is_write)?;
     if is_write && dbx_core::production_safety::targets_production_database(config, database, sql) {
         return Err("PRODUCTION_DATABASE_READ_ONLY: SQL write targeting production scope is blocked.".to_string());
     }
     Ok(())
+}
+
+async fn handle_sql_approval(app: &AppHandle, state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: SqlApprovalRequest = match serde_json::from_str(body) {
+        Ok(req) => req,
+        Err(_) => {
+            respond_error(stream, "400 Bad Request", "Invalid approval request").await;
+            return;
+        }
+    };
+    let config = match resolve_connection(state, Some(&req.connection_id), "").await {
+        Ok(config) => config,
+        Err(error) => {
+            respond_error(stream, "403 Forbidden", &error).await;
+            return;
+        }
+    };
+    // A prompt must not be offered for an operation that cannot be executed
+    // even with high-risk permission (scope, read-only, or production).
+    let (policy, group_paths) = match load_mcp_policy_context(state).await {
+        Ok(context) => context,
+        Err(error) => {
+            respond_error(stream, "403 Forbidden", &error).await;
+            return;
+        }
+    };
+    let group_ids = group_paths.get(&config.id).map(|path| path.ids.as_slice()).unwrap_or_default();
+    let (read_only, allow_dangerous) =
+        effective_database_execution_policy_with_groups(&policy, group_ids, &config.id, &req.database);
+    let high_risk = dbx_core::sql_risk::classify_sql_risk_for_database(&req.sql, config.db_type)
+        .is_ok_and(|risk| risk == dbx_core::sql_risk::SqlRisk::Ddl)
+        || dbx_core::sql_risk::is_dangerous_sql_for_database(&req.sql, config.db_type);
+    let confirmation = policy.confirmation_policy();
+    let allow_timed = confirmation == McpConfirmPolicy::Full;
+    if !high_risk
+        || confirmation.decide(McpAccessLevel::from_flags(read_only, allow_dangerous), McpAccessLevel::Full, true)
+            != McpCallDecision::Confirm
+    {
+        respond_error(stream, "403 Forbidden", "SQL_BLOCKED: High-risk SQL approval is unavailable.").await;
+        return;
+    }
+    if let Err(error) = ensure_mcp_sql_allowed_with_approval(state, &config, &req.database, &req.sql, true).await {
+        respond_error(stream, "403 Forbidden", &error).await;
+        return;
+    }
+    let key = (config.id.clone(), req.database.clone());
+    let now = Instant::now();
+    let existing = (|| {
+        let mut approvals = sql_approvals().lock().map_err(|_| ())?;
+        approvals
+            .timed
+            .retain(|grant_key, grant| grant.expires_at > now && (grant_key != &key || grant.valid_for(&config, now)));
+        Ok::<_, ()>((
+            (allow_timed && approvals.timed.contains_key(&key)).then_some(SqlApprovalDecision::Hour),
+            approvals.generation,
+        ))
+    })();
+    let (decision, generation) = match existing {
+        Ok(existing) => existing,
+        Err(()) => {
+            respond_error(stream, "500 Internal Server Error", "MCP approval state unavailable").await;
+            return;
+        }
+    };
+    let decision = if let Some(decision) = decision {
+        decision
+    } else {
+        let id = uuid::Uuid::new_v4().to_string();
+        let (sender, receiver) = oneshot::channel();
+        let queued = (|| {
+            let mut approvals =
+                sql_approvals().lock().map_err(|_| ("500 Internal Server Error", "MCP approval state unavailable"))?;
+            if approvals.pending.len() >= 16 {
+                return Err(("429 Too Many Requests", "Too many pending MCP approvals"));
+            }
+            approvals.pending.insert(id.clone(), sender);
+            Ok::<_, (&str, &str)>(())
+        })();
+        if let Err((status, message)) = queued {
+            respond_error(stream, status, message).await;
+            return;
+        }
+        let event = SqlApprovalEvent {
+            allow_timed,
+            id: id.clone(),
+            connection_name: config.name.clone(),
+            database: req.database.clone(),
+            sql: req.sql.clone(),
+        };
+        if app.emit_to("main", "mcp-sql-approval", event).is_err() {
+            sql_approvals().lock().ok().map(|mut approvals| approvals.pending.remove(&id));
+            respond_error(stream, "503 Service Unavailable", "DBX approval window unavailable").await;
+            return;
+        }
+        let answer = tokio::time::timeout(Duration::from_secs(90), receiver).await;
+        sql_approvals().lock().ok().map(|mut approvals| approvals.pending.remove(&id));
+        match answer {
+            Ok(Ok(decision)) => decision,
+            _ => {
+                respond_error(stream, "403 Forbidden", "SQL_BLOCKED: MCP approval timed out.").await;
+                return;
+            }
+        }
+    };
+    if matches!(decision, SqlApprovalDecision::Deny) || (!allow_timed && !matches!(decision, SqlApprovalDecision::Once))
+    {
+        respond_error(stream, "403 Forbidden", "SQL_BLOCKED: MCP approval denied.").await;
+        return;
+    }
+    // Re-read mutable policy after the person responds. Revocation wins.
+    let current = match resolve_connection(state, Some(&config.id), "").await {
+        Ok(current) => current,
+        Err(error) => {
+            respond_error(stream, "403 Forbidden", &error).await;
+            return;
+        }
+    };
+    if current != config {
+        respond_error(stream, "403 Forbidden", "SQL_BLOCKED: Connection changed while awaiting approval.").await;
+        return;
+    }
+    if let Err(error) = ensure_mcp_sql_allowed_with_approval(state, &current, &req.database, &req.sql, true).await {
+        respond_error(stream, "403 Forbidden", &error).await;
+        return;
+    }
+    let token = uuid::Uuid::new_v4().to_string();
+    let grant_result = (|| -> Result<(), &'static str> {
+        let mut approvals = sql_approvals().lock().map_err(|_| "MCP approval state unavailable")?;
+        if approvals.generation != generation {
+            return Err("SQL_BLOCKED: Approval revoked by policy change.");
+        }
+        if let Some(duration) = match decision {
+            SqlApprovalDecision::Hour => Some(Duration::from_secs(3600)),
+            SqlApprovalDecision::Day => Some(Duration::from_secs(86400)),
+            _ => None,
+        } {
+            // Do not renew an existing grant on use.
+            approvals.timed.entry(key).or_insert_with(|| TimedSqlApproval {
+                connection: config.clone(),
+                expires_at: Instant::now() + duration,
+            });
+        }
+        approvals.tokens.retain(|_, grant| grant.expires_at > Instant::now());
+        approvals.tokens.insert(
+            token.clone(),
+            SqlApprovalGrant {
+                connection: config,
+                database: req.database,
+                sql: req.sql,
+                expires_at: Instant::now() + Duration::from_secs(90),
+            },
+        );
+        Ok(())
+    })();
+    if let Err(error) = grant_result {
+        respond_error(stream, "403 Forbidden", error).await;
+        return;
+    }
+    respond_json(stream, &serde_json::json!({ "token": token })).await;
+}
+
+/// The MCP server validates the exact tool/sub-scope level before requesting
+/// and after receiving confirmation. The bridge gates the shared switch and
+/// independent protections; a global read default cannot veto resource overrides.
+async fn tool_approval_target(state: &Arc<AppState>, req: &ToolApprovalRequest) -> Result<Option<String>, String> {
+    let policy = load_mcp_policy(state).await?;
+    if policy.confirmation_policy() == McpConfirmPolicy::Off || (req.connection_id.is_none() && policy.read_only) {
+        return Err("TOOL_BLOCKED: High-risk confirmation is unavailable in DBX MCP settings.".to_string());
+    }
+    let Some(id) = req.connection_id.as_deref() else { return Ok(None) };
+    let config = resolve_connection(state, Some(id), "").await?;
+    if config.read_only {
+        return Err("CONNECTION_READ_ONLY: The connection has read-only protection enabled.".to_string());
+    }
+    if dbx_core::production_safety::is_production_database(&config, req.database.as_deref().unwrap_or_default()) {
+        return Err("PRODUCTION_WRITE_BLOCKED: The target has production protection enabled.".to_string());
+    }
+    Ok(Some(config.name))
+}
+
+/// Shows a one-shot confirmation for a high-risk non-SQL tool call and answers
+/// once the person decided. Shares the pending queue (and its cap and policy
+/// generation) with SQL approvals, so a policy save cancels it too.
+async fn handle_tool_approval(app: &AppHandle, state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: ToolApprovalRequest = match serde_json::from_str(body) {
+        Ok(req) => req,
+        Err(_) => {
+            respond_error(stream, "400 Bad Request", "Invalid tool approval request").await;
+            return;
+        }
+    };
+    let connection_name = match tool_approval_target(state, &req).await {
+        Ok(name) => name,
+        Err(error) => {
+            respond_error(stream, "403 Forbidden", &error).await;
+            return;
+        }
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let (sender, receiver) = oneshot::channel();
+    let queued = (|| {
+        let mut approvals =
+            sql_approvals().lock().map_err(|_| ("500 Internal Server Error", "MCP approval state unavailable"))?;
+        if approvals.pending.len() >= 16 {
+            return Err(("429 Too Many Requests", "Too many pending MCP approvals"));
+        }
+        approvals.pending.insert(id.clone(), sender);
+        Ok::<_, (&str, &str)>(approvals.generation)
+    })();
+    let generation = match queued {
+        Ok(generation) => generation,
+        Err((status, message)) => {
+            respond_error(stream, status, message).await;
+            return;
+        }
+    };
+    let event = ToolApprovalEvent {
+        id: id.clone(),
+        kind: req.kind,
+        tool: req.tool,
+        plugin: req.plugin,
+        connection_name,
+        database: req.database,
+        detail: req.detail,
+    };
+    if app.emit_to("main", "mcp-tool-approval", event).is_err() {
+        sql_approvals().lock().ok().map(|mut approvals| approvals.pending.remove(&id));
+        respond_error(stream, "503 Service Unavailable", "DBX approval window unavailable").await;
+        return;
+    }
+    let answer = tokio::time::timeout(Duration::from_secs(90), receiver).await;
+    sql_approvals().lock().ok().map(|mut approvals| approvals.pending.remove(&id));
+    let approved = matches!(answer, Ok(Ok(decision)) if !matches!(decision, SqlApprovalDecision::Deny));
+    if !approved {
+        let message = if answer.is_err() {
+            "TOOL_BLOCKED: MCP confirmation timed out."
+        } else {
+            "TOOL_BLOCKED: MCP confirmation denied."
+        };
+        respond_error(stream, "403 Forbidden", message).await;
+        return;
+    }
+    let revoked = sql_approvals().lock().map(|approvals| approvals.generation != generation).unwrap_or(true);
+    if revoked {
+        respond_error(stream, "403 Forbidden", "TOOL_BLOCKED: Approval revoked by policy change.").await;
+        return;
+    }
+    respond_json(stream, &serde_json::json!({ "ok": true })).await;
+}
+
+async fn handle_consume_sql_approval(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: ConsumeSqlApprovalRequest = match serde_json::from_str(body) {
+        Ok(req) => req,
+        Err(_) => {
+            respond_error(stream, "400 Bad Request", "Invalid approval request").await;
+            return;
+        }
+    };
+    let config = match resolve_connection(state, Some(&req.connection_id), "").await {
+        Ok(config) => config,
+        Err(error) => {
+            respond_error(stream, "403 Forbidden", &error).await;
+            return;
+        }
+    };
+    if !take_sql_approval(Some(&req.token), &config, &req.database, &req.sql) {
+        respond_error(stream, "403 Forbidden", "SQL_BLOCKED: Approval expired or does not match this request.").await;
+        return;
+    }
+    if let Err(error) = ensure_mcp_sql_allowed_with_approval(state, &config, &req.database, &req.sql, true).await {
+        respond_error(stream, "403 Forbidden", &error).await;
+        return;
+    }
+    respond_json(stream, &serde_json::json!({ "ok": true })).await;
 }
 
 fn ensure_mcp_sql_database_switch_allowed(
@@ -1831,7 +2414,8 @@ async fn handle_execute_query(app: &AppHandle, state: &Arc<AppState>, body: &str
     // Check the complete batch first so a session-changing statement cannot
     // hide a later production write, then recheck every statement immediately
     // before it reaches the database.
-    if let Err(e) = ensure_mcp_sql_allowed(state, &config, &database, &req.sql).await {
+    let approved = take_sql_approval(req.approval_token.as_deref(), &config, &database, &req.sql);
+    if let Err(e) = ensure_mcp_sql_allowed_with_approval(state, &config, &database, &req.sql, approved).await {
         respond(stream, "403 Forbidden", &e).await;
         return;
     }
@@ -1850,7 +2434,7 @@ async fn handle_execute_query(app: &AppHandle, state: &Arc<AppState>, body: &str
                 return;
             }
         };
-        if let Err(e) = ensure_mcp_sql_allowed(state, &current, &database, &statement).await {
+        if let Err(e) = ensure_mcp_sql_allowed_with_approval(state, &current, &database, &statement, approved).await {
             respond(stream, "403 Forbidden", &e).await;
             return;
         }
@@ -2335,7 +2919,7 @@ async fn handle_redis_execute_command_data(state: &Arc<AppState>, body: &str, st
             return;
         }
     };
-    let cmd_name = argv[0].to_ascii_uppercase();
+    let cmd_name = String::from_utf8_lossy(&argv[0]).to_ascii_uppercase();
     let safety = dbx_core::db::redis_driver::classify_command(&cmd_name);
     let centrally_approved_high_risk = safety == dbx_core::db::redis_driver::RedisCommandSafety::Blocked;
     if safety != dbx_core::db::redis_driver::RedisCommandSafety::Allowed {

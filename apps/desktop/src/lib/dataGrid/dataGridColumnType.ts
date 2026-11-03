@@ -16,15 +16,23 @@ import { isElasticsearchCompatibleDatabaseType, isSolrDatabaseType, type Databas
 export interface HeaderColumnTypeSources {
   /** Type from table metadata for this column (looked up by name), if any. */
   tableColumnType?: string;
+  /**
+   * Type label from multi-source display enrichment (by result ordinal), used
+   * when a single `tableMeta` cannot cover every JOIN source column.
+   */
+  displayColumnType?: string;
   /** `QueryResult.column_types`, parallel to `result.columns` (by index). */
   resultColumnTypes?: readonly string[];
   /** Index of the column within `result.columns`. */
   actualColIdx: number;
 }
 
-export function resolveHeaderColumnType({ tableColumnType, resultColumnTypes, actualColIdx }: HeaderColumnTypeSources): string | undefined {
+export function resolveHeaderColumnType({ tableColumnType, displayColumnType, resultColumnTypes, actualColIdx }: HeaderColumnTypeSources): string | undefined {
   const fromMeta = tableColumnType?.trim();
   if (fromMeta) return fromMeta;
+
+  const fromDisplay = displayColumnType?.trim();
+  if (fromDisplay) return fromDisplay;
 
   const fromResult = resultColumnTypes?.[actualColIdx]?.trim();
   return fromResult ? fromResult : undefined;
@@ -53,6 +61,27 @@ export function formatMetadataColumnTypeLabel({ dataType, characterMaximumLength
     return `${typeName}(${numericPrecision},${numericScale ?? 0})`;
   }
   return typeName;
+}
+
+/** Shorten verbose SQL type names while preserving a trailing `(length)` / `(p,s)` suffix. */
+export function shortHeaderTypeName(dataType: string): string {
+  const trimmed = dataType.trim();
+  const match = /^(.*?)(\([^)]*\))$/.exec(trimmed);
+  const base = (match?.[1] ?? trimmed).trim();
+  const suffix = match?.[2] ?? "";
+  const lower = base.toLowerCase();
+  if (lower === "character varying") return `varchar${suffix}`;
+  if (lower === "character") return `char${suffix}`;
+  if (lower === "double precision") return `double${suffix}`;
+  if (lower === "timestamp without time zone") return `timestamp${suffix}`;
+  if (lower === "timestamp with time zone") return `timestamptz${suffix}`;
+  if (lower === "time without time zone") return `time${suffix}`;
+  if (lower === "time with time zone") return `timetz${suffix}`;
+  if (lower === "boolean") return `bool${suffix}`;
+  if (lower === "integer") return `int${suffix}`;
+  if (lower === "smallint") return `int2${suffix}`;
+  if (lower === "real") return `float4${suffix}`;
+  return trimmed;
 }
 
 /**
@@ -101,6 +130,12 @@ const NUMERIC_COLUMN_TYPE_BASES = new Set([
   "int",
   "integer",
   "bigint",
+  "hugeint",
+  "uhugeint",
+  "utinyint",
+  "usmallint",
+  "uinteger",
+  "ubigint",
   "serial",
   "smallserial",
   "bigserial",
@@ -148,6 +183,7 @@ const NUMERIC_COLUMN_TYPE_BASES = new Set([
   "smallmoneyn",
   "binary_float",
   "binary_double",
+  "bignum",
   // Elasticsearch numeric mapping types.
   "half_float",
   "scaled_float",
@@ -160,6 +196,9 @@ export function isNumericColumnType(dataType: string | undefined): boolean {
     const openIndex = normalized.indexOf("(");
     if (openIndex <= 0 || !TRANSPARENT_NUMERIC_TYPE_WRAPPERS.has(normalized.slice(0, openIndex).trim())) break;
     normalized = normalized.slice(openIndex + 1, -1).trim();
+  }
+  if (normalized.startsWith("unsigned ") || normalized.startsWith("signed ")) {
+    normalized = normalized.slice(normalized.indexOf(" ") + 1).trim();
   }
   const base = normalized.split(/[\s([]/, 1)[0];
   return NUMERIC_COLUMN_TYPE_BASES.has(base);
@@ -176,6 +215,13 @@ const INTEGER_COLUMN_TYPE_BASES = new Set([
   "int",
   "integer",
   "bigint",
+  "hugeint",
+  "uhugeint",
+  "utinyint",
+  "usmallint",
+  "uinteger",
+  "ubigint",
+  "bignum",
   "serial",
   "smallserial",
   "bigserial",
@@ -295,6 +341,12 @@ function dataGridColumnTypeBase(dataType: string): { base: string; array: boolea
   else if (base.startsWith("time without ")) base = "time";
   else if (base === "double precision") base = "double";
   return { base, array: unwrapped.array };
+}
+
+export function isUuidColumnType(dataType: string | undefined): boolean {
+  if (!dataType?.trim()) return false;
+  const { base, array } = dataGridColumnTypeBase(dataType);
+  return !array && (base === "uuid" || base === "uniqueidentifier");
 }
 
 /**

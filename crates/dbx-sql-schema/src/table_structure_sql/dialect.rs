@@ -9,6 +9,7 @@ pub(super) enum StructureDialect {
     #[cfg(feature = "duckdb-sidecar")]
     DuckDb,
     SqlServer,
+    SapHana,
     Oracle,
     Dameng,
     // 神通 Oscar：Oracle 兼容方言，且支持 ALTER TABLE DROP/ADD PRIMARY KEY（与 Dameng 一致，
@@ -98,6 +99,20 @@ pub(super) fn capabilities_for(
     driver_profile: Option<&str>,
 ) -> TableStructureCapabilities {
     let base = TableStructureCapabilities::default();
+    if database_type == Some(DatabaseType::StarRocks)
+        || (database_type == Some(DatabaseType::Mysql)
+            && driver_profile.is_some_and(|p| p.eq_ignore_ascii_case("starrocks")))
+    {
+        return TableStructureCapabilities {
+            dialect: StructureDialect::Mysql,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            comment: true,
+            ..base
+        };
+    }
     match database_type {
         Some(
             DatabaseType::Mysql
@@ -132,23 +147,19 @@ pub(super) fn capabilities_for(
             comment: true,
             ..base
         },
-        // GBase 8s is Informix-compatible, unlike the rest of the `Gbase`
-        // family (GBase 8a and friends) which speak MySQL wire protocol and
-        // SQL dialect. `driver_profile` is the only signal that distinguishes
-        // them (see the same check in `table_export.rs` / `table_select.rs`).
-        Some(DatabaseType::Gbase) if driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s")) => {
-            TableStructureCapabilities {
-                dialect: StructureDialect::Informix,
-                add_column: true,
-                drop_column: true,
-                rename_column: true,
-                alter_existing_column: true,
-                create_index: true,
-                drop_index: true,
-                rebuild_index: true,
-                ..base
-            }
-        }
+        // GBase 8s is Informix-compatible, unlike GBase 8a (`Gbase`), which speaks
+        // the MySQL wire protocol and SQL dialect.
+        Some(DatabaseType::Gbase8s) => TableStructureCapabilities {
+            dialect: StructureDialect::Informix,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            create_index: true,
+            drop_index: true,
+            rebuild_index: true,
+            ..base
+        },
         Some(DatabaseType::Gbase) => TableStructureCapabilities {
             dialect: StructureDialect::Mysql,
             add_column: true,
@@ -267,6 +278,16 @@ pub(super) fn capabilities_for(
             // from the index metadata (issue #10758).
             add_primary_key: true,
             alter_primary_key: true,
+            foreign_key: true,
+            ..base
+        },
+        Some(DatabaseType::SapHana) => TableStructureCapabilities {
+            dialect: StructureDialect::SapHana,
+            add_column: true,
+            drop_column: true,
+            rename_column: true,
+            alter_existing_column: true,
+            comment: true,
             ..base
         },
         Some(DatabaseType::Dameng) => TableStructureCapabilities {
@@ -342,6 +363,7 @@ pub(super) fn capabilities_for(
                 drop_index: true,
                 rebuild_index: true,
                 index_type: true,
+                add_primary_key: matches!(database_type, Some(DatabaseType::OceanbaseOracle)),
                 ..base
             }
         }
@@ -421,6 +443,7 @@ pub(super) fn dialect_label(dialect: StructureDialect) -> String {
         #[cfg(feature = "duckdb-sidecar")]
         StructureDialect::DuckDb => "duckdb",
         StructureDialect::SqlServer => "sqlserver",
+        StructureDialect::SapHana => "saphana",
         StructureDialect::Oracle => "oracle",
         StructureDialect::Dameng => "dameng",
         StructureDialect::Oscar => "oscar",
@@ -444,6 +467,7 @@ pub(super) fn database_type_for_dialect(dialect: StructureDialect) -> Option<Dat
         #[cfg(feature = "duckdb-sidecar")]
         StructureDialect::DuckDb => Some(DatabaseType::DuckDb),
         StructureDialect::SqlServer => Some(DatabaseType::SqlServer),
+        StructureDialect::SapHana => Some(DatabaseType::SapHana),
         StructureDialect::Oracle => Some(DatabaseType::Oracle),
         StructureDialect::Dameng => Some(DatabaseType::Dameng),
         StructureDialect::Oscar => Some(DatabaseType::Oscar),
@@ -455,4 +479,25 @@ pub(super) fn database_type_for_dialect(dialect: StructureDialect) -> Option<Dat
         StructureDialect::GaussdbM => Some(DatabaseType::Mysql),
         StructureDialect::Unsupported => None,
     }
+}
+
+/// Whether the dialect persists a user-supplied primary key constraint name.
+///
+/// MySQL-family engines accept `CONSTRAINT name PRIMARY KEY` and store the
+/// symbol as the primary key index name; PostgreSQL, SQL Server, Oracle, Dameng
+/// and Oscar store real named constraints. Dialects outside this set either
+/// ignore the symbol (SQLite) or have no named PK constraint concept, so the
+/// builder keeps the anonymous form instead of emitting a no-op name.
+pub(super) fn supports_named_primary_key(dialect: StructureDialect) -> bool {
+    matches!(
+        dialect,
+        StructureDialect::Mysql
+            | StructureDialect::Doris
+            | StructureDialect::GaussdbM
+            | StructureDialect::Postgres
+            | StructureDialect::SqlServer
+            | StructureDialect::Oracle
+            | StructureDialect::Dameng
+            | StructureDialect::Oscar
+    )
 }

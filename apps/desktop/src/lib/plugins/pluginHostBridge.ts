@@ -1,4 +1,5 @@
 import { PLUGIN_AI_TASKS } from "./pluginAiCompletion";
+import { permittedPluginUrl } from "./pluginOpenUrl";
 import type { PluginAiProvider, PluginAiModel, PluginAiGenerateRequest, PluginAiStreamRequest, PluginAiStreamChunkEvent, PluginAiTask } from "./pluginAiCompletion";
 import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginUiContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
@@ -8,6 +9,7 @@ import { isValidPluginAiRecommendationTemplate, resolvePluginAiRecommendationUpd
 import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
 import { MAX_PLUGIN_SCHEMA_METADATA_NAME_CHARS, PLUGIN_SCHEMA_METADATA_CAPABILITY, PLUGIN_SCHEMA_METADATA_PERMISSION, type PluginTableContext, type PluginTableMetadata } from "@/types/pluginSchemaMetadata";
 import { MAX_PLUGIN_DATA_MAX_ROWS, MAX_PLUGIN_DATA_NAME_CHARS, MAX_PLUGIN_DATA_SQL_CHARS, MAX_PLUGIN_DATA_TIMEOUT_MS, PLUGIN_DATA_ACCESS_NOT_GRANTED, PLUGIN_DATA_CAPABILITY, PLUGIN_DATA_READ_PERMISSION, type PluginDataQueryRequest, type PluginDataQueryResult } from "@/types/pluginData";
+import { PLUGIN_CONNECTIONS_CAPABILITY, PLUGIN_CONNECTIONS_READ_PERMISSION, type PluginConnectionSummary } from "@/types/pluginConnection";
 import { floatingWindowLabel } from "@/lib/app/windowContext";
 import { parseFloatingWindowRequest, type FloatingRect, type OpenFloatingWindowRequest, type OpenFloatingWindowResult } from "@/lib/plugins/pluginFloatingWindow";
 
@@ -127,6 +129,11 @@ export interface PluginFileHandleMeta {
   relativePath?: string;
 }
 
+export interface PluginDragPosition {
+  x: number;
+  y: number;
+}
+
 export interface PluginPickFilesOptions {
   multiple?: boolean;
 }
@@ -155,6 +162,8 @@ export const MAX_PLUGIN_STORAGE_VALUE_BYTES = 256 * 1024;
 export const MAX_PLUGIN_STORAGE_KEY_CHARS = 256;
 
 export interface PluginHostBridgeApi {
+  /** Must display trusted host consent for every request; never launch directly. */
+  openUrl?(url: string): Promise<{ opened: boolean }>;
   invoke<T = unknown>(pluginId: string, method: string, params?: unknown, timeoutMs?: number): Promise<T>;
   notify(pluginId: string, method: string, params?: unknown): Promise<void>;
   sendBinary(pluginId: string, channel: string, dataBase64: string): Promise<void>;
@@ -178,6 +187,13 @@ export interface PluginHostBridgeApi {
   setAiRecommendations?(update: PluginAiRecommendationHostUpdate): void;
   openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext, options?: { forceNew?: boolean; target?: "tab" }): Promise<void> | void;
   /**
+   * Updates the calling workbench tab/dock title (or resets to default when title is null).
+   * Scoped to the single surface hosting the caller.
+   */
+  setTitle?(title: string | null): Promise<void> | void;
+  /** Reads the calling workbench tab/dock title. */
+  getTitle?(): Promise<string> | string;
+  /**
    * §4/§5 command execution asked from a plugin webview: the same registry
    * path as menu execution — enablement (§5.4), §4.1 singleton reuse,
    * host-authored context — scoped to the calling plugin's own declared
@@ -195,8 +211,11 @@ export interface PluginHostBridgeApi {
    * PR-A4 generic extension point: a read-only, secret-free connection list scoped to the calling plugin's own
    * connection-providers, so plugins can implement their own connection switching inside panels/workbenches and
    * their own business (the host stays unaware of the purpose).
+   *
+   * With `host.connections:read` (#12603), returns all connections when requested.
    */
-  listConnections?(pluginId: string): Array<{ id: string; name: string; providerId: string; connectionType?: string; readOnly: boolean }>;
+  listConnections?(pluginId: string, options?: { all?: boolean }): PluginConnectionSummary[];
+  listAllConnections?(): PluginConnectionSummary[];
   /**
    * Estimated plan capability metadata for one connection. Requires the plugin
    * to declare `host.plans:read`. The host only reads the stored connection
@@ -489,6 +508,7 @@ export class PluginHostBridge {
       // Additive capability advertisement: an older host omits `planApi`, and a
       // plugin must treat the absence as "unsupported" rather than probing.
       capabilities: {
+        openUrl: !!this.api.openUrl,
         downloadFile: !!this.api.downloadFile,
         planApi: !!this.api.getPlanCapabilities && !!this.api.explainPlan,
         [PLUGIN_SCHEMA_METADATA_CAPABILITY]: !!this.api.getTableMetadata,
@@ -510,6 +530,7 @@ export class PluginHostBridge {
         // Floating desktop widget windows: advertised only when the host can both
         // open a window and drive its geometry, so a plugin sees one honest flag.
         floating: !!this.api.openFloatingWindow && !!this.api.beginFloatingDrag && !!this.api.endFloatingDrag,
+        workbenchTitle: !!this.api.setTitle,
         // The namespace exists on both hosts, but what it can DO differs:
         // portable plugins gate on these flags instead of probing calls.
         fileTransfer: {
@@ -520,6 +541,7 @@ export class PluginHostBridge {
           drop: !!this.api.receiveOsDrops,
           folderExpansion: !!this.api.receiveOsDrops,
         },
+        [PLUGIN_CONNECTIONS_CAPABILITY]: !!this.api.listConnections || !!this.api.listAllConnections,
       },
       context: snapshotPluginWorkbenchContext(this.context),
     });
@@ -594,13 +616,27 @@ export class PluginHostBridge {
   }
 
   /** Tell the plugin whether an OS-level file drag is currently over its workbench. */
-  forwardDragState(active: boolean): void {
-    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "dragstate", active });
+  forwardDragState(active: boolean, position?: PluginDragPosition): void {
+    this.post({
+      source: HOST_MESSAGE_SOURCE,
+      version: BRIDGE_VERSION,
+      type: "dragstate",
+      active,
+      position: position ? { x: position.x, y: position.y } : undefined,
+    });
   }
 
   /** Hand the plugin already-opened handles for files dropped onto its workbench. */
-  forwardFileDrop(files: PluginFileHandleMeta[], drop?: { dropId?: string; truncated?: boolean }): void {
-    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "filedrop", files, dropId: drop?.dropId, truncated: drop?.truncated === true });
+  forwardFileDrop(files: PluginFileHandleMeta[], drop?: { dropId?: string; truncated?: boolean; position?: PluginDragPosition }): void {
+    this.post({
+      source: HOST_MESSAGE_SOURCE,
+      version: BRIDGE_VERSION,
+      type: "filedrop",
+      files,
+      dropId: drop?.dropId,
+      truncated: drop?.truncated === true,
+      position: drop?.position ? { x: drop.position.x, y: drop.position.y } : undefined,
+    });
   }
 
   private async handleRequest(request: PluginRequestMessage, target: Window): Promise<void> {
@@ -614,6 +650,12 @@ export class PluginHostBridge {
   }
 
   private async dispatch(method: string, params: unknown, binary?: ArrayBuffer): Promise<unknown> {
+    if (method === "host.openUrl") {
+      const input = requireRecord(params, "open URL params");
+      const url = permittedPluginUrl(input.url, this.plugin.manifest.permissions);
+      if (!this.api.openUrl) throw new Error("Host URL opening is unavailable");
+      return this.api.openUrl(url);
+    }
     if (method === "host.downloadFile") {
       if (!this.api.downloadFile) throw new Error("Streaming file downloads require the desktop host");
       const input = requireRecord(params, "download params");
@@ -778,6 +820,20 @@ export class PluginHostBridge {
       await this.api.openWorkbench(this.plugin.manifest.id, requireProtocolName(input.contributionId, "workbench contribution"), isRecord(input.context) ? input.context : undefined, { forceNew: input.forceNew === true, target: input.target === "tab" ? "tab" : undefined });
       return null;
     }
+    if (method === "host.setTitle") {
+      this.requirePermission("host.workbench");
+      if (!this.api.setTitle) throw new Error("Host tab title update is unavailable");
+      const input = requireRecord(params, "setTitle params");
+      const rawTitle = input.title;
+      const title = typeof rawTitle === "string" ? rawTitle.trim().slice(0, 256) || null : null;
+      await this.api.setTitle(title);
+      return null;
+    }
+    if (method === "host.getTitle") {
+      this.requirePermission("host.workbench");
+      if (!this.api.getTitle) throw new Error("Host tab title read is unavailable");
+      return (await this.api.getTitle()) ?? "";
+    }
     if (method === "host.executeCommand") {
       this.requirePermission("host.workbench");
       if (!this.api.executeCommand) throw new Error("Host command execution is unavailable");
@@ -790,10 +846,24 @@ export class PluginHostBridge {
       await this.api.reopenConnection(this.plugin.manifest.id, requireProtocolName(input.connectionId, "connectionId"));
       return { ok: true };
     }
+    if (method === "host.getConnections") {
+      this.requirePermission(PLUGIN_CONNECTIONS_READ_PERMISSION);
+      if (!this.api.listConnections && !this.api.listAllConnections) throw new Error("Connection enumeration is unavailable on this host");
+      if (this.api.listAllConnections) return this.api.listAllConnections();
+      return this.api.listConnections!(this.plugin.manifest.id, { all: true });
+    }
     if (method === "host.listConnections") {
-      this.requirePermission("host.workbench");
-      if (!this.api.listConnections) throw new Error("Connection enumeration is unavailable on this host");
-      return this.api.listConnections(this.plugin.manifest.id);
+      const hasConnectionsRead = this.hasPermission(PLUGIN_CONNECTIONS_READ_PERMISSION);
+      const forceScoped = isRecord(params) && params.scoped === true;
+      if (!hasConnectionsRead) {
+        this.requirePermission("host.workbench");
+      }
+      if (!this.api.listConnections && !this.api.listAllConnections) throw new Error("Connection enumeration is unavailable on this host");
+      if (hasConnectionsRead && !forceScoped) {
+        if (this.api.listAllConnections) return this.api.listAllConnections();
+        return this.api.listConnections!(this.plugin.manifest.id, { all: true });
+      }
+      return this.api.listConnections ? this.api.listConnections(this.plugin.manifest.id) : [];
     }
     if (method === "host.openFilesystem") {
       this.requirePermission("host.filesystem");
@@ -1058,7 +1128,12 @@ export class PluginHostBridge {
   }
 
   private hasPermission(permission: string): boolean {
-    return (this.plugin.manifest.permissions || []).includes(permission);
+    const permissions = this.plugin.manifest.permissions || [];
+    if (permissions.includes(permission)) return true;
+    if (permission === PLUGIN_CONNECTIONS_READ_PERMISSION && permissions.includes("host.connections::read")) {
+      return true;
+    }
+    return false;
   }
 
   private respond(target: Window, id: string, payload: { result?: unknown; error?: string }): void {
@@ -1388,11 +1463,14 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         return request('backend.sendBinary', { channel }, { transfer: bytes });
       },
       readAsset: (path) => request('ui.readAsset', { path }),
+      openUrl: (url) => request('host.openUrl', { url }),
       readAssetUrl: async (path) => {
         const asset = await request('ui.readAsset', { path });
         return URL.createObjectURL(new Blob([decode(asset.dataBase64)], { type: asset.contentType }));
       },
       openWorkbench: (contributionId, childContext, options) => request('host.openWorkbench', { contributionId, context: childContext, forceNew: !!(options && options.forceNew), target: options && options.target === "tab" ? "tab" : undefined }),
+      setTitle: (title) => request('host.setTitle', { title }),
+      getTitle: () => request('host.getTitle'),
       // Closes whatever surface hosts this plugin UI — a workbench tab, a dock
       // entry, or this plugin's floating window. Same path as the Ctrl+W
       // shortcut, so a plugin can offer its own close/minimize affordance.
@@ -1427,6 +1505,12 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       executeCommand: (commandId, context) => request('host.executeCommand', { commandId, context }),
       openFilesystem: (providerId, childContext) => request('host.openFilesystem', { providerId, context: childContext }),
       reopenConnection: (connectionId) => request('host.reopenConnection', { connectionId }),
+      getConnections: () => request('host.getConnections', {}),
+      listConnections: (options) => request('host.listConnections', options || {}),
+      connections: Object.freeze({
+        list: (options) => request('host.listConnections', options || {}),
+        getAll: () => request('host.getConnections', {}),
+      }),
       // Estimated plans only: mode must be sent explicitly so a plugin states
       // its intent, and the host refuses anything other than "estimated".
       getPlanCapabilities: (connectionId) => request('host.getPlanCapabilities', { connectionId }),
@@ -1501,6 +1585,8 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
       // listener has settled. The host bounds the wait on its side.
       workbench: Object.freeze({
         onClose: (listener) => { listeners.close.add(listener); return () => listeners.close.delete(listener); },
+        setTitle: (title) => request('host.setTitle', { title }),
+        getTitle: () => request('host.getTitle'),
       }),
       decodeBase64: decode,
       encodeBase64: encode,
@@ -1543,14 +1629,24 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         document.dispatchEvent(new CustomEvent('dbx-plugin-binary', { detail: payload }));
       } else if (message.type === 'filedrop') {
         const files = Array.isArray(message.files) ? message.files : [];
+        const position = (message.position && typeof message.position.x === 'number' && typeof message.position.y === 'number')
+          ? { x: message.position.x, y: message.position.y }
+          : undefined;
         // The drop metadata rides as a second listener argument so existing
         // single-parameter listeners keep working unchanged.
-        const drop = { dropId: typeof message.dropId === 'string' ? message.dropId : undefined, truncated: message.truncated === true };
+        const drop = {
+          dropId: typeof message.dropId === 'string' ? message.dropId : undefined,
+          truncated: message.truncated === true,
+          position,
+        };
         listeners.filedrop.forEach((listener) => listener(files, drop));
         document.dispatchEvent(new CustomEvent('dbx-plugin-filedrop', { detail: { files, drop } }));
       } else if (message.type === 'dragstate') {
         const active = message.active === true;
-        listeners.dragstate.forEach((listener) => listener(active));
+        const position = (message.position && typeof message.position.x === 'number' && typeof message.position.y === 'number')
+          ? { x: message.position.x, y: message.position.y }
+          : undefined;
+        listeners.dragstate.forEach((listener) => listener(active, position));
         document.dispatchEvent(new CustomEvent('dbx-plugin-dragstate', { detail: active }));
       } else if (message.type === 'workbench/close') {
         const notifyClose = (listener) => Promise.resolve().then(listener).catch(() => undefined);
@@ -1560,13 +1656,21 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         });
       }
     });
+    // The close-tab shortcut listens in the BUBBLE phase and yields to events a
+    // plugin input already consumed. A capture-phase listener runs before the
+    // focused control, so a terminal (xterm) handling Ctrl+W as "delete word"
+    // had the tab closed underneath it: the host posted closeTab before the
+    // terminal ever saw the key. Bubbling lets the focused control run first;
+    // xterm calls preventDefault()+stopPropagation() for the keys it sends, and
+    // any other consumer only needs preventDefault() to keep the tab open.
     addEventListener('keydown', (event) => {
+      if (event.defaultPrevented) return;
       const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
       if (key !== 'w' || (!event.metaKey && !event.ctrlKey) || event.altKey || event.shiftKey || event.isComposing) return;
       event.preventDefault();
       event.stopPropagation();
       parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'shortcut', shortcut: 'closeTab' }, '*');
-    }, true);
+    });
     parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'ready', features: ['workbench.close'] }, '*');
   })();`;
 }

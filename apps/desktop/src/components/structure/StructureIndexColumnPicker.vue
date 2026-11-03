@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { ChevronDown, Search, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { sortStructureIndexColumnOptions } from "@/lib/table/tableStructureEditorState";
 
 interface ColumnOption {
   name: string;
@@ -26,9 +27,10 @@ const optionInputs = ref<HTMLInputElement[]>([]);
 const selectedPositions = computed(() => new Map(props.selected.map((name, position) => [name, position + 1])));
 const visibleOptions = computed(() => {
   const query = search.value.trim().toLowerCase();
-  return props.options
-    .filter((column) => !query || column.name.toLowerCase().includes(query) || column.dataType.toLowerCase().includes(query))
-    .sort((left, right) => (selectedPositions.value.get(left.name) ?? Number.MAX_SAFE_INTEGER) - (selectedPositions.value.get(right.name) ?? Number.MAX_SAFE_INTEGER));
+  return sortStructureIndexColumnOptions(
+    props.options.filter((column) => !query || column.name.toLowerCase().includes(query) || column.dataType.toLowerCase().includes(query)),
+    selectedPositions.value,
+  );
 });
 
 function onOpenChange(value: boolean) {

@@ -8,6 +8,9 @@ public final class ObjectInfo {
     private String schema;
     private String comment;
     private Boolean valid;
+    private String parent_name;
+    private String parent_schema;
+    private TriggerInfo trigger;
 
     public ObjectInfo() {
         this("", "", null, null, null);
@@ -69,6 +72,30 @@ public final class ObjectInfo {
         this.valid = valid;
     }
 
+    public String getParent_schema() {
+        return parent_schema;
+    }
+
+    public void setParent_schema(String parentSchema) {
+        this.parent_schema = parentSchema;
+    }
+
+    public TriggerInfo getTrigger() {
+        return trigger;
+    }
+
+    public void setTrigger(TriggerInfo trigger) {
+        this.trigger = trigger;
+    }
+
+    public String getParent_name() {
+        return parent_name;
+    }
+
+    public void setParent_name(String parentName) {
+        this.parent_name = parentName;
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) return true;
@@ -78,12 +105,15 @@ public final class ObjectInfo {
             && Objects.equals(object_type, that.object_type)
             && Objects.equals(schema, that.schema)
             && Objects.equals(comment, that.comment)
-            && Objects.equals(valid, that.valid);
+            && Objects.equals(parent_name, that.parent_name)
+            && Objects.equals(valid, that.valid)
+            && Objects.equals(parent_schema, that.parent_schema)
+            && Objects.equals(trigger, that.trigger);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(name, object_type, schema, comment, valid);
+        return Objects.hash(name, object_type, schema, comment, valid, parent_name, parent_schema, trigger);
     }
 
     @Override

@@ -277,6 +277,23 @@ describe("tableStructureEditorState", () => {
     });
   });
 
+  describe("Dameng temporal precision", () => {
+    it("restores timestamp and time precision reported in DATA_SCALE", () => {
+      const drafts = createColumnDrafts(
+        [
+          { name: "updated_at", data_type: "TIMESTAMP", numeric_scale: 6, is_nullable: true, column_default: null, is_primary_key: false },
+          { name: "created_at", data_type: "TIMESTAMP", numeric_scale: 0, is_nullable: true, column_default: null, is_primary_key: false },
+          { name: "clock_time", data_type: "TIME", numeric_scale: 3, is_nullable: true, column_default: null, is_primary_key: false },
+        ],
+        "dameng",
+      );
+
+      expect(drafts.map((column) => column.dataType)).toEqual(["TIMESTAMP(6)", "TIMESTAMP(0)", "TIME(3)"]);
+      expect(drafts.map((column) => column.original?.data_type)).toEqual(drafts.map((column) => column.dataType));
+      expect(hasExistingColumnTypeChange(drafts)).toBe(false);
+    });
+  });
+
   describe("PostgreSQL temporal precision", () => {
     it("keeps the time-zone qualifier returned by PostgreSQL metadata", () => {
       const drafts = createColumnDrafts(
@@ -368,16 +385,57 @@ describe("tableStructureEditorState", () => {
     });
   });
 
-  it("keeps existing Oracle trigger drafts read-only until full source editing is available", () => {
-    const [existing] = createTriggerDrafts([{ name: "ORDERS_AUDIT", timing: "AFTER EACH ROW", event: "INSERT OR UPDATE", statement: "BEGIN NULL; END;" }]);
-    if (!existing) throw new Error("expected an existing trigger draft");
+  it("allows existing Oracle trigger drafts to be edited only when the source is a plain body", () => {
+    const [existing, unstructured, missingSource] = createTriggerDrafts([
+      { name: "ORDERS_AUDIT", timing: "AFTER EACH ROW", event: "INSERT OR UPDATE", statement: "BEGIN NULL; END;", enabled: false },
+      { name: "ORDERS_WHEN", timing: "BEFORE EACH ROW", event: "INSERT", statement: "TRIGGER ORDERS_WHEN\nBEFORE INSERT ON ORDERS\nFOR EACH ROW\nWHEN (NEW.ID > 0)\nBEGIN NULL; END;" },
+      { name: "ORDERS_EMPTY", timing: "BEFORE EACH ROW", event: "INSERT" },
+    ]);
+    if (!existing || !unstructured || !missingSource) throw new Error("expected existing trigger drafts");
 
-    expect(canEditStructuredTriggerDraft("oracle", existing)).toBe(false);
+    expect(existing.enabled).toBe(false);
+    expect(canEditStructuredTriggerDraft("oracle", existing)).toBe(true);
+    expect(canEditStructuredTriggerDraft("oracle", unstructured)).toBe(false);
+    expect(canEditStructuredTriggerDraft("oracle", missingSource)).toBe(false);
     expect(canEditStructuredTriggerDraft(undefined, existing)).toBe(false);
     expect(canEditStructuredTriggerDraft("mysql", existing)).toBe(true);
     expect(canEditStructuredTriggerDraft("sqlserver", existing)).toBe(true);
     expect(
       canEditStructuredTriggerDraft("oracle", {
+        id: "new:trigger",
+        name: "ORDERS_AUDIT",
+        timing: "AFTER EACH ROW",
+        event: "INSERT",
+        statement: "BEGIN NULL; END;",
+        markedForDrop: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("allows existing Dameng trigger drafts to be edited only without a WHEN clause or complete source", () => {
+    const [existing, withCondition, completeSource] = createTriggerDrafts([
+      { name: "ORDERS_AUDIT", timing: "AFTER EACH ROW", event: "INSERT", statement: "BEGIN NULL; END;", enabled: true },
+      {
+        name: "ORDERS_WHEN",
+        timing: "BEFORE EACH ROW",
+        event: "INSERT",
+        statement: "BEGIN NULL; END;",
+        condition: "NEW.ID > 0",
+      },
+      {
+        name: "ORDERS_FULL",
+        timing: "BEFORE EACH ROW",
+        event: "INSERT",
+        statement: 'CREATE OR REPLACE TRIGGER "APP"."ORDERS_FULL" BEFORE INSERT ON "APP"."ORDERS" FOR EACH ROW BEGIN NULL; END;',
+      },
+    ]);
+    if (!existing || !withCondition || !completeSource) throw new Error("expected existing trigger drafts");
+
+    expect(canEditStructuredTriggerDraft("dameng", existing)).toBe(true);
+    expect(canEditStructuredTriggerDraft("dameng", withCondition)).toBe(false);
+    expect(canEditStructuredTriggerDraft("dameng", completeSource)).toBe(false);
+    expect(
+      canEditStructuredTriggerDraft("dameng", {
         id: "new:trigger",
         name: "ORDERS_AUDIT",
         timing: "AFTER EACH ROW",
@@ -670,10 +728,11 @@ describe("tableStructureEditorState", () => {
     expect(combineDataTypeForDatabaseWithLengthUnit("dameng", "varchar2", "255", "")).toBe("varchar2(255)");
   });
 
-  it("separates and reconstructs Oracle character length units", () => {
-    expect(dataTypeLengthInputValue("oracle", "VARCHAR2(255 CHAR)")).toBe("255");
-    expect(dataTypeLengthUnitValue("oracle", "VARCHAR2(255 CHAR)")).toBe("CHAR");
-    expect(combineDataTypeForDatabaseWithLengthUnit("oracle", "VARCHAR2", "64", "BYTE")).toBe("VARCHAR2(64 BYTE)");
+  it.each(["oracle", "oceanbase-oracle"] as const)("separates and reconstructs %s character length units", (databaseType) => {
+    expect(dataTypeLengthInputValue(databaseType, "VARCHAR2(255 CHAR)")).toBe("255");
+    expect(dataTypeLengthUnitValue(databaseType, "VARCHAR2(255 CHAR)")).toBe("CHAR");
+    expect(combineDataTypeForDatabaseWithLengthUnit(databaseType, "VARCHAR2", "64", "BYTE")).toBe("VARCHAR2(64 BYTE)");
+    expect(getDataTypeLengthUnitOptions(databaseType, "NVARCHAR2(10)")).toEqual([]);
   });
 
   it("does not reinterpret unsupported length parameters or dialects", () => {
@@ -725,10 +784,10 @@ describe("tableStructureEditorState", () => {
     expect(restored?.original?.data_type).toBe("VARCHAR2(255 BYTE)");
   });
 
-  it("keeps a saved Oracle length unit when refreshed metadata omits it", () => {
-    const [legacyAgentDraft] = createColumnDrafts([{ name: "DISPLAY_NAME", data_type: "VARCHAR2(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null }], "oracle");
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps a saved %s length unit when refreshed metadata omits it", (databaseType) => {
+    const [legacyAgentDraft] = createColumnDrafts([{ name: "DISPLAY_NAME", data_type: "VARCHAR2(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null }], databaseType);
 
-    const [restored] = restoreCharacterLengthUnitsAfterSave("oracle", [legacyAgentDraft!], new Map([["display_name", "VARCHAR2(255 CHAR)"]]));
+    const [restored] = restoreCharacterLengthUnitsAfterSave(databaseType, [legacyAgentDraft!], new Map([["display_name", "VARCHAR2(255 CHAR)"]]));
 
     expect(restored?.dataType).toBe("VARCHAR2(255 CHAR)");
     expect(restored?.original?.data_type).toBe("VARCHAR2(255 CHAR)");

@@ -7,12 +7,47 @@ import {
   getPostgresSequenceLiteralCompletionContext,
   getSqlCompletionContext,
   prepareSqlCompletionReplacement,
+  quotedCompletionFilterPrefix,
   selectStarResultColumnsMatch,
   shouldAutoOpenSqlCompletion,
 } from "@/lib/sql/sqlCompletion";
 import { sqlCompletionContextFromSemantic } from "@/lib/sql/semantic/completion";
 import { buildSqlSemanticModel } from "@/lib/sql/semantic/model";
 import { originForSqlCompletionProvider, originForTypedSqlCompletionStart, shouldAllowSqlCompletionTrigger, type SqlCompletionTriggerFacts } from "@/lib/sql/sqlCompletionTriggerPolicy";
+
+describe("OceanBase quoted routine lookup context", () => {
+  it("does not trust a cached package owner when the current schema is unknown", () => {
+    const sql = "CALL PKG.R";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+      tables: [],
+      columnsByTable: new Map(),
+      objects: [{ name: "RUN", schema: "OTHER", parentSchema: "OTHER", parentName: "PKG", type: "procedure", signature: "P NUMBER", routineId: "other-run" }],
+    });
+    expect(items.some((item) => item.label === "RUN")).toBe(false);
+  });
+
+  it.each([
+    ["CALL PKG.R", "APP", "APP.PKG.RUN"],
+    ["CALL OTHER.PKG.R", "APP", "OTHER.PKG.RUN"],
+    ["CALL OTHER.R", "APP", "OTHER.RUN"],
+    ["CALL PKG.R", "OTHER", "OTHER.PKG.RUN"],
+  ])("keeps cached package owners scoped for %s in %s", (sql, currentSchema, expected) => {
+    const objects = [
+      { name: "RUN", schema: "APP", parentSchema: "APP", parentName: "PKG", type: "procedure" as const, signature: "P VARCHAR2", routineId: "app-run" },
+      { name: "RUN", schema: "OTHER", parentSchema: "OTHER", parentName: "PKG", type: "procedure" as const, signature: "P NUMBER", routineId: "other-run" },
+      { name: "RUN", schema: "OTHER", type: "procedure" as const, signature: "P DATE", routineId: "standalone-run" },
+    ];
+    const items = buildSqlCompletionItems(sql, sql.length, { databaseType: "oceanbase-oracle", dialect: "oracle", currentSchema, tables: [], columnsByTable: new Map(), objects });
+    expect(items.filter((item) => item.label === "RUN").map((item) => item.info?.split("\n")[0])).toEqual([expected]);
+  });
+
+  it.each(['CALL "Mixed.Owner"."Do', 'CALL "Mixed.Owner"."Do"'])("preserves quoted prefixes in %s", (sql) => {
+    const context = getSqlCompletionContext(sql, sql.length, { databaseType: "oceanbase-oracle" });
+    expect(context).toMatchObject({ prefix: "Do", prefixQuoted: true, qualifierParts: ["Mixed.Owner"], qualifierQuoted: [true] });
+  });
+});
 
 describe("SQL completion replacement", () => {
   const columnItem = { label: "price", type: "column" as const, apply: "price", boost: 0 };
@@ -257,6 +292,120 @@ describe("sqlCompletion keyword snippets", () => {
 
     expect(items.some((item) => item.label === "QUALIFY")).toBe(false);
   });
+
+  describe("clause keywords after a FROM table reference (#13120)", () => {
+    const routineNames = ["wms_handle_order", "WriteHistoryEntry", "WhereUsed", "web_hook", "w_h_e_r", "wh_sync", "group_hist", "order_sync"];
+    const objects = routineNames.flatMap((name) => [
+      { name, schema: "app", type: "procedure" as const, signature: "" },
+      { name: `${name}_fn`, schema: "app", type: "function" as const, signature: "" },
+    ]);
+
+    function rankedItems(sql: string, databaseType: "mysql" | "postgres" | "sqlserver") {
+      const legacy = getSqlCompletionContext(sql, sql.length, { databaseType });
+      const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, sql.length, { databaseType }), legacy);
+      return buildSqlCompletionItemsFromContext(context, {
+        databaseType,
+        tables: [{ name: "users" }],
+        columnsByTable: new Map([["users", [{ name: "id", table: "users" }]]]),
+        objects,
+        keywordCase: "upper",
+      });
+    }
+
+    it.each([
+      ["SELECT * FROM users w", "WHERE"],
+      ["SELECT * FROM users wh", "WHERE"],
+      ["SELECT * FROM users whe", "WHERE"],
+      ["SELECT * FROM users wher", "WHERE"],
+      ["SELECT * FROM users u wh", "WHERE"],
+      ["SELECT * FROM users AS u gr", "GROUP"],
+      ["SELECT * FROM users ord", "ORDER"],
+    ])("ranks the clause keyword above routines for %s", (sql, keyword) => {
+      for (const databaseType of ["mysql", "postgres", "sqlserver"] as const) {
+        const items = rankedItems(sql, databaseType);
+        const keywordIndex = items.findIndex((item) => item.type === "keyword" && item.label === keyword);
+        const firstRoutineIndex = items.findIndex((item) => item.type === "function");
+        expect(keywordIndex, `${databaseType} ${sql}`).toBeGreaterThanOrEqual(0);
+        expect(items[0]?.type, `${databaseType} ${sql}`).toBe("keyword");
+        if (firstRoutineIndex >= 0) expect(keywordIndex, `${databaseType} ${sql}`).toBeLessThan(firstRoutineIndex);
+      }
+    });
+
+    it("keeps routines ahead of keywords where an expression is expected", () => {
+      const items = rankedItems("SELECT * FROM users WHERE id = wh", "mysql");
+
+      expect(items[0]?.type).toBe("function");
+    });
+  });
+
+  describe("clause keywords after a completed JOIN ... ON predicate (#13283)", () => {
+    const objects = ["wms_handle_order", "WhereUsed", "web_hook", "wh_sync"].flatMap((name) => [
+      { name, schema: "app", type: "procedure" as const, signature: "" },
+      { name: `${name}_fn`, schema: "app", type: "function" as const, signature: "" },
+    ]);
+
+    function rankedItems(sql: string, databaseType: "mysql" | "postgres" | "sqlserver") {
+      const legacy = getSqlCompletionContext(sql, sql.length, { databaseType });
+      const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, sql.length, { databaseType }), legacy);
+      return buildSqlCompletionItemsFromContext(context, {
+        databaseType,
+        tables: [{ name: "orders" }, { name: "users" }],
+        columnsByTable: new Map([
+          [
+            "orders",
+            [
+              { name: "user_id", table: "orders" },
+              { name: "warehouse_id", table: "orders" },
+            ],
+          ],
+          ["users", [{ name: "id", table: "users" }]],
+        ]),
+        objects,
+        keywordCase: "upper",
+      });
+    }
+
+    it.each([
+      ["SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_id w", "WHERE"],
+      ["SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_id wh", "WHERE"],
+      ["SELECT * FROM orders JOIN users ON users.id = orders.user_id AND users.id > 0 w", "WHERE"],
+      ["SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_id gr", "GROUP"],
+    ])("ranks the clause keyword first for %s", (sql, keyword) => {
+      for (const databaseType of ["mysql", "postgres", "sqlserver"] as const) {
+        const items = rankedItems(sql, databaseType);
+        expect(items[0]?.type, `${databaseType} ${sql}`).toBe("keyword");
+        expect(items[0]?.label, `${databaseType} ${sql}`).toBe(keyword);
+      }
+    });
+
+    it("keeps columns ahead of keywords while the ON predicate is still open", () => {
+      const items = rankedItems("SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_", "mysql");
+
+      expect(items[0]?.label).toBe("user_id");
+    });
+
+    it.each([
+      ["SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_id GROUP BY w", "orders.warehouse_id"],
+      ["SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_id ORDER BY w", "orders.warehouse_id"],
+    ])("keeps the typed column first after a later clause boundary for %s", (sql, expected) => {
+      for (const databaseType of ["mysql", "postgres", "sqlserver"] as const) {
+        const items = rankedItems(sql, databaseType);
+        expect(items[0]?.label, `${databaseType} ${sql}`).toBe(expected);
+      }
+    });
+
+    it.each([
+      ["... LIMIT 10 w", "SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_id LIMIT 10 w", "SELECT * FROM orders LIMIT 10 w"],
+      ["... UNION w", "SELECT * FROM orders LEFT JOIN users ON users.id = orders.user_id UNION w", "SELECT * FROM orders UNION w"],
+    ])("ranks the same items with and without a preceding join predicate for %s", (_label, withJoin, withoutJoin) => {
+      for (const databaseType of ["mysql", "postgres", "sqlserver"] as const) {
+        const joined = rankedItems(withJoin, databaseType);
+        const plain = rankedItems(withoutJoin, databaseType);
+        expect(joined[0]?.label, `${databaseType} ${withJoin}`).toBe(plain[0]?.label);
+        expect(joined[0]?.type, `${databaseType} ${withJoin}`).toBe(plain[0]?.type);
+      }
+    });
+  });
 });
 
 describe("SQL Server datepart completion", () => {
@@ -484,6 +633,417 @@ describe("PostgreSQL sequence literal completion", () => {
     expect(items.some((item) => item.label === "order_seq")).toBe(false);
   });
 
+  it("suggests Oracle sequences in SQL expressions and select lists", () => {
+    const sql = "SELECT ord";
+    const unqualifiedItems = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oracle",
+      dialect: "oracle",
+      currentSchema: "APP",
+    });
+
+    expect(unqualifiedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "ORDER_SEQ",
+          type: "sequence",
+          detail: "sequence in APP",
+          apply: "ORDER_SEQ",
+        }),
+      ]),
+    );
+
+    const qualifiedItems = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oracle",
+      dialect: "oracle",
+    });
+
+    expect(qualifiedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "ORDER_SEQ",
+          type: "sequence",
+          detail: "sequence in APP",
+          apply: "APP.ORDER_SEQ",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests Oracle sequences under schema qualifier", () => {
+    const sql = "SELECT app.ord";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oracle",
+      dialect: "oracle",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "ORDER_SEQ",
+          type: "sequence",
+          apply: "ORDER_SEQ",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests NEXTVAL and CURRVAL pseudo-columns for Oracle sequences", () => {
+    const sql = "SELECT ORDER_SEQ.";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oracle",
+      dialect: "oracle",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "NEXTVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+        expect.objectContaining({
+          label: "CURRVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests NEXTVAL and CURRVAL pseudo-columns for schema-qualified Oracle sequences", () => {
+    const sql = "SELECT APP.ORDER_SEQ.";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oracle",
+      dialect: "oracle",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "NEXTVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+        expect.objectContaining({
+          label: "CURRVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+      ]),
+    );
+  });
+
+  it("ranks tables and columns ahead of sequences for matching prefixes (#12266)", () => {
+    const columnsByTable = new Map([["ORDERS", [{ name: "order_id", table: "ORDERS" }]]]);
+    const items = buildSqlCompletionItems("SELECT ord FROM ORDERS", "SELECT ord".length, {
+      tables: [{ name: "ORDERS" }],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable,
+      databaseType: "oracle",
+      dialect: "oracle",
+    });
+
+    const columnIndex = items.findIndex((item) => item.label === "order_id" && item.type === "column");
+    const sequenceIndex = items.findIndex((item) => item.label === "ORDER_SEQ" && item.type === "sequence");
+    expect(columnIndex).toBeGreaterThanOrEqual(0);
+    expect(sequenceIndex).toBeGreaterThanOrEqual(0);
+    expect(columnIndex).toBeLessThan(sequenceIndex);
+  });
+
+  it("suppresses sequence suggestions and pseudo-columns when sequenceCompletionEnabled is false (#12266)", () => {
+    const items = buildSqlCompletionItems("SELECT ord", "SELECT ord".length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oracle",
+      dialect: "oracle",
+      sequenceCompletionEnabled: false,
+    });
+    expect(items.some((item) => item.label === "ORDER_SEQ")).toBe(false);
+
+    const pseudoItems = buildSqlCompletionItems("SELECT ORDER_SEQ.", "SELECT ORDER_SEQ.".length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oracle",
+      dialect: "oracle",
+      sequenceCompletionEnabled: false,
+    });
+    expect(pseudoItems.some((item) => item.label === "NEXTVAL" || item.label === "CURRVAL")).toBe(false);
+  });
+
+  it("suggests Dameng sequences like Oracle sequences", () => {
+    const unqualifiedItems = buildSqlCompletionItems("SELECT ord", "SELECT ord".length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "dameng",
+      dialect: "oracle",
+      currentSchema: "APP",
+    });
+
+    expect(unqualifiedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "ORDER_SEQ",
+          type: "sequence",
+          detail: "sequence in APP",
+          apply: "ORDER_SEQ",
+        }),
+      ]),
+    );
+
+    const pseudoColumnSql = "SELECT ORDER_SEQ.";
+    const pseudoColumnItems = buildSqlCompletionItems(pseudoColumnSql, pseudoColumnSql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "dameng",
+      dialect: "oracle",
+    });
+
+    expect(pseudoColumnItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "NEXTVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+        expect.objectContaining({
+          label: "CURRVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+      ]),
+    );
+  });
+
+  it("does not suggest sequences for databases without Oracle-style sequences", () => {
+    const items = buildSqlCompletionItems("SELECT ord", "SELECT ord".length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "mysql",
+      dialect: "mysql",
+    });
+
+    expect(items).not.toEqual(expect.arrayContaining([expect.objectContaining({ label: "ORDER_SEQ", type: "sequence" })]));
+  });
+
+  it("respects keyword case for Oracle sequence pseudo-columns", () => {
+    const sql = "SELECT ORDER_SEQ.n";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oracle",
+      dialect: "oracle",
+      keywordCase: "lower",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "nextval",
+          apply: "nextval",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests Oracle sequence pseudo-columns in INSERT VALUES clause", () => {
+    const sql = "INSERT INTO orders (id, name) VALUES (ORDER_SEQ.";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [{ name: "orders", schema: "APP" }],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map([["APP.orders", [{ name: "id" }, { name: "name" }]]]),
+      databaseType: "oracle",
+      dialect: "oracle",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "NEXTVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests OceanBase-Oracle sequences in SQL expressions and select lists", () => {
+    const sql = "SELECT ord";
+    const unqualifiedItems = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+      currentSchema: "APP",
+    });
+
+    expect(unqualifiedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "ORDER_SEQ",
+          type: "sequence",
+          detail: "sequence in APP",
+          apply: "ORDER_SEQ",
+        }),
+      ]),
+    );
+
+    const qualifiedItems = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+    });
+
+    expect(qualifiedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "ORDER_SEQ",
+          type: "sequence",
+          detail: "sequence in APP",
+          apply: "APP.ORDER_SEQ",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests OceanBase-Oracle sequences under schema qualifier", () => {
+    const sql = "SELECT app.ord";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "ORDER_SEQ",
+          type: "sequence",
+          apply: "ORDER_SEQ",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests NEXTVAL and CURRVAL pseudo-columns for OceanBase-Oracle sequences", () => {
+    const sql = "SELECT ORDER_SEQ.";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "NEXTVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+        expect.objectContaining({
+          label: "CURRVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests NEXTVAL and CURRVAL pseudo-columns for schema-qualified OceanBase-Oracle sequences", () => {
+    const sql = "SELECT APP.ORDER_SEQ.";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "NEXTVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+        expect.objectContaining({
+          label: "CURRVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+      ]),
+    );
+  });
+
+  it("respects keyword case for OceanBase-Oracle sequence pseudo-columns", () => {
+    const sql = "SELECT ORDER_SEQ.n";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map(),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+      keywordCase: "lower",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "nextval",
+          apply: "nextval",
+        }),
+      ]),
+    );
+  });
+
+  it("suggests OceanBase-Oracle sequence pseudo-columns in INSERT VALUES clause", () => {
+    const sql = "INSERT INTO orders (id, name) VALUES (ORDER_SEQ.";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      tables: [{ name: "orders", schema: "APP" }],
+      objects: [{ name: "ORDER_SEQ", schema: "APP", type: "sequence" }],
+      columnsByTable: new Map([["APP.orders", [{ name: "id" }, { name: "name" }]]]),
+      databaseType: "oceanbase-oracle",
+      dialect: "oracle",
+    });
+
+    expect(items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "NEXTVAL",
+          type: "column",
+          detail: "sequence pseudo-column",
+        }),
+      ]),
+    );
+  });
+
   it.each([
     ["SELECT 'order_", "postgres"],
     ["SELECT nextval('order_", "mysql"],
@@ -681,6 +1241,8 @@ describe("SELECT star expansion", () => {
   it.each([
     ["oracle", "mysql"],
     ["oracle", undefined],
+    ["oceanbase-oracle", "mysql"],
+    ["oceanbase-oracle", undefined],
     [undefined, "oracle"],
   ] as const)("preserves required Oracle column quotes with databaseType %s and dialect %s", (databaseType, dialect) => {
     const columnsByTable = new Map([["orders", ["OrderId", "order_id", "AGENT_NAME", "SELECT", "created at", "ACCOUNT$SYS"].map((name) => ({ name, table: "orders" }))]]);
@@ -1539,9 +2101,9 @@ describe("sqlCompletion scoped context classification", () => {
     // The CTE is what the statement selects from, so it outranks a catalog table
     // that only matched by initials.
     expect(cteIndex).toBeLessThan(items.findIndex((item) => item.label === "tb_market_price"));
-    // The alias snippet for the relation being typed stays available, matching
-    // the document's existing alias-completion behaviour.
-    expect(items.some((item) => item.type === "snippet" && item.apply === "tm ")).toBe(true);
+    // The alias snippet for the relation being typed must not be offered,
+    // avoiding replacing the table name being completed (#13750).
+    expect(items.some((item) => item.type === "snippet" && item.apply === "tm ")).toBe(false);
   });
 
   it("offers a star-projection CTE as a table candidate without a duplicate alias snippet", () => {
@@ -1579,6 +2141,67 @@ describe("sqlCompletion scoped context classification", () => {
     const context = getSqlCompletionContext(sql, cursor);
 
     expect(context.referencedTables.map((table) => table.name)).toEqual(expect.arrayContaining(["orders", "cte"]));
+  });
+
+  it("expands nested CTE columns when selecting alias.* from preceding CTE (#11479)", () => {
+    const sql = `with test_a as (
+    select '1' as 字段
+)
+, test_b as (
+    select ta.*
+        , '2' as 追加字段
+    from test_a ta
+)
+select tb.
+from test_b tb`;
+    const cursor = sql.indexOf("select tb.") + "select tb.".length;
+    const context = getSqlCompletionContext(sql, cursor);
+    const tbRef = context.referencedTables.find((t) => t.alias === "tb" || t.name === "test_b");
+    expect(tbRef).toBeDefined();
+    expect(tbRef?.columns).toEqual(["字段", "追加字段"]);
+
+    // ta from inside test_b must not leak as a referenced table in outer query
+    expect(context.referencedTables.some((t) => t.alias === "ta")).toBe(false);
+
+    const items = buildSqlCompletionItems(sql, cursor, {
+      tables: [],
+      columnsByTable: new Map(),
+    });
+    const labels = items.map((item) => item.label);
+    expect(labels).toContain("字段");
+    expect(labels).toContain("追加字段");
+  });
+
+  it("expands multi-level chained CTEs with bare and qualified wildcards (#11479)", () => {
+    const sql = `with c1 as (
+    select 1 as id, 'alice' as name
+)
+, c2 as (
+    select *
+        , true as is_active
+    from c1
+)
+, c3 as (
+    select c2.*
+        , 99 as score
+    from c2
+)
+select c3.
+from c3`;
+    const cursor = sql.indexOf("select c3.") + "select c3.".length;
+    const context = getSqlCompletionContext(sql, cursor);
+    const c3Ref = context.referencedTables.find((t) => t.name === "c3");
+    expect(c3Ref?.columns).toEqual(["id", "name", "is_active", "score"]);
+
+    const items = buildSqlCompletionItems(sql, cursor, {
+      tables: [],
+      columnsByTable: new Map(),
+    });
+    const labels = items.map((item) => item.label);
+    expect(labels).toContain("id");
+    expect(labels).toContain("name");
+    expect(labels).toContain("is_active");
+    expect(labels).toContain("score");
   });
 
   it("extracts subquery aliases and projected columns", () => {
@@ -2090,6 +2713,24 @@ describe("line block statement boundary", () => {
 
     expect(context.referencedTables.map((table) => table.name)).toEqual(expect.arrayContaining(["users"]));
   });
+
+  it("keeps WITH clause in scope when cursor is in the following top-level main query", () => {
+    const sql = "with cte as (\n  select id, name from users\n)\nselect c.\nfrom cte c\n\nselect * from other_table";
+    const cursor = sql.indexOf("select c.") + "select c.".length;
+    const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+    expect(context.referencedTables.some((t) => t.name === "cte" || t.alias === "c")).toBe(true);
+    expect(context.referencedTables.some((t) => t.name === "other_table")).toBe(false);
+  });
+
+  it("stops line block before following statement when completing in a separate query after WITH", () => {
+    const sql = "with cte as (\n  select id, name from users\n)\nselect * from cte c\n\nselect * from other_table ot where ot.";
+    const cursor = sql.length;
+    const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+    expect(context.referencedTables.some((t) => t.name === "other_table" || t.alias === "ot")).toBe(true);
+    expect(context.referencedTables.some((t) => t.name === "cte")).toBe(false);
+  });
 });
 
 describe("select-list function argument completion", () => {
@@ -2118,5 +2759,212 @@ describe("select-list function argument completion", () => {
     expect(items.some((item) => item.type === "snippet" && item.label === "daily_statistic.*")).toBe(false);
     expect(items.filter((item) => item.type === "column").every((item) => item.batchSelectionMode === undefined)).toBe(true);
     expect(getSqlCompletionContext(sql, cursor, options).selectListColumnContext).toBe(false);
+  });
+});
+
+describe("smart unpaired SQL keyword completion before existing keywords (#11527)", () => {
+  it("detects following keywords across whitespace and comments", () => {
+    expect(getSqlCompletionContext("SELECT * FROM users CR JOIN orders", "SELECT * FROM users CR".length).followingKeyword).toBe("JOIN");
+    expect(getSqlCompletionContext("SELECT * FROM users CR /* comment */ JOIN orders", "SELECT * FROM users CR".length).followingKeyword).toBe("JOIN");
+    expect(getSqlCompletionContext("SELECT * FROM users CR\n  JOIN orders", "SELECT * FROM users CR".length).followingKeyword).toBe("JOIN");
+    expect(getSqlCompletionContext("SELECT * FROM users ORD BY id", "SELECT * FROM users ORD".length).followingKeyword).toBe("BY");
+    expect(getSqlCompletionContext("SELECT * FROM users CR; SELECT * FROM orders", "SELECT * FROM users CR".length).followingKeyword).toBeUndefined();
+    expect(getSqlCompletionContext("SELECT * FROM users CR", "SELECT * FROM users CR".length).followingKeyword).toBeUndefined();
+  });
+
+  it("suggests standalone CROSS instead of compound CROSS JOIN when JOIN already follows", () => {
+    const sql = "SELECT * FROM users CR JOIN orders";
+    const cursor = "SELECT * FROM users CR".length;
+    const items = buildSqlCompletionItems(sql, cursor, {
+      databaseType: "mysql",
+      tables: [
+        { name: "users", type: "table" },
+        { name: "orders", type: "table" },
+      ],
+      columnsByTable: new Map(),
+    });
+
+    const keywords = items.filter((item) => item.type === "keyword");
+    const labels = keywords.map((item) => item.label);
+
+    // Standalone CROSS should be available and ranked at the top
+    expect(labels[0]).toBe("CROSS");
+    // Compound CROSS JOIN should NOT be suggested because JOIN already follows
+    expect(labels).not.toContain("CROSS JOIN");
+
+    // The CROSS item should not enforce a trailing space that would duplicate the space before JOIN
+    const crossItem = keywords.find((item) => item.label === "CROSS");
+    expect(crossItem?.apply).toBeUndefined();
+  });
+
+  it("suggests both CROSS JOIN and standalone CROSS when JOIN does not follow", () => {
+    const sql = "SELECT * FROM users CR";
+    const cursor = sql.length;
+    const items = buildSqlCompletionItems(sql, cursor, {
+      databaseType: "mysql",
+      tables: [{ name: "users", type: "table" }],
+      columnsByTable: new Map(),
+    });
+
+    const keywords = items.filter((item) => item.type === "keyword");
+    const labels = keywords.map((item) => item.label);
+
+    expect(labels).toContain("CROSS JOIN");
+    expect(labels).toContain("CROSS");
+
+    const crossJoinItem = keywords.find((item) => item.label === "CROSS JOIN");
+    expect(crossJoinItem?.apply).toBe("CROSS JOIN ");
+  });
+
+  it("suggests ORDER without duplicating BY when BY already follows", () => {
+    const sql = "SELECT * FROM users ORD BY id";
+    const cursor = "SELECT * FROM users ORD".length;
+    const items = buildSqlCompletionItems(sql, cursor, {
+      databaseType: "mysql",
+      tables: [{ name: "users", type: "table" }],
+      columnsByTable: new Map(),
+    });
+
+    const keywords = items.filter((item) => item.type === "keyword");
+    const labels = keywords.map((item) => item.label);
+
+    expect(labels[0]).toBe("ORDER");
+    expect(labels).not.toContain("ORDER BY");
+  });
+
+  it("suggests GROUP without duplicating BY when BY already follows", () => {
+    const sql = "SELECT * FROM users GR BY id";
+    const cursor = "SELECT * FROM users GR".length;
+    const items = buildSqlCompletionItems(sql, cursor, {
+      databaseType: "mysql",
+      tables: [{ name: "users", type: "table" }],
+      columnsByTable: new Map(),
+    });
+
+    const keywords = items.filter((item) => item.type === "keyword");
+    const labels = keywords.map((item) => item.label);
+
+    expect(labels[0]).toBe("GROUP");
+    expect(labels).not.toContain("GROUP BY");
+  });
+
+  it("suggests both ORDER and ORDER BY when BY does not follow", () => {
+    const sql = "SELECT * FROM users ORD";
+    const cursor = sql.length;
+    const items = buildSqlCompletionItems(sql, cursor, {
+      databaseType: "mysql",
+      tables: [{ name: "users", type: "table" }],
+      columnsByTable: new Map(),
+    });
+
+    const labels = items.filter((item) => item.type === "keyword").map((item) => item.label);
+    expect(labels).toContain("ORDER");
+    expect(labels).toContain("ORDER BY");
+  });
+
+  it("supports other paired clauses like APPLY and KEY without duplication", () => {
+    const applySql = "SELECT * FROM users a OUT APPLY sys.tables";
+    const applyCursor = "SELECT * FROM users a OUT".length;
+    const applyItems = buildSqlCompletionItems(applySql, applyCursor, {
+      databaseType: "sqlserver",
+      tables: [{ name: "users", type: "table" }],
+      columnsByTable: new Map(),
+    });
+    const applyLabels = applyItems.filter((item) => item.type === "keyword").map((item) => item.label);
+    expect(applyLabels[0]).toBe("OUTER");
+    expect(applyLabels).not.toContain("OUTER APPLY");
+
+    const keySql = "CREATE TABLE t (id INT UNIQ KEY)";
+    const keyCursor = "CREATE TABLE t (id INT UNIQ".length;
+    const keyItems = buildSqlCompletionItems(keySql, keyCursor, {
+      databaseType: "mysql",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+    const keyLabels = keyItems.filter((item) => item.type === "keyword").map((item) => item.label);
+    expect(keyLabels[0]).toBe("UNIQUE");
+    expect(keyLabels).not.toContain("UNIQUE KEY");
+  });
+});
+
+describe("quoted identifier completion filtering (issue #12008)", () => {
+  // CodeMirror filters candidate labels against the raw document span from the
+  // completion result's `from` to the cursor. A quoted-identifier completion
+  // replaces the opening quote too, so that span starts with `` ` ``/`"`/`[`
+  // and no identifier label can ever match it, leaving the menu empty.
+  it.each([
+    ["`test_", "test_", "test_"],
+    ['"test_', "test_", "test_"],
+    ["[test_", "test_", "test_"],
+    ["`test_`", "test_", "test_"],
+    ['"test_"', "test_", "test_"],
+    ["[test_]", "test_", "test_"],
+  ])("maps the quoted span %s with prefix %s back to %s", (query, prefix, expected) => {
+    expect(quotedCompletionFilterPrefix(query, prefix)).toBe(expected);
+  });
+
+  it.each([
+    ["test_", "test_"],
+    ["`other_", "test_"],
+    ["`test", "test_"],
+    ["tes", "test_"],
+    ["", "test_"],
+  ])("leaves %s (prefix %s) to CodeMirror's own matcher", (query, prefix) => {
+    expect(quotedCompletionFilterPrefix(query, prefix)).toBeUndefined();
+  });
+});
+
+describe("Spanner keyword completion (issue #13129)", () => {
+  it.each([
+    "CREATE CHANGE STREAM",
+    "CREATE SEARCH INDEX",
+    "CREATE VECTOR INDEX",
+    "CREATE PROPERTY GRAPH",
+    "INTERLEAVE IN PARENT",
+    "STORING",
+    "PENDING_COMMIT_TIMESTAMP",
+    "GENERATE_UUID",
+    // Ported from the overlapping #13138 (row-deletion policies, DML exits,
+    // scalar types, sequence options) so one list carries the full dialect.
+    "ROW DELETION POLICY",
+    "THEN RETURN",
+    "INSERT OR UPDATE",
+    "SQL SECURITY INVOKER",
+    "BIT_REVERSED_POSITIVE",
+    "INT64",
+  ])("offers %s", (label) => {
+    const sql = "CREATE ";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "spanner",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.some((item) => item.label === label)).toBe(true);
+  });
+
+  it("keeps BigQuery-only syntax out of the Spanner keyword list", () => {
+    const sql = "SELECT * ";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "spanner",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    // TABLESAMPLE and FOR SYSTEM_TIME AS OF are BigQuery syntax; Spanner reads
+    // staleness through the API, not SQL.
+    expect(items.some((item) => item.label === "TABLESAMPLE")).toBe(false);
+    expect(items.some((item) => item.label === "FOR SYSTEM_TIME AS OF")).toBe(false);
+  });
+
+  it("keeps Spanner-only DDL out of the PostgreSQL keyword list", () => {
+    const sql = "CREATE ";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      databaseType: "postgres",
+      tables: [],
+      columnsByTable: new Map(),
+    });
+
+    expect(items.some((item) => item.label === "CREATE CHANGE STREAM")).toBe(false);
   });
 });

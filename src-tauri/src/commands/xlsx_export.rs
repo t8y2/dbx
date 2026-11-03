@@ -14,6 +14,10 @@ pub struct QueryResultXlsxExportRequest {
     pub column_types: Vec<String>,
     #[serde(default)]
     pub column_comments: Vec<Option<String>>,
+    /// Render comments as a second header row (names row 1, comments row 2,
+    /// data from row 3) instead of overriding the header text.
+    #[serde(default)]
+    pub header_comment_rows: bool,
     pub rows: Vec<Vec<Value>>,
     #[serde(default)]
     pub numeric_column_right_align: bool,
@@ -48,6 +52,7 @@ pub async fn export_query_result_xlsx(request: QueryResultXlsxExportRequest) -> 
             rows: request.rows,
             numeric_column_right_align: request.numeric_column_right_align,
             auto_filter: request.auto_filter,
+            header_comment_rows: request.header_comment_rows,
         };
         // Ensure consistency: if the feature is disabled, clear the flag.
         if !data.numeric_column_right_align {

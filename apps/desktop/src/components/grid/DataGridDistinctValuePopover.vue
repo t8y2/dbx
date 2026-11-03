@@ -4,25 +4,36 @@ import { Check, Database, Loader2, Search } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Switch } from "@/components/ui/switch";
 import type { DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
+import type { DataGridDistinctValueSource } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
 
-const props = defineProps<{
-  open: boolean;
-  search: string;
-  options: DataGridLocalFilterOption[];
-  loading: boolean;
-  error: string;
-  limited: boolean;
-  limit: number;
-  multiple?: boolean;
-  selectedKeys?: Set<string>;
-  disabled?: boolean;
-  compact?: boolean;
-}>();
+const props = withDefaults(
+  defineProps<{
+    open: boolean;
+    search: string;
+    options: DataGridLocalFilterOption[];
+    loading: boolean;
+    error: string;
+    limited: boolean;
+    limit: number;
+    source?: DataGridDistinctValueSource;
+    canUseServerFilter?: boolean;
+    multiple?: boolean;
+    selectedKeys?: Set<string>;
+    disabled?: boolean;
+    compact?: boolean;
+  }>(),
+  {
+    source: "database",
+    canUseServerFilter: true,
+  },
+);
 
 const emit = defineEmits<{
   "update:open": [open: boolean];
   "update:search": [search: string];
+  "update:source": [source: DataGridDistinctValueSource];
   select: [option: DataGridLocalFilterOption];
   toggle: [option: DataGridLocalFilterOption];
   toggleAll: [];
@@ -41,6 +52,12 @@ const allOptionsSelected = computed(() => props.options.length > 0 && props.opti
       </Button>
     </PopoverTrigger>
     <PopoverContent align="end" side="bottom" class="w-80 gap-0 overflow-hidden p-0" @keydown.stop>
+      <div class="flex items-center justify-between border-b bg-muted/40 px-2.5 py-1.5 text-xs">
+        <label for="distinct-value-page-switch" class="cursor-pointer select-none text-muted-foreground">
+          {{ t("grid.filterFromCurrentPage") }}
+        </label>
+        <Switch id="distinct-value-page-switch" data-distinct-value-page-switch size="sm" :disabled="props.canUseServerFilter === false" :model-value="props.source === 'page' || props.canUseServerFilter === false" @update:model-value="emit('update:source', $event ? 'page' : 'database')" />
+      </div>
       <div class="flex items-center gap-1.5 border-b px-2 py-1.5">
         <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         <input

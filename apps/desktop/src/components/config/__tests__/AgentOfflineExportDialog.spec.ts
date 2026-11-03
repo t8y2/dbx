@@ -143,7 +143,7 @@ describe("AgentOfflineExportDialog", () => {
     expect(document.getElementById("offline-export-reason-kafka")?.textContent).toContain("Locally imported");
 
     buttonContaining("Export 2 driver(s)")?.click();
-    expect(onConfirm).toHaveBeenCalledWith(["duckdb", "redis"]);
+    expect(onConfirm).toHaveBeenCalledWith(["duckdb", "redis"], true);
   });
 
   it("disables export after clearing the selection", async () => {

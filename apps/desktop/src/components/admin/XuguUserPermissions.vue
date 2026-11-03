@@ -175,7 +175,7 @@ async function queryEither(primary: string, fallback: string): Promise<{ result:
 }
 
 async function ensureConnection() {
-  await connectionStore.ensureConnected(props.connection.id);
+  await connectionStore.ensureConnected(props.connection.id, { skipIfClosedByUser: true });
 }
 
 async function loadDatabaseContext() {

@@ -12,6 +12,7 @@ fn is_schema_qualifying_dialect(dialect: StructureDialect) -> bool {
             | StructureDialect::Dameng
             | StructureDialect::Oscar
             | StructureDialect::SqlServer
+            | StructureDialect::SapHana
             | StructureDialect::H2
             | StructureDialect::Informix
             | StructureDialect::Sqlite
@@ -80,6 +81,23 @@ pub(super) fn quote_new_ident(database_type: Option<DatabaseType>, dialect: Stru
         oracle_new_object_reference(name)
     } else {
         quote_ident(dialect, name)
+    }
+}
+
+/// The stored name corresponding to the same creation rule as `quote_new_ident`.
+pub(super) fn created_identifier_name(
+    database_type: Option<DatabaseType>,
+    dialect: StructureDialect,
+    name: &str,
+) -> String {
+    if database_type == Some(DatabaseType::Oracle)
+        && dialect == StructureDialect::Oracle
+        && is_simple_oracle_identifier(name)
+        && !is_oracle_reserved_identifier(name)
+    {
+        name.to_ascii_uppercase()
+    } else {
+        name.to_owned()
     }
 }
 

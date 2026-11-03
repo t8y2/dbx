@@ -30,19 +30,16 @@ function collectOpenedDatabaseNodeIds(node: TreeNode, opened: Set<string>, optio
 
 /**
  * Node ids of database-level nodes the sidebar search may load for one
- * connection, or null when the search must stay unrestricted.
- *
- * null means either the setting is off, the connection exposes no
- * database-level nodes (schema-mode trees such as Oracle, Redis, etc.), or
- * none of them is opened — in that case falling back to searching every
- * database keeps the box useful right after connecting, before the user
- * opens anything.
+ * connection, or null when the setting allows searching every database.
+ * An empty set must stay restricted: searching before opening a database
+ * must not load every database on the user's behalf. Schema-mode trees
+ * remain searchable because only database-level nodes are pruned.
  */
 export function resolveSidebarSearchDatabaseScope(connectionNode: TreeNode, options: SidebarSearchDatabaseScopeOptions): ReadonlySet<string> | null {
   if (!options.enabled) return null;
   const opened = new Set<string>();
   collectOpenedDatabaseNodeIds(connectionNode, opened, options);
-  return opened.size > 0 ? opened : null;
+  return opened;
 }
 
 /**

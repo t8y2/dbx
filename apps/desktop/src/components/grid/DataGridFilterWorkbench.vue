@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
 import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
-import type { DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
+import type { DataGridDistinctValueSource, DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
 import type { DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 
 const props = defineProps<{
@@ -36,14 +36,23 @@ const emit = defineEmits<{
   openValueSuggestions: [id: string, target: DataGridDistinctValueSuggestionTarget];
   closeValueSuggestions: [];
   updateValueSuggestionSearch: [value: string];
+  updateValueSuggestionSource: [source: DataGridDistinctValueSource];
   selectValueSuggestion: [option: DataGridLocalFilterOption];
   toggleValueSuggestion: [option: DataGridLocalFilterOption];
   toggleAllValueSuggestions: [];
   applyValueSuggestions: [];
+  customModeOrder: [];
 }>();
 
 const { t } = useI18n();
 const rulesScrollerRef = ref<HTMLElement>();
+const filterBuilderRef = ref<InstanceType<typeof DataGridFilterBuilder>>();
+
+function focusRuleValue(ruleId: string) {
+  filterBuilderRef.value?.focusFilterRuleValue(ruleId);
+}
+
+defineExpose({ focusRuleValue });
 const previewText = computed(() => props.sqlPreview || t("grid.filterSqlPreviewEmpty"));
 
 onMounted(() => emit("ensureRule"));
@@ -65,6 +74,7 @@ watch(
   <section data-grid-filter-workbench class="shrink-0 border-b bg-muted/10 text-foreground">
     <div ref="rulesScrollerRef" data-filter-rules-scroll class="filter-rules-scroll min-h-11 overflow-auto px-3 py-2">
       <DataGridFilterBuilder
+        ref="filterBuilderRef"
         class="min-w-[560px]"
         :rules="rules"
         :show-apply-only="true"
@@ -90,10 +100,12 @@ watch(
         @open-value-suggestions="(id, target) => emit('openValueSuggestions', id, target)"
         @close-value-suggestions="emit('closeValueSuggestions')"
         @update-value-suggestion-search="emit('updateValueSuggestionSearch', $event)"
+        @update-value-suggestion-source="emit('updateValueSuggestionSource', $event)"
         @select-value-suggestion="emit('selectValueSuggestion', $event)"
         @toggle-value-suggestion="emit('toggleValueSuggestion', $event)"
         @toggle-all-value-suggestions="emit('toggleAllValueSuggestions')"
         @apply-value-suggestions="emit('applyValueSuggestions')"
+        @custom-mode-order="emit('customModeOrder')"
       />
     </div>
 

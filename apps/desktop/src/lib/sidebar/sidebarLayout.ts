@@ -647,9 +647,30 @@ export function deleteGroup(layout: SidebarLayout, groupId: string): SidebarLayo
 }
 
 export function toggleGroupCollapsed(layout: SidebarLayout, groupId: string): SidebarLayout {
+  const targetGroup = layout.groups.find((group) => group.id === groupId);
+  const willCollapse = targetGroup ? !targetGroup.collapsed : false;
+  if (!willCollapse) {
+    return {
+      ...layout,
+      groups: layout.groups.map((group) => (group.id === groupId ? { ...group, collapsed: false } : group)),
+    };
+  }
+
+  const groupEntry = findGroupEntry(layout.order, groupId);
+  const descendantGroupIds = new Set<string>();
+  const collectDescendants = (entry: Extract<SidebarOrderEntry, { type: "group" }>) => {
+    for (const child of entryChildren(entry)) {
+      if (child.type === "group") {
+        descendantGroupIds.add(child.id);
+        collectDescendants(child);
+      }
+    }
+  };
+  if (groupEntry) collectDescendants(groupEntry);
+
   return {
     ...layout,
-    groups: layout.groups.map((group) => (group.id === groupId ? { ...group, collapsed: !group.collapsed } : group)),
+    groups: layout.groups.map((group) => (group.id === groupId || descendantGroupIds.has(group.id) ? { ...group, collapsed: true } : group)),
   };
 }
 

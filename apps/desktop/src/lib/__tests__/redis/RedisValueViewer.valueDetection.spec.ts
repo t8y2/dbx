@@ -109,16 +109,4 @@ describe("Redis value detection (issue 10922)", () => {
     expect(stringViewInit).toContain('readStoredRedisValueFormat() ?? "utf8"');
     expect(stringCodecInit).toContain('readStoredRedisValueCodec() ?? "none"');
   });
-
-  it("labels the detected representation next to the value on both surfaces", () => {
-    const template = parsedViewer.descriptor.template;
-    expect(parsedViewer.errors).toEqual([]);
-    expect(template).toBeDefined();
-
-    expect(viewerSource).toContain('v-if="stringValueDetectionLabel"');
-    expect(viewerSource).toContain('v-if="memberDetectionLabel"');
-    expect(viewerSource.match(/t\('redis\.detectedBadgeTitle'\)/g)).toHaveLength(4);
-    expect(findFunction("redisDetectionBadgeLabel").getText()).toContain('t("redis.detectedJavaSerialized")');
-    expect(findFunction("redisDetectionBadgeLabel").getText()).toContain("isRedisJsonContainerValue(detail.json?.value)");
-  });
 });

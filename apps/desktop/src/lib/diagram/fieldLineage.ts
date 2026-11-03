@@ -29,6 +29,19 @@ export interface FieldLineageHistory {
   executed_at?: string;
 }
 
+export interface FieldLineageHistoryEntry {
+  database?: string;
+  connection_id?: string;
+}
+
+export function filterFieldLineageHistory<T extends FieldLineageHistoryEntry>(entries: T[], options: { database: string; connectionId: string; requireConnectionMatch?: boolean }): T[] {
+  return entries.filter((entry) => {
+    if (entry.database && entry.database !== options.database) return false;
+    if (options.requireConnectionMatch && entry.connection_id !== options.connectionId) return false;
+    return true;
+  });
+}
+
 export interface FieldLineageItem {
   id: string;
   kind: FieldLineageKind;

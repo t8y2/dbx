@@ -10,6 +10,11 @@ pub(super) fn write_json(
     context: &ExtractContext<'_>,
     output: &mut dyn Write,
 ) -> Result<Vec<DataGridExtractWarning>, DataGridExtractError> {
+    // Values-only output is only well-defined for a single-column selection;
+    // anything else keeps the object form so no column is silently dropped.
+    if context.request.options.json.values_only && context.selected_source_indexes.len() == 1 {
+        return write_json_values(context, output);
+    }
     let (names, warnings) =
         unique_json_names(&context.selected_columns, context.request.options.json.camel_case_field_names);
     let rows =
@@ -26,6 +31,25 @@ pub(super) fn write_json(
         )
     })?;
     Ok(warnings)
+}
+
+fn write_json_values(
+    context: &ExtractContext<'_>,
+    output: &mut dyn Write,
+) -> Result<Vec<DataGridExtractWarning>, DataGridExtractError> {
+    let values = JsonValues { source_index: context.selected_source_indexes[0], rows: &context.request.rows };
+    let result = if context.request.options.json.pretty {
+        serde_json::to_writer_pretty(output, &values)
+    } else {
+        serde_json::to_writer(output, &values)
+    };
+    result.map_err(|error| {
+        DataGridExtractError::new(
+            DataGridExtractErrorCode::EncodingFailed,
+            format!("Failed to encode JSON extractor output: {error}"),
+        )
+    })?;
+    Ok(Vec::new())
 }
 
 pub(super) fn write_json_lines(
@@ -70,6 +94,24 @@ impl Serialize for JsonRows<'_, '_> {
                 source_indexes: self.source_indexes,
                 values: row,
             })?;
+        }
+        sequence.end()
+    }
+}
+
+struct JsonValues<'value> {
+    source_index: usize,
+    rows: &'value [Vec<serde_json::Value>],
+}
+
+impl Serialize for JsonValues<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.rows.len()))?;
+        for row in self.rows {
+            sequence.serialize_element(&row[self.source_index])?;
         }
         sequence.end()
     }

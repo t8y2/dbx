@@ -5,6 +5,7 @@ export type MongoInputValue = string | number | boolean | null;
 
 const MONGO_SHELL_DATE_PATTERN = /^(?:ISODate|new Date)\(\s*(["'])(.+)\1\s*\)$/;
 const MONGO_SHELL_NUMBER_LONG_PATTERN = /^NumberLong\(\s*(["'])(-?\d+)\1\s*\)$/;
+const MONGO_SHELL_OBJECT_ID_PATTERN = /^(?:ObjectId|new ObjectId)\(\s*(?:(["'])([a-fA-F0-9]{24})\1|([a-fA-F0-9]{24}))\s*\)$/;
 const MONGO_OBJECT_ID_PATTERN = /^[a-fA-F0-9]{24}$/;
 const MONGO_INTEGER_PATTERN = /^-?\d+$/;
 // These values are internal to the MongoDB collection grid. BSON strings may
@@ -106,6 +107,13 @@ export function mongoShellDateToExtendedJson(value: unknown): unknown {
   return { $date: normalizeMongoDateInput(match[2] ?? "") ?? match[2] };
 }
 
+export function mongoShellObjectIdToExtendedJson(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const match = value.trim().match(MONGO_SHELL_OBJECT_ID_PATTERN);
+  if (!match) return value;
+  return { $oid: match[2] ?? match[3] };
+}
+
 /** `2025-04-01 19:46:03`, `2025/04/01`, `2025-04-01T19:46` … : a date with no zone, as people read one off a screen. */
 const MONGO_LOCAL_DATE_PATTERN = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[T ](\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3})\d*)?)?)?$/;
 /** The one spelling the server's `$date` parser accepts, kept as written. */
@@ -142,6 +150,7 @@ export function normalizeMongoDateInput(text: string): string | null {
 
 export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
   if (raw === null || typeof raw === "number" || typeof raw === "boolean") return raw;
+  if (typeof raw !== "string") return raw;
 
   const trimmed = raw.trim();
   if (trimmed === "NULL") return null;
@@ -153,6 +162,8 @@ export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
   if (shellDate !== trimmed) return shellDate;
   const shellNumberLong = mongoShellNumberLongToExtendedJson(trimmed);
   if (shellNumberLong !== trimmed) return shellNumberLong;
+  const shellObjectId = mongoShellObjectIdToExtendedJson(trimmed);
+  if (shellObjectId !== trimmed) return shellObjectId;
 
   if (MONGO_INTEGER_PATTERN.test(trimmed)) {
     const integer = BigInt(trimmed);
@@ -393,7 +404,42 @@ function parseMongoExistingFieldInputValue(raw: Exclude<MongoInputValue, null>, 
   if (typeof originalValue === "string") {
     return typeof raw === "string" ? raw : String(raw);
   }
+  const typedNumber = mongoTypedNumberInputValue(raw, mongoDocumentNumericValueType(originalValue));
+  if (typedNumber !== undefined) return typedNumber;
   return parseMongoDocumentInputValue(raw);
+}
+
+const MONGO_DECIMAL_INPUT_PATTERN = /^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+const MIN_BSON_INT32 = -2147483648n;
+const MAX_BSON_INT32 = 2147483647n;
+
+/**
+ * Re-wraps a number typed over an existing typed BSON number in the original
+ * wrapper. A bare JSON number is always saved as Int64, so without this an
+ * edited Int32 or Double silently changes type. Input the original type cannot
+ * hold (a fraction for Int32, an Int32 overflow) falls back to normal parsing.
+ */
+function mongoTypedNumberInputValue(raw: Exclude<MongoInputValue, null>, numericType: string | undefined): unknown {
+  if (!numericType || numericType === "number" || typeof raw === "boolean") return undefined;
+  const text = String(raw).trim();
+  if (!MONGO_DECIMAL_INPUT_PATTERN.test(text)) return undefined;
+  switch (numericType) {
+    case "int32":
+    case "int64": {
+      if (!MONGO_INTEGER_PATTERN.test(text)) return undefined;
+      const integer = BigInt(text);
+      if (numericType === "int32") return integer >= MIN_BSON_INT32 && integer <= MAX_BSON_INT32 ? { $numberInt: integer.toString() } : undefined;
+      return integer >= MIN_BSON_INT64 && integer <= MAX_BSON_INT64 ? { $numberLong: integer.toString() } : undefined;
+    }
+    case "double": {
+      const double = Number(text);
+      return Number.isFinite(double) ? { $numberDouble: String(double) } : undefined;
+    }
+    case "decimal128":
+      return { $numberDecimal: text };
+    default:
+      return undefined;
+  }
 }
 
 function mongoDocumentFieldValue(document: unknown, field: string): unknown {
@@ -560,12 +606,29 @@ export function applyMongoGridChangesToDocumentBaseline(baselineDocuments: unkno
   });
 }
 
+export function parseMongoInsertIdValue(val: MongoInputValue | unknown): unknown {
+  if (val === null || val === undefined) return undefined;
+  if (typeof val === "string") {
+    const trimmed = val.trim();
+    if (trimmed === "") return undefined;
+    const shellObjectId = mongoShellObjectIdToExtendedJson(trimmed);
+    if (shellObjectId !== trimmed) return shellObjectId;
+    if (MONGO_OBJECT_ID_PATTERN.test(trimmed)) return { $oid: trimmed };
+  }
+  return val === MONGO_DOCUMENT_GRID_NULL ? null : (mongoDocumentGridEscapedString(val) ?? parseMongoDocumentInputValue(val as MongoInputValue));
+}
+
 export function buildMongoInsertDocument(row: MongoInputValue[], columns: string[]): Record<string, unknown> {
   const doc: Record<string, unknown> = {};
   for (let ci = 0; ci < columns.length; ci++) {
     const col = columns[ci];
-    if (!col || col === "_id") continue;
+    if (!col) continue;
     const val = row[ci];
+    if (col === "_id") {
+      const parsedId = parseMongoInsertIdValue(val);
+      if (parsedId !== undefined) doc[col] = parsedId;
+      continue;
+    }
     if (val === null) continue;
     doc[col] = val === MONGO_DOCUMENT_GRID_NULL ? null : (mongoDocumentGridEscapedString(val) ?? parseMongoDocumentInputValue(val));
   }
@@ -578,11 +641,12 @@ export function buildMongoCopyInsertDocument(row: MongoInputValue[], columns: st
     const col = columns[ci];
     if (!col || (options.excludePrimaryKeys && col === "_id")) continue;
     const val = row[ci];
-    if (val === null) continue;
-    if (col === "_id" && typeof val === "string" && MONGO_OBJECT_ID_PATTERN.test(val)) {
-      doc[col] = { $oid: val };
+    if (col === "_id") {
+      const parsedId = parseMongoInsertIdValue(val);
+      if (parsedId !== undefined) doc[col] = parsedId;
       continue;
     }
+    if (val === null) continue;
     doc[col] = val === MONGO_DOCUMENT_GRID_NULL ? null : (mongoDocumentGridEscapedString(val) ?? parseMongoDocumentInputValue(val));
   }
   return doc;
@@ -595,16 +659,23 @@ export function buildMongoCopyDocumentFromOriginal(original: unknown, row: Mongo
   const document: Record<string, unknown> = {};
   for (let columnIndex = 0; columnIndex < columns.length; columnIndex++) {
     const column = columns[columnIndex];
-    if (!column || (options.excludePrimaryKeys && column === "_id")) continue;
+    if (!column) continue;
 
     // Display strings are ambiguous, so only explicitly edited cells may replace original BSON values.
     if (dirtyColumns[columnIndex]) {
       const value = row[columnIndex];
+      if (column === "_id") {
+        const parsedId = parseMongoInsertIdValue(value);
+        if (parsedId !== undefined) document[column] = parsedId;
+        continue;
+      }
       if (value !== null) {
         document[column] = value === MONGO_DOCUMENT_GRID_NULL ? null : (mongoDocumentGridEscapedString(value) ?? parseMongoDocumentInputValue(value));
       }
       continue;
     }
+
+    if (options.excludePrimaryKeys && column === "_id") continue;
     if (Object.prototype.hasOwnProperty.call(source, column)) document[column] = source[column];
   }
   return document;

@@ -15,6 +15,9 @@ pub enum DatabaseObjectType {
     Procedure,
     Function,
     Event,
+    Trigger,
+    Type,
+    TypeBody,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +96,45 @@ pub struct DropObjectSqlOptions {
     pub signature: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifier_quote: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OracleTypeGrantSqlOptions {
+    pub database_type: DatabaseType,
+    pub owner: String,
+    pub type_name: String,
+    pub grantee: String,
+    pub privilege: String,
+    #[serde(default)]
+    pub grantable: bool,
+}
+
+pub fn build_oracle_type_grant_sql(options: OracleTypeGrantSqlOptions) -> Result<String, String> {
+    if !matches!(options.database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng) {
+        return Err("TYPE EXECUTE grants are supported only for Oracle-family databases.".to_string());
+    }
+    if options.owner.trim().is_empty() || options.type_name.trim().is_empty() || options.grantee.trim().is_empty() {
+        return Err("TYPE owner, name, and grantee are required.".to_string());
+    }
+    let privilege = options.privilege.to_ascii_uppercase();
+    if !matches!(privilege.as_str(), "EXECUTE" | "DEBUG" | "UNDER")
+        || (options.database_type == DatabaseType::Dameng && privilege != "EXECUTE")
+    {
+        return Err("Unsupported direct TYPE privilege for this database.".into());
+    }
+    let object = format!(
+        "{}.{}",
+        quote_table_identifier(Some(options.database_type), &options.owner),
+        quote_table_identifier(Some(options.database_type), &options.type_name),
+    );
+    let grantee = if options.grantee == "PUBLIC" {
+        "PUBLIC".into()
+    } else {
+        quote_table_identifier(Some(options.database_type), &options.grantee)
+    };
+    let option = if options.grantable { " WITH GRANT OPTION" } else { "" };
+    Ok(format!("GRANT {privilege} ON {object} TO {grantee}{option};"))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -250,6 +292,8 @@ pub struct CopyTableDataSqlOptions {
 
 const MYSQL_COMPATIBLE_PROFILES: &[&str] = &["mysql", "mariadb", "tidb", "oceanbase", "custom_mysql"];
 const CREATE_DATABASE_CHARSET_UNSUPPORTED_PROFILES: &[&str] = &["doris", "selectdb", "starrocks"];
+const MYSQL_AUTO_INCREMENT_PROFILES: &[&str] =
+    &["mysql", "mariadb", "tidb", "oceanbase", "tdsql", "polardb", "greatsql", "custom_mysql", "dolt", "goldendb"];
 
 pub fn supports_create_database_charset(database_type: Option<DatabaseType>, driver_profile: Option<&str>) -> bool {
     let normalized_profile = driver_profile.map(str::to_ascii_lowercase);
@@ -261,6 +305,17 @@ pub fn supports_create_database_charset(database_type: Option<DatabaseType>, dri
     }
     matches!(database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb))
         || normalized_profile.as_deref().is_some_and(|profile| MYSQL_COMPATIBLE_PROFILES.contains(&profile))
+}
+
+pub fn supports_mysql_auto_increment(database_type: Option<DatabaseType>, driver_profile: Option<&str>) -> bool {
+    if database_type == Some(DatabaseType::Goldendb) {
+        return true;
+    }
+    if database_type != Some(DatabaseType::Mysql) {
+        return false;
+    }
+    let profile = driver_profile.map(str::trim).unwrap_or_default();
+    profile.is_empty() || MYSQL_AUTO_INCREMENT_PROFILES.iter().any(|candidate| profile.eq_ignore_ascii_case(candidate))
 }
 
 pub fn build_create_database_sql(options: CreateDatabaseSqlOptions) -> Result<String, String> {
@@ -285,12 +340,12 @@ fn build_create_database_statement(options: &CreateDatabaseSqlOptions) -> Result
             quote_table_identifier(options.database_type, &options.name)
         ));
     }
-    if is_informix_family(options.database_type, options.driver_profile.as_deref()) {
+    if is_informix_family(options.database_type) {
         // Informix / GBase 8s accept only a bare `CREATE DATABASE <name>`. The new database
         // inherits the instance default locale, and the MySQL `CHARACTER SET`/`COLLATE`
         // clauses are invalid syntax here. Database names are ordinary identifiers, so quote
         // them with the Informix rule (unquoted for simple identifiers) rather than the
-        // default double-quote path that `DatabaseType::Gbase` would otherwise take.
+        // default double-quote path that other types would otherwise take.
         let name = quote_table_identifier(Some(DatabaseType::Informix), &options.name);
         let locale = clean_sql_option(options.charset.as_deref());
         if locale.is_empty() {
@@ -312,23 +367,18 @@ fn build_create_database_statement(options: &CreateDatabaseSqlOptions) -> Result
     Ok(format!("CREATE DATABASE {name} CHARACTER SET {charset}{collate_clause};"))
 }
 
-/// Whether the connection belongs to the Informix family: standalone Informix, or GBase 8s
-/// (which shares `DatabaseType::Gbase` with the MySQL-based GBase 8a and is only distinguishable
-/// through the `gbase8s` driver profile). Informix-family servers accept `CREATE DATABASE` but
-/// have no `CREATE SCHEMA <name>` statement (a "schema" is the table owner), so the create
-/// targets differ from the rest of the `Gbase` family.
-fn is_informix_family(database_type: Option<DatabaseType>, driver_profile: Option<&str>) -> bool {
-    match database_type {
-        Some(DatabaseType::Informix) => true,
-        Some(DatabaseType::Gbase) => driver_profile.is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s")),
-        _ => false,
-    }
+/// Whether the connection belongs to the Informix family: standalone Informix, or GBase 8s.
+/// Informix-family servers accept `CREATE DATABASE` but have no `CREATE SCHEMA <name>`
+/// statement (a "schema" is the table owner), so the create targets differ from the MySQL-based
+/// GBase 8a (`DatabaseType::Gbase`).
+fn is_informix_family(database_type: Option<DatabaseType>) -> bool {
+    matches!(database_type, Some(DatabaseType::Informix | DatabaseType::Gbase8s))
 }
 
-pub fn supports_create_database_target(database_type: Option<DatabaseType>, driver_profile: Option<&str>) -> bool {
+pub fn supports_create_database_target(database_type: Option<DatabaseType>, _driver_profile: Option<&str>) -> bool {
     // Informix / GBase 8s create namespaces with `CREATE DATABASE`, so they are valid targets
     // even though they are absent from the explicit list below.
-    if is_informix_family(database_type, driver_profile) {
+    if is_informix_family(database_type) {
         return true;
     }
     matches!(
@@ -441,15 +491,22 @@ pub fn build_create_user_sql(username: &str, password: &str, tablespace: &str) -
 }
 
 pub fn build_drop_object_sql(options: DropObjectSqlOptions) -> String {
-    let signature = if matches!(options.database_type, Some(DatabaseType::Postgres))
+    let signature = if matches!(options.database_type, Some(DatabaseType::Postgres | DatabaseType::Kingbase))
         && matches!(options.object_type, DatabaseObjectType::Function | DatabaseObjectType::Procedure)
     {
         options.signature.as_deref().map(|value| format!("({value})")).unwrap_or_default()
     } else {
         String::new()
     };
+    let restrict = if options.database_type == Some(DatabaseType::Dameng)
+        && matches!(options.object_type, DatabaseObjectType::Type | DatabaseObjectType::TypeBody)
+    {
+        " RESTRICT"
+    } else {
+        ""
+    };
     format!(
-        "DROP {} {}{};",
+        "DROP {} {}{}{};",
         object_type_keyword(options.object_type),
         qualified_name_with_quote(
             options.database_type,
@@ -457,7 +514,8 @@ pub fn build_drop_object_sql(options: DropObjectSqlOptions) -> String {
             &options.name,
             options.identifier_quote.as_deref(),
         ),
-        signature
+        signature,
+        restrict
     )
 }
 
@@ -647,17 +705,15 @@ fn supports_vacuum_table(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
+                | DatabaseType::Gbase8c
                 | DatabaseType::OpenGauss
         )
     )
 }
 
 pub(crate) fn validate_mysql_auto_increment_options(options: &MysqlAutoIncrementSqlOptions) -> Result<(), String> {
-    let profile = options.driver_profile.as_deref().map(str::trim).unwrap_or_default();
-    if options.database_type != Some(DatabaseType::Mysql)
-        || (!profile.is_empty() && !profile.eq_ignore_ascii_case("mysql"))
-    {
-        return Err("Setting AUTO_INCREMENT is supported only for native MySQL connections.".to_string());
+    if !supports_mysql_auto_increment(options.database_type, options.driver_profile.as_deref()) {
+        return Err("Setting AUTO_INCREMENT is supported only for compatible MySQL-family connections.".to_string());
     }
 
     let value = options.value.as_str();
@@ -699,6 +755,7 @@ fn supports_truncate_table_cascade(database_type: Option<DatabaseType>) -> bool 
                 | DatabaseType::Highgo
                 | DatabaseType::Uxdb
                 | DatabaseType::Vastbase
+                | DatabaseType::Gbase8c
                 | DatabaseType::OpenGauss
         )
     )
@@ -804,7 +861,13 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
         qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name);
     let structure_sql = if matches!(
         options.database_type,
-        Some(DatabaseType::Mysql | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo)
+        Some(
+            DatabaseType::Mysql
+                | DatabaseType::Kyuubi
+                | DatabaseType::Impala
+                | DatabaseType::Argo
+                | DatabaseType::SapHana
+        )
     ) {
         format!("CREATE TABLE {target} LIKE {source};")
     } else if options.database_type == Some(DatabaseType::Questdb) {
@@ -835,7 +898,9 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
             ));
         }
     }
-    if let Some(database_type @ (DatabaseType::Dameng | DatabaseType::Vastbase)) = options.database_type {
+    if let Some(database_type @ (DatabaseType::Dameng | DatabaseType::Vastbase | DatabaseType::Oscar)) =
+        options.database_type
+    {
         comment_sql.extend(options.column_comments.iter().filter_map(|column| {
             if column.comment.trim().is_empty() {
                 return None;
@@ -970,6 +1035,9 @@ pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
 }
 
 pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: DatabaseObjectType) -> bool {
+    if object_type == DatabaseObjectType::Trigger {
+        return false;
+    }
     let Some(database_type) = database_type else {
         return false;
     };
@@ -977,6 +1045,9 @@ pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: 
         return true;
     }
     if matches!(database_type, DatabaseType::Transwarp | DatabaseType::StarRocks) {
+        return object_type == DatabaseObjectType::Table;
+    }
+    if database_type == DatabaseType::SapHana {
         return object_type == DatabaseObjectType::Table;
     }
     if matches!(object_type, DatabaseObjectType::Procedure | DatabaseObjectType::Function) {
@@ -1027,6 +1098,14 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
             "ALTER TABLE {} RENAME {};",
             qualified_name(database_type, options.schema.as_deref(), &options.old_name),
             quote_rename_identifier(database_type, &options.new_name)
+        ));
+    }
+
+    if database_type == Some(DatabaseType::SapHana) {
+        return Ok(format!(
+            "RENAME TABLE {} TO {};",
+            qualified_name(database_type, options.schema.as_deref(), &options.old_name),
+            qualified_name(database_type, options.schema.as_deref(), &options.new_name)
         ));
     }
 
@@ -1188,6 +1267,7 @@ fn supports_duplicate_table_comment(database_type: DatabaseType) -> bool {
             | DatabaseType::OpenGauss
             | DatabaseType::Dameng
             | DatabaseType::Vastbase
+            | DatabaseType::Oscar
     )
 }
 
@@ -1250,12 +1330,10 @@ fn qualified_name_with_quote(
 }
 
 fn qualified_duplicate_target_name(database_type: Option<DatabaseType>, schema: Option<&str>, name: &str) -> String {
-    // Both duplicate-target normalizations emit the spelling a freshly created clone resolves
-    // to: Oracle's clone DDL creates plain identifiers unquoted (uppercase fold), and Dameng's
-    // clone keeps the same fold convention through its profile.  Every other type stays exact.
+    // Oracle's clone DDL creates plain identifiers unquoted (uppercase fold). Other types,
+    // including Dameng's quoted structured CREATE TABLE, preserve the requested spelling.
     let target = match database_type {
         Some(DatabaseType::Oracle) => crate::table_structure_sql::oracle_new_object_reference(name),
-        Some(DatabaseType::Dameng) => profile_for(DatabaseType::Dameng).quote_ident(name),
         _ => return qualified_name(database_type, schema, name),
     };
     if schema.is_some_and(|schema| !schema.is_empty()) {
@@ -1289,6 +1367,9 @@ fn object_type_keyword(object_type: DatabaseObjectType) -> &'static str {
         DatabaseObjectType::Procedure => "PROCEDURE",
         DatabaseObjectType::Function => "FUNCTION",
         DatabaseObjectType::Event => "EVENT",
+        DatabaseObjectType::Trigger => "TRIGGER",
+        DatabaseObjectType::Type => "TYPE",
+        DatabaseObjectType::TypeBody => "TYPE BODY",
     }
 }
 
@@ -1301,9 +1382,9 @@ fn quote_sql_string(value: &str) -> String {
 }
 
 fn quote_duplicate_table_comment(database_type: DatabaseType, value: &str) -> String {
-    // Dameng rejects Postgres E'...' escape strings; keep standard '' escaping
-    // (same as DamengAgent COMMENT ON / COMMENT ON COLUMN generation).
-    if database_type == DatabaseType::Dameng {
+    // Dameng and Oscar reject Postgres E'...' escape strings; keep standard '' escaping
+    // (same as DamengAgent/Oscar COMMENT ON / COMMENT ON COLUMN generation).
+    if matches!(database_type, DatabaseType::Dameng | DatabaseType::Oscar) {
         return quote_sql_string(value);
     }
     if !value.contains('\\') && !value.chars().any(|character| character.is_ascii_control()) {
@@ -1530,12 +1611,11 @@ mod tests {
 
     #[test]
     fn builds_informix_family_create_database_without_mysql_clause() {
-        // GBase 8s shares DatabaseType::Gbase with GBase 8a and is only identified by the
-        // gbase8s driver profile; with no locale chosen it emits a bare, unquoted CREATE DATABASE.
+        // With no locale chosen, GBase 8s emits a bare, unquoted CREATE DATABASE.
         assert_eq!(
             build_create_database_sql(CreateDatabaseSqlOptions {
-                database_type: Some(DatabaseType::Gbase),
-                driver_profile: Some("gbase8s".to_string()),
+                database_type: Some(DatabaseType::Gbase8s),
+                driver_profile: None,
                 target: None,
                 parent: None,
                 name: "app_db".to_string(),
@@ -1567,8 +1647,8 @@ mod tests {
         // because Informix cannot express a codeset in CREATE DATABASE.
         assert_eq!(
             build_create_database_sql(CreateDatabaseSqlOptions {
-                database_type: Some(DatabaseType::Gbase),
-                driver_profile: Some("gbase8s".to_string()),
+                database_type: Some(DatabaseType::Gbase8s),
+                driver_profile: None,
                 target: None,
                 parent: None,
                 name: "app_db".to_string(),
@@ -1608,8 +1688,8 @@ mod tests {
     }
 
     #[test]
-    fn create_database_target_distinguishes_gbase_profiles() {
-        assert!(supports_create_database_target(Some(DatabaseType::Gbase), Some("gbase8s")));
+    fn create_database_target_distinguishes_gbase_types() {
+        assert!(supports_create_database_target(Some(DatabaseType::Gbase8s), None));
         assert!(!supports_create_database_target(Some(DatabaseType::Gbase), Some("gbase8a")));
         assert!(!supports_create_database_target(Some(DatabaseType::Gbase), None));
         assert!(supports_create_database_target(Some(DatabaseType::Informix), None));
@@ -2152,6 +2232,31 @@ mod tests {
             );
         }
 
+        for (database_type, driver_profile) in [
+            (Some(DatabaseType::Mysql), None),
+            (Some(DatabaseType::Mysql), Some("mariadb".to_string())),
+            (Some(DatabaseType::Mysql), Some("tidb".to_string())),
+            (Some(DatabaseType::Mysql), Some("oceanbase".to_string())),
+            (Some(DatabaseType::Mysql), Some("tdsql".to_string())),
+            (Some(DatabaseType::Mysql), Some("polardb".to_string())),
+            (Some(DatabaseType::Mysql), Some("greatsql".to_string())),
+            (Some(DatabaseType::Mysql), Some("custom_mysql".to_string())),
+            (Some(DatabaseType::Mysql), Some("dolt".to_string())),
+            (Some(DatabaseType::Mysql), Some("goldendb".to_string())),
+            (Some(DatabaseType::Goldendb), Some("goldendb".to_string())),
+        ] {
+            assert_eq!(
+                build_mysql_auto_increment_sql(MysqlAutoIncrementSqlOptions {
+                    database_type,
+                    driver_profile,
+                    schema: Some("sales".to_string()),
+                    table_name: "events".to_string(),
+                    value: "42".to_string(),
+                }),
+                Ok("ALTER TABLE `sales`.`events` AUTO_INCREMENT = 42;".to_string())
+            );
+        }
+
         for value in
             ["", "0", "01", " 1", "1 ", "+1", "-1", "1.0", "1e3", "1; DROP TABLE users", "18446744073709551616"]
         {
@@ -2171,12 +2276,12 @@ mod tests {
         for (database_type, driver_profile) in [
             (Some(DatabaseType::Postgres), None),
             (Some(DatabaseType::Jdbc), Some("mysql".to_string())),
-            (Some(DatabaseType::Mysql), Some("mariadb".to_string())),
-            (Some(DatabaseType::Mysql), Some("tidb".to_string())),
-            (Some(DatabaseType::Mysql), Some("oceanbase".to_string())),
-            (Some(DatabaseType::Mysql), Some("dolt".to_string())),
-            (Some(DatabaseType::Goldendb), Some("goldendb".to_string())),
-            (Some(DatabaseType::Doris), Some("selectdb".to_string())),
+            (Some(DatabaseType::Mysql), Some("unknown".to_string())),
+            (Some(DatabaseType::Mysql), Some("doris".to_string())),
+            (Some(DatabaseType::Mysql), Some("selectdb".to_string())),
+            (Some(DatabaseType::Mysql), Some("starrocks".to_string())),
+            (Some(DatabaseType::Mysql), Some("manticoresearch".to_string())),
+            (Some(DatabaseType::Doris), Some("doris".to_string())),
             (Some(DatabaseType::StarRocks), Some("starrocks".to_string())),
         ] {
             assert!(build_mysql_auto_increment_sql(MysqlAutoIncrementSqlOptions {
@@ -2187,6 +2292,48 @@ mod tests {
                 value: "1".to_string(),
             })
             .is_err());
+        }
+    }
+
+    #[test]
+    fn trigger_drop_transport_preserves_exact_identity_without_enabling_rename() {
+        for database_type in ["oracle", "oceanbase-oracle", "dameng"] {
+            let options: DropObjectSqlOptions = serde_json::from_value(serde_json::json!({
+                "databaseType": database_type,
+                "objectType": "TRIGGER",
+                "schema": " Owner ",
+                "name": " Tr\"igger ",
+                "signature": "must_not_be_appended"
+            }))
+            .unwrap();
+            let object_type = options.object_type;
+            assert_eq!(build_drop_object_sql(options), "DROP TRIGGER \" Owner \".\" Tr\"\"igger \";");
+            for rename_database in
+                [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng, DatabaseType::SqlServer]
+            {
+                assert!(!supports_object_rename(Some(rename_database), object_type));
+            }
+        }
+    }
+
+    #[test]
+    fn kingbase_drop_object_sql_preserves_routine_signature() {
+        for (object_type, keyword) in
+            [(DatabaseObjectType::Procedure, "PROCEDURE"), (DatabaseObjectType::Function, "FUNCTION")]
+        {
+            for signature in ["", "v integer", "v INOUT integer"] {
+                assert_eq!(
+                    build_drop_object_sql(DropObjectSqlOptions {
+                        database_type: Some(DatabaseType::Kingbase),
+                        object_type,
+                        schema: Some("app".to_string()),
+                        name: "run".to_string(),
+                        signature: Some(signature.to_string()),
+                        identifier_quote: None,
+                    }),
+                    format!("DROP {keyword} \"app\".\"run\"({signature});")
+                );
+            }
         }
     }
 
@@ -2214,6 +2361,24 @@ mod tests {
             }),
             "DROP FUNCTION \"public\".\"calc\"(integer, integer);"
         );
+        for (database_type, object_type, expected) in [
+            (DatabaseType::Oracle, DatabaseObjectType::Type, "DROP TYPE \"APP\".\"Mixed Type\";"),
+            (DatabaseType::OceanbaseOracle, DatabaseObjectType::TypeBody, "DROP TYPE BODY \"APP\".\"Mixed Type\";"),
+            (DatabaseType::Dameng, DatabaseObjectType::Type, "DROP TYPE \"APP\".\"Mixed Type\" RESTRICT;"),
+            (DatabaseType::Dameng, DatabaseObjectType::TypeBody, "DROP TYPE BODY \"APP\".\"Mixed Type\" RESTRICT;"),
+        ] {
+            assert_eq!(
+                build_drop_object_sql(DropObjectSqlOptions {
+                    database_type: Some(database_type),
+                    object_type,
+                    schema: Some("APP".to_string()),
+                    name: "Mixed Type".to_string(),
+                    signature: None,
+                    identifier_quote: None,
+                }),
+                expected,
+            );
+        }
         assert_eq!(
             build_drop_database_sql(DatabaseNameSqlOptions {
                 database_type: Some(DatabaseType::Mysql),
@@ -2301,6 +2466,61 @@ mod tests {
             }),
             "DROP USER \"ana\"\"lytics\" CASCADE;"
         );
+    }
+
+    #[test]
+    fn builds_type_execute_grants_with_database_native_identifier_quotes() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+            assert_eq!(
+                build_oracle_type_grant_sql(OracleTypeGrantSqlOptions {
+                    database_type,
+                    owner: "APP".into(),
+                    type_name: "Mixed Type".into(),
+                    grantee: "MIG_OTHER".into(),
+                    privilege: "EXECUTE".into(),
+                    grantable: true,
+                })
+                .unwrap(),
+                "GRANT EXECUTE ON \"APP\".\"Mixed Type\" TO \"MIG_OTHER\" WITH GRANT OPTION;"
+            );
+        }
+        assert!(build_oracle_type_grant_sql(OracleTypeGrantSqlOptions {
+            database_type: DatabaseType::Mysql,
+            owner: "APP".into(),
+            type_name: "T".into(),
+            grantee: "U".into(),
+            privilege: "EXECUTE".into(),
+            grantable: false,
+        })
+        .is_err());
+        for privilege in ["DEBUG", "UNDER"] {
+            let input = OracleTypeGrantSqlOptions {
+                database_type: DatabaseType::Oracle,
+                owner: "APP".into(),
+                type_name: "T".into(),
+                grantee: "PUBLIC".into(),
+                privilege: privilege.into(),
+                grantable: false,
+            };
+            assert_eq!(
+                build_oracle_type_grant_sql(input.clone()).unwrap(),
+                format!("GRANT {privilege} ON \"APP\".\"T\" TO PUBLIC;")
+            );
+            assert!(build_oracle_type_grant_sql(OracleTypeGrantSqlOptions {
+                database_type: DatabaseType::Dameng,
+                ..input
+            })
+            .is_err());
+        }
+        assert!(build_oracle_type_grant_sql(OracleTypeGrantSqlOptions {
+            database_type: DatabaseType::Oracle,
+            owner: "APP".into(),
+            type_name: "T".into(),
+            grantee: "USER".into(),
+            privilege: "EXECUTE; DROP USER X".into(),
+            grantable: false
+        })
+        .is_err());
     }
 
     #[test]
@@ -2539,6 +2759,53 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_table_structure_oscar_includes_table_and_column_comments() {
+        let sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+            database_type: Some(DatabaseType::Oscar),
+            schema: Some("SYSDBA".to_string()),
+            source_name: "USERS".to_string(),
+            target_name: "USERS_COPY".to_string(),
+            table_comment: Some("用户表'测试".to_string()),
+            column_comments: vec![
+                DuplicateTableColumnComment { name: "NAME".to_string(), comment: "姓名'测试".to_string() },
+                DuplicateTableColumnComment { name: "AGE".to_string(), comment: "年龄".to_string() },
+                DuplicateTableColumnComment { name: "EMPTY".to_string(), comment: " \t\n".to_string() },
+            ],
+            primary_key_columns: vec![],
+            primary_key_constraint_name: None,
+            identifier_quote: Some("\"".to_string()),
+        });
+        let expected_statements = vec![
+            "CREATE TABLE \"SYSDBA\".\"USERS_COPY\" AS SELECT * FROM \"SYSDBA\".\"USERS\" WHERE 1=0",
+            "COMMENT ON TABLE \"SYSDBA\".\"USERS_COPY\" IS '用户表''测试'",
+            "COMMENT ON COLUMN \"SYSDBA\".\"USERS_COPY\".\"NAME\" IS '姓名''测试'",
+            "COMMENT ON COLUMN \"SYSDBA\".\"USERS_COPY\".\"AGE\" IS '年龄'",
+        ];
+        assert_eq!(sql, format!("{};", expected_statements.join(";\n")));
+        assert_eq!(crate::sql::split_sql_statements_for_database(&sql, DatabaseType::Oscar), expected_statements);
+
+        // Control chars / backslashes must keep standard '' escaping for Oscar (no Postgres E'...' literals).
+        let oscar_escape_sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+            database_type: Some(DatabaseType::Oscar),
+            schema: Some("SYSDBA".to_string()),
+            source_name: "ORDERS".to_string(),
+            target_name: "ORDERS_COPY".to_string(),
+            table_comment: Some("line1\\path\nline2".to_string()),
+            column_comments: vec![DuplicateTableColumnComment {
+                name: "PATH".to_string(),
+                comment: "C:\\data\t'file'".to_string(),
+            }],
+            primary_key_columns: vec![],
+            primary_key_constraint_name: None,
+            identifier_quote: None,
+        });
+        assert_eq!(
+            oscar_escape_sql,
+            "CREATE TABLE \"SYSDBA\".\"ORDERS_COPY\" AS SELECT * FROM \"SYSDBA\".\"ORDERS\" WHERE 1=0;\nCOMMENT ON TABLE \"SYSDBA\".\"ORDERS_COPY\" IS 'line1\\path\nline2';\nCOMMENT ON COLUMN \"SYSDBA\".\"ORDERS_COPY\".\"PATH\" IS 'C:\\data\t''file''';"
+        );
+    }
+
+    #[test]
     fn duplicate_table_structure_comments_keep_other_dialects_unchanged() {
         for (database_type, expected) in [
             (
@@ -2570,6 +2837,24 @@ mod tests {
                 "{database_type:?}"
             );
         }
+    }
+
+    #[test]
+    fn duplicate_table_structure_saphana_uses_like_instead_of_ctas() {
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::SapHana),
+                schema: Some("APP".to_string()),
+                source_name: "orders".to_string(),
+                target_name: "orders_copy".to_string(),
+                table_comment: None,
+                column_comments: vec![],
+                primary_key_columns: vec![],
+                primary_key_constraint_name: None,
+                identifier_quote: None,
+            }),
+            "CREATE TABLE \"APP\".\"orders_copy\" LIKE \"APP\".\"orders\";"
+        );
     }
 
     #[test]
@@ -2817,15 +3102,16 @@ mod tests {
         });
         assert_eq!(
             dameng_sql,
-            "CREATE TABLE \"APP\".USERS_COPY AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON TABLE \"APP\".USERS_COPY IS '测试''克隆';\nCOMMENT ON COLUMN \"APP\".USERS_COPY.\"DISPLAY\"\"NAME\" IS '  Owner''s; display name';\nCOMMENT ON COLUMN \"APP\".USERS_COPY.\"STATUS\" IS 'active  ';"
+            "CREATE TABLE \"APP\".\"users_copy\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON TABLE \"APP\".\"users_copy\" IS '测试''克隆';\nCOMMENT ON COLUMN \"APP\".\"users_copy\".\"DISPLAY\"\"NAME\" IS '  Owner''s; display name';\nCOMMENT ON COLUMN \"APP\".\"users_copy\".\"STATUS\" IS 'active  ';"
         );
         assert_eq!(
             crate::sql::split_sql_statements_for_database(&dameng_sql, DatabaseType::Dameng),
             vec![
-                "CREATE TABLE \"APP\".USERS_COPY AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0".to_string(),
-                "COMMENT ON TABLE \"APP\".USERS_COPY IS '测试''克隆'".to_string(),
-                "COMMENT ON COLUMN \"APP\".USERS_COPY.\"DISPLAY\"\"NAME\" IS '  Owner''s; display name'".to_string(),
-                "COMMENT ON COLUMN \"APP\".USERS_COPY.\"STATUS\" IS 'active  '".to_string(),
+                "CREATE TABLE \"APP\".\"users_copy\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0".to_string(),
+                "COMMENT ON TABLE \"APP\".\"users_copy\" IS '测试''克隆'".to_string(),
+                "COMMENT ON COLUMN \"APP\".\"users_copy\".\"DISPLAY\"\"NAME\" IS '  Owner''s; display name'"
+                    .to_string(),
+                "COMMENT ON COLUMN \"APP\".\"users_copy\".\"STATUS\" IS 'active  '".to_string(),
             ]
         );
         // Control chars / backslashes must not switch Dameng to Postgres E'...' literals.
@@ -2842,7 +3128,7 @@ mod tests {
         });
         assert_eq!(
             dameng_escape_sql,
-            "CREATE TABLE \"APP\".USERS_COPY AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON TABLE \"APP\".USERS_COPY IS 'line1\\path\nline2';"
+            "CREATE TABLE \"APP\".\"users_copy\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON TABLE \"APP\".\"users_copy\" IS 'line1\\path\nline2';"
         );
         assert!(!dameng_escape_sql.contains("E'"));
         assert_eq!(
@@ -3024,7 +3310,7 @@ mod tests {
                 normalize_new_target_name: true,
                 identifier_quote: None,
             }),
-            "INSERT INTO \"APP\".USERS_COPY SELECT * FROM \"APP\".\"users\";"
+            "INSERT INTO \"APP\".\"users_copy\" SELECT * FROM \"APP\".\"users\";"
         );
         assert_eq!(
             build_copy_table_data_sql(CopyTableDataSqlOptions {
@@ -3113,6 +3399,10 @@ mod tests {
                 foreign_table: false,
                 is_gaussdb_m_mode: false,
                 table_collation: None,
+                primary_key_name: None,
+                primary_key_change: None,
+                oracle_foreign_key_changes: None,
+                oracle_constraint_changes: None,
             });
         assert_eq!(create.warnings, Vec::<String>::new());
         assert_eq!(
@@ -3175,6 +3465,22 @@ mod tests {
             })
             .is_err());
         }
+    }
+
+    #[test]
+    fn builds_saphana_table_rename_sql() {
+        let options = RenameObjectSqlOptions {
+            database_type: Some(DatabaseType::SapHana),
+            object_type: DatabaseObjectType::Table,
+            schema: Some("APP".to_string()),
+            old_name: "orders".to_string(),
+            new_name: "orders_copy".to_string(),
+        };
+        assert!(supports_object_rename(options.database_type, options.object_type));
+        assert_eq!(
+            build_rename_object_sql(options).unwrap(),
+            "RENAME TABLE \"APP\".\"orders\" TO \"APP\".\"orders_copy\";"
+        );
     }
 
     #[test]

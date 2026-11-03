@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useI18n } from "vue-i18n";
 import { Badge } from "@/components/ui/badge";
@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Check, ChevronDown, ChevronRight, DatabaseBackup, Download, FolderOpen, Loader2, Pencil, Play, Plus, RotateCcw, Search, Square, Trash2 } from "@lucide/vue";
+import { Check, ChevronDown, ChevronRight, DatabaseBackup, Download, FileInput, FolderOpen, Loader2, Pencil, Play, Plus, RotateCcw, Search, Square, Trash2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { useScheduledDatabaseBackups } from "@/composables/useScheduledDatabaseBackups";
 import DatabaseBackupConfigFields from "@/components/backup/DatabaseBackupConfigFields.vue";
@@ -20,12 +20,15 @@ import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import {
   DEFAULT_DATABASE_BACKUP_RUN_DIRECTORY_PATTERN,
   DEFAULT_DATABASE_BACKUP_FILE_NAME_PATTERN,
+  databaseBackupFileNamePatternHasRunId,
   databaseBackupFileNamePatternIsValid,
   databaseBackupFilePath,
   databaseBackupRunDirectory,
   databaseBackupRunDirectoryPatternIsValid,
   nextDatabaseBackupRunAt,
+  normalizeDatabaseBackupRetention,
   normalizeDatabaseBackupTablePatterns,
+  supportsNavicatBackupFormat,
   supportsScheduledDatabaseBackup,
   type DatabaseBackupExecutionConfig,
   type DatabaseBackupFile,
@@ -42,7 +45,27 @@ const { t, locale } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
-const { schedules, runs, activeScheduleIds, activeRunIds, cancellingRunIds, activeRuns, heartbeat, destinationRoot, error: backupError, saveSchedule, setScheduleEnabled, deleteSchedule, deleteRuns, renameRun, runSchedule, runOneShot, cancelRun } = useScheduledDatabaseBackups();
+const {
+  schedules,
+  runs,
+  activeScheduleIds,
+  activeRunIds,
+  cancellingRunIds,
+  activeRuns,
+  heartbeat,
+  destinationRoot,
+  error: backupError,
+  saveSchedule,
+  setScheduleEnabled,
+  deleteSchedule,
+  deleteRuns,
+  importBackupFiles,
+  renameRun,
+  runSchedule,
+  runOneShot,
+  runOneShotBatch,
+  cancelRun,
+} = useScheduledDatabaseBackups();
 const desktop = isTauriRuntime();
 const backgroundEnabled = ref(false);
 const backgroundBusy = ref(false);
@@ -115,7 +138,7 @@ const selectedRunIds = reactive(new Set<string>());
 const historyConnectionId = ref("");
 const historyConnectionPickerOpen = ref(false);
 const historyConnectionSearch = ref("");
-const historyBackupMethod = ref<"all" | "manual" | "scheduled" | "one-shot">("all");
+const historyBackupMethod = ref<"all" | ReturnType<typeof runBackupMethod>>("all");
 const historyStatus = ref<"all" | DatabaseBackupRun["status"]>("all");
 
 const sqlConnections = computed(() => connectionStore.connections.filter((connection) => supportsScheduledDatabaseBackup(connection.db_type)));
@@ -124,7 +147,8 @@ const sortedRuns = computed(() => [...runs.value].sort((left, right) => Date.par
 const historyConnections = computed(() => {
   const connectionById = new Map<string, string>();
   for (const run of sortedRuns.value) {
-    if (!connectionById.has(run.connectionId)) connectionById.set(run.connectionId, run.connectionName || connectionName(run.connectionId));
+    // Imported backup files are not tied to a saved connection.
+    if (run.connectionId && !connectionById.has(run.connectionId)) connectionById.set(run.connectionId, run.connectionName || connectionName(run.connectionId));
   }
   return [...connectionById].map(([id, name]) => ({ id, name })).sort((left, right) => left.name.localeCompare(right.name, locale.value));
 });
@@ -154,8 +178,40 @@ const weekdays = computed(() => [
   { value: 6, label: t("databaseBackup.weekdays.saturday") },
 ]);
 
+function handleHistoryScrollOutside(event: Event) {
+  if (!historyConnectionPickerOpen.value) return;
+  const target = event.target;
+  if (target instanceof HTMLElement && target.closest?.('[data-slot="popover-content"]')) return;
+  historyConnectionPickerOpen.value = false;
+}
+
 watch(historyConnectionPickerOpen, (open) => {
-  if (!open) historyConnectionSearch.value = "";
+  if (!open) {
+    window.removeEventListener("scroll", handleHistoryScrollOutside, { capture: true });
+    historyConnectionSearch.value = "";
+    return;
+  }
+  window.addEventListener("scroll", handleHistoryScrollOutside, { capture: true, passive: true });
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("scroll", handleHistoryScrollOutside, { capture: true });
+});
+
+watch(scheduleDialogOpen, async (open) => {
+  if (open) {
+    await nextTick();
+    const dialogs = document.querySelectorAll<HTMLElement>(".dbx-backup-dialog");
+    for (const dialog of dialogs) dialog.scrollTop = 0;
+  }
+});
+
+watch(oneShotDialogOpen, async (open) => {
+  if (open) {
+    await nextTick();
+    const dialogs = document.querySelectorAll<HTMLElement>(".dbx-backup-dialog");
+    for (const dialog of dialogs) dialog.scrollTop = 0;
+  }
 });
 
 /**
@@ -210,9 +266,29 @@ function newScheduleDraft(connectionId = sqlConnections.value[0]?.id ?? ""): Dat
 }
 
 const draft = ref<DatabaseBackupSchedule>(newScheduleDraft());
+const previousPositiveRetention = ref(10);
+
+function togglePermanentRetention(forever: boolean) {
+  if (forever) {
+    if (draft.value.retentionCount > 0) {
+      previousPositiveRetention.value = draft.value.retentionCount;
+    }
+    draft.value.retentionCount = 0;
+  } else {
+    draft.value.retentionCount = previousPositiveRetention.value > 0 ? previousPositiveRetention.value : 10;
+  }
+}
 const oneShotDraft = ref<DatabaseBackupExecutionConfig>(newBackupConfig());
 const activeDraft = computed<DatabaseBackupExecutionConfig>(() => (oneShotDialogOpen.value ? oneShotDraft.value : draft.value));
 const activeOneShotRun = computed(() => activeRuns.value.find((run) => run.source === "one-shot"));
+// A one-shot backup may target several connections; each one is queued as its own run, which the backend executes in turn.
+const oneShotConnectionIds = ref<string[]>([]);
+const oneShotBatchRunning = ref(false);
+const oneShotBatchRunIds = reactive(new Set<string>());
+let oneShotBatchCancelRequested = false;
+const multipleOneShotConnections = computed(() => oneShotConnectionIds.value.length > 1);
+// Cancel acts on the runs this dialog started: every queued run of a batch, or the active one-shot run otherwise.
+const cancellableOneShotRuns = computed(() => (oneShotBatchRunning.value ? activeRuns.value.filter((run) => oneShotBatchRunIds.has(run.id)) : activeOneShotRun.value ? [activeOneShotRun.value] : []));
 type BackupDialogKind = "schedule" | "one-shot";
 let databaseLoadGeneration = 0;
 
@@ -221,6 +297,10 @@ function databaseLoadIsCurrent(generation: number, dialog: BackupDialogKind, tar
   if (dialog === "one-shot") return oneShotDialogOpen.value && oneShotDraft.value === targetDraft && targetDraft.connectionId === connectionId;
   return scheduleDialogOpen.value && draft.value === targetDraft && targetDraft.connectionId === connectionId;
 }
+
+// `.nb3` is a MySQL/PostgreSQL-only format; keep a saved or newly selected value from being submitted for other connections.
+const scheduleNavicatFormatSupported = computed(() => supportsNavicatBackupFormat([connectionStore.getConfig(draft.value.connectionId)?.db_type]));
+const oneShotNavicatFormatSupported = computed(() => supportsNavicatBackupFormat(oneShotConnectionIds.value.map((connectionId) => connectionStore.getConfig(connectionId)?.db_type)));
 
 const canSave = computed(() => {
   const hasContent = draft.value.includeStructure || draft.value.includeData || draft.value.includeObjects;
@@ -232,6 +312,7 @@ const canSave = computed(() => {
     !!draft.value.destinationDirectory.trim() &&
     databaseBackupRunDirectoryPatternIsValid(draft.value.runDirectoryPattern || "") &&
     databaseBackupFileNamePatternIsValid(draft.value.fileNamePattern || "") &&
+    (draft.value.outputCompression !== "nb3" || scheduleNavicatFormatSupported.value) &&
     hasContent &&
     hasDatabaseScope &&
     hasTableScope &&
@@ -272,10 +353,26 @@ const oneShotOutputPathPreview = computed(() => {
   return databaseBackupFilePath(oneShotDraft.value.destinationDirectory, t("databaseBackup.oneShotName"), "database", new Date(), "preview01", oneShotDraft.value.outputCompression, oneShotDraft.value.fileNamePattern);
 });
 const canStartOneShot = computed(() => {
+  const multiple = multipleOneShotConnections.value;
   const hasContent = oneShotDraft.value.includeStructure || oneShotDraft.value.includeData || oneShotDraft.value.includeObjects;
-  const hasDatabaseScope = allDatabases.value || selectedDatabases.value.length > 0;
+  // Database names and exact table lists are per connection, so several connections always back up all databases.
+  const hasDatabaseScope = multiple || allDatabases.value || selectedDatabases.value.length > 0;
   const hasTableScope = tableScopeReady(oneShotDraft.value, oneShotTableSelectionState.value);
-  return !!oneShotDraft.value.connectionId && !!oneShotDraft.value.destinationDirectory.trim() && databaseBackupFileNamePatternIsValid(oneShotDraft.value.fileNamePattern || "") && hasContent && hasDatabaseScope && hasTableScope && !oneShotStarting.value && !loadingDatabases.value;
+  // Runs started together share a timestamp, so only {runId} keeps their files apart.
+  const hasUniqueFileNames = !multiple || databaseBackupFileNamePatternHasRunId(oneShotDraft.value.fileNamePattern);
+  const hasSupportedFormat = oneShotDraft.value.outputCompression !== "nb3" || oneShotNavicatFormatSupported.value;
+  return (
+    !!oneShotDraft.value.connectionId &&
+    !!oneShotDraft.value.destinationDirectory.trim() &&
+    databaseBackupFileNamePatternIsValid(oneShotDraft.value.fileNamePattern || "") &&
+    hasContent &&
+    hasDatabaseScope &&
+    hasTableScope &&
+    hasUniqueFileNames &&
+    hasSupportedFormat &&
+    !oneShotStarting.value &&
+    !loadingDatabases.value
+  );
 });
 
 function connectionName(connectionId: string): string {
@@ -288,9 +385,16 @@ function selectHistoryConnection(connectionId: string) {
   historyConnectionSearch.value = "";
 }
 
-function runBackupMethod(run: DatabaseBackupRun): "manual" | "scheduled" | "one-shot" {
-  if (run.source === "one-shot") return "one-shot";
+function runBackupMethod(run: DatabaseBackupRun): "manual" | "scheduled" | "one-shot" | "imported" {
+  if (run.source === "one-shot" || run.source === "imported") return run.source;
   return run.trigger;
+}
+
+function runBackupMethodLabel(run: DatabaseBackupRun): string {
+  const method = runBackupMethod(run);
+  if (method === "one-shot") return t("databaseBackup.oneShotTrigger");
+  if (method === "imported") return t("databaseBackup.importedTrigger");
+  return method === "scheduled" ? t("databaseBackup.scheduledTrigger") : t("databaseBackup.manualTrigger");
 }
 
 function formatDate(value?: string): string {
@@ -344,7 +448,8 @@ function scheduleCancellationRequested(scheduleId: string): boolean {
 }
 
 function oneShotCancellationRequested(): boolean {
-  return !!activeOneShotRun.value && cancellingRunIds.has(activeOneShotRun.value.id);
+  const runs = cancellableOneShotRuns.value;
+  return runs.length > 0 && runs.every((run) => cancellingRunIds.has(run.id));
 }
 
 async function loadDatabases(dialog: BackupDialogKind, targetDraft: DatabaseBackupExecutionConfig, preserveSelection: boolean) {
@@ -413,6 +518,7 @@ async function openCreateSchedule() {
   editingScheduleId.value = "";
   const nextDraft = newScheduleDraft();
   draft.value = nextDraft;
+  previousPositiveRetention.value = nextDraft.retentionCount > 0 ? nextDraft.retentionCount : 10;
   resetDatabaseScope(nextDraft);
   scheduleDialogOpen.value = true;
 }
@@ -422,6 +528,7 @@ async function openEditSchedule(schedule: DatabaseBackupSchedule) {
   oneShotDialogOpen.value = false;
   editingScheduleId.value = schedule.id;
   draft.value = { ...schedule, databases: [...schedule.databases], tablePatterns: [...schedule.tablePatterns] };
+  previousPositiveRetention.value = schedule.retentionCount > 0 ? schedule.retentionCount : 10;
   allDatabases.value = schedule.databases.length === 0;
   selectedDatabases.value = [...schedule.databases];
   tablePatternsInput.value = schedule.tablePatterns.join(", ");
@@ -450,6 +557,31 @@ async function changeConnection(connectionId: string) {
   await loadDatabases(dialog, targetDraft, true);
 }
 
+function toggleOneShotConnection(connectionId: string) {
+  const current = oneShotConnectionIds.value;
+  const selected = new Set(current);
+  if (selected.has(connectionId)) selected.delete(connectionId);
+  else selected.add(connectionId);
+  // Keep the picker order stable and never leave the form without a connection.
+  const next = sqlConnections.value.map((connection) => connection.id).filter((id) => selected.has(id));
+  if (next.length === 0) return;
+  const targetDraft = oneShotDraft.value;
+  if (next.length > 1 && current.length <= 1) {
+    // Invalidate any in-flight database list load and drop the per-connection scope.
+    databaseLoadGeneration++;
+    loadingDatabases.value = false;
+    databaseOptions.value = [];
+    databaseLoadError.value = "";
+    allDatabases.value = true;
+    selectedDatabases.value = [];
+    if (targetDraft.tableFilterMode === "selected") targetDraft.tableFilterMode = "all";
+    targetDraft.selectedTables = [];
+    oneShotTableSelectionState.value = { scopeKey: "", ready: false };
+  }
+  oneShotConnectionIds.value = next;
+  targetDraft.connectionId = next[0]!;
+}
+
 async function setAllDatabases(value: boolean) {
   allDatabases.value = value;
   databaseLoadError.value = "";
@@ -466,6 +598,11 @@ function toggleDatabase(database: string) {
   const selected = new Set(selectedDatabases.value);
   if (selected.has(database)) selected.delete(database);
   else selected.add(database);
+  selectedDatabases.value = databaseOptions.value.filter((item) => selected.has(item));
+}
+
+function updateSelectedDatabases(databases: string[]) {
+  const selected = new Set(databases);
   selectedDatabases.value = databaseOptions.value.filter((item) => selected.has(item));
 }
 
@@ -488,6 +625,7 @@ async function submitSchedule() {
     if (desktop) setLastBackupDirectory(draft.value.destinationDirectory);
     await saveSchedule({
       ...draft.value,
+      retentionCount: normalizeDatabaseBackupRetention(draft.value.retentionCount),
       databases: allDatabases.value ? [] : [...selectedDatabases.value],
       ...backupTablePayload(draft.value),
     });
@@ -505,8 +643,15 @@ async function openOneShotBackup() {
   scheduleDialogOpen.value = false;
   const nextDraft = newBackupConfig();
   oneShotDraft.value = nextDraft;
+  oneShotConnectionIds.value = nextDraft.connectionId ? [nextDraft.connectionId] : [];
   resetDatabaseScope(nextDraft);
   oneShotDialogOpen.value = true;
+}
+
+function toastRunResult(run: DatabaseBackupRun) {
+  if (run.status === "success") toast(t("databaseBackup.runSuccess", { count: run.files.length }), 3000);
+  else if (run.status === "cancelled") toast(t("databaseBackup.runCancelled"), 3000);
+  else toast(t("databaseBackup.runFailed", { error: run.error ? translateBackendError(t, run.error) : t("databaseBackup.unknownError") }), 5000);
 }
 
 async function startOneShotBackup() {
@@ -515,6 +660,10 @@ async function startOneShotBackup() {
   try {
     if (desktop) await api.recordDatabaseExportDestination(oneShotDraft.value.destinationDirectory);
     if (desktop) setLastBackupDirectory(oneShotDraft.value.destinationDirectory);
+    if (multipleOneShotConnections.value) {
+      await startOneShotBatch();
+      return;
+    }
     const run = await runOneShot(
       {
         ...oneShotDraft.value,
@@ -525,9 +674,7 @@ async function startOneShotBackup() {
     );
     if (!run) return;
     oneShotDialogOpen.value = false;
-    if (run.status === "success") toast(t("databaseBackup.runSuccess", { count: run.files.length }), 3000);
-    else if (run.status === "cancelled") toast(t("databaseBackup.runCancelled"), 3000);
-    else toast(t("databaseBackup.runFailed", { error: run.error ? translateBackendError(t, run.error) : t("databaseBackup.unknownError") }), 5000);
+    toastRunResult(run);
   } catch (error: any) {
     toast(translateBackendError(t, error), 5000);
   } finally {
@@ -535,9 +682,39 @@ async function startOneShotBackup() {
   }
 }
 
+async function startOneShotBatch() {
+  oneShotBatchRunning.value = true;
+  oneShotBatchCancelRequested = false;
+  try {
+    const configs = oneShotConnectionIds.value.map((connectionId) => ({
+      ...oneShotDraft.value,
+      connectionId,
+      databases: [],
+      ...backupTablePayload(oneShotDraft.value),
+    }));
+    const { runs: finished, enqueueErrors } = await runOneShotBatch(configs, t("databaseBackup.oneShotName"), (run) => {
+      oneShotBatchRunIds.add(run.id);
+      // Cancel was requested while later connections were still being queued.
+      if (oneShotBatchCancelRequested) void cancelRun(run.id).catch(() => {});
+    });
+    if (finished.length === 0 && enqueueErrors.length > 0) {
+      toast(translateBackendError(t, enqueueErrors[0]!.error), 5000);
+      return;
+    }
+    oneShotDialogOpen.value = false;
+    const count = (status: DatabaseBackupRun["status"]) => finished.filter((run) => run.status === status).length;
+    toast(t("databaseBackup.batchRunSummary", { success: count("success"), failed: count("failed") + enqueueErrors.length, cancelled: count("cancelled") }), 5000);
+  } finally {
+    oneShotBatchRunning.value = false;
+    oneShotBatchRunIds.clear();
+  }
+}
+
 async function cancelActiveOneShotBackup() {
-  const run = activeOneShotRun.value;
-  if (run && (await cancelRun(run.id))) toast(t("databaseBackup.cancelRequested"), 2500);
+  oneShotBatchCancelRequested = true;
+  const runs = cancellableOneShotRuns.value.filter((run) => !cancellingRunIds.has(run.id));
+  const results = await Promise.all(runs.map((run) => cancelRun(run.id)));
+  if (results.some(Boolean)) toast(t("databaseBackup.cancelRequested"), 2500);
 }
 
 async function requestCancelRun(runId: string) {
@@ -674,6 +851,46 @@ async function revealBackup(file: DatabaseBackupFile) {
   }
 }
 
+const BACKUP_FILE_FILTERS = [{ name: "Database backup", extensions: ["sql", "gz", "nb3"] }];
+
+async function pickBackupFiles(multiple: boolean): Promise<string[]> {
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({ multiple, filters: BACKUP_FILE_FILTERS });
+  return Array.isArray(selected) ? selected : selected ? [selected] : [];
+}
+
+/** Restores a backup file created anywhere, without adding it to the history. */
+async function restoreFromFile() {
+  try {
+    // The web SQL file dialog uploads the file itself; the desktop picks a local path first.
+    const [filePath] = desktop ? await pickBackupFiles(false) : [undefined];
+    if (desktop && !filePath) return;
+    connectionStore.sqlFileSource = { connectionId: "", database: "", ...(filePath ? { filePath } : {}) };
+  } catch (error) {
+    toast(translateBackendError(t, error), 5000);
+  }
+}
+
+async function importBackups() {
+  try {
+    const files = await pickBackupFiles(true);
+    if (files.length === 0) return;
+    const imported = await importBackupFiles(files);
+    toast(t("databaseBackup.backupsImported", { count: imported.length }), 2500);
+  } catch (error) {
+    toast(translateBackendError(t, error), 5000);
+  }
+}
+
+const pendingDeleteMessage = computed(() => {
+  const pending = pendingDeleteRunIds.value.map((runId) => runs.value.find((run) => run.id === runId)).filter((run): run is DatabaseBackupRun => !!run);
+  const owned = pending.filter((run) => run.source !== "imported");
+  if (owned.length === 0) return t("databaseBackup.deleteImportedConfirm", { count: pending.length });
+  const files = owned.reduce((total, run) => total + run.files.length, 0);
+  const message = pending.length === 1 ? t("databaseBackup.deleteBackupConfirm", { count: files }) : t("databaseBackup.deleteBackupsConfirm", { count: pending.length, files });
+  return owned.length === pending.length ? message : `${message} ${t("databaseBackup.importedFilesKept")}`;
+});
+
 async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
   try {
     const prepared = desktop ? file.filePath : await api.prepareDatabaseBackupRestore(run.id, run.files.indexOf(file));
@@ -697,6 +914,14 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
         <p v-if="!canCreateSchedule" class="mt-1 text-xs text-muted-foreground">{{ t("databaseBackup.noSupportedConnections") }}</p>
       </div>
       <div class="flex flex-wrap items-center justify-end gap-2">
+        <Button data-backup-restore-from-file variant="outline" size="sm" :title="t('databaseBackup.restoreFromFileHint')" @click="restoreFromFile">
+          <RotateCcw class="mr-2 h-4 w-4" />
+          {{ t("databaseBackup.restoreFromFile") }}
+        </Button>
+        <Button v-if="desktop" data-backup-import variant="outline" size="sm" :title="t('databaseBackup.importBackupHint')" @click="importBackups">
+          <FileInput class="mr-2 h-4 w-4" />
+          {{ t("databaseBackup.importBackup") }}
+        </Button>
         <Button variant="outline" size="sm" :disabled="!canCreateSchedule" :title="canCreateSchedule ? t('databaseBackup.oneShotBackup') : t('databaseBackup.noSupportedConnections')" @click="openOneShotBackup">
           <Play class="mr-2 h-4 w-4" />
           {{ t("databaseBackup.oneShotBackup") }}
@@ -741,7 +966,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
             <span>{{ databaseScopeLabel(schedule) }}</span>
             <span v-if="schedule.tableFilterMode !== 'all'">{{ tableScopeLabel(schedule) }}</span>
             <span>{{ t("databaseBackup.nextRun", { time: formatDate(schedule.nextRunAt) }) }}</span>
-            <span>{{ t("databaseBackup.keepRuns", { count: schedule.retentionCount }) }}</span>
+            <span>{{ schedule.retentionCount === 0 ? t("databaseBackup.keepForever") : t("databaseBackup.keepRuns", { count: schedule.retentionCount }) }}</span>
           </div>
         </div>
         <div class="flex items-center justify-end gap-1">
@@ -782,7 +1007,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
                 <ChevronDown class="ml-2 h-4 w-4 shrink-0 opacity-50" />
               </Button>
             </PopoverTrigger>
-            <PopoverContent align="end" class="w-[var(--reka-popover-trigger-width)] p-1">
+            <PopoverContent align="end" :hide-when-detached="true" class="w-[var(--reka-popover-trigger-width)] p-1">
               <div class="relative">
                 <Search class="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input v-model="historyConnectionSearch" data-backup-history-connection-search class="h-9 pl-8" :aria-label="t('databaseBackup.searchHistoryConnections')" :placeholder="t('databaseBackup.searchHistoryConnections')" />
@@ -813,6 +1038,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
               <SelectItem value="manual">{{ t("databaseBackup.manualTrigger") }}</SelectItem>
               <SelectItem value="scheduled">{{ t("databaseBackup.scheduledTrigger") }}</SelectItem>
               <SelectItem value="one-shot">{{ t("databaseBackup.oneShotTrigger") }}</SelectItem>
+              <SelectItem value="imported">{{ t("databaseBackup.importedTrigger") }}</SelectItem>
             </SelectContent>
           </Select>
           <Select v-model="historyStatus">
@@ -859,10 +1085,10 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
               <div class="flex min-w-0 flex-wrap items-center gap-2">
                 <span class="truncate text-sm font-medium">{{ run.displayName || run.scheduleName }}</span>
                 <Badge :variant="runStatusVariant(run.status)" class="font-normal">{{ displayedRunStatusLabel(run) }}</Badge>
-                <Badge variant="outline" class="font-normal">{{ run.source === "one-shot" ? t("databaseBackup.oneShotTrigger") : run.trigger === "scheduled" ? t("databaseBackup.scheduledTrigger") : t("databaseBackup.manualTrigger") }}</Badge>
+                <Badge variant="outline" class="font-normal">{{ runBackupMethodLabel(run) }}</Badge>
               </div>
               <div class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                <span>{{ run.connectionName || connectionName(run.connectionId) }}</span>
+                <span>{{ run.source === "imported" ? t("databaseBackup.externalFile") : run.connectionName || connectionName(run.connectionId) }}</span>
                 <span>{{ formatDate(run.startedAt) }}</span>
                 <span>{{ t("databaseBackup.fileCount", { count: run.files.length }) }}</span>
                 <span v-if="run.error" class="break-all text-destructive">{{ translateBackendError(t, run.error) }}</span>
@@ -948,6 +1174,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
           @change-connection="changeConnection"
           @choose-destination="chooseDestination"
           @toggle-database="toggleDatabase"
+          @update:selected-databases="updateSelectedDatabases"
           @update:all-databases="setAllDatabases"
           @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
           @table-selection-state="(state) => (scheduleTableSelectionState = state)"
@@ -984,8 +1211,15 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
             </Select>
           </div>
           <div class="space-y-2">
-            <Label>{{ t("databaseBackup.retention") }}</Label>
-            <Input v-model.number="draft.retentionCount" type="number" min="1" max="100" />
+            <div class="flex items-center justify-between">
+              <Label>{{ t("databaseBackup.retention") }}</Label>
+              <label class="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+                <input data-backup-retention-forever type="checkbox" class="h-3.5 w-3.5 rounded border-border accent-primary" :checked="draft.retentionCount === 0" @change="togglePermanentRetention(($event.target as HTMLInputElement).checked)" />
+                {{ t("databaseBackup.keepForever") }}
+              </label>
+            </div>
+            <Input v-if="draft.retentionCount !== 0" v-model.number="draft.retentionCount" type="number" min="1" max="1000" />
+            <Input v-else disabled :model-value="t('databaseBackup.keepForever')" class="cursor-not-allowed bg-muted text-muted-foreground" />
           </div>
         </div>
         <div class="space-y-2">
@@ -1024,6 +1258,8 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
       <DatabaseBackupConfigFields
         :draft="oneShotDraft"
         :connections="sqlConnections"
+        multi-select-connections
+        :selected-connection-ids="oneShotConnectionIds"
         :all-databases="allDatabases"
         :selected-databases="selectedDatabases"
         :database-options="databaseOptions"
@@ -1031,9 +1267,10 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
         :loading-databases="loadingDatabases"
         :database-load-error="databaseLoadError"
         :output-path-preview="oneShotOutputPathPreview"
-        @change-connection="changeConnection"
+        @toggle-connection="toggleOneShotConnection"
         @choose-destination="chooseDestination"
         @toggle-database="toggleDatabase"
+        @update:selected-databases="updateSelectedDatabases"
         @update:all-databases="setAllDatabases"
         @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
         @table-selection-state="(state) => (oneShotTableSelectionState = state)"
@@ -1041,7 +1278,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
 
       <DialogFooter>
         <Button variant="outline" @click="oneShotDialogOpen = false">{{ oneShotStarting ? t("common.close") : t("common.cancel") }}</Button>
-        <Button v-if="oneShotStarting" variant="destructive" :disabled="!activeOneShotRun || oneShotCancellationRequested()" :title="oneShotCancellationRequested() ? t('databaseBackup.cancelling') : t('databaseBackup.cancel')" @click="cancelActiveOneShotBackup">
+        <Button v-if="oneShotStarting" variant="destructive" :disabled="cancellableOneShotRuns.length === 0 || oneShotCancellationRequested()" :title="oneShotCancellationRequested() ? t('databaseBackup.cancelling') : t('databaseBackup.cancel')" @click="cancelActiveOneShotBackup">
           <Loader2 v-if="oneShotCancellationRequested()" class="mr-2 h-4 w-4 animate-spin" />
           <Square v-else class="mr-2 h-4 w-4" />
           {{ oneShotCancellationRequested() ? t("databaseBackup.cancelling") : t("databaseBackup.cancel") }}
@@ -1071,13 +1308,7 @@ async function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
       <DialogHeader
         ><DialogTitle>{{ t("databaseBackup.deleteBackup") }}</DialogTitle></DialogHeader
       >
-      <p class="text-sm text-muted-foreground">
-        {{
-          pendingDeleteRunIds.length === 1
-            ? t("databaseBackup.deleteBackupConfirm", { count: runs.find((run) => run.id === pendingDeleteRunIds[0])?.files.length || 0 })
-            : t("databaseBackup.deleteBackupsConfirm", { count: pendingDeleteRunIds.length, files: pendingDeleteRunIds.reduce((total, runId) => total + (runs.find((run) => run.id === runId)?.files.length || 0), 0) })
-        }}
-      </p>
+      <p data-backup-delete-message class="text-sm text-muted-foreground">{{ pendingDeleteMessage }}</p>
       <DialogFooter>
         <Button variant="outline" @click="deleteRunDialogOpen = false">{{ t("common.cancel") }}</Button>
         <Button variant="destructive" @click="confirmDeleteRuns">{{ t("databaseBackup.delete") }}</Button>

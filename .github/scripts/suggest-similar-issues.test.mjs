@@ -2,15 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 
-import {
-  GitHubClient,
-  formatComment,
-  rankCandidates,
-  run,
-  scoreCandidate,
-  searchTerms,
-  searchTitleTerms,
-} from "./suggest-similar-issues.mjs";
+import { GitHubClient, formatComment, rankCandidates, run, scoreCandidate, searchTerms, searchTitleTerms } from "./suggest-similar-issues.mjs";
 
 const baseIssue = {
   number: 4043,
@@ -213,7 +205,10 @@ test("uses corpus rarity to reject generic real-world matches", () => {
   ];
 
   const ranked = rankCandidates(issue, candidates);
-  assert.deepEqual(ranked.map(({ candidate }) => candidate.number), [2201]);
+  assert.deepEqual(
+    ranked.map(({ candidate }) => candidate.number),
+    [2201],
+  );
   assert.equal(ranked[0].signals.anchorHit, true);
 });
 
@@ -247,9 +242,7 @@ test("ranks candidates, excludes the current issue and limits output", () => {
 });
 
 test("formats a cautious localized comment with concise issue references", () => {
-  const comment = formatComment(baseIssue, [
-    { candidate: { number: 82, title: "[Bug] [快捷键](https://example.com)", state: "closed" } },
-  ]);
+  const comment = formatComment(baseIssue, [{ candidate: { number: 82, title: "[Bug] [快捷键](https://example.com)", state: "closed" } }]);
 
   assert.match(comment, /^<!-- dbx-similar-issues -->/u);
   assert.match(comment, /\n- #82\n/u);
@@ -272,16 +265,20 @@ test("run searches and posts one idempotent comment", async (t) => {
         return;
       }
       if (request.method === "GET" && request.url.startsWith("/search/issues?")) {
-        response.end(JSON.stringify({
-          search_type: "hybrid",
-          items: [{
-            number: 82,
-            title: "Ctrl+Enter 执行当前 SQL 语句",
-            body: "Ctrl+Enter 直接执行光标所在语句，不显示选择框。",
-            state: "open",
-            labels: [{ name: "bug" }, { name: "db/mysql" }],
-          }],
-        }));
+        response.end(
+          JSON.stringify({
+            search_type: "hybrid",
+            items: [
+              {
+                number: 82,
+                title: "Ctrl+Enter 执行当前 SQL 语句",
+                body: "Ctrl+Enter 直接执行光标所在语句，不显示选择框。",
+                state: "open",
+                labels: [{ name: "bug" }, { name: "db/mysql" }],
+              },
+            ],
+          }),
+        );
         return;
       }
       if (request.method === "POST" && request.url.endsWith("/comments")) {

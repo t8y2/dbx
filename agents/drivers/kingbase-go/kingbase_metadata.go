@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"sort"
 	"strconv"
@@ -47,7 +48,9 @@ var kingbaseReleasePattern = regexp.MustCompile(`(?i)\bV0*([0-9]+)R`)
 
 func detectKingbaseV7(db *sql.DB) bool {
 	var version string
-	if err := db.QueryRow("SELECT version()").Scan(&version); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := db.QueryRowContext(ctx, "SELECT version()").Scan(&version); err != nil {
 		return false
 	}
 	match := kingbaseReleasePattern.FindStringSubmatch(version)
@@ -124,6 +127,7 @@ type objectInfo struct {
 	ParentSchema   *string `json:"parent_schema,omitempty"`
 	ParentName     *string `json:"parent_name,omitempty"`
 	Comment        *string `json:"comment"`
+	Signature      *string `json:"signature,omitempty"`
 	Valid          *bool   `json:"valid,omitempty"`
 	CustomTypeKind *string `json:"custom_type_kind,omitempty"`
 	HasMembers     *bool   `json:"has_members,omitempty"`
@@ -160,6 +164,8 @@ type indexInfo struct {
 	IndexType       *string  `json:"index_type"`
 	IncludedColumns []string `json:"included_columns"`
 	Comment         *string  `json:"comment"`
+	KeyIsExpression []bool   `json:"key_is_expression,omitempty"`
+	KeyOptions      []int    `json:"key_options,omitempty"`
 }
 
 func (i indexInfo) MarshalJSON() ([]byte, error) {
@@ -210,12 +216,13 @@ func detectKingbaseMode(db *sql.DB, configuredMySQL bool) kingbaseMode {
 	}
 	mode := kingbaseMode{compatibilityMode: detectDatabaseMode(db)}
 	mode.postgresCatalog = !catalogExists(db, "sys_catalog.sys_namespace") && catalogExists(db, "pg_catalog.pg_namespace")
+	// Catalog availability and the SQL compatibility mode are independent.
+	if mode.compatibilityMode != "" {
+		mode.mysqlCompat = mode.compatibilityMode == "mysql"
+	} else if !mode.postgresCatalog {
+		mode.mysqlCompat = supportsBacktickIdentifiers(db)
+	}
 	if !mode.postgresCatalog {
-		if mode.compatibilityMode != "" {
-			mode.mysqlCompat = mode.compatibilityMode == "mysql"
-		} else {
-			mode.mysqlCompat = supportsBacktickIdentifiers(db)
-		}
 		mode.sqlServerIdentity = !mode.mysqlCompat && catalogExists(db, "sys.identity_columns")
 	}
 	return mode
@@ -239,23 +246,29 @@ func detectMySQLCompatMode(db *sql.DB) bool {
 }
 
 func detectDatabaseMode(db *sql.DB) string {
-	var databaseMode string
-	switch err := db.QueryRow("SELECT setting FROM sys_catalog.sys_settings WHERE LOWER(name) = 'database_mode'").Scan(&databaseMode); {
-	case err == nil:
-		// Treat database_mode as authoritative when the server exposes it. This
-		// avoids misclassifying Oracle-compatible servers that also publish
-		// sql_mode for MySQL syntax toggles such as ANSI_QUOTES.
-		return strings.ToLower(strings.TrimSpace(databaseMode))
-	case errors.Is(err, sql.ErrNoRows):
-		return ""
-	default:
-		return ""
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for _, query := range []string{
+		"SELECT setting FROM sys_catalog.sys_settings WHERE LOWER(name) = 'database_mode'",
+		"SELECT setting FROM pg_catalog.pg_settings WHERE LOWER(name) = 'database_mode'",
+		"SHOW database_mode",
+	} {
+		var databaseMode string
+		if err := db.QueryRowContext(ctx, query).Scan(&databaseMode); err == nil {
+			// The reported mode wins over syntax probes, including unknown future modes.
+			if mode := strings.ToLower(strings.TrimSpace(databaseMode)); mode != "" {
+				return mode
+			}
+		}
 	}
+	return ""
 }
 
 func supportsBacktickIdentifiers(db *sql.DB) bool {
 	var value int
-	return db.QueryRow("SELECT 1 AS `dbx_identifier_probe`").Scan(&value) == nil
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return db.QueryRowContext(ctx, "SELECT 1 AS `dbx_identifier_probe`").Scan(&value) == nil
 }
 
 func (s *server) identifierQuote() string {
@@ -281,15 +294,20 @@ func (s *server) connectionInfo() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	var database, username, version, schema string
+	var database, username, version string
+	var schema sql.NullString
 	err = db.QueryRow("SELECT current_database(), current_user, version(), current_schema()").Scan(&database, &username, &version, &schema)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{
-		"database": database, "username": username, "version": version, "schema": schema,
+		"database": database, "username": username, "version": version, "schema": schema.String,
 		"compatibilityMode": s.mode.compatibilityMode, "mysql_compat_mode": s.mode.mysqlCompat,
 		"identifierQuote": s.identifierQuote(),
+		"databaseInfo": map[string]string{
+			"productName": "KingbaseES", "productVersion": version, "currentDatabase": database,
+			"compatibilityMode": s.mode.compatibilityMode,
+		},
 	}, nil
 }
 
@@ -624,12 +642,16 @@ type customTypeCatalogQueries struct {
 // for built-in pg_catalog types.
 func qualifiedCatalogTypeExpression(typeAlias, namespaceAlias, elementAlias, elementNamespaceAlias, oidExpression, typmodExpression string) string {
 	return fmt.Sprintf(`CASE
-  WHEN %s.typelem <> 0 AND %s.nspname <> 'pg_catalog'
+  WHEN %s.typelem <> 0 AND %s.nspname NOT IN ('pg_catalog', 'sys_catalog')
     THEN quote_ident(%s.nspname) || '.' || quote_ident(%s.typname) || '[]'
-  WHEN %s.nspname <> 'pg_catalog'
+  WHEN %s.nspname NOT IN ('pg_catalog', 'sys_catalog')
     THEN quote_ident(%s.nspname) || '.' || quote_ident(%s.typname)
+  WHEN %s.typname = 'json'
+    THEN 'json'
+  WHEN %s.typname = '_json'
+    THEN 'json[]'
   ELSE format_type(%s, %s)
-END`, typeAlias, elementNamespaceAlias, elementNamespaceAlias, elementAlias, namespaceAlias, namespaceAlias, typeAlias, oidExpression, typmodExpression)
+END`, typeAlias, elementNamespaceAlias, elementNamespaceAlias, elementAlias, namespaceAlias, namespaceAlias, typeAlias, typeAlias, typeAlias, oidExpression, typmodExpression)
 }
 
 func customTypeCatalogQueriesFor(catalog, prefix, schema, name string) customTypeCatalogQueries {
@@ -1651,34 +1673,11 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 		}
 	}
 	if constraintsAllowRoutines(constraints) {
-		var query string
-		if s.mode.mysqlCompat {
-			query = fmt.Sprintf(`SELECT ROUTINE_NAME, ROUTINE_TYPE, ROUTINE_COMMENT
-FROM information_schema.routines
-WHERE ROUTINE_SCHEMA = %s
-ORDER BY ROUTINE_NAME`, quoteLiteral(effective))
-		} else {
-			catalog := "sys_catalog"
-			function := "sys"
-			if s.mode.postgresCatalog {
-				catalog, function = "pg_catalog", "pg"
-			}
-			query = fmt.Sprintf(`SELECT p.proname, CASE WHEN p.prorettype = 2278 THEN 'PROCEDURE' ELSE 'FUNCTION' END, d.description
-FROM %s.%s_proc p JOIN %s.%s_namespace n ON n.oid = p.pronamespace
-LEFT JOIN %s.%s_description d ON d.objoid = p.oid AND d.objsubid = 0
-WHERE n.nspname = %s ORDER BY p.proname`, catalog, function, catalog, function, catalog, function, quoteLiteral(effective))
+		routines, routineErr := s.listRoutineObjects(effective)
+		if routineErr != nil {
+			return nil, fmt.Errorf("list routines in schema %q: %w", effective, routineErr)
 		}
-		rows, queryErr := s.metadataQuery(query)
-		if queryErr == nil {
-			for rows.Next() {
-				var name, kind string
-				var comment sql.NullString
-				if rows.Scan(&name, &kind, &comment) == nil {
-					result = append(result, objectInfo{Name: name, ObjectType: kind, Schema: effective, Comment: nullStringPtr(comment)})
-				}
-			}
-			_ = rows.Close()
-		}
+		result = append(result, routines...)
 	}
 	if constraintsAllowTriggers(constraints) {
 		triggers, triggerErr := s.listTriggerObjects(effective)
@@ -1884,28 +1883,29 @@ func (s *server) queryCatalogColumns(
 	schema, table string,
 	catalog, prefix, expression string,
 ) ([]columnInfo, error) {
-	identityExpression := "a.attidentity"
-	if s.catalogIdentityUnsupported {
-		identityExpression = "CAST(NULL AS varchar(1)) AS attidentity"
-	}
+	identityExpression, generatedExpression := s.catalogColumnGenerationExpressions()
 	relationPredicate := fmt.Sprintf("n.nspname = %s AND c.relname = %s", quoteLiteral(schema), quoteLiteral(table))
 	if strings.TrimSpace(schema) == "" {
 		visibilityFunction := kingbaseCatalogFunction(catalog, "sys_table_is_visible", "pg_table_is_visible")
 		relationPredicate = fmt.Sprintf("c.relname = %s AND %s(c.oid)", quoteLiteral(table), visibilityFunction)
 	}
-	query := fmt.Sprintf(`SELECT n.nspname, a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull,
+	query := fmt.Sprintf(`SELECT n.nspname, a.attname,
+	CASE
+		WHEN t.typname = 'json' THEN 'json'
+		WHEN t.typname = '_json' THEN 'json[]'
+		ELSE format_type(a.atttypid, a.atttypmod)
+	END, NOT a.attnotnull,
 	%s(ad.adbin, ad.adrelid), col_description(a.attrelid, a.attnum),
 	CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 THEN ((a.atttypmod - 4) >> 16) & 65535 END,
 	CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 THEN (a.atttypmod - 4) & 65535 END,
 	CASE WHEN t.typname IN ('varchar','bpchar') AND a.atttypmod > 0 THEN a.atttypmod - 4 END,
-	%s
+	%s, %s
 	FROM %s.%s_attribute a JOIN %s.%s_type t ON t.oid = a.atttypid
 	JOIN %s.%s_class c ON c.oid = a.attrelid JOIN %s.%s_namespace n ON n.oid = c.relnamespace
 	LEFT JOIN %s.%s_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
-WHERE %s AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, expression, identityExpression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, relationPredicate)
+WHERE %s AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, expression, identityExpression, generatedExpression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, relationPredicate)
 	rows, err := s.metadataQuery(query)
-	if err != nil && !s.catalogIdentityUnsupported && isUndefinedColumn(err, "attidentity") {
-		s.catalogIdentityUnsupported = true
+	if err != nil && s.cacheMissingColumnGenerationCapability(err) {
 		return s.queryCatalogColumns(schema, table, catalog, prefix, expression)
 	}
 	if err != nil {
@@ -1916,17 +1916,66 @@ WHERE %s AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, expression,
 	for rows.Next() {
 		var resolvedSchema, name, dataType string
 		var nullable bool
-		var defaultValue, comment, identity sql.NullString
+		var defaultValue, comment, identity, generated sql.NullString
 		var precision, scale, length sql.NullInt64
-		if err := rows.Scan(&resolvedSchema, &name, &dataType, &nullable, &defaultValue, &comment, &precision, &scale, &length, &identity); err != nil {
+		if err := rows.Scan(&resolvedSchema, &name, &dataType, &nullable, &defaultValue, &comment, &precision, &scale, &length, &identity, &generated); err != nil {
 			return nil, err
 		}
-		result = append(result, columnInfo{Name: name, DataType: dataType, ResolvedSchema: stringPtr(resolvedSchema), IsNullable: nullable, ColumnDefault: nullStringPtr(defaultValue), Extra: kingbaseIdentityClause(identity.String), Comment: nullStringPtr(comment), NumericPrecision: nullIntPtr(precision), NumericScale: nullIntPtr(scale), CharacterMaximumLength: nullIntPtr(length)})
+		column := columnInfo{Name: name, DataType: dataType, ResolvedSchema: stringPtr(resolvedSchema), IsNullable: nullable, ColumnDefault: nullStringPtr(defaultValue), Comment: nullStringPtr(comment), NumericPrecision: nullIntPtr(precision), NumericScale: nullIntPtr(scale), CharacterMaximumLength: nullIntPtr(length)}
+		if err := applyColumnGenerationMetadata(&column, identity.String, generated.String, defaultValue); err != nil {
+			return nil, err
+		}
+		result = append(result, column)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+func (s *server) catalogColumnGenerationExpressions() (identity, generated string) {
+	identity, generated = "a.attidentity", "a.attgenerated"
+	if s.catalogIdentityUnsupported {
+		identity = "CAST(NULL AS varchar(1)) AS attidentity"
+	}
+	if s.catalogGeneratedUnsupported {
+		generated = "CAST(NULL AS varchar(1)) AS attgenerated"
+	}
+	return identity, generated
+}
+
+func (s *server) cacheMissingColumnGenerationCapability(err error) bool {
+	switch {
+	case !s.catalogIdentityUnsupported && isUndefinedColumn(err, "attidentity"):
+		s.catalogIdentityUnsupported = true
+	case !s.catalogGeneratedUnsupported && isUndefinedColumn(err, "attgenerated"):
+		s.catalogGeneratedUnsupported = true
+	default:
+		return false
+	}
+	return true
+}
+
+func applyColumnGenerationMetadata(column *columnInfo, identity, generated string, expression sql.NullString) error {
+	identity = strings.ToLower(strings.TrimSpace(identity))
+	generated = strings.ToLower(strings.TrimSpace(generated))
+	if generated == "s" {
+		if !expression.Valid || strings.TrimSpace(expression.String) == "" {
+			return fmt.Errorf("generated column %q has no generation expression", column.Name)
+		}
+		// attrdef stores both defaults and generated expressions. Keep generation
+		// in the established extra clause, never in column_default.
+		column.Extra = stringPtr("GENERATED ALWAYS AS (" + expression.String + ") STORED")
+		column.ColumnDefault = nil
+		return nil
+	}
+	// Unrecognised identity codes (KingbaseES reports e.g. "i") keep the plain
+	// column default instead of failing the whole table load.
+	if clause := kingbaseIdentityClause(identity); clause != nil {
+		column.Extra = clause
+		column.ColumnDefault = nil
+	}
+	return nil
 }
 
 func isUndefinedFunction(err error, functionName string) bool {
@@ -1955,6 +2004,9 @@ func (s *server) informationSchemaColumns(schema, table string, primary map[stri
 		if err == nil {
 			return result, nil
 		}
+		if s.cacheMissingColumnGenerationCapability(err) {
+			continue
+		}
 		switch {
 		case includeColumnType && isUndefinedColumn(err, "column_type"):
 			includeColumnType = false
@@ -1962,6 +2014,8 @@ func (s *server) informationSchemaColumns(schema, table string, primary map[stri
 		case includeUdtName && isUndefinedColumn(err, "udt_name"):
 			includeUdtName = false
 			s.infoUdtNameUnsupported = true
+		case !s.mode.postgresCatalog && !s.usePgDefaultExpression && isUndefinedFunction(err, "sys_get_expr"):
+			s.usePgDefaultExpression = true
 		default:
 			return nil, err
 		}
@@ -1969,6 +2023,17 @@ func (s *server) informationSchemaColumns(schema, table string, primary map[stri
 }
 
 func (s *server) queryInformationSchemaColumns(schema, table string, primary map[string]bool, includeColumnType, includeUdtName bool) ([]columnInfo, error) {
+	catalog, prefix, expression := "sys_catalog", "sys", "sys_get_expr"
+	if s.mode.postgresCatalog {
+		catalog, prefix, expression = "pg_catalog", "pg", "pg_get_expr"
+	} else if s.usePgDefaultExpression {
+		expression = "pg_get_expr"
+	}
+	identityExpression, generatedExpression := s.catalogColumnGenerationExpressions()
+	generationExpression := "NULL"
+	if !s.catalogGeneratedUnsupported {
+		generationExpression = fmt.Sprintf("CASE WHEN a.attgenerated <> '' THEN %s(ad.adbin, ad.adrelid) END", expression)
+	}
 	var fullDataTypeExpression string
 	switch {
 	case includeColumnType && includeUdtName:
@@ -1988,12 +2053,14 @@ func (s *server) queryInformationSchemaColumns(schema, table string, primary map
 		fullDataTypeExpression = "NULL AS column_type"
 	}
 	query := fmt.Sprintf(`SELECT c.column_name, c.data_type, %s, c.is_nullable, c.column_default,
-	col_description(a.attrelid, a.attnum), c.numeric_precision, c.numeric_scale, c.character_maximum_length
+	col_description(a.attrelid, a.attnum), c.numeric_precision, c.numeric_scale, c.character_maximum_length,
+	%s, %s, %s AS generation_expression
 	FROM information_schema.columns c
-	LEFT JOIN sys_catalog.sys_namespace n ON n.nspname = c.table_schema
-	LEFT JOIN sys_catalog.sys_class rel ON rel.relnamespace = n.oid AND rel.relname = c.table_name
-	LEFT JOIN sys_catalog.sys_attribute a ON a.attrelid = rel.oid AND a.attname = c.column_name AND a.attnum > 0 AND NOT a.attisdropped
-	WHERE c.table_schema = %s AND c.table_name = %s ORDER BY c.ordinal_position`, fullDataTypeExpression, quoteLiteral(schema), quoteLiteral(table))
+	LEFT JOIN %s.%s_namespace n ON n.nspname = c.table_schema
+	LEFT JOIN %s.%s_class rel ON rel.relnamespace = n.oid AND rel.relname = c.table_name
+	LEFT JOIN %s.%s_attribute a ON a.attrelid = rel.oid AND a.attname = c.column_name AND a.attnum > 0 AND NOT a.attisdropped
+	LEFT JOIN %s.%s_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+	WHERE c.table_schema = %s AND c.table_name = %s ORDER BY c.ordinal_position`, fullDataTypeExpression, identityExpression, generatedExpression, generationExpression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
 	rows, err := s.metadataQuery(query)
 	if err != nil {
 		return nil, err
@@ -2002,9 +2069,9 @@ func (s *server) queryInformationSchemaColumns(schema, table string, primary map
 	result := []columnInfo{}
 	for rows.Next() {
 		var name, dataType, nullable string
-		var fullDataType, defaultValue, comment sql.NullString
+		var fullDataType, defaultValue, comment, identity, generated, generationValue sql.NullString
 		var precision, scale, length sql.NullInt64
-		if err := rows.Scan(&name, &dataType, &fullDataType, &nullable, &defaultValue, &comment, &precision, &scale, &length); err != nil {
+		if err := rows.Scan(&name, &dataType, &fullDataType, &nullable, &defaultValue, &comment, &precision, &scale, &length, &identity, &generated, &generationValue); err != nil {
 			return nil, err
 		}
 		if !length.Valid || length.Int64 < 0 {
@@ -2014,7 +2081,11 @@ func (s *server) queryInformationSchemaColumns(schema, table string, primary map
 				length = sql.NullInt64{Int64: int64(*parsed), Valid: true}
 			}
 		}
-		result = append(result, columnInfo{Name: name, DataType: resolvedInformationSchemaDataType(dataType, fullDataType.String), ResolvedSchema: stringPtr(schema), FullDataType: fullDataType.String, IsNullable: strings.EqualFold(nullable, "YES"), ColumnDefault: nullStringPtr(defaultValue), IsPrimaryKey: primary[strings.ToLower(name)], Comment: nullStringPtr(comment), NumericPrecision: nullIntPtr(precision), NumericScale: nullIntPtr(scale), CharacterMaximumLength: nullIntPtr(length)})
+		column := columnInfo{Name: name, DataType: resolvedInformationSchemaDataType(dataType, fullDataType.String), ResolvedSchema: stringPtr(schema), FullDataType: fullDataType.String, IsNullable: strings.EqualFold(nullable, "YES"), ColumnDefault: nullStringPtr(defaultValue), IsPrimaryKey: primary[strings.ToLower(name)], Comment: nullStringPtr(comment), NumericPrecision: nullIntPtr(precision), NumericScale: nullIntPtr(scale), CharacterMaximumLength: nullIntPtr(length)}
+		if err := applyColumnGenerationMetadata(&column, identity.String, generated.String, generationValue); err != nil {
+			return nil, err
+		}
+		result = append(result, column)
 	}
 	return result, rows.Err()
 }
@@ -2051,10 +2122,14 @@ func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
 	if s.indexOrdinalityUnsupported {
 		return s.listIndexesWithoutOrdinality(catalog, prefix, effective, table)
 	}
-	rows, err := s.metadataQuery(kingbaseListIndexesQuery(catalog, prefix, effective, table))
+	keyCount, expression := s.indexMetadataExpressions(catalog)
+	rows, err := s.metadataQuery(kingbaseListIndexesQuery(catalog, prefix, effective, table, keyCount, expression))
 	if err != nil && isUnsupportedWithOrdinality(err) {
 		s.indexOrdinalityUnsupported = true
 		return s.listIndexesWithoutOrdinality(catalog, prefix, effective, table)
+	}
+	if err != nil && s.cacheMissingIndexMetadataCapability(err) {
+		return s.listIndexes(effective, table)
 	}
 	if err != nil {
 		return nil, err
@@ -2063,25 +2138,67 @@ func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
 	byName := map[string]*indexInfo{}
 	order := []string{}
 	for rows.Next() {
-		var name, kind, column string
-		var unique, primary bool
+		var name, kind string
+		var column, filter sql.NullString
+		var unique, primary, isExpression, included bool
 		var ordinal int
-		if err := rows.Scan(&name, &kind, &unique, &primary, &column, &ordinal); err != nil {
+		var rawOptions any
+		if err := rows.Scan(&name, &kind, &unique, &primary, &column, &ordinal, &isExpression, &included, &filter, &rawOptions); err != nil {
 			return nil, err
+		}
+		if !column.Valid || column.String == "" || (isExpression && strings.TrimSpace(column.String) == "") {
+			return nil, fmt.Errorf("index %q has no definition for key %d", name, ordinal)
 		}
 		item := byName[name]
 		if item == nil {
-			item = &indexInfo{Name: name, IsUnique: unique, IsPrimary: primary, IndexType: stringPtr(kind), Columns: []string{}, IncludedColumns: []string{}}
+			item = &indexInfo{Name: name, IsUnique: unique, IsPrimary: primary, IndexType: stringPtr(kind), Filter: nullStringPtr(filter), Columns: []string{}, IncludedColumns: []string{}}
 			byName[name] = item
 			order = append(order, name)
 		}
-		item.Columns = append(item.Columns, column)
+		if included {
+			item.IncludedColumns = append(item.IncludedColumns, column.String)
+		} else {
+			options, err := parseCatalogAttributeNumbers(rawOptions)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse index %q key options: %w", name, err)
+			}
+			if ordinal < 1 || ordinal > len(options) {
+				return nil, fmt.Errorf("index %q has %d options for key %d", name, len(options), ordinal)
+			}
+			item.Columns = append(item.Columns, column.String)
+			item.KeyIsExpression = append(item.KeyIsExpression, isExpression)
+			item.KeyOptions = append(item.KeyOptions, options[ordinal-1])
+		}
 	}
 	result := make([]indexInfo, 0, len(order))
 	for _, name := range order {
 		result = append(result, *byName[name])
 	}
 	return result, rows.Err()
+}
+
+func (s *server) indexMetadataExpressions(catalog string) (keyCount, expression string) {
+	keyCount = "ix.indnkeyatts"
+	if s.indexKeyCountUnsupported {
+		keyCount = "ix.indnatts"
+	}
+	expression = kingbaseCatalogFunction(catalog, "sys_get_expr", "pg_get_expr")
+	if catalog != "pg_catalog" && s.usePgDefaultExpression {
+		expression = "pg_get_expr"
+	}
+	return keyCount, expression
+}
+
+func (s *server) cacheMissingIndexMetadataCapability(err error) bool {
+	switch {
+	case !s.indexKeyCountUnsupported && isUndefinedColumn(err, "indnkeyatts"):
+		s.indexKeyCountUnsupported = true
+	case !s.usePgDefaultExpression && (isUndefinedFunction(err, "sys_get_expr") || isUndefinedFunction(err, "sys_get_indexdef")):
+		s.usePgDefaultExpression = true
+	default:
+		return false
+	}
+	return true
 }
 
 func isUnsupportedWithOrdinality(err error) bool {
@@ -2095,12 +2212,17 @@ func isUnsupportedWithOrdinality(err error) bool {
 }
 
 func (s *server) listIndexesWithoutOrdinality(catalog, prefix, schema, table string) ([]indexInfo, error) {
-	query := fmt.Sprintf(`SELECT i.relname, am.amname, ix.indisunique, ix.indisprimary, ix.indkey
+	keyCount, expression := s.indexMetadataExpressions(catalog)
+	query := fmt.Sprintf(`SELECT i.relname, am.amname, ix.indisunique, ix.indisprimary, ix.indkey,
+ix.indexrelid, %s, %s(ix.indpred, ix.indrelid), ix.indoption
 FROM %s.%s_index ix JOIN %s.%s_class t ON t.oid = ix.indrelid
 JOIN %s.%s_class i ON i.oid = ix.indexrelid JOIN %s.%s_namespace n ON n.oid = t.relnamespace
 JOIN %s.%s_am am ON am.oid = i.relam
-WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+WHERE (n.nspname = %s OR lower(n.nspname) = lower(%s)) AND (t.relname = %s OR lower(t.relname) = lower(%s)) ORDER BY i.relname`, keyCount, expression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(schema), quoteLiteral(table), quoteLiteral(table))
 	rows, err := s.metadataQuery(query)
+	if err != nil && s.cacheMissingIndexMetadataCapability(err) {
+		return s.listIndexesWithoutOrdinality(catalog, prefix, schema, table)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2109,17 +2231,28 @@ WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname`, catalog, prefix, ca
 		name, kind      string
 		unique, primary bool
 		attributeNums   []int
+		oid             int64
+		keyCount        int
+		filter          sql.NullString
+		options         []int
 	}
 	rawIndexes := []rawIndex{}
 	for rows.Next() {
 		var item rawIndex
-		var raw any
-		if err := rows.Scan(&item.name, &item.kind, &item.unique, &item.primary, &raw); err != nil {
+		var raw, rawOptions any
+		if err := rows.Scan(&item.name, &item.kind, &item.unique, &item.primary, &raw, &item.oid, &item.keyCount, &item.filter, &rawOptions); err != nil {
 			return nil, err
 		}
 		item.attributeNums, err = parseCatalogAttributeNumbers(raw)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse index %s columns: %w", item.name, err)
+		}
+		item.options, err = parseCatalogAttributeNumbers(rawOptions)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse index %q key options: %w", item.name, err)
+		}
+		if item.keyCount < 1 || item.keyCount > len(item.attributeNums) || len(item.options) < item.keyCount {
+			return nil, fmt.Errorf("index %q has inconsistent metadata: %d keys, %d attributes, %d options", item.name, item.keyCount, len(item.attributeNums), len(item.options))
 		}
 		rawIndexes = append(rawIndexes, item)
 	}
@@ -2135,10 +2268,28 @@ WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname`, catalog, prefix, ca
 	}
 	result := make([]indexInfo, 0, len(rawIndexes))
 	for _, raw := range rawIndexes {
-		item := indexInfo{Name: raw.name, IsUnique: raw.unique, IsPrimary: raw.primary, IndexType: stringPtr(raw.kind), Columns: []string{}, IncludedColumns: []string{}}
-		for _, number := range raw.attributeNums {
-			if name := attributes[number]; name != "" {
+		item := indexInfo{Name: raw.name, IsUnique: raw.unique, IsPrimary: raw.primary, IndexType: stringPtr(raw.kind), Filter: nullStringPtr(raw.filter), Columns: []string{}, IncludedColumns: []string{}}
+		for ordinal, number := range raw.attributeNums {
+			name := attributes[number]
+			if number == 0 {
+				definitionFunction := kingbaseCatalogFunction(catalog, "sys_get_indexdef", "pg_get_indexdef")
+				if catalog != "pg_catalog" && s.usePgDefaultExpression {
+					definitionFunction = "pg_catalog.pg_get_indexdef"
+				}
+				query := fmt.Sprintf("SELECT %s(%d, %d, true)", definitionFunction, raw.oid, ordinal+1)
+				if err := s.requireDBQueryRow(query, &name); err != nil {
+					return nil, fmt.Errorf("failed to read index %q key %d: %w", raw.name, ordinal+1, err)
+				}
+			}
+			if name == "" || (number == 0 && strings.TrimSpace(name) == "") {
+				return nil, fmt.Errorf("index %q has no definition for key %d", raw.name, ordinal+1)
+			}
+			if ordinal >= raw.keyCount {
+				item.IncludedColumns = append(item.IncludedColumns, name)
+			} else {
 				item.Columns = append(item.Columns, name)
+				item.KeyIsExpression = append(item.KeyIsExpression, number == 0)
+				item.KeyOptions = append(item.KeyOptions, raw.options[ordinal])
 			}
 		}
 		result = append(result, item)
@@ -2178,7 +2329,7 @@ func (s *server) relationAttributesByNumber(catalog, prefix, schema, table strin
 	query := fmt.Sprintf(`SELECT a.attnum, a.attname
 FROM %s.%s_attribute a JOIN %s.%s_class c ON c.oid = a.attrelid
 JOIN %s.%s_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped`, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+WHERE (n.nspname = %s OR lower(n.nspname) = lower(%s)) AND (c.relname = %s OR lower(c.relname) = lower(%s)) AND a.attnum > 0 AND NOT a.attisdropped`, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(schema), quoteLiteral(table), quoteLiteral(table))
 	rows, err := s.metadataQuery(query)
 	if err != nil {
 		return nil, err
@@ -2196,14 +2347,20 @@ WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped`
 	return result, rows.Err()
 }
 
-func kingbaseListIndexesQuery(catalog, prefix, schema, table string) string {
-	return fmt.Sprintf(`SELECT i.relname, am.amname, ix.indisunique, ix.indisprimary, a.attname, pos.n
+func kingbaseListIndexesQuery(catalog, prefix, schema, table, keyCount, expression string) string {
+	definitionFunction := kingbaseCatalogFunction(catalog, "sys_get_indexdef", "pg_get_indexdef")
+	if catalog != "pg_catalog" && strings.Contains(expression, "pg_get_expr") {
+		definitionFunction = "pg_catalog.pg_get_indexdef"
+	}
+	return fmt.Sprintf(`SELECT i.relname, am.amname, ix.indisunique, ix.indisprimary,
+CASE WHEN pos.attnum = 0 THEN %s(ix.indexrelid, CAST(pos.n AS integer), true) ELSE CAST(a.attname AS text) END, pos.n,
+pos.attnum = 0, pos.n > %s, %s(ix.indpred, ix.indrelid), ix.indoption
 FROM %s.%s_index ix JOIN %s.%s_class t ON t.oid = ix.indrelid
 JOIN %s.%s_class i ON i.oid = ix.indexrelid JOIN %s.%s_namespace n ON n.oid = t.relnamespace
 JOIN %s.%s_am am ON am.oid = i.relam
 JOIN unnest(ix.indkey) WITH ORDINALITY AS pos(attnum,n) ON true
-JOIN %s.%s_attribute a ON a.attrelid = t.oid AND a.attnum = pos.attnum
-WHERE n.nspname = %s AND t.relname = %s ORDER BY i.relname, pos.n`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+LEFT JOIN %s.%s_attribute a ON a.attrelid = t.oid AND a.attnum = pos.attnum
+WHERE (n.nspname = %s OR lower(n.nspname) = lower(%s)) AND (t.relname = %s OR lower(t.relname) = lower(%s)) ORDER BY i.relname, pos.n`, definitionFunction, keyCount, expression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(schema), quoteLiteral(table), quoteLiteral(table))
 }
 
 func kingbaseCatalogFunction(catalog, sysFunction, postgresFunction string) string {
@@ -2606,6 +2763,10 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 }
 
 func (s *server) getObjectSourceForRelation(schema, name, objectType, relationName string) (map[string]any, error) {
+	return s.getObjectSourceWithSignature(schema, name, objectType, relationName, nil)
+}
+
+func (s *server) getObjectSourceWithSignature(schema, name, objectType, relationName string, signature *string) (map[string]any, error) {
 	effective, err := s.effectiveSchema(schema)
 	if err != nil {
 		return nil, err
@@ -2613,60 +2774,11 @@ func (s *server) getObjectSourceForRelation(schema, name, objectType, relationNa
 	source := ""
 	kind := strings.ToUpper(objectType)
 	if kind == "VIEW" {
-		if s.mode.mysqlCompat {
-			err = s.requireDBQueryRow("SELECT view_definition FROM information_schema.views WHERE table_schema = "+quoteLiteral(effective)+" AND table_name = "+quoteLiteral(name), &source)
-		} else {
-			catalog, prefix, function := "sys_catalog", "sys", "sys_get_viewdef"
-			if s.mode.postgresCatalog {
-				catalog, prefix, function = "pg_catalog", "pg", "pg_get_viewdef"
-			} else if s.usePgViewDefinition {
-				function = "pg_get_viewdef"
-			}
-			querySource := func(definitionFunction string) error {
-				query := fmt.Sprintf("SELECT %s(c.oid) FROM %s.%s_class c JOIN %s.%s_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname=%s LIMIT 1", definitionFunction, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(name))
-				return s.requireDBQueryRow(query, &source)
-			}
-			err = querySource(function)
-			if err != nil && function == "sys_get_viewdef" && isUndefinedFunction(err, function) {
-				s.usePgViewDefinition = true
-				err = querySource("pg_get_viewdef")
-			}
-		}
+		source, err = s.getViewSource(effective, name)
 	} else if kind == "MATERIALIZED_VIEW" {
 		source, err = s.getMaterializedViewSource(effective, name)
 	} else if kind == "FUNCTION" || kind == "PROCEDURE" {
-		catalog, prefix, function := "sys_catalog", "sys", "sys_get_functiondef"
-		if s.mode.postgresCatalog {
-			catalog, prefix, function = "pg_catalog", "pg", "pg_get_functiondef"
-		} else if s.usePgFunctionDefinition {
-			function = "pg_get_functiondef"
-		}
-		querySource := func(definitionFunction string) error {
-			query := fmt.Sprintf("SELECT %s(p.oid) FROM %s.%s_proc p JOIN %s.%s_namespace n ON n.oid=p.pronamespace WHERE n.nspname=%s AND p.proname=%s ORDER BY CASE WHEN p.prorettype=2278 THEN 0 ELSE 1 END LIMIT 1", definitionFunction, catalog, prefix, catalog, prefix, quoteLiteral(effective), quoteLiteral(name))
-			return s.requireDBQueryRow(query, &source)
-		}
-		queryLegacySource := func() error {
-			legacyFunction := "GET_FUNC_DDL"
-			if kind == "PROCEDURE" {
-				legacyFunction = "GET_PROCEDURE_DDL"
-			}
-			query := fmt.Sprintf("SELECT DBMS_METADATA.%s(CAST(%s AS varchar(128)), CAST(%s AS varchar(128)))", legacyFunction, quoteLiteral(name), quoteLiteral(effective))
-			return s.requireDBQueryRow(query, &source)
-		}
-		if s.useLegacyRoutineDefinition {
-			err = queryLegacySource()
-		} else {
-			err = querySource(function)
-			if err != nil && function == "sys_get_functiondef" && isUndefinedFunction(err, function) {
-				s.usePgFunctionDefinition = true
-				function = "pg_get_functiondef"
-				err = querySource(function)
-			}
-			if err != nil && !s.mode.postgresCatalog && function == "pg_get_functiondef" && isUndefinedFunction(err, function) {
-				s.useLegacyRoutineDefinition = true
-				err = queryLegacySource()
-			}
-		}
+		source, err = s.getRoutineSource(effective, name, kind, signature)
 	} else if kind == "TRIGGER" {
 		definitions, triggerErr := s.listTriggerDefinitionsFor(effective, relationName, name)
 		if triggerErr != nil {
@@ -2687,6 +2799,60 @@ func (s *server) getObjectSourceForRelation(schema, name, objectType, relationNa
 		result["editable"] = false
 	}
 	return result, nil
+}
+
+func (s *server) getViewSource(schema, name string) (string, error) {
+	querySource := func(query string) (string, error) {
+		var source sql.NullString
+		if err := s.requireDBQueryRow(query, &source); err != nil {
+			return "", err
+		}
+		if !source.Valid || strings.TrimSpace(source.String) == "" {
+			return "", sql.ErrNoRows
+		}
+		return source.String, nil
+	}
+	if s.mode.mysqlCompat {
+		// information_schema can expose a view while hiding its definition from
+		// a non-owner with SELECT privileges. Try the catalogs as the same user.
+		source, err := querySource("SELECT view_definition FROM information_schema.views WHERE table_schema = " + quoteLiteral(schema) + " AND table_name = " + quoteLiteral(name))
+		if err == nil {
+			return source, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+	}
+
+	catalog, prefix, function := "sys_catalog", "sys", "sys_get_viewdef"
+	if s.mode.postgresCatalog {
+		catalog, prefix, function = "pg_catalog", "pg", "pg_get_viewdef"
+	} else if s.usePgViewDefinition {
+		function = "pg_get_viewdef"
+	}
+	queryCatalog := func(definitionFunction string) (string, error) {
+		query := fmt.Sprintf("SELECT %s(c.oid) FROM %s.%s_class c JOIN %s.%s_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname=%s AND c.relkind = 'v' LIMIT 1", definitionFunction, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(name))
+		return querySource(query)
+	}
+	source, err := queryCatalog(function)
+	if err == nil {
+		return source, nil
+	}
+	if function == "sys_get_viewdef" {
+		if isUndefinedFunction(err, function) {
+			s.usePgViewDefinition = true
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+		source, err = queryCatalog("pg_get_viewdef")
+		if err == nil {
+			return source, nil
+		}
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("view %q.%q does not exist or its source definition is unavailable to the current user", schema, name)
+	}
+	return "", err
 }
 
 func (s *server) getMaterializedViewSource(schema, name string) (string, error) {
@@ -2737,6 +2903,14 @@ func (s *server) getTableDDL(schema, table string) (string, error) {
 	columns, err := s.getColumns(effective, table)
 	if err != nil {
 		return "", err
+	}
+	if len(columns) == 0 {
+		if visibleColumns, fallbackErr := s.getColumns("", table); fallbackErr == nil && len(visibleColumns) > 0 {
+			columns = visibleColumns
+			if columns[0].ResolvedSchema != nil && *columns[0].ResolvedSchema != "" {
+				effective = *columns[0].ResolvedSchema
+			}
+		}
 	}
 	tableComment, _ := s.getTableComment(effective, table)
 	ddl := s.renderTableDDL(effective, table, columns, tableComment)
@@ -3037,21 +3211,100 @@ func (s *server) effectiveSchema(schema string) (string, error) {
 func (s *server) primaryKeys(schema, table string) (map[string]bool, error) {
 	query := `SELECT kcu.column_name FROM information_schema.table_constraints tc
 JOIN information_schema.key_column_usage kcu ON kcu.constraint_schema=tc.constraint_schema AND kcu.constraint_name=tc.constraint_name AND kcu.table_schema=tc.table_schema AND kcu.table_name=tc.table_name
-WHERE tc.table_schema=` + quoteLiteral(schema) + ` AND tc.table_name=` + quoteLiteral(table) + ` AND tc.constraint_type='PRIMARY KEY' ORDER BY kcu.ordinal_position`
+WHERE (tc.table_schema=` + quoteLiteral(schema) + ` OR lower(tc.table_schema)=lower(` + quoteLiteral(schema) + `))
+  AND (tc.table_name=` + quoteLiteral(table) + ` OR lower(tc.table_name)=lower(` + quoteLiteral(table) + `))
+  AND tc.constraint_type='PRIMARY KEY' ORDER BY kcu.ordinal_position`
 	rows, err := s.metadataQuery(query)
+	result := map[string]bool{}
 	if err != nil {
-		return nil, err
+		log.Printf("[kingbase-go][primaryKeys] information_schema query failed: schema=%q table=%q err=%v", schema, table, err)
+	} else {
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				return nil, err
+			}
+			result[strings.ToLower(name)] = true
+		}
+		if err := rows.Err(); err != nil {
+			log.Printf("[kingbase-go][primaryKeys] information_schema query failed: schema=%q table=%q err=%v", schema, table, err)
+		}
+	}
+	if len(result) > 0 {
+		return result, nil
+	}
+	s.appendCatalogPrimaryKeys(result, schema, table)
+	return result, nil
+}
+
+// appendCatalogPrimaryKeys recovers primary keys from the system catalog when
+// information_schema reports none, e.g. in MySQL-compatibility modes. indkey
+// spans key and INCLUDE columns, so only positions up to indnkeyatts count and
+// keep declaration order; older servers fall back to indnatts (they predate
+// INCLUDE columns) or to a plain ANY membership without WITH ORDINALITY.
+func (s *server) appendCatalogPrimaryKeys(result map[string]bool, schema, table string) {
+	catalog, prefix := "sys_catalog", "sys"
+	if s.mode.postgresCatalog {
+		catalog, prefix = "pg_catalog", "pg"
+	}
+	rows, err := s.metadataQuery(s.primaryKeysCatalogQuery(catalog, prefix, schema, table))
+	if err != nil {
+		retry := false
+		if !s.indexOrdinalityUnsupported && isUnsupportedWithOrdinality(err) {
+			s.indexOrdinalityUnsupported = true
+			retry = true
+		} else if s.cacheMissingIndexMetadataCapability(err) {
+			retry = true
+		}
+		if !retry {
+			log.Printf("[kingbase-go][primaryKeys] catalog fallback query failed: schema=%q table=%q err=%v", schema, table, err)
+			return
+		}
+		rows, err = s.metadataQuery(s.primaryKeysCatalogQuery(catalog, prefix, schema, table))
+		if err != nil {
+			log.Printf("[kingbase-go][primaryKeys] catalog fallback query failed: schema=%q table=%q err=%v", schema, table, err)
+			return
+		}
 	}
 	defer rows.Close()
-	result := map[string]bool{}
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			return nil, err
+			log.Printf("[kingbase-go][primaryKeys] catalog fallback row scan failed: schema=%q table=%q err=%v", schema, table, err)
+			return
 		}
 		result[strings.ToLower(name)] = true
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		log.Printf("[kingbase-go][primaryKeys] catalog fallback query failed: schema=%q table=%q err=%v", schema, table, err)
+	}
+}
+
+func (s *server) primaryKeysCatalogQuery(catalog, prefix, schema, table string) string {
+	predicate := fmt.Sprintf(`(n.nspname = %s OR lower(n.nspname) = lower(%s))
+  AND (t.relname = %s OR lower(t.relname) = lower(%s))`, quoteLiteral(schema), quoteLiteral(schema), quoteLiteral(table), quoteLiteral(table))
+	if s.indexOrdinalityUnsupported {
+		return fmt.Sprintf(`SELECT a.attname
+FROM %s.%s_index ix
+JOIN %s.%s_class t ON t.oid = ix.indrelid
+JOIN %s.%s_namespace n ON n.oid = t.relnamespace
+JOIN %s.%s_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+WHERE %s
+  AND ix.indisprimary
+ORDER BY a.attnum`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, predicate)
+	}
+	keyCount, _ := s.indexMetadataExpressions(catalog)
+	return fmt.Sprintf(`SELECT a.attname
+FROM %s.%s_index ix
+JOIN %s.%s_class t ON t.oid = ix.indrelid
+JOIN %s.%s_namespace n ON n.oid = t.relnamespace
+JOIN unnest(ix.indkey) WITH ORDINALITY AS k(attnum, pos) ON true
+JOIN %s.%s_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+WHERE %s
+  AND ix.indisprimary
+  AND k.pos <= %s
+ORDER BY k.pos`, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, predicate, keyCount)
 }
 
 func (s *server) applyIdentityMetadata(schema, table string, columns []columnInfo) {
@@ -3079,6 +3332,7 @@ WHERE n.nspname=` + quoteLiteral(schema) + ` AND c.relname=` + quoteLiteral(tabl
 					extra = "IDENTITY(" + seed.String + "," + increment.String + ")"
 				}
 				column.Extra = &extra
+				column.ColumnDefault = nil
 			}
 		}
 	}

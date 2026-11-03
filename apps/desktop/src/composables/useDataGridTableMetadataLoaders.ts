@@ -1,8 +1,9 @@
-import { computed, type ComputedRef, type Ref } from "vue";
+import { computed, getCurrentScope, onScopeDispose, ref, watch, type ComputedRef, type Ref } from "vue";
 import * as api from "@/lib/backend/api";
+import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { applyDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
-import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
+import { loadObjectDdl, type ObjectDdlRequest } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { tableObjectSourceKind } from "@/lib/table/tableObjectSourceKind";
 import { columnIndexMetadataRequestCurrent, columnIndexTableIdentity } from "@/lib/dataGrid/dataGridColumnIndexIcon";
@@ -84,20 +85,27 @@ export interface DataGridTableMetadataLoaderOptions {
 export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLoaderOptions) {
   const { props, state } = options;
 
+  const defaultSchema = () => {
+    if (isSchemaAware(options.resolvedDatabaseType.value)) {
+      return props.tableMeta?.schema || props.schema || "";
+    }
+    return props.tableMeta?.schema || props.schema || props.database || "";
+  };
+
   const currentTableIdentity = (kind: "columns" | "owner" | "indexes" | "foreignKeys" | "constraints") =>
     kind === "foreignKeys"
       ? foreignKeyTableIdentity({
           connectionId: props.connectionId,
           database: props.database,
           catalog: props.tableMeta?.catalog,
-          schema: props.tableMeta?.schema,
+          schema: defaultSchema(),
           tableName: props.tableMeta?.tableName,
         })
       : columnIndexTableIdentity({
           connectionId: props.connectionId,
           database: props.database,
           catalog: props.tableMeta?.catalog,
-          schema: props.tableMeta?.schema,
+          schema: defaultSchema(),
           tableName: props.tableMeta?.tableName,
         });
 
@@ -105,8 +113,9 @@ export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLo
     if (!props.connectionId || !props.tableMeta) return undefined;
     return {
       connectionId: props.connectionId,
+      queryTimeoutSecs: options.connectionStore.getConfig(props.connectionId)?.query_timeout_secs,
       database: props.database || "",
-      schema: props.tableMeta.schema || props.database || "",
+      schema: defaultSchema(),
       tableName: props.tableMeta.tableName,
       catalog: props.tableMeta.catalog,
       objectType: tableObjectSourceKind(props.tableMeta.tableType),
@@ -117,24 +126,63 @@ export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLo
   const currentForeignKeyTableIdentity = computed(() => currentTableIdentity("foreignKeys"));
   const currentConstraintTableIdentity = computed(() => currentTableIdentity("constraints"));
 
-  async function fetchDdl(force = options.settingsStore.editorSettings.refreshDdlOnOpen) {
-    const request = tableRequest();
+  let ddlRequestGeneration = 0;
+  const ddlError = ref("");
+  watch(
+    [
+      () => props.connectionId,
+      () => props.database,
+      () => props.schema,
+      () => props.tableMeta?.database,
+      () => props.tableMeta?.schema,
+      () => props.tableMeta?.catalog,
+      () => props.tableMeta?.tableName,
+      () => props.tableMeta?.tableType,
+      options.resolvedDatabaseType,
+      () => (options.resolvedDatabaseType.value === "oracle" || options.resolvedDatabaseType.value === "oceanbase-oracle") && options.settingsStore.editorSettings.separateDdlIndexes,
+    ],
+    () => {
+      ddlRequestGeneration++;
+      state.ddlContent.value = "";
+      state.ddlLoading.value = false;
+      ddlError.value = "";
+    },
+    { flush: "sync" },
+  );
+  if (getCurrentScope())
+    onScopeDispose(() => {
+      ddlRequestGeneration++;
+    });
+
+  // The properties drawer has no cache preference; reopening it must reflect external schema changes.
+  async function fetchDdl(force = true) {
+    const request: ObjectDdlRequest | undefined = tableRequest();
     if (!request) return;
     // Query execution and source-table metadata can belong to different
     // databases (for example SQL Server three-part table references).
     request.database = props.tableMeta?.database || request.database;
-    request.schema = props.tableMeta?.schema || props.schema || props.database || "";
+    request.schema = defaultSchema();
+    const requestGeneration = ++ddlRequestGeneration;
+    const databaseType = options.resolvedDatabaseType.value;
+    if (databaseType === "oracle" || databaseType === "oceanbase-oracle") request.separateIndexes = options.settingsStore.editorSettings.separateDdlIndexes;
+    const includeDatabaseName = options.settingsStore.editorSettings.generateSqlIncludeDatabaseName;
+    const quoteIdentifiers = options.settingsStore.editorSettings.generateSqlQuoteIdentifiers;
+    const sourceDatabase = props.tableMeta?.database;
     options.showTableInfo.value = true;
     state.ddlLoading.value = true;
+    ddlError.value = "";
     try {
       const { ddl } = await loadObjectDdl(request, { force });
-      const formatDialect = sqlFormatDialectForDbType(options.resolvedDatabaseType.value);
-      const unqualified = applyDdlDatabaseQualifier(ddl, formatDialect, options.resolvedDatabaseType.value, options.settingsStore.editorSettings.generateSqlIncludeDatabaseName, props.tableMeta?.database, props.tableMeta?.catalog);
-      state.ddlContent.value = options.settingsStore.editorSettings.generateSqlQuoteIdentifiers ? unqualified : omitDdlIdentifierQuotes(unqualified, formatDialect);
+      if (requestGeneration !== ddlRequestGeneration) return;
+      const formatDialect = sqlFormatDialectForDbType(databaseType);
+      const unqualified = applyDdlDatabaseQualifier(ddl, formatDialect, databaseType, includeDatabaseName, sourceDatabase, request.catalog);
+      state.ddlContent.value = quoteIdentifiers ? unqualified : omitDdlIdentifierQuotes(unqualified, formatDialect);
     } catch (error: any) {
+      if (requestGeneration !== ddlRequestGeneration) return;
+      ddlError.value = String(error?.message || error);
       state.ddlContent.value = `-- Error: ${error}`;
     } finally {
-      state.ddlLoading.value = false;
+      if (requestGeneration === ddlRequestGeneration) state.ddlLoading.value = false;
     }
   }
 
@@ -304,6 +352,7 @@ export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLo
   }
 
   return {
+    ddlError,
     currentIndexTableIdentity,
     currentForeignKeyTableIdentity,
     currentConstraintTableIdentity,

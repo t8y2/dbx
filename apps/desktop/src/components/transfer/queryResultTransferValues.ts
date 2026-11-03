@@ -260,6 +260,12 @@ export function queryResultTransferTargetType(sourceType: string | undefined, da
     if (databaseType === "h2" || databaseType === "db2") return "BLOB";
     return "BLOB";
   }
+  if (/^(?:uuid|uniqueidentifier)$/.test(type)) {
+    if (POSTGRES_TYPES.has(databaseType)) return "uuid";
+    if (databaseType === "sqlserver") return "uniqueidentifier";
+    if (databaseType === "mysql") return "char(36)";
+    return textTargetType(databaseType);
+  }
   return textTargetType(databaseType);
 }
 

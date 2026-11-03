@@ -203,6 +203,26 @@ describe("buildSnippetItems", () => {
     expect(items[0].apply).toBe("SELECT *\nFROM ${table}\nLIMIT 7;");
   });
 
+  it.each([
+    ["single-line select for SQL Server", { ...BUILTIN_SELECT, body: "SELECT * FROM table LIMIT 100;" }, "sqlserver", "SELECT TOP 100 * FROM table;", "SELECT TOP 100 * FROM ${table};"],
+    ["single-line select for MySQL", { ...BUILTIN_SELECT, body: "SELECT * FROM table LIMIT 100;" }, "mysql", "SELECT * FROM table LIMIT 100;", "SELECT * FROM ${table} LIMIT 100;"],
+    ["re-wrapped select for Oracle", { ...BUILTIN_SELECT, body: "SELECT * FROM table\n  LIMIT 100;" }, "oracle", "SELECT *\nFROM table\nWHERE ROWNUM <= 100;", "SELECT *\nFROM ${table}\nWHERE ROWNUM <= 100;"],
+    ["CRLF select for Oracle", { ...BUILTIN_SELECT, body: "SELECT *\r\nFROM table\r\nLIMIT 100;" }, "oracle", "SELECT *\nFROM table\nWHERE ROWNUM <= 100;", "SELECT *\nFROM ${table}\nWHERE ROWNUM <= 100;"],
+    ["single-line update for ClickHouse", { ...BUILTIN_UPDATE, body: "UPDATE table SET column = value WHERE condition;" }, "clickhouse", "ALTER TABLE table UPDATE column = value WHERE condition;", "ALTER TABLE ${table} UPDATE ${column} = ${value} WHERE ${condition};"],
+    [
+      "re-indented CTE",
+      { ...BUILTIN_CTE, body: "WITH name AS (\n    SELECT columns\n    FROM table\n)\nSELECT *\nFROM name;" },
+      "oracle",
+      "WITH name AS (\n    SELECT columns\n    FROM table\n)\nSELECT *\nFROM name;",
+      "WITH ${name} AS (\n    SELECT ${columns}\n    FROM ${table}\n)\nSELECT *\nFROM ${name};",
+    ],
+  ] as const)("adapts a layout-only edit of a built-in snippet: %s", (_case, snippet, databaseType, detail, apply) => {
+    const items = buildSnippetItemsForTest(snippet.prefix, [snippet], undefined, databaseType);
+
+    expect(items[0].detail).toBe(detail);
+    expect(items[0].apply).toBe(apply);
+  });
+
   it("replaces placeholder words but preserves uppercase SQL keywords", () => {
     const items = buildSnippetItemsForTest("ct", [BUILTIN_CREATE_TABLE]);
 
@@ -304,5 +324,42 @@ describe("buildSnippetItems", () => {
   it("returns empty for empty prefix", () => {
     const items = buildSnippetItemsForTest("", TEST_SNIPPETS);
     expect(items).toEqual([]);
+  });
+});
+
+describe("snippet ranking", () => {
+  const SEQUENCE_OBJECTS = [
+    { name: "SEQ_SEL_A", type: "sequence" as const },
+    { name: "SEQ_SEL_B", type: "sequence" as const },
+  ];
+
+  // Regression for #13115: sequences pin themselves to the top of the list while
+  // no columns are expected, so on an Oracle-family connection (Dameng here)
+  // typing the `sel` trigger listed every `SEL*` sequence above `select *` and
+  // Tab expanded a sequence instead of the snippet.
+  it("ranks an exactly matched snippet above sequences without a column context", () => {
+    const items = buildSqlCompletionItems("sel", 3, {
+      databaseType: "dameng",
+      tables: [],
+      columnsByTable: new Map(),
+      objects: SEQUENCE_OBJECTS,
+    });
+
+    expect(items[0]).toMatchObject({ type: "snippet", label: "select *", filterText: "sel" });
+    expect(items.filter((item) => item.type === "sequence").map((item) => item.label)).toEqual(["SEQ_SEL_A", "SEQ_SEL_B"]);
+  });
+
+  it("keeps sequences ahead of ordinary candidates when the prefix is only a partial match", () => {
+    const items = buildSqlCompletionItems("se", 2, {
+      databaseType: "dameng",
+      tables: [],
+      columnsByTable: new Map(),
+      objects: SEQUENCE_OBJECTS,
+    });
+
+    const firstSequence = items.findIndex((item) => item.type === "sequence");
+    const firstNonSequence = items.findIndex((item) => item.type !== "sequence");
+    expect(firstSequence).toBeGreaterThanOrEqual(0);
+    expect(firstSequence).toBeLessThan(firstNonSequence);
   });
 });

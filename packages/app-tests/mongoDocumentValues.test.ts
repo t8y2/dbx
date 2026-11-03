@@ -169,6 +169,48 @@ test("preserves existing Mongo strings that resemble typed literals", () => {
   });
 });
 
+test("keeps the BSON number type of edited Mongo fields", () => {
+  const original = {
+    _id: { $oid: "65f000000000000000000001" },
+    count: { $numberInt: "1" },
+    total: { $numberLong: "2" },
+    ratio: { $numberDouble: "1.5" },
+    price: { $numberDecimal: "9.99" },
+  };
+  const changes = new Map<number, string | number | boolean | null>([
+    [1, "200"],
+    [2, 7],
+    [3, "3"],
+    [4, "10.50"],
+  ]);
+
+  assert.deepEqual(buildMongoUpdateDocument(changes, ["_id", "count", "total", "ratio", "price"], original), {
+    $set: {
+      count: { $numberInt: "200" },
+      total: { $numberLong: "7" },
+      ratio: { $numberDouble: "3" },
+      price: { $numberDecimal: "10.50" },
+    },
+  });
+});
+
+test("falls back to inferred types when an edit no longer fits the Mongo number type", () => {
+  const original = { _id: "1", count: { $numberInt: "1" }, other: { $numberInt: "1" }, label: { $numberInt: "1" } };
+  const changes = new Map<number, string | number | boolean | null>([
+    [1, "2147483648"],
+    [2, "1.5"],
+    [3, "abc"],
+  ]);
+
+  assert.deepEqual(buildMongoUpdateDocument(changes, ["_id", "count", "other", "label"], original), {
+    $set: {
+      count: 2147483648,
+      other: 1.5,
+      label: "abc",
+    },
+  });
+});
+
 test("keeps JSON inference for fields without an existing Mongo type", () => {
   const changes = new Map<number, string | number | boolean | null>([
     [1, '{"enabled":true}'],
@@ -241,9 +283,31 @@ test("applies sorted Mongo grid edits to a cloned BSON baseline by document id",
   ]);
 });
 
-test("builds Mongo inserts with parsed date values", () => {
-  assert.deepEqual(buildMongoInsertDocument(["ignored", 'new Date("2026-06-10T13:59:31.287Z")'], ["_id", "createdAt"]), {
+test("builds Mongo inserts with parsed date values and omits empty _id", () => {
+  assert.deepEqual(buildMongoInsertDocument([null, 'new Date("2026-06-10T13:59:31.287Z")'], ["_id", "createdAt"]), {
     createdAt: { $date: "2026-06-10T13:59:31.287Z" },
+  });
+  assert.deepEqual(buildMongoInsertDocument(["", 'new Date("2026-06-10T13:59:31.287Z")'], ["_id", "createdAt"]), {
+    createdAt: { $date: "2026-06-10T13:59:31.287Z" },
+  });
+});
+
+test("builds Mongo inserts preserving custom _id values (#11523)", () => {
+  assert.deepEqual(buildMongoInsertDocument(["custom_id_1", "Lin"], ["_id", "name"]), {
+    _id: "custom_id_1",
+    name: "Lin",
+  });
+  assert.deepEqual(buildMongoInsertDocument(["42", "Lin"], ["_id", "name"]), {
+    _id: 42,
+    name: "Lin",
+  });
+  assert.deepEqual(buildMongoInsertDocument(['ObjectId("507f1f77bcf86cd799439011")', "Lin"], ["_id", "name"]), {
+    _id: { $oid: "507f1f77bcf86cd799439011" },
+    name: "Lin",
+  });
+  assert.deepEqual(buildMongoInsertDocument(["507f1f77bcf86cd799439011", "Lin"], ["_id", "name"]), {
+    _id: { $oid: "507f1f77bcf86cd799439011" },
+    name: "Lin",
   });
 });
 
@@ -289,6 +353,18 @@ test("projects original Mongo values without guessing types", () => {
 
 test("applies only explicit Mongo grid edits to copied original documents", () => {
   assert.deepEqual(buildMongoCopyDocumentFromOriginal({ _id: "1", count: "123", profile: { role: "admin" } }, ["1", "456", '{"role":"maintainer"}'], ["_id", "count", "profile"], [false, true, false], { excludePrimaryKeys: true }), {
+    count: 456,
+    profile: { role: "admin" },
+  });
+});
+
+test("applies custom _id when explicitly edited on copied original documents (#11523)", () => {
+  assert.deepEqual(buildMongoCopyDocumentFromOriginal({ _id: { $oid: "507f1f77bcf86cd799439011" }, count: "123", profile: { role: "admin" } }, ["custom_id_2", "456", '{"role":"maintainer"}'], ["_id", "count", "profile"], [true, true, false], { excludePrimaryKeys: true }), {
+    _id: "custom_id_2",
+    count: 456,
+    profile: { role: "admin" },
+  });
+  assert.deepEqual(buildMongoCopyDocumentFromOriginal({ _id: { $oid: "507f1f77bcf86cd799439011" }, count: "123", profile: { role: "admin" } }, ["", "456", '{"role":"maintainer"}'], ["_id", "count", "profile"], [true, true, false], { excludePrimaryKeys: true }), {
     count: 456,
     profile: { role: "admin" },
   });
@@ -405,7 +481,11 @@ test("keeps explicit Mongo null fields distinct from missing fields during grid 
     _id: "1",
     nullable: null,
   });
+  assert.deepEqual(buildMongoInsertDocument([null, MONGO_DOCUMENT_GRID_NULL, null], columns), {
+    nullable: null,
+  });
   assert.deepEqual(buildMongoInsertDocument(["1", MONGO_DOCUMENT_GRID_NULL, null], columns), {
+    _id: 1,
     nullable: null,
   });
   assert.deepEqual(buildMongoCopyInsertDocument(["1", MONGO_DOCUMENT_GRID_NULL, null], columns), {
@@ -452,8 +532,8 @@ test("counts typed BSON scalars as numbers so a column total keeps its negative 
   const summary = summarizeSelection({ columns: ["charactersUsed"], rows }, { numericValue: mongoDocumentGridNumericValue });
 
   assert.equal(summary.numericCount, 5);
-  assert.equal(summary.sum, 2528.125 - 12.5 - 100.5 - 5 + 9);
-  assert.equal(summary.average, (2528.125 - 12.5 - 100.5 - 5 + 9) / 5);
+  assert.equal(summary.sum, "2419.125");
+  assert.equal(summary.average, "483.825");
 });
 
 test("keeps non-numeric Mongo cells out of a column total", () => {

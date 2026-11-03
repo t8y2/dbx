@@ -12,11 +12,11 @@ import type { DataGridStructuredFilterRule } from "@/composables/useDataGridFilt
 import type { DataGridStructuredSortRule } from "@/composables/useDataGridSortBuilder";
 import type { DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
 import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
-import type { DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
+import type { DataGridDistinctValueSource, DataGridDistinctValueSuggestionState, DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
 import type { DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import type { DataGridFilterEditorView } from "@/stores/settingsStore";
 import type { DatabaseType } from "@/types/database";
-import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
+import { clampSearchSplitWidth, MIN_SEARCH_SPLIT_PANE_WIDTH } from "@/lib/dataGrid/dataGridSearchSplit";
 
 type LocalFilterSummary = {
   columnIndex: number;
@@ -80,10 +80,12 @@ const emit = defineEmits<{
   openValueSuggestions: [id: string, target: DataGridDistinctValueSuggestionTarget];
   closeValueSuggestions: [];
   updateValueSuggestionSearch: [value: string];
+  updateValueSuggestionSource: [source: DataGridDistinctValueSource];
   selectValueSuggestion: [option: DataGridLocalFilterOption];
   toggleValueSuggestion: [option: DataGridLocalFilterOption];
   toggleAllValueSuggestions: [];
   applyValueSuggestions: [];
+  customModeOrder: [];
   addSortRule: [];
   removeSortRule: [id: string];
   moveSortRule: [id: string, targetIndex: number];
@@ -113,7 +115,15 @@ const resizing = ref(false);
 let resizeStartX = 0;
 let resizeStartWidth = 0;
 
-const wherePaneStyle = computed(() => (whereWidth.value == null ? {} : { flex: `0 0 ${whereWidth.value}px` }));
+const wherePaneStyle = computed(() =>
+  whereWidth.value == null
+    ? {}
+    : {
+        // Retain the dragged preference while keeping both panes visible when
+        // their container later shrinks, without a reactive resize loop.
+        flex: `0 0 clamp(min(${MIN_SEARCH_SPLIT_PANE_WIDTH}px, 50%), ${whereWidth.value}px, max(50%, calc(100% - ${MIN_SEARCH_SPLIT_PANE_WIDTH}px)))`,
+      },
+);
 
 function containerWidth(): number {
   return containerRef.value?.getBoundingClientRect().width ?? 0;
@@ -280,10 +290,12 @@ onUnmounted(onResizeEnd);
               @open-value-suggestions="(id, target) => emit('openValueSuggestions', id, target)"
               @close-value-suggestions="emit('closeValueSuggestions')"
               @update-value-suggestion-search="emit('updateValueSuggestionSearch', $event)"
+              @update-value-suggestion-source="emit('updateValueSuggestionSource', $event)"
               @select-value-suggestion="emit('selectValueSuggestion', $event)"
               @toggle-value-suggestion="emit('toggleValueSuggestion', $event)"
               @toggle-all-value-suggestions="emit('toggleAllValueSuggestions')"
               @apply-value-suggestions="emit('applyValueSuggestions')"
+              @custom-mode-order="emit('customModeOrder')"
             />
           </PopoverContent>
         </Popover>

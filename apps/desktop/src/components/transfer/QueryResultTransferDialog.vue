@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { isSchemaAware } from "@/lib/database/databaseFeatureSupport";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
@@ -171,7 +172,7 @@ onBeforeUnmount(() => {
   sourceRevision += 1;
 });
 
-const sqlConnections = computed(() => connections.connections.filter((item) => supportsQueryResultTransfer(item)));
+const sqlConnections = computed(() => connections.connections.filter((item) => !mysqlDataCharsetEnabled(item) && supportsQueryResultTransfer(item)));
 const targetConfig = computed<ConnectionConfig | undefined>(() => (targetConnectionId.value ? connections.getConfig(targetConnectionId.value) : undefined));
 const targetDatabaseType = computed(() => queryResultTransferDatabaseType(targetConfig.value));
 const reviewMode = ref<"preview" | "confirm" | null>(null);
@@ -181,7 +182,10 @@ const reviewOpen = computed({
     if (!value) reviewMode.value = null;
   },
 });
-const canTransfer = computed(() => open.value && !!targetConfig.value && !!targetDatabaseType.value && !!targetDatabase.value.trim() && !!targetTable.value.trim() && (!isSchemaAware(targetDatabaseType.value) || !!targetSchema.value.trim()) && !submitting.value && !databasesLoading.value);
+const compatibilityBlocked = computed(() => mysqlDataCharsetEnabled(connections.getConfig(props.sourceConnectionId)) || mysqlDataCharsetEnabled(targetConfig.value));
+const canTransfer = computed(
+  () => !compatibilityBlocked.value && open.value && !!targetConfig.value && !!targetDatabaseType.value && !!targetDatabase.value.trim() && !!targetTable.value.trim() && (!isSchemaAware(targetDatabaseType.value) || !!targetSchema.value.trim()) && !submitting.value && !databasesLoading.value,
+);
 const sourceLocation = computed(() => [connections.getConfig(props.sourceConnectionId)?.name || props.sourceConnectionId, props.sourceDatabase, props.sourceSchema, props.sourceTable || props.result.sourceLabel].filter(Boolean).join(" / "));
 const targetLocation = computed(() => [targetConfig.value?.name, targetDatabase.value.trim(), isSchemaAware(targetDatabaseType.value) ? targetSchema.value.trim() : undefined, targetTable.value.trim()].filter(Boolean).join(" / "));
 const operationSummary = computed(() => t(createTable.value ? "grid.exportDatabasePlanCreate" : mode.value === "overwrite" ? "grid.exportDatabasePlanOverwrite" : "grid.exportDatabasePlanAppend"));
@@ -278,6 +282,7 @@ function requestCancel() {
 }
 
 async function transfer() {
+  if (compatibilityBlocked.value) return;
   const config = targetConfig.value;
   const databaseType = targetDatabaseType.value;
   const database = targetDatabase.value.trim();
@@ -535,6 +540,7 @@ async function transfer() {
           <label class="flex items-center gap-2"><input v-model="mode" :disabled="submitting" type="radio" value="overwrite" />{{ t("grid.exportDatabaseModeOverwrite") }}</label>
         </div>
         <p v-if="progress" class="text-xs text-muted-foreground">{{ progress }}</p>
+        <p v-if="compatibilityBlocked" class="text-xs text-muted-foreground">{{ t("connection.mysqlDataCharsetExportHint") }}</p>
       </div>
       <DialogFooter>
         <Button variant="outline" size="sm" :disabled="submitting && !canCancel" @click="requestCancel">{{ t("transfer.cancel") }}</Button>

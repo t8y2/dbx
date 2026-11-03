@@ -36,6 +36,7 @@ async fn setup() -> (AppState, ConnectionConfig, sqlserver::SqlServerClient, tem
         &user,
         &password,
         Some(&database),
+        None,
         Duration::from_secs(10),
     )
     .await

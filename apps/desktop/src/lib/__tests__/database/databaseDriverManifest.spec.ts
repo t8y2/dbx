@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { databaseConnectionFormKind, databaseDefaultPort, databaseManifestEntry, databaseProductCapabilities, databaseRuntimeMode, supportsDatabaseFeature, usesAgentCursorForQuery, usesAgentCursorForTableData } from "@/lib/database/databaseDriverManifest";
+import {
+  databaseConnectionFormKind,
+  databaseDefaultPort,
+  databaseManifestEntry,
+  databaseProductCapabilities,
+  databaseRuntimeMode,
+  databaseTransferSupportLevel,
+  supportsDatabaseCompareMode,
+  supportsDatabaseFeature,
+  usesAgentCursorForQuery,
+  usesAgentCursorForTableData,
+} from "@/lib/database/databaseDriverManifest";
 
 describe("databaseDriverManifest", () => {
   it("advertises implemented Xugu capabilities without enabling unsupported features", () => {
@@ -13,10 +24,10 @@ describe("databaseDriverManifest", () => {
       tableDataEdit: true,
       tableStructureEdit: true,
       tableImport: true,
-      dataTransfer: false,
+      dataTransfer: true,
       sqlFileExecution: true,
       databaseCreate: false,
-      fieldLineage: false,
+      fieldLineage: true,
       sqlExplain: true,
       userAdmin: true,
       driverManagement: true,
@@ -26,7 +37,7 @@ describe("databaseDriverManifest", () => {
     }
   });
 
-  it("uses agent cursor only for agent or external runtimes", () => {
+  it("uses result cursors for agent, external, and native DuckDB queries", () => {
     expect(databaseRuntimeMode("gaussdb")).toBe("native");
     expect(databaseRuntimeMode("meilisearch")).toBe("native");
     expect(databaseRuntimeMode("dynamodb")).toBe("native");
@@ -34,6 +45,7 @@ describe("databaseDriverManifest", () => {
     expect(usesAgentCursorForQuery("meilisearch")).toBe(false);
     expect(usesAgentCursorForQuery("dynamodb")).toBe(false);
     expect(usesAgentCursorForQuery("mysql")).toBe(false);
+    expect(usesAgentCursorForQuery("duckdb")).toBe(true);
     expect(usesAgentCursorForQuery("cassandra")).toBe(true);
     expect(usesAgentCursorForQuery("jdbc")).toBe(true);
     expect(usesAgentCursorForQuery("prestosql")).toBe(true);
@@ -61,6 +73,20 @@ describe("databaseDriverManifest", () => {
     });
   });
 
+  it("exposes transfer compatibility evidence from the shared manifest", () => {
+    expect(databaseTransferSupportLevel("mysql")).toBe("verified");
+    expect(databaseTransferSupportLevel("kingbase")).toBe("family-compatible");
+    expect(databaseTransferSupportLevel("db2")).toBe("best-effort");
+    expect(databaseTransferSupportLevel("gbase")).toBeUndefined();
+  });
+
+  it("exposes schema and data comparison support from the shared manifest", () => {
+    expect(supportsDatabaseCompareMode("mysql", "schema")).toBe(true);
+    expect(supportsDatabaseCompareMode("kingbase", "data")).toBe(true);
+    expect(supportsDatabaseCompareMode("mongodb", "data")).toBe(false);
+    expect(supportsDatabaseCompareMode("redis", "schema")).toBe(false);
+  });
+
   it("offers only the supported NebulaGraph 3.x profile", () => {
     expect(databaseManifestEntry("nebula")?.driverProfiles).toEqual([{ profile: "nebula-v3", agentKey: "nebula", label: "NebulaGraph 3.x", storeVisible: false }]);
   });
@@ -71,5 +97,9 @@ describe("databaseDriverManifest", () => {
     expect(databaseConnectionFormKind("mq")).toBe("mq");
     expect(databaseConnectionFormKind("mqtt")).toBe("mqtt");
     expect(databaseConnectionFormKind("nacos")).toBe("nacos");
+  });
+
+  it("advertises tableDataEdit capability for InterSystems IRIS / Caché (#11808)", () => {
+    expect(supportsDatabaseFeature("iris", "tableDataEdit")).toBe(true);
   });
 });

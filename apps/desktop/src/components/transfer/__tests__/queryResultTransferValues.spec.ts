@@ -22,6 +22,12 @@ describe("query result transfer value literals", () => {
     expect(queryResultTransferSqlLiteral("0x0001fe", "postgres", "timestamp", "bytea", "sqlserver")).toBe("decode('0001fe', 'hex')");
   });
 
+  it("maps uniqueidentifier and uuid to target types appropriately", () => {
+    expect(queryResultTransferTargetType("uniqueidentifier", "postgres", "sqlserver")).toBe("uuid");
+    expect(queryResultTransferTargetType("uuid", "sqlserver", "postgres")).toBe("uniqueidentifier");
+    expect(queryResultTransferTargetType("uniqueidentifier", "mysql", "sqlserver")).toBe("char(36)");
+  });
+
   it("fails closed for an unverified binary dialect", () => {
     expect(queryResultTransferSqlLiteral("0x0001fe", "hive", "binary", "BINARY")).toBeUndefined();
   });

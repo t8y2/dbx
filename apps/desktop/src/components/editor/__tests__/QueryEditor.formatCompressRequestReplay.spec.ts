@@ -6,11 +6,15 @@ import { EditorView } from "@codemirror/view";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 import QueryEditor from "@/components/editor/QueryEditor.vue";
-import { compressSqlText, formatSqlForEditing } from "@/lib/sql/sqlFormatter";
+import { compressSqlText, formatSqlForEditing, formatSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { DEFAULT_SQL_FORMATTER_SETTINGS } from "@/lib/sql/sqlFormatterConfig";
 import type { DatabaseType } from "@/types/database";
+
+const mocks = vi.hoisted(() => ({ toast: vi.fn() }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 
 // The request ids are per-kind global counters in App.vue, so ids keep
 // increasing for the lifetime of the process. The module-scope replay cursor in
@@ -32,36 +36,58 @@ type EditorState = {
   modelValue: string;
   formatRequestId: number | undefined;
   compressRequestId: number | undefined;
+  keywordCaseRequestId: number | undefined;
+  keywordCaseRequestMode: "upper" | "lower" | undefined;
 };
 
 const WAIT = { timeout: 5000, interval: 20 };
 
-function mountEditor(initial: { modelValue: string; tabId: string; databaseType?: DatabaseType; formatRequestId?: number; compressRequestId?: number }) {
+function mountEditor(initial: {
+  modelValue: string;
+  tabId: string;
+  databaseType?: DatabaseType;
+  formatDialect?: SqlFormatDialect;
+  formatterSettings?: typeof DEFAULT_SQL_FORMATTER_SETTINGS;
+  formatRequestId?: number;
+  compressRequestId?: number;
+  keywordCaseRequestId?: number;
+  keywordCaseRequestMode?: "upper" | "lower";
+}) {
   const pinia = createPinia();
   setActivePinia(pinia);
+  const settings = useSettingsStore(pinia);
+  if (initial.formatterSettings) settings.editorSettings.sqlFormatter = initial.formatterSettings;
   const state = reactive<EditorState>({
     tabId: initial.tabId,
     modelValue: initial.modelValue,
     formatRequestId: initial.formatRequestId,
     compressRequestId: initial.compressRequestId,
+    keywordCaseRequestId: initial.keywordCaseRequestId,
+    keywordCaseRequestMode: initial.keywordCaseRequestMode,
   });
   const emits: string[] = [];
+  const formatErrors: string[] = [];
   const root = defineComponent({
     setup: () => () =>
       h(QueryEditor, {
         modelValue: state.modelValue,
         tabId: state.tabId,
         databaseType: initial.databaseType ?? "mysql",
-        dialect: "mysql",
-        formatDialect: "mysql",
+        dialect: initial.formatDialect ?? "mysql",
+        formatDialect: initial.formatDialect ?? "mysql",
         autoFocus: false,
         formatRequestId: state.formatRequestId,
         compressRequestId: state.compressRequestId,
+        keywordCaseRequestId: state.keywordCaseRequestId,
+        keywordCaseRequestMode: state.keywordCaseRequestMode,
         "onUpdate:modelValue": (value: string) => {
           emits.push(value);
           // Mirror the app: App.vue writes the emitted text back into the tab
           // store, so the modelValue prop follows the editor document.
           state.modelValue = value;
+        },
+        onFormatError: (message: string) => {
+          formatErrors.push(message);
         },
       }),
   });
@@ -75,7 +101,7 @@ function mountEditor(initial: { modelValue: string; tabId: string; databaseType?
     app.unmount();
     host.remove();
   });
-  return { state, emits, host, unmount: () => app.unmount() };
+  return { state, emits, formatErrors, host, settings, unmount: () => app.unmount() };
 }
 
 async function waitForEditor(host: HTMLElement) {
@@ -96,6 +122,7 @@ async function settle() {
 describe("QueryEditor format/compress request replay", () => {
   afterEach(() => {
     for (const cleanup of cleanups.splice(0)) cleanup();
+    mocks.toast.mockClear();
   });
 
   it("does not replay the stale compress/format requests when the ids re-arm after a tab switch", async () => {
@@ -180,25 +207,46 @@ describe("QueryEditor format/compress request replay", () => {
     expect(undo(editorView)).toBe(false);
   });
 
-  it("does not move the caret or dispatch a change when a parse failure returns the source", async () => {
+  it("reports the parse failure instead of silently formatting nothing", async () => {
     const source = "SELECT 1 .";
-    const { state, emits, host } = mountEditor({ modelValue: source, tabId: "tab-a" });
+    const { state, emits, formatErrors, host } = mountEditor({ modelValue: source, tabId: "tab-a" });
     await waitForEditor(host);
     const editorView = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!;
     const caret = source.indexOf("1");
     editorView.dispatch({ selection: { anchor: caret } });
 
     state.formatRequestId = 5;
-    await settle();
-    await settle();
+    // The formatter cannot parse the statement, so the command must say so
+    // rather than return the source and leave the editor looking untouched.
+    await vi.waitFor(() => expect(formatErrors).toHaveLength(1), WAIT);
 
+    expect(formatErrors[0]).toContain("Parse error");
     expect(emits).toEqual([]);
+    expect(editorView.state.doc.toString()).toBe(source);
     expect(editorView.state.selection.main.head).toBe(caret);
   });
 
+  it("reports custom-rule fallback even when a procedure block already matches the base output", async () => {
+    const procedure =
+      "create or replace function department_label(p_id number) return varchar2 is\n  v_id number;\n  v_name varchar2(100);\nbegin\n  select deptno,dname into v_id,v_name from dept where deptno=p_id and loc='Boston';\n  v_name := trim(v_name);\n  return v_name;\nexception when no_data_found then return 'unknown';\nend;";
+    const settings = { ...DEFAULT_SQL_FORMATTER_SETTINGS, layoutStyle: "classic" as const };
+    const baseFormatted = await formatSqlText(procedure, "oracle", settings);
+    const diagnostics: string[] = [];
+    expect(await formatSqlText(baseFormatted, "oracle", { ...settings, customRulesEnabled: true }, (value) => diagnostics.push(value))).toBe(baseFormatted);
+    expect(diagnostics).toEqual(["custom-rules-fallback"]);
+
+    const mounted = mountEditor({ modelValue: baseFormatted, tabId: "procedure-fallback", databaseType: "oracle", formatDialect: "oracle", formatterSettings: { ...settings, customRulesEnabled: true } });
+    await waitForEditor(mounted.host);
+
+    mounted.state.formatRequestId = 15;
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("settings.sqlFormatterFallbackNotice", 4000), WAIT);
+    expect(mounted.emits).toEqual([]);
+    expect(EditorView.findFromDOM(mounted.host.querySelector(".cm-editor") as HTMLElement)!.state.doc.toString()).toBe(baseFormatted);
+  });
+
   it.each([
-    ["forward", 0, COMPRESSED_SQL.length, 0, FORMATTED_SQL.length, 6],
-    ["reverse", COMPRESSED_SQL.length, 0, FORMATTED_SQL.length, 0, 7],
+    ["forward", 0, COMPRESSED_SQL.length, 0, FORMATTED_SQL.length, 16],
+    ["reverse", COMPRESSED_SQL.length, 0, FORMATTED_SQL.length, 0, 17],
   ] as const)("keeps a %s formatted SQL selection complete and in its original direction", async (_direction, anchor, head, expectedAnchor, expectedHead, requestId) => {
     const { state, emits, host } = mountEditor({ modelValue: COMPRESSED_SQL, tabId: "tab-a" });
     await waitForEditor(host);
@@ -218,28 +266,28 @@ describe("QueryEditor format/compress request replay", () => {
       databaseType: "mongodb",
       source: 'db.items.find({name:"Ada",age:42});',
       formatted: 'db.items.find({\n  name: "Ada",\n  age: 42\n});',
-      requestId: 8,
+      requestId: 18,
     },
     {
       name: "Elasticsearch request",
       databaseType: "elasticsearch",
       source: 'GET /items/_search {"query":{"match_all":{}}}',
       formatted: 'GET /items/_search\n{\n  "query": {\n    "match_all": {}\n  }\n}',
-      requestId: 9,
+      requestId: 19,
     },
     {
       name: "JSON",
       databaseType: "mysql",
       source: '{"name":"Ada","items":[1,2]}',
       formatted: '{\n  "name": "Ada",\n  "items": [\n    1,\n    2\n  ]\n}',
-      requestId: 10,
+      requestId: 20,
     },
     {
       name: "XML",
       databaseType: "mysql",
       source: '<root><item id="1"/><item id="2"/></root>',
       formatted: '<root>\n  <item id="1"/>\n  <item id="2"/>\n</root>',
-      requestId: 11,
+      requestId: 21,
     },
   ] as const)("keeps the existing whole-document caret behavior for $name formatting", async ({ databaseType, source, formatted, requestId }) => {
     const { state, emits, host } = mountEditor({ modelValue: source, tabId: "tab-a", databaseType });
@@ -262,7 +310,7 @@ describe("QueryEditor format/compress request replay", () => {
     const editorView = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!;
     editorView.dispatch({ selection: { anchor: source.length, head: 0 } });
 
-    state.formatRequestId = 12;
+    state.formatRequestId = 22;
     await vi.waitFor(() => expect(emits.at(-1)).toBe(formatted), WAIT);
 
     expect(editorView.state.selection.main.anchor).toBe(0);
@@ -270,8 +318,8 @@ describe("QueryEditor format/compress request replay", () => {
   });
 
   it.each([
-    ["whole document", false, 13],
-    ["full selection", true, 14],
+    ["whole document", false, 23],
+    ["full selection", true, 24],
   ] as const)("formats MySQL view CASE/REPLACE calls through the %s toolbar request", async (_name, selectAll, requestId) => {
     const source = "ALTER ALGORITHM=UNDEFINED DEFINER=`root`@`127.0.0.1` SQL SECURITY DEFINER VIEW `v_format_repro` AS SELECT CASE WHEN 1 THEN REPLACE('a','a','b') END AS `结果`;";
     const { state, emits, host } = mountEditor({ modelValue: source, tabId: "mysql-view" });
@@ -288,5 +336,73 @@ describe("QueryEditor format/compress request replay", () => {
       expect(editorView.state.selection.main.from).toBe(0);
       expect(editorView.state.selection.main.to).toBe(editorView.state.doc.length);
     }
+  });
+
+  // #11828: the toolbar `a`/`A` button used to only flip the formatter
+  // preference, so clicking it left the text untouched and read as broken.
+  it("re-cases keywords in place for the whole document", async () => {
+    const source = "select id, name from users where status = 'active'";
+    const { state, emits, host } = mountEditor({ modelValue: source, tabId: "keyword-case" });
+    await waitForEditor(host);
+
+    state.keywordCaseRequestMode = "upper";
+    state.keywordCaseRequestId = 1;
+    await vi.waitFor(() => expect(emits.at(-1)).toBe("SELECT id, name FROM users WHERE status = 'active'"), WAIT);
+  });
+
+  it("re-cases only the selected range when there is a selection", async () => {
+    const source = "select a from t";
+    const { state, emits, host } = mountEditor({ modelValue: source, tabId: "keyword-case" });
+    await waitForEditor(host);
+    const editorView = EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!;
+    const from = source.indexOf("from");
+    editorView.dispatch({ selection: { anchor: from, head: from + 4 } });
+
+    state.keywordCaseRequestMode = "upper";
+    state.keywordCaseRequestId = 2;
+    await vi.waitFor(() => expect(emits.at(-1)).toBe("select a FROM t"), WAIT);
+  });
+
+  it("keeps column names and string literals untouched while converting keywords", async () => {
+    // `status` / `note` are ordinary identifiers, and the literal's text must
+    // survive even though it contains keyword spellings.
+    const source = "select status, note from t where note = 'from where'";
+    const { state, emits, host } = mountEditor({ modelValue: source, tabId: "keyword-case" });
+    await waitForEditor(host);
+
+    state.keywordCaseRequestMode = "upper";
+    state.keywordCaseRequestId = 3;
+    await vi.waitFor(() => expect(emits.at(-1)).toBe("SELECT status, note FROM t WHERE note = 'from where'"), WAIT);
+  });
+
+  it("does not re-case a non-SQL document such as an Elasticsearch request", async () => {
+    const source = "GET /_search\n{}";
+    const { state, emits, host } = mountEditor({ modelValue: source, tabId: "es", databaseType: "elasticsearch" });
+    await waitForEditor(host);
+
+    state.keywordCaseRequestMode = "upper";
+    state.keywordCaseRequestId = 4;
+    await settle();
+    await settle();
+
+    expect(emits).toEqual([]);
+  });
+
+  it("does not replay a stale keyword-case request on a fresh mount", async () => {
+    const first = mountEditor({ modelValue: "select 1", tabId: "keyword-case" });
+    await waitForEditor(first.host);
+    first.state.keywordCaseRequestMode = "upper";
+    first.state.keywordCaseRequestId = 5;
+    await vi.waitFor(() => expect(first.emits.at(-1)).toBe("SELECT 1"), WAIT);
+    first.unmount();
+
+    // A remount re-arms the same stale id; the module-scope cursor must consume
+    // it instead of converting again.
+    const second = mountEditor({ modelValue: "SELECT 1", tabId: "keyword-case", keywordCaseRequestId: 5, keywordCaseRequestMode: "upper" });
+    await waitForEditor(second.host);
+    await settle();
+    await settle();
+
+    expect(second.emits).toEqual([]);
   });
 });

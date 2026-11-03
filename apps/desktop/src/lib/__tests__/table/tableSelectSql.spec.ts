@@ -176,6 +176,20 @@ describe("qualifiedTableName — SQL Server linked servers", () => {
   });
 });
 
+describe("qualifiedTableName — PostgreSQL family schema qualifier (#13235)", () => {
+  it("qualifies a table outside the connection's default schema even with includeDatabaseName off", () => {
+    expect(qualifiedTableName({ databaseType: "postgres", identifierQuote: '"', schema: "analytics", tableName: "users", includeDatabaseName: false, defaultSchema: "public" })).toBe("analytics.users");
+    expect(qualifiedTableName({ databaseType: "opengauss", identifierQuote: '"', schema: "public", tableName: "t", includeDatabaseName: false, defaultSchema: "$user" })).toBe("public.t");
+    expect(qualifiedTableName({ databaseType: "kingbase", identifierQuote: '"', schema: "audit", tableName: "events", includeDatabaseName: false, defaultSchema: "public" })).toBe('"audit"."events"');
+  });
+
+  it("keeps the bare name for the default schema and when the default schema is unknown (#9110)", () => {
+    expect(qualifiedTableName({ databaseType: "postgres", identifierQuote: '"', schema: "public", tableName: "users", includeDatabaseName: false, defaultSchema: "public" })).toBe("users");
+    expect(qualifiedTableName({ databaseType: "postgres", identifierQuote: '"', schema: "analytics", tableName: "users", includeDatabaseName: false })).toBe("users");
+    expect(qualifiedTableName({ databaseType: "postgres", identifierQuote: '"', tableName: "users", includeDatabaseName: false, defaultSchema: "public" })).toBe("users");
+  });
+});
+
 describe("qualifiedTableName — schema-aware JDBC profiles", () => {
   it("qualifies Phoenix tables without forcing identifier quotes", () => {
     expect(qualifiedTableName({ databaseType: "jdbc", driverProfile: "phoenix", schema: "DEMO", tableName: "STUDENT" })).toBe("DEMO.STUDENT");
@@ -273,7 +287,9 @@ describe("tableMetaWithoutOptionalDatabaseQualifier — copy extractors (#9326)"
 describe("qualifiedTableName — GBase 8s", () => {
   it("omits the metadata owner for GBase 8s table data", () => {
     expect(qualifiedTableName({ databaseType: "informix", driverProfile: "gbase8s", identifierQuote: "", schema: "gbasedbt", tableName: "connection_smoke" })).toBe("connection_smoke");
+    expect(qualifiedTableName({ databaseType: "gbase8s", identifierQuote: "", schema: "gbasedbt", tableName: "connection_smoke" })).toBe("connection_smoke");
     expect(quoteTableDataIdentifier("informix", "connection_smoke", "")).toBe("connection_smoke");
+    expect(quoteTableDataIdentifier("gbase8s", "connection_smoke", "")).toBe("connection_smoke");
   });
 
   it("keeps native Informix owner qualification", () => {
@@ -286,12 +302,23 @@ describe("quoteTableIdentifier", () => {
     expect(quoteTableIdentifierIfNeeded("oracle", "DBX_TEST")).toBe("DBX_TEST");
     expect(quoteTableIdentifierIfNeeded("oracle", "Order")).toBe('"Order"');
     expect(quoteTableIdentifierIfNeeded("oracle", "ORDER")).toBe('"ORDER"');
+    expect(quoteTableIdentifierIfNeeded("oceanbase-oracle", "DBX_TEST")).toBe("DBX_TEST");
+    expect(quoteTableIdentifierIfNeeded("oceanbase-oracle", "Order")).toBe('"Order"');
+    expect(quoteTableIdentifierIfNeeded("oceanbase-oracle", "order_id")).toBe('"order_id"');
+    expect(quoteTableIdentifierIfNeeded("oceanbase-oracle", "ORDER")).toBe('"ORDER"');
     expect(quoteTableIdentifierIfNeeded("dameng", "DBX_TEST")).toBe("DBX_TEST");
     expect(quoteTableIdentifierIfNeeded("dameng", "order detail")).toBe('"order detail"');
     expect(quoteTableIdentifierIfNeeded("postgres", "dbx_test")).toBe("dbx_test");
     expect(quoteTableIdentifierIfNeeded("postgres", "Order")).toBe('"Order"');
     expect(quoteTableIdentifierIfNeeded("mysql", "dbx_test")).toBe("dbx_test");
     expect(quoteTableIdentifierIfNeeded("mysql", "order")).toBe("`order`");
+    expect(quoteTableIdentifierIfNeeded("clickhouse", "dbx_test")).toBe("dbx_test");
+    expect(quoteTableIdentifierIfNeeded("clickhouse", "Order_Test")).toBe("Order_Test");
+    expect(quoteTableIdentifierIfNeeded("clickhouse", "order")).toBe("`order`");
+    expect(quoteTableIdentifierIfNeeded("clickhouse", "prewhere")).toBe("`prewhere`");
+    expect(quoteTableIdentifierIfNeeded("clickhouse", "姓名")).toBe("`姓名`");
+    expect(quoteTableIdentifierIfNeeded("clickhouse", "时间")).toBe("`时间`");
+    expect(quoteTableIdentifierIfNeeded("clickhouse", "col$1")).toBe("`col$1`");
   });
 
   it("uses a JDBC driver's reported quote for required identifiers", () => {
@@ -336,6 +363,7 @@ describe("quoteTableIdentifier", () => {
     expect(requiresEagerTableMetadataForDataOpen("salesforce")).toBe(true);
     expect(requiresEagerTableMetadataForDataOpen("mysql")).toBe(true);
     expect(requiresEagerTableMetadataForDataOpen("postgres")).toBe(true);
+    expect(requiresEagerTableMetadataForDataOpen("oracle")).toBe(true);
     expect(requiresEagerTableMetadataForDataOpen("nebula")).toBe(true);
     expect(requiresEagerTableMetadataForDataOpen("neo4j")).toBe(true);
     // Drivers whose preview works from `SELECT *` keep loading metadata lazily.

@@ -27,6 +27,10 @@ public final class QueryResult {
         return messages == null ? Collections.emptyList() : messages;
     }
 
+    public void setMessages(List<Map<String, Object>> messages) {
+        this.messages = messages;
+    }
+
     public void addInformationalMessage(String message, String code) {
         if (messages == null) messages = new ArrayList<>();
         if (messages.size() >= 512) return;

@@ -90,6 +90,7 @@ func newDiscoveryConnector(config connectionConfig) *discoveryConnector {
 				BrowserResponseTimeout:     config.BrowserResponseTimeout,
 				BrowserDisableSSLCheck:     config.BrowserDisableSSLCheck,
 				WaitForNonQueryCompletion:  waitsForNonQueryCompletion(config.DatabaseType),
+				IdentifierQuote:            config.identifierQuote(),
 			})
 		},
 		driver:        &gohive.Driver{},

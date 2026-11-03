@@ -1100,6 +1100,8 @@ export default withEnglishFallback({
     preparationTasks: "実行中のタスクとトランザクションを終了してください。",
     preparationDrafts: "未保存の変更を保存または破棄してください。",
     preparationConfig: "設定の編集を終了してください。",
+    preparationAppClose: "終了の確認ダイアログが開いています。終了をキャンセルしてから「再起動して更新」をクリックしてください。",
+    preparationSaveConfirmation: "保存の確認ダイアログが開いています。変更を保存するか、閉じる操作をキャンセルしてから、再度更新してください。",
     preparationConfigBusy: "設定のエクスポートまたはインポートを実行中です。完了してから更新してください。",
     preparationConfigDetail: "更新する前に「{surface}」を閉じてください。",
     preparationOtherWindowHint: "（このダイアログは別の DBX ウィンドウにあります）",

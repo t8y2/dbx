@@ -1106,6 +1106,8 @@ export default withEnglishFallback({
     preparationTasks: "실행 중인 작업과 트랜잭션을 종료하세요.",
     preparationDrafts: "변경 사항을 저장하거나 버리세요.",
     preparationConfig: "현재 설정 편집을 완료하세요.",
+    preparationAppClose: "종료 확인 대화 상자가 열려 있습니다. 종료를 취소한 후 다시 시작 및 업데이트를 클릭하세요.",
+    preparationSaveConfirmation: "저장 확인 대화 상자가 열려 있습니다. 변경 사항을 저장하거나 닫기를 취소한 후 업데이트를 다시 시도하세요.",
     preparationConfigBusy: "설정 내보내기 또는 가져오기가 진행 중입니다. 완료된 후 업데이트하세요.",
     preparationConfigDetail: '업데이트하기 전에 "{surface}" 대화 상자를 닫으세요.',
     preparationOtherWindowHint: " (이 대화 상자는 다른 DBX 창에 있습니다)",

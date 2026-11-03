@@ -430,6 +430,8 @@ export default withEnglishFallback({
     preparationTasks: "Etkin görevleri ve işlemleri bitirin.",
     preparationDrafts: "Kaydedilmemiş değişiklikleri kaydedin veya atın.",
     preparationConfig: "Yapılandırma düzenlemesini bitirin.",
+    preparationAppClose: "Çıkış onayı iletişim kutusu hâlâ açık. Çıkışı iptal edin, ardından Yeniden Başlat ve Güncelle’ye tıklayın.",
+    preparationSaveConfirmation: "Kaydetme onayı iletişim kutusu hâlâ açık. Değişiklikleri kaydedin veya kapatmayı iptal edin, ardından güncellemeyi yeniden deneyin.",
     preparationConfigBusy: "Bir yapılandırma dışa veya içe aktarma işlemi sürüyor. Güncellemeden önce tamamlanmasını bekleyin.",
     preparationConfigDetail: "Güncellemeden önce «{surface}» penceresini kapatın.",
     preparationOtherWindowHint: " (pencere başka bir DBX penceresinde)",

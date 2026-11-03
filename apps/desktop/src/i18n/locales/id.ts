@@ -624,6 +624,8 @@ export default withEnglishFallback({
     preparationTasks: "Selesaikan tugas aktif dan transaksi sebelum memperbarui.",
     preparationDrafts: "Simpan atau buang perubahan yang belum disimpan sebelum memperbarui.",
     preparationConfig: "Selesaikan pengeditan konfigurasi saat ini sebelum memperbarui.",
+    preparationAppClose: "Dialog konfirmasi keluar masih terbuka. Batalkan keluar, lalu klik Mulai Ulang dan Perbarui.",
+    preparationSaveConfirmation: "Dialog konfirmasi simpan masih terbuka. Simpan perubahan atau batalkan penutupan, lalu coba perbarui lagi.",
     preparationNotReady: "Persiapan pembaruan belum siap. Coba lagi.",
     downloadedReady: "Versi baru v{version} sudah diunduh. Restart untuk memperbarui.",
     restartAndUpdate: "Restart & Perbarui",

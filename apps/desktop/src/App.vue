@@ -386,6 +386,8 @@ const translateUpdateSurface: UpdateConfigTranslator = (key, named) => (named ? 
 function updateBlockingConfigState(): UpdateBlockingConfigState {
   return {
     pendingAppClose: pendingAppCloseAction.value !== null,
+    saveCloseConfirm: queryStore.showCloseConfirm && queryStore.isConfirmingAppClose,
+    exitCloseConfirm: showCloseActionPrompt.value || showAiRunsClosePrompt.value || showBackgroundTasksClosePrompt.value,
     connectionDialog: showConnectionDialog.value,
     saveSqlDialog: showSaveSqlDialog.value,
     ddlDialog: showQueryEditorDdlDialog.value,

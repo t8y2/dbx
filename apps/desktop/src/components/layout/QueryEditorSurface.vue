@@ -11,13 +11,11 @@ const emit = defineEmits<ContentAreaSurfaceEmits>();
 const surfaceProps = computed<ContentAreaSurfaceProps>(() => ({
   activeTab: props.activeTab,
   activeConnection: props.activeConnection,
-  executableSql: props.executableSql,
+  hasExecutableSql: props.hasExecutableSql,
   activeOutputView: props.activeOutputView,
   formatSqlRequest: props.formatSqlRequest,
   compressSqlRequest: props.compressSqlRequest,
   keywordCaseRequest: props.keywordCaseRequest,
-  selectedSql: props.selectedSql,
-  cursorPos: props.cursorPos,
   blockDangerousRedisCommands: props.blockDangerousRedisCommands,
 }));
 const contentEmits = createContentSurfaceEventForwarders(emit);
@@ -25,6 +23,7 @@ const bindings = computed(() => ({ ...surfaceProps.value, ...contentEmits }));
 const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
 
 defineExpose<QueryEditorSurfaceHandle>({
+  focusSqlEditor: () => contentAreaRef.value?.focusSqlEditor() ?? false,
   focusSearch: (target: Element | null = null) => contentAreaRef.value?.focusSearch(target) ?? false,
   focusWhere: () => contentAreaRef.value?.focusWhere() ?? false,
   openGoToColumn: () => contentAreaRef.value?.openGoToColumn() ?? false,

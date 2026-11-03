@@ -214,6 +214,31 @@ describe("data transfer task duration", () => {
     expect(task.status).toBe(expectedStatus);
   });
 
+  it("shows cancelling immediately and keeps it until the backend reports the terminal state", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("cancel-pending", "many tables", 1693);
+
+    await tracker.cancelTask(task.exportId);
+    expect(api.cancelTransfer).toHaveBeenCalledWith("cancel-pending");
+    expect(task.status).toBe("Cancelling");
+
+    tracker.updateDataTransferTask(task.exportId, transferProgress(task.exportId, "running", false));
+    expect(task.status).toBe("Cancelling");
+
+    tracker.updateDataTransferTask(task.exportId, transferProgress(task.exportId, "cancelled"));
+    expect(task.status).toBe("Cancelled");
+  });
+
+  it("returns to running when the cancel request itself fails", async () => {
+    vi.mocked(api.cancelTransfer).mockRejectedValueOnce(new Error("unreachable"));
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("cancel-failed", "users", 1);
+
+    await tracker.cancelTask(task.exportId);
+
+    expect(task.status).toBe("Running");
+  });
+
   it("tracks concurrent transfer durations independently", () => {
     const tracker = useExportTracker();
     now = 1_000;

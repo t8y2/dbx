@@ -17,7 +17,7 @@ vi.mock("@tauri-apps/plugin-fs", () => ({ writeTextFile: vi.fn().mockResolvedVal
 vi.mock("@/lib/backend/api", () => ({ startQueryResultExport: vi.fn(), startTableExport: vi.fn(), cancelQueryResultExport: vi.fn(), cancelTableExport: vi.fn() }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/composables/useDataGridExtractor", () => ({ useDataGridExtractor: () => ({ copyWithExtractor: vi.fn(), previewWithExtractor: vi.fn(), canCopyWithExtractor: vi.fn() }) }));
-vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { exportBatchSize: 1000, globalDateTimeExportFormat: "", numericColumnRightAlign: true } }) }));
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { defaultExportMode: "immediate", exportBatchSize: 1000, globalDateTimeExportFormat: "", numericColumnRightAlign: true } }) }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/i18n", () => ({ default: { install() {} } }));
 vi.mock("@/lib/export/sqlInsertMode", () => ({ showSqlInsertModeDialog: vi.fn() }));

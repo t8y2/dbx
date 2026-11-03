@@ -138,6 +138,13 @@ pub struct DatabaseExportRequest {
     pub include_create_database: bool,
     #[serde(default)]
     pub drop_table_if_exists: bool,
+    /// Omit the database qualifier from MySQL-family table references in the
+    /// exported SQL (INSERT targets keep plain `table` names; the `USE`
+    /// preamble stays the authority for the database). Defaults to `false`
+    /// (preserve `db`.`table`) for callers that import into a different
+    /// database than the one named by the dump (issue #13509).
+    #[serde(default)]
+    pub omit_database_qualifier: bool,
     /// Drop the table-level `AUTO_INCREMENT=N` clause from exported MySQL DDL,
     /// so the script can initialize a fresh database without pinning a sequence
     /// position. No-op for non-MySQL databases. Defaults to `false` (preserve).
@@ -633,6 +640,9 @@ pub struct BuildDatabaseSqlExportOptions {
     /// Defaults to `false` (preserve). See `DatabaseExportRequest::omit_auto_increment`.
     #[serde(default)]
     pub omit_auto_increment: bool,
+    /// See `DatabaseExportRequest::omit_database_qualifier`.
+    #[serde(default)]
+    pub omit_database_qualifier: bool,
     /// See `DatabaseExportRequest::preserve_original_language`.
     #[serde(default)]
     pub preserve_original_language: bool,
@@ -1306,6 +1316,58 @@ pub(crate) fn is_geometry_spatial_column_type(column_type: &str) -> bool {
     matches!(base, "geometry" | "geography")
 }
 
+// PostgreSQL database export streams carry only values, not the spatial
+// metadata used by grid exports. Preserve PostGIS's canonical HEXEWKB text
+// behind a marker so normal query decoding cannot turn it into display WKT.
+const POSTGRES_SPATIAL_EXPORT_PREFIX: &str = "DBX_PG_EWKB:";
+
+fn is_postgres_spatial_export_type(column_type: &str) -> bool {
+    // Catalog array types may include a scalar typmod before the array suffix.
+    // Their text representation is an array literal, not a single HEXEWKB value.
+    if column_type.trim_end().ends_with("[]") {
+        return false;
+    }
+    let mut quoted = false;
+    let mut start = 0;
+    let mut end = column_type.len();
+    for (index, ch) in column_type.char_indices() {
+        match ch {
+            '"' => quoted = !quoted,
+            '.' if !quoted => start = index + 1,
+            '(' if !quoted => {
+                end = index;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let name = column_type[start..end].trim();
+    if let Some(name) = name.strip_prefix('"').and_then(|name| name.strip_suffix('"')) {
+        matches!(name, "geometry" | "geography")
+    } else {
+        name.eq_ignore_ascii_case("geometry") || name.eq_ignore_ascii_case("geography")
+    }
+}
+
+fn postgres_spatial_export_hex<'a>(
+    value: &'a Value,
+    database_type: Option<DatabaseType>,
+    column_type: Option<&str>,
+) -> Result<Option<&'a str>, String> {
+    if database_type != Some(DatabaseType::Postgres) || !column_type.is_some_and(is_postgres_spatial_export_type) {
+        return Ok(None);
+    }
+    let Some(hex) = value.as_str().and_then(|text| text.strip_prefix(POSTGRES_SPATIAL_EXPORT_PREFIX)) else {
+        return Ok(None);
+    };
+    if hex.is_empty() || hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Invalid PostgreSQL spatial export value: expected hexadecimal EWKB".to_string());
+    }
+    // Do not use the display WKB decoder to validate/re-encode: PostGIS also
+    // supports curves and surfaces that the preview decoder does not support.
+    Ok(Some(hex))
+}
+
 /// Xugu returns spatial values as readable WKT/EWKT text. Plain WKT is
 /// accepted by the server, but it cannot carry a non-zero SRID; database
 /// exports therefore select EWKT and replay it through the Xugu constructor.
@@ -1714,7 +1776,12 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
             } else {
                 value
             };
-            let literal = if insert_dialect == SqlInsertDialect::Standard {
+            let literal = if let Some(hex) = postgres_spatial_export_hex(value, options.database_type, column_type)? {
+                // PostGIS accepts canonical HEXEWKB for both geometry and
+                // geography. A literal also works in Standard SQL mode and
+                // does not depend on the extension's schema/search_path.
+                quote_standard_export_sql_string(hex)
+            } else if insert_dialect == SqlInsertDialect::Standard {
                 format_standard_sql_literal(value, options.database_type)
             } else if let Some(literal) =
                 crate::data_grid_sql::format_oracle_lob_export_literal(value, options.database_type, column_type)?
@@ -2060,13 +2127,21 @@ pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Resu
             lines.push(format!("-- Exported rows: {}", table.rows.len()));
         }
 
+        // #13509: with the `USE` preamble as the database authority, MySQL-family
+        // dumps can drop the `db`. qualifier so the script replays against any
+        // database the USE targets.
+        let mysql_omit = options.omit_database_qualifier
+            && table.database_type.as_ref().is_some_and(supports_database_qualifier_omission);
+        // Both dialects must honor the flag: Source dialect prefers the passed
+        // pre-qualified name over the schema, so it has to be cleared too
+        // (#13601 review point 3).
         let inserts = build_export_insert_statements_excluding_with_dialect(
             BuildExportInsertStatementsOptions {
                 database_type: table.database_type,
                 identifier_quote: table.identifier_quote.clone(),
-                schema: table.schema,
+                schema: if mysql_omit { None } else { table.schema.clone() },
                 table_name: table.table_name,
-                qualified_table_name: table.qualified_table_name,
+                qualified_table_name: if mysql_omit { None } else { table.qualified_table_name },
                 columns: table.columns,
                 column_types: table.column_types,
                 column_extras: table.column_extras,
@@ -3060,6 +3135,19 @@ fn database_export_select_list(columns: &[String], column_types: &[Option<String
                 && column_types.get(index).and_then(|value| value.as_deref()).is_some_and(is_mysql_spatial_export_type)
             {
                 mysql_spatial_export_marker_expression(column)
+            } else if *db_type == DatabaseType::Postgres
+                && column_types
+                    .get(index)
+                    .and_then(|value| value.as_deref())
+                    .is_some_and(is_postgres_spatial_export_type)
+            {
+                let quoted = quote_identifier(column, db_type);
+                // PostGIS's text output is HEXEWKB, including SRID and Z/M.
+                // The text cast needs no extension function or type lookup.
+                // Do not alias this expression to the source column: ORDER BY
+                // would then sort the hex text instead of the spatial key used
+                // by WHERE. Export writers use catalog names and positional rows.
+                format!("'{POSTGRES_SPATIAL_EXPORT_PREFIX}' || {quoted}::text")
             } else if *db_type == DatabaseType::Xugu
                 && column_types
                     .get(index)
@@ -3134,7 +3222,15 @@ fn write_database_export_rows<W: Write>(
         SqlInsertMode::default(),
         false,
         None,
+        false,
     )
+}
+
+/// MySQL-family engines are the ones whose whole-database dump pairs a `USE`
+/// preamble with `db`.`table` targets; other engines ignore the flag so a
+/// persisted option can never strip a PostgreSQL/Oracle schema (#13601).
+fn supports_database_qualifier_omission(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::Doris | DatabaseType::StarRocks)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3151,6 +3247,7 @@ fn write_database_export_rows_with_mode<W: Write>(
     insert_mode: SqlInsertMode,
     preserve_original_language: bool,
     table_ddl: Option<&str>,
+    omit_database_qualifier: bool,
 ) -> Result<(), String> {
     let normalized_column_extras;
     let column_extras = if *db_type == DatabaseType::Dameng && table_ddl.is_some_and(is_dameng_auto_increment_ddl) {
@@ -3212,7 +3309,17 @@ fn write_database_export_rows_with_mode<W: Write>(
     // Database exports use the same table qualification as the SELECT/DDL
     // path and the legacy typed INSERT writer. In particular, MySQL uses the
     // selected database rather than a schema-qualified table name.
-    let qualified_table_name = crate::transfer::qualified_table(table, schema, db_type, None);
+    // `omit_database_qualifier` drops the schema qualifier for the MySQL
+    // family: the export's `USE` preamble already sets the database, and a
+    // `db`.`table` INSERT target pins the dump to one database (#13509).
+    // Rebuild with an empty schema instead of stripping the rendered name:
+    // MySQL-family targets never carry a schema prefix, so a table whose own
+    // name contains a dot must not be split at that dot (#13601).
+    let qualified_table_name = if omit_database_qualifier && supports_database_qualifier_omission(db_type) {
+        crate::transfer::qualified_table(table, "", db_type, None)
+    } else {
+        crate::transfer::qualified_table(table, schema, db_type, None)
+    };
     // Batch database exports do not currently thread a per-connection identifier
     // quote through BuildDatabaseSqlExportOptions; Kingbase MySQL-compat users
     // should fall back to the single-table export path which carries the quote.
@@ -3220,7 +3327,15 @@ fn write_database_export_rows_with_mode<W: Write>(
         BuildExportInsertStatementsOptions {
             database_type: Some(*db_type),
             identifier_quote: None,
-            schema: (!schema.is_empty()).then(|| schema.to_string()),
+            // Standard dialect re-derives `db`.`table` from the schema, so the
+            // flag also has to blank it there — but only for engines that own
+            // the flag; a persisted `true` must not strip a PostgreSQL schema
+            // (#13601).
+            schema: if omit_database_qualifier && supports_database_qualifier_omission(db_type) {
+                None
+            } else {
+                (!schema.is_empty()).then(|| schema.to_string())
+            },
             table_name: Some(table.to_string()),
             qualified_table_name: Some(qualified_table_name),
             columns: insert_columns.to_vec(),
@@ -4843,6 +4958,7 @@ async fn export_database_sql_core_inner(
                                     request.insert_mode,
                                     request.preserve_original_language,
                                     table_ddl_text.as_deref(),
+                                    request.omit_database_qualifier,
                                 )?;
                                 total_rows_exported += rows.len() as u64;
                                 on_progress(ExportProgress {
@@ -4963,12 +5079,22 @@ async fn export_database_sql_core_inner(
                             request.insert_mode,
                             request.preserve_original_language,
                             table_ddl_text.as_deref(),
+                            request.omit_database_qualifier,
                         )?;
                         total_rows_exported += row_count as u64;
                         if use_keyset {
                             if let Some(last_row) = result.rows.last() {
-                                last_primary_key_values =
-                                    primary_key_indices.iter().map(|&index| last_row[index].clone()).collect();
+                                last_primary_key_values = primary_key_indices
+                                    .iter()
+                                    .map(|&index| {
+                                        let value = &last_row[index];
+                                        let column_type = col_types.get(index).and_then(|value| value.as_deref());
+                                        // Keep the internal marker out of the next WHERE boundary.
+                                        // A spatial key compares using the original canonical value.
+                                        Ok(postgres_spatial_export_hex(value, Some(db_type), column_type)?
+                                            .map_or_else(|| value.clone(), |hex| Value::String(hex.to_string())))
+                                    })
+                                    .collect::<Result<Vec<_>, String>>()?;
                             }
                         } else {
                             offset += row_count as u64;
@@ -5626,6 +5752,7 @@ mod tests {
             include_create_database: false,
             drop_table_if_exists: false,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             fail_on_error: false,
             prevent_overwrite: false,
             output_compression: Default::default(),
@@ -6490,6 +6617,113 @@ mod tests {
     }
 
     #[test]
+    fn postgres_spatial_export_type_preserves_quoted_identifier_boundaries() {
+        for data_type in
+            ["geometry", "GEOGRAPHY(Point,4326)", "spatial.geometry", "\"spatial.schema(1)\".\"geometry\"(PointZ,4326)"]
+        {
+            assert!(super::is_postgres_spatial_export_type(data_type), "{data_type}");
+        }
+        for data_type in [
+            "text",
+            "geometry[]",
+            "geometry(Point,4326)[]",
+            "geography(Point,4326)[]",
+            "\"spatial\".\"geometry\"(PointZ,4326)[]",
+            "\"fake.geometry\"",
+            "spatial.\"fake.geometry\"",
+            "\"GEOMETRY\"",
+        ] {
+            assert!(!super::is_postgres_spatial_export_type(data_type), "{data_type}");
+        }
+    }
+
+    #[test]
+    fn postgres_spatial_database_export_preserves_canonical_ewkb_in_both_dialects() {
+        let hex = "0101000020E6100000000000000000F03F0000000000000040";
+        for dialect in [SqlInsertDialect::Source, SqlInsertDialect::Standard] {
+            let mut output = Vec::new();
+            super::write_database_export_rows_with_mode(
+                &mut output,
+                &[vec![json!(format!("DBX_PG_EWKB:{hex}")), Value::Null, json!("DBX_PG_EWKB:not geometry")]],
+                &["shape".into(), "location".into(), "label".into()],
+                &[Some("geometry(Point,4326)".into()), Some("geography".into()), Some("text".into())],
+                &[],
+                "places",
+                "public",
+                &DatabaseType::Postgres,
+                dialect,
+                Default::default(),
+                false,
+                None,
+                false,
+            )
+            .unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains(&format!("VALUES ('{hex}', NULL, 'DBX_PG_EWKB:not geometry');")), "{output}");
+        }
+    }
+
+    #[test]
+    fn postgres_spatial_database_export_rejects_corrupt_internal_values() {
+        for value in ["DBX_PG_EWKB:", "DBX_PG_EWKB:0", "DBX_PG_EWKB:xx", "DBX_PG_EWKB:00');--"] {
+            let mut output = Vec::new();
+            let error = write_database_export_rows(
+                &mut output,
+                &[vec![json!(value)]],
+                &["shape".into()],
+                &[Some("geometry".into())],
+                &[],
+                "places",
+                "public",
+                &DatabaseType::Postgres,
+                SqlInsertDialect::Source,
+            )
+            .unwrap_err();
+            assert!(error.contains("expected hexadecimal EWKB"));
+            assert!(output.is_empty());
+        }
+        let marker = json!("DBX_PG_EWKB:0101000000000000000000F03F0000000000000040");
+        for (db, column_type) in [
+            (Some(DatabaseType::Mysql), Some("geometry")),
+            (Some(DatabaseType::Xugu), Some("geometry")),
+            (Some(DatabaseType::Postgres), Some("text")),
+            (Some(DatabaseType::Postgres), Some("geometry(Point,4326)[]")),
+            (Some(DatabaseType::Postgres), Some("geography(Point,4326)[]")),
+            (Some(DatabaseType::Postgres), None),
+            (None, Some("geometry")),
+        ] {
+            assert!(super::postgres_spatial_export_hex(&marker, db, column_type).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn postgres_spatial_export_projection_handles_qualified_types_and_quoted_identifiers() {
+        let columns = vec!["id".into(), "shape\"quoted".into(), "location".into(), "label".into()];
+        let types = vec![
+            Some("int".into()),
+            Some("\"spatial\".\"geometry\"(PointZ,4326)".into()),
+            Some("spatial.geography".into()),
+            Some("text".into()),
+        ];
+        let sql = database_export_select_sql(&columns, &types, "places", "public", &DatabaseType::Postgres);
+        assert_eq!(sql, "SELECT \"id\", 'DBX_PG_EWKB:' || \"shape\"\"quoted\"::text, 'DBX_PG_EWKB:' || \"location\"::text, \"label\" FROM \"public\".\"places\"");
+        let paged = crate::transfer::keyset_pagination_sql_with_identifier_quote(
+            &columns,
+            "places",
+            "public",
+            &DatabaseType::Postgres,
+            &["id".into()],
+            &[json!(7)],
+            2,
+            None,
+        );
+        let rewritten = replace_database_export_select_list(paged, &columns, &types, &DatabaseType::Postgres);
+        assert!(rewritten.contains("WHERE \"id\" > 7"), "{rewritten}");
+        assert!(rewritten.contains("ORDER BY \"id\" ASC LIMIT 2"), "{rewritten}");
+        assert!(rewritten.contains("'DBX_PG_EWKB:' || \"location\"::text"));
+    }
+
+    #[test]
     fn xugu_spatial_export_selects_ewkt_to_preserve_srid() {
         let sql = database_export_select_sql(
             &["id".to_string(), "shape".to_string(), "location".to_string(), "name".to_string()],
@@ -6993,6 +7227,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             preserve_original_language: false,
         })
         .expect("build SQL Server database export");
@@ -8385,6 +8620,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             preserve_original_language: false,
         })
         .unwrap();
@@ -8459,6 +8695,139 @@ mod tests {
     }
 
     #[test]
+    fn qualifier_omission_strips_only_the_database_even_for_dotted_tables() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("orders.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        // A table whose own name contains a dot renders as `app`.`order.items`;
+        // the strip removes the leading database, never the table (#13601).
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1)]],
+            &["id".to_string()],
+            &[Some("int".to_string())],
+            &[None],
+            "order.items",
+            "app",
+            &DatabaseType::Mysql,
+            SqlInsertDialect::Standard,
+            SqlInsertMode::default(),
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO `order.items` (`id`) VALUES (1);
+
+"
+        );
+    }
+
+    #[test]
+    fn source_dialect_keeps_dotted_mysql_table_when_omitting_qualifier() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("orders.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        // Source dialect reuses the qualified target verbatim; with the
+        // qualifier omitted the dotted table name must survive intact
+        // instead of being split at its own dot (#13601).
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1)]],
+            &["id".to_string()],
+            &[Some("int".to_string())],
+            &[None],
+            "order.items",
+            "app",
+            &DatabaseType::Mysql,
+            SqlInsertDialect::Source,
+            SqlInsertMode::default(),
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        drop(file);
+
+        let sql = std::fs::read_to_string(path).unwrap();
+        assert!(sql.contains("INSERT INTO `order.items`"), "unexpected export: {sql}");
+    }
+
+    #[test]
+    fn qualifier_omission_is_ignored_for_non_mysql_engines() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("users.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        // A persisted `true` must not strip a PostgreSQL schema when the
+        // exported engine is not the MySQL family (#13601 review point 1).
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1)]],
+            &["id".to_string()],
+            &[Some("int".to_string())],
+            &[None],
+            "users",
+            "app",
+            &DatabaseType::Postgres,
+            SqlInsertDialect::Standard,
+            SqlInsertMode::default(),
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO \"app\".\"users\" (\"id\") VALUES (1);
+
+"
+        );
+    }
+
+    #[test]
+    fn mysql_export_can_omit_the_database_qualifier_from_insert_targets() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("users.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        // The USE preamble owns the database context, so the flag drops the
+        // `db`. prefix in both Standard and Source dialects (#13509).
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1), json!("Ada")]],
+            &["id".to_string(), "name".to_string()],
+            &[Some("int".to_string()), Some("varchar(32)".to_string())],
+            &[None, None],
+            "users",
+            "app",
+            &DatabaseType::Mysql,
+            SqlInsertDialect::Standard,
+            SqlInsertMode::default(),
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');
+
+"
+        );
+    }
+
+    #[test]
     fn database_row_writer_standard_dialect_uses_mysql_backticks() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("users.sql");
@@ -8503,6 +8872,7 @@ mod tests {
             SqlInsertMode::Single,
             false,
             None,
+            false,
         )
         .unwrap();
         drop(file);
@@ -8859,6 +9229,7 @@ mod tests {
             SqlInsertMode::Single,
             false,
             Some(ddl),
+            false,
         )
         .unwrap();
         drop(file);
@@ -8938,6 +9309,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             preserve_original_language: false,
         })
         .unwrap();

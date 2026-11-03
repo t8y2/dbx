@@ -33,4 +33,17 @@ describe("sidebar utility visibility", () => {
     const result = sidebarUserAdminVisibility(nodes, (id) => ({ id, show_native_jobs: id === "c1" ? false : undefined }) as ConnectionConfig);
     expect(result.nodes.map((node) => node.id)).toEqual(["c2"]);
   });
+
+  it("returns the tree untouched when no connection opts out, and still filters when one does", () => {
+    const jobs: TreeNode = { id: "jobs", connectionId: "c1", type: "database-job-admin", label: "jobs" };
+    const nodes: TreeNode[] = [{ id: "c1", connectionId: "c1", type: "connection", label: "c1", children: [jobs] }];
+    const visible = { id: "c1" } as ConnectionConfig;
+    const optedOut = { id: "c1", show_native_jobs: false } as ConnectionConfig;
+    const untouched = sidebarUserAdminVisibility(nodes, () => visible, [visible]);
+    expect(untouched.nodes).toBe(nodes);
+    expect(untouched.hiddenNodeIds.size).toBe(0);
+    const filtered = sidebarUserAdminVisibility(nodes, () => optedOut, [optedOut]);
+    expect(filtered.nodes[0].children).toEqual([]);
+    expect(filtered.hiddenNodeIds.has("jobs")).toBe(true);
+  });
 });

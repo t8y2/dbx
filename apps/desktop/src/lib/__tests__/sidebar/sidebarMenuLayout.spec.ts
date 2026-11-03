@@ -53,8 +53,8 @@ describe("sidebar menu layout", () => {
   it("groups database-wide search with data tools without an extra management submenu", () => {
     const search = item("databaseSearch.open");
     const menu = buildSidebarMenuLayout([search, item("contextMenu.exportDatabase")], "database", "grouped", [], t);
-    expect(menu.map((entry) => entry.sidebarActionId)).toEqual(["group.data"]);
-    expect(menu[0].children).toContainEqual(search);
+    expect(menu.map((entry) => entry.sidebarActionId)).toEqual(["contextMenu.exportDatabase", undefined, "group.data"]);
+    expect(menu.find((entry) => entry.sidebarActionId === "group.data")?.children).toContainEqual(search);
   });
   it("leads database menus with closing the database and falls back to browsing objects", () => {
     const close = item("contextMenu.closeDatabaseConnection");

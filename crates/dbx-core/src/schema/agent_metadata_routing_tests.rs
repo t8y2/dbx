@@ -1,8 +1,10 @@
 use super::{
     get_table_comment_core, get_table_ddl_core, list_databases_core, list_object_statistics_core, list_objects_core,
-    AppState, ConnectionConfig, DatabaseType, PoolKind,
+    list_objects_core_with_options, AppState, ConnectionConfig, DatabaseType, MetadataIdentityMode,
+    MetadataReadOptions, PoolKind,
 };
 use crate::db::agent_driver::{AgentDriverClient, PooledAgentClient};
+use crate::db::ObjectSourceKind;
 use serde_json::{json, Value};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
@@ -139,6 +141,87 @@ async fn oracle_public_object_entry_applies_index_filter_and_offset_once() {
             .await
             .unwrap_err();
     assert!(error.contains("fixture sql"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn oracle_exact_object_list_fills_table_and_view_comments_for_that_exact_owner() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+    let object =
+        |name: &str, object_type: &str| json!({"name": name, "schema": "App Owner", "object_type": object_type});
+    std::fs::write(
+        fixture.control_path("objects.json"),
+        json!([
+            object("Orders", "TABLE"),
+            object("ORDERS", "TABLE"),
+            object("ACTIVE_ORDERS", "VIEW"),
+            object("REFRESH_ORDERS", "PROCEDURE")
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.control_path("comments.json"),
+        json!([["ORDERS", "Upper orders"], ["ACTIVE_ORDERS", "Open orders"]]).to_string(),
+    )
+    .unwrap();
+    let options = MetadataReadOptions { identity_mode: Some(MetadataIdentityMode::Exact), catalog: None };
+
+    let objects = list_objects_core_with_options(
+        &fixture.state,
+        "conn",
+        "configured",
+        "App Owner",
+        None,
+        None,
+        None,
+        None,
+        None,
+        &options,
+    )
+    .await
+    .unwrap();
+
+    let comments = objects.iter().map(|object| object.comment.as_deref()).collect::<Vec<_>>();
+    assert_eq!(comments, [None, Some("Upper orders"), Some("Open orders"), None]);
+    let queries = fixture.requests("execute_query");
+    assert_eq!(queries.len(), 1);
+    let sql = queries[0]["params"]["sql"].as_str().unwrap();
+    assert!(sql.contains("OWNER = 'App Owner'"), "{sql}");
+    assert!(sql.contains("'Orders'") && sql.contains("'ACTIVE_ORDERS'"), "{sql}");
+    assert!(!sql.contains("REFRESH_ORDERS"), "{sql}");
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn oracle_exact_object_list_survives_a_failed_comment_lookup() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+    std::fs::write(
+        fixture.control_path("objects.json"),
+        json!([{"name": "ORDERS", "schema": "APP", "object_type": "TABLE"}]).to_string(),
+    )
+    .unwrap();
+    std::fs::write(fixture.control_path("statistics"), "sql").unwrap();
+    let options = MetadataReadOptions { identity_mode: Some(MetadataIdentityMode::Exact), catalog: None };
+
+    let objects = list_objects_core_with_options(
+        &fixture.state,
+        "conn",
+        "configured",
+        "APP",
+        None,
+        None,
+        None,
+        None,
+        None,
+        &options,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].comment, None);
+    assert_eq!(fixture.requests("execute_query").len(), 1);
     fixture.shutdown().await;
 }
 
@@ -547,4 +630,46 @@ async fn statistics_native_sqlite_preserves_default_pool() {
     assert!(state.with_connection_pools(|pools| pools.len() == 1 && pools.contains_key(&key)).await);
     assert!(state.agent_manager.connection_runtimes.lock().await.is_empty());
     state.shutdown(Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn kingbase_view_ddl_appends_view_and_column_comments() {
+    let fixture = AgentFixture::new(DatabaseType::Kingbase).await;
+    let ddl = get_table_ddl_core(&fixture.state, "conn", "configured", "app", "orders_v", Some(ObjectSourceKind::View))
+        .await
+        .unwrap();
+    assert_eq!(
+        ddl,
+        "CREATE OR REPLACE VIEW \"app\".\"orders_v\" AS\nSELECT 1 AS id;\n\
+         COMMENT ON VIEW \"app\".\"orders_v\" IS 'View''s comment';\n\
+         COMMENT ON COLUMN \"app\".\"orders_v\".\"id\" IS 'Column''s comment';"
+    );
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn kingbase_view_ddl_survives_comment_lookup_failure() {
+    let fixture = AgentFixture::new(DatabaseType::Kingbase).await;
+    std::fs::write(fixture.control_path("comment-error"), "sql").unwrap();
+    let ddl = get_table_ddl_core(&fixture.state, "conn", "configured", "app", "orders_v", Some(ObjectSourceKind::View))
+        .await
+        .unwrap();
+    assert!(ddl.starts_with("CREATE OR REPLACE VIEW \"app\".\"orders_v\" AS"), "{ddl}");
+    assert!(!ddl.contains("COMMENT ON VIEW"), "{ddl}");
+    assert!(ddl.contains("COMMENT ON COLUMN"), "{ddl}");
+    fixture.shutdown().await;
+}
+
+#[test]
+fn kingbase_view_comments_follow_the_reported_identifier_quote() {
+    let column = crate::db::ColumnInfo { name: "id".into(), comment: Some("c".into()), ..Default::default() };
+    let ddl = super::append_kingbase_view_comments_to_ddl(
+        "CREATE VIEW `app`.`v` AS\nSELECT 1;",
+        "app",
+        "v",
+        Some("`"),
+        Some("v"),
+        &[column],
+    );
+    assert!(ddl.ends_with("\nCOMMENT ON VIEW `app`.`v` IS 'v';\nCOMMENT ON COLUMN `app`.`v`.`id` IS 'c';"), "{ddl}");
 }

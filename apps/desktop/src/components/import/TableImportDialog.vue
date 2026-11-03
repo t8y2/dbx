@@ -12,6 +12,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, DatabaseBackup, FileCode, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, Maximize2, Minimize2, Plus, RefreshCw, Square, Trash2, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
 import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -37,7 +38,7 @@ import {
 import { importPreviewInput, importSourceDisplayName, uploadedImportSourceFromPreview } from "@/lib/import/importSource";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
 import { uniqueKeyModelColumns } from "@/lib/table/tableEditing";
-import { metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { isSchemaAware } from "@/lib/database/databaseFeatureSupport";
 import { schemaOptionsForConnection } from "@/composables/useSchemaOptions";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
@@ -156,6 +157,9 @@ const cancelling = ref(false);
 const importId = ref("");
 const progress = ref<api.TableImportProgress | null>(null);
 const errorMessage = ref("");
+// A SQL file that table import cannot preview (multi-table dump, DDL, REPLACE, expressions) is a
+// script for the SQL file executor; remember it so the dialog can offer that hand-off.
+const sqlScriptFallbackSource = ref<ImportSource | null>(null);
 const wizardStep = ref<TableImportWizardStep>("source");
 const fileInput = ref<HTMLInputElement | null>(null);
 const navicatBackupInput = ref<HTMLInputElement | null>(null);
@@ -558,6 +562,7 @@ function resetState() {
   importId.value = "";
   progress.value = null;
   errorMessage.value = "";
+  sqlScriptFallbackSource.value = null;
   wizardStep.value = "source";
 }
 
@@ -896,6 +901,7 @@ async function loadPreview(fileOrPath = selectedSource.value) {
   const requestId = ++previewRequestId;
   loadingPreview.value = true;
   errorMessage.value = "";
+  sqlScriptFallbackSource.value = null;
   try {
     const nextPreview = await previewSelectedImportFile(fileOrPath);
     if (requestId !== previewRequestId) return;
@@ -911,6 +917,7 @@ async function loadPreview(fileOrPath = selectedSource.value) {
     columnMapping.value = {};
     columnDataTypes.value = {};
     errorMessage.value = String(e?.message || e);
+    if (sourceFormat.value === "sql") sqlScriptFallbackSource.value = fileOrPath;
   } finally {
     if (requestId === previewRequestId) loadingPreview.value = false;
   }
@@ -933,6 +940,7 @@ function assignSelectedSource(source: string | File) {
   columnDataTypes.value = {};
   progress.value = null;
   errorMessage.value = "";
+  sqlScriptFallbackSource.value = null;
   const name = typeof source === "string" ? source : source.name;
   sourceFormat.value = detectedFormat;
   emptyStringAsNull.value = defaultTableImportEmptyStringAsNull(sourceFormat.value);
@@ -983,8 +991,11 @@ async function prepareBatchSources(sources: ImportSource[]) {
     return;
   }
   emptyStringAsNull.value = formats.length && formats.every((format) => format === formats[0]) ? defaultTableImportEmptyStringAsNull(formats[0]!) : defaultTableImportEmptyStringAsNull(formats[0] ?? "csv");
+  sqlScriptFallbackSource.value = null;
+  let previewingSource: ImportSource | undefined;
   try {
     for (const [index, source] of sources.entries()) {
+      previewingSource = source;
       const format = formats[index]!;
       const initialPreview = await api.previewTableImportFile(source, {
         connectionId: props.prefillConnectionId,
@@ -1035,6 +1046,7 @@ async function prepareBatchSources(sources: ImportSource[]) {
   } catch (e: any) {
     batchTasks.value = [];
     errorMessage.value = String(e?.message || e);
+    if (previewingSource !== undefined && detectFormat(sourceName(previewingSource)) === "sql") sqlScriptFallbackSource.value = previewingSource;
   } finally {
     loadingPreview.value = false;
   }
@@ -1074,7 +1086,7 @@ async function applySelectedSources(sources: ImportSource[]) {
   // A Navicat archive restores a whole database, so only a single-file selection may
   // take that path; a mixed batch must stay in the table-import flow for the other files.
   const navicatBackup = supportsNavicatBackupImport.value && sources.length === 1 ? sources.find((source) => sourceName(source).toLowerCase().endsWith(`.${NAVICAT_BACKUP_FORMAT}`)) : undefined;
-  if (navicatBackup) await openNavicatBackupRestore(navicatBackup);
+  if (navicatBackup) await openSqlFileExecutor(navicatBackup);
   else if (targetMode.value === "create") await prepareBatchSources(sources);
   else assignSelectedSource(sources[0]!);
 }
@@ -1091,21 +1103,22 @@ async function selectNavicatBackupFile() {
   }
   const { open } = await import("@tauri-apps/plugin-dialog");
   const selected = await open({ multiple: false, filters: [NAVICAT_BACKUP_FILTER] });
-  if (typeof selected === "string") await openNavicatBackupRestore(selected);
+  if (typeof selected === "string") await openSqlFileExecutor(selected);
 }
 
 async function handleNavicatBackupInputChange(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   input.value = "";
-  if (file && !running.value) await openNavicatBackupRestore(file);
+  if (file && !running.value) await openSqlFileExecutor(file);
 }
 
 /**
- * Navicat archives hold whole databases (DDL, rows, routines, triggers), so they are
- * restored by the SQL file executor, prefilled with this dialog's target database.
+ * Navicat archives and whole-database SQL dumps hold DDL, rows, routines and triggers rather
+ * than rows for one table, so they run through the streaming SQL file executor, prefilled
+ * with this dialog's target database.
  */
-async function openNavicatBackupRestore(source: ImportSource) {
+async function openSqlFileExecutor(source: ImportSource) {
   const connectionId = props.prefillConnectionId;
   if (!connectionId) return;
   const target = { connectionId, database: props.prefillDatabase || "", ...(props.prefillSchema ? { schema: props.prefillSchema } : {}) };
@@ -1342,6 +1355,30 @@ async function goNext() {
   wizardStep.value = nextTableImportWizardStep(wizardStep.value);
 }
 
+async function refreshImportedTable(target: Pick<api.TableImportRequest, "connectionId" | "database" | "schema" | "table">) {
+  try {
+    store.invalidateMetadataCache(target.connectionId, target.database, target.schema || undefined, target.table);
+    // Respect an explicit disconnect while an import finishes in the background.
+    if (!store.connectedIds.has(target.connectionId)) return;
+    const schema = target.schema || undefined;
+    // MySQL metadata uses the database as schema; open data tabs may omit it.
+    const schemaCandidates = [...new Set([schema, connectionObjectTreeNodeSchema(store.getConfig(target.connectionId), target.database, schema)])];
+    await useQueryStore().refreshDataTabsForTable({ connectionId: target.connectionId, database: target.database, schema, schemaCandidates, name: target.table }, { skipPendingChanges: true });
+  } catch (error) {
+    // Refresh failure must not turn committed writes into a failed import.
+    console.warn("[DBX][table-import:refresh-data-failed]", error);
+  }
+}
+
+async function importTableFileAndRefresh(request: api.TableImportRequest, onProgress: (progress: api.TableImportProgress) => void) {
+  try {
+    return await api.importTableFile(request, onProgress);
+  } finally {
+    // Truncate or earlier batches can commit even when import fails/cancels.
+    void refreshImportedTable(request);
+  }
+}
+
 async function startImport() {
   saveActiveBatchTask();
   if (!canImport.value) return;
@@ -1355,6 +1392,7 @@ async function startImport() {
   const currentPreview = preview.value;
   const tableName = targetTableName.value;
   if (!canImport.value || !currentPreview || !props.prefillConnectionId || !tableName) return;
+  const target = { connectionId: props.prefillConnectionId, database: props.prefillDatabase || "", schema: targetSchema.value, table: tableName };
   backgroundMode.value = true;
   running.value = true;
   progressPercentFloor.value = 0;
@@ -1376,13 +1414,10 @@ async function startImport() {
   };
 
   try {
-    const summary = await api.importTableFile(
+    const summary = await importTableFileAndRefresh(
       {
         importId: importId.value,
-        connectionId: props.prefillConnectionId,
-        database: props.prefillDatabase || "",
-        schema: targetSchema.value,
-        table: tableName,
+        ...target,
         filePath: currentPreview.filePath,
         sourceRef: currentPreview.sourceRef || null,
         sourceFormat: sourceFormat.value,
@@ -1413,9 +1448,8 @@ async function startImport() {
       failuresTruncated: summary.failuresTruncated ?? false,
     };
     toast(importSummaryMessage(summary.rowsImported, summary.rowsFailed ?? 0), 2500);
-    store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined, tableName);
     if (targetMode.value === "create") {
-      store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined).catch((error) => {
+      store.refreshObjectListTreeNode(target.connectionId, target.database, target.schema || undefined).catch((error) => {
         console.warn("[DBX][table-import:refresh-created-table-failed]", error);
       });
     }
@@ -1495,13 +1529,11 @@ async function startBatchImport() {
         throw new Error(validation.errors[0] || "Target table name is required");
       }
 
-      const summary = await api.importTableFile(
+      const target = { connectionId: props.prefillConnectionId, database: props.prefillDatabase || "", schema: targetSchema.value, table: task.tableName };
+      const summary = await importTableFileAndRefresh(
         {
           importId: importId.value,
-          connectionId: props.prefillConnectionId,
-          database: props.prefillDatabase || "",
-          schema: targetSchema.value,
-          table: task.tableName,
+          ...target,
           filePath: task.preview.filePath,
           sourceRef: task.preview.sourceRef || null,
           sourceFormat: task.format,
@@ -1547,7 +1579,6 @@ async function startBatchImport() {
       completedFailureList = [...completedFailureList, ...(summary.failures ?? [])];
       completedFailuresTruncated ||= summary.failuresTruncated ?? false;
       completedBytes += task.preview.sizeBytes;
-      store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined, task.tableName);
     }
     refreshImportElapsedClock();
     progress.value = {
@@ -2484,6 +2515,12 @@ watch(rawProgressPercent, (percent) => {
           <span class="flex-1">{{ errorMessage }}</span>
           <Button v-if="targetMode === 'existing' && !loadingTarget && !existingTargetMetadataReady" variant="outline" size="sm" class="h-6 px-2 text-xs" @click="loadTargetColumns()">
             {{ t("tableImport.retry") }}
+          </Button>
+        </div>
+        <div v-if="sqlScriptFallbackSource && props.prefillConnectionId" class="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          <span class="flex-1">{{ t("tableImport.sqlScriptHint") }}</span>
+          <Button variant="outline" size="sm" class="h-6 shrink-0 px-2 text-xs" :disabled="loadingPreview || running" @click="openSqlFileExecutor(sqlScriptFallbackSource)">
+            {{ t("tableImport.sqlScriptRun") }}
           </Button>
         </div>
       </div>

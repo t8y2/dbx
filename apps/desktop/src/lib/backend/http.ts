@@ -174,6 +174,7 @@ import type {
   UpdateInfo,
   DownloadedUpdate,
   UpdateDownloadSource,
+  UpdateChannel,
   RedisCollectionPage,
   RedisBlob,
   RedisDatabaseInfo,
@@ -539,6 +540,10 @@ export async function testConnection(config: ConnectionConfig): Promise<string> 
   return post("/api/connection/test", { config });
 }
 
+export async function connectionParameters(config: ConnectionConfig): Promise<import("@/lib/connection/connectionParameterCatalog").ConnectionParameterMetadata> {
+  return post("/api/connection/parameters", { config });
+}
+
 export async function testSshTunnel(config: ConnectionConfig): Promise<string> {
   return post("/api/connection/test-ssh-tunnel", { config });
 }
@@ -877,14 +882,36 @@ export async function readPluginUiAsset(pluginId: string, path: string): Promise
   return pluginAssetPayload(`/api/plugins/${encodeURIComponent(pluginId)}/ui/${encodedPath}`);
 }
 
+type PluginEventSubscriber = { onEvent: (event: PluginEvent) => void; onBinary?: (event: PluginBinaryEvent) => void };
+
+const pluginEventSubscribers = new Set<PluginEventSubscriber>();
+let pluginEventSource: EventSource | undefined;
+
+/**
+ * Every plugin host shares one `/api/plugins/events` stream (#14027). A stream per
+ * workbench held one of the browser's six HTTP/1.1 connections per origin each, so
+ * a few open workbenches starved every later `fetch` (plugin invoke, reconnect),
+ * which then queued forever without an error.
+ */
 export async function subscribePluginEvents(onEvent: (event: PluginEvent) => void, onBinary?: (event: PluginBinaryEvent) => void): Promise<() => void> {
-  const source = new EventSource(apiUrl("/api/plugins/events"));
-  source.onmessage = (message) => {
-    const payload = JSON.parse(message.data) as ({ kind: "event" } & PluginEvent) | ({ kind: "binary" } & PluginBinaryEvent) | { kind: "lagged" };
-    if (payload.kind === "event") onEvent(payload);
-    if (payload.kind === "binary") onBinary?.(payload);
+  const subscriber: PluginEventSubscriber = { onEvent, onBinary };
+  pluginEventSubscribers.add(subscriber);
+  if (!pluginEventSource) {
+    const source = new EventSource(apiUrl("/api/plugins/events"));
+    source.onmessage = (message) => {
+      const payload = JSON.parse(message.data) as ({ kind: "event" } & PluginEvent) | ({ kind: "binary" } & PluginBinaryEvent) | { kind: "lagged" };
+      for (const current of pluginEventSubscribers) {
+        if (payload.kind === "event") current.onEvent(payload);
+        if (payload.kind === "binary") current.onBinary?.(payload);
+      }
+    };
+    pluginEventSource = source;
+  }
+  return () => {
+    if (!pluginEventSubscribers.delete(subscriber) || pluginEventSubscribers.size > 0) return;
+    pluginEventSource?.close();
+    pluginEventSource = undefined;
   };
-  return () => source.close();
 }
 
 /**
@@ -1197,6 +1224,10 @@ export async function revealPathInFileManager(_path: string): Promise<void> {
   throw new Error("Reveal in file manager is only available in the desktop app.");
 }
 
+export async function openPathWithDefaultApp(_path: string): Promise<void> {
+  throw new Error("Open with default application is only available in the desktop app.");
+}
+
 export async function deleteDatabaseBackupFiles(_paths: string[], _allowedRoots: string[] = []): Promise<number> {
   throw new Error("Database backup file management is only available in the desktop app.");
 }
@@ -1289,8 +1320,22 @@ export async function listSchemaInfos(connectionId: string, database: string): P
   return schemas.map((name) => ({ name, comment: null }));
 }
 
-export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: SidebarObjectKind[], catalog?: string, tableNameFilter?: TableNameFilter, exactIdentity?: boolean): Promise<TableInfo[]> {
-  return get(`/api/schema/tables?${qs({ connection_id: connectionId, database, schema, filter, limit, offset, object_types: objectTypes?.join(","), catalog, table_name_filter: tableNameFilter ? JSON.stringify(tableNameFilter) : undefined, exact_identity: exactIdentity || undefined })}`);
+export async function listTables(
+  connectionId: string,
+  database: string,
+  schema: string,
+  filter?: string,
+  limit?: number,
+  offset?: number,
+  objectTypes?: SidebarObjectKind[],
+  catalog?: string,
+  tableNameFilter?: TableNameFilter,
+  exactIdentity?: boolean,
+  pageTableRoots?: boolean,
+): Promise<TableInfo[]> {
+  return get(
+    `/api/schema/tables?${qs({ connection_id: connectionId, database, schema, filter, limit, offset, object_types: objectTypes?.join(","), catalog, table_name_filter: tableNameFilter ? JSON.stringify(tableNameFilter) : undefined, exact_identity: exactIdentity || undefined, page_table_roots: pageTableRoots || undefined })}`,
+  );
 }
 
 export async function getTableComment(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<string | null> {
@@ -1703,6 +1748,8 @@ export async function executeMulti(
      *  (`BEGIN` / `START TRANSACTION`) open across executions until COMMIT /
      *  ROLLBACK instead of rolling it back when the batch ends. */
     preserveExplicitTransaction?: boolean;
+    /** Oracle SQL editor: fail a statement whose PL/SQL object stays INVALID. */
+    reportCompilationErrors?: boolean;
   },
 ): Promise<QueryResult[]> {
   return postQueryWithDiagnostics(
@@ -1757,6 +1804,8 @@ export async function executeMultiWithProgress(
     continueOnError?: boolean;
     executionMode?: "simple";
     preserveExplicitTransaction?: boolean;
+    /** Oracle SQL editor: fail a statement whose PL/SQL object stays INVALID. */
+    reportCompilationErrors?: boolean;
     executionId?: string;
   },
 ): Promise<QueryResult[]> {
@@ -1922,6 +1971,7 @@ export async function executeInManualTransaction(
   _timeoutSecs?: number,
   _boundStatements?: BlobBoundStatement[],
   _deferLobs?: boolean,
+  _reportCompilationErrors?: boolean,
 ): Promise<QueryResult[]> {
   throw new Error("Manual transaction management is only available in the desktop app.");
 }
@@ -5833,10 +5883,11 @@ export async function deleteHistoryEntry(id: string): Promise<void> {
 // Updates
 // ---------------------------------------------------------------------------
 
-export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource): Promise<UpdateInfo> {
+export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource, channel: UpdateChannel = "stable"): Promise<UpdateInfo> {
   const params = new URLSearchParams();
   if (locale) params.set("locale", locale);
   if (source) params.set("source", source);
+  params.set("channel", channel);
   const query = params.size > 0 ? `?${params.toString()}` : "";
   return get(`/api/update/check${query}`);
 }
@@ -5844,6 +5895,16 @@ export async function checkForUpdates(locale?: string, source?: UpdateDownloadSo
 export async function fetchChangelog(lang?: string): Promise<import("@/lib/app/changelog").ChangelogData> {
   const query = lang ? `?lang=${encodeURIComponent(lang)}` : "";
   return get(`/api/changelog${query}`);
+}
+
+export async function fetchChangelogIndex(lang?: string): Promise<import("@/lib/app/changelog").ChangelogIndexData> {
+  const query = lang ? `?lang=${encodeURIComponent(lang)}` : "";
+  return get(`/api/changelog/index${query}`);
+}
+
+export async function fetchChangelogRelease(lang: string | undefined, tag: string): Promise<import("@/lib/app/changelog").ChangelogRelease> {
+  const query = lang ? `?lang=${encodeURIComponent(lang)}` : "";
+  return get(`/api/changelog/releases/${encodeURIComponent(tag)}${query}`);
 }
 
 export async function checkMcpServerStatus(): Promise<import("@/lib/backend/tauri").McpServerStatus> {
@@ -5896,7 +5957,7 @@ export async function getSystemProxyUrl(): Promise<string | null> {
   return null;
 }
 
-export async function downloadUpdate(_source: UpdateDownloadSource, _latestVersion: string, _attemptId: string, _releaseNotes?: string): Promise<DownloadedUpdate> {
+export async function downloadUpdate(_source: UpdateDownloadSource, _latestVersion: string, _attemptId: string, _releaseNotes?: string, _channel: UpdateChannel = "stable", _releaseTag?: string): Promise<DownloadedUpdate> {
   throw new Error("In-app update downloads are only available in the desktop app.");
 }
 

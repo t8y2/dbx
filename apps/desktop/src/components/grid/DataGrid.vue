@@ -15267,36 +15267,38 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       },
       deferDeleteToDangerousMenu: true,
     }),
-    {
-      label: t("dangerDialog.title"),
-      icon: AlertTriangle,
-      variant: "destructive",
-      visible: canShowContextDeleteColumn || (row && !row.isDeleted && deletableContextRowIds.length > 0),
-      children: [
-        ...(canShowContextDeleteColumn
-          ? [
-              {
-                label: dropColumnCandidatesNow().length > 1 ? t("grid.deleteColumns", { count: dropColumnCandidatesNow().length }) : t("grid.deleteColumn"),
-                action: () => void requestDropColumns(),
-                disabled: deleteColumnToolbarCapability.value.disabled,
-                variant: "destructive" as const,
-                icon: Columns3,
-              },
-            ]
-          : []),
-        ...(canShowContextDeleteColumn && row && !row.isDeleted && deletableContextRowIds.length > 0 ? [{ label: "", separator: true }] : []),
-        ...(row && !row.isDeleted && deletableContextRowIds.length > 0
-          ? [
-              {
-                label: rowLabels.delete,
-                action: () => requestDeleteRows(deletableContextRowIds),
-                variant: "destructive" as const,
-                icon: Trash2,
-              },
-            ]
-          : []),
-      ],
-    },
+    [
+      {
+        label: t("dangerDialog.title"),
+        icon: AlertTriangle,
+        variant: "destructive",
+        visible: canShowContextDeleteColumn || (row && !row.isDeleted && deletableContextRowIds.length > 0),
+        children: [
+          ...(canShowContextDeleteColumn
+            ? [
+                {
+                  label: dropColumnCandidatesNow().length > 1 ? t("grid.deleteColumns", { count: dropColumnCandidatesNow().length }) : t("grid.deleteColumn"),
+                  action: () => void requestDropColumns(),
+                  disabled: deleteColumnToolbarCapability.value.disabled,
+                  variant: "destructive" as const,
+                  icon: Columns3,
+                },
+              ]
+            : []),
+          ...(canShowContextDeleteColumn && row && !row.isDeleted && deletableContextRowIds.length > 0 ? [{ label: "", separator: true }] : []),
+          ...(row && !row.isDeleted && deletableContextRowIds.length > 0
+            ? [
+                {
+                  label: rowLabels.delete,
+                  action: () => requestDeleteRows(deletableContextRowIds),
+                  variant: "destructive" as const,
+                  icon: Trash2,
+                },
+              ]
+            : []),
+        ],
+      },
+    ],
     [
       exportSubmenu(),
       ...(isTauriRuntime()

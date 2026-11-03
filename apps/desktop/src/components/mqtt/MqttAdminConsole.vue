@@ -30,6 +30,7 @@ interface MqttTabUiState {
   messageDirectionFilter?: MqttMessageDirectionFilter;
   showSubscriptionDialog?: boolean;
   formTopic?: string;
+  formAlias?: string;
   formQos?: MqttQoS;
   formNoLocal?: boolean;
   formEnabled?: boolean;
@@ -78,6 +79,7 @@ const messageDirectionFilter = ref<MqttMessageDirectionFilter>(restoredUiState.m
 const showSubscriptionDialog = ref(restoredUiState.showSubscriptionDialog ?? false);
 const savingSubscription = ref(false);
 const formTopic = ref(restoredUiState.formTopic ?? "");
+const formAlias = ref(restoredUiState.formAlias ?? "");
 const formQos = ref<MqttQoS>(restoredUiState.formQos ?? "atmostonce");
 const formNoLocal = ref(restoredUiState.formNoLocal ?? false);
 const formEnabled = ref(restoredUiState.formEnabled ?? true);
@@ -112,6 +114,7 @@ trackUiState(() => ({
   messageDirectionFilter: messageDirectionFilter.value,
   showSubscriptionDialog: showSubscriptionDialog.value,
   formTopic: formTopic.value,
+  formAlias: formAlias.value,
   formQos: formQos.value,
   formNoLocal: formNoLocal.value,
   formEnabled: formEnabled.value,
@@ -261,6 +264,7 @@ function openSubscriptionDialog() {
   resetSubscriptionDialogDrag();
   editingTopic.value = null;
   formTopic.value = "";
+  formAlias.value = "";
   formQos.value = "atmostonce";
   formNoLocal.value = false;
   formEnabled.value = true;
@@ -272,6 +276,7 @@ function editSubscription(config: MqttSavedTopic) {
   resetSubscriptionDialogDrag();
   editingTopic.value = config.topic;
   formTopic.value = config.topic;
+  formAlias.value = config.alias ?? "";
   formQos.value = config.qos;
   formNoLocal.value = config.noLocal === true;
   formEnabled.value = config.enabled !== false;
@@ -363,7 +368,7 @@ async function saveSubscription() {
   try {
     // Save the new configuration first so a broker failure cannot remove the
     // previous configuration or leave the edited topic without a retry path.
-    await mqttSaveTopicConfig(props.connectionId, topic, formQos.value, formNoLocal.value, formEnabled.value);
+    await mqttSaveTopicConfig(props.connectionId, topic, formQos.value, formNoLocal.value, formEnabled.value, formAlias.value.trim());
     if (formEnabled.value) await mqttSubscribe(props.connectionId, topic, formQos.value, formNoLocal.value);
     else if (!topicChanged && previousWasActive) await mqttUnsubscribe(props.connectionId, topic);
     if (topicChanged && previousWasActive && previousTopic) await mqttUnsubscribe(props.connectionId, previousTopic);
@@ -746,6 +751,10 @@ onUnmounted(stopPolling);
             <span>{{ t("connection.mqttTopicFilter") }}</span>
             <input v-model="formTopic" class="h-8 rounded border bg-transparent px-2 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring" :placeholder="t('connection.mqttTopicFilterPlaceholder')" :disabled="savingSubscription" @keydown.enter.prevent="saveSubscription" />
             <span class="text-[11px] font-normal text-muted-foreground">{{ t("connection.mqttTopicFilterHint") }}</span>
+          </label>
+          <label class="grid gap-1.5 text-xs font-medium">
+            <span>{{ t("connection.mqttTopicAlias") }}</span>
+            <input v-model="formAlias" data-mqtt-topic-alias class="h-8 rounded border bg-transparent px-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring" :disabled="savingSubscription" @keydown.enter.prevent="saveSubscription" />
           </label>
           <label class="grid gap-1.5 text-xs font-medium">
             <span>QoS</span>

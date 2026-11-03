@@ -922,7 +922,7 @@ jobs:
         with:
           toolchain: nightly-2026-10-25
           components: rust-src
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         if: runner.os == 'Windows'
         with:
           python-version: "3.15"

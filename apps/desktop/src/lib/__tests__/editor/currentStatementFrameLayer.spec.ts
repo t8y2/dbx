@@ -337,4 +337,96 @@ describe("currentStatementFrameLayer", () => {
       }),
     ).toBe(true);
   });
+
+  describe("measurement reuse", () => {
+    type Config = {
+      markers: (currentView: ViewLike) => unknown[];
+      update: (update: { docChanged: boolean; selectionSet: boolean; viewportChanged: boolean; geometryChanged: boolean; transactions: { reconfigured: boolean }[]; view: ViewLike }) => boolean;
+    };
+
+    function setup(view: ViewLike) {
+      let docViewUpdate: (() => void) | undefined;
+      const ViewPlugin = {
+        define: vi.fn((create: () => { docViewUpdate?: () => void }) => {
+          docViewUpdate = create().docViewUpdate;
+          return { plugin: true };
+        }),
+      };
+      const layer = vi.fn((config) => config);
+      const RectangleMarker = vi.fn();
+      const extension = currentStatementFrameLayer({ layer, RectangleMarker, ViewPlugin } as never, () => ({ from: 0, to: 8 }), {
+        shouldRefresh: (update) => (update as unknown as { refresh?: boolean }).refresh === true,
+      });
+      const config = layer.mock.results[0].value as Config;
+      const coords = vi.spyOn(view, "coordsAtPos");
+      return { config, coords, extension, notifyDomUpdate: () => docViewUpdate?.() };
+    }
+
+    const idle = { docChanged: false, selectionSet: false, viewportChanged: false, geometryChanged: true, transactions: [] as { reconfigured: boolean }[] };
+
+    it("reuses the measured frame across repeated measure cycles", () => {
+      const view = buildView(["SELECT 1;", "SELECT 2;"]);
+      const { config, coords } = setup(view);
+
+      const first = config.markers(view);
+      const probes = coords.mock.calls.length;
+      const second = config.markers(view);
+
+      expect(probes).toBeGreaterThan(0);
+      expect(coords.mock.calls.length).toBe(probes);
+      expect(second).toBe(first);
+    });
+
+    it("exposes a DOM-generation plugin next to the layer", () => {
+      const { extension } = setup(buildView(["SELECT 1;"]));
+      expect(Array.isArray(extension)).toBe(true);
+    });
+
+    it("re-measures after the document, the DOM or the geometry changed", () => {
+      const view = buildView(["SELECT 1;", "SELECT 2;"]);
+      const { config, coords, notifyDomUpdate } = setup(view);
+      config.markers(view);
+      let probes = coords.mock.calls.length;
+
+      config.markers({ ...view, state: { doc: Text.of(["SELECT 1;", "SELECT 2;"]) } });
+      expect(coords.mock.calls.length).toBeGreaterThan(probes);
+
+      config.markers(view);
+      probes = coords.mock.calls.length;
+      notifyDomUpdate();
+      config.markers(view);
+      expect(coords.mock.calls.length).toBeGreaterThan(probes);
+
+      probes = coords.mock.calls.length;
+      config.markers({ ...view, defaultCharacterWidth: CHAR_WIDTH + 1 });
+      expect(coords.mock.calls.length).toBeGreaterThan(probes);
+    });
+
+    it("re-measures when the statement grows taller without a document change", () => {
+      const view = buildView(["SELECT 1;", "SELECT 2;"]);
+      const { config, coords } = setup(view);
+      config.markers(view);
+      const probes = coords.mock.calls.length;
+
+      config.markers({ ...view, lineBlockAt: (pos: number) => ({ ...view.lineBlockAt(pos), height: LINE_HEIGHT * 3, bottom: view.lineBlockAt(pos).top + LINE_HEIGHT * 3 }) });
+
+      expect(coords.mock.calls.length).toBeGreaterThan(probes);
+    });
+
+    it("drops the measured frame on reconfiguration and on a refresh request", () => {
+      const view = buildView(["SELECT 1;", "SELECT 2;"]);
+      const { config, coords } = setup(view);
+      config.markers(view);
+      let probes = coords.mock.calls.length;
+
+      expect(config.update({ ...idle, geometryChanged: false, transactions: [{ reconfigured: true }], view })).toBe(true);
+      config.markers(view);
+      expect(coords.mock.calls.length).toBeGreaterThan(probes);
+
+      probes = coords.mock.calls.length;
+      expect(config.update({ ...idle, geometryChanged: false, refresh: true, view } as never)).toBe(true);
+      config.markers(view);
+      expect(coords.mock.calls.length).toBeGreaterThan(probes);
+    });
+  });
 });

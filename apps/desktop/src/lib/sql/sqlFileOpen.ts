@@ -9,8 +9,20 @@ export function isSqlFilePath(path: string): boolean {
   return /\.sql$/i.test(path.trim());
 }
 
+export function isDdlFilePath(path: string): boolean {
+  return /\.ddl$/i.test(path.trim());
+}
+
 export function isScriptFilePath(path: string): boolean {
   return /\.(sql|js)$/i.test(path.trim());
+}
+
+export function isSqlOrScriptFilePath(path: string): boolean {
+  return /\.(sql|ddl|js)$/i.test(path.trim());
+}
+
+export function isSpreadsheetFilePath(path: string): boolean {
+  return /\.(xlsx|xls|csv|tsv)$/i.test(path.trim());
 }
 
 export interface QueryEditorFileDialogFilter {

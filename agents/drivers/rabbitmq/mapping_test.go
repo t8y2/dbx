@@ -343,7 +343,7 @@ func TestGetTopicConfigPreservesArgumentTypes(t *testing.T) {
 	}
 }
 
-func TestDecodeDeliveryPayloadTextDecodesThriftBinaryProtocol(t *testing.T) {
+func TestDecodeDeliveryPayloadTextDecodesThriftBinaryProtocolWhenOptedIn(t *testing.T) {
 	// Strict TBinaryProtocol v1 CALL: method="ping", seqId=7, field 1 (string)="ok", field 2 (i32)=42, STOP
 	strictCall := []byte{
 		0x80, 0x01, 0x00, 0x01,
@@ -353,9 +353,12 @@ func TestDecodeDeliveryPayloadTextDecodesThriftBinaryProtocol(t *testing.T) {
 		0x08, 0x00, 0x02, 0x00, 0x00, 0x00, 0x2a,
 		0x00,
 	}
-	decoded, ok := decodeDeliveryPayloadText(strictCall)
+	if _, ok := decodeDeliveryPayloadText(strictCall); ok {
+		t.Fatal("expected strict TBinaryProtocol payload not to decode by default")
+	}
+	decoded, ok := decodeDeliveryPayloadText(strictCall, true)
 	if !ok {
-		t.Fatal("expected strict TBinaryProtocol payload to decode")
+		t.Fatal("expected strict TBinaryProtocol payload to decode when opted in")
 	}
 	parsed := mustObject(t, decoded)
 	if parsed["method"] != "ping" || parsed["type"] != "CALL" {
@@ -368,9 +371,12 @@ func TestDecodeDeliveryPayloadTextDecodesThriftBinaryProtocol(t *testing.T) {
 
 	// Raw TSerializer struct (valid UTF-8 bytes < 0x80 with NUL/control bytes): field 1 (string)="hello", STOP
 	rawStruct := []byte{0x0b, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05, 'h', 'e', 'l', 'l', 'o', 0x00}
-	decodedStruct, ok := decodeDeliveryPayloadText(rawStruct)
+	if rawDefault, ok := decodeDeliveryPayloadText(rawStruct); !ok || rawDefault != string(rawStruct) {
+		t.Fatalf("expected raw struct to stay undecoded by default, got %q (%v)", rawDefault, ok)
+	}
+	decodedStruct, ok := decodeDeliveryPayloadText(rawStruct, true)
 	if !ok {
-		t.Fatal("expected raw TSerializer struct to decode")
+		t.Fatal("expected raw TSerializer struct to decode when opted in")
 	}
 	structObj := mustObject(t, decodedStruct)
 	if structObj["1"] != "hello" {

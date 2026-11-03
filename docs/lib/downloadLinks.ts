@@ -102,7 +102,19 @@ const downloadArtifacts: DownloadArtifact[] = [
   },
 ];
 
-export function createInstallOptions(lang: InstallLang, version: string): InstallOption[] {
+const RELEASE_TAG_PATTERN = /^v\d+\.\d+\.\d+(-beta\.\d{8}\.\d+)?$/;
+
+// Stable packages are published once under releases/stable/<release_tag>/. A
+// promoted beta is republished under its plain vX.Y.Z tag; releases promoted
+// earlier keep their beta tag there. Package files are always named by the plain
+// version. Releases from before channels have no release_tag and live in
+// releases/v<version>/.
+function releaseDirectory(version: string, releaseTag?: string) {
+  return releaseTag && RELEASE_TAG_PATTERN.test(releaseTag) ? `stable/${releaseTag}` : `v${version}`;
+}
+
+export function createInstallOptions(lang: InstallLang, version: string, releaseTag?: string): InstallOption[] {
+  const directory = releaseDirectory(version, releaseTag);
   return downloadArtifacts.map((artifact) => ({
     id: artifact.id,
     iconId: artifact.iconId,
@@ -111,12 +123,12 @@ export function createInstallOptions(lang: InstallLang, version: string): Instal
     driverLinkLabel: artifact.driverLinkLabels?.[lang],
     descriptionSuffix: artifact.descriptionSuffixes?.[lang],
     badge: artifact.badges?.[lang],
-    href: `${DOWNLOAD_BASE_URL}/v${version}/DBX_${version}_${artifact.suffix}?v=${version}`,
+    href: `${DOWNLOAD_BASE_URL}/${directory}/DBX_${version}_${artifact.suffix}?v=${version}`,
     action: artifact.action ?? "download",
     browserStaticDownloads: artifact.browserStaticSuffixes
       ? Object.entries(artifact.browserStaticSuffixes).map(([arch, suffix]) => ({
           arch: arch as BrowserStaticArch,
-          href: `${DOWNLOAD_BASE_URL}/v${version}/DBX_${version}_${suffix}?v=${version}`,
+          href: `${DOWNLOAD_BASE_URL}/${directory}/DBX_${version}_${suffix}?v=${version}`,
         }))
       : undefined,
   }));

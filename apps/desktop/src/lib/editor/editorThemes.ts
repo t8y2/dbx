@@ -1,5 +1,6 @@
 import type { Extension } from "@codemirror/state";
 import type { EditorTheme, CustomThemeColors } from "@/stores/settingsStore";
+import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/app/appFonts";
 import { customUiAppearance, type AppCustomUiColors, type AppThemeAppearance, type AppThemePalette } from "@/lib/app/appTheme";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
@@ -21,7 +22,7 @@ type CodeMirrorStyleSpec = Parameters<typeof import("@codemirror/view").EditorVi
 type LucideIconNode = Array<[string, Record<string, string>]>;
 
 export const EDITOR_FONT_SIZE_CSS_VAR = "--dbx-editor-font-size";
-export const EDITOR_FONT_FAMILY_CSS_VAR = "--dbx-editor-font-family";
+export { EDITOR_FONT_FAMILY_CSS_VAR };
 export const SQL_TABLE_COLOR_CSS_VAR = "--dbx-sql-table-color";
 const EDITOR_SELECTION_BACKGROUND_CSS_VAR = "--dbx-editor-selection-background";
 
@@ -862,8 +863,12 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       borderRight: "0 !important",
       fontSize: `var(${EDITOR_FONT_SIZE_CSS_VAR}, ${defaults?.size ?? 13}px)`,
       fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, ${defaults?.family ?? "monospace"})`,
-      position: "relative",
+      position: "sticky",
       userSelect: "none",
+    },
+    ".cm-scroller[data-scrolled-x] > .cm-gutters, .cm-gutters[data-scrolled-x], .cm-gutters.cm-gutters-scrolled-x": {
+      backgroundColor: `var(--background-solid, var(--background))`,
+      boxShadow: "2px 0 8px rgba(0, 0, 0, 0.18)",
     },
     ".cm-gutters:after": {
       background: "rgba(148, 163, 184, 0.38)",

@@ -22,6 +22,7 @@ import { requestOracleTypeManagement } from "@/lib/table/oracleTypeManagementReq
 import * as api from "@/lib/backend/api";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import RoutineMetadataPanel from "@/components/objects/RoutineMetadataPanel.vue";
+import ObjectSourceSqlPreview from "@/components/objects/ObjectSourceSqlPreview.vue";
 import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
 import { objectDependencyTarget, type ObjectDependencyTarget, type ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
 import { useQueryStore } from "@/stores/queryStore";
@@ -591,6 +592,12 @@ defineExpose({ hasUnsavedDraft: () => editing.value && draft.value !== editableT
         <Button v-if="editing && section === 'source'" variant="outline" :disabled="saving || loading" @click="cancelEditSource">
           {{ t("objects.cancelEdit") }}
         </Button>
+        <ObjectSourceSqlPreview
+          v-if="editing && section === 'source' && props.databaseType && (resolvedObjectType === 'PROCEDURE' || resolvedObjectType === 'FUNCTION')"
+          :input="{ databaseType: props.databaseType, objectType: resolvedObjectType, schema: props.schema || props.database, name: props.name, source: draft }"
+          :context-key="JSON.stringify([props.connectionId, props.database, props.catalog])"
+          :disabled="saving || loading || !canEdit"
+        />
         <Button v-if="editing && section === 'source'" :disabled="saving || loading || !draft.trim()" @click="saveSource">
           <Loader2 v-if="saving" class="h-4 w-4 animate-spin" />
           {{ t(managedType ? "objects.typeManagementPreviewSave" : "objects.saveSource") }}

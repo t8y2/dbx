@@ -388,13 +388,14 @@ async fn pl_debug_process_exit_requires_the_child_status_not_only_a_reaper_flag(
 async fn pl_debug_confirmed_process_exit_survives_child_lock_contention() {
     use futures::FutureExt;
 
-    let fixture = Fixture::spawn_observed("normal").await;
-    fixture.channel.fail_stop();
-    assert!(fixture.channel.wait_for_exit(TEST_TIMEOUT).await);
+    for fixture in [Fixture::spawn("normal").await, Fixture::spawn_observed("normal").await] {
+        fixture.channel.fail_stop();
+        assert!(fixture.channel.wait_for_exit(TEST_TIMEOUT).await);
 
-    // Another exit observer/reaper can own the lock after exit was confirmed.
-    let _child = fixture.runtime.child.lock().unwrap();
-    assert_eq!(fixture.channel.wait_for_exit(Duration::ZERO).now_or_never(), Some(true));
+        // Another exit observer/reaper can own the lock after exit was confirmed.
+        let _child = fixture.runtime.child.lock().unwrap();
+        assert_eq!(fixture.channel.wait_for_exit(Duration::ZERO).now_or_never(), Some(true));
+    }
 }
 
 #[tokio::test]

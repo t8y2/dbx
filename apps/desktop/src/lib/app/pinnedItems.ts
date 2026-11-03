@@ -151,6 +151,8 @@ export function replacePinnedTreeNodeInOrder(order: readonly string[], oldNode: 
 export function migrateLegacyPinnedTreeNodeOrder(nodes: readonly TreeNode[], pinnedOrder: readonly string[]): { order: string[]; ids: Set<string>; changed: boolean } {
   const next = normalizePinnedTreeNodeOrder(pinnedOrder);
   let changed = next.length !== pinnedOrder.length;
+  // With nothing pinned there is no legacy key to upgrade; skip the per-node key derivation.
+  if (next.length === 0) return { order: next, ids: new Set(), changed };
   const visit = (items: readonly TreeNode[]) => {
     for (const node of items) {
       const pinKey = treeNodePinKey(node);
@@ -305,12 +307,44 @@ function pinnedRankForNode(node: TreeNode, orderByKey: Map<string, number>): num
   return undefined;
 }
 
-export function isPinnedKeyPresent(node: TreeNode, pinnedIds: Set<string>): boolean {
-  if (pinnedIds.has(treeNodePinKey(node)) || pinnedIds.has(node.id)) return true;
+type PinnedIdentityIndex = { size: number; groups: Map<string, { anyName: boolean; names: Set<string> }> };
+
+// Pinned id sets are replaced rather than edited, so an index built once per set turns the
+// per-node scan over every pinned key into a single map lookup. The size check rebuilds it
+// if a caller does add or remove entries in place.
+const pinnedIdentityIndexes = new WeakMap<Set<string>, PinnedIdentityIndex>();
+
+function pinnedIdentityGroupKey(identity: PinnedTreeNodeIdentity): string {
+  return [identity.connectionId, identity.database, identity.schema, identity.catalog, identity.type, identity.signature].join("\u0000");
+}
+
+function pinnedIdentityIndexFor(pinnedIds: Set<string>): PinnedIdentityIndex {
+  const cached = pinnedIdentityIndexes.get(pinnedIds);
+  if (cached && cached.size === pinnedIds.size) return cached;
+  const index: PinnedIdentityIndex = { size: pinnedIds.size, groups: new Map() };
   for (const key of pinnedIds) {
-    if (pinnedTreeNodeOrderKeyMatchesNode(key, node, (id) => id)) return true;
+    const identity = parseTreeNodePinKey(key);
+    if (!identity) continue;
+    const groupKey = pinnedIdentityGroupKey(identity);
+    let group = index.groups.get(groupKey);
+    if (!group) {
+      group = { anyName: false, names: new Set() };
+      index.groups.set(groupKey, group);
+    }
+    // Redis databases are matched by index; their display name is not part of the identity.
+    if (identity.type === "redis-db") group.anyName = true;
+    else group.names.add(identity.name);
   }
-  return false;
+  pinnedIdentityIndexes.set(pinnedIds, index);
+  return index;
+}
+
+export function isPinnedKeyPresent(node: TreeNode, pinnedIds: Set<string>): boolean {
+  if (pinnedIds.size === 0) return false;
+  if (pinnedIds.has(node.id)) return true;
+  const identity = treeNodePinIdentity(node);
+  const group = pinnedIdentityIndexFor(pinnedIds).groups.get(pinnedIdentityGroupKey(identity));
+  return !!group && (group.anyName || group.names.has(identity.name));
 }
 
 function findTreeNodeLocation(nodes: TreeNode[], target: TreeNode, parent: TreeNode | null = null): { node: TreeNode; parent: TreeNode | null } | null {
@@ -372,10 +406,10 @@ function syncPinnedTreeNodeStateInPlaceInternal(nodes: TreeNode[], pinnedIds: Se
     if (visited.has(node)) continue;
     visited.add(node);
     node.pinned = isPinnedKeyPresent(node, pinnedIds);
-    if (node.children) {
+    if (node.children?.length) {
       syncPinnedTreeNodeStateInPlaceInternal(node.children, pinnedIds, pinnedOrder, isFixedPriority, visited, node.type === "table-vgroup");
     }
-    if (node.hiddenChildren) {
+    if (node.hiddenChildren?.length) {
       syncPinnedTreeNodeStateInPlaceInternal(node.hiddenChildren, pinnedIds, pinnedOrder, isFixedPriority, visited, node.type === "table-vgroup");
     }
   }

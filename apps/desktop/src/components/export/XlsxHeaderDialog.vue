@@ -9,13 +9,14 @@ import type { ManualExportMode } from "@/lib/export/manualExportQueue";
 
 const { t } = useI18n();
 
-const props = withDefaults(defineProps<{ showHeaderOptions?: boolean; showExecutionMode?: boolean }>(), {
+const props = withDefaults(defineProps<{ showHeaderOptions?: boolean; showExecutionMode?: boolean; initialExecutionMode?: ManualExportMode }>(), {
   showHeaderOptions: true,
+  initialExecutionMode: "immediate",
 });
 const open = defineModel<boolean>("open", { default: false });
 const selected = ref<XlsxHeaderMode>("name");
 const autoFilter = ref(false);
-const executionMode = ref<ManualExportMode>("immediate");
+const executionMode = ref<ManualExportMode>(props.initialExecutionMode);
 
 const emit = defineEmits<{
   confirm: [options: XlsxExportOptions];

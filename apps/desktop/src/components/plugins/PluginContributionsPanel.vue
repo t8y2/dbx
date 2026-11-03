@@ -1932,6 +1932,13 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
 
+                <div v-if="!selectedDefinition.plugin.compatibility.compatible && selectedDefinition.plugin.compatibility.errors?.length" class="space-y-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-xs" role="alert" data-plugin-compatibility-errors>
+                  <div class="font-medium text-destructive">{{ t("pluginPlatform.compatibilityErrors") }}</div>
+                  <ul class="list-disc space-y-1 pl-5 text-muted-foreground">
+                    <li v-for="error in selectedDefinition.plugin.compatibility.errors" :key="error" class="break-words">{{ error }}</li>
+                  </ul>
+                </div>
+
                 <PluginAiAccessSection :key="selectedDefinition.plugin.manifest.id" :plugin="selectedDefinition.plugin" />
 
                 <PluginGraphicsEngineSection :key="`graphics-${selectedDefinition.plugin.manifest.id}`" :plugin="selectedDefinition.plugin" />

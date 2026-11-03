@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
+import PluginOpenUrlDialog from "./PluginOpenUrlDialog.vue";
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { AlertTriangle, Loader2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
@@ -59,6 +60,7 @@ const emit = defineEmits<{
 const { t, locale: appLocale } = useI18n();
 const { isDark, themeRevision } = useTheme();
 const settingsStore = useSettingsStore();
+const urlDialog = ref<InstanceType<typeof PluginOpenUrlDialog>>();
 const openAiConversation = inject(OPEN_PLUGIN_AI_CONVERSATION, undefined);
 // Per-plugin grant for `script-src 'unsafe-eval'`; flipping it rebuilds the
 // sandbox document (and must not reuse a doc cached under the other setting).
@@ -685,6 +687,7 @@ function createBridge() {
       saveFile: (_pluginId, request, data) => savePluginFile(request, data),
       downloadFile: isTauriRuntime() ? downloadPluginFile : undefined,
       cancelDownload: isTauriRuntime() ? cancelPluginDownload : undefined,
+      openUrl: (url) => (urlDialog.value ? urlDialog.value.request(url) : Promise.reject(new Error("Host URL consent is unavailable"))),
       copyText: (_pluginId, text) => copyToClipboard(text),
       // Permission-gated in the bridge (host.clipboard:read); the helper
       // prefers the Tauri clipboard plugin and falls back to the Web Clipboard.
@@ -786,6 +789,7 @@ async function loadWorkbench() {
   // An identity rebuild swaps the plugin this component serves; retire the
   // previous plugin's handles first or they would outlive their owner.
   disposeLocalFileHandles();
+  urlDialog.value?.cancel();
   bridge?.dispose();
   bridge = undefined;
   loading.value = true;
@@ -931,6 +935,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="relative flex size-full overflow-hidden" :class="hostSurfaceClass">
+    <PluginOpenUrlDialog ref="urlDialog" :plugin-id="plugin.manifest.id" :plugin-name="plugin.manifest.name" :permissions="plugin.manifest.permissions" />
     <div v-if="loading" class="absolute inset-0 z-10 flex items-center justify-center text-sm text-muted-foreground" :class="overlayClass">
       <Loader2 class="mr-2 size-4 animate-spin" />
       {{ t("pluginPlatform.loadingTitle", { title }) }}

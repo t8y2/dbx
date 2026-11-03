@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { looksLikeDmlStatement } from "../dmlChangePreview";
+import { looksLikeDmlStatement, mayContainDmlStatement } from "../dmlChangePreview";
 
 describe("looksLikeDmlStatement", () => {
   it("recognizes UPDATE / INSERT / DELETE statements", () => {
@@ -16,5 +16,17 @@ describe("looksLikeDmlStatement", () => {
     expect(looksLikeDmlStatement("WITH x AS (SELECT 1) SELECT * FROM x")).toBe(false);
     expect(looksLikeDmlStatement("")).toBe(false);
     expect(looksLikeDmlStatement("CREATE TABLE t (a int)")).toBe(false);
+  });
+});
+
+describe("mayContainDmlStatement", () => {
+  it("accepts a DML statement anywhere in a multi-statement document", () => {
+    expect(mayContainDmlStatement("UPDATE t SET a = 1")).toBe(true);
+    expect(mayContainDmlStatement("SELECT 1;\nDELETE FROM t WHERE a = 1")).toBe(true);
+    expect(mayContainDmlStatement("-- note\ninsert into t values (1)")).toBe(true);
+  });
+  it("rejects documents without DML keywords", () => {
+    expect(mayContainDmlStatement("SELECT * FROM updates")).toBe(false);
+    expect(mayContainDmlStatement("")).toBe(false);
   });
 });

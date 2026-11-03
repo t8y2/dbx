@@ -9383,7 +9383,7 @@ onUnmounted(() => {
               </div>
 
               <div class="settings-appearance-group">
-                <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+                <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
                   <div class="space-y-2">
                     <Label>{{ t("settings.tabPlacement") }}</Label>
                     <Select :model-value="editTabPlacement" @update:model-value="setTabPlacement($event as TabPlacement)">
@@ -9453,13 +9453,6 @@ onUnmounted(() => {
                       </SelectContent>
                     </Select>
                   </div>
-                </div>
-                <div class="space-y-1 text-xs text-muted-foreground">
-                  <p>{{ t("settings.tabPlacementDescription") }}</p>
-                  <p>{{ t("settings.tabOrganizationDescription") }}</p>
-                  <p>{{ t("settings.tabGroupRowsDescription") }}</p>
-                  <p>{{ t("settings.tabMaxWidthDescription") }}</p>
-                  <p>{{ t("settings.tabDoubleClickActionDescription") }}</p>
                 </div>
               </div>
 

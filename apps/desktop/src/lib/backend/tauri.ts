@@ -6717,6 +6717,13 @@ export async function cancelMongodbExport(exportId: string): Promise<boolean> {
 }
 
 // --- Database Export ---
+/** An object picked in the object browser for "export selected". */
+export interface DatabaseExportSelectedObject {
+  objectType: string;
+  name: string;
+  signature?: string;
+}
+
 export interface DatabaseExportRequest {
   exportId: string;
   connectionId: string;
@@ -6724,6 +6731,8 @@ export interface DatabaseExportRequest {
   schema: string;
   filePath: string;
   selectedTables?: string[];
+  /** Typed object browser selection; takes precedence over `selectedTables`, and an empty list is rejected. */
+  selectedObjects?: DatabaseExportSelectedObject[];
   excludedTables?: string[];
   includeStructure: boolean;
   includeData: boolean;
@@ -6779,6 +6788,7 @@ export interface TableExportRequest {
   format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt";
   insertMode?: SqlInsertMode;
   insertDialect?: SqlInsertDialect;
+  csvWithoutBom?: boolean;
   csvQuoteMode?: CsvQuoteMode;
   /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
   nullLiteral?: string;
@@ -6818,6 +6828,7 @@ export interface TableCsvExportOptions {
   columns?: string[];
   pageSize?: number;
   timeoutSecs?: number;
+  csvWithoutBom?: boolean;
   csvQuoteMode?: CsvQuoteMode;
   /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
   nullLiteral?: string;
@@ -6846,6 +6857,7 @@ export interface QueryResultExportRequest {
   filePath: string;
   format: "csv" | "xlsx" | "json" | "txt" | "sql";
   insertMode?: SqlInsertMode;
+  csvWithoutBom?: boolean;
   csvQuoteMode?: CsvQuoteMode;
   /** CSV 里 NULL 写成什么。缺省表示用后端默认值 `\N`；空串表示关闭字面量。 */
   nullLiteral?: string;
@@ -7081,13 +7093,14 @@ export async function resolveDamengDumpTool(binDir: string, kind: DamengDumpKind
   return invoke("resolve_dameng_dump_tool", { binDir, kind });
 }
 
-export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string): Promise<void> {
+export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all", nullLiteral?: string, csvWithoutBom = false): Promise<void> {
   return invoke("export_query_result_csv", {
     request: {
       filePath,
       columns,
       rows,
       csvQuoteMode,
+      csvWithoutBom,
       ...(nullLiteral === undefined ? {} : { nullLiteral }),
     },
   });

@@ -3378,6 +3378,8 @@ function openBatchDatabaseExport() {
     database: props.database,
     schema: selectedTableRows.value[0]?.schema || selectedSchema.value,
     tableNames: selectedTables,
+    // Names alone cannot tell a table from a routine of the same name (#13940).
+    objects: selectedTableRows.value.map((row) => ({ objectType: row.type, name: row.name, ...(row.signature != null ? { signature: row.signature } : {}) })),
   };
 }
 
@@ -4077,7 +4079,7 @@ async function exportTableData(
         if (native && task) task.canCancel = false;
         if (format === "json") await read(() => api.exportQueryResultJson(filePath, result.columns, result.rows));
         else if (format === "csv") {
-          await read(() => api.exportQueryResultCsv(filePath, result.columns, result.rows, settings.csvQuoteMode, csvNullLiteralForMode(settings.csvNullMode)));
+          await read(() => api.exportQueryResultCsv(filePath, result.columns, result.rows, settings.csvQuoteMode, csvNullLiteralForMode(settings.csvNullMode), settings.csvWithoutBom));
         } else {
           const comments = result.columns.map((name) => columnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
           const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
@@ -5523,6 +5525,9 @@ function selectObjectFilter(filter: ObjectFilter) {
   const wasServerPaged = usesServerObjectPaging.value;
   userHasSelectedFilter.value = true;
   objectFilter.value = filter;
+  // Rows of the previous type are no longer listed; keeping them checked would
+  // export them together with the newly picked type (#13940).
+  clearTableSelection();
   emit("filterChange", filter);
   if (wasServerPaged || usesServerObjectPaging.value) void loadObjects();
 }

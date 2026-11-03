@@ -7647,6 +7647,62 @@ fn mysql_statistics_expression_is_unsupported(error: &mysql_async::Error) -> boo
     }
 }
 
+fn append_mysql_index_row(
+    row: &mysql_async::Row,
+    include_expression: bool,
+    include_index_comment: bool,
+    indexes: &mut Vec<IndexInfo>,
+    index_positions: &mut HashMap<String, usize>,
+) -> Result<(), String> {
+    let name = get_str_by_name(row, "INDEX_NAME");
+    let index_position = if let Some(index_position) = index_positions.get(&name) {
+        *index_position
+    } else {
+        let index_position = indexes.len();
+        index_positions.insert(name.clone(), index_position);
+        indexes.push(IndexInfo {
+            owner: None,
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
+            name: name.clone(),
+            columns: Vec::new(),
+            is_unique: get_opt_i32(row, "NON_UNIQUE").unwrap_or(1) == 0,
+            is_primary: name == "PRIMARY",
+            filter: None,
+            index_type: Some(get_str_by_name(row, "INDEX_TYPE")),
+            included_columns: None,
+            comment: if include_index_comment {
+                get_opt_str(row, "INDEX_COMMENT").filter(|value| !value.is_empty())
+            } else {
+                // MySQL 5.0/5.1 STATISTICS has no INDEX_COMMENT column (#14021).
+                None
+            },
+            key_is_expression: Vec::new(),
+            column_opclasses: vec![],
+            key_options: Vec::new(),
+            constraint_backed: false,
+        });
+        index_position
+    };
+
+    let index_part = if include_expression {
+        get_opt_str(row, "EXPRESSION")
+            // TiDB 4.0 returns the text "NULL", not SQL NULL, for ordinary
+            // index keys. Only EXPRESSION uses this sentinel; a column can
+            // legitimately be named NULL and must retain its original bytes.
+            .filter(|value| !value.trim().is_empty() && !value.trim().eq_ignore_ascii_case("NULL"))
+            .map(|expression| format!("({})", expression.trim()))
+            .or_else(|| get_opt_str(row, "COLUMN_NAME").filter(|value| !value.is_empty()))
+    } else {
+        get_opt_str(row, "COLUMN_NAME").filter(|value| !value.is_empty())
+    };
+    let index_part = index_part
+        .ok_or_else(|| format!("MySQL index metadata for {name:?} has a key without a column name or expression"))?;
+    indexes[index_position].columns.push(index_part);
+    Ok(())
+}
+
 pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
     let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
     // Column sets shrink in steps: MySQL 8+ carries both EXPRESSION and
@@ -7672,56 +7728,29 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
         let include_index_comment = with_comment;
         let mut indexes = Vec::new();
         let mut index_positions = HashMap::new();
+        let mut metadata_error = None;
 
+        // Drain the result even if one key cannot be decoded, but never expose
+        // a partial composite index to consumers that can generate DDL.
         result
             .for_each_and_drop(|row| {
-                let name = get_str_by_name(&row, "INDEX_NAME");
-                let index_position = if let Some(index_position) = index_positions.get(&name) {
-                    *index_position
-                } else {
-                    let index_position = indexes.len();
-                    index_positions.insert(name.clone(), index_position);
-                    indexes.push(IndexInfo {
-                        owner: None,
-                        key_directions: Vec::new(),
-                        visibility: None,
-                        key_metadata_complete: false,
-                        name: name.clone(),
-                        columns: Vec::new(),
-                        is_unique: get_opt_i32(&row, "NON_UNIQUE").unwrap_or(1) == 0,
-                        is_primary: name == "PRIMARY",
-                        filter: None,
-                        index_type: Some(get_str_by_name(&row, "INDEX_TYPE")),
-                        included_columns: None,
-                        comment: if include_index_comment {
-                            get_opt_str(&row, "INDEX_COMMENT").filter(|value| !value.is_empty())
-                        } else {
-                            // MySQL 5.0/5.1 STATISTICS has no INDEX_COMMENT column (#14021).
-                            None
-                        },
-                        key_is_expression: Vec::new(),
-                        column_opclasses: vec![],
-                        key_options: Vec::new(),
-                        constraint_backed: false,
-                    });
-                    index_position
-                };
-
-                let index_part = if include_expression {
-                    get_opt_str(&row, "EXPRESSION")
-                        .filter(|value| !value.trim().is_empty())
-                        .map(|expression| format!("({})", expression.trim()))
-                        .or_else(|| get_opt_str(&row, "COLUMN_NAME").filter(|value| !value.is_empty()))
-                } else {
-                    get_opt_str(&row, "COLUMN_NAME").filter(|value| !value.is_empty())
-                };
-                if let Some(index_part) = index_part {
-                    indexes[index_position].columns.push(index_part);
+                if metadata_error.is_none() {
+                    metadata_error = append_mysql_index_row(
+                        &row,
+                        include_expression,
+                        include_index_comment,
+                        &mut indexes,
+                        &mut index_positions,
+                    )
+                    .err();
                 }
             })
             .await
             .map_err(|e| e.to_string())?;
 
+        if let Some(error) = metadata_error {
+            return Err(error);
+        }
         return Ok(indexes);
     }
     Err(match last_unsupported_error {
@@ -10715,6 +10744,110 @@ mod tests {
             mysql_url_with_charset("mysql://root@host/app?ssl-mode=disabled#session", "utf8"),
             "mysql://root@host/app?ssl-mode=disabled&charset=utf8#session"
         );
+    }
+
+    fn mysql_index_metadata_row(
+        name: &str,
+        column: Value,
+        expression: Value,
+        sequence: i64,
+        non_unique: i64,
+    ) -> mysql_async::Row {
+        let columns =
+            ["INDEX_NAME", "COLUMN_NAME", "EXPRESSION", "SEQ_IN_INDEX", "NON_UNIQUE", "INDEX_TYPE", "INDEX_COMMENT"]
+                .into_iter()
+                .map(|name| Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(name.as_bytes()))
+                .collect();
+        mysql_test_row_with_columns(
+            vec![
+                name.into(),
+                column,
+                expression,
+                Value::Int(sequence),
+                Value::Int(non_unique),
+                "BTREE".into(),
+                "kept comment".into(),
+            ],
+            columns,
+        )
+    }
+
+    fn decode_mysql_index_metadata(
+        rows: &[mysql_async::Row],
+        expression: bool,
+        comment: bool,
+    ) -> Result<Vec<IndexInfo>, String> {
+        let mut indexes = Vec::new();
+        let mut positions = HashMap::new();
+        for row in rows {
+            append_mysql_index_row(row, expression, comment, &mut indexes, &mut positions)?;
+        }
+        Ok(indexes)
+    }
+
+    #[test]
+    fn mysql_index_metadata_tidb_null_expression_preserves_keys_and_names() {
+        let rows = vec![
+            mysql_index_metadata_row("PRIMARY", "id".into(), "NULL".into(), 1, 0),
+            mysql_index_metadata_row("custom_lookup", " display_name".into(), "NULL".into(), 1, 1),
+            mysql_index_metadata_row("custom_unique", "tenant_id".into(), "NULL".into(), 1, 0),
+            mysql_index_metadata_row("custom_unique", "code".into(), "NULL".into(), 2, 0),
+        ];
+        let indexes = decode_mysql_index_metadata(&rows, true, true).unwrap();
+        assert_eq!(indexes.len(), 3);
+        assert_eq!(indexes[0].name, "PRIMARY");
+        assert!(indexes[0].is_primary && indexes[0].is_unique);
+        assert_eq!(indexes[0].columns, vec!["id"]);
+        assert_eq!(indexes[1].name, "custom_lookup");
+        assert!(!indexes[1].is_unique);
+        assert_eq!(indexes[1].columns, vec![" display_name"]);
+        assert_eq!(indexes[1].index_type.as_deref(), Some("BTREE"));
+        assert_eq!(indexes[1].comment.as_deref(), Some("kept comment"));
+        assert_eq!(indexes[2].name, "custom_unique");
+        assert!(indexes[2].is_unique);
+        assert_eq!(indexes[2].columns, vec!["tenant_id", "code"]);
+    }
+
+    #[test]
+    fn mysql_index_metadata_preserves_null_named_columns_and_real_expressions() {
+        for expression in [Value::NULL, "".into(), "  ".into(), "NULL".into(), " null ".into()] {
+            let row = mysql_index_metadata_row("literal_column", "NULL".into(), expression, 1, 1);
+            let indexes = decode_mysql_index_metadata(&[row], true, true).unwrap();
+            assert_eq!(indexes[0].columns, vec!["NULL"]);
+        }
+        for (column, expression, expected) in [
+            (Value::NULL, "lower(`email`)", "(lower(`email`))"),
+            ("NULL".into(), "(lower(`email`))", "((lower(`email`)))"),
+            (Value::NULL, "(NULL)", "((NULL))"),
+            (Value::NULL, "'NULL'", "('NULL')"),
+        ] {
+            let row = mysql_index_metadata_row("functional", column, expression.into(), 1, 1);
+            let indexes = decode_mysql_index_metadata(&[row], true, true).unwrap();
+            assert_eq!(indexes[0].columns, vec![expected]);
+        }
+    }
+
+    #[test]
+    fn mysql_index_metadata_missing_composite_key_rejects_entire_result() {
+        for expression in [Value::NULL, "".into(), "NULL".into()] {
+            let rows = vec![
+                mysql_index_metadata_row("custom_unique", "tenant_id".into(), "NULL".into(), 1, 0),
+                mysql_index_metadata_row("custom_unique", Value::NULL, expression, 2, 0),
+            ];
+            assert!(decode_mysql_index_metadata(&rows, true, true).is_err());
+        }
+    }
+
+    #[test]
+    fn mysql_index_metadata_legacy_column_sets_keep_identifiers() {
+        let row = mysql_index_metadata_row("legacy", "NULL".into(), "ignored".into(), 1, 1);
+        for comment in [true, false] {
+            let indexes = decode_mysql_index_metadata(std::slice::from_ref(&row), false, comment).unwrap();
+            assert_eq!(indexes[0].columns, vec!["NULL"]);
+            assert_eq!(indexes[0].comment.as_deref(), comment.then_some("kept comment"));
+        }
+        let invalid = mysql_index_metadata_row("invalid", Value::NULL, Value::NULL, 1, 1);
+        assert!(decode_mysql_index_metadata(&[invalid], false, false).is_err());
     }
 
     #[test]

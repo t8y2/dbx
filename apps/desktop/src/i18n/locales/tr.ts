@@ -4635,6 +4635,8 @@ export default withEnglishFallback({
     anyPrivilegeDisabled: "ANY türü yetkiler DM8 tarafından devre dışı bırakılmış (ENABLE_DDL_ANY_PRIV=0); verilemez veya geri alınamaz",
   },
   objects: {
+    loadCapacity: "Kapasiteyi yükle / yenile",
+    loadDetails: "Ayrıntıları yükle",
     packageSaveAsTitle: "Paketi Farklı Kaydet",
     packageSaveAsHint: "{name} paketini yeni bir paket olarak kopyalayın. Özgün paket, çağıranları, kaydedilmiş öğeler ve açık taslaklar korunur.",
     packageSaveAsMetadataProblem: "Paket meta verileri eksik veya güvenle kopyalanamıyor. Tanılamayı inceleyip planı yenileyin.",

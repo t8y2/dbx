@@ -5992,6 +5992,8 @@ export default withEnglishFallback({
     anyPrivilegeDisabled: "ANY 유형 권한은 DM8에서 비활성화되어(ENABLE_DDL_ANY_PRIV=0) 부여하거나 회수할 수 없습니다",
   },
   objects: {
+    loadCapacity: "용량 불러오기 / 새로 고침",
+    loadDetails: "상세 정보 불러오기",
     packageSaveAsTitle: "패키지 다른 이름으로 저장",
     packageSaveAsHint: "{name}을(를) 새 패키지로 복사합니다. 기존 패키지, 호출자, 저장 항목 및 열린 초안은 그대로 유지됩니다.",
     packageSaveAsMetadataProblem: "패키지 메타데이터가 불완전하거나 안전하게 복사할 수 없습니다. 진단을 확인하고 계획을 새로 고치세요.",

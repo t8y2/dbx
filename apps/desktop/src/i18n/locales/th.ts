@@ -6730,6 +6730,8 @@ export default withEnglishFallback({
     anyPrivilegeDisabled: "DM8 ปิดใช้ Privilege ประเภท ANY (ENABLE_DDL_ANY_PRIV=0) จึง Grant หรือ Revoke ไม่ได้",
   },
   objects: {
+    loadCapacity: "โหลด / รีเฟรชความจุ",
+    loadDetails: "โหลดรายละเอียด",
     packageSaveAsTitle: "บันทึก Package เป็น",
     packageSaveAsHint: "คัดลอก {name} เป็น Package ใหม่ โดย Package เดิม ผู้เรียกใช้ รายการที่บันทึก และฉบับร่างที่เปิดอยู่จะยังคงอยู่",
     packageSaveAsMetadataProblem: "Metadata ของ Package ไม่สมบูรณ์หรือไม่สามารถคัดลอกได้อย่างปลอดภัย โปรดตรวจสอบการวินิจฉัยและรีเฟรชแผน",

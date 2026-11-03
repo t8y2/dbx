@@ -6465,6 +6465,8 @@ export default withEnglishFallback({
     anyPrivilegeDisabled: "Привилегии типа ANY отключены в DM8 (ENABLE_DDL_ANY_PRIV=0) и не могут быть выданы или отозваны",
   },
   objects: {
+    loadCapacity: "Загрузить / обновить объём",
+    loadDetails: "Загрузить сведения",
     packageSaveAsTitle: "Сохранить пакет как",
     packageSaveAsHint: "Скопировать {name} в новый пакет. Исходный пакет, его вызывающие объекты, сохранённые элементы и открытые черновики останутся без изменений.",
     packageSaveAsMetadataProblem: "Метаданные пакета неполны или его нельзя безопасно скопировать. Проверьте диагностику и обновите план.",

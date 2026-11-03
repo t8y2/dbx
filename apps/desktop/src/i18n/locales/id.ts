@@ -5338,6 +5338,8 @@ export default withEnglishFallback({
     anyPrivilegeDisabled: "Hak akses tipe ANY dinonaktifkan oleh DM8 (ENABLE_DDL_ANY_PRIV=0) dan tidak dapat diberikan atau dicabut",
   },
   objects: {
+    loadCapacity: "Muat / segarkan kapasitas",
+    loadDetails: "Muat detail",
     viewRenameDraft: "Definisi yang dijalankan (gunakan nama objek lama)",
     routineRenamePreview: "Prosedur atau fungsi ini akan dibuat ulang dari kode sumber, lalu objek aslinya dihapus.",
     tableRenameCoverage: "Memperbarui dependensi statis yang terlihat dan dimiliki skema yang sama: view, rutin, dan trigger. Jika referensi tidak dapat dikenali dengan aman, edit draf lalu validasi ulang; masalah yang belum selesai akan memblokir DDL.",

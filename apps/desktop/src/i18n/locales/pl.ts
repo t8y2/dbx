@@ -5389,6 +5389,8 @@ export default withEnglishFallback({
     anyPrivilegeDisabled: "Uprawnienia typu ANY są wyłączone przez DM8 (ENABLE_DDL_ANY_PRIV=0) i nie mogą być nadawane ani odbierane",
   },
   objects: {
+    loadCapacity: "Wczytaj / odśwież pojemność",
+    loadDetails: "Wczytaj szczegóły",
     all: "Wszystkie",
     tables: "Tabele",
     collections: "Kolekcje",

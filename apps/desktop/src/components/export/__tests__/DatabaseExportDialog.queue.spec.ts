@@ -6,7 +6,7 @@ import { useExportTracker } from "@/composables/useExportTracker";
 import type { ConnectionConfig } from "@/types/database";
 import type { DatabaseExportRequest, ExportProgress } from "@/lib/backend/api";
 
-const mocks = vi.hoisted(() => ({ export: vi.fn(), begin: vi.fn(), rollback: vi.fn(), cancel: vi.fn(), toast: vi.fn(), listSchemas: vi.fn() }));
+const mocks = vi.hoisted(() => ({ export: vi.fn(), begin: vi.fn(), rollback: vi.fn(), cancel: vi.fn(), toast: vi.fn(), listSchemas: vi.fn(), settings: { defaultExportMode: "immediate" } }));
 vi.mock("@/lib/backend/api", () => ({
   listDatabases: vi.fn(async () => [{ name: "app" }, { name: "other" }]),
   listSchemas: mocks.listSchemas,
@@ -21,7 +21,7 @@ vi.mock("@/lib/backend/api", () => ({
   recordDatabaseExportDestination: vi.fn(async () => undefined),
 }));
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connections: [connection], getConfig: () => connection, ensureConnected: vi.fn(async () => undefined) }) }));
-vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: {} }) }));
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: mocks.settings }) }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
 vi.mock("@/lib/export/exportPath", () => ({ promptExportSavePath: vi.fn(async () => "C:/exports/original.sql"), autoRevealExportedPathIfConfigured: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(async () => "C:/exports") }));
@@ -57,6 +57,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   operations.length = 0;
+  mocks.settings.defaultExportMode = "immediate";
   connection.db_type = "mysql";
   mocks.listSchemas.mockResolvedValue(["public"]);
   mocks.begin.mockReset().mockImplementation(async (_id, database) => ({ sessionId: `snapshot-${database}` }));
@@ -72,7 +73,7 @@ afterEach(() => {
   const tracker = useExportTracker();
   for (const task of tracker.tasks.value) tracker.removeTask(task.exportId);
 });
-async function mountDialog(allDatabases = false) {
+async function mountDialog(allDatabases = false, prefill: Record<string, unknown> = {}) {
   const host = document.createElement("div");
   document.body.append(host);
   const open = ref(true);
@@ -85,6 +86,7 @@ async function mountDialog(allDatabases = false) {
         },
         prefillConnectionId: connection.id,
         ...(allDatabases ? { prefillAllDatabases: true } : { prefillDatabase: "app", prefillSchema: "app", prefillTable: "orders" }),
+        ...prefill,
       }),
   });
   mounted.push({ app, host });
@@ -114,6 +116,19 @@ function terminal(index: number, status: "Done" | "Cancelled" = "Done", resolve 
   operation.progress({ exportId: operation.request.exportId, currentObject: "orders", objectIndex: 1, totalObjects: 1, rowsExported: 7, totalRows: 7, status, error: null });
   if (resolve) operation.resolve();
 }
+it("reloads the global default on reopen without persisting a one-off override", async () => {
+  mocks.settings.defaultExportMode = "queued";
+  const dialog = await mountDialog();
+  expect(dialog.host.querySelector<HTMLInputElement>('input[value="queued"]')!.checked).toBe(true);
+  dialog.host.querySelector<HTMLInputElement>('input[value="immediate"]')!.click();
+  await nextTick();
+  expect(mocks.settings.defaultExportMode).toBe("queued");
+  dialog.open.value = false;
+  await nextTick();
+  dialog.open.value = true;
+  await nextTick();
+  await vi.waitFor(() => expect(dialog.host.querySelector<HTMLInputElement>('input[value="queued"]')!.checked).toBe(true));
+});
 it("does not begin a snapshot or database export while queued and cancels waiting without RPCs", async () => {
   const tracker = useExportTracker();
   let release!: () => void;
@@ -238,4 +253,43 @@ it.each([false, true])("recovers the UI lease without rolling back a still-runni
   } finally {
     vi.useRealTimers();
   }
+});
+it("sends an object browser selection as typed objects instead of table names (#13940)", async () => {
+  const objects = [
+    { objectType: "TABLE", name: "orders" },
+    { objectType: "FUNCTION", name: "orders", signature: "integer" },
+  ];
+  const dialog = await mountDialog(false, { prefillObjects: objects });
+  await dialog.start();
+  await vi.waitFor(() => expect(operations).toHaveLength(1));
+
+  expect(operations[0]!.request).toMatchObject({ selectedObjects: objects, selectedTables: undefined, includeObjects: true });
+  terminal(0);
+});
+it("disables export once an object browser selection is cleared instead of exporting the whole schema (#13940)", async () => {
+  const dialog = await mountDialog(false, { prefillObjects: [{ objectType: "TABLE", name: "orders" }] });
+  const option = (key: string) => [...dialog.host.querySelectorAll<HTMLElement>("div")].find((element) => element.textContent?.trim() === key)!;
+  const button = (key: string) => [...dialog.host.querySelectorAll<HTMLButtonElement>("button")].find((element) => element.textContent?.trim() === key)!;
+  // Objects only: an empty table list used to pass validation and reach the backend as "whole schema".
+  option("databaseExport.includeStructure").click();
+  option("databaseExport.includeData").click();
+  await nextTick();
+  expect(button("databaseExport.export").disabled).toBe(false);
+
+  button("databaseExport.clearTables").click();
+  await nextTick();
+
+  expect(button("databaseExport.export").disabled).toBe(true);
+});
+it("disables export of picked routines once objects are no longer included (#13940)", async () => {
+  const dialog = await mountDialog(false, { prefillObjects: [{ objectType: "PROCEDURE", name: "PRC_CLEAR_ORDERS" }] });
+  const option = (key: string) => [...dialog.host.querySelectorAll<HTMLElement>("div")].find((element) => element.textContent?.trim() === key)!;
+  const button = (key: string) => [...dialog.host.querySelectorAll<HTMLButtonElement>("button")].find((element) => element.textContent?.trim() === key)!;
+  expect(button("databaseExport.export").disabled).toBe(false);
+
+  // The procedure is the whole selection, so without objects the export would be empty.
+  option("databaseExport.includeObjects").click();
+  await nextTick();
+
+  expect(button("databaseExport.export").disabled).toBe(true);
 });

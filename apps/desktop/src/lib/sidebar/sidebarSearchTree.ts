@@ -43,26 +43,28 @@ function findNodePath(nodes: readonly TreeNode[], targetNodeId: string, ancestor
   return undefined;
 }
 
-function nodePreservesSearchSubtree(node: TreeNode, matchLabel: SidebarLabelMatcher, searchableNodeTypes?: ReadonlySet<TreeNodeType>): boolean {
+function nodePreservesSearchSubtree(node: TreeNode, matchLabel: SidebarLabelMatcher, searchableNodeTypes?: ReadonlySet<TreeNodeType>, exactNameOnly = false): boolean {
   if (searchableNodeTypes && !searchableNodeTypes.has(node.type)) return false;
-  return preserveMatchedSubtreeTypes.has(node.type) && !!bestMatch(matchLabel, normalizedLabel(node), node.comment, node.searchAliases);
+  return preserveMatchedSubtreeTypes.has(node.type) && (!exactNameOnly || node.type === "table" || node.type === "view") && !!bestMatch(matchLabel, normalizedLabel(node), exactNameOnly ? undefined : node.comment, exactNameOnly ? undefined : node.searchAliases);
 }
 
 export function createSidebarSearchSubtreePreserver(query: string, searchableNodeTypes?: ReadonlySet<TreeNodeType>, options?: SidebarSearchMatcherOptions): (node: TreeNode) => boolean {
   const matchLabel = query ? createSidebarLabelMatcher(query, options) : undefined;
-  return (node) => !!matchLabel && nodePreservesSearchSubtree(node, matchLabel, searchableNodeTypes);
+  return (node) => !!matchLabel && nodePreservesSearchSubtree(node, matchLabel, searchableNodeTypes, options?.matchMode === "exact" && !options.regexMode);
 }
 
 export function resolveSidebarObjectSearchFilter(nodes: readonly TreeNode[], targetNodeId: string, query: string, searchableNodeTypes?: ReadonlySet<TreeNodeType>, options?: SidebarSearchMatcherOptions): string {
   if (!query) return query;
   const matchLabel = createSidebarLabelMatcher(query, options);
   const path = findNodePath(nodes, targetNodeId);
-  const preservesSubtree = path?.some((node) => nodePreservesSearchSubtree(node, matchLabel, searchableNodeTypes));
+  const preservesSubtree = path?.some((node) => nodePreservesSearchSubtree(node, matchLabel, searchableNodeTypes, options?.matchMode === "exact" && !options.regexMode));
   return preservesSubtree ? "" : query;
 }
 
 export interface SidebarTreeSearchMatcherOptions extends SidebarSearchMatcherOptions {
   resolveLabel?: (node: TreeNode) => string;
+  /** Partition groups explicitly expanded during the current search projection. */
+  searchExpandedIds?: ReadonlySet<string>;
 }
 
 export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>, options?: SidebarTreeSearchMatcherOptions | ((node: TreeNode) => string)): TreeNode[] {
@@ -72,7 +74,7 @@ export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds
   const matcherOptions = typeof options === "function" ? undefined : options;
   const matchLabel = query ? createSidebarLabelMatcher(query, matcherOptions) : undefined;
   if (!matchLabel && searchableNodeTypes === undefined) return nodes;
-  return filterSidebarTreeWithMatcher(nodes, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query);
+  return filterSidebarTreeWithMatcher(nodes, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query, matcherOptions?.matchMode === "exact" && !matcherOptions.regexMode, matcherOptions?.searchExpandedIds);
 }
 
 export function reuseLiveSidebarTreeNodes(indexedNodes: TreeNode[], liveNodes: readonly TreeNode[]): TreeNode[] {
@@ -360,21 +362,40 @@ export function mergeSidebarRegexIndexScopes(liveNodes: readonly TreeNode[], sco
 }
 
 function applySearchCollapsedState(node: TreeNode, collapsedIds: ReadonlySet<string>): TreeNode {
-  const children = node.children?.map((child) => applySearchCollapsedState(child, collapsedIds));
-  const childrenChanged = children?.some((child, index) => child !== node.children?.[index]) ?? false;
+  // With nothing collapsed no node can change, so a matched database or schema holding thousands of
+  // tables is not walked (and every leaf is not re-allocated) on each keystroke.
+  if (collapsedIds.size === 0) return node;
+  let children: TreeNode[] | undefined;
+  const source = node.children;
+  if (source && source.length > 0) {
+    for (let index = 0; index < source.length; index++) {
+      const child = applySearchCollapsedState(source[index], collapsedIds);
+      if (child !== source[index] && !children) children = source.slice(0, index);
+      children?.push(child);
+    }
+  }
   const collapsed = collapsedIds.has(node.id);
-  if (!collapsed && !childrenChanged) return node;
+  if (!collapsed && !children) return node;
 
   return {
     ...node,
-    children: childrenChanged ? children : node.children,
+    children: children ?? node.children,
     isExpanded: collapsed ? false : node.isExpanded,
   };
 }
 
-function preservedSearchChildren(node: TreeNode, collapsedIds: ReadonlySet<string>): TreeNode[] | undefined {
+function preservedSearchChildren(node: TreeNode, collapsedIds: ReadonlySet<string>, expandedIds?: ReadonlySet<string>): TreeNode[] | undefined {
   if (!node.children) return undefined;
-  return node.children.filter((child) => !hiddenSearchNodeTypes.has(child.type)).map((child) => applySearchCollapsedState(child, collapsedIds));
+  return node.children
+    .filter((child) => !hiddenSearchNodeTypes.has(child.type))
+    .map((child) => {
+      const projected = applySearchCollapsedState(child, collapsedIds);
+      // A matching table keeps its partition group visible, but search starts
+      // with that group collapsed so partition children do not flood results.
+      // `expandedIds` records an explicit user expansion for this search.
+      if (child.type === "group-partitions" && !collapsedIds.has(child.id) && !expandedIds?.has(child.id)) return { ...projected, isExpanded: false };
+      return projected;
+    });
 }
 
 const typeFilterDatabaseDescendantTypes = new Set<TreeNodeType>([
@@ -431,7 +452,16 @@ function isUnloadedTypeFilterContainer(node: TreeNode, searchableNodeTypes: Read
   return false;
 }
 
-function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabelMatcher | undefined, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>, resolveLabel?: (node: TreeNode) => string, query?: string): TreeNode[] {
+function filterSidebarTreeWithMatcher(
+  nodes: TreeNode[],
+  matchLabel: SidebarLabelMatcher | undefined,
+  collapsedIds: ReadonlySet<string>,
+  searchableNodeTypes?: ReadonlySet<TreeNodeType>,
+  resolveLabel?: (node: TreeNode) => string,
+  query?: string,
+  exactNameOnly = false,
+  searchExpandedIds?: ReadonlySet<string>,
+): TreeNode[] {
   const filteredNodes: { node: TreeNode; score: number }[] = [];
 
   for (const node of nodes) {
@@ -457,10 +487,10 @@ function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabe
 
     const label = normalizedLabel(node, resolveLabel);
     const canSelfMatch = (!searchableNodeTypes || searchableNodeTypes.has(node.type)) && !hiddenUtility;
-    const selfMatch = canSelfMatch ? (matchLabel ? bestMatch(matchLabel, label, node.comment, node.searchAliases) : { score: 0 }) : null;
+    const selfMatch = canSelfMatch ? (matchLabel ? bestMatch(matchLabel, label, exactNameOnly ? undefined : node.comment, exactNameOnly ? undefined : node.searchAliases) : { score: 0 }) : null;
     // Type-only filtering keeps matching rows and their ancestor path, but not
     // unrelated descendants that would make the selected type appear ignored.
-    const preservesSubtree = !!matchLabel && !!selfMatch && preserveMatchedSubtreeTypes.has(node.type);
+    const preservesSubtree = !!matchLabel && !!selfMatch && preserveMatchedSubtreeTypes.has(node.type) && (!exactNameOnly || node.type === "table" || node.type === "view");
     // A type-matched table keeps its loaded detail groups after the text query
     // is cleared instead of being rebuilt with an empty filtered child list.
     const preservesTypeMatchedTable = !matchLabel && !!selfMatch && node.type === "table";
@@ -470,7 +500,7 @@ function filterSidebarTreeWithMatcher(nodes: TreeNode[], matchLabel: SidebarLabe
     // Connection utility entries are synthetic navigation actions, not schema
     // search results. Keep real loaded descendants for connection-name matches,
     // but do not let those actions make a disconnected result look expanded.
-    const filteredChildren = preservesSubtree ? preservedSearchChildren(node, collapsedIds) : node.children ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query) : undefined;
+    const filteredChildren = preservesSubtree ? preservedSearchChildren(node, collapsedIds, searchExpandedIds) : node.children ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query, exactNameOnly, searchExpandedIds) : undefined;
 
     if (selfMatch || (filteredChildren && filteredChildren.length > 0) || isUnloadedContainer) {
       if (!node.children || preservesTypeMatchedTable || isUnloadedContainer) {

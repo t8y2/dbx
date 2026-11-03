@@ -130,6 +130,7 @@ async fn manual_e2e_sqlserver_default_split_zip_export_then_import_skip_relation
         schema: String::new(),
         file_path: zip_path.to_string_lossy().to_string(),
         selected_tables: Vec::new(),
+        selected_objects: None,
         excluded_tables: Vec::new(),
         include_structure: true,
         include_data: true,

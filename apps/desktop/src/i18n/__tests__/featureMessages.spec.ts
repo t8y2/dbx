@@ -45,6 +45,7 @@ const under = (namespace: string, keys: string[]) => keys.map((key) => `${namesp
 // leaks the raw key path, and a key missing from a locale silently shows
 // English.
 const FEATURE_MESSAGES: FeatureMessages[] = [
+  { feature: "query connection group path preview", keys: ["connection.groupPath"], translated: true },
   { feature: "SQL file includes", keys: under("sqlFile", ["resolveIncludes", "resolveIncludesHint"]), translated: true },
   { feature: "AstraFlow provider", keys: ["ai.astraflowDescription"], translated: true },
   { feature: "AI HTML preview (#6467)", keys: under("ai", ["htmlPreviewLabel", "htmlExpandPreview", "htmlExpandPreviewHint", "htmlSaveSafe", "htmlSaveFailed", "htmlCopySource", "htmlCopyRiskBody", "htmlCopyRiskAccept", "htmlCopyRiskRemember", "htmlCopyRiskToast"]) },
@@ -144,6 +145,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "sidebar search match mode (#13505)", keys: under("sidebar", ["listOptions", "searchMatchMode", "searchMatchModeFuzzy", "searchMatchModeContains", "searchMatchModeTooltip"]), translated: true },
   { feature: "PostgreSQL legacy TLS", keys: ["connection.postgresLegacyTls", "connection.postgresLegacyTlsHint"] },
   { feature: "settings search sections", keys: ["settings.syncWebDavWebDescription", "settings.performanceSection"] },
+  { feature: "sidebar connection endpoints (#14188)", keys: under("settings", ["sidebarShowConnectionEndpoints", "sidebarShowConnectionEndpointsDescription"]), translated: true },
   { feature: "local backup selection", keys: ["settings.localBackupSecretsPassphraseRequiredHint", "settings.localBackupPathLabel", "settings.localBackupPathUnset", "settings.localBackupChoosePath", "settings.localBackupPathRequired"], translated: true },
   { feature: "SQL table completion schema qualification (#9219)", keys: ["settings.tableCompletionSchemaQualification*"], translated: true },
   { feature: "Redis batch expiration", keys: under("redis", ["batchExpiry", "batchExpiryTitle", "batchExpirySelected", "batchExpiryApply", "batchExpirySuccess", "batchExpiryPartial"]) },
@@ -158,6 +160,11 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   {
     feature: "statement navigation shortcuts",
     keys: under("settings", ["shortcutPreviousStatement", "shortcutNextStatement", "shortcutStatementStart"]),
+    translated: true,
+  },
+  {
+    feature: "editor line bookmarks",
+    keys: under("settings", ["shortcutToggleBookmark", "shortcutNextBookmark", "shortcutPreviousBookmark"]),
     translated: true,
   },
   { feature: "MCP history kind", keys: ["history.kinds.mcp"] },
@@ -237,6 +244,12 @@ describe("feature message content rules", () => {
   it.each(ALL_LOCALES)("%s renders include syntax literally instead of resolving an i18n link", (locale) => {
     const i18n = createI18n({ legacy: false, locale, messages: { [locale]: declared[locale] } });
     expect(i18n.global.t("sqlFile.resolveIncludesHint")).toContain("-- @include");
+    i18n.dispose();
+  });
+  it.each(ALL_LOCALES)("%s renders the sidebar connection endpoints suffix @ literally instead of resolving an i18n link", (locale) => {
+    const i18n = createI18n({ legacy: false, locale, messages: { [locale]: declared[locale] } });
+    expect(i18n.global.t("settings.sidebarShowConnectionEndpointsDescription")).toContain("@");
+    expect(i18n.global.t("settings.sidebarShowConnectionEndpointsDescription")).not.toContain("{");
     i18n.dispose();
   });
   it.each(EXCEPT_AZ_TR)("%s keeps the Dameng validity labels as the database literals", (locale) => {

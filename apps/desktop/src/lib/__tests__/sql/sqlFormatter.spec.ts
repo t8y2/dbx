@@ -1047,4 +1047,19 @@ describe("PostgreSQL MERGE formatting (#12592)", () => {
     expect(sqlFormatDialectForDbType("gaussdb")).toBe("postgres");
     await expect(formatSqlText(merge, sqlFormatDialectForDbType("kingbase"))).resolves.toContain("WHEN MATCHED THEN\nUPDATE SET name = s.name");
   });
+
+  it("compresses a long script in linear time", () => {
+    const statement = (index: number) => `INSERT INTO t (id, note)\n  VALUES (${index}, 'a  b''c')  -- row ${index}\n;`;
+    const script = Array.from({ length: 20000 }, (_, index) => statement(index)).join("\n");
+
+    const started = performance.now();
+    const compressed = compressSqlText(script, "mysql");
+    const elapsed = performance.now() - started;
+
+    expect(compressed.startsWith("INSERT INTO t (id, note) VALUES (0, 'a  b''c') ;")).toBe(true);
+    expect(compressed.split("INSERT INTO").length - 1).toBe(20000);
+    expect(compressed.includes("\n")).toBe(false);
+    // The earlier implementation re-flattened the output on every whitespace run and needed minutes here.
+    expect(elapsed).toBeLessThan(3000);
+  });
 });

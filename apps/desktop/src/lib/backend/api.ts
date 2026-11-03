@@ -204,6 +204,7 @@ export const deleteSavedSqlFile = forward("deleteSavedSqlFile");
 export const savedSqlStorageDir = forward("savedSqlStorageDir");
 export const openSavedSqlStorageDir = forward("openSavedSqlStorageDir");
 export const revealPathInFileManager = forward("revealPathInFileManager");
+export const openPathWithDefaultApp = forward("openPathWithDefaultApp");
 export const deleteDatabaseBackupFiles = forward("deleteDatabaseBackupFiles");
 export const databaseBackupCommand = forward("databaseBackupCommand");
 export const databaseBackupBackground = forward("databaseBackupBackground");
@@ -1041,6 +1042,8 @@ export const rotateWebMcpToken = forward("rotateWebMcpToken");
 export const loadWebCapabilities = forward("loadWebCapabilities");
 export const checkForUpdates = forward("checkForUpdates");
 export const fetchChangelog = forward("fetchChangelog");
+export const fetchChangelogIndex = forward("fetchChangelogIndex");
+export const fetchChangelogRelease = forward("fetchChangelogRelease");
 export const getSystemProxyUrl = forward("getSystemProxyUrl");
 export const downloadUpdate = forward("downloadUpdate");
 export const cancelUpdateDownload = forward("cancelUpdateDownload");
@@ -1247,6 +1250,7 @@ export type {
   MongoExportProgress,
   MongoExportSummary,
   DatabaseExportRequest,
+  DatabaseExportSelectedObject,
   ExportProgress,
   TableExportProgress,
   TableExportStatus,

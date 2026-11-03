@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { usesLightweightMysqlBrowser } from "@/lib/database/mysqlBrowserLoading";
 import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { uuid } from "@/lib/common/utils";
 import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
@@ -133,6 +134,7 @@ import { executeOceanbaseTableClone, executeOceanbaseTableCloneData, oceanbaseCl
 import { useOceanbaseCloneDialog } from "@/composables/useOceanbaseCloneDialog";
 import { useToast } from "@/composables/useToast";
 import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, prepareObjectSourceSave, objectSourceSaveSuccessMessage, formatObjectSourceSaveError, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import ObjectSourceSqlPreview from "@/components/objects/ObjectSourceSqlPreview.vue";
 import { inspectExactOracleTriggerSource } from "@/lib/table/objectSourceLoad";
 import {
   readOracleTriggerSource,
@@ -165,7 +167,7 @@ import { autoRevealExportedPathIfConfigured, promptExportSavePath } from "@/lib/
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, xlsxHeaderUsesCommentRows, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import { showSqlInsertModeDialog, type SqlInsertDialect, type SqlInsertMode } from "@/lib/export/sqlInsertMode";
-import { showExportExecutionModeDialog } from "@/lib/export/exportExecutionMode";
+import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode";
 import type { ManualExportMode } from "@/lib/export/manualExportQueue";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
 import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
@@ -239,7 +241,7 @@ import { customTypeCapabilities, isOracleFamilyTypeSource, sidebarObjectKindsFor
 import { requestOracleTypeManagement } from "@/lib/table/oracleTypeManagementRequest";
 import { schemaIndexIdentity, schemaIndexIsSameOwner } from "@/lib/table/schemaIndexNavigation";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
-import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
+import { filterObjectBrowserTableColumns, sortObjectBrowserTableColumns, type ObjectBrowserTableColumnSort, type ObjectBrowserTableColumnSortKey } from "@/lib/table/objectBrowserTableInfo";
 import { visibleMongoCollections } from "@/lib/sidebar/mongoCollectionMutation";
 import { createSidePanelRequestGuard } from "@/lib/table/sidePanelRequestGuard";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
@@ -248,6 +250,7 @@ import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRowsForScaffold, type ObjectBrowserRowsCacheScope, type ObjectBrowserRowsCacheWriteToken } from "@/lib/table/objectBrowserRowsCache";
 import { createObjectBrowserRowsLoadGuard, type ObjectBrowserRowsLoadHandle } from "@/lib/table/objectBrowserRowsLoadGuard";
 import { metadataLoadBudgetMs } from "@/lib/metadata/metadataLoadBudget";
+import { shareObjectBrowserRead } from "@/lib/table/objectBrowserPendingReads";
 import { loadObjectDdl, type ObjectDdlRequest } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
@@ -1478,13 +1481,37 @@ const tableInfoTabListStyle = computed(() => ({
 
 const filteredTableColumns = computed(() => filterObjectBrowserTableColumns(tableColumns.value, tableInfoSearchQuery.value));
 
+const tableColumnSort = ref<ObjectBrowserTableColumnSort | null>(null);
+
+const sortedTableColumns = computed(() => sortObjectBrowserTableColumns(filteredTableColumns.value, tableColumnSort.value));
+
+watch(
+  () => [sidePanelRow.value?.id, props.database] as const,
+  () => {
+    tableColumnSort.value = null;
+  },
+);
+
+function toggleTableColumnSort(key: ObjectBrowserTableColumnSortKey) {
+  tableColumnSort.value = tableColumnSort.value?.key === key ? (tableColumnSort.value.direction === "asc" ? { key, direction: "desc" } : null) : { key, direction: "asc" };
+}
+
+function tableColumnSortDirection(key: ObjectBrowserTableColumnSortKey): ObjectBrowserTableColumnSort["direction"] | undefined {
+  return tableColumnSort.value?.key === key ? tableColumnSort.value.direction : undefined;
+}
+
+function tableColumnSortIndicator(key: ObjectBrowserTableColumnSortKey): string {
+  const direction = tableColumnSortDirection(key);
+  return direction === "asc" ? "▲" : direction === "desc" ? "▼" : "↕";
+}
+
 function toggleTableInfoColumnSelection(name: string, event: MouseEvent) {
   const current = selectedTableInfoColumns.value;
   const index = current.indexOf(name);
   if (event.ctrlKey || event.metaKey) {
     selectedTableInfoColumns.value = index < 0 ? [...current, name] : current.filter((column) => column !== name);
   } else if (event.shiftKey && current.length > 0) {
-    const visibleNames = filteredTableColumns.value.map((column) => column.name);
+    const visibleNames = sortedTableColumns.value.map((column) => column.name);
     const anchor = visibleNames.indexOf(current[current.length - 1]!);
     const target = visibleNames.indexOf(name);
     selectedTableInfoColumns.value = anchor < 0 || target < 0 ? [name] : visibleNames.slice(Math.min(anchor, target), Math.max(anchor, target) + 1);
@@ -1499,10 +1526,10 @@ function onTableInfoColumnContextMenu(name: string, event: MouseEvent, openMenu:
 }
 
 function copyTableInfoColumnDetails() {
-  const ordered = filteredTableColumns.value.filter((column) => selectedTableInfoColumns.value.includes(column.name));
+  const ordered = sortedTableColumns.value.filter((column) => selectedTableInfoColumns.value.includes(column.name));
   if (ordered.length === 0) return;
   const headers = ["#", t("grid.columnName"), t("grid.columnType"), t("grid.tableInfoNullable"), t("structureEditor.defaultValue"), t("grid.columnComment")];
-  const rows = ordered.map((column) => [String(filteredTableColumns.value.findIndex((item) => item.name === column.name) + 1), column.name, gaussdbMColumnType(column.data_type), column.is_nullable ? "YES" : "NO", tableColumnDefaultDisplayValue(column.column_default), column.comment ?? ""]);
+  const rows = ordered.map((column) => [String(sortedTableColumns.value.findIndex((item) => item.name === column.name) + 1), column.name, gaussdbMColumnType(column.data_type), column.is_nullable ? "YES" : "NO", tableColumnDefaultDisplayValue(column.column_default), column.comment ?? ""]);
   const text = [headers, ...rows].map((row) => row.map(encodeSpreadsheetTsvCell).join("\t")).join("\n");
   void copyToClipboard(text)
     .then(() => toast(t("contextMenu.copyAdvancedInfo"), 2000))
@@ -1515,7 +1542,7 @@ function tableInfoColumnContextMenuItems(): ContextMenuItem[] {
 
 function onTableInfoColumnsCopy(event: ClipboardEvent) {
   if (selectedTableInfoColumns.value.length === 0 || !event.clipboardData) return;
-  const names = filteredTableColumns.value.filter((column) => selectedTableInfoColumns.value.includes(column.name)).map((column) => column.name);
+  const names = sortedTableColumns.value.filter((column) => selectedTableInfoColumns.value.includes(column.name)).map((column) => column.name);
   if (names.length === 0) return;
   event.clipboardData.setData("text/plain", names.join("\n"));
   event.preventDefault();
@@ -1529,7 +1556,7 @@ function onTableInfoColumnsKeydown(event: KeyboardEvent) {
   event.preventDefault();
   event.stopPropagation();
   if (key === "c" && !event.shiftKey) {
-    const names = filteredTableColumns.value.filter((column) => selectedTableInfoColumns.value.includes(column.name)).map((column) => column.name);
+    const names = sortedTableColumns.value.filter((column) => selectedTableInfoColumns.value.includes(column.name)).map((column) => column.name);
     if (names.length) void copyToClipboard(names.join("\n")).catch((error) => toast(t("grid.copyFailed", { message: error?.message || String(error) }), 5000));
     return;
   }
@@ -3353,6 +3380,8 @@ function openBatchDatabaseExport() {
     database: props.database,
     schema: selectedTableRows.value[0]?.schema || selectedSchema.value,
     tableNames: selectedTables,
+    // Names alone cannot tell a table from a routine of the same name (#13940).
+    objects: selectedTableRows.value.map((row) => ({ objectType: row.type, name: row.name, ...(row.signature != null ? { signature: row.signature } : {}) })),
   };
 }
 
@@ -3892,6 +3921,7 @@ function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<XlsxEx
       open: true,
       showHeaderOptions: hasComments,
       showExecutionMode: isTauriRuntime(),
+      initialExecutionMode: getDefaultExportExecutionMode(),
       onConfirm: (exportOptions: XlsxExportOptions) => {
         resolve(exportOptions);
         app.unmount();
@@ -3955,8 +3985,7 @@ async function exportTableData(
   const { connectionId, database, schema, catalog, tableName, identifierQuote, databaseType, settings } = captured;
   columnInfos = columnInfos?.map((column) => ({ ...column }));
   const native = isTauriRuntime();
-  const mode = native ? (selectedMode ?? (await showExportExecutionModeDialog())) : "immediate";
-  if (mode === null) return;
+  const mode = native ? (selectedMode ?? getDefaultExportExecutionMode()) : "immediate";
   const splitSqlOutput = format === "sql" && splitMaxMb !== undefined;
 
   // Save dialog first
@@ -4052,7 +4081,7 @@ async function exportTableData(
         if (native && task) task.canCancel = false;
         if (format === "json") await read(() => api.exportQueryResultJson(filePath, result.columns, result.rows));
         else if (format === "csv") {
-          await read(() => api.exportQueryResultCsv(filePath, result.columns, result.rows, settings.csvQuoteMode, csvNullLiteralForMode(settings.csvNullMode)));
+          await read(() => api.exportQueryResultCsv(filePath, result.columns, result.rows, settings.csvQuoteMode, csvNullLiteralForMode(settings.csvNullMode), settings.csvWithoutBom));
         } else {
           const comments = result.columns.map((name) => columnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
           const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
@@ -5175,7 +5204,7 @@ watch([() => props.initialEventName, () => props.initialEventOpenRequestId, () =
 // 匹配 0 行；schema 解析失败（loadSchemas 抛错或返回空列表）时标签会整体空白
 // (#8301)。经 objectListSchemaForConnection 回退到连接用户名（大写），仅限
 // 达梦；oracle/oceanbase-oracle 维持空 schema 由后端解析当前 schema。
-async function loadObjects(options?: { allowCached?: boolean; preserveExistingRows?: boolean }) {
+async function loadObjects(options?: { allowCached?: boolean; preserveExistingRows?: boolean; details?: boolean }) {
   clearTimeout(objectSearchTimer);
   if (usesServerObjectPaging.value) return loadObjectPage(false, options);
   error.value = "";
@@ -5216,7 +5245,7 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     finishOnce();
     // 行数/大小是随对象列表一起缓存的，直接返回缓存会让这两列一直停在上一次统计
     // （#10461）。对象列表本身仍按上面的约定不动，只把统计信息在后台补一次。
-    if (cached.stale) void revalidateCachedObjectStatistics(request, cacheWriteToken);
+    if (cached.stale && !usesLightweightMysqlBrowser(props.connection)) void revalidateCachedObjectStatistics(request, cacheWriteToken);
     return;
   } else {
     // No scaffold: first load in this scope, cache invalidated by a DDL mutation,
@@ -5233,12 +5262,12 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
   }
 
   try {
-    const load = props.connection.db_type === "mongodb" ? loadMongoObjectBrowserRows(request.scope.connectionId, request.scope.database) : loadSqlObjectBrowserRows(request);
+    const load = props.connection.db_type === "mongodb" ? loadMongoObjectBrowserRows(request.scope.connectionId, request.scope.database) : loadSqlObjectBrowserRows(request, options?.details);
     const nextRows = await objectBrowserRowsLoadGuard.wait(request.epoch, load, metadataLoadBudgetMs(props.connection.query_timeout_secs));
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     applyObjectBrowserRows(nextRows);
     const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows);
-    void loadObjectStatistics(request, cacheWriteToken, cachedAt);
+    if (!usesLightweightMysqlBrowser(props.connection) || options?.details) void loadObjectStatistics(request, cacheWriteToken, cachedAt);
   } catch (e: any) {
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     // Keep visible rows on a background revalidate failure — surface a lightweight
@@ -5262,7 +5291,7 @@ function objectPageAnchor(object: ObjectInfo): string {
   return exactOracleTriggerMetadata(object.trigger) ? tablePageRowAnchorKey(object.name, object.schema, undefined, object.trigger) : JSON.stringify([object.schema, object.name, object.object_type, object.signature]);
 }
 
-async function loadObjectPage(append: boolean, options?: { preserveExistingRows?: boolean }) {
+async function loadObjectPage(append: boolean, options?: { preserveExistingRows?: boolean; details?: boolean }) {
   if (append && (loadingObjects.value || refreshingObjects.value || loadingMoreObjects.value || !hasMoreObjects.value)) return;
   const schema = exactIndexList.value ? indexParentSchema() : needsSchema.value ? objectListSchemaForConnection(props.connection, selectedSchema.value) : props.database;
   const request = objectBrowserRowsLoadGuard.start(objectBrowserRowsCacheScope(schema));
@@ -5350,14 +5379,17 @@ async function loadObjectPage(append: boolean, options?: { preserveExistingRows?
   }
 }
 
-async function loadSqlObjectBrowserRows(request: ObjectBrowserRowsLoadHandle) {
+async function loadSqlObjectBrowserRows(request: ObjectBrowserRowsLoadHandle, details = false) {
   // Schema indexes use their dedicated exact, server-paged filter. Mixing an
   // unbounded exact subset into the legacy all view defeats both contracts.
   const types = supportsSchemaIndexes.value ? sidebarObjectKindsForDatabase(effectiveDatabaseType.value).filter((type) => type !== "INDEX") : undefined;
-  const readOptions = oracleTriggerObjectReadOptions(props.connection, types, request.scope.catalog);
-  const objects: ObjectInfo[] = await (readOptions
-    ? api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog, undefined, undefined, readOptions)
-    : api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog));
+  const readOptions = usesLightweightMysqlBrowser(props.connection) ? { lightweight: !details } : oracleTriggerObjectReadOptions(props.connection, types, request.scope.catalog);
+  const readKey = JSON.stringify([createObjectBrowserRowsCacheWriteToken(request.scope), types, readOptions]);
+  const objects: ObjectInfo[] = await shareObjectBrowserRead(readKey, () =>
+    readOptions
+      ? api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog, undefined, undefined, readOptions)
+      : api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog),
+  );
   return buildObjectBrowserRows({
     objects: objects.filter((object) => !supportsSchemaIndexes.value || object.object_type !== "INDEX"),
     database: request.scope.database,
@@ -5374,10 +5406,11 @@ async function loadMongoObjectBrowserRows(connectionId: string, database: string
 async function loadObjectStatistics(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
   if (!rows.value.some((row) => row.type === "TABLE")) return;
   try {
-    const stats = await api.listObjectStatistics(request.scope.connectionId, request.scope.database, request.scope.schema);
+    const stats = await shareObjectBrowserRead(JSON.stringify(["statistics", cacheWriteToken]), () => api.listObjectStatistics(request.scope.connectionId, request.scope.database, request.scope.schema));
     if (!objectBrowserRowsLoadGuard.isCurrent(request) || stats.length === 0) return;
     mergeObjectStatistics(stats, request.scope.schema, cacheWriteToken, cachedAt);
   } catch (e) {
+    if (usesLightweightMysqlBrowser(props.connection) && objectBrowserRowsLoadGuard.isCurrent(request)) scaffoldRefreshError.value = translateBackendError(t, e);
     console.debug("[ObjectBrowser] table statistics unavailable", e);
   }
 }
@@ -5498,6 +5531,9 @@ function selectObjectFilter(filter: ObjectFilter) {
   const wasServerPaged = usesServerObjectPaging.value;
   userHasSelectedFilter.value = true;
   objectFilter.value = filter;
+  // Rows of the previous type are no longer listed; keeping them checked would
+  // export them together with the newly picked type (#13940).
+  clearTableSelection();
   emit("filterChange", filter);
   if (wasServerPaged || usesServerObjectPaging.value) void loadObjects();
 }
@@ -6097,6 +6133,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <Button v-if="showInlineSidePanelToggle" variant="ghost" size="icon" class="h-7 w-7" :class="{ 'text-primary': isSidePanelOpen }" :title="isSidePanelOpen ? t('objects.closeDetailPanel') : t('objects.openDetailPanel')" @click="toggleSidePanel">
         <PanelRight class="h-3.5 w-3.5" />
       </Button>
+      <Button v-if="usesLightweightMysqlBrowser(props.connection)" variant="ghost" size="sm" :disabled="loadingObjects || refreshingObjects" @click="loadObjects({ preserveExistingRows: true, details: true })">{{ t("objects.loadDetails") }}</Button>
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="refreshTooltip" :disabled="loadingObjects" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingObjects || refreshingObjects }" />
       </Button>
@@ -6568,14 +6605,30 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               <thead class="sticky top-0 bg-muted text-muted-foreground">
                 <tr class="border-b">
                   <th class="text-left text-nowrap font-medium px-3 py-2 w-8">#</th>
-                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnName") }}</th>
-                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.columnType") }}</th>
-                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("grid.tableInfoNullable") }}</th>
-                  <th class="text-left text-nowrap font-medium px-3 py-2">{{ t("structureEditor.defaultValue") }}</th>
+                  <th class="text-left text-nowrap font-medium px-3 py-2" :aria-sort="tableColumnSortDirection('name') === 'asc' ? 'ascending' : tableColumnSortDirection('name') === 'desc' ? 'descending' : 'none'">
+                    <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleTableColumnSort('name')">
+                      {{ t("grid.columnName") }} <span class="text-[10px]">{{ tableColumnSortIndicator("name") }}</span>
+                    </button>
+                  </th>
+                  <th class="text-left text-nowrap font-medium px-3 py-2" :aria-sort="tableColumnSortDirection('dataType') === 'asc' ? 'ascending' : tableColumnSortDirection('dataType') === 'desc' ? 'descending' : 'none'">
+                    <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleTableColumnSort('dataType')">
+                      {{ t("grid.columnType") }} <span class="text-[10px]">{{ tableColumnSortIndicator("dataType") }}</span>
+                    </button>
+                  </th>
+                  <th class="text-left text-nowrap font-medium px-3 py-2" :aria-sort="tableColumnSortDirection('nullable') === 'asc' ? 'ascending' : tableColumnSortDirection('nullable') === 'desc' ? 'descending' : 'none'">
+                    <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleTableColumnSort('nullable')">
+                      {{ t("grid.tableInfoNullable") }} <span class="text-[10px]">{{ tableColumnSortIndicator("nullable") }}</span>
+                    </button>
+                  </th>
+                  <th class="text-left text-nowrap font-medium px-3 py-2" :aria-sort="tableColumnSortDirection('defaultValue') === 'asc' ? 'ascending' : tableColumnSortDirection('defaultValue') === 'desc' ? 'descending' : 'none'">
+                    <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleTableColumnSort('defaultValue')">
+                      {{ t("structureEditor.defaultValue") }} <span class="text-[10px]">{{ tableColumnSortIndicator("defaultValue") }}</span>
+                    </button>
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                <CustomContextMenu v-for="(column, index) in filteredTableColumns" :key="column.name" :items="tableInfoColumnContextMenuItems" v-slot="{ onContextMenu, isOpen }">
+                <CustomContextMenu v-for="(column, index) in sortedTableColumns" :key="column.name" :items="tableInfoColumnContextMenuItems" v-slot="{ onContextMenu, isOpen }">
                   <tr
                     tabindex="0"
                     :data-table-info-column="column.name"
@@ -6732,6 +6785,12 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             <span v-if="sourceRow?.valid != null" class="shrink-0 rounded border px-1 py-px text-[10px] font-medium" :class="sourceRow.valid ? 'border-emerald-500/30 text-emerald-600' : 'border-destructive/30 text-destructive'">
               {{ t(sourceRow.valid ? "objects.validStatus" : "objects.invalidStatus") }}
             </span>
+            <ObjectSourceSqlPreview
+              v-if="sourceEditing && sourceSection === 'source' && sourceRow && (sourceRow.type === 'PROCEDURE' || sourceRow.type === 'FUNCTION')"
+              :input="{ databaseType: effectiveDatabaseType, objectType: sourceRow.type, schema: sourceRow.schema || selectedSchema || props.database, name: sourceRow.name, source: sourceDraft }"
+              :context-key="JSON.stringify([props.connection.id, props.database, props.catalog])"
+              :disabled="sourceSaving || sourceLoading || !sourceCanEdit"
+            />
             <Button v-if="sourceEditing && sourceSection === 'source'" variant="ghost" size="sm" class="h-6 px-2 text-xs" :disabled="sourceSaving || sourceLoading || !sourceDraft.trim()" @click="saveSource">
               <Loader2 v-if="sourceSaving" class="mr-1 h-3 w-3 animate-spin" />
               {{ t("objects.saveSource") }}

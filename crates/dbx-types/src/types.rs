@@ -488,6 +488,7 @@ pub struct CompletionAssistantResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct SpatialColumn {
     /// Zero-based index into `QueryResult.columns`.
     pub column_index: usize,

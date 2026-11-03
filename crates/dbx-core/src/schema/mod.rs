@@ -225,6 +225,21 @@ async fn list_database_storage_once(
         return Ok(Vec::new());
     }
     let config = connection_config(state, connection_id).await;
+    if config.as_ref().is_some_and(is_native_mysql_browser_config) {
+        let mut seen = std::collections::HashSet::new();
+        let requested = database_names
+            .iter()
+            .filter(|name| !name.is_empty() && seen.insert((*name).clone()))
+            .take(MAX_DATABASE_STORAGE_NAMES)
+            .cloned()
+            .collect::<Vec<_>>();
+        let pool = state.pool_handle(connection_id).await;
+        if let Some(PoolKind::Mysql(pool, MysqlMode::Normal | MysqlMode::Bare)) = pool {
+            let budget = mysql_browser_explicit_budget(config.as_ref().expect("native mysql config verified above"));
+            return db::mysql::list_database_storage_with_budget(&pool, &requested, budget).await;
+        }
+        return Ok(Vec::new());
+    }
     if !config.as_ref().is_some_and(|config| {
         config.db_type == DatabaseType::Postgres && config.driver_profile.as_deref() != Some("cockroachdb")
     }) {
@@ -789,6 +804,8 @@ async fn list_database_metadata_once(state: &AppState, connection_id: &str) -> R
         let mode = *mode;
         return if mode == MysqlMode::OceanBaseOracle {
             db::ob_oracle::list_databases(&pool).await
+        } else if config.as_ref().is_some_and(is_native_mysql_browser_config) {
+            db::mysql::list_database_attributes(&pool).await
         } else {
             db::mysql::list_database_metadata(&pool).await
         };
@@ -1028,6 +1045,64 @@ pub async fn list_tables_core(
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
 ) -> Result<Vec<db::TableInfo>, String> {
+    list_tables_core_impl(
+        state,
+        connection_id,
+        database,
+        schema,
+        filter,
+        limit,
+        offset,
+        object_types,
+        table_name_filter,
+        false,
+    )
+    .await
+}
+
+/// Sidebar table-tree variant of [`list_tables_core`]: for PostgreSQL-family
+/// connections `limit`/`offset` count top-level relations, and every partition
+/// below a returned root is included in the same page. Other drivers ignore
+/// the flag and keep row-based pagination.
+pub async fn list_table_roots_page_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
+) -> Result<Vec<db::TableInfo>, String> {
+    list_tables_core_impl(
+        state,
+        connection_id,
+        database,
+        schema,
+        filter,
+        limit,
+        offset,
+        object_types,
+        table_name_filter,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn list_tables_core_impl(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
+    page_table_roots: bool,
+) -> Result<Vec<db::TableInfo>, String> {
     let db_config = connection_config(state, connection_id).await;
     if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OceanbaseOracle) {
         validate_oceanbase_metadata_page(limit, offset)?;
@@ -1053,6 +1128,7 @@ pub async fn list_tables_core(
                 object_types,
                 table_name_filter,
                 metadata_session.client_session_id(),
+                page_table_roots,
             )
         },
     )
@@ -1442,13 +1518,17 @@ fn single_table_comment_from_query_result(result: db::QueryResult) -> Result<Opt
 }
 
 fn oracle_table_comments_sql(schema: &str, table_names: &[String]) -> Option<String> {
+    oracle_table_comments_sql_for_owner(&oracle_owner_filter(schema), table_names)
+}
+
+fn oracle_table_comments_sql_for_owner(owner: &str, table_names: &[String]) -> Option<String> {
     if table_names.is_empty() {
         return None;
     }
     let names = table_names.iter().map(|name| sql_string(name)).collect::<Vec<_>>().join(", ");
     Some(format!(
         "SELECT TABLE_NAME, COMMENTS FROM ALL_TAB_COMMENTS WHERE OWNER = {} AND TABLE_NAME IN ({}) AND TABLE_TYPE IN ('TABLE', 'VIEW') AND COMMENTS IS NOT NULL",
-        oracle_owner_filter(schema),
+        owner,
         names,
     ))
 }
@@ -2308,6 +2388,53 @@ async fn load_oracle_table_comments_for_objects(
     Ok(())
 }
 
+/// Fills table and view comments on an exact-identity object list. The owner and
+/// names are matched verbatim, because case-folding them could attach the comment
+/// of a different object such as `APP.T` to `"app"."t"`. Comments are decorative
+/// here, so a failed lookup is logged and keeps the listing usable.
+async fn load_oracle_exact_table_comments_for_objects(
+    client: &mut db::agent_driver::AgentDriverClient,
+    database: &str,
+    owner: &str,
+    objects: &mut [db::ObjectInfo],
+    timeout_duration: Option<Duration>,
+) {
+    let table_names = objects
+        .iter()
+        .filter(|object| oracle_object_info_can_have_table_comment(object) && comment_is_blank(&object.comment))
+        .map(|object| object.name.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let owner_literal = sql_string(owner);
+    let mut comments = HashMap::new();
+    for chunk in table_names.chunks(ORACLE_TABLE_COMMENT_BATCH_SIZE) {
+        let Some(sql) = oracle_table_comments_sql_for_owner(&owner_literal, chunk) else {
+            continue;
+        };
+        let params = agent_execute_query_params(
+            &sql,
+            (!database.is_empty()).then_some(database),
+            None,
+            QueryExecutionOptions { max_rows: Some(chunk.len()), ..Default::default() },
+        );
+        match client.execute_query_with_timeout::<db::QueryResult>(params, timeout_duration).await {
+            Ok(result) => comments.extend(table_comments_from_query_result(result)),
+            Err(error) => {
+                log::warn!("[schema][oracle:list_objects:comment-lookup-failed] owner={owner} error={error}");
+                break;
+            }
+        }
+    }
+    for object in objects.iter_mut().filter(|object| oracle_object_info_can_have_table_comment(object)) {
+        if comment_is_blank(&object.comment) {
+            if let Some(comment) = comments.get(&object.name) {
+                object.comment = Some(comment.clone());
+            }
+        }
+    }
+}
+
 /// Runs an object-statistics fallback chain against an arbitrary query
 /// transport, so the agent drivers and generic JDBC connections
 /// (`PoolKind::ExternalDriver`) can share the same vendor SQL and the same
@@ -2523,6 +2650,7 @@ fn message_queue_topic_tables(topics: Vec<crate::mq::TopicInfo>) -> Vec<db::Tabl
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn list_tables_once(
     state: &AppState,
     connection_id: &str,
@@ -2534,6 +2662,7 @@ async fn list_tables_once(
     object_types: Option<&[String]>,
     table_name_filter: Option<&TableNameFilter>,
     client_session_id: Option<&str>,
+    page_table_roots: bool,
 ) -> Result<Vec<db::TableInfo>, String> {
     let pool_key =
         state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
@@ -2922,17 +3051,25 @@ async fn list_tables_once(
                 db::cloudberry::list_tables_filtered(p, schema, filter, None, None)
                     .await
                     .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
+            } else if page_table_roots {
+                db::cloudberry::list_table_roots_page_filtered(p, schema, filter, limit, offset).await
             } else {
                 db::cloudberry::list_tables_filtered(p, schema, filter, limit, offset).await
             }
         }
         PoolKind::Postgres(p) => {
             if requests_table_objects_only(object_types) && table_name_filter.is_none_or(TableNameFilter::is_empty) {
-                db::postgres::list_table_objects_filtered(p, schema, filter, limit, offset).await
+                if page_table_roots {
+                    db::postgres::list_table_roots_page_filtered(p, schema, filter, limit, offset, true).await
+                } else {
+                    db::postgres::list_table_objects_filtered(p, schema, filter, limit, offset).await
+                }
             } else if object_types.is_some() || table_name_filter.is_some_and(|filter| !filter.is_empty()) {
                 db::postgres::list_tables_filtered(p, schema, filter, None, None)
                     .await
                     .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
+            } else if page_table_roots {
+                db::postgres::list_table_roots_page_filtered(p, schema, filter, limit, offset, false).await
             } else {
                 db::postgres::list_tables_filtered(p, schema, filter, limit, offset).await
             }
@@ -4005,6 +4142,10 @@ done
         config.jdbc_driver_class = Some("com.mysql.cj.jdbc.Driver".to_string());
         assert!(!is_oracle_external_driver_config(&config));
 
+        config.connection_string = Some("__DBX_SAVED_CREDENTIAL__:xyz".to_string());
+        config.jdbc_driver_class = Some("oracle.jdbc.OracleDriver".to_string());
+        assert!(is_oracle_external_driver_config(&config));
+
         config.db_type = DatabaseType::Oracle;
         assert!(!is_oracle_external_driver_config(&config));
     }
@@ -4977,6 +5118,63 @@ done
     }
 
     #[tokio::test]
+    async fn mysql_browser_metadata_timeout_returns_once_without_reconnecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = crate::connection::AppState::new(storage);
+        // An in-memory pool makes an accidental reconnect observable without a live server.
+        let mut config = test_connection_config(DatabaseType::Sqlite);
+        config.id = "conn".to_string();
+        config.host = ":memory:".to_string();
+        config.password.clear();
+        config.database = None;
+        state.configs.write().await.insert(config.id.clone(), config);
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+        pool.with_connection(|conn| {
+            conn.execute_batch("CREATE TEMP TABLE metadata_timeout_marker (id INTEGER)").map_err(|e| e.to_string())
+        })
+        .unwrap();
+        state
+            .update_connection_pools(|connections| {
+                connections.insert("conn".to_string(), super::PoolKind::Sqlite(pool.clone()));
+            })
+            .await;
+
+        for error in [
+            "MySQL browser metadata timed out after 5s; query cancelled",
+            "MySQL browser metadata timed out after 5s; cancellation failed: connection reset by peer",
+        ] {
+            assert!(!is_retryable_metadata_error(error));
+            assert_eq!(
+                metadata_error_action(Some(DatabaseType::Mysql), error, false),
+                super::MetadataErrorAction::Return
+            );
+            let mut attempts = 0;
+            let result = super::retry_metadata_connection_for_session(&state, "conn", None, None, || {
+                attempts += 1;
+                async { Err::<(), _>(error.to_string()) }
+            })
+            .await;
+
+            assert_eq!(result.unwrap_err(), error);
+            assert_eq!(attempts, 1);
+            let Some(super::PoolKind::Sqlite(retained)) = state.pool_handle("conn").await else {
+                panic!("metadata timeout must retain the pool");
+            };
+            retained
+                .with_connection(|conn| {
+                    conn.query_row("SELECT COUNT(*) FROM metadata_timeout_marker", [], |row| row.get::<_, i64>(0))
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            metadata_error_action(Some(DatabaseType::Mysql), "connection reset by peer", false),
+            super::MetadataErrorAction::Retry
+        );
+    }
+
+    #[tokio::test]
     async fn metadata_pool_races_retry_once_and_saturation_returns_busy() {
         let dir = std::env::temp_dir().join(format!("dbx-schema-metadata-pool-race-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -5767,6 +5965,30 @@ for line in sys.stdin:
         let filtered = filter_table_infos(tables, Some("orders"), Some(1), Some(1), Some(&object_types), None);
 
         assert_eq!(filtered.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["monthly_orders_mv"]);
+    }
+
+    #[test]
+    fn mysql_browser_loading_policy_excludes_other_dialects_and_proxies() {
+        assert!(super::is_native_mysql_browser_config(&test_connection_config(DatabaseType::Mysql)));
+        for profile in ["", " ", "mysql", " MYSQL "] {
+            let mut config = test_connection_config(DatabaseType::Mysql);
+            config.driver_profile = Some(profile.to_string());
+            assert!(super::is_native_mysql_browser_config(&config));
+        }
+        for dialect in [DatabaseType::Postgres, DatabaseType::OceanbaseOracle, DatabaseType::Jdbc] {
+            assert!(!super::is_native_mysql_browser_config(&test_connection_config(dialect)));
+        }
+        for profile in ["tidb", "dolt", "oceanbase-mysql", "starrocks", "doris"] {
+            let mut config = test_connection_config(DatabaseType::Mysql);
+            config.driver_profile = Some(profile.to_string());
+            assert!(!super::is_native_mysql_browser_config(&config));
+        }
+        let mut proxy = test_connection_config(DatabaseType::Mysql);
+        proxy.database_info = Some(DatabaseConnectionInfo {
+            product_version: Some("5.6.29-mycat-1.6".to_string()),
+            ..Default::default()
+        });
+        assert!(!super::is_native_mysql_browser_config(&proxy));
     }
 
     #[test]
@@ -7576,6 +7798,103 @@ pub async fn list_objects_core(
     .await
 }
 
+/// Mirrors the frontend `metadataLoadBudgetMs`: explicit user-initiated metadata reads
+/// (details / storage) follow the session query timeout instead of the snappy 5s
+/// browsing budget, and stay bounded even when server timeouts are disabled (0).
+fn mysql_browser_explicit_budget(config: &ConnectionConfig) -> Duration {
+    let timeout_secs = config.effective_query_timeout_secs();
+    if timeout_secs == 0 {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs((timeout_secs + 5).max(15))
+    }
+}
+
+fn is_native_mysql_browser_config(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::Mysql
+        && config
+            .driver_profile
+            .as_deref()
+            .is_none_or(|profile| profile.trim().is_empty() || profile.trim().eq_ignore_ascii_case("mysql"))
+        && !db::mysql_compatible::uses_show_metadata(config)
+        && !is_mycat_config(config)
+        && mysql_table_list_source_for_config(Some(config)) != MysqlTableListSource::ShowFullTables
+}
+
+/// Optional browser loading policy; omission retains the existing metadata contract.
+#[allow(clippy::too_many_arguments)]
+pub async fn list_objects_core_with_loading_options(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
+    options: &MetadataReadOptions,
+    lightweight: Option<bool>,
+) -> Result<Vec<db::ObjectInfo>, String> {
+    let config = connection_config(state, connection_id).await;
+    if let Some(lightweight) = lightweight.filter(|_| config.as_ref().is_some_and(is_native_mysql_browser_config)) {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        if matches!(
+            clone_metadata_pool(state, &pool_key).await,
+            Some(PoolKind::Mysql(_, MysqlMode::Normal | MysqlMode::Bare))
+        ) {
+            let budget = if lightweight {
+                Duration::from_secs(5)
+            } else {
+                mysql_browser_explicit_budget(config.as_ref().expect("native mysql config verified above"))
+            };
+            return retry_metadata_connection(state, connection_id, Some(database), || async {
+                let pool_key =
+                    state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+                let Some(PoolKind::Mysql(pool, MysqlMode::Normal | MysqlMode::Bare)) =
+                    clone_metadata_pool(state, &pool_key).await
+                else {
+                    return Err("MySQL metadata pool unavailable".to_string());
+                };
+                let can_page = filter.is_none_or(|value| value.trim().is_empty())
+                    && table_name_filter.is_none_or(|filter| filter.is_empty());
+                let result = db::mysql::list_objects_for_browser(
+                    &pool,
+                    database,
+                    object_types,
+                    if can_page { limit } else { None },
+                    if can_page { offset } else { None },
+                    lightweight,
+                    budget,
+                )
+                .await?;
+                Ok(filter_object_infos(
+                    result.objects,
+                    filter,
+                    limit,
+                    if result.paging_applied { Some(0) } else { offset },
+                    object_types,
+                    table_name_filter,
+                ))
+            })
+            .await;
+        }
+    }
+    list_objects_core_with_options(
+        state,
+        connection_id,
+        database,
+        schema,
+        filter,
+        limit,
+        offset,
+        object_types,
+        table_name_filter,
+        options,
+    )
+    .await
+}
+
 pub async fn list_objects_core_with_options(
     state: &AppState,
     connection_id: &str,
@@ -8208,7 +8527,13 @@ async fn list_object_statistics_once(
                 let include_mysql_details = db_config.as_ref().is_some_and(|config| {
                     config.db_type == DatabaseType::Mysql && !db::mysql_compatible::uses_show_metadata(config)
                 });
-                db::mysql::list_object_statistics(p, database, include_mysql_details).await
+                db::mysql::list_object_statistics_with_budget(
+                    p,
+                    database,
+                    include_mysql_details,
+                    db_config.as_ref().is_some_and(is_native_mysql_browser_config),
+                )
+                .await
             }
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => Ok(vec![]),
@@ -10754,7 +11079,7 @@ async fn get_table_ddl_core_with_options(
             schema: if schema.trim().is_empty() { None } else { Some(schema.to_string()) },
             name: table.to_string(),
             source: source.source,
-            identifier_quote,
+            identifier_quote: identifier_quote.clone(),
         });
         // Oracle-family comments live in dictionary tables, not inside CREATE VIEW.
         // Append COMMENT ON so table-properties DDL / hover match the structure editor.
@@ -10773,6 +11098,21 @@ async fn get_table_ddl_core_with_options(
                     &ddl,
                     client_session_id,
                     pool_key.as_deref(),
+                )
+                .await,
+            ));
+        }
+        if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Kingbase) {
+            return Ok(sanitize_ddl_string(
+                enrich_kingbase_view_ddl_with_comments(
+                    state,
+                    connection_id,
+                    database,
+                    schema,
+                    table,
+                    &ddl,
+                    identifier_quote.as_deref(),
+                    client_session_id,
                 )
                 .await,
             ));
@@ -11309,9 +11649,22 @@ pub(crate) fn is_oracle_external_driver_config(config: &ConnectionConfig) -> boo
         return false;
     }
 
-    let connection_string = config.connection_string.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let connection_string = config
+        .connection_string
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.starts_with("__DBX_SAVED_CREDENTIAL__:"));
     let driver_class = config.jdbc_driver_class.as_deref().map(str::trim).filter(|value| !value.is_empty());
-    let oracle_url = connection_string.map(|value| value.to_ascii_lowercase().starts_with("jdbc:oracle:"));
+    let oracle_url =
+        connection_string.map(|value| value.to_ascii_lowercase().starts_with("jdbc:oracle:")).or_else(|| {
+            if crate::models::connection::jdbc_dialect_hint(config)
+                == Some(crate::models::connection::JdbcDialectHint::Oracle)
+            {
+                Some(true)
+            } else {
+                None
+            }
+        });
     let oracle_driver = driver_class.map(|value| {
         matches!(value.to_ascii_lowercase().as_str(), "oracle.jdbc.oracledriver" | "oracle.jdbc.driver.oracledriver")
     });
@@ -13422,6 +13775,67 @@ fn append_oracle_comments_to_ddl(
         }
     }
     result
+}
+
+/// Render the view and column comments that `CREATE VIEW` cannot carry.
+///
+/// PostgreSQL-derived engines reject `COMMENT ON TABLE` for a view, so this uses
+/// `COMMENT ON VIEW` rather than [`append_oracle_comments_to_ddl`].
+fn append_kingbase_view_comments_to_ddl(
+    ddl: &str,
+    schema: &str,
+    view: &str,
+    identifier_quote: Option<&str>,
+    view_comment: Option<&str>,
+    columns: &[db::ColumnInfo],
+) -> String {
+    let quote = |value: &str| if identifier_quote == Some("`") { mysql_ident(value) } else { oracle_ident(value) };
+    let view_ref = if schema.trim().is_empty() { quote(view) } else { format!("{}.{}", quote(schema), quote(view)) };
+    let mut result = ddl.to_string();
+    if let Some(comment) = view_comment.map(str::trim).filter(|comment| !comment.is_empty()) {
+        result.push_str(&format!("\nCOMMENT ON VIEW {view_ref} IS {};", sql_string(comment)));
+    }
+    for column in columns {
+        if let Some(comment) = column.comment.as_deref().map(str::trim).filter(|comment| !comment.is_empty()) {
+            result.push_str(&format!(
+                "\nCOMMENT ON COLUMN {view_ref}.{} IS {};",
+                quote(&column.name),
+                sql_string(comment)
+            ));
+        }
+    }
+    result
+}
+
+/// Failures are logged and the view definition is returned without comments.
+async fn enrich_kingbase_view_ddl_with_comments(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    view: &str,
+    ddl: &str,
+    identifier_quote: Option<&str>,
+    client_session_id: Option<&str>,
+) -> String {
+    let view_comment =
+        get_table_comment_core_for_session(state, connection_id, database, schema, view, client_session_id)
+            .await
+            .unwrap_or_else(|error| {
+                log::debug!(
+                    "[schema][kingbase:view-ddl:view-comment-failed] connection_id={connection_id} schema={schema} view={view} error={error}"
+                );
+                None
+            });
+    let columns = get_columns_core_for_session(state, connection_id, database, schema, view, client_session_id)
+        .await
+        .unwrap_or_else(|error| {
+            log::debug!(
+                "[schema][kingbase:view-ddl:column-comments-failed] connection_id={connection_id} schema={schema} view={view} error={error}"
+            );
+            Vec::new()
+        });
+    append_kingbase_view_comments_to_ddl(ddl, schema, view, identifier_quote, view_comment.as_deref(), &columns)
 }
 
 fn should_append_oracle_style_comment_ddl(config: Option<&ConnectionConfig>) -> bool {

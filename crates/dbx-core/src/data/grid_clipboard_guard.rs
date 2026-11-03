@@ -159,6 +159,8 @@ mod tests {
             rows,
             selection_kind: DataGridSelectionKind::Cells,
             options: Default::default(),
+            spatial_columns: None,
+            spatial_values: None,
         }
     }
 

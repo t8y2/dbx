@@ -2007,6 +2007,7 @@ pub fn run() {
             #[cfg(not(target_os = "linux"))]
             {
                 window_state_guard::restore_main_window_state(app.handle());
+                window_state_guard::track_main_window_geometry(app.handle());
 
                 if should_show_main_window_before_setup_tasks() {
                     prepare_main_window_for_display(app.handle());
@@ -2076,6 +2077,7 @@ pub fn run() {
                 // preference first so a disabled frame is never briefly shown during startup.
                 create_linux_main_window(app, desktop_settings.linux_floating_frame_enabled)?;
                 window_state_guard::restore_main_window_state(app.handle());
+                window_state_guard::track_main_window_geometry(app.handle());
 
                 if should_show_main_window_before_setup_tasks() {
                     prepare_main_window_for_display(app.handle());
@@ -2832,6 +2834,7 @@ pub fn run() {
             commands::saved_sql::sync_saved_sql_directory,
             commands::shortcut_recording::set_shortcut_recording,
             commands::fs_open::reveal_path_in_file_manager,
+            commands::fs_open::open_path_with_default_app,
             commands::fs_open::is_sqlite_database_file,
             commands::fs_open::delete_database_backup_files,
             background_backup::database_backup_command,
@@ -3121,6 +3124,8 @@ pub fn run() {
             commands::app_relaunch::relaunch_app,
             commands::update::check_for_updates,
             commands::update::fetch_changelog,
+            commands::update::fetch_changelog_index,
+            commands::update::fetch_changelog_release,
             commands::update::get_system_proxy_url,
             commands::update::get_downloaded_update,
             commands::update::discard_downloaded_update,

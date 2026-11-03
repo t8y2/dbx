@@ -12,11 +12,16 @@
 //!
 //! Placeholders in templates:
 //! - `{{log}}`  — full path of `startup.log`
-//! - `{{url}}`  — direct download URL of the Windows 10 offline package
+//! - `{{url}}`  — official download page, where the Windows 10 offline package is listed
 
 /// Messages for one language. Templates contain `{{log}}` / `{{url}}` placeholders.
 pub(crate) struct StartupMessages {
     pub title: &'static str,
+    /// Official download page in this language. A page rather than a file link:
+    /// the dialog is built into the binary, which cannot know which release
+    /// directory its package was published under, and it must still work after
+    /// newer versions replace this one.
+    pub download_page_url: &'static str,
     pub missing_runtime: &'static str,
     pub damaged_runtime: &'static str,
     pub compatibility_failed: &'static str,
@@ -27,13 +32,14 @@ impl StartupMessages {
     /// Fills the template placeholders. Unknown placeholders are left untouched
     /// so a translation mistake is visible instead of silently producing an empty
     /// dialog.
-    pub(crate) fn render(&self, template: &'static str, log_path: &str, offline_url: &str) -> String {
-        template.replace("{{log}}", log_path).replace("{{url}}", offline_url)
+    pub(crate) fn render(&self, template: &'static str, log_path: &str, download_url: &str) -> String {
+        template.replace("{{log}}", log_path).replace("{{url}}", download_url)
     }
 }
 
 const EN: StartupMessages = StartupMessages {
     title: "DBX could not start",
+    download_page_url: "https://dbxio.com/en",
     missing_runtime: "【DBX could not start】\nWebView2 is missing, so DBX cannot show its window.\n\nDownload the Windows 10 offline package from the DBX website and install it (the offline package bundles WebView2, no internet required). Click Yes to open the download page:\n{{url}}\n\nIf it still fails, send this log to the maintainer:\n{{log}}",
     damaged_runtime: "【DBX could not start】\nThe WebView2 runtime is damaged, so DBX cannot show its window.\n\nDownload the Windows 10 offline package from the DBX website and install it (it bundles WebView2 and repairs it during setup). Click Yes to open the download page:\n{{url}}\n\nIf it still fails, send this log to the maintainer:\n{{log}}",
     compatibility_failed: "【DBX could not start】\nDBX tried several startup compatibility methods, but the main window still did not appear.\n\nSend this log to the maintainer for diagnosis. Click Yes to open the log folder:\n{{log}}",
@@ -42,6 +48,7 @@ const EN: StartupMessages = StartupMessages {
 
 const ZH_CN: StartupMessages = StartupMessages {
     title: "DBX 无法启动",
+    download_page_url: "https://dbxio.com/cn",
     missing_runtime: "【DBX 无法启动】\n缺少 WebView2 运行时，DBX 无法显示主界面。\n\n请到 DBX 官网下载「Windows 10 离线版」安装（离线版自带 WebView2，无需联网），点“是”打开下载页：\n{{url}}\n\n如仍有问题，请把启动日志发给维护者：\n{{log}}",
     damaged_runtime: "【DBX 无法启动】\nWebView2 运行时已损坏，DBX 无法显示主界面。\n\n请到 DBX 官网下载「Windows 10 离线版」重新安装（安装时会自动修复），点“是”打开下载页：\n{{url}}\n\n如仍有问题，请把启动日志发给维护者：\n{{log}}",
     compatibility_failed: "【DBX 无法启动】\nDBX 已自动尝试多种兼容启动方式，主窗口仍未显示。\n\n请把启动日志发给维护者排查，点“是”打开日志所在文件夹：\n{{log}}",
@@ -50,6 +57,7 @@ const ZH_CN: StartupMessages = StartupMessages {
 
 const ZH_TW: StartupMessages = StartupMessages {
     title: "DBX 無法啟動",
+    download_page_url: "https://dbxio.com/cn",
     missing_runtime: "【DBX 無法啟動】\n缺少 WebView2 執行階段，DBX 無法顯示主視窗。\n\n請到 DBX 官網下載「Windows 10 離線版」安裝（離線版自帶 WebView2，無需連網），點「是」開啟下載頁：\n{{url}}\n\n若仍有問題，請把啟動日誌寄給維護者：\n{{log}}",
     damaged_runtime: "【DBX 無法啟動】\nWebView2 執行階段已損壞，DBX 無法顯示主視窗。\n\n請到 DBX 官網下載「Windows 10 離線版」重新安裝（安裝時會自動修復），點「是」開啟下載頁：\n{{url}}\n\n若仍有問題，請把啟動日誌寄給維護者：\n{{log}}",
     compatibility_failed: "【DBX 無法啟動】\nDBX 已自動嘗試多種相容啟動方式，主視窗仍未顯示。\n\n請把啟動日誌寄給維護者排查，點「是」開啟日誌所在資料夾：\n{{log}}",
@@ -81,18 +89,9 @@ pub(crate) fn current() -> &'static StartupMessages {
     messages_for_locale(&sys_locale::get_locale().unwrap_or_default())
 }
 
-/// Direct link to the Windows 10 offline package for this build's version. The
-/// offline package embeds the WebView2 installer, so a user with a missing or
-/// damaged runtime only needs this one download. The URL pattern is the same one
-/// the official release pipeline publishes (`DBX_<version>_x64-offline-setup.exe`).
-pub(crate) fn offline_installer_url() -> String {
-    let version = env!("CARGO_PKG_VERSION");
-    format!("https://dl.dbxio.com/releases/v{version}/DBX_{version}_x64-offline-setup.exe")
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{messages_for_locale, offline_installer_url};
+    use super::messages_for_locale;
 
     #[test]
     fn chinese_locales_are_split_between_simplified_and_traditional() {
@@ -122,12 +121,11 @@ mod tests {
     }
 
     #[test]
-    fn offline_installer_url_matches_the_published_asset_name() {
-        let version = env!("CARGO_PKG_VERSION");
-        assert_eq!(
-            offline_installer_url(),
-            format!("https://dl.dbxio.com/releases/v{version}/DBX_{version}_x64-offline-setup.exe")
-        );
+    fn download_page_follows_the_message_language() {
+        assert_eq!(messages_for_locale("zh-CN").download_page_url, "https://dbxio.com/cn");
+        assert_eq!(messages_for_locale("zh-TW").download_page_url, "https://dbxio.com/cn");
+        assert_eq!(messages_for_locale("en-US").download_page_url, "https://dbxio.com/en");
+        assert_eq!(messages_for_locale("").download_page_url, "https://dbxio.com/en");
     }
 
     #[test]

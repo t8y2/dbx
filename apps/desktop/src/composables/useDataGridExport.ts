@@ -223,6 +223,8 @@ interface CopyInsertData {
   sourceColumns?: Array<string | undefined>;
   columnTypes?: Array<string | undefined>;
   rows: RowItem[];
+  spatialColumns?: QueryResult["spatial_columns"];
+  spatialValues?: QueryResult["spatial_values"];
 }
 
 export function useDataGridExport(options: UseDataGridExportOptions) {
@@ -821,6 +823,18 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (selectedColumns.length !== matrix.columnIndexes.length) return null;
     const selectedSourceColumns = sourceColumns.value?.length === columns.value.length ? matrix.columnIndexes.map((columnIndex) => sourceColumns.value?.[columnIndex]) : undefined;
     const selectedColumnTypes = columnTypes.value?.length === columns.value.length ? matrix.columnIndexes.map((columnIndex) => columnTypes.value?.[columnIndex] ?? undefined) : undefined;
+    const visibleIndexes = visibleColumnIndexesOption?.value ?? columns.value.map((_, index) => index);
+    const targetSourceIndexes = matrix.columnIndexes.map((targetIdx) => visibleIndexes[targetIdx] ?? targetIdx);
+    const targetIndexBySource = new Map<number, number>();
+    targetSourceIndexes.forEach((sourceIdx, targetIdx) => {
+      targetIndexBySource.set(sourceIdx, targetIdx);
+    });
+    const spatialColumns = spatialColumnsOption?.value?.flatMap((column) => {
+      const targetIndex = targetIndexBySource.get(column.column_index);
+      return targetIndex === undefined ? [] : [{ column_index: targetIndex, srid: column.srid }];
+    });
+    const allSpatialValues = spatialValuesOption?.value;
+    const spatialValues = allSpatialValues?.length ? selectedRows.map((item, rowIndex) => targetSourceIndexes.map((sourceIdx) => allSpatialValues[item.sourceIndex ?? rowIndex]?.[sourceIdx] ?? null)) : undefined;
     return {
       columns: selectedColumns,
       sourceColumns: selectedSourceColumns,
@@ -830,6 +844,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         data: matrix.columnIndexes.map((columnIndex) => item.data[columnIndex] ?? null),
         isDirtyCol: matrix.columnIndexes.map((columnIndex) => item.isDirtyCol[columnIndex] ?? false),
       })),
+      spatialColumns: spatialColumns?.length ? spatialColumns : undefined,
+      spatialValues: spatialValues?.length ? spatialValues : undefined,
     };
   }
 
@@ -857,6 +873,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       rows: data.rows.map((item) => item.data),
       primaryKeyMode,
       insertMode,
+      spatialColumns: data.spatialColumns,
+      spatialValues: data.spatialValues,
     });
   }
 
@@ -1074,6 +1092,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     selectedRowIds,
     resolveSourceValues,
     copyText,
+    spatialColumns: options.spatialColumns,
+    spatialValues: options.spatialValues,
     canCopySqlInsert: (request) => {
       const selectedColumns = request.selectedColumnIndexes.map((index) => request.columns[index]?.sourceName ?? request.columns[index]?.displayName).filter((column): column is string => !!column);
       return request.rows.length > 0 && insertableCopyColumnCount(request.options.sql.primaryKeyMode, selectedColumns, request.options) > 0;

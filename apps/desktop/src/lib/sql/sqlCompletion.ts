@@ -1918,7 +1918,12 @@ function isStandaloneSelectWildcard(sql: string, cursor: number, selectListColum
 
 export function prepareSqlCompletionReplacement(sql: string, cursor: number, context: Pick<SqlCompletionContext, "prefix" | "qualifier" | "replacementRange" | "selectListWildcardAfterCursor">, items: SqlCompletionItem[]): { from: number; items: SqlCompletionItem[] } {
   const range = context.replacementRange;
-  const from = range && range.start >= 0 && range.start <= cursor && range.end === cursor ? range.start : cursor - context.prefix.length;
+  const rangeWidth = range ? cursor - range.start : -1;
+  // Semantic and legacy parsers can disagree about a multi-line prefix. Never let
+  // an oversized span replace text before the prefix at the cursor.
+  const quotedPrefix = range && rangeWidth === context.prefix.length + 1 && !!SQL_COMPLETION_CLOSING_QUOTES[sql[range.start] ?? ""];
+  const rangeMatchesPrefix = rangeWidth === context.prefix.length || quotedPrefix;
+  const from = range && range.start >= 0 && range.start <= cursor && range.end === cursor && rangeMatchesPrefix ? range.start : cursor - context.prefix.length;
   const closingQuote = from < cursor ? SQL_COMPLETION_CLOSING_QUOTES[sql[from] ?? ""] : undefined;
   const replaceClosingQuote = sql[cursor] === closingQuote ? closingQuote : undefined;
   const replaceSelectWildcard = from === cursor && context.selectListWildcardAfterCursor === true;

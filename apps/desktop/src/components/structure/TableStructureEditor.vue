@@ -8729,12 +8729,12 @@ watch(
                     <colgroup>
                       <col v-for="(width, index) in visibleColWidths" :key="index" :style="{ width: width + 'px' }" />
                     </colgroup>
-                    <thead class="bg-background">
+                    <thead class="bg-background-solid">
                       <tr>
                         <th
                           v-for="(columnLabel, i) in colLabels"
                           :key="columnLabel.key"
-                          :class="[structureHeaderCellClass, 'bg-background select-none', { 'text-center': columnLabel.key === 'primaryKey' || columnLabel.key === 'nullable' }]"
+                          :class="[structureHeaderCellClass, 'bg-background-solid select-none', { 'text-center': columnLabel.key === 'primaryKey' || columnLabel.key === 'nullable' }]"
                           :data-column-selected="columnLabel.key === 'actions' ? undefined : selectedStructureColumnKeys.has(columnLabel.key)"
                           :style="{
                             width: visibleColWidths[i] + 'px',
@@ -9281,7 +9281,7 @@ watch(
               {{ secondaryMetadataErrors.indexes || indexMetadataReadError }}
             </div>
             <table v-else ref="indexesTableRef" class="structure-edit-grid border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]" :style="{ minWidth: indexColWidths.reduce((a, w) => a + w, 0) + 'px' }">
-              <thead class="sticky top-0 z-10 bg-background">
+              <thead class="sticky top-0 z-10 bg-background-solid">
                 <tr>
                   <th
                     v-for="(label, i) in indexColLabels"
@@ -10507,7 +10507,8 @@ watch(
   top: 0;
   z-index: 10;
   min-width: var(--structure-column-table-width);
-  background: var(--background);
+  /* Wallpaper mode makes --background translucent; sticky headers need an opaque surface (#14065). */
+  background: var(--background-solid, var(--background));
 }
 
 .structure-column-virtual-scroller :deep(.structure-column-virtual-list) {

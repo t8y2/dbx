@@ -3729,12 +3729,19 @@ const EXPORT_DESTINATION_IDENTITY_MAGIC: &[u8; 5] = b"DBXEI";
 const EXPORT_DESTINATION_IDENTITY_VERSION: u8 = 1;
 const EXPORT_DESTINATION_IDENTITY_DEVICE_KIND: u8 = 1;
 const EXPORT_DESTINATION_IDENTITY_VOLUME_UUID_KIND: u8 = 2;
+const EXPORT_DESTINATION_IDENTITY_NETWORK_MOUNT_SOURCE_KIND: u8 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ExportDestinationIdentity {
     Device(u64),
     PersistentVolumeUuid([u8; 16]),
     LegacyDevice(u64),
+    /// Network filesystems whose device identity changes on every remount
+    /// (rclone, sshfs, NFS, CIFS/SMB). The stable identifier is the **mount
+    /// source string** from `/proc/mounts` (the remote the path is mounted
+    /// from), so a same-source remount is accepted while a different storage
+    /// mounted at the same path is still refused (#14018).
+    NetworkMountSource(String),
 }
 
 impl ExportDestinationIdentity {
@@ -3750,6 +3757,12 @@ impl ExportDestinationIdentity {
             Self::PersistentVolumeUuid(uuid) => {
                 encoded.push(EXPORT_DESTINATION_IDENTITY_VOLUME_UUID_KIND);
                 encoded.extend_from_slice(uuid);
+            }
+            Self::NetworkMountSource(source) => {
+                encoded.push(EXPORT_DESTINATION_IDENTITY_NETWORK_MOUNT_SOURCE_KIND);
+                let bytes = source.as_bytes();
+                encoded.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                encoded.extend_from_slice(bytes);
             }
             Self::LegacyDevice(_) => unreachable!("legacy identities are decoded for migration, never written"),
         }
@@ -3779,6 +3792,11 @@ impl ExportDestinationIdentity {
             EXPORT_DESTINATION_IDENTITY_VOLUME_UUID_KIND => <[u8; 16]>::try_from(payload)
                 .map(|bytes| Some(Self::PersistentVolumeUuid(bytes)))
                 .map_err(|_| "Stored database export destination volume UUID has an invalid length".to_string()),
+            EXPORT_DESTINATION_IDENTITY_NETWORK_MOUNT_SOURCE_KIND => {
+                let source = String::from_utf8(payload.to_vec())
+                    .map_err(|_| "Stored database export destination mount source is not valid UTF-8".to_string())?;
+                Ok(Some(Self::NetworkMountSource(source)))
+            }
             _ => Err("Stored database export destination identity has an unknown kind".to_string()),
         }
     }
@@ -3790,6 +3808,11 @@ impl ExportDestinationIdentity {
             | (Self::Device(expected), Self::LegacyDevice(actual))
             | (Self::LegacyDevice(expected), Self::LegacyDevice(actual)) => expected == actual,
             (Self::PersistentVolumeUuid(expected), Self::PersistentVolumeUuid(actual)) => expected == actual,
+            // The mount source (e.g. `rclone://remote:path`, `nas:/export`)
+            // identifies the backing storage, not the transient device number:
+            // the same source remounted keeps it, a different storage mounted
+            // at the same path changes it (#14018).
+            (Self::NetworkMountSource(expected), Self::NetworkMountSource(actual)) => expected == actual,
             _ => false,
         }
     }
@@ -3845,7 +3868,7 @@ pub async fn verify_export_destination_identity(
         .flatten();
     if recorded.as_ref().is_some_and(|identity| {
         let current = export_destination_identity_for_path(dir);
-        destination_identity_mismatch_is_hard_error(dir, identity, current.as_ref())
+        recorded_export_destination_identity_mismatch(identity, current.as_ref())
     }) {
         return Err(format!("Backup directory now resolves to a different filesystem: {}", dir.display()));
     }
@@ -3896,8 +3919,7 @@ async fn ensure_recorded_export_destination_ancestor(
             }
             if let Some(recorded_identity) = recorded_identity {
                 let current_identity = export_destination_identity_for_path(candidate);
-                if destination_identity_mismatch_is_hard_error(candidate, &recorded_identity, current_identity.as_ref())
-                {
+                if recorded_export_destination_identity_mismatch(&recorded_identity, current_identity.as_ref()) {
                     return Err(format!(
                         "Backup directory {} now resolves to a different filesystem than the configured parent {}. Refusing to create a child directory automatically -- make sure the correct removable or network drive is connected before running the backup.",
                         dir.display(),
@@ -3938,7 +3960,7 @@ async fn ensure_export_destination_dir(
     if dir.is_dir() {
         let current_identity = export_destination_identity_for_path(dir);
         if let Some(Some(recorded_identity)) = recorded_identity.as_ref() {
-            if destination_identity_mismatch_is_hard_error(dir, recorded_identity, current_identity.as_ref()) {
+            if recorded_export_destination_identity_mismatch(recorded_identity, current_identity.as_ref()) {
                 return Err(format!(
                     "Backup directory {} now resolves to a different filesystem than the last \
                      successful export to this location. Refusing to write here automatically -- \
@@ -3970,8 +3992,7 @@ async fn ensure_export_destination_dir(
                 // The leaf itself is missing, so the remount check runs against
                 // the parent path — the closest surviving witness of the
                 // filesystem the leaf was recorded on.
-                let witness = dir.parent().unwrap_or(dir);
-                !destination_identity_mismatch_is_hard_error(witness, &recorded, parent_identity.as_ref())
+                !recorded_export_destination_identity_mismatch(&recorded, parent_identity.as_ref())
             });
             if !same_filesystem {
                 return Err(format!(
@@ -4027,57 +4048,61 @@ fn linux_f_type_is_network_filesystem(f_type: i64) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn unix_path_sits_on_network_filesystem(path: &std::path::Path) -> bool {
-    let Some(text) = path.to_str() else { return false };
-    let Ok(c_path) = std::ffi::CString::new(text) else { return false };
+fn linux_f_type_for_path(path: &std::path::Path) -> Option<i64> {
+    let Some(text) = path.to_str() else { return None };
+    let Ok(c_path) = std::ffi::CString::new(text) else { return None };
     let mut buf: nix::libc::statfs = unsafe { std::mem::zeroed() };
     // SAFETY: `c_path` is a NUL-terminated string owned by this call and `buf`
     // is a fully-initialized statfs buffer the kernel fills in.
     let result = unsafe { nix::libc::statfs(c_path.as_ptr(), &mut buf) };
     if result != 0 {
-        return false;
+        return None;
     }
-    linux_f_type_is_network_filesystem(buf.f_type)
+    Some(buf.f_type)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn unix_path_sits_on_network_filesystem(_path: &std::path::Path) -> bool {
-    // Network-filesystem detection is only implemented for Linux, where the
-    // Docker/Web backup deployments with rclone/NFS mounts live (#14018).
-    // macOS and Windows keep the strict identity check.
-    false
+/// Reads `/proc/mounts` and returns the source of the mount entry that
+/// contains `path` (the longest matching mount point wins, so nested mounts
+/// resolve to their own entry). `/proc/mounts` escapes spaces as `\040` and
+/// tabs as `\011`; both are decoded before matching.
+fn linux_mount_source_for_path(path: &std::path::Path, mounts: &str) -> Option<String> {
+    let mut best: Option<(usize, String)> = None;
+    for line in mounts.lines() {
+        let mut fields = line.split(' ');
+        let source = fields.next()?;
+        let mount_point = fields.next()?;
+        let mount_point = decode_proc_mounts_field(mount_point);
+        if path.starts_with(&mount_point) {
+            let depth = mount_point.matches('/').count();
+            if best.as_ref().is_none_or(|(best_depth, _)| depth > *best_depth) {
+                best = Some((depth, source.to_string()));
+            }
+        }
+    }
+    best.map(|(_, source)| source)
 }
 
-/// Whether an identity mismatch at `path` must fail the operation. FUSE-based
-/// network mounts (rclone, sshfs, …) and NFS/CIFS/SMB remounts get a fresh
-/// `st_dev` on every mount, so the recorded device identity never matches
-/// afterwards even though the storage behind the path is still the user's
-/// (#14018); such mismatches are logged and accepted. Every other mismatch —
-/// and a vanished path anywhere along the chain — keeps the #6327 fail-closed
-/// behavior so a replaced mount can never silently receive backups.
-fn destination_identity_mismatch_is_hard_error(
-    path: &std::path::Path,
-    recorded: &ExportDestinationIdentity,
-    current: Option<&ExportDestinationIdentity>,
-) -> bool {
-    if !recorded_export_destination_identity_mismatch(recorded, current) {
-        return false;
+/// Decodes the octal escapes (`\040` space, `\011` tab, `\134` backslash) that
+/// `/proc/mounts` uses inside its source and mount-point fields.
+fn decode_proc_mounts_field(field: &str) -> String {
+    let mut decoded = String::with_capacity(field.len());
+    let bytes = field.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 3 < bytes.len() {
+            let octal = &field[i + 1..i + 4];
+            if let Ok(value) = u8::from_str_radix(octal, 8) {
+                decoded.push(value as char);
+                i += 4;
+                continue;
+            }
+        }
+        decoded.push(field[i..].chars().next().unwrap_or('\0'));
+        i += field[i..].chars().next().unwrap_or('\0').len_utf8();
     }
-    if unix_path_sits_on_network_filesystem(path) {
-        log::warn!(
-            "[db:export][destination] {} sits on a network filesystem whose identity changed (remount); accepting the new filesystem instead of failing the operation",
-            path.display()
-        );
-        return false;
-    }
-    true
+    decoded
 }
 
-/// Whether a destination's identity, checked once via [`ensure_export_destination_dir`]
-/// and then again against the file dbx actually opened, indicates the mount
-/// changed in between. An unknown expected identity has nothing to compare,
-/// but once an expected identity is known, failing to identify the opened
-/// handle must fail closed rather than allowing an unverified write.
 fn export_destination_identity_mismatch(
     expected: Option<&ExportDestinationIdentity>,
     actual: Option<&ExportDestinationIdentity>,
@@ -4087,6 +4112,16 @@ fn export_destination_identity_mismatch(
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn export_destination_identity_for_path(dir: &std::path::Path) -> Option<ExportDestinationIdentity> {
+    // On Linux, network filesystems (FUSE/NFS/CIFS/SMB) get a fresh device
+    // identity on every remount, so their stable identifier is the mount
+    // source string from /proc/mounts instead of st_dev (#14018).
+    #[cfg(target_os = "linux")]
+    if let Some(f_type) = linux_f_type_for_path(dir) {
+        if linux_f_type_is_network_filesystem(f_type) {
+            let source = linux_mount_source_for_path(dir)?;
+            return Some(ExportDestinationIdentity::NetworkMountSource(source));
+        }
+    }
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(dir).ok().map(|metadata| ExportDestinationIdentity::Device(metadata.dev()))
 }
@@ -5962,21 +5997,20 @@ mod tests {
         build_export_insert_statements_excluding, build_export_insert_statements_excluding_with_dialect,
         build_export_object_source_sql, build_export_sql_insert, create_database_export_writer,
         database_export_query_options_for_timeout, database_export_select_sql, database_export_total_objects,
-        decode_unicode_escapes_for_export, destination_identity_mismatch_is_hard_error, drop_table_if_exists_sql,
-        ensure_export_destination_dir, export_destination_identity_mismatch, extract_postgres_deferred_foreign_keys,
-        filter_export_table_infos, format_export_sql_literal, format_export_table_ddl,
-        format_mysql_spatial_export_literal, format_postgres_spatial_export_literal_with_srid,
-        format_sqlserver_spatial_export_literal,
+        decode_unicode_escapes_for_export, drop_table_if_exists_sql, ensure_export_destination_dir,
+        export_destination_identity_mismatch, extract_postgres_deferred_foreign_keys, filter_export_table_infos,
+        format_export_sql_literal, format_export_table_ddl, format_mysql_spatial_export_literal,
+        format_postgres_spatial_export_literal_with_srid, format_sqlserver_spatial_export_literal,
         format_xugu_spatial_export_literal, generate_postgres_enum_ddl, generate_postgres_extension_ddl,
         generate_postgres_sequence_create_ddl, generate_postgres_sequence_post_table_ddl,
         generate_postgres_sequence_setval_sql, is_dameng_auto_increment_ddl, is_postgres_extension_member_routine,
-        linux_f_type_is_network_filesystem, mysql_database_export_preamble, mysql_view_dependencies_from_rows,
-        mysql_view_dependencies_sql, normalize_export_table_ddl, record_export_destination_identity,
-        record_export_error, replace_database_export_select_list, sort_export_views_by_dependencies,
-        split_postgres_export_table_ddl, write_database_export_rows, write_database_export_rows_with_mode,
-        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions,
-        DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions,
-        ExportDestinationIdentity, ExportedTableSql, PostgresExportEnum, PostgresExportExtension,
+        linux_f_type_is_network_filesystem, linux_mount_source_for_path, mysql_database_export_preamble,
+        mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
+        record_export_destination_identity, record_export_error, replace_database_export_select_list,
+        sort_export_views_by_dependencies, split_postgres_export_table_ddl, write_database_export_rows,
+        write_database_export_rows_with_mode, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions,
+        BuildExportSqlInsertOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter,
+        DdlNormalizeOptions, ExportDestinationIdentity, ExportedTableSql, PostgresExportEnum, PostgresExportExtension,
         PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode,
         DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
         POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
@@ -10537,18 +10571,56 @@ mod tests {
         }
     }
 
+    // #14018 review round 2: the network-filesystem identity is the mount
+    // source string, so same-source remounts are accepted while different
+    // storages mounted at the same path are refused. These four cases are the
+    // ones the review asked to distinguish; they run on the identity values
+    // because a real FUSE mount cannot be reproduced in the test sandbox.
     #[test]
-    fn destination_identity_mismatch_keeps_failing_closed_outside_network_filesystems() {
-        // On a platform without network-filesystem detection (and for local
-        // paths everywhere), an identity mismatch keeps the fail-closed
-        // behavior; the relaxation is gated on statfs, not on the identity
-        // values themselves.
-        let recorded = ExportDestinationIdentity::Device(12345);
-        let other = ExportDestinationIdentity::Device(67890);
-        let path = std::env::temp_dir();
-        assert!(destination_identity_mismatch_is_hard_error(&path, &recorded, Some(&other)));
-        assert!(destination_identity_mismatch_is_hard_error(&path, &recorded, None));
-        assert!(!destination_identity_mismatch_is_hard_error(&path, &recorded, Some(&recorded)));
+    fn network_mount_source_identity_distinguishes_the_four_review_scenarios() {
+        let nas_a = ExportDestinationIdentity::NetworkMountSource("rclone://remote:backup".to_string());
+        let nas_b = ExportDestinationIdentity::NetworkMountSource("nas-b:/export".to_string());
+
+        // 同源重挂载（same-source remount）
+        assert!(nas_a.matches(&ExportDestinationIdentity::NetworkMountSource("rclone://remote:backup".to_string())));
+        // 异源同类型替换（different storage mounted at the same path）
+        assert!(!nas_a.matches(&nas_b));
+        // 挂载消失：current is None, the strict mismatch keeps failing closed
+        assert!(export_destination_identity_mismatch(Some(&nas_a), None));
+        // 不同身份类型（device vs network mount）也视为不匹配
+        assert!(export_destination_identity_mismatch(Some(&nas_a), Some(&ExportDestinationIdentity::Device(4242))));
+    }
+
+    #[test]
+    fn network_mount_source_identity_encodes_and_decodes_round_trip() {
+        let source = "rclone://remote:backup";
+        let encoded = ExportDestinationIdentity::NetworkMountSource(source.to_string()).encode();
+        assert_eq!(
+            ExportDestinationIdentity::decode(&encoded).unwrap(),
+            Some(ExportDestinationIdentity::NetworkMountSource(source.to_string()))
+        );
+    }
+
+    // Linux 执行级用例：/proc/mounts 解析（最长前缀、八进制转义、无匹配）
+    #[test]
+    fn linux_mount_source_for_path_prefers_the_deepest_mount_point() {
+        let mounts =
+            "proc /proc proc rw 0 0\n/dev/sda1 / ext4 rw 0 0\nrclone://remote:backup /mnt/backup fuse.rclone rw 0 0\n";
+        assert_eq!(
+            linux_mount_source_for_path(std::path::Path::new("/mnt/backup/data"), mounts).as_deref(),
+            Some("rclone://remote:backup")
+        );
+        assert_eq!(linux_mount_source_for_path(std::path::Path::new("/mnt"), mounts).as_deref(), Some("/dev/sda1"));
+        assert_eq!(linux_mount_source_for_path(std::path::Path::new("/opt"), mounts), None);
+    }
+
+    #[test]
+    fn linux_mount_source_for_path_decodes_octal_escapes() {
+        let mounts = "usbhd /mnt/backup\040drive vfat rw 0 0\n";
+        assert_eq!(
+            linux_mount_source_for_path(std::path::Path::new("/mnt/backup drive"), mounts).as_deref(),
+            Some("usbhd")
+        );
     }
 
     #[tokio::test]
@@ -10726,6 +10798,7 @@ mod tests {
             super::ExportDestinationIdentity::LegacyDevice(_) => {
                 unreachable!("freshly resolved identities are never legacy values")
             }
+            other => other,
         };
         state
             .storage

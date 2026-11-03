@@ -211,7 +211,7 @@ describe("original LOB result exports", () => {
     original.large_value_cells = [{ row_index: 0, column_index: 1, original_bytes: 20000, pending_decode: true }];
     await state.exportCurrentPageCsv();
     expect(resolveSourceValues).toHaveBeenCalledWith([1], [0, 1]);
-    expect(exportQueryResultCsv).toHaveBeenCalledWith(expect.any(String), ["id", "name"], [[1, "缤纷彩虹完整值"]], expect.anything(), expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenCalledWith(expect.any(String), ["id", "name"], [[1, "缤纷彩虹完整值"]], expect.anything(), expect.anything(), false);
   });
 
   it("blocks compatibility SQL and unsupported local exports before extraction or saving", async () => {
@@ -2477,7 +2477,7 @@ describe("useDataGridExport prepared row statements", () => {
 
     setActivePinia(createPinia());
     await state.exportCurrentPageCsv();
-    expect(exportQueryResultCsv).toHaveBeenCalledWith(expect.any(String), ["_id", "nullable"], [["1", null]], expect.anything(), expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenCalledWith(expect.any(String), ["_id", "nullable"], [["1", null]], expect.anything(), expect.anything(), false);
 
     const reservedString = MONGO_DOCUMENT_GRID_NULL;
     const fullExportState = createMongoExportState({
@@ -2496,7 +2496,7 @@ describe("useDataGridExport prepared row statements", () => {
     });
 
     await fullExportState.exportCsv();
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["_id", "value"], [["1", reservedString]], expect.anything(), expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["_id", "value"], [["1", reservedString]], expect.anything(), expect.anything(), false);
   });
 
   it("exports temporal CSV values without an Excel formula wrapper (#10694)", async () => {
@@ -2511,7 +2511,7 @@ describe("useDataGridExport prepared row statements", () => {
 
     await state.exportCurrentPageCsv();
 
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["created_at"], [[timestamp]], expect.anything(), expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["created_at"], [[timestamp]], expect.anything(), expect.anything(), false);
   });
 
   it("exports only visible Mongo columns from the full result set", async () => {
@@ -2534,7 +2534,7 @@ describe("useDataGridExport prepared row statements", () => {
 
     await state.exportCsv();
 
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"], ["Other"]], expect.anything(), expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"], ["Other"]], expect.anything(), expect.anything(), false);
   });
 
   it("applies visible Mongo columns when the complete result is already local", async () => {
@@ -2563,7 +2563,7 @@ describe("useDataGridExport prepared row statements", () => {
 
     await state.exportCsv();
 
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"], ["Other"]], expect.anything(), expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"], ["Other"]], expect.anything(), expect.anything(), false);
   });
 
   it("exports duplicate-named columns by source position from the full result", async () => {
@@ -2595,7 +2595,7 @@ describe("useDataGridExport prepared row statements", () => {
         ["2", "two"],
       ],
       expect.anything(),
-      expect.anything(),
+      expect.anything(), false,
     );
   });
 
@@ -2630,7 +2630,7 @@ describe("useDataGridExport prepared row statements", () => {
         ["2", "two"],
       ],
       expect.anything(),
-      expect.anything(),
+      expect.anything(), false,
     );
   });
 
@@ -2643,11 +2643,12 @@ describe("useDataGridExport prepared row statements", () => {
     });
 
     await state.exportCsv();
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"]], expect.anything(), "\\N");
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"]], expect.anything(), "\\N", false);
 
     useSettingsStore().editorSettings.csvNullMode = "empty";
+    useSettingsStore().editorSettings.csvWithoutBom = true;
     await state.exportCsv();
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"]], expect.anything(), "");
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"]], expect.anything(), "", true);
   });
 
   it("exports missing Mongo fields as null while retaining explicit empty strings", async () => {
@@ -2792,7 +2793,7 @@ describe("useDataGridExport prepared row statements", () => {
 
     await state.exportCsv({ rowIds: [2], columnIndexes: [1, 2] });
 
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name", "email"], [["Bob", "bob@example.com"]], expect.anything(), expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name", "email"], [["Bob", "bob@example.com"]], expect.anything(), expect.anything(), false);
   });
 
   it("exports non-Mongo JSON with selected columns and rows", async () => {
@@ -2855,7 +2856,7 @@ describe("useDataGridExport prepared row statements", () => {
         ["Bob", "bob@example.com"],
       ],
       expect.anything(),
-      expect.anything(),
+      expect.anything(), false,
     );
   });
 });

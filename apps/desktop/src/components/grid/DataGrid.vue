@@ -15053,6 +15053,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   const deletableContextRowIds = deletableRowIds(rowIdsForDelete);
   const hasEditableSelection = selectionHasEditableCells();
   const selectedColumnCount = selectedVisibleColumnIndexes().length;
+  const canShowContextDeleteColumn = !!contextHeaderColumn.value && deleteColumnToolbarCapability.value.visible;
   const gridSnapshotContext = contextHeaderColumn.value && hasColumnSelection.value ? "columns" : contextCell.value?.col === -1 && affectedRowIds().length > 0 ? "rows" : contextCell.value && hasCellSelection.value && selectedCellMatrix.value ? "cells" : null;
   const previewItems: ContextMenuItem[] = [];
   if (!contextHeaderColumn.value && contextCell.value) {
@@ -15128,6 +15129,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         hideIdenticalColumns: identicalColumnCount > 0 ? t("grid.hideIdenticalColumnsCount", { count: identicalColumnCount }) : t("grid.hideIdenticalColumns"),
         showAllColumnsMenu: t("grid.showAllColumnsMenu"),
         clearRememberedColumnWidths: t("grid.clearRememberedColumnWidths"),
+        deleteColumn: dropColumnCandidatesNow().length > 1 ? t("grid.deleteColumns", { count: dropColumnCandidatesNow().length }) : t("grid.deleteColumn"),
       },
       icons: {
         copy: Copy,
@@ -15137,6 +15139,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         descending: ArrowDown,
         clearSort: Eraser,
         clearRememberedColumnWidths: RotateCcw,
+        deleteColumn: Columns3,
       },
       actions: {
         copyName: copyHeaderColumnOrSelected,
@@ -15181,7 +15184,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         hideSelectedColumns,
         hideIdenticalColumns,
         showAllColumnsMenu: showAllColumns,
+        deleteColumn: () => {
+          void requestDropColumns();
+        },
       },
+      canDeleteColumn: canShowContextDeleteColumn ? !deleteColumnToolbarCapability.value.disabled : undefined,
+      deferDeleteToDangerousMenu: true,
       filterSubmenu: filterSubmenu(),
       highlightSubmenu: highlightSubmenu(),
     }),
@@ -15257,7 +15265,40 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           if (deletableContextRowIds.length > 0) requestDeleteRows(deletableContextRowIds);
         },
       },
+      deferDeleteToDangerousMenu: true,
     }),
+    [
+      {
+        label: t("dangerDialog.title"),
+        icon: AlertTriangle,
+        variant: "destructive",
+        visible: !!(canShowContextDeleteColumn || (row && !row.isDeleted && deletableContextRowIds.length > 0)),
+        children: [
+          ...(canShowContextDeleteColumn
+            ? [
+                {
+                  label: dropColumnCandidatesNow().length > 1 ? t("grid.deleteColumns", { count: dropColumnCandidatesNow().length }) : t("grid.deleteColumn"),
+                  action: () => void requestDropColumns(),
+                  disabled: deleteColumnToolbarCapability.value.disabled,
+                  variant: "destructive" as const,
+                  icon: Columns3,
+                },
+              ]
+            : []),
+          ...(canShowContextDeleteColumn && row && !row.isDeleted && deletableContextRowIds.length > 0 ? [{ label: "", separator: true }] : []),
+          ...(row && !row.isDeleted && deletableContextRowIds.length > 0
+            ? [
+                {
+                  label: rowLabels.delete,
+                  action: () => requestDeleteRows(deletableContextRowIds),
+                  variant: "destructive" as const,
+                  icon: Trash2,
+                },
+              ]
+            : []),
+        ],
+      },
+    ],
     [
       exportSubmenu(),
       ...(isTauriRuntime()
@@ -15476,7 +15517,6 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             :auto-refresh="autoRefreshToolbarCapability"
             :add-row="addRowToolbarCapability"
             :delete-row="deleteRowToolbarCapability"
-            :delete-column="deleteColumnToolbarCapability"
             :layer-preview="layerPreviewToolbarCapability"
             :preview="previewToolbarCapability"
             :save="saveToolbarCapability"

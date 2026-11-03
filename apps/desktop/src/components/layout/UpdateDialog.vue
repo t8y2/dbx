@@ -220,6 +220,15 @@ function handleOpenChange(nextOpen: boolean) {
   open.value = false;
 }
 
+function handleOpenAutoFocus(event: Event) {
+  // Opening the center should not make a tab or update action look selected by
+  // keyboard focus. Keep focus inside the dialog; Tab still reaches its controls.
+  if (event.target instanceof HTMLElement) {
+    event.preventDefault();
+    event.target.focus({ preventScroll: true });
+  }
+}
+
 function openExternalUrl(url: string) {
   if (isTauriRuntime()) {
     import("@tauri-apps/plugin-shell").then(({ open }) => open(url));
@@ -327,6 +336,7 @@ watch(
       class="sm:max-w-[700px]"
       :class="'flex max-h-[min(720px,calc(var(--dbx-viewport-height)-48px))] flex-col gap-0 overflow-hidden p-0'"
       :show-close-button="!isCloseBlocked"
+      @open-auto-focus="handleOpenAutoFocus"
       @interact-outside="
         (e: Event) => {
           if (blocksImplicitDismiss) e.preventDefault();

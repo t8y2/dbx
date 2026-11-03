@@ -2436,6 +2436,7 @@ export default withEnglishFallback({
       pasteRestoringSourceSql: "Incolla e ripristina SQL sorgente",
       pasteClipboardReadFailed: "Impossibile leggere gli appunti: {message}",
       convertNamingStyle: "Cambia stile di denominazione",
+      addSnippet: "Aggiungi snippet",
     },
     gotoLine: {
       placeholder: "Numero di riga",
@@ -2497,6 +2498,10 @@ export default withEnglishFallback({
     previewChangesComment: "Anteprima modifiche (prova a secco): istruzione {operation}",
     previewChangesFailed: "Anteprima modifiche non riuscita.",
     previewChangesNoStatement: "Seleziona o posiziona il cursore su un'istruzione UPDATE / INSERT / DELETE per visualizzare l'anteprima delle modifiche.",
+    snippetQuickAdd: {
+      prefixUnique: "Il tasto di attivazione deve essere univoco.",
+      saved: "Snippet aggiunto {label}",
+    },
   },
   tabs: {
     sql: "SQL",

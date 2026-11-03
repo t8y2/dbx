@@ -2363,6 +2363,7 @@ export default withEnglishFallback({
       deleteEmptyLines: "빈 줄 삭제",
       selectAll: "모두 선택",
       convertNamingStyle: "네이밍 스타일 전환",
+      addSnippet: "스니펫 추가",
     },
     delimitedList: {
       title: "구분자 목록으로 변환",
@@ -2418,6 +2419,10 @@ export default withEnglishFallback({
     previewChangesComment: "변경 미리 보기(드라이 런): {operation} 문",
     previewChangesFailed: "변경 미리 보기 실패.",
     previewChangesNoStatement: "변경 사항을 미리 보려면 UPDATE / INSERT / DELETE 문을 선택하거나 커서를 해당 문에 놓으십시오.",
+    snippetQuickAdd: {
+      prefixUnique: "트리거 키는 고유해야 합니다.",
+      saved: "스니펫 {label}을(를) 추가했습니다",
+    },
   },
   tabs: {
     sql: "SQL",

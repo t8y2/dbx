@@ -2443,6 +2443,7 @@ export default withEnglishFallback({
       findReplace: "Найти/Заменить",
       deleteEmptyLines: "Удалить пустые строки",
       selectAll: "Выбрать всё",
+      addSnippet: "Добавить сниппет",
     },
     delimitedList: {
       title: "Преобразовать в список с разделителями",
@@ -2496,6 +2497,10 @@ export default withEnglishFallback({
       allStatements: "Весь SQL",
       currentCommand: "Текущая команда",
       allCommands: "Все команды",
+    },
+    snippetQuickAdd: {
+      prefixUnique: "Триггерная клавиша должна быть уникальной.",
+      saved: "Сниппет {label} добавлен",
     },
   },
   tabs: {

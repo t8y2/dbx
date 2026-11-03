@@ -16,6 +16,7 @@ public final class AgentProtocol {
     public static final String METHOD_VALIDATE_SESSION = "validate_session";
     public static final String METHOD_CANCEL_SESSION = "cancel_session";
     public static final String METHOD_TEST_CONNECTION = "test_connection";
+    public static final String METHOD_CONNECTION_PARAMETERS = "connection_parameters";
     public static final String METHOD_VALIDATE_CONNECTION = "validate_connection";
     public static final String METHOD_CONNECTION_INFO = "connection_info";
     public static final String METHOD_LIST_DATABASES = "list_databases";

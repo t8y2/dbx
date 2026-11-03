@@ -472,6 +472,15 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     let client = ().serve(client_transport).await.expect("initialize MCP client");
 
     let tools = client.peer().list_tools(None).await.expect("list tools");
+    let nacos_registration = tools
+        .tools
+        .iter()
+        .find(|tool| tool.name == "dbx_nacos_register_instance")
+        .expect("Nacos registration tool should be advertised");
+    let metadata = &nacos_registration.input_schema["properties"]["metadata"];
+    assert!(metadata.is_object(), "strict MCP clients reject boolean property schemas: {metadata}");
+    assert_eq!(metadata["type"], "object");
+    assert!(!nacos_registration.input_schema["required"].as_array().unwrap().contains(&json!("metadata")));
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
     // Includes the 22 product-provider tools (14 Nacos + 8 Consul).
     #[cfg(feature = "mq-admin")]

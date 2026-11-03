@@ -1,6 +1,7 @@
 import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
 import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOptions";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { notifySavedSqlLibraryChanged } from "@/lib/savedSql/savedSqlLibraryEvents";
 import { Channel } from "@tauri-apps/api/core";
 import { SnapshotCompletionError, unwrapSnapshotCompletion } from "@/lib/export/snapshotCompletion";
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
@@ -1560,7 +1561,7 @@ export interface AiChatMessage {
   content: string;
   mentions?: unknown[];
   reasoning?: string;
-  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked";
+  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked" | "outputTruncated";
   /** Set on the assistant message whose generation failed; persisted (mirrors dbx-core `AiChatMessage.failed`). */
   failed?: boolean;
   /** Target frozen when this assistant turn started, retained for confirmation. */
@@ -1706,6 +1707,10 @@ export async function readUserSkills(ids: string[], settings: UserSkillRootSetti
 
 export async function testConnection(config: ConnectionConfig): Promise<string> {
   return invokeBackend("test_connection", { config });
+}
+
+export async function connectionParameters(config: ConnectionConfig): Promise<import("@/lib/connection/connectionParameterCatalog").ConnectionParameterMetadata> {
+  return invokeBackend("connection_parameters", { config });
 }
 
 export async function testSshTunnel(config: ConnectionConfig): Promise<string> {
@@ -1920,6 +1925,7 @@ export async function listTables(
   catalog?: string,
   tableNameFilter?: import("@/types/database").TableNameFilter,
   exactIdentity?: boolean,
+  pageTableRoots?: boolean,
 ): Promise<TableInfo[]> {
   return invoke("list_tables", {
     connectionId,
@@ -1932,6 +1938,7 @@ export async function listTables(
     catalog,
     tableNameFilter,
     ...(exactIdentity ? { exactIdentity: true } : {}),
+    ...(pageTableRoots ? { pageTableRoots: true } : {}),
   });
 }
 
@@ -2190,6 +2197,8 @@ export async function executeMulti(
      *  (`BEGIN` / `START TRANSACTION`) open across executions until COMMIT /
      *  ROLLBACK instead of rolling it back when the batch ends. */
     preserveExplicitTransaction?: boolean;
+    /** Oracle SQL editor: fail a statement whose PL/SQL object stays INVALID. */
+    reportCompilationErrors?: boolean;
   },
 ): Promise<QueryResult[]> {
   const diagnosticsEnabled = isDebugLoggingEnabled();
@@ -2264,6 +2273,8 @@ export async function executeMultiWithProgress(
     continueOnError?: boolean;
     executionMode?: "simple";
     preserveExplicitTransaction?: boolean;
+    /** Oracle SQL editor: fail a statement whose PL/SQL object stays INVALID. */
+    reportCompilationErrors?: boolean;
     executionId?: string;
   },
 ): Promise<QueryResult[]> {
@@ -2409,6 +2420,7 @@ export async function executeInManualTransaction(
   timeoutSecs?: number,
   boundStatements?: BlobBoundStatement[],
   deferLobs?: boolean,
+  reportCompilationErrors?: boolean,
 ): Promise<QueryResult[]> {
   return invokeBackend("execute_in_manual_transaction", {
     txnSessionId,
@@ -2424,6 +2436,7 @@ export async function executeInManualTransaction(
     timeoutSecs,
     boundStatements,
     deferLobs,
+    reportCompilationErrors,
   });
 }
 
@@ -3116,8 +3129,8 @@ export async function saveConnections(configs: ConnectionConfig[], removedIds: s
   return invoke("save_connections", { configs, removedIds });
 }
 
-export async function loadConnections(): Promise<ConnectionConfig[]> {
-  return invoke("load_connections");
+export async function loadConnections(legacySidebarShowUserAdmin?: boolean): Promise<ConnectionConfig[]> {
+  return legacySidebarShowUserAdmin === undefined ? invoke("load_connections") : invoke("load_connections", { legacySidebarShowUserAdmin });
 }
 
 export async function loadTunnelProfiles(): Promise<TunnelProfile[]> {
@@ -3555,23 +3568,30 @@ export async function loadSavedSqlFile(id: string): Promise<SavedSqlFile | null>
 }
 
 export async function saveSavedSqlFolder(folder: SavedSqlFolder): Promise<SavedSqlFolder> {
-  return invoke("save_saved_sql_folder", { folder });
+  const saved = await invoke<SavedSqlFolder>("save_saved_sql_folder", { folder });
+  await notifySavedSqlLibraryChanged();
+  return saved;
 }
 
 export async function deleteSavedSqlFolder(id: string): Promise<void> {
-  return invoke("delete_saved_sql_folder", { id });
+  await invoke("delete_saved_sql_folder", { id });
+  await notifySavedSqlLibraryChanged();
 }
 
 export async function saveSavedSqlFile(file: SavedSqlFile): Promise<SavedSqlFile> {
-  return invoke("save_saved_sql_file", { file });
+  const saved = await invoke<SavedSqlFile>("save_saved_sql_file", { file });
+  await notifySavedSqlLibraryChanged();
+  return saved;
 }
 
 export async function saveDefaultQueryContent(id: string, sql: string, updatedAt: string): Promise<void> {
-  return invoke("save_default_query_content", { id, sql, updatedAt });
+  await invoke("save_default_query_content", { id, sql, updatedAt });
+  await notifySavedSqlLibraryChanged();
 }
 
 export async function deleteSavedSqlFile(id: string): Promise<void> {
-  return invoke("delete_saved_sql_file", { id });
+  await invoke("delete_saved_sql_file", { id });
+  await notifySavedSqlLibraryChanged();
 }
 
 export async function savedSqlStorageDir(): Promise<string> {
@@ -3584,6 +3604,10 @@ export async function openSavedSqlStorageDir(dir?: string | null): Promise<void>
 
 export async function revealPathInFileManager(path: string): Promise<void> {
   return invoke("reveal_path_in_file_manager", { path });
+}
+
+export async function openPathWithDefaultApp(path: string): Promise<void> {
+  return invoke("open_path_with_default_app", { path });
 }
 
 export async function deleteDatabaseBackupFiles(paths: string[], allowedRoots: string[] = []): Promise<number> {
@@ -3636,9 +3660,13 @@ export interface UpdateInfo {
   release_name: string;
   release_url: string;
   release_notes: string;
+  channel?: "stable" | "beta";
+  release_tag?: string;
+  is_promoted?: boolean;
 }
 
 export type UpdateDownloadSource = "official" | "cnb";
+export type UpdateChannel = "stable" | "beta";
 
 export interface DownloadedUpdate {
   cache_id: string;
@@ -3647,6 +3675,9 @@ export interface DownloadedUpdate {
   release_url: string;
   release_notes: string;
   downloaded_at: number;
+  channel?: UpdateChannel;
+  release_tag?: string;
+  is_promoted?: boolean;
 }
 
 export interface UpdateDownloadProgress {
@@ -3706,20 +3737,28 @@ export async function uninstallNpmMcpServer(): Promise<string> {
   return invoke("uninstall_npm_mcp_server");
 }
 
-export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource): Promise<UpdateInfo> {
-  return invoke("check_for_updates", { locale, source });
+export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource, channel: UpdateChannel = "stable"): Promise<UpdateInfo> {
+  return invoke("check_for_updates", { locale, source, channel });
 }
 
 export async function fetchChangelog(lang?: string): Promise<import("@/lib/app/changelog").ChangelogData> {
   return invoke("fetch_changelog", { lang });
 }
 
+export async function fetchChangelogIndex(lang?: string): Promise<import("@/lib/app/changelog").ChangelogIndexData> {
+  return invoke("fetch_changelog_index", { lang });
+}
+
+export async function fetchChangelogRelease(lang: string | undefined, tag: string): Promise<import("@/lib/app/changelog").ChangelogRelease> {
+  return invoke("fetch_changelog_release", { lang, tag });
+}
+
 export async function getSystemProxyUrl(): Promise<string | null> {
   return invoke("get_system_proxy_url");
 }
 
-export async function downloadUpdate(source: UpdateDownloadSource, latestVersion: string, attemptId: string, releaseNotes?: string): Promise<DownloadedUpdate> {
-  return invoke("download_update", { source, latestVersion, attemptId, releaseNotes });
+export async function downloadUpdate(source: UpdateDownloadSource, latestVersion: string, attemptId: string, releaseNotes?: string, channel: UpdateChannel = "stable", releaseTag?: string): Promise<DownloadedUpdate> {
+  return invoke("download_update", { source, channel, latestVersion, attemptId, releaseNotes, releaseTag });
 }
 
 export async function cancelUpdateDownload(): Promise<void> {
@@ -3761,6 +3800,13 @@ export interface RedisKeyInfo {
   ttl?: number;
   size?: number;
   value_preview?: string;
+}
+
+/** TYPE + TTL of one key, resolved for an explicit list of keys. */
+export interface RedisKeyMetadata {
+  key_raw: string;
+  key_type?: string;
+  ttl: number;
 }
 
 export interface RedisDatabaseInfo {
@@ -3937,6 +3983,14 @@ export async function redisScanKeysBatch(connectionId: string, db: number, curso
     count,
     maxIterations,
     includeTypes,
+  });
+}
+
+export async function redisKeyMetadataBatch(connectionId: string, db: number, keyRaws: string[]): Promise<RedisKeyMetadata[]> {
+  return invoke("redis_key_metadata_batch", {
+    connectionId,
+    db,
+    keyRaws,
   });
 }
 
@@ -6360,6 +6414,15 @@ export interface TableImportRequest {
   retainSource?: boolean;
   conflictPolicy?: TableImportConflictPolicy;
   skipDuplicateRows?: boolean;
+  continueOnError?: boolean;
+}
+
+export interface TableImportFailure {
+  /** Target table, so a batch import can label each failed row. */
+  table: string;
+  /** 1-based data row number in the source (the header row is not counted). */
+  row: number;
+  error: string;
 }
 
 export interface TableImportSummary {
@@ -6367,6 +6430,10 @@ export interface TableImportSummary {
   rowsImported: number;
   totalRows: number;
   elapsedMs: number;
+  // Absent from older web backends, so the dialog treats them as "no failures".
+  rowsFailed?: number;
+  failures?: TableImportFailure[];
+  failuresTruncated?: boolean;
 }
 
 export interface TableImportProgress {
@@ -6380,6 +6447,9 @@ export interface TableImportProgress {
   totalBytes?: number;
   elapsedMs: number;
   error?: string | null;
+  rowsFailed?: number;
+  failures?: TableImportFailure[];
+  failuresTruncated?: boolean;
 }
 
 export async function previewTableImportFile(filePathOrRequest: string | File | TableImportPreviewRequest, options: Partial<TableImportPreviewRequest> = {}): Promise<TableImportPreview> {
@@ -6660,6 +6730,7 @@ export interface DatabaseExportRequest {
   includeCreateDatabase?: boolean;
   dropTableIfExists?: boolean;
   omitAutoIncrement?: boolean;
+  omitDatabaseQualifier?: boolean;
   preserveOriginalLanguage?: boolean;
   failOnError?: boolean;
   preventOverwrite?: boolean;

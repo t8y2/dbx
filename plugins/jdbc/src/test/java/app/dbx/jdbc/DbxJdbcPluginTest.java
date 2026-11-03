@@ -51,6 +51,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class DbxJdbcPluginTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Test
+    void readsRealH2DriverParametersWithoutConnecting() throws Exception {
+        try (java.net.ServerSocket listener = new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
+            listener.setSoTimeout(200);
+            JsonNode response = request("connectionParameters", """
+                { "connection": {
+                  "connection_string": "jdbc:h2:tcp://127.0.0.1:%d/metadata-only",
+                  "jdbc_driver_class": "org.h2.Driver", "username": "sa", "password": "not-for-metadata"
+                }}
+                """.formatted(listener.getLocalPort()));
+            assertFalse(response.has("error"), response.toString());
+            assertTrue(response.path("result").isArray());
+            // H2 deliberately reports no DriverPropertyInfo entries; keep custom editing available.
+            assertTrue(response.path("result").isEmpty());
+            assertFalse(response.toString().contains("not-for-metadata"));
+            assertThrows(java.net.SocketTimeoutException.class, listener::accept);
+        }
+    }
     private static final String CONNECTION = """
         {
           "connection_string": "jdbc:h2:mem:dbx_ctx;DB_CLOSE_DELAY=-1",
@@ -713,6 +732,125 @@ final class DbxJdbcPluginTest {
         assertEquals(5, third.path("result").path("rows").path(0).path(0).asInt());
         assertEquals(false, third.path("result").path("has_more").asBoolean());
         assertEquals(true, third.path("result").path("session_id").isNull());
+    }
+
+    @Test
+    void executeQueryPageCommitsStatementWithoutResultSet() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = testDriver("jdbc:postgresql:dbx-ctas", scriptedPostgresConnection(calls, false, 2, false));
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "jdbc:postgresql:dbx-ctas" }
+            """;
+        try {
+            JsonNode response = request("executeQueryPage", """
+                {
+                  "connection": %s,
+                  "sql": "create table dbx_t1 as (select 1 as a union all select 2 as b)",
+                  "pageSize": 100,
+                  "maxRows": 1000
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(2, response.path("result").path("affected_rows").asInt());
+            assertEquals(true, response.path("result").path("session_id").isNull());
+            int begin = callIndex(calls, call -> call.equals("setAutoCommit:false"));
+            int commit = callIndex(calls, call -> call.equals("commit"));
+            int restore = callIndex(calls, call -> call.equals("setAutoCommit:true"));
+            assertTrue(begin >= 0 && begin < commit && commit < restore, calls.toString());
+            assertFalse(calls.contains("rollback"), calls.toString());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void executeQueryPageCommitsEffectfulCursorWhenSessionDrains() throws Exception {
+        List<String> calls = new ArrayList<>();
+        // updateCount -1 with an open result set is what real drivers report --
+        // Statement.getUpdateCount returns -1 whenever the current result is a
+        // ResultSet, including INSERT ... RETURNING -- so commit-on-drain must
+        // not depend on the driver's effect count (#13644 review).
+        Driver driver = testDriver("jdbc:postgresql:dbx-returning", scriptedPostgresConnection(calls, true, -1, false));
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "jdbc:postgresql:dbx-returning" }
+            """;
+        try {
+            JsonNode response = request("executeQueryPage", """
+                {
+                  "connection": %s,
+                  "sql": "insert into dbx_t1(a) values (1), (2), (3) returning a",
+                  "pageSize": 100,
+                  "maxRows": 1000
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(3, response.path("result").path("rows").size());
+            assertEquals(false, response.path("result").path("has_more").asBoolean());
+            assertTrue(calls.contains("commit"), calls.toString());
+            assertFalse(calls.contains("rollback"), calls.toString());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void executeQueryPageSurfacesCommitFailureAsError() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = testDriver("jdbc:postgresql:dbx-commit-fail", scriptedPostgresConnection(calls, false, 1, true));
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "jdbc:postgresql:dbx-commit-fail" }
+            """;
+        try {
+            JsonNode response = request("executeQueryPage", """
+                {
+                  "connection": %s,
+                  "sql": "insert into deferred_check values (1)",
+                  "pageSize": 100,
+                  "maxRows": 1000
+                }
+                """.formatted(connection));
+
+            assertTrue(response.has("error"), "a failed commit must reach the caller as an error: " + response);
+            assertTrue(response.path("error").path("message").asText().contains("deferred constraint violated"), response.toString());
+            int begin = callIndex(calls, call -> call.equals("setAutoCommit:false"));
+            int commit = callIndex(calls, call -> call.equals("commit"));
+            int restore = callIndex(calls, call -> call.equals("setAutoCommit:true"));
+            assertTrue(begin >= 0 && begin < commit && commit < restore, calls.toString());
+            assertTrue(calls.contains("rollback"), "the broken transaction must be cleared: " + calls);
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void executeQueryPageRollsBackWhenPagingFailsMidStream() throws Exception {
+        List<String> calls = new ArrayList<>();
+        Driver driver = testDriver("jdbc:postgresql:dbx-midstream-fail", failingCursorPostgresConnection(calls));
+        DriverManager.registerDriver(driver);
+        String connection = """
+            { "connection_string": "jdbc:postgresql:dbx-midstream-fail" }
+            """;
+        try {
+            JsonNode response = request("executeQueryPage", """
+                {
+                  "connection": %s,
+                  "sql": "select a from dbx_t1",
+                  "pageSize": 100,
+                  "maxRows": 1000
+                }
+                """.formatted(connection));
+
+            assertTrue(response.has("error"), response.toString());
+            assertTrue(calls.contains("rollback"), calls.toString());
+            assertFalse(calls.contains("commit"), calls.toString());
+        } finally {
+            closeAndDeregister(connection, driver);
+        }
     }
 
     @Test
@@ -5337,6 +5475,158 @@ final class DbxJdbcPluginTest {
                             }
                             yield null;
                         }
+                        default -> defaultValue(method.getReturnType());
+                    };
+                }
+            }
+        );
+    }
+
+    /**
+     * PostgreSQL connection mock for the paged-transaction tests: records
+     * transaction control calls and answers one statement that either returns a
+     * fixed three-row result set or no result set at all, with a scripted
+     * update count and an optional commit failure.
+     */
+    private static Connection scriptedPostgresConnection(List<String> calls, boolean returnsResultSet, int updateCount, boolean commitFails) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getAutoCommit" -> {
+                    calls.add("getAutoCommit");
+                    yield true;
+                }
+                case "setAutoCommit" -> {
+                    calls.add("setAutoCommit:" + (boolean) args[0]);
+                    yield null;
+                }
+                case "commit" -> {
+                    calls.add("commit");
+                    if (commitFails) {
+                        throw new SQLException("deferred constraint violated");
+                    }
+                    yield null;
+                }
+                case "createStatement" -> scriptedPostgresStatement(calls, returnsResultSet, updateCount);
+                case "isClosed" -> false;
+                case "rollback" -> {
+                    calls.add("rollback");
+                    yield null;
+                }
+                case "close", "setCatalog", "setSchema" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static Statement scriptedPostgresStatement(List<String> calls, boolean returnsResultSet, int updateCount) {
+        return (Statement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Statement.class },
+            new java.lang.reflect.InvocationHandler() {
+                @Override
+                public Object invoke(Object proxy, Method method, Object[] args) {
+                    return switch (method.getName()) {
+                        case "execute" -> {
+                            calls.add("execute:" + args[0]);
+                            yield returnsResultSet;
+                        }
+                        case "getResultSet" -> returnsResultSet ? integerResultSet(new int[] {1, 2, 3}) : null;
+                        case "getUpdateCount" -> updateCount;
+                        case "setMaxRows", "setFetchSize", "setQueryTimeout", "close" -> null;
+                        default -> defaultValue(method.getReturnType());
+                    };
+                }
+            }
+        );
+    }
+
+    /**
+     * PostgreSQL connection mock whose cursor dies mid-stream: the first
+     * {@code next()} succeeds, the second throws, simulating a connection
+     * dropped while a paged session is still open.
+     */
+    private static Connection failingCursorPostgresConnection(List<String> calls) {
+        return (Connection) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Connection.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getAutoCommit" -> {
+                    calls.add("getAutoCommit");
+                    yield true;
+                }
+                case "setAutoCommit" -> {
+                    calls.add("setAutoCommit:" + (boolean) args[0]);
+                    yield null;
+                }
+                case "commit" -> {
+                    calls.add("commit");
+                    yield null;
+                }
+                case "createStatement" -> (Statement) Proxy.newProxyInstance(
+                    DbxJdbcPluginTest.class.getClassLoader(),
+                    new Class<?>[] { Statement.class },
+                    new java.lang.reflect.InvocationHandler() {
+                        @Override
+                        public Object invoke(Object proxy, Method method, Object[] args) {
+                            return switch (method.getName()) {
+                                case "execute" -> {
+                                    calls.add("execute:" + args[0]);
+                                    yield true;
+                                }
+                                case "getResultSet" -> (ResultSet) Proxy.newProxyInstance(
+                                    DbxJdbcPluginTest.class.getClassLoader(),
+                                    new Class<?>[] { ResultSet.class },
+                                    new java.lang.reflect.InvocationHandler() {
+                                        private int nextCalls = 0;
+
+                                        @Override
+                                        public Object invoke(Object proxy, Method method, Object[] args) throws SQLException {
+                                            return switch (method.getName()) {
+                                                case "next" -> {
+                                                    nextCalls++;
+                                                    if (nextCalls == 1) yield true;
+                                                    throw new SQLException("connection closed mid-stream");
+                                                }
+                                                case "getMetaData" -> columnMeta(Types.INTEGER);
+                                                case "getObject" -> 1;
+                                                default -> defaultValue(method.getReturnType());
+                                            };
+                                        }
+                                    }
+                                );
+                                case "getUpdateCount" -> -1;
+                                case "setMaxRows", "setFetchSize", "setQueryTimeout", "close" -> null;
+                                default -> defaultValue(method.getReturnType());
+                            };
+                        }
+                    }
+                );
+                case "isClosed" -> false;
+                case "rollback" -> {
+                    calls.add("rollback");
+                    yield null;
+                }
+                case "close", "setCatalog", "setSchema" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static ResultSet integerResultSet(int[] values) {
+        return (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            new java.lang.reflect.InvocationHandler() {
+                private int index = -1;
+
+                @Override
+                public Object invoke(Object proxy, Method method, Object[] args) {
+                    return switch (method.getName()) {
+                        case "next" -> ++index < values.length;
+                        case "getMetaData" -> columnMeta(Types.INTEGER);
+                        case "getObject" -> values[index];
                         default -> defaultValue(method.getReturnType());
                     };
                 }

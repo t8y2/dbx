@@ -52,6 +52,7 @@ vi.mock("@/stores/connectionStore", () => ({
     treeClipboard: null,
     ensureConnected: mocks.ensureConnected,
     getConfig: () => connection,
+    tableNameFilterForScope: () => undefined,
     orderByPinnedTreeNodes: (rows: unknown[]) => rows,
     refreshObjectListTreeNode: mocks.refreshObjectListTreeNode,
   }),

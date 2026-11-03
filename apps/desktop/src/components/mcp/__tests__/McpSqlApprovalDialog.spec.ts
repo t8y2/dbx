@@ -21,13 +21,22 @@ vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setFocus: 
 vi.mock("@/components/ui/button", () => ({ Button: { template: "<button><slot /></button>" } }));
 vi.mock("@/components/ui/dialog", () => ({
   Dialog: { props: ["open"], template: '<div v-if="open"><slot /></div>' },
-  DialogContent: { template: "<div><slot /></div>" },
+  DialogContent: {
+    inheritAttrs: false,
+    setup(_: Record<string, never>, { slots, attrs }: { slots: { default?: () => unknown }; attrs: Record<string, unknown> }) {
+      dialogContentAttrs = attrs as Record<string, ((event: { preventDefault: () => void }) => void) | undefined>;
+      return () => slots.default?.() ?? null;
+    },
+  },
   DialogFooter: { template: "<div><slot /></div>" },
   DialogHeader: { template: "<div><slot /></div>" },
   DialogTitle: { template: "<div><slot /></div>" },
 }));
 
+import { h } from "vue";
 import McpSqlApprovalDialog from "../McpSqlApprovalDialog.vue";
+
+let dialogContentAttrs: Record<string, ((event: { preventDefault: () => void }) => void) | undefined> = {};
 
 let host: HTMLDivElement;
 let app: ReturnType<typeof createApp>;
@@ -35,6 +44,8 @@ let app: ReturnType<typeof createApp>;
 beforeEach(async () => {
   vi.useFakeTimers();
   bridge.handlers = {};
+  dialogContentAttrs = {};
+  localStorage.clear();
   bridge.invoke.mockClear();
   bridge.focus.mockClear();
   bridge.unlisten.mockClear();
@@ -60,6 +71,9 @@ beforeEach(async () => {
             mcpToolApprovalDescription: "Review the call",
             mcpToolApprovalTool: "Tool",
             mcpToolApprovalTarget: "Target",
+            mcpToolApprovalDetail: "Call payload",
+            mcpToolApprovalAutoApprove: "Remember this tool and auto-approve its calls for 24 hours",
+            mcpApprovalExpires: "Auto-deny in {seconds}s",
           },
         },
       },
@@ -98,6 +112,20 @@ it("shows the exact SQL and sends a one-time decision for its request ID", async
   expect(host.textContent).not.toContain("DROP TABLE important;");
 });
 
+it("keeps the dialog open on outside clicks or focus moves instead of denying", async () => {
+  request("approval-outside");
+  await nextTick();
+  expect(host.textContent).toContain("DROP TABLE important;");
+  for (const key of ["onPointerDownOutside", "onInteractOutside", "onFocusOutside"]) {
+    const event = { preventDefault: vi.fn() };
+    dialogContentAttrs[key]?.(event);
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+  }
+  // No decision was sent and the approval is still on screen.
+  expect(bridge.invoke).not.toHaveBeenCalled();
+  expect(host.textContent).toContain("DROP TABLE important;");
+});
+
 it("removes an unanswered request when the desktop approval times out", async () => {
   request("approval-2");
   await nextTick();
@@ -105,6 +133,41 @@ it("removes an unanswered request when the desktop approval times out", async ()
   await nextTick();
   expect(host.textContent).not.toContain("DROP TABLE important;");
   expect(bridge.invoke).not.toHaveBeenCalled();
+});
+
+it("shows a visible countdown and drops the request when it expires", async () => {
+  request("approval-cd");
+  await nextTick();
+  expect(host.querySelector("[data-mcp-approval-remaining]")?.textContent).toContain("Auto-deny in 90s");
+  vi.advanceTimersByTime(2000);
+  await nextTick();
+  expect(host.querySelector("[data-mcp-approval-remaining]")?.textContent).toContain("Auto-deny in 88s");
+  vi.advanceTimersByTime(90_000);
+  await nextTick();
+  expect(host.textContent).not.toContain("DROP TABLE important;");
+  expect(bridge.invoke).not.toHaveBeenCalled();
+});
+
+it("auto-approves remembered tools without showing the dialog", async () => {
+  localStorage.setItem("dbx.mcp-tool-approval.auto-approve", JSON.stringify([{ tool: "dbx_ssh__exec", until: Date.now() + 60_000 }]));
+  toolRequest("tool-auto");
+  await nextTick();
+  expect(bridge.invoke).toHaveBeenCalledWith("respond_mcp_sql_approval", { id: "tool-auto", decision: "once" });
+  expect(host.textContent).not.toContain("Confirm Terminal tool");
+});
+
+it("stores a 24h consent when remembering is checked before allowing once", async () => {
+  toolRequest("tool-remember");
+  await nextTick();
+  host.querySelector<HTMLInputElement>("[data-mcp-approval-remember] input")!.click();
+  await nextTick();
+  Array.from(host.querySelectorAll("button"))
+    .find((button) => button.textContent === "Once")
+    ?.click();
+  await nextTick();
+  expect(bridge.invoke).toHaveBeenCalledWith("respond_mcp_sql_approval", { id: "tool-remember", decision: "once" });
+  const consents = JSON.parse(localStorage.getItem("dbx.mcp-tool-approval.auto-approve")!) as { tool: string }[];
+  expect(consents.map((consent) => consent.tool)).toContain("dbx_ssh__exec");
 });
 
 it("confirms high-risk tool calls once only and queues them with SQL approvals", async () => {

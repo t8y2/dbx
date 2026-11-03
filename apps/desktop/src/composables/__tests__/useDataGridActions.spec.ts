@@ -919,6 +919,76 @@ describe("useDataGridActions", () => {
     expect(tab.orderByInput).toBe("LOWER(new_name) ASC");
   });
 
+  it("keeps the active column sort when a refresh rebuilds the same columns", async () => {
+    // issue #13350 的期望行为：列头排序后点刷新，只要排序列仍在重建后的表结构里，
+    // ORDER BY 必须原样下推，排序状态原样保留，数据继续按该列有序。
+    const columns = [
+      { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "create_time", data_type: "timestamp", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ];
+    const tab = tableDataTab({
+      resultSortColumn: "create_time",
+      resultSortColumnIndex: 1,
+      resultSortDirection: "asc",
+      resultSortMode: "database",
+      orderByInput: '"create_time" ASC',
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns,
+        primaryKeys: ["id"],
+      },
+    });
+    mocks.tabs.push(tab);
+    mocks.getColumns.mockResolvedValue(columns);
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onReloadData(tab.id, tab.sql, "", "", '"create_time" ASC', undefined, undefined, "refresh");
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: '"create_time" ASC' }));
+    expect(tab.resultSortColumn).toBe("create_time");
+    expect(tab.resultSortDirection).toBe("asc");
+    expect(tab.orderByInput).toBe('"create_time" ASC');
+  });
+
+  it("clears the header sort state when a refresh drops the incoming order", async () => {
+    // 不变量（issue #13350 的用户可见症状）：刷新一旦移除 ORDER BY，列头排序图标
+    // 必须同步熄灭，否则出现「图标亮、数据无序」的错位。构造 grid 发来的 orderBy
+    // 引用了已不存在的列，而标签页排序状态仍指向存活的 create_time —— 元数据
+    // 重建不会清理它，移除 ORDER BY 后排序状态必须一并清理。
+    const columns = [
+      { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "create_time", data_type: "timestamp", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ];
+    const tab = tableDataTab({
+      resultSortColumn: "create_time",
+      resultSortColumnIndex: 1,
+      resultSortDirection: "asc",
+      resultSortMode: "database",
+      orderByInput: '"create_time" ASC',
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns,
+        primaryKeys: ["id"],
+      },
+    });
+    mocks.tabs.push(tab);
+    mocks.getColumns.mockResolvedValue(columns);
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onReloadData(tab.id, tab.sql, "", "", '"ghost_col" ASC', undefined, undefined, "refresh");
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: undefined }));
+    expect(tab.orderByInput).toBeUndefined();
+    expect(tab.resultSortColumn).toBeUndefined();
+    expect(tab.resultSortColumnIndex).toBeUndefined();
+    expect(tab.resultSortDirection).toBeUndefined();
+    expect(tab.resultSortMode).toBeUndefined();
+  });
+
   it("keeps SQL result toolbar reload free of table pagination defaults", async () => {
     const tab = {
       id: "tab-1",

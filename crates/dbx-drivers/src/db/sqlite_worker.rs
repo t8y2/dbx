@@ -178,6 +178,7 @@ impl SqliteWorkerSession<'_> {
                 deferred_large_value_cells: Vec::new(),
                 column_sortables: vec![],
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: rows.unwrap_or_default(),
                 affected_rows: affected_rows.unwrap_or(0),

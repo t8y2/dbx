@@ -9,6 +9,7 @@ import { gaussdbConnectionMode } from "@/lib/database/jdbcDialect";
 import { exactOracleTriggerMetadata, exactOracleTriggerNodeMetadata, oracleTriggerIdentityKey, oracleTriggerReadOptions, oracleTriggerObjectReadOptions } from "@/lib/database/oracleTriggerIdentity";
 import { nativeJobAdminEngine } from "@/lib/database/nativeJobAdmin";
 import { supportsSchemaIndexManagement } from "@/lib/database/databaseObjectCapabilities";
+import { pagesTablePartitionsWithRootPage } from "@/lib/database/databaseFeatureSupport";
 import { notifyComponentUpdatesChanged } from "@/lib/updates/componentUpdateEvents";
 import type {
   ColumnInfo,
@@ -163,6 +164,7 @@ import {
   mergeTableInfosIntoObjects,
   mergeTableTreePageChildren,
   objectGroupRefreshParentId,
+  partitionPageTables,
   objectTypesForGroupNode,
   tablePartitionGroups,
   syncTablePartitionGroups,
@@ -205,6 +207,7 @@ import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } f
 import { buildPackageMemberNodes, markPackageNodesExpandable, packageMemberGroupOwnerId } from "@/lib/sidebar/packageMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
 import { withoutSshLocalPorts } from "@/lib/connection/sshLocalPort";
+import { mysqlDataCharsetChanged, mysqlDataCharsetChangeBlocked } from "@/lib/connection/mysqlDataCharset";
 import { driverProfileObjectTreeProfileForConnection } from "@/lib/database/driverProfileExtensions";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
@@ -2432,7 +2435,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const damengRoleNode = buildDamengRoleNode(connectionId, existingConnectionNode);
     const damengJobAdminNode = buildDamengJobAdminNode(connectionId, existingConnectionNode);
     const xuguTablespacesNode = buildXuguTablespacesNode(connectionId, existingConnectionNode);
-    return [...nonUtilityChildren, buildOracleDatabaseLinksNode(connectionId, existingConnectionNode), userAdminNode, xuguUserAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode, buildDatabaseJobAdminNode(connectionId), xuguTablespacesNode].filter(Boolean) as TreeNode[];
+    return [...nonUtilityChildren, buildOracleDatabaseLinksNode(connectionId, existingConnectionNode), buildDatabaseJobAdminNode(connectionId), userAdminNode, xuguUserAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode, xuguTablespacesNode].filter(Boolean) as TreeNode[];
   }
 
   function withSavedSqlRoot(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
@@ -2664,8 +2667,15 @@ export const useConnectionStore = defineStore("connection", () => {
     return (sidebarTableNameFilterRevisions.get(options.tableNameFilterScopeKey) ?? 0) === options.expectedTableNameFilterRevision;
   }
 
-  function listTablesWithOptionalTableNameFilter(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: DatabaseObjectTreeKind[], catalog?: string, tableNameFilter?: TableNameFilter) {
-    if (tableNameFilter) return api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes, catalog, tableNameFilter);
+  function listTablesWithOptionalTableNameFilter(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: DatabaseObjectTreeKind[], catalog?: string, tableNameFilter?: TableNameFilter, pageTableRoots?: boolean) {
+    // Only append the root-paging flag when the caller opts in so every other
+    // caller keeps the exact argument list its backend contract already had.
+    if (tableNameFilter) return pageTableRoots ? api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes, catalog, tableNameFilter, undefined, true) : api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes, catalog, tableNameFilter);
+    if (pageTableRoots) {
+      if (catalog) return api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes, catalog, undefined, undefined, true);
+      if (objectTypes) return api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes, undefined, undefined, undefined, true);
+      return api.listTables(connectionId, database, schema, filter, limit, offset, undefined, undefined, undefined, undefined, true);
+    }
     if (catalog) return api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes, catalog);
     if (objectTypes) return api.listTables(connectionId, database, schema, filter, limit, offset, objectTypes);
     return api.listTables(connectionId, database, schema, filter, limit, offset);
@@ -3077,6 +3087,10 @@ export const useConnectionStore = defineStore("connection", () => {
     // like unfiltered loads, instead of silently stopping at the first budget
     // window. Global sidebar search keeps the bounded single-shot fetch.
     const paginate = options.pagedSearch || !searchFilter || getConfig(options.node.connectionId)?.db_type === "oceanbase-oracle";
+    // PostgreSQL-family backends can count only top-level relations against the
+    // page size and return every partition below them, so one page fully loads
+    // the partition groups it shows (issue #13860).
+    const rootPaged = paginate && !searchFilter && tableNameFilterIsEmpty(tableNameFilter) && pagesTablePartitionsWithRootPage(getConfig(options.node.connectionId));
     const fetchLimit = paginate ? options.pageSize + 1 : SIDEBAR_TABLE_SEARCH_RESULT_BUDGET;
     const fetchOffset = paginate ? options.offset : undefined;
     const tables = await loadCachedMetadataListPage<TableInfo[]>(
@@ -3093,11 +3107,12 @@ export const useConnectionStore = defineStore("connection", () => {
         sidebarDisplayMode: "grouped",
         extra: tableNameFilterMetadataExtra(tableNameFilter, sourceRevision),
       }),
-      () => listTablesWithOptionalTableNameFilter(options.node.connectionId!, options.node.database!, options.querySchema, searchFilter, fetchLimit, fetchOffset, options.objectTypes, options.node.catalog, tableNameFilter),
+      () => listTablesWithOptionalTableNameFilter(options.node.connectionId!, options.node.database!, options.querySchema, searchFilter, fetchLimit, fetchOffset, options.objectTypes, options.node.catalog, tableNameFilter, rootPaged),
       { force: options.force },
     );
-    const hasMore = paginate ? tables.length > options.pageSize : false;
-    const pageTables = hasMore ? tables.slice(0, options.pageSize) : tables;
+    const anchorTables = rootPaged ? tables.filter((table) => !table.parent_name) : tables;
+    const hasMore = paginate ? anchorTables.length > options.pageSize : false;
+    const pageTables = rootPaged ? partitionPageTables(tables, options.pageSize) : hasMore ? tables.slice(0, options.pageSize) : tables;
     if (tableListSourceRevision(options.node.connectionId) === sourceRevision) {
       indexCompletionTables(options.node.connectionId, options.node.database, options.effectiveSchema, tableInfosToCompletionTables(pageTables, options.effectiveSchema));
     }
@@ -3114,9 +3129,9 @@ export const useConnectionStore = defineStore("connection", () => {
       children,
       objectCount: children.length,
       hasMore,
-      nextOffset: options.offset + pageTables.length,
-      loadMoreParent: lastTable?.parent_name ? { schema: lastTable.parent_schema, name: lastTable.parent_name } : undefined,
-      ...tablePageAnchors(tables, options.pageSize, hasMore, options.effectiveSchema),
+      nextOffset: options.offset + (rootPaged ? Math.min(anchorTables.length, options.pageSize) : pageTables.length),
+      loadMoreParent: rootPaged ? undefined : lastTable?.parent_name ? { schema: lastTable.parent_schema, name: lastTable.parent_name } : undefined,
+      ...tablePageAnchors(anchorTables, options.pageSize, hasMore, options.effectiveSchema),
     };
   }
 
@@ -3359,6 +3374,7 @@ export const useConnectionStore = defineStore("connection", () => {
       return { children, objectCount: children.length, hasMore, nextOffset: options.offset + pageObjects.length, firstAnchor: anchor(objects[0]), nextAnchor: hasMore ? anchor(objects[options.pageSize]) : undefined };
     }
     const paginate = options.pagedSearch || !searchFilter || getConfig(options.connectionId)?.db_type === "oceanbase-oracle";
+    const rootPaged = paginate && !searchFilter && tableNameFilterIsEmpty(tableNameFilter) && pagesTablePartitionsWithRootPage(getConfig(options.connectionId));
     const fetchLimit = paginate ? options.pageSize + 1 : SIDEBAR_TABLE_SEARCH_RESULT_BUDGET;
     const fetchOffset = paginate ? options.offset : undefined;
     const tables = await loadCachedMetadataListPage<TableInfo[]>(
@@ -3374,11 +3390,12 @@ export const useConnectionStore = defineStore("connection", () => {
         sidebarDisplayMode: "simple",
         extra: tableNameFilterMetadataExtra(tableNameFilter, sourceRevision),
       }),
-      () => listTablesWithOptionalTableNameFilter(options.connectionId, options.database, options.querySchema, searchFilter, fetchLimit, fetchOffset, undefined, undefined, tableNameFilter),
+      () => listTablesWithOptionalTableNameFilter(options.connectionId, options.database, options.querySchema, searchFilter, fetchLimit, fetchOffset, undefined, undefined, tableNameFilter, rootPaged),
       { force: options.force },
     );
-    const hasMore = paginate ? tables.length > options.pageSize : false;
-    const pageTables = hasMore ? tables.slice(0, options.pageSize) : tables;
+    const anchorTables = rootPaged ? tables.filter((table) => !table.parent_name) : tables;
+    const hasMore = paginate ? anchorTables.length > options.pageSize : false;
+    const pageTables = rootPaged ? partitionPageTables(tables, options.pageSize) : hasMore ? tables.slice(0, options.pageSize) : tables;
     if (tableListSourceRevision(options.connectionId) === sourceRevision) {
       indexCompletionTables(options.connectionId, options.database, options.effectiveSchema, tableInfosToCompletionTables(pageTables, options.effectiveSchema));
     }
@@ -3395,9 +3412,9 @@ export const useConnectionStore = defineStore("connection", () => {
       children,
       objectCount: children.length,
       hasMore,
-      nextOffset: options.offset + pageTables.length,
-      loadMoreParent: lastTable?.parent_name ? { schema: lastTable.parent_schema, name: lastTable.parent_name } : undefined,
-      ...tablePageAnchors(tables, options.pageSize, hasMore, options.effectiveSchema),
+      nextOffset: options.offset + (rootPaged ? Math.min(anchorTables.length, options.pageSize) : pageTables.length),
+      loadMoreParent: rootPaged ? undefined : lastTable?.parent_name ? { schema: lastTable.parent_schema, name: lastTable.parent_name } : undefined,
+      ...tablePageAnchors(anchorTables, options.pageSize, hasMore, options.effectiveSchema),
     };
   }
 
@@ -3529,14 +3546,21 @@ export const useConnectionStore = defineStore("connection", () => {
   // (a manual collapse never rewrites the cache), so opening a connection would
   // keep auto-expanding a schema the user collapsed. Expansion state is instead
   // restored from the live tree (restoreExpandedChildren) within a session.
+  // Copy-on-write: collapsed subtrees are reused as-is, so persisting a long table page list
+  // only clones the nodes that were actually expanded.
   function stripTreeNodeExpansionState(nodes: TreeNode[]): TreeNode[] {
-    return nodes
-      .filter((node) => (node.type !== "index" || node.objectScope !== "schema") && node.loadMore?.objectType !== "INDEX")
-      .map((node) => ({
-        ...node,
-        isExpanded: false,
-        children: node.children ? stripTreeNodeExpansionState(node.children) : node.children,
-      }));
+    let stripped: TreeNode[] | undefined;
+    nodes.forEach((node, index) => {
+      const dropped = (node.type === "index" && node.objectScope === "schema") || node.loadMore?.objectType === "INDEX";
+      let next: TreeNode | undefined = dropped ? undefined : node;
+      if (!dropped) {
+        const children = node.children ? stripTreeNodeExpansionState(node.children) : node.children;
+        if (node.isExpanded !== false || children !== node.children) next = { ...node, isExpanded: false, children };
+      }
+      if (next !== node && !stripped) stripped = nodes.slice(0, index);
+      if (next) stripped?.push(next);
+    });
+    return stripped ?? nodes;
   }
 
   async function loadPersistedTreeChildren(node: TreeNode, cacheKey: string, load: TreeNodeLoadHandle, options?: { freshOnly?: boolean; isCurrent?: () => boolean; acceptChildren?: (children: TreeNode[]) => boolean }): Promise<PersistedTreeChildrenLoadResult> {
@@ -4693,6 +4717,14 @@ export const useConnectionStore = defineStore("connection", () => {
     // Edit forms do not own server-derived hints. Retain the previous hint only
     // while its protected URL still refers to the same saved JDBC target.
     config = { ...config, jdbc_dialect: keepsSavedJdbcTarget ? previousConfig.jdbc_dialect : undefined };
+    if (mysqlDataCharsetChanged(previousConfig, config)) {
+      const { useQueryStore } = await import("@/stores/queryStore");
+      if (mysqlDataCharsetChangeBlocked(useQueryStore().tabs, config.id)) throw new Error(i18n.global.t("connection.mysqlDataCharsetCloseTabs"));
+      // Retire the old decoding session before publishing a potentially writable
+      // config. Preserve SQL drafts and do not silently discard grid edits.
+      await disconnect(config.id, { skipTabHandling: true, markClosedByUser: false });
+      if (mysqlDataCharsetChangeBlocked(useQueryStore().tabs, config.id)) throw new Error(i18n.global.t("connection.mysqlDataCharsetCloseTabs"));
+    }
     const previousDatabase = previousConfig.database ?? "";
     const runtimeConfigChanged = connectionConfigFingerprint(previousConfig) !== connectionConfigFingerprint(config);
     const shouldReconnectPlugin = runtimeConfigChanged && previousConfig.db_type === "plugin" && config.db_type === "plugin" && connectedIds.value.has(config.id);
@@ -8319,7 +8351,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  async function loadColumns(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string) {
+  async function loadColumns(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string, options?: { preserveExpansion?: boolean }) {
     const parentId = nodeId ?? (schema ? `${connectionId}:${database}:${schema}:${table}:__columns` : `${connectionId}:${database}:${table}:__columns`);
     const node = findNode(treeNodes.value, parentId);
     if (!node) return;
@@ -8352,7 +8384,7 @@ export const useConnectionStore = defineStore("connection", () => {
             };
           }),
         );
-        targetNode.isExpanded = true;
+        if (!options?.preserveExpansion) targetNode.isExpanded = true;
         return;
       }
       const querySchema = metadataQuerySchema(connectionId, database, schema);
@@ -8375,7 +8407,7 @@ export const useConnectionStore = defineStore("connection", () => {
           meta: col,
         })),
       );
-      targetNode.isExpanded = true;
+      if (!options?.preserveExpansion) targetNode.isExpanded = true;
     } catch (e) {
       recordMetadataLoadError(connectionId, e, load);
       throw e;
@@ -8895,6 +8927,26 @@ export const useConnectionStore = defineStore("connection", () => {
       await refreshDatabaseTreeNode(connectionId, database, catalog);
     }
     void loadSidebarTableStorage({ connectionId, database, schema: schema || "" }, { force: true });
+  }
+
+  // Saving structure does not replace existing sidebar column nodes. Reload only
+  // materialized groups so their labels and DDL metadata stay current, including
+  // groups the user has since collapsed, without opening new branches.
+  async function refreshTableColumnsTree(connectionId: string, database: string, table: string, schema?: string, catalog?: string) {
+    if (!connectedIds.value.has(connectionId)) return;
+    const querySchema = metadataQuerySchema(connectionId, database, schema);
+    const groups = findTreeNodes(
+      treeNodes.value,
+      (node) =>
+        node.type === "group-columns" &&
+        node.connectionId === connectionId &&
+        node.database === database &&
+        node.tableName === table &&
+        metadataQuerySchema(connectionId, database, node.schema) === querySchema &&
+        (node.catalog || "") === (catalog || "") &&
+        !!(node.isExpanded || node.isLoading || node.children?.length || isTreeNodeChildrenLoaded(node.id)),
+    );
+    await Promise.all(groups.map((node) => loadColumns(connectionId, database, table, node.schema, node.id, node.catalog, { preserveExpansion: true })));
   }
 
   function isSchemaAwareDatabase(connectionId: string): boolean {
@@ -11330,7 +11382,7 @@ export const useConnectionStore = defineStore("connection", () => {
         // 整体覆盖内存布局前，先落盘窗口内未写盘的分组编辑（防止 300ms 防抖窗口
         // 内的编辑被备份轮询/重载带回的旧快照静默回滚）。
         await flushTableVGroupPersist();
-        const [pinnedOrder, saved, , loadedTableVGroups] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(), tunnelProfileStore.init(), api.loadTableVGroups()]);
+        const [pinnedOrder, saved, , loadedTableVGroups] = await Promise.all([loadPinnedTreeNodeOrder(), api.loadConnections(settingsStore.editorSettings.sidebarShowUserAdmin !== false), tunnelProfileStore.init(), api.loadTableVGroups()]);
         setPinnedTreeNodeOrder(pinnedOrder);
         await migrateTimeoutInheritance(saved);
         const loadedConnections = saved.map(normalizeConnection).map((loadedConfig) => {
@@ -11408,6 +11460,7 @@ export const useConnectionStore = defineStore("connection", () => {
     refreshConnectionTreeNode,
     refreshDatabaseTreeNode,
     refreshObjectListTreeNode,
+    refreshTableColumnsTree,
     connectedIds,
     connectingIds,
     isConnectionClosedByUser,

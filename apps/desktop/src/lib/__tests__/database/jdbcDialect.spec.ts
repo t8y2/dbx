@@ -91,7 +91,8 @@ describe("jdbc dialect inference", () => {
     expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, connection_string: "jdbc:mysql://host/db" })).toBe("mysql");
     expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, connection_string: "" })).toBe("jdbc");
     expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, db_type: "oracle" })).toBe("oracle");
-    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, jdbc_dialect: "oracle" as never })).toBe("jdbc");
+    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, jdbc_dialect: "oracle" })).toBe("oracle");
+    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, jdbc_dialect: "unsupported" as never })).toBe("jdbc");
   });
 
   it("detects InterSystems IRIS and Caché JDBC connections", () => {
@@ -256,7 +257,8 @@ describe("jdbc dialect inference", () => {
     expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, connection_string: "jdbc:mysql://host/db" })).toBe("mysql");
     expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, connection_string: "" })).toBe("jdbc");
     expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, db_type: "oracle" })).toBe("oracle");
-    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, jdbc_dialect: "oracle" as never })).toBe("jdbc");
+    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, jdbc_dialect: "oracle" })).toBe("oracle");
+    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, jdbc_dialect: "unsupported" as never })).toBe("jdbc");
   });
 
   it("does not guess Oracle mode from an ordinary OceanBase URL or change MySQL connections", () => {
@@ -291,6 +293,9 @@ describe("jdbc dialect inference", () => {
     expect(connectionShouldLoadIdentifierQuote({ db_type: "kingbase" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "kyuubi" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "gaussdb" })).toBe(true);
+    // openGauss databases switch between backticks (B/MySQL mode) and double
+    // quotes (A/PG modes), so the quote has to come from the backend probe.
+    expect(connectionShouldLoadIdentifierQuote({ db_type: "opengauss" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "gbase8s", driver_profile: "gbase8s" })).toBe(true);
     expect(connectionShouldLoadIdentifierQuote({ db_type: "gbase", driver_profile: "gbase8a" })).toBe(false);
     // Cloud Spanner reports a backtick for GoogleSQL and a double quote for the

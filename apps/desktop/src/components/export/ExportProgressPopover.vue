@@ -3,8 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
-import { Loader2, Check, CheckCircle2, XCircle, AlertCircle, Clock, X, FileDown, Database, DatabaseBackup, FileCode2, ArrowRightLeft, Layers3, GitCompareArrows, ChevronRight, FolderOpen, Copy, RotateCcw } from "@lucide/vue";
-import { formatDataTransferDuration, useExportTracker, canReexecuteDataTransferTask, type ExportTask } from "@/composables/useExportTracker";
+import { Loader2, Check, CheckCircle2, XCircle, AlertCircle, Clock, X, FileDown, Database, DatabaseBackup, FileCode2, ArrowRightLeft, Layers3, GitCompareArrows, ChevronRight, FolderOpen, Copy } from "@lucide/vue";
+import { formatDataTransferDuration, useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { dataTransferFailureCopyText } from "@/components/export/failureDetailCopyText";
 import SqlFileProgressIndicator from "@/components/sql-file/SqlFileProgressIndicator.vue";
 import FailureDetailsList from "@/components/sql-file/FailureDetailsList.vue";
@@ -13,16 +13,28 @@ import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import * as api from "@/lib/backend/api";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 
 const { t } = useI18n();
 const { toast } = useToast();
-const { tasks, activeCount, hasActive, clearFinished, cancelTask, removeTask, reexecuteDataTransferTask } = useExportTracker();
+const { tasks, activeCount, hasActive, clearFinished, cancelTask, removeTask, recoverCancelledTask } = useExportTracker();
+const recoveryOpen = ref(false);
+const pendingRemoval = ref<ExportTask>();
 
-function handleReexecuteTask(task: ExportTask) {
-  const newTask = reexecuteDataTransferTask(task);
-  if (newTask) {
-    toast(t("transfer.backgroundStarted"));
-  }
+function requestRemoval(task: ExportTask) {
+  if (task.canRemove === false) return;
+  if (task.status === "Unknown" || task.canRecoverCancellation) {
+    pendingRemoval.value = task;
+    recoveryOpen.value = true;
+  } else if (isFinished(task.status)) removeTask(task.exportId);
+}
+
+function confirmRemoval() {
+  const task = pendingRemoval.value;
+  pendingRemoval.value = undefined;
+  if (!task || !tasks.value.includes(task) || task.canRemove === false) return;
+  if (task.status === "Cancelling" && task.canRecoverCancellation) recoverCancelledTask(task.exportId);
+  else if (task.status === "Unknown" || isFinished(task.status)) removeTask(task.exportId);
 }
 const open = ref(false);
 const showAll = ref(false);
@@ -105,6 +117,7 @@ const taskFileName = (task: ExportTask) => {
 };
 
 const taskTitle = (task: ExportTask) => {
+  if (task.kind === "table-copy") return `${t("tableCopyTask.title")}: ${task.tableName}`;
   if (task.kind === "data-dictionary") return `${t("dataDictionary.title")}: ${task.tableName}`;
   // database-export and sql-file keep their task labels on purpose: the former
   // names the database (filePath may be a directory), the latter already names
@@ -138,6 +151,9 @@ const comparePhaseText = (phase?: string) => {
 };
 
 const rowsText = (task: ExportTask) => {
+  if (task.kind === "table-copy") {
+    return [t(`tableCopyTask.${task.copyPhase ?? "preparing"}`), task.affectedRows === undefined ? "" : t("tableCopyTask.copiedRows", { count: task.affectedRows })].filter(Boolean).join(" · ");
+  }
   if (task.kind === "data-dictionary") {
     if (task.status === "Done") return [t("exportProgress.done"), task.dictionaryWarnings ? t("dataDictionary.warningCount", { count: task.dictionaryWarnings }) : ""].filter(Boolean).join(" · ");
     if (task.status === "Error") return t("exportProgress.error");
@@ -250,6 +266,7 @@ const databaseObjectText = (task: ExportTask) => {
 
 const statusIcon = (task: ExportTask) => {
   if (isActive(task.status)) {
+    if (task.kind === "table-copy") return Copy;
     if (task.kind === "database-export") return DatabaseBackup;
     if (task.kind === "data-dictionary") return FileDown;
     if (task.kind === "sql-file") return FileCode2;
@@ -470,7 +487,7 @@ function openTask(task: ExportTask): void {
               <FolderOpen class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
             </button>
             <button
-              v-if="(isActive(task.status) || task.status === 'Queued') && task.canCancel !== false"
+              v-if="!task.canRecoverCancellation && (isActive(task.status) || task.status === 'Queued') && task.canCancel !== false"
               class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted disabled:cursor-not-allowed"
               :disabled="task.status === 'Cancelling'"
               :title="task.status === 'Cancelling' ? t('databaseBackup.cancelling') : t('exportProgress.cancel')"
@@ -479,14 +496,9 @@ function openTask(task: ExportTask): void {
               <Loader2 v-if="task.status === 'Cancelling'" class="h-3.5 w-3.5 animate-spin text-primary" />
               <X v-else class="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
             </button>
-            <template v-else-if="isFinished(task.status) || task.status === 'Unknown'">
-              <button v-if="canReexecuteDataTransferTask(task)" class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('transfer.reexecute')" :aria-label="t('transfer.reexecute')" @click.stop="handleReexecuteTask(task)">
-                <RotateCcw class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
-              </button>
-              <button class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('exportProgress.delete')" @click="removeTask(task.exportId)">
-                <X class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
-              </button>
-            </template>
+            <button v-else-if="task.canRemove !== false && (isFinished(task.status) || task.status === 'Unknown' || task.canRecoverCancellation)" class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('exportProgress.delete')" @click="requestRemoval(task)">
+              <X class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+            </button>
           </div>
         </div>
       </div>
@@ -504,6 +516,7 @@ function openTask(task: ExportTask): void {
       </div>
     </PopoverContent>
   </Popover>
+  <DangerConfirmDialog v-model:open="recoveryOpen" :title="t('exportProgress.recoveryTitle')" :message="t('exportProgress.recoveryMessage')" :confirm-label="t('exportProgress.recoveryConfirm')" initial-focus="cancel" @confirm="confirmRemoval" />
 </template>
 
 <style scoped>

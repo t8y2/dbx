@@ -424,8 +424,8 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     const crossBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-warning/30"]');
     const conflictBadge = () => shortcutsPane(host).querySelector<HTMLElement>('span[class*="border-destructive/25"]');
 
-    // 调试 stepOver 与 quickOpen 共用 Mod+P，增加一组跨域提示，不阻断应用。
-    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=7");
+    // Debugger/quickOpen and bookmark navigation add informational cross-scope overlaps.
+    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=8");
     expect(conflictBadge()).toBeNull();
 
     const search = shortcutsPane(host).querySelector<HTMLInputElement>('input[placeholder="settings.shortcutSearchPlaceholder"]')!;
@@ -448,7 +448,7 @@ describe("EditorSettingsDialog shortcut scope grouping (behaviour)", () => {
     search.value = "";
     search.dispatchEvent(new Event("input", { bubbles: true }));
     await flushAsyncUpdates();
-    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=7");
+    expect(crossBadge()!.textContent!.trim()).toBe("settings.shortcutCrossScopeBadge count=8");
   });
 
   it("scopes the red same-scope badge to the search results while the footer gate stays global", async () => {

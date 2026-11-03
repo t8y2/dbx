@@ -59,6 +59,7 @@ interface ResolvedDataGridExtraction {
 const NUMERIC_COLUMN_TYPES = new Set(["int", "integer", "smallint", "bigint", "tinyint", "mediumint", "decimal", "numeric", "number", "float", "double", "real", "serial", "smallserial", "bigserial", "money", "smallmoney", "dec", "fixed"]);
 
 interface UseDataGridExtractorOptions {
+  allowExtractor?: (extractor: DataGridCopyExtractorId) => boolean;
   columns: ComputedRef<string[]>;
   displayItems: ComputedRef<ExtractorRowItem[]>;
   allColumns: ComputedRef<string[]>;
@@ -411,6 +412,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   }
 
   function canCopyWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): boolean {
+    if (options.allowExtractor?.(extractor) === false) return false;
     const contextPredicateTarget = hasContextPredicateTarget(extractor);
     if (hasUnsupportedDiscreteSelection.value && !contextPredicateTarget) return false;
     if (!options.hasRowSelection.value && !options.hasCellSelection.value && !options.contextCell.value) return false;
@@ -486,6 +488,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   }
 
   async function extractWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, maxRows?: number): Promise<ResolvedDataGridExtraction | null> {
+    if (options.allowExtractor?.(extractor) === false) return null;
     const initialRequest = buildRequest(extractor, extractorOptions);
     if (!initialRequest) return null;
     const rowLimit = maxRows === undefined ? undefined : Math.min(initialRequest.rows.length, maxRows);

@@ -56,6 +56,8 @@ def handle(request):
         failure = root / 'objects-error'
         if failure.exists():
             error = rpc_error(failure.read_text())
+        elif (root / 'objects.json').exists():
+            result = json.loads((root / 'objects.json').read_text())
         else:
             objects = [{'name': 'Ix%d' % i, 'schema': params['schema'], 'object_type': 'INDEX',
                         'parent_schema': ' Other Owner ', 'parent_name': ' T(a) '} for i in range(5)]
@@ -63,6 +65,16 @@ def handle(request):
                 objects = [obj for obj in objects if params['filter'].lower() in obj['name'].lower()]
             start = params.get('offset') or 0
             result = objects[start:][:params.get('limit') or len(objects)]
+    elif method == 'get_object_source':
+        result = {'name': params['name'], 'object_type': 'VIEW', 'source': 'SELECT 1 AS id;'}
+    elif method == 'get_table_comment':
+        failure = root / 'comment-error'
+        error = rpc_error(failure.read_text()) if failure.exists() else None
+        result = None if failure.exists() else "View's comment"
+    elif method == 'get_columns':
+        result = [{'name': 'id', 'data_type': 'integer', 'is_nullable': True, 'is_primary_key': False,
+                   'comment': "Column's comment"}, {'name': 'plain', 'data_type': 'integer', 'is_nullable': True,
+                                                    'is_primary_key': False}]
     elif method in ('execute_query', 'get_table_ddl'):
         with session_locks[session]:
             if method == 'get_table_ddl':
@@ -79,7 +91,10 @@ def handle(request):
                     if not failed.exists():
                         failed.write_text(session)
                     mode = 'connection' if failed.read_text() == session else 'success'
-                if mode in ('sql', 'timeout', 'connection'):
+                if 'ALL_TAB_COMMENTS' in params['sql'] and (root / 'comments.json').exists():
+                    result = {'columns': ['TABLE_NAME', 'COMMENTS'], 'rows': json.loads((root / 'comments.json').read_text()),
+                              'affected_rows': 0, 'execution_time_ms': 0}
+                elif mode in ('sql', 'timeout', 'connection'):
                     error = rpc_error(mode)
                 elif mode == 'fallback' and ('TABLE_USED_PAGES' in params['sql'] or 'DBA_OB_TABLET_REPLICAS' in params['sql']):
                     error = rpc_error('sql')

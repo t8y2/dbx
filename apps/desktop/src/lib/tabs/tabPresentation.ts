@@ -1,4 +1,5 @@
 import { useConnectionStore } from "@/stores/connectionStore";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { hexToRgba } from "@/lib/common/color";
 import { isLegacyWebView } from "@/lib/ui/legacyWebView";
@@ -76,7 +77,8 @@ export function tabConnectionColor(connectionId: string): string {
 
 export function isConnectionReadonly(connectionId: string): boolean {
   const connectionStore = useConnectionStore();
-  return connectionStore.getConfig(connectionId)?.read_only ?? false;
+  const connection = connectionStore.getConfig(connectionId);
+  return mysqlDataCharsetEnabled(connection) || connection?.read_only === true;
 }
 
 function jdbcTargetLabel(connection: ConnectionConfig): string {
@@ -558,20 +560,24 @@ export function statementExecutionMarkers(
   if (!results?.length || sqlTextFingerprint(editorSql) !== executionEditorFingerprint) return [];
   const submittedStatements = statementRanges(submittedSql, databaseType, parameterOptions);
   if (submittedStatements.length <= 1) return [];
-  const editorStatements = submittedSql === editorSql ? submittedStatements : statementRanges(editorSql, databaseType, parameterOptions);
+  const submittedStatementTexts = new Set(submittedStatements.map((statement) => statement.sql));
 
   const byLine = new Map<number, { success: number; error: number }>();
   for (const result of results) {
-    if (!Number.isInteger(result.statement_index) || result.statement_index! < 0) continue;
-    const statementIndex = result.statement_index!;
-    const submittedStatement = submittedStatements[statementIndex];
-    if (!submittedStatement || submittedStatement.sql !== result.sourceStatement) continue;
-    const range =
-      typeof result.sourceFrom === "number" && typeof result.sourceTo === "number" && editorSql.slice(result.sourceFrom, result.sourceTo) === result.sourceStatement
-        ? { from: result.sourceFrom, to: result.sourceTo, sql: result.sourceStatement }
-        : editorStatements[statementIndex]?.sql === result.sourceStatement
-          ? editorStatements[statementIndex]
-          : undefined;
+    if (result.server_message === true || !result.sourceStatement) continue;
+    const statementIndex = result.statement_index;
+    if (statementIndex !== undefined && (!Number.isInteger(statementIndex) || statementIndex < 0)) continue;
+    const absoluteRange =
+      Number.isInteger(result.sourceFrom) && Number.isInteger(result.sourceTo) && result.sourceFrom! >= 0 && result.sourceTo! > result.sourceFrom! && result.sourceTo! <= editorSql.length && editorSql.slice(result.sourceFrom, result.sourceTo) === result.sourceStatement
+        ? { from: result.sourceFrom!, to: result.sourceTo!, sql: result.sourceStatement }
+        : undefined;
+    // Manual transactions and non-streaming drivers can omit statement indexes.
+    // Their preserved editor ranges still identify the executed selection; never
+    // infer an unindexed result's position from its order in the result array.
+    if (statementIndex === undefined) {
+      if (!absoluteRange || !submittedStatementTexts.has(result.sourceStatement)) continue;
+    } else if (submittedStatements[statementIndex]?.sql !== result.sourceStatement) continue;
+    const range = absoluteRange ?? (submittedSql === editorSql && statementIndex !== undefined ? submittedStatements[statementIndex] : undefined);
     if (!range) continue;
     const from = lineStartOffset(editorSql, range.from);
     const current = byLine.get(from) ?? { success: 0, error: 0 };

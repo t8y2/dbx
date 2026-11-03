@@ -1469,7 +1469,7 @@
         "diagram": true,
         "tableDataEdit": true,
         "tableStructureEdit": true,
-        "tableImport": false,
+        "tableImport": true,
         "dataTransfer": false,
         "sqlFileExecution": true,
         "databaseCreate": false,

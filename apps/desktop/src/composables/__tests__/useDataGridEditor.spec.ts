@@ -53,6 +53,7 @@ function createEditorWithResult(
   quickEntry = false,
   editable = ref(true),
   resultColumnTypes?: string[],
+  databaseType: import("@/types/database").DatabaseType = "postgres",
 ) {
   let editor: ReturnType<typeof useDataGridEditor>;
   const result = ref<{ columns: string[]; rows: CellValue[][]; column_types?: string[] }>({
@@ -64,7 +65,7 @@ function createEditorWithResult(
   editor = useDataGridEditor({
     result: computed(() => result.value),
     editable: computed(() => editable.value),
-    databaseType: computed(() => (mongoCollectionGrid ? "mongodb" : "postgres")),
+    databaseType: computed(() => (mongoCollectionGrid ? "mongodb" : databaseType)),
     normalizeEditorInput: mongoCollectionGrid ? mongoDocumentGridInputValue : undefined,
     connectionId: computed(() => "connection-1"),
     database: computed(() => "app"),
@@ -147,6 +148,47 @@ describe("useDataGridEditor searched replacements", () => {
     mocks.prepareDataGridSave.mockReset();
     mocks.executeBatch.mockReset();
     mocks.getConfig.mockReturnValue(undefined);
+  });
+
+  it("stages a cleared DB2 integer as NULL through inline edit and save preparation (#13755)", async () => {
+    const editor = createEditor(
+      undefined,
+      true,
+      undefined,
+      undefined,
+      [[639522, "keep", "last"]],
+      undefined,
+      [
+        { name: "first", data_type: "INT" },
+        { name: "hidden", data_type: "VARCHAR" },
+        { name: "last", data_type: "VARCHAR" },
+      ],
+      false,
+      false,
+      ref(true),
+      undefined,
+      "db2",
+    );
+    editor.newRows.value = [];
+    editor.startEdit(0, 0);
+    editor.editValue.value = "";
+    editor.commitEdit();
+    expect(editor.dirtyRows.value.get(0)?.get(0)).toBeNull();
+    expect(editor.hasPendingChanges.value).toBe(true);
+
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: [], rollbackStatements: [] });
+    await editor.previewChanges();
+    expect(mocks.prepareDataGridSave).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "db2", dirtyRows: [[0, [[0, null]]]] }), undefined);
+
+    editor.undoPendingChange();
+    expect(editor.dirtyRows.value.size).toBe(0);
+    editor.redoPendingChange();
+    expect(editor.dirtyRows.value.get(0)?.get(0)).toBeNull();
+
+    editor.startEdit(0, 0);
+    editor.editValue.value = "0";
+    editor.commitEdit();
+    expect(editor.dirtyRows.value.get(0)?.get(0)).toBe(0);
   });
 
   it.each([true, false])("blocks queued saves while row identity is pending (autoSave=%s)", async (autoSave) => {
@@ -1963,6 +2005,23 @@ describe("useDataGridEditor saveChanges reload", () => {
     expect(mocks.executeInTransaction).not.toHaveBeenCalled();
     expect(mocks.executeBatch).toHaveBeenCalledTimes(1);
     expect(mocks.executeBatch).toHaveBeenCalledWith("connection-1", "app", ["UPDATE users SET name='alpha' WHERE id=1", "UPDATE users SET name='beta' WHERE id=2"], undefined);
+    expect(editor.saveError.value).toBe("");
+  });
+
+  it("routes multi-statement edits through executeBatch for external JDBC drivers inferred as a transactional dialect (#12657)", async () => {
+    mocks.getConfig.mockReturnValue({ id: "connection-1", db_type: "jdbc", database_info: { productName: "H2" } });
+    mocks.prepareDataGridSave.mockResolvedValue({
+      statements: ["DELETE FROM users WHERE id=1", "DELETE FROM users WHERE id=2"],
+      rollbackStatements: [],
+    });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 2 });
+    const { editor } = createSaveTestEditor({ databaseType: "h2" });
+    expect(editor.useTransaction.value).toBe(false);
+    editor.dirtyRows.value.set(0, new Map([[1, "alpha"]]));
+    editor.dirtyRows.value.set(1, new Map([[1, "beta"]]));
+    await editor.saveChanges();
+    expect(mocks.executeInTransaction).not.toHaveBeenCalled();
+    expect(mocks.executeBatch).toHaveBeenCalledWith("connection-1", "app", ["DELETE FROM users WHERE id=1", "DELETE FROM users WHERE id=2"], undefined);
     expect(editor.saveError.value).toBe("");
   });
 

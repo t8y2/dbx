@@ -2,6 +2,7 @@
 
 use dbx_core::connection::{task_client_session_id, AppState, PoolKind};
 use dbx_core::db::agent_driver::{AgentDriverClient, AgentLaunchSpec, PooledAgentClient};
+use dbx_core::models::connection::{ConnectionConfig, DatabaseConnectionInfo};
 use dbx_core::schema::native_jobs::*;
 use dbx_types::native_jobs::*;
 use serde_json::{json, Value};
@@ -46,6 +47,8 @@ fn native_job_configuration_rpc_fixture() {
             || (params["nativeJobOperationId"] == operation && params["nativeJobSessionToken"] == token);
         let value = if !authorized {
             json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,"message":"fixture requires owned physical token"}})
+        } else if method == "connection_info" && mode == "oracle-no-connection-info" {
+            json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32601,"message":"unknown method: connection_info"}})
         } else {
             let result = match method {
                 "handshake" => json!({"protocolVersion":2,"agentProtocolVersion":2,
@@ -75,10 +78,14 @@ fn native_job_configuration_rpc_fixture() {
                 "execute_query" => {
                     let sql = params["sql"].as_str().unwrap();
                     if sql == "SELECT USER AS DBX_SESSION_USER FROM DUAL" {
-                        query_result(
-                            &["DBX_SESSION_USER"],
-                            json!([[if leased && mode == "changed-user" { "Other" } else { "Owner" }]]),
-                        )
+                        if mode == "oracle-query-failed" {
+                            json!({"columns":[],"rows":[],"execution_error":true,"error":{"diagnostics":{"category":"sql","vendorCode":942}}})
+                        } else {
+                            query_result(
+                                &["DBX_SESSION_USER"],
+                                json!([[if leased && mode == "changed-user" { "Other" } else { "Owner" }]]),
+                            )
+                        }
                     } else if sql.starts_with("DECLARE") {
                         if sql.contains("SP_ENABLE_JOB('Job_1', 0)") {
                             enabled = false;
@@ -266,4 +273,90 @@ async fn production_rejects_changed_database_or_version_on_the_reserved_physical
             .iter()
             .any(|request| request["params"]["sql"].as_str().is_some_and(|sql| sql.starts_with("DECLARE"))));
     }
+}
+
+#[tokio::test]
+async fn oracle_runtime_identity_falls_back_when_agent_connection_info_is_unsupported() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("requests.jsonl");
+    let storage = dbx_core::persistence::test_storage::open(&dir.path().join("state.db")).await.unwrap();
+    let state = Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
+        storage,
+        dir.path().join("plugins"),
+        dir.path().join("agents"),
+        "test",
+    ));
+    let saved_info = DatabaseConnectionInfo {
+        product_name: Some("Oracle Database".into()),
+        product_version: Some("11.2.0.4.0".into()),
+        current_database: Some("ORCL".into()),
+        ..Default::default()
+    };
+    let mut config: ConnectionConfig = serde_json::from_value(json!({
+        "id": "oracle-conn", "name": "Oracle fixture", "db_type": "oracle", "host": "127.0.0.1", "port": 1521,
+        "username": "Owner", "password": "", "database": ""
+    }))
+    .unwrap();
+    config.database_info = Some(saved_info.clone());
+    state.configs.write().await.insert("oracle-conn".into(), config.clone());
+
+    let launch = AgentLaunchSpec::new(std::env::current_exe().unwrap())
+        .with_args(["--exact", "native_job_configuration_rpc_fixture", "--nocapture", "--test-threads=1"])
+        .with_env(vec![
+            ("DBX_NATIVE_JOB_RPC_LOG".into(), log.to_string_lossy().into_owned()),
+            ("DBX_NATIVE_JOB_RPC_MODE".into(), "oracle-no-connection-info".into()),
+        ]);
+    let mut client = AgentDriverClient::spawn(launch).await.unwrap();
+    assert!(client.try_optional_handshake("test").await.is_some());
+    let client = Arc::new(PooledAgentClient::new(client));
+    let pool = PoolKind::Agent(client.clone());
+
+    let identity = match runtime_identity(&config, &pool, "").await {
+        Ok(identity) => identity,
+        Err(err) => panic!("expected success, got {err}"),
+    };
+    assert_eq!(identity.session_user, "Owner");
+    assert_eq!(identity.database_info, Some(saved_info));
+
+    client.lock().await.shutdown().await;
+    state.shutdown(Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn oracle_runtime_identity_reports_failure_when_session_user_query_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("requests.jsonl");
+    let storage = dbx_core::persistence::test_storage::open(&dir.path().join("state.db")).await.unwrap();
+    let state = Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
+        storage,
+        dir.path().join("plugins"),
+        dir.path().join("agents"),
+        "test",
+    ));
+    let config: ConnectionConfig = serde_json::from_value(json!({
+        "id": "oracle-conn", "name": "Oracle fixture", "db_type": "oracle", "host": "127.0.0.1", "port": 1521,
+        "username": "Owner", "password": "", "database": ""
+    }))
+    .unwrap();
+    state.configs.write().await.insert("oracle-conn".into(), config.clone());
+
+    let launch = AgentLaunchSpec::new(std::env::current_exe().unwrap())
+        .with_args(["--exact", "native_job_configuration_rpc_fixture", "--nocapture", "--test-threads=1"])
+        .with_env(vec![
+            ("DBX_NATIVE_JOB_RPC_LOG".into(), log.to_string_lossy().into_owned()),
+            ("DBX_NATIVE_JOB_RPC_MODE".into(), "oracle-query-failed".into()),
+        ]);
+    let mut client = AgentDriverClient::spawn(launch).await.unwrap();
+    assert!(client.try_optional_handshake("test").await.is_some());
+    let client = Arc::new(PooledAgentClient::new(client));
+    let pool = PoolKind::Agent(client.clone());
+
+    let err = match runtime_identity(&config, &pool, "").await {
+        Ok(_) => panic!("expected failure"),
+        Err(err) => err,
+    };
+    assert_eq!(err, "native_job_runtime_identity_failed");
+
+    client.lock().await.shutdown().await;
+    state.shutdown(Duration::from_secs(2)).await;
 }

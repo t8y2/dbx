@@ -5410,18 +5410,70 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
             }
             return result.map_err(QueryExecutionError::Agent);
         }
-        Some(BatchTransactionPath::ExternalDriver { config, session }) => exec_tx_external_driver_inner(
-            session,
-            config,
-            db_type,
-            database,
-            statements,
-            schema,
-            start,
-            &operation_budget,
-        )
-        .await
-        .map_err(Into::into),
+        Some(BatchTransactionPath::ExternalDriver { config, session }) => {
+            let pool_database = query_pool_database(database, catalog);
+            if crate::connection::is_session_scoped_pool_key(pool_key) {
+                exec_tx_external_driver_inner(
+                    session,
+                    config,
+                    db_type,
+                    database,
+                    statements,
+                    schema,
+                    start,
+                    &operation_budget,
+                )
+                .await
+                .map_err(Into::into)
+            } else {
+                let client_session_id = format!("batch-txn-{}", uuid::Uuid::new_v4());
+                let dedicated_pool_key = state
+                    .get_or_create_pool_for_session_with_catalog(
+                        connection_id,
+                        pool_database,
+                        catalog,
+                        Some(&client_session_id),
+                    )
+                    .await
+                    .map_err(QueryExecutionError::Legacy)?;
+                let (dedicated_config, dedicated_session) = {
+                    let pool_handle = state.pool_handle(&dedicated_pool_key).await;
+                    match pool_handle.as_ref() {
+                        Some(PoolKind::ExternalDriver { config, session, .. }) => (config.clone(), session.clone()),
+                        _ => {
+                            let _ =
+                                state.close_client_session_pool(connection_id, pool_database, &client_session_id).await;
+                            return Err(QueryExecutionError::Legacy(
+                                "External driver connection not found for batch transaction".to_string(),
+                            ));
+                        }
+                    }
+                };
+                let mut cleanup_guard =
+                    state.workload_session_pool_cleanup_guard(connection_id, pool_database, &client_session_id).await;
+                let exec_result = exec_tx_external_driver_inner(
+                    dedicated_session,
+                    dedicated_config,
+                    db_type,
+                    database,
+                    statements,
+                    schema,
+                    start,
+                    &operation_budget,
+                )
+                .await;
+                if state
+                    .detach_client_session_pool(connection_id, pool_database, &client_session_id)
+                    .await
+                    .unwrap_or(false)
+                {
+                    if let Some(guard) = cleanup_guard.as_mut() {
+                        guard.disarm();
+                    }
+                }
+                return exec_result.map_err(Into::into);
+            }
+        }
         Some(BatchTransactionPath::Explicit) => {
             let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
             exec_tx_explicit_inner(state, pool_key, mysql_dialect, Some(database), statements, schema, start)
@@ -6080,22 +6132,24 @@ async fn exec_tx_external_driver_inner(
                 total_affected += result.affected_rows;
             }
             Err(e) => {
-                if let Err(rb_err) = session
+                let rollback_result = session
                     .invoke_with_timeout::<serde_json::Value>(
                         "rollbackManualTransaction",
                         serde_json::json!({ "connection": config.as_ref() }),
-                        Some(budget.cleanup_timeout),
+                        budget.query_timeout.or(Some(budget.cleanup_timeout)),
                     )
-                    .await
-                {
-                    if !rb_err.to_ascii_lowercase().contains("no manual transaction") {
-                        log::warn!("ROLLBACK failed after statement {} error: {}", i + 1, rb_err);
+                    .await;
+                let message = match rollback_result {
+                    Ok(_) => format!("Statement {} failed: {e}. The transaction was rolled back.", i + 1),
+                    Err(rb_err) if rb_err.to_ascii_lowercase().contains("no manual transaction") => {
+                        format!("Statement {} failed: {e}. The transaction was rolled back.", i + 1)
                     }
-                }
-                return Err(query_error_with_omitted_sql_context(
-                    &format!("Statement {} failed: {e}. The transaction was rolled back.", i + 1),
-                    sql,
-                ));
+                    Err(rb_err) => {
+                        log::warn!("ROLLBACK failed after statement {} error: {}", i + 1, rb_err);
+                        format!("Statement {} failed: {e}. Transaction rollback failed: {rb_err}", i + 1)
+                    }
+                };
+                return Err(query_error_with_omitted_sql_context(&message, sql));
             }
         }
     }
@@ -6104,18 +6158,27 @@ async fn exec_tx_external_driver_inner(
         .invoke_with_timeout::<serde_json::Value>(
             "commitManualTransaction",
             serde_json::json!({ "connection": config.as_ref() }),
-            Some(budget.cleanup_timeout),
+            budget.query_timeout.or(Some(budget.cleanup_timeout)),
         )
         .await
     {
-        let _ = session
+        let rollback_result = session
             .invoke_with_timeout::<serde_json::Value>(
                 "rollbackManualTransaction",
                 serde_json::json!({ "connection": config.as_ref() }),
-                Some(budget.cleanup_timeout),
+                budget.query_timeout.or(Some(budget.cleanup_timeout)),
             )
             .await;
-        return Err(format!("COMMIT failed: {e}"));
+        return match rollback_result {
+            Ok(_) => Err(format!("COMMIT failed: {e}. The transaction was rolled back.")),
+            Err(rb_err) if rb_err.to_ascii_lowercase().contains("no manual transaction") => {
+                Err(format!("COMMIT failed: {e}"))
+            }
+            Err(rb_err) => {
+                log::warn!("ROLLBACK failed after commit error: {rb_err}");
+                Err(format!("COMMIT failed: {e}. Transaction rollback failed: {rb_err}"))
+            }
+        };
     }
 
     Ok(db::QueryResult { affected_rows: total_affected, ..empty_query_result(start.elapsed().as_millis()) })
@@ -11226,7 +11289,7 @@ for line in sys.stdin:
         config.connection_string = Some("jdbc:kingbase8://127.0.0.1:54321/dbx_test".to_string());
         state.configs.write().await.insert(config.id.clone(), config.clone());
 
-        let pool_key = "kingbase-jdbc:dbx_test";
+        let pool_key = "kingbase-jdbc:dbx_test:session:mock-batch-commit";
         let config = Arc::new(config);
         state
             .update_connection_pools(|connections| {
@@ -11325,7 +11388,7 @@ for line in sys.stdin:
         config.connection_string = Some("jdbc:kingbase8://127.0.0.1:54321/dbx_test".to_string());
         state.configs.write().await.insert(config.id.clone(), config.clone());
 
-        let pool_key = "kingbase-jdbc:dbx_test";
+        let pool_key = "kingbase-jdbc:dbx_test:session:mock-batch-rollback";
         let config = Arc::new(config);
         state
             .update_connection_pools(|connections| {
@@ -11360,6 +11423,102 @@ for line in sys.stdin:
             std::fs::read_to_string(&calls).unwrap(),
             "beginManualTransaction\nexecuteInManualTransaction\nexecuteInManualTransaction\nrollbackManualTransaction\n"
         );
+
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_driver_batch_transaction_reports_rollback_failure_accurately() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-jdbc-batch-rb-fail-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let calls = dir.join("calls.log");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nwhile IFS= read -r line; do\n  id=$(printf '%s' \"$line\" | sed -E 's/.*\"id\":([0-9]+).*/\\1/')\n  case \"$line\" in\n    *'\"method\":\"executeInManualTransaction\"'*)\n      echo executeInManualTransaction >> '{}'\n      printf '{{\"id\":%s,\"error\":\"Table does not exist\"}}\\n' \"$id\"\n      ;;\n    *'\"method\":\"beginManualTransaction\"'*)\n      echo beginManualTransaction >> '{}'\n      printf '{{\"id\":%s,\"result\":{{\"ok\":true}}}}\\n' \"$id\"\n      ;;\n    *'\"method\":\"rollbackManualTransaction\"'*)\n      echo rollbackManualTransaction >> '{}'\n      printf '{{\"id\":%s,\"error\":\"connection closed during rollback\"}}\\n' \"$id\"\n      ;;\n  esac\ndone\n",
+                calls.display(),
+                calls.display(),
+                calls.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+                ..Default::default()
+            },
+            path: dir.clone(),
+            compatibility: PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(dir.join("plugin.sh")),
+                ..Default::default()
+            },
+            provenance: None,
+        };
+        let session = Arc::new(
+            PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
+                .await
+                .expect("plugin should start"),
+        );
+        let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let mut config = test_connection_config(DatabaseType::Kingbase);
+        config.id = "kingbase-jdbc".to_string();
+        config.database = Some("dbx_test".to_string());
+        config.connection_string = Some("jdbc:kingbase8://127.0.0.1:54321/dbx_test".to_string());
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+
+        let pool_key = "kingbase-jdbc:dbx_test:session:mock-rb-fail";
+        let config = Arc::new(config);
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(
+                    pool_key.to_string(),
+                    PoolKind::ExternalDriver {
+                        driver_id: "jdbc".to_string(),
+                        config: config.clone(),
+                        session: session.clone(),
+                    },
+                );
+            })
+            .await;
+
+        let statements = vec!["DELETE FROM users WHERE id = 1".to_string()];
+        let err = execute_statements_in_transaction_on_pool(
+            &state,
+            pool_key,
+            "kingbase-jdbc",
+            "dbx_test",
+            &statements,
+            Some("public"),
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.contains("Table does not exist"));
+        assert!(err.contains("Transaction rollback failed: connection closed during rollback"));
+        assert!(!err.contains("The transaction was rolled back"));
 
         state.shutdown(Duration::from_secs(1)).await;
         let _ = std::fs::remove_dir_all(dir);

@@ -5482,6 +5482,27 @@ function applyBuiltinSnippetPlaceholders(snippet: SqlSnippet, body = snippet.bod
   return body.replace(BUILTIN_SNIPPET_PLACEHOLDER_RE, (match) => `\${${match}}`);
 }
 
+function snippetMaxTabstopNumber(body: string): number {
+  let max = 0;
+  for (const match of body.matchAll(/\$\{?(\d+)/g)) {
+    const seq = Number(match[1]);
+    if (seq > max) max = seq;
+  }
+  return max;
+}
+
+// CodeMirror's snippet engine has no VSCode-style `$0` (final cursor position):
+// a bare `$0` is inserted literally and `${0}` sorts *before* `${1}` because
+// fields are ordered by number. Renumber the final cursor to max tabstop + 1 —
+// Tab walks ${1}..${n}, then lands on it as the last field and snippet mode
+// ends, matching VSCode. Only `0` is translated: PostgreSQL bind parameters
+// start at $1, so bare `$1`/`$2` stay literal, and `\`-escaped `$0` is kept.
+function finalizeSnippetCursor(body: string): string {
+  if (!/\$0|\$\{0/.test(body)) return body;
+  const finalSeq = snippetMaxTabstopNumber(body) + 1;
+  return body.replace(/\\[\s\S]|\$(?:0|\{0(:[^{}]*)?\})/g, (match, placeholder: string | undefined) => (match.startsWith("\\") ? match : `\${${finalSeq}${placeholder ?? ""}}`));
+}
+
 function buildPreferredKeywordItems(prefix: string, keywords: string[], keywordCase?: SqlKeywordCase): SqlCompletionItem[] {
   return keywords
     .filter((keyword) => matchesPrefix(keyword, prefix))
@@ -6626,7 +6647,7 @@ function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?:
       // then keyword casing is applied to both variants uniformly.
       const resolvedBody = resolveSqlSnippetBodyForDatabase(snippet, databaseType);
       const body = applyBuiltinSnippetKeywordCase(snippet, resolvedBody, keywordCase);
-      const apply = applyBuiltinSnippetKeywordCase(snippet, applyBuiltinSnippetPlaceholders(snippet, resolvedBody), keywordCase);
+      const apply = finalizeSnippetCursor(applyBuiltinSnippetKeywordCase(snippet, applyBuiltinSnippetPlaceholders(snippet, resolvedBody), keywordCase));
       return {
         label: snippet.label,
         filterText: snippet.prefix,

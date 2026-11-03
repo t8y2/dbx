@@ -1595,6 +1595,7 @@ export interface TriggerInfo {
 
 /** Missing metadata means a provider has not established exact identity. */
 export interface MetadataReadOptions {
+  lightweight?: boolean;
   identityMode?: "exact";
   catalog?: string;
 }

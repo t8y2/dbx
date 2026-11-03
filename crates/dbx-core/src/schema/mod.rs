@@ -225,6 +225,21 @@ async fn list_database_storage_once(
         return Ok(Vec::new());
     }
     let config = connection_config(state, connection_id).await;
+    if config.as_ref().is_some_and(is_native_mysql_browser_config) {
+        let mut seen = std::collections::HashSet::new();
+        let requested = database_names
+            .iter()
+            .filter(|name| !name.is_empty() && seen.insert((*name).clone()))
+            .take(MAX_DATABASE_STORAGE_NAMES)
+            .cloned()
+            .collect::<Vec<_>>();
+        let pool = state.pool_handle(connection_id).await;
+        if let Some(PoolKind::Mysql(pool, MysqlMode::Normal | MysqlMode::Bare)) = pool {
+            let budget = mysql_browser_explicit_budget(config.as_ref().expect("native mysql config verified above"));
+            return db::mysql::list_database_storage_with_budget(&pool, &requested, budget).await;
+        }
+        return Ok(Vec::new());
+    }
     if !config.as_ref().is_some_and(|config| {
         config.db_type == DatabaseType::Postgres && config.driver_profile.as_deref() != Some("cockroachdb")
     }) {
@@ -789,6 +804,8 @@ async fn list_database_metadata_once(state: &AppState, connection_id: &str) -> R
         let mode = *mode;
         return if mode == MysqlMode::OceanBaseOracle {
             db::ob_oracle::list_databases(&pool).await
+        } else if config.as_ref().is_some_and(is_native_mysql_browser_config) {
+            db::mysql::list_database_attributes(&pool).await
         } else {
             db::mysql::list_database_metadata(&pool).await
         };
@@ -5101,6 +5118,63 @@ done
     }
 
     #[tokio::test]
+    async fn mysql_browser_metadata_timeout_returns_once_without_reconnecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = crate::connection::AppState::new(storage);
+        // An in-memory pool makes an accidental reconnect observable without a live server.
+        let mut config = test_connection_config(DatabaseType::Sqlite);
+        config.id = "conn".to_string();
+        config.host = ":memory:".to_string();
+        config.password.clear();
+        config.database = None;
+        state.configs.write().await.insert(config.id.clone(), config);
+        let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
+        pool.with_connection(|conn| {
+            conn.execute_batch("CREATE TEMP TABLE metadata_timeout_marker (id INTEGER)").map_err(|e| e.to_string())
+        })
+        .unwrap();
+        state
+            .update_connection_pools(|connections| {
+                connections.insert("conn".to_string(), super::PoolKind::Sqlite(pool.clone()));
+            })
+            .await;
+
+        for error in [
+            "MySQL browser metadata timed out after 5s; query cancelled",
+            "MySQL browser metadata timed out after 5s; cancellation failed: connection reset by peer",
+        ] {
+            assert!(!is_retryable_metadata_error(error));
+            assert_eq!(
+                metadata_error_action(Some(DatabaseType::Mysql), error, false),
+                super::MetadataErrorAction::Return
+            );
+            let mut attempts = 0;
+            let result = super::retry_metadata_connection_for_session(&state, "conn", None, None, || {
+                attempts += 1;
+                async { Err::<(), _>(error.to_string()) }
+            })
+            .await;
+
+            assert_eq!(result.unwrap_err(), error);
+            assert_eq!(attempts, 1);
+            let Some(super::PoolKind::Sqlite(retained)) = state.pool_handle("conn").await else {
+                panic!("metadata timeout must retain the pool");
+            };
+            retained
+                .with_connection(|conn| {
+                    conn.query_row("SELECT COUNT(*) FROM metadata_timeout_marker", [], |row| row.get::<_, i64>(0))
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            metadata_error_action(Some(DatabaseType::Mysql), "connection reset by peer", false),
+            super::MetadataErrorAction::Retry
+        );
+    }
+
+    #[tokio::test]
     async fn metadata_pool_races_retry_once_and_saturation_returns_busy() {
         let dir = std::env::temp_dir().join(format!("dbx-schema-metadata-pool-race-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -5891,6 +5965,30 @@ for line in sys.stdin:
         let filtered = filter_table_infos(tables, Some("orders"), Some(1), Some(1), Some(&object_types), None);
 
         assert_eq!(filtered.into_iter().map(|table| table.name).collect::<Vec<_>>(), vec!["monthly_orders_mv"]);
+    }
+
+    #[test]
+    fn mysql_browser_loading_policy_excludes_other_dialects_and_proxies() {
+        assert!(super::is_native_mysql_browser_config(&test_connection_config(DatabaseType::Mysql)));
+        for profile in ["", " ", "mysql", " MYSQL "] {
+            let mut config = test_connection_config(DatabaseType::Mysql);
+            config.driver_profile = Some(profile.to_string());
+            assert!(super::is_native_mysql_browser_config(&config));
+        }
+        for dialect in [DatabaseType::Postgres, DatabaseType::OceanbaseOracle, DatabaseType::Jdbc] {
+            assert!(!super::is_native_mysql_browser_config(&test_connection_config(dialect)));
+        }
+        for profile in ["tidb", "dolt", "oceanbase-mysql", "starrocks", "doris"] {
+            let mut config = test_connection_config(DatabaseType::Mysql);
+            config.driver_profile = Some(profile.to_string());
+            assert!(!super::is_native_mysql_browser_config(&config));
+        }
+        let mut proxy = test_connection_config(DatabaseType::Mysql);
+        proxy.database_info = Some(DatabaseConnectionInfo {
+            product_version: Some("5.6.29-mycat-1.6".to_string()),
+            ..Default::default()
+        });
+        assert!(!super::is_native_mysql_browser_config(&proxy));
     }
 
     #[test]
@@ -7700,6 +7798,103 @@ pub async fn list_objects_core(
     .await
 }
 
+/// Mirrors the frontend `metadataLoadBudgetMs`: explicit user-initiated metadata reads
+/// (details / storage) follow the session query timeout instead of the snappy 5s
+/// browsing budget, and stay bounded even when server timeouts are disabled (0).
+fn mysql_browser_explicit_budget(config: &ConnectionConfig) -> Duration {
+    let timeout_secs = config.effective_query_timeout_secs();
+    if timeout_secs == 0 {
+        Duration::from_secs(60)
+    } else {
+        Duration::from_secs((timeout_secs + 5).max(15))
+    }
+}
+
+fn is_native_mysql_browser_config(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::Mysql
+        && config
+            .driver_profile
+            .as_deref()
+            .is_none_or(|profile| profile.trim().is_empty() || profile.trim().eq_ignore_ascii_case("mysql"))
+        && !db::mysql_compatible::uses_show_metadata(config)
+        && !is_mycat_config(config)
+        && mysql_table_list_source_for_config(Some(config)) != MysqlTableListSource::ShowFullTables
+}
+
+/// Optional browser loading policy; omission retains the existing metadata contract.
+#[allow(clippy::too_many_arguments)]
+pub async fn list_objects_core_with_loading_options(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    filter: Option<&str>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    object_types: Option<&[String]>,
+    table_name_filter: Option<&TableNameFilter>,
+    options: &MetadataReadOptions,
+    lightweight: Option<bool>,
+) -> Result<Vec<db::ObjectInfo>, String> {
+    let config = connection_config(state, connection_id).await;
+    if let Some(lightweight) = lightweight.filter(|_| config.as_ref().is_some_and(is_native_mysql_browser_config)) {
+        let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+        if matches!(
+            clone_metadata_pool(state, &pool_key).await,
+            Some(PoolKind::Mysql(_, MysqlMode::Normal | MysqlMode::Bare))
+        ) {
+            let budget = if lightweight {
+                Duration::from_secs(5)
+            } else {
+                mysql_browser_explicit_budget(config.as_ref().expect("native mysql config verified above"))
+            };
+            return retry_metadata_connection(state, connection_id, Some(database), || async {
+                let pool_key =
+                    state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+                let Some(PoolKind::Mysql(pool, MysqlMode::Normal | MysqlMode::Bare)) =
+                    clone_metadata_pool(state, &pool_key).await
+                else {
+                    return Err("MySQL metadata pool unavailable".to_string());
+                };
+                let can_page = filter.is_none_or(|value| value.trim().is_empty())
+                    && table_name_filter.is_none_or(|filter| filter.is_empty());
+                let result = db::mysql::list_objects_for_browser(
+                    &pool,
+                    database,
+                    object_types,
+                    if can_page { limit } else { None },
+                    if can_page { offset } else { None },
+                    lightweight,
+                    budget,
+                )
+                .await?;
+                Ok(filter_object_infos(
+                    result.objects,
+                    filter,
+                    limit,
+                    if result.paging_applied { Some(0) } else { offset },
+                    object_types,
+                    table_name_filter,
+                ))
+            })
+            .await;
+        }
+    }
+    list_objects_core_with_options(
+        state,
+        connection_id,
+        database,
+        schema,
+        filter,
+        limit,
+        offset,
+        object_types,
+        table_name_filter,
+        options,
+    )
+    .await
+}
+
 pub async fn list_objects_core_with_options(
     state: &AppState,
     connection_id: &str,
@@ -8332,7 +8527,13 @@ async fn list_object_statistics_once(
                 let include_mysql_details = db_config.as_ref().is_some_and(|config| {
                     config.db_type == DatabaseType::Mysql && !db::mysql_compatible::uses_show_metadata(config)
                 });
-                db::mysql::list_object_statistics(p, database, include_mysql_details).await
+                db::mysql::list_object_statistics_with_budget(
+                    p,
+                    database,
+                    include_mysql_details,
+                    db_config.as_ref().is_some_and(is_native_mysql_browser_config),
+                )
+                .await
             }
         }
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => Ok(vec![]),

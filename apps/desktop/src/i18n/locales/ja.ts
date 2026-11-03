@@ -5762,6 +5762,8 @@ export default withEnglishFallback({
     anyPrivilegeDisabled: "ANY系権限はDM8で無効化されています（ENABLE_DDL_ANY_PRIV=0）ため、付与・取り消しはできません",
   },
   objects: {
+    loadCapacity: "容量を読み込み / 更新",
+    loadDetails: "詳細を読み込み",
     packageSaveAsTitle: "パッケージを別名で保存",
     packageSaveAsHint: "{name} を新しいパッケージとしてコピーします。元のパッケージ、呼び出し元、保存済み項目、開いている下書きは保持されます。",
     packageSaveAsMetadataProblem: "パッケージのメタデータが不完全か、安全にコピーできません。診断を確認して計画を再読み込みしてください。",

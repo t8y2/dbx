@@ -4734,6 +4734,8 @@ export default withEnglishFallback({
     anyPrivilegeDisabled: "ANY növlü səlahiyyətlər DM8 tərəfindən deaktiv edilib (ENABLE_DDL_ANY_PRIV=0) və verilə və ya geri alına bilməz",
   },
   objects: {
+    loadCapacity: "Tutumu yüklə / yenilə",
+    loadDetails: "Təfərrüatları yüklə",
     packageSaveAsTitle: "Paketi başqa adla saxla",
     packageSaveAsHint: "{name} obyektini yeni paket kimi köçürün. İlkin paket, onun çağıranları, saxlanmış elementlər və açıq qaralamalar dəyişməz qalacaq.",
     packageSaveAsMetadataProblem: "Paket metadatası natamamdır və ya təhlükəsiz köçürülə bilmir. Diaqnostikanı yoxlayıb planı yeniləyin.",

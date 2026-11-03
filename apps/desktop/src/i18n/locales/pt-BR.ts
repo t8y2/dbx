@@ -5708,6 +5708,8 @@ export default withEnglishFallback({
     anyPrivilegeDisabled: "Privilégios do tipo ANY estão desabilitados pelo DM8 (ENABLE_DDL_ANY_PRIV=0) e não podem ser concedidos ou revogados",
   },
   objects: {
+    loadCapacity: "Carregar / atualizar capacidade",
+    loadDetails: "Carregar detalhes",
     packageSaveAsTitle: "Salvar pacote como",
     packageSaveAsHint: "Copiar {name} como um novo pacote. O pacote original, seus chamadores, itens salvos e rascunhos abertos serão mantidos.",
     packageSaveAsMetadataProblem: "Os metadados do pacote estão incompletos ou não podem ser copiados com segurança. Revise o diagnóstico e atualize o plano.",

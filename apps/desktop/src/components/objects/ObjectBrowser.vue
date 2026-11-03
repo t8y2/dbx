@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { usesLightweightMysqlBrowser } from "@/lib/database/mysqlBrowserLoading";
 import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { uuid } from "@/lib/common/utils";
 import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
@@ -249,6 +250,7 @@ import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRowsForScaffold, type ObjectBrowserRowsCacheScope, type ObjectBrowserRowsCacheWriteToken } from "@/lib/table/objectBrowserRowsCache";
 import { createObjectBrowserRowsLoadGuard, type ObjectBrowserRowsLoadHandle } from "@/lib/table/objectBrowserRowsLoadGuard";
 import { metadataLoadBudgetMs } from "@/lib/metadata/metadataLoadBudget";
+import { shareObjectBrowserRead } from "@/lib/table/objectBrowserPendingReads";
 import { loadObjectDdl, type ObjectDdlRequest } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
@@ -5202,7 +5204,7 @@ watch([() => props.initialEventName, () => props.initialEventOpenRequestId, () =
 // 匹配 0 行；schema 解析失败（loadSchemas 抛错或返回空列表）时标签会整体空白
 // (#8301)。经 objectListSchemaForConnection 回退到连接用户名（大写），仅限
 // 达梦；oracle/oceanbase-oracle 维持空 schema 由后端解析当前 schema。
-async function loadObjects(options?: { allowCached?: boolean; preserveExistingRows?: boolean }) {
+async function loadObjects(options?: { allowCached?: boolean; preserveExistingRows?: boolean; details?: boolean }) {
   clearTimeout(objectSearchTimer);
   if (usesServerObjectPaging.value) return loadObjectPage(false, options);
   error.value = "";
@@ -5243,7 +5245,7 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     finishOnce();
     // 行数/大小是随对象列表一起缓存的，直接返回缓存会让这两列一直停在上一次统计
     // （#10461）。对象列表本身仍按上面的约定不动，只把统计信息在后台补一次。
-    if (cached.stale) void revalidateCachedObjectStatistics(request, cacheWriteToken);
+    if (cached.stale && !usesLightweightMysqlBrowser(props.connection)) void revalidateCachedObjectStatistics(request, cacheWriteToken);
     return;
   } else {
     // No scaffold: first load in this scope, cache invalidated by a DDL mutation,
@@ -5260,12 +5262,12 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
   }
 
   try {
-    const load = props.connection.db_type === "mongodb" ? loadMongoObjectBrowserRows(request.scope.connectionId, request.scope.database) : loadSqlObjectBrowserRows(request);
+    const load = props.connection.db_type === "mongodb" ? loadMongoObjectBrowserRows(request.scope.connectionId, request.scope.database) : loadSqlObjectBrowserRows(request, options?.details);
     const nextRows = await objectBrowserRowsLoadGuard.wait(request.epoch, load, metadataLoadBudgetMs(props.connection.query_timeout_secs));
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     applyObjectBrowserRows(nextRows);
     const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows);
-    void loadObjectStatistics(request, cacheWriteToken, cachedAt);
+    if (!usesLightweightMysqlBrowser(props.connection) || options?.details) void loadObjectStatistics(request, cacheWriteToken, cachedAt);
   } catch (e: any) {
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     // Keep visible rows on a background revalidate failure — surface a lightweight
@@ -5289,7 +5291,7 @@ function objectPageAnchor(object: ObjectInfo): string {
   return exactOracleTriggerMetadata(object.trigger) ? tablePageRowAnchorKey(object.name, object.schema, undefined, object.trigger) : JSON.stringify([object.schema, object.name, object.object_type, object.signature]);
 }
 
-async function loadObjectPage(append: boolean, options?: { preserveExistingRows?: boolean }) {
+async function loadObjectPage(append: boolean, options?: { preserveExistingRows?: boolean; details?: boolean }) {
   if (append && (loadingObjects.value || refreshingObjects.value || loadingMoreObjects.value || !hasMoreObjects.value)) return;
   const schema = exactIndexList.value ? indexParentSchema() : needsSchema.value ? objectListSchemaForConnection(props.connection, selectedSchema.value) : props.database;
   const request = objectBrowserRowsLoadGuard.start(objectBrowserRowsCacheScope(schema));
@@ -5377,14 +5379,17 @@ async function loadObjectPage(append: boolean, options?: { preserveExistingRows?
   }
 }
 
-async function loadSqlObjectBrowserRows(request: ObjectBrowserRowsLoadHandle) {
+async function loadSqlObjectBrowserRows(request: ObjectBrowserRowsLoadHandle, details = false) {
   // Schema indexes use their dedicated exact, server-paged filter. Mixing an
   // unbounded exact subset into the legacy all view defeats both contracts.
   const types = supportsSchemaIndexes.value ? sidebarObjectKindsForDatabase(effectiveDatabaseType.value).filter((type) => type !== "INDEX") : undefined;
-  const readOptions = oracleTriggerObjectReadOptions(props.connection, types, request.scope.catalog);
-  const objects: ObjectInfo[] = await (readOptions
-    ? api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog, undefined, undefined, readOptions)
-    : api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog));
+  const readOptions = usesLightweightMysqlBrowser(props.connection) ? { lightweight: !details } : oracleTriggerObjectReadOptions(props.connection, types, request.scope.catalog);
+  const readKey = JSON.stringify([createObjectBrowserRowsCacheWriteToken(request.scope), types, readOptions]);
+  const objects: ObjectInfo[] = await shareObjectBrowserRead(readKey, () =>
+    readOptions
+      ? api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog, undefined, undefined, readOptions)
+      : api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog),
+  );
   return buildObjectBrowserRows({
     objects: objects.filter((object) => !supportsSchemaIndexes.value || object.object_type !== "INDEX"),
     database: request.scope.database,
@@ -5401,10 +5406,11 @@ async function loadMongoObjectBrowserRows(connectionId: string, database: string
 async function loadObjectStatistics(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
   if (!rows.value.some((row) => row.type === "TABLE")) return;
   try {
-    const stats = await api.listObjectStatistics(request.scope.connectionId, request.scope.database, request.scope.schema);
+    const stats = await shareObjectBrowserRead(JSON.stringify(["statistics", cacheWriteToken]), () => api.listObjectStatistics(request.scope.connectionId, request.scope.database, request.scope.schema));
     if (!objectBrowserRowsLoadGuard.isCurrent(request) || stats.length === 0) return;
     mergeObjectStatistics(stats, request.scope.schema, cacheWriteToken, cachedAt);
   } catch (e) {
+    if (usesLightweightMysqlBrowser(props.connection) && objectBrowserRowsLoadGuard.isCurrent(request)) scaffoldRefreshError.value = translateBackendError(t, e);
     console.debug("[ObjectBrowser] table statistics unavailable", e);
   }
 }
@@ -6127,6 +6133,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <Button v-if="showInlineSidePanelToggle" variant="ghost" size="icon" class="h-7 w-7" :class="{ 'text-primary': isSidePanelOpen }" :title="isSidePanelOpen ? t('objects.closeDetailPanel') : t('objects.openDetailPanel')" @click="toggleSidePanel">
         <PanelRight class="h-3.5 w-3.5" />
       </Button>
+      <Button v-if="usesLightweightMysqlBrowser(props.connection)" variant="ghost" size="sm" :disabled="loadingObjects || refreshingObjects" @click="loadObjects({ preserveExistingRows: true, details: true })">{{ t("objects.loadDetails") }}</Button>
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="refreshTooltip" :disabled="loadingObjects" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingObjects || refreshingObjects }" />
       </Button>

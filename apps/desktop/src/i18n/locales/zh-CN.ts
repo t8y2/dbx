@@ -6837,6 +6837,8 @@ export default withEnglishFallback({
     anyPrivilegeDisabled: "ANY 类权限已被 DM8 禁用（ENABLE_DDL_ANY_PRIV=0），无法授予或回收",
   },
   objects: {
+    loadCapacity: "加载 / 刷新容量",
+    loadDetails: "加载详情",
     packageSaveAsTitle: "包另存为",
     packageSaveAsHint: "将 {name} 复制为新包。原包、调用方、收藏项和已打开的草稿都会保留。",
     packageSaveAsMetadataProblem: "包元数据不完整或无法安全复制。请查看诊断并刷新计划。",

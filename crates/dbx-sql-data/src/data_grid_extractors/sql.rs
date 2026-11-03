@@ -219,6 +219,8 @@ pub(super) fn write_sql_updates(
         source_columns: Some(data.source_columns),
         rows: data.rows,
         include_database_name: context.request.options.sql.include_database_name,
+        spatial_columns: data.spatial_columns,
+        spatial_values: data.spatial_values,
     });
     if statements.len() != context.request.rows.len() {
         return Err(DataGridExtractError::new(

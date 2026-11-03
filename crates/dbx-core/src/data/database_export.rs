@@ -7001,7 +7001,7 @@ mod tests {
         assert_eq!(
             statements,
             vec![
-                "INSERT INTO [dbo].[spatial_data] ([geom], [geog]) VALUES (geometry::STGeomFromText('POINT (1 2)', 3857), geography::STGeomFromText('POINT (10 20)', 4326)),\n(geometry::STGeomFromText('POINT (3 4)', 2154), geography::STGeomFromText('POINT (30 40)', 4269)),\n(geometry::STGeomFromText('POINT (5 6)', 0), geography::STGeomFromText('POINT (50 60)', 4326));".to_string()
+                "INSERT INTO [dbo].[spatial_data] ([geom], [geog]) VALUES\n(geometry::STGeomFromText('POINT (1 2)', 3857), geography::STGeomFromText('POINT (10 20)', 4326)),\n(geometry::STGeomFromText('POINT (3 4)', 2154), geography::STGeomFromText('POINT (30 40)', 4269)),\n(geometry::STGeomFromText('POINT (5 6)', 0), geography::STGeomFromText('POINT (50 60)', 4326));".to_string()
             ]
         );
     }

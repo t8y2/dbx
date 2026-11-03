@@ -1616,6 +1616,8 @@ fn build_data_grid_copy_update_statements_returns_empty_for_mongodb() {
         source_columns: Some(vec![Some("id".to_string())]),
         rows: vec![vec![json!(1)]],
         include_database_name: false,
+        spatial_columns: None,
+        spatial_values: None,
     };
     assert!(build_data_grid_copy_update_statements(options).is_empty());
 }
@@ -1706,6 +1708,71 @@ fn sqlserver_spatial_extract_selection_replays_cell_srid() {
     assert_eq!(
         result.text,
         "INSERT INTO [test_db].[dbo].[spatial_data] ([shape], [location]) VALUES\n(geometry::STGeomFromText('POINT (1 2)', 3857), geography::STGeomFromText('POINT (10 20)', 4326)),\n(geometry::STGeomFromText('POINT (3 4)', 2154), geography::STGeomFromText('POINT (30 40)', 4269));"
+    );
+}
+
+#[test]
+fn sqlserver_spatial_extract_updates_replay_cell_srid() {
+    use dbx_types::types::SpatialColumn;
+    let req = DataGridExtractRequest {
+        version: DATA_GRID_EXTRACTOR_CONTRACT_VERSION,
+        extractor: DataGridExtractorId::SqlUpdates,
+        database_type: Some(DatabaseType::SqlServer),
+        identifier_quote: None,
+        table_meta: Some(DataGridTableMeta {
+            catalog: None,
+            database: Some("test_db".to_string()),
+            schema: Some("dbo".to_string()),
+            table_name: "spatial_data".to_string(),
+            primary_keys: vec!["id".to_string()],
+            columns: Some(vec![
+                DataGridColumnInfo {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    is_nullable: false,
+                    is_primary_key: true,
+                    column_default: None,
+                    extra: None,
+                },
+                DataGridColumnInfo {
+                    name: "shape".to_string(),
+                    data_type: "geometry".to_string(),
+                    is_nullable: true,
+                    is_primary_key: false,
+                    column_default: None,
+                    extra: None,
+                },
+            ]),
+        }),
+        source_table_name: None,
+        columns: vec![
+            DataGridExtractColumn {
+                display_name: "id".to_string(),
+                source_name: Some("id".to_string()),
+                source_index: 0,
+                data_type: Some("int".to_string()),
+                description: None,
+            },
+            DataGridExtractColumn {
+                display_name: "shape".to_string(),
+                source_name: Some("shape".to_string()),
+                source_index: 1,
+                data_type: Some("geometry".to_string()),
+                description: None,
+            },
+        ],
+        selected_column_indexes: vec![0, 1],
+        rows: vec![vec![json!(1), json!("POINT (1 2)")], vec![json!(2), json!("POINT (3 4)")]],
+        selection_kind: DataGridSelectionKind::Cells,
+        options: DataGridExtractorOptions::default(),
+        spatial_columns: Some(vec![SpatialColumn { column_index: 1, srid: Some(0) }]),
+        spatial_values: Some(vec![vec![None, Some(3857)], vec![None, Some(2154)]]),
+    };
+
+    let result = extract_data_grid_selection(req).expect("extract");
+    assert_eq!(
+        result.text,
+        "UPDATE [test_db].[dbo].[spatial_data] SET [shape] = geometry::STGeomFromText('POINT (1 2)', 3857) WHERE [id] = 1;\nUPDATE [test_db].[dbo].[spatial_data] SET [shape] = geometry::STGeomFromText('POINT (3 4)', 2154) WHERE [id] = 2;"
     );
 }
 

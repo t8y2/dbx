@@ -160,6 +160,15 @@ pub struct DataGridCopyUpdateStatementOptions {
     /// callers that never strip the table metadata keep the historical shape.
     #[serde(default = "default_include_database_name")]
     pub include_database_name: bool,
+    /// Spatial column SRID metadata in the same column-index space as
+    /// `columns`, mirroring the copy-as-INSERT options so SQL Server
+    /// geometry/geography SET literals can carry per-column SRIDs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_columns: Option<Vec<SpatialColumn>>,
+    /// Per-cell SRID overrides (`rows`-major, `columns`-minor), mirroring the
+    /// copy-as-INSERT options. Falls back to `spatial_columns` per column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_values: Option<Vec<Vec<Option<u32>>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -550,21 +559,34 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
         options.include_database_name,
     );
     let mut statements = Vec::new();
-    for row in &options.rows {
+    let spatial_columns: std::collections::HashMap<usize, Option<u32>> =
+        options.spatial_columns.unwrap_or_default().into_iter().map(|col| (col.column_index, col.srid)).collect();
+    for (row_index, row) in options.rows.iter().enumerate() {
         if primary_key_indexes.iter().any(|index| row.get(*index).unwrap_or(&Value::Null).is_null()) {
             continue;
         }
         let sets = writable_indexes
             .iter()
             .map(|(column, index, info)| {
+                // Per-cell SRID with column-level fallback, mirroring the
+                // copy-as-INSERT value formatting.
+                let spatial_srid = options
+                    .spatial_values
+                    .as_ref()
+                    .and_then(|values| values.get(row_index))
+                    .and_then(|row| row.get(*index))
+                    .copied()
+                    .flatten()
+                    .or_else(|| spatial_columns.get(index).copied().flatten());
                 format!(
                     "{} = {}",
                     data_grid_identifier(options.database_type, column, options.identifier_quote.as_deref()),
-                    format_grid_assignment_sql_literal(
+                    format_grid_assignment_sql_literal_with_spatial(
                         row.get(*index).unwrap_or(&Value::Null),
                         options.database_type,
                         *info,
                         options.identifier_quote.as_deref(),
+                        spatial_srid,
                     )
                 )
             })
@@ -5943,6 +5965,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!("Ada"), json!("active")]],
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             statements,
@@ -5970,6 +5994,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!("blocked")]],
             include_database_name: true,
+            spatial_columns: None,
+            spatial_values: None,
         };
         assert_eq!(
             build_data_grid_copy_update_statements(options.clone()),
@@ -6003,6 +6029,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(42), json!("ready")]],
             include_database_name: true,
+            spatial_columns: None,
+            spatial_values: None,
         };
         assert_eq!(
             build_data_grid_copy_update_statements(options),
@@ -6241,6 +6269,8 @@ mod tests {
             source_columns: Some(vec![Some("id".to_string()), Some("display_name".to_string())]),
             rows: vec![vec![json!(1), json!("Ada")]],
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(statements, vec!["UPDATE `users` SET `display_name` = 'Ada' WHERE `id` = 1;"]);
     }
@@ -6636,6 +6666,8 @@ mod tests {
                 vec![json!(3), json!([])],
             ],
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -6665,6 +6697,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!(r#"[1,2]"#)], vec![json!(2), json!(true)], vec![json!(3), Value::Null]],
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             json_statements,
@@ -6690,6 +6724,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!([1, 2])]],
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(generic_statements, vec!["UPDATE `arrays` SET `payload` = '{1,2}' WHERE `id` = 1;"]);
 
@@ -6949,6 +6985,8 @@ mod tests {
             source_columns: None,
             rows,
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             updates,
@@ -9668,6 +9706,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!("logout")]],
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(statements, vec!["UPDATE `audit-schema`.`events` SET `event_type` = 'logout' WHERE `id` = 1;"]);
@@ -11625,6 +11665,78 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_spatial_copy_update_with_real_driver_mixed_srid() {
+        let geom_col = column("geom", "geometry", true, None);
+        let geog_col = column("geog", "geography", true, None);
+        let id_col = column("id", "int", false, None);
+        let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: Some("test_db".to_string()),
+                schema: Some("dbo".to_string()),
+                table_name: "spatial_table".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![id_col, geom_col, geog_col]),
+            },
+            columns: vec!["id".to_string(), "geom".to_string(), "geog".to_string()],
+            source_columns: None,
+            // Real driver result shape: plain WKT in cells, per-cell SRIDs in spatial_values
+            rows: vec![
+                vec![json!(1), json!("POINT (1 2)"), json!("POINT (10 20)")],
+                vec![json!(2), json!("POINT (3 4)"), json!("POINT (30 40)")],
+            ],
+            include_database_name: true,
+            spatial_columns: Some(vec![
+                SpatialColumn { column_index: 1, srid: Some(0) },
+                SpatialColumn { column_index: 2, srid: Some(4326) },
+            ]),
+            spatial_values: Some(vec![vec![None, Some(3857), Some(4326)], vec![None, Some(2154), Some(4269)]]),
+        });
+
+        assert_eq!(
+            statements,
+            vec![
+                "UPDATE [test_db].[dbo].[spatial_table] SET [geom] = geometry::STGeomFromText('POINT (1 2)', 3857), [geog] = geography::STGeomFromText('POINT (10 20)', 4326) WHERE [id] = 1;",
+                "UPDATE [test_db].[dbo].[spatial_table] SET [geom] = geometry::STGeomFromText('POINT (3 4)', 2154), [geog] = geography::STGeomFromText('POINT (30 40)', 4269) WHERE [id] = 2;",
+            ]
+        );
+        // The per-cell SRID 3857 must not silently regress to the geometry column default 0.
+        assert!(statements.first().is_some_and(|statement| statement.contains("STGeomFromText('POINT (1 2)', 3857)")));
+    }
+
+    #[test]
+    fn sqlserver_spatial_copy_update_falls_back_to_column_srid() {
+        let geom_col = column("geom", "geometry", true, None);
+        let id_col = column("id", "int", false, None);
+        let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: Some("test_db".to_string()),
+                schema: Some("dbo".to_string()),
+                table_name: "spatial_table".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![id_col, geom_col]),
+            },
+            columns: vec!["id".to_string(), "geom".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("POINT (5 6)")]],
+            include_database_name: true,
+            // No per-cell value: the column-level SRID 3857 must apply.
+            spatial_columns: Some(vec![SpatialColumn { column_index: 1, srid: Some(3857) }]),
+            spatial_values: Some(vec![vec![None, None]]),
+        });
+
+        assert_eq!(
+            statements,
+            vec!["UPDATE [test_db].[dbo].[spatial_table] SET [geom] = geometry::STGeomFromText('POINT (5 6)', 3857) WHERE [id] = 1;"]
+        );
+    }
+
+    #[test]
     fn sqlserver_spatial_copy_insert_recovers_missing_type_and_cell_srid() {
         let options = DataGridCopyInsertStatementOptions {
             database_type: Some(DatabaseType::SqlServer),
@@ -12578,6 +12690,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!("Ada")]],
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(statements, vec!["ALTER TABLE `people` UPDATE `name` = 'Ada' WHERE `id` = 1;"]);
@@ -12602,6 +12716,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!("paid")]],
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             copy_updates,
@@ -13356,6 +13472,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!("before"), json!("0x00ff")]],
             include_database_name: true,
+            spatial_columns: None,
+            spatial_values: None,
         })
         .is_empty());
     }

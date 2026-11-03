@@ -9313,6 +9313,7 @@ export default withEnglishFallback({
       cancelled: "ยกเลิกการถ่ายโอนแล้ว (หยุดที่ตาราง {index}/{total})",
     },
     title: "ถ่ายโอนข้อมูล",
+    reexecute: "ดำเนินการอีกครั้ง",
     content: "เนื้อหาที่ถ่ายโอน",
     contentStructureAndData: "โครงสร้างและข้อมูล",
     contentStructureOnly: "เฉพาะโครงสร้าง",

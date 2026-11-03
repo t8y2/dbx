@@ -4065,7 +4065,14 @@ fn linux_f_type_for_path(path: &std::path::Path) -> Option<i64> {
 /// contains `path` (the longest matching mount point wins, so nested mounts
 /// resolve to their own entry). `/proc/mounts` escapes spaces as `\040` and
 /// tabs as `\011`; both are decoded before matching.
-fn linux_mount_source_for_path(path: &std::path::Path, mounts: &str) -> Option<String> {
+fn linux_mount_source_for_path(path: &std::path::Path) -> Option<String> {
+    let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
+    linux_mount_source_from_proc(path, &mounts)
+}
+
+/// Pure parsing half of [`linux_mount_source_for_path`], split out so tests can
+/// feed synthetic `/proc/mounts` content without a Linux filesystem.
+fn linux_mount_source_from_proc(path: &std::path::Path, mounts: &str) -> Option<String> {
     let mut best: Option<(usize, String)> = None;
     for line in mounts.lines() {
         let mut fields = line.split(' ');
@@ -6004,16 +6011,17 @@ mod tests {
         format_xugu_spatial_export_literal, generate_postgres_enum_ddl, generate_postgres_extension_ddl,
         generate_postgres_sequence_create_ddl, generate_postgres_sequence_post_table_ddl,
         generate_postgres_sequence_setval_sql, is_dameng_auto_increment_ddl, is_postgres_extension_member_routine,
-        linux_f_type_is_network_filesystem, linux_mount_source_for_path, mysql_database_export_preamble,
-        mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
-        record_export_destination_identity, record_export_error, replace_database_export_select_list,
-        sort_export_views_by_dependencies, split_postgres_export_table_ddl, write_database_export_rows,
-        write_database_export_rows_with_mode, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions,
-        BuildExportSqlInsertOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter,
-        DdlNormalizeOptions, ExportDestinationIdentity, ExportedTableSql, PostgresExportEnum, PostgresExportExtension,
-        PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode,
-        DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
-        POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
+        linux_f_type_is_network_filesystem, linux_mount_source_for_path, linux_mount_source_from_proc,
+        mysql_database_export_preamble, mysql_view_dependencies_from_rows, mysql_view_dependencies_sql,
+        normalize_export_table_ddl, record_export_destination_identity, record_export_error,
+        replace_database_export_select_list, sort_export_views_by_dependencies, split_postgres_export_table_ddl,
+        write_database_export_rows, write_database_export_rows_with_mode, BuildDatabaseSqlExportOptions,
+        BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions, DatabaseExportObjectCounts,
+        DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportDestinationIdentity, ExportedTableSql,
+        PostgresExportEnum, PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers,
+        SqlInsertDialect, SqlInsertMode, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
+        POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL, POSTGRES_EXPORT_SEQUENCES_SQL,
+        POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
     };
     use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
@@ -10607,18 +10615,18 @@ mod tests {
         let mounts =
             "proc /proc proc rw 0 0\n/dev/sda1 / ext4 rw 0 0\nrclone://remote:backup /mnt/backup fuse.rclone rw 0 0\n";
         assert_eq!(
-            linux_mount_source_for_path(std::path::Path::new("/mnt/backup/data"), mounts).as_deref(),
+            linux_mount_source_from_proc(std::path::Path::new("/mnt/backup/data"), mounts).as_deref(),
             Some("rclone://remote:backup")
         );
-        assert_eq!(linux_mount_source_for_path(std::path::Path::new("/mnt"), mounts).as_deref(), Some("/dev/sda1"));
-        assert_eq!(linux_mount_source_for_path(std::path::Path::new("/opt"), mounts), None);
+        assert_eq!(linux_mount_source_from_proc(std::path::Path::new("/mnt"), mounts).as_deref(), Some("/dev/sda1"));
+        assert_eq!(linux_mount_source_from_proc(std::path::Path::new("/opt"), mounts), None);
     }
 
     #[test]
     fn linux_mount_source_for_path_decodes_octal_escapes() {
         let mounts = "usbhd /mnt/backup\040drive vfat rw 0 0\n";
         assert_eq!(
-            linux_mount_source_for_path(std::path::Path::new("/mnt/backup drive"), mounts).as_deref(),
+            linux_mount_source_from_proc(std::path::Path::new("/mnt/backup drive"), mounts).as_deref(),
             Some("usbhd")
         );
     }

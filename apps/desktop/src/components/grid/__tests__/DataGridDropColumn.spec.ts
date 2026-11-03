@@ -30,6 +30,7 @@ vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
       renderedColumnWidths: ref([120, 120]),
       totalWidth: ref(240),
       columnVars: ref({ "--total-w": "240px" }),
+      hasUserSizedColumns: ref(false),
       getIsResizing: () => false,
     }),
   };
@@ -142,9 +143,19 @@ describe("DataGrid drop column cross-tab refresh", () => {
     await settle();
     grid.value!.selectSingleCell(0, 1);
     await settle();
-    const drop = host.querySelector<HTMLButtonElement>('[data-toolbar-action="deleteColumn"]')!;
-    expect(drop.disabled).toBe(false);
-    drop.click();
+    const header = host.querySelectorAll<HTMLElement>(".data-grid-header-cell")[2];
+    expect(header).toBeDefined();
+    header!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 12 }));
+    await settle();
+    const danger = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === i18n.global.t("dangerDialog.title"));
+    expect(danger).toBeDefined();
+    danger!.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse" }));
+    danger!.click();
+    await settle();
+    const drop = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === i18n.global.t("grid.deleteColumn"));
+    expect(drop).toBeDefined();
+    expect(drop!.disabled).toBe(false);
+    drop!.click();
     await settle();
     const confirm = [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((button) => button.textContent?.trim() === i18n.global.t("grid.deleteColumn"))!;
     expect(confirm).toBeDefined();

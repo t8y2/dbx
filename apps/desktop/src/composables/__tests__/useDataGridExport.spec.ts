@@ -3090,4 +3090,72 @@ describe("useDataGridExport MySQL BLOB 文本复制 (#12413)", () => {
     expect(copyRichTextToClipboard).toHaveBeenCalledWith("<table><tr><td>Ada</td></tr></table>", "<table><tr><td>Ada</td></tr></table>");
     expect(copyToClipboard).not.toHaveBeenCalled();
   });
+
+  it("preserves per-cell spatialValues and spatialColumns when copying sql-inserts for SQL Server", async () => {
+    const spatialTable: DataGridTableMeta = {
+      tableName: "places",
+      primaryKeys: ["id"],
+      columns: [
+        { name: "id", data_type: "int", is_nullable: false, is_primary_key: true },
+        { name: "geo", data_type: "geometry", is_nullable: true },
+      ],
+    };
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0, 1],
+      columnIndexes: [0, 1],
+      columns: ["id", "geo"],
+      rows: [
+        [1, "POINT (30 10)"],
+        [2, "POINT (40 20)"],
+      ],
+    };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({
+      text: "INSERT INTO [places] ([id], [geo]) VALUES (1, geometry::STGeomFromText('POINT (30 10)', 3857)), (2, geometry::STGeomFromText('POINT (40 20)', 4326));",
+      mimeType: "application/sql",
+      fileExtension: "sql",
+      rowCount: 2,
+      columnCount: 2,
+    });
+    const state = createExportState(
+      spatialTable,
+      ["id", "geo"],
+      matrix,
+      undefined,
+      undefined,
+      [
+        [1, "POINT (30 10)"],
+        [2, "POINT (40 20)"],
+      ],
+      [],
+      DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      false,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      "sqlserver",
+      undefined,
+      {
+        spatialColumns: computed(() => [{ column_index: 1, srid: 0 }]),
+        spatialValues: computed(() => [
+          [null, 3857],
+          [null, 4326],
+        ]),
+      },
+    );
+
+    await expect(state.copyWithExtractor("sql-inserts")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "sql-inserts",
+        databaseType: "sqlserver",
+        spatialColumns: [{ column_index: 1, srid: 0 }],
+        spatialValues: [
+          [null, 3857],
+          [null, 4326],
+        ],
+      }),
+    );
+  });
 });

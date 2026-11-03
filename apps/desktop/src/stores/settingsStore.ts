@@ -1,3 +1,4 @@
+import { SIDEBAR_HOVER_DELAY_DEFAULT, normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import { DEFAULT_OBJECT_BROWSER_COMPACT_WIDTH, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { normalizeModelTemplates, type ModelTemplate } from "@/lib/model/modelTemplates";
 import { normalizePluginGraphicsEngineIds } from "@/lib/plugins/pluginGraphicsEngine";
@@ -1243,6 +1244,8 @@ export interface EditorSettings {
   sidebarObjectInfoMode: SidebarObjectInfoMode;
   sidebarShowConnectionNotes: boolean;
   sidebarShowConnectionEndpoints: boolean;
+  sidebarHoverEnabled: boolean;
+  sidebarHoverDelay: number;
   sidebarShowTooltips: boolean;
   /** Legacy input for the one-time connection visibility migration. */
   sidebarShowUserAdmin?: boolean;
@@ -1613,6 +1616,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarObjectInfoMode: "comment-inline",
   sidebarShowConnectionNotes: false,
   sidebarShowConnectionEndpoints: false,
+  sidebarHoverEnabled: true,
+  sidebarHoverDelay: SIDEBAR_HOVER_DELAY_DEFAULT,
   sidebarShowTooltips: true,
   sidebarAllowHorizontalScroll: false,
   sidebarIndent: SIDEBAR_INDENT_DEFAULT,
@@ -2388,6 +2393,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     ),
     sidebarShowConnectionNotes: settings.sidebarShowConnectionNotes === true,
     sidebarShowConnectionEndpoints: settings.sidebarShowConnectionEndpoints === true,
+    sidebarHoverEnabled: typeof settings.sidebarHoverEnabled === "boolean" ? settings.sidebarHoverEnabled : DEFAULT_EDITOR_SETTINGS.sidebarHoverEnabled,
+    sidebarHoverDelay: normalizeSidebarHoverDelay(settings.sidebarHoverDelay),
     sidebarShowTooltips: settings.sidebarShowTooltips ?? DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips,
     ...(typeof settings.sidebarShowUserAdmin === "boolean" ? { sidebarShowUserAdmin: settings.sidebarShowUserAdmin } : {}),
     sidebarAllowHorizontalScroll: settings.sidebarAllowHorizontalScroll ?? DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll,
@@ -3319,6 +3326,8 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarObjectInfoMode !== undefined) editorSettings.value.sidebarObjectInfoMode = normalizeSidebarObjectInfoMode(partial.sidebarObjectInfoMode);
     if (partial.sidebarShowConnectionNotes !== undefined) editorSettings.value.sidebarShowConnectionNotes = partial.sidebarShowConnectionNotes === true;
     if (partial.sidebarShowConnectionEndpoints !== undefined) editorSettings.value.sidebarShowConnectionEndpoints = partial.sidebarShowConnectionEndpoints === true;
+    if (partial.sidebarHoverEnabled !== undefined) editorSettings.value.sidebarHoverEnabled = partial.sidebarHoverEnabled === true;
+    if (partial.sidebarHoverDelay !== undefined) editorSettings.value.sidebarHoverDelay = normalizeSidebarHoverDelay(partial.sidebarHoverDelay);
     if (partial.sidebarShowTooltips !== undefined) editorSettings.value.sidebarShowTooltips = partial.sidebarShowTooltips;
     if (partial.sidebarAllowHorizontalScroll !== undefined) editorSettings.value.sidebarAllowHorizontalScroll = partial.sidebarAllowHorizontalScroll;
     if (partial.sidebarIndent !== undefined) editorSettings.value.sidebarIndent = normalizeSidebarIndent(partial.sidebarIndent);

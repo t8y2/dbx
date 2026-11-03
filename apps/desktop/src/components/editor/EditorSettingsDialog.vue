@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { SIDEBAR_HOVER_DELAY_MIN, SIDEBAR_HOVER_DELAY_MAX, normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import { cleanupMcpHistoryRetention, loadMcpHistoryRetentionLimit, saveMcpHistoryRetentionLimit } from "@/lib/backend/api";
 import { HISTORY_RETENTION_LIMITS, useHistoryRetentionSetting } from "@/composables/useHistoryRetentionSetting";
 import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } from "vue";
@@ -1061,6 +1062,8 @@ const editRedisDatabaseDisplayLimit = ref(settingsStore.editorSettings.redisData
 const editSidebarObjectInfoMode = ref<SidebarObjectInfoMode>(settingsStore.editorSettings.sidebarObjectInfoMode);
 const editSidebarAllowHorizontalScroll = ref(settingsStore.editorSettings.sidebarAllowHorizontalScroll);
 const editSidebarShowConnectionEndpoints = ref(settingsStore.editorSettings.sidebarShowConnectionEndpoints);
+const editSidebarHoverEnabled = ref(settingsStore.editorSettings.sidebarHoverEnabled);
+const editSidebarHoverDelay = ref(settingsStore.editorSettings.sidebarHoverDelay);
 const editSidebarShowTooltips = ref(settingsStore.editorSettings.sidebarShowTooltips);
 const editSidebarIndent = ref(settingsStore.editorSettings.sidebarIndent);
 const editSidebarFontSize = ref(settingsStore.editorSettings.sidebarFontSize);
@@ -1448,6 +1451,8 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarObjectInfoMode: editSidebarObjectInfoMode.value,
     sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll.value,
     sidebarShowConnectionEndpoints: editSidebarShowConnectionEndpoints.value,
+    sidebarHoverEnabled: editSidebarHoverEnabled.value,
+    sidebarHoverDelay: editSidebarHoverDelay.value,
     sidebarShowTooltips: editSidebarShowTooltips.value,
     sidebarIndent: editSidebarIndent.value,
     sidebarFontSize: editSidebarFontSize.value,
@@ -2164,6 +2169,8 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarObjectInfoMode.value = settingsStore.editorSettings.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = settingsStore.editorSettings.sidebarAllowHorizontalScroll;
   editSidebarShowConnectionEndpoints.value = settingsStore.editorSettings.sidebarShowConnectionEndpoints;
+  editSidebarHoverEnabled.value = settingsStore.editorSettings.sidebarHoverEnabled;
+  editSidebarHoverDelay.value = settingsStore.editorSettings.sidebarHoverDelay;
   editSidebarShowTooltips.value = settingsStore.editorSettings.sidebarShowTooltips;
   editSidebarIndent.value = settingsStore.editorSettings.sidebarIndent;
   editSidebarFontSize.value = settingsStore.editorSettings.sidebarFontSize;
@@ -2339,6 +2346,8 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sidebarObjectInfoMode: editSidebarObjectInfoMode,
   sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll,
   sidebarShowConnectionEndpoints: editSidebarShowConnectionEndpoints,
+  sidebarHoverEnabled: editSidebarHoverEnabled,
+  sidebarHoverDelay: editSidebarHoverDelay,
   sidebarShowTooltips: editSidebarShowTooltips,
   sidebarIndent: editSidebarIndent,
   sidebarFontSize: editSidebarFontSize,
@@ -2716,6 +2725,7 @@ async function persistSettings() {
   if (hasApplyBlocker.value) return;
   await historyRetention.save();
   await mcpHistoryRetention.save();
+  editSidebarHoverDelay.value = normalizeSidebarHoverDelay(editSidebarHoverDelay.value);
   const editorSettingsPatch = editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value);
   const sidebarObjectDisplayChanged = editorSettingsPatch.sidebarObjectDisplay !== undefined && editorSettingsPatch.sidebarObjectDisplay !== settingsStore.editorSettings.sidebarObjectDisplay;
   const sidebarTablePageSizeChanged = editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
@@ -2938,6 +2948,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
     editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
     editSidebarShowConnectionEndpoints.value = DEFAULT_EDITOR_SETTINGS.sidebarShowConnectionEndpoints;
+    editSidebarHoverEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarHoverEnabled;
+    editSidebarHoverDelay.value = DEFAULT_EDITOR_SETTINGS.sidebarHoverDelay;
     editSidebarShowTooltips.value = DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips;
     editSidebarIndent.value = DEFAULT_EDITOR_SETTINGS.sidebarIndent;
     editSidebarFontSize.value = DEFAULT_EDITOR_SETTINGS.sidebarFontSize;
@@ -3173,6 +3185,8 @@ function resetAllDefaults() {
   editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
   editSidebarShowConnectionEndpoints.value = DEFAULT_EDITOR_SETTINGS.sidebarShowConnectionEndpoints;
+  editSidebarHoverEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarHoverEnabled;
+  editSidebarHoverDelay.value = DEFAULT_EDITOR_SETTINGS.sidebarHoverDelay;
   editSidebarShowTooltips.value = DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips;
   editSidebarIndent.value = DEFAULT_EDITOR_SETTINGS.sidebarIndent;
   editSidebarFontSize.value = DEFAULT_EDITOR_SETTINGS.sidebarFontSize;
@@ -10079,6 +10093,35 @@ onUnmounted(() => {
                   </HelpTooltip>
                 </div>
                 <Switch id="sidebar-show-connection-endpoints" v-model="editSidebarShowConnectionEndpoints" />
+              </div>
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="sidebar-hover-enabled">{{ t("settings.sidebarHoverEnabled") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.sidebarHoverEnabledDescription") }}</p>
+                </div>
+                <Switch id="sidebar-hover-enabled" v-model="editSidebarHoverEnabled" />
+              </div>
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="sidebar-hover-delay">{{ t("settings.sidebarHoverDelay") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.sidebarHoverDelayDescription") }}</p>
+                </div>
+                <Input
+                  id="sidebar-hover-delay"
+                  type="number"
+                  class="w-24 text-right"
+                  :disabled="!editSidebarHoverEnabled"
+                  :min="SIDEBAR_HOVER_DELAY_MIN"
+                  :max="SIDEBAR_HOVER_DELAY_MAX"
+                  :step="50"
+                  :model-value="editSidebarHoverDelay"
+                  @update:model-value="
+                    (value: string | number) => {
+                      const n = typeof value === 'string' ? Number(value) : value;
+                      if (Number.isFinite(n)) editSidebarHoverDelay = n;
+                    }
+                  "
+                />
               </div>
               <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">

@@ -1099,6 +1099,8 @@ export default withEnglishFallback({
     preparationTasks: "Termina attività e transazioni in corso.",
     preparationDrafts: "Salva o scarta le modifiche non salvate.",
     preparationConfig: "Completa la modifica della configurazione.",
+    preparationAppClose: "Una conferma di uscita è ancora aperta. Annulla l’uscita, quindi fai clic su Riavvia e aggiorna.",
+    preparationSaveConfirmation: "Una conferma di salvataggio è ancora aperta. Salva le modifiche o annulla la chiusura, quindi riprova ad aggiornare.",
     preparationConfigBusy: "È in corso un'esportazione o importazione della configurazione. Attendi che finisca prima di aggiornare.",
     preparationConfigDetail: "Chiudi la finestra «{surface}» prima di aggiornare.",
     preparationOtherWindowHint: " (la finestra di dialogo è in un'altra finestra di DBX)",

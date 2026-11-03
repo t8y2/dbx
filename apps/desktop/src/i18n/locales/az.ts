@@ -430,6 +430,8 @@ export default withEnglishFallback({
     preparationTasks: "Aktiv tapşırıqları və tranzaksiyaları bitirin.",
     preparationDrafts: "Dəyişiklikləri saxlayın və ya ləğv edin.",
     preparationConfig: "Konfiqurasiya redaktəsini bitirin.",
+    preparationAppClose: "Çıxış təsdiqi pəncərəsi hələ açıqdır. Çıxışı ləğv edin, sonra Yenidən başladın və yeniləyin düyməsinə klikləyin.",
+    preparationSaveConfirmation: "Yadda saxlama təsdiqi pəncərəsi hələ açıqdır. Dəyişiklikləri yadda saxlayın və ya bağlamanı ləğv edin, sonra yeniləməyə yenidən cəhd edin.",
     preparationConfigBusy: "Konfiqurasiya ixracı və ya idxalı davam edir. Yeniləmədən əvvəl tamamlanmasını gözləyin.",
     preparationConfigDetail: "Yeniləmədən əvvəl «{surface}» pəncərəsini bağlayın.",
     preparationOtherWindowHint: " (pəncərə başqa DBX pəncərəsindədir)",

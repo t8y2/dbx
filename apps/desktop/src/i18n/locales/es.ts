@@ -1111,6 +1111,8 @@ export default withEnglishFallback({
     preparationTasks: "Finaliza las tareas y transacciones activas.",
     preparationDrafts: "Guarda o descarta los cambios pendientes.",
     preparationConfig: "Finaliza la edición de configuración.",
+    preparationAppClose: "Hay una confirmación de salida pendiente. Cancela la salida y haz clic en Reiniciar y actualizar.",
+    preparationSaveConfirmation: "Hay una confirmación de guardado pendiente. Guarda los cambios o cancela el cierre y vuelve a intentar la actualización.",
     preparationConfigBusy: "Hay una exportación o importación de configuración en curso. Espera a que termine antes de actualizar.",
     preparationConfigDetail: "Cierra el diálogo «{surface}» antes de actualizar.",
     preparationOtherWindowHint: " (el diálogo está en otra ventana de DBX)",

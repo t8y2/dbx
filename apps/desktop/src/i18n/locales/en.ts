@@ -1314,6 +1314,8 @@ export default {
     preparationTasks: "Finish active tasks and transactions before updating.",
     preparationDrafts: "Save or discard unsaved changes before updating.",
     preparationConfig: "Finish editing the current configuration before updating.",
+    preparationAppClose: "An exit confirmation is still open. Cancel exiting, then click Restart and Update.",
+    preparationSaveConfirmation: "A save confirmation is still open. Save your changes or cancel closing, then try updating again.",
     preparationConfigBusy: "A configuration export or import is still running. Wait for it to finish before updating.",
     preparationConfigDetail: "Close the {surface} dialog before updating.",
     preparationOtherWindowHint: " (the dialog is in another DBX window)",

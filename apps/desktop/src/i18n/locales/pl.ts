@@ -684,6 +684,8 @@ export default withEnglishFallback({
     preparationTasks: "Zakończ aktywne zadania i transakcje przed aktualizacją.",
     preparationDrafts: "Przed aktualizacją zapisz lub odrzuć niezapisane zmiany.",
     preparationConfig: "Przed aktualizacją zakończ edycję bieżącej konfiguracji.",
+    preparationAppClose: "Okno potwierdzenia wyjścia jest nadal otwarte. Anuluj wyjście, a następnie kliknij Uruchom ponownie i zaktualizuj.",
+    preparationSaveConfirmation: "Okno potwierdzenia zapisu jest nadal otwarte. Zapisz zmiany lub anuluj zamknięcie, a następnie ponów aktualizację.",
     preparationNotReady: "Przygotowanie aktualizacji nie jest gotowe. Spróbuj ponownie.",
     downloadedReady: "Pobrano nową wersję v{version}. Uruchom ponownie, aby zaktualizować.",
     restartAndUpdate: "Uruchom ponownie i zaktualizuj",

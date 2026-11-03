@@ -1250,6 +1250,8 @@ export default withEnglishFallback({
     preparationTasks: "请先结束正在运行的任务和事务。",
     preparationDrafts: "请先保存或放弃尚未保存的修改。",
     preparationConfig: "请先完成当前配置编辑。",
+    preparationAppClose: "还有未处理的退出确认，请先取消退出，再点击“重启并更新”。",
+    preparationSaveConfirmation: "还有未处理的保存确认，请先保存修改或取消关闭，再重试更新。",
     preparationConfigBusy: "配置导出或导入正在进行中，请等待完成后再更新。",
     preparationConfigDetail: "请先关闭「{surface}」后再更新。",
     preparationOtherWindowHint: "（该对话框在另一个 DBX 窗口中）",

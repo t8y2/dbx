@@ -133,6 +133,7 @@ import { executeOceanbaseTableClone, executeOceanbaseTableCloneData, oceanbaseCl
 import { useOceanbaseCloneDialog } from "@/composables/useOceanbaseCloneDialog";
 import { useToast } from "@/composables/useToast";
 import { buildExecutableObjectSourceStatements, buildRoutineRenameObjectSourceStatements, prepareObjectSourceSave, objectSourceSaveSuccessMessage, formatObjectSourceSaveError, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
+import ObjectSourceSqlPreview from "@/components/objects/ObjectSourceSqlPreview.vue";
 import { inspectExactOracleTriggerSource } from "@/lib/table/objectSourceLoad";
 import {
   readOracleTriggerSource,
@@ -165,7 +166,7 @@ import { autoRevealExportedPathIfConfigured, promptExportSavePath } from "@/lib/
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, xlsxHeaderUsesCommentRows, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import { showSqlInsertModeDialog, type SqlInsertDialect, type SqlInsertMode } from "@/lib/export/sqlInsertMode";
-import { showExportExecutionModeDialog } from "@/lib/export/exportExecutionMode";
+import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode";
 import type { ManualExportMode } from "@/lib/export/manualExportQueue";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
 import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
@@ -3892,6 +3893,7 @@ function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<XlsxEx
       open: true,
       showHeaderOptions: hasComments,
       showExecutionMode: isTauriRuntime(),
+      initialExecutionMode: getDefaultExportExecutionMode(),
       onConfirm: (exportOptions: XlsxExportOptions) => {
         resolve(exportOptions);
         app.unmount();
@@ -3955,8 +3957,7 @@ async function exportTableData(
   const { connectionId, database, schema, catalog, tableName, identifierQuote, databaseType, settings } = captured;
   columnInfos = columnInfos?.map((column) => ({ ...column }));
   const native = isTauriRuntime();
-  const mode = native ? (selectedMode ?? (await showExportExecutionModeDialog())) : "immediate";
-  if (mode === null) return;
+  const mode = native ? (selectedMode ?? getDefaultExportExecutionMode()) : "immediate";
   const splitSqlOutput = format === "sql" && splitMaxMb !== undefined;
 
   // Save dialog first
@@ -6732,6 +6733,12 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             <span v-if="sourceRow?.valid != null" class="shrink-0 rounded border px-1 py-px text-[10px] font-medium" :class="sourceRow.valid ? 'border-emerald-500/30 text-emerald-600' : 'border-destructive/30 text-destructive'">
               {{ t(sourceRow.valid ? "objects.validStatus" : "objects.invalidStatus") }}
             </span>
+            <ObjectSourceSqlPreview
+              v-if="sourceEditing && sourceSection === 'source' && sourceRow && (sourceRow.type === 'PROCEDURE' || sourceRow.type === 'FUNCTION')"
+              :input="{ databaseType: effectiveDatabaseType, objectType: sourceRow.type, schema: sourceRow.schema || selectedSchema || props.database, name: sourceRow.name, source: sourceDraft }"
+              :context-key="JSON.stringify([props.connection.id, props.database, props.catalog])"
+              :disabled="sourceSaving || sourceLoading || !sourceCanEdit"
+            />
             <Button v-if="sourceEditing && sourceSection === 'source'" variant="ghost" size="sm" class="h-6 px-2 text-xs" :disabled="sourceSaving || sourceLoading || !sourceDraft.trim()" @click="saveSource">
               <Loader2 v-if="sourceSaving" class="mr-1 h-3 w-3 animate-spin" />
               {{ t("objects.saveSource") }}

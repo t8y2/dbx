@@ -1363,6 +1363,10 @@ pub struct QueryExecutionOptions {
     /// `false` keeps the historical cleanup that stops a leftover transaction
     /// from pinning the tab's read view (#9479).
     pub preserve_explicit_transaction: bool,
+    /// Oracle SQL editor only: fail a statement whose PL/SQL object was kept
+    /// INVALID. Imports and transfers leave this off, because forward references
+    /// legitimately stay invalid until their dependencies exist.
+    pub report_compilation_errors: bool,
 }
 
 fn validate_query_execution_mode(
@@ -1429,6 +1433,9 @@ pub fn agent_execute_query_params(
     if let Some(timeout_secs) = options.timeout_secs {
         params["timeoutSecs"] = serde_json::json!(timeout_secs);
     }
+    if options.report_compilation_errors {
+        params["reportCompilationErrors"] = serde_json::json!(true);
+    }
     params
 }
 
@@ -1458,6 +1465,9 @@ pub fn agent_execute_query_page_params(
     }
     if let Some(timeout_secs) = options.timeout_secs {
         params["timeoutSecs"] = serde_json::json!(timeout_secs);
+    }
+    if options.report_compilation_errors {
+        params["reportCompilationErrors"] = serde_json::json!(true);
     }
     params
 }
@@ -7060,6 +7070,7 @@ pub struct ManualTransactionExecutionOptions {
     /// read-preserving rewrites (hidden primary keys, sort wrappers,
     /// pagination) do not change toolbar semantics. Fail-closed on mismatch.
     pub classification_sql: Option<String>,
+    pub report_compilation_errors: bool,
 }
 
 pub async fn execute_in_manual_transaction_with_options(
@@ -7268,6 +7279,7 @@ pub async fn execute_in_manual_transaction_with_options(
                         options.table_data_preview,
                         options.page_size,
                         options.result_session_id.as_deref(),
+                        options.report_compilation_errors,
                     )
                     .await
                 }
@@ -7782,10 +7794,14 @@ async fn execute_manual_txn_agent_statement(
     table_data_preview: bool,
     page_size: Option<usize>,
     result_session_id: Option<&str>,
+    report_compilation_errors: bool,
 ) -> Result<db::QueryResult, String> {
     let sql = sql_for_execution_context_with_identifier_quote(db_type, statement, schema, client.identifier_quote());
     let execution_schema = schema_for_execution_context(db_type, schema);
-    let options = manual_txn_agent_query_options(row_limit, table_data_preview, page_size, result_session_id);
+    let options = QueryExecutionOptions {
+        report_compilation_errors,
+        ..manual_txn_agent_query_options(row_limit, table_data_preview, page_size, result_session_id)
+    };
     let request = manual_txn_agent_query_request(
         &sql,
         Some(database).filter(|value| !value.is_empty()),
@@ -8965,6 +8981,19 @@ mod tests {
 
         let count = db::sqlite::execute_query(&pool, "SELECT COUNT(*) AS n FROM t").await.expect("count rows");
         assert_eq!(count.rows[0][0], serde_json::json!(2));
+    }
+
+    #[test]
+    fn agent_query_params_send_compilation_error_flag_only_when_requested() {
+        let requested = || QueryExecutionOptions { report_compilation_errors: true, ..Default::default() };
+        assert_eq!(agent_execute_query_params("x", None, None, requested())["reportCompilationErrors"], true);
+        assert_eq!(agent_execute_query_page_params("x", None, None, requested())["reportCompilationErrors"], true);
+        assert!(agent_execute_query_params("x", None, None, Default::default())
+            .get("reportCompilationErrors")
+            .is_none());
+        assert!(agent_execute_query_page_params("x", None, None, Default::default())
+            .get("reportCompilationErrors")
+            .is_none());
     }
 
     #[test]

@@ -1498,6 +1498,62 @@ fn decorate_chat_completion_body(body: &mut serde_json::Value, config: &AiConfig
     crate::ai_effort::apply_runtime_effort(body, config);
 }
 
+/// Only lower an output budget when the provider explicitly reports its bound.
+/// Do not infer model capabilities from model names or unrelated context errors.
+fn reduce_chat_output_limit(body: &mut serde_json::Value, error: &str) -> bool {
+    for field in ["max_completion_tokens", "max_tokens"] {
+        let Some(requested) = body[field].as_u64() else { continue };
+        let Some((_, detail)) = error.split_once(field) else { continue };
+        let detail: String = detail.chars().take(200).collect();
+        let range = detail.split_once('[').and_then(|(_, range)| range.split_once(']')).and_then(|(range, _)| {
+            let (min, max) = range.split_once(',')?;
+            let min = min.trim().parse::<u32>().ok()?;
+            let max = max.trim().parse::<u32>().ok()?;
+            (min > 0 && min <= max).then_some(max)
+        });
+        let maximum = range.or_else(|| {
+            let (_, tail) = detail.split_once("at most ")?;
+            tail.split(|c: char| !c.is_ascii_digit()).next()?.parse::<u32>().ok().filter(|max| *max > 0)
+        });
+        if let Some(max) = maximum.filter(|max| u64::from(*max) < requested) {
+            body[field] = json!(max);
+            return true;
+        }
+    }
+    false
+}
+
+/// A 400 rejection has produced no output, so one retry with the reported
+/// output limit is safe for both normal completions and streaming/tool calls.
+/// Other errors keep their normal classification, redaction and retry policy.
+async fn send_chat_completion(
+    client: &reqwest::Client,
+    endpoint: &str,
+    headers: &reqwest::header::HeaderMap,
+    mut body: serde_json::Value,
+    secrets: &[String],
+) -> Result<reqwest::Response, String> {
+    for attempt in 0..2 {
+        let response = client
+            .post(endpoint)
+            .headers(headers.clone())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format_request_error("AI", e))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        let error = stream_error(response, "API error", secrets).await;
+        if attempt == 0 && status == reqwest::StatusCode::BAD_REQUEST && reduce_chat_output_limit(&mut body, &error) {
+            continue;
+        }
+        return Err(error);
+    }
+    unreachable!()
+}
+
 /// Kimi K2.5+ models (including K2.7-Code) handle thinking flags differently
 /// and reject the OpenAI-compatible `extra_body.chat_template_kwargs` toggle.
 ///
@@ -2503,19 +2559,15 @@ pub async fn call_openai_compatible(client: &reqwest::Client, request: AiComplet
     });
     decorate_chat_completion_body(&mut body_obj, &request.config, request.max_tokens);
 
-    let res = client
-        .post(resolve_endpoint(&request.config))
-        .headers(headers)
-        .json(&body_obj)
-        .send()
-        .await
-        .map_err(|e| format_request_error("AI", e))?;
-
-    let status = res.status();
+    let res = send_chat_completion(
+        client,
+        &resolve_endpoint(&request.config),
+        &headers,
+        body_obj,
+        &sensitive_values(&request.config),
+    )
+    .await?;
     let data: serde_json::Value = res.json().await.map_err(|e| format_response_body_error("AI", e))?;
-    if !status.is_success() {
-        return Err(redacted_http_detail(&data, format!("API error: {status}"), &sensitive_values(&request.config)));
-    }
 
     Ok(openai_response_text(&data))
 }
@@ -3970,16 +4022,7 @@ async fn stream_openai(
         let emitted = emitted.clone();
         async move {
             let mut minimax_state = MiniMaxStreamState::new(minimax_semantics);
-            let res = client
-                .post(&endpoint)
-                .headers(headers)
-                .json(&body_obj)
-                .send()
-                .await
-                .map_err(|e| format_request_error("AI", e))?;
-            if !res.status().is_success() {
-                return Err(stream_error(res, "API error", &secrets).await);
-            }
+            let res = send_chat_completion(client, &endpoint, &headers, body_obj, &secrets).await?;
 
             let mut byte_stream = res.bytes_stream();
             let mut buf = Vec::new();
@@ -4677,16 +4720,7 @@ async fn stream_openai_with_tools(
         async move {
             let mut minimax_state = MiniMaxStreamState::new(minimax_semantics);
             let mut first_tool_index = None;
-            let res = client
-                .post(&endpoint)
-                .headers(headers)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| format_request_error("AI", e))?;
-            if !res.status().is_success() {
-                return Err(stream_error(res, "API error", &secrets).await);
-            }
+            let res = send_chat_completion(client, &endpoint, &headers, body, &secrets).await?;
 
             let mut byte_stream = res.bytes_stream();
             let mut buf = Vec::new();
@@ -5342,6 +5376,156 @@ mod tests {
         assert_eq!(output_limit_finish_reason("max_output_tokens"), Some("max_tokens"));
         assert_eq!(output_limit_finish_reason("stop"), None);
         assert_eq!(output_limit_finish_reason("tool_calls"), None);
+    }
+
+    #[test]
+    fn chat_output_limit_only_uses_explicit_smaller_provider_bounds() {
+        for (field, message) in [
+            ("max_tokens", "max_tokens参数非法：限制数值范围[1,131072]"),
+            ("max_completion_tokens", "max_completion_tokens must be in [1, 8192]"),
+            ("max_tokens", "max_tokens is too large. This model supports at most 4096 completion tokens."),
+        ] {
+            let mut body = serde_json::json!({field: 1_000_000, "model": "custom-model"});
+            assert!(super::reduce_chat_output_limit(&mut body, message), "{message}");
+            assert!(body[field].as_u64().unwrap() < 1_000_000);
+            assert_eq!(body["model"], "custom-model");
+            assert!(!super::reduce_chat_output_limit(&mut body, message), "must never retry an equal limit");
+        }
+        for message in [
+            "invalid max_tokens",
+            "context_length must be in [1,131072]",
+            "max_tokens must be in [131072,1]",
+            "max_tokens must be in [0,0]",
+            "max_tokens must be in [1,2000000]",
+            "max_tokens must be in [1,99999999999999999999]",
+            "max_tokens must be at least 4096",
+        ] {
+            let mut body = serde_json::json!({"max_tokens": 1_000_000});
+            assert!(!super::reduce_chat_output_limit(&mut body, message), "{message}");
+            assert_eq!(body["max_tokens"], 1_000_000);
+        }
+    }
+
+    async fn spawn_output_limit_server(
+        responses: Vec<(&'static str, &'static str, &'static str)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<serde_json::Value>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for (status, content_type, response_body) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                let header_end = loop {
+                    if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                        break index + 4;
+                    }
+                    let n = socket.read(&mut chunk).await.unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&chunk[..n]);
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                while request.len() < header_end + length {
+                    let n = socket.read(&mut chunk).await.unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&chunk[..n]);
+                }
+                bodies.push(serde_json::from_slice(&request[header_end..header_end + length]).unwrap());
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            bodies
+        });
+        (format!("http://{address}/v1"), server)
+    }
+
+    #[tokio::test]
+    async fn chat_output_limit_recovers_completion_stream_and_agent_requests() {
+        const ERROR: &str = r#"{"error":{"message":"max_tokens参数非法：限制数值范围[1,131072]"}}"#;
+        const STREAM: &str =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        for kind in ["complete", "stream", "agent"] {
+            let success = if kind == "complete" {
+                ("200 OK", "application/json", r#"{"choices":[{"message":{"content":"ok"}}]}"#)
+            } else {
+                ("200 OK", "text/event-stream", STREAM)
+            };
+            let (endpoint, server) =
+                spawn_output_limit_server(vec![("400 Bad Request", "application/json", ERROR), success]).await;
+            let mut config = test_config(AiProvider::Zhipu);
+            config.endpoint = endpoint;
+            config.api_key = "test-key".to_string();
+            config.max_retries = Some(0);
+            config.max_output_tokens = Some(1_000_000);
+            let mut request = prompt_cache_test_request(config, None);
+            request.max_tokens = Some(1_000_000);
+            let cancelled = Notify::new();
+            let output = std::sync::Mutex::new(String::new());
+            let run = async {
+                match kind {
+                    "complete" => assert_eq!(complete(&request).await.unwrap(), "ok"),
+                    "stream" => {
+                        stream("output-limit", &request, &cancelled, |chunk| {
+                            output.lock().unwrap().push_str(&chunk.delta)
+                        })
+                        .await
+                        .unwrap();
+                        assert_eq!(*output.lock().unwrap(), "ok");
+                    }
+                    _ => {
+                        stream_with_tools(&request.config, &request, "output-limit", &[], &cancelled, |chunk| {
+                            output.lock().unwrap().push_str(&chunk.delta);
+                        })
+                        .await
+                        .unwrap();
+                        assert_eq!(*output.lock().unwrap(), "ok");
+                    }
+                }
+                let bodies = server.await.unwrap();
+                assert_eq!(bodies.len(), 2);
+                assert_eq!(bodies[0]["max_tokens"], 1_000_000);
+                assert_eq!(bodies[1]["max_tokens"], 131_072);
+                let mut expected = bodies[0].clone();
+                expected["max_tokens"] = serde_json::json!(131_072);
+                assert_eq!(bodies[1], expected, "only the output budget may change");
+                assert_eq!(request.config.max_output_tokens, Some(1_000_000));
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(5), run).await.expect(kind);
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_output_limit_does_not_loop_or_retry_authentication_failures() {
+        const ERROR: &str = r#"{"error":{"message":"max_tokens参数非法：限制数值范围[1,131072] test-secret"}}"#;
+        for (status, attempts) in [("400 Bad Request", 2), ("401 Unauthorized", 1)] {
+            let (endpoint, server) =
+                spawn_output_limit_server(vec![(status, "application/json", ERROR); attempts]).await;
+            let mut config = test_config(AiProvider::OpenaiCompatible);
+            config.endpoint = endpoint;
+            config.api_key = "test-secret".to_string();
+            config.max_retries = Some(0);
+            let mut request = prompt_cache_test_request(config, None);
+            request.max_tokens = Some(1_000_000);
+            let run = async {
+                let error = complete(&request).await.unwrap_err();
+                assert!(!error.contains("test-secret"));
+                assert!(error.contains("max_tokens"));
+                assert_eq!(server.await.unwrap().len(), attempts);
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(5), run).await.unwrap();
+        }
     }
 
     #[test]

@@ -91,7 +91,8 @@ describe("jdbc dialect inference", () => {
     expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, connection_string: "jdbc:mysql://host/db" })).toBe("mysql");
     expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, connection_string: "" })).toBe("jdbc");
     expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, db_type: "oracle" })).toBe("oracle");
-    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, jdbc_dialect: "oracle" as never })).toBe("jdbc");
+    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, jdbc_dialect: "oracle" })).toBe("oracle");
+    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, jdbc_dialect: "unsupported" as never })).toBe("jdbc");
   });
 
   it("detects InterSystems IRIS and Caché JDBC connections", () => {
@@ -256,7 +257,8 @@ describe("jdbc dialect inference", () => {
     expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, connection_string: "jdbc:mysql://host/db" })).toBe("mysql");
     expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, connection_string: "" })).toBe("jdbc");
     expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, db_type: "oracle" })).toBe("oracle");
-    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, jdbc_dialect: "oracle" as never })).toBe("jdbc");
+    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, jdbc_dialect: "oracle" })).toBe("oracle");
+    expect(effectiveDatabaseTypeForConnection({ ...protectedConnection, jdbc_dialect: "unsupported" as never })).toBe("jdbc");
   });
 
   it("does not guess Oracle mode from an ordinary OceanBase URL or change MySQL connections", () => {

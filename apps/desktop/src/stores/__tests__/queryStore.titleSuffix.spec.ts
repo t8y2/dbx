@@ -1,5 +1,5 @@
-import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createPinia, disposePinia, setActivePinia, type Pinia } from "pinia";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
 import { TAB_TITLE_SUFFIX_MAX_LENGTH } from "@/lib/tabs/tabPresentation";
 
@@ -13,14 +13,25 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
 }));
 
 describe("queryStore tab title suffix", () => {
+  let pinia: Pinia;
+
   beforeEach(() => {
     vi.resetModules();
-    vi.unstubAllGlobals();
-    vi.useRealTimers();
+    vi.useFakeTimers();
     mocks.saveOpenTabsState.mockReset();
     mocks.saveOpenTabsState.mockResolvedValue(undefined);
     vi.stubGlobal("localStorage", { getItem: vi.fn(() => null), setItem: vi.fn(), removeItem: vi.fn() });
-    setActivePinia(createPinia());
+    pinia = createPinia();
+    setActivePinia(pinia);
+  });
+
+  afterEach(() => {
+    // Dispose watchers before restoring the clock so saves cannot leak into the next test.
+    disposePinia(pinia);
+    setActivePinia(undefined);
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   async function createStoreWithDataTab() {
@@ -66,7 +77,6 @@ describe("queryStore tab title suffix", () => {
   });
 
   it("persists a suffix change on the debounced save", async () => {
-    vi.useFakeTimers();
     const { store, id } = await createStoreWithDataTab();
     // Let the creation-time save settle so only the suffix change is observed.
     await nextTick();

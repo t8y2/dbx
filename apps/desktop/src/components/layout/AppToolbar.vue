@@ -6,6 +6,7 @@ import {
   ChevronsRight,
   DatabaseZap,
   FilePlus2,
+  FolderOpen,
   Moon,
   Sun,
   SunMoon,
@@ -92,6 +93,7 @@ const emit = defineEmits<{
   "new-connection": [];
   "new-query": [];
   "open-console": [];
+  "open-sql-editor-file": [];
   "set-theme-mode": [mode: AppThemeMode];
   "toggle-ai": [];
   "toggle-history": [];
@@ -498,6 +500,13 @@ function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenu
     disabled: !props.canOpenConsole,
   });
 
+  items.push({
+    value: "open-sql-editor-file",
+    label: t("toolbar.openSql"),
+    icon: FolderOpen,
+    action: () => emit("open-sql-editor-file"),
+    disabled: false,
+  });
   if (includeVisiblePrimaryItems || !toolbarItems.value.dataTransfer) {
     items.push({
       value: "transfer",

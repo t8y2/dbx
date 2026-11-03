@@ -217,7 +217,7 @@ import {
   foldCreatedTableName,
   draftColumnNameForSql,
 } from "@/lib/table/tableStructureEditorState";
-import { CREATE_DATABASE_CHARSET_OPTIONS, createDatabaseCollationOptionsForCharset, fallbackCreateDatabaseCharsetMetadata, normalizeCreateDatabaseCharsetKey, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
+import { CREATE_DATABASE_CHARSET_OPTIONS, createDatabaseCollationOptionsForCharset, normalizeCreateDatabaseCharsetKey, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import type { CreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import * as api from "@/lib/backend/api";
 import { EditorView } from "@codemirror/view";
@@ -1267,6 +1267,12 @@ function isPlainModShortcut(event: KeyboardEvent, key: string): boolean {
   return event.key.toLowerCase() === key;
 }
 
+function isModShiftShortcut(event: KeyboardEvent, key: string): boolean {
+  if (event.isComposing || event.altKey || !event.shiftKey) return false;
+  if (!event.metaKey && !event.ctrlKey) return false;
+  return event.key.toLowerCase() === key;
+}
+
 const structureDensityValues: StructureEditorDensity[] = ["compact", "standard", "comfortable"];
 const STRUCTURE_COLUMNS_WIDTHS_STORAGE_KEY = "dbx-structure-editor-column-widths";
 const STRUCTURE_INDEX_COLUMNS_WIDTHS_STORAGE_KEY = "dbx-structure-editor-index-column-widths";
@@ -1814,6 +1820,7 @@ const showCharacterSet = computed(() => structureDialect.value === "mysql" && da
 
 const serverCharsetMetadata = ref<CreateDatabaseCharsetMetadata>();
 const charsetMetadataLoading = ref(false);
+let charsetMetadataLoadRequestId = 0;
 // The table's own default collation, used only to keep inherited charsets out of the
 // generated DDL. Columns keep the real values MySQL reports so the pickers stay filled.
 const mysqlTableDefaultCollation = ref("");
@@ -1823,9 +1830,9 @@ const mysqlTableCollation = ref("");
 const originalMysqlTableCollation = ref("");
 const mysqlTableCharsetChanged = computed(() => mysqlTableCharset.value.trim().toLowerCase() !== originalMysqlTableCharset.value.trim().toLowerCase() || mysqlTableCollation.value.trim().toLowerCase() !== originalMysqlTableCollation.value.trim().toLowerCase());
 
-const mysqlTableCharsetChange = computed<MysqlTableCharsetChange | undefined>(() => {
+const mysqlTableCharsetOption = computed<MysqlTableCharsetChange | undefined>(() => {
   const profile = connection.value?.driver_profile?.trim().toLowerCase();
-  if (isCreateMode.value || databaseType.value !== "mysql" || connection.value?.db_type !== "mysql" || (profile && profile !== "mysql") || !mysqlTableCharsetChanged.value) return undefined;
+  if (databaseType.value !== "mysql" || connection.value?.db_type !== "mysql" || (profile && profile !== "mysql")) return undefined;
   const charset = mysqlTableCharset.value.trim();
   if (!charset) return undefined;
   return {
@@ -1833,6 +1840,8 @@ const mysqlTableCharsetChange = computed<MysqlTableCharsetChange | undefined>(()
     collation: mysqlTableCollation.value.trim() || undefined,
   };
 });
+
+const mysqlTableCharsetChange = computed(() => (!isCreateMode.value && mysqlTableCharsetChanged.value ? mysqlTableCharsetOption.value : undefined));
 
 const mysqlCharsetOptions = computed<string[]>(() => {
   const meta = serverCharsetMetadata.value;
@@ -1847,17 +1856,21 @@ function collationOptionsForCharset(charset: string): string[] {
   return createDatabaseCollationOptionsForCharset(charset);
 }
 
-async function loadCharsetMetadata() {
-  if (charsetMetadataLoading.value || !showCharacterSet.value) return;
+async function loadCharsetMetadata(force = false) {
+  if (charsetMetadataLoading.value || !showCharacterSet.value || (serverCharsetMetadata.value && !force)) return;
+  const requestId = ++charsetMetadataLoadRequestId;
+  const { connectionId, database } = props;
   charsetMetadataLoading.value = true;
   try {
-    await store.ensureConnected(props.connectionId);
-    const [charsetResult, collationResult] = await Promise.all([api.executeQuery(props.connectionId, props.database, "SHOW CHARACTER SET"), api.executeQuery(props.connectionId, props.database, "SHOW COLLATION")]);
+    await store.ensureConnected(connectionId);
+    const [charsetResult, collationResult] = await Promise.all([api.executeQuery(connectionId, database, "SHOW CHARACTER SET"), api.executeQuery(connectionId, database, "SHOW COLLATION")]);
+    if (requestId !== charsetMetadataLoadRequestId) return;
     serverCharsetMetadata.value = parseCreateDatabaseCharsetMetadata(charsetResult, collationResult);
   } catch {
-    serverCharsetMetadata.value = fallbackCreateDatabaseCharsetMetadata();
+    // Keep the fallback options usable, but retry the server on the next activation.
+    if (requestId === charsetMetadataLoadRequestId) serverCharsetMetadata.value = undefined;
   } finally {
-    charsetMetadataLoading.value = false;
+    if (requestId === charsetMetadataLoadRequestId) charsetMetadataLoading.value = false;
   }
 }
 
@@ -1891,9 +1904,9 @@ async function loadMysqlTableDefaultCollation() {
 
 function onMysqlTableCharsetChange(value: string) {
   mysqlTableCharset.value = value;
-  const collationCharset = mysqlTableCollation.value.split("_", 1)[0]?.toLowerCase();
-  if (mysqlTableCollation.value && collationCharset !== value.trim().toLowerCase()) {
-    mysqlTableCollation.value = collationOptionsForCharset(value)[0] ?? "";
+  const collationCharset = normalizeCreateDatabaseCharsetKey(mysqlTableCollation.value.split("_", 1)[0] ?? "");
+  if (mysqlTableCollation.value && collationCharset !== normalizeCreateDatabaseCharsetKey(value)) {
+    mysqlTableCollation.value = "";
   }
 }
 
@@ -3244,6 +3257,7 @@ function hasPendingStructureChanges(includeExistingPrimaryKey = true, includeOra
       isCreatingForeignTable.value ||
       !!tableComment.value.trim() ||
       mysqlTableEngine.value !== originalMysqlTableEngine.value ||
+      mysqlTableCharsetChanged.value ||
       hasTablePhysicalOptions(physicalOptions.value) ||
       (databaseType.value === "starrocks" && hasStarRocksPhysicalOptions(starrocksPhysicalOptions.value)) ||
       columns.value.length > 0 ||
@@ -3759,7 +3773,13 @@ async function refreshSqlPreview() {
           : api.buildCreateTableSql(
               options,
               connection.value?.database_info?.productVersion,
-              isCreatingForeignTable.value ? { postgresForeignTable: buildPostgresForeignTableOptions(postgresForeignTable.value) } : databaseType.value === "starrocks" ? buildStarRocksDialectOptions(starrocksPhysicalOptions.value) : undefined,
+              isCreatingForeignTable.value
+                ? { postgresForeignTable: buildPostgresForeignTableOptions(postgresForeignTable.value) }
+                : databaseType.value === "starrocks"
+                  ? buildStarRocksDialectOptions(starrocksPhysicalOptions.value)
+                  : mysqlTableCharsetOption.value
+                    ? { mysqlTableCharset: mysqlTableCharsetOption.value }
+                    : undefined,
             )
         : hasSqliteTypeChange.value
           ? api.previewSqliteTableStructureChange(props.connectionId, props.database, options)
@@ -3941,6 +3961,9 @@ function resetState() {
   originalMysqlTableCharset.value = "";
   mysqlTableCollation.value = "";
   originalMysqlTableCollation.value = "";
+  charsetMetadataLoadRequestId += 1;
+  serverCharsetMetadata.value = undefined;
+  charsetMetadataLoading.value = false;
   physicalOptions.value = emptyTablePhysicalOptions();
   starrocksPhysicalOptions.value = emptyStarRocksPhysicalOptions();
   starrocksAlterContext.value = undefined;
@@ -3971,6 +3994,7 @@ function resetState() {
 
 async function reloadStructureFromDatabase() {
   if (isCreateMode.value) return;
+  void loadCharsetMetadata(true);
   if (oracleIndexRefreshError.value) return retryOracleIndexRefresh();
   if (needsColumnDraftMetadataHydration() || draftHydrationError.value) {
     const identity = draftTargetIdentity();
@@ -4326,9 +4350,6 @@ async function loadStructure(
         }
       }
       if (!oracleIndexLoadIsCurrent(requestId, loadTargetIdentity, loadConnectionRevision, loadConfigFingerprint)) return;
-      // Load live charset/collation metadata from the MySQL server so the column
-      // editor shows the correct options for the server version.
-      void loadCharsetMetadata();
       void loadMysqlTableDefaultCollation();
       const retainOracleColumns = (oracleIndexContext || props.exactIdentity) && options.preserveDraft === true && !scope.columns;
       if (!retainOracleColumns) {
@@ -7729,6 +7750,18 @@ function onStructureEditorKeydown(event: KeyboardEvent) {
       void copySelectedStructureColumns();
       return;
     }
+    // Open the "copy fields from another table" picker (#13719). Guarded like the
+    // clipboard shortcuts above so it never fires while typing into a native input,
+    // and only when the event originates inside this editor instance.
+    if (isModShiftShortcut(event, "c") && canAddColumn.value) {
+      const target = event.target;
+      if (target instanceof Element && rootRef.value?.contains(target) && !target.closest('[role="dialog"], [role="alertdialog"]')) {
+        event.preventDefault();
+        event.stopPropagation();
+        void openCopyColumnsDialog();
+        return;
+      }
+    }
   }
   const focusedColumn = activeTab.value === "columns" ? focusedEditableColumn(event.target) : undefined;
   if (focusedColumn && isShiftEnterShortcut(event) && canAddColumn.value) {
@@ -7806,10 +7839,12 @@ onMounted(() => {
   void loadTableOwner(false, props.draft?.tableOwner !== undefined);
   void loadTableOwnerRoles();
   void loadMysqlTableEngine(props.draft?.mysqlTableEngine !== undefined);
+  // Options belong to the connection, not the table's loaded column facet.
+  // New tables and restored drafts need the server's full lists as well.
+  void loadCharsetMetadata();
   if (props.draft && props.draft.mysqlTableCollation === undefined && !isCreateMode.value) {
     // Drafts written before table-level charset support already mark the columns
     // facet as loaded, so the normal structure load would skip this lookup.
-    void loadCharsetMetadata();
     void loadMysqlTableDefaultCollation();
   }
   if (props.draft?.initialized) {
@@ -7836,6 +7871,7 @@ onActivated(() => {
   observeStructureToolbar();
   observeStructureHorizontalScroller();
   void loadDynamicDataTypeOptions();
+  void loadCharsetMetadata();
   if (supportsTableOwner.value && !loadedMetadataFacets.has("owner")) void loadTableOwner(false, props.draft?.tableOwner !== undefined);
   if (supportsTableOwner.value && !tableOwnerRolesLoading.value && tableOwnerRoles.value.length === 0 && !tableOwnerRolesLoadError.value) void loadTableOwnerRoles();
   if (supportsMysqlEngine.value && !mysqlTableEngineLoading.value && mysqlTableEngineOptions.value.length === 0 && !mysqlTableEngineLoadError.value) {
@@ -7869,6 +7905,7 @@ onDeactivated(() => {
   destroyDdlEditor();
 });
 onBeforeUnmount(() => {
+  charsetMetadataLoadRequestId += 1;
   invalidateDraftHydration();
   stopStructureToolbarObserver();
   ++copySourceScopeRequestId;
@@ -8033,6 +8070,10 @@ watch([columns, indexes, indexesLoading, loading, oracleIndexReady], () => {
 
 watch([() => props.connectionId, () => props.database, databaseType], () => {
   void loadDynamicDataTypeOptions();
+  charsetMetadataLoadRequestId += 1;
+  serverCharsetMetadata.value = undefined;
+  charsetMetadataLoading.value = false;
+  void loadCharsetMetadata();
 });
 
 watch(draftTargetIdentity, () => {
@@ -8340,7 +8381,7 @@ watch(
       </Tooltip>
     </div>
 
-    <div v-if="supportsMysqlEngine && !isCreateMode" class="flex shrink-0 items-center gap-2">
+    <div v-if="supportsMysqlEngine" class="flex shrink-0 items-center gap-2">
       <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.characterSet") }}</label>
       <SearchableSelect
         :model-value="mysqlTableCharset"
@@ -8349,6 +8390,7 @@ watch(
         :search-placeholder="t('structureEditor.charsetPlaceholder')"
         :empty-text="t('structureEditor.noMatchingType')"
         :allow-custom="true"
+        :clearable="isCreateMode"
         :loading="charsetMetadataLoading"
         :loading-text="t('common.loading')"
         :disabled="charsetMetadataLoading || saving"
@@ -8358,7 +8400,7 @@ watch(
       />
     </div>
 
-    <div v-if="supportsMysqlEngine && !isCreateMode" class="flex shrink-0 items-center gap-2">
+    <div v-if="supportsMysqlEngine" class="flex shrink-0 items-center gap-2">
       <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.collation") }}</label>
       <SearchableSelect
         v-model="mysqlTableCollation"
@@ -8367,7 +8409,10 @@ watch(
         :search-placeholder="t('structureEditor.collationPlaceholder')"
         :empty-text="t('structureEditor.noMatchingType')"
         :allow-custom="true"
-        :disabled="charsetMetadataLoading || saving"
+        :clearable="isCreateMode"
+        :loading="charsetMetadataLoading"
+        :loading-text="t('common.loading')"
+        :disabled="charsetMetadataLoading || saving || !mysqlTableCharset"
         :trigger-class="[structureMonoControlClass, 'w-[220px] max-w-[220px]']"
         data-mysql-table-collation-select
       />
@@ -8513,19 +8558,23 @@ watch(
               >
                 <SlidersHorizontal :class="structureIconClass" /><span class="structure-toolbar-label">{{ t("starrocksLayout.copyButton") }}</span>
               </Button>
-              <Button
-                v-if="activeTab === 'columns'"
-                size="sm"
-                variant="outline"
-                :class="[structureToolbarButtonClass, 'structure-toolbar-action structure-toolbar-secondary']"
-                :disabled="!canAddColumn"
-                :title="t('structureEditor.copyColumns')"
-                :aria-label="t('structureEditor.copyColumns')"
-                @click="openCopyColumnsDialog"
-              >
-                <Copy :class="structureIconClass" />
-                <span class="structure-toolbar-label">{{ t("structureEditor.copyColumns") }}</span>
-              </Button>
+              <Tooltip v-if="activeTab === 'columns'" :delay-duration="FIELD_SHORTCUT_TOOLTIP_DELAY_MS">
+                <TooltipTrigger as-child>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    :class="[structureToolbarButtonClass, 'structure-toolbar-action structure-toolbar-secondary']"
+                    :disabled="!canAddColumn"
+                    :title="t('structureEditor.copyColumns') + ' ⌘/Ctrl+Shift+C'"
+                    :aria-label="t('structureEditor.copyColumns')"
+                    @click="openCopyColumnsDialog"
+                  >
+                    <Copy :class="structureIconClass" />
+                    <span class="structure-toolbar-label">{{ t("structureEditor.copyColumns") }}</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" class="font-mono font-medium">⌘/Ctrl+Shift+C</TooltipContent>
+              </Tooltip>
               <Button
                 v-if="activeTab === 'columns' && databaseType === 'mysql'"
                 size="sm"

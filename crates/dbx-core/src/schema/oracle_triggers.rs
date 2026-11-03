@@ -213,9 +213,8 @@ pub(super) async fn list_objects(
                     .list_objects(schema, filter, page_limit, page_offset, object_types)
                     .await?
             } else {
-                client
-                    .lock()
-                    .await
+                let mut client = client.lock().await;
+                let mut objects: Vec<db::ObjectInfo> = client
                     .list_objects_with_options(
                         database,
                         schema,
@@ -226,7 +225,14 @@ pub(super) async fn list_objects(
                         options,
                         timeout,
                     )
-                    .await?
+                    .await?;
+                // The Oracle Agent leaves comments NULL in its object list, so the exact
+                // read must join them here the same way the default read does.
+                if config.is_some_and(|config| config.db_type == DatabaseType::Oracle) {
+                    load_oracle_exact_table_comments_for_objects(&mut client, database, schema, &mut objects, timeout)
+                        .await;
+                }
+                objects
             };
             let paging_applied = !local_filter;
             Ok(Some(ObjectListOutcome { objects, paging_applied }))

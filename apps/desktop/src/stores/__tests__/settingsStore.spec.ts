@@ -31,6 +31,21 @@ import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
+  it("keeps manual export and toolbar preferences across updates and reloads", async () => {
+    const defaults = { defaultExportMode: "immediate", dataGridHideToolbarLabels: false };
+    expect(DEFAULT_EDITOR_SETTINGS).toMatchObject(defaults);
+    expect(normalizeEditorSettings({})).toMatchObject(defaults);
+    expect(normalizeEditorSettings({ defaultExportMode: "invalid", dataGridHideToolbarLabels: "true" } as any)).toMatchObject(defaults);
+    setActivePinia(createPinia());
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settings = useSettingsStore();
+    const changes = { defaultExportMode: "queued" as const, dataGridHideToolbarLabels: true };
+    settings.updateEditorSettings(changes);
+    expect(normalizeEditorSettings(JSON.parse(JSON.stringify(settings.editorSettings)))).toMatchObject(changes);
+    settings.updateEditorSettings(defaults as { defaultExportMode: "immediate"; dataGridHideToolbarLabels: boolean });
+    expect(settings.editorSettings).toMatchObject(defaults);
+  });
+
   it("defaults the selection statistic to sum and validates every saved metric", () => {
     expect(DEFAULT_EDITOR_SETTINGS.dataGridSelectionSummaryMetric).toBe("sum");
     expect(normalizeEditorSettings({}).dataGridSelectionSummaryMetric).toBe("sum");
@@ -465,6 +480,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sidebarShowConnectionNotes: false }).sidebarShowConnectionNotes).toBe(false);
   });
 
+  it("hides connection endpoints by default and normalizes non-boolean values", () => {
+    expect(normalizeEditorSettings({}).sidebarShowConnectionEndpoints).toBe(false);
+    expect(normalizeEditorSettings({ sidebarShowConnectionEndpoints: true }).sidebarShowConnectionEndpoints).toBe(true);
+    expect(normalizeEditorSettings({ sidebarShowConnectionEndpoints: false }).sidebarShowConnectionEndpoints).toBe(false);
+    expect(normalizeEditorSettings({ sidebarShowConnectionEndpoints: "yes" } as any).sidebarShowConnectionEndpoints).toBe(false);
+  });
+
   it("shows sidebar tooltips by default and preserves an explicit opt-out", () => {
     expect(normalizeEditorSettings({}).sidebarShowTooltips).toBe(true);
     expect(normalizeEditorSettings({ sidebarShowTooltips: false }).sidebarShowTooltips).toBe(false);
@@ -490,6 +512,13 @@ describe("normalizeEditorSettings", () => {
 
   it("enables automatic table aliases by default", () => {
     expect(normalizeEditorSettings({}).autoAliasTables).toBe(true);
+  });
+
+  it("preserves legacy column comments by default and accepts an explicit opt-out", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments).toBe(true);
+    expect(normalizeEditorSettings({}).batchColumnSelectionIncludeComments).toBe(true);
+    expect(normalizeEditorSettings({ batchColumnSelectionIncludeComments: false }).batchColumnSelectionIncludeComments).toBe(false);
+    expect(normalizeEditorSettings({ batchColumnSelectionIncludeComments: "false" as any }).batchColumnSelectionIncludeComments).toBe(true);
   });
 
   it("preserves disabled automatic table aliases", () => {
@@ -2278,6 +2307,20 @@ describe("settingsStore persisted settings initialization", () => {
     expect(store.editorSettings.sidebarShowConnectionNotes).toBe(true);
     expect(saveEditorSettings).toHaveBeenCalledTimes(2);
     expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarShowConnectionNotes: true }));
+  });
+
+  it("persists sidebarShowConnectionEndpoints update", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue({ sidebarShowConnectionEndpoints: false });
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    await store.updateEditorSettingsAndPersist({ sidebarShowConnectionEndpoints: true });
+    expect(store.editorSettings.sidebarShowConnectionEndpoints).toBe(true);
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarShowConnectionEndpoints: true }));
   });
 
   it("persists preferredExportPath update", async () => {

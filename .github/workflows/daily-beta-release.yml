@@ -2,7 +2,7 @@ name: Daily Beta Release
 
 on:
   schedule:
-    - cron: "15 2 * * *"
+    - cron: "15 18 * * *"
   workflow_dispatch:
     inputs:
       base_version:

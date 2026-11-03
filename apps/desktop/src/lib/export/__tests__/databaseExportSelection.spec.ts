@@ -1,20 +1,30 @@
 import { describe, expect, it } from "vitest";
-import { buildSelectedTablesPayload, databaseExportSelectedTablesRequest, isDatabaseExportTableSelectionValid } from "@/lib/export/databaseExportSelection";
+import type { DatabaseExportSelectedObject } from "@/lib/backend/api";
+import { buildSelectedTablesPayload, databaseExportSelectedObjectsRequest, isDatabaseExportTableSelectionValid, splitDatabaseExportObjectSelection } from "@/lib/export/databaseExportSelection";
 
-describe("databaseExportSelectedTablesRequest", () => {
-  const allTables = ["T_CUSTOMER", "T_ORDER", "V_CUSTOMER"];
-  const objectsOnly = { includeStructure: false, includeData: false };
+const picked = (objectType: string, name: string, signature?: string): DatabaseExportSelectedObject => ({ objectType, name, ...(signature === undefined ? {} : { signature }) });
+
+describe("splitDatabaseExportObjectSelection (#13940)", () => {
+  const allTables = ["orders", "T_CUSTOMER", "V_CUSTOMER"];
 
   it.each([
-    ["sends picked routines when only objects are exported (#13940)", ["PRC_ADD_CUSTOMER", "PRC_CLEAR_ORDERS"], { ...objectsOnly, explicitObjectSelection: true }, ["PRC_ADD_CUSTOMER", "PRC_CLEAR_ORDERS"]],
-    ["sends a picked view that is also in the table list", ["V_CUSTOMER"], { ...objectsOnly, explicitObjectSelection: true }, ["V_CUSTOMER"]],
-    ["keeps table order before other objects", ["PKG_ORDER", "T_ORDER", "T_CUSTOMER"], { includeStructure: true, includeData: false, explicitObjectSelection: true }, ["T_CUSTOMER", "T_ORDER", "PKG_ORDER"]],
-    ["does not collapse a picked selection that covers every table", allTables, { includeStructure: true, includeData: true, explicitObjectSelection: true }, allTables],
-    ["leaves objects-only sidebar exports schema-wide", ["T_ORDER"], { ...objectsOnly, explicitObjectSelection: false }, undefined],
-    ["keeps the all-tables shortcut for sidebar exports", allTables, { includeStructure: true, includeData: true, explicitObjectSelection: false }, undefined],
-    ["sends a sidebar table subset when tables are exported", ["T_ORDER"], { includeStructure: true, includeData: false, explicitObjectSelection: false }, ["T_ORDER"]],
-  ])("%s", (_name, selectedTables, options, expected) => {
-    expect(databaseExportSelectedTablesRequest(allTables, selectedTables, options)).toEqual(expected);
+    ["keeps listed tables and views in list order", [picked("VIEW", "V_CUSTOMER"), picked("TABLE", "orders")], { tables: ["orders", "V_CUSTOMER"], others: [] }],
+    ["keeps a routine named like a table out of the table list", [picked("FUNCTION", "orders", "integer")], { tables: [], others: [picked("FUNCTION", "orders", "integer")] }],
+    ["keeps objects the list cannot show", [picked("TABLE", "orders"), picked("SEQUENCE", "SEQ_ORDER"), picked("VIEW", "V_UNLISTED")], { tables: ["orders"], others: [picked("SEQUENCE", "SEQ_ORDER"), picked("VIEW", "V_UNLISTED")] }],
+  ])("%s", (_name, objects, expected) => {
+    expect(splitDatabaseExportObjectSelection(objects, allTables)).toEqual(expected);
+  });
+});
+
+describe("databaseExportSelectedObjectsRequest (#13940)", () => {
+  const viewNames = new Set(["V_CUSTOMER"]);
+
+  it.each([
+    ["sends the checked tables and views with their types", ["orders", "V_CUSTOMER"], [], [picked("TABLE", "orders"), picked("VIEW", "V_CUSTOMER")]],
+    ["keeps a routine named like a table typed as a routine", [], [picked("FUNCTION", "orders", "integer")], [picked("FUNCTION", "orders", "integer")]],
+    ["sends an empty list once every table is unchecked", [], [], []],
+  ])("%s", (_name, selectedTables, others, expected) => {
+    expect(databaseExportSelectedObjectsRequest(selectedTables, viewNames, others)).toEqual(expected);
   });
 });
 

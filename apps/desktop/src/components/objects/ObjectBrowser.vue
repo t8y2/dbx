@@ -3353,6 +3353,8 @@ function openBatchDatabaseExport() {
     database: props.database,
     schema: selectedTableRows.value[0]?.schema || selectedSchema.value,
     tableNames: selectedTables,
+    // Names alone cannot tell a table from a routine of the same name (#13940).
+    objects: selectedTableRows.value.map((row) => ({ objectType: row.type, name: row.name, ...(row.signature != null ? { signature: row.signature } : {}) })),
   };
 }
 
@@ -5498,6 +5500,9 @@ function selectObjectFilter(filter: ObjectFilter) {
   const wasServerPaged = usesServerObjectPaging.value;
   userHasSelectedFilter.value = true;
   objectFilter.value = filter;
+  // Rows of the previous type are no longer listed; keeping them checked would
+  // export them together with the newly picked type (#13940).
+  clearTableSelection();
   emit("filterChange", filter);
   if (wasServerPaged || usesServerObjectPaging.value) void loadObjects();
 }

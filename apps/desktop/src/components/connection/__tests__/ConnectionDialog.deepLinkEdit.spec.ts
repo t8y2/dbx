@@ -1172,4 +1172,47 @@ describe("ConnectionDialog manual Nacos namespace discovery", () => {
     expect(document.querySelector<HTMLTextAreaElement>("textarea[data-nacos-managed-namespaces]")?.value).toBe("prod");
     expect(backend.connectDb).not.toHaveBeenCalled();
   });
+
+  it.each(["pre", ""])("preserves the saved scope after canceling draft %j and saving the connection", async (draft) => {
+    const config = nacosConnection();
+    config.external_config = { ...config.external_config, namespaceDiscovery: "manual", managedNamespaces: ["prod"] };
+    config.visible_databases = ["prod"];
+    await mountDialog(config, "");
+    const button = (label: string) => [...document.querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.textContent?.trim() === label).at(-1)!;
+    button(i18n.global.t("nacos.nacosVisibleNamespacesTitle")).click();
+    await settle();
+    const input = document.querySelector<HTMLTextAreaElement>("textarea[data-nacos-managed-namespaces]")!;
+    input.value = draft;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    button(i18n.global.t("dangerDialog.cancel")).click();
+    await settle();
+    button("Save").click();
+    await vi.waitFor(() => expect(store.updateConnection).toHaveBeenCalledOnce());
+    expect(store.updateConnection.mock.calls[0][0]).toMatchObject({
+      visible_databases: ["prod"],
+      external_config: { namespaceDiscovery: "manual", managedNamespaces: ["prod"] },
+    });
+    expect(backend.connectDb).not.toHaveBeenCalled();
+  });
+
+  it.each(["pre", ""])("restores the committed scope when reopening after canceling draft %j", async (draft) => {
+    const config = nacosConnection();
+    config.external_config = { ...config.external_config, namespaceDiscovery: "manual", managedNamespaces: ["prod"] };
+    config.visible_databases = ["prod"];
+    await mountDialog(config, "");
+    const button = (label: string) => [...document.querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.textContent?.trim() === label).at(-1)!;
+    button(i18n.global.t("nacos.nacosVisibleNamespacesTitle")).click();
+    await settle();
+    const input = document.querySelector<HTMLTextAreaElement>("textarea[data-nacos-managed-namespaces]")!;
+    input.value = draft;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    button(i18n.global.t("dangerDialog.cancel")).click();
+    await settle();
+    button(i18n.global.t("nacos.nacosVisibleNamespacesTitle")).click();
+    await settle();
+    expect(document.querySelector<HTMLTextAreaElement>("textarea[data-nacos-managed-namespaces]")?.value).toBe("prod");
+    expect(backend.connectDb).not.toHaveBeenCalled();
+  });
 });

@@ -417,6 +417,7 @@ const visibleNacosNamespaceSearchText = ref("");
 const visibleNacosNamespaceError = ref("");
 const visibleNacosNamespaceListingPermissionDenied = ref(false);
 const visibleNacosNamespaceAccessMode = ref<"automatic" | "manual">("automatic");
+const visibleNacosManagedNamespacesDraftText = ref("");
 const nacosDynamicAllNamespaces = ref(false);
 const visibleNacosNamespaceDynamicAllSupported = ref(false);
 const showProductionDatabasesDialog = ref(false);
@@ -4306,7 +4307,10 @@ const filteredVisibleNacosNamespaces = computed(() => {
   });
 });
 const visibleNacosNamespaceSelectedCount = computed(() => visibleNacosNamespaceSelection.value.size);
-const visibleNacosNamespaceCanSave = computed(() => (visibleNacosNamespaceAccessMode.value === "manual" ? parseNacosManagedNamespaces(nacosManagedNamespacesText.value).length > 0 : visibleNacosNamespaceSelection.value.size > 0));
+const visibleNacosNamespaceCanSave = computed(() => (visibleNacosNamespaceAccessMode.value === "manual" ? parseNacosManagedNamespaces(visibleNacosManagedNamespacesDraftText.value).length > 0 : visibleNacosNamespaceSelection.value.size > 0));
+watch(showVisibleNacosNamespacesDialog, (isOpen) => {
+  visibleNacosManagedNamespacesDraftText.value = isOpen ? nacosManagedNamespacesText.value : "";
+});
 const filteredProductionDatabaseNames = computed(() => {
   const query = productionDatabaseSearchText.value.trim().toLowerCase();
   if (!query) return productionDatabaseNames.value;
@@ -5890,6 +5894,7 @@ function resetVisibleNacosNamespaceDraftState() {
   visibleNacosNamespaceError.value = "";
   visibleNacosNamespaceListingPermissionDenied.value = false;
   visibleNacosNamespaceAccessMode.value = "automatic";
+  visibleNacosManagedNamespacesDraftText.value = "";
   visibleNacosNamespaceDynamicAllSupported.value = false;
 }
 
@@ -6073,7 +6078,7 @@ function showAllVisibleNacosNamespaces() {
 async function saveVisibleNacosNamespaceSelection() {
   if (!visibleNacosNamespaceCanSave.value) return;
   if (visibleNacosNamespaceAccessMode.value === "manual") {
-    const manualNamespaces = parseNacosManagedNamespaces(nacosManagedNamespacesText.value);
+    const manualNamespaces = parseNacosManagedNamespaces(visibleNacosManagedNamespacesDraftText.value);
     nacosManagedNamespacesText.value = manualNamespaces.join("\n");
     nacosNamespaceDiscovery.value = "manual";
     form.value.visible_databases = manualNamespaces;
@@ -11437,7 +11442,7 @@ function openExternalUrl(url: string) {
               <span class="text-[11px] text-muted-foreground">{{ t("nacos.nacosManagedNamespacesSeparator") }}</span>
             </div>
             <textarea
-              v-model="nacosManagedNamespacesText"
+              v-model="visibleNacosManagedNamespacesDraftText"
               data-nacos-managed-namespaces
               rows="6"
               class="min-h-32 resize-y rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring"

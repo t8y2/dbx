@@ -530,7 +530,7 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
 ///   `@@version`, `@@server_id`, …) are reproducible across sessions and keep
 ///   counting, which the existing pagination contracts count over.
 ///
-/// Quoted strings, comments, quoted identifiers and dollar-quoted bodies never
+/// Quoted strings, comments and quoted identifiers never
 /// hold a live reference — with two MySQL-specific exceptions handled here:
 /// `/*! ... */` is an **executable** comment whose body the server evaluates,
 /// and `--` only starts a comment when followed by whitespace/control chars
@@ -592,13 +592,6 @@ fn mysql_statement_references_session_variable(sql: &str) -> bool {
                 i += current.len_utf8();
             }
             continue;
-        }
-
-        if ch == '$' {
-            if let Some(end) = skip_sql_dollar_quoted(sql, i) {
-                i = end;
-                continue;
-            }
         }
 
         if matches!(ch, '\'' | '"' | '`') {
@@ -6440,6 +6433,17 @@ WHERE u.id = picked.id;
             result.sql.unwrap(),
             "SELECT COUNT(*) AS dbx_total_rows FROM TATFY WHERE UpdateDate = '2026-07-30' AND UpdateTime > '08:00:00';"
         );
+    }
+
+    #[test]
+    fn mysql_count_query_declines_variables_between_mysql_dollar_identifiers() {
+        let sql = "SELECT * FROM (SELECT 1 AS `a$a$`) t WHERE a$a$ + @x + a$a$ = 4";
+        assert!(mysql_statement_references_session_variable(sql));
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::Mysql),
+        });
+        assert!(!result.ok, "MySQL identifier dollars are not dollar-quoted strings");
     }
 
     #[test]

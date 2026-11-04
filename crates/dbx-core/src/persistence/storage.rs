@@ -3626,6 +3626,11 @@ fn scrub_mq_auth_secrets(config: &mut ConnectionConfig) {
     }
 }
 
+/// Password and certificate (optional username/password) auth both store `auth.password`.
+fn mqtt_auth_kind_carries_password(auth: &serde_json::Map<String, serde_json::Value>) -> bool {
+    matches!(auth.get("kind").and_then(serde_json::Value::as_str), Some("password" | "certificate"))
+}
+
 fn scrub_mqtt_auth_secrets(config: &mut ConnectionConfig) {
     if config.db_type != DatabaseType::Mqtt {
         return;
@@ -3636,7 +3641,7 @@ fn scrub_mqtt_auth_secrets(config: &mut ConnectionConfig) {
     let Some(auth) = auth.as_object_mut() else {
         return;
     };
-    if auth.get("kind").and_then(serde_json::Value::as_str) == Some("password") {
+    if mqtt_auth_kind_carries_password(auth) {
         scrub_json_secret(auth, "password");
     }
 }
@@ -8262,7 +8267,7 @@ impl Storage {
         let Some(auth) = auth.as_object_mut() else {
             return Ok(false);
         };
-        if auth.get("kind").and_then(serde_json::Value::as_str) != Some("password") {
+        if !mqtt_auth_kind_carries_password(auth) {
             return Ok(false);
         }
         hydrate_mq_json_secret(self, connection_id, MQTT_AUTH_PASSWORD_KEY, auth, "password").await
@@ -10155,7 +10160,7 @@ fn persist_mqtt_auth_secrets_in_tx(
         delete_secret_prefix_in_tx(tx, &config.id, MQTT_AUTH_SECRET_PREFIX)?;
         return Ok(());
     };
-    if auth.get("kind").and_then(serde_json::Value::as_str) != Some("password") {
+    if !mqtt_auth_kind_carries_password(auth) {
         delete_secret_prefix_in_tx(tx, &config.id, MQTT_AUTH_SECRET_PREFIX)?;
         return Ok(());
     }
@@ -16487,6 +16492,64 @@ mod tests {
             .is_some_and(|secret| secret == "mqtt-secret"));
         assert_eq!(storage.load_connections().await.unwrap()[0], config);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn mqtt_certificate_password_is_encrypted_at_rest_and_hydrated_on_load() {
+        let path = temp_db_path("mqtt-certificate-password-secret");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        let mut config = plain_connection("mqtt-certificate", "");
+        config.db_type = DatabaseType::Mqtt;
+        config.external_config = Some(serde_json::json!({
+            "auth": {
+                "kind": "certificate",
+                "username": "mqtt-user",
+                "password": "mqtt-cert-secret",
+                "clientCertPath": "/tmp/client.pem"
+            }
+        }));
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+
+        let raw = raw_connection_json(&storage, "mqtt-certificate").await;
+        assert!(!raw.contains("mqtt-cert-secret"), "{raw}");
+        assert_eq!(
+            storage.get_secret("mqtt-certificate", MQTT_AUTH_PASSWORD_KEY).await.unwrap().as_deref(),
+            Some("mqtt-cert-secret")
+        );
+        assert_eq!(storage.load_connections().await.unwrap()[0], config);
+
+        // Re-saving the hydrated config must keep the stored secret.
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        assert_eq!(
+            storage.get_secret("mqtt-certificate", MQTT_AUTH_PASSWORD_KEY).await.unwrap().as_deref(),
+            Some("mqtt-cert-secret")
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn migration_moves_legacy_mqtt_certificate_password_into_secret_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open_unmigrated(&dir.path().join("dbx.db")).await.unwrap();
+        let mut config = plain_connection("mqtt-legacy-certificate", "");
+        config.db_type = DatabaseType::Mqtt;
+        config.external_config = Some(serde_json::json!({
+            "auth": { "kind": "certificate", "username": "mqtt-user", "password": "legacy-cert-secret" }
+        }));
+        insert_raw_connection(&storage, &config).await;
+
+        assert_eq!(storage.inspect_data_migration().await.unwrap().database_plaintext_count, 1);
+        storage.start_data_migration().await.unwrap();
+
+        let raw = raw_connection_json(&storage, "mqtt-legacy-certificate").await;
+        assert!(!raw.contains("legacy-cert-secret"), "{raw}");
+        assert_eq!(
+            storage.get_secret("mqtt-legacy-certificate", MQTT_AUTH_PASSWORD_KEY).await.unwrap().as_deref(),
+            Some("legacy-cert-secret")
+        );
+        let after = storage.inspect_data_migration().await.unwrap();
+        assert_eq!(after.database_plaintext_count, 0);
+        assert!(!after.needs_migration);
     }
 
     #[tokio::test]

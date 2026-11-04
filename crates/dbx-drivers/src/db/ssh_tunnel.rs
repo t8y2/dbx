@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::path_utils::expand_tilde;
 use crate::db::ssh_totp;
+use crate::path_utils::expand_tilde;
 use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -3628,7 +3628,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             5,
             &known_hosts_path,
             "",
-        None,
+            None,
         )
         .await
         .expect("password + TOTP authentication should succeed");
@@ -3677,7 +3677,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             5,
             &known_hosts_path,
             "",
-        None,
+            None,
         )
         .await
         .expect("public key + TOTP authentication should succeed");
@@ -3787,7 +3787,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                             5,
                             false,
                             "",
-                        None,
+                            None,
                         )
                         .await
                 } else {
@@ -3812,7 +3812,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                             false,
                             false,
                             "",
-                        None,
+                            None,
                         )
                         .await
                 }
@@ -3972,7 +3972,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 5,
                 false,
                 "",
-            None,
+                None,
             )
             .await
             .unwrap();
@@ -3994,7 +3994,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 5,
                 false,
                 "",
-            None,
+                None,
             )
             .await
             .unwrap();
@@ -4078,7 +4078,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 false,
                 requested_local_port,
                 "",
-            None,
+                None,
             )
             .await
     }
@@ -4285,7 +4285,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 false,
                 true,
                 "",
-            None,
+                None,
             )
             .await
             .expect("start fallback tunnel");
@@ -4343,7 +4343,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 false,
                 false,
                 "",
-            None,
+                None,
             )
             .await
             .expect("start tunnel");
@@ -4389,7 +4389,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             5,
             &known_hosts_path,
             "",
-        None,
+            None,
         )
         .await
         .expect("forwarded SSH connection should authenticate");
@@ -4441,7 +4441,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             1,
             &known_hosts_path,
             "",
-        None,
+            None,
         )
         .await
         .expect("accepting the host key after the network timeout window should still succeed");
@@ -4493,7 +4493,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             false,
             false,
             "",
-        None,
+            None,
         );
         let second = manager.start_tunnel(
             "shared-layer",
@@ -4515,7 +4515,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             false,
             false,
             "",
-        None,
+            None,
         );
         let (first_port, second_port) = tokio::join!(first, second);
 
@@ -4728,7 +4728,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 false,
                 false,
                 "",
-            None,
+                None,
             )
             .await
             .expect("initial tunnel start should succeed");
@@ -4775,7 +4775,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 false,
                 false,
                 "",
-            None,
+                None,
             )
             .await;
 
@@ -4829,7 +4829,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
                 false,
                 Some(local_port),
                 "",
-            None,
+                None,
             )
         };
         assert_eq!(start().await.unwrap(), local_port);
@@ -4891,7 +4891,7 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
             5,
             &known_hosts_path,
             "",
-        None,
+            None,
         )
         .await
         {

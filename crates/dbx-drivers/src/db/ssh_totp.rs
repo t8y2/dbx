@@ -57,8 +57,7 @@ pub fn generate_code(secret: &str, unix_time: u64) -> Result<String, String> {
         base32_decode(secret).ok_or_else(|| "TOTP secret is not valid Base32 (expected A-Z and 2-7).".to_string())?;
     let counter = (unix_time / TIME_STEP_SECS).to_be_bytes();
 
-    let mut mac =
-        HmacSha1::new_from_slice(&key).map_err(|error| format!("TOTP secret is unusable: {error}"))?;
+    let mut mac = HmacSha1::new_from_slice(&key).map_err(|error| format!("TOTP secret is unusable: {error}"))?;
     mac.update(&counter);
     let digest = mac.finalize().into_bytes();
 
@@ -80,17 +79,8 @@ pub fn generate_code(secret: &str, unix_time: u64) -> Result<String, String> {
 /// interactive dialog and, headless, to the existing fail-closed path.
 pub fn is_totp_prompt(prompt: &str) -> bool {
     let prompt = prompt.to_lowercase();
-    const MARKERS: [&str; 9] = [
-        "otp",
-        "totp",
-        "one-time",
-        "one time",
-        "verification code",
-        "authenticator",
-        "验证码",
-        "动态密码",
-        "动态口令",
-    ];
+    const MARKERS: [&str; 9] =
+        ["otp", "totp", "one-time", "one time", "verification code", "authenticator", "验证码", "动态密码", "动态口令"];
     MARKERS.iter().any(|marker| prompt.contains(marker))
 }
 

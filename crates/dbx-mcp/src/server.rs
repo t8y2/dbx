@@ -3915,6 +3915,8 @@ impl DbxMcpServer {
                 partition: request.partition,
                 offset: request.offset,
                 timestamp: None,
+                end_timestamp: None,
+                sort_order: None,
             };
             match self.backend.peek_messages(&resolved.connection, topic, count, options).await {
                 Ok(result) => text(format_peek_messages_result(result, count as usize)),

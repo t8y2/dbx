@@ -5,6 +5,7 @@ import type { AppThemeMode } from "@/lib/app/appTheme";
 import { EDITOR_MAX_FONT_SIZE, EDITOR_MIN_FONT_SIZE } from "@/lib/editor/editorZoom";
 import { DATA_GRID_TYPE_COLOR_KEYS, DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import { SHORTCUT_DEFINITIONS } from "@/lib/editor/shortcutRegistry";
+import { normalizeEditorToolbarHiddenActions, normalizeEditorToolbarOrder } from "@/lib/editor/editorToolbarPreferences";
 import { DEFAULT_SQL_FORMATTER_RULE_SETTINGS, DEFAULT_SQL_FORMATTER_SETTINGS, isCompleteSqlFormatterSettings, type SqlFormatterOptionSettings, type SqlFormatterRuleSettings } from "@/lib/sql/sqlFormatterConfig";
 import { SQL_VARIABLE_SYNTAX_KEYS } from "@/lib/sql/sqlVariableSyntax";
 
@@ -138,6 +139,8 @@ const SETTINGS_TRANSFER_CATEGORY_ORDER: readonly SettingsTransferCategoryId[] = 
 const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readonly EditorSettingsDraftKey[]> = {
   appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "fontSmoothing", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "welcomePageMode", "webLogoPosition"],
   editor: [
+    "editorToolbarOrder",
+    "editorToolbarHiddenActions",
     "executeMode",
     "defaultTransactionMode",
     "keepExplicitTransactionInAutoCommit",
@@ -429,6 +432,8 @@ const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (val
   // each one must already be the boolean the UI writes, and no extra key may
   // appear.
   toolbarItems: (value) => isPlainObject(value) && Object.keys(DEFAULT_TOOLBAR_ITEMS).every((key) => typeof value[key] === "boolean") && Object.keys(value).every((key) => key in DEFAULT_TOOLBAR_ITEMS),
+  editorToolbarOrder: (value) => isStringArray(value) && JSON.stringify(normalizeEditorToolbarOrder(value)) === JSON.stringify(value),
+  editorToolbarHiddenActions: (value) => isStringArray(value) && JSON.stringify(normalizeEditorToolbarHiddenActions(value)) === JSON.stringify(value),
   ...Object.fromEntries(PASS_THROUGH_BOOLEAN_KEYS.map((key) => [key, (value: unknown) => typeof value === "boolean"])),
 };
 

@@ -1,3 +1,4 @@
+import { EDITOR_TOOLBAR_ACTION_IDS } from "@/lib/editor/editorToolbarPreferences";
 import { getPlatform } from "@/lib/backend/platform";
 import { SQL_VARIABLE_SYNTAX_KEYS, SQL_VARIABLE_SYNTAX_TOKENS } from "@/lib/sql/sqlVariableSyntax";
 import { APP_CUSTOM_UI_COLOR_DEFS } from "@/lib/app/appTheme";
@@ -143,6 +144,7 @@ export function createShortcutSettingsSearchDefinitions(shortcuts: readonly Shor
  * configurations) deliberately resolve to their management entry instead.
  */
 export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = [
+  ...EDITOR_TOOLBAR_ACTION_IDS.map((id): SettingsSearchDefinition => ({ id: `editor-toolbar-action-${id}`, category: "editor", titleKey: `settings.editorToolbarAction.${id}`, targetId: "editor-toolbar" })),
   { id: "editor-font", category: "editor", titleKey: "settings.fontFamily", targetId: "editor" },
   { id: "editor-theme", category: "editor", titleKey: "settings.theme", targetId: "editor" },
   { id: "editor-font-size", category: "editor", titleKey: "settings.fontSize", targetId: "editor" },
@@ -385,6 +387,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   },
   { id: "navigation-table-search", category: "navigation", titleKey: "settings.sidebarTableSearchEnabled", descriptionKey: "settings.sidebarTableSearchEnabledDescription", targetId: "navigation" },
   { id: "navigation-search-opened-databases-only", category: "navigation", titleKey: "settings.sidebarSearchOpenedDatabasesOnly", descriptionKey: "settings.sidebarSearchOpenedDatabasesOnlyDescription", targetId: "navigation" },
+  { id: "editor-toolbar-preferences", category: "editor", titleKey: "settings.editorToolbarPreferences", keywordKeys: ["settings.editorToolbarVisibilityAndOrder"], descriptionKey: "settings.editorToolbarPreferencesDescription", targetId: "editor-toolbar" },
   { id: "navigation-active-node", category: "navigation", titleKey: "settings.autoSelectActiveSidebarNode", descriptionKey: "settings.autoSelectActiveSidebarNodeDescription", targetId: "navigation" },
   { id: "navigation-sidebar-pin-default-database", category: "navigation", titleKey: "settings.sidebarPinDefaultDatabase", descriptionKey: "settings.sidebarPinDefaultDatabaseDescription", targetId: "navigation" },
   { id: "navigation-browse-objects-on-database-activation", category: "navigation", titleKey: "settings.sidebarBrowseObjectsOnDatabaseActivation", descriptionKey: "settings.sidebarBrowseObjectsOnDatabaseActivationDescription", targetId: "navigation" },

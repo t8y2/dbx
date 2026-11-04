@@ -63,6 +63,7 @@ import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { HelpTooltip, Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
+import EditorToolbarPreferencesEditor from "@/components/editor/EditorToolbarPreferencesEditor.vue";
 import {
   useSettingsStore,
   AI_PROVIDER_PRESETS,
@@ -1094,6 +1095,8 @@ const editQueryExportKeysetOptimizationEnabled = ref(settingsStore.editorSetting
 const editUpdateDownloadSource = ref<UpdateDownloadSource>(settingsStore.editorSettings.updateDownloadSource);
 const editUpdateChannel = ref<UpdateChannel>(settingsStore.editorSettings.updateChannel);
 const editToolbarItems = ref({ ...settingsStore.editorSettings.toolbarItems });
+const editEditorToolbarOrder = ref([...settingsStore.editorSettings.editorToolbarOrder]);
+const editEditorToolbarHiddenActions = ref([...settingsStore.editorSettings.editorToolbarHiddenActions]);
 // Desktop-only toolbar buttons (always-on-top) can never render in the Web build, so their switches stay out of the Web settings dialog.
 const toolbarVisibilityItems = computed(() => visibleToolbarVisibilityItems(TOOLBAR_VISIBILITY_ITEMS, isWeb));
 function getToolbarVisibilityItemLabel(item: ToolbarVisibilityItem): string {
@@ -1481,6 +1484,8 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     updateDownloadSource: editUpdateDownloadSource.value,
     updateChannel: editUpdateChannel.value,
     toolbarItems: { ...editToolbarItems.value },
+    editorToolbarOrder: [...editEditorToolbarOrder.value],
+    editorToolbarHiddenActions: [...editEditorToolbarHiddenActions.value],
     snippets: editSnippets.value,
     snippetTriggerKey: editSnippetTriggerKey.value,
     sqlShortcuts: editSqlShortcuts.value,
@@ -2195,6 +2200,8 @@ function syncEditorSettingsDraftFromStore() {
   editUpdateDownloadSource.value = settingsStore.editorSettings.updateDownloadSource;
   editUpdateChannel.value = settingsStore.editorSettings.updateChannel;
   editToolbarItems.value = { ...settingsStore.editorSettings.toolbarItems };
+  editEditorToolbarOrder.value = [...settingsStore.editorSettings.editorToolbarOrder];
+  editEditorToolbarHiddenActions.value = [...settingsStore.editorSettings.editorToolbarHiddenActions];
   editSnippets.value = settingsStore.editorSettings.snippets.map(editableSnippet);
   editSnippetTriggerKey.value = settingsStore.editorSettings.snippetTriggerKey;
   editSqlShortcuts.value = mergeDefaultSqlShortcuts(settingsStore.editorSettings.sqlShortcuts.map(editableSqlShortcut));
@@ -2378,6 +2385,8 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   updateDownloadSource: editUpdateDownloadSource,
   updateChannel: editUpdateChannel,
   toolbarItems: editToolbarItems,
+  editorToolbarOrder: editEditorToolbarOrder,
+  editorToolbarHiddenActions: editEditorToolbarHiddenActions,
   snippets: editSnippets,
   snippetTriggerKey: editSnippetTriggerKey,
   sqlShortcuts: editSqlShortcuts,
@@ -2408,6 +2417,8 @@ function applyEditorSettingsKeysToRefs(draft: EditorSettingsDraft, keys: readonl
     excludedCompletionItems: (value) => (value as string[]).join("\n"),
     redisKeyTemplates: (value) => normalizeRedisKeyTemplates(value as string[]).join("\n"),
     toolbarItems: (value) => ({ ...(value as EditorSettings["toolbarItems"]) }),
+    editorToolbarOrder: (value) => [...(value as EditorSettings["editorToolbarOrder"])],
+    editorToolbarHiddenActions: (value) => [...(value as EditorSettings["editorToolbarHiddenActions"])],
     snippets: (value) => (value as SqlSnippet[]).map(editableSnippet),
     sqlShortcuts: (value) => mergeDefaultSqlShortcuts((value as SqlShortcutAction[]).map(editableSqlShortcut)),
     sqlVariableSyntaxOverrides: (value) => normalizeSqlVariableSyntaxOverrides(value as EditorSettings["sqlVariableSyntaxOverrides"]),
@@ -2890,6 +2901,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowTableDdlHoverPreview.value = DEFAULT_EDITOR_SETTINGS.showTableDdlHoverPreview;
     editTableHoverLookupMode.value = DEFAULT_EDITOR_SETTINGS.tableHoverLookupMode;
     editExternalSqlEditorMaxMb.value = DEFAULT_EDITOR_SETTINGS.externalSqlEditorMaxMb;
+    editEditorToolbarOrder.value = [...DEFAULT_EDITOR_SETTINGS.editorToolbarOrder];
+    editEditorToolbarHiddenActions.value = [...DEFAULT_EDITOR_SETTINGS.editorToolbarHiddenActions];
     editClickTableNavigationTarget.value = DEFAULT_EDITOR_SETTINGS.clickTableNavigationTarget;
     editSqlVariableSubstitutionEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlVariableSubstitutionEnabled;
     editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(DEFAULT_EDITOR_SETTINGS.sqlVariableSyntaxOverrides);
@@ -3219,6 +3232,8 @@ function resetAllDefaults() {
   editUpdateDownloadSource.value = DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
   editUpdateChannel.value = DEFAULT_EDITOR_SETTINGS.updateChannel;
   editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
+  editEditorToolbarOrder.value = [...DEFAULT_EDITOR_SETTINGS.editorToolbarOrder];
+  editEditorToolbarHiddenActions.value = [...DEFAULT_EDITOR_SETTINGS.editorToolbarHiddenActions];
   editSnippets.value = DEFAULT_SQL_SNIPPETS.map((s) => ({ ...s }));
   editSnippetTriggerKey.value = DEFAULT_EDITOR_SETTINGS.snippetTriggerKey;
   editSqlShortcuts.value = DEFAULT_SQL_SHORTCUTS.map(editableSqlShortcut);
@@ -8988,6 +9003,11 @@ onUnmounted(() => {
                     @input="updateExternalSqlEditorMaxMbInput"
                   />
                 </div>
+              </div>
+              <Separator />
+
+              <div data-settings-search-id="editor-toolbar" :class="['min-w-0 py-2', settingsSearchTargetClass('editor-toolbar')]">
+                <EditorToolbarPreferencesEditor v-model:order="editEditorToolbarOrder" v-model:hidden-actions="editEditorToolbarHiddenActions" :word-wrap="editWordWrap" :semantic-diagnostics="editSqlSemanticDiagnosticsEnabled" :insert-value-hints="editShowInsertValueHints" />
               </div>
             </section>
 

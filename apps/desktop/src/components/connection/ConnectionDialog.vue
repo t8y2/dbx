@@ -155,7 +155,7 @@ import { pluginFieldHasValue as pluginFieldHasValueOf, pluginFieldIsRequired, pl
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, requestAgentInstallCancellation, resolveAgentInstallOutcome, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
-import { parseSqlServerHostPort } from "@/lib/sqlserver/sqlServerHostPort";
+import { parseSqlServerHostPort, resolveSqlServerPortSubmission } from "@/lib/sqlserver/sqlServerHostPort";
 import { normalizeNacosConsoleUrl, normalizeNacosEndpoint, normalizeNacosMetricsUrl, parseNacosManagedNamespaces } from "@/lib/nacos/nacosAdmin";
 import { loadReadableNacosNamespaces, nacosNamespaceIdentity, normalizeNacosNamespaceSelection } from "@/lib/nacos/nacosNamespaceVisibility";
 import {
@@ -870,7 +870,9 @@ function setSqlServerPortExplicit(config: Pick<ConnectionConfig, "db_type"> & { 
 }
 
 function markSqlServerPortExplicit() {
-  setSqlServerPortExplicit(form.value, true);
+  // Keep the in-editor flag equal to what submit will derive: a fresh connection
+  // starts on the default port, and typing it back must not look deliberate.
+  setSqlServerPortExplicit(form.value, resolveSqlServerPortSubmission(form.value.port, selectedProfile().port).portExplicit);
 }
 
 function handleHostBlur() {
@@ -5378,10 +5380,13 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
   } else if (config.db_type === "sqlserver") {
     const parsed = parseSqlServerHostPort(config.host, config.port);
     config.host = parsed.host;
-    if (parsed.portExplicit && parsed.port !== undefined) {
-      config.port = parsed.port;
-      setSqlServerPortExplicit(config, true);
-    }
+    // A cleared port field stays the empty string and cannot deserialize as the
+    // backend's u16 (#14239). Deriving the flag from the final port instead of
+    // "did the user touch the field" also stops one edit from permanently
+    // disabling SQL Browser resolution for `host\instance` (#14238).
+    const submission = resolveSqlServerPortSubmission(parsed.portExplicit && parsed.port !== undefined ? parsed.port : config.port, selectedProfile().port);
+    config.port = submission.port;
+    setSqlServerPortExplicit(config, submission.portExplicit);
     if (!connectionUpdateExternalConfigPreserved(config)) config.external_config = sqlServerPortExplicitFromConfig(config) ? { portExplicit: true } : undefined;
   } else if (supportsGaussdbIdentifierQuoteStyle(config)) {
     const style = gaussdbIdentifierQuoteStyle(config);

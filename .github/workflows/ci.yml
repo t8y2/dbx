@@ -313,7 +313,11 @@ jobs:
     timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      # An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so the
+      # 8 MiB main-thread stack must be repeated here: without it the Windows PE
+      # keeps the 1 MiB linker default and deep connect/serde call stacks abort
+      # with 0xC00000FD ("DBX 已停止工作"). Verified below for x64 and ARM64.
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
       RUSTC_WRAPPER: sccache
       # Prefer S3 when available; GitHub's 10 GB cache quota evicts the shared
       # Linux target caches when thousands of GHA sccache entries pile up.
@@ -324,6 +328,12 @@ jobs:
 
       - name: Setup Rust for standard Windows
         uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - name: Windows PE stack reserve audit tests
+        shell: pwsh
+        run: ./.github/scripts/assert-windows-stack-reserve.test.ps1
 
       - name: MCP replacement temporary file cleanup tests
         shell: pwsh
@@ -368,6 +378,10 @@ jobs:
             echo "SCCACHE_IDLE_TIMEOUT=0"
           } >> "$GITHUB_ENV"
 
+      - name: Verify x64 and ARM64 executable stack reserves
+        shell: pwsh
+        run: ./.github/scripts/test-windows-stack-reserve.ps1
+
       - name: Check standard Windows dependency path
         run: cargo check --locked --package dbx --no-default-features --target x86_64-pc-windows-msvc
 
@@ -388,7 +402,11 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_RELEASE_LTO: "off"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      # An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so the
+      # 8 MiB main-thread stack must be repeated here: without it the Windows PE
+      # keeps the 1 MiB linker default and deep connect/serde call stacks abort
+      # with 0xC00000FD ("DBX 已停止工作"). Guarded by assert-win7-pe-compat.ps1.
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
       RUSTC_WRAPPER: sccache
       # Prefer S3 when available; GitHub's 10 GB cache quota evicts the shared
       # Linux target caches when thousands of GHA sccache entries pile up.
@@ -830,7 +848,11 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/duckdb-driver
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      # An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so the
+      # 8 MiB main-thread stack must be repeated here: without it the Windows PE
+      # keeps the 1 MiB linker default and deep connect/serde call stacks abort
+      # with 0xC00000FD ("DBX 已停止工作"). Guarded by assert-win7-pe-compat.ps1.
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
       RUSTC_WRAPPER: sccache
       # Prefer S3 when available; GitHub's 10 GB cache quota evicts the shared
       # Linux target caches when thousands of GHA sccache entries pile up.
@@ -991,6 +1013,10 @@ jobs:
     env:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
+      # Test binaries default to full debug info; the workspace-wide test build
+      # then fills the runner disk during linking (mold: failed to write).
+      # Backtraces stay usable via the minimal line tables.
+      CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
       # Deep async export tests exceed the Rust test harness's default thread stack on Linux.
       RUST_MIN_STACK: 8388608
       RUSTC_WRAPPER: sccache
@@ -1176,7 +1202,7 @@ jobs:
           cache: gradle
 
       - name: Cache approved Maven assets
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/dbx-offline-jdbc-maven
           key: offline-jdbc-${{ hashFiles('apps/desktop/src/lib/database/managedJdbcAssets.json') }}

@@ -31,6 +31,62 @@ import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
+  it("defaults sidebar hover to enabled with a 300ms delay and validates saved values", () => {
+    const defaults = { sidebarHoverEnabled: true, sidebarHoverDelay: 300 };
+    expect(DEFAULT_EDITOR_SETTINGS).toMatchObject(defaults);
+    expect(normalizeEditorSettings({})).toMatchObject(defaults);
+    expect(normalizeEditorSettings({ sidebarHoverEnabled: false, sidebarHoverDelay: 750 })).toMatchObject({ sidebarHoverEnabled: false, sidebarHoverDelay: 750 });
+    expect(normalizeEditorSettings({ sidebarHoverEnabled: "false", sidebarHoverDelay: "500" } as any)).toMatchObject(defaults);
+    for (const invalid of [NaN, Infinity, null]) expect(normalizeEditorSettings({ sidebarHoverDelay: invalid } as any).sidebarHoverDelay).toBe(300);
+    expect(normalizeEditorSettings({ sidebarHoverDelay: 0 }).sidebarHoverDelay).toBe(100);
+    expect(normalizeEditorSettings({ sidebarHoverDelay: 9999 }).sidebarHoverDelay).toBe(2000);
+    expect(normalizeEditorSettings({ sidebarHoverDelay: 499.7 }).sidebarHoverDelay).toBe(500);
+  });
+
+  it("keeps manual export and toolbar preferences across updates and reloads", async () => {
+    const defaults = { defaultExportMode: "immediate", dataGridHideToolbarLabels: false };
+    expect(DEFAULT_EDITOR_SETTINGS).toMatchObject(defaults);
+    expect(normalizeEditorSettings({})).toMatchObject(defaults);
+    expect(normalizeEditorSettings({ defaultExportMode: "invalid", dataGridHideToolbarLabels: "true" } as any)).toMatchObject(defaults);
+    setActivePinia(createPinia());
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settings = useSettingsStore();
+    const changes = { defaultExportMode: "queued" as const, dataGridHideToolbarLabels: true };
+    settings.updateEditorSettings(changes);
+    expect(normalizeEditorSettings(JSON.parse(JSON.stringify(settings.editorSettings)))).toMatchObject(changes);
+    settings.updateEditorSettings(defaults as { defaultExportMode: "immediate"; dataGridHideToolbarLabels: boolean });
+    expect(settings.editorSettings).toMatchObject(defaults);
+  });
+
+  it("defaults the selection statistic to sum and validates every saved metric", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.dataGridSelectionSummaryMetric).toBe("sum");
+    expect(normalizeEditorSettings({}).dataGridSelectionSummaryMetric).toBe("sum");
+    expect(normalizeEditorSettings({ dataGridSelectionSummaryMetric: "unknown" as any }).dataGridSelectionSummaryMetric).toBe("sum");
+    for (const metric of ["sum", "average", "min", "max", "count", "distinct", "cells", "rows"] as const) {
+      expect(normalizeEditorSettings({ dataGridSelectionSummaryMetric: metric }).dataGridSelectionSummaryMetric).toBe(metric);
+    }
+  });
+
+  it("retains only an explicit legacy sidebar value without creating a global default", () => {
+    expect(DEFAULT_EDITOR_SETTINGS).not.toHaveProperty("sidebarShowUserAdmin");
+    expect(normalizeEditorSettings({})).not.toHaveProperty("sidebarShowUserAdmin");
+    for (const visible of [false, true]) {
+      expect(normalizeEditorSettings({ sidebarShowUserAdmin: visible }).sidebarShowUserAdmin).toBe(visible);
+    }
+    expect(normalizeEditorSettings({ sidebarShowUserAdmin: "false" as any })).not.toHaveProperty("sidebarShowUserAdmin");
+  });
+
+  it("preserves result export view options across settings updates and reload normalization", async () => {
+    const defaults = { dataGridExportInToolbar: false, dataGridLoadAllInToolbar: false, showSaveResult: true, warnIncompleteExport: true };
+    expect(normalizeEditorSettings({})).toMatchObject(defaults);
+    setActivePinia(createPinia());
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settings = useSettingsStore();
+    const changes = { dataGridExportInToolbar: true, dataGridLoadAllInToolbar: true, showSaveResult: false, warnIncompleteExport: false };
+    settings.updateEditorSettings(changes);
+    expect(normalizeEditorSettings(JSON.parse(JSON.stringify(settings.editorSettings)))).toMatchObject(changes);
+  });
+
   it("defaults query connection group paths to hidden and validates the toggle", () => {
     expect(DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath).toBe(false);
     expect(normalizeEditorSettings({}).showConnectionGroupPath).toBe(false);
@@ -436,6 +492,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sidebarShowConnectionNotes: false }).sidebarShowConnectionNotes).toBe(false);
   });
 
+  it("hides connection endpoints by default and normalizes non-boolean values", () => {
+    expect(normalizeEditorSettings({}).sidebarShowConnectionEndpoints).toBe(false);
+    expect(normalizeEditorSettings({ sidebarShowConnectionEndpoints: true }).sidebarShowConnectionEndpoints).toBe(true);
+    expect(normalizeEditorSettings({ sidebarShowConnectionEndpoints: false }).sidebarShowConnectionEndpoints).toBe(false);
+    expect(normalizeEditorSettings({ sidebarShowConnectionEndpoints: "yes" } as any).sidebarShowConnectionEndpoints).toBe(false);
+  });
+
   it("shows sidebar tooltips by default and preserves an explicit opt-out", () => {
     expect(normalizeEditorSettings({}).sidebarShowTooltips).toBe(true);
     expect(normalizeEditorSettings({ sidebarShowTooltips: false }).sidebarShowTooltips).toBe(false);
@@ -461,6 +524,13 @@ describe("normalizeEditorSettings", () => {
 
   it("enables automatic table aliases by default", () => {
     expect(normalizeEditorSettings({}).autoAliasTables).toBe(true);
+  });
+
+  it("preserves legacy column comments by default and accepts an explicit opt-out", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments).toBe(true);
+    expect(normalizeEditorSettings({}).batchColumnSelectionIncludeComments).toBe(true);
+    expect(normalizeEditorSettings({ batchColumnSelectionIncludeComments: false }).batchColumnSelectionIncludeComments).toBe(false);
+    expect(normalizeEditorSettings({ batchColumnSelectionIncludeComments: "false" as any }).batchColumnSelectionIncludeComments).toBe(true);
   });
 
   it("preserves disabled automatic table aliases", () => {
@@ -1026,7 +1096,18 @@ describe("normalizeMcpGlobalPolicy", () => {
       groupPolicies: [],
       configured: false,
       queryTimeoutSecs: null,
+      pluginToolsMode: "flat",
     });
+  });
+
+  it.each(["auto", "flat", "lazy"] as const)("preserves the saved %s plugin tool mode", (pluginToolsMode) => {
+    expect(normalizeMcpGlobalPolicy({ configured: true, pluginToolsMode }).pluginToolsMode).toBe(pluginToolsMode);
+  });
+
+  it("distinguishes a missing mode in legacy saved policies from a fresh configuration", () => {
+    expect(normalizeMcpGlobalPolicy({ configured: true }).pluginToolsMode).toBe("auto");
+    expect(normalizeMcpGlobalPolicy({ configured: false }).pluginToolsMode).toBe("flat");
+    expect(normalizeMcpGlobalPolicy(null).pluginToolsMode).toBe("flat");
   });
 
   it("normalizes and deduplicates an explicit connection allowlist", () => {
@@ -1048,6 +1129,7 @@ describe("normalizeMcpGlobalPolicy", () => {
       groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
+      pluginToolsMode: "auto",
     });
   });
 
@@ -1056,6 +1138,9 @@ describe("normalizeMcpGlobalPolicy", () => {
   });
 
   it("enables high-risk SQL prompts only when explicitly configured", () => {
+    expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: true, callConfirmation: "high_risk" })).toMatchObject({ promptHighRiskSql: false, callConfirmation: "high_risk" });
+    expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: true, callConfirmation: "off" }).promptHighRiskSql).toBe(false);
+    expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: false, callConfirmation: "full" }).promptHighRiskSql).toBe(true);
     expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: true }).promptHighRiskSql).toBe(true);
     expect(normalizeMcpGlobalPolicy({ promptHighRiskSql: "true" } as any).promptHighRiskSql).toBe(false);
   });
@@ -1295,25 +1380,6 @@ describe("normalizeEditorSettings - sidebarPinDefaultDatabase", () => {
     expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: undefined } as any).sidebarPinDefaultDatabase).toBe(true);
     expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: null } as any).sidebarPinDefaultDatabase).toBe(true);
     expect(normalizeEditorSettings({ sidebarPinDefaultDatabase: 0 } as any).sidebarPinDefaultDatabase).toBe(true);
-  });
-});
-
-// #13302：连接后是否自动展开对象树的开关。默认必须为 false——模式多的库
-// 全量自动展开是反馈的卡顿来源，升级后的老用户也走新默认。
-describe("normalizeEditorSettings - sidebarExpandTreeOnConnect", () => {
-  it("defaults sidebarExpandTreeOnConnect to false", () => {
-    expect(normalizeEditorSettings({}).sidebarExpandTreeOnConnect).toBe(false);
-  });
-
-  it("preserves explicit boolean values", () => {
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: true }).sidebarExpandTreeOnConnect).toBe(true);
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: false }).sidebarExpandTreeOnConnect).toBe(false);
-  });
-
-  it("falls back to default for non-boolean values", () => {
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: "true" } as any).sidebarExpandTreeOnConnect).toBe(false);
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: undefined } as any).sidebarExpandTreeOnConnect).toBe(false);
-    expect(normalizeEditorSettings({ sidebarExpandTreeOnConnect: 1 } as any).sidebarExpandTreeOnConnect).toBe(false);
   });
 });
 
@@ -1683,6 +1749,7 @@ describe("settingsStore MCP policy persistence", () => {
       groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
+      pluginToolsMode: "auto",
     };
     store.mcpGlobalPolicy = previous;
 
@@ -1701,6 +1768,7 @@ describe("settingsStore MCP policy persistence", () => {
       groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
+      pluginToolsMode: "auto",
     });
 
     rejectSave(new Error("save failed"));
@@ -1713,6 +1781,77 @@ describe("settingsStore persisted settings initialization", () => {
   beforeEach(() => {
     vi.resetModules();
     setActivePinia(createPinia());
+  });
+
+  it("persists sidebar hover preferences across restarts and restores defaults", async () => {
+    let saved: Record<string, unknown> | null = null;
+    vi.doMock("@/lib/backend/api", () => ({
+      loadEditorSettings: async () => saved,
+      saveEditorSettings: async (settings: Record<string, unknown>) => {
+        saved = JSON.parse(JSON.stringify(settings));
+      },
+    }));
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    store.updateEditorSettings({ sidebarHoverEnabled: false, sidebarHoverDelay: 750 });
+    await store.persistEditorSettings();
+    setActivePinia(createPinia());
+    const restarted = useSettingsStore();
+    await restarted.initEditorSettings();
+    expect(restarted.editorSettings).toMatchObject({ sidebarHoverEnabled: false, sidebarHoverDelay: 750 });
+    restarted.updateEditorSettings({ sidebarHoverDelay: 9999 });
+    expect(restarted.editorSettings.sidebarHoverDelay).toBe(2000);
+    restarted.updateEditorSettings({ sidebarHoverEnabled: DEFAULT_EDITOR_SETTINGS.sidebarHoverEnabled, sidebarHoverDelay: DEFAULT_EDITOR_SETTINGS.sidebarHoverDelay });
+    expect(restarted.editorSettings).toMatchObject({ sidebarHoverEnabled: true, sidebarHoverDelay: 300 });
+  });
+
+  it("persists and restores the chosen selection statistic after restarting the store", async () => {
+    let persistedSettings: Record<string, unknown> | null = null;
+    const loadEditorSettings = vi.fn(async () => persistedSettings);
+    const saveEditorSettings = vi.fn(async (settings: Record<string, unknown>) => {
+      persistedSettings = JSON.parse(JSON.stringify(settings));
+    });
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    expect(store.editorSettings.dataGridSelectionSummaryMetric).toBe("sum");
+    store.updateEditorSettings({ dataGridSelectionSummaryMetric: "average" });
+    await store.persistEditorSettings();
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ dataGridSelectionSummaryMetric: "average" }));
+
+    setActivePinia(createPinia());
+    const restartedStore = useSettingsStore();
+    await restartedStore.initEditorSettings();
+    expect(restartedStore.editorSettings.dataGridSelectionSummaryMetric).toBe("average");
+  });
+
+  it.each(["persisted", "legacy"])("preserves a %s global opt-out through unrelated saves until connection migration", async (source) => {
+    const old = { sidebarShowUserAdmin: false, theme: "xcode-dark" };
+    const data = new Map(source === "legacy" ? [["dbx-editor-settings", JSON.stringify(old)]] : []);
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => data.set(key, value),
+      removeItem: (key: string) => data.delete(key),
+    });
+    try {
+      const loadEditorSettings = vi.fn().mockResolvedValue(source === "persisted" ? old : null);
+      const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+      vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+      const { useSettingsStore } = await import("@/stores/settingsStore");
+      const store = useSettingsStore();
+      await store.initEditorSettings();
+      expect(store.editorSettings.sidebarShowUserAdmin).toBe(false);
+      expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ sidebarShowUserAdmin: false }));
+      store.updateEditorSettings({ fontSize: 16 });
+      await store.persistEditorSettings();
+      expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarShowUserAdmin: false, fontSize: 16 }));
+      if (source === "legacy") expect(data.has("dbx-editor-settings")).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("does not treat an editor settings read failure as an empty record", async () => {
@@ -2205,6 +2344,20 @@ describe("settingsStore persisted settings initialization", () => {
     expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarShowConnectionNotes: true }));
   });
 
+  it("persists sidebarShowConnectionEndpoints update", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue({ sidebarShowConnectionEndpoints: false });
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    await store.updateEditorSettingsAndPersist({ sidebarShowConnectionEndpoints: true });
+    expect(store.editorSettings.sidebarShowConnectionEndpoints).toBe(true);
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarShowConnectionEndpoints: true }));
+  });
+
   it("persists preferredExportPath update", async () => {
     const loadEditorSettings = vi.fn().mockResolvedValue({ preferredExportPath: "" });
     const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
@@ -2293,6 +2446,7 @@ describe("settingsStore editor settings persistence", () => {
   it("rolls back a failed atomic update and allows retry", async () => {
     const loadEditorSettings = vi.fn().mockResolvedValue({
       ignoredUpdateVersion: "",
+      updateChannel: "stable",
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
@@ -2342,6 +2496,7 @@ describe("settingsStore editor settings persistence", () => {
     let resolveFirstSave!: () => void;
     const loadEditorSettings = vi.fn().mockResolvedValue({
       ignoredUpdateVersion: "",
+      updateChannel: "stable",
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
@@ -2379,6 +2534,7 @@ describe("settingsStore editor settings persistence", () => {
     let rejectFirstSave!: (error: Error) => void;
     const loadEditorSettings = vi.fn().mockResolvedValue({
       ignoredUpdateVersion: "",
+      updateChannel: "stable",
       theme: "system",
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,

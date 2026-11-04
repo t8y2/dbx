@@ -111,9 +111,16 @@ describe("thriftBinary (thrift.TBinaryProtocol)", () => {
     });
   });
 
-  it("formats RabbitMQ TBinaryProtocol messages even when Go utf8.Valid passed control bytes", () => {
+  it("formats RabbitMQ TBinaryProtocol messages only when decode is enabled", () => {
     const rawBytes = [0x0b, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05, ...new TextEncoder().encode("hello"), 0x00];
     const rawTextWithControls = String.fromCharCode(...rawBytes);
+
+    expect(
+      formatMqMessagePayload({
+        payloadBase64: toBase64(rawBytes),
+        payloadText: rawTextWithControls,
+      }),
+    ).toBe(rawTextWithControls);
 
     expect(
       formatMqMessagePayload(
@@ -121,7 +128,7 @@ describe("thriftBinary (thrift.TBinaryProtocol)", () => {
           payloadBase64: toBase64(rawBytes),
           payloadText: rawTextWithControls,
         },
-        { allowRawStructSniff: true },
+        { decode: true, allowRawStructSniff: true },
       ),
     ).toBe('{\n  "1": "hello"\n}');
   });

@@ -2415,6 +2415,17 @@ fn compare_mysql_column_charset(options: &SchemaDiffPreparationOptions) -> bool 
     source_dialect == DialectKind::Mysql && target_dialect == DialectKind::Mysql
 }
 
+/// MySQL-family engines treat `RESTRICT`, `NO ACTION` and an omitted referential action identically,
+/// so they are only folded together when both sides of the comparison use the MySQL dialect.
+/// PostgreSQL, SQL Server, Oracle, SQLite, etc. are deliberately excluded: there `NO ACTION` may be
+/// deferred to the end of the statement/transaction while `RESTRICT` is checked immediately.
+fn mysql_foreign_key_actions(options: &SchemaDiffPreparationOptions) -> bool {
+    let target_dialect =
+        options.target_dialect.unwrap_or_else(|| DialectKind::from_database_type(options.database_type));
+    let source_dialect = options.source_dialect.unwrap_or(target_dialect);
+    source_dialect == DialectKind::Mysql && target_dialect == DialectKind::Mysql
+}
+
 fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
     let source_details: HashMap<&str, &TableSchemaDetail> =
         options.source_details.iter().map(|detail| (detail.name.as_str(), detail)).collect();
@@ -2719,6 +2730,7 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             &normalized_target_fks,
             options.ignore_table_name_case,
             options.ignore_column_name_case,
+            mysql_foreign_key_actions(options),
         );
         let trigger_diffs = diff_triggers(&source.triggers, &target.triggers);
         let source_comment = source_table_comments.get(name.as_str()).cloned().unwrap_or(None);
@@ -3840,6 +3852,30 @@ fn normalized_foreign_key_action(action: Option<&str>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Normalizes a referential action for comparison. With `mysql_actions`, InnoDB semantics apply:
+/// `RESTRICT`, `NO ACTION` and an omitted clause (which MySQL reports as `NO ACTION`) all reject
+/// the change immediately, so they collapse to one value and never surface as a difference.
+///
+/// References (MySQL 8.4 Reference Manual, 15.1.20.5 "FOREIGN KEY Constraints"):
+/// - "NO ACTION: ... For InnoDB, this is equivalent to RESTRICT".
+/// - "Specifying RESTRICT (or NO ACTION) is the same as omitting the ON DELETE or ON UPDATE clause."
+/// - "For an ON DELETE or ON UPDATE that is not specified, the default action is always NO ACTION."
+///   MariaDB KB "Foreign Keys" likewise documents `NO ACTION` as a "Synonym for RESTRICT".
+///
+/// Only the comparison is normalized; generated DDL keeps the source's original action text.
+/// Known caveat: on MySQL NDB Cluster `NO ACTION` is a deferred check, but schema metadata does
+/// not carry the storage engine, and NDB foreign keys are rare enough that InnoDB semantics win.
+fn comparable_foreign_key_action(action: Option<&str>, mysql_actions: bool) -> Option<String> {
+    let normalized = normalized_foreign_key_action(action);
+    if !mysql_actions {
+        return normalized;
+    }
+    match normalized.as_deref() {
+        None | Some("RESTRICT" | "NO ACTION") => Some("NO ACTION".to_string()),
+        _ => normalized,
+    }
+}
+
 fn normalize_self_referencing_fk(
     fk: &ForeignKeyInfo,
     own_table_names: &HashSet<&str>,
@@ -3885,7 +3921,7 @@ fn normalize_mapped_foreign_key(
 }
 
 pub fn diff_foreign_keys(source: &[ForeignKeyInfo], target: &[ForeignKeyInfo]) -> Vec<ForeignKeyDiff> {
-    diff_foreign_keys_with_options(source, target, false, false)
+    diff_foreign_keys_with_options(source, target, false, false, false)
 }
 
 fn diff_foreign_keys_with_options(
@@ -3893,6 +3929,7 @@ fn diff_foreign_keys_with_options(
     target: &[ForeignKeyInfo],
     ignore_table_name_case: bool,
     ignore_column_name_case: bool,
+    mysql_actions: bool,
 ) -> Vec<ForeignKeyDiff> {
     let source = group_foreign_keys(source);
     let target = group_foreign_keys(target);
@@ -3912,8 +3949,14 @@ fn diff_foreign_keys_with_options(
             target.iter().enumerate().find_map(|(index, target_fk)| {
                 (!matched[index]
                     && target_fk.name.is_empty()
-                    && foreign_key_changes(source_fk, target_fk, ignore_table_name_case, ignore_column_name_case)
-                        .is_empty())
+                    && foreign_key_changes(
+                        source_fk,
+                        target_fk,
+                        ignore_table_name_case,
+                        ignore_column_name_case,
+                        mysql_actions,
+                    )
+                    .is_empty())
                 .then_some(index)
             })
         } else {
@@ -3931,7 +3974,8 @@ fn diff_foreign_keys_with_options(
         };
         matched[target_index] = true;
         let target_fk = &target[target_index];
-        let changes = foreign_key_changes(source_fk, target_fk, ignore_table_name_case, ignore_column_name_case);
+        let changes =
+            foreign_key_changes(source_fk, target_fk, ignore_table_name_case, ignore_column_name_case, mysql_actions);
         if !changes.is_empty() {
             diffs.push(ForeignKeyDiff {
                 diff_type: "modified".to_string(),
@@ -3963,6 +4007,7 @@ fn foreign_key_changes(
     target_fk: &SchemaForeignKeyInfo,
     ignore_table_name_case: bool,
     ignore_column_name_case: bool,
+    mysql_actions: bool,
 ) -> Vec<String> {
     let mut changes = Vec::new();
     if source_fk.columns().len() != target_fk.columns().len()
@@ -3993,8 +4038,8 @@ fn foreign_key_changes(
     {
         changes.push(format!("ref column: {} → {}", target_fk.ref_column, source_fk.ref_column));
     }
-    let source_on_delete = normalized_foreign_key_action(source_fk.on_delete.as_deref());
-    let target_on_delete = normalized_foreign_key_action(target_fk.on_delete.as_deref());
+    let source_on_delete = comparable_foreign_key_action(source_fk.on_delete.as_deref(), mysql_actions);
+    let target_on_delete = comparable_foreign_key_action(target_fk.on_delete.as_deref(), mysql_actions);
     if source_on_delete != target_on_delete {
         changes.push(format!(
             "delete: {} → {}",
@@ -4002,8 +4047,8 @@ fn foreign_key_changes(
             source_on_delete.as_deref().unwrap_or("")
         ));
     }
-    let source_on_update = normalized_foreign_key_action(source_fk.on_update.as_deref());
-    let target_on_update = normalized_foreign_key_action(target_fk.on_update.as_deref());
+    let source_on_update = comparable_foreign_key_action(source_fk.on_update.as_deref(), mysql_actions);
+    let target_on_update = comparable_foreign_key_action(target_fk.on_update.as_deref(), mysql_actions);
     if source_on_update != target_on_update {
         changes.push(format!(
             "update: {} → {}",
@@ -13690,6 +13735,85 @@ mod tests {
         assert_eq!(diffs.len(), 1, "referential action change: {diffs:?}");
         assert!(diffs[0].changes.iter().any(|change| change == "delete: RESTRICT → SET NULL"));
         assert!(diffs[0].changes.iter().any(|change| change == "update: NO ACTION → CASCADE"));
+    }
+
+    fn mysql_fk_action_options(
+        database_type: DatabaseType,
+        dialect: Option<DialectKind>,
+        source_actions: (Option<&str>, Option<&str>),
+        target_actions: (Option<&str>, Option<&str>),
+    ) -> SchemaDiffPreparationOptions {
+        let detail = |(on_update, on_delete): (Option<&str>, Option<&str>)| TableSchemaDetail {
+            name: "purchase_order_amendment".to_string(),
+            columns: vec![column("id_purchase_order", "int unsigned", None)],
+            indexes: Vec::new(),
+            foreign_keys: vec![foreign_key(ForeignKeyInfo {
+                name: "purchase_order_amendment_id_purchase_order_foreign".into(),
+                column: "id_purchase_order".into(),
+                ref_schema: None,
+                ref_table: "purchase_order".into(),
+                ref_column: "id".into(),
+                on_update: on_update.map(str::to_string),
+                on_delete: on_delete.map(str::to_string),
+            })],
+            triggers: Vec::new(),
+            ddl: None,
+        };
+        SchemaDiffPreparationOptions {
+            source_tables: vec![table_info("purchase_order_amendment", "TABLE")],
+            target_tables: vec![table_info("purchase_order_amendment", "TABLE")],
+            source_details: vec![detail(source_actions)],
+            target_details: vec![detail(target_actions)],
+            database_type,
+            source_dialect: dialect,
+            target_dialect: dialect,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn mysql_fk_restrict_and_no_action_are_equivalent() {
+        let cases = [
+            ((Some("NO ACTION"), Some("RESTRICT")), (Some("RESTRICT"), Some("RESTRICT"))),
+            ((Some("restrict"), Some("NO ACTION")), (Some("NO ACTION"), Some("RESTRICT"))),
+            ((None, None), (Some("RESTRICT"), Some("NO ACTION"))),
+            ((Some(""), Some("RESTRICT")), (Some("NO ACTION"), None)),
+        ];
+        for (source, target) in cases {
+            let result = prepare_schema_diff(mysql_fk_action_options(
+                DatabaseType::Mysql,
+                Some(DialectKind::Mysql),
+                source,
+                target,
+            ));
+            assert!(result.diffs.is_empty(), "{source:?} vs {target:?} reported {:?}", result.diffs);
+            assert!(!result.sync_sql.contains("FOREIGN KEY"), "no FK rebuild expected: {}", result.sync_sql);
+        }
+    }
+
+    #[test]
+    fn mysql_fk_real_action_change_is_still_reported() {
+        let result = prepare_schema_diff(mysql_fk_action_options(
+            DatabaseType::Mysql,
+            Some(DialectKind::Mysql),
+            (Some("CASCADE"), Some("SET NULL")),
+            (Some("NO ACTION"), Some("RESTRICT")),
+        ));
+        assert_eq!(result.diffs.len(), 1, "{:?}", result.diffs);
+        let changes = &result.diffs[0].foreign_keys.as_ref().expect("fk diffs")[0].changes;
+        assert!(changes.iter().any(|change| change == "update: NO ACTION → CASCADE"), "{changes:?}");
+        assert!(changes.iter().any(|change| change == "delete: NO ACTION → SET NULL"), "{changes:?}");
+    }
+
+    #[test]
+    fn postgres_fk_restrict_and_no_action_remain_distinct() {
+        let result = prepare_schema_diff(mysql_fk_action_options(
+            DatabaseType::Postgres,
+            Some(DialectKind::Postgres),
+            (Some("NO ACTION"), Some("RESTRICT")),
+            (Some("RESTRICT"), Some("RESTRICT")),
+        ));
+        assert_eq!(result.diffs.len(), 1, "PostgreSQL NO ACTION is deferrable, unlike RESTRICT");
     }
 
     #[test]

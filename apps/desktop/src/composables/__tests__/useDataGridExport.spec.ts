@@ -8,7 +8,7 @@ import { copyRichTextToClipboard, copyToClipboard } from "@/lib/common/clipboard
 import type { DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import type { CellSelectionMatrix, SelectionData } from "@/lib/dataGrid/gridSelection";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
-import { cancelQuery, extractDataGridSelection, exportQueryResultCsv, exportQueryResultJson, exportQueryResultMarkdown, exportQueryResultXlsx, exportSnapshotResult, readLargeValueChunk } from "@/lib/backend/api";
+import { cancelQuery, extractDataGridSelection, exportQueryResultCsv, exportQueryResultJson, exportQueryResultMarkdown, exportQueryResultXlsx, exportQueryResultsXlsx, exportSnapshotResult, readLargeValueChunk } from "@/lib/backend/api";
 import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { clearDataGridClipboardCopy, parseDataGridClipboard } from "@/lib/dataGrid/dataGridClipboard";
 import { MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridExternalValue } from "@/lib/mongo/mongoDocumentValues";
@@ -55,6 +55,7 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
     exportQueryResultJson: vi.fn(),
     exportQueryResultMarkdown: vi.fn(),
     exportQueryResultXlsx: vi.fn(),
+    exportQueryResultsXlsx: vi.fn(),
     exportSnapshotResult: vi.fn(),
     readLargeValueChunk: vi.fn(),
     cancelQuery: vi.fn(),
@@ -186,6 +187,55 @@ function createExportState(
 }
 
 describe("original LOB result exports", () => {
+  it("rejects unresolved legacy text in multi-sheet XLSX before writing any sheet", async () => {
+    const { original, state } = snapshotState({ mysqlDataCharsetReadOnly: computed(() => true), context: computed(() => "results") });
+    original.large_value_cells = [{ row_index: 0, column_index: 1, original_bytes: 20000, pending_decode: true }];
+    await state.exportResultSheetsXlsx([{ sheetName: "pending", result: original }]);
+    expect(exportQueryResultsXlsx).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("grid.largeValuePendingDecodeExport"), 5000);
+  });
+
+  it.each(["csv", "json"] as const)("rejects unresolved legacy text in complete-local %s instead of exporting a carrier prefix", async (format) => {
+    const { original, state } = snapshotState({ mysqlDataCharsetReadOnly: computed(() => true), context: computed(() => "results") });
+    original.large_value_cells = [{ row_index: 0, column_index: 1, original_bytes: 20000, pending_decode: true }];
+    await (format === "csv" ? state.exportCsv() : state.exportJson());
+    expect(exportSnapshotResult).not.toHaveBeenCalled();
+    expect(exportQueryResultCsv).not.toHaveBeenCalled();
+    expect(exportQueryResultJson).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("grid.largeValuePendingDecodeExport"), 5000);
+  });
+
+  it("exports selected legacy text only after full-value resolution", async () => {
+    const resolveSourceValues = vi.fn(async () => new Map([[1, new Map([[1, "缤纷彩虹完整值"]])]]));
+    const { original, state } = snapshotState({ mysqlDataCharsetReadOnly: computed(() => true), resolveSourceValues });
+    original.large_value_cells = [{ row_index: 0, column_index: 1, original_bytes: 20000, pending_decode: true }];
+    await state.exportCurrentPageCsv();
+    expect(resolveSourceValues).toHaveBeenCalledWith([1], [0, 1]);
+    expect(exportQueryResultCsv).toHaveBeenCalledWith(expect.any(String), ["id", "name"], [[1, "缤纷彩虹完整值"]], expect.anything(), expect.anything(), false);
+  });
+
+  it("blocks compatibility SQL and unsupported local exports before extraction or saving", async () => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+    const { state } = snapshotState({ mysqlDataCharsetReadOnly: computed(() => true), hasCellSelection: computed(() => true), selectedCellMatrix: computed(() => ({ columns: ["name"], rows: [["缤纷彩虹"]], rowIds: [1], columnIndexes: [1] })) });
+    await state.exportSql();
+    await state.exportCurrentPageSql();
+    await state.exportMarkdown();
+    await state.exportCurrentPageMarkdown();
+    await state.exportHtml();
+    await state.exportCurrentPageHtml();
+    await state.exportTxt();
+    await state.exportCurrentPageTxt();
+    expect(await state.exportWithExtractor("sql-inserts")).toBe(false);
+    expect(await state.copyWithExtractor("sql-inserts")).toBe(false);
+    expect(await state.copyWithExtractor("where-clause")).toBe(false);
+    expect(state.canCopyWithExtractor("sql-updates")).toBe(false);
+    expect(state.canCopyWithExtractor("csv")).toBe(true);
+    expect(saveTextFile).not.toHaveBeenCalled();
+    expect(extractDataGridSelection).not.toHaveBeenCalled();
+    expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     setActivePinia(createPinia());
@@ -2427,7 +2477,7 @@ describe("useDataGridExport prepared row statements", () => {
 
     setActivePinia(createPinia());
     await state.exportCurrentPageCsv();
-    expect(exportQueryResultCsv).toHaveBeenCalledWith(expect.any(String), ["_id", "nullable"], [["1", null]], expect.anything(), expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenCalledWith(expect.any(String), ["_id", "nullable"], [["1", null]], expect.anything(), expect.anything(), false);
 
     const reservedString = MONGO_DOCUMENT_GRID_NULL;
     const fullExportState = createMongoExportState({
@@ -2446,7 +2496,7 @@ describe("useDataGridExport prepared row statements", () => {
     });
 
     await fullExportState.exportCsv();
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["_id", "value"], [["1", reservedString]], expect.anything(), expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["_id", "value"], [["1", reservedString]], expect.anything(), expect.anything(), false);
   });
 
   it("exports temporal CSV values without an Excel formula wrapper (#10694)", async () => {
@@ -2461,7 +2511,7 @@ describe("useDataGridExport prepared row statements", () => {
 
     await state.exportCurrentPageCsv();
 
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["created_at"], [[timestamp]], expect.anything(), expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["created_at"], [[timestamp]], expect.anything(), expect.anything(), false);
   });
 
   it("exports only visible Mongo columns from the full result set", async () => {
@@ -2484,7 +2534,7 @@ describe("useDataGridExport prepared row statements", () => {
 
     await state.exportCsv();
 
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"], ["Other"]], expect.anything(), expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"], ["Other"]], expect.anything(), expect.anything(), false);
   });
 
   it("applies visible Mongo columns when the complete result is already local", async () => {
@@ -2513,7 +2563,7 @@ describe("useDataGridExport prepared row statements", () => {
 
     await state.exportCsv();
 
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"], ["Other"]], expect.anything(), expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"], ["Other"]], expect.anything(), expect.anything(), false);
   });
 
   it("exports duplicate-named columns by source position from the full result", async () => {
@@ -2546,6 +2596,7 @@ describe("useDataGridExport prepared row statements", () => {
       ],
       expect.anything(),
       expect.anything(),
+      false,
     );
   });
 
@@ -2581,6 +2632,7 @@ describe("useDataGridExport prepared row statements", () => {
       ],
       expect.anything(),
       expect.anything(),
+      false,
     );
   });
 
@@ -2593,11 +2645,12 @@ describe("useDataGridExport prepared row statements", () => {
     });
 
     await state.exportCsv();
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"]], expect.anything(), "\\N");
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"]], expect.anything(), "\\N", false);
 
     useSettingsStore().editorSettings.csvNullMode = "empty";
+    useSettingsStore().editorSettings.csvWithoutBom = true;
     await state.exportCsv();
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"]], expect.anything(), "");
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name"], [["Visible"]], expect.anything(), "", true);
   });
 
   it("exports missing Mongo fields as null while retaining explicit empty strings", async () => {
@@ -2742,7 +2795,7 @@ describe("useDataGridExport prepared row statements", () => {
 
     await state.exportCsv({ rowIds: [2], columnIndexes: [1, 2] });
 
-    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name", "email"], [["Bob", "bob@example.com"]], expect.anything(), expect.anything());
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["name", "email"], [["Bob", "bob@example.com"]], expect.anything(), expect.anything(), false);
   });
 
   it("exports non-Mongo JSON with selected columns and rows", async () => {
@@ -2806,6 +2859,7 @@ describe("useDataGridExport prepared row statements", () => {
       ],
       expect.anything(),
       expect.anything(),
+      false,
     );
   });
 });
@@ -3035,5 +3089,73 @@ describe("useDataGridExport MySQL BLOB 文本复制 (#12413)", () => {
 
     expect(copyRichTextToClipboard).toHaveBeenCalledWith("<table><tr><td>Ada</td></tr></table>", "<table><tr><td>Ada</td></tr></table>");
     expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
+  it("preserves per-cell spatialValues and spatialColumns when copying sql-inserts for SQL Server", async () => {
+    const spatialTable: DataGridTableMeta = {
+      tableName: "places",
+      primaryKeys: ["id"],
+      columns: [
+        { name: "id", data_type: "int", is_nullable: false, is_primary_key: true },
+        { name: "geo", data_type: "geometry", is_nullable: true },
+      ],
+    };
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0, 1],
+      columnIndexes: [0, 1],
+      columns: ["id", "geo"],
+      rows: [
+        [1, "POINT (30 10)"],
+        [2, "POINT (40 20)"],
+      ],
+    };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({
+      text: "INSERT INTO [places] ([id], [geo]) VALUES (1, geometry::STGeomFromText('POINT (30 10)', 3857)), (2, geometry::STGeomFromText('POINT (40 20)', 4326));",
+      mimeType: "application/sql",
+      fileExtension: "sql",
+      rowCount: 2,
+      columnCount: 2,
+    });
+    const state = createExportState(
+      spatialTable,
+      ["id", "geo"],
+      matrix,
+      undefined,
+      undefined,
+      [
+        [1, "POINT (30 10)"],
+        [2, "POINT (40 20)"],
+      ],
+      [],
+      DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
+      false,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      "sqlserver",
+      undefined,
+      {
+        spatialColumns: computed(() => [{ column_index: 1, srid: 0 }]),
+        spatialValues: computed(() => [
+          [null, 3857],
+          [null, 4326],
+        ]),
+      },
+    );
+
+    await expect(state.copyWithExtractor("sql-inserts")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extractor: "sql-inserts",
+        databaseType: "sqlserver",
+        spatialColumns: [{ column_index: 1, srid: 0 }],
+        spatialValues: [
+          [null, 3857],
+          [null, 4326],
+        ],
+      }),
+    );
   });
 });

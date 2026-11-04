@@ -82,6 +82,18 @@ describe("ExportProgressDialog display name", () => {
 });
 
 describe("ExportProgressDialog query timeout action", () => {
+  it("explains snapshot preparation and keeps cancellation available", async () => {
+    i18n.global.locale.value = "en";
+    const onCancel = vi.fn();
+    await mountDialog({ ...baseProps, status: "PreparingSnapshot", totalRows: 20000, onCancel });
+    expect(document.body.textContent).toContain("Preparing a consistent export snapshot");
+    expect(document.body.textContent).toContain("temporary disk space");
+    const cancel = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Cancel");
+    expect(cancel).toBeTruthy();
+    cancel!.click();
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
+
   it("offers connection settings for a query timeout", async () => {
     i18n.global.locale.value = "en";
     const onChangeQueryTimeout = vi.fn();

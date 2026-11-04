@@ -13,10 +13,29 @@ import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import * as api from "@/lib/backend/api";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 
 const { t } = useI18n();
 const { toast } = useToast();
-const { tasks, activeCount, hasActive, clearFinished, cancelTask, removeTask } = useExportTracker();
+const { tasks, activeCount, hasActive, clearFinished, cancelTask, removeTask, recoverCancelledTask } = useExportTracker();
+const recoveryOpen = ref(false);
+const pendingRemoval = ref<ExportTask>();
+
+function requestRemoval(task: ExportTask) {
+  if (task.canRemove === false) return;
+  if (task.status === "Unknown" || task.canRecoverCancellation) {
+    pendingRemoval.value = task;
+    recoveryOpen.value = true;
+  } else if (isFinished(task.status)) removeTask(task.exportId);
+}
+
+function confirmRemoval() {
+  const task = pendingRemoval.value;
+  pendingRemoval.value = undefined;
+  if (!task || !tasks.value.includes(task) || task.canRemove === false) return;
+  if (task.status === "Cancelling" && task.canRecoverCancellation) recoverCancelledTask(task.exportId);
+  else if (task.status === "Unknown" || isFinished(task.status)) removeTask(task.exportId);
+}
 const open = ref(false);
 const showAll = ref(false);
 const expandedFailureTaskIds = ref<string[]>([]);
@@ -49,7 +68,7 @@ const visibleTasks = computed(() => {
 
 const hasMore = computed(() => tasks.value.length > MAX_VISIBLE);
 
-const isActive = (status: string) => status === "Running" || status === "Writing" || status === "Cancelling";
+const isActive = (status: string) => status === "PreparingSnapshot" || status === "Running" || status === "Writing" || status === "Cancelling";
 const isFinished = (status: string) => status === "Done" || status === "Error" || status === "Cancelled";
 
 const finishedCount = computed(() => tasks.value.filter((t) => isFinished(t.status)).length);
@@ -98,6 +117,7 @@ const taskFileName = (task: ExportTask) => {
 };
 
 const taskTitle = (task: ExportTask) => {
+  if (task.kind === "table-copy") return `${t("tableCopyTask.title")}: ${task.tableName}`;
   if (task.kind === "data-dictionary") return `${t("dataDictionary.title")}: ${task.tableName}`;
   // database-export and sql-file keep their task labels on purpose: the former
   // names the database (filePath may be a directory), the latter already names
@@ -131,6 +151,9 @@ const comparePhaseText = (phase?: string) => {
 };
 
 const rowsText = (task: ExportTask) => {
+  if (task.kind === "table-copy") {
+    return [t(`tableCopyTask.${task.copyPhase ?? "preparing"}`), task.affectedRows === undefined ? "" : t("tableCopyTask.copiedRows", { count: task.affectedRows })].filter(Boolean).join(" · ");
+  }
   if (task.kind === "data-dictionary") {
     if (task.status === "Done") return [t("exportProgress.done"), task.dictionaryWarnings ? t("dataDictionary.warningCount", { count: task.dictionaryWarnings }) : ""].filter(Boolean).join(" · ");
     if (task.status === "Error") return t("exportProgress.error");
@@ -212,6 +235,7 @@ const rowsText = (task: ExportTask) => {
 };
 
 const taskStatusText = (task: ExportTask) => {
+  if (task.status === "PreparingSnapshot") return t("exportProgress.preparingSnapshot");
   if (task.status === "Queued") return t("exportProgress.queued");
   if (task.status === "Unknown") return t("exportProgress.unknown");
   if (task.status === "Cancelling") return t("databaseBackup.cancelling");
@@ -242,6 +266,7 @@ const databaseObjectText = (task: ExportTask) => {
 
 const statusIcon = (task: ExportTask) => {
   if (isActive(task.status)) {
+    if (task.kind === "table-copy") return Copy;
     if (task.kind === "database-export") return DatabaseBackup;
     if (task.kind === "data-dictionary") return FileDown;
     if (task.kind === "sql-file") return FileCode2;
@@ -272,6 +297,7 @@ const statusIcon = (task: ExportTask) => {
 
 const statusColor = (status: string) => {
   switch (status) {
+    case "PreparingSnapshot":
     case "Running":
     case "Writing":
     case "Cancelling":
@@ -385,7 +411,7 @@ function openTask(task: ExportTask): void {
             <div v-else-if="isActive(task.status)" class="w-full bg-muted rounded-full h-1.5 overflow-hidden">
               <div
                 v-if="
-                  task.totalRows ||
+                  (task.totalRows && task.status !== 'PreparingSnapshot') ||
                   (task.kind === 'database-export' && (task.totalObjects || task.overallPercent !== undefined)) ||
                   (task.kind === 'data-dictionary' && task.dictionaryPhase === 'collecting' && task.dictionaryProgressKnown && task.dictionaryTotal) ||
                   (task.kind === 'data-transfer' && task.totalTables) ||
@@ -461,7 +487,7 @@ function openTask(task: ExportTask): void {
               <FolderOpen class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
             </button>
             <button
-              v-if="(isActive(task.status) || task.status === 'Queued') && task.canCancel !== false"
+              v-if="!task.canRecoverCancellation && (isActive(task.status) || task.status === 'Queued') && task.canCancel !== false"
               class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted disabled:cursor-not-allowed"
               :disabled="task.status === 'Cancelling'"
               :title="task.status === 'Cancelling' ? t('databaseBackup.cancelling') : t('exportProgress.cancel')"
@@ -470,7 +496,7 @@ function openTask(task: ExportTask): void {
               <Loader2 v-if="task.status === 'Cancelling'" class="h-3.5 w-3.5 animate-spin text-primary" />
               <X v-else class="h-3.5 w-3.5 text-muted-foreground hover:text-destructive" />
             </button>
-            <button v-else-if="isFinished(task.status) || task.status === 'Unknown'" class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('exportProgress.delete')" @click="removeTask(task.exportId)">
+            <button v-else-if="task.canRemove !== false && (isFinished(task.status) || task.status === 'Unknown' || task.canRecoverCancellation)" class="flex h-6 w-6 items-center justify-center rounded hover:bg-muted" :title="t('exportProgress.delete')" @click="requestRemoval(task)">
               <X class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
             </button>
           </div>
@@ -490,6 +516,7 @@ function openTask(task: ExportTask): void {
       </div>
     </PopoverContent>
   </Popover>
+  <DangerConfirmDialog v-model:open="recoveryOpen" :title="t('exportProgress.recoveryTitle')" :message="t('exportProgress.recoveryMessage')" :confirm-label="t('exportProgress.recoveryConfirm')" initial-focus="cancel" @confirm="confirmRemoval" />
 </template>
 
 <style scoped>

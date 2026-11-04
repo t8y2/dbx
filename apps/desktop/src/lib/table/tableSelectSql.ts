@@ -4,7 +4,7 @@ import { DATABASE_SCHEMA_QUALIFIED_TYPES } from "@/lib/database/databaseCapabili
 import { jdbcDriverProfileUsesSchemaQualification } from "@/lib/database/jdbcDialect";
 import * as api from "@/lib/backend/api.ts";
 import { parseSqlServerLinkedSchema, sqlServerLinkedTableName } from "@/lib/database/sqlServerLinkedServers.ts";
-import { isExplicitlyQuotedSqlIdentifier, quoteGaussDbJdbcIdentifier, requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier.ts";
+import { isExplicitlyQuotedSqlIdentifier, quoteGaussDbJdbcIdentifier, requiresClickhouseIdentifierQuote, requiresDamengIdentifierQuote, requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier.ts";
 import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
 import { sqlSemanticTableNameSpans } from "@/lib/sql/semantic/model";
 import { tokenIsIdentifier, tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
@@ -91,7 +91,9 @@ function sqlStatementSpans(sql: string, dialectId: string): Array<{ start: numbe
 }
 
 export function quoteTableIdentifier(databaseType: DatabaseType | undefined, name: string): string {
-  if ((databaseType === "gaussdb" || databaseType === "opengauss") && isExplicitlyQuotedSqlIdentifier(name)) return name;
+  // Mirrors Rust `quote_table_identifier`: re-quoting an already delimited name
+  // produced `"""neptune"""` and PostgreSQL rejected it (#14194).
+  if ((databaseType === "gaussdb" || databaseType === "opengauss" || databaseType === "postgres") && isExplicitlyQuotedSqlIdentifier(name)) return name;
   if (databaseType === "iotdb") return name;
   // SOQL has no delimited identifiers — `"Account"` is a string literal there and
   // `SELECT * FROM "Account"` fails with MALFORMED_QUERY. Mirrors the Rust
@@ -149,8 +151,9 @@ function quoteWithDelimiter(name: string, delimiter: string): string {
 function requiresIdentifierQuote(databaseType: DatabaseType | undefined, name: string, identifierQuote?: string): boolean {
   if (isExplicitlyQuotedSqlIdentifier(name)) return false;
   switch (databaseType) {
-    case "mysql":
     case "clickhouse":
+      return requiresClickhouseIdentifierQuote(name);
+    case "mysql":
     case "hive":
     case "argo":
     case "transwarp":

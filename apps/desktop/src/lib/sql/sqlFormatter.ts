@@ -985,6 +985,14 @@ export function compressSqlText(sql: string, dialect: SqlCompressDialect = "gene
 
   const len = sql.length;
   let out = "";
+  // Tracks the last character of `out`: calling out.endsWith() on a string grown with += forces V8
+  // to flatten it every time, which made compressing a long script quadratic.
+  let last = "";
+  const emit = (text: string) => {
+    if (!text) return;
+    out += text;
+    last = text[text.length - 1];
+  };
   let i = 0;
 
   const isWhitespace = (c: string) => c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f" || c === "\v";
@@ -1013,10 +1021,10 @@ export function compressSqlText(sql: string, dialect: SqlCompressDialect = "gene
     }
     // PostgreSQL only concatenates adjacent string literals when their separating
     // whitespace contains a newline, so flattening this case would make valid SQL invalid.
-    if (dialect === "postgres" && containsLineBreak && out.endsWith("'") && sql[i] === "'") {
-      out += "\n";
-    } else if (out && !out.endsWith(" ")) {
-      out += " ";
+    if (dialect === "postgres" && containsLineBreak && last === "'" && sql[i] === "'") {
+      emit("\n");
+    } else if (last !== "" && last !== " ") {
+      emit(" ");
     }
   };
 
@@ -1035,14 +1043,14 @@ export function compressSqlText(sql: string, dialect: SqlCompressDialect = "gene
         const end = sql.indexOf("*/", contentStart);
         if (end < 0) {
           // Keep malformed input malformed instead of silently turning it into executable SQL.
-          out += sql.slice(i);
+          emit(sql.slice(i));
           break;
         }
         const content = sql.slice(contentStart, end);
         const leadingSpace = /^\s/.test(content) ? " " : "";
         const trailingSpace = /\s$/.test(content) ? " " : "";
         const compressedContent = content.trim() ? compressSqlText(content, dialect) : "";
-        out += `/*${third}${leadingSpace}${compressedContent}${trailingSpace}*/`;
+        emit(`/*${third}${leadingSpace}${compressedContent}${trailingSpace}*/`);
         i = end + 2;
         continue;
       }
@@ -1064,10 +1072,10 @@ export function compressSqlText(sql: string, dialect: SqlCompressDialect = "gene
       }
       if (depth > 0) {
         // Removing an unterminated comment can expose a destructive statement that was invalid before.
-        out += sql.slice(commentStart);
+        emit(sql.slice(commentStart));
         break;
       }
-      if (out && !out.endsWith(" ")) out += " ";
+      if (last !== "" && last !== " ") emit(" ");
       continue;
     }
 
@@ -1083,14 +1091,14 @@ export function compressSqlText(sql: string, dialect: SqlCompressDialect = "gene
     if (dialect === "postgres" && ch === "$") {
       const tag = dollarQuoteTagAt(i);
       if (tag) {
-        out += tag;
+        emit(tag);
         i += tag.length;
         const end = sql.indexOf(tag, i);
         if (end < 0) {
-          out += sql.slice(i);
+          emit(sql.slice(i));
           break;
         }
-        out += sql.slice(i, end + tag.length);
+        emit(sql.slice(i, end + tag.length));
         i = end + tag.length;
         continue;
       }
@@ -1098,22 +1106,22 @@ export function compressSqlText(sql: string, dialect: SqlCompressDialect = "gene
 
     // 单引号字符串字面量（处理 '' 转义；MySQL 额外处理反斜杠转义）
     if (ch === "'") {
-      out += "'";
+      emit("'");
       i++;
       const postgresEscapeString = dialect === "postgres" && (sql[i - 2] === "E" || sql[i - 2] === "e") && !isIdentifierPart(sql[i - 3]);
       while (i < len) {
         const c = sql[i];
         // MySQL strings and PostgreSQL E'...' strings use backslash escapes.
         if ((dialect === "mysql" || postgresEscapeString) && c === "\\" && i + 1 < len) {
-          out += c;
-          out += sql[i + 1];
+          emit(c);
+          emit(sql[i + 1]);
           i += 2;
           continue;
         }
-        out += c;
+        emit(c);
         if (c === "'") {
           if (sql[i + 1] === "'") {
-            out += sql[i + 1];
+            emit(sql[i + 1]);
             i += 2;
             continue;
           }
@@ -1127,19 +1135,19 @@ export function compressSqlText(sql: string, dialect: SqlCompressDialect = "gene
 
     // 双引号标识符（处理 "" 转义）
     if (ch === '"') {
-      out += '"';
+      emit('"');
       i++;
       while (i < len) {
         if (dialect === "mysql" && sql[i] === "\\" && i + 1 < len) {
-          out += sql[i];
-          out += sql[i + 1];
+          emit(sql[i]);
+          emit(sql[i + 1]);
           i += 2;
           continue;
         }
-        out += sql[i];
+        emit(sql[i]);
         if (sql[i] === '"') {
           if (sql[i + 1] === '"') {
-            out += sql[i + 1];
+            emit(sql[i + 1]);
             i += 2;
             continue;
           }
@@ -1153,14 +1161,14 @@ export function compressSqlText(sql: string, dialect: SqlCompressDialect = "gene
 
     // 反引号标识符（MySQL）
     if (ch === "`") {
-      out += "`";
+      emit("`");
       i++;
       while (i < len && sql[i] !== "`") {
-        out += sql[i];
+        emit(sql[i]);
         i++;
       }
       if (i < len) {
-        out += "`";
+        emit("`");
         i++;
       }
       continue;
@@ -1168,14 +1176,14 @@ export function compressSqlText(sql: string, dialect: SqlCompressDialect = "gene
 
     // SQL Server 方括号标识符 [...]（]] 为转义 ]）
     if (dialect === "sqlserver" && ch === "[") {
-      out += "[";
+      emit("[");
       i++;
       while (i < len) {
         const c = sql[i];
-        out += c;
+        emit(c);
         if (c === "]") {
           if (sql[i + 1] === "]") {
-            out += sql[i + 1];
+            emit(sql[i + 1]);
             i += 2;
             continue;
           }
@@ -1193,7 +1201,7 @@ export function compressSqlText(sql: string, dialect: SqlCompressDialect = "gene
       continue;
     }
 
-    out += ch;
+    emit(ch);
     i++;
   }
 

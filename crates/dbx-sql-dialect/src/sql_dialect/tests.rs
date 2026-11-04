@@ -613,6 +613,32 @@ fn jdbc_table_data_qualifies_schema_without_forcing_identifier_quotes() {
 }
 
 #[test]
+fn opengauss_table_data_uses_compatibility_identifier_quote() {
+    // openGauss keeps the PostgreSQL catalog but switches identifier quoting with
+    // the database compatibility mode: B/MySQL databases reject the double quotes
+    // that A/PG databases require (#13596).
+    let base = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::OpenGauss),
+        schema: Some("dbx-demo".to_string()),
+        table_name: "order".to_string(),
+        limit: Some(25),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            identifier_quote: Some("`".to_string()),
+            ..base.clone()
+        }),
+        "SELECT * FROM `dbx-demo`.`order` LIMIT 25;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions { identifier_quote: Some("\"".to_string()), ..base }),
+        "SELECT * FROM \"dbx-demo\".\"order\" LIMIT 25;"
+    );
+}
+
+#[test]
 fn builds_table_data_where_and_schema_queries() {
     assert_eq!(
         build_count_table_sql(Some(DatabaseType::Kingbase), Some("cqbq_ls"), "actionlogs"),

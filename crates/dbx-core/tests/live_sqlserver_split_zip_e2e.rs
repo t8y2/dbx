@@ -92,6 +92,8 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         database_info: None,
         sidebar_auto_load_all_tables: false,
         show_database_links: None,
+        show_native_jobs: None,
+        show_user_admin: None,
     }
 }
 
@@ -128,6 +130,7 @@ async fn manual_e2e_sqlserver_default_split_zip_export_then_import_skip_relation
         schema: String::new(),
         file_path: zip_path.to_string_lossy().to_string(),
         selected_tables: Vec::new(),
+        selected_objects: None,
         excluded_tables: Vec::new(),
         include_structure: true,
         include_data: true,
@@ -135,6 +138,7 @@ async fn manual_e2e_sqlserver_default_split_zip_export_then_import_skip_relation
         include_create_database: false,
         drop_table_if_exists: true,
         omit_auto_increment: false,
+        omit_database_qualifier: false,
         preserve_original_language: false,
         fail_on_error: true,
         prevent_overwrite: false,

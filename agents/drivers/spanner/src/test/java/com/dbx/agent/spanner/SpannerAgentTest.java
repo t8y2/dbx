@@ -19,6 +19,7 @@ import java.lang.reflect.Proxy;
 import java.sql.Array;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
@@ -208,6 +209,113 @@ class SpannerAgentTest extends JdbcFakeExecutionBehaviorTest {
         assertEquals(Collections.singletonList("release_ts"), secondary.getIncluded_columns());
         assertFalse(secondary.getIs_unique());
         assertFalse(secondary.getIs_primary());
+    }
+
+    @Test
+    void keepsKeyDirectionsAlignedWithOrdinalPosition() {
+        Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
+        rows.put("getIndexInfo", Arrays.asList(
+            // The driver reports the one-letter ASC_OR_DESC ('A'/'D'), not ASC/DESC.
+            indexRow("PRIMARY_KEY", "singer_id", 1, false, "A"),
+            indexRow("PRIMARY_KEY", "album_id", 2, false, "D"),
+            // Rows arriving out of ordinal order must not detach a direction from its column,
+            // and the STORING column (NULL ordinal) must not add a direction entry.
+            indexRow("idx_albums_title", "release_ts", 2, true, "D"),
+            indexRow("idx_albums_title", "stored_col", null, true, null),
+            indexRow("idx_albums_title", "title", 1, true, "A")
+        ));
+        SpannerAgent agent = connectedAgent(GOOGLE_SQL_PRODUCT, null, rows);
+
+        List<IndexInfo> indexes = agent.listIndexes("", "albums");
+
+        assertEquals(2, indexes.size());
+        IndexInfo primaryKey = indexes.get(0);
+        assertEquals(Arrays.asList("singer_id", "album_id"), primaryKey.getColumns());
+        assertEquals(Arrays.asList("ASC", "DESC"), primaryKey.getKey_directions());
+
+        IndexInfo secondary = indexes.get(1);
+        assertEquals(Arrays.asList("title", "release_ts"), secondary.getColumns());
+        assertEquals(Arrays.asList("ASC", "DESC"), secondary.getKey_directions());
+        assertEquals(Collections.singletonList("stored_col"), secondary.getIncluded_columns());
+    }
+
+    @Test
+    void marksSpannerSearchIndexesAsNonUniqueAndTyped() {
+        Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
+        rows.put("getIndexInfo", Arrays.asList(
+            indexRow("PRIMARY_KEY", "singer_id", 1, false),
+            // Verified on google-cloud-spanner-jdbc 2.47.0 against the emulator: a
+            // SEARCH index comes back with NON_UNIQUE=false even though it must not
+            // be rendered as CREATE UNIQUE INDEX.
+            indexRow("idx_search", "tokenfull", 1, false),
+            indexRow("idx_search", "tokenngram", 2, false)
+        ));
+        rows.put("informationSchemaIndexes", Arrays.asList(
+            row("INDEX_NAME", "PRIMARY_KEY", "INDEX_TYPE", "PRIMARY_KEY"),
+            row("INDEX_NAME", "idx_search", "INDEX_TYPE", "SEARCH")
+        ));
+        SpannerAgent agent = connectedAgent(GOOGLE_SQL_PRODUCT, null, rows);
+
+        List<IndexInfo> indexes = agent.listIndexes("", "albums");
+
+        assertEquals(2, indexes.size());
+        IndexInfo primaryKey = indexes.get(0);
+        assertTrue(primaryKey.getIs_unique());
+        assertTrue(primaryKey.getIs_primary());
+        assertNull(primaryKey.getIndex_type());
+
+        IndexInfo search = indexes.get(1);
+        assertFalse(search.getIs_unique(), "Spanner has no CREATE UNIQUE SEARCH INDEX grammar");
+        assertEquals("SEARCH", search.getIndex_type());
+        assertEquals(Arrays.asList("tokenfull", "tokenngram"), search.getColumns());
+    }
+
+    @Test
+    void keepsMetadataUniquenessWhenNoIndexTypesAreReported() {
+        // No informationSchemaIndexes rows: the type query returns nothing and the
+        // classification falls back to the getIndexInfo uniqueness flag.
+        Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
+        rows.put("getIndexInfo", Arrays.asList(
+            indexRow("PRIMARY_KEY", "singer_id", 1, false),
+            indexRow("idx_search", "tokenfull", 1, false)
+        ));
+        SpannerAgent agent = connectedAgent(GOOGLE_SQL_PRODUCT, null, rows);
+
+        List<IndexInfo> indexes = agent.listIndexes("", "albums");
+
+        assertEquals(2, indexes.size());
+        assertTrue(indexes.get(1).getIs_unique());
+        assertNull(indexes.get(1).getIndex_type());
+    }
+
+    @Test
+    void keepsMetadataUniquenessWhenTheIndexTypeQueryFails() {
+        Map<String, List<Map<String, Object>>> rows = new LinkedHashMap<>();
+        rows.put("getIndexInfo", Arrays.asList(
+            indexRow("PRIMARY_KEY", "singer_id", 1, false),
+            indexRow("idx_search", "tokenfull", 1, false)
+        ));
+        // A backend without the catalog (or any query failure) must not break index
+        // listing: the classification falls back to the metadata uniqueness flag.
+        DatabaseMetaData metaData = fakeMetaData(GOOGLE_SQL_PRODUCT, rows, new ArrayList<>());
+        Connection failingConnection = proxy(Connection.class, (method, args) -> {
+            if ("getMetaData".equals(method.getName())) {
+                return metaData;
+            }
+            if ("prepareStatement".equals(method.getName())) {
+                throw new SQLException("INDEXES catalog unavailable");
+            }
+            return defaultValue(method.getReturnType());
+        });
+        SpannerAgent agent = new SpannerAgent();
+        agent.detectDialect(failingConnection);
+        TestSupport.setPrivateConnection(agent, failingConnection);
+
+        List<IndexInfo> indexes = agent.listIndexes("", "albums");
+
+        assertEquals(2, indexes.size());
+        assertTrue(indexes.get(1).getIs_unique());
+        assertNull(indexes.get(1).getIndex_type());
     }
 
     @Test
@@ -604,6 +712,29 @@ class SpannerAgentTest extends JdbcFakeExecutionBehaviorTest {
             if ("getSchema".equals(name)) {
                 return schema;
             }
+            if ("createStatement".equals(name) || "prepareStatement".equals(name)) {
+                // prepareStatement receives the SQL; the later no-arg executeQuery does not.
+                return fakeIndexTypesStatement(
+                    args.length > 0 && String.valueOf(args[0]).contains("INFORMATION_SCHEMA.INDEXES"),
+                    rowsByCall);
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    /**
+     * Backs {@code SpannerAgent.spannerIndexTypes}: a statement whose executeQuery
+     * returns the scripted {@code INFORMATION_SCHEMA.INDEXES} rows (empty when the
+     * key is absent, or a failing statement when the SQL was not scripted).
+     */
+    private static PreparedStatement fakeIndexTypesStatement(boolean scripted, Map<String, List<Map<String, Object>>> rowsByCall) {
+        return proxy(PreparedStatement.class, (method, args) -> {
+            if ("executeQuery".equals(method.getName())) {
+                if (!scripted) {
+                    throw new SQLException("unsupported statement");
+                }
+                return fakeResultSet(rowsByCall.get("informationSchemaIndexes"));
+            }
             return defaultValue(method.getReturnType());
         });
     }
@@ -735,6 +866,14 @@ class SpannerAgentTest extends JdbcFakeExecutionBehaviorTest {
             "ORDINAL_POSITION", ordinal,
             "NON_UNIQUE", nonUnique
         );
+    }
+
+    private static Map<String, Object> indexRow(
+        String indexName, String column, Integer ordinal, boolean nonUnique, String ascOrDesc
+    ) {
+        Map<String, Object> result = indexRow(indexName, column, ordinal, nonUnique);
+        result.put("ASC_OR_DESC", ascOrDesc);
+        return result;
     }
 
     @SuppressWarnings("unchecked")

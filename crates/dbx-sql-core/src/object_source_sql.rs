@@ -593,8 +593,16 @@ fn build_executable_object_source_statements_with_mysql_validation_name(
         return Ok(vec![executable_oracle_view_ddl(input.schema.as_deref(), &input.name, source)]);
     }
 
-    if is_oracle_like(input.database_type)
-        && matches!(input.object_type, ObjectSourceKind::Function | ObjectSourceKind::Procedure)
+    if (is_oracle_like(input.database_type) || input.database_type == DatabaseType::OceanbaseOracle)
+        && matches!(
+            input.object_type,
+            ObjectSourceKind::Function
+                | ObjectSourceKind::Procedure
+                | ObjectSourceKind::Package
+                | ObjectSourceKind::PackageBody
+                | ObjectSourceKind::Type
+                | ObjectSourceKind::TypeBody
+        )
     {
         return Ok(vec![executable_oracle_routine_ddl(source)]);
     }
@@ -736,7 +744,12 @@ fn validate_oracle_object_source(
         source.to_string()
     } else if matches!(
         object_type,
-        ObjectSourceKind::Procedure | ObjectSourceKind::Function | ObjectSourceKind::Type | ObjectSourceKind::TypeBody
+        ObjectSourceKind::Procedure
+            | ObjectSourceKind::Function
+            | ObjectSourceKind::Package
+            | ObjectSourceKind::PackageBody
+            | ObjectSourceKind::Type
+            | ObjectSourceKind::TypeBody
     ) {
         format!("CREATE OR REPLACE {}", source.trim())
     } else {
@@ -1138,6 +1151,17 @@ pub fn build_export_object_source_sql(
     if source.is_empty() {
         return String::new();
     }
+    if is_oracle_plsql_script_target(database_type)
+        && matches!(
+            object_type,
+            ObjectSourceKind::Procedure
+                | ObjectSourceKind::Function
+                | ObjectSourceKind::Package
+                | ObjectSourceKind::PackageBody
+        )
+    {
+        return oracle_plsql_script_unit(source);
+    }
     // MySQL routine bodies, trigger bodies and event bodies may contain `;`, so the
     // exported statements need a client-side delimiter the same way `mysqldump` emits one.
     if is_mysql_like(database_type)
@@ -1456,9 +1480,69 @@ fn executable_oracle_view_ddl(schema: Option<&str>, name: &str, source: &str) ->
     format!("CREATE OR REPLACE VIEW {} AS\n{}", postgres_qualified_name(schema, name), ensure_semicolon(trimmed))
 }
 
+fn is_oracle_plsql_script_target(database_type: DatabaseType) -> bool {
+    matches!(database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng)
+}
+
+static STORED_PLSQL_UNIT_START: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"(?i)^(?:PROCEDURE|FUNCTION|PACKAGE)\b").unwrap());
+static CREATE_PLSQL_UNIT_LINE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(
+        r"(?im)^[ \t]*CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?(?:PACKAGE|PROCEDURE|FUNCTION|TYPE|TRIGGER)\b",
+    )
+    .unwrap()
+});
+static CREATE_PACKAGE_BODY_LINE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"(?im)^[ \t]*CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?PACKAGE\s+BODY\b").unwrap()
+});
+
+/// Split package DDL into the spec and the body it may carry.
+///
+/// Oracle's `DBMS_METADATA.GET_DDL('PACKAGE', ...)` returns the spec followed by
+/// `CREATE OR REPLACE ... PACKAGE BODY`; other sources return the spec alone. An
+/// export writes the body later than the spec, after the routines it may call.
+pub fn split_package_spec_and_body(source: &str) -> (&str, Option<&str>) {
+    let statement_start = leading_sql_statement_start(source);
+    match CREATE_PACKAGE_BODY_LINE.find_iter(source).map(|found| found.start()).find(|&start| start > statement_start) {
+        Some(body_start) => {
+            let spec = strip_standalone_trailing_slash(&source[..body_start]);
+            (spec, Some(source[body_start..].trim()))
+        }
+        None => (source, None),
+    }
+}
+
+/// Stored PL/SQL source starts at `PROCEDURE`/`FUNCTION`/`PACKAGE [BODY]` without
+/// `CREATE OR REPLACE`, and its body contains `;`, so a replayable script needs the
+/// prefix plus a `/` line that ends the unit. A source carrying several units gets a
+/// `/` between them as well.
+fn oracle_plsql_script_unit(source: &str) -> String {
+    let source = strip_standalone_trailing_slash(source);
+    let statement_start = leading_sql_statement_start(source);
+    let (leading, executable) = source.split_at(statement_start);
+    let unit = if STORED_PLSQL_UNIT_START.is_match(executable) {
+        format!("{leading}CREATE OR REPLACE {executable}")
+    } else {
+        source.to_string()
+    };
+    let mut script = String::with_capacity(unit.len() + 8);
+    let mut previous = 0;
+    for next in
+        CREATE_PLSQL_UNIT_LINE.find_iter(&unit).map(|found| found.start()).filter(|&start| start > statement_start)
+    {
+        let previous_unit = unit[previous..next].trim_end();
+        script.push_str(previous_unit);
+        script.push_str(if previous_unit.lines().last().map(str::trim) == Some("/") { "\n" } else { "\n/\n" });
+        previous = next;
+    }
+    script.push_str(unit[previous..].trim_end());
+    script.push_str("\n/");
+    script
+}
+
 fn executable_oracle_routine_ddl(source: &str) -> String {
     let trimmed = source.trim();
-    if Regex::new(r"(?i)^(?:PROCEDURE|FUNCTION)\b").unwrap().is_match(trimmed) {
+    if Regex::new(r"(?i)^(?:PROCEDURE|FUNCTION|PACKAGE(?:\s+BODY)?|TYPE(?:\s+BODY)?)\b").unwrap().is_match(trimmed) {
         return ensure_semicolon(&format!("CREATE OR REPLACE {trimmed}"));
     }
     ensure_semicolon(trimmed)
@@ -3501,6 +3585,30 @@ mod tests {
     }
 
     #[test]
+    fn oceanbase_oracle_bare_package_body_source_saves_as_create_or_replace() {
+        let source = "PACKAGE BODY PAYROLL AS\n  PROCEDURE PROCESS IS BEGIN NULL; END;\nEND PAYROLL;";
+
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+            let statements =
+                build_executable_object_source_statements(input(database_type, ObjectSourceKind::PackageBody, source))
+                    .unwrap();
+
+            assert_eq!(
+                statements,
+                vec![
+                    "CREATE OR REPLACE PACKAGE BODY PAYROLL AS\n  PROCEDURE PROCESS IS BEGIN NULL; END;\nEND PAYROLL;"
+                ]
+            );
+
+            let editable = build_editable_object_source(input(database_type, ObjectSourceKind::PackageBody, source));
+            assert_eq!(
+                editable,
+                "CREATE OR REPLACE PACKAGE BODY PAYROLL AS\n  PROCEDURE PROCESS IS BEGIN NULL; END;\nEND PAYROLL;"
+            );
+        }
+    }
+
+    #[test]
     fn oracle_routine_create_prefix_is_not_duplicated() {
         for source in [
             "CREATE PROCEDURE refresh_cache AS BEGIN NULL; END;",
@@ -3847,6 +3955,93 @@ mod tests {
         let sql = build_export_object_source_sql(DatabaseType::Mysql, ObjectSourceKind::Procedure, source);
 
         assert_eq!(sql, source);
+    }
+
+    #[test]
+    fn oracle_plsql_export_is_a_replayable_script_unit() {
+        let cases = [
+            (
+                "stored procedure source",
+                DatabaseType::Oracle,
+                ObjectSourceKind::Procedure,
+                "PROCEDURE prc_clear_orders AS\nBEGIN\n  DELETE FROM t_order;\nEND;",
+                "CREATE OR REPLACE PROCEDURE prc_clear_orders AS\nBEGIN\n  DELETE FROM t_order;\nEND;\n/",
+            ),
+            (
+                "function source",
+                DatabaseType::Dameng,
+                ObjectSourceKind::Function,
+                "function fn_total RETURN NUMBER AS\nBEGIN\n  RETURN 1;\nEND;",
+                "CREATE OR REPLACE function fn_total RETURN NUMBER AS\nBEGIN\n  RETURN 1;\nEND;\n/",
+            ),
+            (
+                "package spec",
+                DatabaseType::OceanbaseOracle,
+                ObjectSourceKind::Package,
+                "PACKAGE pkg_order AS\n  PROCEDURE clear_all;\nEND pkg_order;",
+                "CREATE OR REPLACE PACKAGE pkg_order AS\n  PROCEDURE clear_all;\nEND pkg_order;\n/",
+            ),
+            (
+                "package body after a comment",
+                DatabaseType::Oracle,
+                ObjectSourceKind::PackageBody,
+                "-- body\nPACKAGE BODY pkg_order AS\n  PROCEDURE clear_all IS BEGIN NULL; END;\nEND pkg_order;",
+                "-- body\nCREATE OR REPLACE PACKAGE BODY pkg_order AS\n  PROCEDURE clear_all IS BEGIN NULL; END;\nEND pkg_order;\n/",
+            ),
+            (
+                "package DDL carrying the body",
+                DatabaseType::Oracle,
+                ObjectSourceKind::Package,
+                "\n  CREATE OR REPLACE EDITIONABLE PACKAGE \"HR\".\"PKG_ORDER\" AS\n  PROCEDURE clear_all;\nEND pkg_order;\nCREATE OR REPLACE EDITIONABLE PACKAGE BODY \"HR\".\"PKG_ORDER\" AS\n  PROCEDURE clear_all IS BEGIN NULL; END;\nEND pkg_order;",
+                "CREATE OR REPLACE EDITIONABLE PACKAGE \"HR\".\"PKG_ORDER\" AS\n  PROCEDURE clear_all;\nEND pkg_order;\n/\nCREATE OR REPLACE EDITIONABLE PACKAGE BODY \"HR\".\"PKG_ORDER\" AS\n  PROCEDURE clear_all IS BEGIN NULL; END;\nEND pkg_order;\n/",
+            ),
+            (
+                "package DDL already split by a slash",
+                DatabaseType::Oracle,
+                ObjectSourceKind::Package,
+                "CREATE OR REPLACE PACKAGE p AS\n  x NUMBER;\nEND p;\n/\n\nCREATE OR REPLACE PACKAGE BODY p AS\nBEGIN\n  NULL;\nEND p;\n/",
+                "CREATE OR REPLACE PACKAGE p AS\n  x NUMBER;\nEND p;\n/\nCREATE OR REPLACE PACKAGE BODY p AS\nBEGIN\n  NULL;\nEND p;\n/",
+            ),
+            (
+                "full DDL already terminated",
+                DatabaseType::Oracle,
+                ObjectSourceKind::Procedure,
+                "CREATE OR REPLACE EDITIONABLE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;\n/",
+                "CREATE OR REPLACE EDITIONABLE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;\n/",
+            ),
+        ];
+
+        for (name, database_type, object_type, source, expected) in cases {
+            assert_eq!(build_export_object_source_sql(database_type, object_type, source), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn package_ddl_splits_into_spec_and_body() {
+        let cases = [
+            (
+                "Oracle DDL carrying the body",
+                "CREATE OR REPLACE EDITIONABLE PACKAGE \"HR\".\"P\" AS\n  x NUMBER;\nEND p;\n  CREATE OR REPLACE EDITIONABLE PACKAGE BODY \"HR\".\"P\" AS\nBEGIN NULL; END p;\n",
+                "CREATE OR REPLACE EDITIONABLE PACKAGE \"HR\".\"P\" AS\n  x NUMBER;\nEND p;",
+                Some("CREATE OR REPLACE EDITIONABLE PACKAGE BODY \"HR\".\"P\" AS\nBEGIN NULL; END p;"),
+            ),
+            (
+                "slash between spec and body",
+                "CREATE OR REPLACE PACKAGE p AS\n  x NUMBER;\nEND p;\n/\nCREATE OR REPLACE PACKAGE BODY p AS\nBEGIN NULL; END p;",
+                "CREATE OR REPLACE PACKAGE p AS\n  x NUMBER;\nEND p;",
+                Some("CREATE OR REPLACE PACKAGE BODY p AS\nBEGIN NULL; END p;"),
+            ),
+            (
+                "stored spec alone mentioning the body in a comment",
+                "PACKAGE p AS\n  -- see the PACKAGE BODY for details\n  x NUMBER;\nEND p;",
+                "PACKAGE p AS\n  -- see the PACKAGE BODY for details\n  x NUMBER;\nEND p;",
+                None,
+            ),
+        ];
+
+        for (name, source, spec, body) in cases {
+            assert_eq!(split_package_spec_and_body(source), (spec, body), "{name}");
+        }
     }
 
     #[test]

@@ -72,7 +72,7 @@ async function mountDialogs() {
 }
 
 describe("useDialogSources", () => {
-  it.each(["dbx", "rdm"] as const)("runs the final %s import confirmation as a single flight", async (source) => {
+  it.each(["dbx", "rdm", "another-redis"] as const)("runs the final %s import confirmation as a single flight", async (source) => {
     let resolveApply!: (value: { count: number }) => void;
     const applyPromise = new Promise<{ count: number }>((resolve) => {
       resolveApply = resolve;

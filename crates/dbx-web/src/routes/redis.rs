@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::error::AppError;
 use crate::state::WebState;
-use dbx_core::db::redis_driver::RedisKeysExpiryResult;
+use dbx_core::db::redis_driver::{RedisKeyMetadata, RedisKeysExpiryResult};
 
 /// Check if a connection is read-only and return an error if so.
 async fn ensure_writable(
@@ -280,6 +280,14 @@ pub struct RedisKeysTtlRequest {
     pub db: u32,
     pub key_raws: Vec<String>,
     pub ttl: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedisKeyMetadataBatchRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub key_raws: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -845,6 +853,17 @@ pub async fn set_expire_at(
     .await
     .map_err(AppError::from)?;
     Ok(Json(()))
+}
+
+pub async fn key_metadata_batch(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisKeyMetadataBatchRequest>,
+) -> Result<Json<Vec<RedisKeyMetadata>>, AppError> {
+    let result =
+        dbx_core::redis_ops::redis_key_metadata_batch_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raws)
+            .await
+            .map_err(AppError::from)?;
+    Ok(Json(result))
 }
 
 pub async fn set_keys_ttl(

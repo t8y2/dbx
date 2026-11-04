@@ -5,6 +5,7 @@ use std::sync::Arc;
 use dbx_core::connection::{AppState, PoolKind};
 use dbx_core::db::duckdb_worker_process::DuckDbWorkerClient;
 use dbx_core::models::connection::ConnectionConfig;
+use dbx_core::query::{close_query_session, execute_sql_statement_with_options, QueryExecutionOptions};
 use dbx_core::query_result_export::{export_query_result_core, QueryResultExportRequest};
 use dbx_core::table_export::{export_table_data_core, TableExportRequest};
 use dbx_core::table_import::{parse_csv_bytes, parse_xlsx_file};
@@ -28,6 +29,10 @@ pub fn run_parquet_exports(driver: PathBuf) {
 
 pub fn run_snapshot_cleanup(driver: PathBuf) {
     run_with_stack(move || snapshots_preserve_query_values_and_cleanup(driver));
+}
+
+pub fn run_query_pages(driver: PathBuf) {
+    run_with_stack(move || query_pages_preserve_one_execution(driver));
 }
 
 struct Fixture {
@@ -72,6 +77,10 @@ impl Fixture {
     async fn assert_clean(&self) {
         let result = self.sql(
             "SELECT count(*) FROM duckdb_tables() WHERE database_name = 'temp' AND starts_with(table_name, '__dbx_export_')",
+        ).await;
+        assert_eq!(cell_number(&result.rows[0][0]), 0);
+        let result = self.sql(
+            "SELECT count(*) FROM duckdb_tables() WHERE database_name = 'temp' AND starts_with(table_name, '__dbx_result_')",
         ).await;
         assert_eq!(cell_number(&result.rows[0][0]), 0);
         assert_eq!(cell_number(&self.sql("SELECT * FROM keep_me").await.rows[0][0]), 42);
@@ -206,6 +215,33 @@ async fn snapshots_preserve_query_values_and_cleanup(driver: PathBuf) {
     assert_eq!(cell_number(&fixture.sql("SELECT nextval('calls')").await.rows[0][0]), 2051);
     fixture.assert_clean().await;
 
+    // Native DuckDB exposes SQL BEGIN/ROLLBACK on its shared session, rather
+    // than DBX manual-transaction handles. Export must see pending writes and
+    // must not commit or discard the user's transaction.
+    assert!(dbx_core::query::begin_manual_transaction(&fixture.state, &fixture.id, "main", None, None)
+        .await
+        .unwrap_err()
+        .contains("not supported"));
+    fixture.sql("CREATE TABLE transaction_values (id INT)").await;
+    fixture.sql("BEGIN").await;
+    fixture.sql("INSERT INTO transaction_values VALUES (42)").await;
+    let request = fixture.query_request("SELECT * FROM transaction_values", &path, "csv");
+    let preparing = std::sync::atomic::AtomicBool::new(false);
+    export_query_result_core(&fixture.state, &request, None, |progress| {
+        if matches!(progress.status, dbx_core::table_export::ExportStatus::PreparingSnapshot) {
+            preparing.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    })
+    .await
+    .unwrap();
+    assert!(preparing.load(std::sync::atomic::Ordering::Relaxed));
+    let parsed = parse_csv_bytes(&std::fs::read(&path).unwrap(), 10).unwrap();
+    assert_eq!(parsed.rows.len(), 1);
+    assert_eq!(cell_number(&parsed.rows[0][0]), 42);
+    fixture.sql("ROLLBACK").await;
+    assert!(fixture.sql("SELECT * FROM transaction_values").await.rows.is_empty());
+    fixture.assert_clean().await;
+
     let mut request = fixture.query_request("SELECT * FROM range(2050) t(id) ORDER BY id DESC", &path, "csv");
     request.row_limit = Some(513);
     export_query_result_core(&fixture.state, &request, None, |_| {}).await.unwrap();
@@ -239,6 +275,117 @@ async fn snapshots_preserve_query_values_and_cleanup(driver: PathBuf) {
     })
     .await
     .unwrap();
+    fixture.assert_clean().await;
+    fixture.finish().await;
+}
+
+async fn query_pages_preserve_one_execution(driver: PathBuf) {
+    let fixture = Fixture::new(driver).await;
+    fixture.sql("CREATE TEMP TABLE keep_me AS SELECT 42").await;
+    fixture.sql("CREATE SEQUENCE page_calls START 1").await;
+    fixture.sql("CREATE TABLE page_source AS SELECT i AS id, 'same' AS period FROM range(20000) t(i)").await;
+    for sql in ["SHOW TABLES", "EXPLAIN SELECT 42", "DESCRIBE page_source"] {
+        let result = execute_sql_statement_with_options(
+            &fixture.state,
+            &fixture.id,
+            "main",
+            sql,
+            None,
+            None,
+            QueryExecutionOptions { page_size: Some(100), max_rows: Some(1000), ..Default::default() },
+        )
+        .await
+        .unwrap();
+        assert!(!result.rows.is_empty());
+        assert!(!result.has_more);
+    }
+    for order in ["", " ORDER BY period"] {
+        let sql = format!("SELECT id, period FROM page_source{order}; -- trailing comment");
+        let mut session_id = None;
+        let mut ids = BTreeSet::new();
+        loop {
+            let page = execute_sql_statement_with_options(
+                &fixture.state,
+                &fixture.id,
+                "main",
+                &sql,
+                None,
+                None,
+                QueryExecutionOptions {
+                    page_size: Some(512),
+                    max_rows: Some(20000),
+                    result_session_id: session_id.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(page.rows.len() <= 512);
+            for row in &page.rows {
+                assert!(ids.insert(cell_number(&row[0])), "duplicate grid row");
+            }
+            session_id = page.session_id;
+            if !page.has_more {
+                break;
+            }
+            assert!(session_id.is_some());
+        }
+        assert_eq!(ids, (0..20000).collect());
+        fixture.assert_clean().await;
+    }
+    let sql = "SELECT nextval('page_calls') AS dup, i AS dup, i AS rowid FROM range(2050) t(i)";
+    let mut session_id = None;
+    let mut values = Vec::new();
+    loop {
+        let page = execute_sql_statement_with_options(
+            &fixture.state,
+            &fixture.id,
+            "main",
+            sql,
+            None,
+            None,
+            QueryExecutionOptions {
+                page_size: Some(100),
+                max_rows: Some(2050),
+                result_session_id: session_id.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.columns, vec!["dup", "dup", "rowid"]);
+        values.extend(page.rows.iter().map(|row| cell_number(&row[0])));
+        session_id = page.session_id;
+        if !page.has_more {
+            break;
+        }
+    }
+    assert_eq!(values, (1..=2050).collect::<Vec<_>>());
+    assert_eq!(cell_number(&fixture.sql("SELECT nextval('page_calls')").await.rows[0][0]), 2051);
+    fixture.assert_clean().await;
+
+    let sql = "SELECT * FROM range(2050) t(id) ORDER BY id";
+    let first = fixture.client.execute_query_page(None, sql.into(), Some(513), 500, None, None, None).await.unwrap();
+    assert!(first.has_more);
+    let last = fixture
+        .client
+        .execute_query_page(None, sql.into(), Some(513), 500, first.session_id.as_deref(), None, None)
+        .await
+        .unwrap();
+    assert_eq!(last.rows.len(), 13);
+    assert!(!last.has_more);
+    assert!(last.truncated);
+    fixture.assert_clean().await;
+
+    let first = fixture.client.execute_query_page(None, sql.into(), Some(2050), 100, None, None, None).await.unwrap();
+    let id = first.session_id.unwrap();
+    assert!(close_query_session(&fixture.state, &fixture.id, "main", &id, None, None).await.unwrap());
+    assert!(fixture
+        .client
+        .execute_query_page(None, sql.into(), Some(2050), 100, Some(&id), None, None)
+        .await
+        .unwrap_err()
+        .contains("expired"));
     fixture.assert_clean().await;
     fixture.finish().await;
 }

@@ -40,6 +40,10 @@ const WORKER_INTERRUPT_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 pub const DUCKDB_DRIVER_PATH_ENV: &str = "DBX_DUCKDB_DRIVER_PATH";
 type PendingRequests = Arc<Mutex<HashMap<String, PendingRequest>>>;
 
+#[path = "duckdb_query_sessions.rs"]
+mod query_sessions;
+use query_sessions::QuerySession;
+
 /// How a request reacts to cancellation or a timeout. Interactive queries
 /// restart the worker because a DuckDB connection stuck inside a statement
 /// cannot be reused. Statements whose caller shares the session (`:memory:`
@@ -65,6 +69,7 @@ struct DuckDbWorkerClientInner {
     pending: PendingRequests,
     connect_lock: Mutex<()>,
     query_lock: Mutex<()>,
+    query_sessions: Mutex<HashMap<String, QuerySession>>,
     process_limiter: Arc<Semaphore>,
     process_limit: usize,
     executable: PathBuf,
@@ -193,6 +198,7 @@ impl DuckDbWorkerClient {
                 pending: Arc::new(Mutex::new(HashMap::new())),
                 connect_lock: Mutex::new(()),
                 query_lock: Mutex::new(()),
+                query_sessions: Mutex::new(HashMap::new()),
                 process_limiter,
                 process_limit,
                 executable,
@@ -288,7 +294,28 @@ impl DuckDbWorkerClient {
         preserve_insertion_order: bool,
         abort_policy: AbortPolicy,
     ) -> Result<db::QueryResult, DuckDbWorkerError> {
-        let _query_guard = self.inner.query_lock.lock().await;
+        // A queued request must remain cancellable. In particular, cancelling
+        // a grid read waiting behind an export must not kill that export.
+        let lock = self.inner.query_lock.lock();
+        tokio::pin!(lock);
+        let _query_guard = match (cancel_token.as_ref(), query_timeout) {
+            (Some(token), Some(duration)) => tokio::select! {
+                biased;
+                _ = token.cancelled() => return Err(crate::execution::canceled_error().into()),
+                guard = &mut lock => guard,
+                _ = tokio::time::sleep(duration) => return Err(crate::execution::timeout_error_for(duration).into()),
+            },
+            (Some(token), None) => tokio::select! {
+                biased;
+                _ = token.cancelled() => return Err(crate::execution::canceled_error().into()),
+                guard = &mut lock => guard,
+            },
+            (None, Some(duration)) => tokio::select! {
+                guard = &mut lock => guard,
+                _ = tokio::time::sleep(duration) => return Err(crate::execution::timeout_error_for(duration).into()),
+            },
+            (None, None) => lock.await,
+        };
         let client = self.clone();
         // Cancellation and timeout apply `abort_policy` below. An ordinary
         // query error (parser/binder/catalog/runtime) leaves the worker healthy, so we keep it

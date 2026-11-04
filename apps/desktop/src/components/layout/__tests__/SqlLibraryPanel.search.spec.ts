@@ -174,4 +174,34 @@ describe("SQL library locate and search preferences", () => {
     await nextTick();
     expect(button.disabled).toBe(true);
   });
+
+  it("handles locateRequest prop, uncollapses ancestors, scrolls into view and emits locate-handled", async () => {
+    const onLocateHandled = vi.fn();
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const store = useSavedSqlStore();
+    store.loadState = "loaded";
+    store.folders = [
+      { id: "root", name: "Root", connectionId: "", createdAt: timestamp, updatedAt: timestamp },
+      { id: "child", parentFolderId: "root", name: "Child", connectionId: "", createdAt: timestamp, updatedAt: timestamp },
+    ];
+    store.files = [file("unrelated", "unrelated.sql", "SELECT 1"), { ...file("nested-file", "nested.sql", "SELECT 42"), folderId: "child" }];
+    vi.spyOn(store, "ensureAllFilesLoaded").mockResolvedValue(undefined);
+
+    const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const app = createApp(SqlLibraryPanel, {
+      locateRequest: { id: 42, fileId: "nested-file" },
+      "onLocate-handled": onLocateHandled,
+    });
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    mounted.push({ app, host });
+
+    await vi.waitFor(() => expect(onLocateHandled).toHaveBeenCalledWith(42));
+    expect(visibleFiles(host)).toContain("nested-file");
+    expect(scroll.mock.instances.at(-1)).toBe(host.querySelector('[data-sql-library-file="nested-file"]'));
+  });
 });

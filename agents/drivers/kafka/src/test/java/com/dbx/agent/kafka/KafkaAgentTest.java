@@ -1680,6 +1680,64 @@ class KafkaAgentTest {
     }
 
     @Test
+    void pemTlsPathsConfigurePemTruststoreAndInlineClientKeystore(@TempDir Path tempDir) throws Exception {
+        Path caCert = tempDir.resolve("ca-chain.pem");
+        Path clientCert = tempDir.resolve("client.crt");
+        Path clientKey = tempDir.resolve("client.key");
+        Files.writeString(caCert, "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n");
+        Files.writeString(clientCert, "-----BEGIN CERTIFICATE-----\nCLIENT\n-----END CERTIFICATE-----\n");
+        Files.writeString(clientKey, "-----BEGIN PRIVATE KEY-----\nKEY\n-----END PRIVATE KEY-----\n");
+
+        Properties props = new Properties();
+        KafkaAgent.applyConnectionProperties(JsonParser.parseString(("""
+            {
+              "security_protocol": "SASL_SSL",
+              "tls_skip_verify": false,
+              "tls": {
+                "ca_cert_path": "%s",
+                "client_cert_path": "%s",
+                "client_key_path": "%s"
+              }
+            }
+            """).formatted(caCert, clientCert, clientKey)).getAsJsonObject(), props);
+
+        assertEquals("PEM", props.getProperty("ssl.truststore.type"));
+        assertEquals(caCert.toString(), props.getProperty("ssl.truststore.location"));
+        assertEquals("PEM", props.getProperty("ssl.keystore.type"));
+        assertEquals(Files.readString(clientCert), props.getProperty("ssl.keystore.certificate.chain"));
+        assertEquals(Files.readString(clientKey), props.getProperty("ssl.keystore.key"));
+        // PEM store 无密码，不应出现密码属性。
+        assertNull(props.getProperty("ssl.truststore.password"));
+        assertNull(props.getProperty("ssl.keystore.password"));
+    }
+
+    @Test
+    void pemTlsClientCertWithoutKeyFailsFast() {
+        Properties props = new Properties();
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+            () -> KafkaAgent.applyConnectionProperties(JsonParser.parseString("""
+                {
+                  "security_protocol": "SSL",
+                  "tls": { "client_cert_path": "/certs/client.crt" }
+                }
+                """).getAsJsonObject(), props));
+        assertTrue(error.getMessage().contains("client_key_path"));
+    }
+
+    @Test
+    void pemTlsUnreadableFileReportsPath() {
+        Properties props = new Properties();
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+            () -> KafkaAgent.applyConnectionProperties(JsonParser.parseString("""
+                {
+                  "security_protocol": "SSL",
+                  "tls": { "ca_cert_path": "/no/such/ca-chain.pem" }
+                }
+                """).getAsJsonObject(), props));
+        assertTrue(error.getMessage().contains("/no/such/ca-chain.pem"));
+    }
+
+    @Test
     void appliesAllowedKerberosSystemPropertiesFromConnectionProperties() {
         Map<String, String> previous = KafkaAgent.applyKerberosSystemProperties(JsonParser.parseString("""
             {

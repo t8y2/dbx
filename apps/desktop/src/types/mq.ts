@@ -1,5 +1,7 @@
 // Message queue admin types, matching dbx-core/src/mq/types.rs
 
+import type { KafkaTlsConfig } from "@/lib/connection/kafkaTlsOptions";
+
 export type MqSystemKind = "pulsar" | "kafka" | "rocketmq" | "rabbitmq";
 
 export interface MqCapabilities {
@@ -68,6 +70,7 @@ export interface MqAdminConfig {
   adminUrl: string;
   auth?: MqAuth;
   tlsSkipVerify?: boolean;
+  tls?: KafkaTlsConfig;
   pinnedVersion?: string;
   tokenSigning?: MqTokenSigningConfig;
   extra?: unknown;
@@ -581,6 +584,8 @@ export interface SendMessageRequest {
   payloadText?: string;
   headers: Record<string, string>;
   partition?: number;
+  /** RabbitMQ: AMQP BasicProperties, separate from custom headers. */
+  properties?: Record<string, string>;
   /** RabbitMQ: target exchange; empty means the default exchange. */
   exchange?: string;
   /** RabbitMQ: routing key used when publishing to an exchange. */

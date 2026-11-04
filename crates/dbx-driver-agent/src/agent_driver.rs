@@ -66,6 +66,7 @@ pub struct AgentRuntimeClient {
     child: Arc<Mutex<Child>>,
     child_reaper_started: Arc<AtomicBool>,
     child_reaped: Arc<AtomicBool>,
+    process_exit_confirmed: AtomicBool,
     startup_exit: Option<StartupChildExit>,
     stdin: Arc<Mutex<BufWriter<ChildStdin>>>,
     pending: Arc<Mutex<HashMap<u64, PendingAgentResponse>>>,
@@ -114,6 +115,7 @@ impl AgentRuntimeClient {
             child: Arc::new(Mutex::new(child)),
             child_reaper_started: Arc::new(AtomicBool::new(false)),
             child_reaped: Arc::new(AtomicBool::new(false)),
+            process_exit_confirmed: AtomicBool::new(false),
             startup_exit,
             stdin: Arc::new(Mutex::new(stdin)),
             pending: Arc::new(Mutex::new(HashMap::new())),
@@ -482,11 +484,15 @@ impl AgentRuntimeClient {
     pub(crate) async fn wait_for_exit(&self, timeout_duration: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout_duration;
         loop {
-            if self.startup_exit.as_ref().is_some_and(StartupChildExit::is_confirmed) {
+            if self.process_exit_confirmed.load(Ordering::Acquire)
+                || self.startup_exit.as_ref().is_some_and(StartupChildExit::is_confirmed)
+            {
                 return true;
             }
             if let Ok(mut child) = self.child.try_lock() {
                 if matches!(child.try_wait(), Ok(Some(_))) {
+                    // The reaper flag also records failed waits; cache only a confirmed child status.
+                    self.process_exit_confirmed.store(true, Ordering::Release);
                     self.child_reaped.store(true, Ordering::Release);
                     if let Some(exit) = &self.startup_exit {
                         exit.wait_finished(true);

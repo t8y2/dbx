@@ -713,6 +713,9 @@ impl MessageQueueAdmin for RabbitMqAdmin {
             "payloadBase64": req.payload_base64,
             "headers": req.headers,
         });
+        if let Some(properties) = req.properties {
+            params["properties"] = serde_json::json!(properties);
+        }
         if let Some(exchange) = req.exchange.as_deref().filter(|e| !e.is_empty()) {
             params["exchange"] = serde_json::json!(exchange);
         }
@@ -1121,13 +1124,18 @@ fn build_connection_params(cfg: &MqAdminConfig) -> Result<serde_json::Value, Str
 
 /// Map one agent peek message JSON to a `PeekedMessage`.
 fn peeked_message_from_json(idx: usize, m: &serde_json::Value) -> PeekedMessage {
+    peeked_message_from_json_with_options(idx, m, false)
+}
+
+fn peeked_message_from_json_with_options(idx: usize, m: &serde_json::Value, decode_payload: bool) -> PeekedMessage {
     let properties = m
         .get("properties")
         .and_then(|v| v.as_object())
         .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect())
         .unwrap_or_default();
     let payload_base64 = m.get("payloadBase64").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-    let payload_text = resolve_rabbitmq_payload_text(m.get("payloadText").and_then(|v| v.as_str()), &payload_base64);
+    let payload_text =
+        resolve_rabbitmq_payload_text(m.get("payloadText").and_then(|v| v.as_str()), &payload_base64, decode_payload);
     PeekedMessage {
         position: (idx + 1) as u32,
         message_id: m
@@ -1159,7 +1167,10 @@ fn is_printable_text(text: &str) -> bool {
     text.chars().all(|c| (c >= ' ' || matches!(c, '\t' | '\n' | '\r')) && c != '\u{7f}')
 }
 
-fn resolve_rabbitmq_payload_text(raw_text: Option<&str>, payload_base64: &str) -> Option<String> {
+fn resolve_rabbitmq_payload_text(raw_text: Option<&str>, payload_base64: &str, decode_payload: bool) -> Option<String> {
+    if !decode_payload {
+        return raw_text.map(String::from);
+    }
     if let Some(text) = raw_text {
         if !text.is_empty() && is_printable_text(text) {
             return Some(text.to_string());
@@ -1508,12 +1519,59 @@ mod tests {
     use crate::mq::auth::MqAuth;
     use crate::mq::types::MqSystemKind;
 
+    #[tokio::test]
+    async fn send_message_forwards_properties_without_changing_headers_or_legacy_requests() {
+        let directory = tempfile::tempdir().expect("create fake RabbitMQ agent directory");
+        let script = directory.path().join("agent.py");
+        let calls = directory.path().join("calls.jsonl");
+        std::fs::write(
+            &script,
+            r#"import json
+import sys
+
+print(json.dumps({"ready": True}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    if request["method"] == "mq_send_message":
+        with open(sys.argv[1], "a") as calls:
+            calls.write(json.dumps(request["params"]) + "\n")
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {"ok": True}}), flush=True)
+"#,
+        )
+        .expect("write fake RabbitMQ agent");
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let launch = AgentLaunchSpec::new(python)
+            .with_args([script.to_string_lossy().to_string(), calls.to_string_lossy().to_string()]);
+        let config = rabbitmq_config(serde_json::json!({ "addresses": "broker:5672" }), MqAuth::None, false);
+        let admin = RabbitMqAdmin::new(config, launch).await.expect("connect fake RabbitMQ agent");
+        let properties = serde_json::json!({ "content_type": "application/json", "priority": "0" });
+        for expected in [None, Some(properties)] {
+            let mut value = serde_json::json!({
+                "topic": "orders", "payloadBase64": "e30=",
+                "headers": { "content_type": "custom-header" },
+                "exchange": "events", "routingKey": "orders.created", "namespace": "orders-vhost"
+            });
+            if let Some(properties) = expected.as_ref() {
+                value["properties"] = properties.clone();
+            }
+            admin.send_message(serde_json::from_value(value).unwrap()).await.expect("send message");
+            let calls = std::fs::read_to_string(&calls).expect("read agent calls");
+            let actual: serde_json::Value = serde_json::from_str(calls.lines().last().unwrap()).unwrap();
+            assert_eq!(actual.get("properties"), expected.as_ref());
+            assert_eq!(actual["headers"], serde_json::json!({ "content_type": "custom-header" }));
+            assert_eq!(actual["exchange"], "events");
+            assert_eq!(actual["routingKey"], "orders.created");
+            assert_eq!(actual["virtual_host"], "orders-vhost");
+        }
+    }
+
     fn rabbitmq_config(extra: serde_json::Value, auth: MqAuth, tls_skip_verify: bool) -> MqAdminConfig {
         MqAdminConfig {
             system_kind: MqSystemKind::RabbitMq,
             admin_url: String::new(),
             auth,
             tls_skip_verify,
+            tls: None,
             pinned_version: None,
             token_signing: None,
             connect_override: None,
@@ -1858,7 +1916,7 @@ mod tests {
     }
 
     #[test]
-    fn peeked_message_decodes_thrift_binary_protocol() {
+    fn peeked_message_decodes_thrift_binary_protocol_when_opted_in() {
         use base64::Engine as _;
         let strict_call = [
             0x80u8, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, b'p', b'i', b'n', b'g', 0x00, 0x00, 0x00, 0x07, 0x0b,
@@ -1868,7 +1926,10 @@ mod tests {
             "deliveryTag": 9,
             "payloadBase64": base64::engine::general_purpose::STANDARD.encode(strict_call),
         });
-        let peeked = peeked_message_from_json(0, &msg);
+        let default_peeked = peeked_message_from_json(0, &msg);
+        assert!(default_peeked.payload_text.is_none());
+
+        let peeked = peeked_message_from_json_with_options(0, &msg, true);
         let decoded: serde_json::Value =
             serde_json::from_str(peeked.payload_text.as_deref().expect("decoded thrift")).expect("valid json");
         assert_eq!(decoded["method"], "ping");

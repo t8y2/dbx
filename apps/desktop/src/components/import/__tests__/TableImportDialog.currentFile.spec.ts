@@ -268,7 +268,7 @@ afterEach(() => {
 });
 
 describe("TableImportDialog current source file display (#13164)", () => {
-  it("shows the running file while a batch import is queued and hides it once finished", async () => {
+  it("keeps the source file on screen after a batch import finishes", async () => {
     holdImportInProgress();
     await mountDialog([new File(["workbook"], "rows.xlsx")]);
     await startImport();
@@ -287,11 +287,12 @@ describe("TableImportDialog current source file display (#13164)", () => {
 
     resolveRunningImport?.();
     await flushAsyncUpdates();
-    expect(currentFileValue()).toBeUndefined();
+    // The completion screen still names the file that was imported (#13495).
+    expect(currentFileValue()).toBe("/tmp/rows.xlsx");
     expect(mocks.importTableFile).toHaveBeenCalledTimes(3);
   });
 
-  it("shows the single-file source while its import runs", async () => {
+  it("shows the single-file source while its import runs and after it finishes", async () => {
     mocks.previewTableImportFile.mockImplementation(() => Promise.resolve(delimitedPreview()));
     holdImportInProgress();
     await mountDialog([new File(['amount,note\n"12,50",plain'], "rows.csv")]);
@@ -301,7 +302,7 @@ describe("TableImportDialog current source file display (#13164)", () => {
 
     resolveRunningImport?.();
     await flushAsyncUpdates();
-    expect(currentFileValue()).toBeUndefined();
+    expect(currentFileValue()).toBe("/tmp/rows.csv");
   });
 
   it("keeps the current file visible on the minimized floating indicator", async () => {

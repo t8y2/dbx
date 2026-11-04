@@ -1618,6 +1618,13 @@ impl OracleSynonymResolver {
         true
     }
 
+    /// The local object reached through at least one synonym. A PUBLIC synonym does not resolve
+    /// once it is qualified with the requested schema, so writes must address this object.
+    /// Remote targets keep the synonym name, which already carries the database link.
+    fn followed_local_target(&self) -> Option<&OracleObjectRef> {
+        (self.depth > 0 && self.current.db_link.is_none()).then_some(&self.current)
+    }
+
     fn retry_next_candidate(&mut self) -> bool {
         while let Some(target) = self.retries.pop() {
             if self.visited.insert(target.clone()) {
@@ -1771,6 +1778,26 @@ fn oracle_synonym_target_sql(
          ORDER BY CASE WHEN s.OWNER = {owner} THEN 0 ELSE 1 END",
         sql_string(table),
     ))
+}
+
+fn oracle_object_type_sql(owner: &str, name: &str) -> String {
+    format!(
+        "SELECT OBJECT_TYPE FROM ALL_OBJECTS \
+         WHERE OWNER = {} AND OBJECT_NAME = {} \
+           AND OBJECT_TYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW')",
+        sql_string(owner),
+        sql_string(name),
+    )
+}
+
+/// A materialized view is listed as both a TABLE and a MATERIALIZED VIEW object, and editing
+/// must treat it as the latter.
+fn oracle_object_type_from_query_result(result: db::QueryResult) -> Option<String> {
+    let types: Vec<String> = result.rows.iter().filter_map(|row| query_result_cell_string(row, 0)).collect();
+    ["MATERIALIZED VIEW", "VIEW", "TABLE"]
+        .into_iter()
+        .find(|candidate| types.iter().any(|object_type| object_type.eq_ignore_ascii_case(candidate)))
+        .map(str::to_string)
 }
 
 fn oracle_synonym_target_from_query_result(
@@ -1974,7 +2001,17 @@ async fn oracle_columns_via_metadata_query(
             .map(oracle_columns_from_query_result)
             .unwrap_or_default();
         if !columns.is_empty() {
-            return Ok(deduplicate_column_infos(columns));
+            let mut columns = deduplicate_column_infos(columns);
+            if let Some(target) = resolver.followed_local_target().cloned() {
+                let sql = oracle_object_type_sql(&target.owner, &target.name);
+                let object_type = oracle_object_type_from_query_result(query.run(&sql, session_schema, 10).await?);
+                for column in &mut columns {
+                    column.resolved_schema = Some(target.owner.clone());
+                    column.resolved_table = Some(target.name.clone());
+                    column.resolved_object_type = object_type.clone();
+                }
+            }
+            return Ok(columns);
         }
 
         let target = if resolver.can_follow() {
@@ -3563,12 +3600,12 @@ mod tests {
         oracle_current_schema_from_query_result, oracle_database_link_name, oracle_database_link_user_sql,
         oracle_identifier_from_query_result, oracle_object_statistics_dba_segments_sql,
         oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
-        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
-        oracle_synonym_target_from_query_result, oracle_synonym_target_sql, oracle_table_comment_sql,
-        oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
-        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
-        reference_key_columns_from_indexes, reference_keys_from_indexes, replace_metadata_runtime,
-        should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
+        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql, oracle_object_type_from_query_result,
+        oracle_object_type_sql, oracle_synonym_target_from_query_result, oracle_synonym_target_sql,
+        oracle_table_comment_sql, oracle_table_comments_sql, presto_like_columns_from_query_result,
+        presto_like_information_schema_columns_sql, presto_like_information_schema_tables_sql,
+        presto_like_tables_from_query_result, reference_key_columns_from_indexes, reference_keys_from_indexes,
+        replace_metadata_runtime, should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
         single_table_comment_from_query_result, split_oracle_database_link, table_comments_from_query_result,
         table_name_filter_matches, tdengine_table_comment_like_pattern, tdengine_table_comment_sql,
         tdengine_table_comments_sql, uses_mongodb_agent_collection_listing, visible_schema_filter,
@@ -6806,6 +6843,39 @@ for line in sys.stdin:
             name: "ALIAS_TOO_DEEP".to_string(),
             db_link: None
         }));
+    }
+
+    #[test]
+    fn oracle_synonym_resolver_reports_only_followed_local_targets() {
+        let mut resolver = OracleSynonymResolver::new("APP".to_string(), "ORDERS".to_string());
+        assert!(resolver.followed_local_target().is_none(), "a directly readable object needs no write identity");
+
+        let base = OracleObjectRef { owner: "OWNER".to_string(), name: "ORDERS_BASE".to_string(), db_link: None };
+        assert!(resolver.follow(base.clone()));
+        assert_eq!(resolver.followed_local_target(), Some(&base));
+
+        let mut remote = OracleSynonymResolver::new("APP".to_string(), "ORDERS".to_string());
+        assert!(remote.follow(OracleObjectRef {
+            owner: "REMOTE_APP".to_string(),
+            name: "ORDERS".to_string(),
+            db_link: Some("SALES".to_string()),
+        }));
+        assert!(remote.followed_local_target().is_none(), "a remote target is only addressable through the synonym");
+    }
+
+    #[test]
+    fn oracle_object_type_prefers_materialized_view_and_view_over_table() {
+        let types = |rows: &[&str]| {
+            oracle_object_type_from_query_result(oracle_current_schema_result(
+                &["OBJECT_TYPE"],
+                rows.iter().map(|value| vec![serde_json::json!(value)]).collect(),
+            ))
+        };
+        assert_eq!(types(&["TABLE"]).as_deref(), Some("TABLE"));
+        assert_eq!(types(&["VIEW"]).as_deref(), Some("VIEW"));
+        assert_eq!(types(&["TABLE", "MATERIALIZED VIEW"]).as_deref(), Some("MATERIALIZED VIEW"));
+        assert_eq!(types(&[]), None);
+        assert!(oracle_object_type_sql("OWNER", "O'NAME").contains("OBJECT_NAME = 'O''NAME'"));
     }
 
     #[test]

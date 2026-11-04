@@ -166,7 +166,10 @@ pub fn uses_backtick_identifier_quoting(database_type: Option<DatabaseType>) -> 
 }
 
 pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -> String {
-    if matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss))
+    // A name that already is a delimited identifier must not be wrapped again:
+    // `"neptune"` became `"""neptune"""` and PostgreSQL rejected the statement with
+    // a syntax error (#14194).
+    if matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Postgres))
         && is_explicitly_quoted_identifier(name)
     {
         return name.to_string();
@@ -512,5 +515,27 @@ pub fn qualified_transfer_table(
         table
     } else {
         format!("{}.{}", quote_transfer_identifier(schema, database_type), table)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_an_already_quoted_postgres_identifier_intact() {
+        // #14194: wrapping `"neptune"` again produced `"""neptune"""`, which
+        // PostgreSQL rejected with a syntax error.
+        assert_eq!(quote_table_identifier(Some(DatabaseType::Postgres), "\"neptune\""), "\"neptune\"");
+        assert_eq!(quote_table_identifier(Some(DatabaseType::Postgres), "neptune"), "\"neptune\"");
+        assert_eq!(
+            qualified_table_name(Some(DatabaseType::Postgres), Some("\"neptune\""), "\"cron_job\""),
+            "\"neptune\".\"cron_job\""
+        );
+    }
+
+    #[test]
+    fn still_escapes_a_quote_inside_a_plain_postgres_name() {
+        assert_eq!(quote_table_identifier(Some(DatabaseType::Postgres), "we\"ird"), "\"we\"\"ird\"");
     }
 }

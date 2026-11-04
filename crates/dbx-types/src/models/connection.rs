@@ -438,10 +438,10 @@ impl TransportLayerConfig {
                 layer.key_passphrase = String::new();
                 // Like the passphrase above: a TOTP secret is a long-lived
                 // bearer credential, so it is stored in the secret store rather
-                // than the plaintext config JSON. `Some("")` (not `None`) keeps
-                // the field present, preserving the cleared-vs-absent contract.
+                // than the plaintext config JSON. Scrubbing leaves `None`, the
+                // value the read path treats as "fetch it from the store".
                 if layer.totp_secret.is_some() {
-                    layer.totp_secret = Some(String::new());
+                    layer.totp_secret = None;
                 }
             }
             TransportLayerConfig::Proxy(layer) => {

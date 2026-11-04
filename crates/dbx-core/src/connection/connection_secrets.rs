@@ -352,11 +352,14 @@ fn hydrate_transport_layer_secrets(
                     *needs_rewrite = true;
                 }
 
-                // Unlike the password above, an absent `totp_secret` must read
-                // the stored value back: the dialog never receives secrets from
-                // an older payload, and dropping it here would silently disable
-                // MFA for every existing connection on save.
-                if ssh.totp_secret.is_none() {
+                // Scrubbing leaves `None` behind, so an absent or empty value
+                // means "not loaded" rather than "cleared": read the stored
+                // secret back here, otherwise headless hosts (dbx-mcp), which
+                // only ever see configs that went through persistence, would
+                // never receive the code. A user clearing the field sends
+                // `Some("")`, which `persist_transport_layer_secrets` turns
+                // into a delete, so there is nothing to resurrect.
+                if ssh.totp_secret.as_deref().is_none_or(str::is_empty) {
                     if let Some(secret) =
                         store.get_secret(&config.id, &transport_layer_ssh_totp_secret_key(index, &layer_for_key))?
                     {
@@ -1017,7 +1020,7 @@ fn sanitize_connections(configs: &[ConnectionConfig]) -> Vec<ConnectionConfig> {
                         ssh.password.clear();
                         ssh.key_passphrase.clear();
                         if ssh.totp_secret.is_some() {
-                            ssh.totp_secret = Some(String::new());
+                            ssh.totp_secret = None;
                         }
                     }
                     TransportLayerConfig::Proxy(proxy) => {

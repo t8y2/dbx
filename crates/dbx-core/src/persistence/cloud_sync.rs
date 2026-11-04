@@ -2468,7 +2468,7 @@ fn scrub_connection_secrets(config: &mut ConnectionConfig) {
                 ssh.password.clear();
                 ssh.key_passphrase.clear();
                 if ssh.totp_secret.is_some() {
-                    ssh.totp_secret = Some(String::new());
+                    ssh.totp_secret = None;
                 }
             }
             TransportLayerConfig::Proxy(proxy) => {

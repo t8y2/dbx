@@ -3604,10 +3604,11 @@ fn scrub_transport_layer_secrets(config: &mut ConnectionConfig) {
                 ssh.password.clear();
                 ssh.key_passphrase.clear();
                 // Same class of secret as the passphrase: it lives in the
-                // secret store, not in the plaintext config JSON. `Some("")`
-                // keeps the cleared-vs-absent distinction intact.
+                // secret store, not in the plaintext config JSON. Scrubbing
+                // leaves `None`, which is what the read path treats as
+                // "load it back from the store".
                 if ssh.totp_secret.is_some() {
-                    ssh.totp_secret = Some(String::new());
+                    ssh.totp_secret = None;
                 }
             }
             TransportLayerConfig::Proxy(proxy) => {
@@ -8143,6 +8144,14 @@ impl Storage {
                                 TransportLayerConfig::Proxy(_) | TransportLayerConfig::HttpTunnel(_) => None,
                             })
                             .unwrap_or_default();
+                        // The stored TOTP secret has to come back here too: this is
+                        // the path headless hosts take on every query, and a config
+                        // read straight from storage never carries the value.
+                        if ssh.totp_secret.as_deref().is_none_or(str::is_empty) {
+                            ssh.totp_secret = self
+                                .get_secret(&id, &transport_layer_ssh_totp_secret_key(index, &layer_for_key))
+                                .await?;
+                        }
                     }
                     TransportLayerConfig::Proxy(proxy) => {
                         proxy.password = self

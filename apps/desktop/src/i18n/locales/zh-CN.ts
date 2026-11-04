@@ -11169,6 +11169,7 @@ export default withEnglishFallback({
     shortcutZoomOutUi: "缩小全局界面",
     shortcutResetUiZoom: "重置全局界面缩放",
     shortcutRefreshData: "刷新数据",
+    shortcutCommitTransaction: "提交事务",
     shortcutToggleResultsPane: "切换结果面板",
     shortcutFocusResultGrid: "聚焦结果表格",
     shortcutFocusSqlEditor: "聚焦 SQL 编辑器",

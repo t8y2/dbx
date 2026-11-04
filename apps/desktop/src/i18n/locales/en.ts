@@ -11201,6 +11201,7 @@ export default {
     shortcutZoomOutUi: "Zoom out UI",
     shortcutResetUiZoom: "Reset UI zoom",
     shortcutRefreshData: "Refresh data",
+    shortcutCommitTransaction: "Commit transaction",
     shortcutToggleResultsPane: "Toggle results pane",
     shortcutFocusResultGrid: "Focus result grid",
     shortcutFocusSqlEditor: "Focus SQL editor",

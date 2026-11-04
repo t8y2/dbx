@@ -80,6 +80,7 @@ defineExpose({
   openDatabasePicker: () => activeEditorGroup()?.openDatabasePicker() ?? false,
   openSchemaPicker: () => activeEditorGroup()?.openSchemaPicker() ?? false,
   openTableStructureEditor: (initialTab?: TableInfoTab) => activeEditorGroup()?.openTableStructureEditor?.(initialTab) ?? false,
+  commitTransaction: () => activeEditorGroup()?.commitTransaction() ?? false,
   refreshData: (target: Element | null = null) => {
     const element = commandTargetElement(target);
     if (element?.closest("[data-shared-result-surface]")) {

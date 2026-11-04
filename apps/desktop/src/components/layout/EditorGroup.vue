@@ -83,6 +83,15 @@ defineExpose({
   focusWhere: () => activeSurfaceRef.value?.focusWhere() ?? false,
   openGoToColumn: () => activeSurfaceRef.value?.openGoToColumn() ?? false,
   openTableStructureEditor: (initialTab?: TableInfoTab) => activeSurfaceRef.value?.openTableStructureEditor?.(initialTab) ?? false,
+  // Same action as the toolbar's commit button (Shift+Mod+C default). Only
+  // reports handled when the active tab holds a committable transaction, so
+  // the shortcut stays unconsumed for everything else.
+  commitTransaction: () => {
+    const tab = activeTab.value;
+    if (!tab || !(tab.txnSessionId || tab.autoCommitOpenTransaction)) return false;
+    void queryStore.commitTransaction(tab.id);
+    return true;
+  },
   refreshData: () => activeSurfaceRef.value?.refreshData() ?? false,
   toggleResultsPane: () => activeSurfaceRef.value?.toggleResultsPane() ?? false,
   refreshQueryEditorCompletionCache: () => activeSurfaceRef.value?.refreshQueryEditorCompletionCache() ?? false,

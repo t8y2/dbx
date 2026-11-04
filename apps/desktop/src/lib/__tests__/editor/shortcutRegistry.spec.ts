@@ -54,6 +54,20 @@ describe("shortcutRegistry editor actions", () => {
   ];
   const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection", "disconnectSidebarConnection", "viewTableDdl", "editSidebarTableStructure"];
 
+  it("registers commit transaction as a global shortcut defaulting to Shift+Mod+C", () => {
+    expect(SHORTCUT_DEFINITIONS.find((item) => item.id === "commitTransaction")).toMatchObject({
+      id: "commitTransaction",
+      labelKey: "settings.shortcutCommitTransaction",
+      scope: "global",
+      defaultShortcut: "Shift+Mod+C",
+    });
+    expect(DEFAULT_SHORTCUT_SETTINGS.commitTransaction).toBe("Shift+Mod+C");
+    // Not bound by any other action in any scope, and settings saved before
+    // the action existed pick up the default through normalization.
+    expect(findShortcutConflict("commitTransaction", "Shift+Mod+C", normalizeShortcutSettings())).toBeNull();
+    expect(normalizeShortcutSettings().commitTransaction).toBe("Shift+Mod+C");
+  });
+
   it("registers pagination navigation as unassigned grid shortcuts", () => {
     const paginationActions = [
       ["goToFirstPage", "settings.shortcutGoToFirstPage"],

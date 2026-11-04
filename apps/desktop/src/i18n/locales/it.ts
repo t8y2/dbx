@@ -5135,6 +5135,7 @@ export default withEnglishFallback({
     patternsPlaceholder: "Wildcard, es. %n1%, separate da virgole",
     patternsHint: "I database che corrispondono a questi pattern vengono sempre mostrati insieme a quelli selezionati; deseleziona tutto per mostrare solo le corrispondenze (% = qualsiasi caratteri, _ = un singolo carattere)",
     patternsMatchCount: "{count} corrispondono",
+    patternsNoMatch: "Nessun database corrisponde ancora ai pattern. Dopo il salvataggio, questa connessione non mostrerà database finché uno non corrisponde.",
     selectAll: "Seleziona tutto",
     selectFiltered: "Seleziona risultati ricerca",
     clear: "Cancella",

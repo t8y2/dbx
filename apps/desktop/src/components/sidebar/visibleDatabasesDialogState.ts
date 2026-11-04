@@ -1,6 +1,6 @@
 import { initialVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
 import type { ConnectionConfig } from "@/types/database";
-import { MATCH_ALL_VISIBLE_DATABASE_PATTERN, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
+import { MATCH_ALL_VISIBLE_DATABASE_PATTERN, databaseNameMatchesVisiblePatterns, normalizeVisibleDatabaseSelection } from "@/lib/database/visibleDatabases";
 
 export type VisibleDatabaseSaveAction = { type: "none" } | { type: "clear" } | { type: "set"; databaseNames: string[] | undefined; patterns: string[] };
 
@@ -21,6 +21,19 @@ export function initialVisibleDatabaseDialogSelection(databaseNames: string[], c
     return initialVisibleDatabaseSelection(databaseNames, connection?.visible_databases, connection);
   }
   return normalizeVisibleDatabaseSelection(connection?.visible_databases ?? [], databaseNames);
+}
+
+/** 命中通配符的库：无论是否勾选都会显示，弹窗里画成锁定的勾选行。 */
+export function visibleDatabasePatternMatches(databaseNames: readonly string[], patterns: readonly string[]): Set<string> {
+  return new Set(databaseNames.filter((name) => databaseNameMatchesVisiblePatterns(name, [...patterns])));
+}
+
+/**
+ * 没有勾选、通配符又一个库都没命中时，保存后侧栏这个连接下不会显示任何库。
+ * 仍然允许保存（通配符可以提前写给之后新建的库），只提示用户。
+ */
+export function visibleDatabaseFilterShowsNothing(selection: ReadonlySet<string>, patterns: readonly string[], patternMatches: ReadonlySet<string>): boolean {
+  return selection.size === 0 && patterns.length > 0 && patternMatches.size === 0;
 }
 
 export interface VisibleDatabaseSaveInput {

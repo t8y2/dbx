@@ -4510,6 +4510,7 @@ export default withEnglishFallback({
     patternsPlaceholder: "Wildcard, mis. %n1%, dipisahkan koma",
     patternsHint: "Database yang cocok dengan pola ini akan selalu ditampilkan bersama yang dicentang; hapus centang untuk hanya menampilkan yang cocok (% = karakter apa pun, _ = satu karakter)",
     patternsMatchCount: "{count} cocok",
+    patternsNoMatch: "Belum ada database yang cocok dengan pola. Setelah disimpan, koneksi ini tidak menampilkan database apa pun sampai ada yang cocok.",
     selectAll: "Pilih semua",
     selectFiltered: "Pilih hasil pencarian",
     clear: "Bersihkan",

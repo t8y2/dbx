@@ -5314,6 +5314,7 @@ export default withEnglishFallback({
     patternsPlaceholder: "Comodines, p. ej. %n1%, separados por comas",
     patternsHint: "Las bases de datos que coincidan con estos patrones se muestran siempre junto con las marcadas; desmarca todo para mostrar solo las coincidencias (% = cualquier caracteres, _ = un carácter)",
     patternsMatchCount: "{count} coinciden",
+    patternsNoMatch: "Ninguna base de datos coincide todavía con los patrones. Al guardar, esta conexión no mostrará bases de datos hasta que alguna coincida.",
     selectAll: "Seleccionar todo",
     selectFiltered: "Seleccionar resultados de búsqueda",
     clear: "Limpiar",

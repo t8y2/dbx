@@ -16,7 +16,7 @@ import {
   normalizeVisibleDatabaseSelection,
   parseVisibleDatabasePatternsInput,
 } from "@/lib/database/visibleDatabases";
-import { initialVisibleDatabaseDialogSelection, resolveVisibleDatabaseSaveAction, visibleDatabasePatternsWithoutMatchAll } from "./visibleDatabasesDialogState";
+import { initialVisibleDatabaseDialogSelection, resolveVisibleDatabaseSaveAction, visibleDatabaseFilterShowsNothing, visibleDatabasePatternMatches, visibleDatabasePatternsWithoutMatchAll } from "./visibleDatabasesDialogState";
 import * as api from "@/lib/backend/api";
 
 const props = defineProps<{
@@ -69,7 +69,8 @@ const patternMatchCount = computed(() => {
 });
 const userPatterns = computed(() => visibleDatabasePatternsWithoutMatchAll(parsedPatterns.value));
 // 通配符与勾选取并集：命中的库无论是否勾选都会显示，列表里画成锁定的勾选，避免看起来"填了通配符没效果"（#14221）。
-const patternMatchedNames = computed(() => new Set(objectNames.value.filter((name) => databaseNameMatchesVisiblePatterns(name, userPatterns.value))));
+const patternMatchedNames = computed(() => visibleDatabasePatternMatches(objectNames.value, userPatterns.value));
+const showsNothing = computed(() => visibleDatabaseFilterShowsNothing(selectedNames.value, userPatterns.value, patternMatchedNames.value));
 const selectedCount = computed(() => listedObjectNames.value.filter((name) => selectedNames.value.has(name) || patternMatchedNames.value.has(name)).length);
 const totalCount = computed(() => listedObjectNames.value.length);
 const canSaveSelection = computed(() => canSaveVisibleDatabaseSelection([...selectedNames.value], userPatterns.value));
@@ -248,6 +249,9 @@ async function saveSelection() {
       </div>
       <p v-if="!isLoading && !errorMessage && !canSaveSelection" class="text-xs text-destructive">
         {{ t(emptySelectionKey) }}
+      </p>
+      <p v-else-if="!isLoading && !errorMessage && showsNothing" class="text-xs text-amber-600" data-visible-database-no-match>
+        {{ t("visibleDatabases.patternsNoMatch") }}
       </p>
 
       <label v-if="hasSystemObjects" class="flex h-8 items-center gap-2 rounded-md px-1 text-xs text-muted-foreground">

@@ -5156,6 +5156,7 @@ export default withEnglishFallback({
     patternsPlaceholder: "ワイルドカード（例: %n1%）カンマ区切り",
     patternsHint: "これらのパターンに一致するデータベースは、チェックしたものと合わせて常に表示されます。一致するものだけを表示するにはチェックをクリアしてください（% は任意の文字列、_ は任意の 1 文字）",
     patternsMatchCount: "{count} 件が一致",
+    patternsNoMatch: "現在パターンに一致するデータベースはありません。保存すると、一致するデータベースができるまでこの接続にはデータベースが表示されません。",
     selectAll: "すべて選択",
     selectFiltered: "検索結果を選択",
     clear: "クリア",

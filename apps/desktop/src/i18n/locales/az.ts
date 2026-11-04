@@ -4193,6 +4193,7 @@ export default withEnglishFallback({
     patternsPlaceholder: "Əvəzedici simvollar, məsələn, %n1%, vergüllə ayrılmış",
     patternsHint: "Bu şablonlara uyğun verilənlər bazaları seçilənlərlə birlikdə həmişə göstərilir; yalnız uyğun olanları göstərmək üçün seçimi təmizləyin (% = istənilən simvollar, _ = bir simvol)",
     patternsMatchCount: "{count} uyğunluq",
+    patternsNoMatch: "Hələ şablonlara uyğun verilənlər bazası yoxdur. Yadda saxladıqdan sonra uyğun baza yaranana qədər bu bağlantıda heç bir verilənlər bazası göstərilməyəcək.",
     selectAll: "Hamısını seç",
     selectFiltered: "Axtarış nəticələrini seç",
     clear: "Təmizlə",

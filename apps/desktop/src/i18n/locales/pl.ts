@@ -4562,6 +4562,7 @@ export default withEnglishFallback({
     patternsPlaceholder: "Wzorce wieloznaczne, np. %n1%, rozdzielone przecinkami",
     patternsHint: "Bazy danych pasujące do tych wzorców są zawsze wyświetlane razem z zaznaczonymi; wyczyść zaznaczenie, aby pokazać tylko dopasowania (% = dowolne znaki, _ = pojedynczy znak)",
     patternsMatchCount: "Dopasowania: {count}",
+    patternsNoMatch: "Żadna baza danych nie pasuje jeszcze do wzorców. Po zapisaniu to połączenie nie pokaże żadnej bazy, dopóki któraś nie będzie pasować.",
     selectAll: "Zaznacz wszystko",
     selectFiltered: "Wybierz wyniki wyszukiwania",
     clear: "Wyczyść",

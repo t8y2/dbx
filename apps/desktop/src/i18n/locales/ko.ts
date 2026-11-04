@@ -5068,6 +5068,7 @@ export default withEnglishFallback({
     patternsPlaceholder: "와일드카드(예: %n1%), 쉼표로 구분",
     patternsHint: "이 패턴과 일치하는 데이터베이스는 선택한 항목과 함께 항상 표시됩니다. 일치하는 항목만 표시하려면 선택을 지우세요(% = 임의의 문자, _ = 단일 문자)",
     patternsMatchCount: "{count}개 일치",
+    patternsNoMatch: "아직 패턴과 일치하는 데이터베이스가 없습니다. 저장하면 일치하는 데이터베이스가 생길 때까지 이 연결에 데이터베이스가 표시되지 않습니다.",
     selectAll: "모두 선택",
     selectFiltered: "검색 결과 선택",
     clear: "지우기",

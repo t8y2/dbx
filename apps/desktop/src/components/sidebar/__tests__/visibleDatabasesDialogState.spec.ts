@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { initialVisibleDatabaseDialogSelection, resolveVisibleDatabaseSaveAction, visibleDatabasePatternsWithoutMatchAll } from "../visibleDatabasesDialogState";
+import { initialVisibleDatabaseDialogSelection, resolveVisibleDatabaseSaveAction, visibleDatabaseFilterShowsNothing, visibleDatabasePatternMatches, visibleDatabasePatternsWithoutMatchAll } from "../visibleDatabasesDialogState";
 
 const allNames = ["data_upload_mid", "ops", "mysql", "performance_schema", "sys"];
 const defaultVisibleNames = ["data_upload_mid", "ops"];
@@ -83,6 +83,21 @@ describe("visibleDatabasesDialogState", () => {
     ["list and pattern", ["ops", "dropped_db"], ["%_upload_%"], ["ops"]],
   ])("starts the dialog with manual checks only: %s", (_label, visibleDatabases, patterns, expected) => {
     expect(initialVisibleDatabaseDialogSelection(allNames, { db_type: "mysql", visible_databases: visibleDatabases, visible_database_patterns: patterns })).toEqual(expected);
+  });
+
+  it("collects the databases locked by the patterns", () => {
+    expect([...visibleDatabasePatternMatches(allNames, ["%_upload_%", "o%"])]).toEqual(["data_upload_mid", "ops"]);
+    expect(visibleDatabasePatternMatches(allNames, []).size).toBe(0);
+  });
+
+  it.each([
+    ["patterns that match nothing", [], ["zz%"], true],
+    ["patterns with matches", [], ["o%"], false],
+    ["a manual check", ["ops"], ["zz%"], false],
+    ["no patterns", [], [], false],
+  ])("warns that the sidebar would be empty only for %s", (_label, selection, patterns, expected) => {
+    const matches = visibleDatabasePatternMatches(allNames, patterns);
+    expect(visibleDatabaseFilterShowsNothing(new Set(selection), patterns, matches)).toBe(expected);
   });
 
   it("skips persistence when nothing changed", () => {

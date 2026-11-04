@@ -168,6 +168,23 @@ describe("VisibleDatabasesDialog wildcard patterns (#14221)", () => {
     expect(store.setVisibleDatabaseFilter).toHaveBeenCalledWith("conn-1", undefined, ["bill%"]);
   });
 
+  it("warns but still saves when the patterns match no database yet", async () => {
+    await mountDialog({});
+    await click(button("visibleDatabases.clear"));
+    await typePatterns("proj_2027%");
+
+    expect(root!.querySelector("[data-visible-database-no-match]")).not.toBeNull();
+    const save = button("visibleDatabases.save");
+    expect(save.disabled).toBe(false);
+
+    await click(row("billing"));
+    expect(root!.querySelector("[data-visible-database-no-match]")).toBeNull();
+
+    await click(row("billing"));
+    await click(save);
+    expect(store.setVisibleDatabaseFilter).toHaveBeenCalledWith("conn-1", undefined, ["proj_2027%"]);
+  });
+
   it("keeps manual checks next to the patterns", async () => {
     await mountDialog({ visible_databases: ["billing"], visible_database_patterns: ["%ak%"] });
     expect(selectedCountText()).toBe('{"selected":3,"total":3}');

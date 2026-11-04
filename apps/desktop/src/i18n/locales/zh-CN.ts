@@ -5535,6 +5535,7 @@ export default withEnglishFallback({
     patternsPlaceholder: "通配符，如 %n1%，逗号分隔",
     patternsHint: "匹配这些模式的数据库始终显示，与勾选的数据库合并；只想显示匹配项请先清空勾选（% 任意字符，_ 单字符）",
     patternsMatchCount: "匹配 {count} 个",
+    patternsNoMatch: "当前没有数据库匹配通配符，保存后侧边栏不会显示这个连接下的任何数据库，直到有库匹配为止。",
     selectAll: "全选",
     selectFiltered: "选中搜索结果",
     clear: "清空",

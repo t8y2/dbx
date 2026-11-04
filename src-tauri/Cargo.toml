@@ -13,11 +13,12 @@ name = "dbx_lib"
 crate-type = ["rlib"]
 
 [features]
-default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-multiple-ciphers", "system-fonts", "os-keyring", "sqlserver-native-attention"]
+default = ["duckdb-sidecar", "dynamodb", "mq-admin", "sqlite-multiple-ciphers", "system-fonts", "os-keyring", "sqlserver-native-attention", "sqlserver-windows-auth"]
 custom-protocol = ["tauri/custom-protocol"]
 duckdb-sidecar = ["dbx-core/duckdb-sidecar"]
 os-keyring = ["dbx-core/os-keyring"]
 sqlserver-native-attention = ["dbx-core/sqlserver-native-attention"]
+sqlserver-windows-auth = ["dbx-core/sqlserver-windows-auth"]
 dynamodb = ["dbx-core/dynamodb"]
 mq-admin = ["dbx-core/mq-admin"]
 sqlite-sqlcipher = ["dbx-core/sqlite-sqlcipher"]

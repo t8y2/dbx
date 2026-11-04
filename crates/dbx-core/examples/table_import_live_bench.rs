@@ -170,6 +170,7 @@ fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConf
         username: env_required("DBX_BENCH_USER")?,
         password: env_required("DBX_BENCH_PASSWORD")?,
         database: Some(database_name),
+        auth_method: None,
         default_schema: None,
         visible_databases: None,
         visible_database_patterns: None,

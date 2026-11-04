@@ -14,6 +14,8 @@ mq-admin = ["dep:rumqttc", "dbx-types/mq-admin", "dbx-drivers/mq-admin"]
 # Requires the vendored tiberius patched in by the root workspace; standalone
 # agent driver workspaces build dbx-core without it. Desktop enables this.
 sqlserver-native-attention = ["dbx-drivers/sqlserver-native-attention"]
+# SQL Server Windows authentication (SSPI). Inert on non-Windows targets.
+sqlserver-windows-auth = ["dbx-drivers/sqlserver-windows-auth"]
 sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl", "dbx-drivers/sqlite-sqlcipher"]
 sqlite-multiple-ciphers = ["dbx-drivers/sqlite-multiple-ciphers"]
 # Keeps bundled SQLite for consumers that enable no other sqlite source

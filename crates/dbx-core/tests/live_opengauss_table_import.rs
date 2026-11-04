@@ -57,6 +57,7 @@ fn live_connection_config(id: &str, database: &str) -> ConnectionConfig {
         username: required_env("DBX_LIVE_OPENGAUSS_USER"),
         password: required_env("DBX_LIVE_OPENGAUSS_PASSWORD"),
         database: Some(database.to_string()),
+        auth_method: None,
         default_schema: None,
         visible_databases: None,
         visible_database_patterns: None,

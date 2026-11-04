@@ -12,6 +12,8 @@ dynamodb = ["dep:aws-sdk-dynamodb"]
 mq-admin = ["dbx-types/mq-admin"]
 # Desktop/native SQL Server batch interruption; see dbx-driver-sqlserver.
 sqlserver-native-attention = ["dbx-driver-sqlserver/native-attention"]
+# SQL Server Windows authentication (SSPI). Inert on non-Windows targets.
+sqlserver-windows-auth = ["dbx-driver-sqlserver/windows-auth"]
 sqlite-bundled = ["rusqlite/bundled"]
 sqlite-sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
 sqlite-multiple-ciphers = ["dep:libsqlite3-hotbundle"]

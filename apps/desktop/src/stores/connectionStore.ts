@@ -3636,7 +3636,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function isNativePostgresTreeConfig(config: ConnectionConfig | undefined): boolean {
-    return config?.db_type === "postgres" && (!config.driver_profile || config.driver_profile === "postgres") && !config.connection_string?.trim().toLowerCase().startsWith("jdbc:");
+    return pagesTablePartitionsWithRootPage(config) && !config?.connection_string?.trim().toLowerCase().startsWith("jdbc:");
   }
 
   function isPostgresTreeParent(node: TreeNode): boolean {

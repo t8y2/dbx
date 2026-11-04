@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, TableInfo, TreeNode } from "@/types/database";
 import { SCHEMA_TREE_CACHE_TTL_MS } from "@/lib/metadata/schemaTreeCache";
 
-async function setup(mode: "grouped" | "simple") {
+async function setup(mode: "grouped" | "simple", config: Partial<ConnectionConfig> = {}) {
   const cache = new Map<string, any>();
   const roots: TableInfo[] = Array.from({ length: 73 }, (_, i) => ({ name: `root_${String(i).padStart(3, "0")}`, schema: "public", table_type: "TABLE" }));
   const rows = roots.flatMap((root) => [root, ...Array.from({ length: 7 }, (_, i) => ({ name: `${root.name}_p${i}`, schema: "public", table_type: "TABLE", parent_name: root.name }))]);
@@ -22,6 +22,8 @@ async function setup(mode: "grouped" | "simple") {
   vi.doMock("@/lib/backend/api", () => ({
     checkConnectionHealth,
     connectDb,
+    connectionIdentifierQuote: vi.fn().mockResolvedValue('"'),
+    listDatabases: vi.fn().mockResolvedValue([]),
     listInstalledAgents: vi.fn().mockResolvedValue([]),
     listObjects: vi.fn().mockResolvedValue([]),
     deleteSchemaCachePrefix: vi.fn(async (prefix: string) => {
@@ -39,7 +41,7 @@ async function setup(mode: "grouped" | "simple") {
   const settings = useSettingsStore();
   settings.editorSettings.sidebarObjectDisplay = mode;
   settings.desktopSettings.sidebar_table_page_size = 70;
-  store.connections = [{ id: "pg", name: "PG", db_type: "postgres", host: "localhost", port: 5432, username: "postgres", database: "app" } as ConnectionConfig];
+  store.connections = [{ id: "pg", name: "PG", db_type: "postgres", host: "localhost", port: 5432, username: "postgres", database: "app", ...config } as ConnectionConfig];
   store.connectedIds.add("pg");
   store.treeNodes = [
     {
@@ -75,9 +77,20 @@ beforeEach(() => {
   setActivePinia(createPinia());
 });
 
-describe.each(["grouped", "simple"] as const)("PG %s released root window", (mode) => {
+const nativeConfigs: Partial<ConnectionConfig>[] = [
+  { db_type: "postgres" },
+  { db_type: "postgres", driver_profile: "postgres" },
+  { db_type: "postgres", driver_profile: "cloudberry" },
+  { db_type: "postgres", driver_profile: "cockroachdb" },
+  { db_type: "redshift" },
+  { db_type: "gaussdb", driver_profile: "gaussdb" },
+  { db_type: "kwdb" },
+  { db_type: "opengauss" },
+];
+
+describe.each(nativeConfigs.flatMap((config) => (["grouped", "simple"] as const).map((mode) => ({ mode, config }))))("$mode released root window: $config", ({ mode, config }) => {
   it.each(["disconnected", "dead-pool"])("loads the initial page after %s connection recovery", async (reason) => {
-    const f = await setup(mode);
+    const f = await setup(mode, config);
     if (reason === "disconnected") f.store.connectedIds.delete("pg");
     else f.checkConnectionHealth.mockRejectedValueOnce(new Error("pool dead"));
     await f.open();
@@ -87,7 +100,7 @@ describe.each(["grouped", "simple"] as const)("PG %s released root window", (mod
     expect(f.parent.isExpanded).toBe(true);
   });
   it("preserves all 73 roots and complete partitions over three release/reopen cycles", async () => {
-    const f = await setup(mode);
+    const f = await setup(mode, config);
     await f.open();
     await f.settle();
     expect(f.tables()).toHaveLength(70);
@@ -108,7 +121,7 @@ describe.each(["grouped", "simple"] as const)("PG %s released root window", (mod
     }
   });
   it("keeps the partial cursor, then loads only the remaining roots", async () => {
-    const f = await setup(mode);
+    const f = await setup(mode, config);
     await f.open();
     await f.settle();
     const cursor = JSON.parse(JSON.stringify(f.more().loadMore));
@@ -125,7 +138,7 @@ describe.each(["grouped", "simple"] as const)("PG %s released root window", (mod
   });
 
   it.each(["force", "stale", "invalid", "invalid-scope", "invalid-cursor", "legacy", "invalidate"])("reloads page zero for %s snapshots", async (reason) => {
-    const f = await setup(mode);
+    const f = await setup(mode, config);
     await f.open();
     await f.settle();
     await f.store.loadMoreObjectGroupChildren(f.more());
@@ -151,7 +164,7 @@ describe.each(["grouped", "simple"] as const)("PG %s released root window", (mod
   });
 
   it.each(["cancel", "disconnect", "refresh", "invalidate", "config", "filter", "search", "scoped-search"])("rejects delayed hydration after %s", async (action) => {
-    const f = await setup(mode);
+    const f = await setup(mode, config);
     await f.open();
     await f.settle();
     f.release();
@@ -185,7 +198,7 @@ describe.each(["grouped", "simple"] as const)("PG %s released root window", (mod
   });
 
   it("waits for a pending page save before restoring the released window", async () => {
-    const f = await setup(mode);
+    const f = await setup(mode, config);
     await f.open();
     await f.settle();
     let resolve!: () => void;
@@ -209,7 +222,7 @@ describe.each(["grouped", "simple"] as const)("PG %s released root window", (mod
   });
 
   it.each(["cancel", "disconnect", "invalidate"])("does not publish after %s during a pending save", async (action) => {
-    const f = await setup(mode);
+    const f = await setup(mode, config);
     let resolve!: () => void;
     const save = f.saveSchemaCache.getMockImplementation()!;
     f.saveSchemaCache.mockImplementationOnce(async (key, value) => {
@@ -231,7 +244,7 @@ describe.each(["grouped", "simple"] as const)("PG %s released root window", (mod
   });
 
   it.each([0, 70])("rejects an invalidated in-flight page at offset %s and retries fresh", async (offset) => {
-    const f = await setup(mode);
+    const f = await setup(mode, config);
     if (offset) {
       await f.open();
       await f.settle();
@@ -257,7 +270,7 @@ describe.each(["grouped", "simple"] as const)("PG %s released root window", (mod
     expect(f.listTables.mock.calls.map((call) => call[5])).toEqual(offset ? [0, 70, 70] : [0, 0]);
   });
   it("replaces expanded partition identities on explicit refresh", async () => {
-    const f = await setup(mode);
+    const f = await setup(mode, config);
     await f.open();
     await f.settle();
     f.tables()[0].isExpanded = true;
@@ -270,7 +283,7 @@ describe.each(["grouped", "simple"] as const)("PG %s released root window", (mod
   });
 
   it("serializes an obsolete save before the newer refresh snapshot", async () => {
-    const f = await setup(mode);
+    const f = await setup(mode, config);
     let resolve!: () => void;
     const save = f.saveSchemaCache.getMockImplementation()!;
     f.saveSchemaCache.mockImplementationOnce(async (key, value) => {
@@ -294,7 +307,7 @@ describe.each(["grouped", "simple"] as const)("PG %s released root window", (mod
 
   if (mode === "grouped")
     it("preserves explicit auto-all opt-in and reuses its complete window", async () => {
-      const f = await setup(mode);
+      const f = await setup(mode, config);
       f.store.connections[0].sidebar_auto_load_all_tables = true;
       await f.open();
       expect(f.tables()).toHaveLength(73);
@@ -304,14 +317,16 @@ describe.each(["grouped", "simple"] as const)("PG %s released root window", (mod
       expect(f.tables()).toHaveLength(73);
       expect(f.listTables).not.toHaveBeenCalled();
     });
+});
+
+describe.each(["grouped", "simple"] as const)("%s external-driver cache", (mode) => {
   it.each([
-    { db_type: "postgres", driver_profile: "cockroachdb" },
-    { db_type: "postgres", driver_profile: "cloudberry" },
+    { db_type: "gaussdb", driver_profile: "gaussdb-m" },
+    { db_type: "gaussdb", driver_profile: "GAUSSDB-M" },
     { db_type: "jdbc", driver_profile: "postgres" },
     { db_type: "postgres", connection_string: "jdbc:postgresql://localhost/app" },
-  ] as Partial<ConnectionConfig>[])("retains generic cache behavior for non-native scope %j", async (config) => {
-    const f = await setup(mode);
-    Object.assign(f.store.connections[0], config);
+  ] as Partial<ConnectionConfig>[])("retains generic cache behavior for %j", async (config) => {
+    const f = await setup(mode, config);
     f.listTables.mockResolvedValue([]);
     await f.open();
     await f.settle();

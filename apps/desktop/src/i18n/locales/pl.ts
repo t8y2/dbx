@@ -10450,7 +10450,7 @@ export default withEnglishFallback({
     tableSelection: "Tabele",
     selectedTables: "Zaznaczono {selected} z {total}",
     selectAllTables: "Zaznacz wszystko",
-    filterTables: "Szukaj tabel...",
+    filterTables: "Szukaj tabel (rozdzielone przecinkami lub /regex/)...",
     clearTables: "Wyczyść",
     loadingTables: "Wczytywanie tabel...",
     tableLoadError: "Nie udało się załadować tabel: {error}",

@@ -12369,7 +12369,7 @@ export default withEnglishFallback({
     tableSelection: "Таблицы",
     selectedTables: "Выбрано {selected}/{total}",
     selectAllTables: "Выбрать все",
-    filterTables: "Поиск таблиц...",
+    filterTables: "Поиск таблиц (через запятую или /регулярное выражение/)...",
     clearTables: "Очистить",
     loadingTables: "Загрузка таблиц...",
     tableLoadError: "Не удалось загрузить таблицы: {error}",

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::io::{BufRead, BufWriter, Write};
+use std::io::{BufRead, BufWriter, Read, Seek, Write};
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -4344,6 +4344,233 @@ async fn create_database_export_writer(
     })
 }
 
+// Phase records are created at the existing emission boundaries, never reconstructed
+// by parsing SQL. Table data stays in the pre-view spool; only view identities and
+// byte ranges are retained in memory across schemas.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PostgresExportRelation {
+    schema: String,
+    name: String,
+}
+
+struct PostgresExportView {
+    relation: PostgresExportRelation,
+    kind: ObjectSourceKind,
+    offset: u64,
+    length: u64,
+}
+
+struct PostgresSchemaExportPhases {
+    tail_path: std::path::PathBuf,
+    view_path: std::path::PathBuf,
+    view_spool: Option<BufWriter<std::fs::File>>,
+    view_bytes: u64,
+    views: Vec<PostgresExportView>,
+    table_structures: Vec<PostgresExportRelation>,
+}
+
+impl PostgresSchemaExportPhases {
+    fn new(directory: &std::path::Path, schema_index: usize) -> Result<Self, String> {
+        let view_path = directory.join(format!("schema-{schema_index}-views.sql"));
+        let view_spool =
+            BufWriter::new(std::fs::File::create(&view_path).map_err(|e| format!("Failed to create view spool: {e}"))?);
+        Ok(Self {
+            tail_path: directory.join(format!("schema-{schema_index}-tail.sql")),
+            view_path,
+            view_spool: Some(view_spool),
+            view_bytes: 0,
+            views: Vec::new(),
+            table_structures: Vec::new(),
+        })
+    }
+
+    fn push_view(&mut self, schema: &str, view: &crate::types::TableInfo, source: &str) -> Result<(), String> {
+        let sql = format!("{source}\n");
+        self.view_spool
+            .as_mut()
+            .expect("collecting view spool")
+            .write_all(sql.as_bytes())
+            .map_err(|e| format!("Failed to write view spool: {e}"))?;
+        self.views.push(PostgresExportView {
+            relation: PostgresExportRelation { schema: schema.to_string(), name: view.name.clone() },
+            kind: if view.table_type.contains("MATERIALIZED") {
+                ObjectSourceKind::MaterializedView
+            } else {
+                ObjectSourceKind::View
+            },
+            offset: self.view_bytes,
+            length: sql.len() as u64,
+        });
+        self.view_bytes += sql.len() as u64;
+        Ok(())
+    }
+}
+
+const POSTGRES_ALL_SCHEMA_VIEW_DEPENDENCIES_SQL: &str =
+    "SELECT DISTINCT src_ns.nspname, src.relname, tgt_ns.nspname, tgt.relname \
+     FROM pg_catalog.pg_depend dep \
+     JOIN pg_catalog.pg_rewrite rewrite ON rewrite.oid = dep.objid \
+     JOIN pg_catalog.pg_class src ON src.oid = rewrite.ev_class \
+     JOIN pg_catalog.pg_namespace src_ns ON src_ns.oid = src.relnamespace \
+     JOIN pg_catalog.pg_class tgt ON tgt.oid = dep.refobjid \
+     JOIN pg_catalog.pg_namespace tgt_ns ON tgt_ns.oid = tgt.relnamespace \
+     WHERE dep.classid = 'pg_catalog.pg_rewrite'::regclass \
+       AND dep.refclassid = 'pg_catalog.pg_class'::regclass \
+       AND src.relkind IN ('v', 'm') \
+       AND src.oid <> tgt.oid \
+       AND src_ns.nspname = ANY($1) \
+       AND tgt_ns.nspname = ANY($1) \
+     ORDER BY 1, 2, 3, 4";
+
+type PostgresExportViewDependency = (PostgresExportRelation, PostgresExportRelation);
+
+async fn list_postgres_all_schema_view_dependencies(
+    state: &crate::connection::AppState,
+    request: &DatabaseExportRequest,
+    schemas: &[String],
+) -> Result<Vec<PostgresExportViewDependency>, String> {
+    let client_session_id = database_export_client_session_id(&request.export_id);
+    let pool_key = state
+        .get_or_create_pool_for_session(&request.connection_id, Some(&request.database), Some(&client_session_id))
+        .await?;
+    let pool = match state.pool_handle(&pool_key).await {
+        Some(crate::connection::PoolKind::Postgres(pool)) => pool,
+        _ => return Err("PostgreSQL view dependency lookup requires a PostgreSQL pool".to_string()),
+    };
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let client = crate::db::postgres::PostgresTextClient::new(&client);
+    let rows = client.query(POSTGRES_ALL_SCHEMA_VIEW_DEPENDENCIES_SQL, &[&schemas]).await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                PostgresExportRelation { schema: row.get(0), name: row.get(1) },
+                PostgresExportRelation { schema: row.get(2), name: row.get(3) },
+            )
+        })
+        .collect())
+}
+
+fn sort_postgres_all_schema_views(
+    views: &[PostgresExportRelation],
+    dependencies: &[PostgresExportViewDependency],
+) -> Result<Vec<usize>, String> {
+    let indices: HashMap<_, _> = views.iter().enumerate().map(|(index, relation)| (relation, index)).collect();
+    if indices.len() != views.len() {
+        return Err("Duplicate PostgreSQL view identities in export".to_string());
+    }
+    // Assigned IDs are lossless even for identifiers containing dots/quotes. Only
+    // actually exported views are nodes; tables are ready and omitted objects stay omitted.
+    let names: Vec<_> = (0..views.len()).map(|index| index.to_string()).collect();
+    let mut edges: Vec<_> = dependencies
+        .iter()
+        .filter_map(|(dependent, dependency)| {
+            let child = *indices.get(dependent)?;
+            let parent = *indices.get(dependency)?;
+            (child != parent).then_some((child, parent))
+        })
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
+    let named_edges: Vec<_> =
+        edges.iter().map(|(child, parent)| (names[*child].clone(), names[*parent].clone())).collect();
+    let order = crate::transfer::sort_table_names_by_dependencies(&names, &named_edges, true);
+    let order: Vec<usize> = order.iter().map(|name| name.parse().expect("assigned numeric view ID")).collect();
+    let mut positions = vec![0; views.len()];
+    for (position, index) in order.iter().enumerate() {
+        positions[*index] = position;
+    }
+    // The shared sorter deliberately appends cycle leftovers. Do not silently
+    // present that fallback as a valid dependency order for an executable dump.
+    if edges.iter().any(|(child, parent)| positions[*parent] >= positions[*child]) {
+        return Err("Cannot order exported PostgreSQL views: cyclic dependencies".to_string());
+    }
+    Ok(order)
+}
+
+/// Preserve the old schema-block layout unless it already places an included
+/// referenced relation after its dependent view. Otherwise moving every routine
+/// to the tail would break valid earlier-schema function -> later table/view cases.
+fn postgres_export_requires_global_view_phase(
+    schemas: &[String],
+    views: &[PostgresExportRelation],
+    table_structures: &[PostgresExportRelation],
+    dependencies: &[PostgresExportViewDependency],
+) -> bool {
+    let schema_positions: HashMap<_, _> = schemas.iter().enumerate().map(|(index, schema)| (schema, index)).collect();
+    let selected_views: HashSet<_> = views.iter().collect();
+    let included_relations: HashSet<_> = views.iter().chain(table_structures).collect();
+    dependencies.iter().any(|(dependent, dependency)| {
+        selected_views.contains(dependent)
+            && included_relations.contains(dependency)
+            && matches!((schema_positions.get(&dependent.schema), schema_positions.get(&dependency.schema)),
+                (Some(child), Some(parent)) if parent > child)
+    })
+}
+
+enum PostgresExportPhase<'a> {
+    Schema(&'a str, &'a str),
+    View(&'a PostgresSchemaExportPhases, &'a PostgresExportView),
+    Tail(&'a std::path::Path),
+}
+
+fn postgres_view_order_or_fallback<W: Write>(
+    order: Result<Vec<usize>, String>,
+    view_count: usize,
+    file: &mut W,
+    fail_on_error: bool,
+    errors: &mut LenientExportErrors,
+) -> Result<Vec<usize>, String> {
+    match order {
+        Ok(order) => Ok(order),
+        Err(error) if error == EXPORT_CANCELLED_ERROR => Err(error),
+        Err(error) => {
+            // Match the single-schema lenient policy: discovery order is a
+            // fallback, visibly annotated and counted, not a valid topology.
+            record_export_error(
+                file,
+                fail_on_error,
+                format!("resolving global view dependency order: {error}"),
+                errors,
+            )?;
+            Ok((0..view_count).collect())
+        }
+    }
+}
+
+fn copy_postgres_export_phase<W: Write>(
+    source: &mut dyn BufRead,
+    destination: &mut W,
+    export_id: &str,
+) -> Result<(), String> {
+    let mut splitter = SqlStatementSplitter::with_options(SqlParsingOptions::for_database_type(DatabaseType::Postgres));
+    let mut chunk = String::new();
+    loop {
+        if is_export_cancelled_now(export_id) {
+            return Err(EXPORT_CANCELLED_ERROR.to_string());
+        }
+        chunk.clear();
+        if source.read_line(&mut chunk).map_err(|e| format!("Failed to read export phase: {e}"))? == 0 {
+            break;
+        }
+        for statement in splitter.push_chunk(&chunk) {
+            if is_export_cancelled_now(export_id) {
+                return Err(EXPORT_CANCELLED_ERROR.to_string());
+            }
+            // Keep statement boundaries intact for split/compressed writers. This
+            // parses existing SQL solely for output units, not to recover phases.
+            writeln!(destination, "{statement};").map_err(|e| format!("Failed to write export phase: {e}"))?;
+        }
+    }
+    for statement in splitter.finish() {
+        if is_export_cancelled_now(export_id) {
+            return Err(EXPORT_CANCELLED_ERROR.to_string());
+        }
+        writeln!(destination, "{statement};").map_err(|e| format!("Failed to write export phase: {e}"))?;
+    }
+    Ok(())
+}
+
 fn postgres_export_schema_names(schemas: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
     schemas
@@ -4382,6 +4609,13 @@ async fn export_postgres_all_schemas_sql_core(
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
 ) -> Result<(), String> {
+    let collect_phases = request.include_objects
+        && state
+            .configs
+            .read()
+            .await
+            .get(&request.connection_id)
+            .is_some_and(|config| config.db_type == DatabaseType::Postgres);
     let schemas = postgres_export_schema_names(
         crate::schema::list_schemas_core(state, &request.connection_id, &request.database).await?,
     );
@@ -4432,7 +4666,18 @@ async fn export_postgres_all_schemas_sql_core(
                 on_progress(progress);
             };
 
-            Box::pin(export_database_sql_core_inner(state, &schema_request, child_progress)).await?;
+            let mut phases = if collect_phases {
+                Some(PostgresSchemaExportPhases::new(temp_dir.path(), schema_index)?)
+            } else {
+                None
+            };
+            Box::pin(export_database_sql_core_inner_with_phases(
+                state,
+                &schema_request,
+                child_progress,
+                phases.as_mut(),
+            ))
+            .await?;
             let terminal = terminal.lock().expect("export terminal mutex poisoned").clone();
             if terminal.as_ref().is_some_and(|progress| matches!(progress.status, ExportStatus::Cancelled)) {
                 return Err(EXPORT_CANCELLED_ERROR.to_string());
@@ -4450,9 +4695,47 @@ async fn export_postgres_all_schemas_sql_core(
                     });
                 }
             }
-            schema_outputs.push((schema_name.clone(), schema_request.file_path));
+            schema_outputs.push((schema_name.clone(), schema_request.file_path, phases));
         }
 
+        let view_records: Vec<_> = schema_outputs
+            .iter()
+            .filter_map(|(_, _, phases)| phases.as_ref())
+            .flat_map(|phases| phases.views.iter().map(move |view| (phases, view)))
+            .collect();
+        let view_relations: Vec<_> = view_records.iter().map(|(_, view)| view.relation.clone()).collect();
+        let table_structures: Vec<_> = schema_outputs
+            .iter()
+            .filter_map(|(_, _, phases)| phases.as_ref())
+            .flat_map(|phases| phases.table_structures.iter().cloned())
+            .collect();
+        // Even one view may read a table in a later schema. Data-only/omitted
+        // relations are absent from table_structures and cannot trigger reordering.
+        let dependencies = if !view_records.is_empty() && schemas.len() > 1 {
+            await_export_operation(
+                &request.export_id,
+                Box::pin(list_postgres_all_schema_view_dependencies(state, request, &schemas)),
+            )
+            .await
+        } else {
+            Ok(Vec::new())
+        };
+        let requires_global_phase = dependencies.as_ref().is_ok_and(|dependencies| {
+            postgres_export_requires_global_view_phase(&schemas, &view_relations, &table_structures, dependencies)
+        });
+        let view_order =
+            dependencies.and_then(|dependencies| sort_postgres_all_schema_views(&view_relations, &dependencies));
+        // Unknown/invalid metadata in lenient mode must not introduce a new
+        // reordering. Each schema's collected views already have the old local sort.
+        let use_global_phase = requires_global_phase && view_order.is_ok();
+        if is_export_cancelled_now(&request.export_id) {
+            return Err(EXPORT_CANCELLED_ERROR.to_string());
+        }
+        if let Err(error) = &view_order {
+            if error == EXPORT_CANCELLED_ERROR || request.fail_on_error {
+                return Err(error.clone());
+            }
+        }
         let mut file = create_database_export_writer(state, request).await?;
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         writeln!(file, "-- Database export: {}", request.database).map_err(|e| format!("Failed to write file: {e}"))?;
@@ -4467,14 +4750,95 @@ async fn export_postgres_all_schemas_sql_core(
         }
         writeln!(file).map_err(|e| format!("Failed to write file: {e}"))?;
 
-        for (schema_name, path) in schema_outputs {
-            writeln!(file, "-- Schema export: {schema_name}").map_err(|e| format!("Failed to write file: {e}"))?;
-            let mut source = std::io::BufReader::new(
-                std::fs::File::open(path).map_err(|e| format!("Failed to read temporary schema export: {e}"))?,
-            );
-            combine_schema_sql_export(&mut source, &mut file)
-                .map_err(|e| format!("Failed to combine schema export: {e}"))?;
-            writeln!(file).map_err(|e| format!("Failed to write file: {e}"))?;
+        let mut ordering_errors = LenientExportErrors::default();
+        let order = postgres_view_order_or_fallback(
+            view_order,
+            view_records.len(),
+            &mut file,
+            request.fail_on_error,
+            &mut ordering_errors,
+        )?;
+        error_count += ordering_errors.count as u64;
+        if let Some(message) = ordering_errors.first {
+            error_summary = Some(match error_summary.take() {
+                Some(existing) => format!("{existing}; {message}"),
+                None => message,
+            });
+        }
+        let mut output_phases = Vec::new();
+        for (schema_name, path, phases) in &schema_outputs {
+            output_phases.push(PostgresExportPhase::Schema(schema_name, path));
+            if !use_global_phase {
+                if let Some(phases) = phases {
+                    output_phases.extend(phases.views.iter().map(|view| PostgresExportPhase::View(phases, view)));
+                    output_phases.push(PostgresExportPhase::Tail(&phases.tail_path));
+                }
+            }
+        }
+        if use_global_phase {
+            output_phases.extend(order.iter().map(|index| {
+                let (phases, view) = view_records[*index];
+                PostgresExportPhase::View(phases, view)
+            }));
+            output_phases.extend(schema_outputs.iter().filter_map(|(_, _, phases)| {
+                phases.as_ref().map(|phases| PostgresExportPhase::Tail(phases.tail_path.as_path()))
+            }));
+        }
+        let mut view_position = 0;
+        for phase in output_phases {
+            if is_export_cancelled_now(&request.export_id) {
+                return Err(EXPORT_CANCELLED_ERROR.to_string());
+            }
+            match phase {
+                PostgresExportPhase::Schema(schema_name, path) => {
+                    writeln!(file, "-- Schema export: {schema_name}")
+                        .map_err(|e| format!("Failed to write file: {e}"))?;
+                    let mut source = std::io::BufReader::new(
+                        std::fs::File::open(path)
+                            .map_err(|e| format!("Failed to read temporary schema export: {e}"))?,
+                    );
+                    if collect_phases {
+                        copy_postgres_export_phase(&mut source, &mut file, &request.export_id)?;
+                    } else {
+                        combine_schema_sql_export(&mut source, &mut file)
+                            .map_err(|e| format!("Failed to combine schema export: {e}"))?;
+                    }
+                    writeln!(file).map_err(|e| format!("Failed to write file: {e}"))?;
+                }
+                PostgresExportPhase::View(phases, view) => {
+                    let kind = if matches!(view.kind, ObjectSourceKind::MaterializedView) {
+                        "materialized view"
+                    } else {
+                        "view"
+                    };
+                    emit_database_export_running(
+                        &on_progress,
+                        &request.export_id,
+                        format!("{kind}: {}.{}", view.relation.schema, view.relation.name),
+                        view_position,
+                        view_records.len(),
+                        rows_exported,
+                        false,
+                    );
+                    let mut source = std::fs::File::open(&phases.view_path)
+                        .map_err(|e| format!("Failed to read view spool: {e}"))?;
+                    source
+                        .seek(std::io::SeekFrom::Start(view.offset))
+                        .map_err(|e| format!("Failed to seek view spool: {e}"))?;
+                    let mut source = std::io::BufReader::new(source.take(view.length));
+                    copy_postgres_export_phase(&mut source, &mut file, &request.export_id)?;
+                    view_position += 1;
+                }
+                PostgresExportPhase::Tail(path) => {
+                    let mut source = std::io::BufReader::new(
+                        std::fs::File::open(path).map_err(|e| format!("Failed to read export tail: {e}"))?,
+                    );
+                    copy_postgres_export_phase(&mut source, &mut file, &request.export_id)?;
+                }
+            }
+        }
+        if is_export_cancelled_now(&request.export_id) {
+            return Err(EXPORT_CANCELLED_ERROR.to_string());
         }
         file.finish(&export_source_file_name(&request.file_path))?;
         on_progress(ExportProgress {
@@ -4501,6 +4865,15 @@ async fn export_database_sql_core_inner(
     state: &Arc<crate::connection::AppState>,
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
+) -> Result<(), String> {
+    Box::pin(export_database_sql_core_inner_with_phases(state, request, on_progress, None)).await
+}
+
+async fn export_database_sql_core_inner_with_phases(
+    state: &Arc<crate::connection::AppState>,
+    request: &DatabaseExportRequest,
+    on_progress: impl Fn(ExportProgress) + Sync,
+    mut phases: Option<&mut PostgresSchemaExportPhases>,
 ) -> Result<(), String> {
     let _snapshot_keep_alive = if let Some(snapshot_session_id) = request.snapshot_session_id.as_deref() {
         Some(crate::query::keep_manual_transaction_alive(state, snapshot_session_id).await?)
@@ -5216,6 +5589,14 @@ async fn export_database_sql_core_inner(
                         DdlNormalizeOptions { omit_auto_increment: request.omit_auto_increment },
                     );
                     writeln!(file, "{ddl}\n").map_err(|e| format!("Failed to write file: {e}"))?;
+                    if let Some(phases) = phases.as_deref_mut() {
+                        if !ddl.trim().is_empty() {
+                            phases.table_structures.push(PostgresExportRelation {
+                                schema: request.schema.clone(),
+                                name: table_name.clone(),
+                            });
+                        }
+                    }
                 }
                 Err(e) => {
                     record_export_error(
@@ -5506,6 +5887,15 @@ async fn export_database_sql_core_inner(
         }
     }
 
+    // Only whole-database PostgreSQL exports opt into phase collection. The pre-view
+    // stream is already complete; all remaining ordinary writes belong to the tail.
+    if let Some(phases) = phases.as_deref_mut() {
+        file.finish(&export_source_file_name(&request.file_path))?;
+        let mut tail_request = request.clone();
+        tail_request.file_path = phases.tail_path.display().to_string();
+        file = create_database_export_writer(state, &tail_request).await?;
+    }
+
     // Export views (if include_objects)
     if request.include_objects {
         for view_info in &views {
@@ -5551,7 +5941,11 @@ async fn export_database_sql_core_inner(
                         request.drop_table_if_exists,
                     );
                     if !source.is_empty() {
-                        writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
+                        if let Some(phases) = phases.as_deref_mut() {
+                            phases.push_view(&request.schema, view_info, &source)?;
+                        } else {
+                            writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
+                        }
                     }
                 }
                 Err(e) => {
@@ -5763,6 +6157,11 @@ async fn export_database_sql_core_inner(
     }
 
     file.finish(&export_source_file_name(&request.file_path))?;
+    if let Some(phases) = phases {
+        if let Some(mut spool) = phases.view_spool.take() {
+            spool.flush().map_err(|e| format!("Failed to finalize view spool: {e}"))?;
+        }
+    }
 
     // Emit Done progress
     on_progress(ExportProgress {
@@ -7054,6 +7453,163 @@ mod tests {
         let sorted = sort_export_views_by_dependencies(&views, &dependencies);
 
         assert_eq!(sorted.iter().map(|view| view.name.as_str()).collect::<Vec<_>>(), vec!["z_view", "a_view"]);
+    }
+
+    fn postgres_view_relation(schema: &str, name: &str) -> super::PostgresExportRelation {
+        super::PostgresExportRelation { schema: schema.to_string(), name: name.to_string() }
+    }
+
+    #[test]
+    fn postgres_all_schema_view_order_follows_objects_not_schema_blocks() {
+        let views = vec![
+            postgres_view_relation("a", "last"),
+            postgres_view_relation("z", "middle"),
+            postgres_view_relation("a", "first"),
+        ];
+        let dependencies = vec![(views[0].clone(), views[1].clone()), (views[1].clone(), views[2].clone())];
+        assert_eq!(super::sort_postgres_all_schema_views(&views, &dependencies).unwrap(), vec![2, 1, 0]);
+    }
+
+    #[test]
+    fn postgres_all_schema_view_order_preserves_qualified_identity_and_selection() {
+        let views = vec![
+            postgres_view_relation("a.b", "c"),
+            postgres_view_relation("a", "b.c"),
+            postgres_view_relation("a", "same"),
+            postgres_view_relation("z", "same"),
+            postgres_view_relation("Quoted\"Schema", "Case.Sensitive"),
+        ];
+        let mut dependencies = vec![
+            (views[0].clone(), views[1].clone()),
+            (views[2].clone(), views[3].clone()),
+            (views[2].clone(), views[3].clone()), // duplicate edge
+            (views[4].clone(), views[4].clone()), // rewrite rule's own relation
+            (views[4].clone(), postgres_view_relation("outside", "omitted")),
+            (postgres_view_relation("outside", "unselected"), views[0].clone()),
+        ];
+        let order = super::sort_postgres_all_schema_views(&views, &dependencies).unwrap();
+        assert_eq!(order, vec![1, 3, 4, 0, 2]);
+        dependencies.reverse();
+        assert_eq!(super::sort_postgres_all_schema_views(&views, &dependencies).unwrap(), order);
+        assert_eq!(super::sort_postgres_all_schema_views(&views, &[]).unwrap(), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn postgres_all_schema_view_order_rejects_cycles_and_duplicate_nodes() {
+        let views = vec![postgres_view_relation("a", "v"), postgres_view_relation("z", "v")];
+        let cycle = vec![(views[0].clone(), views[1].clone()), (views[1].clone(), views[0].clone())];
+        assert!(super::sort_postgres_all_schema_views(&views, &cycle).unwrap_err().contains("cyclic"));
+        assert!(super::sort_postgres_all_schema_views(&[views[0].clone(), views[0].clone()], &[]).is_err());
+    }
+
+    #[test]
+    fn postgres_all_schema_layout_preserves_valid_schema_blocks() {
+        let schemas = vec!["a".to_string(), "z".to_string()];
+        let views = vec![postgres_view_relation("a", "base"), postgres_view_relation("z", "report")];
+        let tables = vec![postgres_view_relation("z", "items")];
+        // No relation edges: a.function -> z.table DEFAULT / z.view must retain
+        // a's tail before z's prefix/views. Function edges are deliberately not modeled.
+        assert!(!super::postgres_export_requires_global_view_phase(&schemas, &views, &tables, &[]));
+        // A forward cross-schema relation edge does not justify disturbing that layout.
+        let forward = vec![(views[1].clone(), views[0].clone())];
+        assert!(!super::postgres_export_requires_global_view_phase(&schemas, &views, &tables, &forward));
+        let local = vec![(views[1].clone(), tables[0].clone())];
+        assert!(!super::postgres_export_requires_global_view_phase(&schemas, &views, &tables, &local));
+    }
+
+    #[test]
+    fn postgres_all_schema_layout_reorders_backward_included_view_or_table_edges() {
+        let schemas = vec!["a".to_string(), "z".to_string()];
+        let views = vec![postgres_view_relation("a", "report"), postgres_view_relation("z", "base")];
+        let tables = vec![postgres_view_relation("z", "items")];
+        let backward_view = vec![(views[0].clone(), views[1].clone())];
+        assert!(super::postgres_export_requires_global_view_phase(&schemas, &views, &tables, &backward_view));
+        let backward_table = vec![(views[0].clone(), tables[0].clone())];
+        assert!(
+            super::postgres_export_requires_global_view_phase(&schemas, &views[..1], &tables, &backward_table),
+            "even a single exported view can require a later table structure"
+        );
+    }
+
+    #[test]
+    fn postgres_all_schema_layout_ignores_omitted_and_data_only_relations() {
+        let schemas = vec!["a".to_string(), "z".to_string()];
+        let views = vec![postgres_view_relation("a", "report")];
+        let later_table = postgres_view_relation("z", "items");
+        let dependencies = vec![(views[0].clone(), later_table.clone())];
+        // An excluded/extension-owned/failed-DDL/data-only table is not a created
+        // relation. Moving schema blocks cannot supply its missing structure.
+        assert!(!super::postgres_export_requires_global_view_phase(&schemas, &views, &[], &dependencies));
+        let omitted_view = vec![(postgres_view_relation("a", "unselected"), later_table.clone())];
+        assert!(!super::postgres_export_requires_global_view_phase(&schemas, &views, &[later_table], &omitted_view));
+    }
+
+    #[test]
+    fn postgres_all_schema_view_order_failure_policy_is_explicit() {
+        let mut file = Vec::new();
+        let mut errors = LenientExportErrors::default();
+        let failure = "catalog lookup failed".to_string();
+        assert!(super::postgres_view_order_or_fallback(Err(failure.clone()), 2, &mut file, true, &mut errors).is_err());
+        assert!(file.is_empty());
+        assert_eq!(errors.count, 0);
+        assert_eq!(
+            super::postgres_view_order_or_fallback(Err(failure), 2, &mut file, false, &mut errors).unwrap(),
+            vec![0, 1]
+        );
+        assert_eq!(errors.count, 1);
+        assert!(String::from_utf8(file.clone())
+            .unwrap()
+            .contains("-- ERROR resolving global view dependency order: catalog lookup failed"));
+        let before = file.clone();
+        assert_eq!(
+            super::postgres_view_order_or_fallback(
+                Err(super::EXPORT_CANCELLED_ERROR.to_string()),
+                2,
+                &mut file,
+                false,
+                &mut errors
+            )
+            .unwrap_err(),
+            super::EXPORT_CANCELLED_ERROR
+        );
+        assert_eq!(file, before, "cancellation is never converted into a lenient success");
+        assert_eq!(errors.count, 1);
+    }
+
+    #[test]
+    fn postgres_all_schema_view_spool_keeps_exact_ddl_ranges() {
+        use std::io::Seek;
+        let dir = tempfile::tempdir().unwrap();
+        let mut phases = super::PostgresSchemaExportPhases::new(dir.path(), 0).unwrap();
+        let sources = [
+            "CREATE VIEW \"a.b\".\"c\" AS SELECT 'x;y' AS value;",
+            "CREATE MATERIALIZED VIEW a.\"b.c\" AS SELECT 42 AS value;",
+        ];
+        phases.push_view("a.b", &table("c", "VIEW"), sources[0]).unwrap();
+        phases.push_view("a", &table("b.c", "MATERIALIZED VIEW"), sources[1]).unwrap();
+        phases.view_spool.take().unwrap().flush().unwrap();
+        assert!(matches!(phases.views[1].kind, ObjectSourceKind::MaterializedView));
+        let mut output = Vec::new();
+        for index in [1, 0] {
+            let view = &phases.views[index];
+            let mut file = std::fs::File::open(&phases.view_path).unwrap();
+            file.seek(std::io::SeekFrom::Start(view.offset)).unwrap();
+            let mut source = std::io::BufReader::new(file.take(view.length));
+            super::copy_postgres_export_phase(&mut source, &mut output, "view-spool-unit").unwrap();
+        }
+        assert_eq!(String::from_utf8(output).unwrap(), format!("{}\n{}\n", sources[1], sources[0]));
+    }
+
+    #[tokio::test]
+    async fn postgres_all_schema_phase_copy_observes_cancellation() {
+        let export_id = uuid::Uuid::new_v4().to_string();
+        super::set_export_cancelled(&export_id).await;
+        let mut source = std::io::Cursor::new("CREATE TABLE a.t (id int);\n");
+        let mut output = Vec::new();
+        let result = super::copy_postgres_export_phase(&mut source, &mut output, &export_id);
+        super::clear_export_cancelled(&export_id).await;
+        assert_eq!(result.unwrap_err(), super::EXPORT_CANCELLED_ERROR);
+        assert!(output.is_empty());
     }
 
     #[test]
@@ -9924,6 +10480,133 @@ mod tests {
         let combined: String = sql_parts.iter().map(|(_, contents)| contents.as_str()).collect();
         assert_eq!(combined, schema_sql);
         assert_eq!(combined.matches("INSERT INTO").count(), 20);
+    }
+
+    fn postgres_phase_writer_fixture() -> (Vec<String>, Vec<String>) {
+        let mut prefix = vec!["CREATE TABLE z.items (id integer, body text);".to_string()];
+        let payload = "x".repeat(120_000);
+        for id in 0..12 {
+            prefix.push(format!("INSERT INTO z.items VALUES ({id}, '{payload};still one literal');"));
+        }
+        let views = vec![
+            "CREATE VIEW z.base AS SELECT id, body FROM z.items;".to_string(),
+            "CREATE VIEW a.report AS SELECT id, body FROM z.base WHERE body <> ';';".to_string(),
+        ];
+        let tail = vec![
+            "CREATE FUNCTION a.answer() RETURNS integer AS $body$\nBEGIN\n  PERFORM 1;\n  RETURN 42;\nEND\n$body$ LANGUAGE plpgsql;".to_string(),
+            "CREATE INDEX item_id ON z.items (id);".to_string(),
+        ];
+        let phases = [&prefix, &views, &tail].iter().map(|units| format!("{}\n", units.join("\n"))).collect();
+        let units = prefix.into_iter().chain(views).chain(tail).collect();
+        (phases, units)
+    }
+
+    #[test]
+    fn postgres_phase_copy_split_zip_preserves_prefix_view_tail_units() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("phases.zip");
+        let split = crate::export_split_zip::SplitZipExportWriter::create(
+            &path,
+            crate::export_split_zip::MIN_SPLIT_PART_MAX_MB,
+            "phases",
+            "sql",
+        )
+        .unwrap();
+        let mut writer = DatabaseExportWriter::SplitZip(Box::new(split));
+        let (phases, units) = postgres_phase_writer_fixture();
+        for phase in &phases {
+            let mut source = std::io::Cursor::new(phase.as_bytes());
+            super::copy_postgres_export_phase(&mut source, &mut writer, "phase-split-writer-unit").unwrap();
+        }
+        writer.finish("phases.sql").unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+        let mut parts = Vec::new();
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            if entry.name().ends_with(".sql") {
+                let mut contents = String::new();
+                entry.read_to_string(&mut contents).unwrap();
+                parts.push((entry.name().to_string(), contents));
+            }
+        }
+        parts.sort_by(|left, right| left.0.cmp(&right.0));
+        assert!(parts.len() > 1, "must exercise actual split-part rotation");
+        let combined = parts.iter().map(|(_, contents)| contents.as_str()).collect::<String>();
+        assert_eq!(combined, phases.concat(), "all phases retain their complete SQL and order");
+        for unit in units {
+            assert_eq!(
+                parts.iter().filter(|(_, contents)| contents.contains(&unit)).count(),
+                1,
+                "each statement, including the dollar-quoted routine, stays whole in one part"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_phase_copy_gzip_preserves_prefix_view_tail_units() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("phases.sql.gz");
+        let mut writer = DatabaseExportWriter::Gzip(Box::new(flate2::write::GzEncoder::new(
+            std::io::BufWriter::new(std::fs::File::create(&path).unwrap()),
+            flate2::Compression::default(),
+        )));
+        let (phases, _) = postgres_phase_writer_fixture();
+        for phase in &phases {
+            let mut source = std::io::Cursor::new(phase.as_bytes());
+            super::copy_postgres_export_phase(&mut source, &mut writer, "phase-gzip-writer-unit").unwrap();
+        }
+        writer.finish("phases.sql").unwrap();
+        let mut decoded = String::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap()).read_to_string(&mut decoded).unwrap();
+        assert_eq!(decoded, phases.concat(), "gzip round-trip preserves all SQL units and phase order");
+    }
+
+    #[tokio::test]
+    async fn postgres_phase_copy_stops_after_first_unit_when_writer_cancels() {
+        struct CancellingWriter {
+            export_id: String,
+            units: Vec<String>,
+        }
+        impl Write for CancellingWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                panic!("SQL units must use write_fmt");
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn write_fmt(&mut self, arguments: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+                let unit = std::fmt::format(arguments);
+                self.units.push(unit);
+                super::EXPORT_CANCELLED.write().unwrap().insert(self.export_id.clone());
+                Ok(())
+            }
+        }
+        for sql in ["SELECT 1;\nSELECT 2;\n", "SELECT 1; SELECT 2;\n", "SELECT 1; SELECT 2"] {
+            let export_id = uuid::Uuid::new_v4().to_string();
+            let mut writer = CancellingWriter { export_id: export_id.clone(), units: Vec::new() };
+            let mut source = std::io::Cursor::new(sql);
+            let result = super::copy_postgres_export_phase(&mut source, &mut writer, &export_id);
+            super::clear_export_cancelled(&export_id).await;
+            assert_eq!(result.unwrap_err(), super::EXPORT_CANCELLED_ERROR);
+            assert_eq!(writer.units, vec!["SELECT 1;\n"], "must not write the second SQL unit for input {sql:?}");
+        }
+    }
+
+    #[test]
+    fn postgres_phase_copy_propagates_destination_failure() {
+        struct FailingWriter;
+        impl Write for FailingWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("injected phase destination failure"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut source = std::io::Cursor::new("CREATE VIEW a.v AS SELECT 1;\n");
+        let error =
+            super::copy_postgres_export_phase(&mut source, &mut FailingWriter, "phase-write-failure-unit").unwrap_err();
+        assert!(error.contains("Failed to write export phase") && error.contains("injected phase destination failure"));
     }
 
     #[test]

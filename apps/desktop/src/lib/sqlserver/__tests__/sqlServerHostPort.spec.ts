@@ -104,4 +104,10 @@ describe("resolveSqlServerPortSubmission", () => {
   it("keeps a deliberately different port explicit", () => {
     expect(resolveSqlServerPortSubmission("1500", 1433)).toEqual({ port: 1500, portExplicit: true });
   });
+
+  it("falls back to the default for values the backend u16 would reject", () => {
+    expect(resolveSqlServerPortSubmission(70000, 1433)).toEqual({ port: 1433, portExplicit: false });
+    expect(resolveSqlServerPortSubmission("1433.5", 1433)).toEqual({ port: 1433, portExplicit: false });
+    expect(resolveSqlServerPortSubmission(-1, 1433)).toEqual({ port: 1433, portExplicit: false });
+  });
 });

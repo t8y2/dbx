@@ -69,6 +69,8 @@ export function parseSqlServerHostPort(rawHost: string, currentPort?: number): S
  */
 export function resolveSqlServerPortSubmission(requested: unknown, defaultPort: number): { port: number; portExplicit: boolean } {
   const port = Number(requested);
-  const resolved = Number.isFinite(port) && port > 0 ? port : defaultPort;
+  // Same bounds as `parseSqlServerHostPort`: values the backend `u16` would reject
+  // (70000, 1433.5) fall back to the default instead of failing on submit (#14239).
+  const resolved = Number.isInteger(port) && port > 0 && port <= 65535 ? port : defaultPort;
   return { port: resolved, portExplicit: resolved !== defaultPort };
 }

@@ -57,3 +57,18 @@ export function parseSqlServerHostPort(rawHost: string, currentPort?: number): S
 
   return { host, port: currentPort, portExplicit: false };
 }
+
+/**
+ * Port to submit for a SQL Server connection, plus whether it was chosen on purpose.
+ *
+ * A cleared port field arrives as the empty string and cannot deserialize into the
+ * backend's `u16` (#14239), so it falls back to the driver default. The flag is
+ * derived from the port itself rather than from "the field was edited": typing the
+ * default back used to leave `portExplicit` set and permanently disable SQL Browser
+ * resolution for `host\instance` connections (#14238).
+ */
+export function resolveSqlServerPortSubmission(requested: unknown, defaultPort: number): { port: number; portExplicit: boolean } {
+  const port = Number(requested);
+  const resolved = Number.isFinite(port) && port > 0 ? port : defaultPort;
+  return { port: resolved, portExplicit: resolved !== defaultPort };
+}

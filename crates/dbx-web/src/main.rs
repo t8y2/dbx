@@ -54,6 +54,9 @@ Environment variables:
   DBX_PUBLIC_BASE_PATH  URL path prefix (default: /)
   DBX_PASSWORD          Set the Web login password
   DBX_DISABLE_PASSWORD  Set to 1 to disable login protection
+  DBX_WEB_TRUSTED_AUTH_ENABLED  Enable trusted Header authentication
+  DBX_WEB_TRUSTED_AUTH_HEADER   Trusted authentication header name
+  DBX_WEB_TRUSTED_AUTH_TOKEN    Expected trusted authentication token
   DBX_STATIC_DIR        Serve frontend assets from this directory
   RUST_LOG              Configure backend log filtering
   RUST_BACKTRACE        Set to 1 to include Rust backtraces
@@ -76,6 +79,9 @@ Environment variables:
   DBX_PUBLIC_BASE_PATH  URL path prefix (default: /)
   DBX_PASSWORD          Set the Web login password
   DBX_DISABLE_PASSWORD  Set to 1 to disable login protection
+  DBX_WEB_TRUSTED_AUTH_ENABLED  Enable trusted Header authentication
+  DBX_WEB_TRUSTED_AUTH_HEADER   Trusted authentication header name
+  DBX_WEB_TRUSTED_AUTH_TOKEN    Expected trusted authentication token
   DBX_STATIC_DIR        Serve frontend assets from this directory
   RUST_LOG              Configure backend log filtering
   RUST_BACKTRACE        Set to 1 to include Rust backtraces
@@ -577,6 +583,14 @@ async fn serve() -> Result<(), String> {
         .unwrap_or(false);
     let password_viewer_enabled =
         password_viewer_enabled_from_env(std::env::var("DBX_DISABLE_PASSWORD_VIEWER").ok().as_deref());
+    let trusted_header_auth = auth::TrustedHeaderAuth::from_values(
+        std::env::var("DBX_WEB_TRUSTED_AUTH_ENABLED").ok().as_deref(),
+        std::env::var("DBX_WEB_TRUSTED_AUTH_HEADER").ok().as_deref(),
+        std::env::var("DBX_WEB_TRUSTED_AUTH_TOKEN").ok().as_deref(),
+    )?;
+    if let Some(auth) = &trusted_header_auth {
+        log::info!("Trusted Header authentication enabled for {}", auth.header_name());
+    }
 
     let password_hash = if password_disabled {
         None
@@ -606,6 +620,7 @@ async fn serve() -> Result<(), String> {
         public_base_path: public_base_path.clone(),
         demo_mode,
         password_disabled,
+        trusted_header_auth,
         password_viewer_enabled,
         password_hash: RwLock::new(password_hash),
         sessions: RwLock::new(HashSet::new()),

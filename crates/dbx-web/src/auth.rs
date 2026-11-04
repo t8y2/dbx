@@ -4,11 +4,12 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::extract::State;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::state::WebState;
 
@@ -32,6 +33,54 @@ pub struct AuthCheckResponse {
 
 const MAX_ATTEMPTS: u32 = 5;
 const LOCKOUT_SECS: u64 = 60;
+
+#[derive(Clone)]
+pub struct TrustedHeaderAuth {
+    header: HeaderName,
+    token_digest: [u8; 32],
+}
+
+impl TrustedHeaderAuth {
+    pub fn from_values(
+        enabled: Option<&str>,
+        header: Option<&str>,
+        token: Option<&str>,
+    ) -> Result<Option<Self>, String> {
+        let enabled = match enabled.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            None | Some("") | Some("0" | "false" | "no" | "off") => false,
+            Some("1" | "true" | "yes" | "on") => true,
+            Some(value) => return Err(format!("DBX_WEB_TRUSTED_AUTH_ENABLED has invalid value: {value}")),
+        };
+        if !enabled {
+            return Ok(None);
+        }
+
+        let header = header.map(str::trim).filter(|value| !value.is_empty()).ok_or_else(|| {
+            "DBX_WEB_TRUSTED_AUTH_HEADER is required when trusted Header authentication is enabled".to_string()
+        })?;
+        let header = HeaderName::from_bytes(header.as_bytes())
+            .map_err(|_| "DBX_WEB_TRUSTED_AUTH_HEADER is not a valid HTTP header name".to_string())?;
+        let token = token.filter(|value| !value.is_empty()).ok_or_else(|| {
+            "DBX_WEB_TRUSTED_AUTH_TOKEN is required when trusted Header authentication is enabled".to_string()
+        })?;
+        let token = HeaderValue::from_str(token)
+            .map_err(|_| "DBX_WEB_TRUSTED_AUTH_TOKEN is not a valid HTTP header value".to_string())?;
+
+        Ok(Some(Self { header, token_digest: Sha256::digest(token.as_bytes()).into() }))
+    }
+
+    pub fn header_name(&self) -> &HeaderName {
+        &self.header
+    }
+
+    pub fn matches(&self, headers: &HeaderMap) -> bool {
+        let Some(value) = headers.get(&self.header) else {
+            return false;
+        };
+        let candidate: [u8; 32] = Sha256::digest(value.as_bytes()).into();
+        self.token_digest.iter().zip(candidate).fold(0_u8, |diff, (expected, actual)| diff | (expected ^ actual)) == 0
+    }
+}
 
 fn session_cookie_path(state: &WebState) -> &str {
     state.public_base_path.as_str()
@@ -171,14 +220,13 @@ pub async fn check(State(state): State<Arc<WebState>>, req: Request<axum::body::
         return Json(AuthCheckResponse { authenticated: true, required: false, setup_required: false });
     }
     let has_password = state.password_hash.read().await.is_some();
-    if !has_password {
-        return Json(AuthCheckResponse { authenticated: false, required: false, setup_required: true });
+    if has_password && valid_session_token(&state, req.headers()).await.is_some() {
+        return Json(AuthCheckResponse { authenticated: true, required: true, setup_required: false });
     }
-    let authenticated = match extract_session_token(&req) {
-        Some(token) => state.sessions.read().await.contains(&token),
-        None => false,
-    };
-    Json(AuthCheckResponse { authenticated, required: true, setup_required: false })
+    if state.trusted_header_auth.as_ref().is_some_and(|auth| auth.matches(req.headers())) {
+        return Json(AuthCheckResponse { authenticated: true, required: false, setup_required: false });
+    }
+    Json(AuthCheckResponse { authenticated: false, required: has_password, setup_required: !has_password })
 }
 
 pub async fn change_password(
@@ -265,14 +313,17 @@ fn extract_session_token<B>(req: &Request<B>) -> Option<String> {
     session_token_from_headers(req.headers())
 }
 
+async fn valid_session_token(state: &WebState, headers: &HeaderMap) -> Option<String> {
+    let token = session_token_from_headers(headers)?;
+    state.sessions.read().await.contains(&token).then_some(token)
+}
+
 pub async fn auth_middleware(
     State(state): State<Arc<WebState>>,
-    req: Request<axum::body::Body>,
+    mut req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    // Only the bootstrap auth endpoints are reachable without a session —
-    // login/setup/check. change-password and logout require one: change-password
-    // must not be an unauthenticated password oracle.
+    // Login, setup, and the auth status check handle unauthenticated requests.
     let api_suffix = middleware_api_path_suffix(req.uri().path(), &state.public_base_path);
     if api_suffix.is_some_and(|suffix| matches!(suffix, "auth/login" | "auth/setup" | "auth/check")) {
         return next.run(req).await;
@@ -287,17 +338,11 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
-    if state.password_hash.read().await.is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
-    // Check session token
-    let token = extract_session_token(&req);
-    if let Some(ref token) = token {
-        if state.sessions.read().await.contains(token) {
+    let has_password = state.password_hash.read().await.is_some();
+    if has_password {
+        if let Some(owner) = valid_session_token(&state, req.headers()).await {
             // 在下游处理器及其 await 到的池创建路径上注入当前登录会话的 owner 作用域，
             // 使 save_password=false 连接的临时密码按会话隔离（见 SessionCredentialStore）。
-            let owner = token.clone();
             return dbx_core::session_credentials::with_credential_owner(
                 Some(owner),
                 async move { next.run(req).await },
@@ -306,12 +351,129 @@ pub async fn auth_middleware(
         }
     }
 
+    if state.trusted_header_auth.as_ref().is_some_and(|auth| auth.matches(req.headers())) {
+        // The only cookie DBX consumes is dbx_session. Do not let an invalid
+        // session cookie select a downstream credential scope.
+        req.headers_mut().remove(axum::http::header::COOKIE);
+        return next.run(req).await;
+    }
+
     StatusCode::UNAUTHORIZED.into_response()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{api_path_suffix, middleware_api_path_suffix};
+    use std::sync::Arc;
+
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::middleware;
+    use axum::routing::get;
+    use axum::Router;
+    use tokio::sync::RwLock;
+
+    use super::{
+        api_path_suffix, auth_middleware, check, middleware_api_path_suffix, session_token_from_headers,
+        TrustedHeaderAuth,
+    };
+    use crate::state::WebState;
+
+    #[test]
+    fn trusted_header_auth_parses_and_matches_exact_values() {
+        assert!(TrustedHeaderAuth::from_values(None, None, None).unwrap().is_none());
+        assert!(TrustedHeaderAuth::from_values(Some("off"), Some("bad header"), None).unwrap().is_none());
+        assert!(TrustedHeaderAuth::from_values(Some("maybe"), None, None).is_err());
+        assert!(TrustedHeaderAuth::from_values(Some("true"), None, Some("secret")).is_err());
+        assert!(TrustedHeaderAuth::from_values(Some("true"), Some("bad header"), Some("secret")).is_err());
+        assert!(TrustedHeaderAuth::from_values(Some("true"), Some("X-Auth"), None).is_err());
+
+        let auth = TrustedHeaderAuth::from_values(Some("yes"), Some("X-Auth"), Some("secret")).unwrap().unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-auth", "secret".parse().unwrap());
+        assert!(auth.matches(&headers));
+        headers.insert("x-auth", "wrong".parse().unwrap());
+        assert!(!auth.matches(&headers));
+    }
+
+    #[tokio::test]
+    async fn trusted_header_auth_falls_back_after_session_auth() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&directory.path().join("dbx.db")).await.unwrap();
+        let mut state =
+            WebState::for_tests(Arc::new(dbx_core::connection::AppState::new(storage)), directory.path().to_path_buf());
+        state.trusted_header_auth =
+            TrustedHeaderAuth::from_values(Some("true"), Some("X-Forwarded-Dbx-Auth"), Some("proxy-secret")).unwrap();
+        state.password_hash = RwLock::new(Some("configured".to_string()));
+        state.sessions.write().await.insert("legacy-session".to_string());
+        let state = Arc::new(state);
+        let router = Router::new()
+            .route("/auth/check", get(check))
+            .route(
+                "/private",
+                get(|headers: HeaderMap| async move {
+                    let owner = dbx_core::session_credentials::current_credential_owner();
+                    assert_eq!(owner, session_token_from_headers(&headers));
+                    owner.unwrap_or_default()
+                }),
+            )
+            .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::new();
+
+        let check_response = client
+            .get(format!("http://{address}/auth/check"))
+            .header("X-Forwarded-Dbx-Auth", "proxy-secret")
+            .send()
+            .await
+            .unwrap();
+        let check_body: serde_json::Value = check_response.json().await.unwrap();
+        assert_eq!(
+            check_body,
+            serde_json::json!({
+                "authenticated": true,
+                "required": false,
+                "setup_required": false
+            })
+        );
+
+        let check_body: serde_json::Value = client
+            .get(format!("http://{address}/auth/check"))
+            .header("X-Forwarded-Dbx-Auth", "proxy-secret")
+            .header("cookie", "dbx_session=legacy-session")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(check_body, serde_json::json!({ "authenticated": true, "required": true, "setup_required": false }));
+
+        for (header, cookie, expected_owner) in [
+            ("proxy-secret", "", Some("")),
+            ("proxy-secret", "dbx_session=expired", Some("")),
+            ("proxy-secret", "dbx_session=legacy-session", Some("legacy-session")),
+            ("wrong", "dbx_session=legacy-session", Some("legacy-session")),
+            ("wrong", "dbx_session=expired", None),
+        ] {
+            let response = client
+                .get(format!("http://{address}/private"))
+                .header("X-Forwarded-Dbx-Auth", header)
+                .header("cookie", cookie)
+                .send()
+                .await
+                .unwrap();
+            if let Some(owner) = expected_owner {
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.text().await.unwrap(), owner);
+            } else {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+        }
+
+        server.abort();
+    }
 
     #[test]
     fn api_path_suffix_handles_root_api_paths() {

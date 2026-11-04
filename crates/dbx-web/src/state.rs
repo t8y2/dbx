@@ -37,6 +37,7 @@ pub struct WebState {
     pub notes_roots: Vec<PathBuf>,
     pub public_base_path: String,
     pub password_disabled: bool,
+    pub trusted_header_auth: Option<crate::auth::TrustedHeaderAuth>,
     /// Whether the web UI may reveal saved connection passwords.
     pub password_viewer_enabled: bool,
     /// `DBX_DEMO_MODE`：公网演示部署的封锁开关（见 `demo` 模块）。
@@ -74,6 +75,7 @@ impl WebState {
             notes_roots: Vec::new(),
             public_base_path: "/".to_string(),
             password_disabled: false,
+            trusted_header_auth: None,
             password_viewer_enabled: true,
             demo_mode: false,
             password_hash: RwLock::new(None),

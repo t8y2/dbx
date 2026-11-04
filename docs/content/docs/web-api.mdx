@@ -23,7 +23,13 @@ All API routes are under `/api`.
 
 ## Authentication
 
-Protected routes require a session cookie named `dbx_session`.
+Protected routes use the `dbx_session` cookie by default. PL debugging requires a valid session cookie.
+
+### Trusted Header Authentication
+
+Set `DBX_WEB_TRUSTED_AUTH_ENABLED`, `DBX_WEB_TRUSTED_AUTH_HEADER`, and `DBX_WEB_TRUSTED_AUTH_TOKEN` to authenticate Web API requests without a valid session cookie when the configured header value matches exactly. The native `/mcp` endpoint uses its own authentication.
+
+Only enable this behind a trusted reverse proxy that removes the configured Header from client requests and sets it after authenticating the user.
 
 ### Check Auth State
 
@@ -86,6 +92,9 @@ Cookie: dbx_session=...
 | --- | --- |
 | `DBX_PASSWORD` | Set an initial password at container startup |
 | `DBX_DISABLE_PASSWORD=1` | Disable password protection entirely |
+| `DBX_WEB_TRUSTED_AUTH_ENABLED` | Enable trusted Header authentication (`1`, `true`, `yes`, or `on`) |
+| `DBX_WEB_TRUSTED_AUTH_HEADER` | HTTP header name used for trusted Header authentication |
+| `DBX_WEB_TRUSTED_AUTH_TOKEN` | Exact HTTP header value required for trusted Header authentication |
 | `DBX_PORT` | Change the listen port (default `4224`) |
 | `DBX_DATA_DIR` | Data directory containing `dbx.db` |
 | `DBX_PUBLIC_BASE_PATH` | Serve DBX under a subpath such as `/dbx` |

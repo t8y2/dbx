@@ -62,7 +62,7 @@ export default {
       detail: "{count} 件のメモが、存在しないテーブルまたは列を参照しています。メモは削除されていません。メモファイルで参照先を変更するか、メモを削除してください。",
     },
     dbmlOmitted: {
-      title: "DBMLでは表現できません",
+      title: "DBML では表現できません",
       detail: "{table} の {item} はここに記載されていますが、エクスポートされた DBML からは除外されています: {reason}。",
     },
   },

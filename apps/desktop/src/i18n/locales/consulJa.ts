@@ -154,7 +154,7 @@ export const consulJaMessages = {
     docker: "Docker",
     script: "スクリプト",
     arguments: "引数",
-    containerId: "コンテナー ID",
+    containerId: "コンテナ ID",
     endpoint: "エンドポイント",
     interval: "間隔",
     timeout: "タイムアウト",

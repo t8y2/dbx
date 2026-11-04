@@ -7369,7 +7369,7 @@ html.dbx-legacy-webview.dark .object-browser-scroller:hover::-webkit-scrollbar-t
   container-type: inline-size;
 }
 
-:global(.dark) .ddl-code {
+.dark .ddl-code {
   --ddl-search-bg: rgb(72, 57, 8);
   --ddl-current-search-bg: rgb(116, 87, 0);
   --ddl-current-search-border: rgb(239, 177, 0);

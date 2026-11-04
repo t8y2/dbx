@@ -279,8 +279,6 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     return { type: "nacos-namespace", connectionId: tab.connectionId, namespace: tab.nacosNamespace || "" };
   }
 
-  if (tab.savedSqlId) return { type: "saved-sql-file", savedSqlId: tab.savedSqlId };
-
   if (tab.mode === "query") {
     if (!tab.connectionId) return null;
     if (!tab.database) return { type: "connection", connectionId: tab.connectionId };

@@ -6,7 +6,6 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { Search, X, ListOrdered, ArrowDownAZ, ArrowUpZA, Server, Database, FolderTree, Table2, Eye, RotateCcw, Loader2, Unplug } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
-import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSidebarMenuPresentation } from "@/composables/useSidebarMenuPresentation";
 import { useToast } from "@/composables/useToast";
@@ -116,7 +115,6 @@ import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 const { t, locale } = useI18n();
 const store = useConnectionStore();
 const queryStore = useQueryStore();
-const savedSqlStore = useSavedSqlStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const searchQuery = ref("");
@@ -1827,9 +1825,7 @@ async function locateTabInSidebarTarget(tab: QueryTab | undefined | null, align:
   if (!tab) return;
 
   const tabTarget = activeTabSidebarTarget(tab);
-  const locatesSavedSql = tabTarget?.type === "saved-sql-file";
-  const savedSqlFile = locatesSavedSql ? savedSqlStore.getFile(tabTarget.savedSqlId) : undefined;
-  const connId = savedSqlFile?.connectionId ?? tab.connectionId;
+  const connId = tab.connectionId;
 
   // Reconnect if the connection was disconnected (children are cleared on disconnect)
   if (connId && !store.connectedIds.has(connId)) {
@@ -1843,10 +1839,10 @@ async function locateTabInSidebarTarget(tab: QueryTab | undefined | null, align:
   }
 
   const config = connId ? store.getConfig(connId) : undefined;
-  const cursorCandidate = locatesSavedSql ? null : queryCursorTableCandidate(tab, effectiveDatabaseTypeForConnection(config));
-  const tabTableCandidate = locatesSavedSql || cursorCandidate ? null : tableLocateCandidateFromTarget(tabTarget, config);
+  const cursorCandidate = queryCursorTableCandidate(tab, effectiveDatabaseTypeForConnection(config));
+  const tabTableCandidate = cursorCandidate ? null : tableLocateCandidateFromTarget(tabTarget, config);
   const locateTableCandidate = cursorCandidate ?? tabTableCandidate;
-  const fallbackTarget = locatesSavedSql ? tabTarget : (queryContextTargetFromCandidate(tab, cursorCandidate) ?? tabTarget);
+  const fallbackTarget = queryContextTargetFromCandidate(tab, cursorCandidate) ?? tabTarget;
   let initialTarget = locateTableCandidate ? tableTargetFromCandidate(locateTableCandidate) : fallbackTarget;
   if (!initialTarget) return;
   if (initialTarget.type === "query-context" && connectionUsesConnectionRootSchemaMode(config)) {
@@ -1854,8 +1850,8 @@ async function locateTabInSidebarTarget(tab: QueryTab | undefined | null, align:
     initialTarget = { ...initialTarget, database: schema, schema };
   }
 
-  const treeLoadTarget: ActiveTabSidebarTarget = locatesSavedSql && savedSqlFile?.connectionId && savedSqlFile.database ? { type: "query-context", connectionId: savedSqlFile.connectionId, catalog: savedSqlFile.catalog, database: savedSqlFile.database } : initialTarget;
-  await ensureTreeLoadedForTarget(treeLoadTarget, { requireDatabaseChildren: locatesSavedSql });
+  const treeLoadTarget = initialTarget;
+  await ensureTreeLoadedForTarget(treeLoadTarget);
 
   // Clear any active search filter so the node is visible
   if (isRootListPartial.value) {
@@ -1867,7 +1863,7 @@ async function locateTabInSidebarTarget(tab: QueryTab | undefined | null, align:
 
   let target = resolveLoadedLocateTarget(initialTarget, locateTableCandidate);
   let nodePath = target ? findNodePathForTarget(target, store.treeNodes) : null;
-  if (!nodePath && !locatesSavedSql) {
+  if (!nodePath) {
     // The first load may have served a stale schema cache whose async refresh
     // replaced the database node before its tables finished loading, so the
     // table isn't in the tree yet. Force a synchronous reload and retry once so

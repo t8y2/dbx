@@ -231,6 +231,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType, driverProfile?: s
     case "clickhouse":
       return "clickhouse://user:password@host:port/database";
 
+    case "databend":
+      return "databend://user:password@host:443/default?warehouse=default";
+
     case "sqlserver":
       return "mssql://user:password@host:port/database";
 

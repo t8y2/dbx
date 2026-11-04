@@ -388,6 +388,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       action: actions.openDelimitedListDialog,
       disabled: state.readOnly || !canCopySelectedSql,
       icon: List,
+      shortcut: shortcuts.convertSelectionToDelimited,
     },
     {
       sidebarActionId: "editor.contextMenu.addNextSelectionOccurrence",

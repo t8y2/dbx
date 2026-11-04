@@ -12017,6 +12017,7 @@ export default {
     shortcutLowercaseSelection: "Convert selection to lowercase",
     shortcutToggleCaseSelection: "Toggle selection case",
     shortcutConvertNamingStyle: "Toggle naming style",
+    shortcutConvertSelectionToDelimited: "Convert selection to delimited list",
     shortcutExPasteSqlInCondition: "ExPaste: paste as IN condition",
   },
   driverStore: {

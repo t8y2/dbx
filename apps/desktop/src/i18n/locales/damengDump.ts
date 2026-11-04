@@ -187,8 +187,8 @@ export const damengDumpIt = {
 };
 
 export const damengDumpJa = {
-  menuExport: "ネイティブ dexp で .dmp にエクスポート...",
-  menuImport: "ネイティブ dimp で .dmp からインポート...",
+  menuExport: "ネイティブの dexp で .dmp ファイルにエクスポート...",
+  menuImport: "ネイティブの dimp で .dmp ファイルからインポート...",
   exportTitle: "Dameng ネイティブエクスポート（dexp）",
   importTitle: "Dameng ネイティブインポート（dimp）",
   outputFile: "出力 .dmp ファイル",
@@ -205,13 +205,13 @@ export const damengDumpJa = {
   remapTo: "REMAP 先スキーマ",
   remapToPlaceholder: "先スキーマ",
   tableExistsAction: "テーブルが存在する場合",
-  tableExistsHint: "dimp が先スキーマに既に存在するテーブルをどう処理するか。",
-  tableExists: { SKIP: "スキップ", REPLACE: "削除して再作成", TRUNCATE: "全削除", APPEND: "行を追加" },
+  tableExistsHint: "dimpで、対象スキーマにすでに存在するテーブルをどう扱うかを指定します。",
+  tableExists: { SKIP: "スキップ", REPLACE: "削除して再作成", TRUNCATE: "全行を削除", APPEND: "行を追加" },
   passwordOnArgv: "Dameng は dexp/dimp のコマンドラインにパスワードを必要とします。タスク実行中はプロセス一覧に表示される可能性があります。",
   desktopOnly: "ネイティブ dexp/dimp エクスポートはデスクトップアプリでのみ利用できます。",
   readonly: "この接続は読み取り専用のため、インポートは無効です。",
   binDirMissing: "Dameng クライアントの bin ディレクトリが設定されていません。",
-  binDirSettingHint: "設定 → データ → Dameng クライアント bin ディレクトリ で dexp/dimp を含むディレクトリを指定してください。",
+  binDirSettingHint: "設定 → データ → Dameng クライアントの bin ディレクトリで、dexp/dimp を含むディレクトリを指定してください。",
   running: "実行中...",
   done: "完了",
   cancelled: "キャンセル済み",

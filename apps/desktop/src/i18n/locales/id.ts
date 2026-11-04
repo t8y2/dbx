@@ -10385,7 +10385,7 @@ export default withEnglishFallback({
     tableSelection: "Tabel",
     selectedTables: "{selected}/{total} dipilih",
     selectAllTables: "Pilih semua",
-    filterTables: "Cari tabel...",
+    filterTables: "Cari tabel (dipisah koma atau /regex/)...",
     clearTables: "Bersihkan",
     loadingTables: "Memuat tabel...",
     tableLoadError: "Gagal memuat tabel: {error}",

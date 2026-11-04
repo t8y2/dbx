@@ -9907,7 +9907,7 @@ export default withEnglishFallback({
     tableSelection: "資料表",
     selectedTables: "已選擇 {selected}/{total}",
     selectAllTables: "全選",
-    filterTables: "搜尋資料表名稱……",
+    filterTables: "搜尋資料表名稱（支援逗號分隔、/正規表示式/）……",
     clearTables: "清空",
     loadingTables: "正在載入資料表……",
     tableLoadError: "載入資料表失敗：{error}",

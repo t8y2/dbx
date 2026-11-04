@@ -12736,7 +12736,7 @@ export default withEnglishFallback({
     tableSelection: "Tables",
     selectedTables: "เลือกแล้ว {selected}/{total}",
     selectAllTables: "เลือกทั้งหมด",
-    filterTables: "ค้นหา Tables...",
+    filterTables: "ค้นหา Tables (คั่นด้วยจุลภาคหรือ /regex/)...",
     clearTables: "ล้าง",
     loadingTables: "กำลังโหลด Table...",
     tableLoadError: "โหลดตารางไม่สำเร็จ: {error}",

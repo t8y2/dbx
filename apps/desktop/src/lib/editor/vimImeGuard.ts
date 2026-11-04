@@ -77,12 +77,15 @@ export function createVimImeGuard({ EditorView, ViewPlugin }: Pick<ViewModule, "
       if (!vim || vim.insertMode || cm.state.dialog) return false;
       // An IME commit has no keydown, so `r`/`f`/`t` waiting for a literal would
       // take the text as an ordinary insertion instead of replacing the character
-      // under the cursor (#11240). Hand the character to Vim's own literal path;
-      // anything else is swallowed rather than becoming SQL in normal mode.
-      if (vim.expectLiteralNext && [...text].length === 1) {
+      // under the cursor (#11240). While a composition is open the text is still a
+      // preedit — `view.composing` stays true from the first preedit until
+      // compositionend — so the command must wait for the character the user
+      // actually picked; codemirror-vim tracks that preedit itself.
+      if (vim.expectLiteralNext && !view.composing && [...text].length === 1) {
         cm.state.vimPlugin?.handleKey(new KeyboardEvent("keydown", { key: text }), view);
+        return true;
       }
-      return true;
+      return !vim.expectLiteralNext;
     }),
   ];
 }

@@ -45,6 +45,7 @@ import {
   Hash,
   KeyRound,
   Link2,
+  LockOpen,
   ListTree,
   Maximize2,
   RefreshCw,
@@ -400,6 +401,8 @@ import { findDataGridReplacementMatches, prepareDataGridCellReplacements, type D
 import { useDataGridResultLifecycle } from "@/composables/useDataGridResultLifecycle";
 import { useDataGridAutoRefresh } from "@/composables/useDataGridAutoRefresh";
 import { useDataGridAsyncSurface } from "@/composables/useDataGridAsyncSurface";
+import { useSqlPluginCodecs } from "@/composables/useSqlPluginCodecs";
+import type { PluginDecodeRequest } from "@/lib/dataGrid/sqlPluginCodec";
 import { createDataGridFilterConditionCache, useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import { DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT, useDataGridDistinctValueLoader } from "@/composables/useDataGridDistinctValueLoader";
 import { dataGridDistinctValueKey, dataGridNullSuggestionFilterMode, toggleAllDataGridDistinctValueOptions, type DataGridDistinctValueSource, type DataGridDistinctValueSuggestionState, type DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
@@ -1245,6 +1248,12 @@ const bulkEditDialogMounted = useDataGridAsyncSurface(bulkEditDialogOpen);
 const copyColumnNamesDialogMounted = useDataGridAsyncSurface(copyColumnNamesDialogOpen);
 const insertRowsDialogMounted = useDataGridAsyncSurface(insertRowsDialogOpen);
 const cellDetailDialogMounted = useDataGridAsyncSurface(cellDetailDialogOpen);
+const { codecs: sqlPluginCodecs } = useSqlPluginCodecs();
+const cellDetailPluginDecodeRequest = ref<PluginDecodeRequest | null>(null);
+let cellDetailPluginDecodeRequestId = 0;
+watch(cellDetailDialogOpen, (isOpen) => {
+  if (!isOpen) cellDetailPluginDecodeRequest.value = null;
+});
 const detailDialogsMounted = useDataGridAsyncSurface(computed(() => rowDetailDialogOpen.value || columnDetailDialogOpen.value));
 const imagePreviewMounted = useDataGridAsyncSurface(imagePreviewOpen);
 const previewDialogOpen = ref(false);
@@ -12219,6 +12228,23 @@ function binaryDownloadSubmenu(detail: DataGridCellDetail | null): ContextMenuIt
   };
 }
 
+// Shown only while a SQL value codec plugin is installed; nothing reaches a plugin until the user decodes in the dialog.
+function pluginDecodeItem(detail: DataGridCellDetail | null): ContextMenuItem | null {
+  const cell = contextCell.value;
+  if (!detail || !cell || cell.col < 0 || sqlPluginCodecs.value.length === 0) return null;
+  const isNull = detail.isNull ?? detail.value === null;
+  return {
+    label: t("grid.pluginDecode"),
+    icon: LockOpen,
+    // Numeric columns cannot hold a ciphertext; drivers may deliver them as strings, so check the column type too.
+    disabled: isNull || typeof detail.value === "number" || typeof detail.value === "boolean" || isNumericColumnType(detail.type),
+    action: () => {
+      openCellDetailDialog(cell.rowIndex, cell.col);
+      cellDetailPluginDecodeRequest.value = { id: ++cellDetailPluginDecodeRequestId, identity: `${detail.rowId}:${detail.colIndex}` };
+    },
+  };
+}
+
 function binaryImportItem(detail: DataGridCellDetail | null): ContextMenuItem | null {
   if (!canImportDetailBinaryValue(detail)) return null;
   return {
@@ -15225,6 +15251,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
         bulkEdit: openBulkEditDialog,
         transpose: openContextTranspose,
       },
+      pluginDecodeItem: pluginDecodeItem(contextCellDetail.value),
       importItem: binaryImportItem(contextCellDetail.value),
       downloadItem: binaryDownloadSubmenu(contextCellDetail.value),
       foreignKeyItem: contextForeignKeyMenuItem(),
@@ -17562,6 +17589,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       :can-import-binary-value="canImportDetailBinaryValue"
       :import-binary-value="importDetailBinaryValue"
       :database-type="resolvedDatabaseType"
+      :plugin-decode-request="cellDetailPluginDecodeRequest"
       @edit="openDialogCellInSidePanel"
     />
 

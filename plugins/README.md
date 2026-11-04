@@ -898,6 +898,56 @@ install a plugin but do not offer it in Redis details. Package with the current
 source CLI if an older published CLI rejects `capabilities`: the current
 Manifest schema and runtime accept that field.
 
+## SQL value codec capability
+
+Native plugins can decode SQL result cells, for example columns a business
+system stores encrypted, with the same contract as the Redis codec:
+
+```json
+{ "capabilities": [{ "id": "func-source", "label": "Function source", "kind": "sql-value-codec-v1" }] }
+```
+
+The user right-clicks a cell and chooses **Decode with Plugin**, or picks
+**Plugin decode** in the cell details convert preview, then chooses a decoder
+and clicks **Convert**. Listing the plugins sends no value; only that click
+sends the current cell. The option is hidden while no compatible plugin
+declares the capability. Compatible plugins must have a native backend
+entrypoint.
+
+The host invokes the chosen sidecar's `sql/codec/decode` method:
+
+```json
+{
+  "codecId": "func-source",
+  "rawBase64": "5Lit",
+  "context": { "dbType": "oracle", "columnName": "SOURCE", "columnType": "CLOB" }
+}
+```
+
+`rawBase64` is canonical standard Base64 of the cell: the original bytes for
+binary columns (BLOB, BYTEA, VARBINARY…) and UTF-8 text for every other value.
+`context` carries column facts only; the plugin receives no row values beyond
+this cell, no database credentials, connection configuration or host driver.
+Later versions may add optional `context` fields; plugins must ignore fields
+they do not recognise.
+NULL values and partially loaded large values are not passed to plugins.
+
+Return `{ "format": "json", "value": <JSON value> }` or
+`{ "format": "text", "value": "UTF-8 text" }`, exactly as for Redis. The host
+shows text as is and JSON pretty-printed, never as HTML.
+
+Calls time out after 10 seconds. Raw input and the UTF-8 serialized result
+value are each limited to 2 MiB. The result is a read-only preview: it is not
+written back to the database and does not enter the grid, exports or AI
+context. External-program plugins should use binary stdin/stdout, bounded
+execution/output, and stderr for diagnostics.
+
+To let MCP clients use the same decoder, expose a connection-less tool through
+the plugin's own `mcp` contribution (see "Tools for the built-in AI assistant"):
+declare `external_tools: true` and the tool's `read` access, then call the same
+decoding code from `mcp/call`. Users authorize it per plugin under
+Settings → MCP → Capabilities.
+
 ## Backend protocol
 
 The backend is a persistent child process with stdin/stdout reserved for the DBX protocol. Diagnostics must go to stderr.

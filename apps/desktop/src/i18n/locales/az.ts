@@ -164,6 +164,10 @@ export default withEnglishFallback({
     pickFormatPlaceholder: "Format seçin…",
     radixHint: "Yalnız tam ədədlər. 0x, 0o və ya 0b prefiksi olmadan rəqəmlər daxil edin; işarə istifadə oluna bilər.",
     urlHint: "URL komponentləri UTF-8 ilə kodlanır və ya dekodlaşdırılır. Dekodlaşdırma + işarəsini boşluğa çevirmir.",
+    pluginCodec: "Deşifrəçi",
+    pluginCodecPlaceholder: "Deşifrəçi seçin…",
+    pluginHint: "Çevirəndə yalnız bu xananın dəyəri seçilmiş plaginə göndərilir. Nəticə yalnız oxunan önizləmədir və heç vaxt geri yazılmır.",
+    pluginDecoding: "Deşifrə edilir…",
     kinds: {
       timestamp: "Zaman damğası → tarix/saat",
       json: "JSON formatla",
@@ -177,6 +181,7 @@ export default withEnglishFallback({
       urlEncode: "URL komponentini kodla",
       urlDecode: "URL komponentini dekodlaşdır",
       radix: "Tam ədədin say sistemini çevir",
+      plugin: "Plaginlə deşifrə",
     },
     units: {
       auto: "Avtomatik (10/13 rəqəm)",
@@ -194,6 +199,10 @@ export default withEnglishFallback({
       invalidInteger: "Mənbə say sisteminə uyğun tam ədədi prefikssiz daxil edin.",
       invalidBase64: "Düzgün Base64 daxil edin; dekodlanmış mətn UTF-8 olmalıdır.",
       invalidBase64Binary: "Base64 məzmunu yanlıştır: məlumat kəsilib və ya Base64-dən kənar simvollar ehtiva edir.",
+      pluginNoCodec: "Əvvəlcə deşifrəçi seçin.",
+      pluginTooLarge: "Dəyər plaginlə deşifrənin 2 MiB limitini keçir.",
+      pluginUndecodableBinary: "Bu ikili dəyərin orijinal baytlarını oxumaq mümkün deyil.",
+      pluginFailed: "Plaginlə deşifrə uğursuz oldu: {message}",
     },
   },
   customType: {
@@ -2545,6 +2554,7 @@ export default withEnglishFallback({
     collapseCellDetailMetadata: "Xananın metaverilənlərini yığ",
     expandCellDetailMetadata: "Xananın metaverilənlərini genişləndir",
     openCellDetailsDialog: "Xananın təfərrüatlarını aç",
+    pluginDecode: "Plaginlə deşifrə et",
     rowDetails: "Sətrin təfərrüatları",
     rowDetailsFor: "{row} nömrəli sətrin təfərrüatları",
     openRowDetailsDialog: "Sətrin təfərrüatlarını aç",

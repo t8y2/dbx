@@ -49,6 +49,10 @@ export default withEnglishFallback({
     pickFormatPlaceholder: "Pilih format…",
     radixHint: "Hanya bilangan bulat. Masukkan digit tanpa awalan 0x, 0o, atau 0b; tanda opsional didukung.",
     urlHint: "Encoding komponen URL (UTF-8). Dekode mempertahankan + sebagai tanda plus literal.",
+    pluginCodec: "Dekoder",
+    pluginCodecPlaceholder: "Pilih dekoder…",
+    pluginHint: "Saat dikonversi, hanya nilai sel ini yang dikirim ke plugin yang dipilih. Hasilnya pratinjau baca-saja dan tidak pernah ditulis kembali.",
+    pluginDecoding: "Mendekode…",
     kinds: {
       timestamp: "Timestamp → tanggal/waktu",
       json: "Format JSON",
@@ -62,6 +66,7 @@ export default withEnglishFallback({
       urlEncode: "Encode komponen URL",
       urlDecode: "Decode komponen URL",
       radix: "Konversi basis bilangan bulat",
+      plugin: "Dekode dengan plugin",
     },
     units: {
       auto: "Otomatis (10/13 digit)",
@@ -79,6 +84,10 @@ export default withEnglishFallback({
       invalidInteger: "Masukkan bilangan bulat dengan digit yang valid untuk basis sumber yang dipilih, tanpa awalan basis.",
       invalidBase64: "Masukkan Base64 valid yang hasil dekodeannya berupa teks UTF-8.",
       invalidBase64Binary: "Konten Base64 tidak valid: data mungkin terpotong atau berisi karakter di luar Base64.",
+      pluginNoCodec: "Pilih dekoder terlebih dahulu.",
+      pluginTooLarge: "Nilai melebihi batas dekode plugin 2 MiB.",
+      pluginUndecodableBinary: "Byte asli nilai biner ini tidak dapat dibaca.",
+      pluginFailed: "Dekode plugin gagal: {message}",
     },
   },
   customType: {
@@ -2846,6 +2855,7 @@ export default withEnglishFallback({
     collapseCellDetailMetadata: "Ciutkan metadata sel",
     expandCellDetailMetadata: "Perluas metadata sel",
     openCellDetailsDialog: "Buka Detail Sel",
+    pluginDecode: "Dekode dengan plugin",
     rowDetails: "Detail Baris",
     rowDetailsFor: "Detail Baris {row}",
     openRowDetailsDialog: "Buka Detail Baris",

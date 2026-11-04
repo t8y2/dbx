@@ -499,6 +499,10 @@ export default withEnglishFallback({
     pickFormatPlaceholder: "Selecione um formato…",
     radixHint: "Somente inteiros. Insira dígitos sem os prefixos 0x, 0o ou 0b; um sinal opcional é permitido.",
     urlHint: "Codificação de componentes URL em UTF-8. A decodificação preserva + como sinal de adição.",
+    pluginCodec: "Decodificador",
+    pluginCodecPlaceholder: "Escolha um decodificador…",
+    pluginHint: "Ao converter, apenas o valor desta célula é enviado ao plugin selecionado. O resultado é uma prévia somente leitura e nunca é gravado de volta.",
+    pluginDecoding: "Decodificando…",
     kinds: {
       timestamp: "Timestamp → data/hora",
       json: "Formatar JSON",
@@ -512,6 +516,7 @@ export default withEnglishFallback({
       urlEncode: "Codificar componente URL",
       urlDecode: "Decodificar componente URL",
       radix: "Conversão de base de inteiros",
+      plugin: "Decodificar com plugin",
     },
     units: {
       auto: "Automática (10/13 dígitos)",
@@ -529,6 +534,10 @@ export default withEnglishFallback({
       invalidInteger: "Insira um inteiro válido para a base de origem, sem prefixo.",
       invalidBase64: "Insira um Base64 válido cujo conteúdo decodificado seja texto UTF-8 válido.",
       invalidBase64Binary: "Conteúdo Base64 inválido: os dados podem estar truncados ou conter caracteres não permitidos.",
+      pluginNoCodec: "Escolha primeiro um decodificador.",
+      pluginTooLarge: "O valor excede o limite de 2 MiB da decodificação com plugin.",
+      pluginUndecodableBinary: "Não é possível ler os bytes originais deste valor binário.",
+      pluginFailed: "Falha na decodificação com plugin: {message}",
     },
   },
   customType: {
@@ -3231,6 +3240,7 @@ export default withEnglishFallback({
     collapseCellDetailMetadata: "Recolher metadados da célula",
     expandCellDetailMetadata: "Expandir metadados da célula",
     openCellDetailsDialog: "Abrir Detalhes da Célula",
+    pluginDecode: "Decodificar com plugin",
     rowDetails: "Detalhes da Linha",
     rowDetailsFor: "Detalhes da Linha {row}",
     openRowDetailsDialog: "Abrir Detalhes da Linha",

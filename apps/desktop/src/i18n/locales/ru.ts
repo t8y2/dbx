@@ -478,6 +478,10 @@ export default withEnglishFallback({
     pickFormatPlaceholder: "Выберите формат…",
     radixHint: "Только целые числа. Вводите цифры без префикса 0x, 0o или 0b; допускается необязательный знак.",
     urlHint: "Кодирование компонента URL (UTF-8). При декодировании + сохраняется как знак плюс.",
+    pluginCodec: "Декодер",
+    pluginCodecPlaceholder: "Выберите декодер…",
+    pluginHint: "При преобразовании выбранному плагину передаётся только значение этой ячейки. Результат — предпросмотр только для чтения, он не записывается обратно.",
+    pluginDecoding: "Декодирование…",
     kinds: {
       timestamp: "Timestamp → дата/время",
       json: "Форматировать JSON",
@@ -491,6 +495,7 @@ export default withEnglishFallback({
       urlEncode: "Кодировать компонент URL",
       urlDecode: "Декодировать компонент URL",
       radix: "Преобразование систем счисления",
+      plugin: "Декодирование плагином",
     },
     units: {
       auto: "Авто (10/13 цифр)",
@@ -508,6 +513,10 @@ export default withEnglishFallback({
       invalidInteger: "Введите целое число с цифрами, допустимыми для выбранной исходной системы счисления, без префикса основания.",
       invalidBase64: "Введите корректный Base64; декодированное содержимое должно быть допустимым текстом UTF-8.",
       invalidBase64Binary: "Недопустимое содержимое Base64: данные могут быть обрезаны или содержать посторонние символы.",
+      pluginNoCodec: "Сначала выберите декодер.",
+      pluginTooLarge: "Значение превышает лимит декодирования плагином в 2 МиБ.",
+      pluginUndecodableBinary: "Не удаётся прочитать исходные байты этого двоичного значения.",
+      pluginFailed: "Ошибка декодирования плагином: {message}",
     },
   },
   redisGrouping: {
@@ -3473,6 +3482,7 @@ export default withEnglishFallback({
     collapseCellDetailMetadata: "Свернуть метаданные ячейки",
     expandCellDetailMetadata: "Развернуть метаданные ячейки",
     openCellDetailsDialog: "Открыть сведения о ячейке",
+    pluginDecode: "Декодировать плагином",
     rowDetails: "Сведения о строке",
     rowDetailsFor: "Сведения о строке {row}",
     openRowDetailsDialog: "Открыть сведения о строке",

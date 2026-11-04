@@ -564,5 +564,57 @@ describe("ConnectionTree Ctrl+F table search focus", () => {
       expect(localInput.focus).not.toHaveBeenCalled();
       expect(env.globalSearchInput.focus).not.toHaveBeenCalled();
     });
+
+    it("cancels a pending local focus after the user requests disabled-local global search", async () => {
+      const env = createTestEnvironment({ sidebarTableSearchEnabled: true, sidebarObjectDisplay: "simple" });
+      const collapsedDatabase: TreeNode = {
+        id: "conn:1:db_slow",
+        label: "db_slow",
+        type: "database",
+        connectionId: "conn:1",
+        database: "db_slow",
+        isExpanded: false,
+      };
+      env.store.treeNodes = [
+        {
+          id: "conn:1",
+          label: "MySQL",
+          type: "connection",
+          connectionId: "conn:1",
+          children: [collapsedDatabase],
+        },
+      ];
+      env.store.selectedTreeNodeId = collapsedDatabase.id;
+
+      const localInput = document.createElement("input");
+      localInput.dataset.sidebarTableSearchParentId = collapsedDatabase.id;
+      vi.spyOn(localInput, "focus");
+
+      env.toggleNodeMock.mockImplementation((node: TreeNode) => {
+        node.isExpanded = true;
+        node.isLoading = true;
+        setTimeout(() => {
+          node.children = [{ id: "conn:1:db_slow:t1", label: "t1", type: "table", connectionId: "conn:1", database: "db_slow" }];
+          node.isLoading = false;
+          const controlId = tableSearchControlId(collapsedDatabase.id);
+          env.flatNodeIndexById.set(controlId, 1);
+          env.root.append(localInput);
+        }, 40);
+      });
+
+      const result = env.focusSearch();
+      expect(result).toBe(true);
+
+      // User selects another node
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      env.settingsStore.editorSettings.sidebarTableSearchEnabled = false;
+      expect(env.focusSearch()).toBe(true);
+
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      await nextTick();
+
+      expect(localInput.focus).not.toHaveBeenCalled();
+      expect(env.globalSearchInput.focus).toHaveBeenCalledOnce();
+    });
   });
 });

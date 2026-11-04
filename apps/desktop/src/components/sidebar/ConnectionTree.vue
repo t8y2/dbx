@@ -2656,6 +2656,7 @@ function findLocalTableSearchInput(parent: TreeNode): HTMLInputElement | null {
 }
 
 function focusSearch(target: Element | null = null): boolean {
+  const focusRequestId = ++latestLocalTableSearchFocusRequestId;
   const tableSearchControl = target?.closest<HTMLElement>("[data-sidebar-table-search-control]");
   if (tableSearchControl) {
     const input = tableSearchControl.querySelector<HTMLInputElement>("[data-sidebar-table-search-parent-id]");
@@ -2690,7 +2691,6 @@ function focusSearch(target: Element | null = null): boolean {
     sidebarTreeRuntimeHostRef.value?.toggleNode(searchParent);
   }
 
-  const focusRequestId = ++latestLocalTableSearchFocusRequestId;
   const initialTabId = activeTab.value?.id ?? null;
   const initialTargetNodeId = activeNodeId;
 
@@ -2700,6 +2700,7 @@ function focusSearch(target: Element | null = null): boolean {
     const maxAttempts = 150;
 
     const isStale = () => {
+      if (!settingsStore.editorSettings.sidebarTableSearchEnabled) return true;
       if (focusRequestId !== latestLocalTableSearchFocusRequestId) return true;
       if ((activeTab.value?.id ?? null) !== initialTabId) return true;
       const currentActiveNodeId = store.selectedTreeNodeId || findSidebarNodeForActiveTab(activeTab.value, flatNodes.value)?.id || null;

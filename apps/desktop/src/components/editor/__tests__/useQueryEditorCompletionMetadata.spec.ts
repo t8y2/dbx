@@ -11,7 +11,9 @@ import { buildSelectStarExpansion, buildSqlCompletionItems, getSqlCompletionCont
 import { buildSqlSemanticDiagnostics } from "@/lib/sql/semantic/diagnostics";
 
 vi.mock("@/stores/connectionStore", () => ({ COMPLETION_METADATA_CONCURRENCY: 4 }));
-vi.mock("@/lib/backend/api", () => ({}));
+const executeQuery = vi.hoisted(() => vi.fn());
+const executeInManualTransaction = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/backend/api", () => ({ executeQuery, executeInManualTransaction }));
 
 type Options = Parameters<typeof useQueryEditorCompletionMetadata>[0];
 const columns: SqlCompletionColumn[] = [{ name: "id", table: "users", dataType: "int" }];
@@ -44,6 +46,89 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}) {
 }
 
 describe("QueryEditor completion metadata ownership", () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("%s keeps latency fallback and late table reads inside their original scope", async (databaseType) => {
+    vi.useFakeTimers();
+    const { metadata, store, props } = createHarness({ databaseType, schema: "A" });
+    const tables: SqlCompletionTable[] = [
+      { name: "LOCAL_A", schema: "A", type: "table" },
+      { name: "OTHER_B", schema: "B", type: "table" },
+    ];
+    store.lookupLocalCompletionTables.mockReturnValue(tables);
+    let finish!: (value: SqlCompletionTable[]) => void;
+    store.listCompletionTables.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const pending = metadata.listCompletionTablesWithLatencyBudget("connection", "demo", "", 100, undefined, false, undefined, "A", { schema: "A", includePublicSynonyms: true });
+    await vi.advanceTimersByTimeAsync(40);
+    expect((await pending).map((table) => table.name)).toEqual(["LOCAL_A"]);
+    props.schema = "B";
+    finish(tables);
+    await Promise.resolve();
+    expect(metadata.cachedTables).toEqual([]);
+    store.listCompletionTables.mockRejectedValueOnce(new Error("timeout"));
+    const fallback = await metadata.listCompletionTablesWithLatencyBudget("connection", "demo", "", 100, undefined, false, undefined, "B", { schema: "B", includePublicSynonyms: true });
+    expect(fallback.map((table) => table.name)).toEqual(["OTHER_B"]);
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("%s reads a stable manual transaction without changing its schema", async (databaseType) => {
+    executeInManualTransaction.mockReset().mockResolvedValue([{ rows: [["MANUAL_OWNER"]] }]);
+    executeQuery.mockReset();
+    const { metadata, props } = createHarness({ databaseType, schema: "TAB_OWNER", autoCommit: false, txnSessionId: "txn-A", clientSessionId: "tab-A", isExecuting: true });
+    expect(await metadata.resolveOracleCompletionSchema()).toBeUndefined();
+    expect(executeInManualTransaction).not.toHaveBeenCalled();
+    props.isExecuting = false;
+    props.isCancelling = true;
+    expect(await metadata.resolveOracleCompletionSchema()).toBeUndefined();
+    expect(executeInManualTransaction).not.toHaveBeenCalled();
+    props.isCancelling = false;
+    expect(await metadata.resolveOracleCompletionSchema()).toBe("MANUAL_OWNER");
+    expect(executeInManualTransaction).toHaveBeenCalledExactlyOnceWith("txn-A", "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL", "demo", undefined, 1);
+    expect(executeQuery).not.toHaveBeenCalled();
+    props.txnSessionId = undefined;
+    expect(await metadata.resolveOracleCompletionSchema()).toBe("TAB_OWNER");
+    props.schema = undefined;
+    expect(await metadata.resolveOracleCompletionSchema()).toBeUndefined();
+    expect(executeInManualTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("%s resolves the execution schema in the owning session and discards late contexts", async (databaseType) => {
+    executeQuery.mockReset();
+    let resolveOld!: (value: { rows: string[][] }) => void;
+    executeQuery
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveOld = resolve;
+          }),
+      )
+      .mockResolvedValue({ rows: [["B"]] });
+    const a = createHarness({ databaseType, schema: undefined, clientSessionId: "tab-A", completionContextVersion: 0 });
+    const b = createHarness({ databaseType, schema: "SELECTED_B", clientSessionId: "tab-B", completionContextVersion: 0 });
+    const old = a.metadata.resolveOracleCompletionSchema();
+    expect(await b.metadata.resolveOracleCompletionSchema()).toBe("B");
+    expect(executeQuery).toHaveBeenLastCalledWith("connection", "demo", "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL", "SELECTED_B", undefined, { clientSessionId: "tab-B", maxRows: 1 });
+    a.props.completionContextVersion = 1;
+    expect(await a.metadata.resolveOracleCompletionSchema()).toBe("B");
+    resolveOld({ rows: [["A"]] });
+    expect(await old).toBeUndefined();
+    const calls = executeQuery.mock.calls.length;
+    expect(await a.metadata.resolveOracleCompletionSchema()).toBe("B");
+    expect(executeQuery).toHaveBeenCalledTimes(calls);
+    a.props.completionContextVersion = 2;
+    executeQuery.mockRejectedValueOnce(new Error("read failed"));
+    expect(await a.metadata.resolveOracleCompletionSchema()).toBeUndefined();
+    expect(await a.metadata.resolveOracleCompletionSchema()).toBe("B");
+  });
+
+  it("does not guess the login schema when no session or selected schema is available", async () => {
+    const { metadata, store } = createHarness({ databaseType: "oracle", schema: undefined, clientSessionId: undefined });
+    store.getConfig.mockReturnValue({ username: "LOGIN" } as never);
+    expect(await metadata.resolveOracleCompletionSchema()).toBeUndefined();
+  });
+
   it.each([
     ["Alias", "PUBLIC_ID"],
     ["APP.Alias", "PRIVATE_ID"],

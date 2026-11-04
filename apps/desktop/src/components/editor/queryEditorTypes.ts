@@ -16,6 +16,8 @@ export interface QueryEditorProps {
   prefetchCompletion?: boolean;
   schema?: string;
   clientSessionId?: string;
+  txnSessionId?: string;
+  autoCommit?: boolean;
   completionContextVersion?: number;
   databaseType?: DatabaseType;
   dialect?: "mysql" | "postgres" | "sqlserver";
@@ -40,6 +42,7 @@ export interface QueryEditorProps {
   enableExplainShortcut?: boolean;
   canExplain?: boolean;
   isExecuting?: boolean;
+  isCancelling?: boolean;
   initialViewport?: { scrollTop: number; scrollLeft: number };
   initialSelection?: { anchor: number; head: number };
   revealRequest?: { id: number; line: number; column?: number };

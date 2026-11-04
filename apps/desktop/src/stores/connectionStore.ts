@@ -125,7 +125,7 @@ import {
   type ConnectionExportProtection,
 } from "@/lib/connection/connectionConfigTransfer";
 import type { SqlCompletionColumn, SqlCompletionForeignKey, SqlCompletionObject, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
-import { usesOracleCurrentSchemaCompletion, isOracleCompletionDatabase } from "@/lib/sql/oracleCompletionSession";
+import { usesOracleCurrentSchemaCompletion, isOracleCompletionDatabase, oracleCompletionTablesForScope, type OracleCompletionTableScope } from "@/lib/sql/oracleCompletionSession";
 import { mergeSqlObjectNavigationType, sqlObjectNavigationTypeFromTableType } from "@/lib/sql/sqlNavigation";
 import * as api from "@/lib/backend/api";
 import { oracleDatabaseLinksFromResult, oracleDatabaseLinksSql, supportsOracleDatabaseLinks, type OracleDatabaseLinkScope } from "@/lib/database/oracleDatabaseLinks";
@@ -10551,6 +10551,7 @@ export const useConnectionStore = defineStore("connection", () => {
           type: sqlObjectNavigationTypeFromTableType(candidate.data_type || candidate.kind),
           ...(detail ? { detail } : {}),
           ...completionStableTableType(candidate.data_type),
+          ...(candidate.data_type === "SYNONYM" ? { tableType: "SYNONYM" } : {}),
         };
         if (!withOracleMetadata) return table;
         const metadataDetail = candidate.schema ? `${candidate.schema} · ${(candidate.data_type || candidate.kind).toLowerCase()}` : candidate.kind;
@@ -10641,7 +10642,7 @@ export const useConnectionStore = defineStore("connection", () => {
     matchMode: CompletionAssistantMatchMode = "prefix",
   ): Promise<SqlCompletionTable[]> {
     const oracleAssistant = isOracleCompletionDatabase(getConfig(connectionId)?.db_type);
-    const preferredSchema = oracleAssistant ? completionPreferredSchema(connectionId, globalSearch ? currentSchema : (schema ?? currentSchema)) : schema?.trim() || undefined;
+    const preferredSchema = oracleAssistant ? (globalSearch ? completionPreferredSchema(connectionId, currentSchema) : (schema ?? currentSchema)) : schema?.trim() || undefined;
     const objectKinds: CompletionAssistantObjectKind[] = ["table", "view"];
     const response = await completionAssistantSearch(
       {
@@ -10857,15 +10858,14 @@ export const useConnectionStore = defineStore("connection", () => {
     });
   }
 
-  function lookupLocalCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string, catalog?: string): SqlCompletionTable[] {
+  function lookupLocalCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string, catalog?: string, oracleScope?: OracleCompletionTableScope): SqlCompletionTable[] {
     const scopePrefix = `${connectionId}:${database}:${catalog?.toLowerCase() ?? ""}:`;
     const allScopes = [...completionTableIndex.entries()].filter(([key]) => key.startsWith(scopePrefix)).map(([, entry]) => entry);
     const preferred = schema ? completionTableIndex.get(completionTableScopeKey(connectionId, database, schema, catalog)) : undefined;
-    const scopes = schema ? (preferred ? [preferred] : []) : allScopes;
-    const treeTables = completionTablesFromTree(treeNodes.value, connectionId, database, schema, catalog);
-    const ranked = scopes
-      .flatMap((entry) => entry?.tables ?? [])
-      .concat(treeTables)
+    const scopes = schema && !oracleScope ? (preferred ? [preferred] : []) : allScopes;
+    const treeTables = completionTablesFromTree(treeNodes.value, connectionId, database, oracleScope ? undefined : schema, catalog);
+    const tables = scopes.flatMap((entry) => entry?.tables ?? []).concat(treeTables);
+    const ranked = (oracleScope ? oracleCompletionTablesForScope(tables, oracleScope) : tables)
       .map((table) => ({ table, score: tableMatchScore(table, filter, schema) }))
       .filter((entry) => entry.score >= 0)
       .sort((a, b) => b.score - a.score || a.table.name.localeCompare(b.table.name));
@@ -11311,20 +11311,35 @@ export const useConnectionStore = defineStore("connection", () => {
     return api.listTables(connectionId, database, schema, filter, limit);
   }
 
-  async function listCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string, globalSearch = false, currentSchema?: string, catalog?: string, options: { activateConnection?: boolean; verifySchemaMetadata?: boolean } = {}): Promise<SqlCompletionTable[]> {
+  async function listCompletionTables(
+    connectionId: string,
+    database: string,
+    filter = "",
+    limit?: number,
+    schema?: string,
+    globalSearch = false,
+    currentSchema?: string,
+    catalog?: string,
+    options: { activateConnection?: boolean; verifySchemaMetadata?: boolean; oracleScope?: OracleCompletionTableScope } = {},
+  ): Promise<SqlCompletionTable[]> {
     const trimmedFilter = filter.trim();
     const normalizedFilter = trimmedFilter.toLowerCase();
+    const oracleScope = isOracleCompletionDatabase(getConfig(connectionId)?.db_type) && !globalSearch ? (options.oracleScope ?? { schema: schema?.toUpperCase() ?? currentSchema, includePublicSynonyms: !schema }) : undefined;
+    const localTablesForScope = (mask: string, maximum = limit) => lookupLocalCompletionTables(connectionId, database, mask, maximum, schema, catalog, oracleScope);
+    const scopeTables = (tables: SqlCompletionTable[]) => (oracleScope ? oracleCompletionTablesForScope(tables, oracleScope) : tables);
+    const scopedTableMetadata = (tables: TableInfo[]) => (oracleScope?.schema && oracleScope.schema !== oracleScope.schema.toUpperCase() ? [] : tables);
+    if (oracleScope && !oracleScope.schema) return localTablesForScope(trimmedFilter);
     // Remote queries (Dameng/Oracle) are case-sensitive, so the cache key must
     // preserve original casing — otherwise "TEST" and "test" collide and the
     // second lookup returns the first's stale results. Local lookups below stay
     // case-insensitive because tableMatchScore normalizes internally.
     const relaxedFilter = relaxedCompletionTableFilter(trimmedFilter);
-    const cacheKey = `${connectionId}:${database}:${catalog ?? ""}:${trimmedFilter}:${limit ?? ""}:${schema ?? ""}:${globalSearch ? "global" : "scoped"}:${currentSchema ?? ""}:${options.verifySchemaMetadata ? "verified" : "indexed"}`;
+    const cacheKey = `${connectionId}:${database}:${catalog ?? ""}:${trimmedFilter}:${limit ?? ""}:${schema ?? ""}:${globalSearch ? "global" : "scoped"}:${currentSchema ?? ""}:${options.verifySchemaMetadata ? "verified" : "indexed"}:${JSON.stringify(oracleScope)}`;
     const cachedTables = completionTablesCache.value[cacheKey];
     if (cachedTables) {
-      const localTables = lookupLocalCompletionTables(connectionId, database, trimmedFilter, limit, schema, catalog);
-      if (localTables.length === 0) return cachedTables;
-      const mergedTables = dedupeCompletionTables([...localTables, ...cachedTables]);
+      const localTables = localTablesForScope(trimmedFilter);
+      if (localTables.length === 0) return scopeTables(cachedTables);
+      const mergedTables = dedupeCompletionTables(scopeTables([...localTables, ...cachedTables]));
       completionTablesCache.value[cacheKey] = limit ? mergedTables.slice(0, limit) : mergedTables;
       indexCompletionTables(connectionId, database, schema, completionTablesCache.value[cacheKey], catalog);
       return completionTablesCache.value[cacheKey];
@@ -11353,16 +11368,21 @@ export const useConnectionStore = defineStore("connection", () => {
               }
             } catch {
               if (schema) {
-                const tables = await listCompletionTableMetadata(connectionId, database, schema, trimmedFilter, limit, catalog);
-                results = tableInfosToCompletionTables(tables, schema, catalog);
+                try {
+                  const tables = await listCompletionTableMetadata(connectionId, database, schema, trimmedFilter, limit, catalog);
+                  results = tableInfosToCompletionTables(scopedTableMetadata(tables), schema, catalog);
+                } catch (error) {
+                  if (!oracleScope) throw error;
+                  results = localTablesForScope(trimmedFilter);
+                }
               } else {
-                results = lookupLocalCompletionTables(connectionId, database, normalizedFilter, limit, undefined, catalog);
+                results = localTablesForScope(normalizedFilter);
               }
             }
             if (assistantCompleted && schema && options.verifySchemaMetadata) {
               try {
                 const tables = await listCompletionTableMetadata(connectionId, database, schema, trimmedFilter, limit, catalog);
-                results = dedupeCompletionTables([...tableInfosToCompletionTables(tables, schema, catalog), ...results]);
+                results = dedupeCompletionTables([...tableInfosToCompletionTables(scopedTableMetadata(tables), schema, catalog), ...results]);
               } catch {
                 // The completion index still provides a best-effort result when
                 // authoritative metadata is temporarily unavailable.
@@ -11378,14 +11398,15 @@ export const useConnectionStore = defineStore("connection", () => {
               } else if (schema) {
                 try {
                   const tables = await listCompletionTableMetadata(connectionId, database, schema, relaxedFilter, expandedCompletionLimit(limit), catalog);
-                  results = tableInfosToCompletionTables(tables, schema, catalog);
+                  results = tableInfosToCompletionTables(scopedTableMetadata(tables), schema, catalog);
                 } catch {
                   results = [];
                 }
               } else {
-                results = lookupLocalCompletionTables(connectionId, database, relaxedFilter, expandedCompletionLimit(limit), undefined, catalog);
+                results = localTablesForScope(relaxedFilter, expandedCompletionLimit(limit));
               }
             }
+            results = scopeTables(results);
             const limitedTables = limit ? dedupeCompletionTables(results).slice(0, limit) : results;
             if (requestRevision !== completionCacheRevision(connectionId, database)) return listCompletionTables(connectionId, database, filter, limit, schema, globalSearch, currentSchema, catalog, options);
             completionTablesCache.value[cacheKey] = limitedTables;
@@ -11397,10 +11418,11 @@ export const useConnectionStore = defineStore("connection", () => {
           let scopedTables: SqlCompletionTable[];
           if (schema) {
             const tables = await listCompletionTableMetadata(connectionId, database, schema, undefined, undefined, catalog);
-            scopedTables = tableInfosToCompletionTables(tables, schema, catalog);
+            scopedTables = tableInfosToCompletionTables(scopedTableMetadata(tables), schema, catalog);
           } else {
-            scopedTables = lookupLocalCompletionTables(connectionId, database, normalizedFilter, limit, undefined, catalog);
+            scopedTables = localTablesForScope(normalizedFilter);
           }
+          scopedTables = scopeTables(scopedTables);
           if (requestRevision !== completionCacheRevision(connectionId, database)) return listCompletionTables(connectionId, database, filter, limit, schema, globalSearch, currentSchema, catalog, options);
           completionTablesCache.value[cacheKey] = scopedTables;
           indexCompletionTables(connectionId, database, undefined, completionTablesCache.value[cacheKey], catalog);
@@ -11743,8 +11765,8 @@ export const useConnectionStore = defineStore("connection", () => {
     return foreignKeys;
   }
 
-  function refreshCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string, globalSearch = false, currentSchema?: string, catalog?: string): Promise<SqlCompletionTable[]> {
-    return listCompletionTables(connectionId, database, filter, limit, schema, globalSearch, currentSchema, catalog);
+  function refreshCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string, globalSearch = false, currentSchema?: string, catalog?: string, options?: { oracleScope?: OracleCompletionTableScope }): Promise<SqlCompletionTable[]> {
+    return listCompletionTables(connectionId, database, filter, limit, schema, globalSearch, currentSchema, catalog, options);
   }
 
   function refreshCompletionObjects(connectionId: string, database: string, filter = "", limit?: number, schema?: string, parentName?: string, globalSearch = false, currentSchema?: string): Promise<SqlCompletionObject[]> {

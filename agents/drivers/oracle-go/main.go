@@ -2766,6 +2766,9 @@ func oracleCompletionTablesQuery(request completionAssistantRequest, preferredSc
 	if owner != "" {
 		args = append(args, owner)
 		synonymOwnerPredicate = fmt.Sprintf(" AND s.OWNER = :%d", len(args))
+		if strings.TrimSpace(request.ParentSchema) == "" {
+			synonymOwnerPredicate = fmt.Sprintf(" AND (s.OWNER = :%d OR s.OWNER = 'PUBLIC')", len(args))
+		}
 	}
 	args = append(args, preferredSchema)
 	preferredParam := len(args)

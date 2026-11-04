@@ -1047,7 +1047,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 row.name,
                 kind,
                 blankToNull(request.getDatabase()),
-                row.owner,
+                "SYNONYM".equalsIgnoreCase(row.objectType) && "__public".equals(row.owner) ? "PUBLIC" : row.owner,
                 null,
                 null,
                 null,
@@ -1097,6 +1097,13 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         if (!owner.isEmpty()) {
             args.add(owner);
             synonymOwnerPredicate = " AND UPPER(s.OWNER) = ?";
+            if (request.getParent_schema() == null || request.getParent_schema().isBlank()) {
+                synonymOwnerPredicate = " AND (UPPER(s.OWNER) = ? OR s.OWNER IN ('PUBLIC', '__public'))";
+            }
+        }
+        if (!request.getGlobal_search() && "__PUBLIC".equals(owner)) {
+            ownerPredicate += " AND 1 = 0";
+            synonymOwnerPredicate += " AND 1 = 0";
         }
 
         String preferred = preferredSchema == null ? "" : preferredSchema.trim();
@@ -1141,7 +1148,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
               )
             ORDER BY CASE
                        WHEN %s THEN 0
-                       WHEN OWNER = 'PUBLIC' THEN 1
+                       WHEN OWNER IN ('PUBLIC', '__public') THEN 1
                        WHEN OWNER IN ('SYS','SYSTEM','SYSMAN','DBSNMP','OUTLN','XDB','MDSYS','CTXSYS','WMSYS') THEN 3
                        ELSE 2
                      END,

@@ -2917,6 +2917,20 @@ func TestOracleCompletionTablesQueryScopesExplicitSchema(t *testing.T) {
 	}
 }
 
+func TestOracleCompletionTablesQueryIncludesPublicSynonymsOnlyForImplicitScope(t *testing.T) {
+	query := oracleCompletionTablesQuery(completionAssistantRequest{Schema: "app", ObjectKinds: []string{"table"}}, "APP", 50)
+	if !strings.Contains(query.SQL, "AND o.OWNER = :2") || !strings.Contains(query.SQL, "AND (s.OWNER = :4 OR s.OWNER = 'PUBLIC')") {
+		t.Fatalf("implicit completion must restrict objects and include public synonyms: %s", query.SQL)
+	}
+	if query.Args[1] != "APP" || query.Args[3] != "APP" {
+		t.Fatalf("implicit owner must retain unquoted folding: %#v", query.Args)
+	}
+	explicit := oracleCompletionTablesQuery(completionAssistantRequest{Schema: "APP", ParentSchema: "other", ObjectKinds: []string{"table"}}, "APP", 50)
+	if strings.Contains(explicit.SQL, "OR s.OWNER = 'PUBLIC'") || explicit.Args[1] != "OTHER" || explicit.Args[3] != "OTHER" {
+		t.Fatalf("explicit completion must exclude public and current-schema synonyms: %#v %s", explicit.Args, explicit.SQL)
+	}
+}
+
 func TestOracleCompletionRoutinesQueryUsesPublicPackageMetadata(t *testing.T) {
 	query := oracleCompletionPackageRoutinesQuery(completionAssistantRequest{
 		Schema:       "HR",

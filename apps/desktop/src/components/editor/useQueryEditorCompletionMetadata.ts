@@ -8,7 +8,7 @@ import type { SqlSemanticModel } from "@/lib/sql/semantic/types";
 import { analyzeSqlCompletion, type SqlCompletionAnalysisResult } from "@/lib/sql/sqlCompletionAnalysis";
 import { createSqlCompletionAnalysisWorker } from "@/lib/sql/sqlCompletionAnalysisWorker";
 import { shouldUseQueryEditorLargeDocumentModeForSize } from "@/lib/editor/queryEditorLargeDocument";
-import { usesOracleSessionCompletionColumns as shouldUseOracleSessionCompletionColumns } from "@/lib/sql/oracleCompletionSession";
+import { usesOracleSessionCompletionColumns as shouldUseOracleSessionCompletionColumns, isOracleCompletionDatabase, oracleCompletionTablesForScope, type OracleCompletionTableScope } from "@/lib/sql/oracleCompletionSession";
 import { mergeSqlObjectNavigationType } from "@/lib/sql/sqlNavigation";
 import { requestInsertValueHintsRefresh, supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
 import { isSchemaAware, isSingleDatabase, supportsDatabaseSchemaQualifier } from "@/lib/database/databaseFeatureSupport";
@@ -51,6 +51,41 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
   // Completion cache
   let cachedTables: SqlCompletionTable[] = [];
   let completionCacheGeneration = 0;
+  let oracleSchemaRead: { key: string; promise: Promise<string | undefined>; schema?: string } | undefined;
+
+  function oracleSchemaContextKey() {
+    return JSON.stringify([props.connectionId, props.database, props.schema, props.clientSessionId, props.txnSessionId, props.autoCommit, props.isExecuting, props.isCancelling, props.completionContextVersion, completionCacheGeneration]);
+  }
+
+  async function resolveOracleCompletionSchema(): Promise<string | undefined> {
+    if (!isOracleCompletionDatabase(props.databaseType)) return props.schema;
+    if (props.autoCommit === false && (props.isExecuting || props.isCancelling)) return undefined;
+    if (props.autoCommit === false && !props.txnSessionId) return props.schema;
+    if (!props.clientSessionId && !props.txnSessionId) return props.schema;
+    if (!props.connectionId || props.database == null) return undefined;
+    const key = oracleSchemaContextKey();
+    if (oracleSchemaRead?.key !== key) {
+      const read = { key, promise: Promise.resolve<string | undefined>(undefined), schema: undefined as string | undefined };
+      oracleSchemaRead = read;
+      const sql = "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL";
+      const result =
+        props.autoCommit === false && props.txnSessionId
+          ? api.executeInManualTransaction(props.txnSessionId, sql, props.database, undefined, 1).then((results) => results[0])
+          : api.executeQuery(props.connectionId, props.database, sql, props.schema, undefined, { clientSessionId: props.clientSessionId, maxRows: 1 });
+      read.promise = result
+        .then((result) => {
+          if (key !== oracleSchemaContextKey()) return undefined;
+          const schema = result?.rows[0]?.[0];
+          read.schema = typeof schema === "string" && schema.length > 0 ? schema : undefined;
+          return read.schema;
+        })
+        .catch(() => {
+          if (oracleSchemaRead === read) oracleSchemaRead = undefined;
+          return undefined;
+        });
+    }
+    return withCompletionLatencyBudget(oracleSchemaRead.promise, oracleSchemaRead.schema);
+  }
 
   const cachedCompletionObjectsByScope = new Map<string, SqlCompletionObject[]>();
 
@@ -557,7 +592,8 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     if (!props.connectionId || props.database == null || usesLocalOnlyCompletionMetadata()) return;
     const generation = completionCacheGeneration;
     try {
-      const tables = await connectionStore.listCompletionTables(props.connectionId, props.database, "", Math.max(MAX_COMPLETION_TABLES, 500), undefined, false, props.schema, props.catalog, { activateConnection: false });
+      const currentSchema = isOracleCompletionDatabase(props.databaseType) ? await resolveOracleCompletionSchema() : props.schema;
+      const tables = await connectionStore.listCompletionTables(props.connectionId, props.database, "", Math.max(MAX_COMPLETION_TABLES, 500), undefined, false, currentSchema, props.catalog, { activateConnection: false });
       if (generation !== completionCacheGeneration) return;
       const scopedTables = tables.map((table) => ({
         ...table,
@@ -570,19 +606,28 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     }
   }
 
-  function listCompletionTablesWithLatencyBudget(connectionId: string, database: string, filter: string, limit: number, schema?: string, globalSearch = false, catalog = props.catalog, currentSchema = props.schema): Promise<SqlCompletionTable[]> {
+  function listCompletionTablesWithLatencyBudget(connectionId: string, database: string, filter: string, limit: number, schema?: string, globalSearch = false, catalog = props.catalog, currentSchema = props.schema, oracleScope?: OracleCompletionTableScope): Promise<SqlCompletionTable[]> {
     const generation = completionCacheGeneration;
-    const local = connectionStore.lookupLocalCompletionTables(connectionId, database, filter, limit, globalSearch ? undefined : schema, catalog).map((table) => ({ ...table, catalog: table.catalog ?? catalog, database: table.database ?? database }));
-    const remote = connectionStore.listCompletionTables(connectionId, database, filter, limit, schema, globalSearch, currentSchema, catalog).then((tables) => {
-      // A database/schema switch clears the cache while this request is still in
-      // flight; never merge the old result into the new scope.
-      if (generation !== completionCacheGeneration) return [];
-      const scopedTables = tables.map((table) => ({ ...table, catalog: table.catalog ?? catalog, database: table.database ?? database }));
-      cachedTables = mergeCompletionTables(cachedTables, scopedTables);
-      return scopedTables;
-    });
+    const contextKey = oracleSchemaContextKey();
+    const scoped = (tables: SqlCompletionTable[]) => (oracleScope ? oracleCompletionTablesForScope(tables, oracleScope) : tables);
+    const localTables = oracleScope ? connectionStore.lookupLocalCompletionTables(connectionId, database, filter, limit, schema, catalog, oracleScope) : connectionStore.lookupLocalCompletionTables(connectionId, database, filter, limit, globalSearch ? undefined : schema, catalog);
+    const local = scoped(localTables).map((table) => ({ ...table, catalog: table.catalog ?? catalog, database: table.database ?? database }));
+    const request = oracleScope ? connectionStore.listCompletionTables(connectionId, database, filter, limit, schema, globalSearch, currentSchema, catalog, { oracleScope }) : connectionStore.listCompletionTables(connectionId, database, filter, limit, schema, globalSearch, currentSchema, catalog);
+    const remote = request
+      .then((tables) => {
+        // A database/schema switch clears the cache while this request is still in
+        // flight; never merge the old result into the new scope.
+        if (generation !== completionCacheGeneration || (oracleScope && contextKey !== oracleSchemaContextKey())) return [];
+        const scopedTables = scoped(tables).map((table) => ({ ...table, catalog: table.catalog ?? catalog, database: table.database ?? database }));
+        cachedTables = mergeCompletionTables(cachedTables, scopedTables);
+        return scopedTables;
+      })
+      .catch((error) => {
+        if (!oracleScope) throw error;
+        return contextKey === oracleSchemaContextKey() ? local : [];
+      });
     if (local.length === 0) return remote;
-    return withCompletionLatencyBudget(remote, local);
+    return withCompletionLatencyBudget(remote, local).then((tables) => (oracleScope && contextKey !== oracleSchemaContextKey() ? [] : tables));
   }
 
   function mergeCompletionObjects(existing: SqlCompletionObject[], incoming: SqlCompletionObject[]) {
@@ -648,6 +693,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
   }
 
   return {
+    resolveOracleCompletionSchema,
     sqlCompletionDialectOptions,
     getEditorSqlCompletionContext,
     getEditorSqlCompletionAnalysis,

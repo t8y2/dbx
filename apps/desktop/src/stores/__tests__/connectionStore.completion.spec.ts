@@ -194,6 +194,49 @@ describe("connectionStore completion assistant", () => {
     setActivePinia(createPinia());
   });
 
+  it.each(["oracle", "oceanbase-oracle"] as const)("%s scopes warm completion candidates before limiting and keeps explicit owners separate", async (dbType) => {
+    const candidates = [
+      { name: "A_OTHER", schema: "B", kind: "table", data_type: "TABLE" },
+      { name: "A_SYSTEM", schema: "SYS", kind: "table", data_type: "TABLE" },
+      { name: "Z_LOCAL", schema: "A", kind: "table", data_type: "TABLE" },
+      { name: "PRIVATE_ALIAS", schema: "A", kind: "table", data_type: "SYNONYM" },
+      { name: "PUBLIC_ALIAS", schema: "PUBLIC", kind: "table", data_type: "SYNONYM" },
+      { name: "Z_LOCAL", schema: "PUBLIC", kind: "table", data_type: "SYNONYM" },
+    ];
+    const completionAssistantSearch = vi.fn().mockResolvedValue({ candidates, incomplete: false, fallback_used: false });
+    const listTables = vi.fn().mockRejectedValue(new Error("metadata unavailable"));
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch, listTables }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [{ ...oracleConnection(), db_type: dbType }];
+    store.connectedIds.add("oracle-1");
+    await store.listCompletionTables("oracle-1", "ORCL", "", 100, undefined, true, "A");
+    const unknown = await store.listCompletionTables("oracle-1", "ORCL", "", 100, undefined, false);
+    expect(unknown.map((table) => table.schema)).toEqual(["PUBLIC", "PUBLIC"]);
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(1);
+    const implicit = await store.listCompletionTables("oracle-1", "ORCL", "", 3, undefined, false, "A");
+    expect(implicit.map((table) => [table.schema, table.name]).sort()).toEqual([
+      ["A", "PRIVATE_ALIAS"],
+      ["A", "Z_LOCAL"],
+      ["PUBLIC", "PUBLIC_ALIAS"],
+    ]);
+    const explicit = await store.listCompletionTables("oracle-1", "ORCL", "", 100, "B", false, "A");
+    expect(explicit.map((table) => [table.schema, table.name])).toEqual([["B", "A_OTHER"]]);
+    const calls = completionAssistantSearch.mock.calls.length;
+    expect(await store.listCompletionTables("oracle-1", "ORCL", "", 100, "B", false, "A")).toMatchObject(explicit);
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(calls);
+    expect(await store.listCompletionTables("oracle-1", "ORCL", "", 3, undefined, false, "A")).toMatchObject(implicit);
+    completionAssistantSearch.mockRejectedValue(new Error("metadata timeout"));
+    const fallback = await store.listCompletionTables("oracle-1", "ORCL", "AL", 100, undefined, false, "A");
+    expect(fallback.map((table) => table.schema)).not.toContain("B");
+    expect(fallback.map((table) => table.schema)).not.toContain("SYS");
+    expect(fallback.map((table) => table.name).sort()).toEqual(["PRIVATE_ALIAS", "PUBLIC_ALIAS", "Z_LOCAL"]);
+    listTables.mockResolvedValue([{ name: "UNVERIFIED_OWNER", table_type: "TABLE" }]);
+    const quoted = await store.listCompletionTables("oracle-1", "ORCL", "", 100, "MixedOwner", false, "A", undefined, { oracleScope: { schema: "MixedOwner", includePublicSynonyms: false } });
+    expect(quoted).toEqual([]);
+  });
+
   it("does not replace the active connection during a cold metadata search", async () => {
     const connectDb = vi.fn().mockResolvedValue("pg-1");
     const completionAssistantSearch = vi.fn().mockResolvedValue({
@@ -595,8 +638,9 @@ describe("connectionStore completion assistant", () => {
     const tables = await store.listCompletionTables("oracle-1", "ORCL", "", 20, "scott", false, "APP");
 
     expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ schema: "scott", parent_schema: "scott", global_search: false, mask: "" }));
-    expect(tables).toEqual([expect.objectContaining({ name: "EMP", schema: "SCOTT", applyName: "EMP", boost: 2400 })]);
-    expect(store.lookupLocalCompletionTables("oracle-1", "ORCL", "", 20, "scott")).toEqual(tables);
+    expect(tables).toEqual([expect.objectContaining({ name: "EMP", schema: "SCOTT", applyName: undefined, boost: 2400 })]);
+    expect(store.lookupLocalCompletionTables("oracle-1", "ORCL", "", 20, "scott")).toEqual([expect.objectContaining({ name: "EMP", schema: "SCOTT", applyName: "EMP", boost: 2400 })]);
+    expect(store.lookupLocalCompletionTables("oracle-1", "ORCL", "", 20, "scott", undefined, { schema: "SCOTT", includePublicSynonyms: false })).toEqual(tables);
   });
 
   it("reconciles a non-empty filtered cache with a table added to the sidebar tree", async () => {
@@ -763,7 +807,7 @@ describe("connectionStore completion assistant", () => {
     const tables = await store.listCompletionTables("oceanbase-oracle-1", "OBORCL", "", 20, "staging", false, "DWD");
 
     expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ schema: "staging", parent_schema: "staging", global_search: false, mask: "" }));
-    expect(tables).toEqual([expect.objectContaining({ name: "ORDERS", schema: "STAGING", applyName: "ORDERS", boost: 2400 })]);
+    expect(tables).toEqual([expect.objectContaining({ name: "ORDERS", schema: "STAGING", applyName: undefined, boost: 2400 })]);
   });
 
   it("lets Oracle resolve CURRENT_SCHEMA for unqualified column completion", async () => {

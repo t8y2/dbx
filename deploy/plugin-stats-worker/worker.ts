@@ -1,29 +1,33 @@
-// Counts plugin marketplace traffic on Cloudflare without touching artifact bytes.
+// Counts plugin marketplace installs on Cloudflare. Statistics are decorative:
+// they must never sit in the artifact download path.
 //
 // Routes (see wrangler.json):
-// - dl.dbxio.com/plugins/*: counts each GET of a real `.dbxp` artifact (icons and
-//   other static assets are excluded — they are fetched on every marketplace
-//   page/app view and would both burn quota and pollute the numbers), then
-//   passes the request through to the R2 custom domain. Same-zone subrequests do
-//   not re-enter Workers, so the pass-through cannot loop.
 // - dbxio.com/api/plugins/install: fire-and-forget beacon the desktop app can
-//   send after a successful marketplace install. Decorative statistics only.
+//   send after a successful marketplace install.
 // - dbxio.com/api/plugins/stats: public read of the display counters (installs
 //   per plugin) from the archive summary — consumed by the website cards.
 // - dbxio.com/api/plugins/archive: token-gated manual trigger for the daily
 //   aggregation (same handler the cron runs), for verification and backfills.
 //
+// Do not add a dl.dbxio.com route back. That route proxied every artifact GET
+// through this Worker; when the Workers free-tier daily request quota was
+// exhausted, downloads failed with HTTP 429 and plugin installation broke for
+// everyone. Install beacons alone are the displayed metric and cannot fail a
+// download.
+//
 // Event kinds (blob1):
-// - dl:   artifact download (server-side, per .dbxp GET)
 // - inst: fresh install (beacon `kind:"install"`); legacy beacons without a
 //         kind also land here — they keep feeding the historical mixed-event
 //         base until the fleet upgrades, so the inst curve stays comparable
 // - updt: version update (beacon `kind:"update"`)
+// - dl:   historical artifact-download events recorded before the
+//         dl.dbxio.com route was removed; still aggregated from Analytics
+//         Engine so archived totals stay readable
 //
 // Identity (blob4, only used for per-day unique counts):
 // - inst/updt events carry the app's anonymous random installation id when
 //   available (stable across days → true per-machine uniques)
-// - dl events and legacy beacons fall back to a day-scoped IP HMAC
+// - legacy beacons fall back to a day-scoped IP HMAC
 //
 // Storage:
 // - Workers Analytics Engine (binding PLUGIN_STATS) — one datapoint per event.
@@ -49,10 +53,8 @@ type Env = {
   STATS_SALT: string;
 };
 
-type EventKind = "dl" | "inst" | "updt";
+type EventKind = "inst" | "updt";
 
-const DOWNLOAD_PATTERN = /^\/plugins\/([A-Za-z0-9._-]{1,64})\/([0-9A-Za-z.+-]{1,32})\//;
-const ARTIFACT_SUFFIX_PATTERN = /\.dbxp$/;
 const PLUGIN_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 const VERSION_PATTERN = /^[0-9A-Za-z.+-]{1,32}$/;
 const CLIENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -392,16 +394,6 @@ async function handleInstallBeacon(request: Request, env: Env): Promise<Response
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-    if (url.hostname === "dl.dbxio.com") {
-      if (request.method === "GET") {
-        const download = url.pathname.match(DOWNLOAD_PATTERN);
-        if (download && ARTIFACT_SUFFIX_PATTERN.test(url.pathname)) {
-          await recordEvent(env, "dl", download[1], download[2], await ipDayIdentity(env, request));
-        }
-      }
-      return fetch(request);
-    }
     return handleInstallBeacon(request, env);
   },
 

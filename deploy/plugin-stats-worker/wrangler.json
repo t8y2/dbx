@@ -4,10 +4,6 @@
   "main": "worker.ts",
   "routes": [
     {
-      "pattern": "dl.dbxio.com/plugins/*",
-      "zone_name": "dbxio.com"
-    },
-    {
       "pattern": "dbxio.com/api/plugins/*",
       "zone_name": "dbxio.com"
     }

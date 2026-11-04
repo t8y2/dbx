@@ -1,16 +1,11 @@
 # plugin-stats-worker
 
-Cloudflare Worker that counts plugin marketplace traffic. Deployed on the same
+Cloudflare Worker that counts plugin marketplace installs. Deployed on the same
 Cloudflare account as the dbxio.com site (`npx wrangler deploy` from this
 directory; OAuth login required).
 
 ## Routes
 
-- `dl.dbxio.com/plugins/*` — counts every `GET` of a real `.dbxp` artifact
-  (icons and other static assets under the same prefix are excluded: they are
-  fetched on every marketplace page/app view, which both burned KV quota and
-  inflated the numbers), then passes the request through to the R2 custom
-  domain. Artifact bytes, headers, and Range semantics are untouched.
 - `dbxio.com/api/plugins/install` — `POST` fire-and-forget beacon the desktop
   app can send after a successful marketplace install
   (`{"id": "<plugin id>", "version": "<version>", "kind": "install"|"update",
@@ -23,16 +18,27 @@ directory; OAuth login required).
   summary's `inst` section only (dl/updt and unique counts stay internal).
   Cached for 5 minutes.
 
+### Why artifact downloads are not routed here
+
+An earlier version also matched `dl.dbxio.com/plugins/*` to count `.dbxp`
+downloads. That put a Worker invocation in front of every plugin artifact (and
+every icon under the prefix). When the Workers free-tier daily request quota
+was exhausted, the edge returned HTTP 429 for the whole route and every plugin
+installation failed — even though the statistics are decorative. The route was
+removed so R2 serves artifacts directly. Do not add it back; count installations
+with the beacon above instead. Historical `dl` events already written to
+Analytics Engine are still aggregated so the archive remains readable.
+
 ## Storage — Workers Analytics Engine
 
 One datapoint per event (binding `PLUGIN_STATS`):
 
-- `blobs = [kind, pluginId, version, identity]` where kind is `dl` (artifact
-  GET), `inst` (fresh install; legacy beacons without `kind` also land here so
-  the historical mixed-event base stays continuous) or `updt` (version update);
+- `blobs = [kind, pluginId, version, identity]` where kind is `inst` (fresh
+  install; legacy beacons without `kind` also land here so the historical
+  mixed-event base stays continuous) or `updt` (version update). `dl` appears
+  only in historical rows written before the artifact route was removed.
   `identity` is the beacon `clientId` when present (stable per-machine unique),
-  otherwise a day-scoped IP HMAC (all `dl` events use the latter).
-  `doubles = [1]`; `indexes = [pluginId]`.
+  otherwise a day-scoped IP HMAC. `doubles = [1]`; `indexes = [pluginId]`.
 
 Chosen over KV counters: KV read-modify-write costs 1 write per request, and
 the free tier's 1k writes/day is below what a 30k-user base generates on a hot

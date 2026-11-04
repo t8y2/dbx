@@ -1593,6 +1593,7 @@ name = "dbx-platform"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "httpdate",
  "nix",
  "reqwest",
  "serde",

@@ -123,6 +123,7 @@ import { resolveDataGridBusyStartedAt } from "@/lib/dataGrid/dataGridBusyElapsed
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
 import { buildTableSelectSql, qualifyTableReferencesInSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
+import { dataGridExecutedQueryConditions } from "@/lib/dataGrid/dataGridExecutedQuery";
 import { uuid } from "@/lib/common/utils";
 import { generateCellValues, type CellValueGenerationKind, type CellValueGenerationOptions } from "@/lib/dataGrid/cellValueGeneration";
 import { MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridClipboardText, mongoDocumentGridDisplayText, mongoDocumentGridEditorText, mongoDocumentGridExternalValue, mongoDocumentGridInputValue, mongoDocumentGridNumericValue, mongoDocumentRelaxedExtendedJson } from "@/lib/mongo/mongoDocumentValues";
@@ -9689,13 +9690,11 @@ let userFacingSqlGeneration = 0;
 // Legacy snapshots may retain a display page without the actual execution text.
 // Do not present the original, unpaginated statement as the executed SQL there.
 const actualExecutionSql = computed(() => props.result.sqlPage?.executedSql || props.result.executedStatement || (!props.pageSql ? props.result.sourceStatement || props.sql || "" : ""));
-// Copy the SQL attached to the displayed result, not conditions still being
-// edited. Prefer the display page over an internal pagination probe.
-const quickQuerySql = computed(() => sqlWithDisplayDatabaseName(props.result.sqlPage?.sql || props.pageSql || props.result.sourceStatement || props.sql || "").trim());
-const canCopyQuickQuerySql = computed(() => !!quickQuerySql.value && !props.loading && !isApplyingWhere.value && !isQueryExecutionErrorResult(props.result));
+// Both copy entries use the same reconstructed SQL for the displayed result.
+const canCopyQuickQuerySql = computed(() => !!userFacingSql.value && !props.loading && !isApplyingWhere.value && !isQueryExecutionErrorResult(props.result));
 
 async function copyQuickQuerySql() {
-  if (canCopyQuickQuerySql.value) await copyText(quickQuerySql.value);
+  if (canCopyQuickQuerySql.value) await copyUserFacingSql();
 }
 
 function sqlWithDisplayDatabaseName(sql: string): string {
@@ -9710,21 +9709,31 @@ function sqlWithDisplayDatabaseName(sql: string): string {
 
 async function syncUserFacingSql() {
   const generation = ++userFacingSqlGeneration;
-  const executionSql = (props.result.sqlPage?.sql || props.pageSql || props.sql)?.trim() ?? "";
+  const executionSql = (props.result.sqlPage?.sql || props.pageSql || props.result.sourceStatement || props.sql)?.trim() ?? "";
   const includeDatabaseName = settingsStore.editorSettings.generateSqlIncludeDatabaseName;
-  const shouldRebuildSql = executionSql.includes("__DBX_LARGE_VALUE_BYTES_") || includeDatabaseName;
-  if (props.context !== "table-data" || !shouldRebuildSql || !props.tableMeta?.tableName) {
+  const hasPreviewProjection = executionSql.includes("__DBX_LARGE_VALUE_BYTES_");
+  const shouldRebuildSql = hasPreviewProjection || includeDatabaseName;
+  if (props.context !== "table-data" || !shouldRebuildSql) {
     userFacingSql.value = sqlWithDisplayDatabaseName(executionSql);
+    return;
+  }
+
+  // Clearing first prevents a copy of the previous page while its replacement
+  // is being rebuilt. A failed rebuild must never expose internal preview SQL.
+  userFacingSql.value = "";
+  const conditions = props.tableMeta?.tableName ? dataGridExecutedQueryConditions(executionSql, props.tableMeta.tableName, resolvedDatabaseType.value) : null;
+  if (!props.tableMeta?.tableName || !conditions) {
+    if (!hasPreviewProjection) userFacingSql.value = sqlWithDisplayDatabaseName(executionSql);
     return;
   }
 
   try {
     const config = props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined;
     const footerPage = dataGridUserFacingPage({
-      executedPageLimit: props.executedPageLimit,
-      executedPageOffset: props.executedPageOffset,
-      pageLimit: props.pageLimit,
-      pageOffset: props.pageOffset,
+      executedPageLimit: props.result.sqlPage?.executedLimit ?? props.executedPageLimit,
+      executedPageOffset: props.result.sqlPage?.executedOffset ?? props.executedPageOffset,
+      pageLimit: props.result.sqlPage?.limit ?? props.pageLimit,
+      pageOffset: props.result.sqlPage?.offset ?? props.pageOffset,
       fallbackLimit: pageSize.value,
       fallbackOffset: Math.max(0, currentPage.value - 1) * pageSize.value,
     });
@@ -9740,19 +9749,19 @@ async function syncUserFacingSql() {
       tableType: props.tableMeta.tableType,
       includeDatabaseName,
       injectDefaultTimeSeriesWhere: true,
-      whereInput: currentWhereInput(),
-      orderBy: effectiveOrderBy(),
+      whereInput: conditions.whereInput,
+      orderBy: conditions.orderBy,
       limit: footerPage.limit,
       offset: footerPage.offset,
     });
     if (generation === userFacingSqlGeneration) userFacingSql.value = sqlWithDisplayDatabaseName(sql);
   } catch {
-    if (generation === userFacingSqlGeneration) userFacingSql.value = sqlWithDisplayDatabaseName(executionSql);
+    if (generation === userFacingSqlGeneration && !hasPreviewProjection) userFacingSql.value = sqlWithDisplayDatabaseName(executionSql);
   }
 }
 
 watch(
-  () => [props.sql, props.pageSql, props.result.sqlPage, props.context, props.tableMeta, props.pageLimit, props.pageOffset, props.executedPageLimit, props.executedPageOffset, currentWhereInput(), effectiveOrderBy(), settingsStore.editorSettings.generateSqlIncludeDatabaseName],
+  () => [props.sql, props.pageSql, props.result, props.result.sqlPage, props.result.sourceStatement, props.context, props.tableMeta, props.pageLimit, props.pageOffset, props.executedPageLimit, props.executedPageOffset, settingsStore.editorSettings.generateSqlIncludeDatabaseName],
   () => void syncUserFacingSql(),
   { immediate: true },
 );

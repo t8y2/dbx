@@ -9,12 +9,23 @@ import {
   dropOracleDatabaseLinkSql,
   oracleDatabaseLinkName,
   oracleDatabaseLinksSql,
+  oracleDatabaseLinksFromResult,
   redactOracleDatabaseLinkError,
   testOracleDatabaseLinkSql,
 } from "@/lib/database/oracleDatabaseLinks";
 import { databaseObjectCapabilities } from "@/lib/database/databaseObjectCapabilities";
 import { oracleDatabaseLinkCompletionContext as context, oracleDatabaseLinkCompletionItems as items } from "@/lib/sql/oracleDatabaseLinkCompletion";
 describe("OceanBase Oracle schema objects", () => {
+  it("limits scoped Oracle link reads in SQL and retains public shadow metadata", () => {
+    const privateSql = oracleDatabaseLinksSql("oracle", { kind: "schema", schema: "Owner's" });
+    expect(privateSql).toContain("L.OWNER = 'Owner''s'");
+    expect(privateSql).toContain("L.OWNER = SYS_CONTEXT('USERENV', 'SESSION_USER')");
+    const publicSql = oracleDatabaseLinksSql("oracle", { kind: "public" });
+    expect(publicSql).toContain("WHERE L.OWNER = 'PUBLIC'");
+    expect(publicSql).toContain("USER_DB_LINKS P WHERE P.DB_LINK = L.DB_LINK");
+    const links = oracleDatabaseLinksFromResult({ columns: ["OWNER", "DB_LINK", "DBX_SHADOWED"], rows: [["PUBLIC", "SHARED.LINK", 1]] } as Parameters<typeof oracleDatabaseLinksFromResult>[0]);
+    expect(links[0]).toMatchObject({ owner: "PUBLIC", name: "SHARED.LINK", shadowedBySessionPrivate: true });
+  });
   it("exposes sequence and synonym source through the same object model as Oracle", () => {
     for (const db of ["oracle", "oceanbase-oracle"] as const) {
       const capabilities = databaseObjectCapabilities(db);
@@ -81,7 +92,10 @@ describe("Oracle database links", () => {
   it("lists tenant-visible OceanBase links and marks links created by the session user", () => {
     expect(oracleDatabaseLinksSql("oceanbase-oracle")).toBe(OCEANBASE_ORACLE_DATABASE_LINKS_SQL);
     expect(OCEANBASE_ORACLE_DATABASE_LINKS_SQL).toContain("FROM ALL_DB_LINKS");
-    expect(OCEANBASE_ORACLE_DATABASE_LINKS_SQL).toContain("FROM USER_DB_LINKS");
+    expect(OCEANBASE_ORACLE_DATABASE_LINKS_SQL).not.toContain("FROM USER_DB_LINKS");
+    const [unknown] = oracleDatabaseLinksFromResult({ columns: ["OWNER", "DB_LINK", "DBX_CAN_DROP"], rows: [["PUBLIC", "REMOTE", null]] } as Parameters<typeof oracleDatabaseLinksFromResult>[0]);
+    expect(unknown.canDrop).toBeUndefined();
+    expect(unknown.permissionUnknown).toBe(true);
     expect(OCEANBASE_ORACLE_DATABASE_LINKS_SQL).toContain("DBX_CAN_DROP");
     expect(oracleDatabaseLinksSql("oracle")).toBe(ORACLE_DATABASE_LINKS_SQL);
   });

@@ -91,7 +91,9 @@ it.each([
   mounted.push({ app, container });
   await nextTick();
   const host = runtime.value as unknown as { buildContextMenu(node: TreeNode): ContextMenuItem[] };
-  const action = host.buildContextMenu(node).find((item) => item.label === i18n.global.t("contextMenu.openObjectBrowser"))?.action;
+  const browseItem = host.buildContextMenu(node).find((item) => item.sidebarActionId === "contextMenu.openObjectBrowser");
+  expect(browseItem?.label).toBe(i18n.global.t("contextMenu.viewObjects"));
+  const action = browseItem?.action;
   expect(action).toBeDefined();
   await action?.();
   expect(queries.tabs.find((item) => item.mode === "objects")).toMatchObject({ database: expectedDatabase, schema: "APP_OWNER" });

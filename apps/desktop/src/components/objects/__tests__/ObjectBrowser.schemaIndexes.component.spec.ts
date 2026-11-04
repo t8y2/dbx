@@ -142,10 +142,16 @@ describe("schema index browsing and draft navigation", () => {
         return item!;
       });
       row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
-      const action = await vi.waitFor(() => {
+      const structure = await vi.waitFor(() => {
         expect(document.querySelector("[data-dbx-context-menu]")).not.toBeNull();
-        const item = document.querySelector<HTMLElement>('[data-menu-action="contextMenu.exportStructure"]');
-        expect([...document.querySelectorAll("[data-menu-action]")].map((item) => item.getAttribute("data-menu-action"))).toContain("contextMenu.exportStructure");
+        const item = document.querySelector<HTMLElement>('[data-menu-action="group.structure"]');
+        expect(item).not.toBeNull();
+        return item!;
+      });
+      structure.click();
+      const action = await vi.waitFor(() => {
+        const item = [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].find((button) => button.textContent?.includes("contextMenu.exportStructure"));
+        expect(item).toBeDefined();
         return item!;
       });
       action.click();

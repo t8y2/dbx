@@ -2,12 +2,13 @@ import { effectScope, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NativeJobMutation, NativeJobOperationStatus, NativeJobPreparedPlan, NativeJobRef, NativeJobScope } from "@/lib/database/nativeJobs";
 import type { ConnectionConfig } from "@/types/database";
+import type { NativeJobCreationInput } from "@/lib/database/nativeJobAdmin";
 
 const rpc = vi.hoisted(() => ({ prepare: vi.fn(), apply: vi.fn(), status: vi.fn(), cancel: vi.fn(), guard: vi.fn() }));
 vi.mock("@/lib/backend/api", () => ({ nativeJobPrepare: rpc.prepare, nativeJobApply: rpc.apply, nativeJobStatus: rpc.status, nativeJobCancel: rpc.cancel }));
 vi.mock("@/lib/database/productionExecutionGuard", () => ({ executeWithProductionContextGuard: rpc.guard }));
 
-import { useNativeJobExecution } from "@/composables/useNativeJobExecution";
+import { useNativeJobExecution, type NativeJobExecutionState } from "@/composables/useNativeJobExecution";
 
 const scope: NativeJobScope = { connectionId: "c", database: "", contextId: "original" };
 const target: NativeJobRef = { scope, kind: "scheduler", owner: "Owner", name: "A,B" };
@@ -25,7 +26,7 @@ function deferred<T>() {
 }
 
 const scopes: ReturnType<typeof effectScope>[] = [];
-function setup() {
+function setup(retainedState?: NativeJobExecutionState, captureInput?: () => NativeJobCreationInput) {
   const connection = ref<ConnectionConfig>({ id: "c", name: "Original", db_type: "oracle", host: "localhost", port: 1521, username: "Owner", password: "" });
   const selected = ref<NativeJobRef | undefined>(target);
   const context = ref<NativeJobScope | undefined>(scope);
@@ -33,7 +34,7 @@ function setup() {
   const onTargetObserved = vi.fn();
   const owner = effectScope();
   scopes.push(owner);
-  const execution = owner.run(() => useNativeJobExecution({ connection: () => connection.value, database: () => "", scope: () => context.value, selected: () => selected.value, source: () => "admin", onFinished, onTargetObserved }))!;
+  const execution = owner.run(() => useNativeJobExecution({ retainedState, captureInput, connection: () => connection.value, database: () => "", scope: () => context.value, selected: () => selected.value, source: () => "admin", onFinished, onTargetObserved }))!;
   return { execution, connection, selected, context, onFinished, onTargetObserved, owner };
 }
 
@@ -50,6 +51,93 @@ afterEach(() => {
 });
 
 describe("native job page execution", () => {
+  it("captures creation inputs only at dispatch and keeps them independent from later drafts", async () => {
+    const retained: NativeJobExecutionState = {};
+    const input: NativeJobCreationInput = { name: "Original", kind: "scheduler", definition: { attributes: { MAX_FAILURES: { kind: "set", value: 2 } } }, dameng: {} };
+    const a = setup(retained, () => input);
+    await a.execution.prepare(mutation);
+    expect(retained.execution).toBeUndefined();
+    await a.execution.apply();
+    input.name = "Later draft";
+    input.definition.attributes!.MAX_FAILURES = { kind: "set", value: 9 };
+    expect(retained.execution?.input).toMatchObject({ name: "Original", definition: { attributes: { MAX_FAILURES: { value: 2 } } } });
+    expect(retained.execution?.input).not.toBe(input);
+  });
+  it("reattaches only the dispatched observer after A/B/A without replaying apply or completion callbacks", async () => {
+    const retained: NativeJobExecutionState = {};
+    const receipt = deferred<NativeJobOperationStatus>();
+    rpc.apply.mockReturnValueOnce(receipt.promise);
+    const a = setup(retained);
+    await a.execution.prepare(mutation);
+    const applying = a.execution.apply();
+    expect(retained.execution?.status.state).toBe("running");
+    expect(retained.execution?.prepared).not.toHaveProperty("connection");
+    expect(retained.execution?.prepared.plan).not.toHaveProperty("planId");
+    a.owner.stop();
+    const b = setup({});
+    expect(b.execution.execution.value).toBeUndefined();
+    rpc.status.mockResolvedValue({ ...status("running"), steps: [{ id: "run", state: "dispatching", reason: null, vendorCode: null }] });
+    const returned = setup(retained);
+    await returned.execution.refresh();
+    expect(returned.execution.execution.value?.status.steps[0]?.state).toBe("dispatching");
+    expect(returned.execution.previousExecution.value).toBeUndefined();
+    expect(returned.execution.preview.value).toBeUndefined();
+    await returned.execution.apply();
+    receipt.resolve(status("finished", "verified"));
+    await applying;
+    expect(returned.execution.execution.value?.status.state).toBe("running");
+    rpc.status.mockResolvedValue(status("finished", "verified"));
+    await returned.execution.refresh();
+    expect(returned.onFinished).not.toHaveBeenCalled();
+    expect(returned.onTargetObserved).not.toHaveBeenCalled();
+    expect(a.onFinished).not.toHaveBeenCalled();
+    expect(rpc.apply).toHaveBeenCalledTimes(1);
+    expect(rpc.cancel).not.toHaveBeenCalled();
+  });
+
+  it("does not allow an old observer to overwrite the reattached operation", async () => {
+    const retained: NativeJobExecutionState = {};
+    const a = setup(retained);
+    await a.execution.prepare(mutation);
+    await a.execution.apply();
+    const old = deferred<NativeJobOperationStatus>();
+    rpc.status.mockReturnValueOnce(old.promise);
+    const observing = a.execution.observe();
+    a.owner.stop();
+    rpc.status.mockResolvedValue({ ...status(), reason: "new observer" });
+    const returned = setup(retained);
+    await returned.execution.refresh();
+    old.resolve({ ...status(), reason: "old observer" });
+    await observing;
+    expect(retained.execution?.status.reason).toBe("new observer");
+  });
+
+  it("retains explicit invalidation across remount even when the runtime context ID is unchanged", async () => {
+    const retained: NativeJobExecutionState = {};
+    const a = setup(retained);
+    await a.execution.prepare(mutation);
+    await a.execution.apply();
+    a.execution.invalidateContext();
+    a.owner.stop();
+    rpc.status.mockResolvedValue(status());
+    const returned = setup(retained);
+    await returned.execution.refresh();
+    expect(returned.execution.previousExecution.value?.status.operationId).toBe("operation");
+    returned.context.value = { ...scope, contextId: "different" };
+    expect(returned.execution.execution.value).toBeUndefined();
+    expect(returned.execution.previousExecution.value?.status.target).toEqual(target);
+    returned.connection.value.host = "another-server";
+    expect(returned.execution.previousExecution.value).toBeUndefined();
+  });
+
+  it("marks a real source change as previous without requiring explicit invalidation", async () => {
+    const { execution, context } = setup();
+    await execution.prepare(mutation);
+    await execution.apply();
+    context.value = { ...scope, contextId: "different" };
+    expect(execution.previousExecution.value?.status.target).toEqual(target);
+  });
+
   it("observes dispatch while the apply receipt waits and never replaces newer status with the late receipt", async () => {
     const { execution, onFinished } = setup();
     const receipt = deferred<NativeJobOperationStatus>();

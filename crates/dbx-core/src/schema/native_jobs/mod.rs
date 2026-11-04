@@ -19,14 +19,15 @@ mod service;
 pub use details::read_native_job_details_with;
 pub use operations::{
     native_job_apply_core, native_job_apply_with, native_job_cancel, native_job_prepare_core,
-    native_job_prepare_request_with, native_job_prepare_with, native_job_prepare_with_references, native_job_status,
-    native_job_status_observed_core, NativeJobDispatchOutcome, NativeJobExecutionRead, NativeJobMutationSession,
-    NativeJobStepReceipt,
+    native_job_prepare_in_page_core, native_job_prepare_request_with, native_job_prepare_with,
+    native_job_prepare_with_references, native_job_status, native_job_status_observed_core, NativeJobDispatchOutcome,
+    NativeJobExecutionRead, NativeJobMutationSession, NativeJobStepReceipt,
 };
 pub use references::{native_job_references_core, native_job_references_with};
 pub use service::{
     native_job_list_core, native_job_list_with, native_job_open_context_core, native_job_open_context_with,
-    native_job_read_core, native_job_read_with, runtime_identity, NativeJobRegistry, NativeJobRuntimeIdentity,
+    native_job_read_core, native_job_read_in_page_core, native_job_read_in_page_with, native_job_read_with,
+    runtime_identity, NativeJobRegistry, NativeJobRuntimeIdentity,
 };
 
 pub type NativeJobCatalogRow = BTreeMap<String, Value>;
@@ -196,7 +197,7 @@ pub(super) async fn execute_catalog_query_in_session(
                 None,
                 QueryExecutionOptions {
                     max_rows: Some(query.limit + 1),
-                    fetch_size: Some(1_000),
+                    fetch_size: Some(1_000.min(query.limit + 1)),
                     ..Default::default()
                 },
             );
@@ -210,7 +211,7 @@ pub(super) async fn execute_catalog_query_in_session(
         }
         PoolKind::ExternalDriver { config, session, .. } => {
             let mut params = serde_json::json!({ "connection": config.as_ref(), "database": database, "sql": query.sql,
-                "maxRows": query.limit + 1, "fetchSize": 1000, "deferLobs": false, "nativeDiagnostics": true });
+                "maxRows": query.limit + 1, "fetchSize": 1_000.min(query.limit + 1), "deferLobs": false, "nativeDiagnostics": true });
             if let Some(physical) = physical {
                 physical.bind(&mut params);
             }

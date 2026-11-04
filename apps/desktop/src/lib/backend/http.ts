@@ -1311,12 +1311,12 @@ export async function deleteSchemaCachePrefix(prefix: string): Promise<void> {
   return del(`/api/schema/cache-prefix?${qs({ prefix })}`);
 }
 
-export async function listSchemas(connectionId: string, database: string, applyVisibleFilter = false): Promise<string[]> {
-  return get(`/api/schema/schemas?${qs({ connection_id: connectionId, database, apply_visible_filter: applyVisibleFilter || undefined })}`);
+export async function listSchemas(connectionId: string, database: string, applyVisibleFilter = false, showSystemSchemas?: boolean): Promise<string[]> {
+  return get(`/api/schema/schemas?${qs({ connection_id: connectionId, database, apply_visible_filter: applyVisibleFilter || undefined, show_system_schemas: showSystemSchemas })}`);
 }
 
-export async function listSchemaInfos(connectionId: string, database: string): Promise<SchemaInfo[]> {
-  const schemas = await listSchemas(connectionId, database);
+export async function listSchemaInfos(connectionId: string, database: string, showSystemSchemas?: boolean): Promise<SchemaInfo[]> {
+  const schemas = await listSchemas(connectionId, database, false, showSystemSchemas);
   return schemas.map((name) => ({ name, comment: null }));
 }
 
@@ -1374,6 +1374,7 @@ export async function listObjects(
       execution_id: executionId,
       identity_mode: readOptions?.identityMode,
       lightweight: readOptions?.lightweight,
+      directory_page: readOptions?.directoryPage,
       exact_identity: options === true || undefined,
     })}`,
   );
@@ -1412,11 +1413,11 @@ export function nativeJobList(request: NativeJobListRequest): Promise<NativeJobL
 export function nativeJobReferences(request: NativeJobReferenceListRequest): Promise<NativeJobReferenceCatalog> {
   return post("/api/schema/native-jobs/references", request);
 }
-export function nativeJobRead(target: NativeJobRef): Promise<NativeJobDetails> {
-  return post("/api/schema/native-jobs/read", target);
+export function nativeJobRead(target: NativeJobRef, pageScope?: { schema: string; kind: "scheduler" | "legacy"; schedulerCategory?: "regular" | "lightweight" | "in-memory" }): Promise<NativeJobDetails> {
+  return post("/api/schema/native-jobs/read", pageScope ? { target, pageScope } : target);
 }
-export function nativeJobPrepare(mutation: NativeJobRequest): Promise<NativeJobPreparedPlan> {
-  return post("/api/schema/native-jobs/prepare", mutation);
+export function nativeJobPrepare(mutation: NativeJobRequest, pageScope?: { schema: string; kind: "scheduler" | "legacy"; schedulerCategory?: "regular" | "lightweight" | "in-memory" }): Promise<NativeJobPreparedPlan> {
+  return post("/api/schema/native-jobs/prepare", pageScope ? { ...mutation, pageScope } : mutation);
 }
 export function nativeJobApply(planId: string): Promise<NativeJobOperationStatus> {
   return post("/api/schema/native-jobs/apply", { planId });

@@ -7684,7 +7684,7 @@ async function onStarRocksAlterCompleted() {
   }
 }
 
-defineExpose({ applyChanges, focusSearch });
+defineExpose({ applyChanges, focusSearch, saving });
 
 function addItemForActiveTab(): boolean {
   if (activeTab.value === "columns" && canAddColumn.value) {
@@ -8113,6 +8113,7 @@ watch(
     () => props.database,
     databaseType,
     () => props.schema,
+    () => props.catalog,
     () => props.tableName,
     newTableName,
     tableComment,

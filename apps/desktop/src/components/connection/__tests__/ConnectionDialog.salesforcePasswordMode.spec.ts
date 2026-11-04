@@ -191,7 +191,7 @@ beforeEach(() => {
   i18n.global.locale.value = "en";
   for (const fn of Object.values(backend)) fn.mockResolvedValue([]);
   backend.listenAgentInstallProgress.mockResolvedValue(() => {});
-  store.updateConnection.mockResolvedValue(undefined);
+  store.updateConnection.mockImplementation(async (config) => config);
   store.addConnection.mockResolvedValue(undefined);
 });
 

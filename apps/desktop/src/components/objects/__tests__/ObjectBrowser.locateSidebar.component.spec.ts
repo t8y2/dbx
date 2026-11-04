@@ -303,7 +303,7 @@ describe.each(["list", "grid", "compact"] as const)("ObjectBrowser locate in sid
     expect(mocks.locateTable).toHaveBeenCalledExactlyOnceWith({ tableName: "orders", tableType: "TABLE", schema: "row_schema", catalog: "external_catalog" });
     for (const name of ["orders", "customers"]) expect(rowFor(host, name).classList.contains("bg-accent")).toBe(true);
     await openMenu(host, "orders");
-    menuButton(layout === "full" ? "common.more" : "sidebarMenu.groups.danger").dispatchEvent(new MouseEvent("mouseenter"));
+    menuButton("sidebarMenu.groups.danger").dispatchEvent(new MouseEvent("mouseenter"));
     await nextTick();
     menuButton("contextMenu.batchDrop");
     menuButton("contextMenu.batchEmpty");

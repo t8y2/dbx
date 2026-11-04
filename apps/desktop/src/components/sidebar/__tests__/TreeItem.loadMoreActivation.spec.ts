@@ -82,9 +82,10 @@ async function mountTreeItem(node: TreeNode, options: { projectedConnectionIds?:
   const runtime = createSidebarTreeRuntime();
   const host = runtimeHost();
   runtime.bindHost(host);
+  const contextMenu = vi.fn();
   const app = createApp(
     defineComponent({
-      setup: () => () => h(TreeItem, { node, depth: 2 }),
+      setup: () => () => h(TreeItem, { node, depth: 2, onContextMenu: contextMenu }),
     }),
   );
   mountedApps.push(app);
@@ -102,8 +103,43 @@ async function mountTreeItem(node: TreeNode, options: { projectedConnectionIds?:
 
   const row = container.querySelector<HTMLElement>("[tabindex]");
   if (!row) throw new Error(`Tree item row was not rendered: ${container.innerHTML}`);
-  return { row, host };
+  return { row, host, contextMenu };
 }
+
+describe("keyboard context menu", () => {
+  const node: TreeNode = { id: "connection-1:jobs", type: "group-jobs", label: "Jobs", connectionId: "connection-1" };
+
+  it.each([{ key: "ContextMenu" }, { key: "F10", shiftKey: true }])("opens the existing row menu for $key", async (keys) => {
+    const { row, host, contextMenu } = await mountTreeItem(node);
+    row.focus();
+    const event = new KeyboardEvent("keydown", { ...keys, bubbles: true, cancelable: true });
+    row.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(contextMenu).toHaveBeenCalledOnce();
+    expect(contextMenu.mock.calls[0][0]).toBeInstanceOf(MouseEvent);
+    expect(contextMenu.mock.calls[0][1]).toEqual(node);
+    expect(connectionStore.selectedTreeNodeId).toBe(node.id);
+    expect(host.handleRowKeydown).not.toHaveBeenCalled();
+  });
+
+  it.each([{ key: "F10" }, { key: "F10", shiftKey: true, ctrlKey: true }, { key: "ArrowRight" }])("preserves existing key handling for $key", async (keys) => {
+    const { row, host, contextMenu } = await mountTreeItem(node);
+    row.dispatchEvent(new KeyboardEvent("keydown", { ...keys, bubbles: true, cancelable: true }));
+    expect(contextMenu).not.toHaveBeenCalled();
+    expect(host.handleRowKeydown).toHaveBeenCalledOnce();
+  });
+
+  it("does not open the row menu from an editable descendant", async () => {
+    const { row, contextMenu } = await mountTreeItem(node);
+    const input = document.createElement("input");
+    row.append(input);
+    input.focus();
+    const event = new KeyboardEvent("keydown", { key: "F10", shiftKey: true, bubbles: true, cancelable: true });
+    input.dispatchEvent(event);
+    expect(contextMenu).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+  });
+});
 
 function connectionIdsInProjection(nodes: readonly TreeNode[]): Set<string> {
   const connectionIds = new Set<string>();

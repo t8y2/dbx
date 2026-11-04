@@ -1903,7 +1903,7 @@ describe("connectionStore completion assistant", () => {
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       completionAssistantSearch,
       listCompletionObjects,
-      listSchemas: vi.fn().mockResolvedValue(["public"]),
+      listSchemaInfos: vi.fn().mockResolvedValue([{ name: "public", comment: null }]),
     }));
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
@@ -2198,13 +2198,13 @@ describe("connectionStore completion assistant", () => {
     expect(listDatabases).toHaveBeenCalledTimes(2);
   });
 
-  it("evicts old completion schema entries", async () => {
-    const listSchemas = vi.fn(async (_connectionId: string, database: string) => [`schema_${database}`]);
+  it("evicts completion schema index entries while retaining shared metadata", async () => {
+    const listSchemaInfos = vi.fn(async (_connectionId: string, database: string) => [{ name: `schema_${database}`, comment: null }]);
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
-      listSchemas,
+      listSchemaInfos,
     }));
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
@@ -2215,9 +2215,10 @@ describe("connectionStore completion assistant", () => {
       await store.listCompletionSchemas("pg-1", `db_${index}`);
     }
 
-    await store.listCompletionSchemas("pg-1", "db_0");
-
-    expect(listSchemas).toHaveBeenCalledTimes(52);
+    expect(store.lookupLocalCompletionSchemas("pg-1", "db_0")).toEqual([]);
+    expect(await store.listCompletionSchemas("pg-1", "db_0")).toEqual(["schema_db_0"]);
+    expect(store.lookupLocalCompletionSchemas("pg-1", "db_0")).toEqual(["schema_db_0"]);
+    expect(listSchemaInfos).toHaveBeenCalledTimes(51);
   });
 
   it("searches local completion tables and column prefixes by comment (#12033)", async () => {

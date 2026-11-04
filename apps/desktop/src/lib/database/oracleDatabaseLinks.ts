@@ -11,10 +11,13 @@ export interface OracleDatabaseLink {
   host: string;
   created: string;
   canDrop?: boolean;
+  shadowedBySessionPrivate?: boolean;
+  permissionUnknown?: boolean;
 }
 
-// Links belong to the login user, independently of ALTER SESSION SET CURRENT_SCHEMA.
-// Do not expose another user's private links when connected with catalog privileges.
+export type OracleDatabaseLinkScope = { kind: "schema"; schema: string } | { kind: "public" } | { kind: "tenant" };
+
+// Preserve the original unscoped completion/list contract.
 export const ORACLE_DATABASE_LINKS_SQL = `SELECT OWNER, DB_LINK, USERNAME, HOST,
        TO_CHAR(CREATED, 'YYYY-MM-DD HH24:MI:SS') AS CREATED
 FROM ALL_DB_LINKS
@@ -22,21 +25,43 @@ WHERE OWNER IN (SYS_CONTEXT('USERENV', 'SESSION_USER'), 'PUBLIC')
 ORDER BY DB_LINK, CASE WHEN OWNER = 'PUBLIC' THEN 1 ELSE 0 END`;
 
 // OceanBase 4.2.5 links created without a PUBLIC keyword are tenant-visible
-// and ALL_DB_LINKS reports them as PUBLIC. USER_DB_LINKS identifies links
-// created by the login user, which are the only links that user can drop.
+// and ALL_DB_LINKS reports them as PUBLIC. Creation ownership does not establish
+// DROP permission; effective role grants may not be introspectable.
 export const OCEANBASE_ORACLE_DATABASE_LINKS_SQL = `SELECT L.OWNER, L.DB_LINK, L.USERNAME, L.HOST,
        TO_CHAR(L.CREATED, 'YYYY-MM-DD HH24:MI:SS') AS CREATED,
-       CASE WHEN EXISTS (SELECT 1 FROM USER_DB_LINKS U WHERE U.DB_LINK = L.DB_LINK) THEN 1 ELSE 0 END AS DBX_CAN_DROP
+       CAST(NULL AS NUMBER) AS DBX_CAN_DROP
 FROM ALL_DB_LINKS L
 ORDER BY L.DB_LINK`;
 
-export function oracleDatabaseLinksSql(databaseType?: DatabaseType): string {
+export function oracleDatabaseLinksSql(databaseType?: DatabaseType, scope?: OracleDatabaseLinkScope, sessionUser?: string): string {
+  if (scope) {
+    if (databaseType === "oceanbase-oracle") {
+      if (scope.kind !== "tenant") throw new Error("Database links belong to the tenant scope");
+      return OCEANBASE_ORACLE_DATABASE_LINKS_SQL;
+    }
+    if (scope.kind === "tenant") throw new Error("Tenant database link scope is not applicable");
+    if (scope.kind === "schema" && sessionUser && scope.schema !== sessionUser) {
+      return `SELECT L.OWNER, L.DB_LINK, L.USERNAME, L.HOST,
+       TO_CHAR(L.CREATED, 'YYYY-MM-DD HH24:MI:SS') AS CREATED
+FROM SYS.DBA_DB_LINKS L
+WHERE L.OWNER = '${scope.schema.replaceAll("'", "''")}'
+ORDER BY L.DB_LINK`;
+    }
+    const predicate = scope.kind === "public" ? "L.OWNER = 'PUBLIC'" : `L.OWNER = SYS_CONTEXT('USERENV', 'SESSION_USER') AND L.OWNER = '${scope.schema.replaceAll("'", "''")}'`;
+    return `SELECT L.OWNER, L.DB_LINK, L.USERNAME, L.HOST,
+       TO_CHAR(L.CREATED, 'YYYY-MM-DD HH24:MI:SS') AS CREATED,
+       CASE WHEN L.OWNER = 'PUBLIC' AND EXISTS (SELECT 1 FROM USER_DB_LINKS P WHERE P.DB_LINK = L.DB_LINK) THEN 1 ELSE 0 END AS DBX_SHADOWED
+FROM ALL_DB_LINKS L
+WHERE ${predicate}
+ORDER BY L.DB_LINK`;
+  }
   return databaseType === "oceanbase-oracle" ? OCEANBASE_ORACLE_DATABASE_LINKS_SQL : ORACLE_DATABASE_LINKS_SQL;
 }
 
 export function oracleDatabaseLinksFromResult(result: QueryResult): OracleDatabaseLink[] {
   const indexes = new Map(result.columns.map((name, index) => [name.toUpperCase(), index]));
   const canDropIndex = indexes.get("DBX_CAN_DROP");
+  const shadowedIndex = indexes.get("DBX_SHADOWED");
   return result.rows
     .map((row) => {
       const value = (name: string) => String(row[indexes.get(name) ?? -1] ?? "");
@@ -46,7 +71,9 @@ export function oracleDatabaseLinksFromResult(result: QueryResult): OracleDataba
         username: value("USERNAME"),
         host: value("HOST"),
         created: value("CREATED"),
-        canDrop: canDropIndex === undefined || String(row[canDropIndex]) === "1",
+        canDrop: canDropIndex === undefined ? true : row[canDropIndex] == null ? undefined : String(row[canDropIndex]) === "1",
+        ...(canDropIndex !== undefined && row[canDropIndex] == null ? { permissionUnknown: true } : {}),
+        ...(shadowedIndex !== undefined ? { shadowedBySessionPrivate: String(row[shadowedIndex]) === "1" } : {}),
       };
     })
     .filter((link) => !!link.name && !!link.owner);

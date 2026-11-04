@@ -188,7 +188,7 @@ beforeEach(() => {
   i18n.global.locale.value = "en";
   for (const fn of Object.values(backend)) fn.mockResolvedValue([]);
   backend.listenAgentInstallProgress.mockResolvedValue(() => {});
-  store.updateConnection.mockResolvedValue(undefined);
+  store.updateConnection.mockImplementation(async (config) => config);
   store.addConnection.mockResolvedValue(undefined);
 });
 
@@ -306,7 +306,7 @@ describe("Elasticsearch API key authentication", () => {
     expect(backend.testConnectionWithInfo).toHaveBeenCalledWith(expect.objectContaining({ username: "", password: "c3ludGhldGljOmtleQ==", external_config: { authType: "apiKey" } }));
     buttonNamed("Save").click();
     await settle();
-    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ username: "", password: "c3ludGhldGljOmtleQ==", external_config: { authType: "apiKey" }, save_password: true }));
+    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ username: "", password: "c3ludGhldGljOmtleQ==", external_config: { authType: "apiKey" }, save_password: true }), expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }));
   });
 
   it("restores the API key mode when editing and clears the key when switching back to Basic", async () => {

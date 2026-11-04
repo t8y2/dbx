@@ -3,13 +3,14 @@
 use dbx_core::connection::{session_credentials::with_credential_owner, AppState};
 use dbx_core::models::connection::{ConnectionConfig, DatabaseConnectionInfo};
 use dbx_core::schema::native_jobs::{
-    native_job_list_with, native_job_open_context_with, native_job_read_with, native_job_references_with,
-    NativeJobCatalogFailure, NativeJobRuntimeIdentity,
+    native_job_list_with, native_job_open_context_with, native_job_read_in_page_with, native_job_read_with,
+    native_job_references_with, NativeJobCatalogFailure, NativeJobRuntimeIdentity,
 };
 use dbx_sql::native_jobs::NativeJobCatalogQuery;
 use dbx_types::native_jobs::{
     NativeJobArgumentValue, NativeJobCatalogCoverage, NativeJobContext, NativeJobEngine, NativeJobKind,
-    NativeJobListRequest, NativeJobMetadata, NativeJobRef, NativeJobReferenceKind, NativeJobReferenceListRequest,
+    NativeJobListRequest, NativeJobMetadata, NativeJobPageScope, NativeJobRef, NativeJobReferenceKind,
+    NativeJobReferenceListRequest,
 };
 use serde_json::{json, Value};
 
@@ -52,6 +53,117 @@ fn target(context: &NativeJobContext) -> NativeJobRef {
 
 fn result(columns: &[&str], rows: Value) -> Value {
     json!({ "columns": columns, "rows": rows, "affected_rows": 0, "execution_time_ms": 1 })
+}
+
+#[tokio::test]
+async fn scoped_scheduler_read_rejects_wrong_owner_or_kind_before_querying() {
+    let (_directory, state) = state("oracle").await;
+    let target = target(&context(&state).await);
+    for (schema, kind) in [("OtherOwner", NativeJobKind::Scheduler), ("Owner", NativeJobKind::Legacy)] {
+        let page = NativeJobPageScope { schema: schema.into(), kind, scheduler_category: None };
+        let mut calls = 0;
+        let details = native_job_read_in_page_with(&state, &target, Some(&page), |_| {
+            calls += 1;
+            std::future::ready(Err(NativeJobCatalogFailure::RouteUnavailable))
+        })
+        .await;
+        assert_eq!(details.err(), Some("native_job_page_scope_mismatch"));
+        assert_eq!(calls, 0);
+    }
+}
+
+#[tokio::test]
+async fn scoped_legacy_read_uses_schema_user_and_stops_before_other_details_on_mismatch() {
+    for engine in ["oracle", "oceanbase-oracle"] {
+        let (_directory, state) = state(engine).await;
+        let target = NativeJobRef::Legacy { scope: context(&state).await.scope, job_id: "9007199254740993".into() };
+        for schema in ["ParseOwner", "LoginOwner"] {
+            let page =
+                NativeJobPageScope { schema: schema.into(), kind: NativeJobKind::Legacy, scheduler_category: None };
+            let mut calls = 0;
+            let details = native_job_read_in_page_with(&state, &target, Some(&page), |query| {
+                calls += 1;
+                std::future::ready(Ok(if query.sql.starts_with("SELECT TO_CHAR(J.JOB)") {
+                    result(&["DBX_JOB_ID"], json!([["9007199254740993"]]))
+                } else if query.source.ends_with("_JOBS") {
+                    result(
+                        &["DBX_JOB_ID", "LOG_USER", "PRIV_USER", "SCHEMA_USER", "WHAT"],
+                        json!([["9007199254740993", "LoginOwner", "PrivilegeOwner", "ParseOwner", "BEGIN NULL; END;"]]),
+                    )
+                } else {
+                    assert_eq!(schema, "ParseOwner", "mismatched pages must not query subsequent details");
+                    result(&["JOB"], json!([]))
+                }))
+            })
+            .await;
+            if schema == "ParseOwner" {
+                assert!(details.is_ok());
+            } else {
+                assert_eq!(details.err(), Some("native_job_page_scope_mismatch"));
+                assert_eq!(calls, 2);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn scoped_scheduler_read_checks_the_actual_style_before_reading_other_sections() {
+    use dbx_types::native_jobs::NativeJobSchedulerCategory;
+    let (_directory, state) = state("oracle").await;
+    let target = target(&context(&state).await);
+    let page = NativeJobPageScope {
+        schema: "Owner".into(),
+        kind: NativeJobKind::Scheduler,
+        scheduler_category: Some(NativeJobSchedulerCategory::Regular),
+    };
+    let mut calls = 0;
+    let details = native_job_read_in_page_with(&state, &target, Some(&page), |query| {
+        calls += 1;
+        std::future::ready(Ok(if query.source.ends_with("_OBJECTS") {
+            result(&["DBX_JOB_ID", "DBX_CREATED_AT"], json!([["42", "2026-11-04 01:00:00"]]))
+        } else {
+            result(&["DBX_OWNER", "JOB_NAME", "JOB_STYLE"], json!([["Owner", "Job", "LIGHTWEIGHT"]]))
+        }))
+    })
+    .await;
+    assert_eq!(details.err(), Some("native_job_page_scope_mismatch"));
+    assert_eq!(calls, 2);
+}
+
+#[tokio::test]
+async fn classified_regular_directory_does_not_treat_foreign_owner_fallback_as_empty() {
+    use dbx_types::native_jobs::NativeJobSchedulerCategory;
+    let (_directory, state) = state("oracle").await;
+    let context = context(&state).await;
+    for owner in ["Owner", "Other"] {
+        let request = NativeJobListRequest {
+            scope: context.scope.clone(),
+            kind: NativeJobKind::Scheduler,
+            schema: Some(owner.into()),
+            scheduler_category: Some(NativeJobSchedulerCategory::Regular),
+            filter: String::new(),
+            offset: 0,
+            limit: 1000,
+        };
+        let mut sources = Vec::new();
+        let list = native_job_list_with(&state, &request, |query| {
+            sources.push(query.source);
+            std::future::ready(if query.coverage == NativeJobCatalogCoverage::CurrentUser {
+                Ok(result(&["JOB_NAME", "DBX_OWNER", "JOB_STYLE"], json!([])))
+            } else {
+                Err(NativeJobCatalogFailure::Denied(Some(1031)))
+            })
+        })
+        .await
+        .unwrap();
+        if owner == "Owner" {
+            assert!(matches!(list.jobs, NativeJobMetadata::Empty));
+            assert_eq!(sources.len(), 3);
+        } else {
+            assert!(matches!(list.jobs, NativeJobMetadata::Denied { .. }));
+            assert_eq!(sources.len(), 2);
+        }
+    }
 }
 
 #[tokio::test]
@@ -690,6 +802,7 @@ async fn dm_list_uses_one_native_record_for_a_proven_legacy_alias_and_never_fake
         scope: ctx.scope,
         kind: NativeJobKind::DamengNative,
         schema: None,
+        scheduler_category: None,
         filter: "".into(),
         offset: 0,
         limit: 100,
@@ -720,6 +833,7 @@ async fn list_scope_tampering_is_rejected_before_any_database_query() {
         scope: ctx.scope,
         kind: NativeJobKind::Scheduler,
         schema: None,
+        scheduler_category: None,
         filter: "".into(),
         offset: 0,
         limit: 100,

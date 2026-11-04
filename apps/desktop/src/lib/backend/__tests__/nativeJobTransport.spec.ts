@@ -9,14 +9,41 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke, Channel: class {} }));
 
 const scope = { connectionId: "connection a", database: "Owner.With.Dot", contextId: "bound-context" };
 const target = { kind: "scheduler" as const, scope, owner: "Exact Owner", name: " Job,\"One's " };
+const pageScope = { schema: "Exact Owner", kind: "scheduler" as const };
 const list = { scope, kind: "scheduler" as const, schema: "Exact Owner", filter: "%not-a-wildcard_", offset: 500, limit: 100 };
 const mutation = { action: "update" as const, target, baseline: "bound-revision", attributes: [{ name: "COMMENTS", change: { kind: "set" as const, value: "literal 'comment'" } }], arguments: [] };
 const cases = [
   { name: "nativeJobOpenContext", command: "native_job_open_context", route: "context", args: [scope.connectionId, scope.database], invoke: { connectionId: scope.connectionId, database: scope.database }, body: { connectionId: scope.connectionId, database: scope.database } },
   { name: "nativeJobList", command: "native_job_list", route: "list", args: [list], invoke: { request: list }, body: list },
+  {
+    name: "nativeJobList",
+    command: "native_job_list",
+    route: "list",
+    args: [{ ...list, schedulerCategory: "in-memory", offset: 1000, limit: 1000 }],
+    invoke: { request: { ...list, schedulerCategory: "in-memory", offset: 1000, limit: 1000 } },
+    body: { ...list, schedulerCategory: "in-memory", offset: 1000, limit: 1000 },
+  },
   { name: "nativeJobReferences", command: "native_job_references", route: "references", args: [{ ...list, kind: "program", name: 'Program,"Exact' }], invoke: { request: { ...list, kind: "program", name: 'Program,"Exact' } }, body: { ...list, kind: "program", name: 'Program,"Exact' } },
   { name: "nativeJobRead", command: "native_job_read", route: "read", args: [target], invoke: { target }, body: target },
+  { name: "nativeJobRead", command: "native_job_read", route: "read", args: [target, pageScope], invoke: { target, pageScope }, body: { target, pageScope } },
+  {
+    name: "nativeJobRead",
+    command: "native_job_read",
+    route: "read",
+    args: [target, { ...pageScope, schedulerCategory: "lightweight" }],
+    invoke: { target, pageScope: { ...pageScope, schedulerCategory: "lightweight" } },
+    body: { target, pageScope: { ...pageScope, schedulerCategory: "lightweight" } },
+  },
   { name: "nativeJobPrepare", command: "native_job_prepare", route: "prepare", args: [mutation], invoke: { mutation }, body: mutation },
+  { name: "nativeJobPrepare", command: "native_job_prepare", route: "prepare", args: [mutation, pageScope], invoke: { mutation, pageScope }, body: { ...mutation, pageScope } },
+  {
+    name: "nativeJobPrepare",
+    command: "native_job_prepare",
+    route: "prepare",
+    args: [mutation, { ...pageScope, schedulerCategory: "regular" }],
+    invoke: { mutation, pageScope: { ...pageScope, schedulerCategory: "regular" } },
+    body: { ...mutation, pageScope: { ...pageScope, schedulerCategory: "regular" } },
+  },
   { name: "nativeJobApply", command: "native_job_apply", route: "apply", args: ["immutable-plan"], invoke: { planId: "immutable-plan" }, body: { planId: "immutable-plan" } },
   { name: "nativeJobStatus", command: "native_job_status", route: "status", args: ["operation-id"], invoke: { operationId: "operation-id" }, body: { operationId: "operation-id" } },
   { name: "nativeJobCancel", command: "native_job_cancel", route: "cancel", args: ["operation-id"], invoke: { operationId: "operation-id" }, body: { operationId: "operation-id" } },

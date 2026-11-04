@@ -66,6 +66,8 @@ const WINDOWS_JRE_REMOVE_ERROR = [
 // Every backend message changed away from hardcoded Chinese, paired with the
 // key and params it must resolve to.
 const CASES: { name: string; message: string; key: string; params?: Record<string, string> }[] = [
+  { name: "native job context changed", message: "native_job_context_changed", key: "nativeJobs.contextChanged" },
+  { name: "native job context expired", message: "native_job_context_expired", key: "nativeJobs.contextChanged" },
   {
     name: "plugin update requires closing related connections",
     message: "Plugin update blocked by active connections: Production S3, Local storage",
@@ -293,6 +295,10 @@ function lookup(messages: Record<string, unknown>, key: string): unknown {
 }
 
 describe("backend error translation", () => {
+  test.each(["native_job_context_changed", "native_job_context_expired"])("explains %s through the real legacy error wrapper", (message) => {
+    const t = translatorFor("zh-CN");
+    expect(translateBackendError(t, new BackendErrorException(message))).toBe(t("nativeJobs.contextChanged"));
+  });
   test.each(CASES)("$name resolves to a defined English key", ({ key }) => {
     expect(lookup(en as unknown as Record<string, unknown>, key)).toEqual(expect.any(String));
   });

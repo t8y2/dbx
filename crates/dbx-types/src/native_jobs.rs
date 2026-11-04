@@ -27,6 +27,59 @@ pub struct NativeJobScope {
     pub context_id: String,
 }
 
+/// Stable navigation scope; never contains a runtime context ID or grants permissions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeJobPageScope {
+    pub schema: String,
+    pub kind: NativeJobKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler_category: Option<NativeJobSchedulerCategory>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NativeJobSchedulerCategory {
+    Regular,
+    Lightweight,
+    InMemory,
+}
+
+impl NativeJobSchedulerCategory {
+    pub fn styles(self) -> &'static [&'static str] {
+        match self {
+            Self::Regular => &["REGULAR"],
+            Self::Lightweight => &["LIGHTWEIGHT"],
+            Self::InMemory => &["IN_MEMORY_RUNTIME", "IN_MEMORY_FULL"],
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NativeJobReadRequest {
+    Scoped {
+        target: NativeJobRef,
+        #[serde(rename = "pageScope")]
+        page_scope: NativeJobPageScope,
+    },
+    Legacy(NativeJobRef),
+}
+
+impl NativeJobPageScope {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.schema.trim().is_empty() || self.schema.contains('\0') {
+            return Err("native_job_page_scope_invalid");
+        }
+        if self.kind == NativeJobKind::DamengNative
+            || (self.scheduler_category.is_some() && self.kind != NativeJobKind::Scheduler)
+        {
+            return Err("native_job_page_scope_invalid");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum NativeJobRef {
@@ -130,6 +183,7 @@ pub struct NativeJobSummary {
     pub owner: Option<String>,
     pub enabled: Option<bool>,
     pub job_type: Option<String>,
+    pub job_style: Option<String>,
     pub state: Option<String>,
     pub next_run: Option<serde_json::Value>,
     pub comments: Option<String>,
@@ -154,6 +208,8 @@ pub struct NativeJobListRequest {
     pub scope: NativeJobScope,
     pub kind: NativeJobKind,
     pub schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler_category: Option<NativeJobSchedulerCategory>,
     #[serde(default)]
     pub filter: String,
     #[serde(default)]
@@ -423,6 +479,15 @@ pub enum NativeJobRequest {
     Mutation(NativeJobMutation),
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeJobPrepareRequest {
+    #[serde(flatten)]
+    pub request: NativeJobRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_scope: Option<NativeJobPageScope>,
+}
+
 impl From<NativeJobMutation> for NativeJobRequest {
     fn from(mutation: NativeJobMutation) -> Self {
         Self::Mutation(mutation)
@@ -627,4 +692,52 @@ impl NativeJobRef {
 
 fn valid_identity_part(value: &str) -> bool {
     !value.is_empty() && !value.contains('\0')
+}
+
+#[cfg(test)]
+mod navigation_scope_tests {
+    use super::*;
+
+    #[test]
+    fn prepare_requests_preserve_flat_legacy_and_scoped_contracts() {
+        let mut value = serde_json::json!({"action":"create", "scope":{"connectionId":"c", "database":"db", "contextId":"runtime"}, "definition":{"kind":"legacy", "what":"NULL;", "nextDate":"2026-10-29 12:00:00", "interval":"NULL", "enabled":false, "schema":"A"}});
+        let legacy: NativeJobPrepareRequest = serde_json::from_value(value.clone()).unwrap();
+        assert!(legacy.page_scope.is_none());
+        value["pageScope"] = serde_json::json!({"schema":"A", "kind":"legacy"});
+        let scoped: NativeJobPrepareRequest = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(scoped.page_scope.as_ref().unwrap().schema, "A");
+        assert_eq!(serde_json::to_value(scoped).unwrap()["pageScope"], value["pageScope"]);
+    }
+
+    #[test]
+    fn read_requests_keep_legacy_targets_and_scoped_targets_distinct() {
+        let target = serde_json::json!({"kind":"legacy", "jobId":"900719925474099312345", "scope":{"connectionId":"c", "database":"db", "contextId":"runtime"}});
+        assert!(matches!(
+            serde_json::from_value::<NativeJobReadRequest>(target.clone()).unwrap(),
+            NativeJobReadRequest::Legacy(_)
+        ));
+        let request = serde_json::json!({"target":target, "pageScope":{"schema":"Exact.Owner", "kind":"legacy"}});
+        let NativeJobReadRequest::Scoped { target, page_scope } = serde_json::from_value(request).unwrap() else {
+            panic!("expected scoped request")
+        };
+        assert_eq!(page_scope.schema, "Exact.Owner");
+        assert!(page_scope.validate().is_ok());
+        assert!(target.validate().is_ok());
+    }
+
+    #[test]
+    fn page_scope_rejects_invalid_schema_and_dameng_kind() {
+        for schema in ["", " ", "A\0B"] {
+            assert!(NativeJobPageScope {
+                schema: schema.into(),
+                kind: NativeJobKind::Legacy,
+                scheduler_category: None
+            }
+            .validate()
+            .is_err());
+        }
+        assert!(NativeJobPageScope { schema: "A".into(), kind: NativeJobKind::DamengNative, scheduler_category: None }
+            .validate()
+            .is_err());
+    }
 }

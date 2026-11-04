@@ -202,8 +202,22 @@ pub fn native_job_list_queries(
     offset: usize,
     limit: usize,
 ) -> Result<Vec<NativeJobCatalogQuery>, &'static str> {
+    native_job_list_queries_in_category(dialect, kind, schema, filter, offset, limit, None)
+}
+
+pub fn native_job_list_queries_in_category(
+    dialect: NativeJobCatalogDialect,
+    kind: NativeJobKind,
+    schema: Option<&str>,
+    filter: &str,
+    offset: usize,
+    limit: usize,
+    category: Option<dbx_types::native_jobs::NativeJobSchedulerCategory>,
+) -> Result<Vec<NativeJobCatalogQuery>, &'static str> {
     if limit == 0
-        || limit > 500
+        || limit > 1000
+        || (category.is_some()
+            && (kind != NativeJobKind::Scheduler || dialect == NativeJobCatalogDialect::Dameng || schema.is_none()))
         || schema.is_some_and(|schema| schema.is_empty() || schema.contains('\0'))
         || filter.contains('\0')
     {
@@ -229,14 +243,22 @@ pub fn native_job_list_queries(
         quote_string_literal(&format!("%{}%", filter.replace('!', "!!").replace('%', "!%").replace('_', "!_")));
     Ok(sources.into_iter().map(|(source, coverage)| {
         let owner = if coverage == NativeJobCatalogCoverage::CurrentUser { "USER" } else { "J.OWNER" };
+        let style = if category.is_some() { "J.JOB_STYLE, " } else { "" };
         let (projection, name, schema_column, order) = if scheduler {
-            (format!("J.JOB_NAME, {owner} AS DBX_OWNER, J.JOB_TYPE, J.ENABLED, J.STATE, J.NEXT_RUN_DATE, J.COMMENTS"), "J.JOB_NAME", owner, format!("{owner}, J.JOB_NAME"))
+            (format!("J.JOB_NAME, {owner} AS DBX_OWNER, J.JOB_TYPE, {style}J.ENABLED, J.STATE, J.NEXT_RUN_DATE, J.COMMENTS"), "J.JOB_NAME", owner, format!("{owner}, J.JOB_NAME"))
         } else if dm_native {
             ("CAST(J.ID AS VARCHAR(40)) AS DBX_JOB_ID, J.NAME, J.ENABLE, J.USERNAME, J.DESCRIBE, J.SYS_FLAG".into(), "J.NAME", "J.USERNAME", "J.NAME, J.ID".into())
         } else {
             ("TO_CHAR(J.JOB) AS DBX_JOB_ID, J.LOG_USER, J.PRIV_USER, J.SCHEMA_USER, J.BROKEN, J.NEXT_DATE, J.FAILURES".into(), "TO_CHAR(J.JOB)", "J.SCHEMA_USER", "J.JOB".into())
         };
         let mut predicates = Vec::new();
+        if let Some(category) = category {
+            predicates.push(format!("J.JOB_STYLE IN ({})", category.styles().iter().map(|style| quote_string_literal(style)).collect::<Vec<_>>().join(", ")));
+            if category == dbx_types::native_jobs::NativeJobSchedulerCategory::Regular && dialect == NativeJobCatalogDialect::Oracle {
+                let legacy_source = if coverage == NativeJobCatalogCoverage::CurrentUser { "SYS.USER_JOBS" } else { "SYS.DBA_JOBS" };
+                predicates.push(format!("NOT EXISTS (SELECT 1 FROM {legacy_source} L WHERE L.PRIV_USER = {owner} AND J.JOB_NAME = 'DBMS_JOB' || CHR(36) || '_' || TO_CHAR(L.JOB))"));
+            }
+        }
         if let Some(schema) = schema { predicates.push(format!("{schema_column} = {}", quote_string_literal(schema))); }
         if !filter.is_empty() {
             let columns = if dm_native {vec![name, "J.USERNAME", "J.DESCRIBE"]} else {vec![name]};

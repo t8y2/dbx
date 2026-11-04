@@ -1356,6 +1356,8 @@ impl AgentHandshake {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentCapability {
     ExactMetadataIdentityV1,
+    ObjectListCommentsV1,
+    TableListCommentsV1,
     BlobBindStatementsV1,
     Connect,
     TestConnection,
@@ -1468,7 +1470,7 @@ fn parse_agent_rpc_error_header(header: &str) -> (Option<i64>, String) {
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 35] = [
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -1498,6 +1500,8 @@ impl AgentCapability {
         Self::NativeJobLegacyV1,
         Self::NativeJobSessionV1,
         Self::ExactMetadataIdentityV1,
+        Self::ObjectListCommentsV1,
+        Self::TableListCommentsV1,
         Self::MultiSession,
         Self::StructuredErrorV1,
         Self::BlobBindStatementsV1,
@@ -1507,6 +1511,8 @@ impl AgentCapability {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ExactMetadataIdentityV1 => "exact_metadata_identity_v1",
+            Self::ObjectListCommentsV1 => "object_list_comments_v1",
+            Self::TableListCommentsV1 => "table_list_comments_v1",
             Self::BlobBindStatementsV1 => "blob_bind_statements_v1",
             Self::NativeJobLegacyV1 => "native_job_legacy_v1",
             Self::NativeJobSessionV1 => "native_job_session_v1",
@@ -3822,6 +3828,8 @@ pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability:
     if matches!(
         capability,
         AgentCapability::ExactMetadataIdentityV1
+            | AgentCapability::ObjectListCommentsV1
+            | AgentCapability::TableListCommentsV1
             | AgentCapability::BlobBindStatementsV1
             | AgentCapability::Kv
             | AgentCapability::KvTtl
@@ -6740,7 +6748,9 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::NativeJobSessionV1.as_str(), "native_job_session_v1");
         assert_eq!(AgentCapability::NativeJobLegacyObV1.as_str(), "native_job_legacy_ob_v1");
         assert_eq!(AgentCapability::ExactMetadataIdentityV1.as_str(), "exact_metadata_identity_v1");
-        assert_eq!(AgentCapability::ALL.len(), 33);
+        assert_eq!(AgentCapability::ObjectListCommentsV1.as_str(), "object_list_comments_v1");
+        assert_eq!(AgentCapability::TableListCommentsV1.as_str(), "table_list_comments_v1");
+        assert_eq!(AgentCapability::ALL.len(), 35);
     }
 
     #[test]
@@ -7118,6 +7128,25 @@ for line in sys.stdin:
         assert!(handshake.supports(AgentCapability::Metadata));
         assert!(!handshake.supports(AgentCapability::Query));
         assert!(!handshake.supports(AgentCapability::Kv));
+    }
+
+    #[test]
+    fn object_list_comments_requires_explicit_process_support() {
+        assert!(!agent_supports_capability(None, AgentCapability::TableListCommentsV1));
+        assert!(!agent_supports_capability(None, AgentCapability::ObjectListCommentsV1));
+        let mut handshake = AgentHandshake {
+            protocol_version: AGENT_PROTOCOL_VERSION,
+            agent_protocol_version: AGENT_PROTOCOL_VERSION,
+            capabilities: vec!["metadata".into()],
+            pl_debug: None,
+        };
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::ObjectListCommentsV1));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::TableListCommentsV1));
+        handshake.capabilities.push("object_list_comments_v1".into());
+        assert!(agent_supports_capability(Some(&handshake), AgentCapability::ObjectListCommentsV1));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::TableListCommentsV1));
+        handshake.capabilities.push("table_list_comments_v1".into());
+        assert!(agent_supports_capability(Some(&handshake), AgentCapability::TableListCommentsV1));
     }
 
     #[test]

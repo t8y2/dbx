@@ -6,21 +6,15 @@ import { RecycleScroller } from "vue-virtual-scroller";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { useConnectionStore } from "@/stores/connectionStore";
 import { filterSchemaNamesForVisiblePicker, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
 import type { DatabaseType } from "@/types/database";
-import * as api from "@/lib/backend/api";
-import { addVisibleSchemas, initialVisibleSchemaSelection, resolveVisibleSchemaSaveAction, selectVisibleSchemas } from "./visibleSchemasDialogState";
+import { addVisibleSchemas, initialVisibleSchemaSelection, selectVisibleSchemas } from "./visibleSchemasDialogState";
 
 const props = defineProps<{
   open: boolean;
-  connectionId: string;
   connectionName: string;
-  database: string;
   databaseType?: DatabaseType;
   username?: string;
-  /** Draft mode: parent provides schemas/loading/error externally. Component emits events instead of calling store. */
-  draftMode?: boolean;
   draftSchemaNames?: string[];
   draftInitialSelection?: string[];
   draftLoading?: boolean;
@@ -34,21 +28,14 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
-const connectionStore = useConnectionStore();
-
-const schemaNames = shallowRef<string[]>([]);
 const selectedNames = shallowRef<Set<string>>(new Set());
 const searchText = ref("");
-const isLoading = ref(false);
-const isSaving = ref(false);
-const errorMessage = ref("");
 const showSystemSchemas = ref(false);
 
-const isDraftMode = computed(() => props.draftMode);
-const isLoadingState = computed(() => (isDraftMode.value ? props.draftLoading : isLoading.value));
-const errorMessageState = computed(() => (isDraftMode.value ? props.draftError || "" : errorMessage.value));
-const connection = computed(() => (isDraftMode.value ? { db_type: props.databaseType, username: props.username || "" } : connectionStore.getConfig(props.connectionId)));
-const allSchemaNames = computed(() => (isDraftMode.value ? props.draftSchemaNames || [] : schemaNames.value));
+const isLoadingState = computed(() => props.draftLoading);
+const errorMessageState = computed(() => props.draftError || "");
+const connection = computed(() => ({ db_type: props.databaseType, username: props.username || "" }));
+const allSchemaNames = computed(() => props.draftSchemaNames || []);
 const listedSchemaNames = computed(() => (showSystemSchemas.value ? allSchemaNames.value : filterSchemaNamesForVisiblePicker(allSchemaNames.value, connection.value)));
 const hasSystemSchemas = computed(() => filterSchemaNamesForVisiblePicker(allSchemaNames.value, connection.value).length < allSchemaNames.value.length);
 
@@ -69,46 +56,20 @@ watch(
   () => props.open,
   (open) => {
     if (!open) return;
-    if (isDraftMode.value) {
-      initDraftMode();
-    } else {
-      loadSchemas().catch(() => {});
-    }
+    initDraftMode();
   },
-  // Tree-level async hosts mount the dialog with `open` already true.
   { immediate: true },
 );
 
 function initDraftMode() {
   searchText.value = "";
   const names = props.draftSchemaNames || [];
-  initializeSelection(names, props.draftInitialSelection, true);
+  initializeSelection(names, props.draftInitialSelection);
 }
 
-async function loadSchemas() {
-  isLoading.value = true;
-  errorMessage.value = "";
-  searchText.value = "";
-  try {
-    const config = connectionStore.getConfig(props.connectionId);
-    const database = props.database || config?.database || "";
-    await connectionStore.ensureConnected(props.connectionId);
-    const names = await api.listSchemas(props.connectionId, database);
-    schemaNames.value = names;
-    const configured = config?.visible_schemas?.[database || ""];
-    initializeSelection(names, configured);
-  } catch (e: any) {
-    schemaNames.value = [];
-    selectedNames.value = new Set();
-    errorMessage.value = String(e?.message || e);
-  } finally {
-    isLoading.value = false;
-  }
-}
-
-function initializeSelection(names: string[], configured: string[] | undefined, emptySelectionMeansAll = false) {
+function initializeSelection(names: string[], configured: string[] | undefined) {
   showSystemSchemas.value = false;
-  const hasExplicitSelection = configured !== undefined && !(emptySelectionMeansAll && configured.length === 0);
+  const hasExplicitSelection = !!configured?.length;
   const initial = hasExplicitSelection ? initialVisibleSchemaSelection(names, configured) : selectVisibleSchemas(filterSchemaNamesForVisiblePicker(names, connection.value));
   const defaultVisible = new Set(filterSchemaNamesForVisiblePicker(names, connection.value));
   selectedNames.value = initial;
@@ -142,56 +103,18 @@ function clearSelection() {
   selectedNames.value = new Set();
 }
 
-async function showAllSchemas() {
-  if (isSaving.value) return;
-  isSaving.value = true;
-  if (isDraftMode.value) {
-    selectedNames.value = selectVisibleSchemas(props.draftSchemaNames || []);
-    emit("draft:showAll");
-    emit("update:open", false);
-    isSaving.value = false;
-    return;
-  }
-  const config = connectionStore.getConfig(props.connectionId);
-  const database = props.database || config?.database || "";
-  selectedNames.value = selectVisibleSchemas(schemaNames.value);
+function showAllSchemas() {
+  selectedNames.value = selectVisibleSchemas(props.draftSchemaNames || []);
+  emit("draft:showAll");
   emit("update:open", false);
-  try {
-    if (config?.visible_schemas?.[database || ""]) {
-      // Match DBeaver's filter dialog: close first, then refresh the navigator asynchronously.
-      await connectionStore.clearVisibleSchemas(props.connectionId, database);
-    }
-  } finally {
-    isSaving.value = false;
-  }
 }
 
-async function saveSelection() {
-  if (!canSaveSelection.value || isSaving.value) return;
+function saveSelection() {
+  if (!canSaveSelection.value) return;
   const names = listedSchemaNames.value;
   const normalized = normalizeVisibleSchemaSelection([...selectedNames.value], names);
-  if (isDraftMode.value) {
-    emit("draft:save", normalized);
-    emit("update:open", false);
-    return;
-  }
-  const config = connectionStore.getConfig(props.connectionId);
-  const database = props.database || config?.database || "";
-  const action = resolveVisibleSchemaSaveAction(selectedNames.value, names, config?.visible_schemas?.[database || ""]);
+  emit("draft:save", normalized);
   emit("update:open", false);
-  if (action.type === "none") return;
-
-  isSaving.value = true;
-  try {
-    // Persist only real filter changes; the store refreshes the tree after this dialog closes.
-    if (action.type === "clear") {
-      await connectionStore.clearVisibleSchemas(props.connectionId, database);
-    } else {
-      await connectionStore.setVisibleSchemas(props.connectionId, database, action.schemaNames);
-    }
-  } finally {
-    isSaving.value = false;
-  }
 }
 </script>
 
@@ -213,16 +136,16 @@ async function saveSelection() {
       <div class="flex items-center justify-between text-xs text-muted-foreground">
         <span>{{ t("visibleSchemas.selectedCount", { selected: selectedCount, total: totalCount }) }}</span>
         <div class="flex items-center gap-2">
-          <button type="button" class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingState || isSaving" @click="selectAll">
+          <button type="button" class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingState" @click="selectAll">
             {{ t("visibleSchemas.selectAll") }}
           </button>
-          <button v-if="isSearching" type="button" class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingState || isSaving" @click="selectFiltered">
+          <button v-if="isSearching" type="button" class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingState" @click="selectFiltered">
             {{ t("visibleSchemas.selectFiltered") }}
           </button>
-          <button type="button" class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingState || isSaving" @click="clearSelection">
+          <button type="button" class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingState" @click="clearSelection">
             {{ t("visibleSchemas.clear") }}
           </button>
-          <button type="button" class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingState || isSaving" @click="showAllSchemas">
+          <button type="button" class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingState" @click="showAllSchemas">
             {{ t("visibleSchemas.showAll") }}
           </button>
         </div>
@@ -257,8 +180,8 @@ async function saveSelection() {
       </RecycleScroller>
 
       <DialogFooter>
-        <Button type="button" variant="outline" :disabled="isSaving" @click="emit('update:open', false)">{{ t("dangerDialog.cancel") }}</Button>
-        <Button type="button" :disabled="isLoadingState || isSaving || !!errorMessageState || !canSaveSelection" @click="saveSelection">
+        <Button type="button" variant="outline" @click="emit('update:open', false)">{{ t("dangerDialog.cancel") }}</Button>
+        <Button type="button" :disabled="isLoadingState || !!errorMessageState || !canSaveSelection" @click="saveSelection">
           {{ t("visibleSchemas.save") }}
         </Button>
       </DialogFooter>

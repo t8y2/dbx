@@ -7,8 +7,11 @@ fn metadata_options_keep_the_legacy_request_shape_and_forward_exact_catalog_raw(
     let mut params = json!({"schema":" Owner ", "name":" Trigger "});
     MetadataReadOptions::default().apply_to(&mut params);
     assert_eq!(params, json!({"schema":" Owner ", "name":" Trigger "}));
-    let options =
-        MetadataReadOptions { identity_mode: Some(MetadataIdentityMode::Exact), catalog: Some(" Catalog ".into()) };
+    let options = MetadataReadOptions {
+        identity_mode: Some(MetadataIdentityMode::Exact),
+        catalog: Some(" Catalog ".into()),
+        ..Default::default()
+    };
     options.apply_to(&mut params);
     assert_eq!(params, json!({"schema":" Owner ", "name":" Trigger ", "identity_mode":"exact", "catalog":" Catalog "}));
     assert!(serde_json::from_value::<MetadataReadOptions>(json!({"identityMode":"approximate"})).is_err());

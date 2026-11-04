@@ -2,9 +2,10 @@ import ts from "typescript";
 import { computed, ref, shallowRef, type Ref } from "vue";
 import { describe, expect, it, vi } from "vitest";
 import dialogSource from "../EditorSettingsDialog.vue?raw";
-import { DEFAULT_DESKTOP_SETTINGS, DEFAULT_SIDEBAR_TABLE_PAGE_SIZE, normalizeMcpGlobalPolicy, type McpGlobalPolicy } from "@/stores/settingsStore";
-import { shouldConfirmEditorSettingsDialogClose } from "@/lib/settings/editorSettingsDraft";
 import { SIDEBAR_HOVER_DELAY_DEFAULT, normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
+import { DEFAULT_DESKTOP_SETTINGS, DEFAULT_EDITOR_SETTINGS, DEFAULT_SIDEBAR_TABLE_PAGE_SIZE, normalizeMcpGlobalPolicy, type McpGlobalPolicy } from "@/stores/settingsStore";
+import { editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, shouldConfirmEditorSettingsDialogClose } from "@/lib/settings/editorSettingsDraft";
+import { normalizeShortcutSettings } from "@/lib/editor/shortcutRegistry";
 import { mergeMcpToolsetSelection, setMcpCategoryEnabled, setMcpToolsEnabled, setMcpToolsetEnabled, type McpCapabilityCategoryId } from "@/lib/mcp/mcpToolCatalog";
 import { addMcpAllowedToolName, MCP_PLUGIN_TOOLS_WILDCARD, mcpExecutionModeFromPolicy, mcpPolicyFieldsForExecutionMode, type McpExecutionMode } from "@/lib/mcp/mcpPolicySelection";
 import { editableDatabaseAccess, mergeDatabaseAccess, type McpDatabaseAccess } from "@/lib/mcp/mcpDatabaseAccess";
@@ -198,9 +199,13 @@ function createHarness(initial: Partial<McpGlobalPolicy> = {}) {
   });
   const settingsStore = {
     mcpGlobalPolicy: normalizeMcpGlobalPolicy(initial),
-    editorSettings: { sidebarObjectDisplay: "all" },
+    editorSettings: structuredClone(DEFAULT_EDITOR_SETTINGS),
     desktopSettings: { ...DEFAULT_DESKTOP_SETTINGS },
     initMcpGlobalPolicy: vi.fn(async () => {}),
+    updateEditorSettings: vi.fn((patch: object) => {
+      Object.assign(settingsStore.editorSettings, patch);
+    }),
+    persistEditorSettings: vi.fn(async () => {}),
     updateDesktopSettings: vi.fn(async (patch: object) => {
       Object.assign(settingsStore.desktopSettings, patch);
     }),
@@ -217,6 +222,7 @@ function createHarness(initial: Partial<McpGlobalPolicy> = {}) {
   const toast = vi.fn();
   const confirm = vi.fn(() => true);
   const openMcpCallHistory = vi.fn();
+  const editorDraft = ref(editorSettingsDraftFromSettings(settingsStore.editorSettings));
   const context = {
     ref,
     shallowRef,
@@ -259,9 +265,17 @@ function createHarness(initial: Partial<McpGlobalPolicy> = {}) {
     mcpHistoryRetention: { save: vi.fn(async () => {}) },
     editSidebarHoverDelay: ref(SIDEBAR_HOVER_DELAY_DEFAULT),
     normalizeSidebarHoverDelay,
-    editorSettingsPatchFromDraft: () => ({}),
-    currentEditorSettingsDraft: () => ({}),
-    editEditorSettingsBase: ref({}),
+    editorSettingsPatchFromDraft,
+    editorSettingsDraftFromSettings,
+    normalizeShortcutSettings,
+    currentEditorSettingsDraft: () => editorDraft.value,
+    editEditorSettingsBase: ref(editorSettingsDraftFromSettings(settingsStore.editorSettings)),
+    editRedisDatabaseDisplayLimit: ref(settingsStore.editorSettings.redisDatabaseDisplayLimit),
+    editPreferredExportPath: ref(settingsStore.editorSettings.preferredExportPath),
+    editDamengClientBinDir: ref(settingsStore.editorSettings.damengClientBinDir),
+    editShortcuts: ref(settingsStore.editorSettings.shortcuts),
+    editGlobalConnectTimeoutSecs: ref(settingsStore.editorSettings.globalConnectTimeoutSecs),
+    editGlobalQueryTimeoutSecs: ref(settingsStore.editorSettings.globalQueryTimeoutSecs),
     editSidebarTablePageSize: ref(DEFAULT_SIDEBAR_TABLE_PAGE_SIZE),
     DEFAULT_SIDEBAR_TABLE_PAGE_SIZE,
     editMetadataCacheMaxMemoryMb: ref(DEFAULT_DESKTOP_SETTINGS.metadata_cache_max_memory_mb),
@@ -276,7 +290,15 @@ function createHarness(initial: Partial<McpGlobalPolicy> = {}) {
     editDuckDbWorkerMaxProcesses: ref(4),
     normalizeDuckDbWorkerMaxProcesses: (value: number) => value,
     hasImportedSettingsPendingApply: ref(false),
-    connectionStore: { ensureConnected, sidebarLayout: { groups: [], order: [] } as SidebarLayout, refreshAllTree: vi.fn(), refreshSidebarObjectPagination: vi.fn() },
+    connectionStore: {
+      ensureConnected,
+      connections: [{ id: "connected" }, { id: "cached-disconnected" }],
+      connectedIds: new Set(["connected"]),
+      sidebarLayout: { groups: [], order: [] } as SidebarLayout,
+      refreshAllTree: vi.fn(),
+      refreshSidebarObjectPagination: vi.fn(),
+      refreshNavigationPresentation: vi.fn(async (_connectionId: string) => {}),
+    },
   };
   const factory = new Function(
     ...Object.keys(context),
@@ -313,6 +335,10 @@ function createHarness(initial: Partial<McpGlobalPolicy> = {}) {
     confirm,
     openMcpCallHistory,
     controlsDisabled: context.mcpPolicyControlsDisabled,
+    editorDraft,
+    editorBaseline: context.editEditorSettingsBase,
+    sidebarPageSize: context.editSidebarTablePageSize,
+    navigation: context.connectionStore,
   };
 }
 
@@ -325,6 +351,44 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+describe("EditorSettingsDialog navigation settings Apply", () => {
+  it.each([
+    { name: "display only", display: true, page: false },
+    { name: "page only", display: false, page: true },
+    { name: "display and page", display: true, page: true },
+    { name: "unchanged", display: false, page: false },
+  ])("refreshes only the affected navigation state for $name", async ({ display, page }) => {
+    const h = createHarness();
+    if (display) h.editorDraft.value.sidebarObjectDisplay = h.settingsStore.editorSettings.sidebarObjectDisplay === "grouped" ? "simple" : "grouped";
+    if (page) h.sidebarPageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE + 100;
+
+    expect(await h.applySettingsForResult()).toBe(true);
+
+    expect(h.navigation.refreshAllTree).not.toHaveBeenCalled();
+    expect(h.navigation.refreshSidebarObjectPagination).toHaveBeenCalledTimes(page ? 1 : 0);
+    expect(h.navigation.refreshNavigationPresentation.mock.calls.map(([id]) => id)).toEqual(display ? ["connected", "cached-disconnected"] : []);
+    expect(h.toast).not.toHaveBeenCalled();
+  });
+
+  it.each(["editor", "desktop"] as const)("does not refresh navigation when the %s settings save fails", async (boundary) => {
+    const h = createHarness();
+    h.editorDraft.value.sidebarObjectDisplay = h.settingsStore.editorSettings.sidebarObjectDisplay === "grouped" ? "simple" : "grouped";
+    h.sidebarPageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE + 100;
+    const baseline = h.editorBaseline.value;
+    if (boundary === "editor") h.settingsStore.persistEditorSettings.mockRejectedValueOnce(new Error("save failed"));
+    else h.settingsStore.updateDesktopSettings.mockRejectedValueOnce(new Error("save failed"));
+
+    expect(await h.applySettingsForResult()).toBe(false);
+
+    expect(h.navigation.refreshAllTree).not.toHaveBeenCalled();
+    expect(h.navigation.refreshNavigationPresentation).not.toHaveBeenCalled();
+    expect(h.navigation.refreshSidebarObjectPagination).not.toHaveBeenCalled();
+    expect(h.toast).toHaveBeenCalledWith("settings.applyFailed", 5000);
+    expect(h.emit).not.toHaveBeenCalled();
+    if (boundary === "editor") expect(h.editorBaseline.value).toBe(baseline);
+  });
+});
 
 describe("EditorSettingsDialog MCP capability persistence integration", () => {
   it("places plugin tool delivery only in the capabilities advanced slot", () => {

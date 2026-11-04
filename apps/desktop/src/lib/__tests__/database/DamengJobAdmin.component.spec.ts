@@ -1,12 +1,13 @@
 // @vitest-environment happy-dom
 import { createApp, defineComponent, h, nextTick, reactive, type Component } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { NativeJobDetails, NativeJobRequest } from "@/lib/database/nativeJobs";
+import type { NativeJobDetails, NativeJobRequest, NativeJobListRequest, NativeJobRef } from "@/lib/database/nativeJobs";
 import type { ConnectionConfig } from "@/types/database";
-import type { NativeJobAdminSelection } from "@/lib/database/nativeJobAdmin";
+import type { NativeJobAdminSelection, NativeJobWorkspaceState } from "@/lib/database/nativeJobAdmin";
 
 const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn(),
+  refreshNativeJobTree: vi.fn(),
   executeQuery: vi.fn(),
   executeMulti: vi.fn(),
   nativeJobOpenContext: vi.fn(),
@@ -49,12 +50,13 @@ vi.mock("@/components/ui/button", () => ({ Button: passthrough("button") }));
 vi.mock("@/components/ui/badge", () => ({ Badge: passthrough("span") }));
 vi.mock("@/components/ui/input", () => ({ Input: modelInput() }));
 vi.mock("@/components/ui/dialog", () => ({ Dialog: modelDialog(), DialogContent: passthrough("div"), DialogFooter: passthrough("div"), DialogHeader: passthrough("div"), DialogTitle: passthrough("div") }));
-vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ ensureConnected: mocks.ensureConnected }) }));
+vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ ensureConnected: mocks.ensureConnected, refreshNativeJobTree: mocks.refreshNativeJobTree }) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/lib/tabs/tabUiState", () => ({ useTabUiState: () => ({ initialState: { selectedJobName: "Job_1", detailTab: "steps" }, track: mocks.track }) }));
 vi.mock("@/lib/backend/api", () => mocks);
 vi.mock("@/lib/database/productionExecutionGuard", () => ({ executeWithProductionContextGuard: async (options: { execute: () => Promise<unknown> }) => options.execute(), executeWithProductionSqlGuard: async (options: { execute: () => Promise<unknown> }) => options.execute() }));
 import DamengJobAdmin from "@/components/admin/DamengJobAdmin.vue";
+import DatabaseJobAdmin from "@/components/admin/DatabaseJobAdmin.vue";
 
 const scope = { connectionId: "c", database: "", contextId: "context" };
 const target = { kind: "dameng-native" as const, scope, jobId: "900719925474099312345", name: "Job_1" };
@@ -91,6 +93,7 @@ function input(root: Element, label: string, value: string) {
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  mocks.refreshNativeJobTree.mockResolvedValue(undefined);
   request = undefined;
   details = {
     snapshot: {
@@ -158,7 +161,398 @@ function schedulerRefreshFixture(options: { sameScope?: boolean; replaced?: bool
   return { ref, nextScope, read, config: { ...connection, db_type: "oceanbase-oracle" as const } };
 }
 
+function scopedWorkspaceFixture() {
+  let generation = 0;
+  let replaced = false;
+  mocks.nativeJobOpenContext.mockImplementation(async () => ({ scope: { ...scope, database: "DB", contextId: `context-${++generation}` }, engine: "oracle", sessionUser: "Owner", actualDatabase: "DB", productVersion: "19.3" }));
+  mocks.nativeJobList.mockImplementation(async (request: NativeJobListRequest) => ({
+    jobs: { status: "available", value: [{ ref: { kind: "scheduler", scope: request.scope, owner: request.schema, name: "SAME" }, name: "SAME", owner: request.schema, enabled: false, aliases: [] }] },
+    source: { coverage: "database" },
+    offset: 0,
+    limit: 100,
+  }));
+  mocks.nativeJobRead.mockImplementation(async (target: NativeJobRef) => {
+    if (target.kind !== "scheduler") throw new Error("expected scheduler");
+    const result = structuredClone(details);
+    result.snapshot = {
+      ref: target,
+      revision: `revision-${generation}`,
+      definition: { status: "available", value: { JOB_TYPE: "STORED_PROCEDURE", JOB_ACTION: "work_proc", NUMBER_OF_ARGUMENTS: 0, JOB_STYLE: "REGULAR", ENABLED: false, AUTO_DROP: false, JOB_CLASS: "DEFAULT_JOB_CLASS", MAX_FAILURES: 0, MAX_RUN_DURATION: "0 0:0:0.0" } },
+      arguments: { status: "empty" },
+    };
+    result.nativeIdentity = { status: "available", value: { DBX_JOB_ID: target.owner === "A" ? "41" : "42", DBX_CREATED_AT: replaced ? "replacement" : "creation" } };
+    return result;
+  });
+  mocks.nativeJobPrepare.mockImplementation(async (value: NativeJobRequest) => {
+    request = value;
+    if (!("target" in value)) throw new Error("expected mutation");
+    return { planId: "immutable-plan", operationId: "operation", scope: value.target.scope, target: value.target, steps: [{ id: "attributes", label: "attributes", sql: "reviewed effective native attribute" }] };
+  });
+  return {
+    config: { ...connection, db_type: "oracle" as const },
+    replace: () => {
+      replaced = true;
+    },
+  };
+}
+
+async function mountWorkspace(owner: string, workspace: NativeJobWorkspaceState, config: ConnectionConfig, name = "SAME") {
+  const root = document.createElement("div");
+  document.body.append(root);
+  const app = createApp(DatabaseJobAdmin, { connection: config, pageScope: { schema: owner, kind: "scheduler" }, database: "DB", workspace, initialSelection: { kind: "scheduler", owner, name } });
+  app.mount(root);
+  const instance = { app, root };
+  mounted.push(instance);
+  await flush();
+  return {
+    root,
+    unmount: async () => {
+      app.unmount();
+      root.remove();
+      mounted.splice(mounted.indexOf(instance), 1);
+      await flush();
+    },
+  };
+}
+
+it("opens aggregate creation without a runtime context or list and binds only the chosen target", async () => {
+  mocks.nativeJobOpenContext.mockResolvedValue({ scope: { ...scope, database: "DB" }, engine: "oracle", sessionUser: "LOGIN", actualDatabase: "DB", productVersion: "19.3" });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const targets = [
+    { database: "DB", schema: "A", kind: "scheduler" as const },
+    { database: "DB", schema: "B", kind: "scheduler" as const },
+  ];
+  const workspace: NativeJobWorkspaceState = {};
+  const app = createApp(DatabaseJobAdmin, { connection: { ...connection, db_type: "oracle" }, creationTargets: targets, workspace });
+  app.mount(root);
+  mounted.push({ app, root });
+  await flush();
+  expect(mocks.nativeJobOpenContext).not.toHaveBeenCalled();
+  expect(mocks.nativeJobList).not.toHaveBeenCalled();
+  expect(mocks.nativeJobRead).not.toHaveBeenCalled();
+  const selector = root.querySelector<HTMLSelectElement>('select[aria-label="nativeJobs.owner"]')!;
+  expect(selector).not.toBeNull();
+  expect(button(root, "damengJobAdmin.previewSql").disabled).toBe(true);
+  selector.value = JSON.stringify(targets[1]);
+  selector.dispatchEvent(new Event("change", { bubbles: true }));
+  await flush();
+  expect(mocks.nativeJobOpenContext).toHaveBeenCalledWith("c", "DB");
+  expect(mocks.nativeJobList).not.toHaveBeenCalled();
+  expect(mocks.nativeJobRead).not.toHaveBeenCalled();
+  expect(workspace.creationTarget).toBe(JSON.stringify(targets[1]));
+  expect(button(root, "damengJobAdmin.previewSql").disabled).toBe(false);
+});
+
+it("retains the aggregate creation target and draft across a real unmount", async () => {
+  mocks.nativeJobOpenContext.mockResolvedValue({ scope: { ...scope, database: "DB" }, engine: "oracle", sessionUser: "A", actualDatabase: "DB", productVersion: "19.3" });
+  const targets = [{ database: "DB", schema: "A", kind: "scheduler" as const }];
+  const workspace: NativeJobWorkspaceState = {};
+  const props = { connection: { ...connection, db_type: "oracle" as const }, creationTargets: targets, workspace };
+  const root = document.createElement("div");
+  document.body.append(root);
+  const first = createApp(DatabaseJobAdmin, props);
+  first.mount(root);
+  await flush();
+  const selector = root.querySelector<HTMLSelectElement>('select[aria-label="nativeJobs.owner"]')!;
+  selector.value = JSON.stringify(targets[0]);
+  selector.dispatchEvent(new Event("change", { bubbles: true }));
+  await flush();
+  input(root, "damengJobAdmin.jobName", "RETAINED_CREATE_INPUT");
+  await flush();
+  first.unmount();
+  const returned = createApp(DatabaseJobAdmin, props);
+  returned.mount(root);
+  mounted.push({ app: returned, root });
+  await flush();
+  expect(root.querySelector<HTMLSelectElement>('select[aria-label="nativeJobs.owner"]')!.value).toBe(JSON.stringify(targets[0]));
+  expect(root.querySelector<HTMLInputElement>('[aria-label="damengJobAdmin.jobName"]')!.value).toBe("RETAINED_CREATE_INPUT");
+  button(root, "damengJobAdmin.previewSql").click();
+  await flush();
+  expect(request).toMatchObject({ action: "create", definition: { kind: "scheduler", owner: "A", name: "RETAINED_CREATE_INPUT" } });
+  expect(mocks.nativeJobApply).not.toHaveBeenCalled();
+});
+
+it("ignores a late creation context from the previous target and preserves the typed job input", async () => {
+  let finishA!: (value: unknown) => void;
+  const scopeB = { ...scope, database: "DB", contextId: "creation-B" };
+  mocks.nativeJobOpenContext.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finishA = resolve;
+      }),
+  );
+  mocks.nativeJobOpenContext.mockResolvedValueOnce({ scope: scopeB, engine: "oracle", sessionUser: "B", actualDatabase: "DB", productVersion: "19.3" });
+  const targets = [
+    { database: "DB", schema: "A", kind: "scheduler" as const },
+    { database: "DB", schema: "B", kind: "scheduler" as const },
+  ];
+  const root = document.createElement("div");
+  document.body.append(root);
+  const app = createApp(DatabaseJobAdmin, { connection: { ...connection, db_type: "oracle" }, creationTargets: targets, workspace: {} });
+  app.mount(root);
+  mounted.push({ app, root });
+  await flush();
+  const selector = root.querySelector<HTMLSelectElement>('select[aria-label="nativeJobs.owner"]')!;
+  selector.value = JSON.stringify(targets[0]);
+  selector.dispatchEvent(new Event("change", { bubbles: true }));
+  await flush();
+  input(root, "damengJobAdmin.jobName", "Keep_input");
+  selector.value = JSON.stringify(targets[1]);
+  selector.dispatchEvent(new Event("change", { bubbles: true }));
+  await flush();
+  finishA({ scope: { ...scopeB, contextId: "creation-A" }, engine: "oracle", sessionUser: "A", actualDatabase: "DB", productVersion: "19.3" });
+  await flush();
+  expect(root.querySelector<HTMLInputElement>('[aria-label="damengJobAdmin.jobName"]')!.value).toBe("Keep_input");
+  button(root, "damengJobAdmin.previewSql").click();
+  await flush();
+  expect(request).toMatchObject({ action: "create", scope: scopeB, definition: { kind: "scheduler", owner: "B", name: "Keep_input" } });
+  expect(mocks.nativeJobPrepare).toHaveBeenCalledWith(request, { schema: "B", kind: "scheduler" });
+  expect(mocks.nativeJobList).not.toHaveBeenCalled();
+  expect(mocks.nativeJobApply).not.toHaveBeenCalled();
+});
+
+it("keeps A/B same-name drafts across real unmounts and previews only with a newly verified context", async () => {
+  const fixture = scopedWorkspaceFixture();
+  const a: NativeJobWorkspaceState = {},
+    b: NativeJobWorkspaceState = {};
+  const firstA = await mountWorkspace("A", a, fixture.config);
+  button(firstA.root, "nativeJobs.editJob").click();
+  await flush();
+  button(firstA.root, "nativeJobs.advanced").click();
+  await flush();
+  input(firstA.root, "nativeJobs.definitionFields.MAX_FAILURES", "2");
+  await flush();
+  expect(a.snapshot?.retained.some((entry) => entry.draft.definition.attributes?.MAX_FAILURES?.kind === "set")).toBe(true);
+  await firstA.unmount();
+  const firstB = await mountWorkspace("B", b, fixture.config);
+  button(firstB.root, "nativeJobs.editJob").click();
+  await flush();
+  button(firstB.root, "nativeJobs.advanced").click();
+  await flush();
+  input(firstB.root, "nativeJobs.definitionFields.MAX_FAILURES", "3");
+  await firstB.unmount();
+  const restoredA = await mountWorkspace("A", a, fixture.config);
+  button(restoredA.root, "nativeJobs.advanced").click();
+  await flush();
+  expect(restoredA.root.querySelector<HTMLInputElement>('[aria-label="nativeJobs.definitionFields.MAX_FAILURES"]')!.value).toBe("2");
+  button(restoredA.root, "damengJobAdmin.previewSql").click();
+  await flush();
+  expect(request).toMatchObject({ target: { owner: "A", scope: { contextId: "context-3" } }, baseline: "revision-3", attributes: expect.arrayContaining([{ name: "MAX_FAILURES", change: { kind: "set", value: 2 } }]) });
+  expect(b.snapshot?.retained.some((entry) => entry.draft.definition.attributes?.MAX_FAILURES?.kind === "set" && entry.draft.definition.attributes.MAX_FAILURES.value === 3)).toBe(true);
+  expect(mocks.nativeJobApply).not.toHaveBeenCalled();
+});
+
+it("keeps a replaced object's remounted draft readable without restoring an executable edit", async () => {
+  const fixture = scopedWorkspaceFixture();
+  const workspace: NativeJobWorkspaceState = {};
+  const original = await mountWorkspace("A", workspace, fixture.config);
+  button(original.root, "nativeJobs.editJob").click();
+  await flush();
+  button(original.root, "nativeJobs.advanced").click();
+  await flush();
+  input(original.root, "nativeJobs.definitionFields.MAX_FAILURES", "2");
+  await original.unmount();
+  fixture.replace();
+  const restored = await mountWorkspace("A", workspace, fixture.config);
+  expect(restored.root.querySelector('[data-dialog="true"]')).toBeNull();
+  button(restored.root, "nativeJobs.viewRetainedDraft").click();
+  await flush();
+  button(restored.root, "nativeJobs.advanced").click();
+  await flush();
+  const retainedInput = restored.root.querySelector<HTMLInputElement>('[aria-label="nativeJobs.definitionFields.MAX_FAILURES"]')!;
+  expect(retainedInput.value).toBe("2");
+  expect(retainedInput.disabled).toBe(true);
+  expect(mocks.nativeJobPrepare).not.toHaveBeenCalled();
+  expect(mocks.nativeJobApply).not.toHaveBeenCalled();
+});
+
+it("binds a scoped Oracle page list and creation form to its entry scope", async () => {
+  mocks.nativeJobOpenContext.mockResolvedValue({ scope, engine: "oracle", sessionUser: "LOGIN", actualDatabase: "DB", productVersion: "19.3" });
+  mocks.nativeJobList.mockResolvedValue({ jobs: { status: "empty" }, source: { coverage: "all" }, offset: 0, limit: 100 });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const app = createApp(DatabaseJobAdmin, { connection: { ...connection, db_type: "oracle" }, pageScope: { schema: "ENTRY", kind: "scheduler" }, database: "DB" });
+  app.mount(root);
+  mounted.push({ app, root });
+  await flush();
+  expect(mocks.nativeJobOpenContext).toHaveBeenCalledWith("c", "DB");
+  expect(mocks.nativeJobList).toHaveBeenLastCalledWith(expect.objectContaining({ schema: "ENTRY", kind: "scheduler" }));
+  expect(root.querySelector('[aria-label="nativeJobs.ownerFilter"]')).toBeNull();
+  expect(root.querySelector('[aria-label="nativeJobs.kind"]')).toBeNull();
+  button(root, "damengJobAdmin.newJob").click();
+  await flush();
+  expect(root.querySelector('[aria-label="nativeJobs.owner"]')).toBeNull();
+  expect(root.querySelector('[aria-label="nativeJobs.createKind"]')).toBeNull();
+  expect(root.textContent).toContain("ENTRY");
+});
+
+it("consumes category creation once after context is ready and can reopen creation in the same page", async () => {
+  mocks.nativeJobOpenContext.mockResolvedValue({ scope, engine: "oracle", sessionUser: "Owner", actualDatabase: "DB", productVersion: "19.3" });
+  mocks.nativeJobList.mockResolvedValue({ jobs: { status: "empty" }, source: { coverage: "all" }, offset: 0, limit: 100 });
+  const state = reactive<{ createRequest?: number }>({ createRequest: 1 });
+  const consumed = vi.fn(() => {
+    state.createRequest = undefined;
+  });
+  const wrapper = defineComponent({ setup: () => () => h(DatabaseJobAdmin, { connection: { ...connection, db_type: "oracle" }, pageScope: { schema: "Owner", kind: "legacy" }, database: "DB", createRequest: state.createRequest, onCreateRequestConsumed: consumed }) });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const app = createApp(wrapper);
+  app.mount(root);
+  mounted.push({ app, root });
+  await flush();
+  expect(consumed).toHaveBeenCalledTimes(1);
+  expect(root.querySelector('[data-dialog="true"]')).not.toBeNull();
+  button(root, "common.cancel").click();
+  await flush();
+  expect(root.querySelector('[data-dialog="true"]')).toBeNull();
+  state.createRequest = 2;
+  await flush();
+  expect(consumed).toHaveBeenCalledTimes(2);
+  expect(root.querySelector('[data-dialog="true"]')).not.toBeNull();
+  expect(mocks.nativeJobPrepare).not.toHaveBeenCalled();
+  expect(mocks.executeQuery).not.toHaveBeenCalled();
+});
+
 describe("native Job explicit context recovery", () => {
+  it("keeps unknown creation inputs accessible after an empty-schema page is remounted", async () => {
+    const workspace: NativeJobWorkspaceState = {};
+    const config = { ...connection, db_type: "oracle" as const };
+    mocks.nativeJobOpenContext.mockResolvedValue({ scope, engine: "oracle", sessionUser: "Owner", actualDatabase: "DB", productVersion: "19.3" });
+    mocks.nativeJobList.mockResolvedValue({ jobs: { status: "empty" }, source: { coverage: "database" }, offset: 0, limit: 100 });
+    mocks.nativeJobPrepare.mockResolvedValue({ scope, target: null, planId: "unknown-create-plan", operationId: "unknown-create-operation", steps: [{ id: "create", label: "create", sql: "reviewed create" }] });
+    const unknown = { operationId: "unknown-create-operation", target: null, state: "finished", outcome: "unknown", cancelRequested: false, steps: [{ id: "create", state: "unknown", reason: "receipt_unknown", vendorCode: null }], reason: "receipt_unknown" };
+    mocks.nativeJobApply.mockResolvedValue(unknown);
+    mocks.nativeJobStatus.mockResolvedValue(unknown);
+    const open = async () => {
+      const root = document.createElement("div");
+      document.body.append(root);
+      const app = createApp(DatabaseJobAdmin, { connection: config, pageScope: { schema: "Owner", kind: "scheduler" }, database: "DB", workspace });
+      app.mount(root);
+      const mountedInstance = { app, root };
+      mounted.push(mountedInstance);
+      await flush();
+      return {
+        root,
+        close: () => {
+          app.unmount();
+          root.remove();
+          mounted.splice(mounted.indexOf(mountedInstance), 1);
+        },
+      };
+    };
+    const first = await open();
+    button(first.root, "damengJobAdmin.newJob").click();
+    await flush();
+    input(first.root, "damengJobAdmin.jobName", "UNKNOWN_CREATE_INPUT");
+    input(first.root, "nativeJobs.definitionFields.JOB_ACTION", "BEGIN NULL; END;");
+    button(first.root, "damengJobAdmin.previewSql").click();
+    await flush();
+    button(first.root, "damengJobAdmin.applySql").click();
+    await flush();
+    first.close();
+    workspace.snapshot!.create.name = "LATER_DRAFT";
+    const returned = await open();
+    expect(button(returned.root, "nativeJobs.correctDraft").disabled).toBe(false);
+    button(returned.root, "nativeJobs.correctDraft").click();
+    await flush();
+    const retained = returned.root.querySelector('[data-dialog="true"]');
+    expect(retained?.textContent).toContain("UNKNOWN_CREATE_INPUT");
+    expect(retained?.textContent).toContain("BEGIN NULL; END;");
+    expect(workspace.snapshot!.create.name).toBe("LATER_DRAFT");
+    expect([...retained!.querySelectorAll("button")].some((element) => element.textContent?.trim() === "damengJobAdmin.previewSql")).toBe(false);
+    expect(mocks.nativeJobApply).toHaveBeenCalledTimes(1);
+    expect(mocks.nativeJobRead).not.toHaveBeenCalled();
+  });
+
+  it("repairs a remounted partial creation from dispatched inputs without replacing a later create draft", async () => {
+    const fixture = schedulerRefreshFixture({ sameScope: true });
+    const created = { ...fixture.ref, name: "Created" };
+    const workspace: NativeJobWorkspaceState = {};
+    const partial = {
+      operationId: "create-operation",
+      target: created,
+      state: "finished",
+      outcome: "partial",
+      cancelRequested: false,
+      steps: [
+        { id: "create", state: "applied", reason: null, vendorCode: null },
+        { id: "attributes", state: "failed", reason: "test-denied", vendorCode: 1031 },
+      ],
+      reason: "test-denied",
+    };
+    mocks.nativeJobPrepare.mockImplementation(async () => ({
+      planId: "create-plan",
+      operationId: "create-operation",
+      scope,
+      target: null,
+      steps: [
+        { id: "create", label: "create", sql: "reviewed create" },
+        { id: "attributes", label: "attributes", sql: "reviewed attributes" },
+      ],
+    }));
+    mocks.nativeJobApply.mockResolvedValue(partial);
+    mocks.nativeJobStatus.mockResolvedValue(partial);
+    const original = await mountWorkspace("Owner", workspace, fixture.config, "Job_1");
+    button(original.root, "damengJobAdmin.newJob").click();
+    await flush();
+    input(original.root, "damengJobAdmin.jobName", "Created");
+    button(original.root, "nativeJobs.advanced").click();
+    await flush();
+    input(original.root, "nativeJobs.definitionFields.MAX_FAILURES", "2");
+    button(original.root, "damengJobAdmin.previewSql").click();
+    await flush();
+    button(original.root, "damengJobAdmin.applySql").click();
+    await flush();
+    await original.unmount();
+    workspace.snapshot!.create.name = "Later";
+    workspace.snapshot!.create.scheduler = { attributes: { MAX_FAILURES: { kind: "set", value: 9 } } };
+    // No current-object edit is kept: the operation input must supply the repair.
+    workspace.snapshot!.retained = [];
+    const returned = await mountWorkspace("Owner", workspace, fixture.config, "Job_1");
+    button(returned.root, "nativeJobs.correctDraft").click();
+    await flush();
+    button(returned.root, "nativeJobs.advanced").click();
+    await flush();
+    expect(returned.root.querySelector<HTMLInputElement>('[aria-label="nativeJobs.definitionFields.MAX_FAILURES"]')?.value).toBe("2");
+    expect(workspace.snapshot!.create.name).toBe("Later");
+    expect(workspace.snapshot!.create.scheduler.attributes?.MAX_FAILURES).toEqual({ kind: "set", value: 9 });
+    expect(mocks.nativeJobApply).toHaveBeenCalledTimes(1);
+  });
+
+  it("reattaches a dispatched Run with same-context independent Stop and retains both operation slots", async () => {
+    vi.useFakeTimers();
+    const fixture = schedulerRefreshFixture({ sameScope: true });
+    details.running = { status: "empty" };
+    const workspace: NativeJobWorkspaceState = {};
+    const operation = (action: string) => ({ operationId: `${action}-operation`, target: fixture.ref, state: "running", outcome: "unknown", cancelRequested: false, steps: [{ id: action, state: "dispatching", reason: null, vendorCode: null }], reason: null });
+    mocks.nativeJobPrepare.mockImplementation(async (value: NativeJobRequest) => ({ planId: `${value.action}-plan`, operationId: `${value.action}-operation`, scope, target: fixture.ref, steps: [{ id: value.action, label: value.action, sql: `reviewed ${value.action}` }] }));
+    mocks.nativeJobApply.mockImplementation(async (id: string) => operation(id === "run-plan" ? "run" : "stop"));
+    mocks.nativeJobStatus.mockImplementation(async (id: string) => operation(id === "run-operation" ? "run" : "stop"));
+    const first = await mountWorkspace("Owner", workspace, fixture.config, "Job_1");
+    button(first.root, "damengJobAdmin.runAsync").click();
+    await flush();
+    button(first.root, "damengJobAdmin.applySql").click();
+    await flush();
+    await first.unmount();
+    const returned = await mountWorkspace("Owner", workspace, fixture.config, "Job_1");
+    expect(returned.root.textContent).not.toContain("nativeJobs.previousContext");
+    expect(button(returned.root, "damengJobAdmin.stopRunning").disabled).toBe(false);
+    button(returned.root, "damengJobAdmin.stopRunning").click();
+    await flush();
+    button(returned.root, "damengJobAdmin.applySql").click();
+    await flush();
+    expect(workspace.mainExecution?.execution?.status.operationId).toBe("run-operation");
+    expect(workspace.stopExecution?.execution?.status.operationId).toBe("stop-operation");
+    expect(mocks.nativeJobApply.mock.calls.map(([id]) => id)).toEqual(["run-plan", "stop-plan"]);
+    const cancels = [...returned.root.querySelectorAll("button")].filter((element) => element.textContent?.trim() === "nativeJobs.cancelFollowing");
+    mocks.nativeJobCancel.mockResolvedValue({ ...operation("run"), cancelRequested: true });
+    cancels[0]!.click();
+    await flush();
+    expect(mocks.nativeJobCancel).toHaveBeenCalledExactlyOnceWith("run-operation");
+    expect(mocks.nativeJobPrepare).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps a dispatched Run and independent Stop separate while a late Run receipt cannot close Stop confirmation", async () => {
     vi.useFakeTimers();
     const fixture = schedulerRefreshFixture();
@@ -305,6 +699,34 @@ describe("native Job explicit context recovery", () => {
     expect(mocks.nativeJobList).not.toHaveBeenCalled();
     expect(mocks.executeQuery).not.toHaveBeenCalled();
     expect(mocks.nativeJobPrepare).not.toHaveBeenCalled();
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps the selected %s job and editable draft after display-only Dialog defaults change", async (engine) => {
+    const fixture = schedulerRefreshFixture();
+    const config = reactive<ConnectionConfig>({ ...fixture.config, db_type: engine, external_config: null });
+    mocks.nativeJobOpenContext.mockResolvedValue({ scope, engine, sessionUser: "Owner", actualDatabase: "DB", productVersion: engine === "oracle" ? "19.3" : "4.4.2.2" });
+    const root = await mount(config);
+    button(root, "nativeJobs.editJob").click();
+    await flush();
+    button(root, "nativeJobs.advanced").click();
+    await flush();
+    input(root, "nativeJobs.definitionFields.MAX_FAILURES", "2");
+    Object.assign(config, { external_config: undefined, show_extensions: false, color: "", production_badge_scope: "database", driver_label: "Display label", driver_profile: engine });
+    await flush();
+    expect(mocks.nativeJobOpenContext).toHaveBeenCalledTimes(1);
+    const draft = root.querySelector<HTMLInputElement>('[aria-label="nativeJobs.definitionFields.MAX_FAILURES"]')!;
+    expect(draft.value).toBe("2");
+    expect(draft.disabled).toBe(false);
+    expect(root.textContent).not.toContain("nativeJobs.detachedDraft");
+    button(root, "damengJobAdmin.previewSql").click();
+    await flush();
+    expect(request).toMatchObject({ action: "update", target: fixture.ref, baseline: fixture.read(fixture.ref).snapshot.revision, attributes: [{ name: "MAX_FAILURES", change: { kind: "set", value: 2 } }] });
+    config.show_extensions = undefined;
+    await flush();
+    expect(root.textContent).toContain("reviewed effective native attribute");
+    expect(mocks.nativeJobOpenContext).toHaveBeenCalledTimes(1);
+    expect(mocks.nativeJobPrepare).toHaveBeenCalledTimes(1);
+    expect(mocks.nativeJobApply).not.toHaveBeenCalled();
   });
 
   it("reconnects with a fresh scope and baseline while retaining the same object's MAX_FAILURES draft", async () => {
@@ -1277,13 +1699,16 @@ describe("existing Dameng Job management entry", () => {
     const legacy = { kind: "legacy" as const, scope, jobId: "900719925474099312345" };
     mocks.nativeJobOpenContext.mockResolvedValue({ scope, engine: "oracle", sessionUser: "Owner", actualDatabase: "DB", productVersion: "19" });
     mocks.nativeJobList.mockResolvedValue({
-      jobs: { status: "available", value: [{ ref: legacy, name: legacy.jobId, owner: null, enabled: false, jobType: "legacy", state: "BROKEN", nextRun: null, comments: null, aliases: [], logUser: "Log", privUser: "Privilege", schemaUser: "Owner" }] },
+      jobs: { status: "available", value: [{ ref: legacy, name: legacy.jobId, owner: null, enabled: false, jobType: "legacy", state: null, nextRun: null, comments: null, aliases: [], logUser: "Log", privUser: "Privilege", schemaUser: "Owner" }] },
       source: { source: "SYS.DBA_JOBS", coverage: "database" },
       offset: 0,
       limit: 100,
     });
     mocks.nativeJobRead.mockResolvedValue({ ...details, snapshot: { ...details.snapshot, ref: legacy, definition: { status: "available", value: { WHAT: "old();", NEXT_DATE: "2026-10-21 10:00:00", INTERVAL: "NULL", INSTANCE: 0, LOG_USER: "Log", PRIV_USER: "Privilege", SCHEMA_USER: "Owner" } } } });
     const root = await mount({ ...connection, db_type: "oracle", database: "SERVICE" }, { kind: "legacy", jobId: legacy.jobId });
+    const row = [...root.querySelectorAll("button")].find((element) => element.textContent?.includes(legacy.jobId));
+    expect(row?.textContent).toContain("Owner");
+    expect(row?.textContent).not.toContain("nativeJobs.unknown");
     expect(mocks.nativeJobList).toHaveBeenLastCalledWith({ scope, kind: "legacy", filter: "", offset: 0, limit: 100 });
     expect(root.textContent).toContain("nativeJobs.legacyNoStop");
     expect(root.textContent).toContain("nativeJobs.runForeground");

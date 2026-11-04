@@ -99,7 +99,7 @@ describe("connectionStore save_password opt-out", () => {
     await vi.waitFor(() => expect(saveInfo).toHaveBeenCalledExactlyOnceWith(config.id, expect.objectContaining({ compatibilityMode: "oracle" })));
     expect(store.getConfig(config.id)?.database_info?.compatibilityMode).toBe("oracle");
     expect(store.getConfig(config.id)?.password).toBe("");
-    expect(store.treeNodes[0]?.children?.filter((node) => node.type === "database-job-admin")).toHaveLength(1);
+    expect(store.treeNodes[0]?.children?.filter((node) => node.type === "database-job-admin")).toHaveLength(0);
   });
 
   it.each(["saved", "save-failed"] as const)("uses the exact persistent identity after remember-password is %s", async (result) => {

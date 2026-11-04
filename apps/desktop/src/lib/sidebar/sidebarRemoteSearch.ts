@@ -62,20 +62,27 @@ export async function collectSidebarRemoteSearchResults(options: {
 
 export function mergeSidebarRemoteSearchResults(nodes: TreeNode[], results: readonly SidebarRemoteSearchResult[]): TreeNode[] {
   if (!results.length) return nodes;
-  return nodes.map((node) => {
+  let changed = false;
+  const mergedNodes = nodes.map((node) => {
     const children = node.children ? mergeSidebarRemoteSearchResults(node.children, results) : undefined;
     const result = results.find((candidate) => nodeMatchesRegexScopeIdentity(node, candidate.parentNodeId, candidate));
-    if (!result) return children === node.children ? node : { ...node, children };
-    const merged = [...(children ?? [])];
-    const identities = new Set(merged.map((child) => child.id));
-    for (const child of result.children) {
-      if (!identities.has(child.id)) {
-        merged.push(child);
-        identities.add(child.id);
+    let merged = children;
+    if (result) {
+      const identities = new Set((children ?? []).map((child) => child.id));
+      for (const child of result.children) {
+        if (!identities.has(child.id)) {
+          if (merged === children) merged = [...(children ?? [])];
+          merged!.push(child);
+          identities.add(child.id);
+        }
       }
+      merged ??= [];
     }
+    if (merged === node.children) return node;
+    changed = true;
     return { ...node, children: merged };
   });
+  return changed ? mergedNodes : nodes;
 }
 
 export function removeVerifiedSidebarTriggerSearchResult(results: readonly SidebarRemoteSearchResult[], node: TreeNode): SidebarRemoteSearchResult[] {

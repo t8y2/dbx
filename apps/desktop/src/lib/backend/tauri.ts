@@ -1984,6 +1984,7 @@ export async function listObjects(
     executionId,
     ...(readOptions?.identityMode ? { identityMode: readOptions.identityMode } : {}),
     ...(readOptions?.lightweight !== undefined ? { lightweight: readOptions.lightweight } : {}),
+    ...(readOptions?.directoryPage ? { directoryPage: true } : {}),
     ...(options === true ? { exactIdentity: true } : {}),
   });
 }
@@ -2018,12 +2019,12 @@ export async function getEventInfo(connectionId: string, database: string, schem
   return invoke("get_event_info", { connectionId, database, schema, name });
 }
 
-export async function listSchemas(connectionId: string, database: string, applyVisibleFilter = false): Promise<string[]> {
-  return invoke("list_schemas", { connectionId, database, applyVisibleFilter });
+export async function listSchemas(connectionId: string, database: string, applyVisibleFilter = false, showSystemSchemas?: boolean): Promise<string[]> {
+  return invoke("list_schemas", { connectionId, database, applyVisibleFilter, ...(showSystemSchemas === undefined ? {} : { showSystemSchemas }) });
 }
 
-export async function listSchemaInfos(connectionId: string, database: string): Promise<SchemaInfo[]> {
-  return invoke("list_schema_infos", { connectionId, database });
+export async function listSchemaInfos(connectionId: string, database: string, showSystemSchemas?: boolean): Promise<SchemaInfo[]> {
+  return invoke("list_schema_infos", { connectionId, database, ...(showSystemSchemas === undefined ? {} : { showSystemSchemas }) });
 }
 
 export async function getCustomTypeDetails(connectionId: string, database: string, schema: string, name: string): Promise<CustomTypeDetails> {
@@ -2039,11 +2040,11 @@ export function nativeJobList(request: NativeJobListRequest): Promise<NativeJobL
 export function nativeJobReferences(request: NativeJobReferenceListRequest): Promise<NativeJobReferenceCatalog> {
   return invokeBackend("native_job_references", { request });
 }
-export function nativeJobRead(target: NativeJobRef): Promise<NativeJobDetails> {
-  return invokeBackend("native_job_read", { target });
+export function nativeJobRead(target: NativeJobRef, pageScope?: { schema: string; kind: "scheduler" | "legacy"; schedulerCategory?: "regular" | "lightweight" | "in-memory" }): Promise<NativeJobDetails> {
+  return invokeBackend("native_job_read", pageScope ? { target, pageScope } : { target });
 }
-export function nativeJobPrepare(mutation: NativeJobRequest): Promise<NativeJobPreparedPlan> {
-  return invokeBackend("native_job_prepare", { mutation });
+export function nativeJobPrepare(mutation: NativeJobRequest, pageScope?: { schema: string; kind: "scheduler" | "legacy"; schedulerCategory?: "regular" | "lightweight" | "in-memory" }): Promise<NativeJobPreparedPlan> {
+  return invokeBackend("native_job_prepare", pageScope ? { mutation, pageScope } : { mutation });
 }
 export function nativeJobApply(planId: string): Promise<NativeJobOperationStatus> {
   return invokeBackend("native_job_apply", { planId });

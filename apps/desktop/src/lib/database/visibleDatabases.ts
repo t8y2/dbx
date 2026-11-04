@@ -11,6 +11,7 @@ type SystemNameRules = {
 
 type SchemaFilterOptions = {
   showSystemSchemas?: boolean;
+  oracleMaintainedSchemas?: ReadonlySet<string>;
 };
 
 function schemaFilterShowSystemSchemas(connection: Partial<Pick<ConnectionConfig, "show_system_schemas">> | undefined, options?: SchemaFilterOptions): boolean {
@@ -87,15 +88,24 @@ const ORACLE_SYSTEM_SCHEMA_NAMES = new Set([
   "audsys",
   "ctxsys",
   "dbsnmp",
+  "dbsfwuser",
+  "dip",
   "dvf",
   "dvsys",
   "exfsys",
   "flows_files",
+  "ggsys",
   "gsmadmin_internal",
+  "gsmcatuser",
+  "gsmrootuser",
+  "gsmuser",
+  "lbacsys",
   "mddata",
   "mdsys",
   "mgmt_view",
   "olapsys",
+  "ojvmsys",
+  "oracle_ocm",
   "orddata",
   "ordplugins",
   "ordsys",
@@ -105,8 +115,11 @@ const ORACLE_SYSTEM_SCHEMA_NAMES = new Set([
   "si_informtn_schema",
   "sys",
   "sysback",
+  "sysbackup",
+  "sys$umf",
   "sysdg",
   "syskm",
+  "sysrac",
   "system",
   "wmsys",
   "xdb",
@@ -261,7 +274,8 @@ export function filterSchemaNamesForVisiblePicker(schemaNames: string[], connect
   const databaseType = effectiveDatabaseTypeForConnection(connection);
   return schemaNames.filter((name) => {
     const normalized = name.toLowerCase();
-    return normalized === currentSchema || normalized === currentUserPart || !isSystemSchemaName(databaseType, name);
+    const system = databaseType === "oracle" && options?.oracleMaintainedSchemas ? options.oracleMaintainedSchemas.has(name) : isSystemSchemaName(databaseType, name);
+    return normalized === currentSchema || normalized === currentUserPart || !system;
   });
 }
 

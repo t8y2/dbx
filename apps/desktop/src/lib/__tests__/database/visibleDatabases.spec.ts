@@ -15,8 +15,24 @@ describe("visibleDatabases schema filtering", () => {
     ).toEqual(["public", "sys"]);
   });
 
-  it("keeps Oracle DIP visible while hiding default system schemas", () => {
-    expect(filterSchemaNamesForConnection(["DBX_TEST", "DIP", "SYSTEM"], { db_type: "oracle", database: "XE" }, "XE")).toEqual(["DBX_TEST", "DIP"]);
+  it("hides known Oracle-maintained users when maintenance metadata is unavailable", () => {
+    expect(filterSchemaNamesForConnection(["DBX_TEST", "DIP", "SYSTEM", "SYSRAC", "SYS$UMF", "GSMUSER"], { db_type: "oracle", database: "XE" }, "XE")).toEqual(["DBX_TEST"]);
+  });
+  it("uses authoritative Oracle maintenance names and retains the toggle, login and explicit scope rules", () => {
+    const names = ["APP", "SYSRAC", "CUSTOM_INSTALLER", "DIP", "BUSINESS$USER"];
+    const options = { oracleMaintainedSchemas: new Set(["SYSRAC", "CUSTOM_INSTALLER"]) };
+    expect(filterSchemaNamesForConnection(names, { db_type: "oracle", username: "APP" }, "XE", options)).toEqual(["APP", "DIP", "BUSINESS$USER"]);
+    expect(filterSchemaNamesForConnection(names, { db_type: "oracle", username: "SYSRAC" }, "XE", options)).toContain("SYSRAC");
+    expect(filterSchemaNamesForConnection(names, { db_type: "oracle", show_system_schemas: true }, "XE", options)).toEqual(names);
+    expect(filterSchemaNamesForConnection(names, { db_type: "oracle", visible_schemas: { XE: ["CUSTOM_INSTALLER"] } }, "XE", options)).toEqual(["CUSTOM_INSTALLER"]);
+  });
+
+  it("hides Oracle GGSYS and DBSFWUSER without hiding similar business names or explicit choices", () => {
+    const schemas = ["GGSYS", "DBSFWUSER", "APP_GGSYS", "DBSFWUSER_APP", "CUSTOM$USER"];
+    expect(filterSchemaNamesForConnection(schemas, { db_type: "oracle", username: "APP" }, "XE")).toEqual(["APP_GGSYS", "DBSFWUSER_APP", "CUSTOM$USER"]);
+    expect(filterSchemaNamesForConnection(schemas, { db_type: "oracle", show_system_schemas: true }, "XE")).toEqual(schemas);
+    expect(filterSchemaNamesForConnection(schemas, { db_type: "oracle", username: "GGSYS" }, "XE")).toContain("GGSYS");
+    expect(filterSchemaNamesForConnection(schemas, { db_type: "oracle", visible_schemas: { XE: ["DBSFWUSER"] } }, "XE")).toEqual(["DBSFWUSER"]);
   });
 
   it("uses Oracle schema filtering for inferred JDBC connections", () => {

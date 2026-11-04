@@ -1,6 +1,7 @@
 import type { QueryResultSourceLabelKind, QueryTab, TabOutputView } from "@/types/database";
 import { sanitizeTabUiState } from "@/lib/tabs/tabUiState";
 import { restoreOracleTypeManagementDraft } from "@/lib/table/oracleTypeManagement";
+import { nativeJobAdminSelection } from "@/lib/database/nativeJobAdmin";
 
 export const OPEN_TABS_STORAGE_KEY = "dbx-open-tabs";
 export const ACTIVE_TAB_STORAGE_KEY = "dbx-active-tab";
@@ -61,6 +62,8 @@ export interface SavedOpenTab {
   whereInput?: string;
   pinned?: boolean;
   mode?: QueryTab["mode"];
+  nativeJobPage?: QueryTab["nativeJobPage"];
+  nativeJobAdmin?: QueryTab["nativeJobAdmin"];
   pluginWorkbench?: QueryTab["pluginWorkbench"];
   pluginFilesystem?: QueryTab["pluginFilesystem"];
   autoCommit?: boolean;
@@ -128,7 +131,7 @@ function shouldPersistTabSql(tab: QueryTab) {
 // its request is in flight would restore an empty source tab after restart,
 // because the request itself is intentionally not durable.
 function shouldPersistOpenTab(tab: QueryTab): boolean {
-  return !tab.sourceLoad || !!tab.typeManagementDraft;
+  return !tab.nativeJobCreationTargets && !(tab.structureCreationTargets && tab.structureCreationTargetIndex === undefined) && !(tab.queryCreation && tab.queryCreation.selected === undefined) && (!tab.sourceLoad || !!tab.typeManagementDraft);
 }
 
 function restoredOriginalSql(tab: SavedOpenTab, mode: QueryTab["mode"], sql: string) {
@@ -215,6 +218,8 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.whereInput !== undefined ? { whereInput: tab.whereInput } : {}),
     pinned: tab.pinned,
     mode: tab.mode,
+    ...(tab.mode === "database-jobs" && tab.nativeJobPage ? { nativeJobPage: { schema: tab.nativeJobPage.schema, kind: tab.nativeJobPage.kind, ...(tab.nativeJobPage.schedulerCategory ? { schedulerCategory: tab.nativeJobPage.schedulerCategory } : {}) } } : {}),
+    ...((tab.mode === "database-jobs" || tab.mode === "dameng-jobs") && tab.nativeJobAdmin ? { nativeJobAdmin: nativeJobAdminSelection(tab.nativeJobAdmin) } : {}),
     ...(tab.pluginWorkbench ? { pluginWorkbench: tab.pluginWorkbench } : {}),
     ...(tab.pluginFilesystem ? { pluginFilesystem: tab.pluginFilesystem } : {}),
     ...(tab.mode === "query" && tab.autoCommit !== undefined ? { autoCommit: tab.autoCommit } : {}),
@@ -309,6 +314,9 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
           : undefined;
       return {
         ...tab,
+        nativeJobWorkspace: undefined,
+        nativeJobCreateRequest: undefined,
+        nativeJobScopeResolution: undefined,
         mode,
         mongoQueryLanguage: tab.mongoQueryLanguage === "sql" ? "sql" : undefined,
         sql: typeof tab.sql === "string" ? tab.sql : "",

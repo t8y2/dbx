@@ -152,7 +152,7 @@ async function save() {
         </TabsList>
         <TabsContent value="primary" class="min-h-0 overflow-y-auto">
           <p class="mb-3 text-sm text-muted-foreground">{{ t("sidebarMenu.primaryHint") }}</p>
-          <div class="max-h-[min(45vh,360px)] overflow-y-auto space-y-1 pr-2">
+          <div class="space-y-1 pr-2">
             <div
               v-for="(item, index) in selectedChoices"
               :key="item.sidebarActionId"
@@ -190,7 +190,7 @@ async function save() {
         </TabsContent>
         <TabsContent value="groups" class="min-h-0 overflow-y-auto">
           <p class="mb-3 text-sm text-muted-foreground">{{ t("sidebarMenu.orderHint") }}</p>
-          <div class="max-h-[min(45vh,360px)] overflow-y-auto space-y-1 pr-2">
+          <div class="space-y-1 pr-2">
             <div
               v-for="(item, index) in groupChoices"
               :key="item.sidebarActionId"

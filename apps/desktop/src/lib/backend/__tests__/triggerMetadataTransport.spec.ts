@@ -54,6 +54,19 @@ describe("opt-in trigger identity dual transport", () => {
     expect(mocks.invoke.mock.calls[0][1]).not.toHaveProperty("catalog");
   });
 
+  it.each(["tauri", "http"] as const)("%s opts into directory paging only for the background request", async (kind) => {
+    mocks.invoke.mockResolvedValue([]);
+    const fetch = vi.fn().mockResolvedValue({ ok: true, json: vi.fn().mockResolvedValue([]) });
+    vi.stubGlobal("fetch", fetch);
+    const transport = kind === "tauri" ? await import("@/lib/backend/tauri") : await import("@/lib/backend/http");
+    await transport.listObjects("connection", "database", "owner", ["PROCEDURE", "FUNCTION"], undefined, 1000, 1000, undefined, undefined, undefined, { directoryPage: true });
+    if (kind === "tauri") expect(mocks.invoke.mock.calls[0][1]).toMatchObject({ directoryPage: true, limit: 1000, offset: 1000 });
+    else expect(new URL(String(fetch.mock.calls[0][0]), "http://localhost").searchParams.get("directory_page")).toBe("true");
+    await transport.listObjects("connection", "database", "owner", ["PROCEDURE"], undefined, 501, 0);
+    if (kind === "tauri") expect(mocks.invoke.mock.calls[1][1]).not.toHaveProperty("directoryPage");
+    else expect(new URL(String(fetch.mock.calls[1][0]), "http://localhost").searchParams.has("directory_page")).toBe(false);
+  });
+
   it("keeps the default Web read contract", async () => {
     const fetch = vi.fn().mockResolvedValue({ ok: true, json: vi.fn().mockResolvedValue([]) });
     vi.stubGlobal("fetch", fetch);

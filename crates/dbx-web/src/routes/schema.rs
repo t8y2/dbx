@@ -27,6 +27,7 @@ pub struct SchemaQuery {
     pub object_types: Option<String>,
     pub table_name_filter: Option<String>,
     pub apply_visible_filter: Option<bool>,
+    pub show_system_schemas: Option<bool>,
     pub client_session_id: Option<String>,
     pub current_schema: Option<String>,
     pub include_postgres_access: Option<bool>,
@@ -36,6 +37,7 @@ pub struct SchemaQuery {
     pub exact_identity: Option<bool>,
     pub lightweight: Option<bool>,
     pub page_table_roots: Option<bool>,
+    pub directory_page: Option<bool>,
     pub separate_indexes: Option<bool>,
     pub explicit_owner: Option<String>,
 }
@@ -226,11 +228,12 @@ pub async fn list_schemas(
     Query(q): Query<SchemaQuery>,
 ) -> Result<Json<Vec<String>>, AppError> {
     let database = q.database.as_deref().unwrap_or("");
-    let result = dbx_core::schema::list_schemas_core_with_visible_filter(
+    let result = dbx_core::schema::list_schemas_core_with_options(
         &state.app,
         &q.connection_id,
         database,
         q.apply_visible_filter.unwrap_or(false),
+        q.show_system_schemas,
     )
     .await
     .map_err(AppError::from)?;
@@ -387,7 +390,11 @@ pub async fn list_objects(
                 q.offset,
                 object_types.as_deref(),
                 table_name_filter.as_ref(),
-                &dbx_core::schema::MetadataReadOptions { identity_mode: q.identity_mode, catalog },
+                &dbx_core::schema::MetadataReadOptions {
+                    identity_mode: q.identity_mode,
+                    catalog,
+                    directory_page: q.directory_page,
+                },
                 q.lightweight,
             )
             .await
@@ -447,7 +454,11 @@ pub async fn get_object_source(
         object_type,
         q.signature.as_deref(),
         q.relation_name.as_deref(),
-        &dbx_core::schema::MetadataReadOptions { identity_mode: q.identity_mode, catalog: q.catalog },
+        &dbx_core::schema::MetadataReadOptions {
+            identity_mode: q.identity_mode,
+            catalog: q.catalog,
+            ..Default::default()
+        },
     )
     .await
     .map_err(AppError::from)?;
@@ -867,7 +878,11 @@ pub async fn list_triggers(
             database,
             schema,
             table,
-            &dbx_core::schema::MetadataReadOptions { identity_mode: q.identity_mode, catalog: q.catalog },
+            &dbx_core::schema::MetadataReadOptions {
+                identity_mode: q.identity_mode,
+                catalog: q.catalog,
+                ..Default::default()
+            },
         )
         .await
         .map_err(AppError::from)?

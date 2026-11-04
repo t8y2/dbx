@@ -144,6 +144,7 @@ describe("ConnectionDialog Redis editing (#13826)", () => {
         host: "127.0.0.1",
         port: 6379,
       }),
+      expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }),
     );
   });
 

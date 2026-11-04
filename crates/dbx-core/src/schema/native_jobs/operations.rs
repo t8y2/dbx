@@ -654,11 +654,46 @@ where
 
 pub async fn native_job_prepare_core(
     state: &AppState,
-    mut request: NativeJobRequest,
+    request: NativeJobRequest,
 ) -> Result<NativeJobPreparedPlan, String> {
+    native_job_prepare_in_page_core(state, request, None).await
+}
+
+pub async fn native_job_prepare_in_page_core(
+    state: &AppState,
+    mut request: NativeJobRequest,
+    page: Option<&dbx_types::native_jobs::NativeJobPageScope>,
+) -> Result<NativeJobPreparedPlan, String> {
+    if let Some(page) = page {
+        page.validate().map_err(str::to_string)?;
+        if let NativeJobRequest::Create { scope, definition } = &request {
+            let matches = match definition {
+                NativeJobCreateDefinition::Scheduler(definition) => {
+                    page.kind == dbx_types::native_jobs::NativeJobKind::Scheduler
+                        && definition.owner == page.schema
+                        && page.scheduler_category.is_none_or(|category| {
+                            category.styles().contains(&definition.job_style.as_deref().unwrap_or("REGULAR"))
+                        })
+                }
+                NativeJobCreateDefinition::Legacy(definition) => {
+                    page.kind == dbx_types::native_jobs::NativeJobKind::Legacy && definition.schema == page.schema
+                }
+                NativeJobCreateDefinition::DamengNative(_) => false,
+            };
+            if !matches {
+                return Err("native_job_page_scope_mismatch".into());
+            }
+            if matches!(definition, NativeJobCreateDefinition::Legacy(_)) {
+                let binding = state.native_jobs.context(state, scope).map_err(str::to_string)?;
+                if binding.context.engine == NativeJobEngine::Oracle && binding.context.session_user != page.schema {
+                    return Err("native_job_legacy_schema_creation_unavailable".into());
+                }
+            }
+        }
+    }
     arguments::normalize_core(state, &mut request).await.map_err(str::to_string)?;
     native_job_prepare_request_with(state, request, |target| async move {
-        super::native_job_read_core(state, &target).await.map_err(|_| "native_job_readback_failed")
+        super::native_job_read_in_page_core(state, &target, page).await.map_err(|_| "native_job_readback_failed")
     })
     .await
     .map_err(str::to_string)

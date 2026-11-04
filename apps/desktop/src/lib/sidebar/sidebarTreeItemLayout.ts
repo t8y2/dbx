@@ -10,6 +10,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "function",
   "synonym",
   "oracle-db-link",
+  "native-job",
   "package",
   "package-body",
   "type-body",

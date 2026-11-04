@@ -77,7 +77,11 @@ function installBackend(initialConnections: ConnectionConfig[], initialLayout: S
     }
     if (url === "/api/connection/save") {
       const body = JSON.parse(String(init?.body ?? "{}"));
-      state.connections = Array.isArray(body) ? body : body.configs;
+      const configs: ConnectionConfig[] = Array.isArray(body) ? body : body.configs;
+      const removed: string[] = body.removedIds ?? [];
+      const merged = new Map(state.connections.filter((connection) => !removed.includes(connection.id)).map((connection) => [connection.id, connection]));
+      for (const config of configs) merged.set(config.id, config);
+      state.connections = [...merged.values()];
       return json(null);
     }
     if (url === "/api/tunnel-profiles/list") return json(state.profiles);
@@ -209,6 +213,35 @@ function tunnelLayer(id: string, profileId: string) {
 async function decryptExport(content: string) {
   return JSON.parse(await decryptConfig(JSON.parse(content), PASSPHRASE));
 }
+
+test.each([false, true])("legacy display flags (%s) are accepted without rewriting storage and omitted from plain and encrypted exports", async (value) => {
+  const legacy: ConnectionConfig = { ...conn("legacy", "Legacy", 3306), show_extensions: value, show_database_links: value, show_native_jobs: value, show_user_admin: value, external_config: { show_extensions: value, retained: "nested" } };
+  const backend = installBackend([legacy], null);
+  const capture = installExportCapture();
+  const storage = installMemoryStorage();
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    await store.initFromDisk();
+    assert.equal(backend.state.connections[0].show_extensions, value);
+    for (const protection of [{ mode: "plaintext" }, { mode: "encrypted", passphrase: PASSPHRASE }] as ConnectionExportProtection[]) {
+      await store.exportConnectionsToFile(protection);
+      const content = await capture.content();
+      const exported = protection.mode === "encrypted" ? await decryptExport(content) : JSON.parse(content);
+      for (const key of ["show_extensions", "show_database_links", "show_native_jobs", "show_user_admin"]) assert.equal(Object.hasOwn(exported.connections[0], key), false);
+      assert.equal(exported.connections[0].password, protection.mode === "encrypted" ? "secret" : "");
+      assert.deepEqual(exported.connections[0].external_config, legacy.external_config);
+      const preview = await store.parseConnectionsImport(content, protection.mode === "encrypted" ? PASSPHRASE : null);
+      assert.equal(preview.connections[0].password, protection.mode === "encrypted" ? "secret" : "");
+      assert.deepEqual(preview.connections[0].external_config, legacy.external_config);
+    }
+    assert.equal(backend.state.connections[0].show_extensions, value);
+  } finally {
+    storage.restore();
+    capture.restore();
+    backend.restore();
+  }
+});
 
 test("selective encrypted export keeps only chosen connections, layout, and tunnel profiles", async () => {
   const backend = installBackend([], null, [

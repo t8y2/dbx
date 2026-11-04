@@ -122,10 +122,6 @@ import { MQ_PINNED_VERSION_OPTIONS, pinnedVersionToSelection, selectionToPinnedV
 import { looksLikeMongoSrvHost, mongodbAuthFailureHint, mongoConnectionUsesOidc, mongoSrvConnectionString, mongoUrlParam, mongoUrlParamIsTrue, normalizeMongoTlsFormState, setMongoUrlParam, setMongoUrlParamBoolean } from "@/lib/mongo/mongoConnectionOptions";
 import { isMongoLegacyDriverProfile } from "@/lib/mongo/mongoCapabilities";
 import { mysqlCleartextPasswordAuthEnabled, setMysqlCleartextPasswordAuthEnabled } from "@/lib/database/mysqlConnectionOptions";
-import { supportsOracleDatabaseLinks } from "@/lib/database/oracleDatabaseLinks";
-import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
-import { connectionSupportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
-import { nativeJobAdminSupported } from "@/lib/database/nativeJobAdmin";
 import { applyDamengSslUrlParams, damengSslFormConfig } from "@/lib/database/damengSslOptions";
 import { DAMENG_BUILTIN_DRIVER_PROFILE, DAMENG_CUSTOM_DRIVER_PROFILE, DAMENG_DEFAULT_JDBC_DRIVER_CLASS, damengCustomJdbcUrl, damengDriverModeForConfig, defaultDamengJdbcUrl, type DamengDriverMode } from "@/lib/database/damengDriverOptions";
 import { doltSystemTablesVisible, isDoltDriverProfile, setDoltSystemTablesVisible } from "@/lib/database/doltProfile";
@@ -226,6 +222,7 @@ import {
 } from "@/lib/connection/elasticsearchKibanaProxy";
 import {
   GAUSSDB_M_JDBC_DRIVER_CLASS,
+  effectiveDatabaseTypeForConnection,
   gaussdbConnectionMode,
   gaussdbCountQueryDop,
   gaussdbIdentifierQuoteStyle,
@@ -350,6 +347,7 @@ const isDesktop = isTauriRuntime();
 
 const props = defineProps<{
   editConfig?: ConnectionConfig;
+  initialVisibleSchemaDatabase?: string;
   prefillConfig?: ConnectionDeepLinkDraft | null;
   updatePrefill?: ConnectionDeepLinkUpdate | null;
   pluginProvider?: PluginCenterFocus | null;
@@ -439,6 +437,9 @@ const productionDatabaseSearchText = ref("");
 const productionDatabaseError = ref("");
 const productionProtectionEnabled = ref(false);
 const showVisibleSchemasDialog = ref(false);
+const visibleSchemaDatabaseContext = ref<string | undefined>(undefined);
+let visibleSchemaRequest = 0;
+let visibleSchemaPickerDatabase: string | undefined;
 const isLoadingVisibleSchemas = ref(false);
 const visibleSchemaNames = ref<string[]>([]);
 const visibleSchemaInitialSelection = ref<string[]>([]);
@@ -505,9 +506,6 @@ const defaultForm = (): ConnectionForm => ({
   docs_notes_path: undefined,
   read_only: false,
   show_system_schemas: false,
-  show_database_links: true,
-  show_native_jobs: true,
-  show_user_admin: true,
   sidebar_auto_load_all_tables: false,
   is_production: false,
   production_databases: [],
@@ -717,6 +715,35 @@ function sshLayersForConfig(config: LegacyConnectionConfig): SshTunnelConfig[] {
 }
 
 const form = ref(defaultForm());
+
+const navigationVisibilityFields = ["show_system_schemas", "visible_schemas", "visible_databases", "visible_database_patterns"] as const;
+let navigationVisibilityBaseline: Partial<Record<(typeof navigationVisibilityFields)[number], string>> = {};
+let navigationVisibilityKind = "";
+let editingTargetFingerprint: string | undefined;
+const editedNavigationVisibilityFields = new Set<(typeof navigationVisibilityFields)[number]>();
+const editedVisibleSchemaKeys = new Set<string>();
+function rememberNavigationVisibilityDraft() {
+  editedNavigationVisibilityFields.clear();
+  editedVisibleSchemaKeys.clear();
+  navigationVisibilityBaseline = Object.fromEntries(navigationVisibilityFields.map((field) => [field, JSON.stringify(form.value[field])]));
+  navigationVisibilityKind = JSON.stringify([form.value.db_type, form.value.driver_profile]);
+}
+function navigationVisibilityEditOptions() {
+  const sameKind = navigationVisibilityKind === JSON.stringify([form.value.db_type, form.value.driver_profile]);
+  const preserveNavigationVisibility = sameKind ? navigationVisibilityFields.filter((field) => !editedNavigationVisibilityFields.has(field) && JSON.stringify(form.value[field]) === navigationVisibilityBaseline[field]) : [];
+  const previousSchemas = (JSON.parse(navigationVisibilityBaseline.visible_schemas ?? "{}") ?? {}) as Record<string, string[]>;
+  const changedKeys = sameKind
+    ? [...new Set([...Object.keys(previousSchemas), ...Object.keys(form.value.visible_schemas ?? {}), ...editedVisibleSchemaKeys])].filter((key) => editedVisibleSchemaKeys.has(key) || JSON.stringify(previousSchemas[key]) !== JSON.stringify(form.value.visible_schemas?.[key]))
+    : [];
+  return { preserveNavigationVisibility, updatedVisibleSchemaKeys: changedKeys.length ? changedKeys : undefined, expectedFingerprint: editingTargetFingerprint };
+}
+function applySavedNavigationVisibility(config: ConnectionConfig) {
+  form.value.show_system_schemas = config.show_system_schemas === true;
+  form.value.visible_schemas = config.visible_schemas;
+  form.value.visible_databases = config.visible_databases;
+  form.value.visible_database_patterns = config.visible_database_patterns;
+  rememberNavigationVisibilityDraft();
+}
 const parameterEditorOpen = ref(false);
 watch(open, (value) => {
   if (!value) parameterEditorOpen.value = false;
@@ -730,13 +757,6 @@ function applyConnectionParameters(value: string) {
   form.value.url_params = value;
   resetTestState();
 }
-const sidebarVisibilitySettings = computed(() => {
-  const config = { ...form.value, database_info: visibleTestDatabaseInfo.value ?? visibleSavedDatabaseInfo.value ?? undefined } as ConnectionConfig;
-  return [
-    { key: "show_native_jobs" as const, label: "connection.showNativeJobs", hint: "connection.showNativeJobsHint", supported: nativeJobAdminSupported(config) },
-    { key: "show_user_admin" as const, label: "connection.showUserAdmin", hint: "connection.showUserAdminHint", supported: connectionSupportsDatabaseUserAdmin(config) || effectiveDatabaseTypeForConnection(config) === "xugu" },
-  ].filter((setting) => setting.supported);
-});
 const supportsAutomaticTableLoading = computed(() => supportsDataDictionary(form.value.db_type) && !DIRECT_SIDEBAR_OBJECT_TYPES.has(form.value.db_type));
 const redisKeyTemplatesText = ref("");
 const noteTextareaRef = ref<HTMLTextAreaElement | null>(null);
@@ -3274,6 +3294,7 @@ watch(
   ([savedConfig, isOpen]) => {
     const syncAction = connectionEditDraftSyncAction(savedConfig?.id ?? null, isOpen, editingId.value);
     if (syncAction === "preserve") return;
+    resetVisibleSchemasState();
     // Hydrate a detached edit draft before form watchers observe it. Do not
     // mutate the saved record or apply create defaults to an ID update. Only
     // flag the update as applied when the prefill really targeted this
@@ -3285,6 +3306,8 @@ watch(
     editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
     editRedisValuePreviewLimitKiB.value = settingsStore.editorSettings.redisValuePreviewLimitKiB;
     if (syncAction === "hydrate" && config) {
+      visibleSchemaDatabaseContext.value = props.initialVisibleSchemaDatabase === "_" ? "" : props.initialVisibleSchemaDatabase;
+      editingTargetFingerprint = connectionConfigFingerprint(savedConfig!);
       appliedConnectionUpdate = connectionUpdate;
       if (connectionUpdate) applyingConnectionUpdate = true;
       clearSavedDatabaseInfo();
@@ -3349,9 +3372,6 @@ watch(
         docs_notes_path: config.docs_notes_path,
         read_only: config.read_only || false,
         show_system_schemas: config.show_system_schemas || false,
-        show_database_links: config.show_database_links !== false,
-        show_native_jobs: config.show_native_jobs !== false,
-        show_user_admin: config.show_user_admin !== false,
         sidebar_auto_load_all_tables: config.sidebar_auto_load_all_tables === true,
         is_production: config.is_production || false,
         production_databases: config.production_databases || [],
@@ -3363,6 +3383,7 @@ watch(
         visible_schemas: config.visible_schemas,
         save_password: config.save_password !== false,
       };
+      rememberNavigationVisibilityDraft();
       if (config.db_type === "sqlserver" && parseSqlServerHostPort(config.host, config.port).portExplicit) {
         markSqlServerPortExplicit();
       }
@@ -3456,12 +3477,17 @@ watch(
       // the saved baseline afterwards so those initial changes are not treated
       // as user edits that invalidate persisted database metadata.
       void nextTick(() => {
-        if (open.value && props.editConfig?.id === config.id && !props.updatePrefill) applySavedDatabaseInfo(config);
+        if (open.value && props.editConfig?.id === config.id) {
+          if (!isSaving.value) rememberNavigationVisibilityDraft();
+          if (!props.updatePrefill) applySavedDatabaseInfo(config);
+        }
       });
     } else {
       appliedConnectionUpdate = null;
       clearSavedDatabaseInfo();
       editingId.value = null;
+      editingTargetFingerprint = undefined;
+      visibleSchemaDatabaseContext.value = undefined;
       selectedConnectionGroupId.value = initialConnectionGroupId();
       form.value = defaultForm();
       redisKeyTemplatesText.value = "";
@@ -4409,8 +4435,8 @@ function setProductionProtectionEnabled(enabled: boolean) {
     form.value.is_production = true;
   }
 }
-const canChooseVisibleSchemas = computed(() => isSchemaAware(form.value.db_type));
-const visibleSchemasDatabaseKey = computed(() => form.value.database || "");
+const canChooseVisibleSchemas = computed(() => isSchemaAware(effectiveDatabaseTypeForConnection(form.value)));
+const visibleSchemasDatabaseKey = computed(() => visibleSchemaDatabaseContext.value ?? form.value.database ?? "");
 const hasVisibleSchemaFilter = computed(() => {
   const key = visibleSchemasDatabaseKey.value;
   return Array.isArray(form.value.visible_schemas?.[key]);
@@ -5039,7 +5065,6 @@ function connectionConfigForSshTunnelTest(id: string): ConnectionConfig {
 
 function connectionConfigForSubmit(id: string, generatedName = "", validatePluginRequired = true): ConnectionConfig {
   let config: LegacyConnectionConfig;
-  let preserveExistingShowDatabaseLinks = false;
   if (isPluginConnection.value) {
     const entry = selectedPluginProvider.value;
     if (!entry) throw new Error(pluginLoadError.value || t("connection.pluginProviderUnavailable"));
@@ -5625,11 +5650,6 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
         } else if (props.editConfig.production_badge_scope == null && config.production_badge_scope === sidebarProductionBadgeScope(props.editConfig)) {
           config.production_badge_scope = undefined;
         }
-        preserveExistingShowDatabaseLinks = keepsExistingTarget && !supportsOracleDatabaseLinks(config.db_type);
-        if (preserveExistingShowDatabaseLinks) {
-          // Generic JDBC has no DB-link toggle; retain the saved target setting.
-          config.show_database_links = props.editConfig?.show_database_links;
-        }
         config.connection_string = config.connection_string?.trim() || "";
       }
     } else if (config.db_type === "prestosql") {
@@ -5703,9 +5723,10 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.visible_databases = Array.isArray(config.visible_databases) && config.visible_databases.length > 0 ? config.visible_databases : undefined;
   }
   if (!config.show_system_schemas) config.show_system_schemas = undefined;
-  if (config.show_database_links !== false && !preserveExistingShowDatabaseLinks) config.show_database_links = undefined;
-  if (config.show_native_jobs !== false) config.show_native_jobs = undefined;
-  if (config.show_user_admin !== false) config.show_user_admin = undefined;
+  delete config.show_database_links;
+  delete config.show_native_jobs;
+  delete config.show_user_admin;
+  delete config.show_extensions;
   if (!config.sidebar_auto_load_all_tables) config.sidebar_auto_load_all_tables = undefined;
   if (config.visible_schemas && Object.keys(config.visible_schemas).length === 0) config.visible_schemas = undefined;
   if (config.agent_java_options && config.agent_java_options.length === 0) config.agent_java_options = undefined;
@@ -6167,6 +6188,7 @@ function clearVisibleNacosNamespaceSelection() {
 }
 
 function showAllVisibleNacosNamespaces() {
+  editedNavigationVisibilityFields.add("visible_databases");
   nacosDynamicAllNamespaces.value = true;
   nacosManagedNamespacesText.value = "";
   form.value.visible_databases = undefined;
@@ -6322,6 +6344,8 @@ function clearVisibleDatabaseSelection() {
 }
 
 function showAllVisibleDatabases() {
+  editedNavigationVisibilityFields.add("visible_databases");
+  editedNavigationVisibilityFields.add("visible_database_patterns");
   if (visibleFilterUsesSchemas.value) {
     handleDraftSchemasShowAll();
     form.value.visible_databases = undefined;
@@ -6341,12 +6365,9 @@ function showAllVisibleDatabases() {
 function saveVisibleDatabaseSelection() {
   if (!visibleDatabaseCanSave.value) return;
   if (visibleFilterUsesSchemas.value) {
-    const key = visibleSchemasDatabaseKey.value;
+    editedNavigationVisibilityFields.add("visible_databases");
     form.value.visible_databases = undefined;
-    form.value.visible_schemas = {
-      ...form.value.visible_schemas,
-      [key]: normalizeVisibleSchemaSelection([...visibleDatabaseSelection.value], visibleDatabaseNames.value),
-    };
+    handleDraftSchemasSave(normalizeVisibleSchemaSelection([...visibleDatabaseSelection.value], visibleDatabaseNames.value));
   } else {
     // "全选"等价于不筛选：存成当时的库名快照会让之后新建的库永远看不到。
     const action = resolveVisibleDatabaseSaveAction({
@@ -6357,6 +6378,10 @@ function saveVisibleDatabaseSelection() {
       configuredPatterns: form.value.visible_database_patterns,
       patterns: visibleDatabasePatternsWithoutMatchAll(form.value.visible_database_patterns),
     });
+    if (action.type === "clear" || action.type === "set") {
+      editedNavigationVisibilityFields.add("visible_databases");
+      editedNavigationVisibilityFields.add("visible_database_patterns");
+    }
     if (action.type === "clear") {
       form.value.visible_databases = undefined;
       form.value.visible_database_patterns = undefined;
@@ -6369,6 +6394,8 @@ function saveVisibleDatabaseSelection() {
 }
 
 function resetVisibleSchemasState() {
+  visibleSchemaRequest++;
+  visibleSchemaPickerDatabase = undefined;
   showVisibleSchemasDialog.value = false;
   isLoadingVisibleSchemas.value = false;
   visibleSchemaNames.value = [];
@@ -6382,36 +6409,50 @@ async function openVisibleSchemasPicker() {
   isLoadingVisibleSchemas.value = true;
   visibleSchemaError.value = "";
   const draftId = buildDraftVisibleSchemasConnectionId(uuid());
+  const request = ++visibleSchemaRequest;
+  const key = visibleSchemasDatabaseKey.value;
+  const target = connectionConfigForSubmit(draftId);
+  const fingerprint = connectionConfigFingerprint(target);
+  const isCurrent = () => open.value && request === visibleSchemaRequest && key === visibleSchemasDatabaseKey.value && fingerprint === connectionConfigFingerprint(connectionConfigForSubmit(draftId));
   try {
     const draftConfig: ConnectionConfig = {
-      ...connectionConfigForSubmit(draftId),
+      ...target,
       id: draftId,
+      database: key,
     };
     await store.addEphemeralConnection(draftConfig);
+    if (!isCurrent()) return;
     await store.ensureConnected(draftId);
-    const names = await api.listSchemas(draftId, visibleSchemasDatabaseKey.value);
+    if (!isCurrent()) return;
+    const names = await api.listSchemas(draftId, key);
+    if (!isCurrent()) return;
     visibleSchemaNames.value = names;
-    const key = visibleSchemasDatabaseKey.value;
+    visibleSchemaPickerDatabase = key;
     const configured = form.value.visible_schemas?.[key];
     visibleSchemaInitialSelection.value = Array.isArray(configured) ? configured : [];
     showVisibleSchemasDialog.value = true;
   } catch (e: any) {
+    if (!isCurrent()) return;
     visibleSchemaNames.value = [];
     visibleSchemaInitialSelection.value = [];
     visibleSchemaError.value = String(e?.message || e);
   } finally {
-    isLoadingVisibleSchemas.value = false;
+    if (request === visibleSchemaRequest) isLoadingVisibleSchemas.value = false;
     store.removeConnection(draftId).catch(() => {});
   }
 }
 
 function handleDraftSchemasSave(selectedNames: string[]) {
-  const key = visibleSchemasDatabaseKey.value;
+  const key = visibleSchemaPickerDatabase ?? visibleSchemasDatabaseKey.value;
+  editedNavigationVisibilityFields.add("visible_schemas");
+  editedVisibleSchemaKeys.add(key);
   form.value.visible_schemas = { ...form.value.visible_schemas, [key]: selectedNames };
 }
 
 function handleDraftSchemasShowAll() {
-  const key = visibleSchemasDatabaseKey.value;
+  const key = visibleSchemaPickerDatabase ?? visibleSchemasDatabaseKey.value;
+  editedNavigationVisibilityFields.add("visible_schemas");
+  editedVisibleSchemaKeys.add(key);
   if (form.value.visible_schemas) {
     const next = { ...form.value.visible_schemas };
     delete next[key];
@@ -6729,6 +6770,8 @@ watch(
     if (applyingConnectionUpdate || !previous || !visibleObjectFiltersNeedReset(previous, current)) return;
     form.value.visible_databases = undefined;
     form.value.visible_schemas = undefined;
+    navigationVisibilityBaseline.visible_databases = undefined;
+    navigationVisibilityBaseline.visible_schemas = undefined;
     resetVisibleDatabaseDraftState();
     resetVisibleSchemasState();
   },
@@ -7037,6 +7080,10 @@ function startSavedConnection(config: ConnectionConfig) {
 }
 
 function validateConnectionUpdateTarget() {
+  if (editingId.value && editingTargetFingerprint !== undefined) {
+    const current = store.getConfig(editingId.value);
+    if (!current || connectionConfigFingerprint(current) !== editingTargetFingerprint) throw new Error(t("navigationPreferences.connectionUnavailable"));
+  }
   const update = props.updatePrefill ?? appliedConnectionUpdate;
   if (!update) return;
   const target = store.getConfig(update.connectionId);
@@ -7056,6 +7103,7 @@ async function save(options: SaveConnectionOptions = {}): Promise<boolean> {
   const connectAfterSave = options.connectAfterSave ?? (!wasEditing && !isJdbcConnection.value);
   const closeOnSuccess = options.closeOnSuccess ?? true;
   const databaseInfoForSave = visibleTestDatabaseInfo.value ?? visibleSavedDatabaseInfo.value;
+  const visibilityOptions = navigationVisibilityEditOptions();
   isSaving.value = true;
   let connectionSaved = false;
   try {
@@ -7068,9 +7116,18 @@ async function save(options: SaveConnectionOptions = {}): Promise<boolean> {
       validateConnectionUpdateTarget();
       await persistGlobalTimeoutDrafts();
       await persistGlobalRedisValuePreviewLimit();
-      await store.updateConnection(updated);
-      savedConfig = updated;
+      validateConnectionUpdateTarget();
+      const previousVisibility = navigationVisibilityFields.map((field) => (field === "show_system_schemas" ? store.getConfig(updated.id)?.[field] === true : JSON.stringify(store.getConfig(updated.id)?.[field])));
+      const persisted = await store.updateConnection(updated, visibilityOptions);
+      if (!persisted) throw new Error(t("navigationPreferences.connectionUnavailable"));
+      savedConfig = { ...updated };
+      for (const field of navigationVisibilityFields) Object.assign(savedConfig, { [field]: persisted[field] });
+      editingTargetFingerprint = connectionConfigFingerprint(persisted);
+      applySavedNavigationVisibility(savedConfig);
       connectionSaved = true;
+      if (navigationVisibilityFields.some((field, index) => previousVisibility[index] !== (field === "show_system_schemas" ? persisted[field] === true : JSON.stringify(persisted[field])))) {
+        void store.refreshNavigationPresentation(updated.id, { visibilityChanged: true }).catch((cause) => toast(t("navigationPreferences.refreshFailed", { message: String(cause) }), 5000));
+      }
       await persistConnectionNoteVisibilityDraft();
     } else {
       const config = withSavedDatabaseInfo(connectionConfigForSubmit(draftTestConnectionId.value), databaseInfoForSave);
@@ -7080,6 +7137,10 @@ async function save(options: SaveConnectionOptions = {}): Promise<boolean> {
       await persistGlobalRedisValuePreviewLimit();
       await store.addConnection(config, selectedConnectionGroupId.value);
       savedConfig = config;
+      const persisted = store.getConfig(config.id) ?? config;
+      for (const field of navigationVisibilityFields) Object.assign(savedConfig, { [field]: persisted[field] });
+      editingTargetFingerprint = connectionConfigFingerprint(persisted);
+      applySavedNavigationVisibility(savedConfig);
       connectionSaved = true;
       await persistConnectionNoteVisibilityDraft();
       draftTestConnectionId.value = uuid();
@@ -10982,37 +11043,13 @@ function openExternalUrl(url: string) {
                     </label>
                   </div>
                 </section>
-                <section
-                  v-if="supportsDoltSystemTables || isSchemaAware(form.db_type) || supportsOracleDatabaseLinks(form.db_type) || sidebarVisibilitySettings.length > 0 || supportsAutomaticTableLoading || form.db_type === 'redis'"
-                  class="connection-advanced-section grid content-start gap-4 rounded-lg border p-4"
-                >
+                <section class="connection-advanced-section grid content-start gap-4 rounded-lg border p-4">
                   <h3 class="text-base font-bold">{{ t("connection.advancedObjectBrowsing") }}</h3>
                   <div v-if="supportsDoltSystemTables" class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.doltShowSystemTables") }}</Label>
                     <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                       <input v-model="showDoltSystemTables" type="checkbox" class="mr-0" />
                       <span class="text-xs text-muted-foreground">{{ t("connection.doltShowSystemTablesHint") }}</span>
-                    </label>
-                  </div>
-                  <div v-if="isSchemaAware(form.db_type)" class="grid grid-cols-4 items-center gap-4">
-                    <Label :class="connectionLabelSmallClass">{{ t("connection.showSystemSchemas") }}</Label>
-                    <label class="col-span-3 flex items-center gap-2 cursor-pointer">
-                      <input type="checkbox" v-model="form.show_system_schemas" class="mr-0" />
-                      <span class="text-xs text-muted-foreground">{{ t("connection.showSystemSchemasHint") }}</span>
-                    </label>
-                  </div>
-                  <div v-if="supportsOracleDatabaseLinks(form.db_type)" class="grid grid-cols-4 items-center gap-4">
-                    <Label :class="connectionLabelSmallClass">{{ t("connection.showDatabaseLinks") }}</Label>
-                    <label class="col-span-3 flex items-center gap-2 cursor-pointer">
-                      <input type="checkbox" v-model="form.show_database_links" class="mr-0" />
-                      <span class="text-xs text-muted-foreground">{{ t("connection.showDatabaseLinksHint") }}</span>
-                    </label>
-                  </div>
-                  <div v-for="setting in sidebarVisibilitySettings" :key="setting.key" class="grid grid-cols-4 items-center gap-4">
-                    <Label :for="`sidebar-${setting.key}`" :class="connectionLabelSmallClass">{{ t(setting.label) }}</Label>
-                    <label class="col-span-3 flex items-center gap-2 cursor-pointer">
-                      <input :id="`sidebar-${setting.key}`" type="checkbox" v-model="form[setting.key]" :aria-label="t(setting.label)" class="mr-0" />
-                      <span class="text-xs text-muted-foreground">{{ t(setting.hint) }}</span>
                     </label>
                   </div>
                   <div v-if="supportsAutomaticTableLoading" class="grid grid-cols-4 items-start gap-4">
@@ -11024,6 +11061,13 @@ function openExternalUrl(url: string) {
                       </label>
                       <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.autoLoadAllTablesHint") }}</p>
                     </div>
+                  </div>
+                  <div v-if="canChooseVisibleSchemas" class="grid grid-cols-4 items-center gap-4">
+                    <Label for="connection-show-system-schemas" :class="connectionLabelSmallClass">{{ t("connection.showSystemSchemas") }}</Label>
+                    <label class="col-span-3 flex cursor-pointer items-center gap-2">
+                      <input id="connection-show-system-schemas" v-model="form.show_system_schemas" type="checkbox" @change="editedNavigationVisibilityFields.add('show_system_schemas')" />
+                      <span class="text-xs text-muted-foreground">{{ t("connection.showSystemSchemasHint") }}</span>
+                    </label>
                   </div>
                   <!-- Documentation notes are a relational-only feature, so this
                      follows the same isSchemaAware gate as the row above. -->
@@ -11432,10 +11476,10 @@ function openExternalUrl(url: string) {
               <ListFilter v-else class="mr-1.5 h-4 w-4" />
               {{ hasVisibleObjectFilter ? visibleObjectSummary : visibleFilterUsesSchemas ? t("contextMenu.configureVisibleObjects") : t("contextMenu.selectVisibleDatabases") }}
             </Button>
-            <Button v-if="canChooseVisibleSchemas && !visibleFilterUsesSchemas && hasVisibleSchemaFilter" variant="outline" class="shrink-0" :disabled="isTesting || isTestingSshTunnel || isSaving || isLoadingVisibleSchemas || !hasRequiredConnectionTarget" @click="openVisibleSchemasPicker">
+            <Button v-if="canChooseVisibleSchemas && !visibleFilterUsesSchemas" variant="outline" class="shrink-0" :disabled="isTesting || isTestingSshTunnel || isSaving || isLoadingVisibleSchemas || !hasRequiredConnectionTarget" @click="openVisibleSchemasPicker">
               <Loader2 v-if="isLoadingVisibleSchemas" class="mr-1.5 h-4 w-4 animate-spin" />
               <ListFilter v-else class="mr-1.5 h-4 w-4" />
-              {{ visibleSchemaSummary }}
+              {{ hasVisibleSchemaFilter ? visibleSchemaSummary : t("visibleSchemas.title") }}
             </Button>
             <Button variant="outline" class="shrink-0" :disabled="isTesting || isTestingSshTunnel || isSaving" @click="testConnection">
               {{ isTesting ? t("connection.testing") : t("connection.test") }}
@@ -11770,11 +11814,8 @@ function openExternalUrl(url: string) {
 
   <VisibleSchemasDialog
     v-model:open="showVisibleSchemasDialog"
-    draft-mode
-    :connection-id="''"
-    :connection-name="form.name || selectedProfile().label"
-    :database="visibleSchemasDatabaseKey"
-    :database-type="form.db_type"
+    :connection-name="`${form.name || selectedProfile().label}${visibleSchemasDatabaseKey ? ` · ${visibleSchemasDatabaseKey}` : ''}`"
+    :database-type="effectiveDatabaseTypeForConnection(form)"
     :username="form.username"
     :draft-schema-names="visibleSchemaNames"
     :draft-initial-selection="visibleSchemaInitialSelection"

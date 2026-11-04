@@ -185,7 +185,7 @@ fn paged_lists_do_not_read_business_bodies_and_escape_search_metacharacters() {
     assert_eq!(queries[0].limit, 50);
     assert!(queries.last().unwrap().sql.contains("USER AS DBX_OWNER"));
     assert!(!queries.last().unwrap().sql.contains("J.OWNER"));
-    assert!(native_job_list_queries(NativeJobCatalogDialect::Oracle, NativeJobKind::Legacy, None, "", 0, 501).is_err());
+    assert!(native_job_list_queries(NativeJobCatalogDialect::Oracle, NativeJobKind::Legacy, None, "", 0, 1001).is_err());
 }
 
 #[test]
@@ -219,4 +219,57 @@ fn dameng_search_preserves_name_owner_and_description_matching_across_all_pages(
         assert!(query.sql.contains("DBX_ROW_NUM > 100 AND DBX_ROW_NUM <= 201"));
         assert!(!query.sql.contains("COMMAND"));
     }
+}
+
+#[test]
+fn scheduler_category_filters_before_paging_and_preserves_thousand_row_sentinel() {
+    use dbx_sql_schema::native_jobs::native_job_list_queries_in_category;
+    use dbx_types::native_jobs::NativeJobSchedulerCategory;
+    for dialect in [NativeJobCatalogDialect::Oracle, NativeJobCatalogDialect::OceanbaseOracle] {
+        for category in [
+            NativeJobSchedulerCategory::Regular,
+            NativeJobSchedulerCategory::Lightweight,
+            NativeJobSchedulerCategory::InMemory,
+        ] {
+            let queries = native_job_list_queries_in_category(
+                dialect,
+                NativeJobKind::Scheduler,
+                Some("Owner's"),
+                "",
+                1000,
+                1000,
+                Some(category),
+            )
+            .unwrap();
+            for query in queries {
+                assert!(query.sql.contains("J.JOB_STYLE"));
+                assert!(query.sql.contains("= 'Owner''s'"));
+                assert!(query.sql.contains("DBX_ROW_NUM > 1000 AND DBX_ROW_NUM <= 2001"));
+                let style_position = query.sql.find("J.JOB_STYLE IN (").unwrap();
+                assert!(style_position < query.sql.find(") WHERE DBX_ROW_NUM").unwrap());
+                for style in category.styles() {
+                    assert!(query.sql.contains(&format!("'{style}'")));
+                }
+                if dialect == NativeJobCatalogDialect::Oracle && category == NativeJobSchedulerCategory::Regular {
+                    assert!(query.sql.contains("NOT EXISTS (SELECT 1 FROM SYS."));
+                    assert!(query.sql.contains("L.PRIV_USER ="));
+                    assert!(query.sql.contains("TO_CHAR(L.JOB)"));
+                    assert!(!query.sql.contains("L.LOG_USER ="));
+                    assert!(!query.sql.contains("JOB_NAME NOT LIKE"));
+                } else {
+                    assert!(!query.sql.contains("NOT EXISTS"));
+                }
+            }
+        }
+    }
+    assert!(native_job_list_queries_in_category(
+        NativeJobCatalogDialect::Oracle,
+        NativeJobKind::Legacy,
+        None,
+        "",
+        0,
+        1000,
+        Some(NativeJobSchedulerCategory::Regular)
+    )
+    .is_err());
 }

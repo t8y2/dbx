@@ -4,7 +4,6 @@ import { isSchemaAware as isSchemaAwareType, isSingleDatabase, usesTreeSchemaMod
 import { sortSidebarNames } from "@/lib/database/databaseTree";
 import { filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
 import type { ConnectionConfig } from "@/types/database";
-import * as api from "@/lib/backend/api";
 
 export function hasSchemaOptionsCacheEntry(options: Record<string, string[]>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(options, key);
@@ -48,7 +47,7 @@ export function useSchemaOptions() {
       loadingSchemaOptions.value[key] = true;
       try {
         await connectionStore.ensureConnected(connectionId);
-        schemaOptions.value[key] = schemaOptionsForConnection(await api.listSchemas(connectionId, database), connection, database);
+        schemaOptions.value[key] = schemaOptionsForConnection(await connectionStore.listCompletionSchemas(connectionId, database), connection, database);
       } catch (e) {
         schemaOptions.value[key] = [];
         throw e;

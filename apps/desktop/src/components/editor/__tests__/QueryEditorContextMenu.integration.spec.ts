@@ -87,8 +87,17 @@ function mountMenu(layout: "full" | "grouped" = "full") {
   return { state, actions, onClose, open, host, settings };
 }
 
-function button(label: string) {
-  const found = [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].find((candidate) => candidate.textContent?.includes(label));
+async function button(label: string) {
+  const find = () => [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].find((candidate) => candidate.textContent?.includes(label));
+  let found = find();
+  if (!found) {
+    for (const group of document.querySelectorAll<HTMLButtonElement>('[data-dbx-context-menu] button[data-menu-action^="group."]')) {
+      group.click();
+      await nextTick();
+      found = find();
+      if (found) break;
+    }
+  }
   expect(found, label).toBeDefined();
   return found!;
 }
@@ -99,9 +108,9 @@ describe("QueryEditor extracted context menu", () => {
     state.selectedSql = "SELECT 1";
     state.executableSql = "SELECT 1";
     await open();
-    const select = button("editor.contextMenu.selectCurrentStatement");
+    const select = await button("editor.contextMenu.selectCurrentStatement");
     expect(select).toBeDefined();
-    const copy = button("editor.contextMenu.copyCurrentStatement");
+    const copy = await button("editor.contextMenu.copyCurrentStatement");
     expect(copy).toBeDefined();
     copy.click();
     expect(actions.copyCurrentStatementFromContextMenu).toHaveBeenCalledExactlyOnceWith();
@@ -117,39 +126,29 @@ describe("QueryEditor extracted context menu", () => {
     expect(labels.indexOf("sidebarMenu.groups.structure")).toBeLessThan(labels.indexOf("sidebarMenu.groups.execution"));
     expect(labels.indexOf("sidebarMenu.groups.copy")).toBeLessThan(labels.indexOf("sidebarMenu.groups.execution"));
     expect(labels.some((label) => label.includes("editor.contextMenu.uppercaseSelection"))).toBe(true);
-    button("sidebarMenu.groups.sqlEditor").click();
+    (await button("sidebarMenu.groups.sqlEditor")).click();
     await nextTick();
-    button("editor.contextMenu.uppercaseSelection").click();
+    (await button("editor.contextMenu.uppercaseSelection")).click();
     expect(actions.convertSelectedSqlCase).toHaveBeenCalledExactlyOnceWith("upper");
     await open();
-    button("sidebarMenu.groups.structure").click();
+    (await button("sidebarMenu.groups.structure")).click();
     await nextTick();
-    button("contextMenu.editStructure").click();
+    (await button("contextMenu.editStructure")).click();
     expect(actions.emitContextObjectAction).toHaveBeenCalledExactlyOnceWith("edit-table-structure");
   });
 
-  it("updates the open menu when switching layouts without clearing the accepted target", async () => {
-    const { state, open, onClose } = mountMenu("grouped");
+  it.each(["grouped", "full"] as const)("keeps customization accessible with %s preferences and preserves the accepted target", async (layout) => {
+    const { state, open } = mountMenu(layout);
     state.selectedSql = "SELECT * FROM orders";
     state.executableSql = state.selectedSql;
     state.contextObjectTarget = { type: "table", name: "orders", database: "demo" };
     await open();
     state.contextObjectTarget = null;
-    button("sidebarMenu.useFull").click();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(document.querySelector("[data-dbx-context-menu]")?.textContent).not.toContain("sidebarMenu.useFull");
+    expect(await button("sidebarMenu.customize")).toBeDefined();
+    (await button("sidebarMenu.groups.structure")).click();
     await nextTick();
-    expect(onClose).not.toHaveBeenCalled();
-    expect(button("sidebarMenu.useFull").getAttribute("aria-pressed")).toBe("true");
-    expect(document.querySelector("[data-dbx-context-menu]")?.textContent).not.toContain("sidebarMenu.customize");
-    expect(button("contextMenu.editStructure").disabled).toBe(false);
-    button("sidebarMenu.useFull").click();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await nextTick();
-    expect(onClose).not.toHaveBeenCalled();
-    expect(button("sidebarMenu.useFull").getAttribute("aria-pressed")).toBe("false");
-    button("sidebarMenu.groups.structure").click();
-    await nextTick();
-    expect(button("contextMenu.editStructure").disabled).toBe(false);
+    expect((await button("contextMenu.editStructure")).disabled).toBe(false);
   });
 
   it("recommends explain, uppercase, lowercase and screenshot while permitting opt-out", async () => {
@@ -157,11 +156,11 @@ describe("QueryEditor extracted context menu", () => {
     state.selectedSql = "SELECT 1";
     state.executableSql = state.selectedSql;
     await open();
-    for (const label of ["toolbar.explainPlan", "editor.contextMenu.uppercaseSelection", "editor.contextMenu.lowercaseSelection", "editor.contextMenu.screenshotSelection"]) expect(button(label).disabled).toBe(false);
+    for (const label of ["toolbar.explainPlan", "editor.contextMenu.uppercaseSelection", "editor.contextMenu.lowercaseSelection", "editor.contextMenu.screenshotSelection"]) expect((await button(label)).disabled).toBe(false);
     settings.editorSettings.sidebarMenuHiddenPrimaryActions["sql-editor"] = ["editor.contextMenu.uppercaseSelection"];
     await open();
     expect([...document.querySelectorAll("[data-dbx-context-menu] button")].some((entry) => entry.textContent === "editor.contextMenu.uppercaseSelection")).toBe(false);
-    button("sidebarMenu.groups.sqlEditor").click();
+    (await button("sidebarMenu.groups.sqlEditor")).click();
     await nextTick();
     // Opting out hides the action for good; it must not reappear in its group (#12791).
     expect([...document.querySelectorAll("[data-dbx-context-menu] button")].some((entry) => entry.textContent === "editor.contextMenu.uppercaseSelection")).toBe(false);
@@ -172,44 +171,46 @@ describe("QueryEditor extracted context menu", () => {
     settings.editorSettings.sidebarMenuPinnedActions = { "sql-editor": ["editor.contextMenu.export"], table: ["contextMenu.exportData"] };
     state.executableSql = "SELECT 1";
     await open();
-    button("editor.contextMenu.export").click();
+    (await button("editor.contextMenu.export")).click();
     await nextTick();
-    expect(button("CSV").disabled).toBe(false);
+    expect((await button("CSV")).disabled).toBe(false);
     expect(settings.editorSettings.sidebarMenuPinnedActions.table).toEqual(["contextMenu.exportData"]);
   });
 
-  it("preserves disabled export guards when flattening the result submenu", async () => {
+  it("preserves the disabled guard on the entire result export submenu", async () => {
     const { open } = mountMenu("grouped");
     await open();
-    button("sidebarMenu.groups.execution").click();
+    const exportMenu = await button("editor.contextMenu.export");
+    expect(exportMenu.disabled).toBe(true);
+    exportMenu.click();
     await nextTick();
-    expect(button("CSV").disabled).toBe(true);
+    expect([...document.querySelectorAll("[data-dbx-context-menu] button")].some((entry) => entry.textContent?.includes("CSV"))).toBe(false);
   });
   it("routes the upstream table structure peek action through the extracted menu", async () => {
     const { state, actions, open } = mountMenu();
     state.contextObjectTarget = { name: "users", database: "demo", schema: "public", type: "table" };
     await open();
-    expect(button("contextMenu.peekStructure").disabled).toBe(false);
-    button("contextMenu.peekStructure").click();
+    expect((await button("contextMenu.peekStructure")).disabled).toBe(false);
+    (await button("contextMenu.peekStructure")).click();
     expect(actions.emitContextObjectAction).toHaveBeenCalledExactlyOnceWith("peek-table-structure");
   });
 
   it("reads freshly synchronized state before Vue flushes child props", async () => {
     const { state, open } = mountMenu();
     await open();
-    expect(button("editor.contextMenu.executeCurrent").disabled).toBe(true);
-    expect(button("editor.contextMenu.copySelection").disabled).toBe(true);
+    expect((await button("editor.contextMenu.executeCurrent")).disabled).toBe(true);
+    expect((await button("editor.contextMenu.copySelection")).disabled).toBe(true);
     await open(() => {
       state.selectedSql = "SELECT 1";
       state.executableSql = "SELECT 1";
     });
-    expect(button("editor.contextMenu.executeSelection").disabled).toBe(false);
-    expect(button("editor.contextMenu.copySelection").disabled).toBe(false);
+    expect((await button("editor.contextMenu.executeSelection")).disabled).toBe(false);
+    expect((await button("editor.contextMenu.copySelection")).disabled).toBe(false);
     await open(() => {
       state.selectedSql = "";
       state.executableSql = "";
     });
-    expect(button("editor.contextMenu.executeCurrent").disabled).toBe(true);
+    expect((await button("editor.contextMenu.executeCurrent")).disabled).toBe(true);
   });
 
   it("keeps whitespace copyable without treating it as executable SQL", async () => {
@@ -218,8 +219,8 @@ describe("QueryEditor extracted context menu", () => {
       state.selectedSql = " \n ";
       state.executableSql = " \n ";
     });
-    expect(button("editor.contextMenu.executeCurrent").disabled).toBe(true);
-    expect(button("editor.contextMenu.copySelection").disabled).toBe(false);
+    expect((await button("editor.contextMenu.executeCurrent")).disabled).toBe(true);
+    expect((await button("editor.contextMenu.copySelection")).disabled).toBe(false);
   });
 
   it("keeps read-only and hidden-execution controls independent", async () => {
@@ -231,9 +232,9 @@ describe("QueryEditor extracted context menu", () => {
     });
     expect(document.querySelector("[data-dbx-context-menu]")!.textContent).not.toContain("editor.contextMenu.executeSelection");
     for (const name of ["cutSelection", "pasteFromClipboard", "commentSelection", "blockCommentSelection", "formatSelectionSql", "compressSelectionSql", "delimitedList", "deleteEmptyLines"]) {
-      expect(button(`editor.contextMenu.${name}`).disabled, name).toBe(true);
+      expect((await button(`editor.contextMenu.${name}`)).disabled, name).toBe(true);
     }
-    expect(button("editor.contextMenu.copySelection").disabled).toBe(false);
+    expect((await button("editor.contextMenu.copySelection")).disabled).toBe(false);
   });
 
   it.each(["redis", "mongodb"] as const)("preserves unsupported SQL controls for %s", async (databaseType) => {
@@ -242,8 +243,8 @@ describe("QueryEditor extracted context menu", () => {
       state.databaseType = databaseType;
       state.selectedSql = "command";
     });
-    expect(button("editor.contextMenu.blockCommentSelection").disabled).toBe(true);
-    expect(button("editor.contextMenu.formatSelectionSql").disabled).toBe(databaseType === "redis");
+    expect((await button("editor.contextMenu.blockCommentSelection")).disabled).toBe(true);
+    expect((await button("editor.contextMenu.formatSelectionSql")).disabled).toBe(databaseType === "redis");
   });
 
   it("retains the resolved star expansion after the menu close callback clears it", async () => {
@@ -255,7 +256,7 @@ describe("QueryEditor extracted context menu", () => {
     await open(() => {
       state.expandSelectStar = expand;
     });
-    button("editor.contextMenu.expandSelectStar").click();
+    (await button("editor.contextMenu.expandSelectStar")).click();
     await nextTick();
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(expand).toHaveBeenCalledTimes(1);
@@ -266,7 +267,7 @@ describe("QueryEditor extracted context menu", () => {
     state.previewContextSql = "UPDATE users SET name = 'before'";
     await open();
     state.previewContextSql = "UPDATE users SET name = 'after'";
-    button("editor.previewChanges").click();
+    (await button("editor.previewChanges")).click();
     expect(actions.requestPreviewChanges).toHaveBeenCalledExactlyOnceWith(state.previewContextSql);
   });
 
@@ -284,52 +285,52 @@ describe("QueryEditor extracted context menu", () => {
     state.executableSql = "SELECT 1";
     if (label.endsWith("executeCurrent")) state.selectedSql = "";
     await open();
-    button(label).click();
+    (await button(label)).click();
     expect(actions[action]).toHaveBeenCalledTimes(1);
   });
 
   it("enables explain plan only when executable SQL exists and explain is permitted", async () => {
     const { state, actions, open } = mountMenu();
     await open();
-    expect(button("toolbar.explainPlan").disabled).toBe(true);
+    expect((await button("toolbar.explainPlan")).disabled).toBe(true);
 
     await open(() => {
       state.executableSql = "SELECT * FROM users";
     });
-    expect(button("toolbar.explainPlan").disabled).toBe(false);
-    button("toolbar.explainPlan").click();
+    expect((await button("toolbar.explainPlan")).disabled).toBe(false);
+    (await button("toolbar.explainPlan")).click();
     expect(actions.explainFromContextMenu).toHaveBeenCalledTimes(1);
 
     await open(() => {
       state.canExplain = false;
     });
-    expect(button("toolbar.explainPlan").disabled).toBe(true);
+    expect((await button("toolbar.explainPlan")).disabled).toBe(true);
   });
 
   it("dynamically switches format SQL label and enablement between selection and whole document", async () => {
     const { state, actions, open } = mountMenu();
     await open();
-    expect(button("toolbar.formatSql").disabled).toBe(true);
+    expect((await button("toolbar.formatSql")).disabled).toBe(true);
 
     await open(() => {
       state.hasContent = true;
       state.executableSql = "SELECT 1";
     });
-    expect(button("toolbar.formatSql").disabled).toBe(false);
-    button("toolbar.formatSql").click();
+    expect((await button("toolbar.formatSql")).disabled).toBe(false);
+    (await button("toolbar.formatSql")).click();
     expect(actions.formatCurrentSql).toHaveBeenCalledTimes(1);
 
     await open(() => {
       state.selectedSql = "SELECT 1";
     });
-    expect(button("editor.contextMenu.formatSelectionSql").disabled).toBe(false);
-    button("editor.contextMenu.formatSelectionSql").click();
+    expect((await button("editor.contextMenu.formatSelectionSql")).disabled).toBe(false);
+    (await button("editor.contextMenu.formatSelectionSql")).click();
     expect(actions.formatCurrentSql).toHaveBeenCalledTimes(2);
 
     await open(() => {
       state.readOnly = true;
     });
-    expect(button("editor.contextMenu.formatSelectionSql").disabled).toBe(true);
+    expect((await button("editor.contextMenu.formatSelectionSql")).disabled).toBe(true);
   });
 
   it.each([
@@ -341,32 +342,32 @@ describe("QueryEditor extracted context menu", () => {
     await open(() => {
       state.contextObjectTarget = { type, name: "users", schema: "public", database: "db" };
     });
-    button(label).click();
+    (await button(label)).click();
     expect(actions.emitContextObjectAction).toHaveBeenCalledExactlyOnceWith(action);
     await open(() => {
       state.contextObjectTarget = null;
     });
-    expect(button("contextMenu.viewData").disabled).toBe(true);
+    expect((await button("contextMenu.viewData")).disabled).toBe(true);
   });
 
   it("routes folding actions from the folding submenu", async () => {
     const { actions, open } = mountMenu();
     await open();
-    button("editor.contextMenu.folding").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    (await button("editor.contextMenu.folding")).click();
     await nextTick();
-    button("editor.contextMenu.toggleFold").click();
+    (await button("editor.contextMenu.toggleFold")).click();
     expect(actions.toggleFoldFromContextMenu).toHaveBeenCalledTimes(1);
 
     await open();
-    button("editor.contextMenu.folding").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    (await button("editor.contextMenu.folding")).click();
     await nextTick();
-    button("editor.contextMenu.foldAll").click();
+    (await button("editor.contextMenu.foldAll")).click();
     expect(actions.foldAllFromContextMenu).toHaveBeenCalledTimes(1);
 
     await open();
-    button("editor.contextMenu.folding").dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    (await button("editor.contextMenu.folding")).click();
     await nextTick();
-    button("editor.contextMenu.unfoldAll").click();
+    (await button("editor.contextMenu.unfoldAll")).click();
     expect(actions.unfoldAllFromContextMenu).toHaveBeenCalledTimes(1);
   });
 });

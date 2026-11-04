@@ -39,16 +39,18 @@ pub async fn native_job_references(
 pub async fn native_job_read(
     state: State<'_, Arc<AppState>>,
     target: NativeJobRef,
+    page_scope: Option<dbx_core::native_jobs::NativeJobPageScope>,
 ) -> Result<NativeJobDetails, String> {
-    jobs::native_job_read_core(&state, &target).await
+    jobs::native_job_read_in_page_core(&state, &target, page_scope.as_ref()).await
 }
 
 #[tauri::command]
 pub async fn native_job_prepare(
     state: State<'_, Arc<AppState>>,
     mutation: NativeJobRequest,
+    page_scope: Option<dbx_core::native_jobs::NativeJobPageScope>,
 ) -> Result<NativeJobPreparedPlan, String> {
-    jobs::native_job_prepare_core(&state, mutation).await
+    jobs::native_job_prepare_in_page_core(&state, mutation, page_scope.as_ref()).await
 }
 
 #[tauri::command]
@@ -218,12 +220,14 @@ pub async fn list_schemas(
     connection_id: String,
     database: String,
     apply_visible_filter: Option<bool>,
+    show_system_schemas: Option<bool>,
 ) -> Result<Vec<String>, String> {
-    dbx_core::schema::list_schemas_core_with_visible_filter(
+    dbx_core::schema::list_schemas_core_with_options(
         &state,
         &connection_id,
         &database,
         apply_visible_filter.unwrap_or(false),
+        show_system_schemas,
     )
     .await
 }
@@ -233,8 +237,10 @@ pub async fn list_schema_infos(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: String,
+    show_system_schemas: Option<bool>,
 ) -> Result<Vec<db::SchemaInfo>, String> {
-    dbx_core::schema::list_schema_infos_core(&state, &connection_id, &database).await
+    dbx_core::schema::list_schema_infos_core_with_system_schemas(&state, &connection_id, &database, show_system_schemas)
+        .await
 }
 
 #[tauri::command]
@@ -371,6 +377,7 @@ pub async fn list_objects(
     identity_mode: Option<dbx_core::schema::MetadataIdentityMode>,
     exact_identity: Option<bool>,
     lightweight: Option<bool>,
+    directory_page: Option<bool>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
     let app = Arc::clone(state.inner());
     let operation_app = Arc::clone(&app);
@@ -432,7 +439,7 @@ pub async fn list_objects(
             offset,
             object_types.as_deref(),
             table_name_filter.as_ref(),
-            &dbx_core::schema::MetadataReadOptions { identity_mode, catalog },
+            &dbx_core::schema::MetadataReadOptions { identity_mode, catalog, directory_page },
             lightweight,
         )
         .await
@@ -490,7 +497,7 @@ pub async fn get_object_source(
         object_type,
         signature.as_deref(),
         relation_name.as_deref(),
-        &dbx_core::schema::MetadataReadOptions { identity_mode, catalog },
+        &dbx_core::schema::MetadataReadOptions { identity_mode, catalog, ..Default::default() },
     )
     .await
 }
@@ -757,7 +764,7 @@ pub async fn list_triggers(
         &database,
         &schema,
         &table,
-        &dbx_core::schema::MetadataReadOptions { identity_mode, catalog },
+        &dbx_core::schema::MetadataReadOptions { identity_mode, catalog, ..Default::default() },
     )
     .await
 }

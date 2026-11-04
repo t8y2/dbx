@@ -1,9 +1,41 @@
 import { describe, expect, it } from "vitest";
-import { activeTabSidebarTarget, matchesTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
+import { activeTabSidebarTarget, matchesTarget, findNodePathForActiveTab, expandSidebarLocatePath } from "@/lib/sidebar/sidebarActiveTabTarget";
+import { oracleSchemaJobGroups, nativeJobObjectNode } from "@/lib/sidebar/oracleObjectNavigation";
 import { findLoadedTableTargetForCandidate, queryCursorTableCandidate } from "@/lib/sql/queryCursorTableTarget";
 import type { QueryTab, TreeNode } from "@/types/database";
 
 describe("sidebar active-tab targets", () => {
+  it("locates scoped jobs by schema, kind and exact selection instead of the removed global entry", () => {
+    const schema: TreeNode = { id: "schema", type: "schema", label: "A", connectionId: "c", database: "DB", schema: "A" };
+    schema.children = oracleSchemaJobGroups(schema);
+    const legacy = schema.children[0]!.children![3]!;
+    const scheduler = schema.children[0]!.children![0]!;
+    const selection = { kind: "scheduler" as const, owner: "A", name: "SAME" };
+    scheduler.children = [nativeJobObjectNode(scheduler, selection, "SAME")];
+    legacy.children = [nativeJobObjectNode(legacy, { kind: "legacy", jobId: "900719925474099312345" }, "SAME")];
+    const tab = { mode: "database-jobs", connectionId: "c", database: "DB", nativeJobPage: { schema: "A", kind: "scheduler", schedulerCategory: "regular" }, nativeJobAdmin: selection } as QueryTab;
+    const path = findNodePathForActiveTab(tab, [schema])!;
+    expect(path.map((node) => node.type)).toEqual(["schema", "native-job-scheduler", "native-job-group", "native-job"]);
+    expandSidebarLocatePath(path, (node) => node.type === "schema" || node.type === "native-job-group");
+    expect(schema.children[0]?.isExpanded).toBe(true);
+    expect(scheduler.isExpanded).toBe(true);
+    expect(scheduler.children[0]?.isExpanded).toBe(false);
+    const target = activeTabSidebarTarget(tab)!;
+    expect(matchesTarget(legacy.children[0]!, target)).toBe(false);
+    expect(matchesTarget({ ...scheduler.children[0]!, database: "Other" }, target)).toBe(false);
+    expect(matchesTarget({ ...scheduler.children[0]!, nativeJobPage: { schema: "B", kind: "scheduler" }, nativeJobSelection: { ...selection, owner: "B" } }, target)).toBe(false);
+    expect(findNodePathForActiveTab({ ...tab, nativeJobAdmin: undefined }, [schema])?.at(-1)).toBe(scheduler);
+    expect(activeTabSidebarTarget({ ...tab, nativeJobPage: undefined })).toEqual({ type: "connection", connectionId: "c" });
+  });
+  it("locates an old unclassified Scheduler page at the job parent without guessing a style", () => {
+    const schema: TreeNode = { id: "schema", type: "schema", label: "A", connectionId: "c", database: "DB", schema: "A" };
+    schema.children = oracleSchemaJobGroups(schema);
+    for (const nativeJobAdmin of [undefined, { kind: "scheduler" as const, owner: "A", name: "OLD" }]) {
+      const tab = { mode: "database-jobs", connectionId: "c", database: "DB", nativeJobPage: { schema: "A", kind: "scheduler" }, nativeJobAdmin } as QueryTab;
+      expect(findNodePathForActiveTab(tab, [schema])?.at(-1)).toBe(schema.children[0]);
+      expect(schema.children[0]!.children!.every((node) => !matchesTarget(node, activeTabSidebarTarget(tab)!))).toBe(true);
+    }
+  });
   it("selects the connection node for a database-browser tab", () => {
     const target = activeTabSidebarTarget({ mode: "databases", connectionId: "pg-1" } as QueryTab);
 
@@ -60,6 +92,12 @@ describe("locating workspace tabs", () => {
     expect(matchesTarget({ type: "schema", connectionId: "conn", database: "db", schema: "public", label: "public", catalog: "external" } as TreeNode, target!)).toBe(true);
   });
 
+  it("locates a saved query by its execution context without changing its saved-file association", () => {
+    const tab = { mode: "query", connectionId: "conn", database: "DB", schema: "A", catalog: "catalog", savedSqlId: "retained-file", sql: "SELECT 'draft'" } as QueryTab;
+    expect(activeTabSidebarTarget(tab)).toEqual({ type: "query-context", connectionId: "conn", database: "DB", schema: "A", catalog: "catalog" });
+    expect(tab).toMatchObject({ savedSqlId: "retained-file", sql: "SELECT 'draft'" });
+  });
+
   it.each(["database", "mongo-db", "vector-database"] as const)("locates an object browser in a %s tree", (type) => {
     const target = activeTabSidebarTarget({ mode: "objects", connectionId: "conn", database: "db" } as QueryTab);
     expect(matchesTarget({ type, connectionId: "conn", database: "db", label: "db" } as TreeNode, target!)).toBe(true);
@@ -78,7 +116,15 @@ describe("locating workspace tabs", () => {
     expect(matchesTarget({ ...node, catalog: "other" }, target!)).toBe(false);
   });
 
-  it.each(["mq", "redis-dashboard", "nacos-dashboard", "plugin-workbench"] as const)("locates the connection for %s without an object target", (mode) => {
+  it.each(["mysql-dashboard", "postgres-dashboard", "xugu-dashboard", "nacos-dashboard", "solr-admin", "processlist"] as const)("locates the connection for %s", (mode) => {
+    const target = activeTabSidebarTarget({ mode, connectionId: "conn" } as QueryTab);
+    expect(target).toEqual({ type: "connection", connectionId: "conn" });
+    expect(matchesTarget({ id: "conn", label: "renamed", type: "connection", connectionId: "conn" }, target!)).toBe(true);
+    expect(matchesTarget({ id: "other", label: "renamed", type: "connection", connectionId: "other" }, target!)).toBe(false);
+    expect(activeTabSidebarTarget({ mode, connectionId: "" } as QueryTab)).toBeNull();
+  });
+
+  it.each(["mq", "redis-dashboard", "plugin-workbench"] as const)("locates the connection for %s without an object target", (mode) => {
     expect(activeTabSidebarTarget({ mode, connectionId: "conn" } as QueryTab)).toEqual({ type: "connection", connectionId: "conn" });
     expect(activeTabSidebarTarget({ mode, connectionId: "" } as QueryTab)).toBeNull();
   });
@@ -106,13 +152,12 @@ describe("management page sidebar targets", () => {
     ["dameng-users", "dameng-users"],
     ["dameng-roles", "dameng-roles"],
     ["dameng-jobs", "dameng-job-admin"],
-    ["database-jobs", "database-job-admin"],
-  ] as const)("locates %s at its dedicated %s node", (mode, nodeType) => {
+  ] as const)("locates %s at its connection instead of the retired %s node", (mode, nodeType) => {
     const target = activeTabSidebarTarget({ mode, connectionId: "conn" } as QueryTab);
-    expect(target).toEqual({ type: "management", connectionId: "conn", nodeType });
+    expect(target).toEqual({ type: "connection", connectionId: "conn" });
     const node = { id: "management", type: nodeType, connectionId: "conn", label: "translated label" } as TreeNode;
-    expect(matchesTarget(node, target!)).toBe(true);
-    expect(matchesTarget({ ...node, type: "connection" }, target!)).toBe(false);
+    expect(matchesTarget(node, target!)).toBe(false);
+    expect(matchesTarget({ ...node, type: "connection" }, target!)).toBe(true);
     expect(matchesTarget({ ...node, connectionId: "other" }, target!)).toBe(false);
     expect(activeTabSidebarTarget({ mode, connectionId: "" } as QueryTab)).toBeNull();
   });

@@ -77,6 +77,10 @@ function findMore(nodes: TreeNode[]): TreeNode | undefined {
   }
 }
 
+function objectChildren(schema: TreeNode): TreeNode[] {
+  return (schema.children ?? []).flatMap((node) => (node.type.startsWith("group-") ? (node.children ?? []) : [node]));
+}
+
 describe("OceanBase Oracle sidebar paging (#11418)", () => {
   function trigger(name: string, id: string): ObjectInfo {
     return {
@@ -135,11 +139,11 @@ describe("OceanBase Oracle sidebar paging (#11418)", () => {
     const schema = store.treeNodes[0].children![0].children![0];
     schema.children = [];
     await store.loadTables(connection.id, "APP", "APP", { force: true });
-    expect(listObjects.mock.calls.filter((args) => args[10] !== true)).toHaveLength(1);
-    expect(listObjects.mock.calls[0][3]).toContain("TRIGGER");
-    expect(listObjects.mock.calls[0][10]).toEqual({ identityMode: "exact" });
+    const triggerCalls = listObjects.mock.calls.filter((args) => (args[3] as string[]).includes("TRIGGER"));
+    expect(triggerCalls).toHaveLength(1);
+    expect(triggerCalls[0][10]).toEqual({ identityMode: "exact" });
     expect(listTables).not.toHaveBeenCalled();
-    expect(schema.children![0]).toMatchObject({ type: "trigger", objectName: " Trigger ", schema: " Trigger Owner ", parentSchema: " Parent Owner " });
+    expect(objectChildren(schema).find((node) => node.type === "trigger")).toMatchObject({ type: "trigger", objectName: " Trigger ", schema: " Trigger Owner ", parentSchema: " Parent Owner " });
   });
 
   it("keeps the parent entry bound to the returned trigger owner rather than the table owner", async () => {
@@ -151,6 +155,47 @@ describe("OceanBase Oracle sidebar paging (#11418)", () => {
     await store.loadTriggers(connection.id, "APP", " Parent ", " Parent Owner ", group.id, " Catalog ");
     expect(listTriggers).toHaveBeenCalledWith(connection.id, "APP", " Parent Owner ", " Parent ", " Catalog ", { identityMode: "exact", catalog: " Catalog " });
     expect(group.children![0]).toMatchObject({ type: "trigger", schema: " Trigger Owner ", objectName: " Trigger ", parentSchema: " Parent Owner ", parentName: " Parent ", parentType: "view", catalog: " Catalog " });
+  });
+
+  it("replaces a pending native index directory on refresh and leaves partial counts unknown", async () => {
+    let oldPage!: (rows: ObjectInfo[]) => void;
+    let lastPage!: (rows: ObjectInfo[]) => void;
+    let firstReads = 0;
+    const index = (name: string): ObjectInfo => ({ name, object_type: "INDEX", schema: "APP", parent_schema: "APP", parent_name: "T" });
+    const listObjects = vi.fn(async (...args: unknown[]) => {
+      if (args[10] !== true) return [];
+      if (Number(args[6]) === 1000)
+        return new Promise<ObjectInfo[]>((resolve) => {
+          lastPage = resolve;
+        });
+      if (++firstReads === 1)
+        return new Promise<ObjectInfo[]>((resolve) => {
+          oldPage = resolve;
+        });
+      return Array.from({ length: 1001 }, (_, position) => index(`I_${position}`));
+    });
+    const { store } = await setup(listObjects);
+    store.connections = [{ ...connection, db_type: "oracle" }];
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+    const schema = store.treeNodes[0].children![0].children![0];
+    schema.children = [];
+    const initial = store.loadTables(connection.id, "APP", "APP", { force: true });
+    await vi.waitFor(() => expect(oldPage).toBeDefined());
+    const refreshed = store.loadTables(connection.id, "APP", "APP", { force: true });
+    await vi.waitFor(() => expect(firstReads).toBe(2));
+    await refreshed;
+    await vi.waitFor(() => expect(lastPage).toBeDefined());
+    const group = schema.children!.find((node) => node.type === "group-database-indexes")!;
+    expect(group.children?.filter((node) => node.type === "index")).toHaveLength(1000);
+    expect(group.objectCount).toBeUndefined();
+    expect(group.oracleNavigationStatus?.kind).toBe("unknown");
+    lastPage([index("I_1000")]);
+    await vi.waitFor(() => expect(group.objectCount).toBe(1001));
+    oldPage([index("STALE")]);
+    await initial;
+    expect(objectChildren(schema).some((node) => node.objectName === "STALE")).toBe(false);
+    expect(firstReads).toBe(2);
   });
 
   it("does not impose exact metadata on old mixed-object reads because of an Oracle-compatible JDBC label", async () => {
@@ -180,20 +225,24 @@ describe("OceanBase Oracle sidebar paging (#11418)", () => {
     schema.id = `${connection.id}:APP: Mixed `;
     schema.schema = " Mixed ";
     schema.children = [];
-    await store.loadTables(connection.id, "APP", " Mixed ", { force: true });
-    await vi.waitFor(() => expect(schema.children?.find((node) => node.type === "index")).toMatchObject({ objectName: " Ix(a) ", schema: " Mixed ", parentSchema: " Other ", parentName: " T(a) ", objectScope: "schema" }));
-    expect(listObjects).toHaveBeenCalledWith(connection.id, "APP", " Mixed ", ["INDEX"], undefined, 3, 0, undefined, undefined, undefined, true);
     const api = await import("@/lib/backend/api");
-    expect(vi.mocked(api.saveSchemaCache).mock.calls.every((call) => !JSON.stringify(call[1]).includes('"objectScope":"schema"'))).toBe(true);
+    const saved: string[] = [];
+    vi.mocked(api.saveSchemaCache).mockImplementation(async (_key, value) => {
+      saved.push(JSON.stringify(value));
+    });
+    await store.loadTables(connection.id, "APP", " Mixed ", { force: true });
+    await vi.waitFor(() => expect(objectChildren(schema).find((node) => node.type === "index")).toMatchObject({ objectName: " Ix(a) ", schema: " Mixed ", parentSchema: " Other ", parentName: " T(a) ", objectScope: "schema" }));
+    expect(listObjects).toHaveBeenCalledWith(connection.id, "APP", " Mixed ", ["INDEX"], undefined, dbType === "dameng" ? 3 : 1001, 0, undefined, undefined, undefined, true);
+    expect(saved.every((value) => !value.includes('"objectScope":"schema"'))).toBe(true);
   });
 
-  it.each(["table-first", "index-first"])("pages flat indexes and tables independently (%s)", async (order) => {
+  it.each(["table-first", "index-first"])("retains custom-driver flat index and table paging (%s)", async (order) => {
     const indexes: ObjectInfo[] = ["I1", "I2", "I3", "I4"].map((name) => ({ name, object_type: "INDEX", schema: "APP", parent_schema: "OTHER", parent_name: "T" }));
     const tables = ["T1", "T2", "T3", "T4"].map((name) => ({ name, table_type: "TABLE" }));
     const listObjects = vi.fn(async (...args: unknown[]) => (args[10] === true ? indexes.slice(Number(args[6] ?? 0), Number(args[6] ?? 0) + Number(args[5] ?? indexes.length)) : []));
     const listTables = vi.fn(async (...args: unknown[]) => tables.slice(Number(args[5] ?? 0), Number(args[5] ?? 0) + Number(args[4] ?? tables.length)));
     const { store } = await setup(listObjects, listTables);
-    store.connections = [{ ...connection, db_type: "oracle" }];
+    store.connections = [{ ...connection, db_type: "oracle", driver_profile: "oracle-legacy" }];
     const { useSettingsStore } = await import("@/stores/settingsStore");
     useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
     const schema = store.treeNodes[0].children![0].children![0];
@@ -219,7 +268,7 @@ describe("OceanBase Oracle sidebar paging (#11418)", () => {
     expect(vi.mocked(api.saveSchemaCache).mock.calls.every((call) => !JSON.stringify(call[1]).includes('"objectType":"INDEX"'))).toBe(true);
   });
 
-  it("keeps the captured flat index search on later pages and clears it on refresh", async () => {
+  it("keeps the custom-driver flat index search on later pages and clears it on refresh", async () => {
     const indexes: ObjectInfo[] = ["needle1", "needle2", "needle3", "other"].map((name) => ({ name, object_type: "INDEX", schema: "APP", parent_schema: "APP", parent_name: "T" }));
     const listObjects = vi.fn(async (...args: unknown[]) => {
       if (args[10] !== true) return [];
@@ -227,6 +276,7 @@ describe("OceanBase Oracle sidebar paging (#11418)", () => {
       return filtered.slice(Number(args[6] ?? 0), Number(args[6] ?? 0) + Number(args[5]));
     });
     const { store } = await setup(listObjects);
+    store.connections = [{ ...connection, driver_profile: "oracle-legacy" }];
     const { useSettingsStore } = await import("@/stores/settingsStore");
     useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
     const schema = store.treeNodes[0].children![0].children![0];
@@ -251,7 +301,7 @@ describe("OceanBase Oracle sidebar paging (#11418)", () => {
     ).toEqual([undefined, 3, 0]);
   });
 
-  it("rejects a late supplemental index page after the parent is refreshed", async () => {
+  it("rejects a late custom-driver supplemental index page after refresh", async () => {
     let release!: (objects: ObjectInfo[]) => void;
     let exactCalls = 0;
     const listObjects = vi.fn((...args: unknown[]) => {
@@ -263,6 +313,7 @@ describe("OceanBase Oracle sidebar paging (#11418)", () => {
       return Promise.resolve([{ name: "CURRENT", object_type: "INDEX", schema: "APP", parent_schema: "APP", parent_name: "T" }]);
     });
     const { store } = await setup(listObjects);
+    store.connections = [{ ...connection, driver_profile: "oracle-legacy" }];
     const { useSettingsStore } = await import("@/stores/settingsStore");
     useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
     const schema = store.treeNodes[0].children![0].children![0];
@@ -277,7 +328,7 @@ describe("OceanBase Oracle sidebar paging (#11418)", () => {
     expect(schema.children?.some((node) => node.objectName === "CURRENT")).toBe(true);
   });
 
-  it("does not start an exact page from a retired ordinary supplement", async () => {
+  it("does not start a custom-driver exact page from a retired ordinary supplement", async () => {
     let release!: (objects: ObjectInfo[]) => void;
     let ordinaryCalls = 0;
     let exactCalls = 0;
@@ -293,7 +344,7 @@ describe("OceanBase Oracle sidebar paging (#11418)", () => {
       return Promise.resolve([]);
     });
     const { store } = await setup(listObjects);
-    store.connections = [{ ...connection, db_type: "oracle" }];
+    store.connections = [{ ...connection, db_type: "oracle", driver_profile: "oracle-legacy" }];
     const { useSettingsStore } = await import("@/stores/settingsStore");
     useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
     const schema = store.treeNodes[0].children![0].children![0];
@@ -308,12 +359,12 @@ describe("OceanBase Oracle sidebar paging (#11418)", () => {
     expect(exactCalls).toBe(1);
   });
 
-  it("replaces only the index window when a flat index page anchor moves", async () => {
+  it("replaces only the custom-driver index window when its anchor moves", async () => {
     const index = (name: string): ObjectInfo => ({ name, object_type: "INDEX", schema: "APP", parent_schema: "APP", parent_name: "T" });
     const pages = [[index("I1"), index("I2"), index("I3")], [index("I4")], [index("I2"), index("I3"), index("I4")]];
     const listObjects = vi.fn(async (...args: unknown[]) => (args[10] === true ? pages.shift()! : []));
     const { store } = await setup(listObjects, vi.fn().mockResolvedValue([{ name: "TABLE_KEPT", table_type: "TABLE" }]));
-    store.connections = [{ ...connection, db_type: "oracle" }];
+    store.connections = [{ ...connection, db_type: "oracle", driver_profile: "oracle-legacy" }];
     const { useSettingsStore } = await import("@/stores/settingsStore");
     useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
     const schema = store.treeNodes[0].children![0].children![0];
@@ -331,12 +382,13 @@ describe("OceanBase Oracle sidebar paging (#11418)", () => {
     ]);
   });
 
-  it("keeps flat legacy objects usable while exposing an exact-index read error", async () => {
+  it("keeps custom-driver flat objects usable while exposing an exact-index read error", async () => {
     const listObjects = vi.fn().mockImplementation(async (...args: unknown[]) => {
       if (args[10] === true) throw new Error("Cannot verify exact_metadata_identity_v1");
       return [{ name: "T", object_type: "TABLE", schema: "APP" }];
     });
     const { store } = await setup(listObjects);
+    store.connections = [{ ...connection, driver_profile: "oracle-legacy" }];
     const { useSettingsStore } = await import("@/stores/settingsStore");
     useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
     const schema = store.treeNodes[0].children![0].children![0];
@@ -406,33 +458,26 @@ describe("OceanBase Oracle sidebar paging (#11418)", () => {
     expect(group.children?.some((node) => node.objectName === "OLD_CAPABLE_PROCESS")).toBe(false);
   });
 
-  it("uses one bounded object stream in simple mode, retaining a package and its body across pages", async () => {
-    const objects: ObjectInfo[] = [
-      { name: "A_TABLE", schema: "APP", object_type: "TABLE", comment: "table comment" },
-      { name: "SHARED", schema: "APP", object_type: "PACKAGE" },
-      { name: "SHARED", schema: "APP", object_type: "PACKAGE_BODY" },
-    ];
-    let ordinaryPage = 0;
-    const listObjects = vi.fn().mockImplementation(async (...args: unknown[]) => (args[10] === true ? [] : ordinaryPage++ === 0 ? objects : [objects[2]]));
+  it("automatically reads the shared directory in simple mode, retaining a package and its body across pages", async () => {
+    const objects: ObjectInfo[] = [...Array.from({ length: 999 }, (_, index) => procedure(`P_${index}`)), { name: "SHARED", schema: "APP", object_type: "PACKAGE" }, { name: "SHARED", schema: "APP", object_type: "PACKAGE_BODY" }];
+    const listObjects = vi.fn().mockImplementation(async (...args: unknown[]) => objects.filter((object) => (args[3] as string[]).includes(object.object_type)).slice(Number(args[6] ?? 0), Number(args[6] ?? 0) + Number(args[5])));
     const { store } = await setup(listObjects);
     const { useSettingsStore } = await import("@/stores/settingsStore");
     useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
     const schema = store.treeNodes[0].children![0].children![0];
     schema.children = [];
     await store.loadTables(connection.id, "APP", "APP", { force: true });
-    expect(listObjects.mock.calls.filter((call) => call[10] !== true)).toHaveLength(1);
-    expect(listObjects.mock.calls[0]?.[3]).toEqual(expect.arrayContaining(["TABLE", "PACKAGE", "PACKAGE_BODY"]));
-    expect(listObjects.mock.calls[0]?.slice(5, 7)).toEqual([3, 0]);
-    expect(schema.children?.map((node) => node.type)).toContain("package");
-    expect(schema.children?.map((node) => node.type)).not.toContain("package-body");
-    await store.loadMoreObjectGroupChildren(schema.children!.at(-1)!);
-    const ordinaryCalls = listObjects.mock.calls.filter((call) => call[10] !== true);
-    expect(ordinaryCalls).toHaveLength(2);
-    expect(ordinaryCalls[1]?.[3]).toEqual(ordinaryCalls[0]?.[3]);
-    expect(ordinaryCalls[1]?.slice(5, 7)).toEqual([3, 2]);
+    await vi.waitFor(() => expect(objectChildren(schema).some((node) => node.type === "package-body")).toBe(true));
+    const ordinaryCalls = listObjects.mock.calls.filter((call) => call[10]?.directoryPage);
+    expect(ordinaryCalls.map((call) => call.slice(5, 7))).toEqual([
+      [1000, 0],
+      [1000, 1000],
+    ]);
+    expect(ordinaryCalls[0][3]).toEqual(expect.arrayContaining(["PACKAGE", "PACKAGE_BODY"]));
+    expect(objectChildren(schema).some((node) => node.type === "load-more")).toBe(false);
     expect(
-      schema.children
-        ?.filter((node) => node.label === "SHARED")
+      objectChildren(schema)
+        .filter((node) => node.label === "SHARED")
         .map((node) => node.type)
         .sort(),
     ).toEqual(["package", "package-body"]);
@@ -463,7 +508,10 @@ describe("OceanBase Oracle sidebar paging (#11418)", () => {
     store.setSidebarTableSearchQuery(schema.id, "needle");
     await store.refreshSidebarTableSearch(schema.id);
     expect(listObjects.mock.calls[0]?.slice(3, 7)).toEqual([["TABLE"], "needle", 3, 0]);
-    await store.loadMoreObjectGroupChildren(schema.children!.at(-1)!, { searchFilter: "needle" });
+    await store.loadMoreObjectGroupChildren(
+      schema.children!.find((node) => node.type === "load-more")!,
+      { searchFilter: "needle" },
+    );
     expect(listObjects.mock.calls[1]?.slice(3, 7)).toEqual([["TABLE"], "needle", 3, 2]);
   });
 

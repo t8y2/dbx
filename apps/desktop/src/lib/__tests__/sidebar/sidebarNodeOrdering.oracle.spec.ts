@@ -3,6 +3,50 @@ import { orderSidebarConnectionUtilitiesForDisplay, sortSidebarTreeChildrenForPa
 import type { TreeNode } from "@/types/database";
 
 describe("Oracle sidebar ordering", () => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("keeps public objects before pinned schemas at connection and database level (%s)", (engine) => {
+    for (const type of ["connection", "database"] as const) {
+      const children: TreeNode[] = [
+        { id: "default", type: "schema", label: "Z", pinned: true },
+        { id: "public", type: "oracle-shared-objects", label: "tree.publicObjects" },
+        { id: "a", type: "schema", label: "A" },
+      ];
+      const sorted = sortSidebarTreeChildrenForParent({ type }, children, engine);
+      expect(sorted.map((node) => node.id)).toEqual(["public", "a", "default"]);
+      const parent: TreeNode = { id: "parent", type, label: "parent", children };
+      const root: TreeNode = type === "database" ? { id: "c", type: "connection", label: "c", children: [parent] } : parent;
+      const projected = orderSidebarConnectionUtilitiesForDisplay([root]);
+      const result = type === "database" ? projected[0].children![0] : projected[0];
+      expect(result.children!.map((node) => node.id)).toEqual(["public", "default", "a"]);
+      expect(children.map((node) => node.id)).toEqual(["default", "public", "a"]);
+      expect(orderSidebarConnectionUtilitiesForDisplay(projected)).toBe(projected);
+    }
+  });
+
+  it("orders saved queries, extensions and public objects ahead of a cached pinned schema", () => {
+    const children: TreeNode[] = [
+      { id: "schema", type: "schema", label: "A", pinned: true },
+      { id: "public", type: "oracle-shared-objects", label: "tree.tenantObjects" },
+      { id: "ext", type: "connection-extensions", label: "tree.extensions" },
+      { id: "sql", type: "saved-sql-root", label: "sql" },
+    ];
+    const projected = orderSidebarConnectionUtilitiesForDisplay([{ id: "c", type: "connection", label: "c", children }]);
+    expect(projected[0].children!.map((node) => node.id)).toEqual(["sql", "ext", "public", "schema"]);
+    expect(sortSidebarTreeChildrenForParent({ type: "connection" }, children, "oracle").map((node) => node.id)).toEqual(["sql", "ext", "public", "schema"]);
+  });
+
+  it("keeps extensions ahead of schemas in both ordering paths without moving saved queries", () => {
+    const children: TreeNode[] = [
+      { id: "z", type: "schema", label: "Z" },
+      { id: "ext", type: "connection-extensions", label: "zzz extensions" },
+      { id: "a", type: "schema", label: "A" },
+      { id: "sql", type: "saved-sql-root", label: "sql" },
+    ];
+    const sorted = sortSidebarTreeChildrenForParent({ type: "connection" }, children, "oracle");
+    expect(sorted.map((node) => node.id)).toEqual(["sql", "ext", "a", "z"]);
+    const projected = orderSidebarConnectionUtilitiesForDisplay([{ id: "c", type: "connection", label: "c", children }]);
+    expect(projected[0].children!.map((node) => node.id)).toEqual(["sql", "ext", "z", "a"]);
+    expect(children.map((node) => node.id)).toEqual(["z", "ext", "a", "sql"]);
+  });
   it("projects an already-loaded grouped connection without changing schema order, nested objects, or the live tree", () => {
     const children: TreeNode[] = [
       { id: "links", type: "oracle-db-links", label: "links" },

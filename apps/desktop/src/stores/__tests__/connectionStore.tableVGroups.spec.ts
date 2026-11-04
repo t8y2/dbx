@@ -74,9 +74,11 @@ describe("connectionStore table virtual groups during disk reload", () => {
     await store.loadTables(config.id, "app", schema, { force: true });
     const liveDatabase = store.treeNodes[0]!.children!.find((node) => node.id === database.id)!;
     const parent = schema ? liveDatabase.children!.find((node) => node.schema === schema)! : liveDatabase;
-    const container = display === "simple" ? parent : parent.children!.find((node) => node.type === "group-tables")!;
-    if (display === "grouped") await store.loadObjectGroupChildren(container, { force: true });
-    return { api, store, container, member, scope };
+    const container = parent.children!.find((node) => node.type === "group-tables")!;
+    expect(vi.mocked(api.listTables).mock.calls.some((call) => call[4] === 1000)).toBe(true);
+    // Both displays use this canonical group for foreground table search and paging.
+    await store.loadObjectGroupChildren(container, { force: true });
+    return { api, store, container, member, scope, parent };
   }
 
   it.each(["simple", "grouped"] as const)("keeps off-page group members after clearing table search in %s display", async (display) => {
@@ -220,20 +222,21 @@ describe("connectionStore table virtual groups during disk reload", () => {
   });
 
   it.each(["simple", "grouped"] as const)("removes a deleted table from a complete %s reload without synthesizing a row", async (display) => {
-    const { store, container, member, api, scope } = await paginatedGroupFixture(display);
+    const { store, container, member, api, scope, parent } = await paginatedGroupFixture(display);
     vi.mocked(api.listTables)
       .mockClear()
       .mockResolvedValue([{ name: "a_first", table_type: "TABLE" }]);
     if (display === "simple") await store.loadTables(scope.connectionId, scope.database, undefined, { force: true });
     else await store.loadObjectGroupChildren(container, { force: true });
-    expect(container.children?.find((node) => node.type === "table-vgroup")?.children).toEqual([]);
-    expect(store.tableVGroupPathForTable(container, member.name)).toEqual([]);
+    const current = display === "simple" ? parent.children!.find((node) => node.id === container.id)! : container;
+    expect(current.children?.find((node) => node.type === "table-vgroup")?.children).toEqual([]);
+    expect(store.tableVGroupPathForTable(current, member.name)).toEqual([]);
     expect(api.listTables).toHaveBeenCalledTimes(1);
   });
 
   it.each(["simple", "grouped"] as const)("keeps name-filtered group members hidden in %s display", async (display) => {
     const { store, container, api, scope } = await paginatedGroupFixture(display);
-    const scopeKey = store.tableNameFilterScopeKey({ ...scope, schema: display === "simple" ? "app" : undefined, nodeKind: display === "simple" ? "simple-tables" : "group-tables" });
+    const scopeKey = store.tableNameFilterScopeKey({ ...scope, schema: container.schema, nodeKind: container.type });
     for (const filter of [
       { includePatterns: ["a_%"], excludePatterns: [] },
       { includePatterns: [], excludePatterns: ["z_%"] },
@@ -249,6 +252,34 @@ describe("connectionStore table virtual groups during disk reload", () => {
       expect(container.children?.find((node) => node.type === "table-vgroup")?.children).toEqual([]);
       expect(api.listTables).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it.each(["simple-tables", "group-tables"] as const)("keeps a %s name filter when reloading simple canonical groups", async (nodeKind) => {
+    const { store, api, scope, parent, member } = await paginatedGroupFixture("simple");
+    const canonicalKey = store.tableNameFilterScopeKey({ ...scope, nodeKind: "group-tables" });
+    const scopeKey = nodeKind === "simple-tables" ? [scope.connectionId, "", scope.database, scope.database, nodeKind].map(encodeURIComponent).join(":") : canonicalKey;
+    vi.mocked(api.listTables)
+      .mockClear()
+      .mockImplementation(async (_connection, _database, _schema, _filter, _limit, _offset, _types, _catalog, nameFilter) => {
+        const tables: TableInfo[] = [
+          { name: "a_first", table_type: "TABLE" },
+          { name: "a_next", table_type: "TABLE" },
+        ];
+        return nameFilter?.includePatterns.includes("a_%") ? tables : [...tables, member];
+      });
+    const revision = store.setSidebarTableNameFilter(scopeKey, { includePatterns: ["a_%"], excludePatterns: [] });
+    await store.refreshTreeNodeForTableNameFilter(parent, scopeKey, revision);
+    const container = parent.children!.find((node) => node.type === "group-tables")!;
+    expect(vi.mocked(api.listTables).mock.calls.some((call) => call[8]?.includePatterns.includes("a_%"))).toBe(true);
+    expect(container.children?.find((node) => node.type === "table-vgroup")?.children).toEqual([]);
+    expect(store.tableVGroupPathForTable(container, member.name)).toEqual(["business"]);
+    const cleared = store.setSidebarTableNameFilter(canonicalKey, { includePatterns: [], excludePatterns: [] });
+    expect(store.sidebarTableNameFilters[scopeKey]).toBeUndefined();
+    vi.mocked(api.listTables).mockClear();
+    await store.refreshTreeNodeForTableNameFilter(parent, canonicalKey, cleared);
+    const unfiltered = parent.children!.find((node) => node.type === "group-tables")!;
+    expect(vi.mocked(api.listTables).mock.calls.every((call) => !call[8]?.includePatterns.includes("a_%"))).toBe(true);
+    expect(unfiltered.children?.find((node) => node.type === "table-vgroup")?.children?.map((node) => node.label)).toEqual([member.name]);
   });
 
   it("batches long member names and stops requesting batches after the tree is disconnected", async () => {

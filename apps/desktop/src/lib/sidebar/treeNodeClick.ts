@@ -24,6 +24,10 @@ export type SidebarActivation = "single" | "double";
 const dataNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
 const documentBrowserNodeTypes = new Set<TreeNodeType>(["mongo-collection", "mongo-bucket", "dynamodb-table"]);
 const toggleLeafNodeTypes = new Set<TreeNodeType>([
+  "oracle-db-link",
+  "native-job",
+  "process-list",
+  "server-dashboard",
   "redis-db",
   "mq-tenant",
   "mqtt-topic",

@@ -3020,7 +3020,34 @@ fn sqlserver_hidden_schema_names() -> &'static [&'static str] {
 
 pub async fn list_objects(client: &mut SqlServerClient, schema: &str) -> Result<Vec<crate::types::ObjectInfo>, String> {
     let sql = sqlserver_list_objects_sql(schema);
-    let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
+    sqlserver_query_objects(client, schema, &sql).await
+}
+
+pub async fn list_objects_page(
+    client: &mut SqlServerClient,
+    schema: &str,
+    object_types: &[String],
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<crate::types::ObjectInfo>, String> {
+    if object_types.iter().any(|kind| {
+        !["TABLE", "VIEW", "PROCEDURE", "FUNCTION"].iter().any(|supported| kind.eq_ignore_ascii_case(supported))
+    }) {
+        return Err("Unsupported SQL Server object directory type".to_string());
+    }
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let sql = sqlserver_list_objects_page_sql(schema, object_types, limit, offset);
+    sqlserver_query_objects(client, schema, &sql).await
+}
+
+async fn sqlserver_query_objects(
+    client: &mut SqlServerClient,
+    schema: &str,
+    sql: &str,
+) -> Result<Vec<crate::types::ObjectInfo>, String> {
+    let stream = client.query(sql, &[]).await.map_err(|e| e.to_string())?;
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
     Ok(rows
         .iter()
@@ -3041,6 +3068,26 @@ pub async fn list_objects(client: &mut SqlServerClient, schema: &str) -> Result<
             xugu_type_members_expandable: None,
         })
         .collect())
+}
+
+fn sqlserver_list_objects_page_sql(schema: &str, object_types: &[String], limit: usize, offset: usize) -> String {
+    let sql = sqlserver_list_objects_sql(schema).replacen("SELECT o.name,", "SELECT o.object_id, o.name,", 1);
+    let source = sql.rsplit_once(" ORDER BY ").map_or(sql.as_str(), |(query, _)| query);
+    let types = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION"]
+        .into_iter()
+        .filter(|kind| {
+            object_types.is_empty() || object_types.iter().any(|requested| requested.eq_ignore_ascii_case(kind))
+        })
+        .map(|kind| format!("'{kind}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let end = offset.saturating_add(limit);
+    format!(
+        "SELECT name, object_type, create_date, modify_date, object_comment \
+         FROM (SELECT directory.*, ROW_NUMBER() OVER (ORDER BY object_type, name, object_id) AS directory_row \
+               FROM ({source}) directory WHERE object_type IN ({types})) numbered \
+         WHERE directory_row > {offset} AND directory_row <= {end} ORDER BY directory_row"
+    )
 }
 
 fn sqlserver_list_objects_sql(schema: &str) -> String {
@@ -6185,6 +6232,33 @@ mod tests {
 
         assert!(sql.contains("create_date"));
         assert!(sql.contains("modify_date"));
+    }
+
+    #[test]
+    fn sqlserver_directory_page_filters_types_before_numbering_and_preserves_bounds() {
+        let types = vec!["VIEW".to_string(), "FUNCTION".to_string()];
+        let sql = super::sqlserver_list_objects_page_sql("Sales'Ops", &types, 1000, 2000);
+
+        assert!(super::Parser::parse_sql(&super::MsSqlDialect {}, &sql).is_ok());
+        assert!(sql.contains("s.name = 'Sales''Ops'"));
+        assert!(sql.contains("ROW_NUMBER() OVER (ORDER BY object_type, name, object_id)"));
+        assert!(sql.contains("directory WHERE object_type IN ('VIEW', 'FUNCTION')"));
+        assert!(sql.ends_with("directory_row > 2000 AND directory_row <= 3000 ORDER BY directory_row"));
+        assert!(sql.contains(sqlserver_visible_object_predicate()));
+        assert!(sql.contains("OUTER APPLY"));
+        assert!(!sql.contains("OFFSET"));
+        assert!(!sql.contains("FETCH"));
+    }
+
+    #[test]
+    fn sqlserver_directory_page_empty_type_selection_keeps_all_supported_types() {
+        let sql = super::sqlserver_list_objects_page_sql("dbo", &[], 1000, 0);
+
+        assert!(sql.contains("object_type IN ('TABLE', 'VIEW', 'PROCEDURE', 'FUNCTION')"));
+        assert!(sql.ends_with("directory_row > 0 AND directory_row <= 1000 ORDER BY directory_row"));
+        let original = sqlserver_list_objects_sql("dbo");
+        assert!(!original.contains("ROW_NUMBER"));
+        assert!(!original.contains("directory_row"));
     }
 
     #[test]

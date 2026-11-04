@@ -1,7 +1,7 @@
 import { type RoutineCompletionTarget } from "./useQueryEditorCompletionMetadata";
 import { computed } from "vue";
 import { pickedCompletion, type CompletionContext } from "@codemirror/autocomplete";
-import { StateEffect, Transaction, type ChangeSet } from "@codemirror/state";
+import { EditorSelection, StateEffect, Transaction, type ChangeSet } from "@codemirror/state";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { type QueryCompletionItem, type BatchColumnSelectionActionItem } from "./useQueryEditorBatchSelection";
 import type { CompletionMetadataScope } from "./queryEditorTypes";
@@ -141,6 +141,17 @@ function applySnippetWithAdditionalCursors(view: EditorViewType, originalApply: 
     const targetFrom = combinedChanges ? combinedChanges.mapPos(target.from, 1) : target.from;
     const targetTo = combinedChanges ? combinedChanges.mapPos(target.to, 1) : target.to;
     applyCaptured(targetFrom, targetTo);
+  }
+  if (combinedChanges) {
+    // Snippet apply reads the current main selection and extends a completion
+    // range that starts exactly at it. After expanding an earlier target the
+    // captured state's main selection is that target's placeholder, so the
+    // main range could swallow the text just inserted next to it. Restore the
+    // original main selection (mapped through the expansions) before applying
+    // the main target.
+    const originalMain = view.state.selection.main;
+    const mappedMain = EditorSelection.single(combinedChanges.mapPos(originalMain.from, 1), combinedChanges.mapPos(originalMain.to, 1));
+    workingState = workingState.update({ selection: mappedMain }).state;
   }
   const mainFrom = combinedChanges ? combinedChanges.mapPos(from, 1) : from;
   const mainTo = combinedChanges ? combinedChanges.mapPos(replaceTo, 1) : replaceTo;

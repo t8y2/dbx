@@ -168,6 +168,30 @@ describe("QueryEditor multi-cursor snippets", () => {
     expect(view.state.doc.toString()).toBe(doc);
   });
 
+  it.each([
+    ["sfsf", 2, 4, 0, "xx", 0],
+    ["sf sf", 2, 5, 1, "x x", 2],
+  ])("does not swallow the adjacent cursor's expansion (%s, main %s)", async (doc, firstCursor, secondCursor, mainIndex, expected, expectedMainFrom) => {
+    const { view, settings } = await mountEditor();
+    setSnippet(settings, "${1:x}");
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: doc },
+      selection: EditorSelection.create([EditorSelection.cursor(firstCursor), EditorSelection.cursor(secondCursor)], mainIndex),
+      annotations: isolateHistory.of("full"),
+    });
+    await nextTick();
+
+    await acceptSnippet(view);
+
+    expect(view.state.doc.toString()).toBe(expected);
+    expect(selectedText(view)).toBe("x");
+    expect(view.state.selection.main.from).toBe(expectedMainFrom);
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(doc);
+    expect(redo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(expected);
+  });
+
   it("navigates the main cursor's snippet fields with Tab", async () => {
     const { view, settings } = await mountEditor();
     setSnippet(settings, "select ${1:col} from ${2:table_name};");

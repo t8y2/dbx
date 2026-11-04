@@ -56,6 +56,18 @@ describe("external SQL file paths", () => {
     expect(isSqlOrScriptFilePath("query.sql")).toBe(true);
     expect(isSqlOrScriptFilePath("SCHEMA.DDL")).toBe(true);
     expect(isSqlOrScriptFilePath("/app/script.js")).toBe(true);
+    // Database scripts kept in Git open in the editor, not the system app
+    // (t8y2/dbx#14204).
+    expect(isSqlOrScriptFilePath("pkg/api.PKS")).toBe(true);
+    expect(isSqlOrScriptFilePath("pkg/api.PKB")).toBe(true);
+    expect(isSqlOrScriptFilePath("db/sp_add_user.PRC")).toBe(true);
+    expect(isSqlOrScriptFilePath("db/calc_total.FNC")).toBe(true);
+    expect(isSqlOrScriptFilePath("db/set_active.TRG")).toBe(true);
+    expect(isSqlOrScriptFilePath("migrations/001.plpgsql")).toBe(true);
+    expect(isSqlOrScriptFilePath("db/init.PLSQL")).toBe(true);
+    expect(isSqlOrScriptFilePath("pkg/api.PKH")).toBe(true);
+    expect(isSqlOrScriptFilePath("README.md")).toBe(false);
+    expect(isSqlOrScriptFilePath("archive.tar.gz")).toBe(false);
     expect(isSqlOrScriptFilePath("C:\\work\\financial_data.xlsx")).toBe(false);
     expect(isSqlOrScriptFilePath("/docs/readme.pdf")).toBe(false);
     expect(isSqlOrScriptFilePath("memo.docx")).toBe(false);
@@ -90,11 +102,19 @@ describe("query editor script file filters and names", () => {
     expect(queryEditorOpenFileAccept("mongodb")).toBe(".js,.sql");
   });
 
-  it("keeps non-MongoDB pickers SQL-only", () => {
-    expect(queryEditorOpenFileFilters("postgres")).toEqual([{ name: "SQL", extensions: ["sql"] }]);
-    expect(queryEditorOpenFileFilters(undefined)).toEqual([{ name: "SQL", extensions: ["sql"] }]);
-    expect(queryEditorOpenFileAccept("postgres")).toBe(".sql");
-    expect(queryEditorOpenFileAccept(undefined)).toBe(".sql");
+  it("offers the database-script extensions alongside SQL for non-MongoDB pickers", () => {
+    // .prc/.pkb and friends belong to the editor now (t8y2/dbx#14204).
+    const scriptExtensions = ["prc", "pks", "pkb", "pkh", "fnc", "trg", "plsql", "plpgsql"];
+    expect(queryEditorOpenFileFilters("postgres")).toEqual([
+      { name: "SQL", extensions: ["sql", "ddl", ...scriptExtensions] },
+      { name: "All Files", extensions: ["*"] },
+    ]);
+    expect(queryEditorOpenFileFilters(undefined)).toEqual([
+      { name: "SQL", extensions: ["sql", "ddl", ...scriptExtensions] },
+      { name: "All Files", extensions: ["*"] },
+    ]);
+    expect(queryEditorOpenFileAccept("postgres")).toBe(".sql,.ddl,.prc,.pks,.pkb,.pkh,.fnc,.trg,.plsql,.plpgsql");
+    expect(queryEditorOpenFileAccept(undefined)).toBe(".sql,.ddl,.prc,.pks,.pkb,.pkh,.fnc,.trg,.plsql,.plpgsql");
   });
 
   it("generates correct default save file names for MongoDB vs SQL", () => {

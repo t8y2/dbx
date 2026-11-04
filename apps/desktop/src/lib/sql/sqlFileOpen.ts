@@ -17,8 +17,24 @@ export function isScriptFilePath(path: string): boolean {
   return /\.(sql|js)$/i.test(path.trim());
 }
 
+/**
+ * Stored-procedure / database-script extensions that version control repos
+ * commonly keep beside `.sql` files (Oracle packages, procedures, functions,
+ * triggers, PL/SQL and PL/pgSQL scripts). Opening them in the editor instead
+ * of the system app keeps Git-managed database code in one workflow
+ * (t8y2/dbx#14204).
+ */
+export const DATABASE_SCRIPT_FILE_EXTENSIONS = ["prc", "pks", "pkb", "pkh", "fnc", "trg", "plsql", "plpgsql"];
+
+const databaseScriptFileExtensionsPattern = new RegExp(`[.](${DATABASE_SCRIPT_FILE_EXTENSIONS.join("|")})$`, "i");
+
+export function isDatabaseScriptFilePath(path: string): boolean {
+  return databaseScriptFileExtensionsPattern.test(path.trim());
+}
+
 export function isSqlOrScriptFilePath(path: string): boolean {
-  return /\.(sql|ddl|js)$/i.test(path.trim());
+  const trimmed = path.trim();
+  return /\.(sql|ddl|js)$/i.test(trimmed) || isDatabaseScriptFilePath(trimmed);
 }
 
 export function isSpreadsheetFilePath(path: string): boolean {
@@ -38,11 +54,14 @@ export function queryEditorOpenFileFilters(databaseType?: string): QueryEditorFi
       { name: "All Files", extensions: ["*"] },
     ];
   }
-  return [{ name: "SQL", extensions: ["sql"] }];
+  return [
+    { name: "SQL", extensions: ["sql", "ddl", ...DATABASE_SCRIPT_FILE_EXTENSIONS] },
+    { name: "All Files", extensions: ["*"] },
+  ];
 }
 
 export function queryEditorOpenFileAccept(databaseType?: string): string {
-  return databaseType === "mongodb" ? ".js,.sql" : ".sql";
+  return databaseType === "mongodb" ? ".js,.sql" : [".sql", ".ddl", ...DATABASE_SCRIPT_FILE_EXTENSIONS.map((extension) => `.${extension}`)].join(",");
 }
 
 export function defaultSavedQueryFileName(title: string, databaseType?: string): string {

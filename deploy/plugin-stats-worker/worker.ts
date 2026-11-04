@@ -12,17 +12,21 @@
 // Do not add a dl.dbxio.com route back. That route proxied every artifact GET
 // through this Worker; when the Workers free-tier daily request quota was
 // exhausted, downloads failed with HTTP 429 and plugin installation broke for
-// everyone. Install beacons alone are the displayed metric and cannot fail a
-// download.
+// everyone. Artifact downloads are counted out-of-band instead: the aggregation
+// reads the zone's edge request analytics (GraphQL `httpRequestsAdaptiveGroups`),
+// so nothing sits in the download path and nothing can fail a download.
 //
-// Event kinds (blob1):
+// Event kinds (blob1 in Analytics Engine, and the keys in the archive):
 // - inst: fresh install (beacon `kind:"install"`); legacy beacons without a
 //         kind also land here — they keep feeding the historical mixed-event
 //         base until the fleet upgrades, so the inst curve stays comparable
 // - updt: version update (beacon `kind:"update"`)
-// - dl:   historical artifact-download events recorded before the
-//         dl.dbxio.com route was removed; still aggregated from Analytics
-//         Engine so archived totals stay readable
+// - dl:   completed `.dbxp` artifact download. Not an Analytics Engine event
+//         any more: counted from edge analytics (HTTP 200 responses only —
+//         429s, 206 resume fragments and 304s are not downloads) at
+//         aggregation time. Counts are sampled estimates; legacy `dl` events
+//         still sitting in Analytics Engine are ignored so the same window is
+//         never counted twice.
 //
 // Identity (blob4, only used for per-day unique counts):
 // - inst/updt events carry the app's anonymous random installation id when
@@ -50,16 +54,25 @@ type Env = {
   PLUGIN_ARCHIVE: KvBinding;
   ANALYTICS_TOKEN: string;
   CF_ACCOUNT_ID: string;
+  CF_ZONE_ID: string;
   STATS_SALT: string;
 };
 
 type EventKind = "inst" | "updt";
 
+const DOWNLOAD_HOST = "dl.dbxio.com";
+const DOWNLOAD_PATH_PATTERN = /^\/plugins\/([A-Za-z0-9._-]{1,64})\/([0-9A-Za-z.+-]{1,32})\/[^/]+\.dbxp$/;
 const PLUGIN_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 const VERSION_PATTERN = /^[0-9A-Za-z.+-]{1,32}$/;
 const CLIENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const INSTALL_BODY_LIMIT_BYTES = 512;
-const COUNTED_KINDS = new Set(["dl", "inst", "updt"]);
+// Kinds read from Analytics Engine. `dl` is deliberately absent: it comes from
+// edge analytics (see fetchDownloadCounts).
+const COUNTED_KINDS = new Set(["inst", "updt"]);
+const GRAPHQL_ENDPOINT = "https://api.cloudflare.com/client/v4/graphql";
+// Free-plan limits of httpRequestsAdaptiveGroups: 30 days per query, 10000 rows.
+const GRAPHQL_MAX_WINDOW_MS = 29 * 24 * 60 * 60 * 1000;
+const GRAPHQL_ROW_LIMIT = 10000;
 const ARCHIVE_META_KEY = "meta:last-success";
 const ARCHIVE_SUMMARY_KEY = "summary";
 const ARCHIVE_TRIGGER_HEADER = "x-archive-token";
@@ -186,6 +199,66 @@ async function fetchDailyUniques(env: Env, from: Date, to: Date): Promise<DailyU
     .sort((a, b) => `${a.kind}:${a.plugin}:${a.day}`.localeCompare(`${b.kind}:${b.plugin}:${b.day}`));
 }
 
+// Completed `.dbxp` downloads in (from, to] from the zone's edge request
+// analytics. Only HTTP 200 counts: 429/5xx are failures, 206 are Range resume
+// fragments of a download already counted at its 200, 304 are revalidations.
+// `count` is already scaled for adaptive sampling. A window longer than the
+// plan's 30-day query limit is clamped to its most recent part.
+async function fetchDownloadCounts(env: Env, from: Date, to: Date): Promise<WindowCount[]> {
+  const earliest = new Date(to.getTime() - GRAPHQL_MAX_WINDOW_MS);
+  const start = from < earliest ? earliest : from;
+  const query = `query($zone: String!, $since: Time!, $until: Time!) {
+    viewer { zones(filter: { zoneTag: $zone }) {
+      httpRequestsAdaptiveGroups(
+        limit: ${GRAPHQL_ROW_LIMIT},
+        filter: {
+          datetime_gt: $since, datetime_leq: $until,
+          clientRequestHTTPHost: ${JSON.stringify(DOWNLOAD_HOST)},
+          clientRequestPath_like: "/plugins/%.dbxp",
+          edgeResponseStatus: 200,
+          requestSource: "eyeball"
+        }
+      ) { count dimensions { clientRequestPath } }
+    } }
+  }`;
+  const response = await fetch(GRAPHQL_ENDPOINT, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.ANALYTICS_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      query,
+      variables: { zone: env.CF_ZONE_ID, since: start.toISOString(), until: to.toISOString() },
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Analytics GraphQL API ${response.status}: ${(await response.text()).slice(0, 300)}`);
+  }
+  const payload = (await response.json()) as {
+    data?: { viewer?: { zones?: Array<{ httpRequestsAdaptiveGroups?: Array<{ count?: number; dimensions?: { clientRequestPath?: string } }> }> } };
+    errors?: Array<{ message?: string }> | null;
+  };
+  // GraphQL reports permission/schema problems as HTTP 200 with `errors`; a
+  // token without Zone → Analytics → Read must fail loudly, not count zero.
+  if (payload.errors?.length) {
+    throw new Error(`Analytics GraphQL errors: ${payload.errors.map((error) => error.message).join("; ").slice(0, 300)}`);
+  }
+  const groups = payload.data?.viewer?.zones?.[0]?.httpRequestsAdaptiveGroups;
+  if (!groups) throw new Error("Analytics GraphQL response has no httpRequestsAdaptiveGroups for the zone");
+  if (groups.length >= GRAPHQL_ROW_LIMIT) {
+    throw new Error(`Analytics GraphQL returned ${groups.length} rows (limit ${GRAPHQL_ROW_LIMIT}); download counts would be truncated`);
+  }
+  const byVersion = new Map<string, WindowCount>();
+  for (const group of groups) {
+    const match = DOWNLOAD_PATH_PATTERN.exec(group.dimensions?.clientRequestPath ?? "");
+    const count = Number(group.count ?? 0) || 0;
+    if (!match || count <= 0) continue;
+    const key = `${match[1]}:${match[2]}`;
+    const entry = byVersion.get(key) ?? { kind: "dl", plugin: match[1], version: match[2], events: 0 };
+    entry.events += count;
+    byVersion.set(key, entry);
+  }
+  return [...byVersion.values()];
+}
+
 async function fetchWindowCounts(env: Env, from: Date, to: Date): Promise<WindowCount[]> {
   // SQL reads the dataset by NAME (wrangler.json `dataset`), not by binding —
   // keep in sync with the analytics_engine_datasets entry.
@@ -205,14 +278,15 @@ async function fetchWindowCounts(env: Env, from: Date, to: Date): Promise<Window
   const payload = (await response.json()) as unknown;
   // Stable order across invocations (see fetchDailyUniques): the resumable
   // cursor indexes into this array.
-  return parseSqlRows(payload)
+  const eventCounts = parseSqlRows(payload)
     .map((row) => ({
       kind: String(row.kind ?? ""),
       plugin: String(row.plugin ?? ""),
       version: String(row.version ?? ""),
       events: Number(row.events ?? 0) || 0,
     }))
-    .filter((row) => COUNTED_KINDS.has(row.kind) && PLUGIN_ID_PATTERN.test(row.plugin) && VERSION_PATTERN.test(row.version))
+    .filter((row) => COUNTED_KINDS.has(row.kind) && PLUGIN_ID_PATTERN.test(row.plugin) && VERSION_PATTERN.test(row.version));
+  return [...eventCounts, ...(await fetchDownloadCounts(env, from, to))]
     .sort((a, b) => `${a.kind}:${a.plugin}:${a.version}`.localeCompare(`${b.kind}:${b.plugin}:${b.version}`));
 }
 
@@ -274,7 +348,7 @@ async function runAggregation(env: Env, fromOverride?: string): Promise<
     const to = new Date(`${state.windowTo.replace(" ", "T")}Z`);
     if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) throw new Error(`Corrupted aggregation state: ${JSON.stringify(state)}`);
 
-    // Re-fetched every chunk (2 subrequests) so the persisted cursor stays a
+    // Re-fetched every chunk (3 subrequests: AE counts, AE uniques, edge analytics) so the persisted cursor stays a
     // few bytes and AE remains the single source of truth for the window.
     const [counts, uniques] = await Promise.all([fetchWindowCounts(env, from, to), fetchDailyUniques(env, from, to)]);
     const pluginTotals = new Map<string, number>();

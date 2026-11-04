@@ -822,7 +822,12 @@ export function resolveTableVGroupScopeFromNode(nodes: TreeNode[], node: TreeNod
     // 与成员类型已把容器收敛到唯一，直接放行；表结构子行（触发器等同名跨容器
     // 风险）仍要求 live 树按 id 实际持有。注意表/视图行自带的 tableName 只是
     // 身份冗余字段（buildTableTreeNodes），不代表它是结构子行。
-    const isStructuralChildRow = !!row.parentName || (!!row.tableName && row.type !== "table" && row.type !== "view" && row.type !== "materialized_view");
+    const isStructuralChildRow =
+      !!row.parentName ||
+      // 分区/子表行（buildPartitionTree）携带 partitionParentName 而非 parentName，
+      // 属分区树结构子行：右键入组会把分区名写成幻影成员，必须保持严格校验。
+      !!(row as { partitionParentName?: unknown }).partitionParentName ||
+      (!!row.tableName && row.type !== "table" && row.type !== "view" && row.type !== "materialized_view");
     if (!holder || (isStructuralChildRow && !holdsRow(holder.children))) return {};
     const host = tableVGroupScopeHostOf(nodes, holder);
     return { ...tableVGroupScopeFieldsOf(host), objectType: tableVGroupKindOfContainerNode(holder) ?? "tables" };

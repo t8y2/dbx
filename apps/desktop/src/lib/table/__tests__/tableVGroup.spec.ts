@@ -389,8 +389,13 @@ describe("resolveTableVGroupScopeFromNode", () => {
     const database: TreeNode = { id: "db:conn-1:db1", label: "db1", type: "database", connectionId: "conn-1", database: "db1" };
     const dbTriggers: TreeNode = { id: "gt:1", label: "Triggers", type: "group-triggers", connectionId: "conn-1", database: "db1", children: [{ id: "dbtrig:1", label: "tg_a", type: "trigger", connectionId: "conn-1", database: "db1" }] };
     const tree: TreeNode[] = [{ ...database, children: [dbTriggers] }];
+    // 现实中带 parentage 的库级触发器行（parentName/tableName，tableTree.ts）仍走严格
+    // id 路径、投影时解析失败（既有局限）；本用例只覆盖无 parentage 字段的裸行。
     const projected: TreeNode = { id: "dbtrig:projected", label: "tg_b", type: "trigger", connectionId: "conn-1", database: "db1" };
     expect(tableVGroupScopeKey(resolveTableVGroupScopeFromNode(tree, projected))).toBe("conn-1\u0000\u0000\u0000db1\u0000\u0000triggers");
+    // 分区/子表行携带 partitionParentName，属结构子行，即使投影也不放宽。
+    const projectedPartition: TreeNode = { id: "p:projected", label: "t_order_p1", type: "table", connectionId: "conn-1", database: "db1", partitionParentName: "t_order" };
+    expect(resolveTableVGroupScopeFromNode(tree, projectedPartition)).toEqual({});
   });
 });
 

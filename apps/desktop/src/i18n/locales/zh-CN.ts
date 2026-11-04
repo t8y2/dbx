@@ -12217,7 +12217,7 @@ export default withEnglishFallback({
     tableSelection: "选择表",
     selectedTables: "已选择 {selected}/{total}",
     selectAllTables: "全选",
-    filterTables: "搜索表名...",
+    filterTables: "搜索表名（支持逗号分隔、/正则/）...",
     clearTables: "清空",
     loadingTables: "正在加载表...",
     tableLoadError: "加载表失败：{error}",

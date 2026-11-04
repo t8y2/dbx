@@ -10816,7 +10816,7 @@ export default withEnglishFallback({
     tableSelection: "Tabelle",
     selectedTables: "{selected}/{total} selezionate",
     selectAllTables: "Seleziona tutte",
-    filterTables: "Cerca tabelle...",
+    filterTables: "Cerca tabelle (separate da virgole o /regex/)...",
     clearTables: "Cancella",
     loadingTables: "Caricamento tabelle...",
     tableLoadError: "Caricamento tabelle non riuscito: {error}",

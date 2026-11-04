@@ -9466,7 +9466,7 @@ export default withEnglishFallback({
     tableSelection: "Tablolar",
     selectedTables: "{selected}/{total} seçildi",
     selectAllTables: "Tümünü seç",
-    filterTables: "Tablolarda ara...",
+    filterTables: "Tablolarda ara (virgülle ayrılmış veya /regex/)...",
     clearTables: "Temizle",
     loadingTables: "Tablolar yükleniyor...",
     tableLoadError: "Tablolar yüklenemedi: {error}",

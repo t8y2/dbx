@@ -247,6 +247,11 @@ public final class FirebirdAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    protected boolean defaultBeforeNotNullInTableDdl() {
+        return true;
+    }
+
+    @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
         String requestedType = normalizeObjectSourceType(objectType);
         if (!"PROCEDURE".equals(requestedType)) {

@@ -1449,6 +1449,11 @@ fn mysql_auto_increment_from_query_result(result: db::QueryResult) -> Result<Opt
     Ok(Some(text))
 }
 
+// Must not contain "connection": `is_connection_error` matches that substring, and the
+// metadata retry would then rebuild and drop the shared pool under concurrent requests
+// (t8y2/dbx#14067).
+const TABLE_COMMENT_UNSUPPORTED_ERROR: &str = "Table comment lookup is not supported for this database type";
+
 async fn get_table_comment_core_with_pool_key(
     state: &AppState,
     connection_id: &str,
@@ -1547,7 +1552,7 @@ async fn get_table_comment_core_with_pool_key(
         PoolKind::Postgres(p) if !db_config.as_ref().is_some_and(is_questdb_config) => {
             db::postgres::get_table_comment(p, schema, table).await
         }
-        _ => Err("Table comment lookup is not supported for this connection".to_string()),
+        _ => Err(TABLE_COMMENT_UNSUPPORTED_ERROR.to_string()),
     }
 }
 
@@ -1733,6 +1738,13 @@ impl OracleSynonymResolver {
         true
     }
 
+    /// The local object reached through at least one synonym. A PUBLIC synonym does not resolve
+    /// once it is qualified with the requested schema, so writes must address this object.
+    /// Remote targets keep the synonym name, which already carries the database link.
+    fn followed_local_target(&self) -> Option<&OracleObjectRef> {
+        (self.depth > 0 && self.current.db_link.is_none()).then_some(&self.current)
+    }
+
     fn retry_next_candidate(&mut self) -> bool {
         while let Some(target) = self.retries.pop() {
             if self.visited.insert(target.clone()) {
@@ -1886,6 +1898,26 @@ fn oracle_synonym_target_sql(
          ORDER BY CASE WHEN s.OWNER = {owner} THEN 0 ELSE 1 END",
         sql_string(table),
     ))
+}
+
+fn oracle_object_type_sql(owner: &str, name: &str) -> String {
+    format!(
+        "SELECT OBJECT_TYPE FROM ALL_OBJECTS \
+         WHERE OWNER = {} AND OBJECT_NAME = {} \
+           AND OBJECT_TYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW')",
+        sql_string(owner),
+        sql_string(name),
+    )
+}
+
+/// A materialized view is listed as both a TABLE and a MATERIALIZED VIEW object, and editing
+/// must treat it as the latter.
+fn oracle_object_type_from_query_result(result: db::QueryResult) -> Option<String> {
+    let types: Vec<String> = result.rows.iter().filter_map(|row| query_result_cell_string(row, 0)).collect();
+    ["MATERIALIZED VIEW", "VIEW", "TABLE"]
+        .into_iter()
+        .find(|candidate| types.iter().any(|object_type| object_type.eq_ignore_ascii_case(candidate)))
+        .map(str::to_string)
 }
 
 fn oracle_synonym_target_from_query_result(
@@ -2089,7 +2121,17 @@ async fn oracle_columns_via_metadata_query(
             .map(oracle_columns_from_query_result)
             .unwrap_or_default();
         if !columns.is_empty() {
-            return Ok(deduplicate_column_infos(columns));
+            let mut columns = deduplicate_column_infos(columns);
+            if let Some(target) = resolver.followed_local_target().cloned() {
+                let sql = oracle_object_type_sql(&target.owner, &target.name);
+                let object_type = oracle_object_type_from_query_result(query.run(&sql, session_schema, 10).await?);
+                for column in &mut columns {
+                    column.resolved_schema = Some(target.owner.clone());
+                    column.resolved_table = Some(target.name.clone());
+                    column.resolved_object_type = object_type.clone();
+                }
+            }
+            return Ok(columns);
         }
 
         let target = if resolver.can_follow() {
@@ -3654,18 +3696,18 @@ mod tests {
         oracle_current_schema_from_query_result, oracle_database_link_name, oracle_database_link_user_sql,
         oracle_identifier_from_query_result, oracle_object_statistics_dba_segments_sql,
         oracle_object_statistics_from_query_result, oracle_object_statistics_rows_only_sql,
-        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql,
-        oracle_synonym_target_from_query_result, oracle_synonym_target_sql, oracle_table_comment_sql,
-        oracle_table_comments_sql, presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
-        presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
-        reference_key_columns_from_indexes, reference_keys_from_indexes, replace_metadata_runtime,
-        should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
+        oracle_object_statistics_sql, oracle_object_statistics_user_segments_sql, oracle_object_type_from_query_result,
+        oracle_object_type_sql, oracle_synonym_target_from_query_result, oracle_synonym_target_sql,
+        oracle_table_comment_sql, oracle_table_comments_sql, presto_like_columns_from_query_result,
+        presto_like_information_schema_columns_sql, presto_like_information_schema_tables_sql,
+        presto_like_tables_from_query_result, reference_key_columns_from_indexes, reference_keys_from_indexes,
+        replace_metadata_runtime, should_append_oracle_style_comment_ddl, should_query_oracle_columns_via_sql_first,
         single_table_comment_from_query_result, split_oracle_database_link, table_comments_from_query_result,
         table_name_filter_matches, tdengine_table_comment_like_pattern, tdengine_table_comment_sql,
         tdengine_table_comments_sql, uses_mongodb_agent_collection_listing, visible_schema_filter,
         ExternalDriverStatisticsDialect, MetadataErrorAction, MysqlTableListSource, OracleObjectRef,
         OracleSynonymResolver, ReferenceKeyInfo, TableNameFilter, ORACLE_CURRENT_SCHEMA_SQL, ORACLE_SYNONYM_MAX_DEPTH,
-        TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
+        TABLE_COMMENT_UNSUPPORTED_ERROR, TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
     use super::{list_databases_core, list_tables_core};
     use super::{
@@ -7276,6 +7318,39 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn oracle_synonym_resolver_reports_only_followed_local_targets() {
+        let mut resolver = OracleSynonymResolver::new("APP".to_string(), "ORDERS".to_string());
+        assert!(resolver.followed_local_target().is_none(), "a directly readable object needs no write identity");
+
+        let base = OracleObjectRef { owner: "OWNER".to_string(), name: "ORDERS_BASE".to_string(), db_link: None };
+        assert!(resolver.follow(base.clone()));
+        assert_eq!(resolver.followed_local_target(), Some(&base));
+
+        let mut remote = OracleSynonymResolver::new("APP".to_string(), "ORDERS".to_string());
+        assert!(remote.follow(OracleObjectRef {
+            owner: "REMOTE_APP".to_string(),
+            name: "ORDERS".to_string(),
+            db_link: Some("SALES".to_string()),
+        }));
+        assert!(remote.followed_local_target().is_none(), "a remote target is only addressable through the synonym");
+    }
+
+    #[test]
+    fn oracle_object_type_prefers_materialized_view_and_view_over_table() {
+        let types = |rows: &[&str]| {
+            oracle_object_type_from_query_result(oracle_current_schema_result(
+                &["OBJECT_TYPE"],
+                rows.iter().map(|value| vec![serde_json::json!(value)]).collect(),
+            ))
+        };
+        assert_eq!(types(&["TABLE"]).as_deref(), Some("TABLE"));
+        assert_eq!(types(&["VIEW"]).as_deref(), Some("VIEW"));
+        assert_eq!(types(&["TABLE", "MATERIALIZED VIEW"]).as_deref(), Some("MATERIALIZED VIEW"));
+        assert_eq!(types(&[]), None);
+        assert!(oracle_object_type_sql("OWNER", "O'NAME").contains("OBJECT_NAME = 'O''NAME'"));
+    }
+
+    #[test]
     fn oracle_columns_sql_first_handles_current_schema_editor_sessions() {
         assert!(should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, Some("tab-1")));
     }
@@ -8144,6 +8219,20 @@ done
 
         assert_eq!(tables[0].comment.as_deref(), Some("Orders table"));
         assert_eq!(tables[1].comment.as_deref(), Some("Existing"));
+    }
+
+    #[test]
+    fn unsupported_table_comment_is_not_treated_as_a_connection_error() {
+        // StarRocks/Doris editors fetch the table comment alongside indexes; a
+        // misclassified error rebuilt the shared metadata pool and emptied the
+        // concurrent index lookup (t8y2/dbx#14067).
+        assert!(!crate::query::is_connection_error(TABLE_COMMENT_UNSUPPORTED_ERROR));
+        for retried in [false, true] {
+            assert_eq!(
+                metadata_error_action(Some(DatabaseType::StarRocks), TABLE_COMMENT_UNSUPPORTED_ERROR, retried),
+                MetadataErrorAction::Return
+            );
+        }
     }
 
     #[test]
@@ -12556,6 +12645,18 @@ fn opengauss_sequence_object_source_sql(schema: &str, name: &str, include_cache:
 /// procedures either, so this matches plain functions only).
 const POSTGRES_LEGACY_ROUTINE_FILTER: &str = " AND NOT p.proisagg AND NOT p.proiswindow";
 
+fn postgres_routine_signature_filter(signature: Option<&str>, formatter: &str) -> String {
+    match signature {
+        // GaussDB's A compatibility mode treats the SQL literal '' as NULL,
+        // but the catalog formatter returns a non-NULL, zero-length string
+        // for a routine without arguments. Keep that identity distinct from
+        // an unspecified signature and from routines with only OUT arguments.
+        Some("") => format!(" AND length({formatter}(p.oid)) = 0"),
+        Some(value) => format!(" AND {formatter}(p.oid) = {}", sql_string(value)),
+        None => String::new(),
+    }
+}
+
 fn postgres_function_object_source_sql_with_legacy_signature(
     schema: &str,
     name: &str,
@@ -12569,9 +12670,7 @@ fn postgres_function_object_source_sql_with_legacy_signature(
     } else {
         POSTGRES_LEGACY_ROUTINE_FILTER.to_string()
     };
-    let signature_filter = signature
-        .map(|value| format!(" AND pg_get_function_arguments(p.oid) = {}", sql_string(value)))
-        .unwrap_or_default();
+    let signature_filter = postgres_routine_signature_filter(signature, "pg_get_function_arguments");
     format!(
         "SELECT pg_get_functiondef(p.oid) \
          FROM pg_proc p \
@@ -12588,15 +12687,17 @@ fn postgres_function_object_source_sql_with_legacy_signature(
 fn postgres_function_object_source_sql_without_prokind(
     schema: &str,
     name: &str,
+    signature: Option<&str>,
     unwrap_opengauss_record: bool,
 ) -> String {
     let source_expression =
         if unwrap_opengauss_record { "(pg_get_functiondef(p.oid)).definition" } else { "pg_get_functiondef(p.oid)" };
+    let signature_filter = postgres_routine_signature_filter(signature, "pg_get_function_identity_arguments");
     format!(
         "SELECT {source_expression} \
          FROM pg_proc p \
          JOIN pg_namespace n ON n.oid = p.pronamespace \
-         WHERE n.nspname = {} AND p.proname = {}{POSTGRES_LEGACY_ROUTINE_FILTER} \
+         WHERE n.nspname = {} AND p.proname = {}{POSTGRES_LEGACY_ROUTINE_FILTER}{signature_filter} \
          ORDER BY p.oid LIMIT 1",
         sql_string(schema),
         sql_string(name)
@@ -12622,11 +12723,11 @@ fn opengauss_routine_source_fallback_sqls(
     // Keep both no-prokind expressions so a server with both compatibility differences still succeeds.
     fallbacks.push((
         "record-return without prokind",
-        postgres_function_object_source_sql_without_prokind(schema, name, true),
+        postgres_function_object_source_sql_without_prokind(schema, name, signature, true),
     ));
     fallbacks.push((
         "text-return without prokind",
-        postgres_function_object_source_sql_without_prokind(schema, name, false),
+        postgres_function_object_source_sql_without_prokind(schema, name, signature, false),
     ));
     fallbacks
 }
@@ -12690,9 +12791,7 @@ fn postgres_object_source_sql_inner(
             } else {
                 "pg_get_functiondef(p.oid)"
             };
-            let signature_filter = signature
-                .map(|value| format!(" AND pg_get_function_identity_arguments(p.oid) = {}", sql_string(value)))
-                .unwrap_or_default();
+            let signature_filter = postgres_routine_signature_filter(signature, "pg_get_function_identity_arguments");
             // PostgreSQL 11 renamed the routine-kind columns to prokind; older
             // servers (and some Gauss-family kernels) only have proisagg and
             // proiswindow, so a hardcoded prokind reference fails before the
@@ -14699,7 +14798,7 @@ async fn postgres_object_source(
             if postgres_missing_prokind_error(&primary_err)
                 && matches!(object_type, db::ObjectSourceKind::Function | db::ObjectSourceKind::Procedure) =>
         {
-            let fallback_sql = postgres_function_object_source_sql_without_prokind(schema, name, false);
+            let fallback_sql = postgres_function_object_source_sql_without_prokind(schema, name, signature, false);
             db::postgres::execute_query(pool, &fallback_sql)
                 .await
                 .and_then(first_string_cell)
@@ -15093,7 +15192,7 @@ mod object_source_tests {
 
     #[test]
     fn builds_postgres_function_source_sql_without_prokind_for_legacy_catalogs() {
-        let sql = postgres_function_object_source_sql_without_prokind("public", "recalc_score", false);
+        let sql = postgres_function_object_source_sql_without_prokind("public", "recalc_score", None, false);
 
         assert_eq!(
             sql,
@@ -15119,7 +15218,7 @@ mod object_source_tests {
         );
 
         assert_eq!(
-            postgres_function_object_source_sql_without_prokind("public", "recalc_score", true),
+            postgres_function_object_source_sql_without_prokind("public", "recalc_score", None, true),
             "SELECT (pg_get_functiondef(p.oid)).definition FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND NOT p.proisagg AND NOT p.proiswindow ORDER BY p.oid LIMIT 1"
         );
     }
@@ -15219,6 +15318,86 @@ mod object_source_tests {
         assert_eq!(missing_prokind.len(), 2);
         assert_eq!(missing_prokind[0].0, "record-return without prokind");
         assert_eq!(missing_prokind[1].0, "text-return without prokind");
+    }
+
+    #[test]
+    fn routine_source_filters_preserve_empty_and_nonempty_signatures() {
+        use rusqlite::OptionalExtension;
+
+        // Check identity selection independently of the server return format.
+        // Live GaussDB tests additionally cover A-mode's empty-literal behavior.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE pg_namespace (oid INTEGER, nspname TEXT);
+             INSERT INTO pg_namespace VALUES (1, 'public');
+             CREATE TABLE pg_proc (oid INTEGER, pronamespace INTEGER, proname TEXT,
+                 prokind TEXT, proisagg BOOLEAN, proiswindow BOOLEAN);
+             INSERT INTO pg_proc VALUES
+                 (1, 1, 'probe', 'f', false, false),
+                 (2, 1, 'probe', 'f', false, false),
+                 (3, 1, 'probe', 'f', false, false),
+                 (4, 1, 'probe', 'f', false, false),
+                 (5, 1, 'probe', 'f', false, false);",
+        )
+        .unwrap();
+        let flags = rusqlite::functions::FunctionFlags::SQLITE_UTF8;
+        conn.create_scalar_function("pg_get_functiondef", 1, flags, |ctx| ctx.get::<i64>(0)).unwrap();
+        for formatter in ["pg_get_function_identity_arguments", "pg_get_function_arguments"] {
+            conn.create_scalar_function(formatter, 1, flags, |ctx| {
+                Ok(match ctx.get::<i64>(0)? {
+                    1 => Some("value integer"),
+                    2 => Some(""),
+                    3 => Some("OUT result text"),
+                    4 => None,
+                    _ => Some("\"it's quoted\" text"),
+                })
+            })
+            .unwrap();
+        }
+        for (signature, expected) in [
+            (None, Some(1)),
+            (Some(""), Some(2)),
+            (Some("value integer"), Some(1)),
+            (Some("OUT result text"), Some(3)),
+            (Some("\"it's quoted\" text"), Some(5)),
+            (Some(" "), None),
+            (Some("value boolean"), None),
+        ] {
+            let mut queries = vec![
+                postgres_object_source_sql("public", "probe", &ObjectSourceKind::Function, signature),
+                postgres_function_object_source_sql_with_legacy_signature(
+                    "public",
+                    "probe",
+                    &ObjectSourceKind::Function,
+                    signature,
+                    true,
+                ),
+            ];
+            for (_, sql) in opengauss_routine_source_fallback_sqls(
+                "public",
+                "probe",
+                &ObjectSourceKind::Function,
+                signature,
+                "Object source not found",
+            ) {
+                // SQLite cannot parse the record-return expression. The
+                // fallback's identity predicate must still be present there.
+                if signature == Some("") {
+                    assert!(sql.contains("length(pg_get_function_identity_arguments(p.oid)) = 0"));
+                }
+                if !sql.contains(".definition") {
+                    queries.push(sql);
+                }
+            }
+            for sql in queries {
+                assert!(!sql.contains("= ''"), "must not compare against an empty SQL literal: {sql}");
+                let actual = conn.query_row(&sql, [], |row| row.get::<_, i64>(0)).optional().unwrap();
+                assert_eq!(actual, expected, "{sql}");
+            }
+        }
+        conn.execute("DELETE FROM pg_proc WHERE oid = 2", []).unwrap();
+        let sql = postgres_function_object_source_sql_without_prokind("public", "probe", Some(""), false);
+        assert_eq!(conn.query_row(&sql, [], |row| row.get::<_, i64>(0)).optional().unwrap(), None);
     }
 
     #[test]

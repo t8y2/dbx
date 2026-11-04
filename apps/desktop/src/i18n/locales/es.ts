@@ -11090,7 +11090,7 @@ export default withEnglishFallback({
     allSchemas: "Todos los esquemas",
     exportError: "Error al exportar: {error}",
     exportCancelled: "Exportación cancelada",
-    filterTables: "Buscar tablas...",
+    filterTables: "Buscar tablas (separadas por comas o /expresión regular/)...",
     runInBackground: "Ejecutar en segundo plano",
   },
   nacos: {

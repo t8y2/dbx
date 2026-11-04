@@ -1097,6 +1097,8 @@ jobs:
           RUST_FEATURE_MODE: ""
           RUST_TEST_GROUP: ""
         uses: swatinem/rust-cache@v2
+        # Avoid disk exhaustion when restoring the complete target cache for large Rust test groups.
+        if: matrix.group != 'drivers' && matrix.group != 'workspace'
         with:
           prefix-key: v1-rust-complete
           workspaces: "./ -> target"

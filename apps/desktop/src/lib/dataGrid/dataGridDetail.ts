@@ -96,6 +96,8 @@ export interface BuildDataGridColumnDetailOptions {
   typeByColumn?: ReadonlyMap<string, string>;
   resultColumnTypes?: readonly string[];
   commentByColumn?: ReadonlyMap<string, string>;
+  /** Result-ordinal comment resolved by the grid; wins over the name map. */
+  comment?: string;
   displayValue: (value: CellValue, columnIndex: number) => string;
   rawValue?: (value: CellValue, columnIndex: number) => string;
   isNullValue?: (value: CellValue) => boolean;
@@ -172,7 +174,7 @@ export function buildDataGridColumnDetail(options: BuildDataGridColumnDetailOpti
     colIndex: options.columnIndex,
     column,
     type: detailColumnType(options.typeByColumn, options.resultColumnTypes, column, options.columnIndex),
-    comment: options.commentByColumn?.get(column) ?? "",
+    comment: options.comment?.trim() || options.commentByColumn?.get(column) || "",
     fields,
   };
 }

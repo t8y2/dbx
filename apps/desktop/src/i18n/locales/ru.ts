@@ -861,6 +861,7 @@ export default withEnglishFallback({
     logout: "Выйти",
     logoutDescription: "Завершить текущий сеанс и вернуться на страницу входа",
     logoutConfirm: "Вы действительно хотите выйти?",
+    or: "или",
   },
   toolbar: {
     fileEncoding: "Кодировка файла",

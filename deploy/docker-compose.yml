@@ -18,6 +18,24 @@ services:
       # - DBX_PUBLIC_BASE_PATH=/dbx
       # Optional production override. The default key is /app/data/.dbx/secret.key.
       # - DBX_SECRET_KEY_FILE=/run/secrets/dbx_secret_key
+      # --- OIDC / SSO Configuration ---
+      # - DBX_PUBLIC_URL=https://dbx.example.com
+      # - DBX_OIDC_ISSUER=https://auth.example.com/realms/master
+      # - DBX_OIDC_CLIENT_ID=dbx-client
+      # - DBX_OIDC_CLIENT_SECRET=replace-with-client-secret
+      # - DBX_OIDC_BUTTON_LABEL=Sign in with SSO
+      # - DBX_OIDC_DISABLE_PASSWORD=false
+      # - DBX_OIDC_ALLOWED_DOMAINS=example.com,company.vn
+      # CEL Admission Expression (Google CEL spec - https://github.com/google/cel-spec):
+      # Evaluated against the `claims` object (merged id_token + userinfo).
+      # Returns:
+      #   - bool: true = admitted as "Admin", false = rejected
+      #   - string: non-empty string = admitted with that role, "" = rejected
+      # Examples:
+      #   - Boolean check: "admin" in claims.groups
+      #   - Email verified check: claims.email_verified == true
+      #   - Role mapping: "db-admins" in claims.groups ? "Admin" : "db-devs" in claims.groups ? "Developer" : ""
+      # - DBX_OIDC_ADMISSION_EXPR="admin" in claims.groups
     # secrets:
     #   - dbx_secret_key
     volumes:

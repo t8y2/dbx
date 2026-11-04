@@ -410,18 +410,21 @@ function urlParamsRequireTls(dbType: DatabaseType, params: string): boolean {
 function databendUrlOptions(params: string, isJdbcUrl: boolean): { ssl: boolean; urlParams: string; defaultPort: number } {
   const tlsOptions = new Map<string, string>();
   // Match the JDBC query delimiter. Semicolons can be part of other values.
-  const normalizedParams = params.split("&").map((part) => {
-    const [rawKey, ...rest] = part.split("=");
-    const key = decodeUrlPart(rawKey).toLowerCase();
-    if (key !== "ssl" && key !== "sslmode") return part;
-    if (tlsOptions.has(key)) {
-      throw new Error(`Duplicate Databend ${key} parameter`);
-    }
-    const value = decodeUrlPart(rest.join("=")).trim().toLowerCase();
-    tlsOptions.set(key, value);
-    // JDBC property names are case-sensitive. Emit the values we validate.
-    return `${key}=${value}`;
-  }).join("&");
+  const normalizedParams = params
+    .split("&")
+    .map((part) => {
+      const [rawKey, ...rest] = part.split("=");
+      const key = decodeUrlPart(rawKey).toLowerCase();
+      if (key !== "ssl" && key !== "sslmode") return part;
+      if (tlsOptions.has(key)) {
+        throw new Error(`Duplicate Databend ${key} parameter`);
+      }
+      const value = decodeUrlPart(rest.join("=")).trim().toLowerCase();
+      tlsOptions.set(key, value);
+      // JDBC property names are case-sensitive. Emit the values we validate.
+      return `${key}=${value}`;
+    })
+    .join("&");
   const explicitSsl = tlsOptions.get("ssl");
   const sslMode = tlsOptions.get("sslmode");
   if (explicitSsl !== undefined && explicitSsl !== "true" && explicitSsl !== "false") {

@@ -12089,6 +12089,18 @@ fn opengauss_sequence_object_source_sql(schema: &str, name: &str, include_cache:
 /// procedures either, so this matches plain functions only).
 const POSTGRES_LEGACY_ROUTINE_FILTER: &str = " AND NOT p.proisagg AND NOT p.proiswindow";
 
+fn postgres_routine_signature_filter(signature: Option<&str>, formatter: &str) -> String {
+    match signature {
+        // GaussDB's A compatibility mode treats the SQL literal '' as NULL,
+        // but the catalog formatter returns a non-NULL, zero-length string
+        // for a routine without arguments. Keep that identity distinct from
+        // an unspecified signature and from routines with only OUT arguments.
+        Some("") => format!(" AND length({formatter}(p.oid)) = 0"),
+        Some(value) => format!(" AND {formatter}(p.oid) = {}", sql_string(value)),
+        None => String::new(),
+    }
+}
+
 fn postgres_function_object_source_sql_with_legacy_signature(
     schema: &str,
     name: &str,
@@ -12102,9 +12114,7 @@ fn postgres_function_object_source_sql_with_legacy_signature(
     } else {
         POSTGRES_LEGACY_ROUTINE_FILTER.to_string()
     };
-    let signature_filter = signature
-        .map(|value| format!(" AND pg_get_function_arguments(p.oid) = {}", sql_string(value)))
-        .unwrap_or_default();
+    let signature_filter = postgres_routine_signature_filter(signature, "pg_get_function_arguments");
     format!(
         "SELECT pg_get_functiondef(p.oid) \
          FROM pg_proc p \
@@ -12121,15 +12131,17 @@ fn postgres_function_object_source_sql_with_legacy_signature(
 fn postgres_function_object_source_sql_without_prokind(
     schema: &str,
     name: &str,
+    signature: Option<&str>,
     unwrap_opengauss_record: bool,
 ) -> String {
     let source_expression =
         if unwrap_opengauss_record { "(pg_get_functiondef(p.oid)).definition" } else { "pg_get_functiondef(p.oid)" };
+    let signature_filter = postgres_routine_signature_filter(signature, "pg_get_function_identity_arguments");
     format!(
         "SELECT {source_expression} \
          FROM pg_proc p \
          JOIN pg_namespace n ON n.oid = p.pronamespace \
-         WHERE n.nspname = {} AND p.proname = {}{POSTGRES_LEGACY_ROUTINE_FILTER} \
+         WHERE n.nspname = {} AND p.proname = {}{POSTGRES_LEGACY_ROUTINE_FILTER}{signature_filter} \
          ORDER BY p.oid LIMIT 1",
         sql_string(schema),
         sql_string(name)
@@ -12155,11 +12167,11 @@ fn opengauss_routine_source_fallback_sqls(
     // Keep both no-prokind expressions so a server with both compatibility differences still succeeds.
     fallbacks.push((
         "record-return without prokind",
-        postgres_function_object_source_sql_without_prokind(schema, name, true),
+        postgres_function_object_source_sql_without_prokind(schema, name, signature, true),
     ));
     fallbacks.push((
         "text-return without prokind",
-        postgres_function_object_source_sql_without_prokind(schema, name, false),
+        postgres_function_object_source_sql_without_prokind(schema, name, signature, false),
     ));
     fallbacks
 }
@@ -12223,9 +12235,7 @@ fn postgres_object_source_sql_inner(
             } else {
                 "pg_get_functiondef(p.oid)"
             };
-            let signature_filter = signature
-                .map(|value| format!(" AND pg_get_function_identity_arguments(p.oid) = {}", sql_string(value)))
-                .unwrap_or_default();
+            let signature_filter = postgres_routine_signature_filter(signature, "pg_get_function_identity_arguments");
             // PostgreSQL 11 renamed the routine-kind columns to prokind; older
             // servers (and some Gauss-family kernels) only have proisagg and
             // proiswindow, so a hardcoded prokind reference fails before the
@@ -14232,7 +14242,7 @@ async fn postgres_object_source(
             if postgres_missing_prokind_error(&primary_err)
                 && matches!(object_type, db::ObjectSourceKind::Function | db::ObjectSourceKind::Procedure) =>
         {
-            let fallback_sql = postgres_function_object_source_sql_without_prokind(schema, name, false);
+            let fallback_sql = postgres_function_object_source_sql_without_prokind(schema, name, signature, false);
             db::postgres::execute_query(pool, &fallback_sql)
                 .await
                 .and_then(first_string_cell)
@@ -14626,7 +14636,7 @@ mod object_source_tests {
 
     #[test]
     fn builds_postgres_function_source_sql_without_prokind_for_legacy_catalogs() {
-        let sql = postgres_function_object_source_sql_without_prokind("public", "recalc_score", false);
+        let sql = postgres_function_object_source_sql_without_prokind("public", "recalc_score", None, false);
 
         assert_eq!(
             sql,
@@ -14652,7 +14662,7 @@ mod object_source_tests {
         );
 
         assert_eq!(
-            postgres_function_object_source_sql_without_prokind("public", "recalc_score", true),
+            postgres_function_object_source_sql_without_prokind("public", "recalc_score", None, true),
             "SELECT (pg_get_functiondef(p.oid)).definition FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND NOT p.proisagg AND NOT p.proiswindow ORDER BY p.oid LIMIT 1"
         );
     }
@@ -14752,6 +14762,86 @@ mod object_source_tests {
         assert_eq!(missing_prokind.len(), 2);
         assert_eq!(missing_prokind[0].0, "record-return without prokind");
         assert_eq!(missing_prokind[1].0, "text-return without prokind");
+    }
+
+    #[test]
+    fn routine_source_filters_preserve_empty_and_nonempty_signatures() {
+        use rusqlite::OptionalExtension;
+
+        // Check identity selection independently of the server return format.
+        // Live GaussDB tests additionally cover A-mode's empty-literal behavior.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE pg_namespace (oid INTEGER, nspname TEXT);
+             INSERT INTO pg_namespace VALUES (1, 'public');
+             CREATE TABLE pg_proc (oid INTEGER, pronamespace INTEGER, proname TEXT,
+                 prokind TEXT, proisagg BOOLEAN, proiswindow BOOLEAN);
+             INSERT INTO pg_proc VALUES
+                 (1, 1, 'probe', 'f', false, false),
+                 (2, 1, 'probe', 'f', false, false),
+                 (3, 1, 'probe', 'f', false, false),
+                 (4, 1, 'probe', 'f', false, false),
+                 (5, 1, 'probe', 'f', false, false);",
+        )
+        .unwrap();
+        let flags = rusqlite::functions::FunctionFlags::SQLITE_UTF8;
+        conn.create_scalar_function("pg_get_functiondef", 1, flags, |ctx| ctx.get::<i64>(0)).unwrap();
+        for formatter in ["pg_get_function_identity_arguments", "pg_get_function_arguments"] {
+            conn.create_scalar_function(formatter, 1, flags, |ctx| {
+                Ok(match ctx.get::<i64>(0)? {
+                    1 => Some("value integer"),
+                    2 => Some(""),
+                    3 => Some("OUT result text"),
+                    4 => None,
+                    _ => Some("\"it's quoted\" text"),
+                })
+            })
+            .unwrap();
+        }
+        for (signature, expected) in [
+            (None, Some(1)),
+            (Some(""), Some(2)),
+            (Some("value integer"), Some(1)),
+            (Some("OUT result text"), Some(3)),
+            (Some("\"it's quoted\" text"), Some(5)),
+            (Some(" "), None),
+            (Some("value boolean"), None),
+        ] {
+            let mut queries = vec![
+                postgres_object_source_sql("public", "probe", &ObjectSourceKind::Function, signature),
+                postgres_function_object_source_sql_with_legacy_signature(
+                    "public",
+                    "probe",
+                    &ObjectSourceKind::Function,
+                    signature,
+                    true,
+                ),
+            ];
+            for (_, sql) in opengauss_routine_source_fallback_sqls(
+                "public",
+                "probe",
+                &ObjectSourceKind::Function,
+                signature,
+                "Object source not found",
+            ) {
+                // SQLite cannot parse the record-return expression. The
+                // fallback's identity predicate must still be present there.
+                if signature == Some("") {
+                    assert!(sql.contains("length(pg_get_function_identity_arguments(p.oid)) = 0"));
+                }
+                if !sql.contains(".definition") {
+                    queries.push(sql);
+                }
+            }
+            for sql in queries {
+                assert!(!sql.contains("= ''"), "must not compare against an empty SQL literal: {sql}");
+                let actual = conn.query_row(&sql, [], |row| row.get::<_, i64>(0)).optional().unwrap();
+                assert_eq!(actual, expected, "{sql}");
+            }
+        }
+        conn.execute("DELETE FROM pg_proc WHERE oid = 2", []).unwrap();
+        let sql = postgres_function_object_source_sql_without_prokind("public", "probe", Some(""), false);
+        assert_eq!(conn.query_row(&sql, [], |row| row.get::<_, i64>(0)).optional().unwrap(), None);
     }
 
     #[test]

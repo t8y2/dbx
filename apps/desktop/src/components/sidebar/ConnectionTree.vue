@@ -696,8 +696,10 @@ function filterGloballyIndexedTables(nodes: TreeNode[]): TreeNode[] {
   if (!deferredSearchQuery.value) return nodes;
   const matcher = createSidebarLabelMatcher(deferredSearchQuery.value, { regexMode: regexMode.value, matchMode: searchMatchMode.value });
   const matchingScopes = globalTableSearchScopes.value.map((scope) => ({ ...scope, entries: scope.entries.filter((entry) => !!matcher(entry.name) || ((regexMode.value || searchMatchMode.value !== "exact") && !!matcher(entry.comment || ""))) })).filter((scope) => scope.entries.length > 0);
-  return mergeSidebarRegexIndexScopes(nodes, matchingScopes);
+  return mergeSidebarRegexIndexScopes(nodes, matchingScopes, store.resolveSidebarSearchDetailTable);
 }
+
+watch([deferredSearchQuery, regexMode, searchMatchMode, () => store.sidebarTableSearchIndexInvalidation.revision, () => [...store.connectedIds].join("\0")], store.clearSidebarSearchDetailTables, { flush: "sync" });
 
 function scheduleLocalSidebarTableSearchRefresh(parentNodeId: string, focusRestore?: TableSearchFocusRestore) {
   if (isTreeSearchFiltering.value) {
@@ -1584,6 +1586,10 @@ provide(sidebarTreeContextKey, {
   // collapse while a projection is about to start, and the deferred query
   // keeps the currently rendered projection alive while clearing settles.
   isSearchProjectionActive: () => isTreeSearchFiltering.value || !!deferredSearchQuery.value,
+  retainSearchDetailTable: (node) => {
+    if (deferredSearchQuery.value) store.retainSidebarSearchDetailTable(node);
+  },
+  findSearchDetailNode: store.findSidebarSearchDetailNode,
   removeVerifiedTriggerNode: removeVerifiedRemoteTriggerNode,
   getTreeLoadSearchOptions: () => {
     if (!deferredSearchQuery.value) return undefined;
@@ -2853,6 +2859,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   store.sidebarSearchQuery = "";
+  store.clearSidebarSearchDetailTables();
   sidebarLayoutMonitor.dispose();
   sidebarTreeRuntime.dispose();
   sidebarActionGeneration += 1;

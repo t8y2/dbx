@@ -4236,8 +4236,8 @@ fn export_destination_identity_for_file(file: &std::fs::File) -> Option<ExportDe
         return Some(ExportDestinationIdentity::Device(device));
     }
     let dev = device as nix::libc::dev_t;
-    let major = u32::try_from(nix::libc::major(dev)).ok()?;
-    let minor = u32::try_from(nix::libc::minor(dev)).ok()?;
+    let major = nix::libc::major(dev);
+    let minor = nix::libc::minor(dev);
     let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
     linux_network_file_identity_from_mountinfo(major, minor, &mountinfo)
 }

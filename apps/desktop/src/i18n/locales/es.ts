@@ -3786,6 +3786,7 @@ export default withEnglishFallback({
     copyCurrentPageSql: "Copiar SQL de la página actual",
     copyActualExecutionSql: "Copiar SQL realmente ejecutado",
     pageProbeDescription: "Esta página muestra como máximo {count} filas; se lee como máximo 1 fila adicional para determinar si hay una página siguiente.",
+    resultColumnCopied: "Se copió {column}: {value}",
   },
   exportProgress: {
     recoveryTitle: "¿Eliminar la exportación cuyo final no se ha confirmado?",
@@ -10829,6 +10830,11 @@ export default withEnglishFallback({
     shortcutExecuteAllSql: "Ejecutar todo el SQL",
     showConnectionGroupPath: "Mostrar la ruta completa del grupo de la conexión de consulta",
     showConnectionGroupPathDescription: "Cuando está activado, el selector de conexiones de la esquina superior derecha de la página de consulta mostrará la ruta completa del grupo antes del nombre de la conexión; cuando está desactivado, solo mostrará el nombre de la conexión.",
+    shortcutCopyResultColumn1: "Copiar la columna 1 del resultado de la primera fila",
+    shortcutCopyResultColumn2: "Copiar la columna 2 del resultado de la primera fila",
+    shortcutCopyResultColumn3: "Copiar la columna 3 del resultado de la primera fila",
+    shortcutCopyResultColumn4: "Copiar la columna 4 del resultado de la primera fila",
+    shortcutCopyResultColumn5: "Copiar la columna 5 del resultado de la primera fila",
   },
   driverStore: {
     jreDirRemoveFailed: "No se pudo eliminar el directorio JRE antiguo: {path} (error original: {error})",

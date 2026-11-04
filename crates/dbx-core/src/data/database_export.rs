@@ -530,6 +530,42 @@ async fn list_mysql_export_view_dependencies(
     Ok(mysql_view_dependencies_from_rows(&result.rows))
 }
 
+/// Views and materialized views reference relations through their rewrite rules, so
+/// `pg_depend` rows of the rule name every relation a view reads (#14178). The rule
+/// also depends on its own view, which is excluded.
+const POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL: &str = "SELECT DISTINCT src.relname, tgt.relname \
+     FROM pg_catalog.pg_depend dep \
+     JOIN pg_catalog.pg_rewrite rewrite ON rewrite.oid = dep.objid \
+     JOIN pg_catalog.pg_class src ON src.oid = rewrite.ev_class \
+     JOIN pg_catalog.pg_namespace src_ns ON src_ns.oid = src.relnamespace \
+     JOIN pg_catalog.pg_class tgt ON tgt.oid = dep.refobjid \
+     JOIN pg_catalog.pg_namespace tgt_ns ON tgt_ns.oid = tgt.relnamespace \
+     WHERE dep.classid = 'pg_catalog.pg_rewrite'::regclass \
+       AND dep.refclassid = 'pg_catalog.pg_class'::regclass \
+       AND src.relkind IN ('v', 'm') \
+       AND src.oid <> tgt.oid \
+       AND src_ns.nspname = $1 \
+       AND tgt_ns.nspname = $1 \
+     ORDER BY 1, 2";
+
+async fn list_postgres_export_view_dependencies(
+    state: &crate::connection::AppState,
+    pool_key: &str,
+    schema: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let pool = {
+        let pool_handle = state.pool_handle(pool_key).await;
+        match pool_handle.as_ref() {
+            Some(crate::connection::PoolKind::Postgres(pool)) => pool.clone(),
+            _ => return Ok(Vec::new()),
+        }
+    };
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let client = crate::db::postgres::PostgresTextClient::new(&client);
+    let rows = client.query(POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL, &[&schema]).await.map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().map(|row| (row.get::<_, String>(0), row.get::<_, String>(1))).collect())
+}
+
 fn sort_export_views_by_dependencies<'a>(
     views: &[&'a crate::types::TableInfo],
     dependencies: &[(String, String)],
@@ -4637,6 +4673,25 @@ async fn export_database_sql_core_inner(
             }
         }
     }
+    if request.include_objects && db_type == DatabaseType::Postgres && views.len() > 1 {
+        match await_export_operation(
+            &request.export_id,
+            Box::pin(list_postgres_export_view_dependencies(state, &pool_key, &request.schema)),
+        )
+        .await
+        {
+            Ok(dependencies) => views = sort_export_views_by_dependencies(&views, &dependencies),
+            Err(e) if e == EXPORT_CANCELLED_ERROR => return Err(EXPORT_CANCELLED_ERROR.to_string()),
+            Err(e) => {
+                record_export_error(
+                    &mut file,
+                    request.fail_on_error,
+                    format!("resolving view dependency order: {e}"),
+                    &mut lenient_errors,
+                )?;
+            }
+        }
+    }
     // Table-owned sequences come with the table structure. An empty table list means
     // the whole schema, so a selection without tables or views lists none of them.
     // Standalone sequences picked in the object browser are objects of their own.
@@ -5854,7 +5909,7 @@ mod tests {
         DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportedTableSql, PostgresExportEnum,
         PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode,
         DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
-        POSTGRES_EXPORT_SEQUENCES_SQL,
+        POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
     };
     use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
@@ -6999,6 +7054,15 @@ mod tests {
         let sorted = sort_export_views_by_dependencies(&views, &dependencies);
 
         assert_eq!(sorted.iter().map(|view| view.name.as_str()).collect::<Vec<_>>(), vec!["z_view", "a_view"]);
+    }
+
+    #[test]
+    fn postgres_view_dependency_query_reads_view_and_materialized_view_rules_in_one_schema() {
+        let sql = POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL;
+        assert!(sql.contains("dep.classid = 'pg_catalog.pg_rewrite'::regclass"), "{sql}");
+        assert!(sql.contains("src.relkind IN ('v', 'm')"), "{sql}");
+        assert!(sql.contains("src.oid <> tgt.oid"), "{sql}");
+        assert!(sql.contains("src_ns.nspname = $1") && sql.contains("tgt_ns.nspname = $1"), "{sql}");
     }
 
     #[test]

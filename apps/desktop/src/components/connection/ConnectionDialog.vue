@@ -162,6 +162,7 @@ import {
   ArrowLeft,
   ArrowDown,
   ArrowUp,
+  Asterisk,
   Check,
   CheckSquare,
   ChevronRight,
@@ -189,9 +190,18 @@ import {
   Square,
   Trash2,
 } from "@lucide/vue";
-import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
-import { resolveVisibleDatabaseSaveAction, visibleDatabasePatternsWithoutMatchAll } from "@/components/sidebar/visibleDatabasesDialogState";
-import { MATCH_ALL_VISIBLE_DATABASE_PATTERN, canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
+import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
+import { initialVisibleDatabaseDialogSelection, resolveVisibleDatabaseSaveAction, visibleDatabaseFilterShowsNothing, visibleDatabasePatternMatches, visibleDatabasePatternsWithoutMatchAll } from "@/components/sidebar/visibleDatabasesDialogState";
+import {
+  MATCH_ALL_VISIBLE_DATABASE_PATTERN,
+  canSaveVisibleDatabaseSelection,
+  connectionUsesVisibleSchemaFilter,
+  filterDatabaseNamesForVisiblePicker,
+  filterVisibleDatabaseNames,
+  filterSchemaNamesForVisiblePicker,
+  buildDraftVisibleSchemasConnectionId,
+  normalizeVisibleSchemaSelection,
+} from "@/lib/database/visibleDatabases";
 import { isSchemaAware, isSingleDatabase, supportsDataDictionary, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
 import { normalizeConnectionIdentityFields, normalizeConnectionScope, normalizeConnectionTimeouts } from "@/lib/connection/connectionSubmitNormalization";
 import { databaseConnectionFormKind, databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
@@ -4308,9 +4318,15 @@ function hasNacosNamespaceScopeForSave(): boolean {
 }
 const canChooseVisibleDatabases = computed(() => !canChooseVisibleNacosNamespaces.value && connectionCanChooseVisibleDatabases(form.value));
 const visibleFilterUsesSchemas = computed(() => connectionUsesVisibleSchemaFilter(form.value));
-const hasVisibleDatabaseFilter = computed(() => Array.isArray(form.value.visible_databases));
+// 这里没有通配符输入框，只展示和锁定可见对象过滤器里配置的通配符；schema 模式下的通配符是内部兜底，不算用户筛选。
+const visibleDatabaseUserPatterns = computed(() => (visibleFilterUsesSchemas.value ? [] : visibleDatabasePatternsWithoutMatchAll(form.value.visible_database_patterns)));
+const hasVisibleDatabaseFilter = computed(() => Array.isArray(form.value.visible_databases) || visibleDatabaseUserPatterns.value.length > 0);
 const visibleDatabaseSummary = computed(() => {
   const configured = form.value.visible_databases;
+  // 只有通配符时也要显示成已筛选，否则按钮看起来像没有设置过滤（#14221）。
+  if (visibleDatabaseUserPatterns.value.length > 0) {
+    return t("visibleDatabases.selectedCount", { selected: filterVisibleDatabaseNames(visibleDatabaseNames.value, configured, visibleDatabaseUserPatterns.value).length, total: visibleDatabaseNames.value.length });
+  }
   if (!Array.isArray(configured)) return t("visibleDatabases.showAll");
   return t("visibleDatabases.selectedCount", { selected: configured.length, total: visibleDatabaseNames.value.length });
 });
@@ -4325,9 +4341,14 @@ const filteredVisibleDatabaseNames = computed(() => {
   if (!query) return listedVisibleDatabaseNames.value;
   return listedVisibleDatabaseNames.value.filter((name) => name.toLowerCase().includes(query));
 });
-const visibleDatabaseSelectedCount = computed(() => visibleDatabaseSelection.value.size);
+const visibleDatabasePatternMatchedNames = computed(() => visibleDatabasePatternMatches(visibleDatabaseNames.value, visibleDatabaseUserPatterns.value));
+const visibleDatabaseSelectedCount = computed(() => {
+  if (visibleDatabaseUserPatterns.value.length === 0) return visibleDatabaseSelection.value.size;
+  return listedVisibleDatabaseNames.value.filter((name) => visibleDatabaseSelection.value.has(name) || visibleDatabasePatternMatchedNames.value.has(name)).length;
+});
 const visibleDatabaseTotalCount = computed(() => listedVisibleDatabaseNames.value.length);
-const visibleDatabaseCanSave = computed(() => canSaveVisibleDatabaseSelection([...visibleDatabaseSelection.value]));
+const visibleDatabaseCanSave = computed(() => canSaveVisibleDatabaseSelection([...visibleDatabaseSelection.value], visibleDatabaseUserPatterns.value));
+const visibleDatabaseShowsNothing = computed(() => visibleDatabaseFilterShowsNothing(visibleDatabaseSelection.value, visibleDatabaseUserPatterns.value, visibleDatabasePatternMatchedNames.value));
 const visibleDatabaseHasSystemObjects = computed(() => defaultListedVisibleDatabaseNames.value.length < visibleDatabaseNames.value.length);
 const visibleSystemObjectsLabelKey = computed(() => (visibleFilterUsesSchemas.value ? "visibleSchemas.showSystemSchemas" : "visibleDatabases.showSystemDatabases"));
 const filteredVisibleNacosNamespaces = computed(() => {
@@ -5982,7 +6003,11 @@ async function openVisibleDatabasesPicker() {
     visibleDatabaseNames.value = names;
     visibleDatabaseShowSystem.value = false;
     const configuredSchemas = visibleSchemaObjectSelection.value;
-    const initialSelection = visibleFilterUsesSchemas.value ? (Array.isArray(configuredSchemas) ? normalizeVisibleSchemaSelection(configuredSchemas, names) : filterSchemaNamesForVisiblePicker(names, draftConfig)) : initialVisibleDatabaseSelection(names, form.value.visible_databases, draftConfig);
+    const initialSelection = visibleFilterUsesSchemas.value
+      ? Array.isArray(configuredSchemas)
+        ? normalizeVisibleSchemaSelection(configuredSchemas, names)
+        : filterSchemaNamesForVisiblePicker(names, draftConfig)
+      : initialVisibleDatabaseDialogSelection(names, { ...draftConfig, visible_databases: form.value.visible_databases, visible_database_patterns: form.value.visible_database_patterns });
     visibleDatabaseSelection.value = new Set(initialSelection);
     const defaultVisible = new Set(defaultListedVisibleDatabaseNames.value);
     visibleDatabaseShowSystem.value = initialSelection.some((name) => !defaultVisible.has(name));
@@ -6276,6 +6301,7 @@ function saveProductionDatabaseSelection() {
 }
 
 function toggleVisibleDatabase(database: string) {
+  if (visibleDatabasePatternMatchedNames.value.has(database)) return;
   const next = new Set(visibleDatabaseSelection.value);
   if (next.has(database)) next.delete(database);
   else next.add(database);
@@ -11594,6 +11620,11 @@ function openExternalUrl(url: string) {
         <Input v-model="visibleDatabaseSearchText" :placeholder="t(visibleObjectSearchPlaceholderKey)" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoadingVisibleDatabases || !!visibleDatabaseError" />
       </div>
 
+      <p v-if="visibleDatabaseUserPatterns.length > 0" class="flex min-w-0 items-center gap-1 px-1 text-xs text-muted-foreground" :title="t('visibleDatabases.patternsHint')" data-visible-database-configured-patterns>
+        <Asterisk class="h-3.5 w-3.5 shrink-0" />
+        <span class="truncate">{{ visibleDatabaseUserPatterns.join(", ") }} · {{ t("visibleDatabases.patternsMatchCount", { count: visibleDatabasePatternMatchedNames.size }) }}</span>
+      </p>
+
       <div class="flex items-center justify-between text-xs text-muted-foreground">
         <span>
           {{
@@ -11618,6 +11649,9 @@ function openExternalUrl(url: string) {
       <p v-if="!isLoadingVisibleDatabases && !visibleDatabaseError && !visibleDatabaseCanSave" class="text-xs text-destructive">
         {{ t(visibleObjectEmptySelectionKey) }}
       </p>
+      <p v-else-if="!isLoadingVisibleDatabases && !visibleDatabaseError && visibleDatabaseShowsNothing" class="text-xs text-amber-600">
+        {{ t("visibleDatabases.patternsNoMatch") }}
+      </p>
 
       <label v-if="visibleDatabaseHasSystemObjects" class="flex h-8 items-center gap-2 rounded-md px-1 text-xs text-muted-foreground">
         <input v-model="visibleDatabaseShowSystem" type="checkbox" class="h-3.5 w-3.5 accent-primary" :disabled="isLoadingVisibleDatabases || !!visibleDatabaseError" />
@@ -11638,12 +11672,16 @@ function openExternalUrl(url: string) {
             v-for="database in filteredVisibleDatabaseNames"
             :key="database"
             type="button"
-            class="flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
+            class="flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none aria-disabled:cursor-default"
+            :aria-disabled="visibleDatabasePatternMatchedNames.has(database) || undefined"
+            :title="visibleDatabasePatternMatchedNames.has(database) ? t('visibleDatabases.patternsHint') : undefined"
             @click="toggleVisibleDatabase(database)"
           >
-            <CheckSquare v-if="visibleDatabaseSelection.has(database)" class="h-4 w-4 shrink-0 text-primary" />
+            <CheckSquare v-if="visibleDatabasePatternMatchedNames.has(database)" class="h-4 w-4 shrink-0 text-muted-foreground" />
+            <CheckSquare v-else-if="visibleDatabaseSelection.has(database)" class="h-4 w-4 shrink-0 text-primary" />
             <Square v-else class="h-4 w-4 shrink-0 text-muted-foreground" />
             <span class="truncate">{{ database }}</span>
+            <Asterisk v-if="visibleDatabasePatternMatchedNames.has(database)" class="ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           </button>
         </template>
       </div>

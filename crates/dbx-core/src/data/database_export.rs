@@ -4069,6 +4069,21 @@ fn linux_f_type_for_path(path: &std::path::Path) -> Option<i64> {
     Some(buf.f_type)
 }
 
+/// `statfs` on the opened descriptor, so the check describes the file the
+/// writer actually holds rather than the path it was opened from.
+#[cfg(target_os = "linux")]
+fn linux_f_type_for_file(file: &std::fs::File) -> Option<i64> {
+    use std::os::fd::AsRawFd;
+    let mut buf: nix::libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `file` keeps the descriptor valid for the duration of the call
+    // and `buf` is a fully-initialized statfs buffer the kernel fills in.
+    let result = unsafe { nix::libc::fstatfs(file.as_raw_fd(), &mut buf) };
+    if result != 0 {
+        return None;
+    }
+    Some(buf.f_type)
+}
+
 /// Reads `/proc/mounts` and returns the source of the mount entry that
 /// contains `path` (the longest matching mount point wins, so nested mounts
 /// resolve to their own entry). `/proc/mounts` escapes spaces as `\040` and
@@ -4077,6 +4092,58 @@ fn linux_f_type_for_path(path: &std::path::Path) -> Option<i64> {
 fn linux_mount_source_for_path(path: &std::path::Path) -> Option<String> {
     let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
     linux_mount_source_from_proc(path, &mounts)
+}
+
+/// Identity of a network-mounted file derived from its device
+/// (`/proc/self/mountinfo` exposes each mount's `major:minor`), not from the
+/// path the writer was given. It therefore agrees with the directory-side
+/// [`ExportDestinationIdentity::NetworkMountSource`] and still fails closed when
+/// the device is no longer a mounted source.
+#[cfg(any(target_os = "linux", test))]
+fn linux_network_file_identity_from_mountinfo(
+    major: u32,
+    minor: u32,
+    mountinfo: &str,
+) -> Option<ExportDestinationIdentity> {
+    let source = linux_mount_source_from_mountinfo(major, minor, mountinfo)?;
+    Some(ExportDestinationIdentity::NetworkMountSource(source))
+}
+
+/// Pure parsing half of [`linux_mount_source_for_device`]: maps `major:minor`
+/// to the source field of the matching `/proc/self/mountinfo` line. Multiple
+/// entries for the same device are accepted only when they agree on the source;
+/// otherwise the identity is treated as unknown and the caller fails closed.
+#[cfg(any(target_os = "linux", test))]
+fn linux_mount_source_from_mountinfo(major: u32, minor: u32, mountinfo: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    for line in mountinfo.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let Some((entry_major, entry_minor)) = fields.get(2).and_then(|field| parse_major_minor(field)) else {
+            continue;
+        };
+        if entry_major != major || entry_minor != minor {
+            continue;
+        }
+        let Some(separator) = fields.iter().position(|field| *field == "-") else {
+            continue;
+        };
+        let Some(source) = fields.get(separator + 2) else {
+            continue;
+        };
+        let source = decode_proc_mounts_field(source);
+        match found.as_deref() {
+            None => found = Some(source),
+            Some(existing) if existing != source => return None,
+            Some(_) => {}
+        }
+    }
+    found
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_major_minor(field: &str) -> Option<(u32, u32)> {
+    let (major, minor) = field.split_once(':')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
 }
 
 /// Pure parsing half of [`linux_mount_source_for_path`], split out so tests can
@@ -4090,9 +4157,16 @@ fn linux_mount_source_from_proc(path: &std::path::Path, mounts: &str) -> Option<
             continue;
         };
         let mount_point = decode_proc_mounts_field(mount_point);
+        if source.is_empty() || mount_point.is_empty() {
+            continue;
+        }
         if path.starts_with(&mount_point) {
-            let depth = mount_point.matches('/').count();
-            if best.as_ref().is_none_or(|(best_depth, _)| depth > *best_depth) {
+            // Count path components, not slashes: `/` and `/backup` both
+            // contain one slash, so a slash count let the root entry win over
+            // a first-level mount (#14018 review). `>=` keeps the later entry
+            // for the same mount point, which is the visible overmount.
+            let depth = std::path::Path::new(&mount_point).components().count();
+            if best.as_ref().is_none_or(|(best_depth, _)| depth >= *best_depth) {
                 best = Some((depth, source.to_string()));
             }
         }
@@ -4150,7 +4224,25 @@ fn export_destination_identity_for_path(dir: &std::path::Path) -> Option<ExportD
     std::fs::metadata(dir).ok().map(|metadata| ExportDestinationIdentity::Device(metadata.dev()))
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+/// Identity of the **opened file**. On Linux this must agree with
+/// [`export_destination_identity_for_path`]: network mounts are identified by
+/// their mount source, local files by their device (#14018 review round 4).
+#[cfg(target_os = "linux")]
+fn export_destination_identity_for_file(file: &std::fs::File) -> Option<ExportDestinationIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let device = file.metadata().ok()?.dev();
+    let f_type = linux_f_type_for_file(file)?;
+    if !linux_f_type_is_network_filesystem(f_type) {
+        return Some(ExportDestinationIdentity::Device(device));
+    }
+    let dev = device as nix::libc::dev_t;
+    let major = u32::try_from(nix::libc::major(dev)).ok()?;
+    let minor = u32::try_from(nix::libc::minor(dev)).ok()?;
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    linux_network_file_identity_from_mountinfo(major, minor, &mountinfo)
+}
+
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "linux")))]
 fn export_destination_identity_for_file(file: &std::fs::File) -> Option<ExportDestinationIdentity> {
     use std::os::unix::fs::MetadataExt;
     file.metadata().ok().map(|metadata| ExportDestinationIdentity::Device(metadata.dev()))
@@ -6028,13 +6120,14 @@ mod tests {
         format_xugu_spatial_export_literal, generate_postgres_enum_ddl, generate_postgres_extension_ddl,
         generate_postgres_sequence_create_ddl, generate_postgres_sequence_post_table_ddl,
         generate_postgres_sequence_setval_sql, is_dameng_auto_increment_ddl, is_postgres_extension_member_routine,
-        linux_f_type_is_network_filesystem, linux_mount_source_from_proc, mysql_database_export_preamble,
-        mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
-        record_export_destination_identity, record_export_error, replace_database_export_select_list,
-        sort_export_views_by_dependencies, split_postgres_export_table_ddl, write_database_export_rows,
-        write_database_export_rows_with_mode, BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions,
-        BuildExportSqlInsertOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter,
-        DdlNormalizeOptions, ExportDestinationIdentity, ExportedTableSql, PostgresExportEnum, PostgresExportExtension,
+        linux_f_type_is_network_filesystem, linux_mount_source_from_mountinfo, linux_mount_source_from_proc,
+        linux_network_file_identity_from_mountinfo, mysql_database_export_preamble, mysql_view_dependencies_from_rows,
+        mysql_view_dependencies_sql, normalize_export_table_ddl, record_export_destination_identity,
+        record_export_error, replace_database_export_select_list, sort_export_views_by_dependencies,
+        split_postgres_export_table_ddl, write_database_export_rows, write_database_export_rows_with_mode,
+        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions,
+        DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions,
+        ExportDestinationIdentity, ExportedTableSql, PostgresExportEnum, PostgresExportExtension,
         PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode,
         DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
         POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
@@ -6320,6 +6413,25 @@ mod tests {
         .is_err());
         assert!(!collision.load(std::sync::atomic::Ordering::Relaxed));
         assert_eq!(std::fs::read(path).unwrap(), b"keep existing");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_backup_writers_write_after_the_destination_identity_check() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(test_app_state(directory.path()).await);
+        for (name, split_max_mb) in [("plain.sql", None), ("split.sql", Some(1))] {
+            let path = directory.path().join(name);
+            let mut request = export_request(true, true, true, Vec::new());
+            request.file_path = path.to_string_lossy().into_owned();
+            request.split_max_mb = split_max_mb;
+
+            let mut writer = create_database_export_writer(&state, &request).await.expect("writer");
+            writer.write_all(b"SELECT 1;\n").unwrap();
+            writer.finish(name).unwrap();
+
+            assert!(path.is_file(), "{name} should exist after a successful write");
+        }
     }
 
     #[tokio::test]
@@ -10666,6 +10778,22 @@ mod tests {
         );
         // Without a root entry nothing matches.
         assert_eq!(linux_mount_source_from_proc(std::path::Path::new("/opt"), "proc /proc proc rw 0 0\n"), None);
+        // A first-level mount has the same slash count as `/`; component depth
+        // must still prefer it (#14018 review round 4).
+        let mounts = "/dev/root / ext4 rw 0 0\nnas-a:/export /backup nfs rw 0 0\n";
+        assert_eq!(
+            linux_mount_source_from_proc(std::path::Path::new("/backup/db"), mounts).as_deref(),
+            Some("nas-a:/export")
+        );
+    }
+
+    #[test]
+    fn linux_mount_source_for_path_prefers_the_visible_overmount() {
+        let mounts = "/dev/root / ext4 rw 0 0\nnas-a:/export /backup nfs rw 0 0\nnas-b:/export /backup nfs rw 0 0\n";
+        assert_eq!(
+            linux_mount_source_from_proc(std::path::Path::new("/backup/db"), mounts).as_deref(),
+            Some("nas-b:/export")
+        );
     }
 
     #[test]
@@ -10689,6 +10817,72 @@ mod tests {
             linux_mount_source_from_proc(std::path::Path::new("/mnt/备份/db"), mounts).as_deref(),
             Some("nas:/数据")
         );
+    }
+
+    #[test]
+    fn linux_mount_source_from_mountinfo_maps_device_to_source() {
+        let mountinfo = "21 1 0:20 / / rw,relatime - ext4 /dev/root rw\n\
+                         36 21 0:45 / /backup rw,relatime - nfs4 nas-a:/export rw\n";
+        assert_eq!(linux_mount_source_from_mountinfo(0, 20, mountinfo).as_deref(), Some("/dev/root"));
+        assert_eq!(linux_mount_source_from_mountinfo(0, 45, mountinfo).as_deref(), Some("nas-a:/export"));
+        // The unmounted device is no longer listed: the identity is unknown.
+        assert_eq!(linux_mount_source_from_mountinfo(0, 99, mountinfo), None);
+    }
+
+    #[test]
+    fn linux_mount_source_from_mountinfo_decodes_escapes_and_rejects_ambiguous_devices() {
+        let mountinfo = "36 21 0:45 / /mnt/back\\040drive rw - nfs4 nas\\040share:/export rw\n";
+        assert_eq!(linux_mount_source_from_mountinfo(0, 45, mountinfo).as_deref(), Some("nas share:/export"));
+        // Two mounts sharing one device but reporting different sources cannot
+        // prove which storage the handle belongs to: fail closed.
+        let ambiguous = "36 21 0:45 / /a rw - nfs4 nas-a:/export rw\n\
+                         37 21 0:45 / /b rw - nfs4 nas-b:/export rw\n";
+        assert_eq!(linux_mount_source_from_mountinfo(0, 45, ambiguous), None);
+        // Malformed devices are skipped rather than treated as a match.
+        let malformed = "36 21 nope / /backup rw - nfs4 nas-a:/export rw\n";
+        assert_eq!(linux_mount_source_from_mountinfo(0, 45, malformed), None);
+    }
+
+    #[test]
+    fn linux_network_file_identity_agrees_with_the_directory_identity() {
+        let mounts = "/dev/root / ext4 rw 0 0\nnas-a:/export /backup nfs rw 0 0\n";
+        let mountinfo = "21 1 0:20 / / rw,relatime - ext4 /dev/root rw\n\
+                         36 21 0:45 / /backup rw,relatime - nfs4 nas-a:/export rw\n";
+        let directory = linux_mount_source_from_proc(std::path::Path::new("/backup/db"), mounts)
+            .map(ExportDestinationIdentity::NetworkMountSource)
+            .expect("directory identity");
+        let file = linux_network_file_identity_from_mountinfo(0, 45, mountinfo).expect("file identity");
+        assert!(directory.matches(&file));
+        assert!(!ExportDestinationIdentity::NetworkMountSource("nas-b:/export".to_string()).matches(&file));
+
+        // Same source remounted under a new device keeps matching.
+        let remounted = "36 21 0:47 / /backup rw,relatime - nfs4 nas-a:/export rw\n";
+        let remounted_file = linux_network_file_identity_from_mountinfo(0, 47, remounted).expect("remounted identity");
+        assert!(directory.matches(&remounted_file));
+
+        // The mount disappeared: the opened file's device has no entry, so the
+        // current identity is unknown and the shared predicate fails closed.
+        let unmounted = linux_network_file_identity_from_mountinfo(0, 46, mountinfo);
+        assert!(unmounted.is_none());
+        assert!(export_destination_identity_mismatch(Some(&directory), unmounted.as_ref()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_export_destination_identity_agrees_for_path_and_open_file() {
+        let scratch = std::env::temp_dir().join(format!("dbx-export-identity-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let file_path = scratch.join("backup.sql");
+        std::fs::write(&file_path, b"x").unwrap();
+        let file = std::fs::File::open(&file_path).unwrap();
+
+        let directory_identity = export_destination_identity_for_path(&scratch);
+        let file_identity = export_destination_identity_for_file(&file);
+
+        assert!(directory_identity.is_some());
+        assert_eq!(directory_identity, file_identity);
+
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     #[tokio::test]

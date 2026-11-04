@@ -147,6 +147,7 @@ import {
   isCloseTabShortcut,
   isReopenClosedTabShortcut,
   isCloseWindowShortcut,
+  isCommitTransactionShortcut,
   isDisconnectAllActiveConnectionsShortcut,
   isEditTableStructureShortcut,
   isExecuteSqlInNewResultTabShortcut,
@@ -4804,6 +4805,14 @@ async function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
     e.stopPropagation();
     contentAreaRef.value?.refreshData();
+    return;
+  }
+  // Ctrl+Shift+C (default) commits the active tab's transaction — the toolbar
+  // commit button as a shortcut. commitTransaction reports unhandled when no
+  // transaction is open, leaving the keys free for anything more specific.
+  if (isCommitTransactionShortcut(e, shortcuts) && contentAreaRef.value?.commitTransaction()) {
+    e.preventDefault();
+    e.stopPropagation();
     return;
   }
   if (isToggleResultsPaneShortcut(e, shortcuts) && contentAreaRef.value?.toggleResultsPane()) {

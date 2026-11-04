@@ -112,7 +112,8 @@ export type ShortcutActionId =
   | "viewTableDdl"
   | "editSidebarTableStructure"
   | "sendSelectionToAi"
-  | "sqlIntentionActions";
+  | "sqlIntentionActions"
+  | "commitTransaction";
 
 export type ShortcutScope = "global" | "debug" | "editor" | "grid" | "search" | "sidebar";
 
@@ -750,6 +751,16 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutRefreshData",
     scope: "global",
     defaultShortcut: "F5",
+  },
+  {
+    id: "commitTransaction",
+    labelKey: "settings.shortcutCommitTransaction",
+    scope: "global",
+    // Mirrors the toolbar's commit button. The shortcut is only consumed when
+    // the active tab actually holds an open transaction (App.vue keydown), so
+    // the key stays free for in-context bindings (e.g. a user SQL shortcut
+    // action) whenever no transaction exists.
+    defaultShortcut: "Shift+Mod+C",
   },
   {
     id: "toggleResultsPane",

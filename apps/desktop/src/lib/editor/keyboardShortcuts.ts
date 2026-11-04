@@ -335,6 +335,10 @@ export function isRefreshDataShortcut(event: ShortcutLikeEvent, shortcuts?: Part
   return matchesShortcut(event, actionShortcut("refreshData", shortcuts));
 }
 
+export function isCommitTransactionShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("commitTransaction", shortcuts));
+}
+
 export function isToggleResultsPaneShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("toggleResultsPane", shortcuts));
 }

@@ -17,6 +17,8 @@ import { mayContainDmlStatement } from "@/lib/sql/dmlChangePreview";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { isOracleFamilyTypeSource } from "@/lib/database/databaseObjectCapabilities";
 import { usesProvenReadOnlyStickyTransactionState } from "@/lib/database/databaseFeatureSupport";
+import { copyToClipboard } from "@/lib/common/clipboard";
+import { firstResultCellValue } from "@/lib/query/queryResultFirstValue";
 import * as api from "@/lib/backend/api";
 import { externalSqlEditorMaxBytes, externalSqlFileOpenErrorMessage } from "@/lib/sql/sqlFileOpen";
 import { GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
@@ -83,6 +85,18 @@ defineExpose({
   focusWhere: () => activeSurfaceRef.value?.focusWhere() ?? false,
   openGoToColumn: () => activeSurfaceRef.value?.openGoToColumn() ?? false,
   openTableStructureEditor: (initialTab?: TableInfoTab) => activeSurfaceRef.value?.openTableStructureEditor?.(initialTab) ?? false,
+  // Alt+N (default) copies the first row's value from column N of the active
+  // tab's current result. Only reports handled when that result has a first
+  // row with the column, so the keys stay unconsumed for everything else.
+  copyResultColumn: (column: number) => {
+    const cell = firstResultCellValue(activeTab.value?.result, column);
+    if (!cell) return false;
+    const preview = cell.value.length > 60 ? `${cell.value.slice(0, 60)}…` : cell.value;
+    void copyToClipboard(cell.value)
+      .then(() => toast(t("grid.resultColumnCopied", { column: cell.column, value: preview === "" ? "—" : preview })))
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : String(error), 5000));
+    return true;
+  },
   refreshData: () => activeSurfaceRef.value?.refreshData() ?? false,
   toggleResultsPane: () => activeSurfaceRef.value?.toggleResultsPane() ?? false,
   refreshQueryEditorCompletionCache: () => activeSurfaceRef.value?.refreshQueryEditorCompletionCache() ?? false,

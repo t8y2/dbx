@@ -70,15 +70,15 @@ function splitFilterQuery(raw: string): string[] {
   // 还是逗号分隔的多个 token（例如 `/^user/, orders, /_bak$/`）。
   // 如果在第一个逗号之前存在未转义的闭合斜杠 `/`，或者切分后的每一项能有效匹配独立规则，
   // 则应该作为逗号分隔处理。
-  const firstComma = Math.min(
-    raw.indexOf(",") === -1 ? Infinity : raw.indexOf(","),
-    raw.indexOf("，") === -1 ? Infinity : raw.indexOf("，")
-  );
+  const firstComma = Math.min(raw.indexOf(",") === -1 ? Infinity : raw.indexOf(","), raw.indexOf("，") === -1 ? Infinity : raw.indexOf("，"));
   const firstSlashAfterStart = raw.indexOf("/", 1);
 
   // 如果在逗号之前就已经出现了斜杠闭合（如 `/^user/, orders`），说明整体绝不是单个正则
   if (firstSlashAfterStart > 0 && firstSlashAfterStart < firstComma) {
-    return raw.split(/[,，]/).map((t) => t.trim()).filter(Boolean);
+    return raw
+      .split(/[,，]/)
+      .map((t) => t.trim())
+      .filter(Boolean);
   }
 
   // 尝试看整体是否是合法正则
@@ -88,7 +88,10 @@ function splitFilterQuery(raw: string): string[] {
   }
 
   // 否则按照中英文逗号切分
-  return raw.split(/[,，]/).map((t) => t.trim()).filter(Boolean);
+  return raw
+    .split(/[,，]/)
+    .map((t) => t.trim())
+    .filter(Boolean);
 }
 
 /**
@@ -110,11 +113,7 @@ export function matchTableFilter(tableName: string, query: string, options?: Tab
  * 过滤表名列表
  * 导出 filterTableNames 与 filterExportTables 别名以兼顾不同命名习惯
  */
-export function filterTableNames(
-  tables: readonly string[],
-  query: string,
-  options?: TableFilterOptions
-): string[] {
+export function filterTableNames(tables: readonly string[], query: string, options?: TableFilterOptions): string[] {
   const raw = query.trim();
   if (!raw) return [...tables];
 

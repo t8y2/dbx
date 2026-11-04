@@ -1,23 +1,8 @@
 import { describe, expect, it } from "vitest";
-import {
-  filterExportTables,
-  filterTableNames,
-  matchTableFilter,
-} from "../databaseExportTableFilter";
+import { filterExportTables, filterTableNames, matchTableFilter } from "../databaseExportTableFilter";
 
 describe("databaseExportTableFilter", () => {
-  const sampleTables = [
-    "users",
-    "user_profiles",
-    "orders",
-    "order_items",
-    "products",
-    "PRODUCT_TAGS",
-    "accounts_bak",
-    "system_logs_2024",
-    "test[table]",
-    "special*char",
-  ];
+  const sampleTables = ["users", "user_profiles", "orders", "order_items", "products", "PRODUCT_TAGS", "accounts_bak", "system_logs_2024", "test[table]", "special*char"];
 
   describe("空查询与空白字符 (Empty and Whitespace Queries)", () => {
     it("空字符串应返回全部表列表", () => {
@@ -78,12 +63,7 @@ describe("databaseExportTableFilter", () => {
     });
 
     it("正确去除各 token 前后空格，并过滤空 token", () => {
-      expect(filterTableNames(sampleTables, " , user ,  , order , ")).toEqual([
-        "users",
-        "user_profiles",
-        "orders",
-        "order_items",
-      ]);
+      expect(filterTableNames(sampleTables, " , user ,  , order , ")).toEqual(["users", "user_profiles", "orders", "order_items"]);
     });
 
     it("纯逗号输入应等同于空查询返回全部表", () => {
@@ -180,12 +160,7 @@ describe("databaseExportTableFilter", () => {
 
     it("超多逗号与连续空格", () => {
       const crazyQuery = ", , ,  ,  user  , , ,  order  , , ,";
-      expect(filterTableNames(sampleTables, crazyQuery)).toEqual([
-        "users",
-        "user_profiles",
-        "orders",
-        "order_items",
-      ]);
+      expect(filterTableNames(sampleTables, crazyQuery)).toEqual(["users", "user_profiles", "orders", "order_items"]);
     });
 
     it("包含特殊正则字符的普通字符串不会被误认为是正则表达式", () => {

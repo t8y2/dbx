@@ -50,6 +50,7 @@ aes-gcm = "0.10"
 base64 = "0.22"
 pbkdf2 = "0.12"
 sha2 = "0.10"
+subtle = "2.6"
 tempfile = "3"
 rust-embed = { version = "8", features = ["debug-embed"], optional = true }
 mime_guess = { version = "2", optional = true }

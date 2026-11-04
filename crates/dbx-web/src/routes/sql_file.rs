@@ -343,7 +343,7 @@ pub async fn execute_sql_file(
     if req.resolve_includes {
         return Err(AppError::from("Local SQL includes are only available in the desktop application".to_string()));
     }
-    // The failure log of this run belongs to the session that started it: the
+    // The failure log of this run belongs to the authenticated owner: the
     // export/copy routes look it up by this owner, never by path (dbx#11619).
     let log_owner = web_failure_log_owner(&headers);
 
@@ -1156,6 +1156,194 @@ mod failure_log_route_tests {
     use super::*;
     use dbx_core::sql_file_import::{SqlFileFailureLogHandle, SqlFileFailureLogRegistry};
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn header_authenticated_sql_execution_and_logs_preserve_cookie_isolation() {
+        use axum::{
+            middleware,
+            routing::{get, post},
+            Router,
+        };
+        use dbx_core::{connection::AppState, models::connection::ConnectionConfig};
+        use serde_json::{json, Value};
+
+        let directory = tempfile::tempdir().unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
+        let config: ConnectionConfig = serde_json::from_value(json!({
+            "id": "sql-file-test", "name": "SQL file test", "db_type": "sqlite",
+            "host": directory.path().join("query.db"), "port": 0,
+            "username": "", "password": "", "database": "main", "save_password": true
+        }))
+        .unwrap();
+        dbx_core::db::sqlite::connect_path_create_if_missing(&config.host).await.unwrap();
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+        let app = Arc::new(AppState::new(storage));
+        app.configs.write().await.insert(config.id.clone(), config.clone());
+        let mut state = WebState::for_tests(app, directory.path().to_path_buf());
+        state.trusted_header_auth =
+            crate::trusted_auth::TrustedHeaderAuth::from_values(Some("true"), Some("X-DBX-Auth"), Some("proxy-secret"))
+                .unwrap();
+        *state.password_hash.write().await = Some("configured".to_string());
+        state.sessions.write().await.extend(["session-a".to_string(), "session-b".to_string()]);
+        let state = Arc::new(state);
+        let router = Router::new()
+            .route("/api/connection/connect", post(super::super::connection::connect_db))
+            .route("/api/query/execute", post(super::super::query::execute_query))
+            .route("/api/sql-file/preview", post(preview_sql_file))
+            .route("/api/sql-file/execute", post(execute_sql_file))
+            .route("/api/sql-file/failure-log/text", post(sql_file_failure_log_text))
+            .route("/api/sql-file/failure-log/{executionId}", get(sql_file_failure_log_download))
+            .route("/api/sql-file/failure-log/{executionId}/info", get(sql_file_failure_log_info))
+            .layer(middleware::from_fn_with_state(state.clone(), crate::auth::auth_middleware))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        for (owner, foreign_owner, table) in [("", "session-a", "shared"), ("session-a", "", "cookie")] {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-dbx-auth", "proxy-secret".parse().unwrap());
+            let cookie = if owner.is_empty() { "expired" } else { owner };
+            headers.insert(header::COOKIE, format!("dbx_session={cookie}").parse().unwrap());
+            let client = reqwest::Client::builder().default_headers(headers).build().unwrap();
+            client
+                .post(format!("{base}/api/connection/connect"))
+                .json(&json!({"config": config}))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap();
+            let sql = format!("CREATE TABLE {table} (id INTEGER); INSERT INTO {table} VALUES (1); INSERT INTO missing_table VALUES (2);");
+            let upload: Value = client
+                .post(format!("{base}/api/sql-file/preview"))
+                .multipart(
+                    reqwest::multipart::Form::new()
+                        .part("file", reqwest::multipart::Part::text(sql).file_name("test.sql")),
+                )
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let response: Value = client
+                .post(format!("{base}/api/sql-file/execute"))
+                .json(&json!({"request": {
+                    "executionId": table, "connectionId": config.id, "database": "main",
+                    "filePath": upload["filePath"], "continueOnError": true
+                }}))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(response["executionId"], table);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while state.sql_file_executions.read().await.contains_key(table) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let log_owner = if owner.is_empty() { ANONYMOUS_FAILURE_LOG_OWNER } else { owner };
+            let foreign_log_owner = if foreign_owner.is_empty() { ANONYMOUS_FAILURE_LOG_OWNER } else { foreign_owner };
+            assert!(state.sql_file_failure_logs.info(log_owner, table).is_some());
+            assert!(state.sql_file_failure_logs.info(foreign_log_owner, table).is_none());
+            let result: Value = client.post(format!("{base}/api/query/execute"))
+                .json(&json!({"connectionId": config.id, "database": "main", "sql": format!("SELECT COUNT(*) FROM {table}")}))
+                .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+            assert_eq!(result["rows"][0][0], json!(1));
+            let info: Value = client
+                .get(format!("{base}/api/sql-file/failure-log/{table}/info"))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(info["status"], "available");
+            let text: Value = client
+                .post(format!("{base}/api/sql-file/failure-log/text"))
+                .json(&json!({"executionId": table}))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert!(text["text"].as_str().unwrap().contains("missing_table"));
+            let download = client
+                .get(format!("{base}/api/sql-file/failure-log/{table}"))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            assert!(download.contains("missing_table"));
+
+            let foreign = client
+                .get(format!("{base}/api/sql-file/failure-log/{table}/info"))
+                .header(header::COOKIE, "dbx_session=session-b")
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap();
+            assert!(foreign.is_null());
+            let foreign_download = client
+                .get(format!("{base}/api/sql-file/failure-log/{table}"))
+                .header(header::COOKIE, "dbx_session=session-b")
+                .send()
+                .await
+                .unwrap();
+            assert!(!foreign_download.status().is_success());
+            let foreign_text = client
+                .post(format!("{base}/api/sql-file/failure-log/text"))
+                .header(header::COOKIE, "dbx_session=session-b")
+                .json(&json!({"executionId": table}))
+                .send()
+                .await
+                .unwrap();
+            assert!(!foreign_text.status().is_success());
+            for token in ["", "wrong"] {
+                let denied = client
+                    .get(format!("{base}/api/sql-file/failure-log/{table}/info"))
+                    .header("x-dbx-auth", token)
+                    .header(header::COOKIE, "dbx_session=forged")
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+                let denied = client
+                    .post(format!("{base}/api/sql-file/execute"))
+                    .header("x-dbx-auth", token)
+                    .header(header::COOKIE, "dbx_session=forged")
+                    .json(&json!({"request": {"executionId": "denied", "connectionId": config.id,
+                        "database": "main", "filePath": upload["filePath"], "continueOnError": true}}))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+            }
+        }
+        server.abort();
+    }
 
     /// The registry reports a log whose file is gone as unavailable, so these
     /// fixtures must point at a file that really exists.

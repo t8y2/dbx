@@ -4,7 +4,7 @@ import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
-import { useSettingsStore } from "@/stores/settingsStore";
+import { DEFAULT_EDITOR_SETTINGS, useSettingsStore } from "@/stores/settingsStore";
 import EditorSettingsDialog from "../EditorSettingsDialog.vue";
 
 const backend = vi.hoisted(() => ({ saved: null as unknown }));
@@ -142,7 +142,7 @@ describe("EditorSettingsDialog completion delay input", () => {
   it("keeps intermediate edits and normalizes the value on blur", async () => {
     const { store } = await mountSettings("page");
     const input = host.querySelector<HTMLInputElement>("#editor-completion-auto-activation-delay")!;
-    expect(input.value).toBe("500");
+    expect(input.value).toBe(String(DEFAULT_EDITOR_SETTINGS.completionAutoActivationDelayMs));
     input.focus();
     for (const value of ["50", "5", "", "2000", "20000"]) {
       input.value = value;
@@ -153,6 +153,6 @@ describe("EditorSettingsDialog completion delay input", () => {
     input.blur();
     await settle();
     expect(input.value).toBe("5000");
-    expect(store.editorSettings.completionAutoActivationDelayMs).toBe(500);
+    expect(store.editorSettings.completionAutoActivationDelayMs).toBe(DEFAULT_EDITOR_SETTINGS.completionAutoActivationDelayMs);
   });
 });

@@ -4191,7 +4191,7 @@ export default withEnglishFallback({
     searchPlaceholder: "Verilənlər bazalarını axtar...",
     selectedCount: "{selected}/{total} seçilib",
     patternsPlaceholder: "Əvəzedici simvollar, məsələn, %n1%, vergüllə ayrılmış",
-    patternsHint: "Bu şablonlara uyğun verilənlər bazaları həmişə göstərilir (% = istənilən simvollar, _ = bir simvol)",
+    patternsHint: "Bu şablonlara uyğun verilənlər bazaları seçilənlərlə birlikdə həmişə göstərilir; yalnız uyğun olanları göstərmək üçün seçimi təmizləyin (% = istənilən simvollar, _ = bir simvol)",
     patternsMatchCount: "{count} uyğunluq",
     selectAll: "Hamısını seç",
     selectFiltered: "Axtarış nəticələrini seç",

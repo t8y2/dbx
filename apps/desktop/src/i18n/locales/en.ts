@@ -5607,7 +5607,7 @@ export default {
     searchPlaceholder: "Search databases...",
     selectedCount: "{selected}/{total} selected",
     patternsPlaceholder: "Wildcards, e.g. %n1%, comma separated",
-    patternsHint: "Databases matching these patterns are always shown (% = any characters, _ = single character)",
+    patternsHint: "Databases matching these patterns are always shown together with the checked ones; clear the checks to show only matches (% = any characters, _ = single character)",
     patternsMatchCount: "{count} matching",
     selectAll: "Select all",
     selectFiltered: "Select search results",

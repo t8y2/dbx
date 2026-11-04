@@ -4160,7 +4160,7 @@ export default withEnglishFallback({
     searchPlaceholder: "Veritabanlarında ara...",
     selectedCount: "{selected}/{total} seçildi",
     patternsPlaceholder: "Joker karakterler, örn. %n1%, virgülle ayrılmış",
-    patternsHint: "Bu desenlerle eşleşen veritabanları her zaman gösterilir (% = herhangi bir karakter, _ = tek karakter)",
+    patternsHint: "Bu desenlerle eşleşen veritabanları, işaretlenenlerle birlikte her zaman gösterilir; yalnızca eşleşenleri göstermek için işaretleri temizleyin (% = herhangi bir karakter, _ = tek karakter)",
     patternsMatchCount: "{count} eşleşme",
     selectAll: "Tümünü seç",
     selectFiltered: "Arama sonuçlarını seç",

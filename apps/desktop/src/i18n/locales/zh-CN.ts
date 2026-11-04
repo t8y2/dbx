@@ -5533,7 +5533,7 @@ export default withEnglishFallback({
     searchPlaceholder: "搜索数据库...",
     selectedCount: "已选择 {selected}/{total}",
     patternsPlaceholder: "通配符，如 %n1%，逗号分隔",
-    patternsHint: "匹配这些模式的数据库始终显示（% 任意字符，_ 单字符）",
+    patternsHint: "匹配这些模式的数据库始终显示，与勾选的数据库合并；只想显示匹配项请先清空勾选（% 任意字符，_ 单字符）",
     patternsMatchCount: "匹配 {count} 个",
     selectAll: "全选",
     selectFiltered: "选中搜索结果",

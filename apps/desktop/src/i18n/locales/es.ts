@@ -5312,7 +5312,7 @@ export default withEnglishFallback({
     searchPlaceholder: "Buscar bases de datos...",
     selectedCount: "{selected}/{total} seleccionadas",
     patternsPlaceholder: "Comodines, p. ej. %n1%, separados por comas",
-    patternsHint: "Las bases de datos que coincidan con estos patrones se muestran siempre (% = cualquier caracteres, _ = un carácter)",
+    patternsHint: "Las bases de datos que coincidan con estos patrones se muestran siempre junto con las marcadas; desmarca todo para mostrar solo las coincidencias (% = cualquier caracteres, _ = un carácter)",
     patternsMatchCount: "{count} coinciden",
     selectAll: "Seleccionar todo",
     selectFiltered: "Seleccionar resultados de búsqueda",

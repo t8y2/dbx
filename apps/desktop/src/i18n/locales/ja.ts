@@ -5154,7 +5154,7 @@ export default withEnglishFallback({
     searchPlaceholder: "データベースを検索...",
     selectedCount: "{selected}/{total}件選択中",
     patternsPlaceholder: "ワイルドカード（例: %n1%）カンマ区切り",
-    patternsHint: "これらのパターンに一致するデータベースは常に表示されます（% は任意の文字列、_ は任意の 1 文字）",
+    patternsHint: "これらのパターンに一致するデータベースは、チェックしたものと合わせて常に表示されます。一致するものだけを表示するにはチェックをクリアしてください（% は任意の文字列、_ は任意の 1 文字）",
     patternsMatchCount: "{count} 件が一致",
     selectAll: "すべて選択",
     selectFiltered: "検索結果を選択",

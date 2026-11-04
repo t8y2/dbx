@@ -5133,7 +5133,7 @@ export default withEnglishFallback({
     searchPlaceholder: "Cerca database...",
     selectedCount: "{selected}/{total} selezionati",
     patternsPlaceholder: "Wildcard, es. %n1%, separate da virgole",
-    patternsHint: "I database che corrispondono a questi pattern vengono sempre mostrati (% = qualsiasi caratteri, _ = un singolo carattere)",
+    patternsHint: "I database che corrispondono a questi pattern vengono sempre mostrati insieme a quelli selezionati; deseleziona tutto per mostrare solo le corrispondenze (% = qualsiasi caratteri, _ = un singolo carattere)",
     patternsMatchCount: "{count} corrispondono",
     selectAll: "Seleziona tutto",
     selectFiltered: "Seleziona risultati ricerca",

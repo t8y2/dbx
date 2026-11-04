@@ -5131,7 +5131,7 @@ export default withEnglishFallback({
     searchPlaceholder: "Pesquisar bancos de dados...",
     selectedCount: "{selected}/{total} selecionados",
     patternsPlaceholder: "Curingas, ex.: %n1%, separados por vírgula",
-    patternsHint: "Bancos de dados que correspondem a estes padrões são sempre exibidos (% = quaisquer caracteres, _ = um caractere)",
+    patternsHint: "Bancos de dados que correspondem a estes padrões são sempre exibidos junto com os marcados; desmarque todos para exibir apenas as correspondências (% = quaisquer caracteres, _ = um caractere)",
     patternsMatchCount: "{count} correspondem",
     selectAll: "Selecionar todos",
     selectFiltered: "Selecionar resultados da pesquisa",

@@ -5110,7 +5110,7 @@ export default withEnglishFallback({
     searchPlaceholder: "搜尋資料庫……",
     selectedCount: "已選擇 {selected}/{total}",
     patternsPlaceholder: "萬用字元，如 %n1%，逗號分隔",
-    patternsHint: "符合這些模式的資料庫一律顯示（% 任意字元，_ 單一字元）",
+    patternsHint: "符合這些模式的資料庫一律顯示，與勾選的資料庫合併；只想顯示符合項目請先清除勾選（% 任意字元，_ 單一字元）",
     patternsMatchCount: "符合 {count} 個",
     selectAll: "全選",
     selectFiltered: "選取搜尋結果",

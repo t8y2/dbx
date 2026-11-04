@@ -5425,7 +5425,7 @@ export default withEnglishFallback({
     searchPlaceholder: "ค้นหาฐานข้อมูล...",
     selectedCount: "เลือกแล้ว {selected}/{total}",
     patternsPlaceholder: "Wildcard เช่น %n1% คั่นด้วยจุลภาค",
-    patternsHint: "ฐานข้อมูลที่ตรงกับ Pattern เหล่านี้จะแสดงเสมอ (% = อักขระใดก็ได้, _ = อักขระหนึ่งตัว)",
+    patternsHint: "ฐานข้อมูลที่ตรงกับ Pattern เหล่านี้จะแสดงเสมอร่วมกับรายการที่เลือก หากต้องการแสดงเฉพาะที่ตรงกัน ให้ล้างการเลือกก่อน (% = อักขระใดก็ได้, _ = อักขระหนึ่งตัว)",
     patternsMatchCount: "ตรงกัน {count} รายการ",
     selectAll: "เลือกทั้งหมด",
     selectFiltered: "เลือกผลการค้นหา",

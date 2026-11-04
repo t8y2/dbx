@@ -4508,7 +4508,7 @@ export default withEnglishFallback({
     searchPlaceholder: "Cari database...",
     selectedCount: "{selected}/{total} terpilih",
     patternsPlaceholder: "Wildcard, mis. %n1%, dipisahkan koma",
-    patternsHint: "Database yang cocok dengan pola ini akan selalu ditampilkan (% = karakter apa pun, _ = satu karakter)",
+    patternsHint: "Database yang cocok dengan pola ini akan selalu ditampilkan bersama yang dicentang; hapus centang untuk hanya menampilkan yang cocok (% = karakter apa pun, _ = satu karakter)",
     patternsMatchCount: "{count} cocok",
     selectAll: "Pilih semua",
     selectFiltered: "Pilih hasil pencarian",

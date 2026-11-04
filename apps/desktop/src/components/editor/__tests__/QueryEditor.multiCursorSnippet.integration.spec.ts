@@ -3,9 +3,10 @@
 import { createApp, h, nextTick, reactive } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
+import { isolateHistory, redo, undo } from "@codemirror/commands";
 import { EditorSelection } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { acceptCompletion, currentCompletions, setSelectedCompletion, startCompletion } from "@codemirror/autocomplete";
+import { acceptCompletion, currentCompletions, hasNextSnippetField, hasPrevSnippetField, setSelectedCompletion, startCompletion } from "@codemirror/autocomplete";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import QueryEditor from "../QueryEditor.vue";
 import type { QueryEditorProps } from "../queryEditorTypes";
@@ -47,52 +48,140 @@ async function mountEditor(overrides: Partial<QueryEditorProps> = {}) {
   return { view: EditorView.findFromDOM(host.querySelector(".cm-editor") as HTMLElement)!, settings, props };
 }
 
+function setSnippet(settings: ReturnType<typeof useSettingsStore>, body: string) {
+  settings.editorSettings.snippets = [{ id: "multi-sf", prefix: "sf", label: "select from table", body }];
+}
+
+function cursorOffsets(lines: string[], prefixLength = 2): number[] {
+  const offsets: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    offsets.push(offset + prefixLength);
+    offset += line.length + 1;
+  }
+  return offsets;
+}
+
+function setDocument(view: EditorView, lines: string[], mainIndex = 0) {
+  const doc = lines.join("\n");
+  view.dispatch({
+    changes: { from: 0, to: view.state.doc.length, insert: doc },
+    selection: EditorSelection.create(
+      cursorOffsets(lines).map((position) => EditorSelection.cursor(position)),
+      mainIndex,
+    ),
+    annotations: isolateHistory.of("full"),
+  });
+}
+
+async function acceptSnippet(view: EditorView) {
+  startCompletion(view);
+  await vi.waitFor(() => expect(currentCompletions(view.state).some((item) => item.type === "snippet")).toBe(true));
+  const snippetIndex = currentCompletions(view.state).findIndex((item) => item.type === "snippet");
+  view.dispatch({ effects: setSelectedCompletion(snippetIndex) });
+  await vi.waitFor(() => expect(acceptCompletion(view)).toBe(true));
+}
+
+function selectedText(view: EditorView): string {
+  return view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to);
+}
+
+function press(view: EditorView, key: string, shiftKey = false) {
+  const event = new KeyboardEvent("keydown", { key, shiftKey, bubbles: true, cancelable: true });
+  view.contentDOM.dispatchEvent(event);
+  expect(event.defaultPrevented).toBe(true);
+}
+
+function expandedLines(lines: string[], body: string): string[] {
+  const template = body.replace(/\$\{\d+:([^}]*)\}/g, "$1").replace(/\$\{\d+\}/g, "");
+  return lines.map((line) => `${template}${line.slice(2)}`);
+}
+
+function lineStarts(lines: string[]): number[] {
+  const starts: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    starts.push(offset);
+    offset += line.length + 1;
+  }
+  return starts;
+}
+
+function expectMainSelectionInside(view: EditorView, lines: string[], starts: number[], lineIndex: number, text: string) {
+  expect(selectedText(view)).toBe(text);
+  expect(view.state.selection.main.from).toBeGreaterThanOrEqual(starts[lineIndex]);
+  expect(view.state.selection.main.to).toBeLessThanOrEqual(starts[lineIndex] + lines[lineIndex].length);
+}
+
 describe("QueryEditor multi-cursor snippets", () => {
-  it("expands the accepted snippet on every rectangular cursor", async () => {
+  it("expands every rectangular cursor as one undoable edit", async () => {
     const { view, settings } = await mountEditor();
-    settings.editorSettings.snippets = [{ id: "multi-sf", prefix: "sf", label: "select from table", body: "select * from ${1:table_name};" }];
+    setSnippet(settings, "select * from ${1:table_name};");
     const lines = ["sfhd_dwd.a", "sfhd_dwd.b", "sfhd_dwd.c"];
     const doc = lines.join("\n");
-    const cursors: number[] = [];
-    let offset = 0;
-    for (const line of lines) {
-      cursors.push(offset + 2);
-      offset += line.length + 1;
-    }
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: doc },
-      selection: EditorSelection.create(
-        cursors.map((position) => EditorSelection.cursor(position)),
-        0,
-      ),
-    });
+    const expected = expandedLines(lines, "select * from ${1:table_name};");
+    setDocument(view, lines);
     await nextTick();
 
-    startCompletion(view);
-    await vi.waitFor(() => expect(currentCompletions(view.state).some((item) => item.type === "snippet")).toBe(true));
-    const snippetIndex = currentCompletions(view.state).findIndex((item) => item.type === "snippet");
-    view.dispatch({ effects: setSelectedCompletion(snippetIndex) });
-    await vi.waitFor(() => expect(acceptCompletion(view)).toBe(true));
+    await acceptSnippet(view);
 
-    expect(view.state.doc.toString()).toBe(lines.map((line) => `select * from table_name;${line.slice(2)}`).join("\n"));
+    expect(view.state.doc.toString()).toBe(expected.join("\n"));
+    expectMainSelectionInside(view, expected, lineStarts(expected), 0, "table_name");
+
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(doc);
+    expect(redo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(expected.join("\n"));
   });
 
-  it("leaves cursors without the typed prefix untouched", async () => {
+  it.each([
+    [1, "second"],
+    [2, "third"],
+  ])("keeps the active snippet on the original main cursor (%s)", async (mainIndex) => {
     const { view, settings } = await mountEditor();
-    settings.editorSettings.snippets = [{ id: "multi-sf", prefix: "sf", label: "select from table", body: "select * from ${1:table_name};" }];
-    const doc = "sfhd_dwd.a\nxxhd_dwd.b";
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: doc },
-      selection: EditorSelection.create([EditorSelection.cursor(2), EditorSelection.cursor(doc.indexOf("xx") + 2)], 0),
-    });
+    setSnippet(settings, "select * from ${1:table_name};");
+    const lines = ["sfhd_dwd.a", "sfhd_dwd.b", "sfhd_dwd.c"];
+    const expected = expandedLines(lines, "select * from ${1:table_name};");
+    setDocument(view, lines, mainIndex);
     await nextTick();
 
-    startCompletion(view);
-    await vi.waitFor(() => expect(currentCompletions(view.state).some((item) => item.type === "snippet")).toBe(true));
-    const snippetIndex = currentCompletions(view.state).findIndex((item) => item.type === "snippet");
-    view.dispatch({ effects: setSelectedCompletion(snippetIndex) });
-    await vi.waitFor(() => expect(acceptCompletion(view)).toBe(true));
+    await acceptSnippet(view);
 
-    expect(view.state.doc.toString()).toBe("select * from table_name;hd_dwd.a\nxxhd_dwd.b");
+    expect(view.state.doc.toString()).toBe(expected.join("\n"));
+    expectMainSelectionInside(view, expected, lineStarts(expected), mainIndex, "table_name");
+    expect(hasPrevSnippetField(view.state)).toBe(false);
+    expect(hasNextSnippetField(view.state)).toBe(false);
+  });
+
+  it("leaves cursors without the typed prefix untouched but undoes the whole acceptance", async () => {
+    const { view, settings } = await mountEditor();
+    setSnippet(settings, "select * from ${1:table_name};");
+    const lines = ["sfhd_dwd.a", "xxhd_dwd.b", "sfhd_dwd.c"];
+    const doc = lines.join("\n");
+    setDocument(view, lines);
+    await nextTick();
+
+    await acceptSnippet(view);
+
+    expect(view.state.doc.toString()).toBe("select * from table_name;hd_dwd.a\nxxhd_dwd.b\nselect * from table_name;hd_dwd.c");
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(doc);
+  });
+
+  it("navigates the main cursor's snippet fields with Tab", async () => {
+    const { view, settings } = await mountEditor();
+    setSnippet(settings, "select ${1:col} from ${2:table_name};");
+    const lines = ["sfhd_dwd.a", "sfhd_dwd.b", "sfhd_dwd.c"];
+    const expected = expandedLines(lines, "select ${1:col} from ${2:table_name};");
+    setDocument(view, lines, 1);
+    await nextTick();
+
+    await acceptSnippet(view);
+    expect(view.state.doc.toString()).toBe(expected.join("\n"));
+    expectMainSelectionInside(view, expected, lineStarts(expected), 1, "col");
+    expect(hasNextSnippetField(view.state)).toBe(true);
+
+    press(view, "Tab");
+    expectMainSelectionInside(view, expected, lineStarts(expected), 1, "table_name");
   });
 });

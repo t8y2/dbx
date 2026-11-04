@@ -1,6 +1,7 @@
 import { type RoutineCompletionTarget } from "./useQueryEditorCompletionMetadata";
 import { computed } from "vue";
-import type { CompletionContext } from "@codemirror/autocomplete";
+import { pickedCompletion, type CompletionContext } from "@codemirror/autocomplete";
+import { StateEffect, Transaction, type ChangeSet } from "@codemirror/state";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { type QueryCompletionItem, type BatchColumnSelectionActionItem } from "./useQueryEditorBatchSelection";
 import type { CompletionMetadataScope } from "./queryEditorTypes";
@@ -89,6 +90,75 @@ interface QueryEditorCompletionOptions {
   maxCompletionTables: number;
   onDemandTableLimit: number;
   semanticCompletionEnabled: boolean;
+}
+
+/**
+ * Applies one snippet acceptance to the main selection and every additional
+ * cursor that carries the same typed prefix, as a single transaction.
+ *
+ * CodeMirror's snippet apply dispatches its own transaction and keeps exactly
+ * one active snippet session. Calling it repeatedly (the previous approach)
+ * split one acceptance into several undo steps and left the session on the
+ * first document target. Here each apply runs against a captured transaction,
+ * the change sets are composed into one edit, and only the main target's
+ * selection/effects (its snippet session) are dispatched. Tab field navigation
+ * therefore stays on the line the user typed in, while Undo/Redo treats all
+ * expanded lines as one edit.
+ */
+function applySnippetWithAdditionalCursors(view: EditorViewType, originalApply: (view: EditorViewType, completion: unknown, from: number, to: number) => void, completionItem: unknown, from: number, to: number, replaceTo: number): void {
+  const extraTargets = additionalSnippetApplyTargets(view.state, from, to);
+  if (extraTargets.length === 0) {
+    originalApply(view, completionItem, from, replaceTo);
+    return;
+  }
+
+  let combinedChanges: ChangeSet | undefined;
+  let workingState = view.state;
+  let appendConfig: StateEffect<unknown> | undefined;
+  const applyCaptured = (targetFrom: number, targetTo: number): Transaction => {
+    let captured: Transaction | undefined;
+    const captureView = {
+      state: workingState,
+      dispatch(transaction: Transaction) {
+        captured = transaction;
+      },
+    } as unknown as EditorViewType;
+    originalApply(captureView, completionItem, targetFrom, targetTo);
+    if (!captured) throw new Error("snippet apply did not produce a transaction");
+    const transaction = captured;
+    // The first apply sees the real editor state, so its appendConfig effect is
+    // exactly the snippet field/keymap installation the final dispatch needs.
+    // Later applies already run against a captured state that has the field.
+    if (!appendConfig) {
+      appendConfig = transaction.effects.find((effect) => effect.is(StateEffect.appendConfig));
+    }
+    combinedChanges = combinedChanges ? combinedChanges.compose(transaction.changes) : transaction.changes;
+    workingState = transaction.state;
+    return transaction;
+  };
+
+  for (const target of [...extraTargets].sort((left, right) => left.from - right.from)) {
+    const targetFrom = combinedChanges ? combinedChanges.mapPos(target.from, 1) : target.from;
+    const targetTo = combinedChanges ? combinedChanges.mapPos(target.to, 1) : target.to;
+    applyCaptured(targetFrom, targetTo);
+  }
+  const mainFrom = combinedChanges ? combinedChanges.mapPos(from, 1) : from;
+  const mainTo = combinedChanges ? combinedChanges.mapPos(replaceTo, 1) : replaceTo;
+  const main = applyCaptured(mainFrom, mainTo);
+  const picked = main.annotation(pickedCompletion);
+  const addToHistory = main.annotation(Transaction.addToHistory);
+
+  view.dispatch(
+    view.state.update({
+      changes: combinedChanges!,
+      selection: main.selection,
+      effects: [...(appendConfig ? [appendConfig] : []), ...main.effects],
+      annotations: picked ? pickedCompletion.of(picked) : undefined,
+      userEvent: "input.complete",
+      ...(addToHistory === false ? { addToHistory: false } : {}),
+      scrollIntoView: main.scrollIntoView,
+    }),
+  );
 }
 
 export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) {
@@ -474,13 +544,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
             replaceSelectWildcard: "replaceSelectWildcard" in item ? item.replaceSelectWildcard : undefined,
           });
           if (typeof originalApply === "function") {
-            // Expand the snippet on every cursor that still carries the typed
-            // trigger prefix. Process targets from the end of the document
-            // backwards so each dispatch leaves the earlier ranges untouched.
-            const targets = [{ from, to: replaceTo }, ...additionalSnippetApplyTargets(view.state, from, to)].sort((left, right) => right.from - left.from);
-            for (const target of targets) {
-              originalApply(view, completionItem as never, target.from, target.to);
-            }
+            applySnippetWithAdditionalCursors(view, originalApply as never, completionItem, from, to, replaceTo);
           } else {
             const insert = String(originalApply ?? item.label);
             view.dispatch({

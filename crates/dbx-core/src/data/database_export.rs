@@ -6415,9 +6415,8 @@ mod tests {
         assert_eq!(std::fs::read(path).unwrap(), b"keep existing");
     }
 
-    #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn linux_backup_writers_write_after_the_destination_identity_check() {
+    async fn backup_writers_write_after_the_destination_identity_check() {
         let directory = tempfile::tempdir().unwrap();
         let state = Arc::new(test_app_state(directory.path()).await);
         for (name, split_max_mb) in [("plain.sql", None), ("split.sql", Some(1))] {
@@ -10867,17 +10866,16 @@ mod tests {
         assert!(export_destination_identity_mismatch(Some(&directory), unmounted.as_ref()));
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn linux_export_destination_identity_agrees_for_path_and_open_file() {
+    fn export_destination_identity_agrees_for_path_and_open_file() {
         let scratch = std::env::temp_dir().join(format!("dbx-export-identity-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&scratch).unwrap();
         let file_path = scratch.join("backup.sql");
         std::fs::write(&file_path, b"x").unwrap();
         let file = std::fs::File::open(&file_path).unwrap();
 
-        let directory_identity = export_destination_identity_for_path(&scratch);
-        let file_identity = export_destination_identity_for_file(&file);
+        let directory_identity = super::export_destination_identity_for_path(&scratch);
+        let file_identity = super::export_destination_identity_for_file(&file);
 
         assert!(directory_identity.is_some());
         assert_eq!(directory_identity, file_identity);

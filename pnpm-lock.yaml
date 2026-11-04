@@ -382,23 +382,23 @@ importers:
   packages/plugin-cli:
     optionalDependencies:
       '@dbx-app/plugin-cli-darwin-arm64':
-        specifier: 0.1.9
-        version: 0.1.9
+        specifier: 0.1.10
+        version: 0.1.10
       '@dbx-app/plugin-cli-darwin-x64':
-        specifier: 0.1.9
-        version: 0.1.9
+        specifier: 0.1.10
+        version: 0.1.10
       '@dbx-app/plugin-cli-linux-arm64-gnu':
-        specifier: 0.1.9
-        version: 0.1.9
+        specifier: 0.1.10
+        version: 0.1.10
       '@dbx-app/plugin-cli-linux-x64-gnu':
-        specifier: 0.1.9
-        version: 0.1.9
+        specifier: 0.1.10
+        version: 0.1.10
       '@dbx-app/plugin-cli-win32-arm64':
-        specifier: 0.1.9
-        version: 0.1.9
+        specifier: 0.1.10
+        version: 0.1.10
       '@dbx-app/plugin-cli-win32-x64':
-        specifier: 0.1.9
-        version: 0.1.9
+        specifier: 0.1.10
+        version: 0.1.10
 
   packages/plugin-cli-darwin-arm64: {}
 
@@ -614,40 +614,40 @@ packages:
     os: [win32]
     hasBin: true
 
-  '@dbx-app/plugin-cli-darwin-arm64@0.1.9':
-    resolution: {integrity: sha512-ogk6MgTZlgp/mOovwBa9X/3fMc8YPIweaHbRID7h5mO+6v7Sw2anzzNanz9/YPc/I4NkTiBqdlG0WDu4X37X2w==}
+  '@dbx-app/plugin-cli-darwin-arm64@0.1.10':
+    resolution: {integrity: sha512-LMZG70qgN7izqKSzXMtWqJ345JlSLxjiNrKcYExQR8EB6K9FGWkE0+5Ub9qnrNszftTziLI4X9eyycpwpRITkQ==}
     cpu: [arm64]
     os: [darwin]
     hasBin: true
 
-  '@dbx-app/plugin-cli-darwin-x64@0.1.9':
-    resolution: {integrity: sha512-CewebmGxEVXs4sGTIx+OoYCRCJGlEkikXqaGjS16JXu0Ei9rUUWAKRHaEmUFs3Yz4DbQbjDiLMDBMgSxdajs7Q==}
+  '@dbx-app/plugin-cli-darwin-x64@0.1.10':
+    resolution: {integrity: sha512-PD4G0F7Y/Hbp92P4+847CF+pkcCN4lTs7xo4wgFeF8/BqUoR6hFhbeVWefCerI8F7rsaTcIFgPIfua76mKER5g==}
     cpu: [x64]
     os: [darwin]
     hasBin: true
 
-  '@dbx-app/plugin-cli-linux-arm64-gnu@0.1.9':
-    resolution: {integrity: sha512-ZDTb6ynkPxu7m0tT8hzsKcpqudCcQ13h4hYcronN+ekeVwf1dlFE59lGHov+6nI2QnmZmVvm/sp1AtWFHYJDEw==}
+  '@dbx-app/plugin-cli-linux-arm64-gnu@0.1.10':
+    resolution: {integrity: sha512-qD5uCjMBw5/VHuiLsKeq3zMSJDhrNQgCWsWeMXa/xF9IgRI2IsD9pXkOW2nIP/ExM0R09J2j1PF9TwrmVR1T/A==}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
     hasBin: true
 
-  '@dbx-app/plugin-cli-linux-x64-gnu@0.1.9':
-    resolution: {integrity: sha512-I0hyyewJ7AZ4ZikcM7Vx3TCEFF5VhdKCKHBIrydCEemQHKGrhWOvv/v/HBOEm/SF5SVxmkjrIBLUQymMPIECtA==}
+  '@dbx-app/plugin-cli-linux-x64-gnu@0.1.10':
+    resolution: {integrity: sha512-pnBkz50sbfdey/rUqcxqq8p07hXRmobN1nzJWj0hmsmGQ82FcohE8v2uFgKdrjNXyL43D3IMX7CXOJmjvMiHJg==}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
     hasBin: true
 
-  '@dbx-app/plugin-cli-win32-arm64@0.1.9':
-    resolution: {integrity: sha512-5V7JiU4fAL/5yZO1Q9a4E63Irz+YfcidMJNEl3+BwQ/SySU/jXg0dFjFZmX01XKe+LF0/MzIOKc2NnFPIo7cCQ==}
+  '@dbx-app/plugin-cli-win32-arm64@0.1.10':
+    resolution: {integrity: sha512-NchmmwP8PalZ0iys7ezkSf+Flpfq02tTCkjp4l7LGkD7KaiOax0F/SiZBjxn/9QHQ2bNBi1BMlzdA9K+HAK4cw==}
     cpu: [arm64]
     os: [win32]
     hasBin: true
 
-  '@dbx-app/plugin-cli-win32-x64@0.1.9':
-    resolution: {integrity: sha512-ZZ9Jo9f81z8TGZF8monkdBJdVgTxPO0fU5J2CsgoADmiWPvjzqorqmjftlTA8bLE5Y+MmVCbJHRwmO1FR8yW6A==}
+  '@dbx-app/plugin-cli-win32-x64@0.1.10':
+    resolution: {integrity: sha512-oTYcpVdfh6EAUdUa6n7ns4YM+LPQNJAumE/UuTbDyo3aHjNhrnzaZujENy8wU+A7notCbIlAu26cKzADJDS38g==}
     cpu: [x64]
     os: [win32]
     hasBin: true
@@ -4249,22 +4249,22 @@ snapshots:
   '@dbx-app/mcp-win32-x64@0.4.133':
     optional: true
 
-  '@dbx-app/plugin-cli-darwin-arm64@0.1.9':
+  '@dbx-app/plugin-cli-darwin-arm64@0.1.10':
     optional: true
 
-  '@dbx-app/plugin-cli-darwin-x64@0.1.9':
+  '@dbx-app/plugin-cli-darwin-x64@0.1.10':
     optional: true
 
-  '@dbx-app/plugin-cli-linux-arm64-gnu@0.1.9':
+  '@dbx-app/plugin-cli-linux-arm64-gnu@0.1.10':
     optional: true
 
-  '@dbx-app/plugin-cli-linux-x64-gnu@0.1.9':
+  '@dbx-app/plugin-cli-linux-x64-gnu@0.1.10':
     optional: true
 
-  '@dbx-app/plugin-cli-win32-arm64@0.1.9':
+  '@dbx-app/plugin-cli-win32-arm64@0.1.10':
     optional: true
 
-  '@dbx-app/plugin-cli-win32-x64@0.1.9':
+  '@dbx-app/plugin-cli-win32-x64@0.1.10':
     optional: true
 
   '@dotenvx/dotenvx@2.38.2':

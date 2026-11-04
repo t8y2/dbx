@@ -1334,6 +1334,11 @@ fn mysql_auto_increment_from_query_result(result: db::QueryResult) -> Result<Opt
     Ok(Some(text))
 }
 
+// Must not contain "connection": `is_connection_error` matches that substring, and the
+// metadata retry would then rebuild and drop the shared pool under concurrent requests
+// (t8y2/dbx#14067).
+const TABLE_COMMENT_UNSUPPORTED_ERROR: &str = "Table comment lookup is not supported for this database type";
+
 async fn get_table_comment_core_with_pool_key(
     state: &AppState,
     connection_id: &str,
@@ -1432,7 +1437,7 @@ async fn get_table_comment_core_with_pool_key(
         PoolKind::Postgres(p) if !db_config.as_ref().is_some_and(is_questdb_config) => {
             db::postgres::get_table_comment(p, schema, table).await
         }
-        _ => Err("Table comment lookup is not supported for this connection".to_string()),
+        _ => Err(TABLE_COMMENT_UNSUPPORTED_ERROR.to_string()),
     }
 }
 
@@ -3574,7 +3579,7 @@ mod tests {
         tdengine_table_comments_sql, uses_mongodb_agent_collection_listing, visible_schema_filter,
         ExternalDriverStatisticsDialect, MetadataErrorAction, MysqlTableListSource, OracleObjectRef,
         OracleSynonymResolver, ReferenceKeyInfo, TableNameFilter, ORACLE_CURRENT_SCHEMA_SQL, ORACLE_SYNONYM_MAX_DEPTH,
-        TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
+        TABLE_COMMENT_UNSUPPORTED_ERROR, TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
     use super::{list_databases_core, list_tables_core};
     use super::{
@@ -7736,6 +7741,20 @@ done
             super::oracle_missing_object_table_comment_names(&objects),
             vec!["ORDERS".to_string(), "ORDERS_VIEW".to_string()]
         );
+    }
+
+    #[test]
+    fn unsupported_table_comment_is_not_treated_as_a_connection_error() {
+        // StarRocks/Doris editors fetch the table comment alongside indexes; a
+        // misclassified error rebuilt the shared metadata pool and emptied the
+        // concurrent index lookup (t8y2/dbx#14067).
+        assert!(!crate::query::is_connection_error(TABLE_COMMENT_UNSUPPORTED_ERROR));
+        for retried in [false, true] {
+            assert_eq!(
+                metadata_error_action(Some(DatabaseType::StarRocks), TABLE_COMMENT_UNSUPPORTED_ERROR, retried),
+                MetadataErrorAction::Return
+            );
+        }
     }
 
     #[test]

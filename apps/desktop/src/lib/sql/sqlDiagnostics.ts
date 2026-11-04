@@ -69,15 +69,21 @@ export function parseSqlErrorLocation(message: string): SqlErrorLocation | null 
 }
 
 export function lineColumnToOffset(sql: string, location: SqlErrorLocation): number | null {
-  const lines = sql.split(/\r?\n/);
-  if (location.line < 0 || location.line >= lines.length) return null;
+  if (location.line < 0) return null;
 
   let offset = 0;
   for (let index = 0; index < location.line; index++) {
-    offset += lines[index].length + 1;
+    const nextNewline = sql.indexOf("\n", offset);
+    if (nextNewline === -1) return null;
+    offset = nextNewline + 1;
   }
 
-  return Math.min(offset + location.column, offset + lines[location.line].length);
+  const nextNewline = sql.indexOf("\n", offset);
+  const rawLineEnd = nextNewline === -1 ? sql.length : nextNewline;
+  const lineEnd = rawLineEnd > offset && sql.charCodeAt(rawLineEnd - 1) === 13 ? rawLineEnd - 1 : rawLineEnd;
+  const lineLength = lineEnd - offset;
+
+  return Math.min(offset + Math.max(0, location.column), offset + lineLength);
 }
 
 function oracleInvalidIdentifierRange(sql: string, message: string, position: number): SqlErrorRange | null {

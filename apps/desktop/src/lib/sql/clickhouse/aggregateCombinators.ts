@@ -104,12 +104,14 @@ export function generateAggregateCombinatorCandidates(prefix: string, limit: num
   for (const base of CLICKHOUSE_AGGREGATE_FUNCTIONS) {
     if (base.combinators === false) continue;
     const baseName = base.name.toLowerCase();
-    const canMatch = matchMode === "contains" ? baseName.includes(normalized) || normalized.startsWith(baseName) || normalized.includes(baseName) : baseName.startsWith(normalized) || normalized.startsWith(baseName);
-    if (normalized && !canMatch) continue;
+    // A contains match may start in the base and end in a combinator suffix.
+    // Apply the base-only prefilter exclusively to the existing fuzzy path.
+    if (matchMode !== "contains" && normalized && !baseName.startsWith(normalized) && !normalized.startsWith(baseName)) continue;
 
     for (const sequence of COMBINATOR_SEQUENCES) {
+      const candidateName = `${base.name}${sequence.join("")}`;
+      if (!matchesIdentifierSearch(candidateName, prefix, matchMode)) continue;
       const candidate = generateDefinition(base, sequence);
-      if (!matchesIdentifierSearch(candidate.name, prefix, matchMode)) continue;
       results.push(candidate);
       if (results.length === limit) return results;
     }

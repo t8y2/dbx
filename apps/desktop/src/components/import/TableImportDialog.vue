@@ -163,7 +163,14 @@ const sqlScriptFallbackSource = ref<ImportSource | null>(null);
 const wizardStep = ref<TableImportWizardStep>("source");
 const fileInput = ref<HTMLInputElement | null>(null);
 const navicatBackupInput = ref<HTMLInputElement | null>(null);
-const delimiter = ref(",");
+const delimitersByFormat = ref<Partial<Record<api.TableImportSourceFormat, string>>>({});
+const delimiter = computed({
+  get: () => delimiterForFormat(sourceFormat.value),
+  set: (value) => {
+    delimitersByFormat.value[sourceFormat.value] = value;
+    schedulePreviewReloadForTextOptions();
+  },
+});
 const decimalSeparator = ref<"." | ",">(".");
 const textEncoding = ref<api.TableImportTextEncoding>("auto");
 const titleRow = ref(1);
@@ -534,7 +541,7 @@ function resetState() {
   batchTasks.value = [];
   activeTaskIndex.value = 0;
   sourceFormat.value = "csv";
-  delimiter.value = ",";
+  delimitersByFormat.value = {};
   decimalSeparator.value = ".";
   textEncoding.value = "auto";
   titleRow.value = 1;
@@ -581,6 +588,10 @@ function isDelimitedFormat(format: api.TableImportSourceFormat) {
   return format === "csv" || format === "tsv" || format === "delimited";
 }
 
+function delimiterForFormat(format: api.TableImportSourceFormat) {
+  return delimitersByFormat.value[format] ?? (format === "tsv" ? "\\t" : ",");
+}
+
 function encodingLabel(encoding: api.TableImportTextEncoding) {
   return t(encodingOptions.find((option) => option.value === encoding)?.labelKey || "tableImport.encodingAuto");
 }
@@ -607,7 +618,7 @@ function uniqueTableName(baseName: string, usedNames: Set<string>): string {
 function taskParseOptions(format: api.TableImportSourceFormat, sheetName = ""): api.TableImportParseOptions {
   return buildTableImportParseOptions({
     format,
-    delimiter: delimiter.value,
+    delimiter: delimiterForFormat(format),
     decimalSeparator: decimalSeparator.value,
     textEncoding: textEncoding.value,
     titleRow: titleRow.value,
@@ -947,7 +958,7 @@ function assignSelectedSource(source: string | File) {
   if (!newTableName.value.trim()) {
     newTableName.value = suggestedTableName(name);
   }
-  delimiter.value = sourceFormat.value === "tsv" ? "\\t" : ",";
+  delimitersByFormat.value = {};
   selectedSheet.value = "";
   wizardStep.value = "options";
   void loadPreview(source);
@@ -1652,9 +1663,9 @@ function schedulePreviewReload() {
   }, 250);
 }
 
-function schedulePreviewReloadAfterEncodingChange() {
+function schedulePreviewReloadForTextOptions() {
   if (isBatchImport.value) {
-    void reloadBatchPreviewsForEncoding();
+    void reloadBatchTextPreviews();
     return;
   }
   if (!selectedSource.value || running.value) return;
@@ -1665,14 +1676,14 @@ function schedulePreviewReloadAfterEncodingChange() {
   }, 250);
 }
 
-async function reloadBatchPreviewsForEncoding() {
+async function reloadBatchTextPreviews() {
   if (!isBatchImport.value || running.value) return;
   const requestId = ++batchEncodingRequestId;
   loadingPreview.value = true;
   errorMessage.value = "";
   try {
     for (const task of batchTasks.value) {
-      // SQL 脚本同样是文本源，编码变化时需要重新预览
+      // SQL scripts also need a fresh preview after an encoding change.
       if (!isDelimitedFormat(task.format) && task.format !== "sql") continue;
       const input = importPreviewInput(uploadedImportSourceFromPreview(task.preview), task.source);
       const nextPreview = await api.previewTableImportFile(input.fileOrPath, {
@@ -1729,8 +1740,8 @@ onBeforeUnmount(() => {
   }
 });
 
-watch([sourceFormat, delimiter, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
-watch([textEncoding, decimalSeparator], schedulePreviewReloadAfterEncodingChange);
+watch([sourceFormat, titleRow, dataStartRow, lastDataRow, trimValues, emptyStringAsNull, selectedSheet, jsonShape, previewLimit], schedulePreviewReload);
+watch([textEncoding, decimalSeparator], schedulePreviewReloadForTextOptions);
 watch([newTableName, columnMapping, columnGenerators, generatedColumns, columnDataTypes], saveActiveBatchTask, { deep: true });
 watch(wizardStep, (step) => {
   if (step !== "mapping") {
@@ -1989,7 +2000,7 @@ watch(rawProgressPercent, (percent) => {
             </div>
           </div>
 
-          <div v-if="sourceFormat === 'csv' || sourceFormat === 'tsv' || sourceFormat === 'delimited'" class="grid grid-cols-2 gap-3 rounded-md border p-3 md:grid-cols-3 xl:grid-cols-6">
+          <div v-if="isDelimitedFormat(sourceFormat)" class="grid grid-cols-2 gap-3 rounded-md border p-3 md:grid-cols-3 xl:grid-cols-6">
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.encoding") }}</Label>
               <Select :model-value="textEncoding" @update:model-value="(value: any) => (textEncoding = value)">
@@ -2008,7 +2019,7 @@ watch(rawProgressPercent, (percent) => {
             </div>
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.delimiter") }}</Label>
-              <Input v-model="delimiter" :disabled="sourceFormat !== 'delimited'" class="h-8 text-xs font-mono" />
+              <Input v-model="delimiter" class="h-8 text-xs font-mono" :aria-label="t('tableImport.delimiter')" />
             </div>
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.decimalSeparator") }}</Label>

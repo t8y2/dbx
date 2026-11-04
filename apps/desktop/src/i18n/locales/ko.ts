@@ -3611,6 +3611,7 @@ export default withEnglishFallback({
     copyCurrentPageSql: "현재 페이지 SQL 복사",
     copyActualExecutionSql: "실제 실행 SQL 복사",
     pageProbeDescription: "이 페이지에는 최대 {count}행이 표시되며, 다음 페이지가 있는지 판단하기 위해 최대 1행을 추가로 읽습니다.",
+    resultColumnCopied: "{column} 복사됨: {value}",
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",
@@ -10674,6 +10675,11 @@ export default withEnglishFallback({
     shortcutExecuteAllSql: "모든 SQL 실행",
     showConnectionGroupPath: "쿼리 연결의 전체 그룹 경로 표시",
     showConnectionGroupPathDescription: "활성화하면 쿼리 페이지 오른쪽 위의 연결 선택기에서 연결 이름 앞에 전체 그룹 경로를 표시합니다. 비활성화하면 연결 이름만 표시합니다.",
+    shortcutCopyResultColumn1: "첫 번째 행 결과의 1열 복사",
+    shortcutCopyResultColumn2: "첫 번째 행 결과의 2열 복사",
+    shortcutCopyResultColumn3: "첫 번째 행 결과의 3열 복사",
+    shortcutCopyResultColumn4: "첫 번째 행 결과의 4열 복사",
+    shortcutCopyResultColumn5: "첫 번째 행 결과의 5열 복사",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

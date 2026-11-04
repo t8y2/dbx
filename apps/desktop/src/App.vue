@@ -181,6 +181,7 @@ import {
   isToggleZenModeShortcut,
   isZoomInShortcut,
   isZoomOutShortcut,
+  copyResultColumnIndexFromShortcut,
   saveShortcutSurface,
   switchToTabIndexFromShortcut,
   tabSwitcherDirectionFromShortcut,
@@ -4804,6 +4805,15 @@ async function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
     e.stopPropagation();
     contentAreaRef.value?.refreshData();
+    return;
+  }
+  // Alt+1..5 (default) copies the active tab's first result row, column N.
+  // copyResultColumn reports unhandled when the result has no such column, so
+  // the keys stay free for anything more specific bound to them.
+  const copyResultColumn = copyResultColumnIndexFromShortcut(e, shortcuts);
+  if (copyResultColumn !== null && contentAreaRef.value?.copyResultColumn(copyResultColumn)) {
+    e.preventDefault();
+    e.stopPropagation();
     return;
   }
   if (isToggleResultsPaneShortcut(e, shortcuts) && contentAreaRef.value?.toggleResultsPane()) {

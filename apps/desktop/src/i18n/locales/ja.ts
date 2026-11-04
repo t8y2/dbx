@@ -3681,6 +3681,7 @@ export default withEnglishFallback({
     copyCurrentPageSql: "現在のページの SQL をコピー",
     copyActualExecutionSql: "実際に実行された SQL をコピー",
     pageProbeDescription: "このページには最大 {count} 行を表示し、次のページがあるかどうかを判断するために最大 1 行を追加で読み取ります。",
+    resultColumnCopied: "{column} をコピーしました：{value}",
   },
   exportProgress: {
     recoveryTitle: "終了が確認できていないエクスポートを削除しますか？",
@@ -10605,6 +10606,11 @@ export default withEnglishFallback({
     shortcutExecuteAllSql: "すべての SQL を実行",
     showConnectionGroupPath: "クエリ接続の完全なグループパスを表示",
     showConnectionGroupPathDescription: "有効にすると、クエリページ右上の接続セレクターで接続名の前に完全なグループパスが表示されます。無効にすると接続名のみが表示されます。",
+    shortcutCopyResultColumn1: "結果の1行目の1列目をコピー",
+    shortcutCopyResultColumn2: "結果の1行目の2列目をコピー",
+    shortcutCopyResultColumn3: "結果の1行目の3列目をコピー",
+    shortcutCopyResultColumn4: "結果の1行目の4列目をコピー",
+    shortcutCopyResultColumn5: "結果の1行目の5列目をコピー",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

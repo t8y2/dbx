@@ -4066,7 +4066,7 @@ fn linux_f_type_for_path(path: &std::path::Path) -> Option<i64> {
     if result != 0 {
         return None;
     }
-    Some(buf.f_type)
+    Some(buf.f_type as i64)
 }
 
 /// `statfs` on the opened descriptor, so the check describes the file the
@@ -4081,7 +4081,7 @@ fn linux_f_type_for_file(file: &std::fs::File) -> Option<i64> {
     if result != 0 {
         return None;
     }
-    Some(buf.f_type)
+    Some(buf.f_type as i64)
 }
 
 /// Reads `/proc/mounts` and returns the source of the mount entry that

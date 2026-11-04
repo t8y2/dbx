@@ -1407,6 +1407,7 @@ export const useConnectionStore = defineStore("connection", () => {
   // 事件的迟到：若连接时间晚于事件里的 `closedAtMs`，说明事件描述的是上一个会话。
   const connectionConnectedAtMs = new Map<string, number>();
   const connectionErrorRevisions = new Map<string, number>();
+  const connectionPasswordSaveErrors = new Set<string>();
   const tableListSourceRevisions = new Map<string, number>();
   // TDengine and native PostgreSQL reuse persisted snapshots without a background
   // refresh. Keep invalidation/write ordering explicit; these maps hold no trees.
@@ -2101,8 +2102,10 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
-  function setConnectionError(connectionId: string, message: string) {
+  function setConnectionError(connectionId: string, message: string, passwordSaveError = false) {
     connectionErrors.value[connectionId] = message;
+    if (passwordSaveError) connectionPasswordSaveErrors.add(connectionId);
+    else connectionPasswordSaveErrors.delete(connectionId);
     connectionErrorRevisions.set(connectionId, connectionErrorRevision(connectionId) + 1);
   }
 
@@ -2117,7 +2120,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function clearConnectionErrorIfUnchanged(connectionId: string | null | undefined, revision: number) {
-    if (!connectionId || connectionErrorRevision(connectionId) !== revision) return;
+    if (!connectionId || connectionErrorRevision(connectionId) !== revision || connectionPasswordSaveErrors.has(connectionId)) return;
     clearConnectionError(connectionId);
   }
 
@@ -2182,6 +2185,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function clearConnectionError(connectionId: string) {
+    connectionPasswordSaveErrors.delete(connectionId);
     if (!connectionErrors.value[connectionId]) return;
     delete connectionErrors.value[connectionId];
     connectionErrorRevisions.set(connectionId, connectionErrorRevision(connectionId) + 1);
@@ -6460,7 +6464,7 @@ export const useConnectionStore = defineStore("connection", () => {
       try {
         metadataConfigFingerprint = (await persistRememberedConnectionPassword(config, rememberPassword, expectedConfigFingerprint, localAttempt)) ?? expectedConfigFingerprint;
       } catch (error) {
-        if (isCurrentLocalConnectionAttempt(config.id, localAttempt)) setConnectionError(id, i18n.global.t("connection.rememberPasswordSaveFailed", { message: connectionErrorMessage(error) }));
+        if (isCurrentLocalConnectionAttempt(config.id, localAttempt)) setConnectionError(id, i18n.global.t("connection.rememberPasswordSaveFailed", { message: connectionErrorMessage(error) }), true);
       }
       ensureLocalConnectionAttemptActive(config.id, localAttempt);
       if (config.db_type !== "plugin" && !refreshMetadataBeforeReady) void refreshConnectedDatabaseInfo(id, { ...config, id }, metadataConfigFingerprint, isCurrentMetadata);
@@ -6919,7 +6923,7 @@ export const useConnectionStore = defineStore("connection", () => {
       try {
         metadataConfigFingerprint = (await persistRememberedConnectionPassword(config, rememberPassword, expectedConfigFingerprint, localAttempt)) ?? expectedConfigFingerprint;
       } catch (error) {
-        if (isCurrentLocalConnectionAttempt(connectionId, localAttempt)) setConnectionError(connectionId, i18n.global.t("connection.rememberPasswordSaveFailed", { message: connectionErrorMessage(error) }));
+        if (isCurrentLocalConnectionAttempt(connectionId, localAttempt)) setConnectionError(connectionId, i18n.global.t("connection.rememberPasswordSaveFailed", { message: connectionErrorMessage(error) }), true);
       }
       ensureLocalConnectionAttemptActive(connectionId, localAttempt);
       if (config.db_type !== "plugin" && !refreshMetadataBeforeReady) void refreshConnectedDatabaseInfo(connectionId, config, metadataConfigFingerprint, isCurrentMetadata);

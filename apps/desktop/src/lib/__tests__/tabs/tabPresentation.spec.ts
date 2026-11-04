@@ -43,7 +43,7 @@ const translations: Record<string, string> = {
   "editor.noDatabase": "No database",
   "databaseSearch.title": "Search Database",
   "nativeJobs.kinds.scheduler": "定时任务",
-  "nativeJobs.kinds.legacy": "作业",
+  "tree.jobCategories.legacy": "传统作业",
 };
 
 const translate = (key: string) => translations[key] ?? key;
@@ -84,7 +84,7 @@ describe("native job tab titles", () => {
       title: "OWNER · old label",
       nativeJobPage: { schema: "OWNER", kind },
     });
-    expect(tabDisplayTitle(tab, translate)).toBe(`OWNER · ${translations[`nativeJobs.kinds.${kind}`]}`);
+    expect(tabDisplayTitle(tab, translate)).toBe(`OWNER · ${kind === "legacy" ? "传统作业" : "定时任务"}`);
     expect(tab.title).toBe("OWNER · old label");
     tab.customTitle = true;
     tab.title = "My jobs";

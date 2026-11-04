@@ -45,6 +45,8 @@ async function setupStore(visibleDatabases?: string[]) {
     deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
     disconnectDb,
     listDatabases,
+    listTables: vi.fn().mockResolvedValue([]),
+    listObjects: vi.fn().mockResolvedValue([]),
     listInstalledAgents: vi.fn().mockResolvedValue([]),
     loadSchemaCache: vi.fn().mockResolvedValue(encodeSchemaTreeCache(cachedChildren)),
     saveConnections: vi.fn().mockResolvedValue(undefined),
@@ -114,13 +116,15 @@ describe("connectionStore visible filter lifecycle", () => {
     expect(store.getSidebarVisibleFilterSummary(connection.id)).toEqual({ mode: "database", isActive: false, selected: null, total: null });
   });
 
-  it("does not add a background refresh for an unfiltered cached connection", async () => {
+  it("discovers the full database range once for an unfiltered cached connection", async () => {
     const { connection, listDatabases, store } = await setupStore();
 
     await store.loadDatabases(connection.id);
 
     expect(store.connectedIds.has(connection.id)).toBe(true);
-    expect(listDatabases).not.toHaveBeenCalled();
-    expect(store.getSidebarVisibleFilterSummary(connection.id)).toEqual({ mode: "database", isActive: false, selected: null, total: null });
+    await store.initializeRelationalNavigation(connection.id);
+    expect(listDatabases).toHaveBeenCalledTimes(1);
+    expect(store.treeNodes[0]?.children?.filter((node) => node.type === "database").map((node) => node.database)).toEqual(["filter_alpha", "filter_beta", "filter_gamma"]);
+    expect(store.getSidebarVisibleFilterSummary(connection.id)).toEqual({ mode: "database", isActive: false, selected: 3, total: 3 });
   });
 });

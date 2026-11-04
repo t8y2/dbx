@@ -134,8 +134,9 @@ afterEach(() => {
 });
 
 describe("SidebarTreeRuntimeHost expansion", () => {
-  it.each(["dameng-job-admin", "database-job-admin"] as const)("opens %s through the direct-navigation production path", async (type) => {
-    const node: TreeNode = { id: `c:${type}`, label: "Jobs", type, connectionId: "c", database: "" };
+  it.each(["dameng-job-admin", "native-job"] as const)("opens %s through the direct-navigation production path", async (type) => {
+    const page = { schema: "OWNER", kind: "legacy" as const };
+    const node: TreeNode = { id: `c:${type}`, label: "Jobs", type, connectionId: "c", database: "service", ...(type === "native-job" ? { nativeJobPage: page } : {}) };
     const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
     const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node, depth: 0 }) }));
     mountedApps.push(app);
@@ -147,7 +148,7 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     host.value?.handleRowClick(node, 2);
     host.value?.handleRowDoubleClick(node, new MouseEvent("dblclick"));
     const open = type === "dameng-job-admin" ? queryStore.openDamengJobAdmin : queryStore.openDatabaseJobAdmin;
-    await vi.waitFor(() => expect(open).toHaveBeenCalledExactlyOnceWith("c"));
+    await vi.waitFor(() => expect(open).toHaveBeenCalledExactlyOnceWith(...(type === "dameng-job-admin" ? ["c"] : ["c", undefined, { ...page, database: "service" }])));
     expect(connectionStore.loadObjectGroupChildren).not.toHaveBeenCalled();
     expect(node.children).toBeUndefined();
   });

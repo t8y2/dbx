@@ -425,7 +425,7 @@ test("utility-only connection cache is ignored and replaced with live metadata c
     assert.equal(listDatabasesCalls, 1);
     assert.deepEqual(
       store.treeNodes[0].children?.map((child) => child.type),
-      ["database", "user-admin"],
+      ["database"],
     );
     assert.deepEqual(
       savedPayload?.children?.map((child: any) => child.type),
@@ -437,7 +437,7 @@ test("utility-only connection cache is ignored and replaced with live metadata c
   }
 });
 
-test("empty root metadata does not replace existing databases with only user admin", async () => {
+test("empty root metadata preserves existing databases", async () => {
   const restoreStorage = installMemoryStorage();
   const originalFetch = globalThis.fetch;
   let savedPayload: any = null;
@@ -482,11 +482,11 @@ test("empty root metadata does not replace existing databases with only user adm
 
     assert.deepEqual(
       store.treeNodes[0].children?.map((child) => child.type),
-      ["database", "user-admin"],
+      ["database"],
     );
     assert.deepEqual(
       store.treeNodes[0].children?.map((child) => child.id),
-      ["conn-1:app", "conn-1:__user_admin"],
+      ["conn-1:app"],
     );
     assert.deepEqual(
       savedPayload?.children?.map((child: any) => child.id),
@@ -543,7 +543,7 @@ test("dropping the last visible database removes the stale node instead of prese
 
     assert.deepEqual(
       store.treeNodes[0].children?.map((child) => child.type),
-      ["user-admin"],
+      [],
     );
     assert.equal(
       store.treeNodes[0].children?.some((child) => child.id === "conn-1:app"),

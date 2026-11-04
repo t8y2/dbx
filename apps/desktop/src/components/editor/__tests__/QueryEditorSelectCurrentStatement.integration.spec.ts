@@ -120,12 +120,6 @@ describe("QueryEditor select current statement", () => {
     // happy-dom has no layout, so the click position resolves to the caret.
     vi.spyOn(EditorView.prototype, "posAtCoords").mockReturnValue(null);
     document.querySelector("[data-query-editor-root]")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
-    const copyGroup = await vi.waitFor(() => {
-      const found = document.querySelector<HTMLButtonElement>('[data-menu-action="group.sql"]');
-      expect(found).not.toBeNull();
-      return found!;
-    });
-    copyGroup.click();
     const copyButton = await vi.waitFor(() => {
       const found = [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].find((b) => b.textContent?.includes("editor.contextMenu.copyCurrentStatement"));
       expect(found).toBeDefined();

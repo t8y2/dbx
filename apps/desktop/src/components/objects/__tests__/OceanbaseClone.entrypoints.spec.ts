@@ -21,6 +21,8 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
   ...backend,
   closeClientConnectionSession: vi.fn().mockResolvedValue(true),
   listPlugins: vi.fn().mockResolvedValue([]),
+  listInstalledAgents: vi.fn().mockResolvedValue([]),
+  listInstalledAgentsLocal: vi.fn().mockResolvedValue([]),
   saveSchemaCache: vi.fn().mockResolvedValue(undefined),
   loadSchemaCache: vi.fn().mockResolvedValue(null),
   deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),

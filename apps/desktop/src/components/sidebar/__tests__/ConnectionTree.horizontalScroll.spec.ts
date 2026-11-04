@@ -7,6 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 import { sidebarHorizontalWheelDelta } from "@/lib/sidebar/sidebarScrollbar";
 import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, canTreeNodePin, sidebarPinnedActionSlotWidthPx, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { sidebarTreeSecondaryValue } from "@/lib/sidebar/sidebarTreeLabel";
+import { sidebarNavigationSettings } from "@/lib/sidebar/sidebarNavigationPreferences";
+import { oracleNavigationAuxiliaryText } from "@/lib/sidebar/oracleObjectNavigation";
 import { showSidebarRowProductionBadge, isSidebarProductionContainer } from "@/lib/sidebar/sidebarProductionBadge";
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import type { TreeNode } from "@/types/database";
@@ -39,6 +41,8 @@ function measure(nodes: TreeNode[], mode: string, alignedWidths = new Map<string
     t: (key: string) => key,
     sidebarCommentLabel: (node: TreeNode) => node.label,
     sidebarTreeSecondaryValue,
+    sidebarNavigationSettings,
+    oracleNavigationAuxiliaryText,
     showSidebarRowProductionBadge,
     isSidebarProductionContainer,
     sidebarTreeNodeComment,
@@ -96,6 +100,7 @@ describe("ConnectionTree horizontal scrolling", () => {
       t: (key: string) => key,
       sidebarCommentLabel: (node: TreeNode) => node.label,
       sidebarTreeSecondaryValue,
+      sidebarNavigationSettings,
       showSidebarRowProductionBadge,
       isSidebarProductionContainer,
       sidebarTreeNodeComment,

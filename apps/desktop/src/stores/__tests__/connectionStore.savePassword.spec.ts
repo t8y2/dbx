@@ -47,6 +47,7 @@ function installApiMocks(extra: Record<string, unknown> = {}) {
     disconnectDb: vi.fn().mockResolvedValue(undefined),
     deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
     loadSchemaCache: vi.fn().mockResolvedValue(null),
+    listDatabases: vi.fn().mockResolvedValue([]),
     saveConnections: vi.fn().mockResolvedValue(undefined),
     saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
     connectionDatabaseInfo: vi.fn().mockResolvedValue(undefined),
@@ -698,6 +699,10 @@ describe("connectionStore save_password opt-out", () => {
     expect(store.getConfig("mysql-1")?.password).toBe("");
     expect(store.connectionErrors["mysql-1"]).toContain("Connected, but DBX could not remember the password");
     expect(store.connectionErrors["mysql-1"]).toContain("disk full");
+    await store.loadDatabases("mysql-1", { force: true, background: true });
+    expect(store.connectionErrors["mysql-1"]).toContain("disk full");
+    store.clearConnectionError("mysql-1");
+    expect(store.connectionErrors["mysql-1"]).toBeUndefined();
   });
 
   it("keeps ensureConnected successful when remembering the recovered password fails", async () => {
@@ -1007,7 +1012,7 @@ describe("connectionStore plugin password prompt", () => {
     store.connections = [connection];
     store.connectedIds.add(connection.id);
 
-    await expect(store.updateConnection({ ...connection, host: "new.example.com" })).resolves.toBeUndefined();
+    await expect(store.updateConnection({ ...connection, host: "new.example.com" })).resolves.toMatchObject({ id: connection.id, host: "new.example.com" });
 
     expect(saveConnections).toHaveBeenCalledWith([expect.objectContaining({ id: connection.id, host: "new.example.com" })]);
     expect(store.getConfig(connection.id)?.host).toBe("new.example.com");

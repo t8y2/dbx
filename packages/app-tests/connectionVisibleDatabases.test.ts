@@ -141,8 +141,14 @@ test("Dameng explicit schema filters can keep SYSDBA visible", () => {
   assert.deepEqual(filterSchemaNamesForConnection(["APP", "SYS", "SYSDBA"], connection, ""), ["APP", "SYSDBA"]);
 });
 
-test("Oracle keeps an existing DIP user visible", () => {
-  assert.deepEqual(filterSchemaNamesForConnection(["DBX_TEST", "DIP", "SYSTEM"], config({ db_type: "oracle", database: "XE" }), "XE"), ["DBX_TEST", "DIP"]);
+test("Oracle hides predefined DIP by default but preserves visibility overrides and live maintenance metadata", () => {
+  const schemas = ["DBX_TEST", "DIP", "SYSTEM"];
+  const connection = config({ db_type: "oracle", database: "XE" });
+  assert.deepEqual(filterSchemaNamesForConnection(schemas, connection, "XE"), ["DBX_TEST"]);
+  assert.deepEqual(filterSchemaNamesForConnection(schemas, { ...connection, show_system_schemas: true }, "XE"), schemas);
+  assert.deepEqual(filterSchemaNamesForConnection(schemas, { ...connection, username: "DIP" }, "XE"), ["DBX_TEST", "DIP"]);
+  assert.deepEqual(filterSchemaNamesForConnection(schemas, connection, "XE", { oracleMaintainedSchemas: new Set(["SYSTEM"]) }), ["DBX_TEST", "DIP"]);
+  assert.deepEqual(filterSchemaNamesForConnection(schemas, { ...connection, visible_schemas: { XE: ["DIP"] } }, "XE"), ["DIP"]);
 });
 
 test("visible database selection is stale when connection target changes", () => {

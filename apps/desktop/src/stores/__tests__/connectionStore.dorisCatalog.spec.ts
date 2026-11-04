@@ -121,10 +121,8 @@ describe("connectionStore Doris catalog tree", () => {
     expect(listTables).toHaveBeenCalledTimes(1);
     expect(listTables.mock.calls[0]?.[7]).toBe("iceberg");
     expect(hiveDatabase.children).toEqual([]);
-    expect(icebergDatabase.children?.map((node) => [node.catalog, node.database, node.label])).toEqual([
-      ["iceberg", "sales", "orders"],
-      ["iceberg", "sales", "tree.queries"],
-    ]);
+    expect(icebergDatabase.children?.map((node) => node.type)).toEqual(["group-tables", "group-views", "group-materialized-views"]);
+    expect(icebergDatabase.children?.flatMap((node) => node.children ?? []).map((node) => [node.catalog, node.database, node.label])).toEqual([["iceberg", "sales", "orders"]]);
   });
 
   it("uses the bounded fuzzy-search budget for external catalog tables", async () => {

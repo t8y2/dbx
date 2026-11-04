@@ -4,6 +4,7 @@ import type { QueryTab, TreeNode } from "@/types/database";
 import { nativeJobAdminSelectionKey, nativeJobSelectionMatchesPage, type NativeJobAdminSelection } from "@/lib/database/nativeJobAdmin";
 
 export type ActiveTabSidebarTarget =
+  | { type: "saved-sql-file"; savedSqlId: string }
   | {
       type: "native-job";
       connectionId: string;
@@ -278,6 +279,8 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     return { type: "nacos-namespace", connectionId: tab.connectionId, namespace: tab.nacosNamespace || "" };
   }
 
+  if (tab.savedSqlId) return { type: "saved-sql-file", savedSqlId: tab.savedSqlId };
+
   if (tab.mode === "query") {
     if (!tab.connectionId) return null;
     if (!tab.database) return { type: "connection", connectionId: tab.connectionId };
@@ -307,6 +310,7 @@ function schemaMatches(node: TreeNode, schema: string | undefined): boolean {
 }
 
 export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): boolean {
+  if (target.type === "saved-sql-file") return node.type === "saved-sql-file" && node.savedSqlId === target.savedSqlId;
   if (target.type === "native-job") {
     if (target.kind === "scheduler" && !target.schedulerCategory && node.type === "native-job-scheduler") {
       return node.connectionId === target.connectionId && node.database === target.database && (node.schema === target.schema || (node.relationalNavigationSelection?.kind === "named" && node.relationalNavigationSelection.name === target.schema));

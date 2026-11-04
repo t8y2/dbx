@@ -495,7 +495,7 @@ mod tests {
             if engine == DatabaseType::Oracle {
                 form.oracle_connection_type = Some("service_name".into());
             }
-            connection::save_connections(
+            let _ = connection::save_connections(
                 State(state.clone()),
                 HeaderMap::new(),
                 Json(SaveConnectionsRequest { configs: vec![form.clone()], removed_ids: Vec::new() }),
@@ -541,7 +541,7 @@ mod tests {
             }
             let mut changed_driver = stored;
             changed_driver.driver_profile = Some("custom-driver".into());
-            connection::save_connections(
+            let _ = connection::save_connections(
                 State(state.clone()),
                 HeaderMap::new(),
                 Json(SaveConnectionsRequest { configs: vec![changed_driver], removed_ids: Vec::new() }),

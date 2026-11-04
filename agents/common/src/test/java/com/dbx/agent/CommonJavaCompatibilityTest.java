@@ -71,6 +71,8 @@ class CommonJavaCompatibilityTest {
         assertTrue(AgentProtocol.CAPABILITIES.contains(AgentProtocol.CAPABILITY_QUERY));
         assertTrue(AgentProtocol.CAPABILITIES.contains(AgentProtocol.CAPABILITY_METADATA));
         assertFalse(AgentProtocol.CAPABILITIES.contains(AgentProtocol.CAPABILITY_EXACT_METADATA_IDENTITY_V1));
+        assertFalse(AgentProtocol.CAPABILITIES.contains(AgentProtocol.CAPABILITY_OBJECT_LIST_COMMENTS_V1));
+        assertFalse(AgentProtocol.CAPABILITIES.contains(AgentProtocol.CAPABILITY_TABLE_LIST_COMMENTS_V1));
     }
 
     @Test

@@ -183,8 +183,9 @@ describe("connectionStore tree refresh state", () => {
     expect(group.isExpanded).toBeUndefined();
   });
 
-  it("preserves an object group count while rebuilding grouped placeholders", async () => {
-    installApiMocks();
+  it("refreshes an object group count while rebuilding its directory", async () => {
+    const views = Array.from({ length: 7 }, (_, index) => ({ name: `view_${index}`, table_type: "VIEW", comment: null }));
+    installApiMocks({ listTables: vi.fn().mockResolvedValue(views) });
     const oldView: TreeNode = { id: "pg-1:app:public:old_view", label: "old_view", type: "view", connectionId: "pg-1", database: "app", schema: "public" };
     const root = schemaNode([objectGroup("group-views", "__views", oldView)]);
     root.children![0]!.isExpanded = false;
@@ -193,11 +194,12 @@ describe("connectionStore tree refresh state", () => {
     await store.loadTreeNodeChildren(root, { force: true });
 
     expect(root.children?.find((child) => child.type === "group-views")?.objectCount).toBe(7);
+    expect(root.children?.find((child) => child.type === "group-views")?.children?.map((child) => child.label)).toEqual(views.map((view) => view.name));
   });
 
   it("rolls back tree data and loaded markers when an expanded child refresh fails", async () => {
-    const listTables = vi.fn().mockResolvedValue([{ name: "fresh_view", table_type: "VIEW", comment: null }]);
-    const listObjects = vi.fn().mockRejectedValue(new Error("metadata denied"));
+    const listTables = vi.fn().mockResolvedValue([{ name: "old_view", table_type: "VIEW", comment: null }]);
+    const listObjects = vi.fn().mockResolvedValue([{ name: "old_procedure", object_type: "PROCEDURE", schema: "public" }]);
     installApiMocks({ listTables, listObjects });
 
     const oldView: TreeNode = { id: "pg-1:app:public:old_view", label: "old_view", type: "view", connectionId: "pg-1", database: "app", schema: "public" };
@@ -209,11 +211,15 @@ describe("connectionStore tree refresh state", () => {
     const store = await createStore(root);
 
     await store.loadTreeNodeChildren(root, { force: true });
+    listTables.mockClear().mockResolvedValue([{ name: "fresh_view", table_type: "VIEW", comment: null }]);
+    listObjects.mockClear().mockRejectedValue(new Error("metadata denied"));
+    root.hiddenChildren = hiddenChildren;
+    root.objectCount = 42;
     const previousChildren = root.children;
     const viewsGroupId = root.children!.find((child) => child.type === "group-views")!.id;
     const proceduresGroupId = root.children!.find((child) => child.type === "group-procedures")!.id;
     expect(store.isTreeNodeChildrenLoaded(root.id)).toBe(true);
-    expect(store.isTreeNodeChildrenLoaded(viewsGroupId)).toBe(false);
+    expect(store.isTreeNodeChildrenLoaded(viewsGroupId)).toBe(true);
 
     await expect(store.refreshTreeNode(root)).rejects.toThrow("metadata denied");
 
@@ -225,8 +231,8 @@ describe("connectionStore tree refresh state", () => {
     expect(root.children?.find((child) => child.type === "group-views")?.children?.map((child) => child.label)).toEqual(["old_view"]);
     expect(root.children?.find((child) => child.type === "group-procedures")?.children?.map((child) => child.label)).toEqual(["old_procedure"]);
     expect(store.isTreeNodeChildrenLoaded(root.id)).toBe(true);
-    expect(store.isTreeNodeChildrenLoaded(viewsGroupId)).toBe(false);
-    expect(store.isTreeNodeChildrenLoaded(proceduresGroupId)).toBe(false);
+    expect(store.isTreeNodeChildrenLoaded(viewsGroupId)).toBe(true);
+    expect(store.isTreeNodeChildrenLoaded(proceduresGroupId)).toBe(true);
   });
 
   it("reloads completion columns after refreshing their schema tree", async () => {

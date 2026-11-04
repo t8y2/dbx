@@ -48,7 +48,7 @@ describe("NebulaGraph sidebar context menus", () => {
   it("keeps space browsing and queries without relational database operations", async () => {
     const host = await mountHost();
     const items = labels(host.buildContextMenu(node("database", "space")));
-    expect(items).toEqual(expect.arrayContaining([tr("contextMenu.copyName"), tr("contextMenu.newQuery"), tr("contextMenu.openObjectBrowser"), tr("contextMenu.refreshChildren")]));
+    expect(items).toEqual(expect.arrayContaining([tr("contextMenu.copyName"), tr("contextMenu.newQuery"), tr("contextMenu.viewObjects"), tr("contextMenu.refreshObjects")]));
     for (const key of ["transfer.dataTransfer", "diff.title", "dataCompare.title", "contextMenu.exportDatabase", "dataDictionary.title", "sqlFile.title"]) {
       expect(items).not.toContain(tr(key));
     }
@@ -57,7 +57,7 @@ describe("NebulaGraph sidebar context menus", () => {
   it.each(["table", "view"] as const)("keeps %s reads and DDL without SQL table mutations", async (type) => {
     const host = await mountHost();
     const items = labels(host.buildContextMenu(node(type, type === "table" ? "person" : "knows")));
-    expect(items).toEqual(expect.arrayContaining([tr("contextMenu.copyName"), tr("contextMenu.newQuery"), tr("contextMenu.viewData"), tr("contextMenu.viewDdl"), tr("contextMenu.refreshChildren")]));
+    expect(items).toEqual(expect.arrayContaining([tr("contextMenu.copyName"), tr("contextMenu.newQuery"), tr("contextMenu.viewData"), tr("contextMenu.viewDdl"), tr("contextMenu.refreshObjects")]));
     for (const key of ["contextMenu.generateSql", "contextMenu.exportDatabase", "contextMenu.exportData", "contextMenu.editView", "contextMenu.dropView", "contextMenu.dropTable", "contextMenu.emptyTable", "contextMenu.duplicateStructure", "dataCompare.title"]) {
       expect(items).not.toContain(tr(key));
     }
@@ -66,7 +66,7 @@ describe("NebulaGraph sidebar context menus", () => {
   it("does not offer SQL view creation on the edge group", async () => {
     const host = await mountHost();
     const items = labels(host.buildContextMenu(node("group-views", "Edges")));
-    expect(items).toContain(tr("contextMenu.refreshChildren"));
+    expect(items).toContain(tr("contextMenu.refreshObjects"));
     expect(items).not.toContain(tr("contextMenu.createView"));
   });
 

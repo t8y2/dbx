@@ -97,8 +97,8 @@ describe("connectionStore sidebar table storage", () => {
     await store.refreshObjectListTreeNode(connection.id, connection.database, "APP");
     expect(listObjectStatistics).toHaveBeenCalledTimes(2);
 
-    const currentExistingTable = schemaNode.children?.find((node) => node.label === "EXISTING_TABLE");
-    const newTable = schemaNode.children?.find((node) => node.label === "NEW_TABLE");
+    const currentExistingTable = schemaNode.children?.flatMap((node) => (node.type === "group-tables" ? (node.children ?? []) : [node])).find((node) => node.label === "EXISTING_TABLE");
+    const newTable = schemaNode.children?.flatMap((node) => (node.type === "group-tables" ? (node.children ?? []) : [node])).find((node) => node.label === "NEW_TABLE");
     refreshedStatistics.resolve([
       { name: "EXISTING_TABLE", schema: "APP", total_bytes: 8192 },
       { name: "NEW_TABLE", schema: "APP", total_bytes: 16384 },

@@ -33,7 +33,7 @@ import { getSqlFileFilter, getSqlFileFolderPaths, saveSqlFileFilter, saveSqlFile
 import { getSqlFileFoldersUiState, saveSqlFileFoldersUiState, type SqlFileFolderUiState } from "@/lib/sqlFile/sqlFileUiState";
 import { filterAndSortSqlFileEntries, getSqlFileSortOrder, saveSqlFileSortOrder, type SqlFileSortOrder } from "@/lib/sql/sqlFileTreeFilter";
 import { orderedListSelectionIntent, type OrderedListSelectionItem } from "@/lib/selection/orderedListSelection";
-import { getSqlFileOpenMode, saveSqlFileOpenMode, type SqlFileOpenMode } from "@/lib/sqlFile/sqlFileInteraction";
+import { saveSqlFileOpenMode, useSqlFileOpenMode, type SqlFileOpenMode } from "@/lib/sqlFile/sqlFileInteraction";
 import { getSqlFileOrder, saveSqlFileOrder, reorderSqlFiles, remapSqlFileOrder, sqlFileParentPath, type SqlFileOrder } from "@/lib/sqlFile/sqlFileOrder";
 import { useSqlFileReorder } from "@/composables/useSqlFileReorder";
 
@@ -81,7 +81,7 @@ const currentFilePath = computed(() => {
 });
 const filterSettingsOpen = ref(false);
 const fileFilterDraft = ref(getSqlFileFilter());
-const openMode = ref<SqlFileOpenMode>(getSqlFileOpenMode());
+const openMode = useSqlFileOpenMode();
 const openModeDraft = ref<SqlFileOpenMode>(openMode.value);
 const foldersRevision = ref(0);
 const treeId = useId();

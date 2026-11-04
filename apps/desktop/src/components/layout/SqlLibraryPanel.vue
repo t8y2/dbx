@@ -25,13 +25,16 @@ import {
   Library,
   Loader2,
   LocateFixed,
+  MoreHorizontal,
   Pencil,
   Play,
   Trash2,
+  Settings,
   Upload,
   X,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useSqlPanelSearchMode } from "@/composables/useSqlPanelSearchMode";
 import SidebarLocateButton from "@/components/sidebar/SidebarLocateButton.vue";
@@ -53,6 +56,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { externalSqlEditorMaxBytes } from "@/lib/sql/sqlFileOpen";
+import { saveSqlFileOpenMode, useSqlFileOpenMode, type SqlFileOpenMode } from "@/lib/sqlFile/sqlFileInteraction";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCounts";
 import { collectSavedSqlDirectoryImportFiles } from "@/lib/savedSql/savedSqlDirectoryImport";
@@ -125,6 +129,21 @@ watch(
 
 // Sort mode: "folder" (manual sibling order) or "date" (updated date among siblings)
 const sortMode = ref<"folder" | "date">("folder");
+const interactionSettingsOpen = ref(false);
+const openMode = useSqlFileOpenMode();
+const openModeDraft = ref<SqlFileOpenMode>(openMode.value);
+let lastClickedKey: string | null = null;
+
+function openInteractionSettings() {
+  openModeDraft.value = openMode.value;
+  interactionSettingsOpen.value = true;
+}
+
+function saveInteractionSettings() {
+  openMode.value = openModeDraft.value;
+  saveSqlFileOpenMode(openMode.value);
+  interactionSettingsOpen.value = false;
+}
 
 function getConnectionLabel(connectionId: string) {
   if (!connectionId) return t("sqlLibrary.unassociated");
@@ -1040,6 +1059,9 @@ function handleFileClick(file: SavedSqlFile, event: MouseEvent) {
   // Find current file index in unified list
   const currentIndex = allSelectableItems.value.findIndex((item) => item.type === "file" && item.id === file.id);
   if (currentIndex < 0) return;
+  const itemKey = `file:${file.id}`;
+  const repeatedClick = event.detail > 1 && lastClickedKey === itemKey;
+  lastClickedKey = itemKey;
 
   if (selectionIntent === "range") {
     event.preventDefault();
@@ -1062,8 +1084,15 @@ function handleFileClick(file: SavedSqlFile, event: MouseEvent) {
     clearSelection();
     lastClickedItemIndex.value = currentIndex;
     setActiveItem(file.id, "file");
-    openFile(file);
+    if (openMode.value === "single" && !repeatedClick) void openFile(file);
   }
+}
+
+function handleFileDoubleClick(file: SavedSqlFile, event: MouseEvent) {
+  event.stopPropagation();
+  if ((event.target as HTMLElement | null)?.closest("button, input, select, textarea, [contenteditable='true']")) return;
+  if (openMode.value !== "double" || orderedListSelectionIntent(event) !== "single" || event.altKey) return;
+  void openFile(file);
 }
 
 function handleFolderClick(folder: SavedSqlFolder, event: MouseEvent) {
@@ -1074,7 +1103,9 @@ function handleFolderClick(folder: SavedSqlFolder, event: MouseEvent) {
   // Find current folder index in unified list
   const currentIndex = allSelectableItems.value.findIndex((item) => item.type === "folder" && item.id === folder.id);
   if (currentIndex < 0) return;
-
+  const itemKey = `folder:${folder.id}`;
+  const repeatedClick = event.detail > 1 && lastClickedKey === itemKey;
+  lastClickedKey = itemKey;
   if (selectionIntent === "range") {
     event.preventDefault();
     event.stopPropagation();
@@ -1096,8 +1127,15 @@ function handleFolderClick(folder: SavedSqlFolder, event: MouseEvent) {
     clearSelection();
     lastClickedItemIndex.value = currentIndex;
     setActiveItem(folder.id, "folder");
-    toggleFolder(folder.id);
+    if (openMode.value === "single" && !repeatedClick) toggleFolder(folder.id);
   }
+}
+
+function handleFolderDoubleClick(folder: SavedSqlFolder, event: MouseEvent) {
+  event.stopPropagation();
+  if ((event.target as HTMLElement | null)?.closest("button, input, select, textarea, [contenteditable='true']")) return;
+  if (openMode.value !== "double" || orderedListSelectionIntent(event) !== "single" || event.altKey) return;
+  toggleFolder(folder.id);
 }
 
 const contextTarget = ref<SavedSqlFolder | SavedSqlFile | "panel" | null>(null);
@@ -1671,21 +1709,32 @@ defineExpose({
       <LightTooltip :text="t('sqlFileTree.locateActiveFile')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <SidebarLocateButton class="disabled:pointer-events-none disabled:opacity-50" :label="t('sqlFileTree.locateActiveFile')" :disabled="!currentSavedSqlFile" @locate="locateCurrentFile" />
       </LightTooltip>
-      <LightTooltip :text="t('savedSql.newFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
-        <Button variant="ghost" size="icon" class="h-5 w-5" @click="openNewFolderInput()">
-          <FolderPlus class="h-3 w-3" />
+      <LightTooltip :text="t('sqlFileTree.panelSettings')" side="bottom" :delay="0" :close-delay="0" nowrap>
+        <Button variant="ghost" size="icon" class="h-5 w-5" @click="openInteractionSettings">
+          <Settings class="h-3 w-3" />
         </Button>
       </LightTooltip>
-      <LightTooltip :text="t('sqlLibrary.importDirectory')" side="bottom" :delay="0" :close-delay="0" nowrap>
-        <Button variant="ghost" size="icon" class="h-5 w-5" @click="importDirectoryIntoLibrary()">
-          <Download class="h-3 w-3" />
-        </Button>
-      </LightTooltip>
-      <LightTooltip :text="t('sqlLibrary.exportLibrary')" side="bottom" :delay="0" :close-delay="0" nowrap>
-        <Button variant="ghost" size="icon" class="h-5 w-5" @click="exportFolderContents()">
-          <Upload class="h-3 w-3" />
-        </Button>
-      </LightTooltip>
+      <DropdownMenu>
+        <DropdownMenuTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-5 w-5" :aria-label="t('common.more')" :title="t('common.more')">
+            <MoreHorizontal class="h-3.5 w-3.5" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" class="w-44">
+          <DropdownMenuItem @select="openNewFolderInput()">
+            <FolderPlus class="h-3.5 w-3.5" />
+            {{ t("savedSql.newFolder") }}
+          </DropdownMenuItem>
+          <DropdownMenuItem @select="importDirectoryIntoLibrary()">
+            <Download class="h-3.5 w-3.5" />
+            {{ t("sqlLibrary.importDirectory") }}
+          </DropdownMenuItem>
+          <DropdownMenuItem @select="exportFolderContents()">
+            <Upload class="h-3.5 w-3.5" />
+            {{ t("sqlLibrary.exportLibrary") }}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
       <LightTooltip :text="t('common.close')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('close')">
           <X class="h-3 w-3" />
@@ -1735,6 +1784,7 @@ defineExpose({
                 @mousemove="updateDropTarget($event, row.folder.id, 'folder')"
                 @mouseleave="clearDropTarget(row.folder.id)"
                 @click="handleFolderClick(row.folder, $event)"
+                @dblclick.stop="handleFolderDoubleClick(row.folder, $event)"
                 @contextmenu.capture="contextTarget = row.folder"
                 @contextmenu.prevent="
                   contextTarget = row.folder;
@@ -1787,6 +1837,7 @@ defineExpose({
                   @mousemove="updateDropTarget($event, row.file.id, 'file')"
                   @mouseleave="clearDropTarget(row.file.id)"
                   @click="handleFileClick(row.file, $event)"
+                  @dblclick.stop="handleFileDoubleClick(row.file, $event)"
                   @contextmenu.capture="contextTarget = row.file"
                   @contextmenu.prevent="
                     contextTarget = row.file;
@@ -1832,6 +1883,25 @@ defineExpose({
         </template>
       </CustomContextMenu>
     </div>
+
+    <Dialog v-model:open="interactionSettingsOpen">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{{ t("sqlFileTree.panelSettings") }}</DialogTitle>
+        </DialogHeader>
+        <div class="grid gap-2 py-2">
+          <label for="sql-library-open-mode" class="text-sm font-medium">{{ t("sqlFileTree.openMode") }}</label>
+          <select id="sql-library-open-mode" v-model="openModeDraft" class="h-8 rounded-md border border-input bg-background px-2 text-sm">
+            <option value="single">{{ t("sqlFileTree.openModeSingle") }}</option>
+            <option value="double">{{ t("sqlFileTree.openModeDouble") }}</option>
+          </select>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" size="sm" @click="interactionSettingsOpen = false">{{ t("common.cancel") }}</Button>
+          <Button size="sm" @click="saveInteractionSettings">{{ t("common.save") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <Dialog v-model:open="showDeleteConfirm">
       <DialogContent class="sm:max-w-[380px]">

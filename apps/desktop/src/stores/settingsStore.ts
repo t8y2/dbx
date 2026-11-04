@@ -1027,6 +1027,8 @@ export interface EditorSettings {
   batchColumnSelectionIncludeComments: boolean;
   tableCompletionSchemaQualification: SqlTableCompletionSchemaQualification;
   insertSpaceAfterCompletion: boolean;
+  /** Insert built-in snippet bodies on one line instead of their authored multi-line template. */
+  snippetCompletionSingleLine: boolean;
   sqlServerSpaceConfirmsCompletion: boolean;
   functionCompletionIncludeParams: boolean;
   sequenceCompletionEnabled: boolean;
@@ -1441,6 +1443,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   batchColumnSelectionIncludeComments: true,
   tableCompletionSchemaQualification: DEFAULT_SQL_TABLE_COMPLETION_SCHEMA_QUALIFICATION,
   insertSpaceAfterCompletion: true,
+  snippetCompletionSingleLine: true,
   sqlServerSpaceConfirmsCompletion: false,
   functionCompletionIncludeParams: true,
   sequenceCompletionEnabled: true,
@@ -2168,6 +2171,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     batchColumnSelectionIncludeComments: typeof settings.batchColumnSelectionIncludeComments === "boolean" ? settings.batchColumnSelectionIncludeComments : DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments,
     tableCompletionSchemaQualification: normalizeSqlTableCompletionSchemaQualification(settings.tableCompletionSchemaQualification),
     insertSpaceAfterCompletion: typeof settings.insertSpaceAfterCompletion === "boolean" ? settings.insertSpaceAfterCompletion : DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion,
+    snippetCompletionSingleLine: typeof settings.snippetCompletionSingleLine === "boolean" ? settings.snippetCompletionSingleLine : DEFAULT_EDITOR_SETTINGS.snippetCompletionSingleLine,
     sqlServerSpaceConfirmsCompletion: typeof settings.sqlServerSpaceConfirmsCompletion === "boolean" ? settings.sqlServerSpaceConfirmsCompletion : DEFAULT_EDITOR_SETTINGS.sqlServerSpaceConfirmsCompletion,
     functionCompletionIncludeParams: typeof settings.functionCompletionIncludeParams === "boolean" ? settings.functionCompletionIncludeParams : DEFAULT_EDITOR_SETTINGS.functionCompletionIncludeParams,
     sequenceCompletionEnabled: typeof settings.sequenceCompletionEnabled === "boolean" ? settings.sequenceCompletionEnabled : DEFAULT_EDITOR_SETTINGS.sequenceCompletionEnabled,
@@ -3129,6 +3133,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.batchColumnSelectionIncludeComments !== undefined) editorSettings.value.batchColumnSelectionIncludeComments = partial.batchColumnSelectionIncludeComments === true;
     if (partial.tableCompletionSchemaQualification !== undefined) editorSettings.value.tableCompletionSchemaQualification = normalizeSqlTableCompletionSchemaQualification(partial.tableCompletionSchemaQualification);
     if (partial.insertSpaceAfterCompletion !== undefined) editorSettings.value.insertSpaceAfterCompletion = partial.insertSpaceAfterCompletion === true;
+    if (partial.snippetCompletionSingleLine !== undefined) editorSettings.value.snippetCompletionSingleLine = partial.snippetCompletionSingleLine === true;
     if (partial.sqlServerSpaceConfirmsCompletion !== undefined) editorSettings.value.sqlServerSpaceConfirmsCompletion = partial.sqlServerSpaceConfirmsCompletion === true;
     if (partial.functionCompletionIncludeParams !== undefined) editorSettings.value.functionCompletionIncludeParams = partial.functionCompletionIncludeParams === true;
     if (partial.sequenceCompletionEnabled !== undefined) editorSettings.value.sequenceCompletionEnabled = partial.sequenceCompletionEnabled === true;

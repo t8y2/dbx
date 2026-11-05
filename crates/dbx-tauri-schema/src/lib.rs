@@ -32,6 +32,14 @@ define_registry![
     get_object_source,
     get_event_info,
     get_custom_type_details,
+    native_job_open_context,
+    native_job_list,
+    native_job_references,
+    native_job_read,
+    native_job_prepare,
+    native_job_apply,
+    native_job_status,
+    native_job_cancel,
     get_oracle_type_management_snapshot,
     build_oracle_type_management_sql,
     verify_oracle_type_data,
@@ -95,8 +103,8 @@ mod tests {
     use super::{handles, COMMANDS};
 
     #[test]
-    fn handles_only_schema_commands() {
-        assert_eq!(COMMANDS.len(), 60);
+    fn handles_only_schema_commands_including_native_jobs() {
+        assert_eq!(COMMANDS.len(), 68);
         assert!(handles("list_databases"));
         assert!(handles("load_schema_diff_routines"));
         assert!(handles("prepare_oracle_routine_save"));
@@ -107,6 +115,14 @@ mod tests {
         assert!(handles("update_oracle_routine_operation_references"));
         assert!(handles("list_event_triggers"));
         for command in [
+            "native_job_open_context",
+            "native_job_list",
+            "native_job_references",
+            "native_job_read",
+            "native_job_prepare",
+            "native_job_apply",
+            "native_job_status",
+            "native_job_cancel",
             "get_oracle_type_management_snapshot",
             "build_oracle_type_management_sql",
             "verify_oracle_type_data",

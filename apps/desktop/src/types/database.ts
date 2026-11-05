@@ -5,6 +5,7 @@ import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/
 import type { DatabaseType } from "@/types/generated/databaseTypes";
 import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
 import type { GraphResult } from "@/lib/graph/graphResult";
+import type { OracleRoutinePlanDraft } from "@/types/schemaDiff";
 
 export type { DatabaseType } from "@/types/generated/databaseTypes";
 
@@ -140,7 +141,7 @@ export interface ConnectionConfig {
   id: string;
   name: string;
   /** Read-only response identity retained when a saved JDBC URL is protected. */
-  readonly jdbc_dialect?: "oceanbase-oracle";
+  readonly jdbc_dialect?: "oceanbase-oracle" | "oracle";
   note?: string;
   db_type: DatabaseType;
   driver_profile?: string;
@@ -157,8 +158,10 @@ export interface ConnectionConfig {
   visible_database_patterns?: string[];
   visible_schemas?: Record<string, string[]>;
   show_system_schemas?: boolean;
-  /** Whether to show Oracle / OceanBase-Oracle database links node in the sidebar tree. Defaults to true. */
+  /** Connection-level sidebar display preferences. Absent means shown. */
   show_database_links?: boolean;
+  show_native_jobs?: boolean;
+  show_user_admin?: boolean;
   /** Load every page when the sidebar's Tables group is opened for this connection. */
   sidebar_auto_load_all_tables?: boolean;
   attached_databases?: AttachedDatabaseConfig[];
@@ -738,6 +741,12 @@ export interface PluginMcpContribution {
   description?: string;
   ai_tools?: boolean;
   external_tools?: boolean;
+  /** Optional grouping of the plugin's tools for the MCP settings UI. */
+  toolsets?: Array<{ id: string; title: string; description?: string }>;
+  /** Optional per-tool declarations keyed by tool name. */
+  tools?: Record<string, { toolset?: string; access?: "read" | "write" | "full" }>;
+  /** Optional sub-scope below a connection (e.g. a Kubernetes namespace). */
+  scope?: { kind: string; title: string; argument: string; list_method?: string };
 }
 
 /**
@@ -886,6 +895,8 @@ export interface PluginMarketplacePlugin {
   icon?: string;
   tags: string[];
   permissions: string[];
+  /** The plugin provides MCP tools (manifest declares an `mcp` contribution). */
+  mcpTools?: boolean;
   source?: string;
   homepage?: string;
   license?: string;
@@ -1151,6 +1162,7 @@ export interface ObjectSource {
   editable?: boolean;
   /** Optional structured metadata exposed by generic JDBC sidecars. */
   routine_parameters?: RoutineParameterMetadata[];
+  trigger?: TriggerInfo | null;
 }
 
 export interface MysqlEventInfo {
@@ -1578,6 +1590,44 @@ export interface TriggerInfo {
   comment?: string | null;
   created_at?: string | null;
   statement?: string | null;
+  oracle_metadata?: OracleTriggerMetadata | null;
+}
+
+/** Missing metadata means a provider has not established exact identity. */
+export interface MetadataReadOptions {
+  lightweight?: boolean;
+  identityMode?: "exact";
+  catalog?: string;
+}
+
+export interface OracleTriggerParent {
+  owner: string;
+  name: string;
+  objectType: "TABLE" | "VIEW";
+  objectId?: string | null;
+}
+
+export interface OracleTriggerReadState {
+  state: "available" | "empty" | "denied" | "unavailable" | "unsupported" | "error" | "incomplete";
+  message?: string | null;
+}
+
+export interface OracleTriggerMetadata {
+  contractVersion: 1;
+  identityMode: "exact";
+  engine: "oracle" | "oceanbase-oracle" | "dm";
+  engineVersion?: string | null;
+  owner: string;
+  name: string;
+  scope: "TABLE" | "VIEW" | "SCHEMA" | "DATABASE" | "TIMER" | "OTHER" | "UNKNOWN";
+  scopeType?: string | null;
+  scopeOwner?: string | null;
+  parent?: OracleTriggerParent | null;
+  objectId?: string | null;
+  lastDdlTime?: string | null;
+  definition?: { origin: string; format: "ddl" | "declaration" | "body"; complete: boolean } | null;
+  errors?: { sequence: number; line: number; position: number; text: string; severity?: string | null }[] | null;
+  reads: Partial<Record<"identity" | "scope" | "parent" | "enabled" | "validity" | "definition" | "errors", OracleTriggerReadState>>;
 }
 
 export interface ConstraintInfo {
@@ -1727,6 +1777,8 @@ export interface QueryResult {
   appended_from_row_count?: number;
   /** Set for synthesized query execution failures. */
   execution_error?: true;
+  /** Frontend execution that published this result; absent on older cached results. */
+  sourceExecutionId?: string;
   /** Set only for SQL Server informational messages emitted by the backend. */
   server_message?: true;
   /** Manual-transaction UX marker for sticky proven-read-only dialects (Oracle,
@@ -1796,11 +1848,34 @@ export interface QueryResult {
   total_is_exact?: boolean;
   truncated?: boolean;
   /** Variable-length cells represented by bounded previews in `rows`. */
-  large_value_cells?: Array<{ row_index: number; column_index: number; original_bytes: number; value_ref?: string }>;
+  large_value_cells?: Array<{
+    row_index: number;
+    column_index: number;
+    /** With value_ref, zero can mean an unknown byte size, not an empty value. */
+    original_bytes: number;
+    value_ref?: string;
+    pending_decode?: boolean;
+  }>;
+  /** Authoritative original keys for internal reads; never derive these from interpreted display text. */
+  raw_key_cells?: Array<{ row_index: number; column_index: number; value: string | number | boolean | null }>;
   /** Frontend-only original result connection, independent of the currently active tab. */
   large_value_context?: { connectionId: string; database: string; clientSessionId?: string; txnSessionId?: string; catalog?: string };
   /** Retained result refs also cover cells already hydrated into complete local values. */
   large_value_refs?: string[];
+  /** Frontend-only dispatch identity; absent on results without captured provenance. */
+  legacy_export_source?: {
+    connectionId: string;
+    database: string;
+    schema?: string;
+    catalog?: string;
+    databaseType?: DatabaseType;
+    connectionFingerprint: string;
+    identifierQuote?: string;
+    serverVersion?: string;
+    statementSql?: string;
+    hiddenPrimaryKeys?: Array<{ sourceName: string; alias: string }>;
+    ordinaryReadSafe: boolean;
+  };
   session_id?: string | null;
   /** Frontend-only owner of a manual transaction's result cursor, including retained runs. */
   manual_transaction_session_id?: string;
@@ -1935,6 +2010,7 @@ export interface QueryResultRun {
   resultSortMode?: "database" | "local";
   resultLocalSortOriginalRows?: QueryResult["rows"];
   resultLocalSortOriginalLargeValueCells?: QueryResult["large_value_cells"];
+  resultLocalSortOriginalRawKeyCells?: QueryResult["raw_key_cells"];
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
   resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   orderByInput?: string;
@@ -2020,6 +2096,16 @@ export interface SqlGroupByViolation {
   qualifier?: string | null;
 }
 
+/**
+ * A two-part column qualifier that names neither a table nor an alias visible
+ * in the statement, e.g. `b.id` when only `a` and `qb` are declared.
+ * The span covers the qualifier itself.
+ */
+export interface SqlUnknownQualifier {
+  qualifier: string;
+  span: SqlTextSpan;
+}
+
 export interface SqlReferenceScope {
   id: number;
   parent_id?: number | null;
@@ -2030,6 +2116,7 @@ export interface SqlReferenceAnalysis {
   columns: SqlColumnReference[];
   scopes?: SqlReferenceScope[];
   group_by_violations?: SqlGroupByViolation[];
+  unknown_qualifiers?: SqlUnknownQualifier[];
 }
 
 export type TreeNodeType =
@@ -2082,6 +2169,7 @@ export type TreeNodeType =
   | "oracle-db-link"
   | "group-jobs"
   | "group-packages"
+  | "group-package-bodies"
   | "group-partitions"
   | "group-extensions"
   | "group-event-triggers"
@@ -2095,6 +2183,7 @@ export type TreeNodeType =
   | "dameng-users"
   | "dameng-roles"
   | "dameng-job-admin"
+  | "database-job-admin"
   | "saved-sql-root"
   | "saved-sql-folder"
   | "saved-sql-file"
@@ -2311,6 +2400,9 @@ export interface TableStructureEditorDraft {
   /** Original DDL and display preference retained so restoring a draft cannot change its baseline. */
   rawDdlContent?: string;
   excludeDdlStorage?: boolean;
+  includeDdlStorage?: boolean;
+  compactDdlSql?: boolean;
+  separateDdlIndexes?: boolean;
   /** Edited DDL script, or null/undefined when the DDL tab was left untouched. */
   ddlDraft?: string | null;
   newTableName: string;
@@ -2328,6 +2420,7 @@ export interface TableStructureEditorDraft {
   starrocksLayoutDraft?: import("@/lib/table/starrocksAlterOptions").StarRocksLayoutDraft;
   starrocksSortColumns?: string[];
   starrocksPhysicalOptions?: import("@/lib/table/starrocksPhysicalOptions").StarRocksPhysicalOptionsDraft;
+  postgresForeignTable?: import("@/lib/table/postgresForeignTable").PostgresForeignTableDraft;
   tableOwner?: string;
   originalTableOwner?: string;
   columns: import("@/lib/table/tableStructureEditorSql").EditableStructureColumn[];
@@ -2343,6 +2436,11 @@ export interface TableStructureEditorDraft {
     remaining: import("@/lib/table/tableStructureEditorSql").OracleForeignKeyDefinition[];
     uncertainSteps: string[];
   };
+  oracleTriggerStructureRecovery?: {
+    target: import("@/lib/database/oracleTriggerStructurePlan").OracleTriggerStructureTarget;
+    steps: import("@/lib/database/oracleTriggerPlan").OracleTriggerStructureStepResult[];
+    details: string;
+  };
   constraintsLoaded?: boolean;
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
   triggersLoaded?: boolean;
@@ -2354,6 +2452,8 @@ export interface TableStructureEditorDraft {
   createPartitioningColumns?: string[];
   createPartitioningExpression?: string;
   loadedMetadataFacets?: import("@/lib/metadata/objectMetadataCache").ObjectMetadataFacet[];
+  /** A failed index read must keep restored index edits blocked until an explicit reload succeeds. */
+  indexMetadataReadError?: string;
   scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
   /** Request id of the structureInitialTab the editor already applied; remounts must not replay a consumed initial tab over the restored draft. */
   appliedInitialTabRequestId?: number;
@@ -2529,6 +2629,7 @@ export interface QueryTab {
   resultSortMode?: "database" | "local";
   resultLocalSortOriginalRows?: QueryResult["rows"];
   resultLocalSortOriginalLargeValueCells?: QueryResult["large_value_cells"];
+  resultLocalSortOriginalRawKeyCells?: QueryResult["raw_key_cells"];
   resultLocalSortOriginalMongoDocuments?: QueryResult["mongo_documents"];
   resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   orderByInput?: string;
@@ -2648,8 +2749,10 @@ export interface QueryTab {
     | "dameng-users"
     | "dameng-roles"
     | "dameng-jobs"
+    | "database-jobs"
     | "processlist"
     | "sqlserver-trace"
+    | "pl-debug"
     | "mysql-dashboard"
     | "postgres-dashboard"
     | "xugu-dashboard"
@@ -2674,6 +2777,8 @@ export interface QueryTab {
   };
   /** Ephemeral navigation intent; it is consumed by HBaseBrowser and is not persisted. */
   hbaseCreateTableOnOpen?: boolean;
+  /** Connection-level native Job selection; bodies and backend context IDs are not persisted. */
+  nativeJobAdmin?: { kind: "scheduler"; owner: string; name: string } | { kind: "legacy"; jobId: string } | { kind: "dameng-native"; jobId: string; name: string };
   mqTenant?: string;
   mqInitialTab?: "topics";
   mqttInitialTopic?: string;
@@ -2737,9 +2842,12 @@ export interface QueryTab {
   };
   ddlViewer?: {
     schema?: string;
+    explicitOwner?: string;
     tableName: string;
     objectType?: ObjectSourceKind;
     formatDialect?: SqlFormatDialect;
+    displaySource?: string;
+    separateIndexes?: boolean;
   };
   /**
    * 「先出 tab 再加载」的中间态：DDL 新标签已经可见，但 DDL 还在路上
@@ -2894,6 +3002,13 @@ export interface QueryTab {
     collection: string;
     idColumn: "_id";
   };
+  /**
+   * MongoDB query tabs only. "sql" compiles the editor text to a mongo-shell
+   * command before the existing execution path runs it. Absent means shell.
+   */
+  mongoQueryLanguage?: "shell" | "sql";
+  /** Shell text produced by the latest SQL-mode execution. Not persisted. */
+  mongoGeneratedShell?: string;
   mongoBucket?: {
     bucketName: string;
   };
@@ -2973,6 +3088,8 @@ export interface SavedSqlLibrary {
 }
 
 /** Serializable configuration of a saved data-transfer task. */
+export type TransferPackageDraft = Pick<OracleRoutinePlanDraft, "identity" | "sourceName" | "sql" | "packageBodySource" | "packageContract" | "confirmPackagePair"> & { reviewedTargetDraft?: boolean };
+
 export interface TransferTaskConfig {
   sourceConnectionId: string;
   /** Undefined means the connection's built-in/default catalog. */
@@ -2985,6 +3102,7 @@ export interface TransferTaskConfig {
   targetSchema?: string;
   /** Selected object names grouped by object kind (TABLE, VIEW, ...). */
   objects: Partial<Record<TransferObjectKind, string[]>>;
+  oraclePackageDrafts?: TransferPackageDraft[];
   content: TransferContent;
   mode: TransferMode;
   targetTableNameCase: TransferTableNameCase;

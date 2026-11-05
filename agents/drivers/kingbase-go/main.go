@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -162,6 +163,13 @@ type server struct {
 	nextSessionID                   uint64
 	activeCancelMu                  sync.Mutex
 	activeCancel                    context.CancelFunc
+	// manualConn pins the physical connection that carries an interactive
+	// transaction. The agent gives every protocol session one connection, so
+	// pinning it keeps BEGIN, the following statements and COMMIT on the same
+	// session instead of letting the pool hand out another one. manualTxOpen
+	// tracks whether an explicit transaction is currently open on it.
+	manualConn   *sql.Conn
+	manualTxOpen bool
 }
 
 type agentSession struct {
@@ -471,6 +479,12 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 	case "execute_transaction":
 		result, err := s.executeTransaction(params)
 		return result, false, err
+	case "begin_manual_transaction":
+		return map[string]bool{"ok": true}, false, s.beginManualTransaction(stringParam(params, "schema"))
+	case "commit_manual_transaction":
+		return map[string]bool{"ok": true}, false, s.commitManualTransaction()
+	case "rollback_manual_transaction":
+		return map[string]bool{"ok": true}, false, s.rollbackManualTransaction()
 	case "execute_batch":
 		result, err := s.executeBatch(params)
 		return result, false, err
@@ -697,6 +711,7 @@ func openDBWithSSLMode(cp connectParams, sslMode string) (*sql.DB, error) {
 func (s *server) disconnect() error {
 	s.cancelActiveQuery()
 	s.closeAllQuerySessions()
+	s.rollbackManualTransactionQuiet()
 	s.usePgDefaultExpression = false
 	s.usePgViewDefinition = false
 	s.usePgFunctionDefinition = false
@@ -726,12 +741,19 @@ func (s *server) disconnect() error {
 }
 
 func (s *server) validateConnection() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	// The pool holds a single connection (SetMaxOpenConns(1)) and the open
+	// interactive transaction pinned it, so it is the only connection this
+	// session can use — and the only one that can be pinged without waiting
+	// for the pool.
+	if s.manualConn != nil {
+		return s.manualConn.PingContext(ctx)
+	}
 	db, err := s.requireDB()
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
 	return db.PingContext(ctx)
 }
 
@@ -784,7 +806,7 @@ func (s *server) executeQuery(opts queryOptions) (result queryResult, resultErr 
 			_ = rows.Close()
 			result.Messages = messages.drain()
 			restore()
-			_ = conn.Close()
+			s.releaseConn(conn)
 			s.endOperation(cancel)
 		}()
 		maxRows := opts.MaxRows
@@ -801,14 +823,14 @@ func (s *server) executeQuery(opts queryOptions) (result queryResult, resultErr 
 	}
 	messages, restore, err := captureQueryMessages(conn)
 	if err != nil {
-		_ = conn.Close()
+		s.releaseConn(conn)
 		s.endOperation(cancel)
 		return queryResult{}, err
 	}
 	defer func() {
 		result.Messages = messages.drain()
 		restore()
-		_ = conn.Close()
+		s.releaseConn(conn)
 		s.endOperation(cancel)
 	}()
 	execResult, err := conn.ExecContext(ctx, sqlText)
@@ -826,7 +848,7 @@ func (s *server) queryRows(sqlText string, schema string, timeoutSecs int) (*sql
 	}
 	rows, err := conn.QueryContext(ctx, sqlText)
 	if err != nil {
-		_ = conn.Close()
+		s.releaseConn(conn)
 		s.endOperation(cancel)
 		return nil, nil, nil, err
 	}
@@ -840,14 +862,14 @@ func (s *server) queryRowsWithMessages(sqlText string, schema string, timeoutSec
 	}
 	messages, restore, err := captureQueryMessages(conn)
 	if err != nil {
-		_ = conn.Close()
+		s.releaseConn(conn)
 		s.endOperation(cancel)
 		return nil, nil, nil, nil, nil, err
 	}
 	rows, err := conn.QueryContext(ctx, sqlText)
 	if err != nil {
 		restore()
-		_ = conn.Close()
+		s.releaseConn(conn)
 		s.endOperation(cancel)
 		return nil, nil, nil, nil, nil, err
 	}
@@ -869,7 +891,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 	if err != nil {
 		_ = rows.Close()
 		restore()
-		_ = conn.Close()
+		s.releaseConn(conn)
 		s.endOperation(cancel)
 		return queryPageResult{}, err
 	}
@@ -885,7 +907,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 	if err != nil {
 		_ = rows.Close()
 		restore()
-		_ = conn.Close()
+		s.releaseConn(conn)
 		s.endOperation(cancel)
 		return queryPageResult{}, err
 	}
@@ -897,7 +919,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 	} else {
 		_ = rows.Close()
 		restore()
-		_ = conn.Close()
+		s.releaseConn(conn)
 		s.endOperation(cancel)
 	}
 	return result, nil
@@ -934,7 +956,7 @@ func (s *server) closeQuerySession(id string) bool {
 		session.restoreMessages()
 	}
 	if session.conn != nil {
-		_ = session.conn.Close()
+		s.releaseConn(session.conn)
 	}
 	if session.cancel != nil {
 		s.endOperation(session.cancel)
@@ -1061,6 +1083,12 @@ func columnTypeNames(rows *sql.Rows) []string {
 }
 
 func (s *server) executeTransaction(params map[string]json.RawMessage) (result queryResult, resultErr error) {
+	if s.manualTxOpen {
+		// The one-shot transaction would open a second transaction on the
+		// pinned connection, and its COMMIT would end the interactive
+		// transaction the SQL editor is driving.
+		return queryResult{}, errors.New("cannot start a one-shot transaction while a manual transaction is open")
+	}
 	statements := stringSliceParam(params, "statements")
 	conn, ctx, cancel, err := s.operationConn(stringParam(params, "schema"), intParam(params, "timeoutSecs"))
 	if err != nil {
@@ -1068,14 +1096,14 @@ func (s *server) executeTransaction(params map[string]json.RawMessage) (result q
 	}
 	messages, restore, err := captureQueryMessages(conn)
 	if err != nil {
-		_ = conn.Close()
+		s.releaseConn(conn)
 		s.endOperation(cancel)
 		return queryResult{}, err
 	}
 	defer func() {
 		result.Messages = messages.drain()
 		restore()
-		_ = conn.Close()
+		s.releaseConn(conn)
 		s.endOperation(cancel)
 	}()
 	start := time.Now()
@@ -1127,19 +1155,40 @@ func (s *server) operationConn(schema string, timeoutSecs int) (*sql.Conn, conte
 }
 
 func (s *server) schemaConn(ctx context.Context, schema string) (*sql.Conn, error) {
-	db, err := s.requireDB()
-	if err != nil {
-		return nil, err
-	}
-	conn, err := db.Conn(ctx)
+	conn, err := s.acquireConn(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if err := s.setSchema(ctx, conn, schema); err != nil {
-		_ = conn.Close()
+		s.releaseConn(conn)
 		return nil, err
 	}
 	return conn, nil
+}
+
+// acquireConn returns the connection one operation must run on. While an
+// interactive transaction is open, every statement has to run on the pinned
+// connection: another connection would not see the open transaction and the
+// statement would silently commit on its own instead.
+func (s *server) acquireConn(ctx context.Context) (*sql.Conn, error) {
+	if s.manualConn != nil {
+		return s.manualConn, nil
+	}
+	db, err := s.requireDB()
+	if err != nil {
+		return nil, err
+	}
+	return db.Conn(ctx)
+}
+
+// releaseConn returns an operation's connection to the pool. The pinned
+// manual-transaction connection belongs to the transaction, so it has to
+// survive the statement that used it.
+func (s *server) releaseConn(conn *sql.Conn) {
+	if conn == nil || conn == s.manualConn {
+		return
+	}
+	_ = conn.Close()
 }
 
 func (s *server) setSchema(ctx context.Context, conn *sql.Conn, schema string) error {
@@ -1161,6 +1210,113 @@ func (s *server) setSchema(ctx context.Context, conn *sql.Conn, schema string) e
 	s.currentSchema = schema
 	s.schemaSet = schema != ""
 	return nil
+}
+
+// beginManualTransaction pins the session connection and opens an interactive
+// transaction on it. The SQL editor drives the transaction statement by
+// statement, so BEGIN, the following statements and COMMIT have to share one
+// physical connection: the agent gives every protocol session a single
+// connection, and pinning it keeps the transaction on that session.
+func (s *server) beginManualTransaction(schema string) error {
+	if s.manualTxOpen {
+		return errors.New("manual transaction already open")
+	}
+	db, err := s.requireDB()
+	if err != nil {
+		return err
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		return fmt.Errorf("reserve connection for manual transaction: %w", err)
+	}
+	if err := s.setSchema(context.Background(), conn, schema); err != nil {
+		_ = conn.Close()
+		return err
+	}
+	if _, err := conn.ExecContext(context.Background(), "BEGIN"); err != nil {
+		// The server may have started the transaction even though the client
+		// never got the response, so the connection must not go back to the
+		// pool with an open transaction on it.
+		discardConn(conn)
+		return fmt.Errorf("begin manual transaction: %w", err)
+	}
+	s.manualConn = conn
+	s.manualTxOpen = true
+	return nil
+}
+
+// commitManualTransaction commits the interactive transaction and releases the
+// pinned connection.
+func (s *server) commitManualTransaction() error {
+	conn := s.manualConn
+	if !s.manualTxOpen || conn == nil {
+		return errors.New("no manual transaction open")
+	}
+	_, err := conn.ExecContext(context.Background(), "COMMIT")
+	if err != nil {
+		// A failed COMMIT leaves the transaction open. Roll it back before the
+		// connection goes back to the pool, otherwise the pooled connection
+		// would carry that transaction into unrelated statements.
+		if _, rollbackErr := conn.ExecContext(context.Background(), "ROLLBACK"); rollbackErr != nil {
+			// The rollback failed too, so the server may still hold an open
+			// transaction on this connection. Drop the connection instead of
+			// handing it to the next statement.
+			discardConn(conn)
+		}
+	}
+	s.releaseManualTransaction(conn)
+	return err
+}
+
+// rollbackManualTransaction rolls the interactive transaction back and releases
+// the pinned connection.
+func (s *server) rollbackManualTransaction() error {
+	conn := s.manualConn
+	if !s.manualTxOpen || conn == nil {
+		return errors.New("no manual transaction open")
+	}
+	_, err := conn.ExecContext(context.Background(), "ROLLBACK")
+	if err != nil {
+		// The rollback failed, so the connection may still carry an open
+		// transaction. Drop it instead of returning it to the pool.
+		discardConn(conn)
+	}
+	s.releaseManualTransaction(conn)
+	return err
+}
+
+// rollbackManualTransactionQuiet ends an unfinished interactive transaction
+// without reporting an error. It runs when the session is closed, so a
+// transaction the user never committed never reaches the server.
+func (s *server) rollbackManualTransactionQuiet() {
+	conn := s.manualConn
+	if !s.manualTxOpen || conn == nil {
+		return
+	}
+	if _, err := conn.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+		discardConn(conn)
+	}
+	s.releaseManualTransaction(conn)
+}
+
+// discardConn marks a pooled connection as broken so database/sql drops it
+// instead of handing it to the next statement.
+func discardConn(conn *sql.Conn) {
+	if conn == nil {
+		return
+	}
+	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+}
+
+// releaseManualTransaction drops the pinned connection after the transaction
+// ended.
+func (s *server) releaseManualTransaction(conn *sql.Conn) {
+	s.manualConn = nil
+	s.manualTxOpen = false
+	if conn == nil {
+		return
+	}
+	_ = conn.Close()
 }
 
 func buildDSN(cp connectParams) string {

@@ -81,6 +81,17 @@ describe("data grid large-value metadata", () => {
     expect(tableDataLargeValuePreviewOptions("oracle", [column("ID", "NUMBER", true), column("DOC", "XMLTYPE")], ["ID"], 100)).toEqual({});
   });
 
+  it("keeps JDBC CLOB/BLOB locators intact while retaining the NCLOB SQL preview", () => {
+    const columns = [column("ID", "NUMBER", true), column("BODY", "CLOB"), column("DATA", "BLOB")];
+    expect(tableDataLargeValuePreviewOptions("oracle", columns, ["ID"], 1000, true)).toEqual({});
+    expect(tableDataLargeValuePreviewOptions("oracle", [...columns, column("NATIONAL", "NCLOB")], ["ID"], 1000, true)).toEqual({
+      columnTypes: ["NUMBER", "", "", "NCLOB"],
+      largeValuePreviewSize: 4194,
+    });
+    expect(columns.map((item) => item.data_type)).toEqual(["NUMBER", "CLOB", "BLOB"]);
+    expect(tableDataLargeValuePreviewOptions("oracle", columns, ["ID"], 1000)).toEqual({ columnTypes: ["NUMBER", "CLOB", "BLOB"], largeValuePreviewSize: 2097 });
+  });
+
   it("disables marker parsing when a real column uses the reserved preview prefix", () => {
     const columns = [column("id", "bigint", true), column("__dbx_large_value_bytes_t_0", "text")];
 

@@ -23,6 +23,7 @@ mod webview2_legacy_css;
 mod webview2_preflight;
 #[cfg(any(target_os = "windows", test))]
 mod webview2_recovery;
+mod window_geometry;
 mod window_state_guard;
 #[cfg(target_os = "windows")]
 mod windows_appcompat;
@@ -411,8 +412,15 @@ fn linux_nvidia_driver_from_state(
     proprietary_control_exists: bool,
     proprietary_proc_exists: bool,
     render_driver: Option<&str>,
+    prime_render_offload: bool,
 ) -> LinuxNvidiaDriver {
-    if proprietary_control_exists || proprietary_proc_exists {
+    // On hybrid laptops the proprietary module is loaded for the dGPU while the
+    // integrated GPU (i915/xe/amdgpu) drives the display and WebKit's renderer.
+    // Applying the NVIDIA workarounds there needlessly disables DMABuf and drops
+    // WebKitGTK to the slow shared-memory path (laggy scrolling everywhere).
+    let renders_on_nvidia =
+        prime_render_offload || render_driver.is_none_or(|driver| driver.eq_ignore_ascii_case("nvidia"));
+    if (proprietary_control_exists || proprietary_proc_exists) && renders_on_nvidia {
         LinuxNvidiaDriver::Proprietary
     } else if render_driver.is_some_and(|driver| driver.eq_ignore_ascii_case("nouveau")) {
         LinuxNvidiaDriver::Nouveau
@@ -612,6 +620,7 @@ fn apply_linux_webkit_rendering_workarounds() {
         std::path::Path::new("/dev/nvidiactl").exists(),
         std::path::Path::new("/proc/driver/nvidia/version").exists(),
         selected_device.and_then(|device| device.driver.as_deref()),
+        std::env::var_os("__NV_PRIME_RENDER_OFFLOAD").is_some_and(|value| value == "1"),
     );
     let has_hardware_render_device =
         render_devices.iter().any(|device| !linux_drm_driver_is_software_only(device.driver.as_deref()));
@@ -770,6 +779,11 @@ pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, ta
         return;
     }
     show_main_window(app);
+    // The prompt only resolves to a quit after the user answers, by which
+    // point the window may already be hidden. Record its visible frame now;
+    // `complete_app_close` and the dock/menu quit keep this capture unless the
+    // window has meanwhile moved.
+    window_state_guard::remember_main_window_geometry(app);
     let _ = app.emit(APP_CLOSE_REQUESTED_EVENT, target);
 }
 
@@ -1527,13 +1541,19 @@ mod tests {
 
     #[test]
     fn classifies_linux_nvidia_driver_from_selected_renderer() {
-        assert_eq!(linux_nvidia_driver_from_state(true, false, None), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(false, true, None), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(true, false, Some("nouveau")), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("nouveau")), LinuxNvidiaDriver::Nouveau);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("i915")), LinuxNvidiaDriver::None);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("amdgpu")), LinuxNvidiaDriver::None);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, None), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, false, None, false), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(false, true, None, false), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(true, false, Some("nouveau"), false), LinuxNvidiaDriver::Nouveau);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("nouveau"), false), LinuxNvidiaDriver::Nouveau);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("i915"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("amdgpu"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, None, false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("nvidia"), false), LinuxNvidiaDriver::Proprietary);
+        // Hybrid laptops: the iGPU renders, so the proprietary dGPU module must not disable DMABuf.
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("i915"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("xe"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("amdgpu"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("i915"), true), LinuxNvidiaDriver::Proprietary);
     }
 
     fn drm_render_device(path: &str, driver: &str, boot_vga: bool) -> LinuxDrmRenderDevice {
@@ -1621,7 +1641,10 @@ mod tests {
 
         let selected = linux_selected_drm_render_device(None, &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("i915"));
-        assert_eq!(linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()), LinuxNvidiaDriver::None);
+        assert_eq!(
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
+            LinuxNvidiaDriver::None
+        );
     }
 
     #[test]
@@ -1634,7 +1657,7 @@ mod tests {
         let selected = linux_selected_drm_render_device(Some(Path::new("/dev/dri/renderD129")), &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("nouveau"));
         assert_eq!(
-            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()),
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
             LinuxNvidiaDriver::Nouveau
         );
 
@@ -1644,7 +1667,10 @@ mod tests {
         ];
         let selected = linux_selected_drm_render_device(Some(Path::new("/dev/dri/renderD128")), &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("i915"));
-        assert_eq!(linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()), LinuxNvidiaDriver::None);
+        assert_eq!(
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
+            LinuxNvidiaDriver::None
+        );
     }
 
     #[test]
@@ -1657,7 +1683,7 @@ mod tests {
         let selected = linux_selected_drm_render_device(None, &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("nouveau"));
         assert_eq!(
-            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()),
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
             LinuxNvidiaDriver::Nouveau
         );
     }
@@ -1939,6 +1965,9 @@ pub fn run() {
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(window_state_guard::persisted_main_window_state_flags())
+                // The main window's geometry is restored by `window_state_guard`
+                // in logical units; the plugin's physical restore is the bug in
+                // issue #13168.
                 .skip_initial_state("main")
                 .build(),
         );
@@ -1978,6 +2007,7 @@ pub fn run() {
             #[cfg(not(target_os = "linux"))]
             {
                 window_state_guard::restore_main_window_state(app.handle());
+                window_state_guard::track_main_window_geometry(app.handle());
 
                 if should_show_main_window_before_setup_tasks() {
                     prepare_main_window_for_display(app.handle());
@@ -2047,6 +2077,7 @@ pub fn run() {
                 // preference first so a disabled frame is never briefly shown during startup.
                 create_linux_main_window(app, desktop_settings.linux_floating_frame_enabled)?;
                 window_state_guard::restore_main_window_state(app.handle());
+                window_state_guard::track_main_window_geometry(app.handle());
 
                 if should_show_main_window_before_setup_tasks() {
                     prepare_main_window_for_display(app.handle());
@@ -2358,6 +2389,14 @@ pub fn run() {
             commands::app_settings::save_pinned_tree_node_ids,
             commands::app_settings::load_mcp_global_policy,
             commands::app_settings::save_mcp_global_policy,
+            commands::app_settings::load_mcp_tool_catalog,
+            commands::app_settings::load_mcp_access_policy,
+            commands::app_settings::reset_invalid_mcp_access_policy,
+            commands::app_settings::set_mcp_plugin_scope_rule,
+            commands::app_settings::list_plugin_mcp_views,
+            commands::app_settings::load_plugin_mcp_view,
+            commands::app_settings::list_mcp_plugin_scopes,
+            commands::app_settings::save_plugin_mcp_grant,
             commands::mcp_bridge::respond_mcp_sql_approval,
             commands::background_image::save_background_image,
             commands::background_image::clear_background_image,
@@ -2418,6 +2457,7 @@ pub fn run() {
             commands::local_backup::local_backup_import,
             commands::connection::test_connection,
             commands::connection::test_connection_with_info,
+            commands::connection::connection_parameters,
             commands::connection::test_ssh_tunnel,
             commands::salesforce_oauth::salesforce_oauth_browser_authorize,
             commands::salesforce_oauth::salesforce_oauth_device_start,
@@ -2519,6 +2559,17 @@ pub fn run() {
             commands::tab_runtime_cache::delete_tab_runtime_cache_owner,
             commands::tab_runtime_cache::delete_tab_runtime_cache,
             commands::query::execute_query,
+            commands::pl_debug::pl_debug_bootstrap,
+            commands::pl_debug::pl_debug_inspect,
+            commands::pl_debug::pl_debug_compile,
+            commands::pl_debug::pl_debug_compile_status,
+            commands::pl_debug::pl_debug_list,
+            commands::pl_debug::pl_debug_start,
+            commands::pl_debug::pl_debug_status,
+            commands::pl_debug::pl_debug_heartbeat,
+            commands::pl_debug::pl_debug_operation,
+            commands::pl_debug::pl_debug_operate,
+            commands::pl_debug::pl_debug_read,
             commands::query::execute_conditional_update,
             commands::query::execute_multi,
             commands::query::cancel_query,
@@ -2579,6 +2630,7 @@ pub fn run() {
             commands::query::build_copy_table_data_sql,
             commands::query::build_executable_object_source_statements,
             commands::query::validate_oracle_executable_object_source,
+            commands::query::prepare_oracle_trigger_sql,
             commands::query::fingerprint_oracle_routine_object_source,
             commands::query::build_executable_object_source_sql,
             commands::query::build_editable_object_source,
@@ -2662,6 +2714,7 @@ pub fn run() {
             commands::redis_cmd::redis_list_databases,
             commands::redis_cmd::redis_scan_keys,
             commands::redis_cmd::redis_scan_keys_batch,
+            commands::redis_cmd::redis_key_metadata_batch,
             commands::redis_cmd::redis_scan_values,
             commands::redis_cmd::redis_get_value,
             commands::redis_cmd::redis_get_raw_value,
@@ -2781,6 +2834,7 @@ pub fn run() {
             commands::saved_sql::sync_saved_sql_directory,
             commands::shortcut_recording::set_shortcut_recording,
             commands::fs_open::reveal_path_in_file_manager,
+            commands::fs_open::open_path_with_default_app,
             commands::fs_open::is_sqlite_database_file,
             commands::fs_open::delete_database_backup_files,
             background_backup::database_backup_command,
@@ -3070,6 +3124,8 @@ pub fn run() {
             commands::app_relaunch::relaunch_app,
             commands::update::check_for_updates,
             commands::update::fetch_changelog,
+            commands::update::fetch_changelog_index,
+            commands::update::fetch_changelog_release,
             commands::update::get_system_proxy_url,
             commands::update::get_downloaded_update,
             commands::update::discard_downloaded_update,
@@ -3165,6 +3221,7 @@ pub fn run() {
                     // shutdown below gives WindowServer time to remove it.
                     if should_hide_window_before_exit(std::env::consts::OS) {
                         if let Some(window) = app_handle.get_webview_window("main") {
+                            window_state_guard::remember_main_window_geometry(app_handle);
                             let _ = window.hide();
                         }
                     }

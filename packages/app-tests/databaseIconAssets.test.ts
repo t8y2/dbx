@@ -8,6 +8,7 @@ test("Kafka database icon includes a light contrast stroke for dark themes", () 
 
   assert.match(svg, /stroke="#(?:F8FAFC|E5E7EB|FFFFFF)"/i);
   assert.match(svg, /fill="#231F20"/i);
+  assert.match(svg, /Apache Kafka official logo/i);
 });
 
 test("RocketMQ database icon asset exists", () => {

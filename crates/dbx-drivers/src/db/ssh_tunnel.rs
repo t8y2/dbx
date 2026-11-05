@@ -21,6 +21,12 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, MissedTickBehavior};
+use tokio_util::task::AbortOnDropHandle;
+
+#[cfg(test)]
+tokio::task_local! {
+    static SPAWNED_TUNNELS: mpsc::UnboundedSender<(u16, tokio::task::AbortHandle)>;
+}
 
 use crate::db::ssh_host_key::{HostKeyState, HostKeyVerifier};
 use crate::db::ssh_prompt;
@@ -400,6 +406,35 @@ async fn authenticate_keyboard_interactive(
     }
 }
 
+struct PendingSshAuthentication(Option<Handle<SshClient>>);
+
+impl PendingSshAuthentication {
+    fn finish(mut self) -> Handle<SshClient> {
+        self.0.take().expect("pending SSH authentication owns its handle")
+    }
+}
+
+impl Drop for PendingSshAuthentication {
+    fn drop(&mut self) {
+        let Some(session) = self.0.take() else { return };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            log::warn!("SSH authentication cleanup is unconfirmed: async runtime unavailable");
+            return;
+        };
+        runtime.spawn(async move {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let _ = tokio::time::timeout_at(
+                deadline,
+                session.disconnect(russh::Disconnect::ByApplication, "SSH authentication stopped", "en"),
+            )
+            .await;
+            if !matches!(tokio::time::timeout_at(deadline, session).await, Ok(Ok(()))) {
+                log::warn!("SSH authentication local task exit is unconfirmed");
+            }
+        });
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn connect_and_authenticate(
     connect_host: &str,
@@ -471,7 +506,7 @@ pub async fn connect_and_authenticate(
     tokio::pin!(sleep);
     let mut extended = false;
 
-    let mut session = loop {
+    let mut attempt = PendingSshAuthentication(Some(loop {
         tokio::select! {
             res = &mut connect_fut => break res.map_err(|e| format!("SSH connection failed: {e}"))?,
             _ = &mut sleep => return Err(format!("SSH connection timed out ({connect_timeout_secs}s)")),
@@ -482,7 +517,8 @@ pub async fn connect_and_authenticate(
                 }
             }
         }
-    };
+    }));
+    let session = attempt.0.as_mut().expect("pending SSH authentication owns its handle");
 
     // Probe with "none" authentication first. Some SSH proxies and jump-hosts
     // accept connections without any credential, and this is also the standard
@@ -492,7 +528,7 @@ pub async fn connect_and_authenticate(
         .map_err(|_| format!("SSH auth probe timed out ({connect_timeout_secs}s)"))?
         .map_err(|e| format!("SSH auth probe failed: {e}"))?;
     if none_res.success() {
-        return Ok(session);
+        return Ok(attempt.finish());
     }
 
     // When auth_method is "none" and the probe was rejected, fail early
@@ -535,11 +571,11 @@ pub async fn connect_and_authenticate(
             .map_err(|e| format!("SSH key auth failed: {e}"))?;
 
             match auth_res {
-                AuthResult::Success => return Ok(session),
+                AuthResult::Success => return Ok(attempt.finish()),
                 AuthResult::Failure { remaining_methods, partial_success } => {
                     if server_offers_keyboard_interactive(&remaining_methods) {
                         authenticate_keyboard_interactive(
-                            &mut session,
+                            session,
                             ssh_user,
                             host_key_host,
                             host_key_port,
@@ -547,7 +583,7 @@ pub async fn connect_and_authenticate(
                             connect_timeout_secs,
                         )
                         .await?;
-                        return Ok(session);
+                        return Ok(attempt.finish());
                     }
                     // Only fall back to password when the server still offers it.
                     // This prevents sending the password to a server that never
@@ -574,11 +610,11 @@ pub async fn connect_and_authenticate(
                 .map_err(|_| format!("SSH password auth timed out ({connect_timeout_secs}s)"))?
                 .map_err(|e| format!("SSH password auth failed: {e}"))?;
             match auth_res {
-                AuthResult::Success => return Ok(session),
+                AuthResult::Success => return Ok(attempt.finish()),
                 AuthResult::Failure { remaining_methods, partial_success } => {
                     if server_offers_keyboard_interactive(&remaining_methods) {
                         authenticate_keyboard_interactive(
-                            &mut session,
+                            session,
                             ssh_user,
                             host_key_host,
                             host_key_port,
@@ -586,7 +622,7 @@ pub async fn connect_and_authenticate(
                             connect_timeout_secs,
                         )
                         .await?;
-                        return Ok(session);
+                        return Ok(attempt.finish());
                     }
                     return Err(describe_terminal_auth_failure(
                         "password authentication",
@@ -629,7 +665,7 @@ pub async fn connect_and_authenticate(
         .map_err(|e| format!("SSH key auth failed: {e}"))?;
         if auth_result_offers_keyboard_interactive(&auth_res) {
             authenticate_keyboard_interactive(
-                &mut session,
+                session,
                 ssh_user,
                 host_key_host,
                 host_key_port,
@@ -656,7 +692,7 @@ pub async fn connect_and_authenticate(
             .map_err(|e| format!("SSH password auth failed: {e}"))?;
         if auth_result_offers_keyboard_interactive(&auth_res) {
             authenticate_keyboard_interactive(
-                &mut session,
+                session,
                 ssh_user,
                 host_key_host,
                 host_key_port,
@@ -674,7 +710,7 @@ pub async fn connect_and_authenticate(
         }
     } else if try_agent {
         match try_authenticate_with_agent(
-            &mut session,
+            session,
             ssh_user,
             ssh_agent_sock_path,
             ssh_agent_key_fingerprint,
@@ -685,7 +721,7 @@ pub async fn connect_and_authenticate(
             Ok(AgentAuthenticationOutcome::Success) => {}
             Ok(AgentAuthenticationOutcome::KeyboardInteractiveRequired) => {
                 authenticate_keyboard_interactive(
-                    &mut session,
+                    session,
                     ssh_user,
                     host_key_host,
                     host_key_port,
@@ -698,7 +734,7 @@ pub async fn connect_and_authenticate(
         }
     } else if auth_result_offers_keyboard_interactive(&none_res) {
         authenticate_keyboard_interactive(
-            &mut session,
+            session,
             ssh_user,
             host_key_host,
             host_key_port,
@@ -713,7 +749,7 @@ pub async fn connect_and_authenticate(
         );
     }
 
-    Ok(session)
+    Ok(attempt.finish())
 }
 
 enum AgentAuthenticationOutcome {
@@ -1824,9 +1860,11 @@ impl TunnelManager {
         )
         .await?;
 
-        self.tunnels.lock().await.insert(
+        let handle = AbortOnDropHandle::new(handle);
+        let mut tunnels = self.tunnels.lock().await;
+        tunnels.insert(
             connection_id.to_string(),
-            TunnelEntry { handles: vec![handle], statuses: vec![status], local_port, kind: TunnelKind::Fixed },
+            TunnelEntry { handles: vec![handle.detach()], statuses: vec![status], local_port, kind: TunnelKind::Fixed },
         );
         Ok(local_port)
     }
@@ -1882,9 +1920,16 @@ impl TunnelManager {
         )
         .await?;
 
-        self.tunnels.lock().await.insert(
+        let handle = AbortOnDropHandle::new(handle);
+        let mut tunnels = self.tunnels.lock().await;
+        tunnels.insert(
             connection_id.to_string(),
-            TunnelEntry { handles: vec![handle], statuses: vec![status], local_port, kind: TunnelKind::Socks5 },
+            TunnelEntry {
+                handles: vec![handle.detach()],
+                statuses: vec![status],
+                local_port,
+                kind: TunnelKind::Socks5,
+            },
         );
         Ok(local_port)
     }
@@ -2033,15 +2078,21 @@ impl TunnelManager {
             .await
             .map_err(|err| format!("SSH hop {} failed: {err}", index + 1))?;
 
-            handles.push(handle);
+            handles.push(AbortOnDropHandle::new(handle));
             statuses.push(status);
             final_local_port = local_port;
             next_connect_endpoint = Some(("127.0.0.1".to_string(), local_port));
         }
 
-        self.tunnels.lock().await.insert(
+        let mut tunnels = self.tunnels.lock().await;
+        tunnels.insert(
             connection_id.to_string(),
-            TunnelEntry { handles, statuses, local_port: final_local_port, kind: TunnelKind::Fixed },
+            TunnelEntry {
+                handles: handles.into_iter().map(AbortOnDropHandle::detach).collect(),
+                statuses,
+                local_port: final_local_port,
+                kind: TunnelKind::Fixed,
+            },
         );
         Ok(final_local_port)
     }
@@ -2273,6 +2324,9 @@ async fn spawn_tunnel_target(
         status.clone(),
         proxy_command.to_string(),
     ));
+
+    #[cfg(test)]
+    let _ = SPAWNED_TUNNELS.try_with(|observer| observer.send((local_port, handle.abort_handle())));
 
     Ok((handle, local_port, status))
 }
@@ -3566,6 +3620,174 @@ uveF/dLmnVN1IriEyEvHAAAACGRieC10ZXN0AQIDBAU=
         });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         (port, task)
+    }
+
+    #[tokio::test]
+    async fn transport_chain_later_hop_failure_closes_unregistered_listener() {
+        let _guard = prompt_test_lock().lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+        let (port, server_task) = start_accept_none_server().await;
+        let dir = tempdir().unwrap();
+        HostKeyVerifier::new(dir.path().join("known_hosts"))
+            .learn("127.0.0.1", port, &test_server_public_key())
+            .unwrap();
+        let manager = TunnelManager::new(dir.path().to_path_buf());
+        let mut first = hop("first", "127.0.0.1", port);
+        first.auth_method = "none".to_string();
+        let second = hop("second", "unreachable.internal", 22);
+        let (observer, mut spawned) = mpsc::unbounded_channel();
+        let result = super::SPAWNED_TUNNELS
+            .scope(observer, manager.start_chain("failed-chain", &[first, second], "db.internal", 5432))
+            .await;
+        let (local_port, abort) = spawned.recv().await.expect("first hop actually started");
+        assert!(result.as_ref().is_err_and(|error| error.contains("SSH hop 2 failed")), "{result:?}");
+        assert!(manager.tunnels.lock().await.is_empty());
+        let closed = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(listener) = TcpListener::bind(("127.0.0.1", local_port)).await {
+                    drop(listener);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        abort.abort();
+        server_task.abort();
+        assert!(closed, "failed chain left its unregistered first-hop listener on {local_port}");
+    }
+
+    #[tokio::test]
+    async fn transport_tunnel_registration_cancellation_closes_unregistered_listener() {
+        let _guard = prompt_test_lock().lock().await;
+        for socks in [false, true] {
+            ssh_prompt::clear_ssh_prompt_gateway();
+            let (port, server_task) = start_accept_none_server().await;
+            let dir = tempdir().unwrap();
+            let manager = Arc::new(TunnelManager::new(dir.path().to_path_buf()));
+            let (gateway, mut prompts) = mpsc::channel(8);
+            ssh_prompt::install_ssh_prompt_gateway(gateway);
+            let (observer, mut spawned) = mpsc::unbounded_channel();
+            let starting_manager = manager.clone();
+            let start = tokio::spawn(super::SPAWNED_TUNNELS.scope(observer, async move {
+                if socks {
+                    starting_manager
+                        .start_socks5_proxy(
+                            "cancelled",
+                            "127.0.0.1",
+                            port,
+                            "127.0.0.1",
+                            port,
+                            "user",
+                            "",
+                            "",
+                            "",
+                            false,
+                            "",
+                            "",
+                            "none",
+                            5,
+                            false,
+                            "",
+                        )
+                        .await
+                } else {
+                    starting_manager
+                        .start_tunnel(
+                            "cancelled",
+                            "127.0.0.1",
+                            port,
+                            "127.0.0.1",
+                            port,
+                            "user",
+                            "",
+                            "",
+                            "",
+                            false,
+                            "",
+                            "",
+                            "none",
+                            5,
+                            "db.internal",
+                            5432,
+                            false,
+                            false,
+                            "",
+                        )
+                        .await
+                }
+            }));
+            let prompt = tokio::time::timeout(Duration::from_secs(5), prompts.recv()).await.unwrap().unwrap();
+            let tunnels = manager.tunnels.lock().await;
+            prompt.responder.send(ssh_prompt::SshPromptAnswer::Accept { remember: false }).unwrap();
+            let (local_port, abort) =
+                tokio::time::timeout(Duration::from_secs(5), spawned.recv()).await.unwrap().unwrap();
+            assert!(!start.is_finished(), "start must be waiting for the real registration lock");
+            start.abort();
+            assert!(start.await.unwrap_err().is_cancelled());
+            let closed = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if let Ok(listener) = TcpListener::bind(("127.0.0.1", local_port)).await {
+                        drop(listener);
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_ok();
+            abort.abort();
+            assert!(tunnels.is_empty());
+            drop(tunnels);
+            server_task.abort();
+            ssh_prompt::clear_ssh_prompt_gateway();
+            assert!(closed, "cancelled registration left listener {local_port}, socks={socks}");
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_chain_cancellation_closes_unregistered_listener() {
+        let _guard = prompt_test_lock().lock().await;
+        ssh_prompt::clear_ssh_prompt_gateway();
+        let (port, server_task) = start_accept_none_server().await;
+        let dir = tempdir().unwrap();
+        HostKeyVerifier::new(dir.path().join("known_hosts"))
+            .learn("127.0.0.1", port, &test_server_public_key())
+            .unwrap();
+        let manager = TunnelManager::new(dir.path().to_path_buf());
+        let mut first = hop("first", "127.0.0.1", port);
+        first.auth_method = "none".to_string();
+        let hops = [first, hop("second", "unreachable.internal", 22)];
+        let (observer, mut spawned) = mpsc::unbounded_channel();
+        let mut starting = Box::pin(
+            super::SPAWNED_TUNNELS.scope(observer, manager.start_chain("cancelled-chain", &hops, "db.internal", 5432)),
+        );
+        let (local_port, abort) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                biased;
+                spawned = spawned.recv() => spawned.unwrap(),
+                result = &mut starting => panic!("chain ended before cancellation: {result:?}"),
+            }
+        })
+        .await
+        .unwrap();
+        drop(starting);
+        let closed = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(listener) = TcpListener::bind(("127.0.0.1", local_port)).await {
+                    drop(listener);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        abort.abort();
+        server_task.abort();
+        assert!(manager.tunnels.lock().await.is_empty());
+        assert!(closed, "cancelled chain left listener {local_port}");
     }
 
     struct DirectEchoServer {

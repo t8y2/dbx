@@ -7,6 +7,17 @@ const item = (id: string, extras: Partial<ContextMenuItem> = {}): ContextMenuIte
 const leaves = (items: readonly ContextMenuItem[]): ContextMenuItem[] => items.flatMap((entry) => (entry.children?.length ? leaves(entry.children) : entry.separator ? [] : [entry]));
 
 describe("sidebar menu layout", () => {
+  it("keeps PL/SQL debugging in the editor execution group with its original callback and guard", () => {
+    const debug = item("plDebug.start.title", { disabled: true });
+    const execute = item("editor.execute");
+    const grouped = buildSidebarMenuLayout([execute, debug], "sql-editor", "grouped", [], t);
+    const execution = grouped.find((entry) => entry.sidebarActionId === "group.data");
+    expect(execution?.label).toBe("sidebarMenu.groups.execution");
+    expect(execution?.children?.[0]).toMatchObject({ sidebarActionId: debug.sidebarActionId, action: debug.action, disabled: true });
+    expect(leaves(grouped).filter((entry) => entry.sidebarActionId === debug.sidebarActionId)).toHaveLength(1);
+    expect(buildSidebarMenuLayout([execute, debug], "sql-editor", "full", [], t)).toEqual([execute, debug]);
+  });
+
   it.each([
     ["connection", "connectionSettings"],
     ["database", "databaseSettings"],
@@ -42,8 +53,8 @@ describe("sidebar menu layout", () => {
   it("groups database-wide search with data tools without an extra management submenu", () => {
     const search = item("databaseSearch.open");
     const menu = buildSidebarMenuLayout([search, item("contextMenu.exportDatabase")], "database", "grouped", [], t);
-    expect(menu.map((entry) => entry.sidebarActionId)).toEqual(["group.data"]);
-    expect(menu[0].children).toContainEqual(search);
+    expect(menu.map((entry) => entry.sidebarActionId)).toEqual(["contextMenu.exportDatabase", undefined, "group.data"]);
+    expect(menu.find((entry) => entry.sidebarActionId === "group.data")?.children).toContainEqual(search);
   });
   it("leads database menus with closing the database and falls back to browsing objects", () => {
     const close = item("contextMenu.closeDatabaseConnection");

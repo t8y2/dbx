@@ -2,9 +2,9 @@
 import { formatError } from "@/lib/backend/errorUtils";
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { BacklogQuota, DispatchRate, PolicyScope, PublishRate, RetentionPolicy, SubscribeRate, TopicInfo } from "@/types/mq";
+import type { BacklogQuota, DispatchRate, MqSystemKind, PolicyScope, PublishRate, RetentionPolicy, SubscribeRate, TopicInfo } from "@/types/mq";
 import { mqGetEffectivePolicies, mqSetBacklogQuota, mqSetDispatchRate, mqSetPublishRate, mqSetRetention, mqSetSubscribeRate } from "@/lib/backend/api";
-import { defaultMqPolicyForms, policyAccessFromEffectivePolicies, policyFormsFromEffectivePolicies } from "@/lib/mq/mqPolicyForms";
+import { defaultMqPolicyForms, extractKafkaRetentionConfigs, policyAccessFromEffectivePolicies, policyFormsFromEffectivePolicies, retentionWriteFlags, type MqRetentionForm, type RetentionBaseline } from "@/lib/mq/mqPolicyForms";
 import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 
 interface Props {
@@ -17,6 +17,8 @@ interface Props {
   supportsRateLimits?: boolean;
   supportsBacklogQuota?: boolean;
   supportsRetention?: boolean;
+  /** 后端类型：Kafka 的保留大小按字节展示，标签与 Pulsar/RocketMQ 不同。 */
+  systemKind?: MqSystemKind;
 }
 
 const props = defineProps<Props>();
@@ -30,6 +32,7 @@ const notice = ref<string>();
 const readOnlyMessage = computed(() => t("mqPolicies.readOnly"));
 const defaultForms = defaultMqPolicyForms();
 const policyAccess = ref(policyAccessFromEffectivePolicies(undefined));
+const isKafka = computed(() => props.systemKind === "kafka");
 
 const publishForm = ref<PublishRate>({ ...defaultForms.publishForm });
 
@@ -39,7 +42,13 @@ const subscribeForm = ref<SubscribeRate>({ ...defaultForms.subscribeForm });
 
 const backlogForm = ref<BacklogQuota>({ ...defaultForms.backlogForm });
 
-const retentionForm = ref<RetentionPolicy>({ ...defaultForms.retentionForm });
+const retentionForm = ref<MqRetentionForm>({ ...defaultForms.retentionForm });
+
+/** 加载完成后的表单快照，Kafka 保存时据此判断哪些字段被用户改过。 */
+const retentionBaseline = ref<RetentionBaseline | null>(null);
+/** Kafka broker 返回的 retention.ms / retention.bytes 原始值，用于展示取整前的副文本。 */
+const retentionTimeSourceMs = ref<number>();
+const retentionSizeSourceBytes = ref<number>();
 
 const scope = computed<PolicyScope | null>(() => {
   if (!props.tenant || !props.namespace) return null;
@@ -73,6 +82,53 @@ const scopeLabel = computed(() => {
 
 const formattedPolicies = computed(() => JSON.stringify(policies.value ?? {}, null, 2));
 
+/** 输入框清空时 v-model.number 会给出空串，统一归一成 null。 */
+function numericOrNull(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+const retentionTimeHint = computed(() => {
+  if (!isKafka.value) return "";
+  const minutes = numericOrNull(retentionForm.value.retentionTimeInMinutes);
+  if (minutes === null) return t("mqPolicies.retentionUnset");
+  if (minutes === -1) return t("mqPolicies.retentionUnlimited");
+  if (minutes === 0) return t("mqPolicies.retentionZero");
+  const sourceMs = retentionTimeSourceMs.value;
+  // 仅当展示值仍对应原始毫秒值时才提示，用户改动后不再误导。
+  if (sourceMs !== undefined && sourceMs >= 0 && sourceMs % 60000 !== 0 && minutes === Math.floor(sourceMs / 60000)) {
+    return t("mqPolicies.retentionExactMs", { ms: sourceMs });
+  }
+  return "";
+});
+
+const retentionSizeHint = computed(() => {
+  if (!isKafka.value) return "";
+  const megabytes = numericOrNull(retentionForm.value.retentionSizeInMb);
+  if (megabytes === null) return t("mqPolicies.retentionUnset");
+  if (megabytes === -1) return t("mqPolicies.retentionUnlimited");
+  if (megabytes === 0) {
+    // 0 可能是 broker 的真实 0，也可能是小于 1 MB 的非零值被向下取整，需靠原始字节区分。
+    const sourceBytes = retentionSizeSourceBytes.value;
+    if (sourceBytes !== undefined && sourceBytes > 0 && sourceBytes < 1024 * 1024 && megabytes === Math.floor(sourceBytes / (1024 * 1024))) {
+      return t("mqPolicies.retentionLessThanOneMb", { bytes: sourceBytes });
+    }
+    return t("mqPolicies.retentionZero");
+  }
+  const sourceBytes = retentionSizeSourceBytes.value;
+  if (sourceBytes !== undefined && sourceBytes >= 0 && sourceBytes % (1024 * 1024) !== 0 && megabytes === Math.floor(sourceBytes / (1024 * 1024))) {
+    return t("mqPolicies.retentionExactBytes", { bytes: sourceBytes });
+  }
+  return "";
+});
+
+/** 加载失败时没有基线，禁止 Kafka 保存，避免把未知字段覆盖成默认值。 */
+const retentionSaveDisabled = computed(() => isKafka.value && retentionBaseline.value === null);
+
 async function guardWritable(operation: string): Promise<boolean> {
   if (props.readOnly) {
     error.value = readOnlyMessage.value;
@@ -86,6 +142,9 @@ async function loadPolicies() {
   const current = scope.value;
   policies.value = undefined;
   policyAccess.value = policyAccessFromEffectivePolicies(undefined);
+  retentionBaseline.value = null;
+  retentionTimeSourceMs.value = undefined;
+  retentionSizeSourceBytes.value = undefined;
   notice.value = undefined;
   error.value = undefined;
   if (!current) return;
@@ -97,6 +156,13 @@ async function loadPolicies() {
     policyAccess.value = policyAccessFromEffectivePolicies(loaded);
     const hydrated = policyFormsFromEffectivePolicies(loaded, defaultMqPolicyForms());
     applyPolicyForms(hydrated);
+    const kafkaRetention = extractKafkaRetentionConfigs(loaded);
+    retentionTimeSourceMs.value = kafkaRetention?.timeMs;
+    retentionSizeSourceBytes.value = kafkaRetention?.sizeBytes;
+    retentionBaseline.value = {
+      time: hydrated.retentionForm.retentionTimeInMinutes,
+      size: hydrated.retentionForm.retentionSizeInMb,
+    };
   } catch (e: unknown) {
     error.value = formatError(e);
   } finally {
@@ -143,7 +209,32 @@ function saveBacklogQuota() {
 }
 
 function saveRetention() {
-  return applyPolicy(t("mqPolicies.retention"), (scope) => mqSetRetention(props.connectionId, scope, { ...retentionForm.value }));
+  if (!isKafka.value) {
+    // Pulsar/RocketMQ 维持原行为：两个字段整体提交。
+    return applyPolicy(t("mqPolicies.retention"), (scope) =>
+      mqSetRetention(props.connectionId, scope, {
+        retentionTimeInMinutes: numericOrNull(retentionForm.value.retentionTimeInMinutes) ?? -1,
+        retentionSizeInMb: numericOrNull(retentionForm.value.retentionSizeInMb) ?? -1,
+      }),
+    );
+  }
+
+  // Kafka：以加载快照为基线，只提交用户改过的字段，避免未回显的字段被 -1 覆盖。
+  const minutes = numericOrNull(retentionForm.value.retentionTimeInMinutes);
+  const megabytes = numericOrNull(retentionForm.value.retentionSizeInMb);
+  const { writeTime, writeSize } = retentionWriteFlags({ time: minutes, size: megabytes }, retentionBaseline.value);
+  if (!writeTime && !writeSize) {
+    notice.value = t("mqPolicies.retentionUnchanged");
+    return;
+  }
+
+  const payload: RetentionPolicy = {
+    retentionTimeInMinutes: minutes ?? -1,
+    retentionSizeInMb: megabytes ?? -1,
+    writeRetentionTime: writeTime,
+    writeRetentionSize: writeSize,
+  };
+  return applyPolicy(t("mqPolicies.retention"), (scope) => mqSetRetention(props.connectionId, scope, { ...payload }));
 }
 
 function currentPolicyForms() {
@@ -267,12 +358,14 @@ watch(
           <label>
             {{ t("mqPolicies.retentionTimeMinutes") }}
             <input v-model.number="retentionForm.retentionTimeInMinutes" type="number" :disabled="readOnly" />
+            <span v-if="isKafka && retentionTimeHint" class="field-hint">{{ retentionTimeHint }}</span>
           </label>
           <label>
             {{ t("mqPolicies.retentionSizeMb") }}
             <input v-model.number="retentionForm.retentionSizeInMb" type="number" :disabled="readOnly" />
+            <span v-if="isKafka && retentionSizeHint" class="field-hint">{{ retentionSizeHint }}</span>
           </label>
-          <button @click="saveRetention" :disabled="loading || readOnly" class="btn-primary">{{ t("mqPolicies.save") }}</button>
+          <button @click="saveRetention" :disabled="loading || readOnly || retentionSaveDisabled" class="btn-primary">{{ t("mqPolicies.save") }}</button>
         </section>
       </div>
 
@@ -347,6 +440,11 @@ label {
   margin-bottom: 10px;
   color: var(--color-text-secondary);
   font-size: 13px;
+}
+
+.field-hint {
+  color: var(--color-text-secondary);
+  font-size: 12px;
 }
 
 input,

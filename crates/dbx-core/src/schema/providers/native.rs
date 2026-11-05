@@ -293,6 +293,9 @@ pub(in crate::schema) async fn object_source(
     object_type: &db::ObjectSourceKind,
 ) -> Result<Option<String>, String> {
     match pool {
+        PoolKind::Mysql(pool, mode) if *mode == MysqlMode::OceanBaseOracle => {
+            super::super::db::ob_oracle::get_object_source(pool, schema, name, object_type).await.map(Some)
+        }
         PoolKind::Mysql(pool, _) => super::super::mysql_object_source(
             pool,
             super::super::mysql_table_metadata_catalog(database, schema),

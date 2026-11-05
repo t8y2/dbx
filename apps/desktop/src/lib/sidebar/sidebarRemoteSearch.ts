@@ -3,6 +3,7 @@ import { objectTypesForGroupNode } from "@/lib/table/tableTree";
 import { sidebarIndexedObjectGroupTypes } from "@/lib/sidebar/sidebarGlobalSearchIndex";
 import { isSidebarSearchPrunedDatabaseNode } from "@/lib/sidebar/sidebarSearchDatabaseScope";
 import { nodeMatchesRegexScopeIdentity, type SidebarRegexScopeIdentity } from "@/lib/sidebar/sidebarSearchTree";
+import { exactOracleTriggerNodeMetadata } from "@/lib/database/oracleTriggerIdentity";
 
 export interface SidebarRemoteSearchResult extends SidebarRegexScopeIdentity {
   parentNodeId: string;
@@ -75,4 +76,16 @@ export function mergeSidebarRemoteSearchResults(nodes: TreeNode[], results: read
     }
     return { ...node, children: merged };
   });
+}
+
+export function removeVerifiedSidebarTriggerSearchResult(results: readonly SidebarRemoteSearchResult[], node: TreeNode): SidebarRemoteSearchResult[] {
+  const expected = exactOracleTriggerNodeMetadata(node);
+  if (!expected?.objectId) return [...results];
+  return results.map((result) => ({
+    ...result,
+    children: result.children.filter((child) => {
+      const actual = exactOracleTriggerNodeMetadata(child);
+      return child.connectionId !== node.connectionId || child.database !== node.database || child.catalog !== node.catalog || actual?.owner !== expected.owner || actual?.name !== expected.name || actual?.objectId !== expected.objectId;
+    }),
+  }));
 }

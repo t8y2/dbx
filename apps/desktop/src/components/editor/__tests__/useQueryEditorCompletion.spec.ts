@@ -101,7 +101,7 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
     parent.remove();
   });
   const provide = (explicit = true) => completion.provideSqlCompletions(new CompletionContext(currentView.state, currentView.state.selection.main.head, explicit));
-  return { props, currentView, view, store, settings, runtime, completion, provide, startCompletion };
+  return { props, currentView, view, store, settings, runtime, metadata, completion, provide, startCompletion };
 }
 
 describe.each([false, true])("OceanBase standalone routine completion (semantic=%s)", (semanticCompletionEnabled) => {
@@ -308,6 +308,39 @@ describe.each([false, true])("Snowflake namespace completion (semantic=%s)", (se
     expect((await provide())?.options.map((option) => option.label)).toEqual(["QUOTED_TABLE"]);
   });
 
+  it("drops an in-flight table response after the completion cache resets", async () => {
+    const { metadata, store, props } = createHarness({ database: "a", modelValue: "SELECT * FROM " });
+    let resolveOld!: (tables: SqlCompletionTable[]) => void;
+    store.listCompletionTables.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }),
+    );
+    const old = metadata.listCompletionTablesWithLatencyBudget("connection", "a", "", 100);
+    await Promise.resolve();
+
+    props.database = "b";
+    metadata.refreshCompletionCache();
+    store.listCompletionTables.mockResolvedValue([{ name: "NEW_TABLE", database: "b" }]);
+    resolveOld([{ name: "OLD_TABLE", database: "a" }]);
+    await old;
+
+    expect(metadata.cachedTables.map((table) => table.name)).not.toContain("OLD_TABLE");
+    const tables = await metadata.listCompletionTablesWithLatencyBudget("connection", "b", "", 100);
+    expect(tables.map((table) => table.name)).toContain("NEW_TABLE");
+  });
+
+  it("prefetches the active database completion tables", async () => {
+    const { metadata, store } = createHarness({ database: "shop" });
+    store.listCompletionTables.mockResolvedValue([{ name: "TIS_ORDER", database: "shop" }]);
+
+    await metadata.prefetchCompletionTables();
+
+    expect(store.listCompletionTables).toHaveBeenCalledWith("connection", "shop", "", 500, undefined, false, undefined, undefined, { activateConnection: false });
+    expect(metadata.cachedTables.map((table) => table.name)).toContain("TIS_ORDER");
+  });
+
   it.each([false, true])("preserves the quote-identifiers preference (%s) for mixed-case table insertion", async (quoteIdentifiers) => {
     const { catalogs, provide, currentView, settings } = snowflakeHarness("SELECT * FROM ");
     catalogs.DEFAULT_DB!.PUBLIC = ["DimCustomer"];
@@ -400,6 +433,43 @@ describe("SQL completion trailing space insertion", () => {
     expect(option).toBeDefined();
     (option!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, option, result!.from, 4);
     expect(currentView.state.doc.toString()).toBe("SELECT FROM users;");
+  });
+});
+
+describe("SQL completion replacement ranges", () => {
+  beforeEach(() => vi.useRealTimers());
+
+  it("replaces a keyword prefix on a later Doris partition line without changing earlier SQL", async () => {
+    const doc = [
+      "CREATE TABLE single_doris (",
+      "  order_date DATE NOT NULL,",
+      "  order_id BIGINT,",
+      "  region_id INT NOT NULL,",
+      "  status VARCHAR(20) NOT NULL,",
+      "  amount DECIMAL(18,2)",
+      ")DUPLICATE KEY (order_date,order_id)",
+      "PARTITION by range(order_date)",
+      "(",
+      '  PARTITION p20261101 values [("2026-11-01"),("2026-11-02"))',
+      '  PARTITION p20261102 value [("2026-11-02"),("2026-11-02"))',
+      ")distributed by hash(order_id) buckets 4",
+      "PROPERTIES",
+      "(",
+      '  "replication_num"="1"',
+      ");",
+    ].join("\n");
+    const expected = doc.replace("p20261102 value ", "p20261102 VALUES ");
+    const { provide, currentView } = createHarness({ databaseType: "doris", dialect: "doris", modelValue: doc }, undefined, true);
+    const cursor = doc.indexOf("p20261102 value ") + "p20261102 value".length;
+    currentView.dispatch({ selection: { anchor: cursor } });
+
+    const result = await provide(false);
+    const option = result?.options.find((candidate) => candidate.label === "VALUES");
+    expect(option).toBeDefined();
+    expect(result!.from).toBe(cursor - "value".length);
+    (option!.apply as (view: EditorView, completion: unknown, from: number, to: number) => void)(currentView, option, result!.from, cursor);
+
+    expect(currentView.state.doc.toString()).toBe(expected);
   });
 });
 

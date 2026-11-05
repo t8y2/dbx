@@ -209,6 +209,7 @@ describe("TreeItem visible filter connection detail", () => {
 
     expect(document.body.textContent).toContain("Visible databases");
     expect(document.body.textContent).toContain("2/3");
+    expect(document.querySelector("[data-connection-detail-group-path]")).toBeNull();
     const action = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "2/3");
     expect(action).toBeDefined();
     expect(action?.getAttribute("aria-label")).toBe('Configure visible databases for "Filtered connection"');

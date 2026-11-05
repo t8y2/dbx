@@ -19,6 +19,157 @@ test("parses postgres connection URLs", () => {
   });
 });
 
+test("parses Databend Cloud DSNs and retains TLS and warehouse for the JDBC agent", () => {
+  const parsed = parseConnectionUrl("databend://alice:p%40ss%3Aword@warehouse.example.com:443/default?warehouse=default");
+
+  assert.deepEqual(parsed, {
+    dbType: "databend",
+    driverProfile: "databend",
+    driverLabel: "Databend",
+    host: "warehouse.example.com",
+    port: 443,
+    username: "alice",
+    password: "p@ss:word",
+    database: "default",
+    urlParams: "warehouse=default&ssl=true",
+    ssl: true,
+  });
+  const applied = applyParsedConnectionUrl({ name: "cloud", db_type: "databend" } as any, parsed);
+  assert.equal(applied.url_params, "warehouse=default&ssl=true");
+  assert.equal(applied.ssl, true);
+  assert.equal(applied.username, "alice");
+  assert.equal(applied.password, "p@ss:word");
+  assert.equal(applied.connection_string, undefined);
+  assert.ok(!applied.url_params?.includes("p%40ss"));
+});
+
+test("uses HTTPS and port 443 by default for native Databend DSNs", () => {
+  const parsed = parseConnectionUrl("databend://alice:secret@warehouse.example.com/analytics?warehouse=etl");
+
+  assert.equal(parsed.port, 443);
+  assert.equal(parsed.database, "analytics");
+  assert.equal(parsed.ssl, true);
+  assert.equal(parsed.urlParams, "warehouse=etl&ssl=true");
+});
+
+test.each(["databend", "jdbc:databend"])("keeps explicit TLS and warehouse in %s URLs", (scheme) => {
+  const parsed = parseConnectionUrl(`${scheme}://alice:secret@warehouse.example.com:443/default?ssl=true&warehouse=default`);
+
+  assert.equal(parsed.dbType, "databend");
+  assert.equal(parsed.port, 443);
+  assert.equal(parsed.ssl, true);
+  assert.equal(parsed.urlParams, "ssl=true&warehouse=default");
+});
+
+test.each(["enable", "require"])("translates Databend sslmode=%s into the JDBC ssl flag", (mode) => {
+  const parsed = parseConnectionUrl(`jdbc:databend://warehouse.example.com:443/default?sslmode=${mode}&warehouse=default`);
+
+  assert.equal(parsed.ssl, true);
+  assert.equal(new URLSearchParams(parsed.urlParams).get("ssl"), "true");
+  assert.equal(new URLSearchParams(parsed.urlParams).get("warehouse"), "default");
+});
+
+test("uses port 443 for secure Databend JDBC URLs without an explicit port", () => {
+  const parsed = parseConnectionUrl("jdbc:databend://warehouse.example.com/default?ssl=true&warehouse=default");
+
+  assert.equal(parsed.port, 443);
+  assert.equal(parsed.ssl, true);
+});
+
+test("preserves the JDBC Databend plaintext default for local servers", () => {
+  const parsed = parseConnectionUrl("jdbc:databend://root@localhost/default");
+
+  assert.equal(parsed.port, 8000);
+  assert.equal(parsed.ssl, false);
+  assert.equal(parsed.urlParams, "");
+});
+
+test("respects disabled TLS in native Databend DSNs without losing explicit ports", () => {
+  const parsed = parseConnectionUrl("databend://root:@localhost:8000/default?sslmode=disable");
+
+  assert.equal(parsed.port, 8000);
+  assert.equal(parsed.ssl, false);
+  assert.equal(parsed.urlParams, "sslmode=disable&ssl=false");
+  assert.equal(parseConnectionUrl("databend://root@localhost/default?sslmode=disable").port, 80);
+});
+
+test("respects an explicit Databend ssl=false flag", () => {
+  const parsed = parseConnectionUrl("databend://root@localhost:8000/default?ssl=false");
+
+  assert.equal(parsed.port, 8000);
+  assert.equal(parsed.ssl, false);
+  assert.equal(parsed.urlParams, "ssl=false");
+});
+
+test("does not treat port 443 alone as TLS for a Databend JDBC URL", () => {
+  const parsed = parseConnectionUrl("jdbc:databend://localhost:443/default");
+
+  assert.equal(parsed.ssl, false);
+  assert.equal(parsed.urlParams, "");
+});
+
+test("preserves typed credentials when importing a credential-free Databend URL", () => {
+  const parsed = parseConnectionUrl("databend://warehouse.example.com:443/default?warehouse=default");
+  const applied = applyParsedConnectionUrl({ name: "cloud", db_type: "databend", username: "typed-user", password: "typed-secret" } as any, parsed);
+
+  assert.equal(applied.username, "typed-user");
+  assert.equal(applied.password, "typed-secret");
+  assert.equal(applied.url_params, "warehouse=default&ssl=true");
+});
+
+test.each(["ssl=invalid", "sslmode=invalid", "ssl=false&sslmode=require", "ssl=true&sslmode=disable"])("rejects invalid or conflicting Databend TLS options: %s", (params) => {
+  assert.throws(() => parseConnectionUrl(`databend://alice:secret@warehouse.example.com/default?${params}`), /Databend.*(?:ssl|sslmode)/);
+});
+
+test("preserves encoded Databend warehouse parameters and decodes credentials and database", () => {
+  const parsed = parseConnectionUrl("databend://alice%40example.com:p%2Bss%26word@warehouse.example.com/analytics%20db?warehouse=etl%2Dwh&role=reader");
+
+  assert.equal(parsed.username, "alice@example.com");
+  assert.equal(parsed.password, "p+ss&word");
+  assert.equal(parsed.database, "analytics db");
+  assert.equal(parsed.urlParams, "warehouse=etl%2Dwh&role=reader&ssl=true");
+});
+
+test.each(["SSL=TRUE", "%73sl=%74rue", "Ssl=%20true%20", "SSLMODE=REQUIRE", "sslmode=%20ENABLE%20"])("normalizes Databend TLS options for the JDBC driver: %s", (params) => {
+  const parsed = parseConnectionUrl(`databend://warehouse.example.com/default?${params}&warehouse=default`);
+  const options = new URLSearchParams(parsed.urlParams);
+
+  assert.equal(parsed.ssl, true);
+  assert.equal(parsed.port, 443);
+  assert.equal(options.get("ssl"), "true");
+  assert.equal(options.get("warehouse"), "default");
+  assert.ok(!parsed.urlParams.includes("%20"));
+  assert.ok(!parsed.urlParams.includes("SSL"));
+});
+
+test.each(["ssl=false&ssl=true", "SSL=true&ssl=true", "sslmode=disable&sslmode=require", "%73sl=true&ssl=false"])("rejects duplicate Databend TLS parameters: %s", (params) => {
+  assert.throws(() => parseConnectionUrl(`databend://warehouse.example.com/default?${params}`), /Duplicate Databend/);
+});
+
+test("does not interpret semicolons inside Databend parameter values as TLS options", () => {
+  const parsed = parseConnectionUrl("databend://warehouse.example.com/default?warehouse=etl;ssl=false");
+
+  assert.equal(parsed.ssl, true);
+  assert.equal(parsed.port, 443);
+  assert.equal(parsed.urlParams, "warehouse=etl;ssl=false&ssl=true");
+});
+
+test("rejects semicolon-delimited Databend TLS values that JDBC cannot consume", () => {
+  assert.throws(() => parseConnectionUrl("databend://warehouse.example.com/default?ssl=true;warehouse=default"), /Invalid Databend ssl parameter/);
+});
+
+test("keeps the local JDBC port when Databend TLS is explicitly disabled", () => {
+  const parsed = parseConnectionUrl("jdbc:databend://root@localhost/default?sslmode=disable");
+
+  assert.equal(parsed.ssl, false);
+  assert.equal(parsed.port, 8000);
+  assert.equal(parsed.urlParams, "sslmode=disable");
+});
+
+test("shows a Databend DSN example in the connection form", () => {
+  assert.equal(connectionUrlPlaceholder("databend"), "databend://user:password@host:443/default?warehouse=default");
+});
+
 test("parses KWDB connection URLs", () => {
   assert.deepEqual(parseConnectionUrl("kwdb://root:secret@kw.example.com/defaultdb?sslmode=require"), {
     dbType: "kwdb",

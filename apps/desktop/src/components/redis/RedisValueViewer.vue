@@ -17,12 +17,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import AutoRefreshControl from "@/components/common/AutoRefreshControl.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+import { redisDeleteValueItemPreview } from "@/lib/redis/redisCommandPreview";
 import { jsonTreeSearchParts, type JsonTreeSearchMatch } from "@/lib/common/jsonTreeSearch";
 import { createTextContentSearchPattern, type TextContentMatch } from "@/lib/common/textContentSearch";
 import { startRedisContentSearch } from "@/lib/redis/redisContentSearchJob";
 import JsonTree from "@/components/common/JsonTree.vue";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import * as api from "@/lib/backend/api";
+import { getActivePinia } from "pinia";
+import { useConnectionStore } from "@/stores/connectionStore";
 import type { RedisBlob, RedisHashItem, RedisKeyInfo, RedisListItem, RedisSetItem, RedisStreamConsumer, RedisStreamEntry, RedisStreamGroup, RedisStreamPendingEntry, RedisValue, RedisZsetItem } from "@/lib/backend/api";
 import { useToast } from "@/composables/useToast";
 import { useTheme } from "@/composables/useTheme";
@@ -1003,7 +1006,10 @@ function shouldPauseAutoValueRefresh(): boolean {
   return showMemberDetail.value || editingZsetMemberKey.value !== null || showHashFieldTtlDialog.value || valueSearchOpen.value || Boolean(collectionSearchQuery.value.trim()) || Boolean(activeCollectionSearchQuery.value) || searchLoading.value || loadingMore.value || hasExpandedCollectionPage;
 }
 
-type PendingDelete = { kind: "key" } | { kind: "hash"; field: string } | { kind: "list"; index: number } | { kind: "set"; member: string } | { kind: "zset"; member: string };
+const connectionStore = getActivePinia() ? useConnectionStore() : undefined;
+const isClusterMode = computed(() => connectionStore?.getConfig(props.connectionId)?.redis_connection_mode === "cluster");
+
+type PendingDelete = { kind: "key" } | { kind: "hash"; field: RedisBlob | string } | { kind: "list"; index: number } | { kind: "set"; member: RedisBlob | string } | { kind: "zset"; member: RedisBlob | string };
 const pendingDelete = ref<PendingDelete | null>(null);
 
 type RedisMemberContext =
@@ -1765,7 +1771,7 @@ function rawRedisValueText(value: unknown): string {
   return formatRedisMemberDetail(value).rawText;
 }
 
-const deleteDetails = computed(() => {
+const deleteDetailsText = computed(() => {
   const pending = pendingDelete.value;
   if (!pending) return "";
   const key = formatValue(props.keyDisplay);
@@ -1774,6 +1780,16 @@ const deleteDetails = computed(() => {
   if (pending.kind === "list") return t("dangerDialog.redisListItemDetails", { key, index: pending.index });
   if (pending.kind === "zset") return t("dangerDialog.redisSetMemberDetails", { key, member: formatValue(pending.member) });
   return t("dangerDialog.redisSetMemberDetails", { key, member: formatValue(pending.member) });
+});
+
+const deleteSql = computed(() => {
+  const pending = pendingDelete.value;
+  if (!pending) return "";
+  return redisDeleteValueItemPreview(props.keyRaw, pending, {
+    raw: true,
+    database: props.db,
+    isCluster: isClusterMode.value,
+  });
 });
 
 async function load(options: { background?: boolean; notifyParent?: boolean; preserveDraft?: boolean; selectDefaultMember?: boolean; shouldApply?: () => boolean } = {}): Promise<boolean> {
@@ -2355,7 +2371,8 @@ async function saveZsetInlineEdit(item: RedisZsetItem) {
 
     resetZsetInlineEdit();
     try {
-      await load();
+      // Keep an active member search across the post-save reload (#14322).
+      await reloadPreservingCollectionSearch();
     } catch (error) {
       toast(t("redis.updateAppliedRefreshFailed", { message: errorMessage(error) }), 5000);
     }
@@ -2443,7 +2460,8 @@ async function saveMemberEdit() {
     }
     const editedValue = writeValue;
     isEditingMember.value = false;
-    await load({ selectDefaultMember: false });
+    // Saving a member must not drop the "search fields and values" filter (#14322).
+    await reloadPreservingCollectionSearch();
     restoreSelectedMember(nextContext, editedValue);
   } finally {
     savingMember.value = false;
@@ -2573,19 +2591,19 @@ function resolveSelectedMember(context: RedisMemberContext): { title: string; va
   }
 }
 
-function requestHashDel(field: string | null) {
+function requestHashDel(field: RedisBlob | string | null) {
   if (!field) return;
   pendingDelete.value = { kind: "hash", field };
   showDeleteConfirm.value = true;
 }
 
-function requestSetRemove(member: string | null) {
+function requestSetRemove(member: RedisBlob | string | null) {
   if (!member) return;
   pendingDelete.value = { kind: "set", member };
   showDeleteConfirm.value = true;
 }
 
-function requestZsetRemove(member: string | null) {
+function requestZsetRemove(member: RedisBlob | string | null) {
   if (!member) return;
   pendingDelete.value = { kind: "zset", member };
   showDeleteConfirm.value = true;
@@ -2838,14 +2856,19 @@ async function applyZsetRemove(member: string) {
   await load();
 }
 
+function extractMemberText(val: RedisBlob | string): string {
+  if (typeof val === "string") return val;
+  return redisBlobText(val) ?? "";
+}
+
 async function confirmDelete() {
   const pending = pendingDelete.value;
   if (!pending) return;
   if (pending.kind === "key") await applyDeleteKey();
-  else if (pending.kind === "hash") await applyHashDel(pending.field);
+  else if (pending.kind === "hash") await applyHashDel(extractMemberText(pending.field));
   else if (pending.kind === "list") await applyListRemove(pending.index);
-  else if (pending.kind === "set") await applySetRemove(pending.member);
-  else if (pending.kind === "zset") await applyZsetRemove(pending.member);
+  else if (pending.kind === "set") await applySetRemove(extractMemberText(pending.member));
+  else if (pending.kind === "zset") await applyZsetRemove(extractMemberText(pending.member));
   pendingDelete.value = null;
 }
 
@@ -3404,7 +3427,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <div v-if="hasMore && !activeCollectionSearchQuery" class="p-2">
               <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loadingMore || searchLoading" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
-                {{ t("redis.loadMoreKeys") }}
+                {{ t("redis.fetchMoreKeys") }}
               </Button>
             </div>
           </template>
@@ -3443,7 +3466,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
                   ><Eye class="w-3 h-3"
                 /></Button>
                 <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100" :title="t('redis.copyMember')" @click.stop="copyMember(row.value.member)"><Copy class="w-3 h-3" /></Button>
-                <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" :disabled="!canDeleteSetItem(row.value)" @click.stop="requestSetRemove(redisBlobText(row.value.member))"><Trash2 class="w-3 h-3" /></Button>
+                <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" :disabled="!canDeleteSetItem(row.value)" @click.stop="requestSetRemove(row.value.member)"><Trash2 class="w-3 h-3" /></Button>
               </div>
             </div>
           </template>
@@ -3451,7 +3474,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <div v-if="hasMore && !activeCollectionSearchQuery" class="p-2">
               <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loadingMore || searchLoading" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
-                {{ t("redis.loadMoreKeys") }}
+                {{ t("redis.fetchMoreKeys") }}
               </Button>
             </div>
           </template>
@@ -3532,7 +3555,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </div>
-                <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" :disabled="!canDeleteHashItem(row.value)" @click.stop="requestHashDel(redisBlobText(row.value.field))"><Trash2 class="w-3 h-3" /></Button>
+                <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" :disabled="!canDeleteHashItem(row.value)" @click.stop="requestHashDel(row.value.field)"><Trash2 class="w-3 h-3" /></Button>
               </div>
             </div>
           </template>
@@ -3540,7 +3563,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <div v-if="hasMore && !activeCollectionSearchQuery" class="p-2">
               <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loadingMore || searchLoading" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
-                {{ t("redis.loadMoreKeys") }}
+                {{ t("redis.fetchMoreKeys") }}
               </Button>
             </div>
           </template>
@@ -3606,7 +3629,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
                     ><Pencil class="w-3 h-3"
                   /></Button>
                   <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100" :title="t('redis.copyMember')" @click="copyMember(row.value.member)"><Copy class="w-3 h-3" /></Button>
-                  <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" :disabled="!canDeleteZsetItem(row.value)" @click="requestZsetRemove(redisBlobText(row.value.member))"><Trash2 class="w-3 h-3" /></Button>
+                  <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive" :disabled="!canDeleteZsetItem(row.value)" @click="requestZsetRemove(row.value.member)"><Trash2 class="w-3 h-3" /></Button>
                 </template>
               </div>
             </div>
@@ -3615,7 +3638,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <div v-if="hasMore && !activeCollectionSearchQuery" class="p-2">
               <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loadingMore || searchLoading" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
-                {{ t("redis.loadMoreKeys") }}
+                {{ t("redis.fetchMoreKeys") }}
               </Button>
             </div>
           </template>
@@ -3909,7 +3932,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
       <Button data-redis-value-load-retry variant="outline" size="sm" :disabled="loading" @click="retryValueLoad">{{ t("grid.refresh") }}</Button>
     </div>
 
-    <DangerConfirmDialog v-model:open="showDeleteConfirm" :message="t('dangerDialog.deleteMessage')" :details="deleteDetails" :confirm-label="t('dangerDialog.deleteConfirm')" @confirm="confirmDelete" />
+    <DangerConfirmDialog v-model:open="showDeleteConfirm" :message="t('dangerDialog.deleteMessage')" :details-text="deleteDetailsText" :sql="deleteSql" :confirm-label="t('dangerDialog.deleteConfirm')" @confirm="confirmDelete" />
 
     <Dialog :open="showRenameKeyDialog" @update:open="handleRenameKeyDialogOpenChange">
       <DialogContent class="sm:max-w-md" :show-close-button="!renamingKey" :style="editorFontFamilyStyle">

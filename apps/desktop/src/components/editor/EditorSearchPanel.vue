@@ -7,6 +7,8 @@ import { setSearchQuery, openSearchPanel as cmOpenSearchPanel, findNext as cmFin
 import { ChevronUp, ChevronDown, ChevronRight, TextSelect, X } from "@lucide/vue";
 import { collectEditorSearchMatches, countEditorSearchMatches, createEditorSearchQuery, replaceEditorSearchMatches, type EditorSearchMatch } from "@/lib/editor/editorSearchQuery";
 import { appendSearchMatchSelection, findSearchMatch, isSearchAddSelectionModifier, selectionRangesForSearchMatches, type EditorSearchSelectionDirection } from "@/lib/editor/editorSearchSelection";
+import { isReplaceAllShortcut } from "@/lib/editor/replaceAllShortcut";
+import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { vNamingStyleSupport } from "@/directives/vNamingStyleSupport";
 
@@ -426,20 +428,28 @@ function doReplace() {
       r = iter.next();
     }
     if (target) {
-      const insertText = computeReplacementForMatch(v, target.from, target.to);
-      const tr = v.state.changeByRange((range) => {
-        if (range.from === target!.from && range.to === target!.to) {
-          return {
-            changes: { from: target!.from, to: target!.to, insert: insertText },
-            range: EditorSelection.range(target!.from, target!.from + insertText.length),
-          };
+      if (sel.from === target.from && sel.to === target.to) {
+        const insertText = computeReplacementForMatch(v, target.from, target.to);
+        const tr = v.state.update({
+          changes: { from: target.from, to: target.to, insert: insertText },
+        });
+        v.dispatch(tr);
+        searchScopeFrom = tr.changes.mapPos(searchScopeFrom);
+        searchScopeTo = tr.changes.mapPos(searchScopeTo);
+        const nextCursor = target.from + insertText.length;
+        const nextTarget = findSearchMatch(iterateAllMatches(v), nextCursor, "next");
+        if (nextTarget) {
+          v.dispatch({
+            selection: EditorSelection.range(nextTarget.from, nextTarget.to),
+            effects: EditorView.scrollIntoView(nextTarget.from, { y: "center" }),
+          });
         }
-        return { range };
-      });
-      v.dispatch(tr);
-      // Map scope through changes
-      searchScopeFrom = tr.changes.mapPos(searchScopeFrom);
-      searchScopeTo = tr.changes.mapPos(searchScopeTo);
+      } else {
+        v.dispatch({
+          selection: EditorSelection.range(target.from, target.to),
+          effects: EditorView.scrollIntoView(target.from, { y: "center" }),
+        });
+      }
     } else {
       // Wrap around to start of scope
       findInScope("next");
@@ -447,7 +457,7 @@ function doReplace() {
   } else {
     cmReplaceNext(v);
   }
-  updateMatchInfo(true);
+  updateMatchInfo();
 }
 
 function doReplaceAll() {
@@ -469,12 +479,32 @@ function onSearchKeydown(e: KeyboardEvent) {
   if (e.key === "Escape") {
     e.preventDefault();
     closeSearch();
+  } else if (isReplaceAllShortcut(e)) {
+    // Replace All instead of find-next, but only with the replace row
+    // expanded — a collapsed panel must not replace with hidden (possibly
+    // stale) replace text. The combo is swallowed either way so it never
+    // falls into the Enter = find-next branches below.
+    e.preventDefault();
+    if (showReplace.value) doReplaceAll();
   } else if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     nextMatch();
   } else if (e.key === "Enter" && e.shiftKey) {
     e.preventDefault();
     prevMatch();
+  }
+}
+
+function onReplaceKeydown(e: KeyboardEvent) {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeSearch();
+  } else if (isReplaceAllShortcut(e)) {
+    e.preventDefault();
+    doReplaceAll();
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    doReplace();
   }
 }
 
@@ -510,7 +540,7 @@ defineExpose({
         <button class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="showReplace ? t('editor.search.collapseReplace') : t('editor.search.expandReplace')" @click="showReplace = !showReplace">
           <ChevronRight class="h-4 w-4 transition-transform" :class="showReplace && 'rotate-90'" />
         </button>
-        <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
+        <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:bg-background-solid focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
           <input
             ref="searchInputRef"
             v-model="searchText"
@@ -574,7 +604,7 @@ defineExpose({
       </div>
       <div v-if="showReplace" class="flex items-center gap-1">
         <div class="h-7 w-7 shrink-0" />
-        <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
+        <div class="flex h-8 w-64 items-center rounded-md border border-input bg-background focus-within:bg-background-solid focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
           <input
             ref="replaceInputRef"
             v-model="replaceText"
@@ -584,14 +614,13 @@ defineExpose({
             spellcheck="false"
             class="h-full min-w-0 flex-1 bg-transparent px-2 text-sm text-foreground outline-none placeholder:text-muted-foreground"
             :placeholder="t('editor.search.replace')"
-            @keydown.enter.prevent="doReplace"
-            @keydown.escape.prevent="closeSearch"
+            @keydown="onReplaceKeydown"
           />
         </div>
         <button class="flex h-7 items-center justify-center rounded-md border border-border px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="t('editor.search.replace')" @click="doReplace">
           {{ t("editor.search.replace") }}
         </button>
-        <button class="flex h-7 items-center justify-center rounded-md border border-border px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="t('editor.search.replaceAll')" @click="doReplaceAll">
+        <button class="flex h-7 items-center justify-center rounded-md border border-border px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="`${t('editor.search.replaceAll')} (${formatShortcutDisplay('Mod+Alt+Enter')})`" @click="doReplaceAll">
           {{ t("editor.search.replaceAll") }}
         </button>
       </div>
@@ -653,6 +682,10 @@ defineExpose({
   border-color: var(--input);
   border-radius: var(--dbx-radius-fixed-5);
   box-shadow: 0 1px 0 color-mix(in srgb, var(--foreground) 3%, transparent) inset;
+}
+
+.editor-search-panel--editor :deep(.border-input:focus-within) {
+  background: var(--background-solid, var(--background));
 }
 
 .editor-search-panel--editor :deep(.focus-within\:border-ring:focus-within) {

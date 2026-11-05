@@ -141,4 +141,15 @@ describe("exact backup table selection", () => {
     expect(selection.value).toEqual([]);
     expect(states.at(-1)?.ready).toBe(false);
   });
+
+  it("loads schemas and tables for openGauss connections", async () => {
+    apiMock.listSchemas.mockResolvedValue(["public", "pg_catalog", "information_schema"]);
+    apiMock.listTables.mockResolvedValue([{ name: "users" }]);
+    const { scope, container } = mount();
+    scope.databaseType = "opengauss";
+    await settle();
+    expect(apiMock.listSchemas).toHaveBeenCalledWith("source", "app");
+    expect(apiMock.listTables).toHaveBeenCalledWith("source", "app", "public");
+    expect(container.textContent).toContain('"app"."public"."users"');
+  });
 });

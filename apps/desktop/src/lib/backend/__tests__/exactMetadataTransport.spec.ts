@@ -18,6 +18,20 @@ describe("exact metadata transports", () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
+  test.each([true, false, undefined])("both object transports preserve lightweight=%s", async (lightweight) => {
+    const options = lightweight === undefined ? undefined : { lightweight };
+    await tauri.listObjects("conn", "db", "db", undefined, undefined, undefined, undefined, undefined, undefined, undefined, options);
+    await http.listObjects("conn", "db", "db", undefined, undefined, undefined, undefined, undefined, undefined, undefined, options);
+    const url = new URL(String(vi.mocked(fetch).mock.calls[0][0]), "http://localhost");
+    if (lightweight === undefined) {
+      expect(invoke.mock.calls[0][1]).not.toHaveProperty("lightweight");
+      expect(url.searchParams.has("lightweight")).toBe(false);
+    } else {
+      expect(invoke.mock.calls[0][1]).toHaveProperty("lightweight", lightweight);
+      expect(url.searchParams.get("lightweight")).toBe(String(lightweight));
+    }
+  });
+
   const calls = [
     ["tables", (api: typeof tauri | typeof http, exact?: boolean) => api.listTables("conn", "db", owner, "Ix", 2, 1, ["TABLE"], undefined, undefined, exact)],
     ["objects", (api: typeof tauri | typeof http, exact?: boolean) => api.listObjects("conn", "db", owner, ["INDEX"], "Ix", 2, 1, undefined, undefined, "request", exact)],
@@ -57,5 +71,19 @@ describe("exact metadata transports", () => {
     expect(url.searchParams.get("schema")).toBe(owner);
     expect(url.searchParams.get("table")).toBe(table);
     expect(url.searchParams.get("exact_identity")).toBe("true");
+  });
+
+  test.each(["native", "display"] as const)("both %s DDL transports carry explicit owner without requiring exact capability", async (mode) => {
+    for (const api of [tauri, http]) {
+      if (mode === "native") await api.getTableDdl("conn", owner, owner, table, undefined, undefined, false, undefined, true, owner);
+      else await api.getTableDisplayDdl("conn", owner, owner, table, undefined, undefined, true, owner);
+    }
+    const payload = invoke.mock.calls[0][1];
+    expect(payload).toMatchObject({ schema: owner, explicitOwner: owner, separateIndexes: true });
+    expect(payload).not.toHaveProperty("exactIdentity");
+    const url = new URL(String(vi.mocked(fetch).mock.calls[0][0]), "http://localhost");
+    expect(url.searchParams.get("explicit_owner")).toBe(owner);
+    expect(url.searchParams.get("schema")).toBe(owner);
+    expect(url.searchParams.has("exact_identity")).toBe(false);
   });
 });

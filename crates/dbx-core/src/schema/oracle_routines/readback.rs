@@ -29,7 +29,7 @@ pub enum RoutineReadbackGoal {
     Inspect,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutineReadback {
     pub identity: RoutineIdentity,
@@ -37,6 +37,10 @@ pub struct RoutineReadback {
     pub exists: Option<bool>,
     pub version: Option<RoutineVersion>,
     pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_origin: Option<SourceOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_companion: Option<Box<RoutineReadback>>,
     pub definition_matches: Option<bool>,
     pub compiler_messages: Vec<RoutineCompilerMessage>,
     pub issues: Vec<RoutineReadIssue>,
@@ -82,11 +86,16 @@ pub(super) async fn read_namespace(
     dba: bool,
 ) -> Result<CatalogReply, String> {
     let view = if dba { "SYS.DBA_OBJECTS" } else { "ALL_OBJECTS" };
+    let body_kind = if matches!(identity.kind, db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody) {
+        ",'PACKAGE BODY'"
+    } else {
+        ""
+    };
     let reply = catalog.query(&format!(
         "SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, OBJECT_ID, STATUS, \
          TO_CHAR(LAST_DDL_TIME, 'YYYY-MM-DD\"T\"HH24:MI:SS') LAST_DDL_TIME \
          FROM {view} WHERE OWNER = {} AND OBJECT_NAME = {} AND OBJECT_TYPE IN \
-         ('TABLE','VIEW','SEQUENCE','PROCEDURE','FUNCTION','PACKAGE','MATERIALIZED VIEW','TYPE','SYNONYM') ORDER BY OBJECT_ID",
+         ('TABLE','VIEW','SEQUENCE','PROCEDURE','FUNCTION','PACKAGE','MATERIALIZED VIEW','TYPE','SYNONYM'{body_kind}) ORDER BY OBJECT_ID",
         literal(&identity.owner), literal(&identity.name),
     )).await?;
     reply.flags.check()?;
@@ -94,22 +103,40 @@ pub(super) async fn read_namespace(
 }
 
 pub(super) fn exact_version(reply: &CatalogReply, identity: &RoutineIdentity) -> Result<RoutineVersion, String> {
-    if reply.rows.len() != 1 {
-        return Err("Routine namespace is ambiguous or has a different object kind".into());
+    namespace_version(reply, identity)?
+        .ok_or_else(|| "Routine namespace does not contain the requested object kind".into())
+}
+
+fn namespace_version(reply: &CatalogReply, identity: &RoutineIdentity) -> Result<Option<RoutineVersion>, String> {
+    let counterpart = match identity.kind {
+        db::ObjectSourceKind::Package => Some("PACKAGE BODY"),
+        db::ObjectSourceKind::PackageBody => Some("PACKAGE"),
+        _ => None,
+    };
+    let mut matched = None;
+    let mut has_counterpart = false;
+    for row in &reply.rows {
+        if reply.text(row, "OWNER")? != identity.owner || reply.text(row, "OBJECT_NAME")? != identity.name {
+            return Err("Routine namespace contains a different owner or name".into());
+        }
+        let kind = reply.text(row, "OBJECT_TYPE")?;
+        if kind == kind_name(&identity.kind) {
+            if matched.replace(row).is_some() {
+                return Err("Routine namespace contains duplicate exact identities".into());
+            }
+        } else if counterpart == Some(kind.as_str()) && !has_counterpart {
+            has_counterpart = true;
+        } else {
+            return Err("Routine namespace is ambiguous or has a different object kind".into());
+        }
     }
-    let row = &reply.rows[0];
-    if reply.text(row, "OWNER")? != identity.owner
-        || reply.text(row, "OBJECT_NAME")? != identity.name
-        || reply.text(row, "OBJECT_TYPE")? != kind_name(&identity.kind)
-    {
-        return Err("Routine namespace contains a different owner, name or kind".into());
-    }
-    Ok(RoutineVersion {
+    let Some(row) = matched else { return Ok(None) };
+    Ok(Some(RoutineVersion {
         identity: identity.clone(),
         object_id: reply.integer(row, "OBJECT_ID")?.to_string(),
         status: reply.text(row, "STATUS")?,
         last_ddl_time: reply.text(row, "LAST_DDL_TIME")?,
-    })
+    }))
 }
 
 async fn compiler_messages(
@@ -175,12 +202,102 @@ pub(super) async fn readback(
     goal: &RoutineReadbackGoal,
     origin: SourceOrigin,
 ) -> RoutineReadback {
+    let counterpart = match identity.kind {
+        db::ObjectSourceKind::Package => Some(db::ObjectSourceKind::PackageBody),
+        db::ObjectSourceKind::PackageBody => Some(db::ObjectSourceKind::Package),
+        _ => None,
+    };
+    let mut result = readback_single(catalog, endpoint, identity.clone(), goal, origin).await;
+    let Some(kind) = counterpart else {
+        return result;
+    };
+    let companion_goal = if identity.kind == db::ObjectSourceKind::Package && *goal == RoutineReadbackGoal::Absent {
+        RoutineReadbackGoal::Absent
+    } else {
+        RoutineReadbackGoal::Inspect
+    };
+    let companion =
+        readback_single(catalog, endpoint, RoutineIdentity { kind, ..identity.clone() }, &companion_goal, origin).await;
+    let check: Result<(), String> = async {
+        if !result.issues.is_empty() || !companion.issues.is_empty() {
+            return Err(format!(
+                "Package pair readback is incomplete: {}",
+                result
+                    .issues
+                    .iter()
+                    .chain(&companion.issues)
+                    .map(|issue| issue.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        let login = catalog.query("SELECT USER AS LOGIN_OWNER FROM DUAL").await?;
+        login.flags.check()?;
+        if login.rows.len() != 1 {
+            return Err("Package pair namespace visibility is unknown".into());
+        }
+        let other_owner = login.text(&login.rows[0], "LOGIN_OWNER")? != identity.owner;
+        for before in [&result, &companion] {
+            match before.exists {
+                Some(true) => {
+                    let source = catalog.source(&before.identity).await?;
+                    source.flags.check()?;
+                    if source.object.name != before.identity.name
+                        || source.object.schema.as_deref() != Some(&before.identity.owner)
+                        || source.object.object_type != before.identity.kind
+                        || before.source.as_ref() != Some(&source.object.source)
+                        || source.source_origin != before.source_origin
+                    {
+                        return Err("Package pair definition or actual source origin changed during collection".into());
+                    }
+                }
+                Some(false) => {}
+                None => return Err("Package pair existence is not fully observed".into()),
+            }
+        }
+        for before in [&result, &companion] {
+            let namespace =
+                read_namespace(catalog, &before.identity, other_owner && before.exists == Some(false)).await?;
+            let version = namespace_version(&namespace, &before.identity)?;
+            if version != before.version || version.is_some() != (before.exists == Some(true)) {
+                return Err("Package pair identity, status or namespace changed during collection".into());
+            }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = check {
+        result.state = RoutineReadbackState::ReadbackFailed;
+        result.issues.push(issue("package-pair", error));
+    } else if (identity.kind == db::ObjectSourceKind::Package
+        && *goal == RoutineReadbackGoal::Absent
+        && companion.exists != Some(false))
+        || (identity.kind == db::ObjectSourceKind::PackageBody
+            && matches!(goal, RoutineReadbackGoal::Definition { .. })
+            && companion.state != RoutineReadbackState::Present
+            && result.state == RoutineReadbackState::Verified)
+    {
+        result.state = RoutineReadbackState::DefinitionMismatch;
+    }
+    result.package_companion = Some(Box::new(companion));
+    result
+}
+
+async fn readback_single(
+    catalog: &impl RoutineCatalog,
+    endpoint: &RoutineEndpoint,
+    identity: RoutineIdentity,
+    goal: &RoutineReadbackGoal,
+    origin: SourceOrigin,
+) -> RoutineReadback {
     let mut result = RoutineReadback {
         identity,
         state: RoutineReadbackState::ReadbackFailed,
         exists: None,
         version: None,
         source: None,
+        source_origin: None,
+        package_companion: None,
         definition_matches: None,
         compiler_messages: Vec::new(),
         issues: Vec::new(),
@@ -194,25 +311,27 @@ pub(super) async fn readback(
         let other_owner = login.text(&login.rows[0], "LOGIN_OWNER")? != result.identity.owner;
         let mut dba = false;
         let mut namespace = read_namespace(catalog, &result.identity, false).await?;
+        let mut version = namespace_version(&namespace, &result.identity)?;
         // A positive exact ALL_OBJECTS identity is useful evidence for ordinary
         // saves to another owner. Only inferring absence requires full scope.
-        if namespace.rows.is_empty() && other_owner {
+        if version.is_none() && other_owner {
             dba = true;
             namespace = read_namespace(catalog, &result.identity, true).await?;
+            version = namespace_version(&namespace, &result.identity)?;
         }
-        result.exists = Some(!namespace.rows.is_empty());
-        if namespace.rows.is_empty() {
+        result.exists = Some(version.is_some());
+        let Some(version) = version else {
             result.state = if *goal == RoutineReadbackGoal::Absent {
                 RoutineReadbackState::Verified
             } else {
                 RoutineReadbackState::Missing
             };
             return Ok(());
-        }
-        let version = exact_version(&namespace, &result.identity)?;
+        };
         result.version = Some(version.clone());
         let source = catalog.source(&result.identity).await?;
         result.source = Some(source.object.source.clone());
+        result.source_origin = source.source_origin;
         check_source(catalog, endpoint, &result.identity, &source, origin).await?;
         compiler_messages(catalog, &result.identity, &mut result.compiler_messages).await?;
         let second = catalog.source(&result.identity).await?;
@@ -220,6 +339,7 @@ pub(super) async fn readback(
         if second.object.name != source.object.name
             || second.object.schema != source.object.schema
             || second.object.object_type != source.object.object_type
+            || second.source_origin != source.source_origin
             || second.object.source != source.object.source
         {
             return Err("Routine definition changed during readback".into());
@@ -256,6 +376,9 @@ pub(super) async fn readback(
 }
 
 #[cfg(test)]
+mod package_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -272,6 +395,7 @@ mod tests {
         incomplete_errors: bool,
         source_changes: bool,
         source_reads: AtomicUsize,
+        namespace_rows: Option<Vec<Vec<Value>>>,
     }
 
     impl Default for Catalog {
@@ -287,12 +411,56 @@ mod tests {
                 incomplete_errors: false,
                 source_changes: false,
                 source_reads: AtomicUsize::new(0),
+                namespace_rows: None,
             }
         }
     }
 
     fn reply(columns: &[&str], rows: Vec<Vec<Value>>) -> CatalogReply {
         serde_json::from_value(json!({"columns":columns,"rows":rows})).unwrap()
+    }
+
+    #[test]
+    fn package_namespace_resolves_each_kind_without_treating_its_pair_as_a_conflict() {
+        let mut reply = reply(
+            &["OWNER", "OBJECT_NAME", "OBJECT_TYPE", "OBJECT_ID", "STATUS", "LAST_DDL_TIME"],
+            vec![
+                vec![
+                    json!("OWNER"),
+                    json!("Pkg.With.Dot"),
+                    json!("PACKAGE"),
+                    json!(12),
+                    json!("VALID"),
+                    json!("2026-10-23T01:00:00"),
+                ],
+                vec![
+                    json!("OWNER"),
+                    json!("Pkg.With.Dot"),
+                    json!("PACKAGE BODY"),
+                    json!(13),
+                    json!("VALID"),
+                    json!("2026-10-23T01:00:00"),
+                ],
+            ],
+        );
+        let specification =
+            RoutineIdentity { owner: "OWNER".into(), name: "Pkg.With.Dot".into(), kind: db::ObjectSourceKind::Package };
+        let body = RoutineIdentity { kind: db::ObjectSourceKind::PackageBody, ..specification.clone() };
+        assert!(exact_version(&reply, &specification).is_ok(), "the specification must be resolved by exact kind");
+        assert!(exact_version(&reply, &body).is_ok(), "the body must be resolved by exact kind");
+        assert_eq!(exact_version(&reply, &specification).unwrap().object_id, "12");
+        assert_eq!(exact_version(&reply, &body).unwrap().object_id, "13");
+        let standalone = RoutineIdentity { kind: db::ObjectSourceKind::Function, ..specification.clone() };
+        assert!(exact_version(&reply, &standalone).is_err());
+        reply.rows[0][0] = json!("ANOTHER_OWNER");
+        assert!(exact_version(&reply, &body).is_err());
+        reply.rows[0][0] = json!("OWNER");
+        reply.rows.push(reply.rows[1].clone());
+        assert!(exact_version(&reply, &body).is_err());
+        reply.rows.remove(2);
+        reply.rows.remove(0);
+        assert_eq!(exact_version(&reply, &body).unwrap().object_id, "13");
+        assert!(exact_version(&reply, &specification).is_err());
     }
 
     #[async_trait::async_trait]
@@ -344,7 +512,9 @@ mod tests {
             }
             Ok(reply(
                 &["OWNER", "OBJECT_NAME", "OBJECT_TYPE", "OBJECT_ID", "STATUS", "LAST_DDL_TIME"],
-                if self.exists {
+                if let Some(rows) = &self.namespace_rows {
+                    rows.clone()
+                } else if self.exists {
                     vec![vec![
                         json!("OWNER"),
                         json!("Read.Func"),
@@ -358,7 +528,7 @@ mod tests {
                 },
             ))
         }
-        async fn source(&self, _identity: &RoutineIdentity) -> Result<SourceReply, String> {
+        async fn source(&self, identity: &RoutineIdentity) -> Result<SourceReply, String> {
             let calls = self.source_reads.fetch_add(1, Ordering::SeqCst);
             let text = if self.source_changes && calls > 0 {
                 self.source.replace("RETURN 1", "RETURN 3")
@@ -366,7 +536,7 @@ mod tests {
                 self.source.clone()
             };
             Ok(serde_json::from_value(
-                json!({"name":"Read.Func","schema":"OWNER","object_type":"FUNCTION","source":text}),
+                json!({"name":identity.name,"schema":identity.owner,"object_type":identity.kind,"source":text,"source_origin":matches!(identity.kind, db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody).then_some("oceanbase-dictionary")}),
             )
             .unwrap())
         }
@@ -471,6 +641,57 @@ mod tests {
         assert_eq!(run(&catalog, expected()).await.state, RoutineReadbackState::Missing);
         let denied = Catalog { exists: false, fail: "ALL_OBJECTS", ..Default::default() };
         assert_eq!(run(&denied, RoutineReadbackGoal::Absent).await.state, RoutineReadbackState::ReadbackFailed);
+    }
+
+    #[tokio::test]
+    async fn body_absence_is_kind_specific_and_requires_full_owner_visibility() {
+        let rows = vec![vec![
+            json!("OWNER"),
+            json!("Read.Func"),
+            json!("PACKAGE"),
+            json!(12),
+            json!("VALID"),
+            json!("2026-10-23T01:00:00"),
+        ]];
+        let endpoint = RoutineEndpoint {
+            connection_id: "target".into(),
+            database: "tenant".into(),
+            schema: "OWNER".into(),
+            database_type: DatabaseType::OceanbaseOracle,
+            generation: 1,
+        };
+        let identity = RoutineIdentity {
+            owner: "OWNER".into(),
+            name: "Read.Func".into(),
+            kind: db::ObjectSourceKind::PackageBody,
+        };
+        let specification = "CREATE OR REPLACE PACKAGE \"Read.Func\" AS g NUMBER; END \"Read.Func\";";
+        let catalog =
+            Catalog { source: specification.into(), namespace_rows: Some(rows.clone()), ..Default::default() };
+        let result = readback(
+            &catalog,
+            &endpoint,
+            identity.clone(),
+            &RoutineReadbackGoal::Absent,
+            SourceOrigin::OceanBaseDictionary,
+        )
+        .await;
+        assert_eq!(result.state, RoutineReadbackState::Verified);
+        assert_eq!(result.exists, Some(false));
+        assert_eq!(catalog.source_reads.load(Ordering::SeqCst), 3);
+        assert_eq!(result.package_companion.as_ref().unwrap().source.as_deref(), Some(specification));
+        let catalog = Catalog {
+            source: specification.into(),
+            login: "OTHER_LOGIN",
+            fail: "SYS.DBA_OBJECTS",
+            namespace_rows: Some(rows),
+            ..Default::default()
+        };
+        let result =
+            readback(&catalog, &endpoint, identity, &RoutineReadbackGoal::Absent, SourceOrigin::OceanBaseDictionary)
+                .await;
+        assert_eq!(result.state, RoutineReadbackState::ReadbackFailed);
+        assert_eq!(result.exists, None);
     }
 
     #[tokio::test]

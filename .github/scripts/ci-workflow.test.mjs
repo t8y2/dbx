@@ -279,15 +279,36 @@ test("Rust build timings remain available after failures without waiting for can
   assert.ok(job("agent-rust").includes('--manifest-path "drivers/$DRIVER/Cargo.toml" --locked --no-fail-fast --timings'));
 });
 
-test("Linux Rust dependency installs bound apt mirror stalls", () => {
-  for (const name of ["packages", "rust-fmt-clippy", "rust-test", "agent-rust"]) {
-    const content = job(name);
-    const deadlines = [...content.matchAll(/sudo timeout --kill-after=30s (\d+)m apt-get/g)].map((match) => Number(match[1]));
-    assert.deepEqual(deadlines, [10, name === "agent-rust" ? 10 : 20]);
-    for (const option of ["Acquire::Retries=3", "Acquire::http::Timeout=30", "Acquire::https::Timeout=30"]) {
-      assert.ok(content.includes(option));
-    }
+test("Linux dependency installs share bounded acquisition before offline installation", () => {
+  for (const name of ["packages", "rust-fmt-clippy", "rust-test"]) {
+    assert.ok(job(name).includes("sudo python3 .github/scripts/ci-install-system-deps.py"));
+    assert.ok(!job(name).includes("apt-get"));
   }
+  for (const name of ["agent-checks", "agent-java"]) {
+    assert.ok(job(name).includes("sudo python3 ../.github/scripts/ci-install-system-deps.py --group packaging"));
+  }
+  assert.ok(job("agent-rust").includes("sudo python3 ../.github/scripts/ci-install-system-deps.py --group duckdb"));
+  assert.ok(job("github-scripts").includes("python3 .github/scripts/ci-install-system-deps.test.py"));
+});
+
+test("Java CI acquires before original commands without retrying packaging or tests", () => {
+  assert.ok(job("agent-java").includes("python3 ../.github/scripts/ci-gradle.py agents -- ./gradlew test shadowJar --continue"));
+  for (const name of ["jdbc", "offline-jdbc-release"]) {
+    assert.ok(job(name).includes("python3 .github/scripts/ci-gradle.py jdbc -- ./package.sh"));
+  }
+  assert.ok(job("github-scripts").includes("python3 .github/scripts/ci-gradle.test.py"));
+});
+
+test("mold downloads are isolated from extraction in CI and keepalive", () => {
+  for (const name of ["packages", "rust-test"]) {
+    assert.ok(job(name).includes("run: bash .github/scripts/ci-install-mold.sh"));
+  }
+  assert.ok(job("agent-rust").includes("run: bash ../.github/scripts/ci-install-mold.sh"));
+  const keepalive = readFileSync(new URL("../workflows/cache-keepalive.yml", import.meta.url), "utf8");
+  assert.ok(keepalive.includes("run: bash .github/scripts/ci-install-mold.sh"));
+  assert.ok(keepalive.includes("sudo python3 .github/scripts/ci-install-system-deps.py"));
+  assert.ok(job("github-scripts").includes("python3 .github/scripts/ci-install-mold.test.py"));
+  assert.ok(job("github-scripts").includes("./.github/scripts/prepare-webview2-win7-runtime.test.ps1"));
 });
 
 for (const name of ["rust-test", "agent-integration"]) {
@@ -297,7 +318,14 @@ for (const name of ["rust-test", "agent-integration"]) {
       const block = step.slice(step.indexOf("          timeout 30s")).replace(/^          /gm, "");
       const directory = mkdtempSync(path.join(tmpdir(), "dbx-docker-ready-"));
       try {
-        const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", `
+        const result = spawnSync(
+          "bash",
+          [
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            `
           sudo() { "$@"; }
           systemctl() { printf 'restart\\n' >> "$STATE/restarts"; }
           timeout() { shift; "$@"; }
@@ -314,7 +342,10 @@ for (const name of ["rust-test", "agent-integration"]) {
           }
           ${block}
           printf 'verified\\n'
-        `], { env: { ...process.env, STATE: directory.replaceAll("\\", "/"), SCENARIO: scenario }, encoding: "utf8", timeout: 15000 });
+        `,
+          ],
+          { env: { ...process.env, STATE: directory.replaceAll("\\", "/"), SCENARIO: scenario }, encoding: "utf8", timeout: 15000 },
+        );
         assert.ifError(result.error);
         assert.equal(readFileSync(path.join(directory, "restarts"), "utf8"), "restart\n");
         const count = Number(readFileSync(path.join(directory, "count"), "utf8"));
@@ -339,7 +370,7 @@ test("Rust test jobs install pinned nextest and retain separate doctests", () =>
   const pluginRelease = readFileSync(new URL("../workflows/plugin-cli-release.yml", import.meta.url), "utf8");
   const consumers = [job("packages"), job("rust-test"), job("agent-rust"), job("agent-integration"), job("test", pluginDevHost), job("prepare", pluginRelease)];
   for (const content of consumers) {
-    assert.ok(content.includes("uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b"));
+    assert.ok(content.includes("uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91"));
     assert.ok(content.includes("tool: cargo-nextest@0.9.137"));
     assert.doesNotMatch(content, /cargo test (?!.*--doc)/);
     const testCommand = content.indexOf("cargo nextest run") >= 0 ? "cargo nextest run" : content.includes("pnpm test:packages") ? "pnpm test:packages" : content.includes("ci-rust.mjs test") ? "ci-rust.mjs test" : "ci-agent-integration.sh";
@@ -389,7 +420,8 @@ test("Windows compatibility jobs cache Rust compilation without wrapping C or C+
   const win7 = job("windows-win7-bundle");
   assert.ok(win7.includes("needs.changes.outputs.windows_win7_bundle == 'true'"));
   assert.doesNotMatch(win7, /x86_64-pc-windows-msvc|Setup Rust for standard Windows/);
-  for (const setting of ["RUSTC_WRAPPER: sccache", "SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}", "SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1", 'SCCACHE_IDLE_TIMEOUT: "0"', 'CARGO_PROFILE_RELEASE_LTO: "off"', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"']) assert.ok(win7.includes(setting));
+  for (const setting of ["RUSTC_WRAPPER: sccache", "SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}", "SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1", 'SCCACHE_IDLE_TIMEOUT: "0"', 'CARGO_PROFILE_RELEASE_LTO: "off"', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"'])
+    assert.ok(win7.includes(setting));
   assert.ok(win7.includes("fc920bf0ec8de6ee65d409111f7ec508035751ba"));
   assert.ok(win7.includes('version: "v0.16.0"'));
   assert.ok(win7.includes("sccache --show-stats"));
@@ -432,7 +464,10 @@ test("Win7 TLS artifacts come from main and retain a build fallback", () => {
   const win7 = job("windows-win7-bundle");
   assert.ok(win7.includes("actions: read"));
   assert.doesNotMatch(win7, /uses: actions\/cache(?:\/restore|\/save)?@v4/);
-  for (const [name, id] of [["AWS-LC", "aws-lc-artifact"], ["OpenSSL", "openssl-artifact"]]) {
+  for (const [name, id] of [
+    ["AWS-LC", "aws-lc-artifact"],
+    ["OpenSSL", "openssl-artifact"],
+  ]) {
     assert.ok(win7.includes(`if: steps.${id}.outputs.run_id != ''`));
     assert.ok(win7.includes(`if: steps.${id}.outputs.run_id == ''`));
     assert.ok(win7.includes(`if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.${id}.outputs.run_id == ''`));
@@ -460,4 +495,21 @@ test("path filtering and the planner use the exact test merge first parent", () 
     assert.ok(changes.includes(`steps.plan.outputs.${flag}`));
   }
   assert.doesNotMatch(changes, /steps\.filter\.outputs\.windows_win7_bundle|github\.event\.pull_request\.base\.sha|WIN7_CURRENT/);
+});
+
+test("legacy Windows builds keep the 8 MiB main-thread stack", () => {
+  const release = readFileSync(new URL("../workflows/release.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  const sqlServerUserTest = readFileSync(new URL("../workflows/sqlserver2000-windows-user-test.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  const stackFlag = /RUSTFLAGS:.*link-arg=\/STACK:8388608/;
+  // An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so every job
+  // that links a Windows PE has to repeat the /STACK link argument; otherwise
+  // the 1 MiB linker default returns and deep DB call stacks abort with
+  // 0xC00000FD ("DBX 已停止工作").
+  for (const name of ["windows-standard-check", "windows-win7-bundle", "duckdb-windows-driver"]) {
+    assert.match(job(name), stackFlag, `${name} must keep the 8 MiB main-thread stack in RUSTFLAGS`);
+  }
+  for (const name of ["build-windows-7-offline", "build-windows-7-static-browser"]) {
+    assert.match(job(name, release), stackFlag, `release job ${name} must keep the 8 MiB main-thread stack in RUSTFLAGS`);
+  }
+  assert.match(job("build-windows-7-x64", sqlServerUserTest), stackFlag, "the SQL Server 2000 Win7 test build must keep the 8 MiB main-thread stack");
 });

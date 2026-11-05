@@ -10,6 +10,7 @@ import type { DocsLang } from "@/lib/i18n";
 type InstallTabsProps = {
   lang: DocsLang;
   version: string;
+  releaseTag?: string;
 };
 
 const downloadLabel = { en: "Download DBX", cn: "下载 DBX" };
@@ -228,8 +229,8 @@ function BrowserStaticDialog({ lang, option, version, onClose }: { lang: DocsLan
   );
 }
 
-export function InstallTabs({ lang, version }: InstallTabsProps) {
-  const options = useMemo(() => createInstallOptions(lang, version), [lang, version]);
+export function InstallTabs({ lang, version, releaseTag }: InstallTabsProps) {
+  const options = useMemo(() => createInstallOptions(lang, version, releaseTag), [lang, version, releaseTag]);
   const [open, setOpen] = useState(false);
   const [platformId, setPlatformId] = useState<DownloadPlatformId>("unknown");
   const [browserStaticOption, setBrowserStaticOption] = useState<InstallOption | null>(null);

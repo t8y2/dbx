@@ -733,6 +733,9 @@ impl Plan {
                 outcome.transferred.push(label.clone());
             }
             progress(TransferProgress {
+                oracle_package_approval: None,
+                oracle_package_preflight: None,
+                oracle_routine_operation: None,
                 transfer_id: request.transfer_id.clone(),
                 table: format!("schema object: {label}"),
                 table_index: request.tables.len(),

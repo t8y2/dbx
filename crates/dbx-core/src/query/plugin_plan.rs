@@ -845,6 +845,7 @@ mod tests {
             (DatabaseType::Mysql, GeneratedSql),
             (DatabaseType::Doris, GeneratedSql),
             (DatabaseType::Postgres, GeneratedSql),
+            (DatabaseType::OpenGauss, GeneratedSql),
             (DatabaseType::Questdb, GeneratedSql),
             (DatabaseType::Dameng, DriverNative),
             (DatabaseType::Oracle, DriverNative),

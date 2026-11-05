@@ -1,11 +1,224 @@
 use super::*;
 use serde_json::json;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Mutex,
 };
 
 const BODY: &str = "FUNCTION \"Quoted.Func\" RETURN VARCHAR2 IS BEGIN RETURN 'a  b'; END";
+
+struct PackageCatalog {
+    inner: FakeCatalog,
+    fail_body: bool,
+    change_spec_during_body: bool,
+    spec_changed: AtomicBool,
+}
+
+impl PackageCatalog {
+    fn new() -> Self {
+        Self {
+            inner: FakeCatalog {
+                objects: vec![
+                    object_row(12, "Pkg.With.Dot", "PACKAGE"),
+                    object_row(13, "Pkg.With.Dot", "PACKAGE BODY"),
+                ],
+                ..Default::default()
+            },
+            fail_body: false,
+            change_spec_during_body: false,
+            spec_changed: AtomicBool::new(false),
+        }
+    }
+
+    fn body(kind: &db::ObjectSourceKind) -> String {
+        format!("{} \"Pkg.With.Dot\" AS END;", kind_name(kind))
+    }
+}
+
+#[async_trait::async_trait]
+impl RoutineCatalog for PackageCatalog {
+    async fn query(&self, sql: &str) -> Result<CatalogReply, String> {
+        if sql.contains("SOURCE_ROWS") {
+            self.inner.queries.lock().unwrap().push(sql.into());
+            let kind = if sql.contains("TYPE = 'PACKAGE BODY'") {
+                db::ObjectSourceKind::PackageBody
+            } else {
+                db::ObjectSourceKind::Package
+            };
+            let body = Self::body(&kind);
+            return Ok(reply(
+                &["SOURCE_ROWS", "FIRST_LINE", "LAST_LINE", "SOURCE_CHARS", "HEAD_TRIM", "TAIL_TRIM", "SOURCE_HEAD"],
+                vec![vec![
+                    json!(1),
+                    json!(1),
+                    json!(1),
+                    json!(body.chars().count()),
+                    json!(0),
+                    json!(0),
+                    json!(kind_name(&kind)),
+                ]],
+                &json!({}),
+            ));
+        }
+        self.inner.query(sql).await
+    }
+
+    async fn source(&self, identity: &RoutineIdentity) -> Result<SourceReply, String> {
+        if self.fail_body && identity.kind == db::ObjectSourceKind::PackageBody {
+            return Err("body source permission denied".into());
+        }
+        self.inner.source_calls.fetch_add(1, Ordering::SeqCst);
+        if self.change_spec_during_body && identity.kind == db::ObjectSourceKind::PackageBody {
+            self.spec_changed.store(true, Ordering::SeqCst);
+        }
+        let mut body = Self::body(&identity.kind);
+        if self.change_spec_during_body
+            && identity.kind == db::ObjectSourceKind::Package
+            && self.spec_changed.load(Ordering::SeqCst)
+        {
+            body = body.replace("AS END;", "AS c CONSTANT NUMBER := 2; END;");
+        }
+        Ok(serde_json::from_value(json!({"name":identity.name,"schema":identity.owner,"object_type":identity.kind,"source":format!("CREATE OR REPLACE {body}"),"source_origin":"oceanbase-dictionary"})).unwrap())
+    }
+}
+
+#[tokio::test]
+async fn same_second_specification_change_during_body_read_does_not_make_a_mixed_pair_complete() {
+    let catalog = PackageCatalog { change_spec_during_body: true, ..PackageCatalog::new() };
+    let options = RoutineReadOptions {
+        object_kinds: Some(vec![db::ObjectSourceKind::Package, db::ObjectSourceKind::PackageBody]),
+        ..Default::default()
+    };
+    let snapshot =
+        collect_snapshot_with_options(&catalog, endpoint(), SourceOrigin::OceanBaseDictionary, &options).await;
+    assert_eq!(snapshot.state, RoutineReadState::Partial);
+    assert!(snapshot.enumeration_complete, "the catalog IDs and second-resolution DDL times did not change");
+    let specification =
+        snapshot.objects.iter().find(|object| object.version.identity.kind == db::ObjectSourceKind::Package).unwrap();
+    assert!(!specification.source_complete);
+    assert!(specification.source.as_ref().unwrap().ends_with("AS END;"), "retain the original text for review");
+    assert!(specification.issues.iter().any(|issue| issue.message.contains("changed")));
+}
+
+#[tokio::test]
+async fn typed_body_selection_reads_the_pair_without_adding_a_specification_selection() {
+    let catalog = PackageCatalog::new();
+    let selected = RoutineSelection { name: "Pkg.With.Dot".into(), kind: db::ObjectSourceKind::PackageBody };
+    let options = RoutineReadOptions {
+        object_kinds: Some(vec![db::ObjectSourceKind::PackageBody]),
+        selected_objects: Some(vec![selected.clone()]),
+        ..Default::default()
+    };
+    options.validate().unwrap();
+    let snapshot =
+        collect_snapshot_with_options(&catalog, endpoint(), SourceOrigin::OceanBaseDictionary, &options).await;
+    assert_eq!(snapshot.state, RoutineReadState::Complete);
+    assert_eq!(snapshot.objects.len(), 2);
+    assert_eq!(snapshot.objects[0].version.identity.kind, db::ObjectSourceKind::Package);
+    assert_eq!(snapshot.objects[1].version.identity.kind, db::ObjectSourceKind::PackageBody);
+    assert!(snapshot.objects.iter().all(|object| object.source_complete && object.dependencies_complete));
+    assert!(snapshot.objects.iter().all(|object| object.source_origin == Some(SourceOrigin::OceanBaseDictionary)));
+    assert_eq!(serde_json::to_value(&snapshot).unwrap()["objects"][0]["sourceOrigin"], "oceanbase-dictionary");
+    assert_eq!(catalog.inner.source_calls.load(Ordering::SeqCst), 4);
+    assert_eq!(options.selected_objects, Some(vec![selected]));
+    assert!(catalog
+        .inner
+        .queries
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|sql| sql.contains("OBJECT_ID >"))
+        .all(|sql| sql.contains("'PACKAGE BODY'") && sql.contains("'PACKAGE'")));
+}
+
+#[tokio::test]
+async fn typed_standalone_selection_enriches_the_other_kind_as_read_only_conflict_evidence() {
+    let catalog = FakeCatalog::default();
+    let selected = RoutineSelection { name: "Quoted.Func".into(), kind: db::ObjectSourceKind::Procedure };
+    let options = RoutineReadOptions { selected_objects: Some(vec![selected.clone()]), ..Default::default() };
+    options.validate().unwrap();
+    let snapshot =
+        collect_snapshot_with_options(&catalog, endpoint(), SourceOrigin::OceanBaseDictionary, &options).await;
+    assert_eq!(snapshot.state, RoutineReadState::Complete);
+    assert_eq!(snapshot.objects[0].version.identity.kind, db::ObjectSourceKind::Function);
+    assert!(snapshot.objects[0].source_complete);
+    assert_eq!(options.selected_objects, Some(vec![selected]));
+}
+
+#[tokio::test]
+async fn a_failed_body_read_retains_both_exact_objects_without_inventing_absence() {
+    let catalog = PackageCatalog { fail_body: true, ..PackageCatalog::new() };
+    let options = RoutineReadOptions {
+        object_kinds: Some(vec![db::ObjectSourceKind::Package, db::ObjectSourceKind::PackageBody]),
+        ..Default::default()
+    };
+    let snapshot =
+        collect_snapshot_with_options(&catalog, endpoint(), SourceOrigin::OceanBaseDictionary, &options).await;
+    assert_eq!(snapshot.state, RoutineReadState::Partial);
+    assert!(snapshot.enumeration_complete);
+    assert_eq!(snapshot.objects.len(), 2);
+    assert!(snapshot.objects[0].source_complete);
+    assert!(!snapshot.objects[1].source_complete);
+    assert!(!snapshot.objects[1].issues.is_empty());
+}
+
+#[test]
+fn legacy_inventory_remains_procedure_function_only_and_new_selections_are_explicit() {
+    let options = RoutineReadOptions::default();
+    options.validate().unwrap();
+    let sql = inventory_sql("Owner.Mixed", false, 0, &options.inventory_kinds());
+    assert!(sql.contains("IN ('PROCEDURE', 'FUNCTION')"));
+    assert!(!sql.contains("'PACKAGE'"));
+    let package = vec![db::ObjectSourceKind::Package];
+    assert!(RoutineReadOptions {
+        object_kinds: Some(package),
+        selected_routines: Some(vec!["Pkg.With.Dot".into()]),
+        ..Default::default()
+    }
+    .validate()
+    .is_err());
+    assert!(RoutineReadOptions { object_kinds: Some(vec![db::ObjectSourceKind::View]), ..Default::default() }
+        .validate()
+        .is_err());
+    assert!(RoutineReadOptions {
+        selected_objects: Some(vec![RoutineSelection { name: "P".into(), kind: db::ObjectSourceKind::Package }]),
+        ..Default::default()
+    }
+    .validate()
+    .is_err());
+    let decoded: RoutineReadOptions = serde_json::from_value(json!({"objectKinds":["PACKAGE","PACKAGE_BODY"],"selectedObjects":[{"name":"Pkg.With.Dot","kind":"PACKAGE_BODY"}]})).unwrap();
+    decoded.validate().unwrap();
+    assert_eq!(decoded.selected_objects.unwrap()[0].kind, db::ObjectSourceKind::PackageBody);
+}
+
+#[tokio::test]
+async fn package_source_checks_the_reported_metadata_origin_and_exact_metadata_kind() {
+    for (kind, keyword, metadata_kind) in [
+        (db::ObjectSourceKind::Package, "PACKAGE", "PACKAGE_SPEC"),
+        (db::ObjectSourceKind::PackageBody, "PACKAGE BODY", "PACKAGE_BODY"),
+    ] {
+        let source = format!("CREATE OR REPLACE {keyword} \"P\" AS c CONSTANT VARCHAR2(10) := q'[中文😀]'; END;");
+        let catalog = FakeCatalog { length: source.chars().count() as u64, ..Default::default() };
+        let identity = RoutineIdentity { owner: "Owner.Mixed".into(), name: "P".into(), kind };
+        let reply: SourceReply = serde_json::from_value(json!({"name":"P","schema":"Owner.Mixed","object_type":identity.kind,"source":source,"source_origin":"oracle-metadata"})).unwrap();
+        let result = check_source(&catalog, &endpoint(), &identity, &reply, SourceOrigin::OceanBaseDictionary).await;
+        assert!(result.is_ok(), "metadata fallback must use its own source evidence: {result:?}");
+        assert!(catalog.queries.lock().unwrap().iter().any(|sql| sql.contains(&format!("GET_DDL('{metadata_kind}'"))));
+    }
+}
+
+#[tokio::test]
+async fn package_source_without_actual_origin_cannot_be_marked_complete() {
+    let body = "PACKAGE \"P\" AS END;";
+    let catalog = FakeCatalog { length: body.chars().count() as u64, ..Default::default() };
+    let identity =
+        RoutineIdentity { owner: "Owner.Mixed".into(), name: "P".into(), kind: db::ObjectSourceKind::Package };
+    let reply: SourceReply = serde_json::from_value(
+        json!({"name":"P","schema":"Owner.Mixed","object_type":"PACKAGE","source":format!("CREATE OR REPLACE {body}")}),
+    )
+    .unwrap();
+    assert!(check_source(&catalog, &endpoint(), &identity, &reply, SourceOrigin::OceanBaseDictionary).await.is_err());
+}
 
 struct FakeCatalog {
     login: String,

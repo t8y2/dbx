@@ -27,6 +27,7 @@ import com.google.cloud.spanner.jdbc.CloudSpannerJdbcConnection;
 import java.sql.Array;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
@@ -541,9 +542,11 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
 
     static List<IndexInfo> spannerIndexes(Connection conn, String schema, String table) {
         return unchecked(() -> {
+            Map<String, String> typesByIndex = spannerIndexTypes(conn, schema, table);
             Map<String, Boolean> uniqueByIndex = new LinkedHashMap<>();
             Map<String, List<IndexColumn>> keyColumns = new LinkedHashMap<>();
             Map<String, List<String>> storingColumns = new LinkedHashMap<>();
+            Map<String, Map<Integer, String>> keyDirections = new LinkedHashMap<>();
             try (ResultSet rs = conn.getMetaData().getIndexInfo(null, schema, table, false, false)) {
                 while (rs.next()) {
                     String name = rs.getString("INDEX_NAME");
@@ -562,6 +565,14 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
                     }
                     keyColumns.computeIfAbsent(name, ignored -> new ArrayList<>())
                         .add(new IndexColumn(ordinal, column));
+                    // The Spanner JDBC driver surfaces INFORMATION_SCHEMA
+                    // INDEX_COLUMNS.COLUMN_ORDERING as a one-letter ASC_OR_DESC
+                    // ('A'/'D'); without it, DESC key parts render direction-less
+                    // in DDL and the index panel (issue #13484). Keyed by ordinal
+                    // so each direction follows its column through the sort below.
+                    String direction = rs.getString("ASC_OR_DESC");
+                    keyDirections.computeIfAbsent(name, ignored -> new LinkedHashMap<>())
+                        .put(ordinal, "D".equalsIgnoreCase(direction) ? "DESC" : "ASC");
                 }
             }
 
@@ -570,24 +581,64 @@ public final class SpannerAgent extends ConfiguredJdbcAgent {
                 String name = entry.getKey();
                 List<IndexColumn> ordered = keyColumns.getOrDefault(name, new ArrayList<>());
                 ordered.sort(Comparator.comparingInt(IndexColumn::getOrdinal));
+                Map<Integer, String> directionByOrdinal = keyDirections.getOrDefault(name, Collections.emptyMap());
                 List<String> columns = new ArrayList<>();
+                List<String> directions = new ArrayList<>();
                 for (IndexColumn column : ordered) {
                     columns.add(column.getName());
+                    directions.add(directionByOrdinal.getOrDefault(column.getOrdinal(), "ASC"));
                 }
-                result.add(new IndexInfo(
+                // Spanner reports IS_UNIQUE=true for SEARCH indexes in its INFORMATION_SCHEMA
+                // (verified on google-cloud-spanner-jdbc 2.47.0: getIndexInfo rows come back with
+                // NON_UNIQUE=false), but its grammar has no CREATE UNIQUE SEARCH INDEX. Keeping
+                // the uniqueness flag made dbx regenerate the index as a plain unique index
+                // (#13881); INDEX_TYPE='SEARCH' is the only reliable discriminator.
+                boolean searchIndex = "SEARCH".equalsIgnoreCase(typesByIndex.get(name));
+                boolean unique = searchIndex ? false : Boolean.TRUE.equals(entry.getValue());
+                IndexInfo index = new IndexInfo(
                     name,
                     columns,
-                    Boolean.TRUE.equals(entry.getValue()),
+                    unique,
                     // Spanner names the primary key index PRIMARY_KEY, not PRIMARY.
                     PRIMARY_KEY_INDEX.equalsIgnoreCase(name),
                     null,
-                    null,
+                    searchIndex ? "SEARCH" : null,
                     storingColumns.get(name),
                     null
-                ));
+                );
+                index.setKey_directions(directions.isEmpty() ? null : directions);
+                result.add(index);
             }
             return result;
         });
+    }
+
+    /**
+     * Maps index name to its {@code INFORMATION_SCHEMA.INDEXES.INDEX_TYPE} ('INDEX',
+     * 'SEARCH' or 'PRIMARY_KEY'). The standard {@code getIndexInfo} result carries no
+     * index-type column, so the uniqueness flag it exposes cannot distinguish a SEARCH
+     * index from a unique one (#13881). An empty map (query failed, restricted backend,
+     * PostgreSQL dialect without the catalog) keeps the previous classification.
+     */
+    private static Map<String, String> spannerIndexTypes(Connection conn, String schema, String table) {
+        try (PreparedStatement statement = conn.prepareStatement(
+            "SELECT INDEX_NAME, INDEX_TYPE FROM INFORMATION_SCHEMA.INDEXES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?")) {
+            statement.setString(1, schema == null ? "" : schema);
+            statement.setString(2, table);
+            try (ResultSet rs = statement.executeQuery()) {
+                Map<String, String> types = new LinkedHashMap<>();
+                while (rs.next()) {
+                    String name = rs.getString("INDEX_NAME");
+                    String type = rs.getString("INDEX_TYPE");
+                    if (name != null && type != null) {
+                        types.putIfAbsent(name, type);
+                    }
+                }
+                return types;
+            }
+        } catch (Throwable ignored) {
+            return Collections.emptyMap();
+        }
     }
 
     static List<ForeignKeyInfo> spannerForeignKeys(Connection conn, String schema, String table) {

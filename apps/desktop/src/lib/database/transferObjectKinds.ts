@@ -14,7 +14,7 @@ export enum TransferObjectFamily {
   SqlServer = "sqlserver",
 }
 
-export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT" | "PACKAGE" | "SYNONYM";
+export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT" | "PACKAGE" | "PACKAGE_BODY" | "SYNONYM";
 
 const MYSQL_KINDS: TransferObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"];
 const POSTGRES_KINDS: TransferObjectKind[] = ["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "SEQUENCE"];
@@ -31,10 +31,10 @@ export function isSameTransferFamily(a?: DatabaseType, b?: DatabaseType): boolea
   return !!fa && fa === fb;
 }
 
-/** Xugu's initial transfer implementation is deliberately limited to Xugu → Xugu. */
+/** Only native MySQL → Xugu tables and native Xugu → Xugu are validated. */
 export function isTransferPairSupported(source?: DatabaseType, target?: DatabaseType): boolean {
   if (!source || !target) return true;
-  if (source === "xugu" || target === "xugu") return source === "xugu" && target === "xugu";
+  if (source === "xugu" || target === "xugu") return target === "xugu" && (source === "xugu" || source === "mysql");
   return true;
 }
 
@@ -46,7 +46,7 @@ export function transferObjectKindsForDatabase(dbType?: DatabaseType): TransferO
     case TransferObjectFamily.Postgres:
       return [...POSTGRES_KINDS];
     case TransferObjectFamily.Oracle:
-      return [...ORACLE_KINDS];
+      return dbType === "oracle" || dbType === "oceanbase-oracle" ? [...ORACLE_KINDS, "PACKAGE", "PACKAGE_BODY"] : [...ORACLE_KINDS];
     case TransferObjectFamily.SqlServer:
       return [...SQLSERVER_KINDS];
     default:
@@ -66,7 +66,7 @@ export function transferObjectKindsForDatabase(dbType?: DatabaseType): TransferO
 export function crossFamilyTransferableKinds(a?: DatabaseType, b?: DatabaseType): TransferObjectKind[] {
   if (a === "xugu" || b === "xugu") return a === "xugu" && b === "xugu" ? transferObjectKindsForDatabase("xugu") : [];
   if (isSameTransferFamily(a, b)) {
-    return transferObjectKindsForDatabase(a);
+    return transferObjectKindsForDatabase(a).filter((kind) => transferObjectKindsForDatabase(b).includes(kind));
   }
   const aFam = transferObjectFamily(a);
   const bFam = transferObjectFamily(b);

@@ -6,6 +6,26 @@ use std::sync::Mutex;
 const SOURCE: &str = "CREATE OR REPLACE FUNCTION \"Read.Func\" RETURN NUMBER AS BEGIN RETURN 1; END";
 
 #[tokio::test]
+async fn definition_grammar_extension_does_not_enable_unpaired_controlled_package_saves() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    for kind in [db::ObjectSourceKind::Package, db::ObjectSourceKind::PackageBody] {
+        let input = OracleRoutineSaveInput {
+            connection_id: "target".into(),
+            database: "tenant".into(),
+            identity: RoutineIdentity { owner: "OWNER".into(), name: "P".into(), kind: kind.clone() },
+            sql: format!("CREATE OR REPLACE {} \"OWNER\".P AS END P;", kind_name(&kind)),
+            require_absent: false,
+            prerequisite_operation_id: None,
+            supersedes_operation_id: None,
+        };
+        let result = prepare_bound_definition(&state, input, binding().expected_config, 1, false);
+        assert!(result.is_err(), "package approval needs its frozen pair lifecycle");
+    }
+}
+
+#[tokio::test]
 async fn actual_execute_entry_pins_terminal_readback_through_cancel_or_final_response() {
     use crate::db::agent_driver::{AgentDriverClient, AgentLaunchSpec, AgentRuntimeClient};
     struct RuntimeGuard(Arc<AgentRuntimeClient>);
@@ -102,6 +122,8 @@ for line in sys.stdin:
                 database: "tenant".into(),
                 identity: bound.identity,
                 sql: SOURCE.into(),
+                require_absent: false,
+                prerequisite_operation_id: None,
                 supersedes_operation_id: None,
             },
         )
@@ -270,7 +292,7 @@ fn binding() -> RoutineWriteBinding {
         identity: RoutineIdentity { owner: "OWNER".into(), name: "Read.Func".into(), kind: db::ObjectSourceKind::Function },
         sql: SOURCE.into(), goal: RoutineReadbackGoal::Definition { sql: SOURCE.into() }, require_absent: false,
         expected_config: serde_json::from_value(json!({"id":"target","name":"test","db_type":DatabaseType::OceanbaseOracle,"host":"localhost","port":2881,"username":"OWNER","password":"","database":null})).unwrap(),
-        compare: None, prerequisite_operation_ids: Vec::new(),
+        compare: None, prerequisite_operation_ids: Vec::new(), package_effect_operation_ids:Vec::new(),
     }
 }
 
@@ -278,7 +300,7 @@ async fn run(io: &Io, binding: RoutineWriteBinding) -> RoutineOperationRecord {
     let registry = RoutineOperationRegistry::default();
     let operation = registry.prepare(binding.clone());
     registry.begin(&operation.operation_id, &binding.sql).unwrap();
-    run_write(&registry, &operation.operation_id, &binding, io, SourceOrigin::OceanBaseDictionary).await;
+    run_write(&registry, &operation.operation_id, &binding, io, None::<&Io>, SourceOrigin::OceanBaseDictionary).await;
     registry.observe(&operation.operation_id).operation.unwrap()
 }
 
@@ -354,9 +376,9 @@ async fn an_abandoned_worker_does_not_release_a_possibly_dispatched_target() {
         let io = io.clone();
         let registry = registry.clone();
         let id = operation.operation_id.clone();
-        tokio::spawn(
-            async move { run_write(&registry, &id, &bound, io.as_ref(), SourceOrigin::OceanBaseDictionary).await },
-        )
+        tokio::spawn(async move {
+            run_write(&registry, &id, &bound, io.as_ref(), None::<&Io>, SourceOrigin::OceanBaseDictionary).await
+        })
     };
     io.entered.notified().await;
     worker.abort();
@@ -400,9 +422,9 @@ async fn losing_only_the_readback_preserves_the_original_terminal_write_receipt(
         let io = io.clone();
         let registry = registry.clone();
         let id = operation.operation_id.clone();
-        tokio::spawn(
-            async move { run_write(&registry, &id, &bound, io.as_ref(), SourceOrigin::OceanBaseDictionary).await },
-        )
+        tokio::spawn(async move {
+            run_write(&registry, &id, &bound, io.as_ref(), None::<&Io>, SourceOrigin::OceanBaseDictionary).await
+        })
     };
     io.readback_entered.notified().await;
     worker.abort();
@@ -459,7 +481,15 @@ async fn review_regression_completed_prerequisite_is_rechecked_before_the_next_d
         let first = registry.prepare(previous.clone());
         registry.begin(&first.operation_id, &previous.sql).unwrap();
         let original_io = Io::default();
-        run_write(&registry, &first.operation_id, &previous, &original_io, SourceOrigin::OceanBaseDictionary).await;
+        run_write(
+            &registry,
+            &first.operation_id,
+            &previous,
+            &original_io,
+            None::<&Io>,
+            SourceOrigin::OceanBaseDictionary,
+        )
+        .await;
         assert!(registry.observe(&first.operation_id).operation.unwrap().verified());
 
         let prerequisite = Io {
@@ -498,7 +528,7 @@ async fn review_regression_completed_prerequisite_is_rechecked_before_the_next_d
             prerequisite,
             next: Io { name: "Next.Func".into(), source_text: next_source, ..Default::default() },
         };
-        run_write(&registry, &operation.operation_id, &next, &io, SourceOrigin::OceanBaseDictionary).await;
+        run_write(&registry, &operation.operation_id, &next, &io, None::<&Io>, SourceOrigin::OceanBaseDictionary).await;
         let result = registry.observe(&operation.operation_id).operation.unwrap();
         if change == "unchanged" {
             assert!(result.verified(), "{}", result.failure_message());

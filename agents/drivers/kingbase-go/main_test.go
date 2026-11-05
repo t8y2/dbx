@@ -1557,6 +1557,115 @@ func TestListIndexesDoesNotFallbackForUnrelatedErrors(t *testing.T) {
 	}
 }
 
+func TestPrimaryKeysFallsBackToCatalogWhenInformationSchemaIsEmpty(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM information_schema.table_constraints tc"):
+			return &valueRows{columns: []string{"column_name"}}, nil
+		case strings.Contains(query, "FROM sys_catalog.sys_index ix") && strings.Contains(query, "ix.indisprimary"):
+			return &valueRows{columns: []string{"attname"}, rows: [][]driver.Value{{"id"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	keys, err := server.primaryKeys("lhxzztb", "basestr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keys["id"] {
+		t.Fatalf("catalog fallback failed to discover primary key: %#v", keys)
+	}
+}
+
+func TestPrimaryKeysCatalogFallbackSkipsIncludedColumns(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM information_schema.table_constraints tc"):
+			return &valueRows{columns: []string{"column_name"}}, nil
+		case strings.Contains(query, "FROM sys_catalog.sys_index ix") && strings.Contains(query, "ix.indisprimary"):
+			if !strings.Contains(query, "unnest(ix.indkey) WITH ORDINALITY") ||
+				!strings.Contains(query, "k.pos <= ix.indnkeyatts") ||
+				!strings.Contains(query, "ORDER BY k.pos") {
+				return nil, fmt.Errorf("catalog fallback must scope primary keys to key positions in order: %s", query)
+			}
+			// A primary key declared (b, a) INCLUDE (c) has indkey = [2 1 3]
+			// with indnkeyatts = 2, so only attnums 2 and 1 are keys, in order.
+			return &valueRows{columns: []string{"attname"}, rows: [][]driver.Value{{"b"}, {"a"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	keys, err := server.primaryKeys("lhxzztb", "basestr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 2 || !keys["a"] || !keys["b"] || keys["c"] {
+		t.Fatalf("catalog fallback must not treat INCLUDE columns as primary keys: %#v", keys)
+	}
+}
+
+func TestPrimaryKeysCatalogFallbackRetriesWithoutIndnKeyAtts(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM information_schema.table_constraints tc"):
+			return &valueRows{columns: []string{"column_name"}}, nil
+		case strings.Contains(query, "FROM sys_catalog.sys_index ix") && strings.Contains(query, "indnkeyatts"):
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column ix.indnkeyatts does not exist"}
+		case strings.Contains(query, "FROM sys_catalog.sys_index ix") && strings.Contains(query, "k.pos <= ix.indnatts"):
+			return &valueRows{columns: []string{"attname"}, rows: [][]driver.Value{{"id"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	keys, err := server.primaryKeys("lhxzztb", "basestr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keys["id"] {
+		t.Fatalf("catalog fallback failed on servers without indnkeyatts: %#v", keys)
+	}
+	if !server.indexKeyCountUnsupported {
+		t.Fatal("catalog fallback must cache the missing indnkeyatts capability")
+	}
+}
+
+func TestPrimaryKeysCatalogFallbackWithoutOrdinality(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "FROM information_schema.table_constraints tc"):
+			return &valueRows{columns: []string{"column_name"}}, nil
+		case strings.Contains(query, "WITH ORDINALITY"):
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42601"), Message: "syntax error at or near \"ORDINALITY\" ... WITH ORDINALITY"}
+		case strings.Contains(query, "FROM sys_catalog.sys_index ix") && strings.Contains(query, "a.attnum = ANY(ix.indkey)"):
+			return &valueRows{columns: []string{"attname"}, rows: [][]driver.Value{{"id"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	keys, err := server.primaryKeys("lhxzztb", "basestr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keys["id"] {
+		t.Fatalf("catalog fallback failed on servers without WITH ORDINALITY: %#v", keys)
+	}
+	if !server.indexOrdinalityUnsupported {
+		t.Fatal("catalog fallback must cache the missing WITH ORDINALITY capability")
+	}
+}
+
 func TestListForeignKeysUsesCatalogForV7(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
 		switch {
@@ -4358,7 +4467,8 @@ func TestMySQLCompatColumnsUsePostgresColumnComments(t *testing.T) {
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if len(state.queries) != 2 || !strings.Contains(state.queries[1], "col_description(a.attrelid, a.attnum)") {
+	if len(state.queries) != 3 || !strings.Contains(state.queries[1], "ix.indisprimary") ||
+		!strings.Contains(state.queries[2], "col_description(a.attrelid, a.attnum)") {
 		t.Fatalf("MySQL-compatible columns must use PostgreSQL column comments: %v", state.queries)
 	}
 }

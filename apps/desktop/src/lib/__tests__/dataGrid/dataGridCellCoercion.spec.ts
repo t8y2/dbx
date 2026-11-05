@@ -142,6 +142,33 @@ describe("dataGridCellDisplayText", () => {
 });
 
 describe("coerceDataGridCellValue", () => {
+  it.each([
+    ["INT", 639522],
+    ["INTEGER", "639522"],
+    ["SMALLINT", 12],
+    ["BIGINT", "9007199254740993"],
+    ["DECIMAL(31,2)", "639522.00"],
+    ["DOUBLE", 1.5],
+    [undefined, 639522],
+  ])("clears a DB2 %s numeric cell to NULL (#13755)", (dataType, oldValue) => {
+    for (const value of ["", " ", "\t\n"]) {
+      expect(
+        coerceDataGridCellValue({
+          value,
+          oldValue,
+          databaseType: "db2",
+          columnInfo: dataType ? { data_type: dataType } : undefined,
+          preserveEmptyString: true,
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("keeps explicit DB2 zero and empty text distinct from a cleared numeric cell", () => {
+    expect(coerceDataGridCellValue({ value: "0", oldValue: 639522, databaseType: "db2", columnInfo: { data_type: "INT" } })).toBe(0);
+    expect(coerceDataGridCellValue({ value: "", oldValue: "before", databaseType: "db2", columnInfo: { data_type: "VARCHAR(32)" } })).toBe("");
+  });
+
   it.each(["Integer", "Long", "int"])("keeps Neo4j %s edits as exact text for the Cypher builder", (data_type) => {
     for (const value of ["1001", "9007199254740999", "9223372036854775807", "-9223372036854775808"]) {
       expect(coerceDataGridCellValue({ value, oldValue: "1", databaseType: "neo4j", columnInfo: { data_type } })).toBe(value);

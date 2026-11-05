@@ -112,6 +112,10 @@ pub struct PluginMarketplacePlugin {
     pub tags: Vec<String>,
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// The plugin provides MCP tools (its manifest declares an `mcp`
+    /// contribution). Lets the store show the MCP mark before install.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mcp_tools: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -843,6 +847,7 @@ mod tests {
                 icon: Some("../assets/icon.svg".to_string()),
                 tags: vec!["hello".to_string()],
                 permissions: vec!["host.events".to_string()],
+                mcp_tools: false,
                 source: None,
                 homepage: None,
                 license: Some("Apache-2.0".to_string()),
@@ -1119,6 +1124,7 @@ mod tests {
                 icon: None,
                 tags: vec![],
                 permissions: vec![],
+                mcp_tools: false,
                 source: None,
                 homepage: None,
                 license: None,

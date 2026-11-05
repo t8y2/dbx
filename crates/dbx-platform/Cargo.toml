@@ -9,12 +9,13 @@ publish = false
 default = []
 host-prompts = ["dep:serde", "dep:uuid", "tokio/sync"]
 test-support = ["host-prompts"]
-downloads = ["dep:reqwest", "dep:futures", "dep:serde"]
+downloads = ["dep:reqwest", "dep:futures", "dep:serde", "dep:httpdate"]
 
 [dependencies]
 semver = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "socks"], optional = true }
 futures = { version = "0.3", optional = true }
+httpdate = { version = "1", optional = true }
 tokio = { version = "1", features = ["process", "time"] }
 serde = { version = "1.0", features = ["derive"], optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }

@@ -2371,7 +2371,8 @@ async function saveZsetInlineEdit(item: RedisZsetItem) {
 
     resetZsetInlineEdit();
     try {
-      await load();
+      // Keep an active member search across the post-save reload (#14322).
+      await reloadPreservingCollectionSearch();
     } catch (error) {
       toast(t("redis.updateAppliedRefreshFailed", { message: errorMessage(error) }), 5000);
     }
@@ -2459,7 +2460,8 @@ async function saveMemberEdit() {
     }
     const editedValue = writeValue;
     isEditingMember.value = false;
-    await load({ selectDefaultMember: false });
+    // Saving a member must not drop the "search fields and values" filter (#14322).
+    await reloadPreservingCollectionSearch();
     restoreSelectedMember(nextContext, editedValue);
   } finally {
     savingMember.value = false;

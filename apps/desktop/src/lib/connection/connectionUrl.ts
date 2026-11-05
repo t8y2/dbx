@@ -81,7 +81,10 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   opengauss: { type: "gaussdb", profile: "opengauss", label: "openGauss", defaultPort: 5432 },
   questdb: { type: "questdb", profile: "questdb", label: "QuestDB", defaultPort: 8812 },
   tdengine: { type: "tdengine", profile: "tdengine", label: "TDengine", defaultPort: 6041 },
+  taosws: { type: "tdengine", profile: "tdengine", label: "TDengine", defaultPort: 6041 },
+  taoswss: { type: "tdengine", profile: "tdengine", label: "TDengine", defaultPort: 6041 },
   "taos-ws": { type: "tdengine", profile: "tdengine", label: "TDengine", defaultPort: 6041 },
+  "taos-rs": { type: "tdengine", profile: "tdengine", label: "TDengine", defaultPort: 6041 },
   oscar: { type: "oscar", profile: "oscar", label: "神通 OSCAR", defaultPort: 2003 },
   xugu: { type: "xugu", profile: "xugu", label: "XuguDB", defaultPort: 5138 },
   iotdb: { type: "iotdb", profile: "iotdb", label: "Apache IoTDB", defaultPort: 6667 },
@@ -404,24 +407,32 @@ function urlParamsRequireTls(dbType: DatabaseType, params: string): boolean {
     return sslMode === "require" || sslMode === "verify-ca" || sslMode === "verify-full";
   }
 
+  if (dbType === "tdengine") {
+    const useSsl = (queryParamLastValue(params, "useSSL") || queryParamLastValue(params, "ssl") || "").toLowerCase();
+    return ["true", "1", "yes", "on"].includes(useSsl);
+  }
+
   return false;
 }
 
 function databendUrlOptions(params: string, isJdbcUrl: boolean): { ssl: boolean; urlParams: string; defaultPort: number } {
   const tlsOptions = new Map<string, string>();
   // Match the JDBC query delimiter. Semicolons can be part of other values.
-  const normalizedParams = params.split("&").map((part) => {
-    const [rawKey, ...rest] = part.split("=");
-    const key = decodeUrlPart(rawKey).toLowerCase();
-    if (key !== "ssl" && key !== "sslmode") return part;
-    if (tlsOptions.has(key)) {
-      throw new Error(`Duplicate Databend ${key} parameter`);
-    }
-    const value = decodeUrlPart(rest.join("=")).trim().toLowerCase();
-    tlsOptions.set(key, value);
-    // JDBC property names are case-sensitive. Emit the values we validate.
-    return `${key}=${value}`;
-  }).join("&");
+  const normalizedParams = params
+    .split("&")
+    .map((part) => {
+      const [rawKey, ...rest] = part.split("=");
+      const key = decodeUrlPart(rawKey).toLowerCase();
+      if (key !== "ssl" && key !== "sslmode") return part;
+      if (tlsOptions.has(key)) {
+        throw new Error(`Duplicate Databend ${key} parameter`);
+      }
+      const value = decodeUrlPart(rest.join("=")).trim().toLowerCase();
+      tlsOptions.set(key, value);
+      // JDBC property names are case-sensitive. Emit the values we validate.
+      return `${key}=${value}`;
+    })
+    .join("&");
   const explicitSsl = tlsOptions.get("ssl");
   const sslMode = tlsOptions.get("sslmode");
   if (explicitSsl !== undefined && explicitSsl !== "true" && explicitSsl !== "false") {
@@ -873,7 +884,7 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     password: jdbcCredentials?.password ?? decodeUrlPart(parsed.password),
     database: profile.type === "victoriametrics" ? "metrics" : profile.type === "dynamodb" ? dynamodbRegionFromHost(parsed.hostname) : isMeilisearch || profile.type === "solr" ? undefined : pathDatabase,
     urlParams: effectiveUrlParams,
-    ssl: databendOptions?.ssl ?? (scheme === "rediss" || scheme === "https" || (redisPath?.tls ?? false) || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname))),
+    ssl: databendOptions?.ssl ?? (scheme === "rediss" || scheme === "https" || scheme === "taoswss" || (redisPath?.tls ?? false) || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname))),
     ...(profile.type === "victoriametrics" ? { apiPath: parsed.pathname.replace(/\/+$/, "") } : {}),
     ...(isMeilisearch ? { basePath: parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "") } : {}),
   };

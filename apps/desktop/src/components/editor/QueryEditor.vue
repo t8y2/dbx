@@ -1556,6 +1556,10 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.undo, (view) => codeMirrorRuntime.codeMirrorUndo?.(view) ?? false),
         ...binding(shortcuts.redo, (view) => codeMirrorRuntime.codeMirrorRedo?.(view) ?? false),
         ...binding(shortcuts.selectAll, (view) => codeMirrorRuntime.codeMirrorSelectAll?.(view) ?? false),
+        ...binding(shortcuts.convertSelectionToDelimited, () => {
+          openDelimitedListDialog();
+          return true;
+        }),
         ...binding(shortcuts.selectCurrentStatement, selectCurrentStatementFromView),
         ...binding(shortcuts.previousStatement, (currentView) => navigateStatementFromView(currentView, "previous")),
         ...binding(shortcuts.nextStatement, (currentView) => navigateStatementFromView(currentView, "next")),

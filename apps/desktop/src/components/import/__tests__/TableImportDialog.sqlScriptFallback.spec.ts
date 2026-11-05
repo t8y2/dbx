@@ -350,6 +350,24 @@ describe("TableImportDialog SQL script fallback", () => {
     expect(state.open).toBe(true);
   });
 
+  it("discards an upload that finishes after the import dialog unmounts", async () => {
+    mocks.previewTableImportFile.mockRejectedValue(new Error(MULTI_TABLE_ERROR));
+    let finish!: (value: { uploadId: string; cleanupToken: string }) => void;
+    mocks.previewSqlFile.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await mountDialogWithSqlFile();
+    expect(mocks.previewSqlFile).toHaveBeenCalledTimes(1);
+    mountedApps.pop()!.unmount();
+    finish({ uploadId: "obsolete-dump", cleanupToken: "unmounted-upload" });
+    await flushAsyncUpdates();
+    expect(connectionStore.sqlFileSource).toBeNull();
+    expect(mocks.releaseSqlFilePreview).toHaveBeenCalledExactlyOnceWith("unmounted-upload");
+  });
+
   it("ignores an old multi-table preview after another file is selected", async () => {
     let rejectPreview!: (reason: Error) => void;
     mocks.previewTableImportFile.mockImplementationOnce(

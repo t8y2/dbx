@@ -6912,6 +6912,43 @@ pub async fn keep_manual_transaction_alive(
     Ok(ManualTransactionKeepAlive { task, sessions: keep_alive_sessions, txn_session_id })
 }
 
+/// Clears a manual transaction session's `busy` flag when the execution that
+/// claimed it goes away without reaching its own cleanup: the command future was
+/// dropped (frontend cancelled the invoke, the window reloaded) or a driver
+/// panicked. Without it the session stays busy forever and every later run fails
+/// with "Transaction session is already executing" until a new window is opened
+/// (#14184). Normal paths already clear the flag themselves; the guard is a
+/// best-effort `try_write` fallback for exactly the exits nobody owns.
+struct ManualTransactionBusyGuard<'a> {
+    state: &'a AppState,
+    txn_session_id: &'a str,
+}
+
+impl<'a> ManualTransactionBusyGuard<'a> {
+    fn new(state: &'a AppState, txn_session_id: &'a str) -> Self {
+        Self { state, txn_session_id }
+    }
+}
+
+impl Drop for ManualTransactionBusyGuard<'_> {
+    fn drop(&mut self) {
+        // A dropped future cannot await, so retry the non-blocking lock briefly
+        // instead of leaving the session wedged when a poller happens to hold it.
+        for _ in 0..100 {
+            if let Ok(mut sessions) = self.state.transaction_sessions.try_write() {
+                if let Some(session) = sessions.get_mut(self.txn_session_id) {
+                    if session.busy {
+                        session.busy = false;
+                        session.last_activity = std::time::Instant::now();
+                    }
+                }
+                return;
+            }
+            std::thread::yield_now();
+        }
+    }
+}
+
 /// Execute SQL within an existing manual transaction session.
 pub async fn execute_in_manual_transaction(
     state: &AppState,
@@ -7097,6 +7134,12 @@ pub async fn execute_in_manual_transaction_with_options(
         release_manual_txn_session_pool(state, &session.connection_id, &mut conn).await;
         return Err(MANUAL_TRANSACTION_IDLE_ROLLBACK_ERROR.to_string());
     }
+    // If this future is dropped mid-execution — the frontend cancels the invoke,
+    // the window reloads, or a driver panics — the code below never runs and the
+    // session would stay busy forever ("Transaction session is already
+    // executing" until a new window). The guard clears the flag on every exit
+    // path, including cancellation and unwinding (#14184).
+    let _busy_guard = ManualTransactionBusyGuard::new(state, txn_session_id);
 
     let connection = {
         let sessions = state.transaction_sessions.read().await;
@@ -7315,6 +7358,9 @@ where
         let _ = rollback_manual_txn_connection(&mut conn).await;
         return Err(MANUAL_TRANSACTION_IDLE_ROLLBACK_ERROR.to_string());
     }
+    // Same busy-stuck protection as the batch executor: if this streaming
+    // future is dropped mid-run the guard clears the flag (#14184).
+    let _busy_guard = ManualTransactionBusyGuard::new(state, txn_session_id);
 
     let (connection, pool_key, connection_id, mysql_data_charset) = {
         let sessions = state.transaction_sessions.read().await;
@@ -13217,36 +13263,33 @@ done
         );
     }
 
-    /// Spawns a fake Python agent and registers a manual transaction session in
-    /// the app state so `execute_in_manual_transaction_with_options` can run
-    /// end to end without a live database.
-    async fn manual_transaction_test_state(db_type: DatabaseType) -> (AppState, String, std::path::PathBuf) {
-        use std::io::Write;
-
-        let mut script = tempfile::NamedTempFile::new().unwrap();
-        write!(
-            script,
-            r#"import json
+    /// Fake JSON-RPC agent used by the manual-transaction tests. Requests are
+    /// answered from their own thread so a deliberately stalled statement cannot
+    /// block later requests; `HANG_MANUAL_TXN` in the SQL stalls only that reply.
+    const MANUAL_TRANSACTION_FAKE_AGENT_SCRIPT: &str = r#"import json
 import sys
+import threading
+import time
 
-print(json.dumps({{"ready": True}}), flush=True)
-cursor_ids = {{"cursor-1"}}
-for line in sys.stdin:
-    request = json.loads(line)
+print(json.dumps({"ready": True}), flush=True)
+print_lock = threading.Lock()
+cursor_ids = {"cursor-1"}
+
+def respond(request):
     method = request.get("method")
     if method == "close_query_session":
-        cursor_id = request.get("params", {{}}).get("sessionId")
+        cursor_id = request.get("params", {}).get("sessionId")
         closed = cursor_id in cursor_ids
         cursor_ids.discard(cursor_id)
-        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": closed}}), flush=True)
-        continue
+        result = closed
+        with print_lock:
+            print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+        return
     if method == "execute_query_page":
-        # First cursor page: two rows and an open result session on this
-        # transaction connection.
-        params = request.get("params", {{}})
+        params = request.get("params", {})
         page_size = int(params.get("pageSize") or 1)
         rows = [["page-row-" + str(index)] for index in range(1, min(page_size, 2) + 1)]
-        result = {{
+        result = {
             "columns": ["val"],
             "column_types": [],
             "column_sortables": [],
@@ -13256,12 +13299,9 @@ for line in sys.stdin:
             "truncated": False,
             "session_id": "cursor-1",
             "has_more": True
-        }}
-        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": result}}), flush=True)
-        continue
-    if method == "fetch_query_page":
-        # Continuation page of the same cursor: one last row.
-        result = {{
+        }
+    elif method == "fetch_query_page":
+        result = {
             "columns": ["val"],
             "column_types": [],
             "column_sortables": [],
@@ -13271,42 +13311,72 @@ for line in sys.stdin:
             "truncated": False,
             "session_id": "cursor-1",
             "has_more": False
-        }}
-        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": result}}), flush=True)
-        continue
-    if method == "execute_query":
-        params = request.get("params", {{}})
+        }
+    elif method == "execute_query":
+        params = request.get("params", {})
         sql = params.get("sql", "")
         if "REQUIRE_APP_SCHEMA" in sql and params.get("schema") != "APP":
-            print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -32000, "message": "schema was not forwarded"}}}}), flush=True)
-            continue
+            with print_lock:
+                print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32000, "message": "schema was not forwarded"}}), flush=True)
+            return
         if "RAISE_FILE_ERROR" in sql:
-            print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -32000, "message": "file statement rejected"}}}}), flush=True)
-            continue
-        row = [sql]
+            with print_lock:
+                print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32000, "message": "file statement rejected"}}), flush=True)
+            return
+        if "HANG_MANUAL_TXN" in sql:
+            time.sleep(3.0)
+        result = {
+            "columns": ["stmt"],
+            "column_types": [],
+            "column_sortables": [],
+            "rows": [[sql]],
+            "affected_rows": 0,
+            "execution_time_ms": 1,
+            "truncated": False,
+            "session_id": None,
+            "has_more": False
+        }
     else:
         # commit_manual_transaction / rollback_manual_transaction / disconnect
-        row = []
-    result = {{
-        "columns": ["stmt"],
-        "column_types": [],
-        "column_sortables": [],
-        "rows": [row],
-        "affected_rows": 0,
-        "execution_time_ms": 1,
-        "truncated": False,
-        "session_id": None,
-        "has_more": False
-    }}
-    print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": result}}), flush=True)
-"#
-        )
-        .unwrap();
-        script.flush().unwrap();
+        result = {
+            "columns": ["stmt"],
+            "column_types": [],
+            "column_sortables": [],
+            "rows": [[]],
+            "affected_rows": 0,
+            "execution_time_ms": 1,
+            "truncated": False,
+            "session_id": None,
+            "has_more": False
+        }
+    with print_lock:
+        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+
+for line in sys.stdin:
+    request = json.loads(line)
+    threading.Thread(target=respond, args=(request,), daemon=True).start()
+"#;
+
+    /// Spawns a fake Python agent and registers a manual transaction session in
+    /// the app state so `execute_in_manual_transaction_with_options` can run
+    /// end to end without a live database.
+    async fn manual_transaction_test_state(db_type: DatabaseType) -> (AppState, String, std::path::PathBuf) {
+        manual_transaction_state_with_agent_script(db_type, MANUAL_TRANSACTION_FAKE_AGENT_SCRIPT).await
+    }
+
+    async fn manual_transaction_state_with_agent_script(
+        db_type: DatabaseType,
+        script: &str,
+    ) -> (AppState, String, std::path::PathBuf) {
+        use std::io::Write;
+
+        let mut script_file = tempfile::NamedTempFile::new().unwrap();
+        write!(script_file, "{script}").unwrap();
+        script_file.flush().unwrap();
 
         let python = if cfg!(windows) { "python" } else { "python3" };
         let client = AgentDriverClient::spawn(
-            AgentLaunchSpec::new(python).with_args([script.path().to_string_lossy().to_string()]),
+            AgentLaunchSpec::new(python).with_args([script_file.path().to_string_lossy().to_string()]),
         )
         .await
         .unwrap();
@@ -13793,6 +13863,109 @@ for line in sys.stdin:
         assert!(serde_json::to_value(&unproven[0]).unwrap().get("manual_transaction_proven_read_only").is_none());
 
         assert!(rollback_manual_transaction(&state, &txn_session_id).await.is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// #14184: dropping the command future mid-execution — the frontend cancels
+    /// the invoke or the window reloads — must not wedge the session. The fake
+    /// agent stalls one statement, the executing task is aborted to simulate the
+    /// dropped future, and the very next statement must run instead of failing
+    /// with "Transaction session is already executing" forever.
+    #[tokio::test]
+    async fn manual_transaction_busy_flag_clears_when_the_execution_future_is_dropped() {
+        let (state, txn_session_id, dir) = manual_transaction_test_state(DatabaseType::Oracle).await;
+        let state = std::sync::Arc::new(state);
+        let hang_state = state.clone();
+        let hang_session = txn_session_id.clone();
+        let hung = tokio::spawn(async move {
+            execute_in_manual_transaction_with_options(
+                &hang_state,
+                &hang_session,
+                "SELECT HANG_MANUAL_TXN FROM dual",
+                "ORCL",
+                None,
+                ManualTransactionExecutionOptions::default(),
+            )
+            .await
+        });
+
+        // The running execution owns the session: a concurrent run is rejected.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let busy = state
+                .transaction_sessions
+                .read()
+                .await
+                .get(&txn_session_id)
+                .map(|session| session.busy)
+                .unwrap_or(false);
+            if busy {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "execution never claimed the session");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let concurrent = execute_in_manual_transaction_with_options(
+            &state,
+            &txn_session_id,
+            "SELECT 1 FROM dual",
+            "ORCL",
+            None,
+            ManualTransactionExecutionOptions::default(),
+        )
+        .await;
+        assert_eq!(concurrent.unwrap_err(), "Transaction session is already executing");
+
+        // Dropping the executing future (the failure mode behind #14184) used to
+        // leave busy set forever; the guard must release the session instead.
+        hung.abort();
+        let _ = hung.await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let busy = state
+                .transaction_sessions
+                .read()
+                .await
+                .get(&txn_session_id)
+                .map(|session| session.busy)
+                .unwrap_or(false);
+            if !busy {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "busy flag stayed set after the execution future was dropped"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // The next attempt must not be rejected as "already executing" again.
+        // Depending on the driver, the aborted RPC may have invalidated the
+        // underlying agent client; in that case the error tears the session down
+        // and the frontend's rolled-back-session recovery opens a fresh one.
+        let retry = execute_in_manual_transaction_with_options(
+            &state,
+            &txn_session_id,
+            "SELECT 1 FROM dual",
+            "ORCL",
+            None,
+            ManualTransactionExecutionOptions::default(),
+        )
+        .await;
+        if let Err(error) = &retry {
+            assert!(
+                !error.contains("Transaction session is already executing"),
+                "session stayed busy after the execution future was dropped: {error}"
+            );
+        }
+        let session_still_present = state.transaction_sessions.read().await.contains_key(&txn_session_id);
+        assert!(
+            retry.is_ok() || !session_still_present,
+            "a failed retry must discard the session so the frontend can reopen it"
+        );
+        if session_still_present {
+            assert!(rollback_manual_transaction(&state, &txn_session_id).await.is_ok());
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 

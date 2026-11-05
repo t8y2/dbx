@@ -570,7 +570,16 @@ watch([selectedObject, () => ddlPreferences.value.separateDdlIndexes, sourceConn
   const separateIndexes = ddlPreferences.value.separateDdlIndexes;
   const sides = [
     { side: "source" as const, exists: diff.type !== "removed", deferred: !object.sourceDdl && schemaDiffDefersTableDdl(sourceDbType.value), type: sourceEngineDbType.value, connectionId: sourceConnectionId.value, database: sourceDatabase.value, schema: sourceSchema.value, tableName: diff.name },
-    { side: "target" as const, exists: diff.type !== "added", deferred: !object.targetDdl && schemaDiffDefersTableDdl(targetDbType.value), type: targetEngineDbType.value, connectionId: targetConnectionId.value, database: targetDatabase.value, schema: targetSchema.value, tableName: diff.targetName ?? diff.name },
+    {
+      side: "target" as const,
+      exists: diff.type !== "added",
+      deferred: !object.targetDdl && schemaDiffDefersTableDdl(targetDbType.value),
+      type: targetEngineDbType.value,
+      connectionId: targetConnectionId.value,
+      database: targetDatabase.value,
+      schema: targetSchema.value,
+      tableName: diff.targetName ?? diff.name,
+    },
   ].filter((side) => side.exists && (side.deferred || (separateIndexes && (side.type === "oracle" || side.type === "oceanbase-oracle"))));
   if (!sides.length) return;
   independentPreview.value = { objectId: object.id, issues: [], loading: true };
@@ -578,7 +587,10 @@ watch([selectedObject, () => ddlPreferences.value.separateDdlIndexes, sourceConn
     sides.map(async (side) => {
       try {
         // A deferred table was just found to differ, so a cached DDL could contradict that result.
-        const { ddl } = await loadObjectDdl({ connectionId: side.connectionId, queryTimeoutSecs: store.getConfig(side.connectionId)?.query_timeout_secs, database: side.database, schema: side.schema, tableName: side.tableName, ...(side.deferred ? {} : { separateIndexes: true }) }, side.deferred ? { force: true } : undefined);
+        const { ddl } = await loadObjectDdl(
+          { connectionId: side.connectionId, queryTimeoutSecs: store.getConfig(side.connectionId)?.query_timeout_secs, database: side.database, schema: side.schema, tableName: side.tableName, ...(side.deferred ? {} : { separateIndexes: true }) },
+          side.deferred ? { force: true } : undefined,
+        );
         return { side: side.side, ddl, issue: undefined };
       } catch (error: any) {
         return { side: side.side, ddl: undefined, issue: `${t(side.side === "source" ? "diff.sourceDdl" : "diff.targetDdl")} ${side.schema}.${side.tableName}: ${error?.message || String(error)}` };

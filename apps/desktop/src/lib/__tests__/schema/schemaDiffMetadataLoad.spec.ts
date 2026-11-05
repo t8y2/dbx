@@ -34,11 +34,7 @@ describe("deferred SQL Server table DDL", () => {
     const getTableDdl = vi.fn(async (..._args: unknown[]) => "CREATE TABLE added");
     const getColumns = vi.fn(async () => []);
     const api: SchemaDiffMetadataApi = { getTableDdl, getColumns, listIndexes: vi.fn(async () => []), listForeignKeys: vi.fn(async () => []), listTriggers: vi.fn(async () => []) };
-    const details = await loadSchemaDetails(
-      [tableInfo("shared"), tableInfo("added")],
-      { connectionId: "c", database: "d", schema: "dbo", dbType: "sqlserver", options: DEFAULT_MYSQL_OPTIONS, deferredDdlTables: new Set(["shared"]) },
-      api,
-    );
+    const details = await loadSchemaDetails([tableInfo("shared"), tableInfo("added")], { connectionId: "c", database: "d", schema: "dbo", dbType: "sqlserver", options: DEFAULT_MYSQL_OPTIONS, deferredDdlTables: new Set(["shared"]) }, api);
     expect(getTableDdl.mock.calls.map((call) => call[3])).toEqual(["added"]);
     expect(getColumns).toHaveBeenCalledTimes(2);
     expect(details.map((detail) => detail.ddl)).toEqual(["", "CREATE TABLE added"]);

@@ -43,7 +43,13 @@ test("defers DDL per side, only for SQL Server endpoints and tables on both side
     },
     {
       tableListLoader: {
-        load: vi.fn(async ({ schema }: { schema: string }) => [{ name: "shared", table_type: "BASE TABLE" }, { name: schema === "dbo" ? "added" : "removed", table_type: "BASE TABLE" }] as never[]),
+        load: vi.fn(
+          async ({ schema }: { schema: string }) =>
+            [
+              { name: "shared", table_type: "BASE TABLE" },
+              { name: schema === "dbo" ? "added" : "removed", table_type: "BASE TABLE" },
+            ] as never[],
+        ),
       },
     },
   );

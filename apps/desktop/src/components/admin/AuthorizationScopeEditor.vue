@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, ChevronDown, Loader2, Search, Table2 } from "@lucide/vue";
+import { Check, ChevronDown, Layers, Loader2, Search, Table2 } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import * as api from "@/lib/backend/api";
 import { authorizationPresetPrivileges, authorizationPrivileges, type AuthorizationDatabaseOption, type AuthorizationPreset, type AuthorizationTableSelection, type DatabaseAuthorizationSelection } from "@/lib/database/databaseAuthorizationPlan";
-import type { DatabaseUserAdminProvider } from "@/lib/database/databaseUserAdmin";
+import { isPostgresGrantSchema, type DatabaseUserAdminProvider } from "@/lib/database/databaseUserAdmin";
 
 /**
  * 数据库授权范围编辑器：数据库多选 + 每库权限预设 + 表级(全部表/指定表)选择 + 自定义权限勾选。
@@ -49,6 +49,11 @@ const tables = ref<Record<string, AuthorizationTableSelection[]>>({});
 const tablesLoading = ref<Record<string, boolean>>({});
 const tableErrors = ref<Record<string, string>>({});
 const tableSearch = ref<Record<string, string>>({});
+// PostgreSQL「全部表」授权实际按 schema 展开，schema 列表同样按库懒加载
+const schemaOptions = ref<Record<string, string[]>>({});
+const schemasLoading = ref<Record<string, boolean>>({});
+const schemaErrors = ref<Record<string, string>>({});
+const schemaSearch = ref<Record<string, string>>({});
 
 const supportsTableGrants = computed(() => !!props.objectScope || !!props.provider?.supportsTableGrantsOnCreate);
 const filteredDatabases = computed(() => {
@@ -67,9 +72,7 @@ watch(
   () => props.modelValue,
   (value) => {
     pendingSelections = value;
-    for (const selection of value) {
-      if (selection.tables !== undefined) void loadTables({ database: selection.database, ...(selection.catalog ? { catalog: selection.catalog } : {}) });
-    }
+    for (const selection of value) void loadSelectionDependencies(selection);
   },
   { immediate: true },
 );
@@ -77,11 +80,15 @@ watch(
 watch(
   () => props.databases,
   () => {
-    for (const selection of props.modelValue) {
-      if (selection.tables !== undefined) void loadTables({ database: selection.database, ...(selection.catalog ? { catalog: selection.catalog } : {}) });
-    }
+    for (const selection of props.modelValue) void loadSelectionDependencies(selection);
   },
 );
+
+function loadSelectionDependencies(selection: DatabaseAuthorizationSelection) {
+  const database = { database: selection.database, ...(selection.catalog ? { catalog: selection.catalog } : {}) };
+  if (selection.tables !== undefined) void loadTables(database);
+  else if (props.provider?.authorizationModel === "postgres" && selection.database !== GLOBAL_SCOPE) void loadSchemas(database);
+}
 
 function currentSelections(): DatabaseAuthorizationSelection[] {
   return pendingSelections ?? props.modelValue;
@@ -188,12 +195,81 @@ async function loadTables(database: AuthorizationDatabaseOption) {
   }
 }
 
+async function loadSchemas(database: AuthorizationDatabaseOption) {
+  const key = authorizationOptionKey(database);
+  if (schemaOptions.value[key] || schemasLoading.value[key]) return;
+  schemasLoading.value = { ...schemasLoading.value, [key]: true };
+  schemaErrors.value = { ...schemaErrors.value, [key]: "" };
+  try {
+    const result = (await api.listSchemas(props.connectionId, database.database)).filter(isPostgresGrantSchema);
+    schemaOptions.value = { ...schemaOptions.value, [key]: result.sort((left, right) => left.localeCompare(right)) };
+  } catch (error: any) {
+    schemaErrors.value = { ...schemaErrors.value, [key]: error?.message || String(error) };
+  } finally {
+    schemasLoading.value = { ...schemasLoading.value, [key]: false };
+  }
+}
+
+function availableSchemas(database: AuthorizationDatabaseOption): string[] {
+  return schemaOptions.value[authorizationOptionKey(database)] ?? [];
+}
+
+// undefined 表示「全部 schema」：预览时会补齐当前 schema 列表，新建 schema 也会被覆盖。
+function selectedSchemas(database: AuthorizationDatabaseOption): string[] {
+  const selection = selectionFor(database);
+  return selection?.schemas === undefined ? availableSchemas(database) : selection.schemas;
+}
+
+function schemaSelectionLabel(database: AuthorizationDatabaseOption): string {
+  const selection = selectionFor(database);
+  if (selection?.schemas === undefined) return t("userAdmin.allSchemas");
+  if (selection.schemas.length === 0) return t("userAdmin.chooseSchemas");
+  return t("userAdmin.selectedSchemaCount", { count: selection.schemas.length });
+}
+
+function isSchemaSelected(database: AuthorizationDatabaseOption, schema: string): boolean {
+  return selectedSchemas(database).includes(schema);
+}
+
+function allSchemasSelected(database: AuthorizationDatabaseOption): boolean {
+  const available = availableSchemas(database);
+  const selected = selectedSchemas(database);
+  return available.length > 0 && available.every((schema) => selected.includes(schema));
+}
+
+function filteredSchemas(database: AuthorizationDatabaseOption): string[] {
+  const query = (schemaSearch.value[authorizationOptionKey(database)] ?? "").trim().toLowerCase();
+  const available = availableSchemas(database);
+  return query ? available.filter((schema) => schema.toLowerCase().includes(query)) : available;
+}
+
+function toggleSchema(database: AuthorizationDatabaseOption, schema: string) {
+  patchSelection(database, (selection) => {
+    const available = availableSchemas(database);
+    const current = selection.schemas === undefined ? [...available] : [...selection.schemas];
+    const next = current.includes(schema) ? current.filter((item) => item !== schema) : [...current, schema];
+    // 全部勾选时归还为「全部 schema」，避免固定列表漏掉之后新建的 schema
+    if (available.length > 0 && available.every((item) => next.includes(item))) delete selection.schemas;
+    else selection.schemas = next;
+    return selection;
+  });
+}
+
+function toggleAllSchemas(database: AuthorizationDatabaseOption) {
+  patchSelection(database, (selection) => {
+    if (allSchemasSelected(database)) selection.schemas = [];
+    else delete selection.schemas;
+    return selection;
+  });
+}
+
 async function updateTableScope(database: AuthorizationDatabaseOption, selectTables: boolean) {
   if (!selectTables) {
     patchSelection(database, (selection) => {
       delete selection.tables;
       return selection;
     });
+    if (props.provider?.authorizationModel === "postgres") await loadSchemas(database);
     return;
   }
   patchSelection(database, (selection) => {
@@ -281,11 +357,6 @@ function uniqueTableOptions(options: AuthorizationTableSelection[]): Authorizati
     return true;
   });
 }
-
-function isPostgresGrantSchema(schema: string): boolean {
-  const normalized = schema.toLowerCase();
-  return !!schema.trim() && normalized !== "information_schema" && normalized !== "sys_catalog" && !normalized.startsWith("pg_");
-}
 </script>
 
 <template>
@@ -337,6 +408,44 @@ function isPostgresGrantSchema(schema: string): boolean {
               </button>
             </div>
           </div>
+          <Popover v-if="provider?.authorizationModel === 'postgres' && !usesSelectedTables(database)">
+            <PopoverTrigger as-child>
+              <button type="button" class="flex min-w-0 flex-1 items-center gap-1.5 rounded-md border bg-background px-2 text-left hover:bg-accent" :class="compact ? 'h-9 text-xs' : 'h-7 text-[11px]'">
+                <Layers class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span class="min-w-0 flex-1 truncate">{{ schemaSelectionLabel(database) }}</span>
+                <Loader2 v-if="schemasLoading[authorizationOptionKey(database)]" class="h-3.5 w-3.5 shrink-0 animate-spin" />
+                <ChevronDown v-else class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              </button>
+            </PopoverTrigger>
+            <PopoverContent align="end" class="w-64 p-0">
+              <div class="flex items-center gap-2 border-b p-2">
+                <div class="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md border px-2">
+                  <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <input v-model="schemaSearch[authorizationOptionKey(database)]" class="min-w-0 flex-1 bg-transparent text-[11px] outline-none" :placeholder="t('userAdmin.searchSchema')" />
+                </div>
+                <button type="button" class="shrink-0 text-[11px] text-primary disabled:text-muted-foreground" :disabled="availableSchemas(database).length === 0" @click="toggleAllSchemas(database)">
+                  {{ t(allSchemasSelected(database) ? "userAdmin.clearAllSchemas" : "userAdmin.selectAllSchemas") }}
+                </button>
+              </div>
+              <div class="max-h-56 overflow-auto p-1">
+                <div v-if="schemasLoading[authorizationOptionKey(database)]" class="flex items-center justify-center gap-2 px-3 py-6 text-xs text-muted-foreground">
+                  <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                  {{ t("common.loading") }}
+                </div>
+                <div v-else-if="schemaErrors[authorizationOptionKey(database)]" class="px-3 py-4 text-center text-xs text-destructive">
+                  <p class="break-words">{{ t("userAdmin.loadSchemasFailed", { message: schemaErrors[authorizationOptionKey(database)] }) }}</p>
+                  <button type="button" class="mt-2 text-primary" @click="loadSchemas(database)">{{ t("userAdmin.retry") }}</button>
+                </div>
+                <div v-else-if="filteredSchemas(database).length === 0" class="px-3 py-6 text-center text-xs text-muted-foreground">{{ t("userAdmin.emptySchemas") }}</div>
+                <button v-for="schema in filteredSchemas(database)" :key="schema" type="button" class="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-xs hover:bg-accent" @click="toggleSchema(database, schema)">
+                  <span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border" :class="isSchemaSelected(database, schema) ? 'border-primary bg-primary text-primary-foreground' : 'border-border'">
+                    <Check v-if="isSchemaSelected(database, schema)" class="h-2.5 w-2.5" />
+                  </span>
+                  <span class="min-w-0 flex-1 truncate">{{ schema }}</span>
+                </button>
+              </div>
+            </PopoverContent>
+          </Popover>
           <Popover v-if="usesSelectedTables(database)">
             <PopoverTrigger as-child>
               <button type="button" class="flex min-w-0 flex-1 items-center gap-1.5 rounded-md border bg-background px-2 text-left hover:bg-accent" :class="compact ? 'h-9 text-xs' : 'h-7 text-[11px]'">
@@ -382,6 +491,9 @@ function isPostgresGrantSchema(schema: string): boolean {
         </div>
         <p v-if="!objectScope && usesSelectedTables(database) && !selectionFor(database)?.tables?.length" class="mt-1 text-[10px] text-destructive" :class="compact ? '' : 'pl-5'">
           {{ t("userAdmin.tableSelectionRequired") }}
+        </p>
+        <p v-if="provider?.authorizationModel === 'postgres' && !usesSelectedTables(database) && selectionFor(database)?.schemas?.length === 0" class="mt-1 text-[10px] text-destructive" :class="compact ? '' : 'pl-5'">
+          {{ t("userAdmin.schemaSelectionRequired") }}
         </p>
         <div v-if="selectionFor(database)?.preset === 'custom'" class="mt-2 grid gap-1.5" :class="compact ? 'grid-cols-2' : 'grid-cols-3 pl-5'">
           <button

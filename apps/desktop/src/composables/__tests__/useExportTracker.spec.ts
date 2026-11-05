@@ -29,6 +29,7 @@ import {
   MAX_TRANSFER_FAILURE_DETAIL_BYTES,
   MAX_TRANSFER_FAILURE_DETAILS,
   MAX_TRANSFER_FAILURE_ERROR_BYTES,
+  canReexecuteDataTransferTask,
   useExportTracker,
 } from "@/composables/useExportTracker";
 
@@ -338,6 +339,97 @@ describe("data transfer task duration", () => {
 
     for (const resolve of resolvers) resolve();
     await Promise.resolve();
+  });
+
+  describe("data transfer re-execution (#13621)", () => {
+    it("determines whether a task can be re-executed", () => {
+      const tracker = useExportTracker();
+      const task = tracker.addDataTransferTask("manual", "users", 1);
+      expect(canReexecuteDataTransferTask(task)).toBe(false);
+
+      const request = transferRequest("with-req");
+      const tracked = tracker.startDataTransferTask(request, "users");
+      expect(canReexecuteDataTransferTask(tracked)).toBe(false);
+
+      tracker.updateDataTransferTask(tracked.exportId, transferProgress(tracked.exportId, "done"));
+      expect(canReexecuteDataTransferTask(tracked)).toBe(true);
+
+      tracked.status = "Error";
+      expect(canReexecuteDataTransferTask(tracked)).toBe(true);
+
+      tracked.status = "Cancelled";
+      expect(canReexecuteDataTransferTask(tracked)).toBe(true);
+
+      const tableExport = tracker.addTask("users", "csv", "/tmp/users.csv");
+      tableExport.status = "Done";
+      expect(canReexecuteDataTransferTask(tableExport)).toBe(false);
+    });
+
+    it("resets state, assigns a new transferId, and starts transfer again", async () => {
+      vi.mocked(api.startTransfer).mockImplementation(async () => {});
+
+      const tracker = useExportTracker();
+      const openedTaskIds: string[] = [];
+      const onDone = vi.fn();
+      const initialRequest = transferRequest("transfer-1");
+
+      const task = tracker.startDataTransferTask(initialRequest, "users", {
+        openTask: (id) => openedTaskIds.push(id),
+        onDone,
+      });
+
+      expect(task.exportId).toBe("transfer-1");
+      expect(task.status).toBe("Running");
+      expect(api.startTransfer).toHaveBeenCalledTimes(1);
+      // Even if started with confirmed flag, persisted request resets it to false
+      expect(task.dataTransferRequest?.dropTargetConfirmed).toBe(false);
+      // Running task cannot be re-executed
+      expect(canReexecuteDataTransferTask(task)).toBe(false);
+
+      // Finish first run with an error and failure logs
+      tracker.updateDataTransferTask(task.exportId, {
+        transferId: "transfer-1",
+        table: "users",
+        tableIndex: 0,
+        totalTables: 1,
+        rowsTransferred: 5,
+        totalRows: 10,
+        status: "error",
+        error: "connection timeout",
+        terminal: true,
+      });
+
+      expect(task.status).toBe("Error");
+      expect(task.errorMessage).toBe("connection timeout");
+      expect(canReexecuteDataTransferTask(task)).toBe(true);
+
+      // Verify onOpen invokes with task exportId
+      task.onOpen?.();
+      expect(openedTaskIds).toEqual(["transfer-1"]);
+    });
+
+    it("gates re-execution on terminal status and unconfirmed request", () => {
+      const tracker = useExportTracker();
+      const request = transferRequest("active-transfer");
+      request.dropTargetConfirmed = true;
+      const dummyDeployment = {} as any;
+      const task = tracker.startDataTransferTask(request, "users", {
+        oracleRoutineDeployment: dummyDeployment,
+      });
+
+      expect(task.status).toBe("Running");
+      expect(canReexecuteDataTransferTask(task)).toBe(false);
+      // Oracle routine deployment from executed run is not retained for re-execution
+      expect(task.dataTransferOptions?.oracleRoutineDeployment).toBeUndefined();
+      // Drop target confirmed is always reset to false in persisted request
+      expect(task.dataTransferRequest?.dropTargetConfirmed).toBe(false);
+
+      task.status = "Cancelled";
+      expect(canReexecuteDataTransferTask(task)).toBe(true);
+
+      task.status = "Done";
+      expect(canReexecuteDataTransferTask(task)).toBe(true);
+    });
   });
 
   it("keeps SQL-file backend elapsed time unchanged", () => {

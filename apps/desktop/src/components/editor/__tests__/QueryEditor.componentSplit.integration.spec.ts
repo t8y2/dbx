@@ -318,6 +318,10 @@ describe("QueryEditor component split integration", () => {
     vi.spyOn(host.querySelector("[data-query-editor-root]")!, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 600));
     expect(editor.requestExecute()).toBe(true);
     await nextTick();
+    // Vue guards newly attached listeners by timestamp; nextTick alone can still
+    // dispatch a synthetic key in the same millisecond as the picker mount.
+    const firstMountTime = Date.now();
+    await vi.waitFor(() => expect(Date.now()).toBeGreaterThan(firstMountTime), { interval: 1 });
     let picker = host.querySelector<HTMLElement>('[role="listbox"]')!;
     expect(picker).not.toBeNull();
     expect(picker.style.left).toBe("400px");
@@ -332,6 +336,8 @@ describe("QueryEditor component split integration", () => {
     expect(view.hasFocus).toBe(true);
     editor.requestExecute();
     await nextTick();
+    const secondMountTime = Date.now();
+    await vi.waitFor(() => expect(Date.now()).toBeGreaterThan(secondMountTime), { interval: 1 });
     picker = host.querySelector<HTMLElement>('[role="listbox"]')!;
     keydown(picker, "ArrowDown");
     await nextTick();

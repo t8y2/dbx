@@ -621,6 +621,9 @@ async function fetchDdl(force = false, options?: { preserveDraft?: boolean }) {
 }
 const errorMessage = ref("");
 const secondaryMetadataErrors = ref<Partial<Record<ObjectMetadataFacet, string>>>({});
+// Keep the index write gate independent of display errors, which unrelated
+// facet loads and silent refreshes may clear or suppress.
+const indexMetadataReadError = ref("");
 const columns = ref<EditableStructureColumn[]>([]);
 const starrocksStatusBusy = ref(false);
 const starrocksStatusRevision = ref(0);
@@ -3012,6 +3015,7 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     createPartitioningColumns: cloneDraftValue(createPartitioningColumns.value),
     createPartitioningExpression: createPartitioningExpression.value,
     loadedMetadataFacets: [...loadedMetadataFacets],
+    indexMetadataReadError: indexMetadataReadError.value || undefined,
     scrollPositions: cloneDraftValue(structureScrollPositions),
     appliedInitialTabRequestId: lastAppliedInitialTabRequestId,
     appliedInitialTargetRequestId: lastAppliedInitialTargetRequestId,
@@ -3063,6 +3067,7 @@ function restoreDraft(draft: TableStructureEditorDraft) {
     oracleIndexRefreshGuard.value = { ...cloneDraftValue(draft.oracleIndexRecovery), afterRequestId: -1 };
     oracleIndexRefreshError.value = draft.oracleIndexRecovery.refreshError ?? "";
   }
+  indexMetadataReadError.value = draft.indexMetadataReadError || "";
   activeTab.value = draft.activeTab || "columns";
   // Restore the DDL baseline alongside the edit, otherwise the restored script
   // would read as dirty (or clean) against the wrong reference text.
@@ -3864,6 +3869,7 @@ const canApply = computed(
     (databaseType.value !== "starrocks" || !starrocksStatusBusy.value) &&
     !postSaveRefreshing.value &&
     !oracleIndexRefreshError.value &&
+    !schemaIndexWriteWarning() &&
     !secondaryMetadataLoading.value &&
     !mysqlTableEngineLoading.value &&
     !sqlPreviewLoading.value &&
@@ -3907,6 +3913,7 @@ function resetState() {
   oracleIndexRefreshGuard.value = undefined;
   lastAppliedInitialTargetRequestId = undefined;
   secondaryMetadataErrors.value = {};
+  indexMetadataReadError.value = "";
   isPartitionedParent.value = false;
   isTablePartition.value = false;
   isForeignTable.value = false;
@@ -4411,6 +4418,9 @@ async function loadStructure(
       }
 
       const nextIndexes = indexesResult.status === "fulfilled" ? indexesResult.value : undefined;
+      if (indexesResult.status === "rejected") {
+        indexMetadataReadError.value = indexesResult.reason?.message || String(indexesResult.reason);
+      }
       const nextForeignKeys = foreignKeysResult.status === "fulfilled" ? foreignKeysResult.value : undefined;
       const nextConstraints = constraintsResult.status === "fulfilled" ? constraintsResult.value : undefined;
       const nextTriggers = triggersResult.status === "fulfilled" ? triggersResult.value : undefined;
@@ -4423,6 +4433,7 @@ async function loadStructure(
           indexes.value = createIndexDrafts(nextIndexes);
         }
         loadedMetadataFacets.add("indexes");
+        indexMetadataReadError.value = "";
       }
       if (nextForeignKeys) {
         foreignKeys.value = createForeignKeyDrafts(nextForeignKeys, databaseType.value);
@@ -6219,6 +6230,7 @@ function schemaIndexDraftIsReadOnly(index: EditableStructureIndex): boolean {
 }
 
 function schemaIndexWriteWarning(): string | undefined {
+  if (!isCreateMode.value && !ddlDirty.value && indexMetadataReadError.value && indexes.value.some(indexChanged)) return indexMetadataReadError.value;
   const blocked = indexes.value.find((index) => schemaIndexDraftIsReadOnly(index) && indexChanged(index));
   if (!blocked) return undefined;
   return blocked.original?.owner == null ? t("schemaIndex.targetMissing", { name: blocked.original?.name }) : t("schemaIndex.crossOwnerReadOnly", { owner: blocked.original.owner, name: blocked.original.name });
@@ -8088,6 +8100,12 @@ watch([() => props.connectionId, () => props.database, () => props.schema, () =>
 
 watch(() => connection.value?.database_info?.productVersion, scheduleSqlPreviewRefresh);
 
+watch(indexMetadataReadError, () => {
+  if (schemaIndexWriteWarning()) clearSqlPreviewState();
+  scheduleSqlPreviewRefresh();
+  syncDraftToParent();
+});
+
 watch(
   [
     isCreateMode,
@@ -8220,6 +8238,9 @@ async function loadActiveTableStructureMetadataIfNeeded() {
   }
   if (loading.value || secondaryMetadataLoading.value) return;
   const scope = withRequiredPostgresPrimaryKeyMetadata(unloadedTableStructureRefreshScope(activeTab.value, loadedMetadataFacets));
+  // A rejected facet is still unloaded, but retrying it whenever loading
+  // clears would loop indefinitely. The toolbar performs an explicit retry.
+  if (indexMetadataReadError.value) scope.indexes = false;
   if (!hasTableStructureRefreshWork(scope)) return;
   await loadStructure(true, scope, true, { blockSecondaryMetadata: true, preserveDraft: true });
   applyInitialStructureTarget();
@@ -8708,12 +8729,12 @@ watch(
                     <colgroup>
                       <col v-for="(width, index) in visibleColWidths" :key="index" :style="{ width: width + 'px' }" />
                     </colgroup>
-                    <thead class="bg-background">
+                    <thead class="bg-background-solid">
                       <tr>
                         <th
                           v-for="(columnLabel, i) in colLabels"
                           :key="columnLabel.key"
-                          :class="[structureHeaderCellClass, 'bg-background select-none', { 'text-center': columnLabel.key === 'primaryKey' || columnLabel.key === 'nullable' }]"
+                          :class="[structureHeaderCellClass, 'bg-background-solid select-none', { 'text-center': columnLabel.key === 'primaryKey' || columnLabel.key === 'nullable' }]"
                           :data-column-selected="columnLabel.key === 'actions' ? undefined : selectedStructureColumnKeys.has(columnLabel.key)"
                           :style="{
                             width: visibleColWidths[i] + 'px',
@@ -9256,11 +9277,11 @@ watch(
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
             </div>
-            <div v-else-if="secondaryMetadataErrors.indexes" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {{ secondaryMetadataErrors.indexes }}
+            <div v-else-if="secondaryMetadataErrors.indexes || indexMetadataReadError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {{ secondaryMetadataErrors.indexes || indexMetadataReadError }}
             </div>
             <table v-else ref="indexesTableRef" class="structure-edit-grid border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]" :style="{ minWidth: indexColWidths.reduce((a, w) => a + w, 0) + 'px' }">
-              <thead class="sticky top-0 z-10 bg-background">
+              <thead class="sticky top-0 z-10 bg-background-solid">
                 <tr>
                   <th
                     v-for="(label, i) in indexColLabels"
@@ -10486,7 +10507,8 @@ watch(
   top: 0;
   z-index: 10;
   min-width: var(--structure-column-table-width);
-  background: var(--background);
+  /* Wallpaper mode makes --background translucent; sticky headers need an opaque surface (#14065). */
+  background: var(--background-solid, var(--background));
 }
 
 .structure-column-virtual-scroller :deep(.structure-column-virtual-list) {

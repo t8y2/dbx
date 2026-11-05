@@ -223,6 +223,8 @@ interface CopyInsertData {
   sourceColumns?: Array<string | undefined>;
   columnTypes?: Array<string | undefined>;
   rows: RowItem[];
+  spatialColumns?: QueryResult["spatial_columns"];
+  spatialValues?: QueryResult["spatial_values"];
 }
 
 export function useDataGridExport(options: UseDataGridExportOptions) {
@@ -821,6 +823,18 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (selectedColumns.length !== matrix.columnIndexes.length) return null;
     const selectedSourceColumns = sourceColumns.value?.length === columns.value.length ? matrix.columnIndexes.map((columnIndex) => sourceColumns.value?.[columnIndex]) : undefined;
     const selectedColumnTypes = columnTypes.value?.length === columns.value.length ? matrix.columnIndexes.map((columnIndex) => columnTypes.value?.[columnIndex] ?? undefined) : undefined;
+    const visibleIndexes = visibleColumnIndexesOption?.value ?? columns.value.map((_, index) => index);
+    const targetSourceIndexes = matrix.columnIndexes.map((targetIdx) => visibleIndexes[targetIdx] ?? targetIdx);
+    const targetIndexBySource = new Map<number, number>();
+    targetSourceIndexes.forEach((sourceIdx, targetIdx) => {
+      targetIndexBySource.set(sourceIdx, targetIdx);
+    });
+    const spatialColumns = spatialColumnsOption?.value?.flatMap((column) => {
+      const targetIndex = targetIndexBySource.get(column.column_index);
+      return targetIndex === undefined ? [] : [{ column_index: targetIndex, srid: column.srid }];
+    });
+    const allSpatialValues = spatialValuesOption?.value;
+    const spatialValues = allSpatialValues?.length ? selectedRows.map((item, rowIndex) => targetSourceIndexes.map((sourceIdx) => allSpatialValues[item.sourceIndex ?? rowIndex]?.[sourceIdx] ?? null)) : undefined;
     return {
       columns: selectedColumns,
       sourceColumns: selectedSourceColumns,
@@ -830,6 +844,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         data: matrix.columnIndexes.map((columnIndex) => item.data[columnIndex] ?? null),
         isDirtyCol: matrix.columnIndexes.map((columnIndex) => item.isDirtyCol[columnIndex] ?? false),
       })),
+      spatialColumns: spatialColumns?.length ? spatialColumns : undefined,
+      spatialValues: spatialValues?.length ? spatialValues : undefined,
     };
   }
 
@@ -857,6 +873,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       rows: data.rows.map((item) => item.data),
       primaryKeyMode,
       insertMode,
+      spatialColumns: data.spatialColumns,
+      spatialValues: data.spatialValues,
     });
   }
 
@@ -1074,6 +1092,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     selectedRowIds,
     resolveSourceValues,
     copyText,
+    spatialColumns: options.spatialColumns,
+    spatialValues: options.spatialValues,
     canCopySqlInsert: (request) => {
       const selectedColumns = request.selectedColumnIndexes.map((index) => request.columns[index]?.sourceName ?? request.columns[index]?.displayName).filter((column): column is string => !!column);
       return request.rows.length > 0 && insertableCopyColumnCount(request.options.sql.primaryKeyMode, selectedColumns, request.options) > 0;
@@ -1325,7 +1345,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           if (writeWorkbook) assertSnapshotXlsxCellLengths(selected.rows as CellValue[][]);
           onProgress(progress("Writing"));
           let writing: Promise<void>;
-          if (format === "csv" && !hasLocators) writing = api.exportQueryResultCsv(outputPath, names, selected.rows as CellValue[][], editorSettings.csvQuoteMode, csvNullLiteralForMode(editorSettings.csvNullMode));
+          if (format === "csv" && !hasLocators) writing = api.exportQueryResultCsv(outputPath, names, selected.rows as CellValue[][], editorSettings.csvQuoteMode, csvNullLiteralForMode(editorSettings.csvNullMode), editorSettings.csvWithoutBom);
           else if (format === "json" && !hasLocators) writing = api.exportQueryResultJson(outputPath, names, selected.rows as CellValue[][]);
           else if (format === "csv" || format === "json") {
             const request = { ...selected, context: { ...selected.context, executionId }, format, quoteMode: editorSettings.csvQuoteMode, nullLiteral: csvNullLiteralForMode(editorSettings.csvNullMode) };
@@ -1476,7 +1496,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         const sqlData = insertOptions ? captureSqlInsertExportData(result, selectedSqlColumns, sqlContext)(result.rows) : undefined;
         onProgress({ exportId, tableName: title, rowsExported: result.rows.length, totalRows: result.rows.length, status: "Writing" });
         if (writeWorkbook) await writeWorkbook(outputPath, result);
-        else if (format === "csv") await api.exportQueryResultCsv(outputPath, result.columns, result.rows, settings.csvQuoteMode, csvNullLiteralForMode(settings.csvNullMode));
+        else if (format === "csv") await api.exportQueryResultCsv(outputPath, result.columns, result.rows, settings.csvQuoteMode, csvNullLiteralForMode(settings.csvNullMode), settings.csvWithoutBom);
         else if (format === "json") await api.exportQueryResultJson(outputPath, result.columns, result.rows);
         else if (format === "markdown") await api.exportQueryResultMarkdown(outputPath, result.columns, result.rows);
         else if (format === "html") await api.exportQueryResultHtml(outputPath, title, result.columns, result.rows);
@@ -1550,7 +1570,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           }
           outputPath = path;
         }
-        await api.exportQueryResultCsv(outputPath, result.columns, result.rows, useSettingsStore().editorSettings.csvQuoteMode, csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode));
+        await api.exportQueryResultCsv(outputPath, result.columns, result.rows, useSettingsStore().editorSettings.csvQuoteMode, csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode), useSettingsStore().editorSettings.csvWithoutBom);
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
@@ -1591,7 +1611,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           outputPath = path;
         }
         const result = await resultToExport({ columnIndexes }, undefined, false);
-        await api.exportQueryResultCsv(outputPath, result.columns, result.rows, useSettingsStore().editorSettings.csvQuoteMode, csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode));
+        await api.exportQueryResultCsv(outputPath, result.columns, result.rows, useSettingsStore().editorSettings.csvQuoteMode, csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode), useSettingsStore().editorSettings.csvWithoutBom);
         notifyExportSuccess(outputPath);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
@@ -2419,6 +2439,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             omitDatabaseQualifier: dropsSchemaQualifier(databaseType.value, options.includeDatabaseName?.value, meta.catalog),
           }
         : {}),
+      csvWithoutBom: editorSettings.csvWithoutBom,
       csvQuoteMode: editorSettings.csvQuoteMode,
       nullLiteral: csvNullLiteralForMode(editorSettings.csvNullMode),
       columns: exportedColumns,
@@ -2667,6 +2688,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     };
     const requestOptions = {
       ...(format === "sql" ? { selectedColumns: sqlExportOptions?.selectedColumns?.map((column) => ({ ...column })) } : {}),
+      csvWithoutBom: editorSettings.csvWithoutBom,
       csvQuoteMode: editorSettings.csvQuoteMode,
       nullLiteral: csvNullLiteralForMode(editorSettings.csvNullMode),
       ...sqlExportPrimaryKeyOptions(format),

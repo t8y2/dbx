@@ -23,6 +23,10 @@ pub struct TauriRelease {
     pub release_tag: Option<String>,
     #[serde(default = "default_promoted")]
     pub is_promoted: bool,
+    /// Beta build version this stable release was promoted from. A promoted
+    /// build is not rebuilt, so the installed binary still carries it.
+    #[serde(default)]
+    pub promoted_from: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]
@@ -62,6 +66,7 @@ pub struct UpdateInfo {
     pub channel: UpdateChannel,
     pub release_tag: String,
     pub is_promoted: bool,
+    pub promoted_from: Option<String>,
 }
 
 pub async fn fetch_latest_release(locale: &str, source: crate::DownloadSource) -> Result<TauriRelease, String> {
@@ -100,9 +105,9 @@ pub async fn fetch_latest_release_for_channel(
     Ok(release)
 }
 
-/// A promoted beta publishes the stable base version in `version` but keeps its
-/// beta tag in `release_tag`; GitHub metadata and R2 release notes are both keyed
-/// by that tag.
+/// Manifests promoted before the Release moved to its stable tag publish the
+/// stable base version in `version` but keep the beta tag in `release_tag`;
+/// GitHub metadata and R2 release notes are both keyed by that tag.
 fn release_identity_version(release: &TauriRelease) -> &str {
     release.release_tag.as_deref().unwrap_or(&release.version)
 }
@@ -248,6 +253,7 @@ pub fn build_update_info(release: TauriRelease, current_version: &str) -> Update
         channel: release.channel,
         release_tag,
         is_promoted: release.is_promoted,
+        promoted_from: release.promoted_from,
     }
 }
 
@@ -333,12 +339,36 @@ mod tests {
     }
 
     #[test]
+    fn promoted_from_is_read_from_the_manifest_and_exposed_in_update_info() {
+        let promoted: TauriRelease = serde_json::from_str(
+            r#"{
+              "version": "0.6.60",
+              "channel": "stable",
+              "release_tag": "v0.6.60",
+              "is_promoted": true,
+              "promoted_from": "0.6.60-beta.20261028.1",
+              "platforms": {}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            build_update_info(promoted, "0.6.60-beta.20261028.1").promoted_from.as_deref(),
+            Some("0.6.60-beta.20261028.1")
+        );
+
+        // Manifests written before promotions recorded their source stay valid.
+        let legacy: TauriRelease = serde_json::from_str(r#"{ "version": "0.6.59", "platforms": {} }"#).unwrap();
+        assert_eq!(build_update_info(legacy, "0.6.59").promoted_from, None);
+    }
+
+    #[test]
     fn update_info_prefers_github_release_metadata() {
         let release = TauriRelease {
             version: "0.5.3".to_string(),
             channel: UpdateChannel::Stable,
             release_tag: None,
             is_promoted: false,
+            promoted_from: None,
             notes: Some("See the assets below to download and install.".to_string()),
             jdbc_plugin: None,
             github: Some(GithubReleaseMetadata {
@@ -365,6 +395,7 @@ mod tests {
             channel: UpdateChannel::Stable,
             release_tag: None,
             is_promoted: false,
+            promoted_from: None,
             notes: Some("See the assets below to download and install.".to_string()),
             jdbc_plugin: None,
             github: Some(GithubReleaseMetadata {
@@ -387,6 +418,7 @@ mod tests {
             channel: UpdateChannel::Stable,
             release_tag: None,
             is_promoted: false,
+            promoted_from: None,
             notes: Some("## What's Changed\n* generated item".to_string()),
             jdbc_plugin: None,
             github: None,
@@ -405,6 +437,7 @@ mod tests {
             channel: UpdateChannel::Beta,
             release_tag: Some("v0.6.60-beta.20261028.1".to_string()),
             is_promoted: false,
+            promoted_from: None,
             notes: None,
             jdbc_plugin: None,
             github: None,
@@ -423,6 +456,7 @@ mod tests {
             channel: UpdateChannel::Stable,
             release_tag: Some("v0.6.60-beta.20261028.1".to_string()),
             is_promoted: true,
+            promoted_from: None,
             notes: None,
             jdbc_plugin: None,
             github: None,
@@ -442,6 +476,7 @@ mod tests {
             channel: UpdateChannel::Stable,
             release_tag: Some("v0.6.60-beta.20261028.1".to_string()),
             is_promoted: true,
+            promoted_from: None,
             notes: None,
             jdbc_plugin: None,
             github: None,

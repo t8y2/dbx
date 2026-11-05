@@ -23,6 +23,16 @@ function fileWithSections(sections: Record<string, unknown>): string {
 }
 
 describe("settingsTransfer", () => {
+  it("round-trips sidebar hover preferences in navigation and rejects invalid values", () => {
+    const result = parseSettingsTransferFile(serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, sidebarHoverEnabled: false, sidebarHoverDelay: 750 }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.editorSettings).toMatchObject({ sidebarHoverEnabled: false, sidebarHoverDelay: 750 });
+    expect(transferCategoryForKey("sidebarHoverEnabled")).toBe("navigation");
+    expect(transferCategoryForKey("sidebarHoverDelay")).toBe("navigation");
+    expect(parseSettingsTransferFile(fileWith({ sidebarHoverEnabled: "false" })).ok).toBe(false);
+    for (const invalid of [0, 99, 2001, 500.5, "500", null]) expect(parseSettingsTransferFile(fileWith({ sidebarHoverDelay: invalid })).ok).toBe(false);
+  });
+
   it("does not export or reactivate the retired global user visibility setting", () => {
     const text = serializeSettingsTransfer({ ...DEFAULT_EDITOR_SETTINGS, sidebarShowUserAdmin: false });
     expect(JSON.parse(text).settings.editor).not.toHaveProperty("sidebarShowUserAdmin");

@@ -1494,7 +1494,11 @@ pub fn agent_close_query_session_params(session_id: &str) -> serde_json::Value {
 
 pub fn is_connection_error(err: &str) -> bool {
     let lower = err.to_lowercase();
-    if is_dbx_query_timeout_error(&lower) || is_agent_rpc_timeout_error(&lower) || is_pool_saturation_error(err) {
+    if is_dbx_query_timeout_error(&lower)
+        || is_mysql_browser_metadata_timeout_error(&lower)
+        || is_agent_rpc_timeout_error(&lower)
+        || is_pool_saturation_error(err)
+    {
         return false;
     }
     lower.contains("connection")
@@ -1530,6 +1534,13 @@ pub fn is_connection_error(err: &str) -> bool {
 
 pub(crate) fn is_dbx_query_timeout_error(lower: &str) -> bool {
     lower.starts_with("query timed out after ")
+}
+
+fn is_mysql_browser_metadata_timeout_error(lower: &str) -> bool {
+    // The driver already cancels the statement and retires its connection.
+    // Reconnecting and replaying would restart the same exhausted budget,
+    // including when cancellation itself reported a connection error.
+    lower.starts_with("mysql browser metadata timed out after ")
 }
 
 fn is_agent_rpc_timeout_error(lower: &str) -> bool {
@@ -6591,8 +6602,10 @@ fn mysql_error_is_syntax_error(error: &mysql_async::Error) -> bool {
 /// Compute per-execution-statement proven-read-only markers for the sticky
 /// manual-transaction UX (#7122 Oracle, #9018 MySQL/PostgreSQL, ... GaussDB).
 /// The user-facing classification SQL is split with the same dialect-aware
-/// splitter as the execution SQL and paired by count/position; any mismatch is
-/// fail-closed (no markers). Oracle/OceanBase-Oracle reach the same AST proof as
+/// splitter as the execution SQL — including the connection's compatibility
+/// mode, which is what a Kingbase or openGauss connection is actually split
+/// with — and paired by count/position; any mismatch is fail-closed (no
+/// markers). Oracle/OceanBase-Oracle reach the same AST proof as
 /// the PostgreSQL family through `is_oracle_proven_read_only_statement`, which
 /// keeps the Oracle-specific lexical guard rails (see `sql_risk`); MySQL and the
 /// PostgreSQL family use the strict `sql_risk` proof directly; every other
@@ -6601,6 +6614,7 @@ fn classify_manual_transaction_statements(
     database_type: Option<DatabaseType>,
     execution_statement_count: usize,
     classification_sql: Option<&str>,
+    compatibility_mode: Option<&str>,
 ) -> Vec<bool> {
     let Some(database_type) = database_type.filter(|database_type| {
         matches!(
@@ -6611,6 +6625,7 @@ fn classify_manual_transaction_statements(
                 | DatabaseType::Postgres
                 | DatabaseType::Gaussdb
                 | DatabaseType::OpenGauss
+                | DatabaseType::Kingbase
         )
     }) else {
         return Vec::new();
@@ -6618,7 +6633,11 @@ fn classify_manual_transaction_statements(
     let Some(classification_sql) = classification_sql else {
         return Vec::new();
     };
-    let user_statements = crate::sql::split_sql_statements_for_database(classification_sql, database_type);
+    let user_statements = crate::sql::split_sql_statements_for_database_with_compatibility(
+        classification_sql,
+        database_type,
+        compatibility_mode,
+    );
     let paired = user_statements.len() == execution_statement_count && !user_statements.is_empty();
     if !paired {
         return Vec::new();
@@ -6626,7 +6645,11 @@ fn classify_manual_transaction_statements(
     user_statements
         .iter()
         .map(|statement| match database_type {
-            DatabaseType::Mysql | DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::OpenGauss => {
+            DatabaseType::Mysql
+            | DatabaseType::Postgres
+            | DatabaseType::Gaussdb
+            | DatabaseType::OpenGauss
+            | DatabaseType::Kingbase => {
                 crate::sql_risk::prove_read_only_for_database(statement, database_type)
                     == crate::sql_risk::ReadProof::ProvenReadOnly
             }
@@ -6998,6 +7021,7 @@ pub async fn execute_in_manual_transaction_with_options(
                     | DatabaseType::Postgres
                     | DatabaseType::Gaussdb
                     | DatabaseType::OpenGauss
+                    | DatabaseType::Kingbase
             )
         ) {
             result = result.with_manual_transaction_no_statement();
@@ -7041,8 +7065,12 @@ pub async fn execute_in_manual_transaction_with_options(
         }
     }
 
-    let classification: Vec<bool> =
-        classify_manual_transaction_statements(db_type, statements.len(), options.classification_sql.as_deref());
+    let classification: Vec<bool> = classify_manual_transaction_statements(
+        db_type,
+        statements.len(),
+        options.classification_sql.as_deref(),
+        compatibility_mode.as_deref(),
+    );
 
     let connection = {
         let mut sessions = state.transaction_sessions.write().await;
@@ -12458,6 +12486,20 @@ done
     }
 
     #[test]
+    fn mysql_browser_metadata_timeout_does_not_reconnect_or_discard_pool() {
+        for error in [
+            "MySQL browser metadata timed out after 5s; query cancelled",
+            "MySQL browser metadata timed out after 5s; cancellation failed: MySQL KILL QUERY timed out",
+            "MySQL browser metadata timed out after 5s; cancellation failed: connection reset by peer",
+        ] {
+            assert!(!is_connection_error(error), "{error}");
+            assert_eq!(pool_error_action(Some(DatabaseType::Mysql), error), PoolErrorAction::Keep);
+        }
+        assert!(is_connection_error("MySQL connection timed out (5s)"));
+        assert!(is_connection_error("connection reset by peer"));
+    }
+
+    #[test]
     fn is_connection_error_distinguishes_checkout_saturation_from_connection_timeouts() {
         // deadpool-postgres PoolError::Timeout messages (contain "pool" + "timeout" but not "timed out")
         assert!(is_connection_error("pool wait timeout"));
@@ -13054,58 +13096,123 @@ done
     #[test]
     fn manual_transaction_classification_pairs_statements_and_fails_closed() {
         // MySQL/PostgreSQL route through the strict sql_risk proof.
-        assert_eq!(classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, Some("SELECT 1")), vec![true]);
         assert_eq!(
-            classify_manual_transaction_statements(Some(DatabaseType::Postgres), 1, Some("SELECT * FROM users")),
+            classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, Some("SELECT 1"), None),
+            vec![true]
+        );
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::Postgres), 1, Some("SELECT * FROM users"), None),
             vec![true]
         );
         // GaussDB/openGauss share the PostgreSQL-family proof.
         assert_eq!(
-            classify_manual_transaction_statements(Some(DatabaseType::Gaussdb), 1, Some("SELECT * FROM users")),
+            classify_manual_transaction_statements(Some(DatabaseType::Gaussdb), 1, Some("SELECT * FROM users"), None),
             vec![true]
         );
         assert_eq!(
-            classify_manual_transaction_statements(Some(DatabaseType::OpenGauss), 1, Some("UPDATE users SET x = 1")),
+            classify_manual_transaction_statements(
+                Some(DatabaseType::OpenGauss),
+                1,
+                Some("UPDATE users SET x = 1"),
+                None
+            ),
+            vec![false]
+        );
+        // Kingbase shares the PostgreSQL-family proof.
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::Kingbase), 1, Some("SELECT * FROM users"), None),
+            vec![true]
+        );
+        assert_eq!(
+            classify_manual_transaction_statements(
+                Some(DatabaseType::Kingbase),
+                1,
+                Some("UPDATE users SET x = 1"),
+                None
+            ),
             vec![false]
         );
         // Mixed script: every statement is classified individually.
         assert_eq!(
-            classify_manual_transaction_statements(Some(DatabaseType::Mysql), 2, Some("SELECT 1; DELETE FROM t")),
+            classify_manual_transaction_statements(Some(DatabaseType::Mysql), 2, Some("SELECT 1; DELETE FROM t"), None),
             vec![true, false]
         );
         // Session-state writes fail the proof (SELECT ... INTO @var).
         assert_eq!(
-            classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, Some("SELECT 1 INTO @x")),
+            classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, Some("SELECT 1 INTO @x"), None),
             vec![false]
         );
         // Count mismatch, missing classification SQL, non-participating dialects
         // and unknown connections are all fail-closed (no markers).
-        assert!(classify_manual_transaction_statements(Some(DatabaseType::Mysql), 3, Some("SELECT 1")).is_empty());
-        assert!(classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, None).is_empty());
-        assert!(classify_manual_transaction_statements(Some(DatabaseType::Doris), 1, Some("SELECT 1")).is_empty());
-        assert!(classify_manual_transaction_statements(None, 1, Some("SELECT 1")).is_empty());
+        assert!(classify_manual_transaction_statements(Some(DatabaseType::Mysql), 3, Some("SELECT 1"), None).is_empty());
+        assert!(classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, None, None).is_empty());
+        assert!(classify_manual_transaction_statements(Some(DatabaseType::Doris), 1, Some("SELECT 1"), None).is_empty());
+        assert!(classify_manual_transaction_statements(None, 1, Some("SELECT 1"), None).is_empty());
         // Oracle/OceanBase-Oracle share the AST proof and keep the pairing
         // behavior; built-in functions are now provable (#11788) while the
         // Oracle guard rails (dblink, sequence pseudocolumns, set operators)
         // still fail the proof.
         assert_eq!(
-            classify_manual_transaction_statements(Some(DatabaseType::Oracle), 1, Some("SELECT * FROM EMP")),
+            classify_manual_transaction_statements(Some(DatabaseType::Oracle), 1, Some("SELECT * FROM EMP"), None),
             vec![true]
         );
         assert_eq!(
-            classify_manual_transaction_statements(Some(DatabaseType::Oracle), 1, Some("SELECT LENGTH(1) FROM dual")),
+            classify_manual_transaction_statements(
+                Some(DatabaseType::Oracle),
+                1,
+                Some("SELECT LENGTH(1) FROM dual"),
+                None
+            ),
             vec![true]
         );
         assert_eq!(
             classify_manual_transaction_statements(
                 Some(DatabaseType::OceanbaseOracle),
                 2,
-                Some("SELECT COUNT(*) FROM EMP; SELECT * FROM EMP@LINK")
+                Some("SELECT COUNT(*) FROM EMP; SELECT * FROM EMP@LINK"),
+                None
             ),
             vec![true, false]
         );
         assert_eq!(
-            classify_manual_transaction_statements(Some(DatabaseType::OceanbaseOracle), 1, Some("DELETE FROM EMP")),
+            classify_manual_transaction_statements(
+                Some(DatabaseType::OceanbaseOracle),
+                1,
+                Some("DELETE FROM EMP"),
+                None
+            ),
+            vec![false]
+        );
+    }
+
+    /// A Kingbase connection reports the compatibility mode its server runs in,
+    /// and the execution side splits the script with that mode's profile. The
+    /// classification has to use the same profile: otherwise the two statement
+    /// counts differ, the pairing fails closed and the read-only proof is
+    /// dropped even though nothing about the script was risky.
+    #[test]
+    fn manual_transaction_classification_uses_the_connection_compatibility_mode() {
+        // A MySQL-mode Kingbase connection keeps the routine body whole, so the
+        // execution side runs it as a single statement.
+        let sql = "CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END;";
+        for mode in [Some("mysql"), Some("pg"), None] {
+            let execution_statements =
+                crate::sql::split_sql_statements_for_database_with_compatibility(sql, DatabaseType::Kingbase, mode);
+            let classification = classify_manual_transaction_statements(
+                Some(DatabaseType::Kingbase),
+                execution_statements.len(),
+                Some(sql),
+                mode,
+            );
+            assert_eq!(
+                classification.len(),
+                execution_statements.len(),
+                "the classification must pair with the executed statements in mode {mode:?}"
+            );
+        }
+        // The MySQL profile keeps the routine body whole, so it is one write.
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::Kingbase), 1, Some(sql), Some("mysql")),
             vec![false]
         );
     }

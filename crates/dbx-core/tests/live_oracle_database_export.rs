@@ -93,6 +93,7 @@ async fn live_oracle_database_export_replays_trigger_sequences() {
             schema: schema.clone(),
             file_path: file_path.to_string_lossy().to_string(),
             selected_tables: Vec::new(),
+            selected_objects: None,
             excluded_tables: Vec::new(),
             include_structure: true,
             include_data: true,

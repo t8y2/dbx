@@ -233,8 +233,8 @@ export function resolveCanvasDataGridRowBase(
   return theme.background;
 }
 
-export function resolveCanvasDataGridRowFill(theme: Pick<DataGridPaintTheme, "cellActive" | "rowSelected">, rowBase: string, options: { isActive: boolean; isDeleted: boolean; isSelected: boolean; isNew?: boolean }): string {
-  if (options.isSelected) return theme.rowSelected;
+export function resolveCanvasDataGridRowFill(theme: Pick<DataGridPaintTheme, "cellActive" | "cellSelected">, rowBase: string, options: { isActive: boolean; isDeleted: boolean; isSelected: boolean; isNew?: boolean }): string {
+  if (options.isSelected) return theme.cellSelected;
   // 同上：待插入行保留自己的底色，活动行高亮不再覆盖它
   if (options.isNew) return rowBase;
   if (options.isActive && !options.isDeleted) return theme.cellActive;
@@ -685,7 +685,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions): boolean 
         ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
       }
       if (selectedFillVisual && isDirtyCell) {
-        ctx.fillStyle = rowSelectionVisual ? theme.rowSelectedDirty : theme.cellSelectedDirty;
+        ctx.fillStyle = theme.cellSelectedDirty;
         ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
       }
       if (isDuplicateHighlight) {

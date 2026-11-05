@@ -33,3 +33,11 @@ it("contains ordinary and parametric aggregate definitions", () => {
   expect(CLICKHOUSE_FUNCTION_REGISTRY.get("uniqExact")).toMatchObject({ kind: "aggregate" });
   expect(CLICKHOUSE_FUNCTION_REGISTRY.get("quantilesTDigest")?.signatures[0].parameterGroups).toEqual([["level", "...levels"], ["expression"]]);
 });
+
+it("matches a contains query across the aggregate/combinator boundary", () => {
+  expect(generateAggregateCombinatorCandidates("mIf", 200, "contains").some((item) => item.name === "sumIf")).toBe(true);
+});
+
+it("matches a contains query across an Array/If combination", () => {
+  expect(generateAggregateCombinatorCandidates("qArrayIf", 200, "contains").some((item) => item.name === "uniqArrayIf")).toBe(true);
+});

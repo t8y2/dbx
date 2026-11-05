@@ -180,3 +180,80 @@ describe("ObjectBrowser table statistics on a cached scaffold (#10461)", () => {
     expect(mocks.listObjects).not.toHaveBeenCalled();
   });
 });
+
+describe("MySQL lightweight enumeration", () => {
+  it("shares one pending enumeration across equivalent browsers", async () => {
+    const originalType = connection.db_type;
+    connection.db_type = "mysql";
+    let resolve!: (value: unknown[]) => void;
+    mocks.listObjects.mockReturnValue(
+      new Promise<unknown[]>((done) => {
+        resolve = done;
+      }),
+    );
+    try {
+      const first = await mountBrowser();
+      const second = await mountBrowser();
+      await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(1));
+      resolve([{ name: "orders", object_type: "TABLE", schema: "pgdemo" }]);
+      await vi.waitFor(() => {
+        expect(first.textContent).toContain("orders");
+        expect(second.textContent).toContain("orders");
+      });
+      expect(mocks.listObjects).toHaveBeenCalledTimes(1);
+      expect(mocks.listObjectStatistics).not.toHaveBeenCalled();
+    } finally {
+      connection.db_type = originalType;
+    }
+  });
+
+  it("keeps names during detail loading and reports explicit statistics failure", async () => {
+    const originalType = connection.db_type;
+    connection.db_type = "mysql";
+    mocks.listObjects.mockResolvedValue([{ name: "orders", object_type: "TABLE", schema: "pgdemo" }]);
+    try {
+      const host = await mountBrowser();
+      await vi.waitFor(() => expect(host.textContent).toContain("orders"));
+      let resolveDetails!: (value: unknown[]) => void;
+      mocks.listObjects.mockReturnValueOnce(
+        new Promise<unknown[]>((done) => {
+          resolveDetails = done;
+        }),
+      );
+      mocks.listObjectStatistics.mockRejectedValueOnce(new Error("statistics unavailable"));
+      const button = [...host.querySelectorAll("button")].find((item) => item.textContent?.includes("objects.loadDetails"))!;
+      button.click();
+      await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
+      expect(host.textContent).toContain("orders");
+      expect(button.disabled).toBe(true);
+      resolveDetails([{ name: "orders", object_type: "TABLE", schema: "pgdemo", comment: "order details" }]);
+      await vi.waitFor(() => expect(host.textContent).toContain("statistics unavailable"));
+      expect(host.textContent).toContain("orders");
+      expect(getCachedObjectBrowserRows({ ...scope, schema: "pgdemo" })?.[0].comment).toBe("order details");
+    } finally {
+      connection.db_type = originalType;
+    }
+  });
+
+  it("keeps names visible until details are explicitly requested", async () => {
+    const originalType = connection.db_type;
+    connection.db_type = "mysql";
+    mocks.listObjects.mockResolvedValue([{ name: "orders", object_type: "TABLE", schema: "pgdemo" }]);
+    try {
+      const host = await mountBrowser();
+      await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalled());
+      expect(mocks.listObjects.mock.calls[0][10]).toEqual({ lightweight: true });
+      expect(mocks.listObjectStatistics).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(host.textContent).toContain("orders"));
+      mocks.listObjects.mockRejectedValueOnce(new Error("details unavailable"));
+      const button = [...host.querySelectorAll("button")].find((item) => item.textContent?.includes("objects.loadDetails"));
+      expect(button).toBeDefined();
+      button!.click();
+      await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
+      expect(mocks.listObjects.mock.calls[1][10]).toEqual({ lightweight: false });
+      expect(host.textContent).toContain("orders");
+    } finally {
+      connection.db_type = originalType;
+    }
+  });
+});

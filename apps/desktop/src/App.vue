@@ -386,6 +386,8 @@ const translateUpdateSurface: UpdateConfigTranslator = (key, named) => (named ? 
 function updateBlockingConfigState(): UpdateBlockingConfigState {
   return {
     pendingAppClose: pendingAppCloseAction.value !== null,
+    saveCloseConfirm: queryStore.showCloseConfirm && queryStore.isConfirmingAppClose,
+    exitCloseConfirm: showCloseActionPrompt.value || showAiRunsClosePrompt.value || showBackgroundTasksClosePrompt.value,
     connectionDialog: showConnectionDialog.value,
     saveSqlDialog: showSaveSqlDialog.value,
     ddlDialog: showQueryEditorDdlDialog.value,
@@ -5478,7 +5480,7 @@ onUnmounted(() => {
 
         <div class="relative" :class="isDetachedWindowContext ? 'flex-1 flex min-h-0' : isClassicLayout ? 'app-layout-classic flex-1 flex min-h-0' : 'app-panel-gutter flex-1 flex min-h-0 gap-1 p-1'">
           <PluginShortcutBar v-if="!isDetachedWindowContext && !isZenMode && settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position.startsWith('left-')" :position="settingsStore.editorSettings.pluginShortcuts.position" />
-          <SidebarReveal v-if="!isDetachedWindowContext" ref="sidebarRevealRef" :pinned="sidebarOpen" :enabled="!isZenMode" :classic-layout="isClassicLayout">
+          <SidebarReveal v-if="!isDetachedWindowContext" ref="sidebarRevealRef" :pinned="sidebarOpen" :hover-enabled="settingsStore.editorSettings.sidebarHoverEnabled" :hover-delay="settingsStore.editorSettings.sidebarHoverDelay" :enabled="!isZenMode" :classic-layout="isClassicLayout">
             <AppSidebar
               ref="appSidebarRef"
               :sidebar-width="sidebarWidth"

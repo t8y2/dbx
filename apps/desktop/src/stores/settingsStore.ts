@@ -1,3 +1,4 @@
+import { SIDEBAR_HOVER_DELAY_DEFAULT, normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import { DEFAULT_OBJECT_BROWSER_COMPACT_WIDTH, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { normalizeModelTemplates, type ModelTemplate } from "@/lib/model/modelTemplates";
 import { normalizePluginGraphicsEngineIds } from "@/lib/plugins/pluginGraphicsEngine";
@@ -19,6 +20,7 @@ import {
   type DataGridCopyExtractorId,
   type DataGridExtractorOptions,
   DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
+  DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION,
   DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS,
   normalizeDataGridCopyPreference,
   normalizeDataGridExtractorOptions,
@@ -50,6 +52,7 @@ import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateField
 import { type DataTabReuseMode, DEFAULT_DATA_TAB_REUSE_MODE, normalizeDataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
 import { normalizeTableHoverLookupMode, type TableHoverLookupMode } from "@/lib/editor/hoverTableLookup";
 import { normalizeCompletionTriggerMode, type SqlCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { DEFAULT_SQL_COMPLETION_MATCH_MODE, normalizeCompletionMatchMode, type SqlCompletionMatchMode } from "@/lib/sql/sqlCompletionMatchMode";
 import { normalizeExcludedCompletionItems } from "@/lib/editor/excludedCompletions";
 import { DEFAULT_SQL_TABLE_COMPLETION_SCHEMA_QUALIFICATION, normalizeSqlTableCompletionSchemaQualification, type SqlTableCompletionSchemaQualification } from "@/lib/sql/sqlCompletionSchemaQualification";
 import { DEFAULT_CSV_QUOTE_MODE, normalizeCsvQuoteMode, type CsvQuoteMode } from "@/lib/export/csvQuoteMode";
@@ -77,6 +80,7 @@ export type {
   QueryResultExportFileNameSource,
   SavedSqlOpenTargetMode,
   AiSqlApplyTargetMode,
+  SqlCompletionMatchMode,
   SqlCompletionTriggerMode,
   SqlTableCompletionSchemaQualification,
   TableHoverLookupMode,
@@ -1156,6 +1160,7 @@ export interface EditorSettings {
   dataGridCopyExtractor: DataGridCopyPreference;
   dataGridExtractorOptions: DataGridExtractorOptions;
   dataGridVisibleCopyExtractors: DataGridCopyExtractorId[];
+  dataGridVisibleCopyExtractorsMigrationVersion: number;
   dataGridExtractorOptionsMigrationVersion: number;
   resultRunDisplayMode: ResultRunDisplayMode;
   defaultAutoKeepResults: boolean;
@@ -1243,6 +1248,8 @@ export interface EditorSettings {
   sidebarObjectInfoMode: SidebarObjectInfoMode;
   sidebarShowConnectionNotes: boolean;
   sidebarShowConnectionEndpoints: boolean;
+  sidebarHoverEnabled: boolean;
+  sidebarHoverDelay: number;
   sidebarShowTooltips: boolean;
   /** Legacy input for the one-time connection visibility migration. */
   sidebarShowUserAdmin?: boolean;
@@ -1263,6 +1270,7 @@ export interface EditorSettings {
   preferredExportPath: string;
   autoOpenExportFolder: boolean;
   applyColumnFormattersOnExport: boolean;
+  csvWithoutBom: boolean;
   csvQuoteMode: CsvQuoteMode;
   csvNullMode: CsvNullMode;
   queryResultExportFileNameSource: QueryResultExportFileNameSource;
@@ -1292,6 +1300,7 @@ export interface EditorSettings {
   showTableDdlHoverPreview: boolean;
   tableHoverLookupMode: TableHoverLookupMode;
   clickTableNavigationTarget: ClickTableNavigationTarget;
+  completionMatchMode: SqlCompletionMatchMode;
   completionTriggerMode: SqlCompletionTriggerMode;
   /** Completion labels (case-insensitive) the user never wants suggested. */
   excludedCompletionItems: string[];
@@ -1534,6 +1543,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridCopyExtractor: "smart",
   dataGridExtractorOptions: normalizeDataGridExtractorOptions(DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS),
   dataGridVisibleCopyExtractors: normalizeVisibleDataGridCopyExtractors(undefined),
+  dataGridVisibleCopyExtractorsMigrationVersion: DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION,
   dataGridExtractorOptionsMigrationVersion: DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
   resultRunDisplayMode: "tabs",
   defaultAutoKeepResults: false,
@@ -1613,6 +1623,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarObjectInfoMode: "comment-inline",
   sidebarShowConnectionNotes: false,
   sidebarShowConnectionEndpoints: false,
+  sidebarHoverEnabled: true,
+  sidebarHoverDelay: SIDEBAR_HOVER_DELAY_DEFAULT,
   sidebarShowTooltips: true,
   sidebarAllowHorizontalScroll: false,
   sidebarIndent: SIDEBAR_INDENT_DEFAULT,
@@ -1631,6 +1643,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   preferredExportPath: "",
   autoOpenExportFolder: false,
   applyColumnFormattersOnExport: true,
+  csvWithoutBom: false,
   csvQuoteMode: DEFAULT_CSV_QUOTE_MODE,
   csvNullMode: DEFAULT_CSV_NULL_MODE,
   queryResultExportFileNameSource: DEFAULT_QUERY_RESULT_EXPORT_FILE_NAME_SOURCE,
@@ -1656,6 +1669,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showTableDdlHoverPreview: true,
   tableHoverLookupMode: "fallback",
   clickTableNavigationTarget: "data",
+  completionMatchMode: DEFAULT_SQL_COMPLETION_MATCH_MODE,
   completionTriggerMode: "positional",
   excludedCompletionItems: [],
   defaultTransactionMode: "auto",
@@ -2070,6 +2084,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   // The active id can only be validated once the scheme list it points into is known.
   const dataGridTypeColorSchemes = normalizeDataGridTypeColorSchemes(settings.dataGridTypeColorSchemes);
   const savedExtractorMigrationVersion = settings.dataGridExtractorOptionsMigrationVersion;
+  const savedVisibleCopyExtractorsMigrationVersion = settings.dataGridVisibleCopyExtractorsMigrationVersion;
+  const isLegacyVisibleCopyExtractors = typeof savedVisibleCopyExtractorsMigrationVersion !== "number" || savedVisibleCopyExtractorsMigrationVersion < DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION;
   const normalizedExtractorOptions = normalizeDataGridExtractorOptions(settings.dataGridExtractorOptions);
   const isLegacyExtractorOptions = typeof savedExtractorMigrationVersion !== "number" || savedExtractorMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION;
   const dataGridExtractorOptions = (() => {
@@ -2086,6 +2102,9 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   const legacyUpdateOptOut = settings.updateNotificationsEnabled === false;
   const legacyAutoDownload = typeof settings.autoDownloadUpdates === "boolean" ? settings.autoDownloadUpdates : undefined;
   const autoUpdateApp = typeof settings.autoUpdateApp === "boolean" ? settings.autoUpdateApp : legacyUpdateOptOut ? false : (legacyAutoDownload ?? DEFAULT_EDITOR_SETTINGS.autoUpdateApp);
+  const normalizedVisibleCopyExtractors = normalizeVisibleDataGridCopyExtractors(settings.dataGridVisibleCopyExtractors);
+  const dataGridVisibleCopyExtractors =
+    isLegacyVisibleCopyExtractors && Array.isArray(settings.dataGridVisibleCopyExtractors) && settings.dataGridVisibleCopyExtractors.length > 0 ? normalizeVisibleDataGridCopyExtractors([...settings.dataGridVisibleCopyExtractors, "sql-deletes"]) : normalizedVisibleCopyExtractors;
   const autoDownloadUpdates = autoUpdateApp;
   const autoUpdateDrivers = typeof settings.autoUpdateDrivers === "boolean" ? settings.autoUpdateDrivers : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdateDrivers;
   const autoUpdateJdbc = typeof settings.autoUpdateJdbc === "boolean" ? settings.autoUpdateJdbc : legacyUpdateOptOut ? false : DEFAULT_EDITOR_SETTINGS.autoUpdateJdbc;
@@ -2257,7 +2276,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridRowNumberMode: normalizeDataGridRowNumberMode(settings.dataGridRowNumberMode),
     dataGridCopyExtractor: normalizeDataGridCopyPreference(settings.dataGridCopyExtractor),
     dataGridExtractorOptions,
-    dataGridVisibleCopyExtractors: normalizeVisibleDataGridCopyExtractors(settings.dataGridVisibleCopyExtractors),
+    dataGridVisibleCopyExtractors,
+    dataGridVisibleCopyExtractorsMigrationVersion: DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION,
     dataGridExtractorOptionsMigrationVersion: DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION,
     resultRunDisplayMode: normalizeResultRunDisplayMode(settings.resultRunDisplayMode),
     defaultAutoKeepResults: settings.defaultAutoKeepResults === true,
@@ -2388,6 +2408,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     ),
     sidebarShowConnectionNotes: settings.sidebarShowConnectionNotes === true,
     sidebarShowConnectionEndpoints: settings.sidebarShowConnectionEndpoints === true,
+    sidebarHoverEnabled: typeof settings.sidebarHoverEnabled === "boolean" ? settings.sidebarHoverEnabled : DEFAULT_EDITOR_SETTINGS.sidebarHoverEnabled,
+    sidebarHoverDelay: normalizeSidebarHoverDelay(settings.sidebarHoverDelay),
     sidebarShowTooltips: settings.sidebarShowTooltips ?? DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips,
     ...(typeof settings.sidebarShowUserAdmin === "boolean" ? { sidebarShowUserAdmin: settings.sidebarShowUserAdmin } : {}),
     sidebarAllowHorizontalScroll: settings.sidebarAllowHorizontalScroll ?? DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll,
@@ -2407,6 +2429,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     preferredExportPath: typeof settings.preferredExportPath === "string" ? settings.preferredExportPath.trim() : DEFAULT_EDITOR_SETTINGS.preferredExportPath,
     autoOpenExportFolder: typeof settings.autoOpenExportFolder === "boolean" ? settings.autoOpenExportFolder : DEFAULT_EDITOR_SETTINGS.autoOpenExportFolder,
     applyColumnFormattersOnExport: typeof settings.applyColumnFormattersOnExport === "boolean" ? settings.applyColumnFormattersOnExport : DEFAULT_EDITOR_SETTINGS.applyColumnFormattersOnExport,
+    csvWithoutBom: settings.csvWithoutBom === true,
     csvQuoteMode: normalizeCsvQuoteMode(settings.csvQuoteMode),
     csvNullMode: normalizeCsvNullMode(settings.csvNullMode),
     queryResultExportFileNameSource: normalizeQueryResultExportFileNameSource(settings.queryResultExportFileNameSource),
@@ -2435,6 +2458,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showTableDdlHoverPreview: typeof settings.showTableDdlHoverPreview === "boolean" ? settings.showTableDdlHoverPreview : DEFAULT_EDITOR_SETTINGS.showTableDdlHoverPreview,
     tableHoverLookupMode: normalizeTableHoverLookupMode(settings.tableHoverLookupMode, DEFAULT_EDITOR_SETTINGS.tableHoverLookupMode),
     clickTableNavigationTarget: normalizeClickTableNavigationTarget(settings.clickTableNavigationTarget),
+    completionMatchMode: normalizeCompletionMatchMode(settings.completionMatchMode),
     completionTriggerMode: normalizeCompletionTriggerMode(settings.completionTriggerMode),
     excludedCompletionItems: normalizeExcludedCompletionItems(settings.excludedCompletionItems),
     defaultTransactionMode: normalizeDefaultTransactionMode(settings.defaultTransactionMode),
@@ -2666,6 +2690,10 @@ export const useSettingsStore = defineStore("settings", () => {
           const savedSqlIncludeDatabaseName = (savedSettings.dataGridExtractorOptions as Partial<DataGridExtractorOptions> | undefined)?.sql?.includeDatabaseName;
           const needsDataGridExtractorOptionsMigration =
             (typeof savedSettings.dataGridExtractorOptionsMigrationVersion !== "number" || savedSettings.dataGridExtractorOptionsMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION) && (savedNullText === "NULL" || savedSqlIncludeDatabaseName === false);
+          const needsDataGridVisibleCopyExtractorsMigration =
+            (typeof savedSettings.dataGridVisibleCopyExtractorsMigrationVersion !== "number" || savedSettings.dataGridVisibleCopyExtractorsMigrationVersion < DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION) &&
+            Array.isArray(savedSettings.dataGridVisibleCopyExtractors) &&
+            savedSettings.dataGridVisibleCopyExtractors.length > 0;
           const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
           const savedUpdateChannel = (saved as { updateChannel?: unknown }).updateChannel;
           if (
@@ -2676,7 +2704,8 @@ export const useSettingsStore = defineStore("settings", () => {
             needsCompactTabTitleDefaultMigration ||
             needsTabNavigationShortcutMigration ||
             needsSidebarBrowseObjectsMigration ||
-            needsDataGridExtractorOptionsMigration
+            needsDataGridExtractorOptionsMigration ||
+            needsDataGridVisibleCopyExtractorsMigration
           ) {
             // Persist one-time migrations so removed or unsafe defaults cannot reappear.
             await enqueueEditorSettingsSave().catch(() => {});
@@ -3229,6 +3258,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridCopyExtractor !== undefined) editorSettings.value.dataGridCopyExtractor = normalizeDataGridCopyPreference(partial.dataGridCopyExtractor);
     if (partial.dataGridExtractorOptions !== undefined) editorSettings.value.dataGridExtractorOptions = normalizeDataGridExtractorOptions(partial.dataGridExtractorOptions);
     if (partial.dataGridVisibleCopyExtractors !== undefined) editorSettings.value.dataGridVisibleCopyExtractors = normalizeVisibleDataGridCopyExtractors(partial.dataGridVisibleCopyExtractors);
+    if (partial.dataGridVisibleCopyExtractorsMigrationVersion !== undefined) editorSettings.value.dataGridVisibleCopyExtractorsMigrationVersion = DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION;
     if (partial.dataGridExtractorOptionsMigrationVersion !== undefined) editorSettings.value.dataGridExtractorOptionsMigrationVersion = DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION;
     if (partial.resultRunDisplayMode !== undefined) editorSettings.value.resultRunDisplayMode = normalizeResultRunDisplayMode(partial.resultRunDisplayMode);
     if (partial.defaultAutoKeepResults !== undefined) editorSettings.value.defaultAutoKeepResults = partial.defaultAutoKeepResults === true;
@@ -3319,6 +3349,8 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarObjectInfoMode !== undefined) editorSettings.value.sidebarObjectInfoMode = normalizeSidebarObjectInfoMode(partial.sidebarObjectInfoMode);
     if (partial.sidebarShowConnectionNotes !== undefined) editorSettings.value.sidebarShowConnectionNotes = partial.sidebarShowConnectionNotes === true;
     if (partial.sidebarShowConnectionEndpoints !== undefined) editorSettings.value.sidebarShowConnectionEndpoints = partial.sidebarShowConnectionEndpoints === true;
+    if (partial.sidebarHoverEnabled !== undefined) editorSettings.value.sidebarHoverEnabled = partial.sidebarHoverEnabled === true;
+    if (partial.sidebarHoverDelay !== undefined) editorSettings.value.sidebarHoverDelay = normalizeSidebarHoverDelay(partial.sidebarHoverDelay);
     if (partial.sidebarShowTooltips !== undefined) editorSettings.value.sidebarShowTooltips = partial.sidebarShowTooltips;
     if (partial.sidebarAllowHorizontalScroll !== undefined) editorSettings.value.sidebarAllowHorizontalScroll = partial.sidebarAllowHorizontalScroll;
     if (partial.sidebarIndent !== undefined) editorSettings.value.sidebarIndent = normalizeSidebarIndent(partial.sidebarIndent);
@@ -3337,6 +3369,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.preferredExportPath !== undefined) editorSettings.value.preferredExportPath = typeof partial.preferredExportPath === "string" ? partial.preferredExportPath.trim() : "";
     if (partial.autoOpenExportFolder !== undefined) editorSettings.value.autoOpenExportFolder = partial.autoOpenExportFolder === true;
     if (partial.applyColumnFormattersOnExport !== undefined) editorSettings.value.applyColumnFormattersOnExport = partial.applyColumnFormattersOnExport === true;
+    if (partial.csvWithoutBom !== undefined) editorSettings.value.csvWithoutBom = partial.csvWithoutBom === true;
     if (partial.csvQuoteMode !== undefined) editorSettings.value.csvQuoteMode = normalizeCsvQuoteMode(partial.csvQuoteMode);
     if (partial.csvNullMode !== undefined) editorSettings.value.csvNullMode = normalizeCsvNullMode(partial.csvNullMode);
     if (partial.queryResultExportFileNameSource !== undefined) editorSettings.value.queryResultExportFileNameSource = normalizeQueryResultExportFileNameSource(partial.queryResultExportFileNameSource);
@@ -3362,6 +3395,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showTableDdlHoverPreview !== undefined) editorSettings.value.showTableDdlHoverPreview = partial.showTableDdlHoverPreview === true;
     if (partial.tableHoverLookupMode !== undefined) editorSettings.value.tableHoverLookupMode = normalizeTableHoverLookupMode(partial.tableHoverLookupMode, DEFAULT_EDITOR_SETTINGS.tableHoverLookupMode);
     if (partial.clickTableNavigationTarget !== undefined) editorSettings.value.clickTableNavigationTarget = normalizeClickTableNavigationTarget(partial.clickTableNavigationTarget);
+    if (partial.completionMatchMode !== undefined) editorSettings.value.completionMatchMode = normalizeCompletionMatchMode(partial.completionMatchMode);
     if (partial.completionTriggerMode !== undefined) editorSettings.value.completionTriggerMode = normalizeCompletionTriggerMode(partial.completionTriggerMode);
     if (partial.excludedCompletionItems !== undefined) editorSettings.value.excludedCompletionItems = normalizeExcludedCompletionItems(partial.excludedCompletionItems);
     if (partial.defaultTransactionMode !== undefined) editorSettings.value.defaultTransactionMode = normalizeDefaultTransactionMode(partial.defaultTransactionMode);

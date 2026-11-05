@@ -360,6 +360,7 @@ impl BackupService {
                         schema: schema_name.clone(),
                         file_path: file.file_path,
                         selected_tables: selected_tables.clone(),
+                        selected_objects: None,
                         excluded_tables: excluded_tables.clone(),
                         include_structure: job.config.include_structure,
                         include_data: job.config.include_data,

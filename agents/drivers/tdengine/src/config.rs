@@ -35,7 +35,7 @@ pub fn build_dsn(params: &ConnectParams) -> Result<BuiltDsn> {
     if !params.ca_cert_path.trim().is_empty() {
         set_query_param(&mut url, "tls_mode", "verify_identity");
         set_query_param(&mut url, "tls_ca", params.ca_cert_path.trim());
-    } else if url.scheme() == "wss" && !has_query_param(&url, "tls_version") {
+    } else if params.ssl && !has_query_param(&url, "tls_version") {
         set_query_param(&mut url, "tls_version", "tlsv1.2,tlsv1.3");
     }
     let database = url

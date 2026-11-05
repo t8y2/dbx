@@ -54,6 +54,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   "mongodb+srv": { type: "mongodb", profile: "mongodb", label: "MongoDB", defaultPort: 27017 },
   dynamodb: { type: "dynamodb", profile: "dynamodb", label: "Amazon DynamoDB", defaultPort: 443 },
   clickhouse: { type: "clickhouse", profile: "clickhouse", label: "ClickHouse", defaultPort: 8123 },
+  databend: { type: "databend", profile: "databend", label: "Databend", defaultPort: 8000 },
   nebula: { type: "nebula", profile: "nebula", label: "NebulaGraph", defaultPort: 9669 },
   sqlserver: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
   mssql: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
@@ -404,6 +405,43 @@ function urlParamsRequireTls(dbType: DatabaseType, params: string): boolean {
   }
 
   return false;
+}
+
+function databendUrlOptions(params: string, isJdbcUrl: boolean): { ssl: boolean; urlParams: string; defaultPort: number } {
+  const tlsOptions = new Map<string, string>();
+  // Match the JDBC query delimiter. Semicolons can be part of other values.
+  const normalizedParams = params
+    .split("&")
+    .map((part) => {
+      const [rawKey, ...rest] = part.split("=");
+      const key = decodeUrlPart(rawKey).toLowerCase();
+      if (key !== "ssl" && key !== "sslmode") return part;
+      if (tlsOptions.has(key)) {
+        throw new Error(`Duplicate Databend ${key} parameter`);
+      }
+      const value = decodeUrlPart(rest.join("=")).trim().toLowerCase();
+      tlsOptions.set(key, value);
+      // JDBC property names are case-sensitive. Emit the values we validate.
+      return `${key}=${value}`;
+    })
+    .join("&");
+  const explicitSsl = tlsOptions.get("ssl");
+  const sslMode = tlsOptions.get("sslmode");
+  if (explicitSsl !== undefined && explicitSsl !== "true" && explicitSsl !== "false") {
+    throw new Error("Invalid Databend ssl parameter: expected true or false");
+  }
+  if (sslMode !== undefined && !["enable", "require", "disable"].includes(sslMode)) {
+    throw new Error("Invalid Databend sslmode parameter: expected enable, require or disable");
+  }
+  if (explicitSsl !== undefined && sslMode !== undefined && (explicitSsl === "true") !== (sslMode !== "disable")) {
+    throw new Error("Conflicting Databend ssl and sslmode parameters");
+  }
+
+  // Native DSNs default to HTTPS. JDBC defaults to HTTP and only consumes URL
+  // parameters, not the connection form's top-level ssl flag.
+  const ssl = explicitSsl === "true" || sslMode === "enable" || sslMode === "require" || (explicitSsl === undefined && sslMode === undefined && !isJdbcUrl);
+  const urlParams = explicitSsl === undefined && (ssl || !isJdbcUrl) ? [normalizedParams, `ssl=${ssl}`].filter(Boolean).join("&") : normalizedParams;
+  return { ssl, urlParams, defaultPort: ssl ? 443 : isJdbcUrl ? 8000 : 80 };
 }
 
 function isTidbCloudHost(host: string): boolean {
@@ -786,7 +824,8 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   const redisInsecure = redisPath?.insecure || normalizedSource.redisInsecure;
   const parsedUrlParams = profile.type === "redis" && redisInsecure && !/(^|&)insecure=/i.test(urlParamsWithoutName) ? [urlParamsWithoutName, "insecure=true"].filter(Boolean).join("&") : urlParamsWithoutName;
   const jdbcCredentials = isJdbcUrl && (profile.type === "mysql" || profile.profile === "oceanbase-oracle") ? extractMysqlCredentialParams(parsedUrlParams) : undefined;
-  const effectiveUrlParams = jdbcCredentials?.urlParams ?? parsedUrlParams;
+  const databendOptions = profile.type === "databend" ? databendUrlOptions(parsedUrlParams, isJdbcUrl) : undefined;
+  const effectiveUrlParams = databendOptions?.urlParams ?? jdbcCredentials?.urlParams ?? parsedUrlParams;
   if (profile.type === "mongodb") {
     return {
       dbType: profile.type,
@@ -821,7 +860,7 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   }
 
   const isMeilisearch = profile.type === "meilisearch";
-  const defaultPort = isJdbcUrl && scheme === "oceanbase" ? 3306 : isMeilisearch && scheme === "http" ? 80 : isMeilisearch && scheme === "https" ? 443 : profile.defaultPort;
+  const defaultPort = databendOptions?.defaultPort ?? (isJdbcUrl && scheme === "oceanbase" ? 3306 : isMeilisearch && scheme === "http" ? 80 : isMeilisearch && scheme === "https" ? 443 : profile.defaultPort);
   // A Redis URL path is a numeric db index; redis-cli flags salvaged above.
   const pathDatabase = redisPath ? redisPath.database : databaseFromPath(parsed.pathname);
 
@@ -837,7 +876,7 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     password: jdbcCredentials?.password ?? decodeUrlPart(parsed.password),
     database: profile.type === "victoriametrics" ? "metrics" : profile.type === "dynamodb" ? dynamodbRegionFromHost(parsed.hostname) : isMeilisearch || profile.type === "solr" ? undefined : pathDatabase,
     urlParams: effectiveUrlParams,
-    ssl: scheme === "rediss" || scheme === "https" || (redisPath?.tls ?? false) || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname)),
+    ssl: databendOptions?.ssl ?? (scheme === "rediss" || scheme === "https" || (redisPath?.tls ?? false) || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname))),
     ...(profile.type === "victoriametrics" ? { apiPath: parsed.pathname.replace(/\/+$/, "") } : {}),
     ...(isMeilisearch ? { basePath: parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "") } : {}),
   };

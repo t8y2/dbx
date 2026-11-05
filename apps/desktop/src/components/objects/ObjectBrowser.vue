@@ -4,6 +4,7 @@ import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { uuid } from "@/lib/common/utils";
 import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
+import { applyDdlSearchMarks } from "@/lib/sql/ddlSearchMarks";
 import DatabaseActionsMenu from "@/components/objects/DatabaseActionsMenu.vue";
 import FirebirdObjectManager from "@/components/objects/FirebirdObjectManager.vue";
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
@@ -27,6 +28,7 @@ import {
   Copy,
   CopyPlus,
   ChevronDown,
+  ChevronUp,
   ChevronRight,
   Download,
   Eraser,
@@ -430,6 +432,8 @@ watch(tableInfoSearchQuery, () => {
   selectedTableInfoColumns.value = [];
 });
 const tableInfoDdlPreRef = ref<HTMLPreElement | null>(null);
+const tableInfoDdlMatchCount = ref(0);
+const tableInfoDdlMatchIndex = ref(0);
 const activeTableInfoLoading = computed(() => {
   if (tableInfoTab.value === "info") return tableOverviewLoading.value;
   if (tableInfoTab.value === "ddl") return tableDdlLoading.value;
@@ -1627,16 +1631,54 @@ const filteredTableConstraints = computed(() => {
   return base.filter((c) => c.name.toLowerCase().includes(q) || c.constraint_type.toLowerCase().includes(q) || c.columns.some((col) => col.toLowerCase().includes(q)) || c.definition.toLowerCase().includes(q));
 });
 
-const filteredTableDdlContent = computed(() => {
-  if (!tableDdlContent.value) return "";
-  const html = highlight(tableDdlContent.value);
-  if (!tableInfoSearchQuery.value) return html;
-  const escaped = tableInfoSearchQuery.value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const regex = new RegExp(`(${escaped})`, "gi");
-  return html.replace(/>([^<]*)</g, (_, text) => {
-    return `>${text.replace(regex, "<mark>$1</mark>")}<`;
-  });
-});
+const highlightedTableDdlContent = computed(() => (tableDdlContent.value ? highlight(tableDdlContent.value) : ""));
+
+function syncTableInfoDdlMatches(scrollToActive = false) {
+  const pre = tableInfoDdlPreRef.value;
+  const matches = pre && tableInfoTab.value === "ddl" && tableInfoSearchQuery.value ? Array.from(pre.querySelectorAll<HTMLElement>("mark.ddl-search-match")) : [];
+  tableInfoDdlMatchCount.value = matches.length;
+  tableInfoDdlMatchIndex.value = matches.length ? Math.min(tableInfoDdlMatchIndex.value, matches.length - 1) : 0;
+  matches.forEach((match, index) => match.classList.toggle("ddl-search-match-active", index === tableInfoDdlMatchIndex.value));
+  const activeMatch = matches[tableInfoDdlMatchIndex.value];
+  if (!scrollToActive || !pre || !activeMatch) return;
+
+  // 只滚动 DDL 容器，避免带动对象列表和外层页面。
+  const preRect = pre.getBoundingClientRect();
+  const matchRect = activeMatch.getBoundingClientRect();
+  pre.scrollTop += matchRect.top - preRect.top - (pre.clientHeight - matchRect.height) / 2;
+  pre.scrollLeft += matchRect.left - preRect.left - (pre.clientWidth - matchRect.width) / 2;
+}
+
+function navigateTableInfoDdlSearch(delta: -1 | 1) {
+  const count = tableInfoDdlMatchCount.value;
+  if (!count) return;
+  tableInfoDdlMatchIndex.value = (tableInfoDdlMatchIndex.value + delta + count) % count;
+  syncTableInfoDdlMatches(true);
+}
+
+function onTableInfoSearchKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    tableInfoSearchQuery.value = "";
+    return;
+  }
+  if (event.key !== "Enter" || tableInfoTab.value !== "ddl") return;
+  event.preventDefault();
+  event.stopPropagation();
+  navigateTableInfoDdlSearch(event.shiftKey ? -1 : 1);
+}
+
+watch(
+  [highlightedTableDdlContent, tableInfoSearchQuery, tableInfoDdlPreRef],
+  () => {
+    tableInfoDdlMatchIndex.value = 0;
+    applyDdlSearchMarks(tableInfoDdlPreRef.value, tableInfoSearchQuery.value);
+    syncTableInfoDdlMatches(true);
+  },
+  { flush: "post" },
+);
 
 async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab, focusObject?: NonNullable<QueryTab["objectPropertiesRequest"]>["focusObject"]) {
   if (!confirmTriggerDraftDiscard()) return;
@@ -6568,7 +6610,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <div v-if="tableInfoTab !== 'relations'" class="flex items-center gap-1 px-2 py-1.5 border-b shrink-0 bg-background">
             <div class="relative min-w-0 flex-1">
               <Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-              <input v-model="tableInfoSearchQuery" data-table-info-search :placeholder="t('grid.tableInfoSearch')" class="w-full h-7 pl-7 pr-6 text-xs bg-muted/50 rounded border border-border focus:outline-none focus:border-primary/50" @keydown.escape="tableInfoSearchQuery = ''" />
+              <input v-model="tableInfoSearchQuery" data-table-info-search :placeholder="t('grid.tableInfoSearch')" class="w-full h-7 pl-7 pr-6 text-xs bg-muted/50 rounded border border-border focus:outline-none focus:border-primary/50" @keydown="onTableInfoSearchKeydown" />
               <button v-if="tableInfoSearchQuery" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="tableInfoSearchQuery = ''">
                 <X class="w-3 h-3" />
               </button>
@@ -6576,6 +6618,17 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="activeTableInfoLoading" :title="t('structureEditor.refresh')" :aria-label="t('structureEditor.refresh')" @click="refreshActiveTableInfo">
               <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': activeTableInfoLoading }" />
             </Button>
+            <template v-if="tableInfoTab === 'ddl'">
+              <span aria-live="polite" class="w-9 shrink-0 text-center text-[11px] tabular-nums text-muted-foreground">
+                {{ tableInfoSearchQuery ? (tableInfoDdlMatchCount > 0 ? `${tableInfoDdlMatchIndex + 1}/${tableInfoDdlMatchCount}` : "0") : "" }}
+              </span>
+              <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('editor.search.prevMatch')" :aria-label="t('editor.search.prevMatch')" :disabled="tableInfoDdlMatchCount === 0" @click="navigateTableInfoDdlSearch(-1)">
+                <ChevronUp class="h-3.5 w-3.5" />
+              </Button>
+              <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('editor.search.nextMatch')" :aria-label="t('editor.search.nextMatch')" :disabled="tableInfoDdlMatchCount === 0" @click="navigateTableInfoDdlSearch(1)">
+                <ChevronDown class="h-3.5 w-3.5" />
+              </Button>
+            </template>
           </div>
           <div v-if="tableInfoTab === 'ddl' && (effectiveDatabaseType === 'oracle' || effectiveDatabaseType === 'oceanbase-oracle')" class="border-b px-3 py-2">
             <DdlStorageToggle :database-type="effectiveDatabaseType" :disabled="tableDdlLoading" />
@@ -6761,9 +6814,9 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             ref="tableInfoDdlPreRef"
             data-native-clipboard
             tabindex="0"
-            class="flex-1 min-w-0 text-xs font-mono p-3 overflow-auto ddl-code leading-5 select-text outline-none"
+            class="flex-1 min-h-0 min-w-0 text-xs font-mono p-3 overflow-auto ddl-code leading-5 select-text outline-none"
             :class="settingsStore.editorSettings.tableDdlWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
-            v-html="filteredTableDdlContent"
+            v-html="highlightedTableDdlContent"
             @keydown="onTableInfoDdlKeydown"
           ></pre>
           <div v-else class="flex-1 flex items-center justify-center">
@@ -7310,7 +7363,28 @@ html.dbx-legacy-webview.dark .object-browser-scroller:hover::-webkit-scrollbar-t
 }
 
 .ddl-code {
+  --ddl-search-bg: rgb(253, 245, 184);
+  --ddl-current-search-bg: rgba(253, 224, 71, 0.52);
+  --ddl-current-search-border: rgba(234, 179, 8, 0.82);
   container-type: inline-size;
+}
+
+.dark .ddl-code {
+  --ddl-search-bg: rgb(72, 57, 8);
+  --ddl-current-search-bg: rgb(116, 87, 0);
+  --ddl-current-search-border: rgb(239, 177, 0);
+}
+
+.ddl-code :deep(.ddl-search-match) {
+  border-radius: 2px;
+  background: var(--ddl-search-bg);
+  color: inherit;
+  padding: 0;
+}
+
+.ddl-code :deep(.ddl-search-match-active) {
+  background: var(--ddl-current-search-bg);
+  outline: 1px solid var(--ddl-current-search-border);
 }
 
 .object-browser-side-panel {

@@ -10655,6 +10655,7 @@ mod tests {
         AccessDenied,
         LegacyEof,
         Accept,
+        CachingSha2Accept,
     }
 
     async fn mysql_tls_test_packet(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
@@ -10699,7 +10700,11 @@ mod tests {
                     | Caps::CLIENT_DEPRECATE_EOF,
                 33,
                 StatusFlags::SERVER_STATUS_AUTOCOMMIT,
-                Some(&b"mysql_native_password"[..]),
+                Some(if matches!(reply, MysqlTlsTestReply::CachingSha2Accept) {
+                    &b"caching_sha2_password"[..]
+                } else {
+                    &b"mysql_native_password"[..]
+                }),
             );
             let mut payload = Vec::new();
             greeting.serialize(&mut payload);
@@ -10734,7 +10739,7 @@ mod tests {
                     assert!(capabilities.contains(Caps::CLIENT_DEPRECATE_EOF));
                     mysql_tls_test_write(&mut socket, 3, &[0, 0, 0, 2, 0, 0, 0]).await;
                 }
-                MysqlTlsTestReply::Accept => {
+                MysqlTlsTestReply::Accept | MysqlTlsTestReply::CachingSha2Accept => {
                     assert!(!capabilities.contains(Caps::CLIENT_SSL));
                     mysql_tls_test_write(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
                     loop {
@@ -10762,6 +10767,20 @@ mod tests {
         let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode={mode}&max_allowed_packet=65536&wait_timeout=60&sessionVariables=group_concat_max_len%3D1024");
         let result = connect_with_ca_cert_and_pool_limit(&url, None, Duration::from_secs(2), 1).await;
         (result, servers)
+    }
+
+    #[tokio::test]
+    async fn mysql_caching_sha2_immediate_ok_returns_a_working_pool() {
+        // Router may return OK directly after the caching_sha2 handshake response.
+        let (result, mut servers) =
+            mysql_tls_test_connect(vec![MysqlTlsTestReply::CachingSha2Accept], "disabled").await;
+        let pool = result.unwrap();
+        verify_pool_connection(&pool, Duration::from_secs(2)).await.unwrap();
+        pool.get_conn().await.unwrap().query_drop("DO 1").await.unwrap();
+        pool.disconnect().await.unwrap();
+        let attempts = servers.join_next().await.unwrap().unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert!(!attempts[0].contains(mysql_async::consts::CapabilityFlags::CLIENT_SSL));
     }
 
     #[tokio::test]

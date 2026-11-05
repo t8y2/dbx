@@ -7,9 +7,7 @@ import type { TableImportPreview } from "@/lib/backend/api";
 
 const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn().mockResolvedValue(undefined),
-  listTables: vi.fn().mockResolvedValue([
-    { name: "target_table", table_type: "TABLE" },
-  ]),
+  listTables: vi.fn().mockResolvedValue([{ name: "target_table", table_type: "TABLE" }]),
   getColumns: vi.fn().mockResolvedValue([
     { name: "id", data_type: "INTEGER", nullable: false },
     { name: "name", data_type: "TEXT", nullable: true },
@@ -146,15 +144,16 @@ vi.mock("@/components/ui/searchable-select", async () => {
       emits: ["update:modelValue"],
       setup(props, { emit }) {
         return () =>
-          h("select", {
-            class: "existing-table-select-stub",
-            value: props.modelValue,
-            disabled: props.disabled,
-            onChange: (event: Event) => emit("update:modelValue", (event.target as HTMLSelectElement).value),
-          }, [
-            h("option", { value: "" }),
-            ...(props.options as string[]).map((option) => h("option", { value: option }, option)),
-          ]);
+          h(
+            "select",
+            {
+              class: "existing-table-select-stub",
+              value: props.modelValue,
+              disabled: props.disabled,
+              onChange: (event: Event) => emit("update:modelValue", (event.target as HTMLSelectElement).value),
+            },
+            [h("option", { value: "" }), ...(props.options as string[]).map((option) => h("option", { value: option }, option))],
+          );
       },
     }),
   };
@@ -208,7 +207,7 @@ async function mountDialogAndGoToStep2(options: { prefillTable?: string } = {}) 
           prefillDatabase: "main",
           ...(options.prefillTable ? { prefillTable: options.prefillTable } : {}),
         }),
-    })
+    }),
   );
   mountedApps.push(app);
   app.use(i18n);
@@ -218,9 +217,7 @@ async function mountDialogAndGoToStep2(options: { prefillTable?: string } = {}) 
   await selectFiles([new File(["id,name\n1,Alice"], "test_data.csv")]);
 
   // 点击下一步到达 Step 2（列映射页面）
-  const nextButton = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
-    (b) => b.textContent?.trim() === "Next"
-  );
+  const nextButton = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === "Next");
   expect(nextButton).toBeTruthy();
   nextButton!.click();
   await flushAsyncUpdates();

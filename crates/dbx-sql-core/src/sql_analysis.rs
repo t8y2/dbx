@@ -50,7 +50,7 @@ pub struct SqlReferenceAnalysis {
     pub group_by_violations: Vec<SqlGroupByViolation>,
     /// Two-part qualifiers (`alias.column`) that name no table or alias visible
     /// in the reference scope.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub unknown_qualifiers: Vec<SqlUnknownQualifier>,
 }
 
@@ -85,7 +85,8 @@ pub struct SqlGroupByViolation {
 
 /// A two-part column qualifier that matches neither a table nor an alias
 /// visible in the statement, e.g. `b.id` when only `a` and `qb` are declared.
-/// The span covers the qualifier itself, not the whole reference.
+/// The span covers the qualifier token itself (quotes included when the
+/// identifier is quoted), not the whole reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SqlUnknownQualifier {
     pub qualifier: String,
@@ -263,7 +264,10 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
         analyzer.visit_statement(&statement);
     }
 
-    let unknown_qualifiers = analyzer.unknown_qualifiers();
+    // Oracle-family dialects may resolve a qualifier as a schema name, so the
+    // check only runs where the FROM scope is authoritative.
+    let unknown_qualifiers =
+        if dialect_scopes_qualifiers(&normalized_dialect) { analyzer.unknown_qualifiers() } else { Vec::new() };
     let mut analysis = SqlReferenceAnalysis {
         tables: analyzer.tables,
         columns: analyzer.columns,
@@ -1430,6 +1434,17 @@ fn normalize_dialect(dialect: Option<&str>) -> String {
     }
 }
 
+/// Dialects where a two-part qualifier (`alias.column`) has to resolve to a
+/// table or an alias of the statement's FROM scope.
+///
+/// Oracle-family dialects are excluded: `SELECT emp.no FROM dual` resolves
+/// `emp` as a schema rather than as an alias, so the qualifier is legitimately
+/// absent from the scope. Every dialect the analyzer only knows generically is
+/// excluded for the same reason — it may well be an Oracle-compatible engine.
+fn dialect_scopes_qualifiers(dialect: &str) -> bool {
+    matches!(dialect, "mysql" | "postgres" | "sqlite" | "sqlserver" | "clickhouse" | "duckdb" | "spark")
+}
+
 impl Analyzer {
     fn visit_statement(&mut self, statement: &Statement) {
         match statement {
@@ -2544,5 +2559,16 @@ mod unknown_qualifier_tests {
         assert_eq!(analysis.unknown_qualifiers.len(), 1);
         assert_eq!(analysis.unknown_qualifiers[0].qualifier, "b");
         assert_eq!(span_text(sql, &analysis.unknown_qualifiers[0].span), "b");
+    }
+
+    #[test]
+    fn skips_dialects_where_a_qualifier_may_name_a_schema() {
+        // `SELECT emp.no FROM dual` resolves `emp` as a schema in Oracle, so the
+        // qualifier is legitimately absent from the FROM scope.
+        for dialect in ["oracle", "dameng", "generic"] {
+            assert!(qualifiers("SELECT emp.no FROM dual", Some(dialect)).is_empty(), "{dialect}");
+        }
+        // The same shape is invalid where the FROM scope is authoritative.
+        assert_eq!(qualifiers("SELECT emp.no FROM dual", Some("mysql")), vec!["emp".to_string()]);
     }
 }

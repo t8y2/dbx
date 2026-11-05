@@ -127,6 +127,8 @@ describe("DataGridValueTransform plugin decoding", () => {
     await mount({ source: "中", columnType: "CLOB" });
     await openPluginKind();
     expect(backend.invokePlugin).not.toHaveBeenCalled();
+    // With one codec installed there is nothing to choose, so no decoder picker.
+    expect(root!.querySelector("[data-cell-transform-plugin-codec]")).toBeNull();
 
     button("cellTransform.convert")!.click();
     await flush();

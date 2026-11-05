@@ -908,8 +908,9 @@ system stores encrypted, with the same contract as the Redis codec:
 ```
 
 The user right-clicks a cell and chooses **Decode with Plugin**, or picks
-**Plugin decode** in the cell details convert preview, then chooses a decoder
-and clicks **Convert**. Listing the plugins sends no value; only that click
+**Plugin decode** in the cell details convert preview, and clicks **Convert**.
+A decoder picker appears only when more than one decoder is installed; a single
+decoder is used directly. Listing the plugins sends no value; only that click
 sends the current cell. The option is hidden while no compatible plugin
 declares the capability. Compatible plugins must have a native backend
 entrypoint.

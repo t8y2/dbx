@@ -107,7 +107,7 @@ Formatting and preview actions usually affect display only. Actual edits still b
 
 When a column holds values encrypted or encoded with a custom business algorithm, install a native plugin that declares the
 `sql-value-codec-v1` capability. Right-click a cell and choose **Decode with Plugin**, or pick **Plugin decode** in the
-cell details **Convert preview** panel, then choose a decoder and click **Convert**. DBX shows the text or pretty-printed JSON the
+cell details **Convert preview** panel, then click **Convert** (when several decoder plugins are installed, choose one first). DBX shows the text or pretty-printed JSON the
 plugin returns. Binary columns offer plugin decoding only, and the plugin receives the original bytes.
 
 The current cell's value is sent to the selected plugin only when you click **Convert**. The plugin receives the database

@@ -229,13 +229,12 @@ async function saveResult() {
 <template>
   <template v-if="!pluginOnly || pluginCodecs.length > 0">
     <Button v-if="!open" variant="outline" size="sm" class="h-6 px-2 text-xs" @mousedown.prevent @click="open = true">{{ pluginOnly ? t("cellTransform.kinds.plugin") : t("cellTransform.title") }}</Button>
-    <section v-else data-native-clipboard class="@container basis-full min-w-0 space-y-2 rounded border bg-muted/20 p-2 text-xs">
+    <section v-else data-native-clipboard class="basis-full min-w-0 space-y-2 rounded border bg-muted/20 p-2 text-xs">
       <div class="flex min-h-5 items-center justify-between gap-2">
         <div class="min-w-0 truncate font-medium">{{ t("cellTransform.title") }}</div>
         <Button variant="ghost" size="icon" class="h-5 w-5 shrink-0" :title="t('cellTransform.exitPreview')" @mousedown.prevent @click="open = false"><X class="h-3 w-3" /></Button>
       </div>
-      <!-- Source, options and result side by side so the original and converted values can be compared; narrow hosts stack them. -->
-      <div class="grid grid-cols-1 items-start gap-2 @2xl:grid-cols-[minmax(0,1fr)_minmax(11rem,0.7fr)_minmax(0,1fr)]" data-cell-transform-columns>
+      <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-start gap-2">
         <div class="flex min-w-0 flex-col gap-1">
           <div class="text-muted-foreground">{{ t("cellTransform.sourceValue") }}</div>
           <textarea :value="source ?? ''" :aria-label="t('cellTransform.sourceValue')" readonly class="dbx-data-grid-value-font h-72 min-h-24 w-full resize-y rounded border bg-background p-2" spellcheck="false" />
@@ -251,7 +250,8 @@ async function saveResult() {
                 <option v-if="showPluginKind" value="plugin">{{ t("cellTransform.kinds.plugin") }}</option>
               </select>
             </label>
-            <label v-if="kind === 'plugin'" class="flex min-w-0 basis-full flex-col gap-1">
+            <!-- A single installed codec is used directly; the choice only appears once there are several. -->
+            <label v-if="kind === 'plugin' && pluginCodecs.length > 1" class="flex min-w-0 basis-full flex-col gap-1">
               {{ t("cellTransform.pluginCodec") }}
               <select v-model="pluginCodecKey" class="h-7 w-full rounded border bg-background px-2" data-cell-transform-plugin-codec>
                 <option value="">{{ t("cellTransform.pluginCodecPlaceholder") }}</option>
@@ -301,17 +301,15 @@ async function saveResult() {
           <p v-else-if="isPluginKind && pluginLoading" role="status" class="text-xs text-muted-foreground">{{ t("cellTransform.pluginDecoding") }}</p>
           <p v-else-if="isPluginKind && pluginError" role="alert" class="whitespace-pre-wrap break-words text-xs text-destructive">{{ t("cellTransform.errors.pluginFailed", { message: pluginError }) }}</p>
           <p v-else-if="result && !result.ok" role="alert" class="text-xs text-destructive">{{ t(`cellTransform.errors.${resultErrorKey}`, errorLimits) }}</p>
-        </div>
-        <div class="flex min-w-0 flex-col gap-1" data-cell-transform-result>
           <template v-if="textResult !== null">
-            <div class="flex min-h-6 items-center justify-between gap-2 text-xs">
-              <span class="text-muted-foreground"
+            <div class="flex items-center justify-between gap-2 text-xs">
+              <span
                 >{{ t("cellTransform.result") }}<template v-if="result?.ok && 'unit' in result && result.unit"> · {{ t(`cellTransform.units.${result.unit}`) }}</template></span
               >
               <Button variant="outline" size="sm" class="h-6 text-xs" @click="copyResult">{{ t("cellTransform.copy") }}</Button>
             </div>
-            <iframe v-if="kind === 'html'" :srcdoc="htmlPreviewDocument" sandbox="" :title="t('cellTransform.htmlPreview')" class="h-36 min-h-24 w-full rounded border bg-white" />
-            <textarea :value="textResult" :aria-label="t('cellTransform.result')" readonly class="dbx-data-grid-value-font min-h-24 w-full resize-y rounded border bg-background p-2 text-xs" :class="kind === 'html' ? 'h-32' : 'h-72'" spellcheck="false" />
+            <iframe v-if="kind === 'html'" :srcdoc="htmlPreviewDocument" sandbox="" :title="t('cellTransform.htmlPreview')" class="h-56 min-h-24 w-full rounded border bg-white" />
+            <textarea :value="textResult" :aria-label="t('cellTransform.result')" readonly class="dbx-data-grid-value-font h-56 min-h-24 w-full resize-y rounded border bg-background p-2 text-xs" spellcheck="false" />
           </template>
           <template v-else-if="binaryResult && effectiveBinary">
             <div v-if="!binaryResult.recognized" class="flex flex-col gap-1">
@@ -329,10 +327,6 @@ async function saveResult() {
               <Button variant="outline" size="sm" class="h-6 shrink-0 text-xs" @click="saveResult">{{ t("cellTransform.save") }}</Button>
             </div>
             <img v-if="imageUrl" :src="imageUrl" :alt="t('grid.imagePreview')" loading="lazy" decoding="async" class="max-h-56 min-h-16 w-full rounded border bg-white object-contain" />
-          </template>
-          <template v-else>
-            <div class="flex min-h-6 items-center text-muted-foreground">{{ t("cellTransform.result") }}</div>
-            <div class="h-72 min-h-24 w-full rounded border border-dashed bg-background/50" aria-hidden="true" />
           </template>
         </div>
       </div>

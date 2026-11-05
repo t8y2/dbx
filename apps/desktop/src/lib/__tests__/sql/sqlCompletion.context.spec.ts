@@ -1970,6 +1970,29 @@ describe("sqlCompletion scoped context classification", () => {
     expect(shouldAutoOpenSqlCompletion(sql, cursor)).toBe(true);
   });
 
+  // dbx#14144: re-indenting an existing select list with spaces or Tab must not
+  // pop up column suggestions that Tab would then insert in front of the text.
+  it.each([
+    ["spaces", "    "],
+    ["tab", "\t"],
+  ])("does not auto-open completion when %s are typed in front of existing text", (_label, indent) => {
+    const before = `WITH RECURSIVE menu_tree AS (\n  SELECT\n${indent}`;
+    const sql = `${before}r.id, r.permission_name FROM os_system_resource r\n)\nSELECT * FROM menu_tree`;
+    expect(shouldAutoOpenSqlCompletion(sql, before.length, { databaseType: "mysql" })).toBe(false);
+  });
+
+  it("does not auto-open completion for whitespace typed right before the next column of a select list", () => {
+    const before = "SELECT id, ";
+    const sql = `${before}name FROM users`;
+    expect(shouldAutoOpenSqlCompletion(sql, before.length, { databaseType: "mysql" })).toBe(false);
+  });
+
+  it("still auto-opens select-list column completion after SELECT whitespace at the end of a line", () => {
+    const before = "SELECT ";
+    const sql = `${before}\nFROM users`;
+    expect(shouldAutoOpenSqlCompletion(sql, before.length, { databaseType: "mysql" })).toBe(true);
+  });
+
   it("does not let a trailing comment's stray 'and'/'or' text suppress the AND/OR keyword suggestion", () => {
     const sql = "SELECT * FROM t WHERE id = 1 # mentions where and or\n";
     const context = getSqlCompletionContext(sql, sql.length, { databaseType: "mysql" });

@@ -681,6 +681,7 @@ function applySuggestedColumnDataTypes(currentPreview = preview.value) {
 // 200+ 列时 SearchableSelect 太重，换成一个全局 popover，
 // 只有点击输入框时才挂载，避免创建上百分组件实例。
 const activeDataTypeColumn = ref<string | null>(null);
+const activeDataTypeTrigger = ref<HTMLElement | null>(null);
 const dataTypePickerOpen = ref(false);
 const dataTypePickerStyle = ref<Record<string, string>>({});
 const activeDataTypeOptionIndex = ref(-1);
@@ -691,23 +692,51 @@ const dataTypePickerOptions = computed(() => {
   return currentValue && !options.includes(currentValue) ? [...options, currentValue] : options;
 });
 
+function updateDataTypePickerPosition() {
+  const trigger = activeDataTypeTrigger.value;
+  if (!trigger || !dataTypePickerOpen.value) return;
+
+  if (!trigger.isConnected) {
+    closeDataTypePicker();
+    return;
+  }
+
+  const scrollParent = trigger.closest(".overflow-auto");
+  const triggerRect = trigger.getBoundingClientRect();
+  if (scrollParent) {
+    const parentRect = scrollParent.getBoundingClientRect();
+    if (triggerRect.bottom < parentRect.top || triggerRect.top > parentRect.bottom) {
+      closeDataTypePicker();
+      return;
+    }
+  }
+
+  dataTypePickerStyle.value = {
+    position: "fixed",
+    top: `${triggerRect.bottom + 2}px`,
+    left: `${triggerRect.left}px`,
+    width: `${Math.max(triggerRect.width, 200)}px`,
+  };
+}
+
 function closeDataTypePicker() {
   dataTypePickerOpen.value = false;
   activeDataTypeColumn.value = null;
+  activeDataTypeTrigger.value = null;
   activeDataTypeOptionIndex.value = -1;
+  checkSyncListeners();
 }
 
 function openDataTypePicker(sourceColumn: string, input: HTMLInputElement) {
-  const rect = input.getBoundingClientRect();
-  dataTypePickerStyle.value = {
-    position: "fixed",
-    top: `${rect.bottom + 2}px`,
-    left: `${rect.left}px`,
-    width: `${Math.max(rect.width, 200)}px`,
-  };
+  if (generatorPickerOpen.value) {
+    closeGeneratorPicker();
+  }
+  activeDataTypeTrigger.value = input;
   activeDataTypeColumn.value = sourceColumn;
   activeDataTypeOptionIndex.value = -1;
   dataTypePickerOpen.value = true;
+  updateDataTypePickerPosition();
+  checkSyncListeners();
 }
 
 function selectDataTypeOption(value: string) {
@@ -1185,24 +1214,126 @@ function updateColumnDataType(sourceColumn: string, value: any) {
 }
 
 const generatorPickerOpen = ref(false);
+const activeGeneratorTrigger = ref<HTMLElement | null>(null);
 const activeGeneratorColumn = ref<{ type: "source"; sourceColumn: string } | { type: "generated"; id: string } | null>(null);
 const generatorPickerStyle = ref<Record<string, string>>({});
 
-function openGeneratorPicker(target: { type: "source"; sourceColumn: string } | { type: "generated"; id: string }, trigger: HTMLElement) {
-  const rect = trigger.getBoundingClientRect();
+function updateGeneratorPickerPosition() {
+  const trigger = activeGeneratorTrigger.value;
+  if (!trigger || !generatorPickerOpen.value) return;
+
+  if (!trigger.isConnected) {
+    closeGeneratorPicker();
+    return;
+  }
+
+  const scrollParent = trigger.closest(".overflow-auto");
+  const triggerRect = trigger.getBoundingClientRect();
+  if (scrollParent) {
+    const parentRect = scrollParent.getBoundingClientRect();
+    if (triggerRect.bottom < parentRect.top || triggerRect.top > parentRect.bottom) {
+      closeGeneratorPicker();
+      return;
+    }
+  }
+
   generatorPickerStyle.value = {
     position: "fixed",
-    top: `${rect.bottom + 2}px`,
-    left: `${Math.max(10, Math.min(rect.left, window.innerWidth - 260))}px`,
+    top: `${triggerRect.bottom + 2}px`,
+    left: `${Math.max(10, Math.min(triggerRect.left, window.innerWidth - 260))}px`,
     width: "250px",
   };
+}
+
+function openGeneratorPicker(target: { type: "source"; sourceColumn: string } | { type: "generated"; id: string }, trigger: HTMLElement) {
+  if (dataTypePickerOpen.value) {
+    closeDataTypePicker();
+  }
+  activeGeneratorTrigger.value = trigger;
   activeGeneratorColumn.value = target;
   generatorPickerOpen.value = true;
+  updateGeneratorPickerPosition();
+  checkSyncListeners();
 }
 
 function closeGeneratorPicker() {
   generatorPickerOpen.value = false;
   activeGeneratorColumn.value = null;
+  activeGeneratorTrigger.value = null;
+  checkSyncListeners();
+}
+
+let syncListenersAttached = false;
+
+function onPickerScroll(event: Event) {
+  const dtMenu = document.getElementById("table-import-data-type-options");
+  const genMenu = document.getElementById("table-import-generator-options");
+  if (event.target instanceof Node && (dtMenu?.contains(event.target) || genMenu?.contains(event.target))) {
+    return;
+  }
+  if (dataTypePickerOpen.value) {
+    updateDataTypePickerPosition();
+  }
+  if (generatorPickerOpen.value) {
+    updateGeneratorPickerPosition();
+  }
+}
+
+function onPickerResize() {
+  if (dataTypePickerOpen.value) {
+    updateDataTypePickerPosition();
+  }
+  if (generatorPickerOpen.value) {
+    updateGeneratorPickerPosition();
+  }
+}
+
+function onOutsidePointerDown(event: PointerEvent) {
+  const target = event.target as Node | null;
+  if (!target) return;
+
+  if (dataTypePickerOpen.value) {
+    const dtMenu = document.getElementById("table-import-data-type-options");
+    if (!dtMenu?.contains(target) && !activeDataTypeTrigger.value?.contains(target)) {
+      closeDataTypePicker();
+    }
+  }
+
+  if (generatorPickerOpen.value) {
+    const genMenu = document.getElementById("table-import-generator-options");
+    if (!genMenu?.contains(target) && !activeGeneratorTrigger.value?.contains(target)) {
+      closeGeneratorPicker();
+    }
+  }
+}
+
+function onGlobalKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    if (generatorPickerOpen.value) {
+      event.preventDefault();
+      closeGeneratorPicker();
+    } else if (dataTypePickerOpen.value) {
+      event.preventDefault();
+      closeDataTypePicker();
+    }
+  }
+}
+
+function checkSyncListeners() {
+  const needsListeners = dataTypePickerOpen.value || generatorPickerOpen.value;
+  if (needsListeners && !syncListenersAttached) {
+    syncListenersAttached = true;
+    window.addEventListener("scroll", onPickerScroll, true);
+    window.addEventListener("resize", onPickerResize);
+    window.addEventListener("pointerdown", onOutsidePointerDown, true);
+    window.addEventListener("keydown", onGlobalKeydown);
+  } else if (!needsListeners && syncListenersAttached) {
+    syncListenersAttached = false;
+    window.removeEventListener("scroll", onPickerScroll, true);
+    window.removeEventListener("resize", onPickerResize);
+    window.removeEventListener("pointerdown", onOutsidePointerDown, true);
+    window.removeEventListener("keydown", onGlobalKeydown);
+  }
 }
 
 function selectGeneratorOption(generator: string) {
@@ -1716,12 +1847,16 @@ watch(
         previewReloadTimer = null;
       }
       if (!running.value) void releaseTableImportSources();
+      closeDataTypePicker();
+      closeGeneratorPicker();
     }
   },
   { immediate: true },
 );
 
 onBeforeUnmount(() => {
+  closeDataTypePicker();
+  closeGeneratorPicker();
   stopDialogDrag();
   if (previewReloadTimer) {
     clearTimeout(previewReloadTimer);
@@ -2243,7 +2378,6 @@ watch(rawProgressPercent, (percent) => {
                       :aria-activedescendant="activeDataTypeColumn === sourceColumn && activeDataTypeOptionIndex >= 0 ? `table-import-data-type-option-${activeDataTypeOptionIndex}` : undefined"
                       class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
                       @focus="(event) => openDataTypePicker(sourceColumn, event.currentTarget as HTMLInputElement)"
-                      @blur="closeDataTypePicker"
                       @keydown="(event) => handleDataTypePickerKeydown(event, sourceColumn, event.currentTarget as HTMLInputElement)"
                       @input="(e) => updateColumnDataType(sourceColumn, (e.target as HTMLInputElement).value)"
                     />
@@ -2547,7 +2681,6 @@ watch(rawProgressPercent, (percent) => {
 
       <!-- 全局生成器 popover -->
       <Teleport to="body">
-        <div v-if="generatorPickerOpen" class="fixed inset-0 z-[9998]" @click="closeGeneratorPicker" />
         <div v-if="generatorPickerOpen" id="table-import-generator-options" role="listbox" :style="generatorPickerStyle" class="pointer-events-auto z-[9999] max-h-60 overflow-auto rounded-md border bg-popover p-1 shadow-md">
           <div class="px-2 py-1 text-[11px] font-semibold text-muted-foreground">
             {{ t("tableImport.valueSource") }}

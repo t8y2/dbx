@@ -536,6 +536,7 @@ const MYSQL_SQL_KEYWORDS = [
   "JSON",
   "BOOL",
   "BOOLEAN",
+  "MEDIUMINT",
   "TINYTEXT",
   "MEDIUMTEXT",
   "LONGTEXT",
@@ -1078,6 +1079,7 @@ const DATA_TYPE_KEYWORDS = new Set([
   "REAL",
   "SMALLDATETIME",
   "SMALLINT",
+  "MEDIUMINT",
   "SMALLMONEY",
   "TEXT",
   "TIME",
@@ -2257,6 +2259,10 @@ export function shouldAutoOpenSqlCompletion(sql: string, cursor: number, options
   if (isSqlCompletionSuppressedContext(sql, cursor, options)) return false;
   const previousChar = sql[cursor - 1];
   if (!previousChar) return false;
+  // Whitespace typed directly in front of an existing token (re-indenting a select
+  // list, spacing out "a,b") is layout, not a request for a new token; accepting a
+  // suggestion there would glue it onto that token (dbx#14144).
+  if (/\s/.test(previousChar) && /[\w$@`"[\p{Script=Han}]/u.test(sql[cursor] ?? "")) return false;
   // Statement-bounded prefix: every probe below is anchored at the cursor and
   // only looks back within the current statement. Slicing the whole prefix (and
   // the literal-masking scans inside the modifier/expression helpers) made each

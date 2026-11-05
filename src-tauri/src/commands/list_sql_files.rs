@@ -6,7 +6,15 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const MAX_SCAN_DEPTH: usize = 10;
-const DEFAULT_FILE_FILTER: &str = r"(?i)\.(sql|ddl)$";
+/// Database-script extensions shown by default in the SQL file panel (#14204):
+/// `.sql`/`.ddl` plus the per-engine suffixes used in version-controlled repos
+/// (PostgreSQL `.psql`/`.plpgsql`/`.sqlpg`, Oracle `.prc`/`.fnc`/`.pkb`/`.pks`/
+/// `.pck`/`.pls`/`.plsql`/`.tps`/`.tpb`/`.trg`, SQL Server `.tsql`/`.spc`,
+/// MySQL/MariaDB `.trg`/`.rout`). JS/Mongo scripts stay opt-in via the filter
+/// setting. Keep in sync with `isSqlOrScriptFilePath` in the frontend
+/// `sqlFileOpen.ts`, which decides editor vs. system-application open.
+const DEFAULT_FILE_FILTER: &str =
+    r"(?i)\.(sql|ddl|psql|plpgsql|sqlpg|prc|fnc|pkb|pks|pck|pls|plsql|tps|tpb|trg|tsql|spc|rout)$";
 const MAX_SEARCH_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_SEARCH_FILE_MATCHES: usize = 100;
 const MAX_SEARCH_MATCHES: usize = 1000;
@@ -933,6 +941,11 @@ mod tests {
         std::fs::write(nested.join("nested.SQL"), "SELECT 2;").unwrap();
         std::fs::write(nested.join("notes.txt"), "ignored").unwrap();
         std::fs::write(idea.join("workspace.sql"), "SELECT 3;").unwrap();
+        // Per-engine script suffixes are part of the default whitelist (#14204).
+        std::fs::write(root.join("add_salary.prc"), "CREATE PROCEDURE ...").unwrap();
+        std::fs::write(root.join("audit_trg.trg"), "CREATE TRIGGER ...").unwrap();
+        std::fs::write(root.join("pkg_body.pkb"), "CREATE OR REPLACE PACKAGE BODY ...").unwrap();
+        std::fs::write(root.join("schema_dump.psql"), "SELECT 4;").unwrap();
 
         let mut visited = HashSet::new();
         let filter = compile_file_filter(DEFAULT_FILE_FILTER).unwrap();
@@ -941,7 +954,10 @@ mod tests {
         collect_file_names(&entries, &mut names);
         names.sort();
 
-        assert_eq!(names, vec!["nested.SQL", "root.sql"]);
+        assert_eq!(
+            names,
+            vec!["add_salary.prc", "audit_trg.trg", "nested.SQL", "pkg_body.pkb", "root.sql", "schema_dump.psql"]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

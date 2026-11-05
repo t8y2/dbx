@@ -540,6 +540,27 @@ test("parses TDengine WebSocket JDBC URLs", () => {
   assert.equal(parsed.password, "taosdata");
   assert.equal(parsed.database, "power");
   assert.equal(parsed.urlParams, "timezone=UTC");
+  assert.equal(parsed.ssl, false);
+});
+
+test("parses TDengine WebSocket JDBC URLs with useSSL=true", () => {
+  const parsed = parseConnectionUrl("jdbc:TAOS-WS://root:taosdata@td.example.com:6041/power?useSSL=true&timezone=UTC");
+
+  assert.equal(parsed.dbType, "tdengine");
+  assert.equal(parsed.host, "td.example.com");
+  assert.equal(parsed.port, 6041);
+  assert.equal(parsed.database, "power");
+  assert.equal(parsed.ssl, true);
+});
+
+test("parses TDengine native WebSocket URLs with taosws and taoswss schemes", () => {
+  const ws = parseConnectionUrl("taosws://root:taosdata@td.example.com:6041/power");
+  assert.equal(ws.dbType, "tdengine");
+  assert.equal(ws.ssl, false);
+
+  const wss = parseConnectionUrl("taoswss://root:taosdata@td.example.com:6041/power");
+  assert.equal(wss.dbType, "tdengine");
+  assert.equal(wss.ssl, true);
 });
 
 test("parses XuguDB JDBC URLs", () => {

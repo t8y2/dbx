@@ -1883,7 +1883,7 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 .sidebar-object-comment--windows {
-  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  /* Inherit the interface font; only adjust readability on Windows. */
   font-size: 1em;
   font-weight: 500;
   opacity: 1;

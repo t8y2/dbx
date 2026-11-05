@@ -722,4 +722,54 @@ describe("ignoring a version (#13626)", () => {
     expect(effectiveUpdateInfo(info, "1.0.5", false)).toBe(info);
     expect(effectiveUpdateInfo(null, "1.1.0", false)).toBeNull();
   });
+
+  it("reports the ignored version instead of claiming the app is up to date", async () => {
+    settings.ignoredUpdateVersion = "1.1.0";
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+
+    expect(updater.ignoredReleaseVersion.value).toBe("1.1.0");
+    expect(updater.visibleUpdateInfo.value?.update_available).toBe(false);
+  });
+
+  it("offers the release again once the ignore is undone", async () => {
+    settings.ignoredUpdateVersion = "1.1.0";
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+    mocks.checkForUpdates.mockClear();
+
+    await updater.restoreIgnoredVersion();
+    await flush();
+
+    expect(mocks.persist).toHaveBeenCalledWith({ ignoredUpdateVersion: "" });
+    // The guard must be released before the re-check, otherwise checkUpdates() returns early
+    // and the dialog keeps a stale snapshot.
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(updater.ignoredReleaseVersion.value).toBe("");
+    expect(updater.hasUpdateAvailable.value).toBe(true);
+    expect(updater.visibleUpdateInfo.value?.update_available).toBe(true);
+  });
+
+  it("does not report an ignored version when no release is being offered", async () => {
+    // The user ignored 1.1.0 and then upgraded to it; the backend now says up to date.
+    settings.ignoredUpdateVersion = "1.1.0";
+    mocks.checkForUpdates.mockResolvedValue({ ...info, current_version: "1.1.0", update_available: false });
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+
+    expect(updater.updateInfo.value?.update_available).toBe(false);
+    expect(updater.ignoredReleaseVersion.value).toBe("");
+  });
+
+  it("clears the reported ignored version when a newer release is published", async () => {
+    settings.ignoredUpdateVersion = "1.0.5";
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+
+    expect(updater.ignoredReleaseVersion.value).toBe("");
+  });
 });

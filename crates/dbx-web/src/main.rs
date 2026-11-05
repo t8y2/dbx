@@ -1,4 +1,5 @@
 mod auth;
+mod captcha;
 mod credentials;
 mod demo;
 mod error;
@@ -617,6 +618,7 @@ async fn serve() -> Result<(), String> {
         managed_sql_previews: Default::default(),
         nacos_imports: RwLock::new(HashMap::new()),
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
+        captchas: captcha::CaptchaStore::new(),
         export_files: RwLock::new(HashMap::new()),
         ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
         migration_ready: Arc::new(AtomicBool::new(migration_ready)),
@@ -649,6 +651,7 @@ async fn serve() -> Result<(), String> {
         // global limit so the extractor cannot buffer an unauthenticated DoS
         // body before any rate limiting runs.
         .route("/auth/login", post(auth::login).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
+        .route("/auth/captcha", get(auth::captcha))
         .route("/auth/check", get(auth::check))
         .route("/auth/setup", post(auth::setup).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
         .route("/auth/change-password", post(auth::change_password).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))

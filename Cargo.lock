@@ -2792,6 +2792,7 @@ dependencies = [
  "dbx-core",
  "dbx-mcp",
  "futures",
+ "getrandom 0.3.4",
  "log",
  "mime_guess",
  "pbkdf2 0.12.2",

@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import EditorSettingsDialog from "../EditorSettingsDialog.vue";
 
 const backend = vi.hoisted(() => ({ saved: null as unknown }));
@@ -69,12 +70,19 @@ async function mountSettings(variant: "page" | "dialog") {
   app = createApp(
     defineComponent({
       setup: () => () =>
-        h(EditorSettingsDialog, {
-          variant,
-          open: true,
-          initialTab: "editor",
-          "onUpdate:open": () => undefined,
-        }),
+        h(
+          TooltipProvider,
+          {},
+          {
+            default: () =>
+              h(EditorSettingsDialog, {
+                variant,
+                open: true,
+                initialTab: "editor",
+                "onUpdate:open": () => undefined,
+              }),
+          },
+        ),
     }),
   );
   app.use(pinia);
@@ -119,6 +127,25 @@ describe("EditorSettingsDialog footer layout", () => {
     await mountSettings("page");
     if (tab !== "editor") await switchTab(labelKey);
     expectFooterOutsideScrollingBody(host);
+  });
+
+  it("places toolbar inside editor settings after SQL file, without adding sidebar entries", async () => {
+    await mountSettings("page");
+    const editor = host.querySelector('[data-settings-search-id="editor"]')!;
+    const sqlFile = editor.querySelector('[data-settings-search-id="editor-sql-file"]')!;
+    const toolbar = editor.querySelector('[data-settings-search-id="editor-toolbar"]')!;
+    expect(toolbar.querySelector("[data-editor-toolbar-preferences]")).not.toBeNull();
+    expect(sqlFile.compareDocumentPosition(toolbar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(toolbar.previousElementSibling?.previousElementSibling).toBe(sqlFile);
+    const heading = toolbar.querySelector("[data-editor-toolbar-heading]")!;
+    expect(heading.textContent?.trim()).toBe(i18n.global.t("settings.editorToolbarPreferences"));
+    expect(heading.className).toBe(sqlFile.firstElementChild?.className);
+    expect(toolbar.textContent).not.toContain("执行按钮始终显示");
+    expect(toolbar.textContent).not.toContain("可横向滚动查看全部操作");
+    expect(host.querySelector("[data-settings-parent]")).toBeNull();
+    expectFooterOutsideScrollingBody(host);
+    await switchTab("settings.navigationTab");
+    expect(host.querySelector("[data-editor-toolbar-preferences]")).toBeNull();
   });
 
   it("keeps the footer outside the scrolling body (dialog variant)", async () => {

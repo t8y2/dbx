@@ -54,6 +54,7 @@ const excludedLabels: Record<string, string> = {
 // Dynamic labels must have an audited canonical source or a static protocol alias.
 // A newly introduced computed label should fail coverage until its source is accounted for.
 const auditedNonLiteralLabels: Record<string, string> = {
+  "A label(id)": "A is the toolbar keyword-case glyph; EDITOR_TOOLBAR_ACTION_IDS supplies all indexed action labels",
   executeModeLabel: "Translated settings.executeMode",
   "SQL_VARIABLE_SYNTAX_TOKENS[key] t(`settings.sqlVariableSyntax_${key}`)": "SQL_VARIABLE_SYNTAX_KEYS tested below",
   "t(definition.labelKey)": "SHORTCUT_DEFINITIONS tested below",

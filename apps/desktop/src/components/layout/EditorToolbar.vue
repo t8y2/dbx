@@ -69,6 +69,7 @@ import type { MongoQueryLanguage } from "@/lib/mongo/mongoSql";
 import { isObjectDependencySection } from "@/lib/database/objectDependencyDetails";
 import { connectionDetailRows } from "@/lib/connection/connectionDetailRows";
 import { findConnectionGroupPath } from "@/lib/sidebar/sidebarLayout";
+import { editorToolbarActionOrder, editorToolbarActionVisible, resolveEditorToolbarPresentation, type EditorToolbarActionId } from "@/lib/editor/editorToolbarPreferences";
 
 const props = defineProps<{
   activeTab: QueryTab;
@@ -145,6 +146,15 @@ const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const editorToolbarPresentation = computed(() =>
+  resolveEditorToolbarPresentation({
+    order: settingsStore.editorSettings.editorToolbarOrder,
+    hiddenActions: settingsStore.editorSettings.editorToolbarHiddenActions,
+  }),
+);
+const actionVisible = (id: EditorToolbarActionId) => editorToolbarActionVisible(editorToolbarPresentation.value, id);
+// Customizable actions stay before fixed context and transaction controls.
+const actionStyle = (id: EditorToolbarActionId) => ({ order: editorToolbarActionOrder(editorToolbarPresentation.value, id) - 100 });
 const showMongoSqlToggle = computed(() => props.activeConnection?.db_type === "mongodb" && props.activeTab.mode === "query");
 const mongoQueryLanguage = computed(() => props.activeTab.mongoQueryLanguage ?? "shell");
 
@@ -634,6 +644,7 @@ defineExpose({
       <Tooltip>
         <TooltipTrigger as-child>
           <Button
+            :style="actionStyle('execute')"
             :variant="activeTab.isExecuting ? 'destructive' : 'ghost'"
             size="icon"
             class="h-6 w-6"
@@ -665,17 +676,18 @@ defineExpose({
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.copyMongoShell") }}</TooltipContent>
       </Tooltip>
-      <Tooltip>
+      <Tooltip v-if="actionVisible('execute-all')">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6" :class="executeAllButtonClass" :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining || !hasSqlText" :aria-label="t('toolbar.executeAllSql')" @click="onExecuteAllClick">
+          <Button :style="actionStyle('execute-all')" variant="ghost" size="icon" class="h-6 w-6" :class="executeAllButtonClass" :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining || !hasSqlText" :aria-label="t('toolbar.executeAllSql')" @click="onExecuteAllClick">
             <FastForward class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ executeAllShortcutTooltip }}</TooltipContent>
       </Tooltip>
-      <Tooltip>
+      <Tooltip v-if="actionVisible('execute-in-new-result-tab')">
         <TooltipTrigger as-child>
           <Button
+            :style="actionStyle('execute-in-new-result-tab')"
             variant="ghost"
             size="icon"
             class="h-6 w-6 text-violet-600 hover:bg-violet-500/10 hover:text-violet-700 dark:text-violet-300 dark:hover:text-violet-200"
@@ -689,17 +701,27 @@ defineExpose({
         </TooltipTrigger>
         <TooltipContent>{{ executeInNewResultTabTooltip }}</TooltipContent>
       </Tooltip>
-      <Tooltip v-if="showPreviewButton">
+      <Tooltip v-if="showPreviewButton && actionVisible('preview-changes')">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-sky-600 hover:bg-sky-500/10 hover:text-sky-700" :disabled="activeTab.isExecuting || activeTab.isCancelling" :aria-label="t('editor.previewChanges')" @mousedown.prevent @click="emit('previewChanges')">
+          <Button
+            :style="actionStyle('preview-changes')"
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6 text-sky-600 hover:bg-sky-500/10 hover:text-sky-700"
+            :disabled="activeTab.isExecuting || activeTab.isCancelling"
+            :aria-label="t('editor.previewChanges')"
+            @mousedown.prevent
+            @click="emit('previewChanges')"
+          >
             <Eye class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("editor.previewChanges") }}</TooltipContent>
       </Tooltip>
-      <Tooltip v-if="supportsExplain">
+      <Tooltip v-if="supportsExplain && actionVisible('explain')">
         <TooltipTrigger as-child>
           <Button
+            :style="actionStyle('explain')"
             :variant="activeTab.isExplaining ? 'destructive' : 'ghost'"
             size="icon"
             class="h-6 w-6"
@@ -731,41 +753,49 @@ defineExpose({
         </TooltipTrigger>
         <TooltipContent>{{ explainAnalyzeTooltip }}</TooltipContent>
       </Tooltip>
-      <Tooltip v-if="showFormatButton">
+      <Tooltip v-if="showFormatButton && actionVisible('format')">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @click="emit('formatSql')">
+          <Button :style="actionStyle('format')" variant="ghost" size="icon" class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @click="emit('formatSql')">
             <AlignLeft class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ formatSqlTooltip }}</TooltipContent>
       </Tooltip>
-      <Tooltip v-if="showCompressButton">
+      <Tooltip v-if="showCompressButton && actionVisible('compress')">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @click="emit('compressSql')">
+          <Button
+            :style="actionStyle('compress')"
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200"
+            :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText"
+            @click="emit('compressSql')"
+          >
             <Minimize2 class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.compressSql") }}</TooltipContent>
       </Tooltip>
-      <Tooltip v-if="showFoldButtons">
+      <Tooltip v-if="showFoldButtons && actionVisible('fold-all')">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" :aria-label="t('toolbar.foldAll')" @click="emit('foldAll')">
+          <Button :style="actionStyle('fold-all')" variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" :aria-label="t('toolbar.foldAll')" @click="emit('foldAll')">
             <FoldVertical class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ foldAllTooltip }}</TooltipContent>
       </Tooltip>
-      <Tooltip v-if="showFoldButtons">
+      <Tooltip v-if="showFoldButtons && actionVisible('unfold-all')">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" :aria-label="t('toolbar.unfoldAll')" @click="emit('unfoldAll')">
+          <Button :style="actionStyle('unfold-all')" variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" :aria-label="t('toolbar.unfoldAll')" @click="emit('unfoldAll')">
             <UnfoldVertical class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ unfoldAllTooltip }}</TooltipContent>
       </Tooltip>
-      <Tooltip v-if="showKeywordCaseButton">
+      <Tooltip v-if="showKeywordCaseButton && actionVisible('keyword-case')">
         <TooltipTrigger as-child>
           <Button
+            :style="actionStyle('keyword-case')"
             variant="ghost"
             size="icon"
             class="h-6 w-6 font-mono text-sm font-semibold leading-none"
@@ -778,9 +808,10 @@ defineExpose({
         </TooltipTrigger>
         <TooltipContent>{{ keywordCaseToggleTooltip }}</TooltipContent>
       </Tooltip>
-      <Tooltip v-if="showWordWrapButton">
+      <Tooltip v-if="showWordWrapButton && actionVisible('word-wrap')">
         <TooltipTrigger as-child>
           <Button
+            :style="actionStyle('word-wrap')"
             variant="ghost"
             size="icon"
             class="h-6 w-6"
@@ -795,9 +826,10 @@ defineExpose({
         </TooltipTrigger>
         <TooltipContent>{{ t("settings.wordWrap") }}</TooltipContent>
       </Tooltip>
-      <Tooltip v-if="showSemanticDiagnosticsButton">
+      <Tooltip v-if="showSemanticDiagnosticsButton && actionVisible('semantic-diagnostics')">
         <TooltipTrigger as-child>
           <Button
+            :style="actionStyle('semantic-diagnostics')"
             variant="ghost"
             size="icon"
             class="h-6 w-6"
@@ -810,9 +842,10 @@ defineExpose({
         </TooltipTrigger>
         <TooltipContent>{{ sqlSemanticDiagnosticsToggleTooltip }}</TooltipContent>
       </Tooltip>
-      <Tooltip v-if="showInsertValueHintsButton">
+      <Tooltip v-if="showInsertValueHintsButton && actionVisible('insert-value-hints')">
         <TooltipTrigger as-child>
           <Button
+            :style="actionStyle('insert-value-hints')"
             variant="ghost"
             size="icon"
             class="h-6 w-6"
@@ -842,9 +875,9 @@ defineExpose({
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.blockDangerousRedisCommands") }}</TooltipContent>
       </Tooltip>
-      <Tooltip>
+      <Tooltip v-if="actionVisible('save')">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-blue-600 hover:bg-blue-500/10 hover:text-blue-700 dark:text-blue-300 dark:hover:text-blue-200" :disabled="!canSaveSql" @click="emit('saveSql', props.activeTab.id)">
+          <Button :style="actionStyle('save')" variant="ghost" size="icon" class="h-6 w-6 text-blue-600 hover:bg-blue-500/10 hover:text-blue-700 dark:text-blue-300 dark:hover:text-blue-200" :disabled="!canSaveSql" @click="emit('saveSql', props.activeTab.id)">
             <Save class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
@@ -866,33 +899,33 @@ defineExpose({
         </TooltipTrigger>
         <TooltipContent>{{ t("structureEditor.refresh") }}</TooltipContent>
       </Tooltip>
-      <Tooltip v-if="showOpenSqlButton">
+      <Tooltip v-if="showOpenSqlButton && actionVisible('open-sql')">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-sky-600 hover:bg-sky-500/10 hover:text-sky-700 dark:text-sky-300 dark:hover:text-sky-200" @click="emit('openSql')">
+          <Button :style="actionStyle('open-sql')" variant="ghost" size="icon" class="h-6 w-6 text-sky-600 hover:bg-sky-500/10 hover:text-sky-700 dark:text-sky-300 dark:hover:text-sky-200" @click="emit('openSql')">
             <FolderOpen class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.openSql") }}</TooltipContent>
       </Tooltip>
-      <Tooltip v-if="showImportArchiveButton">
+      <Tooltip v-if="showImportArchiveButton && actionVisible('import-result-archive')">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-cyan-600 hover:bg-cyan-500/10 hover:text-cyan-700 dark:text-cyan-300 dark:hover:text-cyan-200" @click="emit('importResultArchive')">
+          <Button :style="actionStyle('import-result-archive')" variant="ghost" size="icon" class="h-6 w-6 text-cyan-600 hover:bg-cyan-500/10 hover:text-cyan-700 dark:text-cyan-300 dark:hover:text-cyan-200" @click="emit('importResultArchive')">
             <Download class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ t("tabs.importResultArchive") }}</TooltipContent>
       </Tooltip>
-      <Tooltip v-if="showPasteSqlButton">
+      <Tooltip v-if="showPasteSqlButton && actionVisible('paste-sql-condition')">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-teal-600 hover:bg-teal-500/10 hover:text-teal-700 dark:text-teal-300 dark:hover:text-teal-200" @click="emit('pasteSqlInCondition')">
+          <Button :style="actionStyle('paste-sql-condition')" variant="ghost" size="icon" class="h-6 w-6 text-teal-600 hover:bg-teal-500/10 hover:text-teal-700 dark:text-teal-300 dark:hover:text-teal-200" @click="emit('pasteSqlInCondition')">
             <ClipboardPaste class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ exPasteSqlInConditionTooltip }}</TooltipContent>
       </Tooltip>
-      <Tooltip v-if="showMultiExecuteButton">
+      <Tooltip v-if="showMultiExecuteButton && actionVisible('multi-execute')">
         <TooltipTrigger as-child>
-          <Button variant="ghost" size="icon" class="h-6 w-6 text-primary hover:bg-primary/10" :disabled="!canMultiExecute" :aria-label="t('toolbar.multiDbExecute')" @click="emit('multiExecute')">
+          <Button :style="actionStyle('multi-execute')" variant="ghost" size="icon" class="h-6 w-6 text-primary hover:bg-primary/10" :disabled="!canMultiExecute" :aria-label="t('toolbar.multiDbExecute')" @click="emit('multiExecute')">
             <CirclePlay class="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
@@ -905,58 +938,58 @@ defineExpose({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" class="w-max min-w-56 max-w-[calc(100vw-1rem)]">
-          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('compressSql')">
+          <DropdownMenuItem v-if="actionVisible('compress')" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('compressSql')">
             <Minimize2 class="h-3.5 w-3.5" />
             {{ t("toolbar.compressSql") }}
           </DropdownMenuItem>
-          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('foldAll')">
+          <DropdownMenuItem v-if="actionVisible('fold-all')" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('foldAll')">
             <FoldVertical class="h-3.5 w-3.5" />
             {{ t("toolbar.foldAll") }}
           </DropdownMenuItem>
-          <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('unfoldAll')">
+          <DropdownMenuItem v-if="actionVisible('unfold-all')" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('unfoldAll')">
             <UnfoldVertical class="h-3.5 w-3.5" />
             {{ t("toolbar.unfoldAll") }}
           </DropdownMenuItem>
-          <DropdownMenuItem @select="emit('toggleSqlKeywordCase')">
+          <DropdownMenuItem v-if="actionVisible('keyword-case')" @select="emit('toggleSqlKeywordCase')">
             <span class="inline-flex h-4 w-4 shrink-0 items-center justify-center font-mono text-xs font-semibold" aria-hidden="true">
               {{ keywordCaseIsLower ? "A" : "a" }}
             </span>
             {{ keywordCaseToggleTooltip }}
           </DropdownMenuItem>
-          <DropdownMenuCheckboxItem :model-value="wordWrapEnabled" :disabled="activeTab.forceWordWrap === true" @select.prevent="toggleWordWrap">
+          <DropdownMenuCheckboxItem v-if="actionVisible('word-wrap')" :model-value="wordWrapEnabled" :disabled="activeTab.forceWordWrap === true" @select.prevent="toggleWordWrap">
             <WrapText class="h-3.5 w-3.5" />
             {{ t("settings.wordWrap") }}
           </DropdownMenuCheckboxItem>
-          <DropdownMenuCheckboxItem v-if="supportsSqlSemanticDiagnosticsToggle" :model-value="sqlSemanticDiagnosticsEnabled" @select.prevent="toggleSqlSemanticDiagnostics">
+          <DropdownMenuCheckboxItem v-if="supportsSqlSemanticDiagnosticsToggle && actionVisible('semantic-diagnostics')" :model-value="sqlSemanticDiagnosticsEnabled" @select.prevent="toggleSqlSemanticDiagnostics">
             <SpellCheck2 class="h-3.5 w-3.5" />
             {{ t("settings.sqlSemanticDiagnosticsEnabled") }}
           </DropdownMenuCheckboxItem>
-          <DropdownMenuItem @select="emit('openSql')">
+          <DropdownMenuItem v-if="actionVisible('open-sql')" @select="emit('openSql')">
             <FolderOpen class="h-3.5 w-3.5" />
             {{ t("toolbar.openSql") }}
           </DropdownMenuItem>
-          <DropdownMenuItem @select="emit('importResultArchive')">
+          <DropdownMenuItem v-if="actionVisible('import-result-archive')" @select="emit('importResultArchive')">
             <Download class="h-3.5 w-3.5" />
             {{ t("tabs.importResultArchive") }}
           </DropdownMenuItem>
-          <DropdownMenuItem v-if="supportsExPaste" @select="emit('pasteSqlInCondition')">
+          <DropdownMenuItem v-if="supportsExPaste && actionVisible('paste-sql-condition')" @select="emit('pasteSqlInCondition')">
             <ClipboardPaste class="h-3.5 w-3.5" />
             {{ t("toolbar.exPasteSqlInCondition") }}
           </DropdownMenuItem>
-          <DropdownMenuItem :disabled="!canMultiExecute" @select="emit('multiExecute')">
+          <DropdownMenuItem v-if="actionVisible('multi-execute')" :disabled="!canMultiExecute" @select="emit('multiExecute')">
             <CirclePlay class="h-3.5 w-3.5" />
             {{ t("toolbar.multiDbExecute") }}
           </DropdownMenuItem>
-          <DropdownMenuItem v-if="previewButtonVisible" :disabled="activeTab.isExecuting || activeTab.isCancelling" @select="emit('previewChanges')">
+          <DropdownMenuItem v-if="previewButtonVisible && actionVisible('preview-changes')" :disabled="activeTab.isExecuting || activeTab.isCancelling" @select="emit('previewChanges')">
             <Eye class="h-3.5 w-3.5" />
             {{ t("editor.previewChanges") }}
           </DropdownMenuItem>
-          <DropdownMenuCheckboxItem v-if="supportsInsertValueHintsToggle" :model-value="insertValueHintsEnabled" @select.prevent="toggleInsertValueHints">
+          <DropdownMenuCheckboxItem v-if="supportsInsertValueHintsToggle && actionVisible('insert-value-hints')" :model-value="insertValueHintsEnabled" @select.prevent="toggleInsertValueHints">
             <BetweenVerticalStart class="h-3.5 w-3.5" />
             {{ t("settings.showInsertValueHints") }}
           </DropdownMenuCheckboxItem>
           <template v-if="toolbarTier >= 2">
-            <DropdownMenuItem v-if="canFormatSql" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('formatSql')">
+            <DropdownMenuItem v-if="canFormatSql && actionVisible('format')" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @select="emit('formatSql')">
               <AlignLeft class="h-3.5 w-3.5" />
               {{ t("toolbar.formatSql") }}
             </DropdownMenuItem>

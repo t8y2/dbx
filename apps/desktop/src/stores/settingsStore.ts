@@ -43,6 +43,7 @@ import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebar/sidebarTableN
 import { normalizeSidebarCopyTableNameSeparator } from "@/lib/sidebar/sidebarTableNameCopy";
 import type { SidebarActivation } from "@/lib/sidebar/treeNodeClick";
 import { normalizeSidebarMenuPinnedActions, normalizeSidebarMenuOrder, type SidebarMenuLayout, type SidebarMenuPinnedActions, type SidebarMenuOrder } from "@/lib/sidebar/sidebarMenuPreferences";
+import { DEFAULT_EDITOR_TOOLBAR_ORDER, normalizeEditorToolbarHiddenActions, normalizeEditorToolbarOrder, type EditorToolbarActionId } from "@/lib/editor/editorToolbarPreferences";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlSnippetTemplates";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 import { canonicalSqlShortcutSql, DEFAULT_SQL_SHORTCUTS, deriveSqlShortcutDatabaseTypes, mergeDefaultSqlShortcuts, normalizeSqlShortcutDatabaseTypes, normalizeSqlShortcutKind, normalizeSqlShortcutLimit, normalizeSqlShortcutSqlByDatabaseType } from "@/lib/sql/sqlShortcutActions";
@@ -1288,6 +1289,8 @@ export interface EditorSettings {
   /** Plugin ids the user granted `script-src 'unsafe-eval'` in the workbench sandbox. */
   pluginGraphicsEngineIds: string[];
   toolbarItems: ToolbarItems;
+  editorToolbarOrder: EditorToolbarActionId[];
+  editorToolbarHiddenActions: EditorToolbarActionId[];
   objectBrowserShowCheckbox: boolean;
   objectBrowserViewMode: "list" | "grid" | "compact";
   objectBrowserCompactWidth: ObjectBrowserCompactWidth;
@@ -1656,6 +1659,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   pluginShortcuts: normalizePluginShortcutSettings(undefined),
   pluginGraphicsEngineIds: [],
   toolbarItems: { ...DEFAULT_TOOLBAR_ITEMS },
+  editorToolbarOrder: [...DEFAULT_EDITOR_TOOLBAR_ORDER],
+  editorToolbarHiddenActions: [],
   objectBrowserShowCheckbox: false,
   objectBrowserViewMode: "list",
   objectBrowserCompactWidth: DEFAULT_OBJECT_BROWSER_COMPACT_WIDTH,
@@ -2439,6 +2444,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     pluginShortcuts: normalizePluginShortcutSettings(settings.pluginShortcuts),
     pluginGraphicsEngineIds: normalizePluginGraphicsEngineIds(settings.pluginGraphicsEngineIds),
     toolbarItems: normalizeToolbarItems(settings.toolbarItems),
+    editorToolbarOrder: normalizeEditorToolbarOrder(settings.editorToolbarOrder),
+    editorToolbarHiddenActions: normalizeEditorToolbarHiddenActions(settings.editorToolbarHiddenActions),
     objectBrowserShowCheckbox: typeof settings.objectBrowserShowCheckbox === "boolean" ? settings.objectBrowserShowCheckbox : DEFAULT_EDITOR_SETTINGS.objectBrowserShowCheckbox,
     objectBrowserCompactWidth: normalizeObjectBrowserCompactWidth(settings.objectBrowserCompactWidth),
     objectBrowserViewMode: settings.objectBrowserViewMode === "grid" || settings.objectBrowserViewMode === "compact" ? settings.objectBrowserViewMode : DEFAULT_EDITOR_SETTINGS.objectBrowserViewMode,
@@ -3370,6 +3377,8 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.pluginShortcuts !== undefined) editorSettings.value.pluginShortcuts = normalizePluginShortcutSettings(partial.pluginShortcuts);
     if (partial.pluginGraphicsEngineIds !== undefined) editorSettings.value.pluginGraphicsEngineIds = normalizePluginGraphicsEngineIds(partial.pluginGraphicsEngineIds);
     if (partial.toolbarItems !== undefined) editorSettings.value.toolbarItems = normalizeToolbarItems(partial.toolbarItems);
+    if (partial.editorToolbarOrder !== undefined) editorSettings.value.editorToolbarOrder = normalizeEditorToolbarOrder(partial.editorToolbarOrder);
+    if (partial.editorToolbarHiddenActions !== undefined) editorSettings.value.editorToolbarHiddenActions = normalizeEditorToolbarHiddenActions(partial.editorToolbarHiddenActions);
     if (partial.objectBrowserShowCheckbox !== undefined) editorSettings.value.objectBrowserShowCheckbox = partial.objectBrowserShowCheckbox === true;
     if (partial.objectBrowserCompactWidth !== undefined) editorSettings.value.objectBrowserCompactWidth = normalizeObjectBrowserCompactWidth(partial.objectBrowserCompactWidth);
     if (partial.objectBrowserViewMode !== undefined) editorSettings.value.objectBrowserViewMode = partial.objectBrowserViewMode === "grid" || partial.objectBrowserViewMode === "compact" ? partial.objectBrowserViewMode : "list";

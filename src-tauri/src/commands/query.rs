@@ -1021,6 +1021,13 @@ pub fn build_routine_rename_object_source_statements(
 }
 
 #[tauri::command]
+pub fn build_routine_copy_object_source_sql(
+    input: dbx_core::object_source_sql::RoutineCopyObjectSourceInput,
+) -> Result<String, String> {
+    dbx_core::object_source_sql::build_routine_copy_object_source_sql(input)
+}
+
+#[tauri::command]
 pub fn rewrite_oracle_routine_references(
     input: dbx_core::object_source_sql::OracleRoutineReferenceRewriteInput,
 ) -> Result<String, String> {

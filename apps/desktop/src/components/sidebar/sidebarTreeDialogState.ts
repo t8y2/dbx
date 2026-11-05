@@ -1,6 +1,7 @@
 import { ref, shallowRef } from "vue";
 import type { DatabaseType, TreeNode } from "@/types/database";
 import type { PasteTableMode } from "@/lib/table/tableClipboard";
+import type { RoutineClipboardEntry } from "@/lib/table/routineClipboard";
 import { fallbackCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
 import type { DatabaseUserIdentity } from "@/lib/database/databaseUserAdmin";
 import type { AuthorizationPlan, AuthorizationStepResult } from "@/lib/database/databaseAuthorizationPlan";
@@ -87,6 +88,12 @@ export const showDuplicateDialog = ref(false);
 export const duplicateTableName = ref("");
 export const duplicateStructureSource = ref<DuplicateStructureSource | null>(null);
 export const showPasteDialog = ref(false);
+export const showPasteRoutineDialog = ref(false);
+export const pasteRoutineName = ref("");
+export const pasteRoutineLoading = ref(false);
+export const pasteRoutineError = ref("");
+export const pasteRoutineSource = shallowRef<RoutineClipboardEntry | null>(null);
+export const pasteRoutineTarget = shallowRef<TreeNode | null>(null);
 export const pasteTableMode = ref<PasteTableMode>("structure-and-data");
 export const pasteTableEntries = ref<Array<{ sourceName: string; targetName: string; connectionId: string; database: string; schema?: string; tableComment?: string | null }>>([]);
 export const pasteTableFromClipboard = ref(false);
@@ -231,6 +238,7 @@ const openFlags = [
   showRenameObjectDialog,
   showDuplicateDialog,
   showPasteDialog,
+  showPasteRoutineDialog,
   showCreateDatabaseDialog,
   showCreateDatabasePreviewDialog,
   showCreateNacosNamespaceDialog,
@@ -260,6 +268,11 @@ const openFlags = [
 
 export function resetSidebarTreeDialogState() {
   for (const flag of openFlags) flag.value = false;
+  pasteRoutineName.value = "";
+  pasteRoutineLoading.value = false;
+  pasteRoutineError.value = "";
+  pasteRoutineSource.value = null;
+  pasteRoutineTarget.value = null;
   compileErrorTitle.value = "";
   compileErrorMessage.value = "";
   createDatabaseUsers.value = [];

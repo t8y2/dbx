@@ -5557,7 +5557,7 @@ function applyObjectBrowserDetails(details: readonly ObjectBrowserRow[]) {
  * previous `JSON.stringify([writeToken, ...])` embedded the token's generation and
  * frozen scope, so two equivalent browsers never shared a pending read.
  */
-function objectBrowserReadKey(request: ObjectBrowserRowsLoadHandle, types: (SidebarObjectKind | "EVENT")[] | undefined, readOptions: MetadataReadOptions | undefined): string {
+function objectBrowserReadKey(request: ObjectBrowserRowsLoadHandle, types: (SidebarObjectKind | "EVENT")[] | undefined, readOptions: import("@/types/database").MetadataReadOptions | undefined): string {
   const { connectionId, database, schema, catalog } = request.scope;
   return JSON.stringify([connectionId, database, schema, catalog ?? "", types ?? null, readOptions?.lightweight ?? null, readOptions?.identityMode ?? null]);
 }

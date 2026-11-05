@@ -251,7 +251,7 @@ import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPr
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRowsForScaffold, type ObjectBrowserRowsCacheScope, type ObjectBrowserRowsCacheWriteToken } from "@/lib/table/objectBrowserRowsCache";
 import { createObjectBrowserRowsLoadGuard, type ObjectBrowserRowsLoadHandle } from "@/lib/table/objectBrowserRowsLoadGuard";
-import { metadataLoadBudgetMs } from "@/lib/metadata/metadataLoadBudget";
+import { metadataLoadBudgetMs, waitForMetadata } from "@/lib/metadata/metadataLoadBudget";
 import { shareObjectBrowserRead } from "@/lib/table/objectBrowserPendingReads";
 import { loadObjectDdl, type ObjectDdlRequest } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
@@ -364,6 +364,9 @@ let objectPageNextAnchor: string | undefined;
 let objectSearchTimer: ReturnType<typeof setTimeout> | undefined;
 const refreshingObjects = ref(false);
 const scaffoldRefreshError = ref("");
+const loadingObjectDetails = ref(false);
+const objectDetailsError = ref("");
+let retryObjectDetails: (() => void) | undefined;
 const sourceLoading = ref(false);
 const sourceContent = ref("");
 const sourceError = ref("");
@@ -5246,10 +5249,13 @@ watch([() => props.initialEventName, () => props.initialEventOpenRequestId, () =
 // 匹配 0 行；schema 解析失败（loadSchemas 抛错或返回空列表）时标签会整体空白
 // (#8301)。经 objectListSchemaForConnection 回退到连接用户名（大写），仅限
 // 达梦；oracle/oceanbase-oracle 维持空 schema 由后端解析当前 schema。
-async function loadObjects(options?: { allowCached?: boolean; preserveExistingRows?: boolean; details?: boolean }) {
+async function loadObjects(options?: { allowCached?: boolean; preserveExistingRows?: boolean }) {
   clearTimeout(objectSearchTimer);
   if (usesServerObjectPaging.value) return loadObjectPage(false, options);
   error.value = "";
+  loadingObjectDetails.value = false;
+  objectDetailsError.value = "";
+  retryObjectDetails = undefined;
   // A new load supersedes any in-flight one, so reset the transient refresh flags
   // on entry. A superseded request's finally() can no longer run (the guard's
   // epoch moved on) and would otherwise leave refreshingObjects stuck spinning
@@ -5287,7 +5293,9 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     finishOnce();
     // 行数/大小是随对象列表一起缓存的，直接返回缓存会让这两列一直停在上一次统计
     // （#10461）。对象列表本身仍按上面的约定不动，只把统计信息在后台补一次。
-    if (cached.stale && !usesLightweightMysqlBrowser(props.connection)) void revalidateCachedObjectStatistics(request, cacheWriteToken);
+    if (usesLightweightMysqlBrowser(props.connection)) {
+      if (!cached.detailsComplete || cached.stale) void loadMysqlObjectDetails(request, cacheWriteToken);
+    } else if (cached.stale) void revalidateCachedObjectStatistics(request, cacheWriteToken);
     return;
   } else {
     // No scaffold: first load in this scope, cache invalidated by a DDL mutation,
@@ -5304,12 +5312,19 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
   }
 
   try {
-    const load = props.connection.db_type === "mongodb" ? loadMongoObjectBrowserRows(request.scope.connectionId, request.scope.database) : loadSqlObjectBrowserRows(request, options?.details);
+    const load = props.connection.db_type === "mongodb" ? loadMongoObjectBrowserRows(request.scope.connectionId, request.scope.database) : loadSqlObjectBrowserRows(request);
     const nextRows = await objectBrowserRowsLoadGuard.wait(request.epoch, load, metadataLoadBudgetMs(props.connection.query_timeout_secs));
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     applyObjectBrowserRows(nextRows);
-    const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows);
-    if (!usesLightweightMysqlBrowser(props.connection) || options?.details) void loadObjectStatistics(request, cacheWriteToken, cachedAt);
+    const progressive = usesLightweightMysqlBrowser(props.connection);
+    const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows, { detailsComplete: !progressive });
+    if (progressive) {
+      // Publish names and release the blocking spinner before awaiting details.
+      loadingObjects.value = false;
+      refreshingObjects.value = false;
+      finishOnce();
+      void loadMysqlObjectDetails(request, cacheWriteToken);
+    } else void loadObjectStatistics(request, cacheWriteToken, cachedAt);
   } catch (e: any) {
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     // Keep visible rows on a background revalidate failure — surface a lightweight
@@ -5333,7 +5348,7 @@ function objectPageAnchor(object: ObjectInfo): string {
   return exactOracleTriggerMetadata(object.trigger) ? tablePageRowAnchorKey(object.name, object.schema, undefined, object.trigger) : JSON.stringify([object.schema, object.name, object.object_type, object.signature]);
 }
 
-async function loadObjectPage(append: boolean, options?: { preserveExistingRows?: boolean; details?: boolean }) {
+async function loadObjectPage(append: boolean, options?: { preserveExistingRows?: boolean }) {
   if (append && (loadingObjects.value || refreshingObjects.value || loadingMoreObjects.value || !hasMoreObjects.value)) return;
   const schema = exactIndexList.value ? indexParentSchema() : needsSchema.value ? objectListSchemaForConnection(props.connection, selectedSchema.value) : props.database;
   const request = objectBrowserRowsLoadGuard.start(objectBrowserRowsCacheScope(schema));
@@ -5427,17 +5442,50 @@ async function loadSqlObjectBrowserRows(request: ObjectBrowserRowsLoadHandle, de
   const types = supportsSchemaIndexes.value ? sidebarObjectKindsForDatabase(effectiveDatabaseType.value).filter((type) => type !== "INDEX") : undefined;
   const readOptions = usesLightweightMysqlBrowser(props.connection) ? { lightweight: !details } : oracleTriggerObjectReadOptions(props.connection, types, request.scope.catalog);
   const readKey = JSON.stringify([createObjectBrowserRowsCacheWriteToken(request.scope), types, readOptions]);
-  const objects: ObjectInfo[] = await shareObjectBrowserRead(readKey, () =>
-    readOptions
+  const objects: ObjectInfo[] = await shareObjectBrowserRead(readKey, () => {
+    const read = readOptions
       ? api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog, undefined, undefined, readOptions)
-      : api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog),
-  );
+      : api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog);
+    // Evict a timed-out shared detail read too, so retry starts a new request.
+    // This bounds local waiting; backend statement cancellation remains separate.
+    return details ? waitForMetadata(read, metadataLoadBudgetMs(props.connection.query_timeout_secs)) : read;
+  });
   return buildObjectBrowserRows({
     objects: objects.filter((object) => !supportsSchemaIndexes.value || object.object_type !== "INDEX"),
     database: request.scope.database,
     fallbackSchema: request.scope.schema,
     rowSchema: connectionObjectTreeNodeSchema(props.connection, props.database, selectedSchema.value),
   });
+}
+
+/** Enrich the published names without resetting filters, selection or scroll. */
+async function loadMysqlObjectDetails(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken) {
+  if (!objectBrowserRowsLoadGuard.isCurrent(request) || loadingObjectDetails.value) return;
+  loadingObjectDetails.value = true;
+  objectDetailsError.value = "";
+  retryObjectDetails = () => void loadMysqlObjectDetails(request, cacheWriteToken);
+  cacheObjectBrowserRows(cacheWriteToken, rows.value, { detailsComplete: false });
+  const budget = metadataLoadBudgetMs(props.connection.query_timeout_secs);
+  try {
+    const details = await objectBrowserRowsLoadGuard.wait(request.epoch, loadSqlObjectBrowserRows(request, true), budget);
+    if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+    // The names snapshot owns membership. Background metadata cannot resurrect
+    // removed names or replace a cached navigation scaffold with a new list.
+    const detailsById = new Map(details.map((row) => [row.id, row]));
+    rows.value = rows.value.map((row) => ({ ...row, ...detailsById.get(row.id) }));
+    cacheObjectBrowserRows(cacheWriteToken, rows.value, { detailsComplete: false });
+    if (rows.value.some((row) => row.type === "TABLE")) {
+      const statistics = shareObjectBrowserRead(JSON.stringify(["statistics", cacheWriteToken]), () => waitForMetadata(api.listObjectStatistics(request.scope.connectionId, request.scope.database, request.scope.schema), budget));
+      const stats = await objectBrowserRowsLoadGuard.wait(request.epoch, statistics, budget);
+      if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+      mergeObjectStatistics(stats, request.scope.schema, cacheWriteToken, undefined);
+    } else cacheObjectBrowserRows(cacheWriteToken, rows.value);
+    retryObjectDetails = undefined;
+  } catch (e) {
+    if (objectBrowserRowsLoadGuard.isCurrent(request)) objectDetailsError.value = translateBackendError(t, e);
+  } finally {
+    if (objectBrowserRowsLoadGuard.isCurrent(request)) loadingObjectDetails.value = false;
+  }
 }
 
 async function loadMongoObjectBrowserRows(connectionId: string, database: string) {
@@ -5522,6 +5570,11 @@ useDatabaseBrowserMutation(({ connectionId, database, operation }) => {
 });
 
 function refresh(): boolean {
+  if (usesLightweightMysqlBrowser(props.connection)) {
+    // A user refresh must not join a pre-refresh detail read or accept its result.
+    objectBrowserRowsLoadGuard.invalidate();
+    invalidateObjectBrowserRowsCache({ connectionId: props.connection.id, database: props.database });
+  }
   void reload({ preserveExistingRows: true });
   void refreshActiveTableInfo();
   return true;
@@ -5642,6 +5695,9 @@ watch(
   () => {
     clearTimeout(objectSearchTimer);
     objectBrowserRowsLoadGuard.invalidate();
+    loadingObjectDetails.value = false;
+    objectDetailsError.value = "";
+    retryObjectDetails = undefined;
     schemaListLoadGuard.invalidate();
     closeSidePanel();
     selectedRowId.value = null;
@@ -5656,6 +5712,9 @@ watch(
   [() => props.connection.id, () => props.database, () => props.schema, () => props.catalog],
   async () => {
     objectBrowserRowsLoadGuard.invalidate();
+    loadingObjectDetails.value = false;
+    objectDetailsError.value = "";
+    retryObjectDetails = undefined;
     const contextEpoch = schemaListLoadGuard.invalidate();
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
@@ -6175,7 +6234,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <Button v-if="showInlineSidePanelToggle" variant="ghost" size="icon" class="h-7 w-7" :class="{ 'text-primary': isSidePanelOpen }" :title="isSidePanelOpen ? t('objects.closeDetailPanel') : t('objects.openDetailPanel')" @click="toggleSidePanel">
         <PanelRight class="h-3.5 w-3.5" />
       </Button>
-      <Button v-if="usesLightweightMysqlBrowser(props.connection)" variant="ghost" size="sm" :disabled="loadingObjects || refreshingObjects" @click="loadObjects({ preserveExistingRows: true, details: true })">{{ t("objects.loadDetails") }}</Button>
+      <span v-if="loadingObjectDetails" role="status" class="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Loader2 class="h-3.5 w-3.5 animate-spin" />
+        {{ t("common.loading") }}
+      </span>
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="refreshTooltip" :disabled="loadingObjects" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingObjects || refreshingObjects }" />
       </Button>
@@ -6269,6 +6331,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </Button>
     </div>
 
+    <div v-if="objectDetailsError" role="status" class="flex h-8 shrink-0 items-center gap-2 border-b border-destructive/30 bg-destructive/5 px-3 text-xs text-destructive">
+      <span class="min-w-0 flex-1 truncate">{{ objectDetailsError }}</span>
+      <Button variant="ghost" size="sm" @click="retryObjectDetails?.()">{{ t("common.retry") }}</Button>
+    </div>
     <div v-if="scaffoldRefreshError" role="status" class="flex h-8 shrink-0 items-center gap-2 border-b border-destructive/30 bg-destructive/5 px-3 text-xs text-destructive">
       <RefreshCw class="h-3 w-3 shrink-0" />
       <span class="min-w-0 truncate">{{ scaffoldRefreshError }}</span>

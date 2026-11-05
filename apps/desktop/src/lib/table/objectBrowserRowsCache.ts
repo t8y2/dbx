@@ -25,7 +25,12 @@ interface ObjectBrowserRowsCacheGeneration {
   scope: ReturnType<typeof metadataScopeParts>;
 }
 
-const objectBrowserRowsCache = new MetadataResultCache<ObjectBrowserRow[]>({
+interface ObjectBrowserRowsSnapshot {
+  rows: ObjectBrowserRow[];
+  detailsComplete: boolean;
+}
+
+const objectBrowserRowsCache = new MetadataResultCache<ObjectBrowserRowsSnapshot>({
   ttlMs: OBJECT_BROWSER_ROWS_CACHE_TTL_MS,
   maxEntries: OBJECT_BROWSER_ROWS_CACHE_MAX_ENTRIES,
   now: () => Date.now(),
@@ -96,7 +101,7 @@ function objectBrowserRowsCacheInvalidation(match: MetadataCacheInvalidation): M
 
 export function getCachedObjectBrowserRows(scope: ObjectBrowserRowsCacheScope): ObjectBrowserRow[] | undefined {
   const hit = objectBrowserRowsCache.get(objectBrowserRowsScope(scope));
-  return hit ? cloneRows(hit.value) : undefined;
+  return hit ? cloneRows(hit.value.rows) : undefined;
 }
 
 export interface ObjectBrowserRowsCacheHit {
@@ -104,6 +109,7 @@ export interface ObjectBrowserRowsCacheHit {
   stale: boolean;
   ageMs: number;
   cachedAt: number;
+  detailsComplete: boolean;
 }
 
 /**
@@ -118,7 +124,7 @@ export interface ObjectBrowserRowsCacheHit {
 export function getCachedObjectBrowserRowsForScaffold(scope: ObjectBrowserRowsCacheScope): ObjectBrowserRowsCacheHit | undefined {
   const hit = objectBrowserRowsCache.get(objectBrowserRowsScope(scope), { allowStale: true });
   if (!hit) return undefined;
-  return { rows: cloneRows(hit.value), stale: hit.stale, ageMs: hit.ageMs, cachedAt: hit.cachedAt };
+  return { rows: cloneRows(hit.value.rows), stale: hit.stale, ageMs: hit.ageMs, cachedAt: hit.cachedAt, detailsComplete: hit.value.detailsComplete };
 }
 
 export function createObjectBrowserRowsCacheWriteToken(scope: ObjectBrowserRowsCacheScope): ObjectBrowserRowsCacheWriteToken {
@@ -126,10 +132,10 @@ export function createObjectBrowserRowsCacheWriteToken(scope: ObjectBrowserRowsC
   return Object.freeze({ generation: objectBrowserRowsCacheGeneration(frozenScope).generation, scope: frozenScope });
 }
 
-export function cacheObjectBrowserRows(token: ObjectBrowserRowsCacheWriteToken, rows: readonly ObjectBrowserRow[], options?: { cachedAt?: number }): number | undefined {
+export function cacheObjectBrowserRows(token: ObjectBrowserRowsCacheWriteToken, rows: readonly ObjectBrowserRow[], options?: { cachedAt?: number; detailsComplete?: boolean }): number | undefined {
   if (objectBrowserRowsCacheGeneration(token.scope).generation !== token.generation) return undefined;
   const cachedAt = options?.cachedAt ?? Date.now();
-  objectBrowserRowsCache.set(objectBrowserRowsScope(token.scope), cloneRows(rows), { cachedAt });
+  objectBrowserRowsCache.set(objectBrowserRowsScope(token.scope), { rows: cloneRows(rows), detailsComplete: options?.detailsComplete ?? true }, { cachedAt });
   return cachedAt;
 }
 

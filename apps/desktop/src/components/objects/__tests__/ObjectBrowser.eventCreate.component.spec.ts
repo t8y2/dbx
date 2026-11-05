@@ -97,7 +97,7 @@ afterEach(() => {
   invalidateObjectBrowserRowsCache({});
 });
 
-async function mountBrowser(overrides: Partial<InstanceType<typeof ObjectBrowser>["$props"]> = {}, expectedObjectRequests = 1) {
+async function mountBrowser(overrides: Partial<InstanceType<typeof ObjectBrowser>["$props"]> = {}, phase: "names" | "details" = "details") {
   const props = reactive({ connection, database: "app", initialEventCreateRequestId: 1 as number | undefined, ...overrides });
   const browser = ref<InstanceType<typeof ObjectBrowser> | null>(null);
   const host = document.createElement("div");
@@ -105,7 +105,13 @@ async function mountBrowser(overrides: Partial<InstanceType<typeof ObjectBrowser
   const app = createApp({ setup: () => () => h(ObjectBrowser, { ...props, ref: browser }) });
   mountedApps.push({ app, host });
   app.mount(host);
+  const progressive = props.connection.db_type === "mysql";
+  const expectedObjectRequests = progressive && phase === "details" ? 2 : 1;
   await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(expectedObjectRequests));
+  if (progressive) {
+    expect(mocks.listObjects.mock.calls[0][10]).toEqual({ lightweight: true });
+    if (phase === "details") expect(mocks.listObjects.mock.calls[1][10]).toEqual({ lightweight: false });
+  }
   await nextTick();
   return { browser, host, props };
 }
@@ -150,7 +156,8 @@ describe("ObjectBrowser event editor rendering", () => {
 
     expect(host.querySelector("[data-event-editor]")?.getAttribute("data-instance")).not.toBe(firstInstance);
     expect(host.querySelector<HTMLInputElement>("[data-event-draft]")?.value).toBe("");
-    expect(mocks.listObjects).toHaveBeenCalledOnce();
+    // A new CREATE request resets only the editor, not either metadata phase.
+    expect(mocks.listObjects).toHaveBeenCalledTimes(2);
   });
 
   it("does not hide CREATE when an existing event is filtered out", async () => {
@@ -170,19 +177,31 @@ describe("ObjectBrowser event editor rendering", () => {
 
   it("keeps loading visible until the initial object request completes", async () => {
     let resolveObjects!: (objects: ObjectInfo[]) => void;
-    mocks.listObjects.mockImplementation(() => new Promise<ObjectInfo[]>((resolve) => (resolveObjects = resolve)));
-    const { host } = await mountBrowser();
+    let resolveDetails!: (objects: ObjectInfo[]) => void;
+    mocks.listObjects.mockReturnValueOnce(new Promise<ObjectInfo[]>((resolve) => (resolveObjects = resolve))).mockReturnValueOnce(new Promise<ObjectInfo[]>((resolve) => (resolveDetails = resolve)));
+    const { host } = await mountBrowser({}, "names");
 
     expect(host.textContent).toContain("objects.loading");
     expect(host.querySelector("[data-event-editor]")).toBeNull();
 
     resolveObjects([]);
     await vi.waitFor(() => expect(host.querySelector('[data-event-editor="create"]')).not.toBeNull());
+    expect(mocks.listObjects).toHaveBeenCalledTimes(2);
+    expect(mocks.listObjects.mock.calls[1][10]).toEqual({ lightweight: false });
+    expect(host.textContent).not.toContain("objects.loading");
+    const editorInstance = host.querySelector("[data-event-editor]")?.getAttribute("data-instance");
+    const draft = host.querySelector<HTMLInputElement>("[data-event-draft]")!;
+    draft.value = "draft while details load";
+    draft.dispatchEvent(new Event("input", { bubbles: true }));
+    resolveDetails([]);
+    await vi.waitFor(() => expect(host.textContent).not.toContain("common.loading"));
+    expect(host.querySelector("[data-event-editor]")?.getAttribute("data-instance")).toBe(editorInstance);
+    expect(host.querySelector<HTMLInputElement>("[data-event-draft]")?.value).toBe("draft while details load");
   });
 
   it("preserves an object-load failure instead of hiding it with the editor", async () => {
     mocks.listObjects.mockRejectedValue(new Error("objects unavailable"));
-    const { host } = await mountBrowser();
+    const { host } = await mountBrowser({}, "names");
 
     await vi.waitFor(() => expect(host.textContent).toContain("objects unavailable"));
     expect(host.querySelector("[data-event-editor]")).toBeNull();

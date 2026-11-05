@@ -1175,6 +1175,19 @@ pub fn build_export_object_source_sql(
     {
         return mysql_delimited_routine_source(source);
     }
+    // T-SQL only accepts these as the first statement of a batch and a module runs to the
+    // end of its batch, so a `;` cannot separate them from the rest of an exported script.
+    if database_type == DatabaseType::SqlServer
+        && matches!(
+            object_type,
+            ObjectSourceKind::View
+                | ObjectSourceKind::Procedure
+                | ObjectSourceKind::Function
+                | ObjectSourceKind::Trigger
+        )
+    {
+        return format!("GO\n{source}\nGO");
+    }
     ensure_semicolon(source)
 }
 
@@ -4053,6 +4066,48 @@ mod tests {
         );
 
         assert_eq!(sql, "CREATE VIEW `active_users` AS SELECT `id` FROM `users`;");
+    }
+
+    #[test]
+    fn sqlserver_exported_modules_run_as_their_own_batches() {
+        let before = "CREATE TABLE dbo.orders (id INT);\nINSERT INTO dbo.orders (id) VALUES (1);";
+        let after = "CREATE TABLE dbo.audit_log (id INT);";
+        let cases = [
+            ("view", ObjectSourceKind::View, "CREATE VIEW dbo.v_orders AS\nSELECT id FROM dbo.orders"),
+            (
+                "procedure",
+                ObjectSourceKind::Procedure,
+                "CREATE PROCEDURE dbo.recalc AS\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND",
+            ),
+            (
+                "function",
+                ObjectSourceKind::Function,
+                "CREATE FUNCTION dbo.total() RETURNS INT AS\nBEGIN\n  RETURN 1;\nEND;",
+            ),
+            (
+                "trigger",
+                ObjectSourceKind::Trigger,
+                "CREATE TRIGGER dbo.tr_orders ON dbo.orders AFTER INSERT AS\nBEGIN\n  SELECT 1;\nEND",
+            ),
+        ];
+
+        for (name, object_type, source) in cases {
+            let exported = build_export_object_source_sql(DatabaseType::SqlServer, object_type, source);
+            let script = format!("{before}\n\n{exported}\n\n{exported}\n\n{after}\n");
+
+            assert_eq!(crate::sql::split_sql_batches(&script), vec![before, source, source, after], "{name}");
+        }
+    }
+
+    #[test]
+    fn sqlserver_sequence_export_keeps_regular_statement_terminator() {
+        let sql = build_export_object_source_sql(
+            DatabaseType::SqlServer,
+            ObjectSourceKind::Sequence,
+            "CREATE SEQUENCE dbo.order_seq AS INT",
+        );
+
+        assert_eq!(sql, "CREATE SEQUENCE dbo.order_seq AS INT;");
     }
 
     #[test]

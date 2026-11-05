@@ -16,9 +16,12 @@ static APPLY_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static APPLY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)\b(?:CROSS|OUTER)\s+APPLY\b").expect("valid APPLY regex"));
-static FROM_CLAUSE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?is)\bFROM\s+(.+?)(?:\b(?:WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|OFFSET|FETCH|FOR|UNION|EXCEPT|INTERSECT|JOIN)\b|$)")
-        .expect("valid FROM clause regex")
+static FROM_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)\bFROM\s+").expect("valid FROM regex"));
+static FROM_CLAUSE_BOUNDARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?is)[()]|\b(?:WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|OFFSET|FETCH|FOR|UNION|EXCEPT|INTERSECT|JOIN)\b",
+    )
+    .expect("valid FROM clause boundary regex")
 });
 static LEADING_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(r"(?is)^\s*({TARGET_NAME_PATTERN})(?:\s+(?:AS\s+)?{IDENTIFIER_PATTERN})?\s*$"))
@@ -384,10 +387,10 @@ fn collect_comma_separated_from_databases(
     databases: &mut HashSet<String>,
 ) -> bool {
     let mut uncertain = false;
-    for capture in FROM_CLAUSE_RE.captures_iter(statement) {
-        let Some(from_body) = capture.get(1).map(|value| value.as_str()) else {
-            continue;
-        };
+    // Match each FROM independently so a nested query cannot consume the next
+    // query block's FROM, including any later cross-database comma targets.
+    for from in FROM_RE.find_iter(statement) {
+        let from_body = from_clause_body(&statement[from.end()..]);
         let factors = split_top_level_comma_separated_targets(from_body);
         if factors.len() < 2 {
             continue;
@@ -403,6 +406,22 @@ fn collect_comma_separated_from_databases(
         }
     }
     uncertain
+}
+
+/// Returns the FROM body up to a closing parenthesis or clause boundary at
+/// the current query level. Expects safety-lexer output with literals/comments
+/// removed and quoted identifiers replaced by tokens.
+fn from_clause_body(value: &str) -> &str {
+    let mut depth = 0usize;
+    for boundary in FROM_CLAUSE_BOUNDARY_RE.find_iter(value) {
+        match boundary.as_str() {
+            "(" => depth += 1,
+            ")" if depth > 0 => depth -= 1,
+            _ if depth == 0 => return &value[..boundary.start()],
+            _ => {}
+        }
+    }
+    value
 }
 
 fn split_top_level_comma_separated_targets(value: &str) -> Vec<&str> {
@@ -1130,6 +1149,161 @@ mod tests {
             &allowed,
         ));
         assert!(!sql_references_disallowed_database("SELECT * FROM dbo.users", &sqlserver, "reporting", &allowed,));
+    }
+
+    #[test]
+    fn cte_query_block_boundaries_do_not_trip_mcp_database_scope() {
+        // A CTE's FROM must stop at its closing parenthesis so commas in the
+        // outer SELECT list are not treated as additional table factors.
+        let allowed = vec!["reporting".to_string()];
+        for sql in [
+            "WITH c AS (VALUES (1)), compared AS (SELECT * FROM c) SELECT 1, 2 FROM compared;",
+            "WITH c(x) AS (VALUES (1), (2)), compared AS (SELECT x FROM c)
+             SELECT COUNT(*) AS n, SUM(x) AS total FROM compared;",
+            r#"WITH samples(state_code, event_code, checked_on, expected_result) AS (
+                VALUES
+                    (NULL::varchar, NULL::varchar, NULL::date, 'R0'::varchar),
+                    (NULL::varchar, NULL::varchar, DATE '2020-01-02', 'R1'::varchar),
+                    ('new'::varchar, 'requested'::varchar, NULL::date, 'R2'::varchar),
+                    ('other'::varchar, 'responded'::varchar, NULL::date, 'R3'::varchar),
+                    ('final_a'::varchar, 'requested'::varchar, NULL::date, 'R6'::varchar)
+            ),
+            compared AS (
+                SELECT s.*,
+                    CASE
+                        WHEN s.state_code = CAST('final_a' AS varchar) THEN CAST('R6' AS varchar)
+                        WHEN s.state_code = CAST('final_b' AS varchar) THEN CAST('R5' AS varchar)
+                        WHEN s.state_code = CAST('intermediate' AS varchar) THEN CAST('R4' AS varchar)
+                        WHEN s.event_code = CAST('responded' AS varchar) THEN CAST('R3' AS varchar)
+                        WHEN s.event_code = CAST('requested' AS varchar) THEN CAST('R2' AS varchar)
+                        WHEN s.checked_on::date BETWEEN DATE '2020-01-02' AND DATE '2020-01-05'
+                            THEN CAST('R1' AS varchar)
+                        ELSE CAST('R0' AS varchar)
+                    END AS actual_result,
+                    CASE
+                        WHEN s.state_code = 'final_a' THEN 'R6'
+                        WHEN s.state_code = 'final_b' THEN 'R5'
+                        WHEN s.state_code = 'intermediate' THEN 'R4'
+                        WHEN (s.state_code IS NULL OR s.state_code = 'new')
+                            AND s.event_code = 'responded' THEN 'R3'
+                        WHEN (s.state_code IS NULL OR s.state_code = 'new')
+                            AND s.event_code = 'requested' THEN 'R2'
+                        WHEN s.checked_on::date BETWEEN DATE '2020-01-02' AND DATE '2020-01-05'
+                            THEN 'R1'
+                        ELSE 'R0'
+                    END AS previous_result
+                FROM samples s
+            )
+            SELECT COUNT(1) AS sample_count,
+                SUM(CASE WHEN actual_result IS DISTINCT FROM expected_result
+                    THEN 1 ELSE 0 END) AS rule_mismatches,
+                SUM(CASE WHEN actual_result IS DISTINCT FROM previous_result
+                    THEN 1 ELSE 0 END) AS changed_count,
+                SUM(CASE WHEN actual_result IS DISTINCT FROM previous_result
+                    AND NOT (state_code = 'other' AND event_code IN ('requested', 'responded'))
+                    THEN 1 ELSE 0 END) AS unexpected_changes
+            FROM compared;"#,
+            "WITH c AS (VALUES (1)), compared AS (SELECT * FROM c) SELECT 1 FROM compared;",
+            "WITH c AS (VALUES (1)), compared AS (SELECT * FROM c WHERE TRUE) SELECT 1, 2 FROM compared;",
+            "WITH c AS (VALUES (1)), compared AS (SELECT * FROM c LIMIT 1) SELECT 1, 2 FROM compared;",
+            "WITH c AS (VALUES (1)), compared AS (SELECT * FROM c) SELECT 1, 2 FROM compared WHERE TRUE;",
+            "SELECT (SELECT COUNT(*) FROM public.users) AS n, 2 FROM public.audit_log;",
+        ] {
+            assert!(
+                !sql_references_disallowed_database(sql, &DatabaseType::Postgres, "reporting", &allowed),
+                "query block boundaries must not be treated as FROM targets: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_database_scope_checks_each_nested_from_list() {
+        // Inspect inner and outer FROM lists independently so fixing CTE false
+        // positives does not hide cross-database references in either list.
+        let allowed = vec!["reporting".to_string()];
+        for (sql, disallowed) in [
+            (
+                "WITH c AS (SELECT * FROM reporting.users)
+                 SELECT * FROM c, reporting.audit_log;",
+                false,
+            ),
+            (
+                "WITH c AS (SELECT * FROM reporting.users)
+                 SELECT * FROM c, production.secrets;",
+                true,
+            ),
+            (
+                "WITH c AS (SELECT * FROM reporting.users, production.secrets)
+                 SELECT 1, 2 FROM c;",
+                true,
+            ),
+            (
+                "SELECT (SELECT COUNT(*) FROM reporting.users, production.secrets) AS n, 2
+                 FROM reporting.audit_log;",
+                true,
+            ),
+            // Derived tables in comma-separated FROM lists remain uncertain and
+            // are rejected even when every named database is allowed.
+            (
+                "SELECT * FROM (SELECT * FROM reporting.users WHERE id = 1) AS users,
+                 reporting.audit_log;",
+                true,
+            ),
+            (
+                "SELECT * FROM (SELECT * FROM reporting.users LIMIT 1) AS users,
+                 production.secrets;",
+                true,
+            ),
+            (
+                "WITH c AS (SELECT * FROM `reporting`.`users) WHERE x, FROM hidden`)
+                 SELECT * FROM c, `reporting`.`audit_log`;",
+                false,
+            ),
+            (
+                "WITH c AS (SELECT * FROM `reporting`.`users) WHERE x, FROM hidden`)
+                 SELECT * FROM c, `production`.`secrets`;",
+                true,
+            ),
+            (
+                "WITH c AS (SELECT ')' AS label, 1 AS n FROM reporting.users /* ), FROM hidden */)
+                 SELECT * FROM c, production.secrets;",
+                true,
+            ),
+        ] {
+            assert_eq!(
+                sql_references_disallowed_database(sql, &DatabaseType::Mysql, "reporting", &allowed),
+                disallowed,
+                "nested FROM list scope: {sql}"
+            );
+        }
+        for (sql, disallowed) in [
+            (
+                "WITH c AS (SELECT * FROM reporting.dbo.users)
+                 SELECT * FROM c, reporting.dbo.audit_log;",
+                false,
+            ),
+            (
+                "WITH c AS (SELECT * FROM reporting.dbo.users)
+                 SELECT * FROM c, production.dbo.secrets;",
+                true,
+            ),
+            (
+                "WITH c AS (SELECT * FROM linked_server.reporting.dbo.users)
+                 SELECT * FROM c, production.reporting.dbo.audit_log;",
+                false,
+            ),
+            (
+                "WITH c AS (SELECT * FROM linked_server.reporting.dbo.users)
+                 SELECT * FROM c, reporting.production.dbo.secrets;",
+                true,
+            ),
+        ] {
+            assert_eq!(
+                sql_references_disallowed_database(sql, &DatabaseType::SqlServer, "reporting", &allowed),
+                disallowed,
+                "SQL Server nested FROM list scope: {sql}"
+            );
+        }
     }
 
     #[test]

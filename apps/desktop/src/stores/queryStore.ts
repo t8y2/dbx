@@ -8089,7 +8089,8 @@ export const useQueryStore = defineStore("query", () => {
     const countKey = options.countSql ? [options.connectionId, options.database, options.schema ?? "", options.catalog ?? "", options.countSql].join("\u0000") : undefined;
     const pendingCount = pendingQueryTotalCounts.get(options.tabId);
     if (countKey && options.preserveTotalRowCountDuringExecution && pendingCount?.key === countKey) return;
-    const countPromise = (async () => {
+    // Defer execution until the promise and its ownership entry are initialized.
+    const countPromise = Promise.resolve().then(async () => {
       let isolatedClientSessionId: string | undefined;
       let countTargetSql: string | undefined;
       try {
@@ -8166,7 +8167,7 @@ export const useQueryStore = defineStore("query", () => {
           void closeClientSessionId(options.connectionId, options.database, isolatedClientSessionId, options.catalog, { tabId: options.tabId });
         }
       }
-    })();
+    });
     if (countKey) {
       pendingQueryTotalCounts.set(options.tabId, { key: countKey, promise: countPromise });
       const clearPendingCount = () => {

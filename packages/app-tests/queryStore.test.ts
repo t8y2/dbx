@@ -8835,7 +8835,7 @@ for (const paginationMode of [
   });
 }
 
-test("paginated query execution keeps the previous total while refreshing it in the background", async () => {
+test("paginated query execution reuses the previous confirmed total without recounting", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
   const connectionStore = useConnectionStore();
@@ -8851,7 +8851,7 @@ test("paginated query execution keeps the previous total while refreshing it in 
   assert.ok(tab);
   tab.resultTotalRowCount = 250;
 
-  let resolveCount: ((value: Response) => void) | undefined;
+  let countRequests = 0;
   globalThis.fetch = withConnectionHealthMock(async (input) => {
     const url = String(input);
     if (url === "/api/query/prepare-pagination-plan") {
@@ -8881,9 +8881,8 @@ test("paginated query execution keeps the previous total while refreshing it in 
       );
     }
     if (url === "/api/query/execute") {
-      return new Promise<Response>((resolve) => {
-        resolveCount = resolve;
-      });
+      countRequests += 1;
+      return Response.json({ columns: ["count"], rows: [[275]], affected_rows: 0, execution_time_ms: 1 });
     }
     if (url === "/api/query/analyze-editability") {
       return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
@@ -8902,20 +8901,7 @@ test("paginated query execution keeps the previous total while refreshing it in 
     });
 
     assert.equal(tab.resultTotalRowCount, 250);
-    assert.equal(tab.resultTotalRowCountLoading, true);
-
-    resolveCount?.(
-      new Response(
-        JSON.stringify({
-          columns: ["count"],
-          rows: [[275]],
-          affected_rows: 0,
-          execution_time_ms: 1,
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
-    );
-    await waitFor(() => tab.resultTotalRowCount === 275);
+    assert.equal(countRequests, 0);
     assert.equal(tab.resultTotalRowCountLoading, false);
   } finally {
     globalThis.fetch = originalFetch;

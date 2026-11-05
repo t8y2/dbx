@@ -8,6 +8,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import ConnectionIcon from "@/components/icons/ConnectionIcon.vue";
 import { buildConnectionPickerRows, connectionPickerSelectableRows } from "@/lib/connection/connectionPickerTree";
 import { cn } from "@/lib/common/utils";
+import { hexToRgba } from "@/lib/common/color";
 import type { ConnectionConfig, SidebarLayout } from "@/types/database";
 
 const props = withDefaults(
@@ -22,9 +23,11 @@ const props = withDefaults(
     triggerClass?: HTMLAttributes["class"];
     triggerIconClass?: HTMLAttributes["class"];
     listClass?: HTMLAttributes["class"];
+    hideTitle?: boolean;
   }>(),
   {
     disabled: false,
+    hideTitle: false,
     triggerIconClass: "size-4 text-muted-foreground",
   },
 );
@@ -44,8 +47,28 @@ const searchInput = ref<InstanceType<typeof Input>>();
 const listContainer = ref<HTMLDivElement>();
 const collapsedGroupIds = ref<Set<string>>(new Set());
 const highlightIndex = ref(-1);
+let focusRestoreElement: HTMLElement | null = null;
 
 const connectionById = computed(() => new Map(props.connections.map((connection) => [connection.id, connection])));
+
+function connectionColor(connectionId: string) {
+  // Preserve every CSS color accepted by the connection editor, including alpha.
+  const color = connectionById.value.get(connectionId)?.color?.trim();
+  if (!color || (typeof CSS !== "undefined" && typeof CSS.supports === "function" && !CSS.supports("color", color))) return undefined;
+  return color;
+}
+
+function hasConnectionTint(connectionId: string) {
+  return Boolean(hexToRgba(connectionColor(connectionId), 0.1));
+}
+
+function connectionColorStyle(connectionId: string) {
+  const color = connectionColor(connectionId);
+  return {
+    "--connection-picker-background": hexToRgba(color, 0.1),
+    "--connection-picker-highlight": hexToRgba(color, 0.2),
+  };
+}
 
 const selectedLabel = computed(() => {
   if (!props.modelValue) return props.placeholder;
@@ -87,6 +110,15 @@ watch(open, async (value) => {
   if (!value) {
     searchText.value = "";
     highlightIndex.value = -1;
+    const restoreTarget = focusRestoreElement;
+    focusRestoreElement = null;
+    if (restoreTarget) {
+      // Reka's modal popover refocuses the trigger synchronously on close, so
+      // the restore must land on the next tick to win for shortcut-opened
+      // dropdowns.
+      await nextTick();
+      if (restoreTarget.isConnected) restoreTarget.focus();
+    }
     return;
   }
   await nextTick();
@@ -130,15 +162,34 @@ function handleKeydown(event: KeyboardEvent) {
     open.value = false;
   }
 }
+
+defineExpose({
+  openDropdown: () => {
+    if (props.disabled) return false;
+    focusRestoreElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    open.value = true;
+    return true;
+  },
+});
 </script>
 
 <template>
   <Popover v-model:open="open">
     <PopoverTrigger as-child>
-      <Button type="button" variant="ghost" :disabled="disabled" :title="selectedLabel" :class="cn('h-6 w-auto max-w-56 min-w-0 justify-between gap-1 border-0 bg-transparent px-1 text-xs font-normal shadow-none hover:bg-muted/50 focus-visible:ring-0', triggerClass)">
-        <slot name="trigger-label" :value="modelValue" :label="selectedLabel">
-          <span class="truncate">{{ selectedLabel }}</span>
-        </slot>
+      <Button
+        type="button"
+        variant="ghost"
+        :disabled="disabled"
+        :title="hideTitle ? undefined : selectedLabel"
+        :style="connectionColorStyle(modelValue)"
+        :class="cn('h-6 w-auto max-w-56 min-w-0 justify-between gap-1 border-0 bg-transparent px-1 text-xs font-normal shadow-none hover:bg-muted/50 focus-visible:ring-0', hasConnectionTint(modelValue) && 'dbx-connection-picker-colored', triggerClass)"
+      >
+        <span class="flex min-w-0 flex-1 items-center gap-1 text-left">
+          <span v-if="connectionColor(modelValue)" data-connection-color aria-hidden="true" class="h-4 w-1 shrink-0 rounded-full" :style="{ backgroundColor: connectionColor(modelValue) }" />
+          <slot name="trigger-label" :value="modelValue" :label="selectedLabel">
+            <span class="truncate">{{ selectedLabel }}</span>
+          </slot>
+        </span>
         <ChevronDown :class="cn('shrink-0 opacity-60', triggerIconClass)" />
       </Button>
     </PopoverTrigger>
@@ -172,17 +223,21 @@ function handleKeydown(event: KeyboardEvent) {
                 v-else
                 type="button"
                 :title="row.label"
-                :style="rowIndent(row.depth)"
+                :style="[rowIndent(row.depth), connectionColorStyle(row.id)]"
                 :data-picker-connection="row.id"
+                :data-highlighted="selectableRows[highlightIndex]?.id === row.id ? true : undefined"
                 :class="
                   cn(
                     'flex h-8 w-full min-w-0 items-center gap-2 rounded-md pr-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none',
                     selectableRows[highlightIndex]?.id === row.id && 'bg-accent text-accent-foreground',
+                    hasConnectionTint(row.id) && 'dbx-connection-picker-colored',
                   )
                 "
                 @click="selectConnection(row.id)"
               >
                 <Check :class="cn('h-3.5 w-3.5 shrink-0', row.id === modelValue ? 'opacity-100' : 'opacity-0')" />
+                <span v-if="connectionColor(row.id)" data-connection-color aria-hidden="true" class="h-4 w-1 shrink-0 rounded-full" :style="{ backgroundColor: connectionColor(row.id) }" />
+                <span v-else aria-hidden="true" class="h-4 w-1 shrink-0" />
                 <ConnectionIcon :connection="connectionById.get(row.id)" class="h-3.5 w-3.5 shrink-0" />
                 <span class="min-w-0 flex-1 truncate">{{ row.label }}</span>
               </button>
@@ -198,6 +253,17 @@ function handleKeydown(event: KeyboardEvent) {
 </template>
 
 <style>
+.dbx-connection-picker-colored {
+  background-color: var(--connection-picker-background);
+}
+
+.dbx-connection-picker-colored:hover,
+.dbx-connection-picker-colored:focus-visible,
+.dbx-connection-picker-colored[data-highlighted="true"],
+.dbx-connection-picker-colored[data-state="open"] {
+  background-color: var(--connection-picker-highlight);
+}
+
 .dbx-connection-tree-select-list {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in oklch, var(--foreground) 30%, transparent) transparent;

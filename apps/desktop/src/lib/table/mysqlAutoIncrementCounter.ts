@@ -1,6 +1,6 @@
 import type { BackendErrorTranslate } from "@/i18n/backend-errors";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
-import { supportsNativeMysqlAutoIncrement, type MysqlAutoIncrementSqlOptions } from "@/lib/database/dbAdminSql";
+import { supportsMysqlAutoIncrement, type MysqlAutoIncrementSqlOptions } from "@/lib/database/dbAdminSql";
 import type { EditableStructureColumn } from "@/lib/table/tableStructureEditorSql";
 
 export interface MysqlAutoIncrementCounterDraft {
@@ -20,7 +20,7 @@ export function refreshMysqlAutoIncrementCounterDraft(serverValue: string | null
 }
 
 export function canEditMysqlAutoIncrementCounter(connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined, _isCreateMode: boolean, columns: readonly EditableStructureColumn[]): boolean {
-  if (!supportsNativeMysqlAutoIncrement(connection)) return false;
+  if (!supportsMysqlAutoIncrement(connection)) return false;
   return columns.some((column) => !column.markedForDrop && column.extra.autoIncrement === true);
 }
 
@@ -45,7 +45,7 @@ export function translateMysqlAutoIncrementWarning(t: BackendErrorTranslate, war
   if (warning === "MySQL allows only one AUTO_INCREMENT column per table.") {
     return t("structureEditor.mysqlAutoIncrementSingleColumn");
   }
-  if (warning === "AUTO_INCREMENT requires a native MySQL auto-increment column.") {
+  if (warning === "AUTO_INCREMENT requires an auto-increment column." || warning === "AUTO_INCREMENT requires a native MySQL auto-increment column.") {
     return t("structureEditor.mysqlAutoIncrementRequiresNativeColumn");
   }
   const missingIndex = /^AUTO_INCREMENT column "([\s\S]*)" requires a supporting index \(first key column for InnoDB\)\.$/.exec(warning);

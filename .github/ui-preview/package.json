@@ -6,6 +6,6 @@
     "seed": "node seed.mjs"
   },
   "dependencies": {
-    "playwright": "1.49.1"
+    "playwright": "1.64.1"
   }
 }

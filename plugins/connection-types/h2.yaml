@@ -1,6 +1,8 @@
 schemaVersion: 1
 order: 470
 dbType: h2
+compareModes: [schema, data]
+transferSupportLevel: best-effort
 rustVariant: H2
 label: H2
 dialect: H2

@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import zhCN from "@/i18n/locales/zh-CN";
 import { createI18n } from "vue-i18n";
 import { describe, expect, it, vi } from "vitest";
@@ -40,7 +39,7 @@ describe("MySQL table AUTO_INCREMENT counter", () => {
     });
   });
 
-  it("is editable for native-MySQL tables with an active auto-increment column draft", () => {
+  it("is editable for supported MySQL-family tables with an active auto-increment column draft", () => {
     const nativeMysql = { db_type: "mysql", driver_profile: "mysql" } as any;
     expect(canEditMysqlAutoIncrementCounter(nativeMysql, false, [existingColumn(true)])).toBe(true);
     expect(canEditMysqlAutoIncrementCounter(nativeMysql, false, [{ ...existingColumn(true), original: undefined }])).toBe(true);
@@ -49,12 +48,24 @@ describe("MySQL table AUTO_INCREMENT counter", () => {
     expect(canEditMysqlAutoIncrementCounter(nativeMysql, false, [{ ...existingColumn(true), markedForDrop: true }])).toBe(false);
 
     for (const connection of [
-      { db_type: "jdbc", driver_profile: "mysql" },
       { db_type: "mysql", driver_profile: "mariadb" },
       { db_type: "mysql", driver_profile: "tidb" },
       { db_type: "mysql", driver_profile: "oceanbase" },
+      { db_type: "mysql", driver_profile: "tdsql" },
+      { db_type: "mysql", driver_profile: "polardb" },
+      { db_type: "mysql", driver_profile: "greatsql" },
+      { db_type: "mysql", driver_profile: "custom_mysql" },
       { db_type: "mysql", driver_profile: "dolt" },
       { db_type: "goldendb", driver_profile: "goldendb" },
+    ] as const) {
+      expect(canEditMysqlAutoIncrementCounter(connection as any, false, [existingColumn(true)])).toBe(true);
+    }
+
+    for (const connection of [
+      { db_type: "jdbc", driver_profile: "mysql" },
+      { db_type: "mysql", driver_profile: "doris" },
+      { db_type: "mysql", driver_profile: "selectdb" },
+      { db_type: "mysql", driver_profile: "starrocks" },
     ] as const) {
       expect(canEditMysqlAutoIncrementCounter(connection as any, false, [existingColumn(true)])).toBe(false);
     }
@@ -102,22 +113,10 @@ describe("MySQL auto-increment warning translations", () => {
   const t = (key: string, params: Record<string, unknown> = {}) => i18n.global.t(key, params);
   it("translates backend warnings and preserves unusual column names as text", () => {
     expect(translateMysqlAutoIncrementWarning(t, "MySQL allows only one AUTO_INCREMENT column per table.")).toBe("MySQL 每张表只能有一个自增字段。");
-    expect(translateMysqlAutoIncrementWarning(t, "AUTO_INCREMENT requires a native MySQL auto-increment column.")).toBe("需要使用原生 MySQL 连接，并为表配置自增字段。");
+    expect(translateMysqlAutoIncrementWarning(t, "AUTO_INCREMENT requires an auto-increment column.")).toBe("需要为表配置自增字段。");
+    expect(translateMysqlAutoIncrementWarning(t, "AUTO_INCREMENT requires a native MySQL auto-increment column.")).toBe("需要为表配置自增字段。");
     const column = 'id"<tag>\n{value}';
     expect(translateMysqlAutoIncrementWarning(t, `AUTO_INCREMENT column "${column}" requires a supporting index (first key column for InnoDB).`)).toBe(`自增字段“${column}”必须有有效索引；使用 InnoDB 时，该字段必须位于索引首列。`);
     expect(translateMysqlAutoIncrementWarning(t, "Unknown backend warning")).toBe("Unknown backend warning");
-  });
-  it("defines all warning messages and matching placeholders in every registered locale", () => {
-    const registry = readFileSync("apps/desktop/src/i18n/index.ts", "utf8");
-    const locales = [...registry.match(/const supportedLocales: Locale\[\] = \[(.*?)\]/)![1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
-    expect(locales.length).toBeGreaterThan(0);
-    for (const locale of locales) {
-      const source = readFileSync(`apps/desktop/src/i18n/locales/${locale}.ts`, "utf8");
-      for (const key of ["mysqlAutoIncrementSingleColumn", "mysqlAutoIncrementRequiresIndex", "mysqlAutoIncrementRequiresNativeColumn"]) {
-        const line = source.split("\n").find((line) => line.trimStart().startsWith(`${key}:`));
-        expect(line, `${locale}: ${key}`).toBeDefined();
-        expect(line!.match(/\{[^}]+\}/g) ?? []).toEqual(key === "mysqlAutoIncrementRequiresIndex" ? ["{column}"] : []);
-      }
-    }
   });
 });

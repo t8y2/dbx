@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { parseSqlErrorLocation, sqlErrorDecorationRange, sqlErrorMessagePosition, sqlErrorSqlMatchesEditor } from "../../apps/desktop/src/lib/sql/sqlDiagnostics.ts";
+import { lineColumnToOffset, parseSqlErrorLocation, sqlErrorDecorationRange, sqlErrorMessagePosition, sqlErrorSqlMatchesEditor } from "../../apps/desktop/src/lib/sql/sqlDiagnostics.ts";
 
 test("locates the Oracle invalid identifier reported by the Agent", () => {
   const sql = "select x.* from si_price_adjust_task t;";
@@ -49,6 +49,22 @@ test("keeps existing line-column and PostgreSQL caret parsing", () => {
   assert.deepEqual(sqlErrorDecorationRange("SELECT 1\nFROM bad", "syntax error at line 2, column 2"), { from: 10, to: 11 });
 });
 
+test("lineColumnToOffset calculates offset correctly with LF and CRLF without splitting full string", () => {
+  const lfText = "SELECT 1;\nSELECT 2;\nSELECT 3;";
+  assert.equal(lineColumnToOffset(lfText, { line: 0, column: 0 }), 0);
+  assert.equal(lineColumnToOffset(lfText, { line: 1, column: 0 }), 10);
+  assert.equal(lineColumnToOffset(lfText, { line: 1, column: 7 }), 17);
+  assert.equal(lineColumnToOffset(lfText, { line: 2, column: 0 }), 20);
+  assert.equal(lineColumnToOffset(lfText, { line: 3, column: 0 }), null);
+  assert.equal(lineColumnToOffset(lfText, { line: -1, column: 0 }), null);
+
+  const crlfText = "SELECT 1;\r\nSELECT 2;\r\nSELECT 3;";
+  assert.equal(lineColumnToOffset(crlfText, { line: 0, column: 0 }), 0);
+  assert.equal(lineColumnToOffset(crlfText, { line: 1, column: 0 }), 11);
+  assert.equal(lineColumnToOffset(crlfText, { line: 1, column: 7 }), 18);
+  assert.equal(lineColumnToOffset(crlfText, { line: 2, column: 0 }), 22);
+});
+
 test("parses the Oracle Agent offset without needing the SQL it refers to", () => {
   assert.deepEqual(sqlErrorMessagePosition('ORA-00904: "NOPE_COL": invalid identifier error occur at position: 2270'), { kind: "offset", offset: 2270 });
   assert.deepEqual(sqlErrorMessagePosition("error occurred at position: 0"), { kind: "offset", offset: 0 });
@@ -85,4 +101,36 @@ test("strips the generated OFFSET ROWS FETCH FIRST suffix fully", () => {
   const executedSql = "SELECT *\nFROM projects OFFSET 10 ROWS FETCH FIRST 5 ROWS ONLY;";
 
   assert.equal(sqlErrorSqlMatchesEditor(editorSql, executedSql), true);
+});
+
+test("underlines only the missing schema.table object, not a following column access", () => {
+  const sql = "SELECT hr.emp.empno FROM hr.emp";
+  const message = (offset: number) => `ORA-00942: table or view does not exist error occur at position: ${offset}`;
+  const objectFrom = sql.indexOf("hr.emp");
+  const objectTo = objectFrom + "hr.emp".length;
+
+  assert.deepEqual(sqlErrorDecorationRange(sql, message(objectFrom), "oracle"), { from: objectFrom, to: objectTo });
+  // A position inside `emp` still belongs to `hr.emp`, not to `emp.empno`.
+  assert.deepEqual(sqlErrorDecorationRange(sql, message(objectFrom + 4), "oracle"), { from: objectFrom, to: objectTo });
+
+  const tableFrom = sql.lastIndexOf("hr.emp");
+  assert.deepEqual(sqlErrorDecorationRange(sql, message(tableFrom), "oracle"), { from: tableFrom, to: tableFrom + "hr.emp".length });
+});
+
+test("keeps a reported keyword position tight to the keyword", () => {
+  const sql = "SELECT hr.emp.empno FROM hr.emp";
+  const keywordFrom = sql.indexOf("FROM");
+
+  // The walk must not extend a keyword position into the object that follows it.
+  assert.deepEqual(sqlErrorDecorationRange(sql, `ORA-00942 error occur at position: ${keywordFrom}`, "oracle"), { from: keywordFrom, to: keywordFrom + "FROM".length });
+});
+
+test("does not apply Oracle object expansion to other database types", () => {
+  const sql = "SELECT /* 中文 */ * FROM missing";
+  const utf16Offset = sql.indexOf("missing");
+  const byteOffset = new TextEncoder().encode(sql.slice(0, utf16Offset)).length;
+  const message = `ORA-00942: table or view does not exist error occur at position: ${byteOffset}`;
+
+  assert.deepEqual(sqlErrorDecorationRange(sql, message, "oracle"), { from: utf16Offset, to: utf16Offset + "missing".length });
+  assert.deepEqual(sqlErrorDecorationRange(sql, message, "postgres"), { from: byteOffset, to: byteOffset + 1 });
 });

@@ -1,4 +1,4 @@
-// @vitest-environment happy-dom
+﻿// @vitest-environment happy-dom
 
 import { createApp, nextTick, type App } from "vue";
 import { EditorView } from "@codemirror/view";
@@ -41,7 +41,7 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("vue-i18n", async (original) => ({ ...(await original<typeof import("vue-i18n")>()), useI18n: () => ({ t: (key: string) => key }) }));
 
 vi.mock("@lucide/vue", async () => {
   const { defineComponent, h } = await import("vue");
@@ -263,6 +263,8 @@ vi.mock("@/components/editor/EditorSearchPanel.vue", async () => {
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: mocks.ensureConnected,
+    connectionStateRevision: () => 0,
+    isCurrentConnectionStateRevision: () => true,
     getConfig: (connectionId: string) => (connectionId === mocks.connection.id ? mocks.connection : undefined),
   }),
 }));

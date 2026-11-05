@@ -911,6 +911,7 @@ fn is_numeric_column_type(column_type: Option<&String>) -> bool {
             | "smallmoneyn"
             | "binary_float"
             | "binary_double"
+            | "bignum"
     )
 }
 
@@ -2155,12 +2156,39 @@ mod tests {
             "usmallint",
             "uinteger",
             "ubigint",
+            "bignum",
         ] {
             assert!(
                 is_numeric_column_type(Some(&duckdb_type.to_string())),
                 "expected DuckDB numeric type: {duckdb_type}"
             );
         }
+    }
+
+    #[test]
+    fn xlsx_export_duckdb_computed_decimal_exports_as_numeric() {
+        use std::io::Cursor;
+
+        let columns = vec!["金额".to_string()];
+        let column_types = vec!["DECIMAL(18, 2)".to_string()];
+        let rows = vec![vec![serde_json::Value::String("101.10".to_string())]];
+
+        let mut writer =
+            start_streaming_xlsx_workbook(Cursor::new(Vec::new()), Some("Result"), &columns, &column_types)
+                .expect("start workbook");
+        for row in &rows {
+            writer.write_row(row).expect("write row");
+        }
+        let cursor = finish_streaming_xlsx_workbook(writer).expect("finish workbook");
+        let bytes = cursor.into_inner();
+        let sheet_xml = read_zip_entry(&bytes, "xl/worksheets/sheet1.xml");
+
+        // The computed decimal value must be exported as a numeric cell (<v>101.10</v>) rather than inlineStr
+        assert!(sheet_xml.contains("<v>101.10</v>"), "expected numeric cell in sheet XML, got: {sheet_xml}");
+        assert!(
+            !sheet_xml.contains(r#"<c r="A2" t="inlineStr""#),
+            "did not expect cell A2 to be inlineStr, got: {sheet_xml}"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -551,6 +551,9 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
     if parse_show_databases(show_source) {
         return Ok(MongoCommand::ShowDatabases);
     }
+    if let Some(command) = parse_show_users_or_roles(show_source) {
+        return Ok(MongoCommand::RunCommand { command_json: format!(r#"{{"{command}":1}}"#) });
+    }
     let source = input.trim().trim_end_matches(';').trim();
     if source.eq_ignore_ascii_case("db.version()") {
         return Ok(MongoCommand::Version);
@@ -610,6 +613,57 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
             command.extend(options);
         }
         return Ok(MongoCommand::RunCommand { command_json: Value::Object(command).to_string() });
+    }
+    // `db.createView(name, source, pipeline[, options])` is the create command with viewOn and pipeline.
+    if let Some((args, tail)) = database_method_call(source, "createView") {
+        if !tail.is_empty() || !(3..=4).contains(&args.len()) {
+            return Err(
+                "MongoDB createView() requires a view name, a source collection name, a pipeline, and optional options."
+                    .to_string(),
+            );
+        }
+        let name = parse_string_arg(&args[0])?;
+        let view_on = parse_string_arg(&args[1])?;
+        if [&name, &view_on].iter().any(|name| name.trim().is_empty() || name.contains('$')) {
+            return Err("MongoDB createView() requires valid view and source collection names.".to_string());
+        }
+        let Some(pipeline @ Value::Array(_)) = parse_json_value(&normalized_json(&args[2])?) else {
+            return Err("MongoDB createView() pipeline must be an array of stages.".to_string());
+        };
+        let mut command = serde_json::Map::new();
+        command.insert("create".to_string(), Value::String(name));
+        command.insert("viewOn".to_string(), Value::String(view_on));
+        command.insert("pipeline".to_string(), pipeline);
+        command.extend(parse_database_method_options("createView", args.get(3), &["create", "viewOn", "pipeline"])?);
+        return Ok(MongoCommand::RunCommand { command_json: Value::Object(command).to_string() });
+    }
+    // `db.getUsers()` / `db.getUser(name)` and the role equivalents read usersInfo / rolesInfo, as mongosh does.
+    for (method, command) in [("getUsers", "usersInfo"), ("getRoles", "rolesInfo")] {
+        if let Some((args, tail)) = database_method_call(source, method) {
+            let args: Vec<_> = args.into_iter().filter(|arg| !arg.trim().is_empty()).collect();
+            if !tail.is_empty() || args.len() > 1 {
+                return Err(format!("MongoDB {method}() accepts only an optional options document."));
+            }
+            let mut command_doc = serde_json::Map::new();
+            command_doc.insert(command.to_string(), Value::from(1));
+            command_doc.extend(parse_database_method_options(method, args.first(), &[command])?);
+            return Ok(MongoCommand::RunCommand { command_json: Value::Object(command_doc).to_string() });
+        }
+    }
+    for (method, command) in [("getUser", "usersInfo"), ("getRole", "rolesInfo")] {
+        if let Some((args, tail)) = database_method_call(source, method) {
+            if !tail.is_empty() || !(1..=2).contains(&args.len()) || args[0].trim().is_empty() {
+                return Err(format!("MongoDB {method}() requires a name and optional options."));
+            }
+            let name = parse_string_arg(&args[0])?;
+            if name.trim().is_empty() {
+                return Err(format!("MongoDB {method}() requires a non-empty name."));
+            }
+            let mut command_doc = serde_json::Map::new();
+            command_doc.insert(command.to_string(), Value::String(name));
+            command_doc.extend(parse_database_method_options(method, args.get(1), &[command])?);
+            return Ok(MongoCommand::RunCommand { command_json: Value::Object(command_doc).to_string() });
+        }
     }
     for (method, command) in [("stats", "dbStats"), ("serverStatus", "serverStatus")] {
         if let Some((args, tail)) = database_method_call(source, method) {
@@ -977,6 +1031,38 @@ fn parse_show_databases(source: &str) -> bool {
     words.next().is_some_and(|word| word.eq_ignore_ascii_case("show"))
         && words.next().is_some_and(|word| word.eq_ignore_ascii_case("dbs") || word.eq_ignore_ascii_case("databases"))
         && words.next().is_none()
+}
+
+/// `show users` / `show roles` name the usersInfo / rolesInfo command for the current database.
+fn parse_show_users_or_roles(source: &str) -> Option<&'static str> {
+    let mut words = source.split_whitespace();
+    if !words.next().is_some_and(|word| word.eq_ignore_ascii_case("show")) {
+        return None;
+    }
+    let command = match words.next()? {
+        word if word.eq_ignore_ascii_case("users") => "usersInfo",
+        word if word.eq_ignore_ascii_case("roles") => "rolesInfo",
+        _ => return None,
+    };
+    words.next().is_none().then_some(command)
+}
+
+/// An optional options document for a database helper, rejected when it would override one of the command's own keys.
+fn parse_database_method_options(
+    method: &str,
+    arg: Option<&String>,
+    reserved_keys: &[&str],
+) -> Result<serde_json::Map<String, Value>, String> {
+    let Some(arg) = arg.filter(|arg| !arg.trim().is_empty()) else {
+        return Ok(serde_json::Map::new());
+    };
+    let Some(Value::Object(options)) = parse_json_value(&normalized_json(arg)?) else {
+        return Err(format!("MongoDB {method}() options must be a document."));
+    };
+    if let Some(key) = reserved_keys.iter().find(|key| options.contains_key(**key)) {
+        return Err(format!("MongoDB {method}() options must not contain {key}."));
+    }
+    Ok(options)
 }
 
 fn trim_mongo_outer_comments(mut source: &str) -> &str {
@@ -1391,13 +1477,18 @@ fn is_shell_regex_value_prefix(previous_significant: Option<char>) -> bool {
 /// Shell value constructors rewritten to extended JSON before json5 parsing.
 /// `Date` is only recognised after `new`, matching the shell where a bare `Date()`
 /// returns a string rather than a date.
-const SHELL_CONSTRUCTORS: [&str; 11] = [
+const SHELL_CONSTRUCTORS: [&str; 15] = [
     "ObjectId",
     "ISODate",
     "Date",
     "NumberLong",
     "NumberInt",
     "NumberDecimal",
+    // mongosh's BSON type names for the same values.
+    "Int32",
+    "Long",
+    "Double",
+    "Decimal128",
     "UUID",
     "BinData",
     "Timestamp",
@@ -1535,6 +1626,10 @@ fn key_constant_json(name: &str) -> String {
 
 /// Rewrite one `Name(...)` / `new Name(...)` call at `index`, or None when it is not a known constructor.
 fn shell_constructor_call(input: &str, index: usize) -> Result<Option<(String, usize)>, String> {
+    // Only at the start of a name, so `myLong(1)` is not read as `Long(1)`.
+    if input[..index].chars().next_back().is_some_and(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$' | '.')) {
+        return Ok(None);
+    }
     let rest = &input[index..];
     let (name_start, is_new) = match rest.strip_prefix("new") {
         Some(after) if after.starts_with(|ch: char| ch.is_whitespace()) => {
@@ -1584,8 +1679,8 @@ fn shell_constructor_to_extended_json(name: &str, inner: &str) -> Result<String,
             Some(millis) => Ok(format!(r#"{{"$date":{{"$numberLong":"{millis}"}}}}"#)),
             None => Ok(extended_json("$date", &parse_string_arg(inner)?)),
         },
-        "NumberLong" | "NumberInt" => {
-            let key = if name == "NumberLong" { "$numberLong" } else { "$numberInt" };
+        "NumberLong" | "NumberInt" | "Long" | "Int32" => {
+            let key = if matches!(name, "NumberLong" | "Long") { "$numberLong" } else { "$numberInt" };
             let value = match integer {
                 Some(value) => value.to_string(),
                 None => parse_string_arg(inner)?,
@@ -1593,13 +1688,13 @@ fn shell_constructor_to_extended_json(name: &str, inner: &str) -> Result<String,
             value.parse::<i64>().map_err(|_| format!("MongoDB {name}() requires an integer argument."))?;
             Ok(extended_json(key, &value))
         }
-        "NumberDecimal" => {
+        "NumberDecimal" | "Decimal128" | "Double" => {
             let value = match parse_json_value(inner) {
                 Some(Value::Number(number)) => number.to_string(),
                 _ => parse_string_arg(inner)?,
             };
-            value.parse::<f64>().map_err(|_| "MongoDB NumberDecimal() requires a numeric argument.".to_string())?;
-            Ok(extended_json("$numberDecimal", &value))
+            value.parse::<f64>().map_err(|_| format!("MongoDB {name}() requires a numeric argument."))?;
+            Ok(extended_json(if name == "Double" { "$numberDouble" } else { "$numberDecimal" }, &value))
         }
         _ => Err(format!("Unsupported MongoDB value constructor {name}().")),
     }
@@ -2092,6 +2187,43 @@ mod tests {
     }
 
     #[test]
+    fn rewrites_mongosh_bson_type_constructors() {
+        let MongoCommand::Insert { documents, .. } = parse(
+            "db.getCollection(\"issue_demo\").insert({\n    name: \"demo\",\n    coins: Int32(\"15000\"),\n    amount: Decimal128(\"100\")\n});",
+        )
+        .unwrap() else {
+            panic!("expected an insert command");
+        };
+        assert_eq!(
+            parse_json_value(&documents).unwrap(),
+            serde_json::json!({ "name": "demo", "coins": { "$numberInt": "15000" }, "amount": { "$numberDecimal": "100" } })
+        );
+
+        let MongoCommand::Find { filter, .. } = parse(
+            r#"db.orders.find({a: Int32(3), b: new Int32(-4), c: Long("9223372036854775807"), d: Long(5), e: Double(1.5), f: Double("2"), g: Decimal128("12.34")})"#,
+        )
+        .unwrap() else {
+            panic!("expected a find command");
+        };
+        assert_eq!(
+            parse_json_value(&filter).unwrap(),
+            serde_json::json!({
+                "a": { "$numberInt": "3" },
+                "b": { "$numberInt": "-4" },
+                "c": { "$numberLong": "9223372036854775807" },
+                "d": { "$numberLong": "5" },
+                "e": { "$numberDouble": "1.5" },
+                "f": { "$numberDouble": "2" },
+                "g": { "$numberDecimal": "12.34" },
+            })
+        );
+
+        assert!(parse(r#"db.orders.find({a: Long("x")})"#).unwrap_err().contains("Long() requires an integer"));
+        assert!(parse(r#"db.orders.find({a: Double("abc")})"#).unwrap_err().contains("Double() requires a numeric"));
+        assert!(parse("db.orders.find({a: myLong(1)})").is_err());
+    }
+
+    #[test]
     fn rewrites_epoch_millisecond_and_numeric_value_constructors() {
         let MongoCommand::Find { filter, .. } =
             parse(r#"db.orders.find({at: new Date(1735689600000), qty: NumberInt(3), sequence: NumberLong("9223372036854775807"), total: NumberDecimal("12.34")})"#)
@@ -2247,6 +2379,72 @@ mod tests {
 
         assert!(parse("db.orders.estimatedDocumentCount({a: 1})").unwrap_err().contains("no filter"));
         assert!(parse("db.orders.estimatedDocumentCount().limit(5)").unwrap_err().contains("chained"));
+    }
+
+    #[test]
+    fn parses_create_view_as_a_create_command() {
+        let command = parse(r#"db.createView("active_users", "users", [{ $match: { active: true } }])"#).unwrap();
+        let MongoCommand::RunCommand { command_json } = command else { panic!("expected runCommand") };
+        assert_eq!(
+            serde_json::from_str::<Value>(&command_json).unwrap(),
+            serde_json::json!({ "create": "active_users", "viewOn": "users", "pipeline": [{ "$match": { "active": true } }] })
+        );
+        let MongoCommand::RunCommand { command_json } =
+            parse("db.createView('v', 'users', [], { collation: { locale: 'fr' } });").unwrap()
+        else {
+            panic!("expected runCommand")
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(&command_json).unwrap(),
+            serde_json::json!({ "create": "v", "viewOn": "users", "pipeline": [], "collation": { "locale": "fr" } })
+        );
+
+        for (source, expected) in [
+            (r#"db.createView("v", "users")"#, "requires a view name"),
+            (r#"db.createView("v", "users", {})"#, "pipeline must be an array"),
+            (r#"db.createView("v", "a$b", [])"#, "valid view and source collection names"),
+            (r#"db.createView("v", "users", [], { viewOn: "x" })"#, "must not contain viewOn"),
+            (r#"db.createView("v", "users", []).x()"#, "requires a view name"),
+        ] {
+            assert!(parse(source).unwrap_err().contains(expected), "{source}");
+        }
+    }
+
+    #[test]
+    fn parses_user_and_role_helpers_as_info_commands() {
+        for (source, expected) in [
+            ("show users", serde_json::json!({ "usersInfo": 1 })),
+            ("SHOW ROLES;", serde_json::json!({ "rolesInfo": 1 })),
+            ("db.getUsers()", serde_json::json!({ "usersInfo": 1 })),
+            (
+                "db.getUsers({ showCredentials: false })",
+                serde_json::json!({ "usersInfo": 1, "showCredentials": false }),
+            ),
+            (r#"db.getUser("app")"#, serde_json::json!({ "usersInfo": "app" })),
+            (
+                "db.getUser('app', { showPrivileges: true })",
+                serde_json::json!({ "usersInfo": "app", "showPrivileges": true }),
+            ),
+            (
+                "db.getRoles({ showBuiltinRoles: true })",
+                serde_json::json!({ "rolesInfo": 1, "showBuiltinRoles": true }),
+            ),
+            (r#"db.getRole("reader")"#, serde_json::json!({ "rolesInfo": "reader" })),
+        ] {
+            let MongoCommand::RunCommand { command_json } = parse(source).unwrap() else { panic!("{source}") };
+            assert_eq!(serde_json::from_str::<Value>(&command_json).unwrap(), expected, "{source}");
+        }
+
+        for (source, expected) in [
+            ("db.getUser()", "requires a name"),
+            ("db.getUser(1)", "must be a string"),
+            ("db.getUsers({ usersInfo: 2 })", "must not contain usersInfo"),
+            ("db.getRoles({}, {})", "optional options document"),
+        ] {
+            assert!(parse(source).unwrap_err().contains(expected), "{source}");
+        }
+        assert!(parse("show users extra").is_err());
+        assert!(parse("show collections").is_err());
     }
 
     #[test]

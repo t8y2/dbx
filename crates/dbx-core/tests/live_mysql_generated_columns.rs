@@ -55,6 +55,9 @@ fn change_options(table_name: &str, columns: Vec<EditableStructureColumn>) -> Ta
         is_gaussdb_m_mode: false,
         table_collation: None,
         primary_key_name: None,
+        primary_key_change: None,
+        oracle_foreign_key_changes: None,
+        oracle_constraint_changes: None,
     }
 }
 

@@ -40,6 +40,7 @@ function mountMenu(layout: "full" | "grouped" = "full") {
     openFindReplaceFromContextMenu: vi.fn(),
     deleteEmptyLines: vi.fn(),
     selectAllSqlFromContextMenu: vi.fn(),
+    copyCurrentStatementFromContextMenu: vi.fn(),
     emitContextObjectAction: vi.fn(),
     openCodeSnapshot: vi.fn(),
     sendSelectionToAi: vi.fn(),
@@ -93,6 +94,19 @@ function button(label: string) {
 }
 
 describe("QueryEditor extracted context menu", () => {
+  it("offers copying the statement at the cursor next to selecting it", async () => {
+    const { state, actions, open } = mountMenu("full");
+    state.selectedSql = "SELECT 1";
+    state.executableSql = "SELECT 1";
+    await open();
+    const select = button("editor.contextMenu.selectCurrentStatement");
+    expect(select).toBeDefined();
+    const copy = button("editor.contextMenu.copyCurrentStatement");
+    expect(copy).toBeDefined();
+    copy.click();
+    expect(actions.copyCurrentStatementFromContextMenu).toHaveBeenCalledExactlyOnceWith();
+  });
+
   it("keeps primary actions direct and groups clipboard, structure and result operations", async () => {
     const { state, actions, open } = mountMenu("grouped");
     state.selectedSql = "SELECT * FROM orders";
@@ -149,7 +163,8 @@ describe("QueryEditor extracted context menu", () => {
     expect([...document.querySelectorAll("[data-dbx-context-menu] button")].some((entry) => entry.textContent === "editor.contextMenu.uppercaseSelection")).toBe(false);
     button("sidebarMenu.groups.sqlEditor").click();
     await nextTick();
-    expect(button("editor.contextMenu.uppercaseSelection").disabled).toBe(false);
+    // Opting out hides the action for good; it must not reappear in its group (#12791).
+    expect([...document.querySelectorAll("[data-dbx-context-menu] button")].some((entry) => entry.textContent === "editor.contextMenu.uppercaseSelection")).toBe(false);
   });
 
   it("promotes saved editor actions without changing the preferences of table menus", async () => {

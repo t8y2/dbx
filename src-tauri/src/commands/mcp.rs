@@ -7,8 +7,22 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
+#[cfg(any(windows, test))]
+#[path = "mcp_cleanup.rs"]
+mod cleanup;
 #[path = "mcp_native_installation.rs"]
 mod native_installation;
+
+#[cfg(windows)]
+pub(crate) fn cleanup_mcp_installation_temp_files() {
+    let Some(home) = env::var_os("USERPROFILE").map(PathBuf::from).filter(|home| home.is_absolute()) else {
+        return;
+    };
+    let directory = home.join(".dbx").join("bin");
+    if let Err(error) = cleanup::cleanup_directory(&directory) {
+        log::debug!("Could not clean MCP replacement temporary files in {}: {error}", directory.display());
+    }
+}
 
 const MCP_PACKAGE_NAME: &str = "@dbx-app/mcp-server";
 const MCP_LATEST_URL: &str = "https://registry.npmjs.org/@dbx-app%2fmcp-server/latest";
@@ -361,6 +375,31 @@ pub async fn check_mcp_server_status(app: AppHandle) -> Result<McpServerStatus, 
             .to_string(),
         error,
     })
+}
+
+/// Whether a background `dbx-mcp` launch can read the DBX encryption key.
+/// Kept apart from `check_mcp_server_status` so the frequent update-badge
+/// polling does not spawn a probe process.
+#[tauri::command]
+pub async fn check_mcp_keychain_access() -> Result<native_installation::KeychainAccess, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        native_installation::resolve()
+            .map_or(native_installation::KeychainAccess::NotApplicable, |native| native.keychain_access())
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn authorize_mcp_keychain() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let native = native_installation::resolve().ok_or_else(|| {
+            "The native DBX MCP is not installed; install it before authorizing Keychain access.".to_string()
+        })?;
+        native.authorize_keychain()
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -717,7 +756,7 @@ fn user_shell_node_candidate() -> Option<NodeRuntimeCandidate> {
         shell_quote(SHELL_COMMAND_MARKER)
     );
     let (shell, shell_args) = user_shell_invocation_args(&script);
-    let output = run_command(&shell, &shell_args).ok()?;
+    let output = run_user_shell_command(&shell, &shell_args).ok()?;
     if !output.success {
         return None;
     }
@@ -1536,10 +1575,26 @@ fn windows_shell_quote(value: &str) -> String {
 fn run_command_through_user_shell(command: &str, args: &[&str]) -> Result<CommandOutput, String> {
     let script = shell_command_script(command, args);
     let (shell, shell_args) = user_shell_invocation_args(&script);
-    let shell_arg_refs = shell_args.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut output = run_command(&shell, &shell_arg_refs)?;
+    let mut output = run_user_shell_command(&shell, &shell_args)?;
     output.stdout = stdout_after_shell_marker(&output.stdout);
     Ok(output)
+}
+
+#[cfg(not(windows))]
+fn run_user_shell_command(shell: &str, args: &[String]) -> Result<CommandOutput, String> {
+    let mut command = dbx_core::process::new_std_command(shell);
+    command.args(args);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+
+        // Interactive shells can use /dev/tty even when stdin is piped. Give
+        // Linux probes their own session so they cannot suspend the app.
+        unsafe {
+            command.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+        }
+    }
+    command_output_from_process(command)
 }
 
 #[cfg(not(windows))]
@@ -2675,9 +2730,10 @@ mod tests {
         let calls = std::fs::read_to_string(log_path).unwrap();
         assert!(calls.contains("npm root -g"));
         assert!(calls.contains("npm prefix -g"));
+        let canonical_npm_cli = canonical_runtime_path(&npm_cli_path).unwrap();
         assert!(calls
             .lines()
-            .any(|line| line == format!("{} install -g @dbx-app/mcp-server@latest", npm_cli_path.display())));
+            .any(|line| line == format!("{} install -g @dbx-app/mcp-server@latest", canonical_npm_cli.display())));
         assert!(!calls.contains("--registry"));
         assert!(calls.contains(&format!("PATH={}", canonical_runtime_path(&dir).unwrap().display())));
 

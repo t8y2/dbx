@@ -25,6 +25,7 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 | exasol | Exasol | Exasol JDBC |
 | oceanbase-oracle | OceanBase Oracle Mode | OceanBase JDBC |
 | gbase8a | GBase 8a | External GBase 8a JDBC |
+| gbase8c | GBase 8c | Bundled GBase 8c JDBC |
 | gbase8s | GBase 8s | External GBase 8s JDBC |
 | oracle | Oracle 10g+ | go-ora native agent |
 | oracle-oci | Oracle OCI (thick driver) | godror native agent (Windows x64, CGO; shares `drivers/oracle-go`, built with `-tags oci`) |
@@ -52,10 +53,18 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 | etcd2 | etcd 2.0–2.3, 3.0–3.5 with --enable-v2 (v2 API) | etcd v2 HTTP/JSON native Go agent |
 | zookeeper | Apache ZooKeeper | go-zookeeper native agent |
 | rabbitmq | RabbitMQ | amqp091-go native agent |
-| rocketmq | Apache RocketMQ | rocketmq-admin-go native agent |
+| rocketmq | Apache RocketMQ | rocketmq-admin-go (Remoting) and official Go v5 SDK (Proxy gRPC) native agent |
 | iris | InterSystems IRIS | InterSystems IRIS JDBC |
 | cache | InterSystems Caché | InterSystems Caché JDBC (CacheDB) |
 
+
+## RocketMQ Connection Modes
+
+The same `rocketmq` Agent supports NameServer/Remoting and the official RocketMQ 5.x Proxy gRPC protocol. Proxy mode requires the handshake feature `rocketmq_proxy_grpc`; configurations without a mode continue to use Remoting.
+
+Proxy messaging uses the official Go v5 SDK's RPC, signing and protocol types with per-connection TLS and dialers. SDK v5.1.4 does not forward the high-level Producer's connection options, so this implementation does not replace global TLS switches or transport constructors. It registers Producer settings through Telemetry before checking Heartbeat, keeps the stream open, and sends ordinary messages with keys, tags and user properties. It does not map consumption to a non-mutating peek. Optional NameServer administration reuses Remoting and reports its own degraded state.
+
+Run `go test ./...` and `go test -race ./...` in the RocketMQ driver directory. The official Proxy integration test is opt-in: prepare a NORMAL topic, set `ROCKETMQ_PROXY_INTEGRATION=1`, `ROCKETMQ_PROXY_ENDPOINT`, `ROCKETMQ_PROXY_TOPIC` and `ROCKETMQ_PROXY_TLS`, then run the test. It publishes a test message. The native Agent does not require Java; Java is only used by the local official-service fixture.
 
 ## Multi-JRE Support
 

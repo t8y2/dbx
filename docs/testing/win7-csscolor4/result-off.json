@@ -1,0 +1,17 @@
+{
+  "mode": "off",
+  "runtimeVersion": "Edg/109.0.1518.78",
+  "capabilities": {
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36 Edg/109.0.1518.78",
+    "oklch": false,
+    "mix": false,
+    "mixOklab": false
+  },
+  "targetUrl": "http://tauri.localhost/",
+  "scope": "WebView2 109 on Windows Actions runner; not a Win7 OS test",
+  "computedColors": {
+    "oklch": "rgb(230, 232, 236)",
+    "mix": "rgb(230, 232, 236)",
+    "mixOklab": "rgb(230, 232, 236)"
+  }
+}

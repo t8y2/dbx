@@ -1,15 +1,17 @@
 import { ref, watch } from "vue";
-import type { SqlFilePreview } from "@/lib/backend/api";
+import type { DatabaseExportSelectedObject, SqlFilePreview } from "@/lib/backend/api";
+import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { rememberExportPassphrase } from "@/lib/backend/exportPassphraseSession";
 import { hasSidebarLayoutEntries } from "@/lib/sidebar/sidebarLayout";
 import type { ConnectionConfigBundle } from "@/lib/connection/connectionConfigTransfer";
-import type { ConnectionConfig, SidebarLayout } from "@/types/database";
+import type { ConnectionConfig, DatabaseType, SidebarLayout } from "@/types/database";
 
 const showTransferDialog = ref(false);
 const transferTaskId = ref<string | null>(null);
+const transferReexecuteTask = ref<ExportTask | null>(null);
 const showSchemaDiffDialog = ref(false);
 const showDataCompareDialog = ref(false);
 const showSqlFileDialog = ref(false);
@@ -22,6 +24,10 @@ const showMongoDatabaseDumpDialog = ref(false);
 const mongoDatabaseDumpPrefillConnectionId = ref("");
 const mongoDatabaseDumpPrefillDatabase = ref("");
 const mongoDatabaseDumpMode = ref<"dump" | "restore">("dump");
+const showDamengDumpDialog = ref(false);
+const damengDumpPrefillConnectionId = ref("");
+const damengDumpPrefillDatabase = ref("");
+const damengDumpMode = ref<"export" | "import">("export");
 const showTableDataGenerateDialog = ref(false);
 const tableDataGenerateSessionId = ref<string | null>(null);
 const showFieldLineageDialog = ref(false);
@@ -41,7 +47,7 @@ const configConnectionSelectList = ref<ConnectionConfig[]>([]);
 const configConnectionSelectLayout = ref<SidebarLayout | null>(null);
 const pendingExportConnectionIds = ref<string[]>([]);
 const pendingImportPreview = ref<ConnectionConfigBundle | null>(null);
-const pendingImportSource = ref<"dbx" | "navicat" | "dbeaver" | "datagrip">("dbx");
+const pendingImportSource = ref<"dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis">("dbx");
 const applyingImportSelection = ref(false);
 
 const transferPrefillConnectionId = ref("");
@@ -71,6 +77,7 @@ const sqlFilePrefillPreview = ref<SqlFilePreview>();
 const diagramPrefillConnectionId = ref("");
 const diagramPrefillDatabase = ref("");
 const diagramPrefillSchema = ref("");
+const diagramPrefillCatalog = ref<string>();
 const diagramFocusTableName = ref("");
 const diagramFocusTableNames = ref<string[]>([]);
 const docsPrefillConnectionId = ref("");
@@ -92,6 +99,7 @@ const tableDataGeneratePrefillDatabase = ref("");
 const tableDataGeneratePrefillSchema = ref("");
 const tableDataGeneratePrefillTable = ref("");
 const lineagePrefillConnectionId = ref("");
+const lineagePrefillDatabaseType = ref<DatabaseType>();
 const lineagePrefillDatabase = ref("");
 const lineagePrefillSchema = ref("");
 const lineagePrefillTable = ref("");
@@ -104,6 +112,7 @@ const databaseExportPrefillDatabase = ref("");
 const databaseExportPrefillSchema = ref("");
 const databaseExportPrefillTable = ref("");
 const databaseExportPrefillTables = ref<string[]>([]);
+const databaseExportPrefillObjects = ref<DatabaseExportSelectedObject[]>([]);
 const databaseExportAllDatabases = ref(false);
 
 let watchersRegistered = false;
@@ -131,6 +140,16 @@ export function openDataCompareSession(sessionId: string): void {
 
 export function openDataTransferTask(taskId: string): void {
   transferTaskId.value = taskId;
+  transferReexecuteTask.value = null;
+  showTransferDialog.value = true;
+}
+
+export function reexecuteDataTransferTask(taskOrId: ExportTask | string): void {
+  const tracker = useExportTracker();
+  const task = typeof taskOrId === "string" ? tracker.tasks.value.find((t) => t.exportId === taskOrId) : taskOrId;
+  if (!task || !task.dataTransferRequest) return;
+  transferTaskId.value = null;
+  transferReexecuteTask.value = task;
   showTransferDialog.value = true;
 }
 
@@ -174,6 +193,7 @@ export function useDialogSources() {
     watch(showTransferDialog, (open) => {
       if (!open) {
         transferTaskId.value = null;
+        transferReexecuteTask.value = null;
         clearTransferPrefill();
       }
     });
@@ -252,6 +272,7 @@ export function useDialogSources() {
           diagramPrefillConnectionId.value = v.connectionId;
           diagramPrefillDatabase.value = v.database;
           diagramPrefillSchema.value = v.schema ?? "";
+          diagramPrefillCatalog.value = v.catalog;
           diagramFocusTableName.value = v.tableName ?? "";
           diagramFocusTableNames.value = v.tableNames ?? (v.tableName ? [v.tableName] : []);
           showDiagramDialog.value = true;
@@ -329,6 +350,18 @@ export function useDialogSources() {
     );
 
     watch(
+      () => connectionStore.damengDumpSource,
+      (source) => {
+        if (!source) return;
+        damengDumpPrefillConnectionId.value = source.connectionId;
+        damengDumpPrefillDatabase.value = source.database;
+        damengDumpMode.value = source.mode;
+        showDamengDumpDialog.value = true;
+        connectionStore.damengDumpSource = null;
+      },
+    );
+
+    watch(
       () => connectionStore.tableDataGenerateSource,
       (v) => {
         if (v) {
@@ -352,6 +385,7 @@ export function useDialogSources() {
       (v) => {
         if (v) {
           lineagePrefillConnectionId.value = v.connectionId;
+          lineagePrefillDatabaseType.value = v.databaseType;
           lineagePrefillDatabase.value = v.database;
           lineagePrefillSchema.value = v.schema ?? "";
           lineagePrefillTable.value = v.tableName;
@@ -384,6 +418,7 @@ export function useDialogSources() {
           databaseExportPrefillSchema.value = v.schema ?? "";
           databaseExportPrefillTable.value = v.tableName ?? "";
           databaseExportPrefillTables.value = v.tableNames ?? [];
+          databaseExportPrefillObjects.value = v.objects ?? [];
           databaseExportAllDatabases.value = v.allDatabases ?? false;
           showDatabaseExportDialog.value = true;
           connectionStore.databaseExportSource = null;
@@ -415,7 +450,7 @@ export function useDialogSources() {
     showConfigConnectionSelectDialog.value = true;
   }
 
-  function importSuccessMessage(source: "dbx" | "navicat" | "dbeaver" | "datagrip", count: number, keychainFilled = 0) {
+  function importSuccessMessage(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis", count: number, keychainFilled = 0) {
     if (count <= 0) return t("configExport.importNone");
     if (source === "navicat") return t("configExport.importNavicatSuccess", { count });
     if (source === "dbeaver") return t("configExport.importDbeaverSuccess", { count });
@@ -423,7 +458,7 @@ export function useDialogSources() {
     return t("configExport.importSuccess", { count });
   }
 
-  async function finishImport(source: "dbx" | "navicat" | "dbeaver" | "datagrip", count: number, layout?: SidebarLayout) {
+  async function finishImport(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis", count: number, layout?: SidebarLayout) {
     let keychainFilled = 0;
     if (source === "datagrip" && count > 0) {
       keychainFilled = await connectionStore.applyDataGripKeychainPasswords();
@@ -507,7 +542,7 @@ export function useDialogSources() {
     if (!open) showConfigPassphraseDialog.value = true;
   }
 
-  async function onImportClick(source: "dbx" | "navicat" | "dbeaver" | "datagrip" = "dbx") {
+  async function onImportClick(source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis" = "dbx") {
     try {
       const result = await connectionStore.readImportFile(source);
       if (!result) return;
@@ -522,7 +557,7 @@ export function useDialogSources() {
       }
       const preview = await connectionStore.parseConnectionsImport(result.content, null);
       pendingImportPreview.value = preview;
-      if (source === "dbx") {
+      if (source === "dbx" || source === "rdm" || source === "another-redis") {
         openConnectionSelect("import", preview.connections, preview.layout);
         return;
       }
@@ -589,6 +624,7 @@ export function useDialogSources() {
   return {
     showTransferDialog,
     transferTaskId,
+    transferReexecuteTask,
     showSchemaDiffDialog,
     showDataCompareDialog,
     showSqlFileDialog,
@@ -601,6 +637,10 @@ export function useDialogSources() {
     mongoDatabaseDumpPrefillConnectionId,
     mongoDatabaseDumpPrefillDatabase,
     mongoDatabaseDumpMode,
+    showDamengDumpDialog,
+    damengDumpPrefillConnectionId,
+    damengDumpPrefillDatabase,
+    damengDumpMode,
     showTableDataGenerateDialog,
     tableDataGenerateSessionId,
     showFieldLineageDialog,
@@ -646,6 +686,7 @@ export function useDialogSources() {
     diagramPrefillConnectionId,
     diagramPrefillDatabase,
     diagramPrefillSchema,
+    diagramPrefillCatalog,
     diagramFocusTableName,
     diagramFocusTableNames,
     docsPrefillConnectionId,
@@ -667,6 +708,7 @@ export function useDialogSources() {
     tableDataGeneratePrefillSchema,
     tableDataGeneratePrefillTable,
     lineagePrefillConnectionId,
+    lineagePrefillDatabaseType,
     lineagePrefillDatabase,
     lineagePrefillSchema,
     lineagePrefillTable,
@@ -679,6 +721,7 @@ export function useDialogSources() {
     databaseExportPrefillSchema,
     databaseExportPrefillTable,
     databaseExportPrefillTables,
+    databaseExportPrefillObjects,
     databaseExportAllDatabases,
     onExportClick,
     onExportConfirm,

@@ -46,6 +46,8 @@ Standard copy and paste still follow platform conventions. Copy Current Row, Del
 
 **Focus WHERE condition** has no default shortcut. Assign your preferred binding in **Settings → Shortcuts → Data grid** to focus the WHERE input in the active table data tab. It keeps the current condition and does not execute a query. It does nothing when the WHERE input is unavailable.
 
+The grid also has two fixed gestures that are not rebindable: pressing `↓` while the cursor is on the last displayed row appends a row at the end of the result (unlike Add Row, which follows the toolbar insert position), and `Esc` inside a cell editor only cancels the current input — with the grid focused, `Esc` removes a new row that was never filled in, otherwise it reverts the selected cell to its original value. See [Data grid](/en/docs/data-grid).
+
 ### Global and Navigation
 
 | Default | Action |
@@ -73,6 +75,12 @@ Press `Mod+P` to search connections, databases, schemas, tables, views, and save
 4. Resolve conflicts and save
 
 DBX detects conflicts within a scope. Editor, grid, search, sidebar, and global actions have separate scopes, but the browser, operating system, input method, or accessibility software may still reserve a key first.
+
+The Shortcuts-tab search box also supports **key recording**: click the keyboard icon next to it and press a combination to filter down to the actions bound to it. Actions that share the same chord in another scope are listed as well, so you can hunt conflicts without knowing how the combination is spelled. Keys pressed while recording never run their command; `Esc` exits recording and `Backspace` clears the recorded combination. You can also type the combination as text — both `Ctrl+T` and `Ctrl + T` match.
+
+**Combinations the system claims cannot be recorded**: keys such as `Alt+F4`, `Win`, `Ctrl+Alt+Del`, or macOS `⌘Tab` are handled by the operating system or window manager before DBX sees them, so recording yields nothing — that is not a recording failure. Such a combination also never fires even if it is configured by hand; use the text search instead when you need to inspect it.
+
+The web build has one more layer: keys the browser reserves (`Ctrl+W` / `Ctrl+Shift+W` / `Ctrl+T` / `Ctrl+N`, or `⌘W` on macOS) are handled by the browser itself and never reach the page. The desktop build has no such restriction — `Ctrl+Shift+W` is the default for Close Window and `Ctrl+W` for Close Tab, and both can be recorded normally.
 
 On Windows/Linux, `Ctrl+Alt` may represent AltGr, so DBX matches those combinations conservatively. On macOS, Option+letter can produce transformed characters, and DBX uses physical-key fallback only where safe.
 

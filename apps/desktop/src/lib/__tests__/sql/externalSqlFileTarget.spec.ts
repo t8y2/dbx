@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   activeTabExternalSqlFileTarget,
   EXTERNAL_SQL_FILE_TARGETS_STORAGE_KEY,
+  forgetExternalSqlFolderTargets,
   MAX_EXTERNAL_SQL_FILE_TARGETS,
   forgetExternalSqlFileTarget,
   moveExternalSqlFileTarget,
@@ -155,6 +156,18 @@ describe("external SQL file targets", () => {
 
     forgetExternalSqlFileTarget("C:/work/report.sql");
     expect(resolveExternalSqlFileTarget("C:/work/report.sql", () => true, unassociatedExternalSqlFileTarget())).toEqual(unassociatedExternalSqlFileTarget());
+  });
+
+  it("removes persisted targets for every file in a deleted folder subtree", () => {
+    rememberExternalSqlFileTarget("/work/archive/open.sql", { connectionId: "open-connection", database: "sales" });
+    rememberExternalSqlFileTarget("/work/archive/closed.sql", { connectionId: "closed-connection", database: "analytics" });
+    rememberExternalSqlFileTarget("/work/keep.sql", { connectionId: "keep-connection", database: "default" });
+
+    forgetExternalSqlFolderTargets("/work/archive");
+
+    expect(resolveExternalSqlFileTarget("/work/archive/open.sql", () => true, unassociatedExternalSqlFileTarget())).toEqual(unassociatedExternalSqlFileTarget());
+    expect(resolveExternalSqlFileTarget("/work/archive/closed.sql", () => true, unassociatedExternalSqlFileTarget())).toEqual(unassociatedExternalSqlFileTarget());
+    expect(resolveExternalSqlFileTarget("/work/keep.sql", () => true, unassociatedExternalSqlFileTarget())).toMatchObject({ connectionId: "keep-connection" });
   });
 
   it("ignores malformed persisted state", () => {

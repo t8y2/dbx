@@ -1,5 +1,6 @@
 import type { Command, EditorView, KeyBinding } from "@codemirror/view";
-import { shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
+import { shortcutToCodeMirrorKey, type ShortcutSettings } from "@/lib/editor/shortcutRegistry";
+import { isExecuteSqlShortcut, isExecuteAllSqlShortcut, isExecuteSqlInNewResultTabShortcut, isExplainSqlShortcut } from "@/lib/editor/keyboardShortcuts";
 
 const SAFARI_POST_COMPOSITION_KEY_WINDOW_MS = 100;
 
@@ -71,4 +72,20 @@ export function createQueryEditorExecutionShortcutBindings(shortcut: string, run
       },
     },
   ];
+}
+
+/**
+ * Intercept DOM keydown events for execution shortcuts to prevent duplicate
+ * executions caused by key repeat or while a query is already running.
+ */
+export function createQueryEditorExecutionShortcutHandler(options: { getShortcuts: () => Partial<ShortcutSettings>; isExecuting?: () => boolean; enableExplainShortcut?: () => boolean }): (event: KeyboardEvent) => boolean {
+  return (event: KeyboardEvent) => {
+    if (!event.repeat && !options.isExecuting?.()) return false;
+    const shortcuts = options.getShortcuts();
+    const isExecution = isExecuteSqlShortcut(event, shortcuts) || isExecuteAllSqlShortcut(event, shortcuts) || isExecuteSqlInNewResultTabShortcut(event, shortcuts) || (options.enableExplainShortcut?.() && isExplainSqlShortcut(event, shortcuts));
+    if (!isExecution) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    return true;
+  };
 }

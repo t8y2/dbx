@@ -423,13 +423,14 @@ fn client_secret_pair(params: &SfOauthParams) -> Option<String> {
 /// one browser flow may run at a time (shared lock with nothing else — Mongo
 /// OIDC keeps its own).
 pub async fn authorize_with_browser(params: &SfOauthParams, opener: &SfBrowserOpener) -> Result<SfTokenSet, String> {
-    authorize_with_browser_policy(params, opener, EndpointPolicy::HttpsOnly).await
+    authorize_with_browser_policy(params, opener, EndpointPolicy::HttpsOnly, None).await
 }
 
 async fn authorize_with_browser_policy(
     params: &SfOauthParams,
     opener: &SfBrowserOpener,
     policy: EndpointPolicy,
+    callback_listener: Option<TcpListener>,
 ) -> Result<SfTokenSet, String> {
     let deadline = Instant::now() + SALESFORCE_OAUTH_BROWSER_TIMEOUT;
     let remaining = || {
@@ -443,9 +444,12 @@ async fn authorize_with_browser_policy(
     let _flow_guard = tokio::time::timeout(remaining()?, browser_flow_lock().lock())
         .await
         .map_err(|_| oauth_error("browser authorization timed out"))?;
-    let listener = TcpListener::bind(OAUTH_CALLBACK_ADDRESS)
-        .await
-        .map_err(|err| oauth_error(format!("cannot listen on {SALESFORCE_OAUTH_REDIRECT_URI}: {err}")))?;
+    let listener = match callback_listener {
+        Some(listener) => listener,
+        None => TcpListener::bind(OAUTH_CALLBACK_ADDRESS)
+            .await
+            .map_err(|err| oauth_error(format!("cannot listen on {SALESFORCE_OAUTH_REDIRECT_URI}: {err}")))?,
+    };
 
     let state = random_url_safe_value();
     let verifier = random_url_safe_value();
@@ -864,6 +868,8 @@ mod tests {
 
     #[tokio::test]
     async fn browser_flow_exchanges_pkce_code_for_tokens() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let callback_address = listener.local_addr().unwrap();
         let (base, requests, server) = start_mock_oauth_server(Vec::new()).await;
         let opened = Arc::new(StdMutex::new(None));
         let captured = opened.clone();
@@ -872,7 +878,7 @@ mod tests {
             let state = parsed.query_pairs().find_map(|(k, v)| (k == "state").then(|| v.into_owned())).unwrap();
             *captured.lock().unwrap() = Some(parsed);
             std::thread::spawn(move || {
-                let mut stream = std::net::TcpStream::connect("127.0.0.1:27098").unwrap();
+                let mut stream = std::net::TcpStream::connect(callback_address).unwrap();
                 write!(stream, "GET /callback?code=auth-code&state={state}").unwrap();
                 std::thread::sleep(Duration::from_millis(10));
                 write!(stream, " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
@@ -884,7 +890,9 @@ mod tests {
         });
 
         let tokens =
-            authorize_with_browser_policy(&params(&base), &opener, EndpointPolicy::AllowLoopbackHttp).await.unwrap();
+            authorize_with_browser_policy(&params(&base), &opener, EndpointPolicy::AllowLoopbackHttp, Some(listener))
+                .await
+                .unwrap();
         server.abort();
 
         assert_eq!(tokens.access_token, "token");
@@ -896,17 +904,20 @@ mod tests {
         assert!(recorded[0].contains("grant_type=authorization_code"));
         assert!(recorded[0].contains("code=auth-code"));
         assert!(recorded[0].contains("code_verifier="));
+        assert!(recorded[0].contains("redirect_uri=http%3A%2F%2Flocalhost%3A27098%2Fcallback"));
         assert!(!recorded[0].contains("client_secret"));
     }
 
     #[tokio::test]
     async fn confidential_app_sends_client_secret() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let callback_address = listener.local_addr().unwrap();
         let (base, requests, server) = start_mock_oauth_server(Vec::new()).await;
         let opener: SfBrowserOpener = Arc::new(move |url| {
             let parsed = Url::parse(url).unwrap();
             let state = parsed.query_pairs().find_map(|(k, v)| (k == "state").then(|| v.into_owned())).unwrap();
             std::thread::spawn(move || {
-                let mut stream = std::net::TcpStream::connect("127.0.0.1:27098").unwrap();
+                let mut stream = std::net::TcpStream::connect(callback_address).unwrap();
                 write!(
                     stream,
                     "GET /callback?code=c&state={state} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
@@ -919,7 +930,10 @@ mod tests {
         });
         let mut confidential = params(&base);
         confidential.client_secret = Some("app-secret".to_string());
-        let _ = authorize_with_browser_policy(&confidential, &opener, EndpointPolicy::AllowLoopbackHttp).await.unwrap();
+        let _ =
+            authorize_with_browser_policy(&confidential, &opener, EndpointPolicy::AllowLoopbackHttp, Some(listener))
+                .await
+                .unwrap();
         server.abort();
         assert!(requests.lock().unwrap()[0].contains("client_secret=app-secret"));
     }

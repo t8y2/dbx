@@ -60,13 +60,14 @@ pub async fn document_find_documents(
     collation: Option<String>,
     cursor: Option<String>,
     cursor_pagination: Option<bool>,
+    include_total: Option<bool>,
     execution_id: Option<String>,
 ) -> Result<DocumentQueryResult, String> {
     let app = state.inner().clone();
     run_cancellable(
         &app,
         execution_id,
-        dbx_core::document_ops::find_documents_core(
+        dbx_core::document_ops::find_documents_core_with_total(
             &app,
             &connection_id,
             &database,
@@ -79,6 +80,7 @@ pub async fn document_find_documents(
             collation.as_deref(),
             cursor.as_deref(),
             cursor_pagination.unwrap_or(false),
+            include_total.unwrap_or(true),
         ),
     )
     .await

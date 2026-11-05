@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 370
 dbType: saphana
+compareModes: [schema, data]
 rustVariant: SapHana
 label: SAP HANA
 runtimeMode: agent
@@ -24,8 +25,8 @@ capabilities:
   schemaSearch: true
   diagram: true
   tableDataEdit: true
-  tableStructureEdit: false
-  tableImport: false
+  tableStructureEdit: true
+  tableImport: true
   dataTransfer: false
   sqlFileExecution: true
   databaseCreate: false

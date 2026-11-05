@@ -1,7 +1,10 @@
-import { syntaxTree, syntaxTreeAvailable } from "@codemirror/language";
+import { StreamLanguage, language, syntaxTree, syntaxTreeAvailable } from "@codemirror/language";
 import type { EditorState, Text } from "@codemirror/state";
 import { matchDollarQuoteTag } from "@/lib/sql/semantic/tokens";
-import { expandToSqlStatementWindow, type TextRange } from "@/lib/sql/insertValueHints";
+import type { TextRange } from "@/lib/sql/insertValueHints";
+import { isEditorStatePlausibleFor, registerEditorStatementWindowResolver, resolveSqlStatementWindow } from "@/lib/sql/sqlStatementWindow";
+
+export { isEditorStatePlausibleFor, resolveSqlStatementWindow };
 
 // `@lezer/common` (the package that declares `SyntaxNode`) is a transitive dependency, not a
 // direct one, so pnpm's strict linking doesn't expose it for a direct type-only import here.
@@ -41,8 +44,11 @@ type SyntaxNode = ReturnType<ReturnType<typeof syntaxTree>["resolve"]>;
 // as a safety check rather than as the primary boundary-finding mechanism.
 const DOLLAR_QUOTE_DISTRUST_LOOKBACK = 32 * 1024;
 
-export function isEditorStatePlausibleFor(state: EditorState, sql: string): boolean {
-  return state.doc.length === sql.length;
+/** The node names these helpers read belong to the Lezer SQL grammar. Documents past the grammar
+ * budget are highlighted by a stream tokenizer whose tree has different (or no) node names, so every
+ * lookup here must report "unknown" for them and let the caller use the bounded scanner. */
+function hasLezerSqlGrammar(state: EditorState): boolean {
+  return !(state.facet(language) instanceof StreamLanguage);
 }
 
 function hasUnresolvedDollarQuoteBefore(doc: Text, from: number, lookback: number): boolean {
@@ -64,15 +70,6 @@ function hasUnresolvedDollarQuoteBefore(doc: Text, from: number, lookback: numbe
   // PostgreSQL closes a dollar-quoted body only with the exact opening delimiter. A different
   // tagged marker inside the body is ordinary text and must not accidentally balance the guard.
   return openTag !== null;
-}
-
-export function resolveSqlStatementWindow(sql: string, cursor: number, editorState: EditorState | undefined, dialectId: string): TextRange {
-  const safeCursor = Math.max(0, Math.min(cursor, sql.length));
-  if (editorState && isEditorStatePlausibleFor(editorState, sql)) {
-    const window = resolveStatementWindowFromSyntaxTree(editorState, safeCursor);
-    if (window) return window;
-  }
-  return expandToSqlStatementWindow(sql, safeCursor, safeCursor, dialectId);
 }
 
 /** Finds the nearest enclosing `Statement` node for `cursor`, resolving the trailing-whitespace
@@ -99,7 +96,7 @@ function statementNodeAt(state: EditorState, cursor: number): SyntaxNode | null 
  * resolved node looks like an error-recovery node, or when a dollar-quoted body might be hiding
  * the true boundary (see module doc comment) -- the caller should fall back to the scanner. */
 export function resolveStatementWindowFromSyntaxTree(state: EditorState, cursor: number): TextRange | null {
-  if (!syntaxTreeAvailable(state, cursor)) return null;
+  if (!hasLezerSqlGrammar(state) || !syntaxTreeAvailable(state, cursor)) return null;
 
   const statementNode = statementNodeAt(state, cursor);
   if (!statementNode) return null;
@@ -126,7 +123,7 @@ export function resolveStatementWindowFromSyntaxTree(state: EditorState, cursor:
  * `QuotedIdentifier` (double-quote/backtick/bracket) and everything else is neither, matching
  * getSqlLexicalContext's existing "only single/dollar-quoted text is a value literal" semantics. */
 export function resolveLexicalLeafFromSyntaxTree(state: EditorState, cursor: number): { inLineComment: boolean; inBlockComment: boolean; inStringLiteral: boolean } | null {
-  if (!syntaxTreeAvailable(state, cursor)) return null;
+  if (!hasLezerSqlGrammar(state) || !syntaxTreeAvailable(state, cursor)) return null;
 
   const tree = syntaxTree(state);
   const node = tree.resolve(cursor, -1);
@@ -138,3 +135,5 @@ export function resolveLexicalLeafFromSyntaxTree(state: EditorState, cursor: num
     inStringLiteral: node.name === "String",
   };
 }
+
+registerEditorStatementWindowResolver(resolveStatementWindowFromSyntaxTree);

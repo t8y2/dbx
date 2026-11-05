@@ -15,7 +15,8 @@ use super::*;
 /// Tables referenced by another selected table are cleared with `DELETE`, the rest with the
 /// usual per-database clear statement. Returns the source names of the tables that were
 /// cleared; the caller passes `target_cleared = true` to `transfer_table_with_result` for
-/// those so they are not cleared a second time.
+/// those so they are not cleared a second time. Returns `Err("Cancelled")` when the transfer
+/// is cancelled while the metadata is still being read; once clearing starts it runs through.
 ///
 /// Returns an empty set, leaving every table to the per-table clear, when the request is not
 /// an overwrite, when no selected target references another, when the foreign key metadata
@@ -28,16 +29,16 @@ pub async fn clear_foreign_key_linked_overwrite_targets(
     target_db_type: DatabaseType,
     target_pool_key: &str,
 ) -> Result<HashSet<String>, String> {
-    if request.mode != TransferMode::Overwrite
-        || request.drop_target_before_create
-        || tables.len() < 2
-        || is_mongodb_transfer_type(&target_db_type)
-    {
+    super::check_data_charset_transfer(state, request).await?;
+    if !overwrite_clear_prepass_enabled(request, tables.len(), &target_db_type) {
         return Ok(HashSet::new());
     }
 
     let mut targets: Vec<(String, String)> = Vec::new();
     for table in tables {
+        if is_cancelled(&request.transfer_id).await {
+            return Err("Cancelled".to_string());
+        }
         let ResolvedTransferTargetTable { name, preexisting } = resolve_transfer_target_table_name(
             state,
             request,
@@ -55,6 +56,9 @@ pub async fn clear_foreign_key_linked_overwrite_targets(
 
     let mut edges: Vec<(String, String)> = Vec::new();
     for (_, target_table) in &targets {
+        if is_cancelled(&request.transfer_id).await {
+            return Err("Cancelled".to_string());
+        }
         let foreign_keys = match crate::schema::list_foreign_keys_core(
             state,
             &request.target_connection_id,
@@ -141,6 +145,20 @@ pub async fn clear_foreign_key_linked_overwrite_targets(
     Ok(cleared)
 }
 
+fn overwrite_clear_prepass_enabled(
+    request: &TransferRequest,
+    table_count: usize,
+    target_db_type: &DatabaseType,
+) -> bool {
+    request.mode == TransferMode::Overwrite
+        // Structure-only transfers use overwrite for selected schema objects
+        // (for example MySQL routines), but must never mutate table rows.
+        && should_copy_data(&request.content)
+        && !request.drop_target_before_create
+        && table_count >= 2
+        && !is_mongodb_transfer_type(target_db_type)
+}
+
 pub(super) fn overwrite_pre_pass_clear_sql(
     table: &str,
     schema: &str,
@@ -159,6 +177,34 @@ pub(super) fn overwrite_pre_pass_clear_sql(
 mod tests {
     use super::*;
 
+    fn request(content: TransferContent) -> TransferRequest {
+        TransferRequest {
+            transfer_id: "transfer-test".into(),
+            source_connection_id: "source".into(),
+            source_database: "source".into(),
+            source_schema: "source".into(),
+            source_catalog: None,
+            target_connection_id: "target".into(),
+            target_database: "target".into(),
+            target_schema: "target".into(),
+            target_catalog: None,
+            tables: vec!["parent".into(), "child".into()],
+            create_table: true,
+            content,
+            objects: None,
+            mode: TransferMode::Overwrite,
+            target_table_name_case: TransferTableNameCase::Preserve,
+            target_column_name_case: TransferColumnNameCase::Preserve,
+            quote_target_column_names: true,
+            ownership_policy: TransferOwnershipPolicy::Preserve,
+            batch_size: 1000,
+            table_filters: HashMap::new(),
+            drop_target_before_create: false,
+            drop_target_confirmed: false,
+            oracle_packages: None,
+        }
+    }
+
     #[test]
     fn referenced_targets_are_deleted_instead_of_truncated() {
         assert_eq!(
@@ -173,5 +219,13 @@ mod tests {
             overwrite_pre_pass_clear_sql("EVENTS", "APP", &DatabaseType::Db2, None, false),
             "TRUNCATE TABLE \"APP\".\"EVENTS\" IMMEDIATE"
         );
+    }
+
+    #[test]
+    fn structure_only_overwrite_does_not_clear_table_rows() {
+        let structure_request = request(TransferContent::StructureOnly);
+        assert!(!overwrite_clear_prepass_enabled(&structure_request, 2, &DatabaseType::Mysql));
+        let data_request = request(TransferContent::StructureAndData);
+        assert!(overwrite_clear_prepass_enabled(&data_request, 2, &DatabaseType::Mysql));
     }
 }

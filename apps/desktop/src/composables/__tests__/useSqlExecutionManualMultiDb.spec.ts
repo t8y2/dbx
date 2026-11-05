@@ -54,6 +54,39 @@ describe("manual multi-database submission", () => {
     vi.mocked(api.rollbackManualTransaction).mockResolvedValue({ columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 });
   });
 
+  it.each([
+    {
+      mode: "oracle",
+      sql: "BEGIN\n NULL;\n NULL;\nEND;\n/\nSELECT 3;",
+      expected: ["BEGIN\n NULL;\n NULL;\nEND;", "SELECT 3"],
+    },
+    {
+      mode: "mysql",
+      sql: "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END$$\nDELIMITER ;\nSELECT 3;",
+      expected: ["CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END", "SELECT 3"],
+    },
+  ])("splits a Kingbase $mode routine by the connection compatibility mode", async ({ mode, sql, expected }) => {
+    const { execution, input, ordinary } = setup();
+    input.connection.db_type = "kingbase";
+    input.connection.database_info = { compatibilityMode: mode };
+    input.sql = sql;
+    const result = await execution.executeTargetSql(input);
+    expect(api.beginManualTransaction).toHaveBeenCalledExactlyOnceWith("target-connection", "target_db", "target_schema", undefined);
+    expect(api.executeInManualTransaction.mock.calls.map((call) => [call[0], call[1]])).toEqual(expected.map((statement) => ["session", statement]));
+    expect(ordinary).not.toHaveBeenCalled();
+    expect(result.status).toBe("pending_commit");
+  });
+
+  it("does not bypass the manual-transaction capability gate for a database without support", async () => {
+    const { execution, input, ordinary } = setup();
+    input.connection.db_type = "doris";
+    const result = await execution.executeTargetSql(input);
+    expect(result).toMatchObject({ status: "failed", errorMessage: "multiDbExecute.manualUnsupported" });
+    expect(api.beginManualTransaction).not.toHaveBeenCalled();
+    expect(api.executeInManualTransaction).not.toHaveBeenCalled();
+    expect(ordinary).not.toHaveBeenCalled();
+  });
+
   it("uses the captured target and records success only after an explicit commit", async () => {
     const { execution, input, ordinary, cleanup, capture, history } = setup();
     input.tab.resultCountSql = "SELECT COUNT(*) FROM unrelated_source";

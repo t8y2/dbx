@@ -292,6 +292,8 @@ pub enum TaskItemKind {
     MaterializedView,
     Procedure,
     Function,
+    Package,
+    PackageBody,
     Trigger,
     Sequence,
     Event,
@@ -306,6 +308,8 @@ impl TaskItemKind {
             Self::MaterializedView => "materialized_view",
             Self::Procedure => "procedure",
             Self::Function => "function",
+            Self::Package => "package",
+            Self::PackageBody => "package_body",
             Self::Trigger => "trigger",
             Self::Sequence => "sequence",
             Self::Event => "event",
@@ -320,6 +324,8 @@ impl TaskItemKind {
             "materialized_view" => Some(Self::MaterializedView),
             "procedure" => Some(Self::Procedure),
             "function" => Some(Self::Function),
+            "package" => Some(Self::Package),
+            "package_body" => Some(Self::PackageBody),
             "trigger" => Some(Self::Trigger),
             "sequence" => Some(Self::Sequence),
             "event" => Some(Self::Event),
@@ -338,6 +344,8 @@ impl TaskItemKind {
             "MaterializedView" => Self::MaterializedView,
             "Procedure" => Self::Procedure,
             "Function" => Self::Function,
+            "Package" => Self::Package,
+            "PackageBody" => Self::PackageBody,
             "Trigger" => Self::Trigger,
             "Sequence" => Self::Sequence,
             "Event" => Self::Event,
@@ -931,8 +939,19 @@ fn to_sqlite_count(value: u64) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_history_keeps_the_exact_kind_and_entire_quoted_name() {
+        for (kind, name) in [(TaskItemKind::Package, "Package"), (TaskItemKind::PackageBody, "PackageBody")] {
+            let actual = TaskItemKind::from_transfer(&format!("{name}:Pkg.With.Dot:😀"));
+            assert_eq!(actual, (kind, "Pkg.With.Dot:😀".into()));
+            assert_eq!(TaskItemKind::from_storage(kind.as_storage_str()), Some(kind));
+            let wire = serde_json::to_string(&kind).unwrap();
+            assert_eq!(serde_json::from_str::<TaskItemKind>(&wire).unwrap(), kind);
+        }
+    }
     use crate::data::transfer::{
-        TransferMode, TransferObjectSelection, TransferOwnershipPolicy, TransferTableNameCase,
+        TransferColumnNameCase, TransferMode, TransferObjectSelection, TransferOwnershipPolicy, TransferTableNameCase,
     };
 
     #[tokio::test]
@@ -959,6 +978,7 @@ mod tests {
             objects: Some(vec![TransferObjectSelection::default()]),
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
+            target_column_name_case: TransferColumnNameCase::Preserve,
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             batch_size: 500,
@@ -968,6 +988,7 @@ mod tests {
             ]),
             drop_target_before_create: false,
             drop_target_confirmed: false,
+            oracle_packages: None,
         };
         let journal =
             TransferTaskJournal::accept(&storage, &app, &request, TaskLifecycleOwner::Web).await.unwrap().unwrap();
@@ -982,6 +1003,9 @@ mod tests {
         journal.finish_table(0, TaskItemStatus::Failed, None, None).await;
         journal
             .finish(&TransferProgress {
+                oracle_package_approval: None,
+                oracle_package_preflight: None,
+                oracle_routine_operation: None,
                 transfer_id: request.transfer_id.clone(),
                 table: "orders".to_string(),
                 table_index: 0,

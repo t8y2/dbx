@@ -96,7 +96,7 @@ describe("EditorGroup mount contract", () => {
 
   it.each(["query", "data"] as const)("reuses hot %s tabs and remounts evicted surfaces", async (mode) => {
     const store = useQueryStore();
-    const tabIds = ["tab-a", "tab-b", "tab-c", "tab-d"];
+    const tabIds = ["tab-a", "tab-b", "tab-c", "tab-d", "tab-e", "tab-f", "tab-g"];
     store.tabs = tabIds.map((tabId) => tab(tabId, mode));
     const activeTabId = ref("tab-a");
     const host = createHost();
@@ -113,6 +113,7 @@ describe("EditorGroup mount contract", () => {
             activeOutputView: "result",
             formatSqlRequest: null,
             compressSqlRequest: null,
+            keywordCaseRequest: null,
             selectedSql: "",
             cursorPos: 0,
             blockDangerousRedisCommands: false,
@@ -125,36 +126,35 @@ describe("EditorGroup mount contract", () => {
     app.mount(host);
     await nextTick();
 
-    activeTabId.value = "tab-b";
-    await nextTick();
+    for (const tabId of ["tab-b", "tab-c", "tab-d", "tab-e", "tab-f"]) {
+      activeTabId.value = tabId;
+      await nextTick();
+    }
+    expect(lifecycle.surfaceCreated).toBe(6);
+    expect(lifecycle.surfaceUnmounted).toBe(0);
+
     activeTabId.value = "tab-a";
     await nextTick();
-
-    expect(lifecycle.surfaceCreated).toBe(2);
+    expect(lifecycle.surfaceCreated).toBe(6);
     expect(lifecycle.surfaceUnmounted).toBe(0);
 
-    activeTabId.value = "tab-c";
+    activeTabId.value = "tab-g";
     await nextTick();
-    expect(lifecycle.surfaceCreated).toBe(3);
-    expect(lifecycle.surfaceUnmounted).toBe(0);
-
-    activeTabId.value = "tab-d";
-    await nextTick();
-    expect(lifecycle.surfaceCreated).toBe(4);
+    expect(lifecycle.surfaceCreated).toBe(7);
     expect(lifecycle.surfaceUnmounted).toBe(1);
 
     activeTabId.value = "tab-a";
     await nextTick();
-    expect(lifecycle.surfaceCreated).toBe(4);
+    expect(lifecycle.surfaceCreated).toBe(7);
     expect(lifecycle.surfaceUnmounted).toBe(1);
 
     activeTabId.value = "tab-b";
     await nextTick();
-    expect(lifecycle.surfaceCreated).toBe(5);
+    expect(lifecycle.surfaceCreated).toBe(8);
     expect(lifecycle.surfaceUnmounted).toBe(2);
 
     app.unmount();
-    expect(lifecycle.surfaceUnmounted).toBe(5);
+    expect(lifecycle.surfaceUnmounted).toBe(8);
     host.remove();
   });
 
@@ -174,6 +174,7 @@ describe("EditorGroup mount contract", () => {
       activeOutputView: "result",
       formatSqlRequest: null,
       compressSqlRequest: null,
+      keywordCaseRequest: null,
       selectedSql: "",
       cursorPos: 0,
       blockDangerousRedisCommands: false,
@@ -200,10 +201,12 @@ describe("EditorGroup mount contract", () => {
       ...createNoopEditorToolbarActions(),
       captureExecutionSnapshot: vi.fn(),
       toolbarExecute: vi.fn(),
+      toolbarExecuteAll: vi.fn(),
       toolbarExecuteInNewResultTab: vi.fn(),
       cancelExecution: vi.fn(),
       explain: vi.fn(),
       saveSql: vi.fn(),
+      toggleSqlKeywordCase: vi.fn(),
     };
 
     const host = createHost();
@@ -217,6 +220,7 @@ describe("EditorGroup mount contract", () => {
       activeOutputView: "result",
       formatSqlRequest: null,
       compressSqlRequest: null,
+      keywordCaseRequest: null,
       selectedSql: "",
       cursorPos: 0,
       blockDangerousRedisCommands: false,
@@ -234,17 +238,23 @@ describe("EditorGroup mount contract", () => {
     // Toolbar events flow to the injected actions with the group's tab id.
     (toolbar as any).__vueParentComponent.emit("executePointerDown");
     (toolbar as any).__vueParentComponent.emit("toolbarExecute", "pointer");
+    (toolbar as any).__vueParentComponent.emit("toolbarExecuteAll", "pointer");
     (toolbar as any).__vueParentComponent.emit("toolbarExecuteInNewResultTab", "pointer");
     (toolbar as any).__vueParentComponent.emit("cancel");
     (toolbar as any).__vueParentComponent.emit("explain");
     (toolbar as any).__vueParentComponent.emit("saveSql", queryId);
+    // #11828: the keyword-case toggle must carry the acting tab, otherwise App
+    // cannot tell which editor to re-case (the button used to take no tab).
+    (toolbar as any).__vueParentComponent.emit("toggleSqlKeywordCase");
     await nextTick();
     expect(actions.captureExecutionSnapshot).toHaveBeenCalledWith(queryId);
     expect(actions.toolbarExecute).toHaveBeenCalledWith("pointer", queryId);
+    expect(actions.toolbarExecuteAll).toHaveBeenCalledWith("pointer", queryId);
     expect(actions.toolbarExecuteInNewResultTab).toHaveBeenCalledWith("pointer", queryId);
     expect(actions.cancelExecution).toHaveBeenCalledWith(queryId);
     expect(actions.explain).toHaveBeenCalledWith(queryId);
     expect(actions.saveSql).toHaveBeenCalledWith(queryId);
+    expect(actions.toggleSqlKeywordCase).toHaveBeenCalledWith(queryId);
 
     // Data tab: no SQL toolbar — the data grid carries its own built-in bar.
     app.unmount();
@@ -258,6 +268,7 @@ describe("EditorGroup mount contract", () => {
       activeOutputView: "result",
       formatSqlRequest: null,
       compressSqlRequest: null,
+      keywordCaseRequest: null,
       selectedSql: "",
       cursorPos: 0,
       blockDangerousRedisCommands: false,

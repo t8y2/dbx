@@ -16,10 +16,22 @@ import (
 // dialZooKeeperConnection opens a raw ZooKeeper transport connection. When
 // tlsConfig is non-nil the connection is wrapped in a TLS handshake so the
 // caller can talk to a secure (clientCnxn with ssl) ZooKeeper port.
-func dialZooKeeperConnection(address string, timeout time.Duration, tlsConfig *tls.Config) (net.Conn, error) {
+func dialZooKeeperConnection(address string, timeout time.Duration, tlsConfig *tls.Config, routes map[string]string) (net.Conn, error) {
+	dialAddress := address
+	if routes != nil {
+		logicalAddress, err := routedEndpointAddress(address)
+		if err != nil {
+			return nil, err
+		}
+		var ok bool
+		dialAddress, ok = routes[logicalAddress]
+		if !ok {
+			return nil, fmt.Errorf("missing ZooKeeper endpoint route for %q", address)
+		}
+	}
 	dialer := &net.Dialer{Timeout: timeout}
 	if tlsConfig == nil {
-		return dialer.Dial("tcp", address)
+		return dialer.Dial("tcp", dialAddress)
 	}
 	config := tlsConfig.Clone()
 	if config.ServerName == "" {
@@ -29,7 +41,7 @@ func dialZooKeeperConnection(address string, timeout time.Duration, tlsConfig *t
 		}
 		config.ServerName = host
 	}
-	return tls.DialWithDialer(dialer, "tcp", address, config)
+	return tls.DialWithDialer(dialer, "tcp", dialAddress, config)
 }
 
 // buildZooKeeperTLSConfig turns the TLS-related fields of a connectionConfig

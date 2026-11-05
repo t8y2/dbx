@@ -5,6 +5,11 @@ export function isOracleCompletionDatabase(databaseType?: DatabaseType): boolean
   return databaseType === "oracle" || databaseType === "oceanbase-oracle";
 }
 
+/** Engines whose sequences are addressed like Oracle's (SEQ.NEXTVAL / SEQ.CURRVAL). */
+export function isSequenceCompletionDatabase(databaseType?: DatabaseType): boolean {
+  return isOracleCompletionDatabase(databaseType) || databaseType === "dameng";
+}
+
 export function usesOracleCurrentSchemaCompletion(databaseType?: DatabaseType, schema?: string | null): boolean {
   return isOracleCompletionDatabase(databaseType) && !schema;
 }

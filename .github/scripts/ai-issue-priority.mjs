@@ -52,26 +52,30 @@ If input is truncated, assess only visible evidence and express uncertainty abou
 class PriorityError extends Error {}
 
 function labelNames(issue) {
-  return (issue.labels || []).map((label) => typeof label === "string" ? label : label.name).filter(Boolean);
+  return (issue.labels || []).map((label) => (typeof label === "string" ? label : label.name)).filter(Boolean);
 }
 
 function withoutUserPriority(body) {
   let inPrioritySection = false;
-  return String(body || "").split(/\r?\n/).filter((line) => {
-    const heading = line.match(/^#{1,6}\s+(.+)/);
-    if (heading) inPrioritySection = /优先级|priority|urgency/i.test(heading[1]);
-    return !inPrioritySection && !/^\s*\*\*[^*]*(?:优先级|priority|urgency)[^*]*\*\*\s*[:：]/i.test(line);
-  }).join("\n").trim();
+  return String(body || "")
+    .split(/\r?\n/)
+    .filter((line) => {
+      const heading = line.match(/^#{1,6}\s+(.+)/);
+      if (heading) inPrioritySection = /优先级|priority|urgency/i.test(heading[1]);
+      return !inPrioritySection && !/^\s*\*\*[^*]*(?:优先级|priority|urgency)[^*]*\*\*\s*[:：]/i.test(line);
+    })
+    .join("\n")
+    .trim();
 }
 
 export function prepareIssue(issue) {
   const body = withoutUserPriority(issue.body);
   return {
     title: String(issue.title || "").slice(0, 500),
-    body: body.length > MAX_BODY_LENGTH
-      ? `${body.slice(0, 10000)}\n[TRUNCATED]\n${body.slice(-4000)}`
-      : body,
-    labels: labelNames(issue).filter((label) => /^(db\/|bug$|enhancement$|feature$|question$)/.test(label)).sort(),
+    body: body.length > MAX_BODY_LENGTH ? `${body.slice(0, 10000)}\n[TRUNCATED]\n${body.slice(-4000)}` : body,
+    labels: labelNames(issue)
+      .filter((label) => /^(db\/|bug$|enhancement$|feature$|question$)/.test(label))
+      .sort(),
     truncated: body.length > MAX_BODY_LENGTH,
   };
 }
@@ -83,21 +87,26 @@ export function parseAssessment(content, issue) {
   } catch {
     throw new PriorityError("AtlasCloud returned invalid priority JSON");
   }
-  const validTextList = (value, maxLength) => Array.isArray(value) && value.length <= 3
-    && value.every((entry) => typeof entry === "string" && entry.trim() && entry.length <= maxLength);
-  if (!result || typeof result.priority !== "string" || !Object.hasOwn(PRIORITY_LABELS, result.priority)
-    || !["high", "medium", "low"].includes(result.confidence)
-    || !["security", "data-loss", "core-blocked", "functional", "feature", "cosmetic", "unknown"].includes(result.risk)
-    || typeof result.reason !== "string" || !result.reason.trim() || result.reason.length > 600
-    || !validTextList(result.evidence, 300) || !validTextList(result.missing_information, 250)) {
+  const validTextList = (value, maxLength) => Array.isArray(value) && value.length <= 3 && value.every((entry) => typeof entry === "string" && entry.trim() && entry.length <= maxLength);
+  if (
+    !result ||
+    typeof result.priority !== "string" ||
+    !Object.hasOwn(PRIORITY_LABELS, result.priority) ||
+    !["high", "medium", "low"].includes(result.confidence) ||
+    !["security", "data-loss", "core-blocked", "functional", "feature", "cosmetic", "unknown"].includes(result.risk) ||
+    typeof result.reason !== "string" ||
+    !result.reason.trim() ||
+    result.reason.length > 600 ||
+    !validTextList(result.evidence, 300) ||
+    !validTextList(result.missing_information, 250)
+  ) {
     throw new PriorityError("AtlasCloud returned an invalid priority assessment");
   }
   if (!result.evidence.every((quote) => issue.title.includes(quote) || issue.body.includes(quote))) {
     throw new PriorityError("AtlasCloud priority evidence does not match the issue text");
   }
   const insufficientEvidence = result.confidence === "low" || result.evidence.length === 0 || result.risk === "unknown";
-  const unsupportedCriticalPriority = result.priority === "P0" && (result.confidence !== "high"
-    || !["security", "data-loss", "core-blocked"].includes(result.risk));
+  const unsupportedCriticalPriority = result.priority === "P0" && (result.confidence !== "high" || !["security", "data-loss", "core-blocked"].includes(result.risk));
   return {
     priority: insufficientEvidence || unsupportedCriticalPriority ? "needs-info" : result.priority,
     confidence: result.confidence,
@@ -219,8 +228,7 @@ export async function run({ event, apiKey, github, model = DEFAULT_MODEL, fetchI
     await github("POST", `${issuePath}/labels`, { labels: [targetLabel] });
   }
   for (const label of existingLabels) {
-    if (label !== targetLabel && label.startsWith(LABEL_PREFIX)
-      && Object.hasOwn(PRIORITY_LABELS, label.slice(LABEL_PREFIX.length))) {
+    if (label !== targetLabel && label.startsWith(LABEL_PREFIX) && Object.hasOwn(PRIORITY_LABELS, label.slice(LABEL_PREFIX.length))) {
       try {
         await github("DELETE", `${issuePath}/labels/${encodeURIComponent(label)}`);
       } catch (error) {
@@ -234,10 +242,12 @@ export async function run({ event, apiKey, github, model = DEFAULT_MODEL, fetchI
 export function formatSummary(result) {
   const escape = (value) => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   if (result.skipped) return `### AI issue priority\n\nSkipped: ${escape(result.skipped)}\n`;
-  return `### AI issue priority${result.dryRun ? " (dry run)" : ""}\n\n`
-    + "AI suggestion based on issue text only, not a verified diagnosis or release commitment. "
-    + "User-reported and maintainer priority labels are unchanged.\n\n"
-    + `<pre>${escape(JSON.stringify({ model: result.model, ...result.assessment }, null, 2))}</pre>\n`;
+  return (
+    `### AI issue priority${result.dryRun ? " (dry run)" : ""}\n\n` +
+    "AI suggestion based on issue text only, not a verified diagnosis or release commitment. " +
+    "User-reported and maintainer priority labels are unchanged.\n\n" +
+    `<pre>${escape(JSON.stringify({ model: result.model, ...result.assessment }, null, 2))}</pre>\n`
+  );
 }
 
 async function main() {

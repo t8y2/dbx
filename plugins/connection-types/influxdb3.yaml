@@ -1,6 +1,7 @@
 schemaVersion: 1
 order: 755
 dbType: influxdb3
+compareModes: [schema, data]
 rustVariant: InfluxDb3
 label: InfluxDB 3.x
 runtimeMode: native

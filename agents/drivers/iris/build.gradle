@@ -1,5 +1,5 @@
 dependencies {
-    implementation 'com.intersystems:intersystems-jdbc:3.10.5'
+    implementation 'com.intersystems:intersystems-jdbc:3.11.0'
 }
 
 tasks.named('shadowJar') {

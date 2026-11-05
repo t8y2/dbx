@@ -7,11 +7,12 @@ import { CanvasRenderer } from "echarts/renderers";
 import { LineChart } from "echarts/charts";
 import { GridComponent, LegendComponent, TooltipComponent } from "echarts/components";
 import VChart from "vue-echarts";
-import { Activity, AlertTriangle, BarChart3, Boxes, CheckCircle2, Database, Download, Gauge, Hash, HardDrive, Layers3, Loader2, Package, RadioTower, RefreshCw, Send, ShieldCheck, Table2, Upload, Users } from "@lucide/vue";
+import { Activity, AlertTriangle, BarChart3, Boxes, CheckCircle2, Database, Download, Gauge, Hash, HardDrive, Layers3, Loader2, Package, RadioTower, Send, ShieldCheck, Table2, Upload, Users } from "@lucide/vue";
 import type { MqSystemKind, TopicRef, TopicInfo, TopicStats, BacklogStats } from "@/types/mq";
 import { mqGetTopicStats, mqGetBacklog } from "@/lib/backend/api";
 import { extractKafkaPartitionRows, isKafkaStatsPayload, type KafkaPartitionStatsRow } from "@/lib/mq/kafkaTopicStats";
 import MessageBrowser from "./MessageBrowser.vue";
+import AutoRefreshControl from "@/components/common/AutoRefreshControl.vue";
 
 use([CanvasRenderer, LineChart, GridComponent, LegendComponent, TooltipComponent]);
 
@@ -222,6 +223,15 @@ function refreshNow() {
   void loadStats();
 }
 
+function disableAutoRefresh() {
+  autoRefresh.value = false;
+}
+
+function selectAutoRefreshInterval(seconds: number) {
+  refreshInterval.value = seconds;
+  autoRefresh.value = true;
+}
+
 function appendHistoryPoint(statsData: TopicStats, backlogData?: BacklogStats) {
   const ratesUnavailable = statsData.ratesUnavailable === true;
   const point: MetricPoint = {
@@ -413,21 +423,18 @@ onUnmounted(() => {
     <div class="panel-toolbar">
       <h3>{{ t("mqMonitoring.title") }}</h3>
       <div class="toolbar-actions">
-        <label class="checkbox-label">
-          <input type="checkbox" v-model="autoRefresh" />
-          <span>{{ t("mqMonitoring.autoRefresh") }}</span>
-        </label>
-        <select v-model.number="refreshInterval" :disabled="!autoRefresh" class="refresh-interval">
-          <option :value="5">{{ t("mqMonitoring.refreshInterval5s") }}</option>
-          <option :value="10">{{ t("mqMonitoring.refreshInterval10s") }}</option>
-          <option :value="30">{{ t("mqMonitoring.refreshInterval30s") }}</option>
-          <option :value="60">{{ t("mqMonitoring.refreshInterval60s") }}</option>
-        </select>
-        <button @click="refreshNow" :disabled="loading" class="btn-sm">
-          <Loader2 v-if="loading" class="btn-icon spinning" :size="14" />
-          <RefreshCw v-else class="btn-icon" :size="14" />
-          <span>{{ loading ? t("mqMonitoring.refreshing") : t("mqMonitoring.refreshNow") }}</span>
-        </button>
+        <AutoRefreshControl
+          :enabled="autoRefresh"
+          :interval-seconds="refreshInterval"
+          :intervals="[5, 10, 30, 60]"
+          :loading="loading"
+          :label="t('mqMonitoring.autoRefresh')"
+          :off-label="t('serverDashboard.off')"
+          :refresh-label="loading ? t('mqMonitoring.refreshing') : t('mqMonitoring.refreshNow')"
+          @refresh="refreshNow"
+          @disable="disableAutoRefresh"
+          @select="selectAutoRefreshInterval"
+        />
       </div>
     </div>
 

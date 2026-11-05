@@ -107,13 +107,18 @@ const DATABASE_METHOD_SHAPES: Record<string, MongoMethodShape> = {
   serverStatus: { expects: "no arguments", roles: [] },
   dropDatabase: { expects: "no arguments", roles: [] },
   createCollection: { expects: "a collection name and optional options", roles: ["name", "options"] },
+  createView: { expects: "a view name, a source collection name, a pipeline, and optional options", roles: ["name", "source", "pipeline", "options"] },
+  getUsers: { expects: "optional options", roles: ["options"] },
+  getUser: { expects: "a user name and optional options", roles: ["name", "options"] },
+  getRoles: { expects: "optional options", roles: ["options"] },
+  getRole: { expects: "a role name and optional options", roles: ["name", "options"] },
   createUser: { expects: "a user document and optional write concern", roles: ["user", "writeConcern"] },
   runCommand: { expects: "one command document", roles: ["command"] },
 };
 
-const SUPPORTED_DATABASE_METHODS = ["version", "stats", "serverStatus", "createCollection", "dropDatabase", "createUser", "runCommand", "getCollection", "getSiblingDB"];
+const SUPPORTED_DATABASE_METHODS = ["version", "stats", "serverStatus", "createCollection", "createView", "dropDatabase", "createUser", "getUsers", "getUser", "getRoles", "getRole", "runCommand", "getCollection", "getSiblingDB"];
 
-const SUPPORTED_VALUE_CONSTRUCTORS = ["ObjectId", "ISODate", "new Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey"];
+const SUPPORTED_VALUE_CONSTRUCTORS = ["ObjectId", "ISODate", "new Date", "NumberLong", "NumberInt", "NumberDecimal", "Int32", "Long", "Double", "Decimal128", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey"];
 
 const COMMAND_SHAPE = /^db\s*(?:\.\s*(?<collection>[A-Za-z_$][\w$]*)|\[\s*(["'])(?<bracket>.*?)\2\s*\]|\.\s*getCollection\s*\(\s*(["'])(?<named>.*?)\4\s*\))?\s*\.\s*(?<method>[A-Za-z_$][\w$]*)\s*\(/;
 
@@ -137,7 +142,7 @@ function diagnoseMongoCommand(source: string): string | null {
     return diagnoseMongoCommand(inner) ?? describeMongoCommandParseFailureBasic(inner);
   }
   if (/^show\s+(collections|tables)\b/i.test(source)) {
-    return "show collections is not supported here; collections are listed in the sidebar. Only show dbs is supported.";
+    return "show collections is not supported here; collections are listed in the sidebar. Supported: show dbs, show users, show roles.";
   }
 
   const shape = COMMAND_SHAPE.exec(source);
@@ -205,7 +210,7 @@ function diagnoseMongoCommand(source: string): string | null {
 
 /** First `Name(` outside a string that is not a constructor the parser understands. */
 function findUnsupportedValueConstructor(argument: string): string | null {
-  const known = new Set(["ObjectId", "ISODate", "Date", "NumberLong", "NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey", "deserialize"]);
+  const known = new Set(["ObjectId", "ISODate", "Date", "NumberLong", "NumberInt", "NumberDecimal", "Int32", "Long", "Double", "Decimal128", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey", "deserialize"]);
   let quote: string | null = null;
   let escaped = false;
   for (let index = 0; index < argument.length; index += 1) {
@@ -457,6 +462,11 @@ export function planMongoFindPagination(input: string, command: MongoFindCommand
     logicalSkip,
     logicalLimit,
   };
+}
+
+/** True when the first page already requests every row an explicit `.limit()` allows. */
+export function mongoFindPageCoversLogicalLimit(plan: Pick<MongoFindPaginationPlan, "pageOffset" | "requestLimit" | "logicalLimit">): boolean {
+  return plan.pageOffset === 0 && plan.logicalLimit !== undefined && plan.requestLimit >= plan.logicalLimit;
 }
 
 export function mongoFindLogicalTotal(total: number, plan: Pick<MongoFindPaginationPlan, "logicalSkip" | "logicalLimit">): number {
@@ -804,11 +814,83 @@ function parseMongoCreateCollectionCommand(source: string): MongoRunCommand | nu
   return { commandJson: JSON.stringify(command) };
 }
 
+/** `db.createView(name, source, pipeline[, options])` is the create command with viewOn and pipeline. */
+function parseMongoCreateViewCommand(source: string): MongoRunCommand | null {
+  const args = databaseMethodArguments(source, "createView");
+  if (!args || args.length < 3 || args.length > 4) return null;
+  const name = parseMongoNameArgument(args[0]!);
+  const viewOn = parseMongoNameArgument(args[1]!);
+  const pipelineJson = normalizeJsonArgument(args[2]!);
+  if (!name || !viewOn || !pipelineJson) return null;
+  const pipeline = JSON.parse(pipelineJson) as unknown;
+  if (!Array.isArray(pipeline)) return null;
+  const command: Record<string, unknown> = { create: name, viewOn, pipeline };
+  const options = parseMongoOptionsArgument(args[3], ["create", "viewOn", "pipeline"]);
+  if (options === null) return null;
+  return { commandJson: JSON.stringify({ ...command, ...options }) };
+}
+
+/** `db.getUsers()` / `db.getUser(name)` and the role equivalents read usersInfo / rolesInfo, as mongosh does. */
+function parseMongoUserInfoCommand(source: string): MongoRunCommand | null {
+  const show = /^show\s+(users|roles)$/i.exec(source)?.[1]?.toLowerCase();
+  if (show) return { commandJson: JSON.stringify(show === "users" ? { usersInfo: 1 } : { rolesInfo: 1 }) };
+  for (const [method, command] of [
+    ["getUsers", "usersInfo"],
+    ["getRoles", "rolesInfo"],
+  ] as const) {
+    const args = databaseMethodArguments(source, method);
+    if (!args) continue;
+    if (args.length > 1) return null;
+    const options = parseMongoOptionsArgument(args[0], [command]);
+    return options === null ? null : { commandJson: JSON.stringify({ [command]: 1, ...options }) };
+  }
+  for (const [method, command] of [
+    ["getUser", "usersInfo"],
+    ["getRole", "rolesInfo"],
+  ] as const) {
+    const args = databaseMethodArguments(source, method);
+    if (!args) continue;
+    if (args.length < 1 || args.length > 2) return null;
+    const name = parseMongoNameArgument(args[0]!);
+    const options = parseMongoOptionsArgument(args[1], [command]);
+    return name && options !== null ? { commandJson: JSON.stringify({ [command]: name, ...options }) } : null;
+  }
+  return null;
+}
+
+/** Arguments of `db.<method>(...)` when the whole source is that one call, otherwise null. */
+function databaseMethodArguments(source: string, method: string): string[] | null {
+  const match = new RegExp(`^db\\s*\\.\\s*${method}\\s*\\(`, "i").exec(source);
+  if (!match) return null;
+  const openIndex = source.indexOf("(", match.index);
+  const closeIndex = findMatchingParen(source, openIndex);
+  if (closeIndex < 0 || source.slice(closeIndex + 1).trim()) return null;
+  const args = splitTopLevel(source.slice(openIndex + 1, closeIndex));
+  return args.length === 1 && !args[0]?.trim() ? [] : args;
+}
+
+function parseMongoNameArgument(argument: string): string | null {
+  return /^(["'])([^"'$]+)\1$/.exec(argument.trim())?.[2]?.trim() || null;
+}
+
+/** An optional options document, rejected when it would override one of the command's own keys. */
+function parseMongoOptionsArgument(argument: string | undefined, reservedKeys: readonly string[]): Record<string, unknown> | null {
+  if (!argument?.trim()) return {};
+  const optionsJson = parseMongoObjectArgument(argument);
+  if (!optionsJson) return null;
+  const options = JSON.parse(optionsJson) as Record<string, unknown>;
+  return reservedKeys.some((key) => key in options) ? null : options;
+}
+
 export function parseMongoRunCommand(input: string): MongoRunCommand | null {
   const source = input.trim().replace(/;$/, "").trim();
   if (/^db\s*\.\s*dropDatabase\s*\(\s*\)$/i.test(source)) return { commandJson: JSON.stringify({ dropDatabase: 1 }) };
   const createCollection = parseMongoCreateCollectionCommand(source);
   if (createCollection) return createCollection;
+  const createView = parseMongoCreateViewCommand(source);
+  if (createView) return createView;
+  const userInfo = parseMongoUserInfoCommand(source);
+  if (userInfo) return userInfo;
   for (const [method, command] of Object.entries(DATABASE_STATUS_COMMANDS)) {
     if (new RegExp(`^db\\s*\\.\\s*${method}\\s*\\(\\s*\\)$`, "i").test(source)) {
       return { commandJson: JSON.stringify({ [command]: 1 }) };
@@ -1575,7 +1657,7 @@ function mongoTopLevelCommandLineStarts(segment: string): number[] {
 
 function isMongoCommandLineStart(segment: string, index: number): boolean {
   const rest = segment.slice(index);
-  return /^use\b/i.test(rest) || /^show\s+(?:dbs|databases)\b/i.test(rest) || /^db(?:\s*\.|\b)/i.test(rest);
+  return /^use\b/i.test(rest) || /^show\s+(?:dbs|databases|users|roles)\b/i.test(rest) || /^db(?:\s*\.|\b)/i.test(rest);
 }
 
 function pushMongoSegment(segments: MongoTextRange[], source: string, from: number, to: number) {

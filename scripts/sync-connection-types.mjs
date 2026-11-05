@@ -15,12 +15,18 @@ const checkOnly = process.argv.includes("--check");
 const runtimeModes = new Set(["native", "file", "agent", "external"]);
 const mcpModes = new Set(["direct", "bridge", "unsupported"]);
 const supportLevels = new Set(["connect", "browse", "understand", "operate"]);
+const transferObjectFamilies = new Set(["mysql", "postgres", "oracle", "sqlserver"]);
+const transferSupportLevels = new Set(["verified", "family-compatible", "best-effort"]);
+const compareModes = new Set(["schema", "data"]);
 const formKinds = new Set(["standard", "jdbc", "mq", "mqtt", "nacos"]);
 const profileCategories = new Set(["sql", "analytics", "domestic", "lightweight", "document", "graph_ai", "timeseries", "mq", "registry_config"]);
 const descriptorKeys = new Set([
   "schemaVersion",
   "order",
   "dbType",
+  "compareModes",
+  "transferObjectFamily",
+  "transferSupportLevel",
   "rustVariant",
   "label",
   "dialect",
@@ -46,24 +52,7 @@ const profileCatalogKeys = new Set(["schemaVersion", "profiles"]);
 const connectionProfileKeys = new Set(["id", "dbType", "label", "pickerLabel", "icon", "pickerIcon", "port", "user", "host", "urlParams", "category"]);
 const driverProfileKeys = new Set(["profile", "agentKey", "packageKey", "label", "storeVisible", "storeOrder"]);
 const managedDriverKeys = new Set(["key", "label", "storeVisible", "storeOrder"]);
-const capabilityKeys = new Set([
-  "queryExecution",
-  "metadataBrowse",
-  "objectBrowser",
-  "objectSource",
-  "schemaSearch",
-  "diagram",
-  "tableDataEdit",
-  "tableStructureEdit",
-  "tableImport",
-  "dataTransfer",
-  "sqlFileExecution",
-  "databaseCreate",
-  "fieldLineage",
-  "sqlExplain",
-  "userAdmin",
-  "driverManagement",
-]);
+const capabilityKeys = new Set(["queryExecution", "metadataBrowse", "objectBrowser", "objectSource", "schemaSearch", "diagram", "tableDataEdit", "tableStructureEdit", "tableImport", "dataTransfer", "sqlFileExecution", "databaseCreate", "fieldLineage", "sqlExplain", "userAdmin", "driverManagement"]);
 const traitKeys = new Set(["schemaAware", "databaseSchemaQualified", "singleDatabase", "clearableQuerySchema", "fetchFirst", "treeSchema", "databaseObjectTree", "pgVacuum", "pgLikeStructure", "diagramSql"]);
 
 function connectionTypeFiles() {
@@ -112,6 +101,18 @@ function validateDescriptor(descriptor, file, knownDialects) {
   if (descriptor.schemaVersion !== 1) throw new Error(`${location}: schemaVersion must be 1`);
   if (!Number.isInteger(descriptor.order) || descriptor.order <= 0) throw new Error(`${location}: order must be a positive integer`);
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(descriptor.dbType ?? "")) throw new Error(`${location}: invalid dbType`);
+  if (descriptor.compareModes !== undefined) {
+    if (!Array.isArray(descriptor.compareModes) || descriptor.compareModes.length === 0 || descriptor.compareModes.some((mode) => !compareModes.has(mode))) {
+      throw new Error(`${location}: invalid compareModes`);
+    }
+    if (new Set(descriptor.compareModes).size !== descriptor.compareModes.length) throw new Error(`${location}: duplicate compareModes`);
+  }
+  if (descriptor.transferObjectFamily !== undefined && !transferObjectFamilies.has(descriptor.transferObjectFamily)) {
+    throw new Error(`${location}: invalid transferObjectFamily`);
+  }
+  if (descriptor.transferSupportLevel !== undefined && !transferSupportLevels.has(descriptor.transferSupportLevel)) {
+    throw new Error(`${location}: invalid transferSupportLevel`);
+  }
   if (!/^[A-Z][A-Za-z0-9]*$/.test(descriptor.rustVariant ?? "")) throw new Error(`${location}: invalid rustVariant`);
   if (typeof descriptor.label !== "string" || descriptor.label.trim() === "") throw new Error(`${location}: label is required`);
   if (!runtimeModes.has(descriptor.runtimeMode)) throw new Error(`${location}: invalid runtimeMode`);
@@ -126,6 +127,18 @@ function validateDescriptor(descriptor, file, knownDialects) {
   }
   if (!descriptor.capabilities || typeof descriptor.capabilities !== "object") throw new Error(`${location}: capabilities are required`);
   validateBooleanMap(descriptor.capabilities, capabilityKeys, `${location}: capabilities`, true);
+  if (descriptor.capabilities.dataTransfer !== (descriptor.transferSupportLevel !== undefined)) {
+    throw new Error(`${location}: transferSupportLevel must be set exactly when dataTransfer is true`);
+  }
+  if (descriptor.compareModes?.includes("schema") && !descriptor.capabilities.metadataBrowse) {
+    throw new Error(`${location}: schema comparison requires metadataBrowse`);
+  }
+  if (descriptor.compareModes?.includes("data") && (!descriptor.capabilities.metadataBrowse || !descriptor.capabilities.queryExecution)) {
+    throw new Error(`${location}: data comparison requires metadataBrowse and queryExecution`);
+  }
+  if (descriptor.transferSupportLevel === "family-compatible" && descriptor.transferObjectFamily === undefined) {
+    throw new Error(`${location}: family-compatible transfer support requires transferObjectFamily`);
+  }
   if (!Object.values(descriptor.capabilities).some(Boolean) && descriptor.specializedSurface !== true) {
     throw new Error(`${location}: enable a product capability or set specializedSurface: true`);
   }

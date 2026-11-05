@@ -19,7 +19,12 @@ public final class SundbAgent extends ConfiguredJdbcAgent {
         "csii.sundb.jdbc.SundbDriver",
         "jdbc:sundb://{host}:{port}/{database}",
         22581
-    );
+    ) {
+        @Override
+        public boolean getCaseInsensitiveTableMetadata() {
+            return true;
+        }
+    };
 
     public SundbAgent() {
         super(SUNDB_PROFILE);

@@ -54,8 +54,19 @@ vi.mock("@/stores/settingsStore", () => ({
   }),
 }));
 
-function column(name: string, comment: string | null, isPrimaryKey = false) {
-  return { name, data_type: "varchar", is_nullable: true, column_default: null, is_primary_key: isPrimaryKey, extra: null, comment };
+function column(name: string, comment: string | null, isPrimaryKey = false, characterMaximumLength: number | null = 64) {
+  return {
+    name,
+    data_type: "varchar",
+    is_nullable: true,
+    column_default: null,
+    is_primary_key: isPrimaryKey,
+    extra: null,
+    comment,
+    character_maximum_length: characterMaximumLength,
+    numeric_precision: null,
+    numeric_scale: null,
+  };
 }
 
 const ordersColumns = [column("id", "订单ID", true), column("user_id", "下单用户"), column("amount", "订单金额")];
@@ -141,6 +152,8 @@ describe("queryStore multi-source result column comments", () => {
     // Comments are indexed by result ordinal, so the second `id` (users.id)
     // keeps its own comment instead of first-source-wins on the name.
     expect(tab.resultColumnComments).toEqual(["订单ID", "下单用户", "用户ID", "用户名"]);
+    // Declared lengths come from source ColumnInfo, not bare ResultSet types.
+    expect(tab.resultColumnTypeLabels).toEqual(["varchar(64)", "varchar(64)", "varchar(64)", "varchar(64)"]);
 
     // The display mapping carries both source identity and physical table
     // identity per ordinal, so display-only features can share table settings.
@@ -536,6 +549,57 @@ describe("queryStore multi-source result column comments", () => {
     const tab = store.tabs.find((item) => item.id === tabId)!;
     await vi.waitFor(() => expect(tab.resultColumnComments).toBeDefined());
     expect(tab.resultColumnComments).toEqual([undefined, undefined]);
+  });
+
+  it("resolves an aggregate label back to its single base column for display comments", async () => {
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "aggregation" });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["amount", "user_id"],
+        rows: [["10.00", 100]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT MAX(amount) AS amount, user_id FROM orders GROUP BY user_id");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.resultColumnComments).toBeDefined());
+    // The aggregate has no direct column reference, but with one source its
+    // label still identifies the physical column whose comment the user
+    // expects to see above the result.
+    expect(tab.resultColumnComments).toEqual(["订单金额", "下单用户"]);
+    expect(tab.resultColumnTypeLabels).toEqual(["varchar(64)", "varchar(64)"]);
+    // Display-only fallback: an aggregate must not gain a writable source
+    // identity that the SQL binder did not prove.
+    expect(tab.queryDisplaySourceColumns).toEqual([undefined, expect.objectContaining({ sourceColumn: "user_id" })]);
+  });
+
+  it("does not attribute an aggregate whose label does not name its input column", async () => {
+    analyzeEditableQueryEditability.mockResolvedValue({ editable: false, reason: "aggregation" });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["id", "user_id"],
+        rows: [[2, 100]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+
+    await store.executeTabSql(tabId, "SELECT COUNT(*) AS id, user_id FROM orders GROUP BY user_id");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.resultColumnComments).toBeDefined());
+    expect(tab.resultColumnComments).toEqual([undefined, "下单用户"]);
   });
 
   it("keeps unsupported keyless row predicates read-only while surfacing comments", async () => {

@@ -21,20 +21,32 @@ function fixture(context, platform = "darwin-arm64") {
   const binary = join(source, "package/bin/dbx-mcp");
   writeFileSync(binary, "#!/bin/sh\nprintf 'dbx-mcp 0.4.96\\n'\n", { mode: 0o755 });
   copyFileSync(binary, join(source, "dbx-mcp"));
-  for (const [archive, member] of [["npm.tgz", "package/bin/dbx-mcp"], ["github.tar.gz", "dbx-mcp"]]) {
+  for (const [archive, member] of [
+    ["npm.tgz", "package/bin/dbx-mcp"],
+    ["github.tar.gz", "dbx-mcp"],
+  ]) {
     const result = spawnSync("tar", ["-czf", join(root, archive), "-C", source, member]);
     assert.equal(result.status, 0, result.stderr.toString());
   }
-  const integrity = "sha512-" + createHash("sha512").update(readFileSync(join(root, "npm.tgz"))).digest("base64");
-  const checksum = createHash("sha256").update(readFileSync(join(root, "github.tar.gz"))).digest("hex");
+  const integrity =
+    "sha512-" +
+    createHash("sha512")
+      .update(readFileSync(join(root, "npm.tgz")))
+      .digest("base64");
+  const checksum = createHash("sha256")
+    .update(readFileSync(join(root, "github.tar.gz")))
+    .digest("hex");
   writeFileSync(join(root, "latest.json"), JSON.stringify({ description: 'ignore "version":"99.0.0"', version: "0.4.96" }));
   writeFileSync(join(root, "metadata.json"), JSON.stringify({ name: "test", version: "0.4.96", dist: { integrity } }));
-  writeFileSync(join(root, "refs.json"), JSON.stringify([
-    { ref: "refs/tags/packages-v0.4.9", object: {} },
-    { ref: "refs/tags/packages-v0.4.96", object: {} },
-    { ref: "refs/tags/packages-v1.0.0-beta.1", object: {} },
-    { ref: "refs/tags/packages-v0.4.10", object: {} },
-  ]));
+  writeFileSync(
+    join(root, "refs.json"),
+    JSON.stringify([
+      { ref: "refs/tags/packages-v0.4.9", object: {} },
+      { ref: "refs/tags/packages-v0.4.96", object: {} },
+      { ref: "refs/tags/packages-v1.0.0-beta.1", object: {} },
+      { ref: "refs/tags/packages-v0.4.10", object: {} },
+    ]),
+  );
   writeFileSync(join(root, "SHA256SUMS"), `${checksum}  dbx-mcp-${platform}.tar.gz\n`);
   const routes = {};
   for (const registry of ["https://registry.npmjs.org", "https://registry.npmmirror.com"]) {
@@ -46,7 +58,9 @@ function fixture(context, platform = "darwin-arm64") {
   routes["https://github.com/t8y2/dbx/releases/download/packages-v0.4.96/SHA256SUMS"] = "SHA256SUMS";
   routes[`https://github.com/t8y2/dbx/releases/download/packages-v0.4.96/dbx-mcp-${platform}.tar.gz`] = "github.tar.gz";
   writeFileSync(join(root, "routes.json"), JSON.stringify(routes));
-  writeFileSync(join(mocks, "curl"), `#!${process.execPath}
+  writeFileSync(
+    join(mocks, "curl"),
+    `#!${process.execPath}
 const fs = require('node:fs');
 const path = require('node:path');
 const args = process.argv.slice(2);
@@ -57,9 +71,13 @@ if (process.env.FAIL_URL && new RegExp(process.env.FAIL_URL).test(url)) process.
 const routes = JSON.parse(fs.readFileSync(path.join(root, 'routes.json')));
 if (!routes[url]) process.exit(22);
 fs.copyFileSync(path.join(root, routes[url]), args[args.indexOf('-o') + 1]);
-`, { mode: 0o755 });
+`,
+    { mode: 0o755 },
+  );
   writeFileSync(join(mocks, "uname"), `#!/bin/sh\ncase "$1" in -s) echo '${platform.startsWith("darwin") ? "Darwin" : "Linux"}';; -m) echo '${platform.includes("arm64") ? "aarch64" : "x86_64"}';; esac\n`, { mode: 0o755 });
-  writeFileSync(join(mocks, "codesign"), `#!${process.execPath}
+  writeFileSync(
+    join(mocks, "codesign"),
+    `#!${process.execPath}
 const args = process.argv.slice(2);
 const mode = process.env.SIGNATURE_MODE || 'valid';
 const requirement = 'identifier "com.dbx.app.mcp" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "TVDM965TDL"';
@@ -73,13 +91,17 @@ console.error('Identifier=com.dbx.app.mcp');
 console.error('TeamIdentifier=TVDM965TDL');
 console.error('Timestamp=' + (mode === 'no-timestamp' ? 'none' : 'Oct 3, 2026'));
 console.error('designated => ' + (mode === 'hash-bound' ? 'cdhash H"' + 'ab'.repeat(20) + '"' : requirement.replaceAll('exists', '/* exists */')));
-`, { mode: 0o755 });
+`,
+    { mode: 0o755 },
+  );
   const installedBinary = join(home, ".dbx/bin/dbx-mcp");
   const marker = join(home, ".dbx/bin/.dbx-mcp-version");
-  const run = (extra = {}) => spawnSync("sh", [installer], {
-    env: { ...process.env, HOME: home, SHELL: "/bin/zsh", ZDOTDIR: home, PATH: `${mocks}:${process.env.PATH}`, FIXTURE: root, FIXTURE_PLATFORM: platform, ...extra },
-    encoding: "utf8", timeout: 30_000,
-  });
+  const run = (extra = {}) =>
+    spawnSync("sh", [installer], {
+      env: { ...process.env, HOME: home, SHELL: "/bin/zsh", ZDOTDIR: home, PATH: `${mocks}:${process.env.PATH}`, FIXTURE: root, FIXTURE_PLATFORM: platform, ...extra },
+      encoding: "utf8",
+      timeout: 30_000,
+    });
   return { root, home, mocks, binary: installedBinary, marker, run };
 }
 
@@ -92,7 +114,10 @@ for (const platform of platforms) {
     assert.equal(readFileSync(setup.marker, "utf8"), "0.4.96\n");
     const json = JSON.parse(result.stdout.split("\n").find((line) => line.startsWith('{"mcpServers"')));
     assert.equal(json.mcpServers.dbx.command, setup.binary);
-    const tomlCommand = result.stdout.split("\n").find((line) => line.startsWith("command = ")).slice(10);
+    const tomlCommand = result.stdout
+      .split("\n")
+      .find((line) => line.startsWith("command = "))
+      .slice(10);
     assert.equal(JSON.parse(tomlCommand), setup.binary);
     assert.deepEqual(readdirSync(join(setup.home, ".dbx/bin")).sort(), [".dbx-mcp-version", "dbx-mcp"]);
   });

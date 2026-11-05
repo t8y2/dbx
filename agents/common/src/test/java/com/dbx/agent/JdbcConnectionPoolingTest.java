@@ -38,6 +38,75 @@ class JdbcConnectionPoolingTest {
     private static final Gson GSON = new Gson();
 
     @Test
+    void unconfirmedRollbackCannotReturnItsTransactionToAnotherSession() throws Exception {
+        for (String sqlState : List.of("HY000", "HYT00", "08006")) {
+            AtomicInteger physicalOpens = new AtomicInteger();
+            CountDownLatch transactionFinished = new CountDownLatch(1);
+            CountDownLatch finishRequest = new CountDownLatch(1);
+            ExecutorService worker = Executors.newSingleThreadExecutor();
+            String url = h2Url("unconfirmed_rollback");
+            try (Connection setup = DriverManager.getConnection(url, "sa", "");
+                 Statement statement = setup.createStatement();
+                 JdbcConnectionPoolRegistry registry = new JdbcConnectionPoolRegistry(poolSettings(2))) {
+                statement.execute("CREATE TABLE rollback_probe (id INT)");
+                List<JsonRpcServer> sessions = new java.util.ArrayList<>();
+                for (int index = 0; index < 2; index++) {
+                    H2TestAgent agent = new H2TestAgent(url, physicalOpens) {
+                        @Override
+                        protected Connection openConnection(ConnectParams params) throws Exception {
+                            Connection physical = openH2(url, physicalOpens);
+                            if (physicalOpens.get() != 1) return physical;
+                            return (Connection) Proxy.newProxyInstance(getClass().getClassLoader(),
+                                new Class<?>[]{Connection.class}, (proxy, method, args) -> {
+                                    if (method.getName().equals("rollback")) {
+                                        throw new SQLException("Rollback was not acknowledged", sqlState);
+                                    }
+                                    try {
+                                        return method.invoke(physical, args);
+                                    } catch (InvocationTargetException error) {
+                                        throw error.getCause();
+                                    }
+                                });
+                        }
+
+                        @Override
+                        public QueryResult executeTransaction(List<String> statements, String schema) {
+                            try {
+                                return super.executeTransaction(statements, schema);
+                            } finally {
+                                // Allow another session to borrow before the RPC's outer cleanup.
+                                transactionFinished.countDown();
+                                awaitUninterruptibly(finishRequest);
+                            }
+                        }
+                    };
+                    agent.attachConnectionPoolRegistry(registry);
+                    JsonRpcServer server = new JsonRpcServer(agent);
+                    server.dispatchForRuntime(AgentProtocol.METHOD_CONNECT,
+                        JsonParser.parseString("{\"database\":\"pooling\",\"username\":\"sa\",\"password\":\"\"}").getAsJsonObject());
+                    sessions.add(server);
+                }
+                Future<Exception> failure = worker.submit(() -> assertThrows(Exception.class,
+                    () -> sessions.get(0).dispatchForRuntime(AgentProtocol.METHOD_EXECUTE_TRANSACTION,
+                        JsonParser.parseString("{\"statements\":[\"INSERT INTO rollback_probe VALUES (1)\",\"INVALID SQL\"]}").getAsJsonObject())));
+                try {
+                    assertTrue(transactionFinished.await(3, TimeUnit.SECONDS));
+                    JsonObject query = JsonParser.parseString("{\"sql\":\"SELECT COUNT(*) FROM rollback_probe\"}").getAsJsonObject();
+                    QueryResult result = (QueryResult) sessions.get(1).dispatchForRuntime(AgentProtocol.METHOD_EXECUTE_QUERY, query);
+                    assertEquals(0L, ((Number) result.getRows().get(0).get(0)).longValue(), sqlState);
+                    assertEquals(2, physicalOpens.get(), sqlState);
+                } finally {
+                    finishRequest.countDown();
+                }
+                assertTrue(failure.get(3, TimeUnit.SECONDS).toString().contains("rollback was not confirmed"));
+            } finally {
+                finishRequest.countDown();
+                worker.shutdownNow();
+            }
+        }
+    }
+
+    @Test
     void blobRollbackFailureCannotReturnDirtyConnectionToAnotherSession() throws Exception {
         for (boolean manual : List.of(false, true)) {
             AtomicInteger physicalOpens = new AtomicInteger();

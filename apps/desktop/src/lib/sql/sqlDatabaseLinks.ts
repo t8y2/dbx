@@ -80,6 +80,20 @@ export function collectSqlDatabaseLinkStarts(sql: string, databaseType?: Databas
     const sqlXmlExpression = objectStart === i - 1 && sqlXmlKeywords.has(objectStart);
     const routineCall = !proceduralExpression && !sqlXmlExpression && tokens[i + 1]?.text === "(" && (object.kind === "quoted_identifier" || !isReservedKeyword(object.text));
     let objectContext = (ORACLE_OBJECT_PREFIX_KEYWORDS.has(prefix) && !(prefix === "update" && tokens[objectStart - 2]?.normalized === "for")) || routineCall;
+    const sequenceValue = object.kind === "word" && (object.normalized === "nextval" || object.normalized === "currval") && tokens[i - 2]?.text === "." && isObjectIdentifier(i - 3);
+    if (sequenceValue) objectContext = true;
+    if (prefix === "for" || prefix === "using") {
+      const statementWords: string[] = [];
+      for (let j = objectStart - 2; j >= 0; j -= 1) {
+        if (tokens[j].text === ";" || tokens[j].depth < token.depth) break;
+        if (tokens[j].depth === token.depth && tokens[j].kind === "word") statementWords.unshift(tokens[j].normalized);
+      }
+      if (prefix === "for") objectContext ||= statementWords[0] === "create" && statementWords.includes("synonym");
+      else {
+        const mergeIndex = statementWords.lastIndexOf("merge");
+        objectContext ||= mergeIndex >= 0 && statementWords[mergeIndex + 1] === "into";
+      }
+    }
     // A comma can separate tables or expressions. Only a FROM list makes the
     // following non-reserved keyword an object name, including after subqueries.
     if (prefix === ",") {

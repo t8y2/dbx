@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   migrationStart: vi.fn(),
   migrationRetry: vi.fn(),
   migrationCleanupBackups: vi.fn(),
+  loadWebCapabilities: vi.fn(),
 }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: mocks.desktop }));
 vi.mock("@/lib/backend/api", () => mocks);
@@ -27,7 +28,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-const readyStatus = { state: "not_required", needsMigration: false };
+const readyStatus = { state: "not_required", needsMigration: false, keyRecoveryRequired: false };
 let businessReady: ReturnType<typeof deferred<void>>;
 let mountedApp: App | undefined;
 let root: HTMLDivElement;
@@ -39,6 +40,7 @@ beforeEach(() => {
   mocks.desktop.mockReturnValue(true);
   mocks.migrationStatus.mockResolvedValue(readyStatus);
   mocks.reloadLocale.mockResolvedValue(undefined);
+  mocks.loadWebCapabilities.mockResolvedValue({ passwordViewerEnabled: true });
   businessReady = deferred<void>();
   root = document.createElement("div");
   document.body.append(root);
@@ -147,7 +149,7 @@ describe("startup boundary", () => {
   });
 
   it("does not load the business app until a required migration is completed and entered", async () => {
-    mocks.migrationStatus.mockResolvedValueOnce({ state: "pending", needsMigration: true }).mockResolvedValue(readyStatus);
+    mocks.migrationStatus.mockResolvedValueOnce({ state: "pending", needsMigration: true, keyRecoveryRequired: false }).mockResolvedValue(readyStatus);
     mocks.migrationStart.mockResolvedValue({ state: "succeeded" });
     businessReady.resolve();
     await mountGate();

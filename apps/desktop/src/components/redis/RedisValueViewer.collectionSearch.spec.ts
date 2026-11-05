@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   redisSetTtl: vi.fn(),
   redisSetExpireAt: vi.fn(),
   redisLoadMore: vi.fn(),
+  redisHashFieldUpdate: vi.fn(),
   toast: vi.fn(),
 }));
 
@@ -19,6 +20,7 @@ vi.mock("@/lib/backend/api", () => ({
   redisSetTtl: mocks.redisSetTtl,
   redisSetExpireAt: mocks.redisSetExpireAt,
   redisLoadMore: mocks.redisLoadMore,
+  redisHashFieldUpdate: mocks.redisHashFieldUpdate,
 }));
 
 vi.mock("@/composables/useEditorFontFamilyStyle", () => ({
@@ -32,6 +34,30 @@ vi.mock("@/composables/useToast", () => ({
 vi.mock("@/lib/common/shikiJsonHighlighter", () => ({
   createShikiJsonHighlighter: vi.fn().mockResolvedValue(() => ""),
 }));
+
+// Exercise the viewer's draft binding without mounting CodeMirror and its stores.
+vi.mock("@/components/redis/RedisJsonEditor.vue", async () => {
+  const { defineComponent, h, onMounted, ref } = await import("vue");
+  return {
+    default: defineComponent({
+      props: { modelValue: String, readOnly: Boolean, autofocus: Boolean },
+      emits: ["update:modelValue"],
+      setup(props, { emit }) {
+        const input = ref<HTMLTextAreaElement>();
+        onMounted(() => {
+          if (props.autofocus) input.value?.focus();
+        });
+        return () =>
+          h("textarea", {
+            ref: input,
+            value: props.modelValue,
+            readonly: props.readOnly,
+            onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLTextAreaElement).value),
+          });
+      },
+    }),
+  };
+});
 
 import RedisValueViewer from "./RedisValueViewer.vue";
 
@@ -128,6 +154,7 @@ function listValue() {
 
 const testI18nMessages = {
   en: {
+    grid: { save: "Save", discard: "Discard" },
     redis: {
       searchFields: "Search fields and values",
       searchMembers: "Search members",
@@ -136,7 +163,8 @@ const testI18nMessages = {
       items: "{count} items",
       loadedMembers: "{loaded} / {total} members loaded",
       loadedItems: "{loaded} / {total} items loaded",
-      loadMoreKeys: "Load more",
+      loadedFields: "{loaded} / {total} fields loaded",
+      fetchMoreKeys: "Load more",
       fields: "{count} fields",
       ttlSecond: "{count}s",
       collectionSearching: "Searching",
@@ -359,6 +387,36 @@ describe("Redis collection member search", () => {
     expect(rows[1].textContent).toContain("new");
     expect(rows[1].textContent).toContain("50s");
   });
+  it("keeps the hash field search after saving an edited value (#14322)", async () => {
+    mocks.redisGetValue.mockResolvedValue({ key_display: "hash", key_raw: "key", ttl: -1, redis_type: "hash", data: { kind: "hash", items: [], total: 2, scan_cursor: 10 } });
+    mocks.redisLoadMore.mockResolvedValue({ kind: "hash", items: [{ field: blob("field-a"), value: blob("one") }], scan_cursor: undefined });
+    mocks.redisHashFieldUpdate.mockResolvedValue(undefined);
+    mountViewer();
+    await settle();
+
+    await typeSearch("field");
+    expect(searchInput()?.value).toBe("field");
+
+    document.querySelector<HTMLElement>("[data-redis-value-row]")!.click();
+    await settle();
+    document.querySelector<HTMLElement>("[data-redis-member-utf8-viewer]")!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+    await settle();
+    const editor = document.querySelector<HTMLTextAreaElement>("[data-redis-member-utf8-editor]")!;
+    editor.value = "two";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+
+    [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Save")!.click();
+    await settle();
+    for (let i = 0; i < 4; i++) await settle();
+
+    expect(mocks.redisHashFieldUpdate).toHaveBeenCalled();
+    // The filter box and the applied query survive the post-save reload.
+    expect(searchInput()?.value).toBe("field");
+    const calls = mocks.redisLoadMore.mock.calls;
+    expect(calls[calls.length - 1]?.[6]).toBe("field");
+  });
+
   it("retries an initial load that settled while the viewer was inactive", async () => {
     let finish!: (value: unknown) => void;
     mocks.redisGetValue
@@ -629,5 +687,93 @@ describe("Redis collection member search", () => {
 
     expect(document.body.textContent).toContain("1 members");
     expect(document.body.textContent).not.toContain("/ 100 members loaded");
+  });
+
+  it("loads more hash fields when clicking load more in hash viewer", async () => {
+    mocks.redisGetValue.mockResolvedValue({
+      key_display: "key",
+      key_raw: "key",
+      ttl: -1,
+      redis_type: "hash",
+      data: {
+        kind: "hash",
+        items: [{ field: blob("f1"), value: blob("v1") }],
+        total: 4000,
+        scan_cursor: 1234,
+      },
+    });
+    mocks.redisLoadMore.mockResolvedValueOnce({
+      kind: "hash",
+      items: [{ field: blob("f2"), value: blob("v2") }],
+      scan_cursor: 5678,
+    });
+    mountViewer();
+    await settle();
+    expect(document.body.textContent).toContain("f1");
+    expect(document.body.textContent).not.toContain("f2");
+    loadMoreButton().click();
+    await settle();
+    expect(mocks.redisLoadMore).toHaveBeenCalledWith("connection", 0, "key", "hash", 1234, 200, undefined, undefined);
+    expect(document.body.textContent).toContain("f1");
+    expect(document.body.textContent).toContain("f2");
+  });
+
+  it("shows error toast when ordinary hash load more fails", async () => {
+    mocks.redisGetValue.mockResolvedValue({
+      key_display: "key",
+      key_raw: "key",
+      ttl: -1,
+      redis_type: "hash",
+      data: {
+        kind: "hash",
+        items: [{ field: blob("f1"), value: blob("v1") }],
+        total: 4000,
+        scan_cursor: 1234,
+      },
+    });
+    mocks.redisLoadMore.mockRejectedValueOnce(new Error("Collection cursor is invalid, expired, or belongs to a different connection/database"));
+    mountViewer();
+    await settle();
+    loadMoreButton().click();
+    await settle();
+    expect(mocks.toast).toHaveBeenCalledWith("Collection cursor is invalid, expired, or belongs to a different connection/database", 3000);
+  });
+
+  it("loads 200 more items on the first load more click for a 200-item initial page (#12640 follow-up)", async () => {
+    const initialItems = Array.from({ length: 200 }, (_, i) => ({
+      field: blob(`field:${i}`),
+      value: blob(`val:${i}`),
+    }));
+    mocks.redisGetValue.mockResolvedValue({
+      key_display: "key",
+      key_raw: "key",
+      ttl: -1,
+      redis_type: "hash",
+      data: {
+        kind: "hash",
+        items: initialItems,
+        total: 500,
+        scan_cursor: 1234,
+      },
+    });
+
+    const moreItems = Array.from({ length: 200 }, (_, i) => ({
+      field: blob(`field:${200 + i}`),
+      value: blob(`val:${200 + i}`),
+    }));
+    mocks.redisLoadMore.mockResolvedValueOnce({
+      kind: "hash",
+      items: moreItems,
+      scan_cursor: 5678,
+    });
+
+    mountViewer();
+    await settle();
+    expect(document.body.textContent).toContain("200 / 500 fields loaded");
+
+    loadMoreButton().click();
+    await settle();
+    expect(mocks.redisLoadMore).toHaveBeenCalledWith("connection", 0, "key", "hash", 1234, 200, undefined, undefined);
+    expect(document.body.textContent).toContain("400 / 500 fields loaded");
   });
 });

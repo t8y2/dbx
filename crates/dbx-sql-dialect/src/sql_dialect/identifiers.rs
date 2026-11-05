@@ -48,7 +48,8 @@ pub fn qualified_table_name(database_type: Option<DatabaseType>, schema: Option<
         }
         return table_name;
     }
-    let supports_qualifier = database_type.is_some_and(is_schema_aware)
+    let supports_qualifier = (database_type.is_some_and(is_schema_aware)
+        && database_type != Some(DatabaseType::Gbase8s))
         || matches!(
             database_type,
             Some(DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::StarRocks | DatabaseType::Doris)
@@ -125,22 +126,15 @@ pub fn qualified_table_name_with_catalog(
     }
 }
 
-pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -> String {
-    if matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss))
-        && is_explicitly_quoted_identifier(name)
-    {
-        return name.to_string();
-    }
-    match database_type {
-        Some(DatabaseType::Iotdb) => name.to_string(),
-        // SOQL has no delimited identifiers: `SELECT * FROM "Account"` fails with
-        // MALFORMED_QUERY, and double quotes are string literals there. Object and
-        // field API names are always sent bare.
-        Some(DatabaseType::Salesforce) => name.to_string(),
-        // JDBC connections use the driver-reported identifier quote string
-        // (DatabaseMetaData.getIdentifierQuoteString()) inside the JDBC agent,
-        // so the Rust layer passes identifiers through unquoted.
-        Some(DatabaseType::Jdbc) => name.to_string(),
+/// Engines whose native identifier delimiter is the backtick (the MySQL/Hive
+/// family plus Neo4j/Nebula). For these engines a double quote is a string
+/// literal, so ANSI double-quoted identifiers cannot be replayed; callers that
+/// must stay ANSI-portable (the "Standard SQL" export dialect) only deviate to
+/// native quoting for this family. Keeping the list here lets
+/// [`quote_table_identifier`] and its consumers share a single source of truth.
+pub fn uses_backtick_identifier_quoting(database_type: Option<DatabaseType>) -> bool {
+    matches!(
+        database_type,
         Some(
             DatabaseType::Mysql
             | DatabaseType::ClickHouse
@@ -164,13 +158,49 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
             // syntax error. PostgreSQL-dialect Spanner databases override this through
             // the identifier quote reported by the agent on connect.
             | DatabaseType::Spanner
-            | DatabaseType::Questdb,
-        ) => {
+            | DatabaseType::Questdb
+            | DatabaseType::Neo4j
+            | DatabaseType::Nebula,
+        )
+    )
+}
+
+pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -> String {
+    // A name that already is a delimited identifier must not be wrapped again:
+    // `"neptune"` became `"""neptune"""` and PostgreSQL rejected the statement with
+    // a syntax error (#14194).
+    if matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Postgres))
+        && is_explicitly_quoted_identifier(name)
+    {
+        return name.to_string();
+    }
+    match database_type {
+        Some(DatabaseType::Iotdb) => name.to_string(),
+        // SOQL has no delimited identifiers: `SELECT * FROM "Account"` fails with
+        // MALFORMED_QUERY, and double quotes are string literals there. Object and
+        // field API names are always sent bare.
+        Some(DatabaseType::Salesforce) => name.to_string(),
+        // JDBC connections use the driver-reported identifier quote string
+        // (DatabaseMetaData.getIdentifierQuoteString()) inside the JDBC agent,
+        // so the Rust layer passes identifiers through unquoted.
+        Some(DatabaseType::Jdbc) => name.to_string(),
+        // Nebula belongs to the backtick family but escapes backslashes as well as
+        // backticks, so it is matched before the shared backtick arm below.
+        Some(DatabaseType::Nebula) => format!("`{}`", name.replace('\\', "\\\\").replace('`', "\\`")),
+        // MySQL/Hive family and Neo4j quote identifiers with backticks. The set is
+        // defined once in `uses_backtick_identifier_quoting` so the "Standard SQL"
+        // export dialect and this quoting never drift apart.
+        Some(db_type) if uses_backtick_identifier_quoting(Some(db_type)) => {
             format!("`{}`", name.replace('`', "``"))
         }
-        Some(DatabaseType::Informix) if is_simple_informix_identifier(name) => name.to_string(),
-        Some(DatabaseType::Neo4j) => format!("`{}`", name.replace('`', "``")),
-        Some(DatabaseType::Nebula) => format!("`{}`", name.replace('\\', "\\\\").replace('`', "\\`")),
+        Some(DatabaseType::Informix | DatabaseType::Gbase8s) if is_simple_informix_identifier(name) => name.to_string(),
+        // SUNDB folds unquoted identifiers to uppercase (its JDBC driver reports
+        // storesUpperCaseIdentifiers=true / supportsMixedCaseIdentifiers=false), so
+        // `select * from rs_salest_budget` resolves to RS_SALEST_BUDGET. Quoting the
+        // name preserves its case instead, and the generated UPDATE then finds no such
+        // table (#11986). Emit simple names unquoted, as Informix does; a name that
+        // needs quoting keeps the generic double-quote form.
+        Some(DatabaseType::Sundb) if is_simple_informix_identifier(name) => name.to_string(),
         Some(DatabaseType::SqlServer) => format!("[{}]", name.replace(']', "]]")),
         _ => format!("\"{}\"", name.replace('"', "\"\"")),
     }
@@ -485,5 +515,27 @@ pub fn qualified_transfer_table(
         table
     } else {
         format!("{}.{}", quote_transfer_identifier(schema, database_type), table)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_an_already_quoted_postgres_identifier_intact() {
+        // #14194: wrapping `"neptune"` again produced `"""neptune"""`, which
+        // PostgreSQL rejected with a syntax error.
+        assert_eq!(quote_table_identifier(Some(DatabaseType::Postgres), "\"neptune\""), "\"neptune\"");
+        assert_eq!(quote_table_identifier(Some(DatabaseType::Postgres), "neptune"), "\"neptune\"");
+        assert_eq!(
+            qualified_table_name(Some(DatabaseType::Postgres), Some("\"neptune\""), "\"cron_job\""),
+            "\"neptune\".\"cron_job\""
+        );
+    }
+
+    #[test]
+    fn still_escapes_a_quote_inside_a_plain_postgres_name() {
+        assert_eq!(quote_table_identifier(Some(DatabaseType::Postgres), "we\"ird"), "\"we\"\"ird\"");
     }
 }

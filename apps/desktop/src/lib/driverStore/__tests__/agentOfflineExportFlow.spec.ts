@@ -29,10 +29,18 @@ describe("runAgentOfflineExportFlow", () => {
       destination: "/tmp/dbx-agents.zip",
       result: { driverCount: 2 },
     });
-    expect(exportPackage).toHaveBeenCalledWith("/tmp/dbx-agents.zip", ["duckdb", "redis"]);
-
-    driverKeys.push("kafka");
+    expect(exportPackage).toHaveBeenCalledWith("/tmp/dbx-agents.zip", ["duckdb", "redis"], true);
     expect(exportPackage.mock.calls[0]?.[1]).toEqual(["duckdb", "redis"]);
+
+    // The JRE can be skipped for a smaller package (#13175).
+    driverKeys.push("kafka");
+    await runAgentOfflineExportFlow({
+      driverKeys,
+      includeJres: false,
+      chooseDestination: vi.fn().mockResolvedValue("/tmp/dbx-agents.zip"),
+      exportPackage,
+    });
+    expect(exportPackage).toHaveBeenLastCalledWith("/tmp/dbx-agents.zip", ["duckdb", "redis", "kafka"], false);
   });
 
   it("does not open the save dialog for an empty selection", async () => {

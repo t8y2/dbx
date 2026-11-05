@@ -19,8 +19,8 @@ mod descriptor_snapshots;
 
 pub use capabilities::{
     firebird_rows_clause, is_schema_aware, pagination_strategy, table_pagination_strategy, uses_fetch_first,
-    uses_oracle_row_id, uses_single_row_insert_statements, uses_synthetic_row_id, uses_xugu_row_id, PaginationContext,
-    TablePaginationStrategy,
+    uses_oracle_row_id, uses_postgres_ctid, uses_single_row_insert_statements, uses_synthetic_row_id, uses_xugu_row_id,
+    PaginationContext, TablePaginationStrategy,
 };
 pub use ddl_profile::{
     profile_for, AutoIncSyntax, DdlDialectProfile, IndexTypePlacement, QuoteStyle, RenameColumnSyntax, TriggerTemplate,
@@ -37,10 +37,11 @@ pub use descriptor::{
 };
 pub use identifiers::{
     normalize_where_input, qualified_table_name, qualified_table_name_with_catalog, quote_table_identifier,
+    uses_backtick_identifier_quoting,
 };
 pub use identifiers::{
-    parse_sqlserver_linked_schema_ref, qualified_transfer_table, quote_iris_identifier, quote_transfer_identifier,
-    transfer_column_identifier,
+    parse_sqlserver_linked_schema_ref, qualified_transfer_table, quote_gaussdb_jdbc_identifier, quote_iris_identifier,
+    quote_transfer_identifier, transfer_column_identifier,
 };
 pub use table_select::{
     build_count_table_sql, build_iris_table_select_sql, build_table_data_select_sql,

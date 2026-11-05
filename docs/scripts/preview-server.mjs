@@ -73,9 +73,7 @@ createServer(async (req, res) => {
       res.writeHead(400);
       return res.end();
     }
-    const hit =
-      (await tryFile(path)) ??
-      (path.endsWith("/") ? await tryFile(join(path, "index.html")) : await tryFile(`${path}.html`));
+    const hit = (await tryFile(path)) ?? (path.endsWith("/") ? await tryFile(join(path, "index.html")) : await tryFile(`${path}.html`));
     if (hit) {
       res.writeHead(200, { "content-type": hit.type, "cache-control": "no-store" });
       return res.end(await readFile(hit.file));

@@ -72,4 +72,85 @@ describe("batch table drop", () => {
     expect(result.succeeded).toEqual([]);
     expect(result.failed?.message).toBe("Batch drop did not report a result for every statement");
   });
+
+  it("succeeds for single table drop when backend returns an indexless result", async () => {
+    const singlePlan = [{ target: "platforms", sql: "DROP TABLE `platforms`" }];
+    const onProgress = vi.fn();
+    const result = await runBatchTableDrop({
+      databaseType: "mysql",
+      plan: singlePlan,
+      executeStatement: vi.fn(),
+      executeBatch: async () => [queryResult()],
+      onProgress,
+    });
+
+    expect(result.succeeded).toEqual(["platforms"]);
+    expect(result.failed).toBeUndefined();
+    expect(onProgress).toHaveBeenCalledWith({ completed: 1, total: 1, success: true });
+  });
+
+  it("reports failure for single table drop when execution error occurs", async () => {
+    const singlePlan = [{ target: "platforms", sql: "DROP TABLE `platforms`" }];
+    const onProgress = vi.fn();
+    const result = await runBatchTableDrop({
+      databaseType: "oceanbase-oracle",
+      plan: singlePlan,
+      executeStatement: vi.fn(),
+      executeBatch: async () => [
+        queryResult({
+          execution_error: true,
+          error: {
+            version: 1,
+            code: "OBE-00942",
+            messageKey: "error.database",
+            messageParams: {},
+            source: "agent",
+            operationOutcome: "unknown",
+            detail: "table or view does not exist",
+          },
+        }),
+      ],
+      onProgress,
+    });
+
+    expect(result.succeeded).toEqual([]);
+    expect(result.failed?.message).toBe("table or view does not exist");
+  });
+
+  it("maps 1-to-1 sequential indexless batch results when lengths match", async () => {
+    const twoPlan = [
+      { target: "orders", sql: "DROP TABLE orders" },
+      { target: "customers", sql: "DROP TABLE customers" },
+    ];
+    const onProgress = vi.fn();
+    const result = await runBatchTableDrop({
+      databaseType: "mysql",
+      plan: twoPlan,
+      executeStatement: vi.fn(),
+      executeBatch: async () => [queryResult(), queryResult({ execution_error: true, rows: [["foreign key constraint fails"]] })],
+      onProgress,
+    });
+
+    expect(result.succeeded).toEqual(["orders"]);
+    expect(result.failed?.message).toBe("foreign key constraint fails");
+  });
+
+  it("handles empty drop plan immediately without executing queries", async () => {
+    const executeStatement = vi.fn();
+    const executeBatch = vi.fn();
+    const onProgress = vi.fn();
+    const result = await runBatchTableDrop({
+      databaseType: "mysql",
+      plan: [],
+      executeStatement,
+      executeBatch,
+      onProgress,
+    });
+
+    expect(result.succeeded).toEqual([]);
+    expect(result.failed).toBeUndefined();
+    expect(executeStatement).not.toHaveBeenCalled();
+    expect(executeBatch).not.toHaveBeenCalled();
+    expect(onProgress).not.toHaveBeenCalled();
+  });
 });

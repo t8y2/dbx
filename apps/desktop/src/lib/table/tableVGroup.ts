@@ -1,4 +1,4 @@
-import type { ConnectionGroup, TableVGroupLayout, TableVGroupOrderEntry, TreeNode } from "@/types/database";
+import type { ConnectionGroup, TableNameFilter, TableVGroupLayout, TableVGroupOrderEntry, TreeNode } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
 
 export type { TableVGroupLayout, TableVGroupOrderEntry };
@@ -43,6 +43,51 @@ export function hasTableVGroupEntries(layout: TableVGroupLayout | null | undefin
 /** Vgroups stay visible unless the user explicitly hid them. */
 export function tableVGroupsEnabled(layout: TableVGroupLayout | null | undefined): boolean {
   return hasTableVGroupEntries(layout) && layout.enabled !== false;
+}
+
+// Match the backend's SQL LIKE name filters, including escaped wildcards.
+// Dynamic programming keeps repeated '%' patterns from causing regex backtracking.
+function matchesTableNamePattern(name: string, pattern: string): boolean {
+  const value = [...name.toLowerCase()];
+  const tokens = [...pattern.trim().toLowerCase()];
+  let previous = Array.from({ length: value.length + 1 }, () => false);
+  previous[0] = true;
+  for (let index = 0; index < tokens.length; index++) {
+    let token = tokens[index]!;
+    const escaped = token === "\\";
+    if (escaped) token = tokens[++index] ?? "\\";
+    const current = Array.from({ length: value.length + 1 }, () => false);
+    if (!escaped && token === "%") current[0] = previous[0]!;
+    for (let offset = 1; offset <= value.length; offset++) {
+      current[offset] = !escaped && token === "%" ? previous[offset]! || current[offset - 1]! : previous[offset - 1]! && ((!escaped && token === "_") || value[offset - 1] === token);
+    }
+    previous = current;
+  }
+  return previous[value.length]!;
+}
+
+export function matchesTableNameFilter(name: string, filter?: TableNameFilter): boolean {
+  const include = filter?.includePatterns.filter((pattern) => pattern.trim()) ?? [];
+  const exclude = filter?.excludePatterns.filter((pattern) => pattern.trim()) ?? [];
+  return (!include.length || include.some((pattern) => matchesTableNamePattern(name, pattern))) && !exclude.some((pattern) => matchesTableNamePattern(name, pattern));
+}
+
+/** Only real group members need supplementary metadata, never ungrouped order entries. */
+export function missingTableVGroupMemberNames(layout: TableVGroupLayout | null | undefined, loadedNames: ReadonlySet<string>, filter?: TableNameFilter): string[] {
+  if (!layout || !tableVGroupsEnabled(layout)) return [];
+  const names = new Set<string>();
+  const visit = (entries: TableVGroupOrderEntry[], inGroup: boolean) => {
+    for (const entry of entries) {
+      if (entry.type === "group") {
+        visit(entry.children ?? [], true);
+      } else if (inGroup && (!entry.rowType || entry.rowType === "table") && !loadedNames.has(entry.name)) {
+        if (!matchesTableNameFilter(entry.name, filter)) continue;
+        names.add(entry.name);
+      }
+    }
+  };
+  visit(layout.order, false);
+  return [...names];
 }
 
 export function tableVGroupScopeKey(scope: TableVGroupScope): string | null {
@@ -98,6 +143,10 @@ export function tableVGroupKindOfContainerNode(node: Pick<TreeNode, "type" | "ta
     case "group-jobs":
       return "jobs";
     case "group-packages":
+    // Bodies live in their own sidebar group but share the packages virtual
+    // group: a v-group key must be unique per package name, and bodies pair
+    // with their spec by name.
+    case "group-package-bodies":
       return "packages";
     case "group-types":
       return "types";
@@ -297,7 +346,7 @@ export function createTableVGroup(layout: TableVGroupLayout, name: string, paren
   return {
     groupId,
     layout: {
-      enabled: layout.enabled,
+      enabled: true,
       version: layout.version,
       groups: [...layout.groups, group].map((current) => (parentFound && current.id === parentGroupId ? { ...current, collapsed: false } : current)),
       order,
@@ -505,7 +554,7 @@ function buildVGroupRootNodes(entries: TableVGroupOrderEntry[], layout: TableVGr
  * simply stay absent (sidebar pagination); stale names are skipped.
  */
 export function applyTableVGroupsToChildren(children: TreeNode[], layout: TableVGroupLayout | null | undefined, scope: TableVGroupScope): TreeNode[] {
-  if (!children.length || !layout || !tableVGroupsEnabled(layout)) return children;
+  if (!layout || !tableVGroupsEnabled(layout) || (!children.length && !layout.groups.length)) return children;
   // Idempotence: merge/refresh flows re-feed already-projected children back
   // into setChildren, so always strip existing group containers first —
   // otherwise stale group copies survive alongside the freshly built ones.
@@ -524,7 +573,7 @@ export function applyTableVGroupsToChildren(children: TreeNode[], layout: TableV
       if (!rows.byLabel.has(node.label)) rows.byLabel.set(node.label, { node, flatIndex: i });
     } else passthrough.push({ node, sortIndex: i });
   }
-  if (!rows.byKey.size) return flatChildren;
+  if (!rows.byKey.size && !activeLayout.groups.length) return flatChildren;
 
   const rootBuilt = buildVGroupRootNodes(activeLayout.order, activeLayout, rows, scope);
   // Rows the layout does not reference stay ungrouped at their original slot.
@@ -607,11 +656,26 @@ export function findTableVGroupContainerNode(nodes: TreeNode[], scope: TableVGro
   walk(nodes);
   if (!candidates.length) return null;
 
+  // 表容器优先级：同 scope 下若存在 group-tables（展开或折叠），绝不能回退给
+  // database/schema 泛容器挂载分组（issue #13030）；且已包含 group-tables 子节点的
+  // 库/模式节点处于分组展示模式，自身绝不是表行的直接挂载点。
+  const hasSpecificTableContainer = candidates.some((node) => node.type === "group-tables");
+  const validCandidates = candidates.filter((node) => {
+    if (hasSpecificTableContainer && (node.type === "database" || node.type === "schema" || node.type === "linked-server-schema")) {
+      return false;
+    }
+    if ((node.children ?? []).some((child) => child.type === "group-tables")) {
+      return false;
+    }
+    return true;
+  });
+  const candidatePool = validCandidates.length > 0 ? validCandidates : candidates;
+
   if (memberLabel) {
-    const holder = candidates.find((node) => (node.children ?? []).some((child) => memberRowTypes[child.type] && child.label === memberLabel));
+    const holder = candidatePool.find((node) => (node.children ?? []).some((child) => memberRowTypes[child.type] && child.label === memberLabel));
     if (holder) return holder;
   }
-  return candidates.find((node) => (node.children ?? []).some((child) => memberRowTypes[child.type] || child.type === "table-vgroup")) ?? candidates[0]!;
+  return candidatePool.find((node) => (node.children ?? []).some((child) => memberRowTypes[child.type] || child.type === "table-vgroup")) ?? candidatePool[0]!;
 }
 
 /**
@@ -740,7 +804,7 @@ export function resolveTableVGroupScopeFromNode(nodes: TreeNode[], node: TreeNod
   const row = node as Partial<TreeNode> & TableVGroupScope;
   const containerKind = isTableVGroupContainerNode(row as TreeNode) ? tableVGroupKindOfContainerNode(row as TreeNode) : null;
   if (containerKind) return { ...tableVGroupScopeFieldsOf(tableVGroupScopeHostOf(nodes, row as TreeNode)), objectType: containerKind };
-  if (row.type === "table-vgroup" || row.type?.startsWith("group-")) {
+  if (row.type === "table-vgroup") {
     const host = tableVGroupScopeHostOf(nodes, row as TreeNode);
     const holder = findTableVGroupHolderContainer(nodes, row as TreeNode);
     return { ...tableVGroupScopeFieldsOf(host), objectType: (holder && tableVGroupKindOfContainerNode(holder)) || "tables" };
@@ -752,12 +816,27 @@ export function resolveTableVGroupScopeFromNode(nodes: TreeNode[], node: TreeNod
     // 而「子树」而非「顶层」是因为已入组的成员行挂在 table-vgroup 行下，仍属
     // 同一容器的管辖范围（移出/换组动作就是从这里发起的）。
     const holdsRow = (nodes?: TreeNode[]): boolean => (nodes ?? []).some((n) => n.id === row.id || (n.type === "table-vgroup" && holdsRow(n.children)));
-    if (!holder || !holdsRow(holder.children)) return {};
+    // 顶层成员行（表/视图等容器唯一归属的类型）的身份就是容器 scope + label：
+    // 搜索投影出的行在 live 树里可能尚未加载（首页之外的表、远程搜索合并的行），
+    // id 校验必然落空，右键「移动到分组」只剩建新组入口（#14228）。scope 字段
+    // 与成员类型已把容器收敛到唯一，直接放行；表结构子行（触发器等同名跨容器
+    // 风险）仍要求 live 树按 id 实际持有。注意表/视图行自带的 tableName 只是
+    // 身份冗余字段（buildTableTreeNodes），不代表它是结构子行。
+    const isStructuralChildRow =
+      !!row.parentName ||
+      // 分区/子表行（buildPartitionTree）携带 partitionParentName 而非 parentName，
+      // 属分区树结构子行：右键入组会把分区名写成幻影成员，必须保持严格校验。
+      !!(row as { partitionParentName?: unknown }).partitionParentName ||
+      (!!row.tableName && row.type !== "table" && row.type !== "view" && row.type !== "materialized_view");
+    if (!holder || (isStructuralChildRow && !holdsRow(holder.children))) return {};
     const host = tableVGroupScopeHostOf(nodes, holder);
     return { ...tableVGroupScopeFieldsOf(host), objectType: tableVGroupKindOfContainerNode(holder) ?? "tables" };
   }
-  const container = findTableVGroupContainerNode(nodes, row as TreeNode);
-  return tableVGroupScopeFieldsOf(container ? tableVGroupScopeHostOf(nodes, container) : (row as TreeNode));
+  if (!row.type) {
+    const container = findTableVGroupContainerNode(nodes, row as TableVGroupScope);
+    return tableVGroupScopeFieldsOf(container ? tableVGroupScopeHostOf(nodes, container) : (row as TreeNode));
+  }
+  return {};
 }
 
 /**

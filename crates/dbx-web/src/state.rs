@@ -37,6 +37,8 @@ pub struct WebState {
     pub notes_roots: Vec<PathBuf>,
     pub public_base_path: String,
     pub password_disabled: bool,
+    /// Whether the web UI may reveal saved connection passwords.
+    pub password_viewer_enabled: bool,
     /// `DBX_DEMO_MODE`：公网演示部署的封锁开关（见 `demo` 模块）。
     pub demo_mode: bool,
     pub password_hash: RwLock<Option<String>>,
@@ -51,6 +53,14 @@ pub struct WebState {
     pub managed_sql_previews: crate::routes::sql_file::ManagedSqlPreviews,
     pub nacos_imports: RwLock<HashMap<String, NacosImportContext>>,
     pub login_rate_limit: Mutex<LoginRateLimit>,
+    /// Single-use image challenges gating `auth::login`.
+    pub captchas: crate::captcha::CaptchaStore,
+    /// When `auth::login` demands a challenge. Editable from `设置 → 安全`
+    /// unless `DBX_WEB_CAPTCHA` pinned it.
+    pub captcha_mode: tokio::sync::RwLock<crate::captcha::CaptchaMode>,
+    /// `DBX_WEB_CAPTCHA` was set, so the settings dialog must not offer to
+    /// change it.
+    pub captcha_env_locked: bool,
     /// Completed Web export temp files waiting for the browser download.
     pub export_files: RwLock<HashMap<String, WebExportFile>>,
     pub ssh_prompts: Arc<crate::ssh_prompt::SshPromptHub>,
@@ -72,6 +82,7 @@ impl WebState {
             notes_roots: Vec::new(),
             public_base_path: "/".to_string(),
             password_disabled: false,
+            password_viewer_enabled: true,
             demo_mode: false,
             password_hash: RwLock::new(None),
             sessions: RwLock::new(HashSet::new()),
@@ -83,6 +94,9 @@ impl WebState {
             managed_sql_previews: Default::default(),
             nacos_imports: RwLock::new(HashMap::new()),
             login_rate_limit: Mutex::new(LoginRateLimit { fail_count: 0, locked_until: None }),
+            captchas: crate::captcha::CaptchaStore::new(),
+            captcha_mode: tokio::sync::RwLock::new(crate::captcha::CaptchaMode::Auto),
+            captcha_env_locked: false,
             export_files: RwLock::new(HashMap::new()),
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
             migration_ready: Arc::new(AtomicBool::new(true)),

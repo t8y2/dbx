@@ -446,22 +446,40 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
 
     @Override
     public String getTableComment(String schema, String table) {
-        if (sqlServer2000Mode) {
-            return null;
-        }
         return unchecked(() -> {
-            try (PreparedStatement statement = requireConnection().prepareStatement(tableCommentSql())) {
-                statement.setString(1, schema);
-                statement.setString(2, table);
-                try (ResultSet resultSet = statement.executeQuery()) {
-                    if (resultSet.next()) {
-                        String comment = resultSet.getString("table_comment");
-                        return comment != null && !comment.trim().isEmpty() ? comment : null;
-                    }
+            try {
+                return readTableComment(tableCommentSql(), schema, table);
+            } catch (SQLException | RuntimeException error) {
+                // sys.extended_properties is absent on SQL Server 2000, where the property
+                // lives in sysproperties; the compatibility function answers on every version.
+                // Bailing out on the driver mode instead used to hide a table comment that had
+                // just been written whenever the connection ran on the jTDS fallback. (#11606)
+                System.err.println(
+                    "[sqlserver-legacy] sys.extended_properties table comment unavailable; trying compatibility function: "
+                        + error.getMessage()
+                );
+            }
+            try {
+                return readTableComment(sqlServer2000TableCommentSql(), schema, table);
+            } catch (SQLException | RuntimeException error) {
+                System.err.println("[sqlserver-legacy] table comment unavailable: " + error.getMessage());
+                return null;
+            }
+        });
+    }
+
+    private String readTableComment(String sql, String schema, String table) throws SQLException {
+        try (PreparedStatement statement = requireConnection().prepareStatement(sql)) {
+            statement.setString(1, schema);
+            statement.setString(2, table);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (resultSet.next()) {
+                    String comment = resultSet.getString("table_comment");
+                    return comment != null && !comment.trim().isEmpty() ? comment : null;
                 }
             }
-            return null;
-        });
+        }
+        return null;
     }
 
     @Override
@@ -753,6 +771,16 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
             + "AND s.name = ? AND t.name = ?";
     }
 
+    /**
+     * SQL Server 2000 stores extended properties in sysproperties and has no
+     * sys.extended_properties view; the compatibility function answers on every version,
+     * so a jTDS connection can still read back a comment written as MS_Description. (#11606)
+     */
+    static String sqlServer2000TableCommentSql() {
+        return "SELECT CONVERT(nvarchar(4000), value) AS table_comment "
+            + "FROM ::fn_listextendedproperty(N'MS_Description', N'USER', ?, N'TABLE', ?, NULL, NULL)";
+    }
+
     static String appendTableCommentDdl(String ddl, String schema, String table, String comment) {
         if (comment == null || comment.trim().isEmpty()) {
             return ddl;
@@ -769,10 +797,71 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
 
     static String legacyTlsUrl(ConnectParams params) {
         Map<String, String> properties = baseConnectionProperties(params);
-        properties.put("encrypt", "true");
+        // ENCRYPT is stripped from baseConnectionProperties; resolve it explicitly.
+        // Default remains true for TLS 1.0 legacy servers; honor encrypt=false /
+        // sqlserverEncryption=disabled for instances (or proxies) without SSL.
+        String encrypt = requestedEncrypt(params);
+        properties.put("encrypt", encrypt);
         properties.put("trustServerCertificate", "true");
-        properties.put("sslProtocol", requestedTlsProtocol(params));
+        if (!"false".equalsIgnoreCase(encrypt)) {
+            properties.put("sslProtocol", requestedTlsProtocol(params));
+        }
         return appendProperties(baseJdbcUrl(params), properties);
+    }
+
+    /**
+     * Reads encrypt / sqlserverEncryption from url_params or connection_string.
+     * Defaults to true so existing TLS 1.0 encrypted endpoints keep working.
+     */
+    private static String requestedEncrypt(ConnectParams params) {
+        String value = firstProperty(params.getUrl_params(), new String[]{"encrypt", "sqlserverEncryption"}, true);
+        if (value == null) {
+            value = firstProperty(params.getConnection_string(), new String[]{"encrypt", "sqlserverEncryption"}, false);
+        }
+        if (value == null) {
+            return "true";
+        }
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        if (normalized.startsWith("{") && normalized.endsWith("}")) {
+            normalized = normalized.substring(1, normalized.length() - 1).replace("}}", "}").toLowerCase(Locale.ROOT);
+        }
+        if (normalized.equals("disabled") || normalized.equals("disable") || normalized.equals("false")
+            || normalized.equals("0") || normalized.equals("off") || normalized.equals("no")) {
+            return "false";
+        }
+        if (normalized.equals("true") || normalized.equals("1") || normalized.equals("yes")
+            || normalized.equals("on") || normalized.equals("required")) {
+            return "true";
+        }
+        // strict (TDS 8.0) is not supported by this legacy driver path; other unrecognized
+        // values are rejected instead of silently downgraded to the encrypted default.
+        throw new IllegalArgumentException(
+            "Unsupported SQL Server encrypt value '" + value.trim() + "'; use true, false or strict");
+    }
+
+    /** Returns the last matching property value for any of the given keys. */
+    private static String firstProperty(String properties, String[] keys, boolean urlParams) {
+        if (properties == null) {
+            return null;
+        }
+        String found = null;
+        for (String property : connectionPropertyParts(properties, urlParams)) {
+            String part = property.trim();
+            while (part.startsWith("?")) {
+                part = part.substring(1).trim();
+            }
+            int separator = part.indexOf('=');
+            if (separator <= 0) {
+                continue;
+            }
+            String key = part.substring(0, separator).trim();
+            for (String candidate : keys) {
+                if (candidate.equalsIgnoreCase(key)) {
+                    found = part.substring(separator + 1).trim();
+                }
+            }
+        }
+        return found;
     }
 
     private static String requestedTlsProtocol(ConnectParams params) {

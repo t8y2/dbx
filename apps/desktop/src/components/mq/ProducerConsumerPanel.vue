@@ -45,7 +45,7 @@ interface PartitionClientRow {
 const producers = ref<ProducerInfo[]>([]);
 const subscriptions = ref<SubscriptionInfo[]>([]);
 const stats = ref<TopicStats>();
-const selectedSubscription = ref("");
+const activeSubscription = ref("");
 const selectedPartitionName = ref("");
 const loading = ref(false);
 const unloading = ref(false);
@@ -181,7 +181,7 @@ async function loadRocketMqProducers(current: TopicRef, loadSeq: number, current
   if (!isRuntimeLoadCurrent(loadSeq, currentKey)) return;
   stats.value = undefined;
   subscriptions.value = [];
-  selectedSubscription.value = "";
+  activeSubscription.value = "";
   selectedPartitionName.value = "";
 }
 
@@ -193,8 +193,8 @@ const selectedPartition = computed(() => {
   return partitionRows.value.find((row) => row.name === selectedPartitionName.value) ?? partitionRows.value[0];
 });
 const subscriptionOptions = computed(() => mergeSubscriptionOptions(subscriptions.value, partitionRows.value));
-const selectedPartitionSubscription = computed(() => selectedPartition.value?.subscriptions.find((sub) => sub.name === selectedSubscription.value));
-const aggregateConsumers = computed(() => subscriptions.value.find((sub) => sub.name === selectedSubscription.value)?.consumers ?? []);
+const selectedPartitionSubscription = computed(() => selectedPartition.value?.subscriptions.find((sub) => sub.name === activeSubscription.value));
+const aggregateConsumers = computed(() => subscriptions.value.find((sub) => sub.name === activeSubscription.value)?.consumers ?? []);
 const displayedProducers = computed(() => selectedPartition.value?.producers ?? producers.value);
 const displayedConsumers = computed(() => {
   if (selectedPartition.value) return selectedPartitionSubscription.value?.consumers ?? [];
@@ -210,7 +210,7 @@ async function loadRuntimeClients() {
     producers.value = [];
     subscriptions.value = [];
     stats.value = undefined;
-    selectedSubscription.value = "";
+    activeSubscription.value = "";
     selectedPartitionName.value = "";
     loading.value = false;
     error.value = undefined;
@@ -225,7 +225,7 @@ async function loadRuntimeClients() {
       producers.value = await mqListProducers(props.connectionId, current);
       subscriptions.value = await mqListSubscriptions(props.connectionId, current);
       stats.value = undefined;
-      selectedSubscription.value = props.selectedSubscription ?? subscriptions.value[0]?.name ?? "";
+      activeSubscription.value = props.selectedSubscription ?? subscriptions.value[0]?.name ?? "";
       selectedPartitionName.value = "";
       return;
     }
@@ -247,7 +247,7 @@ async function loadRuntimeClients() {
     if (!isRuntimeLoadCurrent(loadSeq, currentKey)) return;
     const subscriptionChanged = syncSelectedSubscription();
     syncSelectedPartition();
-    if (selectedSubscription.value && !subscriptionChanged && !hasConsumersForSelectedSubscription()) {
+    if (activeSubscription.value && !subscriptionChanged && !hasConsumersForSelectedSubscription()) {
       await loadSelectedSubscriptionConsumers({ retryIfEmpty: true });
       if (!isRuntimeLoadCurrent(loadSeq, currentKey)) return;
       syncSelectedPartition();
@@ -301,14 +301,14 @@ function formatOptionalBytes(value: number): string {
 }
 
 function syncSelectedSubscription(): boolean {
-  const previous = selectedSubscription.value;
+  const previous = activeSubscription.value;
   const options = subscriptionOptions.value;
   if (props.selectedSubscription && options.some((sub) => sub.name === props.selectedSubscription)) {
-    selectedSubscription.value = props.selectedSubscription;
-  } else if (!options.some((sub) => sub.name === selectedSubscription.value)) {
-    selectedSubscription.value = options[0]?.name ?? "";
+    activeSubscription.value = props.selectedSubscription;
+  } else if (!options.some((sub) => sub.name === activeSubscription.value)) {
+    activeSubscription.value = options[0]?.name ?? "";
   }
-  return previous !== selectedSubscription.value;
+  return previous !== activeSubscription.value;
 }
 
 function syncSelectedPartition() {
@@ -318,20 +318,20 @@ function syncSelectedPartition() {
     return;
   }
   const current = rows.find((row) => row.name === selectedPartitionName.value);
-  if (current?.subscriptions.some((sub) => sub.name === selectedSubscription.value)) return;
+  if (current?.subscriptions.some((sub) => sub.name === activeSubscription.value)) return;
 
-  const withActiveConsumers = rows.find((row) => row.subscriptions.some((sub) => sub.name === selectedSubscription.value && sub.consumers.length > 0));
-  const withSubscription = rows.find((row) => row.subscriptions.some((sub) => sub.name === selectedSubscription.value));
+  const withActiveConsumers = rows.find((row) => row.subscriptions.some((sub) => sub.name === activeSubscription.value && sub.consumers.length > 0));
+  const withSubscription = rows.find((row) => row.subscriptions.some((sub) => sub.name === activeSubscription.value));
   selectedPartitionName.value = (withActiveConsumers ?? withSubscription ?? current ?? rows[0]).name;
 }
 
 function syncSelectedSubscriptionForPartition() {
   const partition = selectedPartition.value;
   if (!partition) return;
-  if (selectedSubscription.value && partition.subscriptions.some((sub) => sub.name === selectedSubscription.value)) return;
+  if (activeSubscription.value && partition.subscriptions.some((sub) => sub.name === activeSubscription.value)) return;
 
   const active = partition.subscriptions.find((sub) => sub.consumers.length > 0);
-  selectedSubscription.value = (active ?? partition.subscriptions[0])?.name ?? selectedSubscription.value;
+  activeSubscription.value = (active ?? partition.subscriptions[0])?.name ?? activeSubscription.value;
 }
 
 interface LoadConsumersOptions {
@@ -340,7 +340,7 @@ interface LoadConsumersOptions {
 
 async function loadSelectedSubscriptionConsumers(options: LoadConsumersOptions = {}): Promise<ConsumerInfo[]> {
   const current = topicRef.value;
-  const subscriptionName = selectedSubscription.value;
+  const subscriptionName = activeSubscription.value;
   if (!current || !subscriptionName) return [];
 
   const loadSeq = ++consumerLoadSeq;
@@ -365,7 +365,7 @@ function applySubscriptionConsumers(subscriptionName: string, consumers: Consume
 }
 
 function hasConsumersForSelectedSubscription(): boolean {
-  return subscriptions.value.some((sub) => sub.name === selectedSubscription.value && sub.consumers.length > 0);
+  return subscriptions.value.some((sub) => sub.name === activeSubscription.value && sub.consumers.length > 0);
 }
 
 function topicRefKey(topic: TopicRef): string {
@@ -384,7 +384,7 @@ function isRuntimeLoadCurrent(loadSeq: number, topicKey: string): boolean {
 }
 
 function isConsumerLoadCurrent(loadSeq: number, topicKey: string, subscriptionName: string): boolean {
-  return loadSeq === consumerLoadSeq && selectedSubscription.value === subscriptionName && isCurrentTopic(topicKey);
+  return loadSeq === consumerLoadSeq && activeSubscription.value === subscriptionName && isCurrentTopic(topicKey);
 }
 
 function isCurrentTopic(topicKey: string): boolean {
@@ -549,7 +549,7 @@ watch(
   { immediate: true },
 );
 
-watch(selectedSubscription, () => {
+watch(activeSubscription, () => {
   if (isProducersOnly.value) return;
   syncSelectedPartition();
   void loadSelectedSubscriptionConsumers({ retryIfEmpty: true }).catch((e: unknown) => {
@@ -565,7 +565,7 @@ watch(
   () => props.selectedSubscription,
   (subscription) => {
     if (subscription && subscriptionOptions.value.some((sub) => sub.name === subscription)) {
-      selectedSubscription.value = subscription;
+      activeSubscription.value = subscription;
     }
   },
 );
@@ -700,7 +700,7 @@ watch(
               <select v-if="!isKafkaStats && partitionRows.length" v-model="selectedPartitionName" :disabled="loading">
                 <option v-for="partition in partitionRows" :key="partition.name" :value="partition.name">{{ partition.shortName }}</option>
               </select>
-              <select v-model="selectedSubscription" :disabled="loading || !subscriptionOptions.length">
+              <select v-model="activeSubscription" :disabled="loading || !subscriptionOptions.length">
                 <option v-for="sub in subscriptionOptions" :key="sub.name" :value="sub.name">{{ sub.name }}</option>
               </select>
             </div>
@@ -721,7 +721,7 @@ watch(
               </tr>
             </thead>
             <tbody>
-              <tr v-for="consumer in displayedConsumers" :key="`${selectedScopeLabel}-${selectedSubscription}-${consumer.consumerName}-${consumer.address}`">
+              <tr v-for="consumer in displayedConsumers" :key="`${selectedScopeLabel}-${activeSubscription}-${consumer.consumerName}-${consumer.address}`">
                 <td>{{ consumer.consumerName || "-" }}</td>
                 <td>{{ consumer.address || "-" }}</td>
                 <td>{{ consumer.clientVersion || "-" }}</td>

@@ -232,6 +232,27 @@ impl SecretCodec {
         Self::resolve(SecretKeyPolicy::PlatformDefault, std::path::Path::new("."), true).map(|resolved| resolved.codec)
     }
 
+    pub(crate) fn from_platform_store() -> Result<Option<Self>, String> {
+        platform_keyring_codec(false)
+    }
+
+    pub(crate) fn persist_managed_data_dir_key(&self, data_dir: &std::path::Path) -> Result<(), String> {
+        let path = managed_key_path(data_dir);
+        let parent = path.parent().ok_or_else(|| "KEY_FILE_UNAVAILABLE".to_string())?;
+        std::fs::create_dir_all(parent).map_err(|_| "KEY_FILE_UNAVAILABLE".to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(|_| "KEY_FILE_UNAVAILABLE".to_string())?;
+        }
+        let persisted = write_key_file(&path, true, *self)?;
+        if persisted.key != self.key {
+            return Err("SECRET_KEY_MISMATCH".to_string());
+        }
+        secure_managed_key_permissions(&path)
+    }
+
     fn read_key_file(path: &std::path::Path, reject_symlink: bool) -> Result<Self, String> {
         let metadata = if reject_symlink { path.symlink_metadata() } else { path.metadata() }
             .map_err(|_| "KEY_FILE_UNAVAILABLE".to_string())?;
@@ -506,12 +527,16 @@ fn secure_managed_key_permissions(path: &std::path::Path) -> Result<(), String> 
 }
 
 fn create_key_file(path: &std::path::Path, managed: bool) -> Result<SecretCodec, String> {
+    let mut key = [0u8; 32];
+    OsRng.fill_bytes(&mut key);
+    write_key_file(path, managed, SecretCodec::new(key))
+}
+
+fn write_key_file(path: &std::path::Path, managed: bool, codec: SecretCodec) -> Result<SecretCodec, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|_| "KEY_FILE_UNAVAILABLE".to_string())?;
     }
-    let mut key = [0u8; 32];
-    OsRng.fill_bytes(&mut key);
-    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key);
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(codec.key);
     let write_result = {
         #[cfg(unix)]
         {

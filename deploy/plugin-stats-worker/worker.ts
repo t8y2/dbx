@@ -1,29 +1,37 @@
-// Counts plugin marketplace traffic on Cloudflare without touching artifact bytes.
+// Counts plugin marketplace installs on Cloudflare. Statistics are decorative:
+// they must never sit in the artifact download path.
 //
 // Routes (see wrangler.json):
-// - dl.dbxio.com/plugins/*: counts each GET of a real `.dbxp` artifact (icons and
-//   other static assets are excluded — they are fetched on every marketplace
-//   page/app view and would both burn quota and pollute the numbers), then
-//   passes the request through to the R2 custom domain. Same-zone subrequests do
-//   not re-enter Workers, so the pass-through cannot loop.
 // - dbxio.com/api/plugins/install: fire-and-forget beacon the desktop app can
-//   send after a successful marketplace install. Decorative statistics only.
+//   send after a successful marketplace install.
 // - dbxio.com/api/plugins/stats: public read of the display counters (installs
 //   per plugin) from the archive summary — consumed by the website cards.
 // - dbxio.com/api/plugins/archive: token-gated manual trigger for the daily
 //   aggregation (same handler the cron runs), for verification and backfills.
 //
-// Event kinds (blob1):
-// - dl:   artifact download (server-side, per .dbxp GET)
+// Do not add a dl.dbxio.com route back. That route proxied every artifact GET
+// through this Worker; when the Workers free-tier daily request quota was
+// exhausted, downloads failed with HTTP 429 and plugin installation broke for
+// everyone. Artifact downloads are counted out-of-band instead: the aggregation
+// reads the zone's edge request analytics (GraphQL `httpRequestsAdaptiveGroups`),
+// so nothing sits in the download path and nothing can fail a download.
+//
+// Event kinds (blob1 in Analytics Engine, and the keys in the archive):
 // - inst: fresh install (beacon `kind:"install"`); legacy beacons without a
 //         kind also land here — they keep feeding the historical mixed-event
 //         base until the fleet upgrades, so the inst curve stays comparable
 // - updt: version update (beacon `kind:"update"`)
+// - dl:   completed `.dbxp` artifact download. Not an Analytics Engine event
+//         any more: counted from edge analytics (HTTP 200 responses only —
+//         429s, 206 resume fragments and 304s are not downloads) at
+//         aggregation time. Counts are sampled estimates; legacy `dl` events
+//         still sitting in Analytics Engine are ignored so the same window is
+//         never counted twice.
 //
 // Identity (blob4, only used for per-day unique counts):
 // - inst/updt events carry the app's anonymous random installation id when
 //   available (stable across days → true per-machine uniques)
-// - dl events and legacy beacons fall back to a day-scoped IP HMAC
+// - legacy beacons fall back to a day-scoped IP HMAC
 //
 // Storage:
 // - Workers Analytics Engine (binding PLUGIN_STATS) — one datapoint per event.
@@ -37,7 +45,8 @@ type AnalyticsEngineBinding = {
 
 type KvBinding = {
   get(key: string): Promise<string | null>;
-  put(key: string, value: string): Promise<void>;
+  put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void>;
+  delete(key: string): Promise<void>;
 };
 
 type Env = {
@@ -45,18 +54,25 @@ type Env = {
   PLUGIN_ARCHIVE: KvBinding;
   ANALYTICS_TOKEN: string;
   CF_ACCOUNT_ID: string;
+  CF_ZONE_ID: string;
   STATS_SALT: string;
 };
 
-type EventKind = "dl" | "inst" | "updt";
+type EventKind = "inst" | "updt";
 
-const DOWNLOAD_PATTERN = /^\/plugins\/([A-Za-z0-9._-]{1,64})\/([0-9A-Za-z.+-]{1,32})\//;
-const ARTIFACT_SUFFIX_PATTERN = /\.dbxp$/;
+const DOWNLOAD_HOST = "dl.dbxio.com";
+const DOWNLOAD_PATH_PATTERN = /^\/plugins\/([A-Za-z0-9._-]{1,64})\/([0-9A-Za-z.+-]{1,32})\/[^/]+\.dbxp$/;
 const PLUGIN_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 const VERSION_PATTERN = /^[0-9A-Za-z.+-]{1,32}$/;
 const CLIENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const INSTALL_BODY_LIMIT_BYTES = 512;
-const COUNTED_KINDS = new Set(["dl", "inst", "updt"]);
+// Kinds read from Analytics Engine. `dl` is deliberately absent: it comes from
+// edge analytics (see fetchDownloadCounts).
+const COUNTED_KINDS = new Set(["inst", "updt"]);
+const GRAPHQL_ENDPOINT = "https://api.cloudflare.com/client/v4/graphql";
+// Free-plan limits of httpRequestsAdaptiveGroups: 30 days per query, 10000 rows.
+const GRAPHQL_MAX_WINDOW_MS = 29 * 24 * 60 * 60 * 1000;
+const GRAPHQL_ROW_LIMIT = 10000;
 const ARCHIVE_META_KEY = "meta:last-success";
 const ARCHIVE_SUMMARY_KEY = "summary";
 const ARCHIVE_TRIGGER_HEADER = "x-archive-token";
@@ -173,10 +189,74 @@ async function fetchDailyUniques(env: Env, from: Date, to: Date): Promise<DailyU
     const key = `${bucket.kind}:${bucket.plugin}:${bucket.day}`;
     byDay.set(key, (byDay.get(key) ?? 0) + bucket.uniq);
   }
-  return [...byDay].map(([key, uniq]) => {
-    const [kind, plugin, day] = key.split(":");
-    return { kind, plugin, day, uniq };
+  // Stable order across invocations: the resumable cursor is an offset into
+  // this array, and the SQL dialect cannot be trusted with ORDER BY.
+  return [...byDay]
+    .map(([key, uniq]) => {
+      const [kind, plugin, day] = key.split(":");
+      return { kind, plugin, day, uniq };
+    })
+    .sort((a, b) => `${a.kind}:${a.plugin}:${a.day}`.localeCompare(`${b.kind}:${b.plugin}:${b.day}`));
+}
+
+// Completed `.dbxp` downloads in (from, to] from the zone's edge request
+// analytics. Only HTTP 200 counts: 429/5xx are failures, 206 are Range resume
+// fragments of a download already counted at its 200, 304 are revalidations.
+// `count` is already scaled for adaptive sampling. A window longer than the
+// plan's 30-day query limit is clamped to its most recent part.
+async function fetchDownloadCounts(env: Env, from: Date, to: Date): Promise<WindowCount[]> {
+  const earliest = new Date(to.getTime() - GRAPHQL_MAX_WINDOW_MS);
+  const start = from < earliest ? earliest : from;
+  const query = `query($zone: String!, $since: Time!, $until: Time!) {
+    viewer { zones(filter: { zoneTag: $zone }) {
+      httpRequestsAdaptiveGroups(
+        limit: ${GRAPHQL_ROW_LIMIT},
+        filter: {
+          datetime_gt: $since, datetime_leq: $until,
+          clientRequestHTTPHost: ${JSON.stringify(DOWNLOAD_HOST)},
+          clientRequestPath_like: "/plugins/%.dbxp",
+          edgeResponseStatus: 200,
+          requestSource: "eyeball"
+        }
+      ) { count dimensions { clientRequestPath } }
+    } }
+  }`;
+  const response = await fetch(GRAPHQL_ENDPOINT, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.ANALYTICS_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      query,
+      variables: { zone: env.CF_ZONE_ID, since: start.toISOString(), until: to.toISOString() },
+    }),
   });
+  if (!response.ok) {
+    throw new Error(`Analytics GraphQL API ${response.status}: ${(await response.text()).slice(0, 300)}`);
+  }
+  const payload = (await response.json()) as {
+    data?: { viewer?: { zones?: Array<{ httpRequestsAdaptiveGroups?: Array<{ count?: number; dimensions?: { clientRequestPath?: string } }> }> } };
+    errors?: Array<{ message?: string }> | null;
+  };
+  // GraphQL reports permission/schema problems as HTTP 200 with `errors`; a
+  // token without Zone → Analytics → Read must fail loudly, not count zero.
+  if (payload.errors?.length) {
+    throw new Error(`Analytics GraphQL errors: ${payload.errors.map((error) => error.message).join("; ").slice(0, 300)}`);
+  }
+  const groups = payload.data?.viewer?.zones?.[0]?.httpRequestsAdaptiveGroups;
+  if (!groups) throw new Error("Analytics GraphQL response has no httpRequestsAdaptiveGroups for the zone");
+  if (groups.length >= GRAPHQL_ROW_LIMIT) {
+    throw new Error(`Analytics GraphQL returned ${groups.length} rows (limit ${GRAPHQL_ROW_LIMIT}); download counts would be truncated`);
+  }
+  const byVersion = new Map<string, WindowCount>();
+  for (const group of groups) {
+    const match = DOWNLOAD_PATH_PATTERN.exec(group.dimensions?.clientRequestPath ?? "");
+    const count = Number(group.count ?? 0) || 0;
+    if (!match || count <= 0) continue;
+    const key = `${match[1]}:${match[2]}`;
+    const entry = byVersion.get(key) ?? { kind: "dl", plugin: match[1], version: match[2], events: 0 };
+    entry.events += count;
+    byVersion.set(key, entry);
+  }
+  return [...byVersion.values()];
 }
 
 async function fetchWindowCounts(env: Env, from: Date, to: Date): Promise<WindowCount[]> {
@@ -196,7 +276,9 @@ async function fetchWindowCounts(env: Env, from: Date, to: Date): Promise<Window
     throw new Error(`Analytics SQL API ${response.status}: ${(await response.text()).slice(0, 300)}`);
   }
   const payload = (await response.json()) as unknown;
-  return parseSqlRows(payload)
+  // Stable order across invocations (see fetchDailyUniques): the resumable
+  // cursor indexes into this array.
+  const eventCounts = parseSqlRows(payload)
     .map((row) => ({
       kind: String(row.kind ?? ""),
       plugin: String(row.plugin ?? ""),
@@ -204,48 +286,140 @@ async function fetchWindowCounts(env: Env, from: Date, to: Date): Promise<Window
       events: Number(row.events ?? 0) || 0,
     }))
     .filter((row) => COUNTED_KINDS.has(row.kind) && PLUGIN_ID_PATTERN.test(row.plugin) && VERSION_PATTERN.test(row.version));
+  return [...eventCounts, ...(await fetchDownloadCounts(env, from, to))]
+    .sort((a, b) => `${a.kind}:${a.plugin}:${a.version}`.localeCompare(`${b.kind}:${b.plugin}:${b.version}`));
 }
 
-// Aggregates events in (last-success, now] into permanent KV totals. The window
-// marker is only advanced after every write lands, so a failed run retries the
-// same window on the next cron; a crash mid-write can double-count a window,
-// which is acceptable for decorative stats.
-async function runAggregation(env: Env, fromOverride?: string): Promise<{ from: string; to: string; activeKeys: number; uniqueDays: number }> {
-  const to = new Date();
-  // `x-archive-from: reset` re-aggregates from the epoch (backfill after a fix);
-  // totals are additive, so only use it when the archived window is known-empty.
-  const override = fromOverride?.trim().toLowerCase() === "reset" ? new Date(0) : undefined;
-  const lastSuccess = await env.PLUGIN_ARCHIVE.get(ARCHIVE_META_KEY);
-  const from = override ?? (lastSuccess ? new Date(`${lastSuccess.replace(" ", "T")}Z`) : new Date(0));
-  if (Number.isNaN(from.getTime())) throw new Error(`Corrupted ${ARCHIVE_META_KEY}: ${lastSuccess}`);
+// Aggregates events in (last-success, now] into permanent KV totals, chunked
+// and resumable. The pre-2026-10 unchunked loop died mid-run once the window
+// grew past the Workers per-invocation subrequest ceiling (1000 paid / 50
+// free; every versioned total costs a get+put pair). A single failed run then
+// left the watermark behind, the next window grew larger, and the aggregation
+// stalled permanently (2026-09-28 → 2026-10-20). Now every trigger processes
+// at most `chunk` keys, persists a cursor in `agg:state`, and the next cron
+// (daily start + */10 continue) resumes until the pass completes; only then
+// are the summary written and the watermark advanced. `agg:tuning` carries
+// the chunk size across passes — it halves on failure and creeps up on
+// progress, so the worker adapts to whatever subrequest/KV limits the
+// account has. A crash mid-chunk can double-count that chunk's additive
+// totals; acceptable for decorative stats (same stance as v1).
+type AggPhase = "counts" | "pluginTotals" | "uniques";
+type AggState = { windowFrom: string; windowTo: string; phase: AggPhase; offset: number; chunk: number };
 
-  const [counts, uniques] = await Promise.all([fetchWindowCounts(env, from, to), fetchDailyUniques(env, from, to)]);
-  const summary = JSON.parse((await env.PLUGIN_ARCHIVE.get(ARCHIVE_SUMMARY_KEY)) ?? "{}") as Record<string, Record<string, number>>;
+const AGG_STATE_KEY = "agg:state";
+const AGG_LOCK_KEY = "agg:lock";
+const AGG_TUNING_KEY = "agg:tuning";
+const AGG_MIN_CHUNK = 8; // keeps get+put pairs + AE fetches under the free plan's 50 subrequests
+const AGG_MAX_CHUNK = 400; // 400×2 + fetches + state writes stays under the paid plan's 1000
+const AGG_LOCK_TTL_SECONDS = 300;
 
-  const pluginTotals = new Map<string, number>();
-  for (const count of counts) {
-    const totalKey = `total:${count.kind}:${count.plugin}:${count.version}`;
-    const current = Number.parseInt((await env.PLUGIN_ARCHIVE.get(totalKey)) ?? "0", 10) || 0;
-    await env.PLUGIN_ARCHIVE.put(totalKey, String(current + count.events));
-    pluginTotals.set(`${count.kind}:${count.plugin}`, (pluginTotals.get(`${count.kind}:${count.plugin}`) ?? 0) + count.events);
-    const byKind = (summary[count.kind] ??= {});
-    byKind[count.plugin] = (byKind[count.plugin] ?? 0) + count.events;
-  }
-  for (const [pair, delta] of pluginTotals) {
-    const [kind, plugin] = pair.split(":");
-    const pluginKey = `total:${kind}:${plugin}`;
-    const current = Number.parseInt((await env.PLUGIN_ARCHIVE.get(pluginKey)) ?? "0", 10) || 0;
-    await env.PLUGIN_ARCHIVE.put(pluginKey, String(current + delta));
-  }
-  // Daily uniques overwrite (not add): reruns converge to the full-day value,
-  // and multi-version releases cannot inflate the per-plugin downloader count.
-  for (const unique of uniques) {
-    await env.PLUGIN_ARCHIVE.put(`uniqd:${unique.kind}:${unique.plugin}:${unique.day}`, String(unique.uniq));
-  }
+async function readChunkSize(env: Env): Promise<number> {
+  const chunk = Number.parseInt((await env.PLUGIN_ARCHIVE.get(AGG_TUNING_KEY)) ?? "", 10);
+  return Number.isFinite(chunk) && chunk >= AGG_MIN_CHUNK && chunk <= AGG_MAX_CHUNK ? chunk : AGG_MAX_CHUNK;
+}
 
-  await env.PLUGIN_ARCHIVE.put(ARCHIVE_SUMMARY_KEY, JSON.stringify(summary));
-  await env.PLUGIN_ARCHIVE.put(ARCHIVE_META_KEY, sqlTimestamp(to));
-  return { from: sqlTimestamp(from), to: sqlTimestamp(to), activeKeys: counts.length, uniqueDays: uniques.length };
+async function runAggregation(env: Env, fromOverride?: string): Promise<
+  | { skipped: "locked" }
+  | { completed: true; from: string; to: string; activeKeys: number; uniqueDays: number; writes: number }
+  | { completed: false; phase: AggPhase; offset: number; of: number; writes: number }
+> {
+  // Best-effort mutex: cron triggers may overlap and additive totals race.
+  if (await env.PLUGIN_ARCHIVE.get(AGG_LOCK_KEY)) return { skipped: "locked" };
+  await env.PLUGIN_ARCHIVE.put(AGG_LOCK_KEY, "1", { expirationTtl: AGG_LOCK_TTL_SECONDS });
+  try {
+    let state: AggState | null = null;
+    const rawState = await env.PLUGIN_ARCHIVE.get(AGG_STATE_KEY);
+    if (rawState) {
+      try {
+        state = JSON.parse(rawState) as AggState;
+      } catch {
+        state = null; // corrupted cursor: start over rather than stay stuck
+      }
+    }
+    if (!state) {
+      // `x-archive-from: reset` re-aggregates from the epoch (backfill after
+      // a fix); totals are additive, so only use it when the archived window
+      // is known-empty.
+      const fromOverrideTs = fromOverride?.trim().toLowerCase() === "reset" ? "1970-01-01 00:00:00" : fromOverride?.trim();
+      const windowFrom = fromOverrideTs ?? (await env.PLUGIN_ARCHIVE.get(ARCHIVE_META_KEY)) ?? "1970-01-01 00:00:00";
+      state = { windowFrom, windowTo: sqlTimestamp(new Date()), phase: "counts", offset: 0, chunk: await readChunkSize(env) };
+    }
+    const from = new Date(`${state.windowFrom.replace(" ", "T")}Z`);
+    const to = new Date(`${state.windowTo.replace(" ", "T")}Z`);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) throw new Error(`Corrupted aggregation state: ${JSON.stringify(state)}`);
+
+    // Re-fetched every chunk (3 subrequests: AE counts, AE uniques, edge analytics) so the persisted cursor stays a
+    // few bytes and AE remains the single source of truth for the window.
+    const [counts, uniques] = await Promise.all([fetchWindowCounts(env, from, to), fetchDailyUniques(env, from, to)]);
+    const pluginTotals = new Map<string, number>();
+    for (const count of counts) {
+      pluginTotals.set(`${count.kind}:${count.plugin}`, (pluginTotals.get(`${count.kind}:${count.plugin}`) ?? 0) + count.events);
+    }
+    const pluginTotalEntries = [...pluginTotals.entries()];
+
+    let writes = 0;
+    if (state.phase === "counts") {
+      for (const count of counts.slice(state.offset, state.offset + state.chunk)) {
+        const totalKey = `total:${count.kind}:${count.plugin}:${count.version}`;
+        const current = Number.parseInt((await env.PLUGIN_ARCHIVE.get(totalKey)) ?? "0", 10) || 0;
+        await env.PLUGIN_ARCHIVE.put(totalKey, String(current + count.events));
+        writes += 2;
+      }
+      state.offset += Math.min(state.chunk, Math.max(0, counts.length - state.offset));
+      if (state.offset >= counts.length) state = { ...state, phase: "pluginTotals", offset: 0 };
+    } else if (state.phase === "pluginTotals") {
+      for (const [pair, delta] of pluginTotalEntries.slice(state.offset, state.offset + state.chunk)) {
+        const [kind, plugin] = pair.split(":");
+        const pluginKey = `total:${kind}:${plugin}`;
+        const current = Number.parseInt((await env.PLUGIN_ARCHIVE.get(pluginKey)) ?? "0", 10) || 0;
+        await env.PLUGIN_ARCHIVE.put(pluginKey, String(current + delta));
+        writes += 2;
+      }
+      state.offset += Math.min(state.chunk, Math.max(0, pluginTotalEntries.length - state.offset));
+      if (state.offset >= pluginTotalEntries.length) state = { ...state, phase: "uniques", offset: 0 };
+    } else {
+      // Daily uniques overwrite (not add): reruns converge to the full-day
+      // value, and multi-version releases cannot inflate the downloader count.
+      for (const unique of uniques.slice(state.offset, state.offset + state.chunk)) {
+        await env.PLUGIN_ARCHIVE.put(`uniqd:${unique.kind}:${unique.plugin}:${unique.day}`, String(unique.uniq));
+        writes += 1;
+      }
+      state.offset += Math.min(state.chunk, Math.max(0, uniques.length - state.offset));
+      if (state.offset >= uniques.length) {
+        const summary = JSON.parse((await env.PLUGIN_ARCHIVE.get(ARCHIVE_SUMMARY_KEY)) ?? "{}") as Record<string, Record<string, number>>;
+        for (const count of counts) {
+          const byKind = (summary[count.kind] ??= {});
+          byKind[count.plugin] = (byKind[count.plugin] ?? 0) + count.events;
+        }
+        await env.PLUGIN_ARCHIVE.put(ARCHIVE_SUMMARY_KEY, JSON.stringify(summary));
+        await env.PLUGIN_ARCHIVE.put(ARCHIVE_META_KEY, state.windowTo);
+        await env.PLUGIN_ARCHIVE.delete(AGG_STATE_KEY);
+        await env.PLUGIN_ARCHIVE.put(AGG_TUNING_KEY, String(Math.min(AGG_MAX_CHUNK, Math.ceil(state.chunk * 1.25))));
+        return { completed: true, from: state.windowFrom, to: state.windowTo, activeKeys: counts.length, uniqueDays: uniques.length, writes };
+      }
+    }
+
+    state.chunk = Math.min(AGG_MAX_CHUNK, state.chunk + 1);
+    await env.PLUGIN_ARCHIVE.put(AGG_STATE_KEY, JSON.stringify(state));
+    const of = state.phase === "counts" ? counts.length : state.phase === "pluginTotals" ? pluginTotalEntries.length : uniques.length;
+    return { completed: false, phase: state.phase, offset: state.offset, of, writes };
+  } catch (error) {
+    // Halve the persisted chunk so the next trigger retries smaller; the
+    // cursor itself stays put (idempotent enough for decorative counters).
+    try {
+      const rawState = await env.PLUGIN_ARCHIVE.get(AGG_STATE_KEY);
+      if (rawState) {
+        const st = JSON.parse(rawState) as AggState;
+        st.chunk = Math.max(AGG_MIN_CHUNK, Math.floor(st.chunk / 2));
+        await env.PLUGIN_ARCHIVE.put(AGG_STATE_KEY, JSON.stringify(st));
+      }
+    } catch {
+      // best-effort tuning write; the error below is the real signal
+    }
+    throw error;
+  } finally {
+    await env.PLUGIN_ARCHIVE.delete(AGG_LOCK_KEY);
+  }
 }
 
 async function handleInstallBeacon(request: Request, env: Env): Promise<Response> {
@@ -294,16 +468,6 @@ async function handleInstallBeacon(request: Request, env: Env): Promise<Response
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-    if (url.hostname === "dl.dbxio.com") {
-      if (request.method === "GET") {
-        const download = url.pathname.match(DOWNLOAD_PATTERN);
-        if (download && ARTIFACT_SUFFIX_PATTERN.test(url.pathname)) {
-          await recordEvent(env, "dl", download[1], download[2], await ipDayIdentity(env, request));
-        }
-      }
-      return fetch(request);
-    }
     return handleInstallBeacon(request, env);
   },
 

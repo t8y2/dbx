@@ -23,10 +23,14 @@ import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.MetadataListConstraints;
+import com.dbx.agent.MetadataReadOptions;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
 import com.dbx.agent.OracleObjectPrivilege;
+import com.dbx.agent.OracleTriggerReader;
 import com.dbx.agent.PartitionInfo;
+import com.dbx.agent.PlDebugBreakpoint;
+import com.dbx.agent.PlDebugStartRequest;
 import com.dbx.agent.QueryPageOptions;
 import com.dbx.agent.QueryPageResult;
 import com.dbx.agent.QueryResult;
@@ -35,10 +39,13 @@ import com.dbx.agent.SpatialColumn;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 
+import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLTimeoutException;
+import java.sql.Statement;
 import java.sql.Types;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -51,6 +58,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.regex.Matcher;
@@ -72,6 +80,11 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     private boolean queryTimeoutChanged;
     private final OceanBaseLobValues lobValues = new OceanBaseLobValues();
     private boolean deferCharacterLobs;
+    private boolean captureDbmsOutput;
+    private boolean dbmsOutputEnabled;
+    private String dbmsOutputWarning;
+    private final PlDebugManager plDebug;
+    private final PlDebugCompile.Manager plDebugCompile;
 
     public static final JdbcAgentProfile OCEANBASE_ORACLE_PROFILE = new JdbcAgentProfile(
         "com.oceanbase.jdbc.Driver",
@@ -88,14 +101,31 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     };
 
     public OceanBaseOracleAgent() {
-        super(OCEANBASE_ORACLE_PROFILE);
+        this(null);
     }
+
+    OceanBaseOracleAgent(PlDebugManager.ConnectionFactory debugConnections) {
+        super(OCEANBASE_ORACLE_PROFILE);
+        Object debugAdmission = dedicatedAdmission();
+        plDebug = debugConnections == null
+            ? new PlDebugManager(this::registerPlDebugConnections, debugAdmission, this::compilationInProgress)
+            : new PlDebugManager(debugConnections, debugAdmission, this::compilationInProgress);
+        plDebugCompile = new PlDebugCompile.Manager(debugAdmission, () -> plDebug.hasUnreleased() || hasNativeJobReservation());
+    }
+
+    private boolean compilationInProgress() { return plDebugCompile.hasUnresolved() || hasNativeJobReservation(); }
+
+    @Override
+    protected boolean hasDedicatedDebugReservation() { return plDebug.hasUnreleased() || plDebugCompile.hasUnresolved(); }
 
     @Override
     public boolean supportsQueryTiming() { return true; }
 
     @Override
     public boolean supportsBlobBindStatements() { return true; }
+
+    @Override
+    public boolean supportsNativeLegacyJobs() { return true; }
 
     @Override
     public QueryResult executeBlobBoundStatements(List<String> previews, List<BlobBoundStatement> statements,
@@ -107,8 +137,11 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
         var lobCheckpoint = lobValues.checkpoint();
+        Connection outputConnection = null;
         try (QueryTiming timing = QueryTiming.begin()) {
             prepareLobExecution(sql, options.getDeferLobs());
+            captureDbmsOutput = isDbmsOutputStatement(sql);
+            outputConnection = requireConnected();
             QueryResult result = super.executeQuery(sql, schema, options);
             var marked = OceanBaseLobValues.mark(result.getColumns(), result.getColumn_types(), result.getRows());
             if (marked != null) {
@@ -123,9 +156,13 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             result.setQuery_timings_ms(timing.finish());
             return result;
         } catch (RuntimeException error) {
+            if (dbmsOutputEnabled && outputConnection != null) cleanupDbmsOutputAfterFailure(outputConnection, error);
             lobValues.releaseSince(lobCheckpoint);
             throw error;
         } finally {
+            captureDbmsOutput = false;
+            dbmsOutputEnabled = false;
+            dbmsOutputWarning = null;
             deferCharacterLobs = false;
         }
     }
@@ -133,22 +170,29 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     @Override
     public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
         var lobCheckpoint = lobValues.checkpoint();
+        Connection outputConnection = null;
         try (QueryTiming timing = QueryTiming.begin()) {
             prepareLobExecution(sql, options.getDeferLobs());
+            captureDbmsOutput = isDbmsOutputStatement(sql);
             long prepareStarted = System.nanoTime();
-            Connection connection = requireConnected();
+            outputConnection = requireConnected();
+            Connection connection = outputConnection;
             uncheckedVoid(() -> beforeQueryExecution(connection, options.getTimeoutSecs()));
             QueryTiming.record("session_prepare", prepareStarted);
             QueryPageResult result = JdbcExecutor.current().executeBoundedPage(
-                connection, sql, schema, this::setSchemaSQL, this::resetSchemaSQL, options, resultValueReader()
+                connection, sql, schema, this::setSchemaSQL, this::resetSchemaSQL, options, resultValueReader(), statementMessageReader()
             );
             markLobPage(result);
             result.setQuery_timings_ms(timing.finish());
             return result;
         } catch (RuntimeException error) {
+            if (dbmsOutputEnabled && outputConnection != null) cleanupDbmsOutputAfterFailure(outputConnection, error);
             lobValues.releaseSince(lobCheckpoint);
             throw error;
         } finally {
+            captureDbmsOutput = false;
+            dbmsOutputEnabled = false;
+            dbmsOutputWarning = null;
             deferCharacterLobs = false;
         }
     }
@@ -322,8 +366,54 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         return buildUrl(params);
     }
 
+    @Override
+    protected java.util.Properties buildConnectionProperties(ConnectParams params) {
+        java.util.Properties properties = super.buildConnectionProperties(params);
+        // Connector/J must stop after a failed or timed-out batch item.
+        properties.setProperty("continueBatchOnError", "false");
+        return properties;
+    }
+
     static String buildUrl(ConnectParams params) {
         return appendDefaultCompatibilityOption(OCEANBASE_ORACLE_PROFILE.buildUrl(params));
+    }
+
+    static String typedLobUrl(ConnectParams params) {
+        String url = buildUrl(params);
+        if (!url.startsWith("jdbc:oceanbase:") || url.indexOf('#') >= 0) {
+            throw new IllegalArgumentException("Typed LOB debugging requires an unambiguous OceanBase JDBC URL");
+        }
+        int queryStart = url.indexOf('?');
+        String base = queryStart < 0 ? url : url.substring(0, queryStart);
+        List<String> options = new ArrayList<>();
+        if (queryStart >= 0) {
+            for (String part : url.substring(queryStart + 1).split("[&;]", -1)) {
+                if (part.isBlank()) continue;
+                int equals = part.indexOf('=');
+                String key;
+                try {
+                    key = java.net.URLDecoder.decode(equals < 0 ? part : part.substring(0, equals), java.nio.charset.StandardCharsets.UTF_8).trim();
+                } catch (IllegalArgumentException error) {
+                    throw new IllegalArgumentException("Typed LOB debugging could not parse a JDBC option name");
+                }
+                if (!key.matches("[A-Za-z][A-Za-z0-9_.-]*")) {
+                    throw new IllegalArgumentException("Typed LOB debugging encountered an ambiguous JDBC option name");
+                }
+                if (!key.equalsIgnoreCase("useServerPrepStmts") && !key.equalsIgnoreCase("usePieceData")
+                    && !key.equalsIgnoreCase("rewriteBatchedStatements") && !key.equalsIgnoreCase("continueBatchOnError")) options.add(part);
+            }
+        }
+        options.add("useServerPrepStmts=true");
+        options.add("usePieceData=true");
+        options.add("rewriteBatchedStatements=false");
+        options.add("continueBatchOnError=false");
+        return base + "?" + String.join("&", options);
+    }
+
+    private DedicatedConnectionOwner registerPlDebugConnections(PlDebugStartRequest request, Runnable onRetire, Runnable onCompletion) {
+        if (!PlDebugTarget.requiresTypedLobConnection(request)) return registerDedicatedConnections(onRetire, onCompletion);
+        return registerDedicatedConnections(onRetire, onCompletion,
+            params -> openConnection(params, typedLobUrl(params)));
     }
 
     @Override
@@ -333,13 +423,173 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         try (var stmt = connection.createStatement()) {
             try {
                 stmt.execute(queryTimeoutSql(timeoutSecs));
+                queryTimeoutChanged = true;
             } catch (SQLException error) {
-                if (isReadOnlyTransactionError(error)) {
-                    return;
-                }
-                throw error;
+                if (!isReadOnlyTransactionError(error)) throw error;
             }
-            queryTimeoutChanged = true;
+        }
+        dbmsOutputEnabled = captureDbmsOutput;
+        dbmsOutputWarning = captureDbmsOutput ? enableDbmsOutput(connection) : null;
+    }
+
+    @Override
+    protected JdbcExecutor.StatementMessageReader statementMessageReader() {
+        if (!captureDbmsOutput) return JdbcExecutor.StatementMessageReader.NONE;
+        String setupWarning = dbmsOutputWarning;
+        boolean outputEnabled = dbmsOutputEnabled;
+        return new JdbcExecutor.StatementMessageReader() {
+            private boolean cleaned;
+
+            @Override
+            public List<String> read(Statement statement) throws SQLException {
+                List<String> lines = new ArrayList<>();
+                if (!outputEnabled) {
+                    if (setupWarning != null) lines.add(setupWarning);
+                    return lines;
+                }
+                int characters = 0;
+                boolean truncated = false;
+                try (CallableStatement call = statement.getConnection().prepareCall("{call DBMS_OUTPUT.GET_LINE(?, ?)}")) {
+                    call.setQueryTimeout(2);
+                    call.registerOutParameter(1, Types.VARCHAR);
+                    call.registerOutParameter(2, Types.INTEGER);
+                    long deadline = System.nanoTime() + 5_000_000_000L;
+                    while (lines.size() < 256 && characters < 65_536) {
+                        if (System.nanoTime() >= deadline) {
+                            lines.add("DBMS_OUTPUT truncated after 5 seconds");
+                            truncated = true;
+                            break;
+                        }
+                        call.execute();
+                        if (call.getInt(2) != 0) break;
+                        String line = call.getString(1);
+                        if (line == null) line = "";
+                        int remaining = 65_536 - characters;
+                        if (line.length() > remaining) {
+                            int end = remaining;
+                            if (end > 0 && Character.isHighSurrogate(line.charAt(end - 1))
+                                && Character.isLowSurrogate(line.charAt(end))) {
+                                end--;
+                            }
+                            lines.add(line.substring(0, end));
+                            lines.add("DBMS_OUTPUT truncated at 65536 characters");
+                            truncated = true;
+                            break;
+                        }
+                        lines.add(line);
+                        characters += line.length();
+                    }
+                    if (!truncated && (lines.size() == 256 || characters >= 65_536)) {
+                        if (System.nanoTime() >= deadline) {
+                            lines.add("DBMS_OUTPUT truncated after 5 seconds");
+                        } else {
+                            call.execute();
+                            if (call.getInt(2) == 0) lines.add("DBMS_OUTPUT truncated at the output limit");
+                        }
+                    }
+                } catch (SQLException ignored) {
+                    lines.add("DBMS_OUTPUT could not be read after statement execution");
+                } finally {
+                    cleanup(statement, lines);
+                }
+                return lines;
+            }
+
+            @Override
+            public List<String> close(Statement statement) throws SQLException {
+                if (!outputEnabled) return setupWarning == null ? List.of() : List.of(setupWarning);
+                return read(statement);
+            }
+
+            private void cleanup(Statement statement, List<String> messages) throws SQLException {
+                if (cleaned) return;
+                cleaned = true;
+                appendDbmsOutputCleanupWarning(statement.getConnection(), messages);
+            }
+        };
+    }
+
+    private static boolean isDbmsOutputStatement(String sql) {
+        if (sql == null) return false;
+        String leading = sql.replaceFirst("(?s)^(?:\\s|--[^\\r\\n]*(?:\\r?\\n|$)|/\\*.*?\\*/)*", "");
+        return leading.matches("(?is)^(?:<<\\s*[\\p{L}_][\\p{L}\\p{N}_$#]*\\s*>>\\s*)?(?:BEGIN|DECLARE|CALL|EXEC|EXECUTE)\\b.*")
+            || leading.matches("(?is)^\\{\\s*(?:\\?\\s*=\\s*)?CALL\\b.*\\}");
+    }
+
+    private String enableDbmsOutput(Connection connection) {
+        try (var statement = connection.createStatement()) {
+            statement.setQueryTimeout(2);
+            statement.execute("BEGIN DBMS_OUTPUT.DISABLE; DBMS_OUTPUT.ENABLE(NULL); END;");
+            return null;
+        } catch (SQLException error) {
+            if (error instanceof SQLTimeoutException || hasConnectionFailure(error)) {
+                try {
+                    discardConnection(connection);
+                } catch (SQLException discardError) {
+                    error.addSuppressed(discardError);
+                }
+                captureDbmsOutput = false;
+                dbmsOutputEnabled = false;
+                throw new RuntimeException("DBMS_OUTPUT setup failed; the connection was discarded", error);
+            }
+            if (isExpectedDbmsOutputUnavailable(error)) {
+                dbmsOutputEnabled = false;
+                return "DBMS_OUTPUT could not be enabled; statement execution continued";
+            }
+            throw new RuntimeException("DBMS_OUTPUT setup failed", error);
+        }
+    }
+
+    private static boolean hasConnectionFailure(SQLException error) {
+        for (SQLException current = error; current != null; current = current.getNextException()) {
+            String state = current.getSQLState();
+            if (state != null && state.startsWith("08")) return true;
+        }
+        return false;
+    }
+
+    private static boolean isExpectedDbmsOutputUnavailable(SQLException error) {
+        for (SQLException current = error; current != null; current = current.getNextException()) {
+            int code = Math.abs(current.getErrorCode());
+            String message = current.getMessage();
+            String lower = message == null ? "" : message.toLowerCase(Locale.ROOT);
+            if (code == 1031 || code == 5543 || code == 5546 || lower.contains("insufficient privilege")
+                || (lower.contains("not declared") || lower.contains("must be declared")) && lower.contains("dbms_output")
+                || lower.contains("dbms_output") && (lower.contains("not supported") || lower.contains("does not exist"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void appendDbmsOutputCleanupWarning(Connection connection, List<String> messages) {
+        try (var statement = connection.createStatement()) {
+            statement.setQueryTimeout(2);
+            statement.execute("BEGIN DBMS_OUTPUT.DISABLE; END;");
+        } catch (SQLException cleanupError) {
+            try {
+                discardConnection(connection);
+                messages.add("DBMS_OUTPUT cleanup failed; the connection was discarded");
+            } catch (SQLException discardError) {
+                cleanupError.addSuppressed(discardError);
+                messages.add("DBMS_OUTPUT cleanup and connection disposal failed");
+            }
+        }
+    }
+
+    private void cleanupDbmsOutputAfterFailure(Connection connection, RuntimeException error) {
+        try {
+            try (var statement = connection.createStatement()) {
+                statement.setQueryTimeout(2);
+                statement.execute("BEGIN DBMS_OUTPUT.DISABLE; END;");
+            }
+        } catch (SQLException cleanupError) {
+            error.addSuppressed(cleanupError);
+            try {
+                discardConnection(connection);
+            } catch (SQLException discardError) {
+                error.addSuppressed(discardError);
+            }
         }
     }
 
@@ -482,27 +732,43 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    public boolean supportsExactMetadataIdentity() { return true; }
+
+    @Override
     public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints) {
         return queryObjects(schema, MetadataListConstraints.orNone(constraints));
     }
 
+    @Override
+    public List<ObjectInfo> listObjects(String schema, MetadataListConstraints constraints, MetadataReadOptions options) {
+        return queryObjects(schema, MetadataListConstraints.orNone(constraints), options != null && options.exact());
+    }
+
     private List<ObjectInfo> queryObjects(String schema, MetadataListConstraints constraints) {
+        return queryObjects(schema, constraints, false);
+    }
+
+    private List<ObjectInfo> queryObjects(String schema, MetadataListConstraints constraints, boolean exact) {
         return unchecked(() -> {
-            String owner = normalizeSchema(schema);
-            List<String> objectTypes = oceanBaseObjectTypes(constraints);
+            if (exact && (schema == null || schema.isEmpty())) throw new IllegalArgumentException("Exact metadata requires an owner");
+            String owner = exact ? schema : normalizeSchema(schema);
+            List<String> objectTypes = oceanBaseObjectTypes(constraints, exact);
             if (objectTypes.isEmpty()) {
                 return List.of();
             }
             String baseSql = """
-                SELECT o.OBJECT_NAME, o.OBJECT_TYPE, c.COMMENTS
+                SELECT o.OBJECT_NAME, o.OBJECT_TYPE, c.COMMENTS,
+                    i.TABLE_OWNER AS PARENT_SCHEMA, i.TABLE_NAME AS PARENT_NAME
                 FROM ALL_OBJECTS o
                 LEFT JOIN ALL_TAB_COMMENTS c ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME
                     AND o.OBJECT_TYPE IN ('TABLE', 'VIEW')
+                LEFT JOIN ALL_INDEXES i ON o.OBJECT_TYPE = 'INDEX'
+                    AND i.OWNER = o.OWNER AND i.INDEX_NAME = o.OBJECT_NAME
                 WHERE o.OWNER = ? AND o.OBJECT_TYPE IN (%s)
                 """.stripIndent().trim();
             MetadataSql query = oceanBaseMetadataSql(
                 String.format(baseSql, placeholders(objectTypes.size())),
-                "OBJECT_NAME, OBJECT_TYPE, COMMENTS",
+                "OBJECT_NAME, OBJECT_TYPE, COMMENTS, PARENT_SCHEMA, PARENT_NAME",
                 "OBJECT_NAME",
                 """
                 ORDER BY CASE OBJECT_TYPE
@@ -527,12 +793,21 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         String objectType = rs.getString(2);
-                        result.add(new ObjectInfo(rs.getString(1),
-                            objectType.replace(' ', '_'), owner, rs.getString(3)));
+                        ObjectInfo object = new ObjectInfo(rs.getString(1),
+                            objectType.replace(' ', '_'), owner, rs.getString(3));
+                        if ("INDEX".equals(objectType)) {
+                            object.setParent_schema(rs.getString(4));
+                            object.setParent_name(rs.getString(5));
+                        }
+                        result.add(object);
                     }
                 }
             }
-            return constraints.withoutPaging().filterObjects(result);
+            List<ObjectInfo> objects = constraints.withoutPaging().filterObjects(result);
+            if (exact && objects.stream().anyMatch(object -> "TRIGGER".equals(object.getObject_type()))) {
+                new OracleTriggerReader(requireConnection(), "oceanbase-oracle").enrichObjects(objects, owner);
+            }
+            return objects;
         });
     }
 
@@ -1102,8 +1377,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         return result;
     }
 
-    private static List<String> oceanBaseObjectTypes(MetadataListConstraints constraints) {
-        List<String> supported = List.of("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY", "SEQUENCE", "SYNONYM", "TYPE", "TYPE BODY");
+    private static List<String> oceanBaseObjectTypes(MetadataListConstraints constraints, boolean exact) {
+        List<String> supported = new ArrayList<>(List.of("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY", "SEQUENCE", "SYNONYM", "TYPE", "TYPE BODY", "INDEX"));
+        if (exact) supported.add("TRIGGER");
         if (!constraints.hasObjectTypes()) {
             return supported;
         }
@@ -1118,12 +1394,21 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
 
     @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
+        return getObjectSource(schema, name, objectType, false);
+    }
+
+    @Override
+    public ObjectSource getObjectSourceWithOrigin(String schema, String name, String objectType) {
+        return getObjectSource(schema, name, objectType, true);
+    }
+
+    private ObjectSource getObjectSource(String schema, String name, String objectType, boolean exactMetadataKind) {
         return unchecked(() -> {
             String owner = normalizeSchema(schema);
             String objectName = normalizeObjectName(name);
             String normalizedType = normalizeObjectSourceType(objectType);
             if (prefersDictionarySource(normalizedType)) {
-                return getDictionaryFirstObjectSource(owner, objectName, normalizedType);
+                return getDictionaryFirstObjectSource(owner, objectName, normalizedType, exactMetadataKind);
             }
             String source;
             SQLException metadataError = null;
@@ -1154,8 +1439,17 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         });
     }
 
-    private ObjectSource getDictionaryFirstObjectSource(String owner, String name, String objectType) throws SQLException {
+    @Override
+    public ObjectSource getObjectSource(String schema, String name, String objectType, MetadataReadOptions options) {
+        if (options == null || !options.exact() || !"TRIGGER".equals(normalizeObjectSourceType(objectType))) {
+            return getObjectSource(schema, name, objectType);
+        }
+        return unchecked(() -> new OracleTriggerReader(requireConnection(), "oceanbase-oracle").getObjectSource(schema, name));
+    }
+
+    private ObjectSource getDictionaryFirstObjectSource(String owner, String name, String objectType, boolean exactMetadataKind) throws SQLException {
         String source;
+        String origin = "oceanbase-dictionary";
         SQLException dictionaryError = null;
         try {
             source = queryDictionarySource(owner, name, objectType);
@@ -1166,7 +1460,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
 
         if (source == null || source.trim().isEmpty()) {
             try {
-                source = queryDbmsMetadataSource(owner, name, objectType);
+                source = queryDbmsMetadataSource(owner, name,
+                    exactMetadataKind && "PACKAGE".equals(objectType) ? "PACKAGE_SPEC" : objectType);
+                origin = "oracle-metadata";
             } catch (SQLException metadataError) {
                 if (dictionaryError != null) {
                     dictionaryError.addSuppressed(metadataError);
@@ -1175,7 +1471,15 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 throw metadataError;
             }
         }
-        return new ObjectSource(name, objectType, owner, source == null ? "" : source);
+        if ("TYPE".equals(objectType) || "TYPE_BODY".equals(objectType)) {
+            if (source == null || source.trim().isEmpty()) {
+                throw new SQLException("No complete source available for " + owner + "." + name + " (" + objectType + ")");
+            }
+            return new ObjectSource(name, objectType, owner, source, false);
+        }
+        ObjectSource result = new ObjectSource(name, objectType, owner, source == null ? "" : source);
+        result.setSourceOrigin(origin);
+        return result;
     }
 
     private String queryDbmsMetadataSource(String owner, String name, String objectType) throws SQLException {
@@ -1753,55 +2057,77 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             String tableName = normalizeObjectName(table);
             String sql = """
                 SELECT i.INDEX_NAME, ic.COLUMN_NAME, ic.COLUMN_POSITION, i.UNIQUENESS,
-                    c.CONSTRAINT_TYPE, i.INDEX_TYPE
+                    c.CONSTRAINT_TYPE, i.INDEX_TYPE, i.PARTITIONED, i.VISIBILITY, ic.DESCEND, ie.COLUMN_EXPRESSION, i.OWNER AS INDEX_OWNER
                 FROM ALL_INDEXES i
                 JOIN ALL_IND_COLUMNS ic
                     ON i.INDEX_NAME = ic.INDEX_NAME
                     AND i.OWNER = ic.INDEX_OWNER
                     AND i.TABLE_OWNER = ic.TABLE_OWNER
                     AND i.TABLE_NAME = ic.TABLE_NAME
+                LEFT JOIN ALL_IND_EXPRESSIONS ie
+                    ON ie.INDEX_OWNER = ic.INDEX_OWNER
+                    AND ie.INDEX_NAME = ic.INDEX_NAME
+                    AND ie.TABLE_OWNER = ic.TABLE_OWNER
+                    AND ie.TABLE_NAME = ic.TABLE_NAME
+                    AND ie.COLUMN_POSITION = ic.COLUMN_POSITION
                 LEFT JOIN ALL_CONSTRAINTS c
                     ON i.INDEX_NAME = c.INDEX_NAME
                     AND i.TABLE_OWNER = c.OWNER
                     AND i.TABLE_NAME = c.TABLE_NAME
+                    AND i.OWNER = c.INDEX_OWNER
                     AND c.CONSTRAINT_TYPE = 'P'
                 WHERE i.TABLE_OWNER = ? AND i.TABLE_NAME = ?
-                ORDER BY i.INDEX_NAME, ic.COLUMN_POSITION
+                ORDER BY i.OWNER, i.INDEX_NAME, ic.COLUMN_POSITION
                 """.stripIndent().trim();
 
-            Map<String, List<String>> columnsByIndex = new LinkedHashMap<>();
-            Map<String, Boolean> uniqueByIndex = new LinkedHashMap<>();
-            Map<String, Boolean> primaryByIndex = new LinkedHashMap<>();
-            Map<String, String> typeByIndex = new LinkedHashMap<>();
+            Map<List<String>, IndexInfo> indexesByName = new LinkedHashMap<>();
             try (var stmt = requireConnection().prepareStatement(sql)) {
                 stmt.setString(1, owner);
                 stmt.setString(2, tableName);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         String indexName = rs.getString("INDEX_NAME");
-                        columnsByIndex.computeIfAbsent(indexName, ignored -> new ArrayList<>()).add(rs.getString("COLUMN_NAME"));
-                        uniqueByIndex.put(indexName, "UNIQUE".equalsIgnoreCase(rs.getString("UNIQUENESS")));
-                        primaryByIndex.put(indexName, "P".equalsIgnoreCase(rs.getString("CONSTRAINT_TYPE")));
-                        typeByIndex.put(indexName, rs.getString("INDEX_TYPE"));
+                        String indexOwner = rs.getString("INDEX_OWNER");
+                        var identity = java.util.Arrays.asList(indexOwner, indexName);
+                        IndexInfo index = indexesByName.get(identity);
+                        if (index == null) {
+                            IndexInfo item = new IndexInfo(indexName, new ArrayList<>(),
+                                "UNIQUE".equalsIgnoreCase(rs.getString("UNIQUENESS")),
+                                "P".equalsIgnoreCase(rs.getString("CONSTRAINT_TYPE")),
+                                null, rs.getString("INDEX_TYPE"), null, null);
+                            item.setKey_is_expression(new ArrayList<>());
+                            item.setOwner(indexOwner);
+                            item.setKey_directions(new ArrayList<>());
+                            item.setKey_metadata_complete(true);
+                            item.setVisibility(rs.getString("VISIBILITY"));
+                            indexesByName.put(identity, item);
+                            index = item;
+                        }
+                        String column = rs.getString("COLUMN_NAME");
+                        String expression = rs.getString("COLUMN_EXPRESSION");
+                        String indexType = rs.getString("INDEX_TYPE");
+                        String partitioned = rs.getString("PARTITIONED");
+                        boolean isExpression = expression != null && !expression.trim().isEmpty();
+                        int position = rs.getInt("COLUMN_POSITION");
+                        String direction = rs.getString("DESCEND");
+                        String visibility = rs.getString("VISIBILITY");
+                        if (position != index.getColumns().size() + 1
+                            || !("ASC".equals(direction) || "DESC".equals(direction))
+                            || !("VISIBLE".equals(visibility) || "INVISIBLE".equals(visibility))
+                            || !Objects.equals(index.getVisibility(), visibility)
+                            || !"NO".equals(partitioned)
+                            || !("NORMAL".equals(indexType) || "FUNCTION-BASED NORMAL".equals(indexType))
+                            || (!isExpression && column != null && column.startsWith("SYS_NC") && column.endsWith("$"))) {
+                            index.setKey_metadata_complete(false);
+                        }
+                        index.getColumns().add(isExpression ? expression : Objects.toString(column, ""));
+                        index.getKey_is_expression().add(isExpression);
+                        index.getKey_directions().add(Objects.toString(direction, ""));
                     }
                 }
             }
 
-            List<IndexInfo> result = new ArrayList<>();
-            for (Map.Entry<String, List<String>> entry : columnsByIndex.entrySet()) {
-                String name = entry.getKey();
-                result.add(new IndexInfo(
-                    name,
-                    entry.getValue(),
-                    Boolean.TRUE.equals(uniqueByIndex.get(name)),
-                    Boolean.TRUE.equals(primaryByIndex.get(name)),
-                    null,
-                    typeByIndex.get(name),
-                    null,
-                    null
-                ));
-            }
-            return result;
+            return new ArrayList<>(indexesByName.values());
         });
     }
 
@@ -1810,31 +2136,57 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
         return unchecked(() -> {
             String owner = normalizeSchema(schema);
             String tableName = normalizeObjectName(table);
-            String sql = """
-                SELECT c.CONSTRAINT_NAME, cc.COLUMN_NAME, rc.TABLE_NAME, rcc.COLUMN_NAME
-                FROM ALL_CONSTRAINTS c
-                JOIN ALL_CONS_COLUMNS cc ON c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME AND c.OWNER = cc.OWNER
-                JOIN ALL_CONSTRAINTS rc ON c.R_CONSTRAINT_NAME = rc.CONSTRAINT_NAME AND c.R_OWNER = rc.OWNER
-                JOIN ALL_CONS_COLUMNS rcc
-                    ON rc.CONSTRAINT_NAME = rcc.CONSTRAINT_NAME
-                    AND rc.OWNER = rcc.OWNER
-                    AND cc.POSITION = rcc.POSITION
-                WHERE c.CONSTRAINT_TYPE = 'R' AND c.OWNER = ? AND c.TABLE_NAME = ?
-                ORDER BY c.CONSTRAINT_NAME, cc.POSITION
-                """.stripIndent().trim();
-
-            List<ForeignKeyInfo> result = new ArrayList<>();
-            try (var stmt = requireConnection().prepareStatement(sql)) {
+            try (var stmt = requireConnection().prepareStatement(
+                "SELECT TABLE_NAME FROM SYS.ALL_TABLES WHERE OWNER = ? AND TABLE_NAME = ?")) {
                 stmt.setString(1, owner);
                 stmt.setString(2, tableName);
                 try (ResultSet rs = stmt.executeQuery()) {
+                    if (!rs.next()) throw new SQLException("Table does not exist or is not accessible", "42000");
+                }
+            }
+            String user;
+            try (var stmt = requireConnection().prepareStatement("SELECT USER FROM DUAL");
+                 ResultSet rs = stmt.executeQuery()) {
+                if (!rs.next()) throw new SQLException("Current user is unavailable", "42000");
+                user = rs.getString(1);
+                if (user == null || user.isEmpty() || rs.next()) throw new SQLException("Invalid current user metadata", "42000");
+            }
+            // Column-level REFERENCES may hide even the source FK from ALL_CONSTRAINTS.
+            boolean ownTable = owner.equals(user);
+            String sql = ownTable
+                ? "SELECT c.CONSTRAINT_NAME, c.R_OWNER, c.DELETE_RULE FROM SYS.USER_CONSTRAINTS c WHERE c.CONSTRAINT_TYPE = 'R' AND c.TABLE_NAME = ? ORDER BY c.CONSTRAINT_NAME"
+                : "SELECT c.CONSTRAINT_NAME, c.R_OWNER, c.DELETE_RULE FROM SYS.ALL_CONSTRAINTS c WHERE c.CONSTRAINT_TYPE = 'R' AND c.OWNER = ? AND c.TABLE_NAME = ? ORDER BY c.CONSTRAINT_NAME";
+            record ForeignKeyReference(String name, String owner, String deleteRule) {}
+            List<ForeignKeyReference> references = new ArrayList<>();
+            var names = new java.util.HashSet<String>();
+            try (var stmt = requireConnection().prepareStatement(sql)) {
+                if (ownTable) {
+                    stmt.setString(1, tableName);
+                } else {
+                    stmt.setString(1, owner);
+                    stmt.setString(2, tableName);
+                }
+                try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        result.add(new ForeignKeyInfo(
-                            rs.getString(1),
-                            rs.getString(2),
-                            rs.getString(3),
-                            rs.getString(4)
-                        ));
+                        String name = rs.getString(1);
+                        if (name == null || !names.add(name)) throw new SQLException("Invalid foreign key metadata", "42000");
+                        references.add(new ForeignKeyReference(name, rs.getString(2), rs.getString(3)));
+                    }
+                }
+            }
+            List<ForeignKeyInfo> result = new ArrayList<>();
+            // ALL_CONS_COLUMNS positions do not retain reordered referenced columns on OceanBase.
+            // Read the actual constraint definition rather than guessing pairs from the parent key.
+            for (var reference : references) {
+                try (var stmt = requireConnection().prepareStatement(
+                    "SELECT DBMS_METADATA.GET_DDL('REF_CONSTRAINT', ?, ?) FROM DUAL")) {
+                    stmt.setString(1, reference.name());
+                    stmt.setString(2, owner);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        if (!rs.next()) throw new SQLException("Foreign key definition is unavailable", "42000");
+                        result.addAll(OracleForeignKeyDefinition.read(rs.getString(1), owner, tableName,
+                            reference.name(), reference.owner(), reference.deleteRule()));
+                        if (rs.next()) throw new SQLException("Foreign key definition is ambiguous", "42000");
                     }
                 }
             }
@@ -1850,6 +2202,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
             String sql = """
                 SELECT c.CONSTRAINT_NAME, c.CONSTRAINT_TYPE, c.SEARCH_CONDITION,
                        c.STATUS, c.VALIDATED, c.DEFERRABLE, c.DEFERRED, c.GENERATED,
+                       c.RELY, c.INDEX_OWNER, c.INDEX_NAME,
                        cc.COLUMN_NAME, tc.NULLABLE
                 FROM ALL_TABLES t
                 LEFT JOIN ALL_CONSTRAINTS c ON c.OWNER = t.OWNER AND c.TABLE_NAME = t.TABLE_NAME
@@ -1862,6 +2215,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 ORDER BY c.CONSTRAINT_NAME, cc.POSITION
                 """.stripIndent().trim();
             Map<String, ConstraintInfo> result = new LinkedHashMap<>();
+            Map<String, ConstraintInfo.OracleConstraintMetadata> oracleMetadata = new LinkedHashMap<>();
             try (var stmt = requireConnection().prepareStatement(sql)) {
                 stmt.setString(1, owner);
                 stmt.setString(2, tableName);
@@ -1882,6 +2236,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                                 + "\\s+(?i:IS\\s+NOT\\s+NULL)\\s*")) continue;
                         ConstraintInfo constraint = result.get(name);
                         if (constraint == null) {
+                            String constraintType = rs.getString("CONSTRAINT_TYPE");
                             String type = switch (rs.getString("CONSTRAINT_TYPE")) {
                                 case "P" -> "PRIMARY KEY";
                                 case "U" -> "UNIQUE";
@@ -1894,6 +2249,16 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                                 constraintState(rs.getString("STATUS"), "ENABLED", "DISABLED"),
                                 constraintState(rs.getString("VALIDATED"), "VALIDATED", "NOT VALIDATED"));
                             result.put(name, constraint);
+                            String status = rs.getString("STATUS");
+                            String validated = rs.getString("VALIDATED");
+                            String deferrable = rs.getString("DEFERRABLE");
+                            String deferred = rs.getString("DEFERRED");
+                            oracleMetadata.put(name, new ConstraintInfo.OracleConstraintMetadata(
+                                status != null && validated != null && deferrable != null && deferred != null
+                                    && constraintType != null && ("C".equals(constraintType) ? condition != null : true),
+                                owner, constraintType, status, validated, deferrable, deferred,
+                                rs.getString("RELY"), rs.getString("INDEX_OWNER"), rs.getString("INDEX_NAME"),
+                                null, null));
                         }
                         if (column != null) constraint.columns().add(column);
                     }
@@ -1907,11 +2272,108 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                     definition = constraint.constraint_type() + " (" + String.join(", ",
                         constraint.columns().stream().map(OceanBaseOracleAgent::quoteIdentifier).toList()) + ")";
                 }
+                ConstraintInfo.OracleConstraintMetadata metadata = oracleMetadata.get(constraint.name());
+                if ("UNIQUE".equals(constraint.constraint_type()) && metadata != null) {
+                    ConstraintInfo.OracleConstraintIndexMetadata index = readOracleUniqueIndexMetadata(
+                        owner, tableName, metadata.indexOwner(), metadata.indexName());
+                    String sharing = index == null || !index.metadataComplete() ? null
+                        : readOracleIndexSharing(owner, tableName, metadata.indexOwner(), metadata.indexName());
+                    metadata = new ConstraintInfo.OracleConstraintMetadata(
+                        metadata.metadataComplete() && index != null && index.metadataComplete() && sharing != null,
+                        metadata.owner(), metadata.constraintType(), metadata.status(), metadata.validated(),
+                        metadata.deferrable(), metadata.deferred(), metadata.rely(), metadata.indexOwner(),
+                        metadata.indexName(), sharing, index);
+                }
                 return new ConstraintInfo(constraint.name(), constraint.constraint_type(), definition,
                     constraint.columns(), constraint.deferrable(), constraint.initially_deferred(),
-                    constraint.enabled(), constraint.valid());
+                    constraint.enabled(), constraint.valid(), metadata);
             }).toList();
         });
+    }
+
+    private ConstraintInfo.OracleConstraintIndexMetadata readOracleUniqueIndexMetadata(
+        String tableOwner, String tableName, String indexOwner, String indexName
+    ) {
+        var columns = new ArrayList<String>();
+        var directions = new ArrayList<String>();
+        var expressions = new ArrayList<Boolean>();
+        String actualOwner = null, actualTableOwner = null, actualTable = null;
+        String indexType = null, uniqueness = null, status = null, partitioned = null, visibility = null, secondary = null;
+        try (var statement = requireConnection().prepareStatement("""
+                 SELECT i.OWNER, i.TABLE_OWNER, i.TABLE_NAME, i.INDEX_TYPE, i.UNIQUENESS, i.STATUS,
+                        i.PARTITIONED, i.VISIBILITY, i.SECONDARY, ic.COLUMN_NAME, ic.DESCEND,
+                        ie.COLUMN_EXPRESSION, ic.COLUMN_POSITION
+                 FROM ALL_INDEXES i
+                 JOIN ALL_IND_COLUMNS ic ON ic.INDEX_OWNER = i.OWNER AND ic.INDEX_NAME = i.INDEX_NAME
+                 LEFT JOIN ALL_IND_EXPRESSIONS ie ON ie.INDEX_OWNER = ic.INDEX_OWNER
+                     AND ie.INDEX_NAME = ic.INDEX_NAME AND ie.TABLE_OWNER = ic.TABLE_OWNER
+                     AND ie.TABLE_NAME = ic.TABLE_NAME AND ie.COLUMN_POSITION = ic.COLUMN_POSITION
+                 WHERE i.OWNER = ? AND i.INDEX_NAME = ? AND i.TABLE_OWNER = ? AND i.TABLE_NAME = ?
+                 ORDER BY ic.COLUMN_POSITION
+                 """)) {
+            statement.setString(1, indexOwner);
+            statement.setString(2, indexName);
+            statement.setString(3, tableOwner);
+            statement.setString(4, tableName);
+            try (var rs = statement.executeQuery()) {
+                int expectedPosition = 1;
+                while (rs.next()) {
+                    actualOwner = rs.getString("OWNER");
+                    actualTableOwner = rs.getString("TABLE_OWNER");
+                    actualTable = rs.getString("TABLE_NAME");
+                    indexType = rs.getString("INDEX_TYPE");
+                    uniqueness = rs.getString("UNIQUENESS");
+                    status = rs.getString("STATUS");
+                    partitioned = rs.getString("PARTITIONED");
+                    visibility = rs.getString("VISIBILITY");
+                    secondary = rs.getString("SECONDARY");
+                    String column = rs.getString("COLUMN_NAME");
+                    String direction = rs.getString("DESCEND");
+                    String expression = rs.getString("COLUMN_EXPRESSION");
+                    int position = rs.getInt("COLUMN_POSITION");
+                    if (rs.wasNull() || position != expectedPosition++ || column == null || direction == null) return null;
+                    columns.add(column);
+                    directions.add(direction);
+                    expressions.add(expression != null && !expression.isBlank());
+                }
+            }
+        } catch (SQLException failure) {
+            return null;
+        }
+        boolean complete = actualOwner != null && actualTableOwner != null && actualTable != null
+            && indexType != null && uniqueness != null && status != null
+            && ("YES".equals(partitioned) || "NO".equals(partitioned)) && visibility != null
+            && !columns.isEmpty() && columns.size() == directions.size()
+            && columns.size() == expressions.size();
+        return new ConstraintInfo.OracleConstraintIndexMetadata(complete,
+            actualOwner == null ? indexOwner : actualOwner,
+            actualTableOwner == null ? tableOwner : actualTableOwner,
+            actualTable == null ? tableName : actualTable,
+            indexType == null ? "" : indexType, uniqueness == null ? "" : uniqueness,
+            status == null ? "" : status, "YES".equals(partitioned),
+            visibility == null ? "" : visibility, secondary,
+            List.copyOf(columns), List.copyOf(directions), List.copyOf(expressions), List.of());
+    }
+
+    private String readOracleIndexSharing(String tableOwner, String tableName, String indexOwner, String indexName) {
+        try (var statement = requireConnection().prepareStatement("""
+            SELECT COUNT(*) FROM ALL_CONSTRAINTS
+            WHERE OWNER = ? AND TABLE_NAME = ? AND INDEX_OWNER = ? AND INDEX_NAME = ?
+                AND CONSTRAINT_TYPE IN ('P', 'U')
+            """)) {
+            statement.setString(1, tableOwner);
+            statement.setString(2, tableName);
+            statement.setString(3, indexOwner);
+            statement.setString(4, indexName);
+            try (var rs = statement.executeQuery()) {
+                if (!rs.next()) return null;
+                int count = rs.getInt(1);
+                if (rs.wasNull() || rs.next() || count < 1) return null;
+                return count == 1 ? "exclusive" : "shared";
+            }
+        } catch (SQLException failure) {
+            return null;
+        }
     }
 
     private static Boolean constraintState(String value, String yes, String no) {
@@ -1947,11 +2409,246 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    public List<TriggerInfo> listTriggers(String schema, String table, MetadataReadOptions options) {
+        if (options == null || !options.exact()) return listTriggers(schema, table);
+        return unchecked(() -> new OracleTriggerReader(requireConnection(), "oceanbase-oracle").listTriggers(schema, table));
+    }
+
+    @Override
     public String setSchemaSQL(String schema) {
         if (schema == null || schema.isBlank()) {
             return "";
         }
         return "ALTER SESSION SET CURRENT_SCHEMA = " + JdbcIdentifiers.INSTANCE.doubleQuote(schema);
+    }
+
+    @Override
+    public Map<String, Object> plDebugProbe() {
+        return PlDebugCapabilities.probe(requireConnected());
+    }
+
+    @Override
+    public Map<String, Object> plDebugInspect(PlDebugStartRequest target) {
+        if (target != null && "debug_compile".equals(target.getMetadataPreparation())) {
+            if (target.getObjectName() == null || target.getObjectName().isEmpty()
+                || !("PROCEDURE".equals(target.getObjectType()) || "FUNCTION".equals(target.getObjectType()))) {
+                throw new IllegalArgumentException("Debug compilation preview requires an exact named routine");
+            }
+            return unchecked(() -> PlDebugMetadataInspection.run(this::registerDedicatedConnections, (connection, deadline) -> {
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("capabilities", PlDebugCapabilities.probe(connection));
+                result.putAll(PlDebugCompile.inspect(connection, target, deadline));
+                return result;
+            }));
+        }
+        if (typePreparationRequested(target)) {
+            return unchecked(() -> PlDebugMetadataInspection.run(this::registerDedicatedConnections, (connection, deadline) -> {
+                Map<String, Object> result = new LinkedHashMap<>();
+                result.put("capabilities", PlDebugCapabilities.probe(connection));
+                result.put("targetPreview", PlDebugTarget.previewTypes(connection, target, deadline));
+                return result;
+            }));
+        }
+        Connection connection = requireConnected();
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("capabilities", PlDebugCapabilities.probe(connection));
+        if (target != null) result.put("targetPreview", unchecked(() -> PlDebugTarget.preview(connection, target)));
+        return result;
+    }
+
+    @Override
+    public Map<String, Object> plDebugResolveTarget(PlDebugStartRequest request) {
+        if (typePreparationRequested(request)) {
+            return unchecked(() -> PlDebugMetadataInspection.run(this::registerDedicatedConnections,
+                (connection, deadline) -> PlDebugTarget.previewTypes(connection, request, deadline)));
+        }
+        return unchecked(() -> PlDebugTarget.preview(requireConnected(), request));
+    }
+
+    private static boolean typePreparationRequested(PlDebugStartRequest request) {
+        if (request == null || request.getMetadataPreparation() == null) return false;
+        if (!"type_only".equals(request.getMetadataPreparation())) throw new IllegalArgumentException("Unsupported type metadata preparation policy");
+        if (!"PROCEDURE".equals(request.getObjectType()) && !"FUNCTION".equals(request.getObjectType())) {
+            throw new IllegalArgumentException("Type metadata preparation requires a named routine");
+        }
+        return true;
+    }
+
+    @Override
+    public Map<String, Object> plDebugStart(PlDebugStartRequest request) {
+        if (request != null && "debug_compile".equals(request.getMetadataPreparation())) {
+            throw new IllegalArgumentException("Debug compilation preparation is only available through inspection");
+        }
+        return unchecked(() -> plDebug.start(request));
+    }
+
+    @Override
+    public Map<String, Object> plDebugCompile(String operationId, PlDebugStartRequest target, Map<String, Object> preview) {
+        return plDebugCompile.execute(operationId, target, preview, this::registerDedicatedConnections);
+    }
+
+    @Override
+    public Map<String, Object> plDebugCompileStatus(String operationId) {
+        return plDebugCompile.status(operationId);
+    }
+
+    @Override
+    public Map<String, Object> plDebugSetBreakpoints(String debugId, List<PlDebugBreakpoint> breakpoints) {
+        return unchecked(() -> plDebug.map(debugId, session -> session.setBreakpoints(breakpoints)));
+    }
+
+    @Override
+    public Map<String, Object> plDebugMutateBreakpoint(String debugId, String action, com.dbx.agent.PlDebugBreakpointMutation request) {
+        return unchecked(() -> plDebug.mutateBreakpoint(debugId, action, request));
+    }
+
+    @Override
+    public Map<String, Object> plDebugSetBreakpoints(String debugId, String operationId, Long stopRevision,
+                                                    List<PlDebugBreakpoint> breakpoints) {
+        if (operationId == null) return plDebugSetBreakpoints(debugId, breakpoints);
+        return unchecked(() -> plDebug.changeBreakpoints(debugId, operationId, stopRevision, breakpoints, false));
+    }
+
+    @Override
+    public Map<String, Object> plDebugDeleteBreakpoints(String debugId, String operationId, Long stopRevision,
+                                                       List<PlDebugBreakpoint> breakpoints) {
+        if (operationId == null) return plDebugDeleteBreakpoints(debugId, breakpoints);
+        return unchecked(() -> plDebug.changeBreakpoints(debugId, operationId, stopRevision, breakpoints, true));
+    }
+
+    @Override
+    public Map<String, Object> plDebugDeleteBreakpoints(String debugId, List<PlDebugBreakpoint> breakpoints) {
+        return unchecked(() -> plDebug.map(debugId, session -> session.deleteBreakpoints(breakpoints)));
+    }
+
+    @Override
+    public List<PlDebugBreakpoint> plDebugListBreakpoints(String debugId) {
+        return unchecked(() -> plDebug.breakpoints(debugId));
+    }
+
+    @Override
+    public Map<String, Object> plDebugResume(String debugId) {
+        return unchecked(() -> plDebug.map(debugId, PlDebugSession::resume));
+    }
+
+    @Override
+    public Map<String, Object> plDebugStepOver(String debugId) {
+        return unchecked(() -> plDebug.map(debugId, PlDebugSession::stepOver));
+    }
+
+    @Override
+    public Map<String, Object> plDebugStepIn(String debugId) {
+        return unchecked(() -> plDebug.map(debugId, PlDebugSession::stepIn));
+    }
+
+    @Override
+    public Map<String, Object> plDebugStepOut(String debugId) {
+        return unchecked(() -> plDebug.map(debugId, PlDebugSession::stepOut));
+    }
+
+    @Override
+    public Map<String, Object> plDebugResumeIgnoreBreakpoints(String debugId) {
+        return unchecked(() -> plDebug.map(debugId, PlDebugSession::resumeIgnoreBreakpoints));
+    }
+
+    @Override
+    public Map<String, Object> plDebugAbort(String debugId) {
+        return unchecked(() -> plDebug.abort(debugId));
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetVariables(String debugId, int frame) {
+        return unchecked(() -> plDebug.map(debugId, session -> session.variables(frame)));
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetValue(String debugId, String name, int frame) {
+        return unchecked(() -> plDebug.map(debugId, session -> session.variable(name, frame)));
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetResults(String debugId) {
+        return plDebug.results(debugId);
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetResultPage(String debugId, String generation, String resultId, int offset, int limit) {
+        return plDebug.resultPage(debugId, generation, resultId, offset, limit);
+    }
+
+    @Override
+    public Map<String, Object> plDebugSetValue(String debugId, String name, int frame, int index, String value) {
+        return plDebugSetValue(debugId, null, null, name, frame, index, value);
+    }
+
+    @Override
+    public Map<String, Object> plDebugSetValue(String debugId, String operationId, Long stopRevision,
+                                              String name, int frame, int index, String value) {
+        return unchecked(() -> plDebug.setValue(debugId, operationId, stopRevision, name, frame, index, value));
+    }
+
+    @Override
+    public Map<String, Object> plDebugOperationStatus(String debugId, String operationId) {
+        return plDebug.operationStatus(debugId, operationId);
+    }
+
+    @Override
+    public Map<String, Object> plDebugSetBreakpointEnabled(String debugId, int breakpointNumber, boolean enabled) {
+        return unchecked(() -> plDebug.map(debugId, session -> session.setBreakpointEnabled(breakpointNumber, enabled)));
+    }
+
+    @Override
+    public Map<String, Object> plDebugSetBreakpointEnabled(String debugId, String operationId, Long stopRevision,
+                                                          int breakpointNumber, boolean enabled) {
+        if (operationId == null) return plDebugSetBreakpointEnabled(debugId, breakpointNumber, enabled);
+        return unchecked(() -> plDebug.setBreakpointEnabled(debugId, operationId, stopRevision, breakpointNumber, enabled));
+    }
+
+    @Override
+    public Map<String, Object> plDebugSetExceptionBreakpoint(String debugId, boolean enabled) {
+        return unchecked(() -> plDebug.map(debugId, session -> session.setExceptionBreakpoint(enabled)));
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetStack(String debugId) {
+        return unchecked(() -> plDebug.map(debugId, PlDebugSession::stack));
+    }
+
+    @Override
+    public Map<String, Object> plDebugStatus(String debugId) {
+        return plDebug.status(debugId);
+    }
+
+    @Override
+    public Map<String, Object> plDebugHeartbeat(String debugId) {
+        return plDebug.heartbeat(debugId);
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetLog(String debugId) {
+        return plDebug.log(debugId);
+    }
+
+    @Override
+    public Map<String, Object> plDebugGetLogPage(String debugId, int offset, int limit) {
+        return plDebug.log(debugId, offset, limit);
+    }
+
+    @Override
+    public boolean plDebugClose(String debugId) {
+        return unchecked(() -> plDebug.close(debugId));
+    }
+
+    @Override
+    public Map<String, Object> plDebugExecute(String debugId, String sql, int maxRows) {
+        return unchecked(() -> plDebug.map(debugId, session -> {
+            throw new UnsupportedOperationException("No verified DBMS_DEBUG.EXECUTE binding is available in this OceanBase adapter; no SQL was dispatched");
+        }));
+    }
+
+    @Override
+    protected void afterDisconnect() throws Exception {
+        plDebug.closeAll();
     }
 
     private List<String> querySchemas() throws SQLException {
@@ -2067,6 +2764,9 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 yield len == null ? base : base + "(" + len + ")";
             }
             case "NUMBER" -> {
+                if (numPrec == null && numScale != null) {
+                    yield base + "(*," + numScale + ")";
+                }
                 if (numPrec != null && numScale != null && numScale != 0) {
                     yield base + "(" + numPrec + "," + numScale + ")";
                 }
@@ -2075,6 +2775,7 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
                 }
                 yield base;
             }
+            case "FLOAT" -> numPrec != null && numPrec > 0 ? base + "(" + numPrec + ")" : base;
             case "RAW" -> dataLen == null ? "RAW" : "RAW(" + dataLen + ")";
             default -> base;
         };
@@ -2086,6 +2787,6 @@ public final class OceanBaseOracleAgent extends ConfiguredJdbcAgent {
     }
 
     public static void main(String[] args) {
-        MultiSessionJsonRpcServer.withBlobBindings(OceanBaseOracleAgent::new).run();
+        MultiSessionJsonRpcServer.withNativeLegacyJobs(OceanBaseOracleAgent::new, true).withExactMetadataIdentity().withNativePlDebug(true).withBreakpointOperationStatus().withRetainedPlDebugResults().run();
     }
 }

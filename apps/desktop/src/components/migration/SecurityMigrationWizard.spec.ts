@@ -44,6 +44,7 @@ describe("migration failure actions", () => {
       migrationId: "secret-store-v1",
       state: "pending" as const,
       needsMigration: true,
+      keyRecoveryRequired: false,
       keyProviderAvailable: true,
       databasePlaintextCount: 1,
       connectionCount: 1,
@@ -67,6 +68,50 @@ describe("migration failure actions", () => {
       start.click();
       await vi.waitFor(() => expect(root.querySelector("textarea")?.value).toContain("LEGACY_JSON_INVALID"));
       expect(root.querySelector("textarea")?.value).toContain('"state": "failed"');
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it("treats a locked key after migration as key recovery instead of retrying migration", async () => {
+    const recoveryStatus = {
+      migrationId: "secret-store-v1",
+      state: "succeeded" as const,
+      needsMigration: false,
+      keyRecoveryRequired: true,
+      keyProviderAvailable: false,
+      keyCreationAllowed: false,
+      keyStatus: "unavailable" as const,
+      databasePlaintextCount: 0,
+      connectionCount: 1,
+      pluginSecretCount: 0,
+      aiSecretCount: 0,
+      tunnelSecretCount: 0,
+      syncCredentialCount: 0,
+      legacyJsonFiles: [],
+      backupRequired: false,
+      errorCode: "KEYRING_ACCESS_FAILED",
+      errorMessage: "The platform credential store refused access",
+    };
+    const backend = {
+      migrationStatus: vi.fn().mockResolvedValue(recoveryStatus),
+      migrationStart: vi.fn(),
+      migrationRetry: vi.fn(),
+      migrationCleanupBackups: vi.fn(),
+    };
+    const store = useMigrationStore(backend);
+    await store.initialize();
+    const root = document.createElement("div");
+    const app = createApp(Wizard, { store });
+    app.mount(root);
+    try {
+      const labels = Array.from(root.querySelectorAll("button")).map((button) => button.textContent);
+      expect(root.textContent).toContain("migration.keyUnavailable");
+      expect(root.textContent).not.toContain("migration.failed");
+      expect(labels).toContain("migration.retryStatus");
+      expect(labels).not.toContain("migration.start");
+      expect(labels).not.toContain("migration.retryMigration");
+      expect(root.querySelector("textarea")?.value).toContain('"keyRecoveryRequired": true');
     } finally {
       app.unmount();
     }

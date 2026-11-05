@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   repushPluginConnection: vi.fn(),
   ensureConnected: vi.fn(),
   openPluginWorkbench: vi.fn(),
+  setPluginWorkbenchTabTitle: vi.fn(),
+  getPluginWorkbenchTabTitle: vi.fn(),
   connectedIds: new Set<string>(["conn-1"]),
 }));
 
@@ -37,7 +39,13 @@ vi.mock("@/stores/connectionStore", () => ({
     reopenPluginConnection: vi.fn(),
   }),
 }));
-vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ openPluginWorkbench: mocks.openPluginWorkbench }) }));
+vi.mock("@/stores/queryStore", () => ({
+  useQueryStore: () => ({
+    openPluginWorkbench: mocks.openPluginWorkbench,
+    setPluginWorkbenchTabTitle: mocks.setPluginWorkbenchTabTitle,
+    getPluginWorkbenchTabTitle: mocks.getPluginWorkbenchTabTitle,
+  }),
+}));
 vi.mock("vue-i18n", () => ({
   useI18n: () => ({ locale: ref("en"), t: (key: string, params?: Record<string, unknown>) => (params ? `${key} ${JSON.stringify(params)}` : key) }),
 }));
@@ -49,7 +57,7 @@ const plugin: InstalledPlugin = {
     id: "com.example.graph",
     name: "Graph plugin",
     version: "1.0.0",
-    permissions: [],
+    permissions: ["host.workbench"],
     drivers: [],
     entrypoints: { ui: { root: "ui", entry: "ui/index.html" } },
     contributions: [
@@ -153,6 +161,39 @@ describe("PluginWorkbenchTab contribution resolution", () => {
 
     expect(root.querySelector("iframe")).toBeNull();
     expect(root.textContent).toContain("pluginPlatform.workbenchUnavailable");
+  });
+
+  it("forwards setTitle and getTitle from the bridge to queryStore for the tab", async () => {
+    mocks.getPluginWorkbenchTabTitle.mockReturnValue("Tab Original Title");
+    app = createApp(PluginWorkbenchTab, { tabId: "tab-test-1", pluginId: "com.example.graph", contributionId: "graph.main", connectionId: "conn-1" });
+    app.mount(root);
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await nextTick();
+    const frame = root.querySelector("iframe");
+    expect(frame).toBeInstanceOf(HTMLIFrameElement);
+    const target = frame!.contentWindow!;
+    const postMessage = vi.spyOn(target, "postMessage").mockImplementation(() => {});
+    frame!.dispatchEvent(new Event("load"));
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalled());
+
+    // Send host.setTitle from the iframe
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: target,
+        data: { source: "dbx-plugin", version: 1, type: "request", id: "t-set", method: "host.setTitle", params: { title: "Custom Title" } },
+      }),
+    );
+    await vi.waitFor(() => expect(mocks.setPluginWorkbenchTabTitle).toHaveBeenCalledWith("tab-test-1", "Custom Title"));
+
+    // Send host.getTitle from the iframe
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        source: target,
+        data: { source: "dbx-plugin", version: 1, type: "request", id: "t-get", method: "host.getTitle" },
+      }),
+    );
+    await vi.waitFor(() => expect(mocks.getPluginWorkbenchTabTitle).toHaveBeenCalledWith("tab-test-1"));
   });
 });
 

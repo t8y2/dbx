@@ -1,6 +1,14 @@
 import type { AiAction } from "@/lib/ai/ai";
 import type { AiSelectionContextInput } from "@/lib/ai/aiAttachments";
 import type { AiConversationBinding } from "@/lib/ai/aiConversationBinding";
+import type { QueryTab } from "@/types/database";
+import { queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
+
+/** Capture the displayed result's SQL before the panel loads or the editor changes. */
+export function queryErrorSelection(tab: Pick<QueryTab, "title" | "result" | "resultSortedSql" | "resultBaseSql" | "lastExecutedSql"> | undefined): AiSelectionContextInput | undefined {
+  const sql = tab ? queryResultExecutionSql({ ...tab, sql: "" }) : "";
+  return sql?.trim() ? { source: "query-error", label: tab?.title, content: sql } : undefined;
+}
 
 /**
  * Request shape shared by every AI entry point that lives *outside* the panel
@@ -24,7 +32,7 @@ export interface AiExternalContextRequest {
   /** Selections taken from that surface, attached as context data (R4/R8). */
   selections?: readonly AiSelectionContextInput[];
   /** Tables the gesture referred to — the object tree's "Add to AI". */
-  tableMentions?: readonly { schema?: string; table: string }[];
+  tableMentions?: readonly { database?: string; schema?: string; table: string }[];
   /** Action to run immediately (query-result "Fix with AI"); omitted = fill the composer only. */
   action?: AiAction;
   /** Instruction text handed to `action`. */

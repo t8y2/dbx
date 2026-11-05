@@ -112,7 +112,16 @@ async function importEngine(): Promise<SqlFormatterEngine | null> {
 
 /** Loads (and caches) the engine, or `null` when the internals are unavailable. */
 export function loadEngine(): Promise<SqlFormatterEngine | null> {
-  enginePromise ??= importEngine();
+  if (!enginePromise) {
+    // Vite can briefly fail a first dynamic import while it optimizes the deep
+    // imports. Do not let one transient miss pin every later Format action to
+    // sql-formatter's fallback layout: retry once now, then cache only success.
+    const pending = importEngine().then((engine) => engine ?? importEngine());
+    enginePromise = pending;
+    void pending.then((engine) => {
+      if (!engine && enginePromise === pending) enginePromise = null;
+    });
+  }
   return enginePromise;
 }
 

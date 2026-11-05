@@ -6,8 +6,17 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, databaseNameMatchesVisiblePatterns, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection, parseVisibleDatabasePatternsInput } from "@/lib/database/visibleDatabases";
-import { resolveVisibleDatabaseSaveAction } from "./visibleDatabasesDialogState";
+import {
+  canSaveVisibleDatabaseSelection,
+  connectionUsesVisibleSchemaFilter,
+  databaseNameMatchesVisiblePatterns,
+  filterDatabaseNamesForVisiblePicker,
+  filterSchemaNamesForVisiblePicker,
+  MATCH_ALL_VISIBLE_DATABASE_PATTERN,
+  normalizeVisibleDatabaseSelection,
+  parseVisibleDatabasePatternsInput,
+} from "@/lib/database/visibleDatabases";
+import { initialVisibleDatabaseDialogSelection, resolveVisibleDatabaseSaveAction, visibleDatabaseFilterShowsNothing, visibleDatabasePatternMatches, visibleDatabasePatternsWithoutMatchAll } from "./visibleDatabasesDialogState";
 import * as api from "@/lib/backend/api";
 
 const props = defineProps<{
@@ -58,9 +67,13 @@ const patternMatchCount = computed(() => {
   if (parsedPatterns.value.length === 0) return 0;
   return objectNames.value.filter((name) => databaseNameMatchesVisiblePatterns(name, parsedPatterns.value)).length;
 });
-const selectedCount = computed(() => selectedNames.value.size);
+const userPatterns = computed(() => visibleDatabasePatternsWithoutMatchAll(parsedPatterns.value));
+// 通配符与勾选取并集：命中的库无论是否勾选都会显示，列表里画成锁定的勾选，避免看起来"填了通配符没效果"（#14221）。
+const patternMatchedNames = computed(() => visibleDatabasePatternMatches(objectNames.value, userPatterns.value));
+const showsNothing = computed(() => visibleDatabaseFilterShowsNothing(selectedNames.value, userPatterns.value, patternMatchedNames.value));
+const selectedCount = computed(() => listedObjectNames.value.filter((name) => selectedNames.value.has(name) || patternMatchedNames.value.has(name)).length);
 const totalCount = computed(() => listedObjectNames.value.length);
-const canSaveSelection = computed(() => canSaveVisibleDatabaseSelection([...selectedNames.value]));
+const canSaveSelection = computed(() => canSaveVisibleDatabaseSelection([...selectedNames.value], userPatterns.value));
 const hasSystemObjects = computed(() => defaultObjectNames.value.length < objectNames.value.length);
 const showAllDisabled = computed(() => {
   if (isSchemaFilterMode.value) {
@@ -96,7 +109,7 @@ async function loadDatabases() {
     showSystemDatabases.value = false;
     const configured = isSchemaFilterMode.value ? connection.value?.visible_schemas?.[databaseKey.value] : connection.value?.visible_databases;
     patternInput.value = isSchemaFilterMode.value ? "" : (connection.value?.visible_database_patterns?.join(", ") ?? "");
-    const initialSelection = Array.isArray(configured) ? normalizeVisibleDatabaseSelection(configured, names) : listedObjectNames.value;
+    const initialSelection = isSchemaFilterMode.value ? (Array.isArray(configured) ? normalizeVisibleDatabaseSelection(configured, names) : listedObjectNames.value) : initialVisibleDatabaseDialogSelection(names, connection.value);
     selectedNames.value = new Set(initialSelection);
     const defaultVisible = new Set(defaultObjectNames.value);
     showSystemDatabases.value = initialSelection.some((name) => !defaultVisible.has(name));
@@ -127,6 +140,7 @@ async function loadObjectNames(): Promise<string[]> {
 }
 
 function toggleObject(name: string) {
+  if (patternMatchedNames.value.has(name)) return;
   const next = new Set(selectedNames.value);
   if (next.has(name)) next.delete(name);
   else next.add(name);
@@ -150,6 +164,10 @@ function clearSelection() {
 async function showAllDatabases() {
   if (isSchemaFilterMode.value) {
     await connectionStore.clearVisibleSchemas(props.connectionId, databaseKey.value);
+  } else if (showSystemDatabases.value && hasSystemObjects.value) {
+    // 未筛选时系统库默认隐藏；用全匹配通配符保留“显示全部（含系统库）”，
+    // 同时不冻结当前库名，之后新建的库仍会自动出现。
+    await connectionStore.setVisibleDatabaseFilter(props.connectionId, undefined, [MATCH_ALL_VISIBLE_DATABASE_PATTERN]);
   } else {
     await connectionStore.clearVisibleDatabases(props.connectionId);
   }
@@ -171,7 +189,7 @@ async function saveSelection() {
     defaultVisibleNames: defaultObjectNames.value,
     configured: connection.value?.visible_databases,
     configuredPatterns: connection.value?.visible_database_patterns,
-    patterns: parsedPatterns.value,
+    patterns: userPatterns.value,
   });
   if (action.type === "none") {
     emit("update:open", false);
@@ -232,6 +250,9 @@ async function saveSelection() {
       <p v-if="!isLoading && !errorMessage && !canSaveSelection" class="text-xs text-destructive">
         {{ t(emptySelectionKey) }}
       </p>
+      <p v-else-if="!isLoading && !errorMessage && showsNothing" class="text-xs text-amber-600" data-visible-database-no-match>
+        {{ t("visibleDatabases.patternsNoMatch") }}
+      </p>
 
       <label v-if="hasSystemObjects" class="flex h-8 items-center gap-2 rounded-md px-1 text-xs text-muted-foreground">
         <input v-model="showSystemDatabases" type="checkbox" class="h-3.5 w-3.5 accent-primary" :disabled="isLoading || !!errorMessage" />
@@ -254,12 +275,17 @@ async function saveSelection() {
             v-for="name in filteredObjectNames"
             :key="name"
             type="button"
-            class="flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
+            class="flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none aria-disabled:cursor-default"
+            :aria-disabled="patternMatchedNames.has(name) || undefined"
+            :title="patternMatchedNames.has(name) ? t('visibleDatabases.patternsHint') : undefined"
+            :data-visible-database-row="name"
             @click="toggleObject(name)"
           >
-            <CheckSquare v-if="selectedNames.has(name)" class="h-4 w-4 shrink-0 text-primary" />
+            <CheckSquare v-if="patternMatchedNames.has(name)" class="h-4 w-4 shrink-0 text-muted-foreground" />
+            <CheckSquare v-else-if="selectedNames.has(name)" class="h-4 w-4 shrink-0 text-primary" />
             <Square v-else class="h-4 w-4 shrink-0 text-muted-foreground" />
             <span class="truncate">{{ name }}</span>
+            <Asterisk v-if="patternMatchedNames.has(name)" class="ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           </button>
         </template>
       </div>

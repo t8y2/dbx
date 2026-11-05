@@ -5300,8 +5300,9 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     // 轻量枚举过的缓存只有名字，注释/时间戳/统计都要回读：陈旧缓存先让统计回源再补
     // 详情，避免两条重读同时打库；新鲜缓存直接补详情。
     if (detailsPassEnabled.value && !rows.value.some((row) => row.comment?.trim() || row.created_at?.trim() || row.updated_at?.trim())) {
-      if (cached.stale) void revalidateCachedObjectStatistics(request, cacheWriteToken).then(() => scheduleObjectBrowserDetails(request, cacheWriteToken));
-      else void scheduleObjectBrowserDetails(request, cacheWriteToken);
+      const start = detailsPassStarter(request, cacheWriteToken, undefined);
+      if (cached.stale) void revalidateCachedObjectStatistics(request, cacheWriteToken).then(start);
+      else start();
     }
     return;
   } else {
@@ -5324,8 +5325,10 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     applyObjectBrowserRows(nextRows);
     const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows);
+    // Row/size statistics come from a separate aggregate read; the MySQL split only
+    // skips them on the enumeration, not for the whole view.
     if (!detailsPassEnabled.value) void loadObjectStatistics(request, cacheWriteToken, cachedAt);
-    else scheduleObjectBrowserDetails(request, cacheWriteToken, cachedAt !== undefined ? Promise.resolve(cachedAt) : undefined);
+    else detailsPassStarter(request, cacheWriteToken, cachedAt)();
   } catch (e: any) {
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     // Keep visible rows on a background revalidate failure — surface a lightweight
@@ -5474,30 +5477,55 @@ interface ObjectBrowserDetailsPass {
  * toolbar button, run that detail read in the background as soon as the names
  * are visible: rows are patched in place (never blanked), failures stay silent
  * (names remain usable), and a superseded scope drops its result.
+ *
+ * The pass is started through a bound starter that defers it onto a timer:
+ * calling it inline from `loadObjects()` reaches the pass bookkeeping while the
+ * row list is still being applied, and deferring one task keeps the list's own
+ * render ahead of the second read.
  */
+function detailsPassStarter(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined): () => void {
+  const epoch = request.epoch;
+  const waitFor = cachedAt !== undefined ? Promise.resolve(cachedAt) : undefined;
+  return () => {
+    // The pass is decorative and must never surface as a load failure: defer it and
+    // keep any throw inside the pass.
+    window.setTimeout(() => {
+      void scheduleObjectBrowserDetails({ epoch, scope: cacheWriteToken.scope } as ObjectBrowserRowsLoadHandle, cacheWriteToken, waitFor);
+    }, 0);
+  };
+}
+
 function scheduleObjectBrowserDetails(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, waitFor?: Promise<unknown>): Promise<unknown> {
   const existing = objectBrowserDetailsPasses.get(cacheWriteToken);
   if (existing) return existing;
   const pending = startObjectBrowserDetails({ epoch: request.epoch, cacheWriteToken, waitFor });
   objectBrowserDetailsPasses.set(cacheWriteToken, pending);
-  void pending.finally(() => {
-    if (objectBrowserDetailsPasses.get(cacheWriteToken) === pending) objectBrowserDetailsPasses.delete(cacheWriteToken);
-  }).catch(() => undefined);
+  void pending
+    .finally(() => {
+      if (objectBrowserDetailsPasses.get(cacheWriteToken) === pending) objectBrowserDetailsPasses.delete(cacheWriteToken);
+    })
+    .catch(() => undefined);
   return pending;
 }
 
 function startObjectBrowserDetails(pass: ObjectBrowserDetailsPass): Promise<unknown> {
+  // `loadSqlObjectBrowserRows()` carries no cache-write-token argument, so this handle
+  // only has to describe the same scope and epoch for the load guard.
   const request: ObjectBrowserRowsLoadHandle = { epoch: pass.epoch, scope: pass.cacheWriteToken.scope };
   return (async () => {
     // Let the background statistics read finish first: both statements hit
     // information_schema on the same metadata pool.
     await pass.waitFor?.catch(() => undefined);
-    if (!objectBrowserRowsLoadGuard.isCurrent(request) || rows.value.some((row) => row.comment?.trim() || row.created_at?.trim() || row.updated_at?.trim())) return;
+    if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+    // A previous full read may have filled the rows while this pass waited on the
+    // statistics; then there is nothing left to fetch.
+    if (rows.value.some((row) => Boolean(row.comment?.trim()))) return;
     try {
       const details = await loadSqlObjectBrowserRows(request, true);
       if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
-      mergeObjectBrowserDetails(details);
+      applyObjectBrowserDetails(details);
       cacheObjectBrowserRows(pass.cacheWriteToken, rows.value);
+      void loadObjectStatistics(request, pass.cacheWriteToken, undefined);
     } catch (e) {
       // Details are decorative: keep the names already rendered and stay quiet.
       console.debug("[ObjectBrowser] object details unavailable", e);
@@ -5510,7 +5538,7 @@ function startObjectBrowserDetails(pass: ObjectBrowserDetailsPass): Promise<unkn
  * lightweight pass and the details pass may return different orders, and any
  * other field already on screen must survive untouched.
  */
-function mergeObjectBrowserDetails(details: readonly ObjectBrowserRow[]) {
+function applyObjectBrowserDetails(details: readonly ObjectBrowserRow[]) {
   const byId = new Map(details.map((row) => [row.id, row]));
   rows.value = rows.value.map((row) => {
     const detail = byId.get(row.id);

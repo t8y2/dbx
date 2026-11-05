@@ -2419,6 +2419,7 @@ export default withEnglishFallback({
       pasteRestoringSourceSql: "貼上並還原來源 SQL",
       pasteClipboardReadFailed: "讀取剪貼簿失敗：{message}",
       convertNamingStyle: "切換命名風格",
+      addSnippet: "新增片段",
     },
     gotoLine: {
       placeholder: "行號",
@@ -2480,6 +2481,10 @@ export default withEnglishFallback({
     previewChangesComment: "變更預覽（乾跑）：{operation} 語句",
     previewChangesFailed: "變更預覽失敗。",
     previewChangesNoStatement: "請選取或將游標放在一條 UPDATE / INSERT / DELETE 語句上以預覽變更。",
+    snippetQuickAdd: {
+      prefixUnique: "觸發鍵必須唯一。",
+      saved: "已新增片段 {label}",
+    },
   },
   tabs: {
     sql: "SQL",

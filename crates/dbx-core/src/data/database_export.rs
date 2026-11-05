@@ -6434,37 +6434,16 @@ fn build_database_export_object_source_sql(
     schema: &str,
     drop_if_exists: bool,
 ) -> String {
-    let source = build_database_export_object_source_sql_unwrapped(
+    // SQL Server 的 GO 批次包裹由 dbx-sql-core 的 build_export_object_source_sql 统一完成
+    // （#14295），这里不能再包一层，否则会输出 `GO\nGO ... GO\nGO`。
+    build_database_export_object_source_sql_unwrapped(
         database_type,
         object_type,
         object_name,
         source,
         schema,
         drop_if_exists,
-    );
-    wrap_sqlserver_export_batch(database_type, object_type, source)
-}
-
-/// SQL Server requires `CREATE VIEW` / `PROCEDURE` / `FUNCTION` / `TRIGGER` to be
-/// the first statement in a batch. `;` only ends a statement, so an exported
-/// script that places one of these after a table DDL or INSERT fails with
-/// "CREATE VIEW must be the first statement in a query batch". `GO` is the
-/// client-side batch separator; the exporter emits it around exactly those
-/// objects, while every other statement keeps `;` (#14295).
-fn wrap_sqlserver_export_batch(database_type: DatabaseType, object_type: &ObjectSourceKind, source: String) -> String {
-    if source.is_empty()
-        || database_type != DatabaseType::SqlServer
-        || !matches!(
-            object_type,
-            ObjectSourceKind::View
-                | ObjectSourceKind::Procedure
-                | ObjectSourceKind::Function
-                | ObjectSourceKind::Trigger
-        )
-    {
-        return source;
-    }
-    format!("GO\n{source}\nGO")
+    )
 }
 
 fn build_database_export_object_source_sql_unwrapped(

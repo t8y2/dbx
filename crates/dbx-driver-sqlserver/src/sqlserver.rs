@@ -337,6 +337,28 @@ fn sqlserver_uses_named_instance_resolution(endpoint: &SqlServerEndpoint<'_>, po
     endpoint.instance_name.is_some() && (port == 0 || (port == SQLSERVER_DEFAULT_PORT && !port_explicit))
 }
 
+fn sqlserver_host_with_url_instance<'a>(
+    host: &'a str,
+    port: u16,
+    port_explicit: bool,
+    url_params: Option<&str>,
+) -> Result<Cow<'a, str>, String> {
+    use dbx_types::models::connection::{normalize_sqlserver_host_port, sqlserver_url_instance_name};
+
+    if port_explicit || !matches!(port, 0 | SQLSERVER_DEFAULT_PORT) || host.contains('\\') || url_params.is_none() {
+        return Ok(Cow::Borrowed(host));
+    }
+    let (normalized_host, embedded_port) = normalize_sqlserver_host_port(host);
+    if normalized_host.is_empty() || embedded_port.is_some() {
+        return Ok(Cow::Borrowed(host));
+    }
+
+    Ok(match sqlserver_url_instance_name(url_params)? {
+        Some(instance) => Cow::Owned(format!(r"{normalized_host}\{instance}")),
+        None => Cow::Borrowed(host),
+    })
+}
+
 fn query_result_row_limit(max_rows: Option<usize>) -> usize {
     max_rows.unwrap_or(MAX_ROWS).max(1)
 }
@@ -368,6 +390,8 @@ pub async fn connect_with_port_explicit(
     url_params: Option<&str>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
+    let host = sqlserver_host_with_url_instance(host, port, port_explicit, url_params)?;
+    let host = host.as_ref();
     if sqlserver_native_encryption_disabled(url_params) {
         let skipped = "encryption was disabled by encrypt=false / sqlserverEncryption=disabled".to_string();
         return try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)

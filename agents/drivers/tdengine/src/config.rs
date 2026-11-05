@@ -35,6 +35,8 @@ pub fn build_dsn(params: &ConnectParams) -> Result<BuiltDsn> {
     if !params.ca_cert_path.trim().is_empty() {
         set_query_param(&mut url, "tls_mode", "verify_identity");
         set_query_param(&mut url, "tls_ca", params.ca_cert_path.trim());
+    } else if params.ssl && !has_query_param(&url, "tls_version") {
+        set_query_param(&mut url, "tls_version", "tlsv1.2,tlsv1.3");
     }
     let database = url
         .path_segments()
@@ -150,6 +152,10 @@ fn set_query_param(url: &mut Url, key: &str, value: &str) {
     for (key, value) in pairs {
         query.append_pair(&key, &value);
     }
+}
+
+fn has_query_param(url: &Url, key: &str) -> bool {
+    url.query_pairs().any(|(existing, _)| existing.eq_ignore_ascii_case(key))
 }
 
 fn is_control_param(key: &str) -> bool {
@@ -270,5 +276,22 @@ mod tests {
         .unwrap();
         assert_eq!(connection.value, "wss://root:taosdata@td.example.com:6041/power%20data");
         assert_eq!(connection.database, "power data");
+    }
+
+    #[test]
+    fn ssl_without_ca_certificate_enables_tls_version_for_self_signed_certificates() {
+        let dsn = build_dsn(&ConnectParams {
+            host: "127.0.0.1".into(),
+            port: 6041,
+            ssl: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let url = Url::parse(&dsn.value).unwrap();
+        assert_eq!(url.scheme(), "wss");
+        let query = url.query_pairs().collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(query.get("tls_version").map(|value| value.as_ref()), Some("tlsv1.2,tlsv1.3"));
+        assert_eq!(query.get("tls_mode"), None);
+        assert_eq!(query.get("tls_ca"), None);
     }
 }

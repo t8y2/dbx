@@ -41,7 +41,7 @@ uuid = { version = "1", features = ["v4"] }
 tokio-postgres = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "ac8ad476de59093d33ab9f294531c956e0c6a724" }
 postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "ac8ad476de59093d33ab9f294531c956e0c6a724" }
 postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "ac8ad476de59093d33ab9f294531c956e0c6a724" }
-mysql_async = { git = "https://github.com/t8y2/mysql_async.git", rev = "a91d198a16d71c48e41f96cc4e7b37fe6a2c53fa" }
+mysql_async = { git = "https://github.com/zipg/mysql_async.git", rev = "c613f68ad32669c1c1392735e7d06966789b3aa6" }
 
 [profile.release]
 panic = "abort"

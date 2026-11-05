@@ -94,6 +94,7 @@ fn saved_mcp_access_policy(
 const MCP_HTTP_SERVER_SETTINGS_KEY: &str = "mcp_http_server_settings";
 const WEB_MCP_SETTINGS_KEY: &str = "web_mcp_settings";
 const MAX_RETRIES_KEY: &str = "max_retries";
+const WEB_LOGIN_CAPTCHA_KEY: &str = "web_login_captcha";
 const HISTORY_RETENTION_LIMIT_KEY: &str = "history_retention_limit";
 const MCP_HISTORY_RETENTION_LIMIT_KEY: &str = "mcp_history_retention_limit";
 const SQL_FILE_UPLOAD_MAX_MB_KEY: &str = "sql_file_upload_max_mb";
@@ -6091,6 +6092,20 @@ impl Storage {
         let values = ids.iter().map(|id| serde_json::Value::String(id.clone())).collect::<Vec<_>>();
         settings.insert("pinned_tree_node_ids".to_string(), serde_json::Value::Array(values));
         self.save_app_settings_json(&settings).await
+    }
+
+    /// Captcha policy chosen in the Web settings dialog (`设置 → 安全`).
+    /// Stored in the shared app settings map so it travels with the data
+    /// directory, but read-modify-write keeps every other key intact.
+    pub async fn save_web_login_captcha_mode(&self, mode: &str) -> Result<(), String> {
+        let mut settings = self.load_app_settings_json().await?;
+        settings.insert(WEB_LOGIN_CAPTCHA_KEY.to_string(), serde_json::Value::String(mode.to_string()));
+        self.save_app_settings_json(&settings).await
+    }
+
+    pub async fn load_web_login_captcha_mode(&self) -> Result<Option<String>, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(settings.get(WEB_LOGIN_CAPTCHA_KEY).and_then(|value| value.as_str()).map(str::to_string))
     }
 
     pub async fn load_pinned_tree_node_ids(&self) -> Result<Vec<String>, String> {

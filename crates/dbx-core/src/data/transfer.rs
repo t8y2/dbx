@@ -2935,15 +2935,49 @@ fn format_mysql_default_literal(raw: &str, data_type: &str) -> String {
     format!("'{}'", trimmed.replace('\'', "''"))
 }
 
+fn dameng_to_postgres_default(value: &str, target_type: &str) -> Option<String> {
+    static STRING_LITERAL: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"\A'([^'\x00]|'')*'\z").expect("valid string literal regex"));
+    static TIMESTAMP_DEFAULT: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"\A(?:CURRENT_TIMESTAMP|LOCALTIMESTAMP)(?:\([ \t]*[0-6][ \t]*\))?\z")
+            .expect("valid timestamp default regex")
+    });
+
+    // Dameng returns SQL expressions. Keep defaults with a PostgreSQL equivalent
+    // for the mapped column type, without copying Dameng functions or sequences.
+    let target_base_type = target_type.split('(').next().unwrap_or(target_type).trim();
+    let upper = value.to_ascii_uppercase();
+    match (target_base_type, upper.as_str()) {
+        (_, "NULL") => Some(upper),
+        ("BOOLEAN", "1" | "TRUE") => Some("TRUE".to_string()),
+        ("BOOLEAN", "0" | "FALSE") => Some("FALSE".to_string()),
+        ("DATE" | "TIMESTAMP", "CURRENT_DATE") => Some(upper),
+        ("DATE" | "TIMESTAMP", _) if TIMESTAMP_DEFAULT.is_match(&upper) => Some(upper),
+        ("SMALLINT", _) if value.parse::<i16>().is_ok() => Some(value.to_string()),
+        ("INTEGER", _) if value.parse::<i32>().is_ok() => Some(value.to_string()),
+        ("BIGINT", _) if value.parse::<i64>().is_ok() => Some(value.to_string()),
+        ("NUMERIC" | "DECIMAL" | "DOUBLE PRECISION", _) if looks_like_numeric_literal(value) => Some(value.to_string()),
+        ("VARCHAR" | "CHAR" | "TEXT", _) if STRING_LITERAL.is_match(value) => {
+            Some(quote_postgres_string_literal(&value[1..value.len() - 1].replace("''", "'")))
+        }
+        _ => None,
+    }
+}
+
 fn column_default_clause(
     column: &db::ColumnInfo,
     source_schema: &str,
     target_schema: &str,
     source_db: &DatabaseType,
     target_db: &DatabaseType,
+    target_type: &str,
 ) -> Option<String> {
     if is_postgres_compat_transfer(source_db, target_db) {
         return postgres_default_clause(column, source_schema, target_schema, source_db, target_db);
+    }
+    if matches!((source_db, target_db), (DatabaseType::Dameng, DatabaseType::Postgres)) {
+        let value = column.column_default.as_deref()?.trim();
+        return dameng_to_postgres_default(value, target_type).map(|value| format!("DEFAULT {value}"));
     }
     if is_mysql_family_target(target_db) {
         let default_value = column.column_default.as_deref()?.trim();
@@ -5090,7 +5124,7 @@ fn generate_create_table_ddl_with_column_quoting(
                             || mysql_extra_clauses.as_ref().is_some_and(|extra| extra.auto_increment));
                     if !skip_default && !mysql_auto_increment {
                         if let Some(default_clause) =
-                            column_default_clause(c, source_schema, schema, source_db, target_db)
+                            column_default_clause(c, source_schema, schema, source_db, target_db, &mapped_type)
                         {
                             line.push(' ');
                             line.push_str(&default_clause);

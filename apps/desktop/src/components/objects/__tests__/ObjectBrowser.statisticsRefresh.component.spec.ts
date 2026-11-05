@@ -81,6 +81,7 @@ const connection = {
 } as unknown as ConnectionConfig;
 
 const scope = { connectionId: connection.id, database: "pgdemo", schema: "public" };
+const mysqlScope = { connectionId: connection.id, database: "pgdemo", schema: "pgdemo" };
 const cachedRows: ObjectBrowserRow[] = [
   {
     id: "table:orders",
@@ -121,8 +122,8 @@ async function mountBrowser(schema = ref("public")) {
   return host;
 }
 
-function primeRowsCache(cachedAt: number) {
-  cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(scope), cachedRows, { cachedAt });
+function primeRowsCache(cachedAt: number, target = scope) {
+  cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(target), cachedRows, { cachedAt });
 }
 
 describe("ObjectBrowser table statistics on a cached scaffold (#10461)", () => {
@@ -200,58 +201,49 @@ describe("MySQL lightweight enumeration", () => {
         expect(first.textContent).toContain("orders");
         expect(second.textContent).toContain("orders");
       });
-      expect(mocks.listObjects).toHaveBeenCalledTimes(1);
-      expect(mocks.listObjectStatistics).not.toHaveBeenCalled();
+      // The cheap name read is shared; the automatic details pass still runs.
+      expect(mocks.listObjects.mock.calls.filter((call) => (call[10] as { lightweight?: boolean } | undefined)?.lightweight === true)).toHaveLength(1);
     } finally {
       connection.db_type = originalType;
     }
   });
 
-  it("keeps names during detail loading and reports explicit statistics failure", async () => {
+  it("runs the details pass automatically and patches comments in place", async () => {
     const originalType = connection.db_type;
     connection.db_type = "mysql";
-    mocks.listObjects.mockResolvedValue([{ name: "orders", object_type: "TABLE", schema: "pgdemo" }]);
+    mocks.listObjects.mockImplementation((_id, _database, _schema, _types, _filter, _limit, _offset, _catalog, _tableNameFilter, _executionId, options) =>
+      Promise.resolve([{ name: "orders", object_type: "TABLE", schema: "pgdemo", comment: (options as { lightweight?: boolean } | undefined)?.lightweight === false ? "order details" : null }]),
+    );
     try {
       const host = await mountBrowser();
-      await vi.waitFor(() => expect(host.textContent).toContain("orders"));
-      let resolveDetails!: (value: unknown[]) => void;
-      mocks.listObjects.mockReturnValueOnce(
-        new Promise<unknown[]>((done) => {
-          resolveDetails = done;
-        }),
-      );
-      mocks.listObjectStatistics.mockRejectedValueOnce(new Error("statistics unavailable"));
-      const button = [...host.querySelectorAll("button")].find((item) => item.textContent?.includes("objects.loadDetails"))!;
-      button.click();
-      await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(mocks.listObjects.mock.calls.map((call) => JSON.stringify(call[10] ?? null))).toContain('{"lightweight":false}'));
+      await vi.waitFor(() => expect(getCachedObjectBrowserRows(mysqlScope)?.[0].comment).toBe("order details"));
       expect(host.textContent).toContain("orders");
-      expect(button.disabled).toBe(true);
-      resolveDetails([{ name: "orders", object_type: "TABLE", schema: "pgdemo", comment: "order details" }]);
-      await vi.waitFor(() => expect(host.textContent).toContain("statistics unavailable"));
-      expect(host.textContent).toContain("orders");
-      expect(getCachedObjectBrowserRows({ ...scope, schema: "pgdemo" })?.[0].comment).toBe("order details");
+      // Comments arrive without a manual click; the row/size statistics read may
+      // still be running against the same metadata pool, so do not gate on it.
+      const manual = [...host.querySelectorAll("button")].find((item) => item.textContent?.includes("objects.loadDetails"));
+      expect(manual).toBeUndefined();
     } finally {
       connection.db_type = originalType;
     }
   });
 
-  it("keeps names visible until details are explicitly requested", async () => {
+  it("keeps names visible when the automatic details pass fails", async () => {
     const originalType = connection.db_type;
     connection.db_type = "mysql";
-    mocks.listObjects.mockResolvedValue([{ name: "orders", object_type: "TABLE", schema: "pgdemo" }]);
+    mocks.listObjects.mockImplementation((_id, _database, _schema, _types, _filter, _limit, _offset, _catalog, _tableNameFilter, _executionId, options) => {
+      if ((options as { lightweight?: boolean } | undefined)?.lightweight === false) return Promise.reject(new Error("details unavailable"));
+      return Promise.resolve([{ name: "orders", object_type: "TABLE", schema: "pgdemo" }]);
+    });
+    mocks.listObjectStatistics.mockRejectedValueOnce(new Error("statistics unavailable"));
     try {
       const host = await mountBrowser();
-      await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalled());
-      expect(mocks.listObjects.mock.calls[0][10]).toEqual({ lightweight: true });
-      expect(mocks.listObjectStatistics).not.toHaveBeenCalled();
-      await vi.waitFor(() => expect(host.textContent).toContain("orders"));
-      mocks.listObjects.mockRejectedValueOnce(new Error("details unavailable"));
-      const button = [...host.querySelectorAll("button")].find((item) => item.textContent?.includes("objects.loadDetails"));
-      expect(button).toBeDefined();
-      button!.click();
-      await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
-      expect(mocks.listObjects.mock.calls[1][10]).toEqual({ lightweight: false });
+      await vi.waitFor(() => expect(mocks.listObjects.mock.calls.map((call) => JSON.stringify(call[10] ?? null))).toContain('{"lightweight":false}'));
+      await new Promise((resolve) => setTimeout(resolve, 20));
       expect(host.textContent).toContain("orders");
+      // Background failures stay silent: no blocking error, no banner.
+      expect(host.textContent).not.toContain("details unavailable");
+      expect(host.textContent).not.toContain("statistics unavailable");
     } finally {
       connection.db_type = originalType;
     }

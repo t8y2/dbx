@@ -11735,7 +11735,7 @@ mod tests {
         let path = temp_db_path("ai-conversation-pin-column-only");
         let storage = crate::persistence::test_storage::open(&path).await.unwrap();
 
-        let mut conversation = ai_conversation("pin-columns", "0001");
+        let conversation = ai_conversation("pin-columns", "0001");
         storage.save_ai_conversation(&conversation).await.unwrap();
 
         // A newer transcript lands (a streaming snapshot) after the caller's copy.

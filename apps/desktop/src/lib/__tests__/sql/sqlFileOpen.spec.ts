@@ -61,6 +61,26 @@ describe("external SQL file paths", () => {
     expect(isSqlOrScriptFilePath("memo.docx")).toBe(false);
   });
 
+  it("treats per-engine database script extensions as editable scripts (#14204)", () => {
+    expect(isSqlOrScriptFilePath("schema_dump.psql")).toBe(true);
+    expect(isSqlOrScriptFilePath("report.PLPGSQL")).toBe(true);
+    expect(isSqlOrScriptFilePath("migration.sqlpg")).toBe(true);
+    expect(isSqlOrScriptFilePath("add_salary.prc")).toBe(true);
+    expect(isSqlOrScriptFilePath("calc_bonus.fnc")).toBe(true);
+    expect(isSqlOrScriptFilePath("pkg_header.pks")).toBe(true);
+    expect(isSqlOrScriptFilePath("pkg_body.pkb")).toBe(true);
+    expect(isSqlOrScriptFilePath("types.pck")).toBe(true);
+    expect(isSqlOrScriptFilePath("lib.pls")).toBe(true);
+    expect(isSqlOrScriptFilePath("procedures.plsql")).toBe(true);
+    expect(isSqlOrScriptFilePath("audit_trg.trg")).toBe(true);
+    expect(isSqlOrScriptFilePath("batch.tsql")).toBe(true);
+    expect(isSqlOrScriptFilePath("proc.spc")).toBe(true);
+    expect(isSqlOrScriptFilePath("sync.rout")).toBe(true);
+    expect(isSqlOrScriptFilePath("mongosh.mjs")).toBe(true);
+    expect(isSqlOrScriptFilePath("archive.zip")).toBe(false);
+    expect(isSqlOrScriptFilePath("notes.txt")).toBe(false);
+  });
+
   it("identifies spreadsheet files for dedicated icon rendering", () => {
     expect(isSpreadsheetFilePath("data.xlsx")).toBe(true);
     expect(isSpreadsheetFilePath("legacy.XLS")).toBe(true);

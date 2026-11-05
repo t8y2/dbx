@@ -1720,6 +1720,7 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
     let mut retry_url = url.to_string();
     let mut retry_ca_cert_path = ca_cert_path;
     let mut tls_error = None;
+    let eof_mode = MySqlEofMode::default_for_setup_mode(setup_mode);
     let mut result = connect_pool_attempt(
         url,
         ca_cert_path,
@@ -1729,7 +1730,7 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
         setup_database,
         extra_setup_queries,
         setup_mode,
-        MySqlEofMode::Deprecate,
+        eof_mode,
     )
     .await;
 
@@ -1748,13 +1749,15 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
                 setup_database,
                 extra_setup_queries,
                 setup_mode,
-                MySqlEofMode::Deprecate,
+                eof_mode,
             )
             .await;
         }
     }
 
-    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error)) {
+    if eof_mode == MySqlEofMode::Deprecate
+        && result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error))
+    {
         log::info!("MySQL proxy returned legacy EOF packets; retrying with CLIENT_DEPRECATE_EOF disabled");
         result = connect_pool_attempt(
             &retry_url,
@@ -1898,6 +1901,17 @@ enum MySqlTcpKeepaliveMode {
 impl MySqlEofMode {
     fn deprecate_eof(self) -> bool {
         self == Self::Deprecate
+    }
+
+    fn default_for_setup_mode(setup_mode: MySqlSetupMode) -> Self {
+        match setup_mode {
+            // Doris and other MySQL-compatible servers append an empty info
+            // field to the login OK packet when CLIENT_DEPRECATE_EOF is set.
+            // Keep the legacy protocol for this compatibility path so the
+            // handshake does not depend on mysql_async accepting that quirk.
+            MySqlSetupMode::Compatible => Self::Legacy,
+            MySqlSetupMode::Standard | MySqlSetupMode::LiteralFloor => Self::Deprecate,
+        }
     }
 }
 
@@ -3366,6 +3380,7 @@ pub async fn connect_bare_with_pool_limit_and_setup_database(
     extra_setup_queries: &[String],
 ) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
+    let eof_mode = MySqlEofMode::default_for_setup_mode(MySqlSetupMode::Compatible);
     let result = connect_pool_attempt(
         url,
         None,
@@ -3375,10 +3390,12 @@ pub async fn connect_bare_with_pool_limit_and_setup_database(
         setup_database,
         extra_setup_queries,
         MySqlSetupMode::Compatible,
-        MySqlEofMode::Deprecate,
+        eof_mode,
     )
     .await;
-    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error)) {
+    if eof_mode == MySqlEofMode::Deprecate
+        && result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error))
+    {
         log::info!(
             "MySQL proxy returned legacy EOF packets; retrying bare connection with CLIENT_DEPRECATE_EOF disabled"
         );
@@ -10655,6 +10672,7 @@ mod tests {
         AccessDenied,
         LegacyEof,
         Accept,
+        DorisAccept,
         CachingSha2Accept,
     }
 
@@ -10739,9 +10757,16 @@ mod tests {
                     assert!(capabilities.contains(Caps::CLIENT_DEPRECATE_EOF));
                     mysql_tls_test_write(&mut socket, 3, &[0, 0, 0, 2, 0, 0, 0]).await;
                 }
-                MysqlTlsTestReply::Accept | MysqlTlsTestReply::CachingSha2Accept => {
+                MysqlTlsTestReply::Accept | MysqlTlsTestReply::DorisAccept | MysqlTlsTestReply::CachingSha2Accept => {
                     assert!(!capabilities.contains(Caps::CLIENT_SSL));
-                    mysql_tls_test_write(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+                    let ok_packet = if matches!(reply, MysqlTlsTestReply::DorisAccept)
+                        && capabilities.contains(Caps::CLIENT_DEPRECATE_EOF)
+                    {
+                        &[0, 0, 0, 2, 0, 0, 0, 0][..]
+                    } else {
+                        &[0, 0, 0, 2, 0, 0, 0][..]
+                    };
+                    mysql_tls_test_write(&mut socket, 2, ok_packet).await;
                     loop {
                         let command = mysql_tls_test_packet(&mut socket).await;
                         if command[0] == 1 {
@@ -10769,6 +10794,20 @@ mod tests {
         (result, servers)
     }
 
+    async fn mysql_bare_test_connect(
+        reply: MysqlTlsTestReply,
+    ) -> (Result<MySqlPool, String>, tokio::task::JoinSet<Vec<mysql_async::consts::CapabilityFlags>>) {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut servers = tokio::task::JoinSet::new();
+        servers.spawn(mysql_tls_test_server(listener, vec![reply]));
+        let url =
+            format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled&max_allowed_packet=65536&wait_timeout=60");
+        let result = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await;
+        (result, servers)
+    }
+
     #[tokio::test]
     async fn mysql_caching_sha2_immediate_ok_returns_a_working_pool() {
         // Router may return OK directly after the caching_sha2 handshake response.
@@ -10781,6 +10820,17 @@ mod tests {
         let attempts = servers.join_next().await.unwrap().unwrap();
         assert_eq!(attempts.len(), 1);
         assert!(!attempts[0].contains(mysql_async::consts::CapabilityFlags::CLIENT_SSL));
+        assert!(attempts[0].contains(mysql_async::consts::CapabilityFlags::CLIENT_DEPRECATE_EOF));
+    }
+
+    #[tokio::test]
+    async fn mysql_bare_compatible_connection_uses_legacy_eof_for_doris_login_ok() {
+        let (result, mut servers) = mysql_bare_test_connect(MysqlTlsTestReply::DorisAccept).await;
+        let pool = result.unwrap();
+        pool.disconnect().await.unwrap();
+        let attempts = servers.join_next().await.unwrap().unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert!(!attempts[0].contains(mysql_async::consts::CapabilityFlags::CLIENT_DEPRECATE_EOF));
     }
 
     #[tokio::test]

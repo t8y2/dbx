@@ -10824,7 +10824,7 @@ export default withEnglishFallback({
     tableSelection: "テーブル",
     selectedTables: "{selected}/{total}件選択中",
     selectAllTables: "すべて選択",
-    filterTables: "テーブルを検索...",
+    filterTables: "テーブルを検索（カンマ区切り・/正規表現/対応）...",
     clearTables: "クリア",
     loadingTables: "テーブルを読み込み中...",
     tableLoadError: "テーブルの読み込みに失敗しました: {error}",

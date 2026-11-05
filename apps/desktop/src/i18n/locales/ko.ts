@@ -10887,7 +10887,7 @@ export default withEnglishFallback({
     tableSelection: "테이블",
     selectedTables: "{selected}/{total} 선택됨",
     selectAllTables: "모두 선택",
-    filterTables: "테이블 검색...",
+    filterTables: "테이블 검색(쉼표 구분, /정규식/ 지원)...",
     clearTables: "지우기",
     loadingTables: "테이블 불러오는 중...",
     tableLoadError: "테이블을 불러오는 데 실패했습니다: {error}",

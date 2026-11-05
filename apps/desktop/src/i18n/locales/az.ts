@@ -9576,7 +9576,7 @@ export default withEnglishFallback({
     tableSelection: "Cədvəllər",
     selectedTables: "{selected}/{total} seçilib",
     selectAllTables: "Hamısını seç",
-    filterTables: "Cədvəlləri axtar...",
+    filterTables: "Cədvəlləri axtar (vergüllə ayrılmış və ya /regex/)...",
     clearTables: "Təmizlə",
     loadingTables: "Cədvəllər yüklənir...",
     tableLoadError: "Cədvəlləri yükləmək mümkün olmadı: {error}",

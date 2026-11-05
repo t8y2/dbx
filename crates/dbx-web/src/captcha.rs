@@ -47,17 +47,10 @@ pub enum CaptchaMode {
 }
 
 impl CaptchaMode {
-    /// Read `DBX_WEB_CAPTCHA`; an unrecognised value falls back to `always`
-    /// (failing closed) and is logged so a typo does not silently weaken login.
-    pub fn from_env() -> Self {
-        Self::parse(&std::env::var("DBX_WEB_CAPTCHA").unwrap_or_default())
-    }
-
     pub fn parse(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
             "" | "auto" => Self::Auto,
             "always" | "on" | "1" | "true" => Self::Always,
-            "auto" => Self::Auto,
             "off" | "0" | "false" | "disabled" => Self::Off,
             other => {
                 log::warn!("DBX_WEB_CAPTCHA={other:?} is not always|auto|off; falling back to always");

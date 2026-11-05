@@ -51,13 +51,12 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     catalog: target.catalog,
     tableName: target.tableName,
   };
-  const existingCandidate = findExistingDataTabCandidate(queryStore.tabs, dataTabTarget, {
-    openMode: "default",
-    reuseDataTab: settingsStore.editorSettings.reuseDataTab,
-  });
   const normalizedWhere = normalizeWhereInput(target.whereInput);
-  const existingSameTableTab = existingCandidate?.match === "same-table" && normalizeWhereInput(existingCandidate.tab.whereInput) === normalizedWhere ? existingCandidate.tab : undefined;
+  // Where filters are part of a data tab's identity: pick the first tab whose
+  // predicate also matches instead of always reusing the first filter tab.
+  const existingSameTableTab = queryStore.tabs.find((tab) => findExistingDataTabCandidate([tab], dataTabTarget, { openMode: "default", reuseDataTab: false })?.match === "same-table" && normalizeWhereInput(tab.whereInput) === normalizedWhere);
   if (existingSameTableTab && canActivateExistingDataTableTab(existingSameTableTab, { activateExecuting: false })) {
+    if (options.tableInfoTab !== undefined) existingSameTableTab.tableInfoTab = options.tableInfoTab;
     queryStore.switchTab(existingSameTableTab.id);
     return;
   }

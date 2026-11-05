@@ -2955,6 +2955,44 @@ fn column_default_clause(
     None
 }
 
+fn mysql_default_for_dameng(column: &db::ColumnInfo) -> Option<String> {
+    static CURRENT_TIMESTAMP: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"\ACURRENT_TIMESTAMP(?:\([0-6]?\))?\z").expect("valid timestamp default regex")
+    });
+    let value = column.column_default.as_deref()?;
+    let trimmed = value.trim();
+    let base_type = column.data_type.split(['(', ' ']).next().unwrap_or_default().to_ascii_lowercase();
+    let upper = trimmed.to_ascii_uppercase();
+    if matches!(base_type.as_str(), "timestamp" | "datetime") && CURRENT_TIMESTAMP.is_match(&upper) {
+        return Some(upper.strip_suffix("()").unwrap_or(&upper).to_string());
+    }
+    if column
+        .extra
+        .as_deref()
+        .is_some_and(|extra| extra.split_ascii_whitespace().any(|part| part.eq_ignore_ascii_case("DEFAULT_GENERATED")))
+    {
+        return None;
+    }
+
+    // COLUMN_DEFAULT is the raw string on MySQL. Quote it even when it looks
+    // like NULL or a function, and check integer bounds after type mapping.
+    let compatible_number = match base_type.as_str() {
+        "tinyint" => trimmed.parse::<i8>().is_ok(),
+        "smallint" => trimmed.parse::<i16>().is_ok(),
+        "mediumint" | "int" | "integer" => trimmed.parse::<i32>().is_ok(),
+        "bigint" => trimmed.parse::<i64>().is_ok(),
+        "numeric" | "decimal" | "double" => looks_like_numeric_literal(trimmed),
+        _ => false,
+    };
+    if compatible_number {
+        Some(trimmed.to_string())
+    } else if matches!(base_type.as_str(), "char" | "varchar") && !value.contains('\0') {
+        Some(quote_string_literal(value))
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct MysqlExtraClauses {
     auto_increment: bool,
@@ -4975,7 +5013,38 @@ fn generate_create_table_ddl_with_column_quoting(
     catalog: Option<&str>,
     quote_target_column_names: bool,
 ) -> String {
+    generate_create_table_ddl_with_source_profile(
+        columns,
+        table,
+        source_schema,
+        schema,
+        target_db,
+        source_db,
+        None,
+        table_comment,
+        catalog,
+        quote_target_column_names,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_create_table_ddl_with_source_profile(
+    columns: &[db::ColumnInfo],
+    table: &str,
+    source_schema: &str,
+    schema: &str,
+    target_db: &DatabaseType,
+    source_db: &DatabaseType,
+    source_driver_profile: Option<&str>,
+    table_comment: Option<&str>,
+    catalog: Option<&str>,
+    quote_target_column_names: bool,
+) -> String {
     let full_table = qualified_table(table, schema, target_db, catalog);
+    // MySQL-compatible profiles can return SQL literals instead of raw string values.
+    let preserve_mysql_defaults_in_dameng =
+        matches!((source_db, target_db), (DatabaseType::Mysql, DatabaseType::Dameng))
+            && matches!(source_driver_profile, None | Some("mysql"));
 
     let is_mysql_family = matches!(
         target_db,
@@ -5094,6 +5163,12 @@ fn generate_create_table_ddl_with_column_quoting(
                         {
                             line.push(' ');
                             line.push_str(&default_clause);
+                        }
+                    }
+                    if preserve_mysql_defaults_in_dameng && !skip_default && !column_is_auto_increment(c) {
+                        if let Some(value) = mysql_default_for_dameng(c) {
+                            line.push_str(" DEFAULT ");
+                            line.push_str(&value);
                         }
                     }
                     if !c.is_nullable

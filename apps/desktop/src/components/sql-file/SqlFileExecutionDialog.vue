@@ -1200,84 +1200,77 @@ watch(sqlConnections, () => {
   applyTarget(resolveInitialTarget());
 });
 
-let isRestoringTask = false;
-
 function restoreExecutionFromTask(task: ExportTask) {
-  isRestoringTask = true;
-  try {
-    executionId.value = task.exportId;
-    activeExecutionTask.value = task;
-    const hasPendingTransaction = !!task.sqlFileTxnSessionId;
-    const isExecuting = task.sqlFileIsExecuting ?? (task.status === "Running" && !hasPendingTransaction);
-    const isRunning = isExecuting || task.status === "Cancelling";
-    running.value = isRunning;
-    cancelling.value = task.status === "Cancelling";
-    executionStarted.value = isRunning;
-    manualTransaction.value = task.sqlFileManualTransaction ?? hasPendingTransaction;
-    txnSessionId.value = task.sqlFileTxnSessionId;
-    commitUncertain.value = task.sqlFileCommitUncertain ?? false;
-    resolvingTransaction.value = task.sqlFileResolvingTransaction ?? false;
+  executionId.value = task.exportId;
+  activeExecutionTask.value = task;
+  const hasPendingTransaction = !!task.sqlFileTxnSessionId;
+  const isExecuting = task.sqlFileIsExecuting ?? (task.status === "Running" && !hasPendingTransaction);
+  const isRunning = isExecuting || task.status === "Cancelling";
+  running.value = isRunning;
+  cancelling.value = task.status === "Cancelling";
+  executionStarted.value = isRunning;
+  manualTransaction.value = task.sqlFileManualTransaction ?? hasPendingTransaction;
+  txnSessionId.value = task.sqlFileTxnSessionId;
+  commitUncertain.value = task.sqlFileCommitUncertain ?? false;
+  resolvingTransaction.value = task.sqlFileResolvingTransaction ?? false;
 
-    let mappedStatus: SqlFileStatus = "running";
-    if (task.status === "Done") mappedStatus = "done";
-    else if (task.status === "Error") mappedStatus = "error";
-    else if (task.status === "Cancelled" || task.status === "Cancelling") mappedStatus = "cancelled";
-    else if (task.status === "Running") {
-      mappedStatus = hasPendingTransaction && !isExecuting ? "done" : "running";
-    }
+  let mappedStatus: SqlFileStatus = "running";
+  if (task.status === "Done") mappedStatus = "done";
+  else if (task.status === "Error") mappedStatus = "error";
+  else if (task.status === "Cancelled" || task.status === "Cancelling") mappedStatus = "cancelled";
+  else if (task.status === "Running") {
+    mappedStatus = hasPendingTransaction && !isExecuting ? "done" : "running";
+  }
 
-    terminalStatus.value = mappedStatus;
-    terminalError.value = task.errorMessage || "";
-    failureDetailsExpanded.value = (task.failureCount ?? 0) > 0 || (task.sqlFileFailures?.length ?? 0) > 0;
+  terminalStatus.value = mappedStatus;
+  terminalError.value = task.errorMessage || "";
+  failureDetailsExpanded.value = (task.failureCount ?? 0) > 0 || (task.sqlFileFailures?.length ?? 0) > 0;
 
-    progress.value = {
-      executionId: task.exportId,
-      status: mappedStatus,
-      statementIndex: task.statementIndex ?? 0,
-      successCount: task.successCount ?? 0,
-      failureCount: task.failureCount ?? 0,
-      affectedRows: task.affectedRows ?? 0,
-      elapsedMs: task.elapsedMs ?? 0,
-      bytesRead: task.bytesRead,
-      totalBytes: task.totalBytes,
-      phase: task.sqlFilePhase,
-      statementSummary: task.statementSummary ?? "",
-      error: task.errorMessage || undefined,
-    };
+  progress.value = {
+    executionId: task.exportId,
+    status: mappedStatus,
+    statementIndex: task.statementIndex ?? 0,
+    successCount: task.successCount ?? 0,
+    failureCount: task.failureCount ?? 0,
+    affectedRows: task.affectedRows ?? 0,
+    elapsedMs: task.elapsedMs ?? 0,
+    bytesRead: task.bytesRead,
+    totalBytes: task.totalBytes,
+    phase: task.sqlFilePhase,
+    statementSummary: task.statementSummary ?? "",
+    error: task.errorMessage || undefined,
+  };
 
-    if (task.targetConnectionId) {
-      connectionId.value = task.targetConnectionId;
-    }
-    if (task.targetDatabase) {
-      targetNamespace.value = task.targetSchema ? `${task.targetDatabase}.${task.targetSchema}` : task.targetDatabase;
-    }
+  if (task.targetConnectionId) {
+    connectionId.value = task.targetConnectionId;
+  }
+  if (task.targetDatabase) {
+    targetNamespace.value = task.targetSchema ? `${task.targetDatabase}.${task.targetSchema}` : task.targetDatabase;
+  }
 
-    if (task.sqlFilePreviews && task.sqlFilePreviews.length > 0) {
-      previews.value = [...task.sqlFilePreviews];
-      pathInput.value = task.filePath || "";
-      activePreviewPath.value = previews.value[0]?.filePath || "";
-    } else if (task.filePath || task.tableName) {
-      const fallbackPath = task.filePath || task.tableName;
-      pathInput.value = fallbackPath;
-      previews.value = [
-        {
-          fileName: task.tableName || fallbackPath,
-          filePath: fallbackPath,
-          preview: "",
-          sizeBytes: task.totalBytes ?? 0,
-          canExecuteWithoutSelectedDatabase: false,
-        },
-      ];
-      activePreviewPath.value = fallbackPath;
-    }
+  if (task.sqlFilePreviews && task.sqlFilePreviews.length > 0) {
+    previews.value = [...task.sqlFilePreviews];
+    pathInput.value = task.filePath || "";
+    activePreviewPath.value = previews.value[0]?.filePath || "";
+  } else if (task.filePath || task.tableName) {
+    const fallbackPath = task.filePath || task.tableName;
+    pathInput.value = fallbackPath;
+    previews.value = [
+      {
+        fileName: task.tableName || fallbackPath,
+        filePath: fallbackPath,
+        preview: "",
+        sizeBytes: task.totalBytes ?? 0,
+        canExecuteWithoutSelectedDatabase: false,
+      },
+    ];
+    activePreviewPath.value = fallbackPath;
+  }
 
-    if (task.sqlFilePerFileResults && task.sqlFilePerFileResults.length > 0) {
-      perFileResults.value = [...task.sqlFilePerFileResults];
-    } else {
-      perFileResults.value = [];
-    }
-  } finally {
-    isRestoringTask = false;
+  if (task.sqlFilePerFileResults && task.sqlFilePerFileResults.length > 0) {
+    perFileResults.value = [...task.sqlFilePerFileResults];
+  } else {
+    perFileResults.value = [];
   }
 }
 

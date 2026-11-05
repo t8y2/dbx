@@ -95,6 +95,7 @@ import {
   type DisconnectTabHandlingMode,
   type DeleteConnectionTabHandlingMode,
   type DeepLinkConnectionConfirmMode,
+  type DuplicateTabTitleMode,
   type DataTabReuseMode,
   type DataGridFilterEditorView,
   type DataGridToolbarLayout,
@@ -1032,6 +1033,7 @@ const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(settingsSto
 const editDeleteConnectionTabHandlingMode = ref<DeleteConnectionTabHandlingMode>(settingsStore.editorSettings.deleteConnectionTabHandlingMode);
 const editRememberConnectionDatabaseOnDelete = ref(settingsStore.editorSettings.rememberConnectionDatabaseOnDelete);
 const editDeepLinkConnectionConfirmMode = ref<DeepLinkConnectionConfirmMode>(settingsStore.editorSettings.deepLinkConnectionConfirmMode);
+const editDuplicateTabTitleMode = ref<DuplicateTabTitleMode>(settingsStore.editorSettings.duplicateTabTitleMode);
 // 「记住的连接名 → 数据库」是累积数据而非偏好设置，不进弹窗草稿；这里直接读写 store，
 // 让清除操作立即生效，不受弹窗的保存/取消影响。
 const rememberedConnectionDatabaseCount = computed(() => Object.keys(settingsStore.editorSettings.rememberedConnectionDatabases).length);
@@ -1156,6 +1158,7 @@ const deepLinkConnectionConfirmModeDescriptionKey = computed(() => {
 
   return "deepLinkConnectionConfirmModeAlwaysDescription";
 });
+const duplicateTabTitleModeDescriptionKey = computed(() => (editDuplicateTabTitleMode.value === "connection" ? "duplicateTabTitleModeConnectionDescription" : "duplicateTabTitleModeOrdinalDescription"));
 const normalizedEditTableColumnTemplateFields = computed(() => tableColumnTemplateRowsToSettings(editTableColumnTemplateRows.value));
 const visibleTableColumnTemplateRows = computed(() =>
   editTableColumnTemplateRows.value.filter((row) => {
@@ -1443,6 +1446,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     deleteConnectionTabHandlingMode: editDeleteConnectionTabHandlingMode.value,
     rememberConnectionDatabaseOnDelete: editRememberConnectionDatabaseOnDelete.value,
     deepLinkConnectionConfirmMode: editDeepLinkConnectionConfirmMode.value,
+    duplicateTabTitleMode: editDuplicateTabTitleMode.value,
     dataTabReuseMode: editDataTabReuseMode.value,
     openDataTabsNextToActive: editOpenDataTabsNextToActive.value,
     openTablesInDetachedWindow: editOpenTablesInDetachedWindow.value,
@@ -2159,6 +2163,7 @@ function syncEditorSettingsDraftFromStore() {
   editDeleteConnectionTabHandlingMode.value = settingsStore.editorSettings.deleteConnectionTabHandlingMode;
   editRememberConnectionDatabaseOnDelete.value = settingsStore.editorSettings.rememberConnectionDatabaseOnDelete;
   editDeepLinkConnectionConfirmMode.value = settingsStore.editorSettings.deepLinkConnectionConfirmMode;
+  editDuplicateTabTitleMode.value = settingsStore.editorSettings.duplicateTabTitleMode;
   editDataTabReuseMode.value = settingsStore.editorSettings.dataTabReuseMode;
   editOpenDataTabsNextToActive.value = settingsStore.editorSettings.openDataTabsNextToActive;
   editOpenTablesInDetachedWindow.value = settingsStore.editorSettings.openTablesInDetachedWindow;
@@ -2341,6 +2346,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   deleteConnectionTabHandlingMode: editDeleteConnectionTabHandlingMode,
   rememberConnectionDatabaseOnDelete: editRememberConnectionDatabaseOnDelete,
   deepLinkConnectionConfirmMode: editDeepLinkConnectionConfirmMode,
+  duplicateTabTitleMode: editDuplicateTabTitleMode,
   dataTabReuseMode: editDataTabReuseMode,
   openDataTabsNextToActive: editOpenDataTabsNextToActive,
   openTablesInDetachedWindow: editOpenTablesInDetachedWindow,
@@ -2953,6 +2959,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDeleteConnectionTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.deleteConnectionTabHandlingMode;
     editRememberConnectionDatabaseOnDelete.value = DEFAULT_EDITOR_SETTINGS.rememberConnectionDatabaseOnDelete;
     editDeepLinkConnectionConfirmMode.value = DEFAULT_EDITOR_SETTINGS.deepLinkConnectionConfirmMode;
+    editDuplicateTabTitleMode.value = DEFAULT_EDITOR_SETTINGS.duplicateTabTitleMode;
     editDataTabReuseMode.value = DEFAULT_EDITOR_SETTINGS.dataTabReuseMode;
     editOpenDataTabsNextToActive.value = DEFAULT_EDITOR_SETTINGS.openDataTabsNextToActive;
     editOpenTablesInDetachedWindow.value = DEFAULT_EDITOR_SETTINGS.openTablesInDetachedWindow;
@@ -3187,6 +3194,7 @@ function resetAllDefaults() {
   editDeleteConnectionTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.deleteConnectionTabHandlingMode;
   editRememberConnectionDatabaseOnDelete.value = DEFAULT_EDITOR_SETTINGS.rememberConnectionDatabaseOnDelete;
   editDeepLinkConnectionConfirmMode.value = DEFAULT_EDITOR_SETTINGS.deepLinkConnectionConfirmMode;
+  editDuplicateTabTitleMode.value = DEFAULT_EDITOR_SETTINGS.duplicateTabTitleMode;
   editDataTabReuseMode.value = DEFAULT_EDITOR_SETTINGS.dataTabReuseMode;
   editOpenDataTabsNextToActive.value = DEFAULT_EDITOR_SETTINGS.openDataTabsNextToActive;
   editOpenTablesInDetachedWindow.value = DEFAULT_EDITOR_SETTINGS.openTablesInDetachedWindow;
@@ -10088,6 +10096,26 @@ onUnmounted(() => {
                 </Select>
                 <p class="text-xs text-muted-foreground">
                   {{ t(`settings.${deepLinkConnectionConfirmModeDescriptionKey}`) }}
+                </p>
+              </div>
+              <div class="settings-item space-y-2 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="duplicate-tab-title-mode">{{ t("settings.duplicateTabTitleMode") }}</Label>
+                  <HelpTooltip :label="t('settings.duplicateTabTitleMode')">
+                    {{ t("settings.duplicateTabTitleModeDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Select :model-value="editDuplicateTabTitleMode" @update:model-value="(value) => (editDuplicateTabTitleMode = value as DuplicateTabTitleMode)">
+                  <SelectTrigger id="duplicate-tab-title-mode" class="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ordinal">{{ t("settings.duplicateTabTitleModeOrdinal") }}</SelectItem>
+                    <SelectItem value="connection">{{ t("settings.duplicateTabTitleModeConnection") }}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p class="text-xs text-muted-foreground">
+                  {{ t(`settings.${duplicateTabTitleModeDescriptionKey}`) }}
                 </p>
               </div>
               <div class="settings-item space-y-2 rounded-md border bg-muted/20 px-3 py-2">

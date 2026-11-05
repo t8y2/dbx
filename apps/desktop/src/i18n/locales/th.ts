@@ -12545,6 +12545,12 @@ export default withEnglishFallback({
     deepLinkConnectionConfirmModeUpdateDescription: "ลิงก์ที่มี id จะอัปเดตการเชื่อมต่อที่บันทึกไว้โดยตรง ส่วนการเชื่อมต่อใหม่ยังคงเปิดป๊อปอัปเพื่อรอการยืนยัน",
     deepLinkConnectionConfirmModeAll: "ลิงก์การเชื่อมต่อทั้งหมด",
     deepLinkConnectionConfirmModeAllDescription: "การเชื่อมต่อใหม่และลิงก์อัปเดตที่มี id จะถูกบันทึกโดยตรงโดยไม่ต้องยืนยันอีก หากการตรวจสอบพารามิเตอร์ที่กรอกล่วงหน้าไม่ผ่าน ป๊อปอัปจะยังคงเปิดอยู่ และคุณสามารถกรอกข้อมูลให้ครบด้วยตนเองต่อไปได้",
+    duplicateTabTitleMode: "การแยกแท็บชื่อซ้ำ",
+    duplicateTabTitleModeDescription: "เลือกวิธีแยกแท็บที่มีชื่อเหมือนกัน ใช้เฉพาะเมื่อมีแท็บตั้งแต่สองแท็บขึ้นไปที่แสดงชื่อเดียวกัน",
+    duplicateTabTitleModeOrdinal: "ชื่อวัตถุ + หมายเลข",
+    duplicateTabTitleModeOrdinalDescription: "แสดงเป็น users 1, users 2 … หมายเลขจะคงอยู่กับแท็บจนกว่าจะปิด แม้จะปิดแท็บชื่อซ้ำอื่นก่อนหน้านั้น",
+    duplicateTabTitleModeConnection: "ชื่อวัตถุ + ชื่อการเชื่อมต่อ",
+    duplicateTabTitleModeConnectionDescription: "แสดงเป็น users prod-db, users staging-db … กลับไปใช้หมายเลขเมื่อแท็บชื่อซ้ำอยู่ในการเชื่อมต่อเดียวกัน หรือชื่อเรื่องมีชื่อการเชื่อมต่ออยู่แล้ว",
     shortcutConvertSelectionToDelimited: "แปลงเนื้อหาที่เลือกเป็นรายการที่คั่นด้วยตัวคั่น",
   },
   driverStore: {

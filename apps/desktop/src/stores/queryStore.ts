@@ -8089,10 +8089,10 @@ export const useQueryStore = defineStore("query", () => {
     const countKey = options.countSql ? [options.connectionId, options.database, options.schema ?? "", options.catalog ?? "", options.countSql].join("\u0000") : undefined;
     const pendingCount = pendingQueryTotalCounts.get(options.tabId);
     if (countKey && options.preserveTotalRowCountDuringExecution && pendingCount?.key === countKey) return;
-    // Self-referencing so the promise's own branches can tell whether they are still
-    // the pending count for this tab; a plain const reads as used-before-assigned.
-    let countPromise: Promise<void>;
-    countPromise = (async () => {
+    // The promise's own branches compare themselves with the pending entry for this
+    // tab, so they need a reference that exists before the async body can run.
+    const countHandle: { promise?: Promise<void> } = {};
+    const countPromise = (async () => {
       let isolatedClientSessionId: string | undefined;
       let countTargetSql: string | undefined;
       try {
@@ -8123,8 +8123,8 @@ export const useQueryStore = defineStore("query", () => {
         if (!Number.isFinite(total) || total < 0) {
           const current = tabs.value.find((tab) => tab.id === options.tabId);
           const pendingEntry = countKey ? pendingQueryTotalCounts.get(options.tabId) : undefined;
-          if (countKey && pendingEntry?.promise !== countPromise) return;
-          if (pendingEntry?.promise === countPromise && countTargetSql && current?.resultCountSql === countTargetSql) {
+          if (countKey && pendingEntry?.promise !== countHandle.promise) return;
+          if (pendingEntry?.promise === countHandle.promise && countTargetSql && current?.resultCountSql === countTargetSql) {
             current.resultTotalRowCount = undefined;
             current.resultTotalRowCountLoading = false;
           } else {
@@ -8136,10 +8136,10 @@ export const useQueryStore = defineStore("query", () => {
         // constrains how many of them pagination may load and retain.
         const current = tabs.value.find((tab) => tab.id === options.tabId);
         const pendingEntry = countKey ? pendingQueryTotalCounts.get(options.tabId) : undefined;
-        if (countKey && pendingEntry?.promise !== countPromise) return;
+        if (countKey && pendingEntry?.promise !== countHandle.promise) return;
         // Match on the counted statement, not just the tab: a page whose countSql
         // changed must not publish the previous statement's total.
-        if (pendingEntry?.promise === countPromise && !!countTarget.sql && current?.resultCountSql === countTarget.sql) {
+        if (pendingEntry?.promise === countHandle.promise && !!countTarget.sql && current?.resultCountSql === countTarget.sql) {
           current.resultTotalRowCount = total;
           current.resultTotalRowCountLoading = false;
           if (activeResultRunOwnsDisplayedResult(current)) syncActiveResultRunFromDisplayed(current);
@@ -8154,8 +8154,8 @@ export const useQueryStore = defineStore("query", () => {
       } catch (error) {
         const current = tabs.value.find((tab) => tab.id === options.tabId);
         const pendingEntry = countKey ? pendingQueryTotalCounts.get(options.tabId) : undefined;
-        if (countKey && pendingEntry?.promise !== countPromise) return;
-        if (pendingEntry?.promise === countPromise && countTargetSql && current?.resultCountSql === countTargetSql) {
+        if (countKey && pendingEntry?.promise !== countHandle.promise) return;
+        if (pendingEntry?.promise === countHandle.promise && countTargetSql && current?.resultCountSql === countTargetSql) {
           current.resultTotalRowCount = undefined;
           current.resultTotalRowCountLoading = false;
         } else {
@@ -8172,10 +8172,11 @@ export const useQueryStore = defineStore("query", () => {
         }
       }
     })();
+    countHandle.promise = countPromise;
     if (countKey) {
       pendingQueryTotalCounts.set(options.tabId, { key: countKey, promise: countPromise });
       const clearPendingCount = () => {
-        if (pendingQueryTotalCounts.get(options.tabId)?.promise === countPromise) pendingQueryTotalCounts.delete(options.tabId);
+        if (pendingQueryTotalCounts.get(options.tabId)?.promise === countHandle.promise) pendingQueryTotalCounts.delete(options.tabId);
       };
       void countPromise.then(clearPendingCount, clearPendingCount);
     }

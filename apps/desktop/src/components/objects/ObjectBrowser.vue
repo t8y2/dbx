@@ -305,7 +305,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const cloneDialog = useOceanbaseCloneDialog(t);
 const { state: cloneDialogState, open: cloneDialogOpen } = cloneDialog;
-const { toast } = useToast();
+const { toast, dismissToast } = useToast();
 const { highlight } = useSqlHighlighter();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
@@ -4550,7 +4550,16 @@ function onObjectBrowserKeydown(event: KeyboardEvent) {
 }
 
 async function confirmPasteTable() {
-  return effectiveDatabaseType.value === "oceanbase-oracle" ? cloneDialog.run(confirmPasteTableImpl) : confirmPasteTableImpl();
+  const databaseType = effectiveDatabaseType.value;
+  if (databaseType === "oceanbase-oracle") return cloneDialog.run(confirmPasteTableImpl);
+  if (databaseType === "mysql" || !pasteTableEntries.value.some((entry) => entry.targetName.trim())) return confirmPasteTableImpl();
+
+  const progressToast = toast(`${t("tableCopyTask.title")} · ${t("tableCopyTask.running")}`, { persistent: true, loading: true });
+  try {
+    await confirmPasteTableImpl();
+  } finally {
+    if (progressToast !== undefined) dismissToast(progressToast);
+  }
 }
 
 async function confirmPasteTableImpl() {

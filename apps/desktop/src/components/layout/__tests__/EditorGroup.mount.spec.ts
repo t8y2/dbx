@@ -109,13 +109,11 @@ describe("EditorGroup mount contract", () => {
             activeTabId: activeTabId.value,
             activeTab: tab(activeTabId.value, mode),
             activeConnection: undefined,
-            executableSql: "SELECT 1",
+            hasExecutableSql: true,
             activeOutputView: "result",
             formatSqlRequest: null,
             compressSqlRequest: null,
             keywordCaseRequest: null,
-            selectedSql: "",
-            cursorPos: 0,
             blockDangerousRedisCommands: false,
           });
       },
@@ -170,13 +168,11 @@ describe("EditorGroup mount contract", () => {
       // Global active tab is intentionally different from the group active tab.
       activeTab: tab("tab-a"),
       activeConnection: undefined,
-      executableSql: "SELECT 1",
+      hasExecutableSql: true,
       activeOutputView: "result",
       formatSqlRequest: null,
       compressSqlRequest: null,
       keywordCaseRequest: null,
-      selectedSql: "",
-      cursorPos: 0,
       blockDangerousRedisCommands: false,
     });
     app.use(pinia);
@@ -216,13 +212,11 @@ describe("EditorGroup mount contract", () => {
       activeTabId: queryId,
       activeTab: tab(queryId),
       activeConnection: undefined,
-      executableSql: "SELECT 1",
+      hasExecutableSql: true,
       activeOutputView: "result",
       formatSqlRequest: null,
       compressSqlRequest: null,
       keywordCaseRequest: null,
-      selectedSql: "",
-      cursorPos: 0,
       blockDangerousRedisCommands: false,
     });
     app.provide(EDITOR_TOOLBAR_ACTIONS, actions);
@@ -243,6 +237,8 @@ describe("EditorGroup mount contract", () => {
     (toolbar as any).__vueParentComponent.emit("cancel");
     (toolbar as any).__vueParentComponent.emit("explain");
     (toolbar as any).__vueParentComponent.emit("saveSql", queryId);
+    (toolbar as any).__vueParentComponent.emit("saveSql", queryId, "local");
+    (toolbar as any).__vueParentComponent.emit("saveSql", queryId, "library");
     // #11828: the keyword-case toggle must carry the acting tab, otherwise App
     // cannot tell which editor to re-case (the button used to take no tab).
     (toolbar as any).__vueParentComponent.emit("toggleSqlKeywordCase");
@@ -253,7 +249,9 @@ describe("EditorGroup mount contract", () => {
     expect(actions.toolbarExecuteInNewResultTab).toHaveBeenCalledWith("pointer", queryId);
     expect(actions.cancelExecution).toHaveBeenCalledWith(queryId);
     expect(actions.explain).toHaveBeenCalledWith(queryId);
-    expect(actions.saveSql).toHaveBeenCalledWith(queryId);
+    expect(actions.saveSql).toHaveBeenCalledWith(queryId, undefined);
+    expect(actions.saveSql).toHaveBeenCalledWith(queryId, "local");
+    expect(actions.saveSql).toHaveBeenCalledWith(queryId, "library");
     expect(actions.toggleSqlKeywordCase).toHaveBeenCalledWith(queryId);
 
     // Data tab: no SQL toolbar — the data grid carries its own built-in bar.
@@ -264,13 +262,11 @@ describe("EditorGroup mount contract", () => {
       activeTabId: dataId,
       activeTab: tab(queryId),
       activeConnection: undefined,
-      executableSql: "SELECT 1",
+      hasExecutableSql: true,
       activeOutputView: "result",
       formatSqlRequest: null,
       compressSqlRequest: null,
       keywordCaseRequest: null,
-      selectedSql: "",
-      cursorPos: 0,
       blockDangerousRedisCommands: false,
     });
     app2.provide(EDITOR_TOOLBAR_ACTIONS, actions);

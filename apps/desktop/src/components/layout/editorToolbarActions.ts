@@ -1,4 +1,5 @@
 import type { InjectionKey, Ref } from "vue";
+import type { SqlSaveDestination } from "@/lib/tabs/sqlTabSaveTarget";
 
 /**
  * App-level orchestration behind the per-group SQL editor toolbar.
@@ -40,7 +41,7 @@ export interface EditorToolbarActions {
   compressSql(tabId: string): void;
   /** Flips the keyword-case preference and re-cases the acting tab's editor to match. */
   toggleSqlKeywordCase(tabId: string): void;
-  saveSql(tabId: string): void;
+  saveSql(tabId: string, destination?: SqlSaveDestination): void;
   saveAllTabs(tabIds?: string[]): void;
   openSqlFile(): void;
   importResultArchive(): void;

@@ -1951,6 +1951,7 @@ export default withEnglishFallback({
     copyExtractorJsonArray: "JSON Dizisi",
     copyExtractorSqlInList: "SQL IN Listesi",
     copyExtractorSqlInserts: "SQL Insert",
+    copyExtractorSqlDeletes: "SQL DELETE",
     copyExtractorSqlInsertsWithPrimaryKeys: "SQL Insert (Birincil Anahtarlarla)",
     copyExtractorSqlInsertsWithoutPrimaryKeys: "SQL Insert (Otomatik Oluşturulan Birincil Anahtarlar Olmadan)",
     copyExtractorSqlInsertsWithoutAllPrimaryKeys: "SQL Insert (Hiçbir Birincil Anahtar Olmadan)",

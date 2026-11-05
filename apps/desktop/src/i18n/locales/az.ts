@@ -1953,6 +1953,7 @@ export default withEnglishFallback({
     copyExtractorJsonArray: "JSON massivi",
     copyExtractorSqlInList: "SQL IN siyahısı",
     copyExtractorSqlInserts: "SQL INSERT əmrləri",
+    copyExtractorSqlDeletes: "SQL DELETE əmrləri",
     copyExtractorSqlInsertsWithPrimaryKeys: "SQL INSERT əmrləri (əsas açarlarla)",
     copyExtractorSqlInsertsWithoutPrimaryKeys: "SQL INSERT əmrləri (avtomatik yaradılan əsas açarlarsız)",
     copyExtractorSqlInsertsWithoutAllPrimaryKeys: "SQL INSERT əmrləri (heç bir əsas açar olmadan)",

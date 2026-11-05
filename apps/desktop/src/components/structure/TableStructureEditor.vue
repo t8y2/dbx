@@ -1994,7 +1994,7 @@ function structureColumnSelectionClass(key: string): string {
 
 function normalizedStructureDataType(dataType: string): string {
   return dataTypeBaseInputValue(databaseType.value, dataType)
-    .replace(/["'`\x5b\x5d]/g, "")
+    .replace(/["'`\[\]]/g, "")
     .trim()
     .toLowerCase();
 }

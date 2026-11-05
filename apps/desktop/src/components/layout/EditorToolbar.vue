@@ -1037,7 +1037,6 @@ defineExpose({
     </div>
     <div class="flex shrink-0 items-center gap-2">
       <div class="flex shrink-0 items-center gap-1" :class="{ 'connection-required-prompt': connectionRequiredVisible }">
-        <span v-if="activeConnection?.color" class="h-4 w-1 rounded-full shrink-0" :style="{ backgroundColor: activeConnection.color }" />
         <LightTooltip text="" :disabled="connectionPickerOpen || !activeConnectionDetailRows.length" side="bottom" :side-offset="6" :delay="250" :close-delay="80" surface="popover">
           <ConnectionTreeSelect
             ref="connectionPickerRef"

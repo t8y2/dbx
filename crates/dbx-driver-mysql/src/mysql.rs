@@ -10820,6 +10820,7 @@ mod tests {
         let attempts = servers.join_next().await.unwrap().unwrap();
         assert_eq!(attempts.len(), 1);
         assert!(!attempts[0].contains(mysql_async::consts::CapabilityFlags::CLIENT_SSL));
+        assert!(attempts[0].contains(mysql_async::consts::CapabilityFlags::CLIENT_DEPRECATE_EOF));
     }
 
     #[tokio::test]

@@ -13,7 +13,7 @@ const (
 	maxRPCMessageBytes   = 32 * 1024 * 1024
 )
 
-var capabilities = []string{"connect", "test_connection", "connection_info", "kv"}
+var capabilities = []string{"connect", "test_connection", "connection_info", "kv", "zookeeper_endpoint_routes"}
 
 type rpcRequest struct {
 	ID     json.RawMessage `json:"id"`

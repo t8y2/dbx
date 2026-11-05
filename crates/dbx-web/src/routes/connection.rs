@@ -313,6 +313,26 @@ async fn sync_mongo_legacy_driver_fallback(
     apply_mongo_legacy_driver_profile(state, config).await
 }
 
+/// Temporary ZooKeeper tests own a unique probe ID, including any published pool.
+struct ZooKeeperTestCleanup {
+    pending: Option<(Arc<AppState>, ConnectionConfig)>,
+}
+
+impl Drop for ZooKeeperTestCleanup {
+    fn drop(&mut self) {
+        if let Some((app, config)) = self.pending.take() {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    app.remove_connection_pools(&config.id).await;
+                    app.reset_connection_transport_for_config(&config.id, &config).await;
+                    app.configs.write().await.remove(&config.id);
+                    app.session_credentials.clear_connection(&config.id);
+                });
+            }
+        }
+    }
+}
+
 async fn with_temporary_connection_config<T, F, Fut>(
     app: &Arc<AppState>,
     config: ConnectionConfig,
@@ -334,9 +354,14 @@ where
     let owner = dbx_core::session_credentials::current_credential_owner().unwrap_or_default();
     record_session_credentials(app, &owner, &temp_id, &secrets, false);
     app.configs.write().await.insert(temp_id.clone(), config.clone());
+    let mut cancellation = ZooKeeperTestCleanup {
+        pending: (config.db_type == DatabaseType::ZooKeeper && config.has_effective_transport_layers())
+            .then(|| (app.clone(), config.clone())),
+    };
     let result = test(temp_id.clone(), config).await;
     app.configs.write().await.remove(&temp_id);
     app.session_credentials.clear_connection(&temp_id);
+    cancellation.pending = None;
     result
 }
 
@@ -1676,6 +1701,56 @@ mod tests {
         let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
         let state = Arc::new(WebState::for_tests(app, dir.clone()));
         (state, dir)
+    }
+
+    #[tokio::test]
+    async fn zookeeper_canceled_temporary_test_releases_routes_and_config() {
+        let (state, _dir) = test_web_state().await;
+        let app = state.app.clone();
+        let mut config = sqlite_config("zk-probe", "");
+        config.db_type = DatabaseType::ZooKeeper;
+        config.connection_string = Some("zk1,zk2".into());
+        config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "proxy".into(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".into(),
+            port: 1,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+            profile_id: String::new(),
+        })];
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let scoped_app = app.clone();
+            super::with_temporary_connection_config(&app, config, move |id, config| async move {
+                let attempt = scoped_app.connection_endpoint_attempt(&id, &config).await?;
+                let routes = attempt.endpoint?.zookeeper_endpoint_routes.unwrap();
+                ready_tx.send((id, routes)).unwrap();
+                std::future::pending::<Result<(), String>>().await
+            })
+            .await
+        });
+        let (id, routes) = ready_rx.await.unwrap();
+        worker.abort();
+        assert!(worker.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let removed = !state.app.configs.read().await.contains_key(&id);
+                let mut all_closed = true;
+                for address in routes.values() {
+                    all_closed &= tokio::net::TcpStream::connect(address).await.is_err();
+                }
+                if removed && all_closed {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

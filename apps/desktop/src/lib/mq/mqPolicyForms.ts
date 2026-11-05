@@ -152,6 +152,17 @@ export function megabytesFromRetentionBytes(bytes: number): number {
   return Math.floor(bytes / (1024 * 1024));
 }
 
+export interface RetentionBaseline {
+  time: number | null;
+  size: number | null;
+}
+
+/** 对比当前表单与加载快照，决定哪些字段需要下发；null 与 0 是不同的值。 */
+export function retentionWriteFlags(current: RetentionBaseline, baseline: RetentionBaseline | null): { writeTime: boolean; writeSize: boolean } {
+  if (!baseline) return { writeTime: current.time !== null, writeSize: current.size !== null };
+  return { writeTime: current.time !== baseline.time, writeSize: current.size !== baseline.size };
+}
+
 function normalizeBacklogQuota(value: unknown): Record<string, unknown> | undefined {
   const quota = objectRecord(value);
   if (!Object.keys(quota).length) return undefined;

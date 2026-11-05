@@ -4,7 +4,7 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { BacklogQuota, DispatchRate, MqSystemKind, PolicyScope, PublishRate, RetentionPolicy, SubscribeRate, TopicInfo } from "@/types/mq";
 import { mqGetEffectivePolicies, mqSetBacklogQuota, mqSetDispatchRate, mqSetPublishRate, mqSetRetention, mqSetSubscribeRate } from "@/lib/backend/api";
-import { defaultMqPolicyForms, extractKafkaRetentionConfigs, policyAccessFromEffectivePolicies, policyFormsFromEffectivePolicies, type MqRetentionForm } from "@/lib/mq/mqPolicyForms";
+import { defaultMqPolicyForms, extractKafkaRetentionConfigs, policyAccessFromEffectivePolicies, policyFormsFromEffectivePolicies, retentionWriteFlags, type MqRetentionForm, type RetentionBaseline } from "@/lib/mq/mqPolicyForms";
 import { useMqMutationGuard } from "@/composables/useMqMutationGuard";
 
 interface Props {
@@ -44,6 +44,8 @@ const backlogForm = ref<BacklogQuota>({ ...defaultForms.backlogForm });
 
 const retentionForm = ref<MqRetentionForm>({ ...defaultForms.retentionForm });
 
+/** 加载完成后的表单快照，Kafka 保存时据此判断哪些字段被用户改过。 */
+const retentionBaseline = ref<RetentionBaseline | null>(null);
 /** Kafka broker 返回的 retention.ms / retention.bytes 原始值，用于展示取整前的副文本。 */
 const retentionTimeSourceMs = ref<number>();
 const retentionSizeSourceBytes = ref<number>();
@@ -124,6 +126,9 @@ const retentionSizeHint = computed(() => {
   return "";
 });
 
+/** 加载失败时没有基线，禁止 Kafka 保存，避免把未知字段覆盖成默认值。 */
+const retentionSaveDisabled = computed(() => isKafka.value && retentionBaseline.value === null);
+
 async function guardWritable(operation: string): Promise<boolean> {
   if (props.readOnly) {
     error.value = readOnlyMessage.value;
@@ -137,6 +142,7 @@ async function loadPolicies() {
   const current = scope.value;
   policies.value = undefined;
   policyAccess.value = policyAccessFromEffectivePolicies(undefined);
+  retentionBaseline.value = null;
   retentionTimeSourceMs.value = undefined;
   retentionSizeSourceBytes.value = undefined;
   notice.value = undefined;
@@ -153,6 +159,10 @@ async function loadPolicies() {
     const kafkaRetention = extractKafkaRetentionConfigs(loaded);
     retentionTimeSourceMs.value = kafkaRetention?.timeMs;
     retentionSizeSourceBytes.value = kafkaRetention?.sizeBytes;
+    retentionBaseline.value = {
+      time: hydrated.retentionForm.retentionTimeInMinutes,
+      size: hydrated.retentionForm.retentionSizeInMb,
+    };
   } catch (e: unknown) {
     error.value = formatError(e);
   } finally {
@@ -199,12 +209,32 @@ function saveBacklogQuota() {
 }
 
 function saveRetention() {
-  return applyPolicy(t("mqPolicies.retention"), (scope) =>
-    mqSetRetention(props.connectionId, scope, {
-      retentionTimeInMinutes: numericOrNull(retentionForm.value.retentionTimeInMinutes) ?? -1,
-      retentionSizeInMb: numericOrNull(retentionForm.value.retentionSizeInMb) ?? -1,
-    }),
-  );
+  if (!isKafka.value) {
+    // Pulsar/RocketMQ 维持原行为：两个字段整体提交。
+    return applyPolicy(t("mqPolicies.retention"), (scope) =>
+      mqSetRetention(props.connectionId, scope, {
+        retentionTimeInMinutes: numericOrNull(retentionForm.value.retentionTimeInMinutes) ?? -1,
+        retentionSizeInMb: numericOrNull(retentionForm.value.retentionSizeInMb) ?? -1,
+      }),
+    );
+  }
+
+  // Kafka：以加载快照为基线，只提交用户改过的字段，避免未回显的字段被 -1 覆盖。
+  const minutes = numericOrNull(retentionForm.value.retentionTimeInMinutes);
+  const megabytes = numericOrNull(retentionForm.value.retentionSizeInMb);
+  const { writeTime, writeSize } = retentionWriteFlags({ time: minutes, size: megabytes }, retentionBaseline.value);
+  if (!writeTime && !writeSize) {
+    notice.value = t("mqPolicies.retentionUnchanged");
+    return;
+  }
+
+  const payload: RetentionPolicy = {
+    retentionTimeInMinutes: minutes ?? -1,
+    retentionSizeInMb: megabytes ?? -1,
+    writeRetentionTime: writeTime,
+    writeRetentionSize: writeSize,
+  };
+  return applyPolicy(t("mqPolicies.retention"), (scope) => mqSetRetention(props.connectionId, scope, { ...payload }));
 }
 
 function currentPolicyForms() {
@@ -335,7 +365,7 @@ watch(
             <input v-model.number="retentionForm.retentionSizeInMb" type="number" :disabled="readOnly" />
             <span v-if="isKafka && retentionSizeHint" class="field-hint">{{ retentionSizeHint }}</span>
           </label>
-          <button @click="saveRetention" :disabled="loading || readOnly" class="btn-primary">{{ t("mqPolicies.save") }}</button>
+          <button @click="saveRetention" :disabled="loading || readOnly || retentionSaveDisabled" class="btn-primary">{{ t("mqPolicies.save") }}</button>
         </section>
       </div>
 

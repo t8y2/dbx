@@ -13189,6 +13189,7 @@ export default withEnglishFallback({
     retentionExactMs: "实际值：{ms} ms（按整分钟向下取整展示）",
     retentionExactBytes: "实际值：{bytes} 字节（按整 MB 向下取整展示）",
     retentionLessThanOneMb: "<1 MB（实际 {bytes} 字节）",
+    retentionUnchanged: "没有修改，已跳过下发",
     effectivePolicies: "当前有效策略",
     savedNotice: "{policy}已保存",
   },

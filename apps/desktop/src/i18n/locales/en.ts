@@ -13228,6 +13228,7 @@ export default {
     retentionExactMs: "Actual value: {ms} ms (displayed as whole minutes)",
     retentionExactBytes: "Actual value: {bytes} bytes (displayed as whole MB)",
     retentionLessThanOneMb: "<1 MB (actual {bytes} bytes)",
+    retentionUnchanged: "No changes; nothing was submitted",
     effectivePolicies: "Effective policies",
     savedNotice: "{policy} saved",
   },

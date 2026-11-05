@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultMqPolicyForms, extractKafkaRetentionConfigs, policyAccessFromEffectivePolicies, policyFormsFromEffectivePolicies } from "@/lib/mq/mqPolicyForms";
+import { defaultMqPolicyForms, extractKafkaRetentionConfigs, policyAccessFromEffectivePolicies, policyFormsFromEffectivePolicies, retentionWriteFlags } from "@/lib/mq/mqPolicyForms";
 
 describe("mqPolicyForms", () => {
   it("keeps ordinary policy responses available", () => {
@@ -146,5 +146,21 @@ describe("mqPolicyForms", () => {
       retentionTimeInMinutes: -1,
       retentionSizeInMb: -1,
     });
+  });
+
+  it("submits only the retention fields changed by the user", () => {
+    expect(retentionWriteFlags({ time: 525600, size: 1024 }, { time: 525600, size: 1024 })).toEqual({
+      writeTime: false,
+      writeSize: false,
+    });
+    expect(retentionWriteFlags({ time: -1, size: 1024 }, { time: 525600, size: 1024 })).toEqual({
+      writeTime: true,
+      writeSize: false,
+    });
+    expect(retentionWriteFlags({ time: 0, size: 0 }, { time: null, size: null })).toEqual({
+      writeTime: true,
+      writeSize: true,
+    });
+    expect(retentionWriteFlags({ time: -1, size: null }, null)).toEqual({ writeTime: true, writeSize: false });
   });
 });

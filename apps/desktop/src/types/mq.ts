@@ -404,6 +404,10 @@ export interface BacklogQuota {
 export interface RetentionPolicy {
   retentionTimeInMinutes: number;
   retentionSizeInMb: number;
+  /** Kafka 专用：仅当用户改过保留时间才下发，避免未修改字段被覆盖。 */
+  writeRetentionTime?: boolean;
+  /** Kafka 专用：仅当用户改过保留大小才下发。 */
+  writeRetentionSize?: boolean;
 }
 
 export type AuthAction = "produce" | "consume" | "functions" | "sources" | "sinks" | "packages";

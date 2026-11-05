@@ -710,6 +710,13 @@ fn build_connection_params(cfg: &MqAdminConfig) -> serde_json::Value {
         "tls": tls,
         "properties": properties,
         "request_timeout_ms": cfg.request_timeout_ms(),
+        "connect_timeout_ms": cfg.connect_timeout_ms(),
+        "socks_proxy": cfg.socks_proxy.as_ref().map(|proxy| serde_json::json!({
+            "host": proxy.host,
+            "port": proxy.port,
+            "username": proxy.username,
+            "password": proxy.password,
+        })),
     })
 }
 
@@ -1135,6 +1142,35 @@ mod tests {
         assert_eq!(params.get("sasl_mechanism").and_then(|v| v.as_str()), Some("PLAIN"));
         assert_eq!(params.get("sasl_username").and_then(|v| v.as_str()), Some("alice"));
         assert_eq!(params.get("sasl_password").and_then(|v| v.as_str()), Some("secret"));
+    }
+
+    #[test]
+    fn connection_params_forward_socks_proxy_and_connect_timeout_to_the_agent() {
+        let mut cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        cfg.socks_proxy = Some(crate::mq::config::MqSocksProxy {
+            host: "proxy.internal".to_string(),
+            port: 1080,
+            username: "proxy-user".to_string(),
+            password: "proxy-secret".to_string(),
+        });
+        cfg.connect_timeout_secs = 7;
+
+        let params = build_connection_params(&cfg);
+
+        assert_eq!(params.get("connect_timeout_ms").and_then(|v| v.as_u64()), Some(7_000));
+        assert_eq!(params.pointer("/socks_proxy/host").and_then(|v| v.as_str()), Some("proxy.internal"));
+        assert_eq!(params.pointer("/socks_proxy/port").and_then(|v| v.as_u64()), Some(1080));
+        assert_eq!(params.pointer("/socks_proxy/username").and_then(|v| v.as_str()), Some("proxy-user"));
+        assert_eq!(params.pointer("/socks_proxy/password").and_then(|v| v.as_str()), Some("proxy-secret"));
+    }
+
+    #[test]
+    fn connection_params_omit_socks_proxy_without_a_transport_layer() {
+        let cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+
+        let params = build_connection_params(&cfg);
+
+        assert!(params.get("socks_proxy").is_some_and(serde_json::Value::is_null));
     }
 
     #[test]

@@ -222,8 +222,8 @@ pub(super) async fn list_objects(
                     .await?;
                 (objects, !local_filter)
             } else {
-                let mut guard = client.lock().await;
-                let mut objects: Vec<db::ObjectInfo> = guard
+                let mut client = client.lock().await;
+                let mut objects: Vec<db::ObjectInfo> = client
                     .list_objects_with_options(
                         database,
                         schema,
@@ -235,8 +235,11 @@ pub(super) async fn list_objects(
                         timeout,
                     )
                     .await?;
+                // The Oracle Agent leaves comments NULL in its object list, so the exact
+                // read must join them here the same way the default read does.
                 if is_default_oracle {
-                    load_oracle_table_comments_for_objects(&mut guard, database, schema, &mut objects, timeout).await?;
+                    load_oracle_exact_table_comments_for_objects(&mut client, database, schema, &mut objects, timeout)
+                        .await;
                 }
                 (objects, !local_filter && !filter_locally_after_oracle_comments)
             };

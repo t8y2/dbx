@@ -9,9 +9,10 @@ import { collectSidebarRemoteSearchResults, type SidebarRemoteSearchResult } fro
 import { findNodePathByIdentity, type SidebarRegexIndexScope } from "@/lib/sidebar/sidebarSearchTree";
 import { resolveSidebarSearchDatabaseScope } from "@/lib/sidebar/sidebarSearchDatabaseScope";
 import type { TableInfo, TreeNode } from "@/types/database";
+import { runSidebarSearchTasks } from "../sidebarSearchTaskRunner";
 import { compileConnectionTreeTestScript } from "./connectionTreeTestScript";
 
-const compiled = compileConnectionTreeTestScript(["globalSearchContext", "globalTableSearchScopes", "remoteSearchResults", "loadGlobalTableSearchIndexes", "loadGlobalRemoteSearchResults", "isGlobalTableIndexParent", "discoverGlobalSearchChildren"]);
+const compiled = compileConnectionTreeTestScript(["globalSearchConnectionRoots", "globalSearchContext", "globalTableSearchScopes", "remoteSearchResults", "loadGlobalTableSearchIndexes", "loadGlobalRemoteSearchResults", "isGlobalTableIndexParent", "discoverGlobalSearchChildren"]);
 const cleanups: Array<() => void> = [];
 
 beforeEach(() => vi.useFakeTimers());
@@ -38,7 +39,7 @@ function fixture(display: "grouped" | "simple" = "grouped") {
     loadConnectedConnectionRootForSidebarSearch: vi.fn(),
     loadTreeNodeChildren: vi.fn(async (node: TreeNode) => openDatabase(node)),
     ensureSidebarTableSearchIndex: vi.fn(async (): Promise<TableInfo[]> => [{ name: "late_orders", table_type: "TABLE" }]),
-    searchSidebarObjects: vi.fn(async (node: TreeNode): Promise<TreeNode[]> => [{ id: `${node.id}:routine`, label: "late_routine", type: "procedure", connectionId: "conn", database: node.database }]),
+    searchSidebarObjects: vi.fn(async (node: TreeNode): Promise<TreeNode[]> => [{ id: `${node.id}:routine`, label: "late_routine", type: "procedure", connectionId: node.connectionId, database: node.database }]),
   });
   const onError = vi.fn();
   const bindings = {
@@ -54,6 +55,7 @@ function fixture(display: "grouped" | "simple" = "grouped") {
     useSidebarSearchIndexes,
     useSidebarRemoteSearch,
     collectSidebarGlobalSearchIndexes,
+    runSidebarSearchTasks,
     collectSidebarRemoteSearchResults,
     findNodePathByIdentity,
     sidebarIndexedObjectGroupTypes,
@@ -78,16 +80,108 @@ function fixture(display: "grouped" | "simple" = "grouped") {
     node.children =
       display === "grouped"
         ? [
-            { id: `${node.id}:tables`, label: "Tables", type: "group-tables", connectionId: "conn", database: node.database, isExpanded: false, children: [] },
-            { id: `${node.id}:procedures`, label: "Procedures", type: "group-procedures", connectionId: "conn", database: node.database, isExpanded: false, children: [] },
+            { id: `${node.id}:tables`, label: "Tables", type: "group-tables", connectionId: node.connectionId, database: node.database, isExpanded: false, children: [] },
+            { id: `${node.id}:procedures`, label: "Procedures", type: "group-procedures", connectionId: node.connectionId, database: node.database, isExpanded: false, children: [] },
           ]
-        : [{ id: `${node.id}:first_page`, label: "first_page", type: "table", connectionId: "conn", database: node.database }];
+        : [{ id: `${node.id}:first_page`, label: "first_page", type: "table", connectionId: node.connectionId, database: node.database }];
     node.isExpanded = true;
     loadedIds.add(node.id);
   }
 
   return { ...state, searchQuery, databases, store, settingsStore, queryStore, loadedIds, openDatabase, onError };
 }
+
+function addConnection(view: ReturnType<typeof fixture>, connectionId: string, connected = true) {
+  const database = reactive<TreeNode>({ id: `${connectionId}:app`, label: "app", type: "database", connectionId, database: "app", children: [] });
+  view.store.treeNodes.push({ id: `folder:${connectionId}`, label: "Folder", type: "connection-group", children: [{ id: connectionId, label: connectionId, type: "connection", connectionId, children: [database] }] });
+  view.loadedIds.add(connectionId);
+  if (connected) view.store.connectedIds.add(connectionId);
+  return database;
+}
+
+test.each(["grouped", "simple"] as const)("aggregates same-name tables across connected roots in %s mode without an active connection", async (display) => {
+  const view = fixture(display);
+  view.openDatabase(view.databases[0]);
+  view.openDatabase(addConnection(view, "second"));
+  view.openDatabase(addConnection(view, "offline", false));
+  view.store.activeConnectionId = "";
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    view.searchQuery.value = "late";
+    await vi.advanceTimersByTimeAsync(350);
+    expect(view.globalTableSearchScopes.value.map((scope) => [scope.connectionId, scope.entries[0].name]).sort()).toEqual([
+      ["conn", "late_orders"],
+      ["second", "late_orders"],
+    ]);
+    expect(view.remoteSearchResults.value.map((scope) => scope.connectionId).sort()).toEqual(["conn", "second"]);
+    view.searchQuery.value = "";
+    await vi.advanceTimersByTimeAsync(350);
+  }
+  expect(view.store.loadTreeNodeChildren).not.toHaveBeenCalled();
+  expect(view.onError).not.toHaveBeenCalled();
+});
+
+test("opening a database on an inactive connection refreshes search without resetting on selection changes", async () => {
+  const view = fixture();
+  view.openDatabase(view.databases[0]);
+  const other = addConnection(view, "second");
+  view.searchQuery.value = "late";
+  await vi.advanceTimersByTimeAsync(350);
+  expect(view.globalTableSearchScopes.value.map((scope) => scope.connectionId)).toEqual(["conn"]);
+
+  view.openDatabase(other);
+  await vi.advanceTimersByTimeAsync(350);
+  expect(view.globalTableSearchScopes.value.map((scope) => scope.connectionId).sort()).toEqual(["conn", "second"]);
+  expect(view.remoteSearchResults.value.map((scope) => scope.connectionId).sort()).toEqual(["conn", "second"]);
+  const tableCalls = view.store.ensureSidebarTableSearchIndex.mock.calls.length;
+  const remoteCalls = view.store.searchSidebarObjects.mock.calls.length;
+  view.store.activeConnectionId = "second";
+  await vi.advanceTimersByTimeAsync(350);
+  expect(view.store.ensureSidebarTableSearchIndex).toHaveBeenCalledTimes(tableCalls);
+  expect(view.store.searchSidebarObjects).toHaveBeenCalledTimes(remoteCalls);
+  expect(view.store.loadTreeNodeChildren).not.toHaveBeenCalled();
+});
+
+test.each(["complete", "disconnect"])("publishes a second connection while the first is pending and handles its late %s", async (action) => {
+  const view = fixture();
+  view.openDatabase(view.databases[0]);
+  view.openDatabase(addConnection(view, "second"));
+  let finishIndex!: (entries: TableInfo[]) => void;
+  let finishRemote!: (nodes: TreeNode[]) => void;
+  view.store.ensureSidebarTableSearchIndex.mockImplementationOnce(() => new Promise((resolve) => (finishIndex = resolve)));
+  view.store.searchSidebarObjects.mockImplementationOnce(() => new Promise((resolve) => (finishRemote = resolve)));
+  view.searchQuery.value = "late";
+  await vi.advanceTimersByTimeAsync(350);
+
+  expect(view.globalTableSearchScopes.value.map((scope) => scope.connectionId)).toEqual(["second"]);
+  expect(view.remoteSearchResults.value.map((scope) => scope.connectionId)).toEqual(["second"]);
+  if (action === "disconnect") {
+    view.store.connectedIds.delete("conn");
+    await vi.advanceTimersByTimeAsync(350);
+  }
+  finishIndex([{ name: "late_orders", table_type: "TABLE" }]);
+  finishRemote([{ id: "conn:app:routine", label: "late_routine", type: "procedure", connectionId: "conn", database: "app" }]);
+  await vi.advanceTimersByTimeAsync(0);
+
+  const expected = action === "complete" ? ["conn", "second"] : ["second"];
+  expect(view.globalTableSearchScopes.value.map((scope) => scope.connectionId).sort()).toEqual(expected);
+  expect(view.remoteSearchResults.value.map((scope) => scope.connectionId).sort()).toEqual(expected);
+  expect(view.onError).not.toHaveBeenCalled();
+});
+
+test("keeps another connection's table and routine results when one connection fails", async () => {
+  const view = fixture();
+  view.openDatabase(view.databases[0]);
+  view.openDatabase(addConnection(view, "second"));
+  view.store.loadSidebarTableSearchIndexScopes.mockRejectedValueOnce(new Error("cache unavailable"));
+  view.store.searchSidebarObjects.mockRejectedValueOnce(new Error("metadata unavailable"));
+  view.searchQuery.value = "late";
+  await vi.advanceTimersByTimeAsync(350);
+
+  expect(view.globalTableSearchScopes.value.map((scope) => scope.connectionId)).toEqual(["second"]);
+  expect(view.remoteSearchResults.value.map((scope) => scope.connectionId)).toEqual(["second"]);
+  expect(view.onError).toHaveBeenCalledTimes(2);
+});
 
 test.each(["grouped", "simple"] as const)("indexes a database opened during %s search without clearing the query", async (display) => {
   const view = fixture(display);

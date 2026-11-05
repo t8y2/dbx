@@ -150,6 +150,11 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     @Override
+    protected java.sql.Driver connectionMetadataDriver(String jdbcUrl) throws Exception {
+        return externalDriver == null ? super.connectionMetadataDriver(jdbcUrl) : externalDriver;
+    }
+
+    @Override
     protected void loadDriver(ConnectParams params) throws Exception {
         withSuppressedStdout(() -> {
             if (params.getJdbc_driver_paths() == null || params.getJdbc_driver_paths().isEmpty()) {

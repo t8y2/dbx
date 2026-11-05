@@ -15,7 +15,10 @@ vi.mock("@/stores/connectionStore", async () => {
   mocks.store = reactive(mocks.store);
   return { useConnectionStore: () => mocks.store };
 });
-vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
+vi.mock("vue-i18n", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("vue-i18n")>()),
+  useI18n: () => ({ t: (key: string) => key }),
+}));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 
 import { useDialogSources } from "@/composables/useDialogSources";

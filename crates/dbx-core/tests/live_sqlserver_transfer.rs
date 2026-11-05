@@ -80,6 +80,8 @@ fn live_sqlserver_config(id: &str, database: &str) -> ConnectionConfig {
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
         show_database_links: None,
+        show_native_jobs: None,
+        show_user_admin: None,
         database_info: None,
     }
 }
@@ -958,6 +960,7 @@ async fn live_sqlserver_database_export_replays_composite_foreign_keys() {
         schema: "dbo".to_string(),
         file_path: export_path.to_string_lossy().into_owned(),
         selected_tables: vec!["QRTZ_JOB_DETAILS".to_string(), "QRTZ_TRIGGERS".to_string()],
+        selected_objects: None,
         excluded_tables: Vec::new(),
         include_structure: true,
         include_data: true,
@@ -965,6 +968,7 @@ async fn live_sqlserver_database_export_replays_composite_foreign_keys() {
         include_create_database: false,
         drop_table_if_exists: false,
         omit_auto_increment: false,
+        omit_database_qualifier: false,
         preserve_original_language: false,
         fail_on_error: false,
         prevent_overwrite: false,

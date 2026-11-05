@@ -7,6 +7,7 @@ import AppLogo from "@/components/icons/AppLogo.vue";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import { connectionDriverLabel, connectionIconType, connectionRedactedNameLabel, connectionRedactedOptionSubtitle } from "@/lib/connection/connectionPresentation";
+import { displayAppVersion } from "@/lib/app/promotedBuild";
 import type { WelcomePageMode } from "@/stores/settingsStore";
 import type { ConnectionConfig } from "@/types/database";
 
@@ -50,8 +51,8 @@ const importSourceItems = computed(() => [
   { value: "navicat", label: t("sidebar.importNavicat") },
   { value: "dbeaver", label: t("sidebar.importDbeaver") },
   { value: "datagrip", label: t("sidebar.importDatagrip") },
-  { value: "rdm", label: t("sidebar.importRdm") },
-  { value: "another-redis", label: t("sidebar.importAnotherRedis") },
+  { value: "rdm", label: t("sidebar.importRdm"), tooltip: "RedisDesktopManager" },
+  { value: "another-redis", label: t("sidebar.importAnotherRedis"), tooltip: "Another Redis Desktop Manager" },
 ]);
 
 function selectImportSource(source: string) {
@@ -134,7 +135,7 @@ function welcomeConnectionSubtitle(connection: ConnectionConfig): string {
         </div>
 
         <div class="mt-5 flex flex-wrap items-center justify-center gap-2 text-[10px] text-muted-foreground/60 @2xl:mt-6 @2xl:gap-3 @2xl:text-[11px]">
-          <span>DBX {{ appVersion ? "v" + appVersion : "" }}</span
+          <span>DBX {{ appVersion ? "v" + displayAppVersion(appVersion) : "" }}</span
           ><span>·</span>
           <a href="#" class="hover:text-foreground" @click.prevent="emit('open-github')">GitHub</a>
           <span>·</span><button type="button" class="hover:text-foreground" @click="emit('open-website')">{{ t("welcome.mcpLearnMore") }}</button>
@@ -255,7 +256,7 @@ function welcomeConnectionSubtitle(connection: ConnectionConfig): string {
 
       <!-- Project Info -->
       <div class="mt-2 flex items-center justify-center gap-3 text-[11px] text-muted-foreground/60">
-        <span>DBX {{ appVersion ? "v" + appVersion : "" }}</span>
+        <span>DBX {{ appVersion ? "v" + displayAppVersion(appVersion) : "" }}</span>
         <span>·</span>
         <a href="#" class="hover:text-foreground transition-colors" @click.prevent="emit('open-github')">GitHub</a>
       </div>

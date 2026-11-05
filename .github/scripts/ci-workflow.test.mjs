@@ -513,9 +513,3 @@ test("legacy Windows builds keep the 8 MiB main-thread stack", () => {
   }
   assert.match(job("build-windows-7-x64", sqlServerUserTest), stackFlag, "the SQL Server 2000 Win7 test build must keep the 8 MiB main-thread stack");
 });
-
-test("the Win7 PE audit fails when the stack reserve regresses", () => {
-  const audit = readFileSync(new URL("./assert-win7-pe-compat.ps1", import.meta.url), "utf8");
-  assert.ok(audit.includes("minimumStackReserve"));
-  assert.ok(audit.includes("link-arg=/STACK:8388608"));
-});

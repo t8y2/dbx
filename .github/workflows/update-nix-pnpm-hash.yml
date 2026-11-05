@@ -24,7 +24,20 @@ jobs:
   update:
     runs-on: ubuntu-22.04
     steps:
+      - name: Verify push token
+        env:
+          PUSH_TOKEN: ${{ secrets.MCP_RELEASE_TOKEN || secrets.PROJECT_AUTOMATION_TOKEN }}
+        run: |
+          if [ -z "$PUSH_TOKEN" ]; then
+            echo "::error::No owner PAT configured; the default GITHUB_TOKEN cannot push to the protected main branch."
+            exit 1
+          fi
+
+      # main 的 ruleset 要求改动走 PR，默认 GITHUB_TOKEN 直推会被 GH013 拒掉；
+      # 用 owner PAT 后 push 以 admin 身份命中 ruleset 的 bypass（同 contributors.yml）。
       - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.MCP_RELEASE_TOKEN || secrets.PROJECT_AUTOMATION_TOKEN }}
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22

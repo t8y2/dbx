@@ -1,6 +1,9 @@
 import type { DatabaseType } from "@/types/database";
+import type { MqAdminConfig } from "@/types/mq";
 import type { DeepLinkConnectionConfirmMode } from "@/stores/settingsStore";
 import { connectionProfileForScheme, parseConnectionUrl } from "@/lib/connection/connectionUrl";
+import { buildMqKafkaConnectionExtra, mqKafkaConnectionTarget } from "@/lib/connection/mqKafkaConnection";
+import { parseKafkaBootstrapServers } from "@/lib/connection/kafkaBootstrapServers";
 
 export type ConnectionDeepLinkServiceConfig =
   | { kind: "consul"; serverAddr: string }
@@ -31,6 +34,7 @@ export interface ConnectionDeepLinkDraft {
   useMongoUrl?: boolean;
   oneTime?: boolean;
   serviceConfig?: ConnectionDeepLinkServiceConfig;
+  mqConfig?: MqAdminConfig;
 }
 
 export interface ConnectionDeepLinkUpdatePatch {
@@ -271,6 +275,51 @@ function draftFromConnectionUrl(value: string, preferredProfile?: string): Conne
   };
 }
 
+/** Kafka needs the full bootstrap list and MQ authentication, not SQL URL fields. */
+function kafkaConnectionDraft(params: URLSearchParams): ConnectionDeepLinkDraft {
+  const allowed = new Set(["v", "type", "name", "host", "port", "user", "password", "ssl", "one_time", "bootstrap_servers", "security_protocol", "sasl_mechanism"]);
+  for (const key of params.keys()) {
+    if (!allowed.has(key)) throw new Error(`Unsupported Kafka connection parameter: ${key}`);
+    if (params.getAll(key).length !== 1) throw new Error(`Duplicate Kafka connection parameter: ${key}`);
+    if (params.get(key)!.length > CONNECTION_UPDATE_MAX_PARAM_LENGTH) throw new Error(`Kafka connection ${key} is too long`);
+  }
+  if (params.toString().length > CONNECTION_UPDATE_MAX_URL_LENGTH) throw new Error("Kafka connection parameters are too long");
+  if (params.has("bootstrap_servers") && (params.has("host") || params.has("port"))) {
+    throw new Error("Use bootstrap_servers or host/port for Kafka, not both");
+  }
+  const host = optionalParam(params, "host") || "127.0.0.1";
+  const port = optionalPortParam(params, "port") ?? 9092;
+  const authority = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  const parsed = parseKafkaBootstrapServers(params.has("bootstrap_servers") ? params.get("bootstrap_servers")! : `${authority}:${port}`);
+  // Credentials are opaque; unlike labels and addresses, spaces must survive.
+  const username = params.get("user") ?? "";
+  const password = params.get("password") ?? "";
+  if (password && !username.trim()) throw new Error("Kafka username is required when a password is provided");
+  const mechanism = optionalParam(params, "sasl_mechanism")?.toUpperCase();
+  if (mechanism && !["PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"].includes(mechanism)) throw new Error("Unsupported Kafka SASL mechanism");
+  const ssl = optionalBooleanParam(params, "ssl");
+  const configuredProtocol = optionalParam(params, "security_protocol")?.toUpperCase();
+  const protocol = configuredProtocol || parsed.inferredSecurityProtocol || (username || password || mechanism ? (ssl ? "SASL_SSL" : "SASL_PLAINTEXT") : ssl ? "SSL" : "PLAINTEXT");
+  if (!["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"].includes(protocol)) throw new Error("Unsupported Kafka security protocol");
+  if (configuredProtocol && parsed.inferredSecurityProtocol && configuredProtocol !== parsed.inferredSecurityProtocol) throw new Error("Conflicting Kafka security protocols");
+  const tls = protocol === "SSL" || protocol === "SASL_SSL";
+  if (ssl !== undefined && ssl !== tls) throw new Error("Kafka ssl conflicts with security protocol");
+  const sasl = protocol.startsWith("SASL_");
+  if (!sasl && (username || password || mechanism)) throw new Error("Kafka credentials and SASL mechanism require a SASL security protocol");
+  const input = { connectionSource: "bootstrap" as const, bootstrapServers: parsed.bootstrapServers, zookeeperServers: "", securityProtocol: protocol };
+  const extra = buildMqKafkaConnectionExtra(input);
+  if (sasl) extra.saslMechanism = mechanism || "PLAIN";
+  return {
+    name: optionalParam(params, "name"),
+    dbType: "mq",
+    driverProfile: "kafka",
+    driverLabel: "Apache Kafka",
+    ...mqKafkaConnectionTarget(input),
+    ...(params.has("one_time") ? { oneTime: optionalBooleanParam(params, "one_time") } : {}),
+    mqConfig: { systemKind: "kafka", adminUrl: "", auth: sasl ? { kind: "basic", username, password } : { kind: "none" }, extra },
+  };
+}
+
 export function parseConnectionDeepLink(value: string): ConnectionDeepLinkDraft | null {
   let url: URL;
   try {
@@ -286,6 +335,7 @@ export function parseConnectionDeepLink(value: string): ConnectionDeepLinkDraft 
   if (params.has("id")) throw new Error("Connection update link cannot create a new connection");
   validateProtocolVersion(params);
   const preferredProfile = optionalParam(params, "type")?.toLowerCase();
+  if (preferredProfile === "kafka") return kafkaConnectionDraft(params);
   const rawConnectionUrl = optionalParam(params, "url");
   let serviceType = normalizeServiceType(preferredProfile);
   if (!serviceType && rawConnectionUrl) {

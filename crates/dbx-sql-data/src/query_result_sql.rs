@@ -455,6 +455,15 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
             .unwrap_or_else(|| err("unsupported"));
     }
     if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::Goldendb)) {
+        // The count query runs on a separate pooled session, so a statement that
+        // references session variables (`@a`, `@@version`) counts with a variable
+        // state the user never set there — `WHERE x.id = @a` silently counts 0
+        // instead of the rows the user sees (#13998). Decline the count rather
+        // than reporting a wrong total; strings, comments and quoted identifiers
+        // never hold a variable reference and are skipped.
+        if mysql_statement_references_session_variable(&statement) {
+            return err("session-variable");
+        }
         return mysql_count_sql(&statement)
             .map(|sql| ok(format!("{execution_hint}{sql}")))
             .unwrap_or_else(|| err("unsupported"));
@@ -508,6 +517,142 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
         "{execution_hint}{}",
         derived_table_sql("SELECT COUNT(*) AS dbx_total_rows FROM", &wrapped_sql, &format!("{alias};"))
     ))
+}
+
+/// Whether a **session-dependent** `@` reference appears in `sql` (#13998):
+///
+/// - a user variable (`@a`) resolves per session, so a COUNT executed on a
+///   different pooled session cannot reproduce the caller's rows;
+/// - a system variable with session scope (`@@session.sql_mode`, or the bare
+///   `@@name` form, which defaults to SESSION) is equally session-dependent
+///   unless the user happened to configure it identically — refuse those too;
+/// - truly global, read-only system variables (`@@global.read_only`,
+///   `@@version`, `@@server_id`, …) are reproducible across sessions and keep
+///   counting, which the existing pagination contracts count over.
+///
+/// Quoted strings, comments and quoted identifiers never
+/// hold a live reference — with two MySQL-specific exceptions handled here:
+/// `/*! ... */` is an **executable** comment whose body the server evaluates,
+/// and `--` only starts a comment when followed by whitespace/control chars
+/// (`--@a` is a double negation, not a comment).
+fn mysql_statement_references_session_variable(sql: &str) -> bool {
+    const GLOBAL_ONLY_SYSTEM_VARIABLES: [&str; 10] = [
+        "version",
+        "version_comment",
+        "server_id",
+        "hostname",
+        "port",
+        "socket",
+        "license",
+        "basedir",
+        "datadir",
+        "lower_case_table_names",
+    ];
+    let mut i = 0usize;
+    while i < sql.len() {
+        let ch = next_char(sql, i);
+        let next = next_char_at(sql, i + ch.len_utf8());
+
+        // `-` starts a MySQL comment only when followed by whitespace or the
+        // end of input; `--@a` is a double negation that still executes @a.
+        if ch == '-' && next == Some('-') {
+            let after = next_char_at(sql, i + 2);
+            if after.is_none_or(|c| c.is_ascii_whitespace()) {
+                i += 2;
+                while i < sql.len() && next_char(sql, i) != '\n' {
+                    i += next_char(sql, i).len_utf8();
+                }
+                continue;
+            }
+        }
+
+        if ch == '#' {
+            i += 1;
+            while i < sql.len() && next_char(sql, i) != '\n' {
+                i += next_char(sql, i).len_utf8();
+            }
+            continue;
+        }
+
+        if ch == '/' && next == Some('*') {
+            // `/*! ... */` (optionally version-gated, e.g. /*!50700) is an
+            // executable comment: its body runs on the server, so scan it.
+            if next_char_at(sql, i + 2) == Some('!') {
+                i += 3;
+                continue;
+            }
+            i += 2;
+            while i < sql.len() {
+                let current = next_char(sql, i);
+                let following = next_char_at(sql, i + current.len_utf8());
+                if current == '*' && following == Some('/') {
+                    i += 2;
+                    break;
+                }
+                i += current.len_utf8();
+            }
+            continue;
+        }
+
+        if matches!(ch, '\'' | '"' | '`') {
+            i = skip_sql_quoted(sql, i, ch);
+            continue;
+        }
+
+        if ch == '[' {
+            i = skip_sql_bracket_identifier(sql, i);
+            continue;
+        }
+
+        if ch == '@' {
+            if next == Some('@') {
+                // System variable: parse `@@[scope.]name`. The scope defaults
+                // to SESSION when omitted, so only an explicit `@@global.`
+                // prefix is reproducible across the count's separate session;
+                // global-only variables in the allow list below are equally
+                // reproducible and keep their existing contracts.
+                i += 2;
+                let name_start = i;
+                while i < sql.len() {
+                    let c = next_char(sql, i);
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+                        i += c.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                let first = sql[name_start..i].to_ascii_lowercase();
+                if next_char(sql, i) == '.' {
+                    // `@@<scope>.<name>`: only @@global.* is reproducible.
+                    i += 1;
+                    while i < sql.len() {
+                        let c = next_char(sql, i);
+                        if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+                            i += c.len_utf8();
+                        } else {
+                            break;
+                        }
+                    }
+                    if first != "global" {
+                        return true;
+                    }
+                    continue;
+                }
+                // Bare `@@name` without scope: reproducible only for the
+                // known global-only variables (existing pagination
+                // contracts count over @@server_id).
+                if !GLOBAL_ONLY_SYSTEM_VARIABLES.contains(&first.as_str()) {
+                    return true;
+                }
+                continue;
+            }
+            // A user variable (`@a`) carries session state.
+            return true;
+        }
+
+        i += ch.len_utf8();
+    }
+    false
 }
 
 pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildResult {
@@ -592,12 +737,24 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
         let [Statement::Query(query)] = statements.as_slice() else {
             return err("unsupported");
         };
-        if query.limit_clause.is_some()
+        if options.column_index >= options.result_columns.len() {
+            return err("unsupported");
+        }
+        // Appending ORDER BY after the statement cannot follow the user's
+        // row-limit clause (`... LIMIT 10 ORDER BY` is a syntax error), so a
+        // statement that entered this block on a row limit must not take the
+        // append path. A CTE on an engine that accepts WITH inside a derived
+        // table falls through to the wrapper sort instead; the Oracle family
+        // and SQL Server keep the historical rejection (#13639). Entry reasons
+        // other than the CTE itself (duplicate labels, OceanBase projection
+        // safety) cannot use the wrapper, so they stay rejected.
+        let has_row_limit = query.limit_clause.is_some()
             || query.fetch.is_some()
             || !query.locks.is_empty()
             || has_top_level_rownum(statement)
-            || has_top_level_top(statement)
-            || options.column_index >= options.result_columns.len()
+            || has_top_level_top(statement);
+        if has_row_limit
+            && (!is_cte || !derived_table_allows_cte(options.database_type) || derived_table_rejects_duplicate_labels)
         {
             return err("unsupported");
         }
@@ -608,18 +765,22 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
         if order_by_index.is_none() && query.order_by.is_some() {
             return err("unsupported");
         }
-        return ok(format!(
-            "{execution_hint}{}",
-            append_sql_suffix(
-                statement[..order_by_index.unwrap_or(statement.len())].trim_end(),
-                &format!(
-                    "ORDER BY {} {}{};",
-                    options.column_index + 1,
-                    options.direction.as_sql(),
-                    tie_breaker_indexes.iter().map(|index| format!(", {} ASC", index + 1)).collect::<String>()
-                ),
-            )
-        ));
+        if !has_row_limit {
+            return ok(format!(
+                "{execution_hint}{}",
+                append_sql_suffix(
+                    statement[..order_by_index.unwrap_or(statement.len())].trim_end(),
+                    &format!(
+                        "ORDER BY {} {}{};",
+                        options.column_index + 1,
+                        options.direction.as_sql(),
+                        tie_breaker_indexes.iter().map(|index| format!(", {} ASC", index + 1)).collect::<String>()
+                    ),
+                )
+            ));
+        }
+        // A row-limited CTE on a wrapper-capable engine: fall through to the
+        // derived-table path below, which sorts the limited result set.
     }
 
     let uses_hive_subquery_syntax =
@@ -755,6 +916,42 @@ fn unsupported_pagination_type(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Solr
                 | DatabaseType::CouchDb
                 | DatabaseType::DynamoDb
+        )
+    )
+}
+
+/// Whether the engine accepts a `WITH ... SELECT` statement inside a derived
+/// table (`SELECT * FROM (WITH ... SELECT ...) t`), so a CTE can be sorted by
+/// wrapping instead of appending ORDER BY to its main query. SQL Server, Db2
+/// and the Oracle family reject WITH in a derived table; PostgreSQL, MySQL,
+/// SQLite and ClickHouse accept it. The Hive family also rejects it — "The
+/// WITH clause is not supported within SubQuery Blocks" — which is why the
+/// count path hoists the CTE out instead (`#8535`); engines not yet verified
+/// against a live instance stay excluded so sorting degrades to the
+/// "not sortable" message instead of a server error.
+fn derived_table_allows_cte(database_type: Option<DatabaseType>) -> bool {
+    !matches!(
+        database_type,
+        Some(
+            DatabaseType::Oracle
+                | DatabaseType::OceanbaseOracle
+                | DatabaseType::Dameng
+                | DatabaseType::Yashandb
+                | DatabaseType::Gaussdb
+                | DatabaseType::Kingbase
+                | DatabaseType::Oscar
+                | DatabaseType::Xugu
+                | DatabaseType::SqlServer
+                | DatabaseType::Iris
+                | DatabaseType::SapHana
+                | DatabaseType::Hive
+                | DatabaseType::Argo
+                | DatabaseType::Impala
+                | DatabaseType::Db2
+                | DatabaseType::Teradata
+                | DatabaseType::Firebird
+                | DatabaseType::Informix
+                | DatabaseType::Gbase8s
         )
     )
 }
@@ -6239,6 +6436,139 @@ WHERE u.id = picked.id;
     }
 
     #[test]
+    fn mysql_count_query_declines_variables_between_mysql_dollar_identifiers() {
+        let sql = "SELECT * FROM (SELECT 1 AS `a$a$`) t WHERE a$a$ + @x + a$a$ = 4";
+        assert!(mysql_statement_references_session_variable(sql));
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::Mysql),
+        });
+        assert!(!result.ok, "MySQL identifier dollars are not dollar-quoted strings");
+    }
+
+    #[test]
+    fn mysql_count_query_declines_session_variables() {
+        for sql in [
+            "SELECT x.id FROM table_x x WHERE x.id=@a",
+            // A multi-statement script never counted (single-statement guard);
+            // pinned here so the variable guard cannot loosen it either.
+            "SET @a=1; SELECT x.id FROM table_x x WHERE x.id=@a",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+            assert!(!result.ok, "expected a declined count for {sql}");
+            assert_eq!(result.sql, None, "declined count for {sql} must not carry SQL");
+        }
+    }
+
+    #[test]
+    fn mysql_count_query_allows_system_variables_and_at_signs_outside_variables() {
+        for sql in [
+            // System variables are server-scoped and reproducible on the count
+            // session; counting over them is an existing contract.
+            "SELECT @@version",
+            "SELECT 'a@b.com' AS email FROM table_x",
+            "SELECT `col@name` FROM table_x",
+            "SELECT /* @a */ id FROM table_x WHERE id = 1",
+            "SELECT id FROM table_x WHERE email = 'x@y' AND id = 1",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+            assert!(result.ok, "an @ outside a user variable must still count: {sql}");
+            assert!(result.sql.unwrap_or_default().contains("COUNT(*)"), "{sql}");
+        }
+    }
+
+    // Review round for #14005: the scanner must speak MySQL's comment dialect —
+    // `/*! ... */` is executable, `--` needs a trailing space, and `@@scope.`
+    // decides reproducibility — verified against a live MySQL 8 server.
+    #[test]
+    fn mysql_count_query_declines_executable_comment_bodies() {
+        for sql in ["SELECT id FROM t WHERE id = /*! @a */", "SELECT id FROM t WHERE id = /*!50700 @a */"] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+            assert!(!result.ok, "executable comment bodies still execute @a: {sql}");
+            assert_eq!(result.sql, None, "declined count for {sql} must not carry SQL");
+        }
+    }
+
+    #[test]
+    fn mysql_count_query_declines_double_dash_without_trailing_space() {
+        // MySQL: `--@a` without whitespace is a double negation, not a comment,
+        // so @a still participates and the count would be wrong.
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "SELECT id FROM t WHERE id = 1--@a".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+        });
+        assert!(!result.ok);
+        assert_eq!(result.sql, None);
+    }
+
+    #[test]
+    fn mysql_count_query_skips_real_comments_with_trailing_space() {
+        for sql in ["SELECT id FROM t WHERE id = 1 -- @a", "SELECT id FROM t WHERE name = 'x@y' -- note"] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+            assert!(result.ok, "a real comment must not trip the variable guard: {sql}");
+            assert!(result.sql.unwrap().contains("COUNT(*)"), "{sql}");
+        }
+    }
+
+    #[test]
+    fn mysql_count_query_declines_session_scoped_system_variables() {
+        for sql in [
+            "SELECT id FROM t WHERE @@session.sql_mode IS NOT NULL",
+            "SELECT id FROM t WHERE @@session.time_zone = '+08:00'",
+            "SELECT id FROM t WHERE id = @@local.max_allowed_packet",
+            // Bare `@@name` defaults to SESSION scope.
+            "SELECT id FROM t WHERE id = @@some_session_var",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+            assert!(!result.ok, "session-scoped system variables must decline the count: {sql}");
+        }
+    }
+
+    #[test]
+    fn mysql_count_query_allows_global_scoped_and_known_global_variables() {
+        for sql in [
+            "SELECT id FROM t WHERE @@global.read_only = 0",
+            "SELECT @@server_id",
+            "SELECT @@version",
+            "SELECT @@global.version_comment",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+            assert!(result.ok, "global/known-global variables keep counting: {sql}");
+        }
+    }
+
+    #[test]
+    fn mysql_count_query_still_wraps_plain_selects() {
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "SELECT x.id FROM table_x x WHERE x.id = 1".to_string(),
+            database_type: Some(DatabaseType::Mysql),
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT COUNT(*) AS dbx_total_rows FROM (SELECT x.id FROM table_x x WHERE x.id = 1) `dbx_count`;"
+        );
+    }
+
+    #[test]
     fn iris_count_query_injects_count_for_simple_select() {
         let result = build_count_query_sql(CountQuerySqlOptions {
             original_sql: "select * from PA_Adm".to_string(),
@@ -7976,16 +8306,126 @@ WHERE u.id = picked.id;
     }
 
     #[test]
+    fn sorts_with_query_with_limit_by_wrapping_the_whole_statement() {
+        // A CTE whose main query ends in a row limit cannot take an appended
+        // ORDER BY (`... LIMIT 10 ORDER BY` is a syntax error), so engines that
+        // accept WITH inside a derived table wrap the whole statement and sort
+        // the limited result set (#13639).
+        let result = sorted_cte_sql(
+            "with tmp_fr as (select 1 as a) select a from tmp_fr limit 10",
+            Some(DatabaseType::Postgres),
+            &["a"],
+            0,
+            QuerySortDirection::Asc,
+            Vec::new(),
+        );
+
+        assert_eq!(
+            result,
+            ok("SELECT * FROM (with tmp_fr as (select 1 as a) select a from tmp_fr limit 10) t(\"a\") ORDER BY \"a\" ASC;"
+                .to_string())
+        );
+    }
+
+    #[test]
+    fn sorts_with_query_with_fetch_or_lock_by_wrapping_on_capable_engines() {
+        let result = sorted_cte_sql(
+            "WITH cte AS (SELECT 1 AS id) SELECT id FROM cte FETCH FIRST 10 ROWS ONLY",
+            Some(DatabaseType::Postgres),
+            &["id"],
+            0,
+            QuerySortDirection::Desc,
+            Vec::new(),
+        );
+        assert_eq!(
+            result,
+            ok("SELECT * FROM (WITH cte AS (SELECT 1 AS id) SELECT id FROM cte FETCH FIRST 10 ROWS ONLY) t(\"id\") ORDER BY \"id\" DESC;"
+                .to_string())
+        );
+
+        // A locking clause rides along into the wrapper: the lock applies to
+        // the inner query and the outer sort keeps the limited rows (#13639).
+        let result = sorted_cte_sql(
+            "WITH cte AS (SELECT 1 AS id) SELECT id FROM cte LIMIT 5 FOR UPDATE",
+            Some(DatabaseType::Postgres),
+            &["id"],
+            0,
+            QuerySortDirection::Asc,
+            Vec::new(),
+        );
+        assert_eq!(
+            result,
+            ok("SELECT * FROM (WITH cte AS (SELECT 1 AS id) SELECT id FROM cte LIMIT 5 FOR UPDATE) t(\"id\") ORDER BY \"id\" ASC;"
+                .to_string())
+        );
+    }
+
+    #[test]
+    fn derived_table_cte_exclusions_track_the_count_path_special_cases() {
+        // The count path already hoists the CTE out for Hive (#8535) and wraps
+        // Db2 specially because both engines reject `WITH` inside a derived
+        // table; the sort wrapper must not feed them that shape.
+        for database_type in [DatabaseType::Hive, DatabaseType::Argo, DatabaseType::Impala, DatabaseType::Db2] {
+            assert!(
+                !derived_table_allows_cte(Some(database_type)),
+                "{database_type:?} must stay excluded from CTE-in-derived-table sorting"
+            );
+        }
+        for database_type in [DatabaseType::Postgres, DatabaseType::Mysql, DatabaseType::Sqlite] {
+            assert!(derived_table_allows_cte(Some(database_type)));
+        }
+    }
+
+    #[test]
+    fn rejects_with_query_sorting_for_cte_rejecting_engines() {
+        // Hive rejects WITH inside subquery blocks outright and Db2's
+        // fullselect grammar has no nested WITH (SQL0199N), so a row-limited
+        // CTE stays unsupported there instead of producing a server error.
+        for (original_sql, database_type) in [
+            ("WITH cte AS (SELECT 1 AS id) SELECT id FROM cte LIMIT 10", DatabaseType::Hive),
+            ("WITH cte AS (SELECT 1 AS id) SELECT id FROM cte FETCH FIRST 10 ROWS ONLY", DatabaseType::Db2),
+        ] {
+            let result =
+                sorted_cte_sql(original_sql, Some(database_type), &["id"], 0, QuerySortDirection::Asc, Vec::new());
+            assert_eq!(result, err("unsupported"), "unexpected sort result for {database_type:?}");
+        }
+    }
+
+    #[test]
+    fn sorts_with_query_with_limit_by_wrapping_for_mysql() {
+        let result = sorted_cte_sql(
+            "with tmp as (select 1 as a) select a from tmp limit 10",
+            Some(DatabaseType::Mysql),
+            &["a"],
+            0,
+            QuerySortDirection::Asc,
+            Vec::new(),
+        );
+
+        assert_eq!(
+            result,
+            ok("SELECT * FROM (with tmp as (select 1 as a) select a from tmp limit 10) t ORDER BY `a` ASC;"
+                .to_string())
+        );
+    }
+
+    #[test]
     fn rejects_with_query_sorting_when_order_by_cannot_be_appended() {
         for (original_sql, database_type, reason) in [
-            ("WITH cte AS (SELECT 1 AS id) SELECT id FROM cte LIMIT 10", Some(DatabaseType::Postgres), "unsupported"),
+            // Engines that reject WITH inside a derived table have no wrapper
+            // fallback, so a row-limited CTE main query stays unsupported.
+            ("WITH cte AS (SELECT 1 AS id) SELECT id FROM cte LIMIT 10", Some(DatabaseType::Oracle), "unsupported"),
             (
                 "WITH cte AS (SELECT 1 AS id) SELECT id FROM cte FETCH FIRST 10 ROWS ONLY",
                 Some(DatabaseType::Oracle),
                 "unsupported",
             ),
             ("WITH cte AS (SELECT 1 AS id) SELECT TOP 10 id FROM cte", Some(DatabaseType::SqlServer), "unsupported"),
-            ("WITH cte AS (SELECT 1 AS id) SELECT id FROM cte FOR UPDATE", Some(DatabaseType::Mysql), "unsupported"),
+            (
+                "WITH cte AS (SELECT 1 AS id) SELECT id FROM cte FOR UPDATE",
+                Some(DatabaseType::SqlServer),
+                "unsupported",
+            ),
             ("WITH cte AS (SELECT 1 AS id) SELECT id INTO #ids FROM cte", Some(DatabaseType::SqlServer), "with"),
             (
                 "WITH cte AS (SELECT 1 AS id) DELETE FROM users WHERE id IN (SELECT id FROM cte)",

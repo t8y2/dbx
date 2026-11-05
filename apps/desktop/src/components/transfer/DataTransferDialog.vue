@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -63,7 +64,7 @@ import { decodeTransferDatabaseOption, encodeTransferDatabaseOptions, formatTran
 import { formatDatabaseLabel } from "@/lib/database/defaultDatabase";
 import { DEFAULT_QUERY_TIMEOUT_SECS, MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import { databaseOptionsForConnection, fetchCatalogNamespaceOptions, fetchNamespaceOptionsForConnection, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
-import { useExportTracker } from "@/composables/useExportTracker";
+import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
 import { openDataTransferTask, openSchemaDiffSession } from "@/composables/useDialogSources";
 import { startSchemaDiffSession } from "@/composables/useSchemaDiffSession";
 import { createSchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
@@ -89,11 +90,27 @@ const props = defineProps<{
   prefillTargetDatabase?: string;
   prefillTargetSchema?: string;
   taskId?: string | null;
+  reexecuteTask?: ExportTask | null;
 }>();
 
+const emit = defineEmits<{
+  (e: "update:taskId", value: string | null): void;
+  (e: "update:reexecuteTask", value: ExportTask | null): void;
+}>();
+
+const activeTrackingTaskId = ref<string | null | undefined>(props.taskId);
+const isReexecuting = ref(false);
+watch(
+  () => props.taskId,
+  (val) => {
+    activeTrackingTaskId.value = val;
+  },
+);
+
 const trackedTransferTask = computed(() => {
-  if (!props.taskId) return undefined;
-  return tasks.value.find((task) => task.exportId === props.taskId && task.kind === "data-transfer");
+  const id = activeTrackingTaskId.value;
+  if (!id) return undefined;
+  return tasks.value.find((task) => task.exportId === id && task.kind === "data-transfer");
 });
 
 const transferDialogStyle = {
@@ -108,7 +125,7 @@ const transferDialogStyle = {
 const store = useConnectionStore();
 const DEFAULT_TRANSFER_OPERATION_TIMEOUT_SECS = 600;
 
-const sqlConnections = computed(() => store.connections.filter((c) => supportsTransfer(transferDatabaseTypeForConnection(c))));
+const sqlConnections = computed(() => store.connections.filter((c) => !mysqlDataCharsetEnabled(c) && supportsTransfer(transferDatabaseTypeForConnection(c))));
 const sourceConnections = computed(() => {
   const targetType = transferDatabaseTypeForConnection(store.getConfig(targetConnectionId.value));
   return sqlConnections.value.filter((connection) => isTransferPairSupported(transferDatabaseTypeForConnection(connection), targetType));
@@ -420,6 +437,7 @@ const operationTimeoutHint = computed(() => {
 });
 
 const canStart = computed(() => {
+  if (mysqlDataCharsetEnabled(store.getConfig(sourceConnectionId.value)) || mysqlDataCharsetEnabled(store.getConfig(targetConnectionId.value))) return false;
   const effectiveSourceSchema = sourceSchema.value || sourceDatabaseName.value;
   const effectiveTargetSchema = targetSchema.value || targetDatabaseName.value;
   const sameCatalogAndDatabase = isSameTransferDatabase(
@@ -849,6 +867,10 @@ watch(
   [open, () => props.taskId],
   async ([val, taskId]) => {
     if (!val || taskId) return;
+    if (isReexecuting.value) {
+      isReexecuting.value = false;
+      return;
+    }
     void taskStore.initFromStorage();
     if (currentConfig().oraclePackageDrafts?.length) {
       const sameContext = [
@@ -1068,6 +1090,7 @@ function runTransfer(request: api.TransferRequest, shouldRefreshTargetTree: bool
     formatOverlapError: (tables) => t("transfer.targetTableBusy", { tables: tables.join(", ") }),
     onStarted: () => toast(t("transfer.backgroundStarted")),
     onOpen: () => openDataTransferTask(request.transferId),
+    openTask: (taskId: string) => openDataTransferTask(taskId),
     onDone: async () => {
       if (shouldRefreshTargetTree) {
         await store.refreshObjectListTreeNode(request.targetConnectionId, request.targetDatabase, request.targetSchema, request.targetCatalog);
@@ -1183,20 +1206,52 @@ watch(
 watch(
   () => {
     const connection = store.getConfig(targetConnectionId.value);
-    return JSON.stringify([connection?.read_only, connection?.is_production, connection?.production_databases]);
+    return JSON.stringify([connection?.read_only, connection?.is_production, connection?.production_databases, mysqlDataCharsetEnabled(connection), mysqlDataCharsetEnabled(store.getConfig(sourceConnectionId.value))]);
   },
   cancelPendingTransfer,
   { flush: "sync" },
 );
 onBeforeUnmount(cancelPendingTransfer);
 
-/** Applies a saved task to the form, loading catalogs/databases/schemas/objects with explicit awaits. */
-async function loadTaskIntoForm(task: TransferTask) {
-  const taskLoadToken = taskLoadTracker.begin(task.id);
+/** Builds a serializable transfer configuration from an existing transfer request. */
+function transferConfigFromRequest(request: api.TransferRequest): TransferTaskConfig {
+  const objects: Partial<Record<TransferObjectKind, string[]>> = {};
+  if (request.objects?.length) {
+    for (const sel of request.objects) {
+      if (sel.names?.length) objects[sel.objectType] = [...sel.names];
+    }
+  } else if (request.tables?.length) {
+    objects.TABLE = [...request.tables];
+  }
+  return {
+    sourceConnectionId: request.sourceConnectionId,
+    sourceCatalog: request.sourceCatalog,
+    sourceDatabase: request.sourceDatabase,
+    sourceSchema: request.sourceSchema,
+    targetConnectionId: request.targetConnectionId,
+    targetCatalog: request.targetCatalog,
+    targetDatabase: request.targetDatabase,
+    targetSchema: request.targetSchema,
+    objects,
+    content: request.content,
+    mode: request.mode,
+    dropTargetBeforeCreate: request.dropTargetBeforeCreate,
+    dropTargetConfirmed: false,
+    targetTableNameCase: request.targetTableNameCase,
+    targetColumnNameCase: request.targetColumnNameCase ?? "preserve",
+    quoteTargetColumnNames: request.quoteTargetColumnNames,
+    batchSize: request.batchSize,
+    operationTimeoutSecs: request.operationTimeoutSecs,
+    tableFilters: request.tableFilters ? { ...request.tableFilters } : undefined,
+  };
+}
+
+async function loadConfigIntoForm(config: TransferTaskConfig, taskId = "") {
+  const loadId = taskId || `config-${Date.now()}`;
+  const taskLoadToken = taskLoadTracker.begin(loadId);
   const isTaskLoadStale = () => !taskLoadTracker.isCurrent(taskLoadToken, activeTaskId.value);
-  const config = task.config;
   resetState(false);
-  activeTaskId.value = task.id;
+  activeTaskId.value = loadId;
   transferContent.value = config.content;
   selectedStrategy.value = resolveTransferStrategy(config);
   targetTableNameCase.value = config.targetTableNameCase;
@@ -1281,7 +1336,33 @@ async function loadTaskIntoForm(task: TransferTask) {
   if (isTaskLoadStale()) return;
   savedPackageDrafts.value = config.oraclePackageDrafts?.length ? { context: packageDraftContext(config), drafts: JSON.parse(JSON.stringify(config.oraclePackageDrafts)) } : null;
   savedConfigSnapshot.value = configSnapshot(currentConfig());
+  if (!taskId) activeTaskId.value = "";
 }
+
+/** Applies a saved task to the form, loading catalogs/databases/schemas/objects with explicit awaits. */
+async function loadTaskIntoForm(task: TransferTask) {
+  return loadConfigIntoForm(task.config, task.id);
+}
+
+async function handleReexecuteTask(task: ExportTask) {
+  if (!task.dataTransferRequest || isSubmitting.value) return;
+  isReexecuting.value = true;
+  activeTrackingTaskId.value = null;
+  emit("update:taskId", null);
+  const config = transferConfigFromRequest(task.dataTransferRequest);
+  await loadConfigIntoForm(config);
+  await requestStartTransfer();
+}
+
+watch(
+  () => props.reexecuteTask,
+  async (task) => {
+    if (!task) return;
+    emit("update:reexecuteTask", null);
+    if (!trackedTransferTask.value && isSubmitting.value) return;
+    await handleReexecuteTask(task);
+  },
+);
 
 /** Runs the action immediately, or asks for confirmation when the form has unsaved changes. */
 function requestDiscardableAction(action: () => void) {
@@ -1357,8 +1438,8 @@ const confirmationDetails = computed(() => {
   if (!preview || !request) return "";
   const lines = [confirmationSummary.value];
   if (preview.rebuild) {
-    const missingTargets = preview.rebuild.tables.some((table) => !table.backupTable);
-    if (!preview.structure) lines.push(t("transfer.rebuildSummary", { count: preview.rebuild.tables.length }));
+    const missingTargets = (preview.rebuild.tables ?? []).some((table) => !table.backupTable);
+    if (!preview.structure) lines.push(t("transfer.rebuildSummary", { count: preview.rebuild.tables?.length ?? 0 }));
     if (missingTargets) lines.push(t("transfer.rebuildMissingTargets"));
   }
   if (preview.structure) {
@@ -1687,7 +1768,7 @@ async function saveConfigTask() {
 </script>
 
 <template>
-  <DataTransferProgressDialog v-if="trackedTransferTask" v-model:open="open" :task="trackedTransferTask" />
+  <DataTransferProgressDialog v-if="trackedTransferTask" v-model:open="open" :task="trackedTransferTask" @reexecute="handleReexecuteTask(trackedTransferTask)" />
   <Dialog v-else v-model:open="open">
     <DialogContent class="dbx-transfer-dialog sm:max-w-[1120px] max-h-[80vh] flex flex-col overflow-hidden resize" :style="transferDialogStyle" @interact-outside.prevent>
       <DialogHeader class="shrink-0">
@@ -1981,6 +2062,7 @@ async function saveConfigTask() {
       </div>
 
       <DialogFooter class="shrink-0">
+        <p v-if="mysqlDataCharsetEnabled(store.getConfig(sourceConnectionId)) || mysqlDataCharsetEnabled(store.getConfig(targetConnectionId))" class="text-xs text-muted-foreground">{{ t("connection.mysqlDataCharsetExportHint") }}</p>
         <Button variant="outline" size="sm" @click="open = false">
           {{ t("transfer.cancel") }}
         </Button>

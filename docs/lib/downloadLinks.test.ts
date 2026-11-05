@@ -85,3 +85,19 @@ test("browser static package opens one guide with both architecture downloads", 
     ],
   );
 });
+
+test("channel releases link into their immutable stable directory by release tag", () => {
+  const options = createInstallOptions("en", "0.6.63", "v0.6.63-beta.20261101.3");
+
+  assert.ok(options.every((option) => option.href.startsWith("https://dl.dbxio.com/releases/stable/v0.6.63-beta.20261101.3/DBX_0.6.63_")));
+  assert.equal(
+    options.find((option) => option.id === "linux")?.href,
+    "https://dl.dbxio.com/releases/stable/v0.6.63-beta.20261101.3/DBX_0.6.63_amd64.AppImage?v=0.6.63",
+  );
+});
+
+test("a release tag outside the published tag formats falls back to the versioned directory", () => {
+  const options = createInstallOptions("en", "0.6.63", "../latest");
+
+  assert.ok(options.every((option) => option.href.startsWith("https://dl.dbxio.com/releases/v0.6.63/DBX_0.6.63_")));
+});

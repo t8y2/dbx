@@ -18,6 +18,20 @@ describe("exact metadata transports", () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
+  test.each([true, false, undefined])("both object transports preserve lightweight=%s", async (lightweight) => {
+    const options = lightweight === undefined ? undefined : { lightweight };
+    await tauri.listObjects("conn", "db", "db", undefined, undefined, undefined, undefined, undefined, undefined, undefined, options);
+    await http.listObjects("conn", "db", "db", undefined, undefined, undefined, undefined, undefined, undefined, undefined, options);
+    const url = new URL(String(vi.mocked(fetch).mock.calls[0][0]), "http://localhost");
+    if (lightweight === undefined) {
+      expect(invoke.mock.calls[0][1]).not.toHaveProperty("lightweight");
+      expect(url.searchParams.has("lightweight")).toBe(false);
+    } else {
+      expect(invoke.mock.calls[0][1]).toHaveProperty("lightweight", lightweight);
+      expect(url.searchParams.get("lightweight")).toBe(String(lightweight));
+    }
+  });
+
   const calls = [
     ["tables", (api: typeof tauri | typeof http, exact?: boolean) => api.listTables("conn", "db", owner, "Ix", 2, 1, ["TABLE"], undefined, undefined, exact)],
     ["objects", (api: typeof tauri | typeof http, exact?: boolean) => api.listObjects("conn", "db", owner, ["INDEX"], "Ix", 2, 1, undefined, undefined, "request", exact)],

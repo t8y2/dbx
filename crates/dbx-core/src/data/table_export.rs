@@ -64,6 +64,8 @@ pub struct TableExportRequest {
     pub insert_dialect: SqlInsertDialect,
     #[serde(default)]
     pub csv_quote_mode: CsvQuoteMode,
+    #[serde(default)]
+    pub csv_without_bom: bool,
     /// CSV 里 NULL 写成什么。默认 `\N`；空字符串表示关闭该字面量，
     /// 退回「NULL 写成空字段」的旧行为（此时 NULL 与空字符串在文件里无法区分）。
     #[serde(default = "dbx_formats::csv_export::default_csv_null_literal")]
@@ -735,6 +737,7 @@ async fn fetch_table_export_batch(
     }
     if *table_read_completed {
         return Ok(QueryResult {
+            raw_key_cells: Vec::new(),
             columns: col_names.to_vec(),
             column_types: Vec::new(),
             deferred_large_value_cells: Vec::new(),
@@ -1191,7 +1194,9 @@ async fn try_export_native_table_stream(
             let mut file = BufWriter::new(
                 std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?,
             );
-            file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
+            if !request.csv_without_bom {
+                file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
+            }
             let header = format_csv_with_options(
                 col_names,
                 &[],
@@ -1608,6 +1613,11 @@ async fn export_table_data_with_cleanup(
     on_progress: impl Fn(TableExportProgress),
     report_completion: bool,
 ) -> ExportCompletion {
+    if let Err(error) =
+        crate::query::mysql_data_charset_policy::check_export(state, &request.connection_id, &request.format).await
+    {
+        return ExportCompletion { result: Err(error), cleanup: Ok(()) };
+    }
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel_token = CancellationToken::new();
     let cancel_watcher =
@@ -1927,7 +1937,9 @@ async fn export_table_data_core_inner(
     match request.format.to_lowercase().as_str() {
         "csv" => {
             // Write UTF-8 BOM
-            file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
+            if !request.csv_without_bom {
+                file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
+            }
 
             let mut is_first_batch = true;
 
@@ -2858,6 +2870,7 @@ mod tests {
             row_limit,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            csv_without_bom: false,
             null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
@@ -3016,6 +3029,7 @@ mod tests {
             insert_mode: Default::default(),
             insert_dialect: Default::default(),
             csv_quote_mode: CsvQuoteMode::All,
+            csv_without_bom: false,
             null_literal: String::new(),
             primary_key_mode: DataGridPrimaryKeyMode::Include,
             columns: None,
@@ -3201,6 +3215,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            csv_without_bom: false,
             null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
@@ -3269,6 +3284,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            csv_without_bom: false,
             null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
@@ -3313,6 +3329,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            csv_without_bom: false,
             null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
@@ -3352,6 +3369,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            csv_without_bom: false,
             null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
@@ -3399,6 +3417,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            csv_without_bom: false,
             null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
@@ -3458,6 +3477,7 @@ mod tests {
             row_limit: Some(1000),
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            csv_without_bom: false,
             null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
@@ -3511,6 +3531,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            csv_without_bom: false,
             null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
@@ -3592,6 +3613,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            csv_without_bom: false,
             null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
@@ -3655,6 +3677,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            csv_without_bom: false,
             null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
@@ -3720,6 +3743,7 @@ mod tests {
             row_limit: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            csv_without_bom: false,
             null_literal: String::new(),
             numeric_column_right_align: false,
             column_comments: None,
@@ -3765,6 +3789,7 @@ mod tests {
             insert_mode: Default::default(),
             insert_dialect: Default::default(),
             csv_quote_mode: CsvQuoteMode::All,
+            csv_without_bom: false,
             null_literal: String::new(),
             columns: None,
             selected_columns: None,
@@ -3811,6 +3836,7 @@ mod tests {
             insert_mode: Default::default(),
             insert_dialect: Default::default(),
             csv_quote_mode: CsvQuoteMode::All,
+            csv_without_bom: false,
             null_literal: String::new(),
             columns: None,
             selected_columns: None,

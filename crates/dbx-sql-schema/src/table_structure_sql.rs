@@ -17,6 +17,7 @@ mod oracle_constraints;
 mod oracle_foreign_keys;
 mod owner;
 mod partitions;
+mod postgres_foreign_table;
 mod starrocks_layout;
 mod starrocks_partition;
 mod transwarp;

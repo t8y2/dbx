@@ -43,6 +43,7 @@ pub fn allowed_command(command: &str) -> bool {
             | "confirm_exit"
             | "complete_app_close"
             | "reveal_path_in_file_manager"
+            | "open_path_with_default_app"
             | "get_platform"
             | "load_app_appearance_settings"
             | "update_app_appearance_settings"
@@ -80,6 +81,7 @@ mod tests {
         }
         assert!(allowed_command("migration_start"));
         assert!(allowed_command("reveal_path_in_file_manager"));
+        assert!(allowed_command("open_path_with_default_app"));
     }
     #[test]
     fn invoke_dispatch_rejects_business_commands_until_ready() {

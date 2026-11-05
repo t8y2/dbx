@@ -1,5 +1,7 @@
 // Message queue admin types, matching dbx-core/src/mq/types.rs
 
+import type { KafkaTlsConfig } from "@/lib/connection/kafkaTlsOptions";
+
 export type MqSystemKind = "pulsar" | "kafka" | "rocketmq" | "rabbitmq";
 
 export interface MqCapabilities {
@@ -68,6 +70,7 @@ export interface MqAdminConfig {
   adminUrl: string;
   auth?: MqAuth;
   tlsSkipVerify?: boolean;
+  tls?: KafkaTlsConfig;
   pinnedVersion?: string;
   tokenSigning?: MqTokenSigningConfig;
   extra?: unknown;

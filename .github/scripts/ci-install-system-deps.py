@@ -11,14 +11,23 @@ import time
 from pathlib import Path
 
 SOURCES = Path("/etc/apt/sources.list.d/ubuntu.sources")
+LEGACY_SOURCES = Path("/etc/apt/sources.list")
 PRIMARY = "https://archive.ubuntu.com/ubuntu/"
 BACKUP = "https://mirrors.edge.kernel.org/ubuntu/"
 LAST_RESORT = "http://azure.archive.ubuntu.com/ubuntu/"
 MIRRORS = [("primary", PRIMARY), ("backup", BACKUP), ("last-resort", LAST_RESORT)]
+PORT_MIRRORS = [("primary", "https://ports.ubuntu.com/ubuntu-ports/"),
+                ("backup", "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/")]
 PACKAGES = ["libwebkit2gtk-4.1-dev", "libappindicator3-dev", "librsvg2-dev",
             "patchelf", "libssl-dev", "libsecret-1-dev"]
 PACKAGE_GROUPS = {"gtk": PACKAGES, "packaging": ["zstd"],
-                  "duckdb": ["libdbus-1-dev", "pkg-config"]}
+                  "duckdb": ["libdbus-1-dev", "pkg-config"],
+                  "release": ["fcitx5-frontend-gtk3", "ibus-gtk3", "libwebkit2gtk-4.1-dev",
+                              "libgtk-3-dev", "libappindicator3-dev", "librsvg2-dev", "patchelf",
+                              "libssl-dev", "xdg-utils", "lld"],
+                  "node-release": ["libfontconfig1-dev", "libsecret-1-dev"],
+                  "fontconfig": ["libfontconfig1-dev"],
+                  "preview": ["ffmpeg", "fonts-noto-cjk", "fonts-noto-color-emoji"]}
 ACQUIRE_OPTIONS = ["-o", "Acquire::Retries=0", "-o", "Acquire::http::Timeout=30",
                    "-o", "Acquire::https::Timeout=30", "-o", "APT::Update::Error-Mode=any"]
 starting_process = False
@@ -28,6 +37,10 @@ pending_cancel = None
 def rewrite_ubuntu_uris(source, mirror):
     known = {"mirror+file:/etc/apt/apt-mirrors.txt", PRIMARY, PRIMARY.rstrip("/"),
              BACKUP, BACKUP.rstrip("/"), LAST_RESORT, LAST_RESORT.rstrip("/")}
+    known.update({"http://archive.ubuntu.com/ubuntu", "http://archive.ubuntu.com/ubuntu/"})
+    if any(mirror == uri for _label, uri in PORT_MIRRORS):
+        known = {uri.rstrip("/") + suffix for _label, uri in PORT_MIRRORS for suffix in ("", "/")}
+        known.update({"http://ports.ubuntu.com/ubuntu-ports", "http://ports.ubuntu.com/ubuntu-ports/"})
     found = 0
     in_uris = False
     result = []
@@ -41,6 +54,14 @@ def rewrite_ubuntu_uris(source, mirror):
 
     for line in source.splitlines(keepends=True):
         if line.lstrip().startswith("#"):
+            result.append(line)
+            continue
+        legacy = re.match(r"^(\s*deb(?:-src)?\s+(?:\[[^\]]*\]\s+)?)(\S+)", line)
+        if legacy:
+            uri = legacy.group(2)
+            if uri in known:
+                found += 1
+                line = line[:legacy.start(2)] + mirror + line[legacy.end(2):]
             result.append(line)
             continue
         field = re.match(r"^([A-Za-z][A-Za-z0-9-]*):", line)
@@ -138,11 +159,15 @@ def run_apt(arguments, budget):
     return process.returncode, output, timed_out
 
 
-def install(source_path=SOURCES, group="gtk"):
+def install(source_path=None, group="gtk"):
+    if source_path is None:
+        source_path = SOURCES if SOURCES.exists() else LEGACY_SOURCES
     packages = PACKAGE_GROUPS[group]
     original = source_path.read_bytes()
     source = original.decode("utf-8")
-    candidates = [(label, rewrite_ubuntu_uris(source, mirror)) for label, mirror in MIRRORS]
+    active_source = "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("#"))
+    mirrors = PORT_MIRRORS if re.search(r"https?://[^\s]+/ubuntu-ports/?(?:\s|$)", active_source) else MIRRORS
+    candidates = [(label, rewrite_ubuntu_uris(source, mirror)) for label, mirror in mirrors]
     try:
         for index, (label, candidate) in enumerate(candidates):
             source_path.write_bytes(candidate.encode("utf-8"))
@@ -155,7 +180,7 @@ def install(source_path=SOURCES, group="gtk"):
                 if code != 0 or timed_out:
                     if index + 1 < len(candidates) and is_retryable_acquisition_failure(output, timed_out):
                         reason = "acquisition deadline" if timed_out else "transient acquisition error"
-                        print(f"APT switching to next source {MIRRORS[index + 1][1]}: {reason}", flush=True)
+                        print(f"APT switching to next source {mirrors[index + 1][1]}: {reason}", flush=True)
                         break
                     raise RuntimeError(f"APT {label} {phase} failed (exit={code}, timed_out={timed_out})")
             else:

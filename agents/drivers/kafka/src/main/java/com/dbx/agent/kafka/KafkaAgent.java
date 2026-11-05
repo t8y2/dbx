@@ -21,10 +21,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.CountDownLatch;
@@ -576,6 +579,37 @@ public final class KafkaAgent {
                     props.put("ssl.keystore.password", keystorePassword);
                 }
             }
+            // PEM 证书路径由 Rust 桥接透传（snake_case 字段）。kafka-clients >= 2.7 支持
+            // PEM truststore（走 location）与 PEM keystore（必须内联内容，没有 location），
+            // 两者均无密码，不需要设置 store password。
+            String caCertPath = stringOrEmpty(tls, "ca_cert_path");
+            if (!caCertPath.isBlank()) {
+                // 读取一次仅作 fail-fast 校验（truststore 本身走 location），
+                // 让坏路径在配置阶段就带着字段名报错，而不是等到客户端启动后埋在堆栈里。
+                readTlsFile(caCertPath, "ca_cert_path");
+                props.put("ssl.truststore.type", "PEM");
+                props.put("ssl.truststore.location", caCertPath);
+            }
+            String clientCertPath = stringOrEmpty(tls, "client_cert_path");
+            String clientKeyPath = stringOrEmpty(tls, "client_key_path");
+            if (!clientCertPath.isBlank() != !clientKeyPath.isBlank()) {
+                throw new IllegalStateException(
+                    "Kafka TLS client certificate needs both client_cert_path and client_key_path");
+            }
+            if (!clientCertPath.isBlank()) {
+                props.put("ssl.keystore.type", "PEM");
+                props.put("ssl.keystore.certificate.chain", readTlsFile(clientCertPath, "client_cert_path"));
+                props.put("ssl.keystore.key", readTlsFile(clientKeyPath, "client_key_path"));
+            }
+        }
+    }
+
+    /** 读取 PEM 文件内容并内联到 keystore 属性；失败时带上路径报错，便于用户定位。 */
+    static String readTlsFile(String path, String field) {
+        try {
+            return Files.readString(Path.of(path), StandardCharsets.US_ASCII);
+        } catch (IOException | java.nio.file.InvalidPathException e) {
+            throw new IllegalStateException("Failed to read Kafka TLS file for " + field + ": " + path, e);
         }
     }
 

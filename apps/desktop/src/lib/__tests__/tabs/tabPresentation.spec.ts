@@ -972,6 +972,51 @@ describe("statement execution markers", () => {
     ]);
   });
 
+  it.each(["oracle", "mysql", "postgres", "sqlite", "dameng", "db2", "sqlserver", "turso", "cloudflare-d1"] as const)("projects unindexed %s selection results using preserved editor ranges", (databaseType) => {
+    const sql = "SELECT 0;\nSELECT 1;\nSELECT bad;\nSELECT 3;";
+    const first = sql.indexOf("SELECT 1");
+    const second = sql.indexOf("SELECT bad");
+    const submitted = sql.slice(first, sql.indexOf("SELECT 3"));
+    expect(
+      statementExecutionMarkers(
+        sql,
+        [
+          { columns: ["Error"], rows: [["failed"]], affected_rows: 0, execution_time_ms: 1, execution_error: true, sourceStatement: "SELECT bad", sourceFrom: second, sourceTo: second + "SELECT bad".length },
+          { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 1", sourceFrom: first, sourceTo: first + "SELECT 1".length },
+          { columns: ["message"], rows: [["server output"]], affected_rows: 0, execution_time_ms: 1, server_message: true, sourceStatement: "SELECT 1", sourceFrom: first, sourceTo: first + "SELECT 1".length },
+        ],
+        databaseType,
+        submitted,
+      ),
+    ).toEqual([
+      { from: first, status: "success", successCount: 1, errorCount: 0 },
+      { from: second, status: "error", successCount: 0, errorCount: 1 },
+    ]);
+  });
+
+  it("keeps duplicate unindexed statements on the selected occurrence", () => {
+    const sql = "SELECT 1;\nSELECT 1;\nSELECT 2;";
+    const from = sql.lastIndexOf("SELECT 1");
+    expect(statementExecutionMarkers(sql, [{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 1", sourceFrom: from, sourceTo: from + "SELECT 1".length }], "oracle", sql.slice(from))).toEqual([
+      { from, status: "success", successCount: 1, errorCount: 0 },
+    ]);
+  });
+
+  it("does not guess a selection's document position from a relative statement index", () => {
+    const sql = "SELECT 1;\nSELECT 1;\nSELECT 2;";
+    expect(statementExecutionMarkers(sql, [{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, statement_index: 0, sourceStatement: "SELECT 1" }], "oracle", sql.slice(sql.lastIndexOf("SELECT 1")))).toEqual([]);
+  });
+
+  it.each([{}, { sourceFrom: -1, sourceTo: 7 }, { sourceFrom: NaN, sourceTo: 8 }, { sourceFrom: 0, sourceTo: 7 }, { sourceFrom: 0, sourceTo: 100 }])("omits unindexed results without a valid matching editor range: %j", (range) => {
+    const sql = "SELECT 1;\nSELECT 2;";
+    expect(statementExecutionMarkers(sql, [{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 1", ...range }], "oracle", sql)).toEqual([]);
+  });
+
+  it("omits ranges whose statement was not submitted", () => {
+    const sql = "SELECT 0;\nSELECT 1;\nSELECT 2;";
+    expect(statementExecutionMarkers(sql, [{ columns: ["value"], rows: [[0]], affected_rows: 0, execution_time_ms: 1, sourceStatement: "SELECT 0", sourceFrom: 0, sourceTo: 8 }], "oracle", sql.slice(sql.indexOf("SELECT 1")))).toEqual([]);
+  });
+
   it("omits unindexed query-level errors and legacy single-statement results without live state", () => {
     expect(statementExecutionMarkers("SELECT 1; SELECT 2;", [{ columns: ["Error"], rows: [["pool failed"]], affected_rows: 0, execution_time_ms: 1, execution_error: true }], "mysql", "SELECT 1; SELECT 2;")).toEqual([]);
     expect(statementExecutionMarkers("SELECT 1", [{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, statement_index: 0, sourceStatement: "SELECT 1", sourceFrom: 0, sourceTo: 8 }], "mysql", "SELECT 1")).toEqual([]);

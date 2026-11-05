@@ -4,7 +4,7 @@ use tauri::{Emitter, State};
 
 pub use dbx_core::agent_connection::{
     agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver, oracle_alternate_connect_config,
-    oracle_error_with_driver_hint, should_retry_mongo_with_legacy_driver,
+    oracle_error_with_driver_hint, should_retry_mongo_with_legacy_driver, with_zookeeper_endpoint_routes,
 };
 pub use dbx_core::connection::{
     agent_connect_timeout, clickhouse_http_proxy, connect_bare_metadata_pool, connect_mysql_metadata_pool,
@@ -111,8 +111,12 @@ async fn test_agent_connection(
     host: &str,
     port: u16,
     agent_env: &[(String, String)],
+    routes: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<ConnectionTestResult, String> {
-    let connect_params = agent_connect_params(config, host, port, config.database.as_deref().unwrap_or(""))?;
+    let connect_params = with_zookeeper_endpoint_routes(
+        agent_connect_params(config, host, port, config.database.as_deref().unwrap_or(""))?,
+        routes,
+    );
     let result = state
         .agent_manager
         .call_daemon_method_with_timeout_and_env::<serde_json::Value>(
@@ -177,8 +181,12 @@ async fn connect_agent_pool(
     host: &str,
     port: u16,
     agent_env: &[(String, String)],
+    routes: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Result<PoolKind, String> {
-    let connect_params = agent_connect_params(config, host, port, config.effective_database().unwrap_or(""))?;
+    let connect_params = with_zookeeper_endpoint_routes(
+        agent_connect_params(config, host, port, config.effective_database().unwrap_or(""))?,
+        routes,
+    );
     let mut client =
         state.agent_manager.spawn_with_env(&config.db_type, config.driver_profile.as_deref(), agent_env).await?;
     let connect_result = client
@@ -484,6 +492,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -1398,7 +1408,13 @@ async fn remove_connection_pools_for_connection_ids(state: &AppState, connection
 }
 
 #[tauri::command]
-pub async fn load_connections(state: State<'_, Arc<AppState>>) -> Result<Vec<ConnectionResponse>, String> {
+pub async fn load_connections(
+    state: State<'_, Arc<AppState>>,
+    legacy_sidebar_show_user_admin: Option<bool>,
+) -> Result<Vec<ConnectionResponse>, String> {
+    if let Some(visible) = legacy_sidebar_show_user_admin {
+        state.storage.migrate_sidebar_user_admin_visibility(visible).await?;
+    }
     load_connection_responses(state.inner()).await
 }
 
@@ -1542,6 +1558,14 @@ pub async fn test_ssh_tunnel(state: State<'_, Arc<AppState>>, config: Connection
     state.test_connection_ssh_tunnel(&config.canonicalized()).await
 }
 
+#[tauri::command]
+pub async fn connection_parameters(
+    state: State<'_, Arc<AppState>>,
+    config: ConnectionConfig,
+) -> Result<dbx_core::connection::parameters::ConnectionParameterMetadata, String> {
+    state.connection_parameter_metadata(&config).await
+}
+
 async fn test_connection_with_info_inner(
     state: &Arc<AppState>,
     config: ConnectionConfig,
@@ -1577,14 +1601,18 @@ async fn test_connection_with_info_impl(
     let has_transport_layers = config.has_effective_transport_layers();
     let connection_id = if has_transport_layers { tunnel_id.as_str() } else { config.id.as_str() };
     let prepared = state.connection_endpoint_attempt(connection_id, &config).await?;
+    let mut cancellation = dbx_core::connection::ZooKeeperTransportCancellation::new(state, connection_id, &prepared);
     let result = async {
         let endpoint = prepared.endpoint?;
         let (host, port) = (endpoint.host.clone(), endpoint.port);
         let runtime_proxy = endpoint.proxy;
         // SOCKS-routed plugin tests dial through the route themselves; probing the
         // logical endpoint (possibly empty host/port) would mislead.
-        let probe_result =
-            if runtime_proxy.is_some() { Ok(()) } else { probe_connection_endpoint(&config, &host, port).await };
+        let probe_result = if runtime_proxy.is_some() || endpoint.zookeeper_endpoint_routes.is_some() {
+            Ok(())
+        } else {
+            probe_connection_endpoint(&config, &host, port).await
+        };
         let url = connection_url_for_endpoint(&config, &host, port);
         let target = redacted_connection_url_for_endpoint(&config, &host, port);
         let connect_timeout = std::time::Duration::from_secs(config.effective_connect_timeout_secs());
@@ -2122,7 +2150,16 @@ async fn test_connection_with_info_impl(
                     Err("MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string())
                 }
                 db_type if database_capabilities::is_agent_type(&db_type) => {
-                    match test_agent_connection(state, &config, &host, port, prepared.stamp.agent_launch_env()).await {
+                    match test_agent_connection(
+                        state,
+                        &config,
+                        &host,
+                        port,
+                        prepared.stamp.agent_launch_env(),
+                        endpoint.zookeeper_endpoint_routes.as_ref(),
+                    )
+                    .await
+                    {
                         Ok(details) => {
                             database_info = details.database_info;
                             Ok(details.message)
@@ -2158,6 +2195,7 @@ async fn test_connection_with_info_impl(
     }
     .await;
     state.reset_connection_transport_if_current(connection_id, &prepared.stamp).await;
+    cancellation.disarm();
     result
 }
 
@@ -2261,12 +2299,13 @@ async fn connect_db_inner(
     }
     drop_nacos_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&id)).await;
     let prepared = state.connection_endpoint_attempt(&id, &db_config).await?;
+    let mut cancellation = dbx_core::connection::ZooKeeperTransportCancellation::new(state.inner(), &id, &prepared);
     let result = async {
         let endpoint = prepared.endpoint?;
         let (host, port) = (endpoint.host, endpoint.port);
         let runtime_proxy = endpoint.proxy;
         state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
-        if db_config.db_type != DatabaseType::Plugin {
+        if db_config.db_type != DatabaseType::Plugin && endpoint.zookeeper_endpoint_routes.is_none() {
             probe_connection_endpoint(&db_config, &host, port).await?;
         }
         state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
@@ -2655,7 +2694,15 @@ async fn connect_db_inner(
                 );
             }
             db_type if database_capabilities::is_agent_type(&db_type) => {
-                connect_agent_pool(state.inner(), &db_config, &host, port, prepared.stamp.agent_launch_env()).await?
+                connect_agent_pool(
+                    state.inner(),
+                    &db_config,
+                    &host,
+                    port,
+                    prepared.stamp.agent_launch_env(),
+                    endpoint.zookeeper_endpoint_routes.as_ref(),
+                )
+                .await?
             }
             DatabaseType::PrestoSql => {
                 let jdbc_config = prestosql_jdbc_config_for_endpoint(&db_config, &host, port)?;
@@ -2707,6 +2754,7 @@ async fn connect_db_inner(
     if result.is_err() {
         state.reset_connection_transport_if_current(&id, &prepared.stamp).await;
     }
+    cancellation.disarm();
     result
 }
 
@@ -3017,10 +3065,7 @@ pub async fn unlock_connection_writes(
     connection_id: String,
     duration_secs: u64,
 ) -> Result<WriteUnlockState, String> {
-    if !state.configs.read().await.contains_key(&connection_id) {
-        return Err("Connection not found".to_string());
-    }
-    let remaining_ms = state.write_unlock_windows.unlock(&connection_id, duration_secs).await?;
+    let remaining_ms = dbx_core::query::unlock_connection_writes_core(&state, &connection_id, duration_secs).await?;
     Ok(WriteUnlockState { remaining_ms })
 }
 

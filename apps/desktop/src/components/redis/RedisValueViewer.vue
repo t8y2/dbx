@@ -2371,7 +2371,8 @@ async function saveZsetInlineEdit(item: RedisZsetItem) {
 
     resetZsetInlineEdit();
     try {
-      await load();
+      // Keep an active member search across the post-save reload (#14322).
+      await reloadPreservingCollectionSearch();
     } catch (error) {
       toast(t("redis.updateAppliedRefreshFailed", { message: errorMessage(error) }), 5000);
     }
@@ -2459,7 +2460,8 @@ async function saveMemberEdit() {
     }
     const editedValue = writeValue;
     isEditingMember.value = false;
-    await load({ selectDefaultMember: false });
+    // Saving a member must not drop the "search fields and values" filter (#14322).
+    await reloadPreservingCollectionSearch();
     restoreSelectedMember(nextContext, editedValue);
   } finally {
     savingMember.value = false;
@@ -3425,7 +3427,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <div v-if="hasMore && !activeCollectionSearchQuery" class="p-2">
               <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loadingMore || searchLoading" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
-                {{ t("redis.loadMoreKeys") }}
+                {{ t("redis.fetchMoreKeys") }}
               </Button>
             </div>
           </template>
@@ -3472,7 +3474,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <div v-if="hasMore && !activeCollectionSearchQuery" class="p-2">
               <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loadingMore || searchLoading" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
-                {{ t("redis.loadMoreKeys") }}
+                {{ t("redis.fetchMoreKeys") }}
               </Button>
             </div>
           </template>
@@ -3561,7 +3563,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <div v-if="hasMore && !activeCollectionSearchQuery" class="p-2">
               <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loadingMore || searchLoading" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
-                {{ t("redis.loadMoreKeys") }}
+                {{ t("redis.fetchMoreKeys") }}
               </Button>
             </div>
           </template>
@@ -3636,7 +3638,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <div v-if="hasMore && !activeCollectionSearchQuery" class="p-2">
               <Button variant="outline" size="sm" class="w-full h-7 text-xs" :disabled="loadingMore || searchLoading" @click="loadMore">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
-                {{ t("redis.loadMoreKeys") }}
+                {{ t("redis.fetchMoreKeys") }}
               </Button>
             </div>
           </template>

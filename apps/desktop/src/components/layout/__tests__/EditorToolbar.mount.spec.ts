@@ -14,7 +14,8 @@ vi.mock("@/components/ui/button", () => ({
 vi.mock("@/components/ui/searchable-select", () => ({
   SearchableSelect: {
     name: "SearchableSelectStub",
-    template: `<div />`,
+    props: ["options"],
+    template: `<div><slot v-for="option in options" name="option-action" :option="option" :label="option" /></div>`,
   },
 }));
 

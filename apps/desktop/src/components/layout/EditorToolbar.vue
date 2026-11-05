@@ -152,8 +152,7 @@ function setMongoQueryLanguage(language: MongoQueryLanguage) {
   queryStore.setMongoQueryLanguage(props.activeTab.id, language);
 }
 
-async function copyDatabaseName() {
-  const database = activeDatabaseValue.value;
+async function copyDatabaseName(database: string) {
   if (!database) return;
   try {
     await copyToClipboard(database);
@@ -1162,15 +1161,21 @@ defineExpose({
               <ProductionContextBadge v-if="databaseOptionIsProduction(option)" compact />
             </div>
           </template>
-        </SearchableSelect>
-        <Tooltip v-if="showDatabaseHelperButtons && activeDatabaseValue">
-          <TooltipTrigger as-child>
-            <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:text-foreground" data-copy-database-name :aria-label="t('contextMenu.copyName')" @click="copyDatabaseName">
+          <template #option-action="{ option }">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              class="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+              :data-copy-database-name="option"
+              :aria-label="`${t('contextMenu.copyName')}: ${option}`"
+              :title="`${t('contextMenu.copyName')}: ${option}`"
+              @click.stop="copyDatabaseName(option)"
+            >
               <Copy class="h-3.5 w-3.5" />
             </Button>
-          </TooltipTrigger>
-          <TooltipContent>{{ t("contextMenu.copyName") }}</TooltipContent>
-        </Tooltip>
+          </template>
+        </SearchableSelect>
         <Tooltip v-if="showDatabaseHelperButtons && activeDatabaseValue && !isSingleDb">
           <TooltipTrigger as-child>
             <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:text-foreground" @click="emit('changeDatabase', '')">

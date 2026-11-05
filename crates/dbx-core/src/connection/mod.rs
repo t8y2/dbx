@@ -451,6 +451,12 @@ pub struct AppState {
     task_supervisor: TaskSupervisor,
     pool_activity: Arc<RwLock<HashMap<String, PoolActivity>>>,
     draining_pools: Arc<std::sync::Mutex<HashMap<String, watch::Sender<bool>>>>,
+    /// Per-pool-key lock serializing physical connection creation. Two callers
+    /// that ask for the same key while it is still connecting (a tab prewarm and
+    /// the first query, typically) used to open one session each and immediately
+    /// close the loser's — over SSH that wasted login cost showed up as seconds
+    /// on the first page fetch.
+    pool_creation_locks: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     connection_attempts: RwLock<HashMap<String, ConnectionAttemptState>>,
     connection_lifecycles: std::sync::Mutex<HashMap<String, ConnectionLifecycle>>,
     shared_resource_budgets: std::sync::Mutex<HashMap<String, SharedResourceBudget>>,
@@ -2100,6 +2106,7 @@ impl AppState {
             task_supervisor: TaskSupervisor::new(),
             pool_activity: Arc::new(RwLock::new(HashMap::new())),
             draining_pools: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            pool_creation_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             connection_attempts: RwLock::new(HashMap::new()),
             connection_lifecycles: std::sync::Mutex::new(HashMap::new()),
             shared_resource_budgets: std::sync::Mutex::new(HashMap::new()),
@@ -2482,6 +2489,76 @@ impl AppState {
         }
         let java = self.agent_manager.resolve_java_runtime(&state, DEFAULT_JRE_KEY)?;
         Ok(PluginRuntimeEnv::default().with_var("DBX_JAVA_BIN", java.to_string_lossy().to_string()))
+    }
+
+    /// Lock guarding physical creation of one pool key.
+    ///
+    /// The registry tolerates two callers racing on the same key — the loser's
+    /// candidate is closed when the winner publishes — but that loser already
+    /// paid a full login. On a remote link (SSH tunnel) a duplicate Oracle
+    /// session cost ~3.7 s of the latency the user is staring at. Callers take
+    /// this lock before connecting and re-check for a published pool afterwards,
+    /// so the second caller reuses the connection in flight instead of opening
+    /// a competing one.
+    ///
+    /// Entries are pruned opportunistically: session-scoped keys are unique per
+    /// tab, so an unbounded map would outlive the tabs that created them.
+    fn pool_creation_lock(&self, pool_key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        const MAX_TRACKED_CREATION_LOCKS: usize = 256;
+        let mut locks = self.pool_creation_locks.lock().unwrap_or_else(|error| error.into_inner());
+        if locks.len() >= MAX_TRACKED_CREATION_LOCKS {
+            // `strong_count == 1` means the map is the only owner: nobody is
+            // holding or waiting on that lock, so dropping it cannot split a
+            // key across two independent mutexes.
+            locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        }
+        locks.entry(pool_key.to_string()).or_default().clone()
+    }
+
+    /// Resolve an already published pool for `pool_key`, or `None` when the
+    /// caller has to connect.
+    ///
+    /// Stale / credential-mismatched pools are removed on the way through, which
+    /// is why this loops instead of doing a single check.
+    async fn published_session_pool_receipt(
+        &self,
+        config: &ConnectionConfig,
+        pool_key: &str,
+        connection_id: &str,
+        connection_attempt: Option<u64>,
+        validate_existing_pool: bool,
+    ) -> Result<Option<ConnectionPoolReceipt>, String> {
+        loop {
+            self.wait_for_pool_drain(pool_key).await;
+            if self.pool_handle(pool_key).await.is_some() {
+                if self.remove_pool_if_duckdb_isolation_mismatch(pool_key).await {
+                    // Recreate below using the current DuckDB isolation mode.
+                } else if self.pool_credential_owner_mismatch(config, pool_key).await {
+                    // 创建该 no-save 池的是另一个登录会话：销毁旧池，用当前会话的
+                    // 凭据重建，避免跨会话复用他人输入的临时密码。
+                    self.remove_stale_connection_pool(pool_key).await;
+                    return Ok(None);
+                } else if !validate_existing_pool || !self.remove_stale_connection_pool(pool_key).await {
+                    let Some(current) = self.pool_publication_snapshot(pool_key).await else {
+                        continue;
+                    };
+                    self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
+                    self.touch_pool_activity(pool_key).await;
+                    return Ok(Some(ConnectionPoolReceipt {
+                        pool_key: pool_key.to_string(),
+                        publication: current.publication,
+                    }));
+                }
+                return Ok(None);
+            }
+            // A reclaim may have removed the pool after the first drain check. Wait
+            // for its confirmed close or rollback before deciding to create a new one.
+            self.wait_for_pool_drain(pool_key).await;
+            if self.pool_handle(pool_key).await.is_some() {
+                continue;
+            }
+            return Ok(None);
+        }
     }
 
     fn begin_pool_drain(&self, pool_key: &str) -> Option<PoolDrainGuard> {
@@ -3489,33 +3566,39 @@ impl AppState {
         let base_pool_key = base_pool_key_for_config(Some(&config), connection_id, database, catalog, false);
         let pool_key = pool_key_for_session_role(Some(&config), base_pool_key.clone(), client_session_id, session_role);
 
-        loop {
-            self.wait_for_pool_drain(&pool_key).await;
-            if self.pool_handle(&pool_key).await.is_some() {
-                if self.remove_pool_if_duckdb_isolation_mismatch(&pool_key).await {
-                    // Recreate below using the current DuckDB isolation mode.
-                } else if self.pool_credential_owner_mismatch(&config, &pool_key).await {
-                    // 创建该 no-save 池的是另一个登录会话：销毁旧池，用当前会话的
-                    // 凭据重建，避免跨会话复用他人输入的临时密码。
-                    self.remove_stale_connection_pool(&pool_key).await;
-                    break;
-                } else if !validate_existing_pool || !self.remove_stale_connection_pool(&pool_key).await {
-                    let Some(current) = self.pool_publication_snapshot(&pool_key).await else {
-                        continue;
-                    };
-                    self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
-                    self.touch_pool_activity(&pool_key).await;
-                    return Ok(ConnectionPoolReceipt { pool_key, publication: current.publication });
-                }
-                break;
+        if let Some(receipt) = self
+            .published_session_pool_receipt(&config, &pool_key, connection_id, connection_attempt, validate_existing_pool)
+            .await?
+        {
+            return Ok(receipt);
+        }
+
+        // Serialize creation for this key: a warm-up that is still connecting has
+        // to be awaited, not duplicated. Without this the tab prewarm and the
+        // first query each opened a physical session and the loser's was closed
+        // immediately, which on a remote link costs a full login.
+        //
+        // The bounded wait is only a deadlock guard: if a creation path ever
+        // re-entered this same key, we degrade to the previous unserialized
+        // behavior instead of hanging forever.
+        const POOL_CREATION_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+        let creation_lock = self.pool_creation_lock(&pool_key);
+        let _creation_guard = match creation_lock.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                log::info!(
+                    "[pool:create] {pool_key} is already connecting; waiting for that session instead of opening a second one"
+                );
+                tokio::time::timeout(POOL_CREATION_LOCK_WAIT, creation_lock.lock()).await.ok()
             }
-            // A reclaim may have removed the pool after the first drain check. Wait
-            // for its confirmed close or rollback before deciding to create a new one.
-            self.wait_for_pool_drain(&pool_key).await;
-            if self.pool_handle(&pool_key).await.is_some() {
-                continue;
-            }
-            break;
+        };
+
+        // Whoever we waited on may have just published the pool.
+        if let Some(receipt) = self
+            .published_session_pool_receipt(&config, &pool_key, connection_id, connection_attempt, validate_existing_pool)
+            .await?
+        {
+            return Ok(receipt);
         }
 
         let PreparedConnectionRuntime { config: db_config, endpoint, url, connect_timeout, transport_stamp } = self
@@ -11447,6 +11530,37 @@ mod tests {
     #[tokio::test]
     async fn concurrently_created_no_save_pool_still_replaces_the_existing_pool() {
         assert!(!publish_two_created_sqlite_pools(false).await);
+    }
+
+    /// The creation lock is what stops a tab warm-up and the first query from
+    /// opening two physical sessions for one pool key. It has to be shared per
+    /// key (otherwise it serializes nothing) and independent across keys
+    /// (otherwise it becomes a global connection bottleneck).
+    #[tokio::test]
+    async fn pool_creation_lock_is_shared_per_key_and_serializes_callers() {
+        let (state, dir) = test_app_state().await;
+        let state = Arc::new(state);
+        let key = "conn:session:tab-1";
+        let lock = state.pool_creation_lock(key);
+        assert!(Arc::ptr_eq(&lock, &state.pool_creation_lock(key)), "one key must resolve to one mutex");
+        assert!(
+            !Arc::ptr_eq(&lock, &state.pool_creation_lock("conn:session:tab-2")),
+            "distinct keys must not share a mutex"
+        );
+
+        let guard = lock.lock().await;
+        let waiting = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let lock = state.pool_creation_lock("conn:session:tab-1");
+                let _guard = lock.lock().await;
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!waiting.is_finished(), "a second caller must wait for the in-flight creation");
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(2), waiting).await.unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

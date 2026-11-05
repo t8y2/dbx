@@ -1,4 +1,4 @@
-import type { ColumnInfo, DatabaseType, IndexInfo, QueryTab } from "@/types/database";
+import type { ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, QueryTab } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { editableRowIdentifierColumns, physicalTablePrimaryKeys, uniqueKeyModelColumns } from "@/lib/table/tableEditing";
 import { loadVirtualRowIdentifier, resolveRowIdentifierColumns } from "@/lib/table/virtualRowIdentifier";
@@ -285,6 +285,121 @@ export async function loadTableColumns(request: TableMetadataRequest): Promise<T
   return { schema: metadata.schema, columns: metadata.columns, tableType: metadata.tableType, cacheStatus: request.force ? "refresh" : "miss", ageMs: 0, cachedAt: metadata.cachedAt };
 }
 
+/**
+ * Foreign-key facet: shares the columns facet's TTL, in-flight dedupe and
+ * invalidation-stamp contract, so the structure panel and the grid's foreign-key
+ * navigation collapse into at most one remote `listForeignKeys` per table instead
+ * of each issuing its own request.
+ */
+export interface TableForeignKeysMetadata {
+  schema?: string;
+  tableName: string;
+  foreignKeys: ForeignKeyInfo[];
+  cachedAt: number;
+}
+
+export interface TableForeignKeysLoadResult {
+  foreignKeys: ForeignKeyInfo[];
+  cacheStatus: MetadataLoadCacheStatus;
+  ageMs: number;
+}
+
+const TABLE_FOREIGN_KEYS_CACHE_MAX_ENTRIES = 240;
+const tableForeignKeysCache = new MetadataResultCache<TableForeignKeysMetadata>({
+  ttlMs: TABLE_METADATA_CACHE_TTL_MS,
+  maxEntries: TABLE_FOREIGN_KEYS_CACHE_MAX_ENTRIES,
+});
+
+const tableForeignKeysCoordinator = new MetadataLoadCoordinator((event) => {
+  console.debug("[DBX][metadata-load:foreign-keys-coordinator]", event);
+});
+
+interface InFlightTableForeignKeysScope {
+  parts: ReturnType<typeof metadataScopeParts>;
+  count: number;
+}
+const inFlightTableForeignKeysScopes = new Map<string, InFlightTableForeignKeysScope>();
+const tableForeignKeysInvalidationStamps = new Map<string, number>();
+
+function registerInFlightTableForeignKeysScope(scopeKey: string, scope: MetadataScopeInput): void {
+  const entry = inFlightTableForeignKeysScopes.get(scopeKey);
+  if (entry) {
+    entry.count++;
+  } else {
+    inFlightTableForeignKeysScopes.set(scopeKey, { parts: metadataScopeParts(scope), count: 1 });
+  }
+}
+
+function unregisterInFlightTableForeignKeysScope(scopeKey: string): void {
+  const entry = inFlightTableForeignKeysScopes.get(scopeKey);
+  if (!entry) return;
+  entry.count--;
+  if (entry.count > 0) return;
+  inFlightTableForeignKeysScopes.delete(scopeKey);
+  tableForeignKeysInvalidationStamps.delete(scopeKey);
+}
+
+function bumpTableForeignKeysInvalidationStamp(scopeKey: string): void {
+  tableForeignKeysInvalidationStamps.set(scopeKey, (tableForeignKeysInvalidationStamps.get(scopeKey) ?? 0) + 1);
+}
+
+export function getCachedTableForeignKeys(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog" | "currentSchema" | "exactIdentity">): TableForeignKeysLoadResult | undefined {
+  const hit = tableForeignKeysCache.get(tableMetadataScope(request));
+  if (!hit) return undefined;
+  return { foreignKeys: hit.value.foreignKeys, cacheStatus: hit.stale ? "stale" : "hit", ageMs: hit.ageMs };
+}
+
+export async function loadTableForeignKeys(request: TableMetadataRequest): Promise<ForeignKeyInfo[]> {
+  const scope = tableMetadataScope(request);
+  const trace = createMetadataLoadTrace(scope);
+  if (!request.force) {
+    const cached = tableForeignKeysCache.get(scope);
+    if (cached) {
+      logMetadataLoadTrace(request.traceLogger, trace, "cache-hit", {
+        cacheStatus: cached.stale ? "stale" : "hit",
+        resultCount: cached.value.foreignKeys.length,
+        stale: cached.stale,
+      });
+      return cached.value.foreignKeys;
+    }
+  }
+
+  logMetadataLoadTrace(request.traceLogger, trace, "cache-miss", {
+    cacheStatus: request.force ? "refresh" : "miss",
+    force: request.force === true,
+  });
+  const scopeKey = metadataScopeKey(scope);
+  const invalidationStampAtStart = tableForeignKeysInvalidationStamps.get(scopeKey) ?? 0;
+  registerInFlightTableForeignKeysScope(scopeKey, scope);
+  let foreignKeys: ForeignKeyInfo[];
+  try {
+    foreignKeys = await tableForeignKeysCoordinator.run(
+      scope,
+      () =>
+        request.exactIdentity
+          ? api.listForeignKeys(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog, true)
+          : api.listForeignKeys(request.connectionId, request.database, request.schema || request.currentSchema || "", request.tableName, request.catalog),
+      { force: request.force, kind: scope.kind },
+    );
+    if (invalidationStampAtStart === (tableForeignKeysInvalidationStamps.get(scopeKey) ?? 0)) {
+      tableForeignKeysCache.set(scope, {
+        schema: request.schema,
+        tableName: request.tableName,
+        foreignKeys,
+        cachedAt: Date.now(),
+      });
+    }
+  } finally {
+    unregisterInFlightTableForeignKeysScope(scopeKey);
+  }
+  logMetadataLoadTrace(request.traceLogger, trace, "done", {
+    cacheStatus: request.force ? "refresh" : "miss",
+    resultCount: foreignKeys.length,
+    force: request.force === true,
+  });
+  return foreignKeys;
+}
+
 export function tableMetadataToDataTabMeta(metadata: TableMetadata, overrides?: { schema?: string }): NonNullable<QueryTab["tableMeta"]> {
   return {
     schema: overrides ? overrides.schema : metadata.schema,
@@ -443,14 +558,22 @@ export function invalidateTableMetadataCache(match: MetadataCacheInvalidation): 
     bumpTableColumnsInvalidationStamp(scopeKey);
     tableColumnsCoordinator.clear(scopeKey);
   }
+  // Foreign keys must observe the invalidation boundary too: a refresh has to
+  // surface indexes/foreign keys changed by someone else, never a stale cache.
+  for (const [scopeKey, entry] of inFlightTableForeignKeysScopes) {
+    if (!matches(entry.parts)) continue;
+    bumpTableForeignKeysInvalidationStamp(scopeKey);
+    tableForeignKeysCoordinator.clear(scopeKey);
+  }
   for (const [scopeKey, entry] of tableIndexesLoads) {
     if (matches(entry.parts)) tableIndexesLoads.delete(scopeKey);
   }
   const removedFull = tableMetadataCache.invalidate(match);
-  // Columns facet is invalidated as a side effect but, to preserve the existing
-  // public return contract (count of table-metadata entries invalidated), it is
-  // not added to the returned total.
+  // Facets are invalidated as a side effect but, to preserve the existing public
+  // return contract (count of table-metadata entries invalidated), they are not
+  // added to the returned total.
   tableColumnsCache.invalidate(match);
+  tableForeignKeysCache.invalidate(match);
   return removedFull;
 }
 
@@ -461,9 +584,14 @@ export function clearTableMetadataCache(): void {
   for (const scopeKey of inFlightTableColumnsScopes.keys()) {
     bumpTableColumnsInvalidationStamp(scopeKey);
   }
+  for (const scopeKey of inFlightTableForeignKeysScopes.keys()) {
+    bumpTableForeignKeysInvalidationStamp(scopeKey);
+  }
   tableMetadataCoordinator.clear();
   tableColumnsCoordinator.clear();
+  tableForeignKeysCoordinator.clear();
   tableIndexesLoads.clear();
   tableMetadataCache.clear();
   tableColumnsCache.clear();
+  tableForeignKeysCache.clear();
 }

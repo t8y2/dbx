@@ -5,6 +5,7 @@ import { applyDdlDatabaseQualifier, omitDdlIdentifierQuotes } from "@/lib/sql/dd
 import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { loadObjectDdl, type ObjectDdlRequest } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
+import { loadTableForeignKeys, loadTableIndexes } from "@/lib/metadata/tableMetadataCache";
 import { tableObjectSourceKind } from "@/lib/table/tableObjectSourceKind";
 import { columnIndexMetadataRequestCurrent, columnIndexTableIdentity } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 import { foreignKeyMetadataRequestCurrent, foreignKeyTableIdentity } from "@/lib/dataGrid/dataGridForeignKeyNavigation";
@@ -111,13 +112,26 @@ export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLo
 
   const tableRequest = () => {
     if (!props.connectionId || !props.tableMeta) return undefined;
+    const config = options.connectionStore.getConfig(props.connectionId);
     return {
       connectionId: props.connectionId,
-      queryTimeoutSecs: options.connectionStore.getConfig(props.connectionId)?.query_timeout_secs,
+      queryTimeoutSecs: config?.query_timeout_secs,
       database: props.database || "",
       schema: defaultSchema(),
       tableName: props.tableMeta.tableName,
       catalog: props.tableMeta.catalog,
+      // Shared facet caches key off `metadataScopeKey`, which reads
+      // `driverProfile || databaseType`. Both must come from the same source as
+      // the `loadTableMetadata` callers, otherwise every facet lookup misses and
+      // in-flight dedupe silently stops working.
+      databaseType: options.resolvedDatabaseType.value ?? config?.db_type ?? "",
+      driverProfile: config?.driver_profile || config?.db_type,
+      // `metadataScopeParts` keys the shared facets on `tableType` too, and the
+      // data-open path always passes it. Omitting it here made the grid's index
+      // and foreign-key loads miss the entries the open path just wrote, so one
+      // table open issued `listIndexes` twice and a refresh issued it twice again
+      // (each serialized behind the other on the same metadata agent session).
+      tableType: props.tableMeta.tableType,
       objectType: tableObjectSourceKind(props.tableMeta.tableType),
     };
   };
@@ -240,7 +254,9 @@ export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLo
           requestIdentity,
           currentIdentity: currentTableIdentity("indexes"),
         }),
-      load: () => api.listIndexes(request.connectionId, request.database, request.schema, request.tableName, request.catalog),
+      // Route through the shared facet cache so a refresh-driven reload and the
+      // grid's own indicator never issue two `listIndexes` calls for one table.
+      load: () => loadTableIndexes(request),
       onSuccess: (value) => {
         state.indexes.value = value;
         state.indexesLoaded.value = true;
@@ -283,7 +299,9 @@ export function useDataGridTableMetadataLoaders(options: DataGridTableMetadataLo
           requestIdentity,
           currentIdentity: currentTableIdentity("foreignKeys"),
         }),
-      load: () => api.listForeignKeys(request.connectionId, request.database, request.schema, request.tableName, request.catalog),
+      // Foreign keys share the same facet contract: one remote read per table,
+      // deduplicated against the structure panel and the grid's FK navigation.
+      load: () => loadTableForeignKeys(request),
       onSuccess: (value) => {
         state.foreignKeys.value = value;
         state.foreignKeysLoaded.value = true;

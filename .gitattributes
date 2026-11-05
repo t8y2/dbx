@@ -47,3 +47,8 @@ src-tauri/tests/fixtures/** text eol=lf
 
 # Preserve the upstream SQL attachment bytes used by the live MySQL regression.
 crates/dbx-core/tests/fixtures/qrtz.sql -text
+
+# The agent metadata fixture is a Python script executed through its shebang, so
+# a CRLF checkout turns `#!/usr/bin/env python3` into `python3\r`, which makes
+# every agent-backed metadata test exit 127. Keep it LF even on Windows.
+crates/dbx-core/src/schema/agent_metadata_fixture.py text eol=lf

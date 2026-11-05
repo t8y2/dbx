@@ -13980,10 +13980,21 @@ watch([showTableInfo, canShowTableOwner], ([shown, supported]) => {
   if (shown && supported && !tableOwnerLoading.value && tableOwner.value === null && !tableOwnerError.value) void fetchTableOwner();
 });
 
+// 索引/外键与列元数据共用同一条常驻元数据连接（Agent 对同一 session 串行）。
+// 打开表时把它们推到首帧之后的空闲时段，避免和列加载抢占连接、拖慢出数据；
+// 显式切到结构面板时（selectTableInfoTab）仍然立即加载。
+function scheduleIdleTableMetadataLoad(task: () => void) {
+  if (typeof requestIdleCallback !== "undefined") {
+    requestIdleCallback(() => task(), { timeout: 1000 });
+    return;
+  }
+  setTimeout(task, 0);
+}
+
 watch(
   () => [showIndexIndicatorsInHeader.value, canShowTableIndexes.value, currentIndexTableIdentity.value] as const,
   ([showIndicators, canShowIndexes, tableIdentity]) => {
-    if (showIndicators && canShowIndexes && tableIdentity) void fetchIndexes();
+    if (showIndicators && canShowIndexes && tableIdentity) scheduleIdleTableMetadataLoad(() => void fetchIndexes());
   },
   { immediate: true },
 );
@@ -14161,7 +14172,7 @@ function canvasCellForeignKey(rowIndex: number, actualColIdx: number): ForeignKe
 watch(
   () => [props.connectionId, props.database, props.tableMeta?.catalog, props.tableMeta?.schema, props.tableMeta?.tableName],
   () => {
-    if (foreignKeyNavigationEnabled.value) void fetchForeignKeys();
+    if (foreignKeyNavigationEnabled.value) scheduleIdleTableMetadataLoad(() => void fetchForeignKeys());
   },
   { immediate: true },
 );

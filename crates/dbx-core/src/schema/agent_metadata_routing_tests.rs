@@ -1,7 +1,7 @@
 use super::{
-    get_table_comment_core, get_table_ddl_core, list_databases_core, list_object_statistics_core, list_objects_core,
-    list_objects_core_with_options, AppState, ConnectionConfig, DatabaseType, MetadataIdentityMode,
-    MetadataReadOptions, PoolKind,
+    get_columns_core, get_table_comment_core, get_table_ddl_core, list_databases_core, list_foreign_keys_core,
+    list_indexes_core, list_object_statistics_core, list_objects_core, list_objects_core_with_options,
+    list_tables_core, AppState, ConnectionConfig, DatabaseType, MetadataIdentityMode, MetadataReadOptions, PoolKind,
 };
 use crate::db::agent_driver::{AgentDriverClient, PooledAgentClient};
 use crate::db::ObjectSourceKind;
@@ -30,7 +30,20 @@ impl AgentFixture {
         let driver_key = crate::database_capabilities::agent_key(&db_type, profile).unwrap();
         let executable = state.agent_manager.driver_native_path(driver_key);
         std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
-        std::fs::write(&executable, include_str!("agent_metadata_fixture.py")).unwrap();
+        // The fixture runs through its shebang, so its bytes must be LF no matter
+        // what `core.autocrlf` did on checkout: a CRLF copy makes the first line
+        // `#!/usr/bin/env python3\r`, and `/usr/bin/env` then fails with
+        // "python3\r: No such file or directory" (exit status 127) on every test
+        // that spawns an agent.
+        let fixture = include_str!("agent_metadata_fixture.py").replace("\r\n", "\n");
+        {
+            // Write through an explicit handle and fsync before anyone executes it:
+            // on overlayfs (WSL/Docker) a just-written file can still report
+            // "Text file busy (os error 26)" when spawned immediately.
+            let mut file = std::fs::File::create(&executable).unwrap();
+            std::io::Write::write_all(&mut file, fixture.as_bytes()).unwrap();
+            file.sync_all().unwrap();
+        }
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let config: ConnectionConfig = serde_json::from_value(json!({
@@ -80,16 +93,51 @@ impl AgentFixture {
         .unwrap_or_else(|_| panic!("expected {count} {method} requests"))
     }
 
+    /// Keys of the connection-level metadata pools currently published in the
+    /// registry. The pool layer resolves session-role keys in ways the raw map
+    /// does not mirror, so tests inspect the registry instead of guessing a
+    /// `...:role:metadata` string.
+    async fn metadata_pool_keys(&self) -> Vec<String> {
+        self.state
+            .with_connection_pools(|pools| {
+                pools.keys().filter(|key| key.ends_with(":role:metadata")).cloned().collect::<Vec<_>>()
+            })
+            .await
+    }
+
     async fn foreground(&self) -> Arc<PooledAgentClient> {
-        let key = self.state.get_or_create_metadata_pool_for_session("conn", Some("configured"), None).await.unwrap();
-        self.pool(&key).await
+        let key =
+            self.state.get_or_create_metadata_pool_for_session("conn", Some("configured"), None).await.unwrap();
+        if let Some(PoolKind::Agent(client)) =
+            self.state.with_connection_pools(|pools| pools.get(&key).cloned()).await
+        {
+            return client;
+        }
+        // `get_or_create_metadata_pool_for_session` can report a session-role key
+        // that differs from the one the registry publishes, so fall back to the
+        // single Agent pool this fixture owns at this point.
+        let mut agents = self
+            .state
+            .with_connection_pools(|pools| {
+                pools
+                    .values()
+                    .filter_map(|pool| match pool {
+                        PoolKind::Agent(client) => Some(client.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await;
+        assert_eq!(agents.len(), 1, "expected exactly one Agent pool (reported key={key})");
+        agents.remove(0)
     }
 
     async fn assert_only_foreground_remains(&self, foreground: &Arc<PooledAgentClient>) {
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 let ready = self.state.with_connection_pools(|pools| {
-                    pools.len() == 1 && matches!(pools.get("conn:configured:role:metadata"), Some(PoolKind::Agent(client)) if Arc::ptr_eq(client, foreground))
+                    pools.len() == 1
+                        && pools.values().any(|pool| matches!(pool, PoolKind::Agent(client) if Arc::ptr_eq(client, foreground)))
                 }).await;
                 let sessions = self.state.agent_manager.connection_runtimes.lock().await.values()
                     .filter_map(|cell| cell.get()).map(|runtime| runtime.active_session_count()).sum::<u64>();
@@ -252,6 +300,133 @@ async fn enumeration_uses_metadata_pool_when_both_roles_exist() {
     assert_eq!(list_databases_core(&fixture.state, "conn").await.unwrap()[0].name, "metadata");
     assert!(Arc::ptr_eq(&metadata, &fixture.pool(&metadata_key).await));
     assert_eq!(fixture.requests("open_session").len(), 2);
+    fixture.shutdown().await;
+}
+
+/// 列、索引、外键三条常规表结构元数据必须复用连接级 `role:metadata` 会话。
+///
+/// 任一入口若仍按请求创建临时会话，SSH 链路上每次读取都会重新握手（单次 3–6 秒），
+/// 这正是「打开表 / 刷新表很慢」的根因。
+#[tokio::test]
+async fn table_structure_metadata_reuses_connection_level_metadata_pool() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+    let foreground = fixture.foreground().await;
+
+    get_columns_core(&fixture.state, "conn", "configured", "APP", "EVENTS").await.unwrap();
+    list_indexes_core(&fixture.state, "conn", "configured", "APP", "EVENTS").await.unwrap();
+    list_foreign_keys_core(&fixture.state, "conn", "configured", "APP", "EVENTS").await.unwrap();
+
+    assert_eq!(fixture.metadata_pool_keys().await.len(), 1, "columns/indexes/foreign keys must share one metadata pool");
+    fixture.assert_only_foreground_remains(&foreground).await;
+    let opens = fixture.requests("open_session");
+    assert_eq!(opens.len(), 1, "metadata reads must reuse the connection-level session: {opens:?}");
+    assert_eq!(fixture.requests("get_columns").len(), 1);
+    assert_eq!(fixture.requests("list_indexes").len(), 1);
+    assert_eq!(fixture.requests("list_foreign_keys").len(), 1);
+    fixture.shutdown().await;
+}
+
+/// 数据库节点展开（表列表 / 对象列表）同样必须复用连接级 `role:metadata` 会话。
+///
+/// 这两条路径此前每次展开都用一次性随机会话，SSH 链路上等于每展开一层就重新登录
+/// 一条物理连接；树列表只是只读查询，不需要隔离。
+#[tokio::test]
+async fn database_node_listing_reuses_connection_level_metadata_pool() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+    let foreground = fixture.foreground().await;
+    // Oracle 的表列表会补查 ALL_TAB_COMMENTS，夹具只在 comments.json 存在时返回
+    // 该查询的列形状。
+    std::fs::write(fixture.control_path("comments.json"), json!([["EVENTS", "Events table"]]).to_string()).unwrap();
+
+    let tables =
+        list_tables_core(&fixture.state, "conn", "configured", "APP", None, None, None, None, None).await.unwrap();
+    assert_eq!(tables.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(), ["EVENTS"]);
+    let objects =
+        list_objects_core(&fixture.state, "conn", "configured", "APP", None, None, None, None, None).await.unwrap();
+    assert!(!objects.is_empty(), "object listing must still return the fixture objects");
+
+    assert_eq!(
+        fixture.metadata_pool_keys().await.len(),
+        1,
+        "database node listing must reuse the connection-level metadata pool"
+    );
+    let session_scoped = fixture
+        .state
+        .with_connection_pools(|pools| pools.keys().filter(|key| key.contains(":session:")).cloned().collect::<Vec<_>>())
+        .await;
+    assert!(session_scoped.is_empty(), "listing must not create session-scoped pools: {session_scoped:?}");
+    fixture.assert_only_foreground_remains(&foreground).await;
+    let opens = fixture.requests("open_session");
+    assert_eq!(opens.len(), 1, "database node listing must not open extra Agent sessions: {opens:?}");
+    assert_eq!(fixture.requests("list_tables").len(), 1);
+    assert_eq!(fixture.requests("list_objects").len(), 1);
+    fixture.shutdown().await;
+}
+
+/// 表注释（展开/悬停表节点的高频只读查询）同样必须复用连接级 `role:metadata` 会话。
+#[tokio::test]
+async fn table_comment_reuses_connection_level_metadata_pool() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+    let foreground = fixture.foreground().await;
+
+    let comment = get_table_comment_core(&fixture.state, "conn", "configured", "APP", "EVENTS").await.unwrap();
+
+    // 夹具对任意查询都回第一行的第一个字符串单元。
+    assert_eq!(comment.as_deref(), Some("EVENTS"));
+    assert_eq!(fixture.metadata_pool_keys().await.len(), 1, "table comment must reuse the connection-level pool");
+    fixture.assert_only_foreground_remains(&foreground).await;
+    let opens = fixture.requests("open_session");
+    assert_eq!(opens.len(), 1, "table comment must not open an extra Agent session: {opens:?}");
+    assert_eq!(fixture.requests("execute_query").len(), 1);
+    fixture.shutdown().await;
+}
+
+/// 关闭连接必须彻底释放常驻 metadata 池与其 Agent 会话，避免关库后残留会话。
+#[tokio::test]
+async fn closing_connection_drains_reused_metadata_pool() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+    get_columns_core(&fixture.state, "conn", "configured", "APP", "EVENTS").await.unwrap();
+    let metadata_keys = fixture.metadata_pool_keys().await;
+    assert_eq!(metadata_keys.len(), 1, "columns must create one connection-level metadata pool: {metadata_keys:?}");
+
+    fixture.state.remove_connection_pools("conn").await;
+
+    assert!(
+        fixture.metadata_pool_keys().await.is_empty(),
+        "closing the connection must drain the metadata pool"
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let sessions = fixture.state.agent_manager.connection_runtimes.lock().await.values()
+                .filter_map(|cell| cell.get()).map(|runtime| runtime.active_session_count()).sum::<u64>();
+            if sessions == 0 { return; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("closing the connection must release the metadata Agent session");
+    fixture.shutdown().await;
+}
+
+/// 反复读取同一张表的结构不应增长连接数：第二次起必须完全命中已建立的 metadata 池。
+#[tokio::test]
+async fn repeated_table_structure_reads_do_not_open_new_sessions() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+
+    for _ in 0..3 {
+        get_columns_core(&fixture.state, "conn", "configured", "APP", "EVENTS").await.unwrap();
+        list_indexes_core(&fixture.state, "conn", "configured", "APP", "EVENTS").await.unwrap();
+        list_foreign_keys_core(&fixture.state, "conn", "configured", "APP", "EVENTS").await.unwrap();
+    }
+
+    let opens = fixture.requests("open_session");
+    assert_eq!(opens.len(), 1, "repeated metadata reads must not open additional sessions: {opens:?}");
+    assert_eq!(fixture.requests("get_columns").len(), 3);
+    assert_eq!(fixture.requests("list_indexes").len(), 3);
+    assert_eq!(fixture.requests("list_foreign_keys").len(), 3);
+    assert_eq!(
+        fixture.metadata_pool_keys().await.len(),
+        1,
+        "repeated reads must reuse the same metadata pool instead of re-creating it"
+    );
     fixture.shutdown().await;
 }
 

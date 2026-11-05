@@ -52,6 +52,9 @@ def handle(request):
             error = rpc_error(category)
         else:
             result = [{'name': sessions[session].get('sessionRole', 'workload')}]
+    elif method == 'list_tables':
+        result = [{'name': 'EVENTS', 'table_type': 'TABLE', 'comment': None,
+                   'parent_schema': None, 'parent_name': None}]
     elif method == 'list_objects':
         failure = root / 'objects-error'
         if failure.exists():
@@ -75,6 +78,8 @@ def handle(request):
         result = [{'name': 'id', 'data_type': 'integer', 'is_nullable': True, 'is_primary_key': False,
                    'comment': "Column's comment"}, {'name': 'plain', 'data_type': 'integer', 'is_nullable': True,
                                                     'is_primary_key': False}]
+    elif method in ('list_indexes', 'list_foreign_keys'):
+        result = []
     elif method in ('execute_query', 'get_table_ddl'):
         with session_locks[session]:
             if method == 'get_table_ddl':

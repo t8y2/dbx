@@ -1110,31 +1110,25 @@ async fn list_tables_core_impl(
             return Ok(vec![]);
         }
     }
-    let metadata_session = EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "tables").await;
-    let result = retry_metadata_connection_for_session(
-        state,
-        connection_id,
-        Some(database),
-        metadata_session.client_session_id(),
-        || {
-            list_tables_once(
-                state,
-                connection_id,
-                database,
-                schema,
-                filter,
-                limit,
-                offset,
-                object_types,
-                table_name_filter,
-                metadata_session.client_session_id(),
-                page_table_roots,
-            )
-        },
-    )
-    .await;
-    metadata_session.finish(state, connection_id, Some(database)).await;
-    result
+    // 数据库节点展开（表/视图列表）走连接级 `role:metadata` 会话：此前每次展开都用
+    // 一次性随机会话，SSH 链路上等于每次展开都要重新登录一条物理连接。树列表本身是
+    // 只读查询，与列/索引共用同一会话不会互相影响（临时表与事务由 tab 会话池隔离）。
+    retry_metadata_connection_for_session(state, connection_id, Some(database), None, || {
+        list_tables_once(
+            state,
+            connection_id,
+            database,
+            schema,
+            filter,
+            limit,
+            offset,
+            object_types,
+            table_name_filter,
+            None,
+            page_table_roots,
+        )
+    })
+    .await
 }
 
 /// List vector database collections, returning structured info (name, id, dimension).
@@ -1243,19 +1237,9 @@ pub async fn get_table_comment_core(
         return Err("Table comments are not available for linked server tables".to_string());
     }
 
-    let metadata_session =
-        EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "table-comment").await;
-    let result = get_table_comment_core_for_session(
-        state,
-        connection_id,
-        database,
-        schema,
-        table,
-        metadata_session.client_session_id(),
-    )
-    .await;
-    metadata_session.finish(state, connection_id, Some(database)).await;
-    result
+    // 表注释是展开/悬停表节点时的高频只读小查询，复用连接级 `role:metadata` 会话；
+    // 此前每次都用一次性随机会话，SSH 链路上等于每次查注释都重新登录一条物理连接。
+    get_table_comment_core_for_session(state, connection_id, database, schema, table, None).await
 }
 
 pub async fn get_mysql_table_auto_increment_core(
@@ -8003,37 +7987,31 @@ pub async fn list_objects_core_with_options(
             return Ok(vec![]);
         }
     }
-    let metadata_session = EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "objects").await;
-    let result = retry_metadata_connection_for_session(
-        state,
-        connection_id,
-        Some(database),
-        metadata_session.client_session_id(),
-        || async {
-            let objects = list_objects_once(
-                state,
-                connection_id,
-                database,
-                schema,
-                filter,
-                limit,
-                offset,
-                object_types,
-                table_name_filter,
-                metadata_session.client_session_id(),
-                options,
-            )
-            .await
-            .map(|outcome| {
-                let final_offset = if outcome.paging_applied { Some(0) } else { offset };
-                filter_object_infos(outcome.objects, filter, limit, final_offset, object_types, table_name_filter)
-            })?;
-            Ok(objects)
-        },
-    )
-    .await;
-    metadata_session.finish(state, connection_id, Some(database)).await;
-    result
+    // 与表列表一致：数据库/对象节点展开复用连接级 `role:metadata` 会话，避免每次展开
+    // 都新登录一条物理连接。精确标识（exactIdentity）查询是只读的，不会给共享会话
+    // 留下需要隔离的状态。
+    retry_metadata_connection_for_session(state, connection_id, Some(database), None, || async {
+        let objects = list_objects_once(
+            state,
+            connection_id,
+            database,
+            schema,
+            filter,
+            limit,
+            offset,
+            object_types,
+            table_name_filter,
+            None,
+            options,
+        )
+        .await
+        .map(|outcome| {
+            let final_offset = if outcome.paging_applied { Some(0) } else { offset };
+            filter_object_infos(outcome.objects, filter, limit, final_offset, object_types, table_name_filter)
+        })?;
+        Ok(objects)
+    })
+    .await
 }
 
 pub async fn list_object_statistics_core(
@@ -9430,25 +9408,11 @@ pub async fn get_columns_core_for_session_in_context(
     if connection_config(state, connection_id).await.is_some_and(|config| config.db_type == DatabaseType::MongoDb) {
         return Box::pin(mongodb_columns::get_columns(state, connection_id, database, table)).await;
     }
-    if client_session_id.is_none() {
-        let metadata_session =
-            EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "columns").await;
-        if metadata_session.client_session_id().is_some() {
-            let result = get_columns_core_for_session_inner_in_context(
-                state,
-                connection_id,
-                database,
-                schema,
-                table,
-                metadata_session.client_session_id(),
-                false,
-                current_schema,
-            )
-            .await;
-            metadata_session.finish(state, connection_id, Some(database)).await;
-            return result;
-        }
-    }
+    // 常规表结构元数据复用连接级 `role:metadata` 会话：此前每次调用都生成随机
+    // 会话 id，连接池 key 必然不命中，于是在 SSH 链路上为每次列读取新建一条物理
+    // 连接（单次 3–6 秒）。表/对象列表（对象树展开）与表注释也已并入该会话；剩余的
+    // 对象统计、补全对象等慢/隔离任务仍保留各自的临时会话，见
+    // `EphemeralAgentMetadataSession`。
     if current_schema.is_none() {
         return get_columns_core_for_session_inner(
             state,
@@ -9998,18 +9962,8 @@ pub async fn list_indexes_core(
     if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
         return Ok(vec![]);
     }
-    let metadata_session = EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "indexes").await;
-    let result = list_indexes_core_for_session(
-        state,
-        connection_id,
-        database,
-        schema,
-        table,
-        metadata_session.client_session_id(),
-    )
-    .await;
-    metadata_session.finish(state, connection_id, Some(database)).await;
-    result
+    // 与列元数据一致：复用连接级 `role:metadata` 会话，避免每次读取都新建物理连接。
+    list_indexes_core_for_session(state, connection_id, database, schema, table, None).await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -10164,19 +10118,8 @@ pub async fn list_foreign_keys_core(
     if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
         return Ok(vec![]);
     }
-    let metadata_session =
-        EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "foreign-keys").await;
-    let result = list_foreign_keys_core_for_session(
-        state,
-        connection_id,
-        database,
-        schema,
-        table,
-        metadata_session.client_session_id(),
-    )
-    .await;
-    metadata_session.finish(state, connection_id, Some(database)).await;
-    result
+    // 与列/索引元数据一致：复用连接级 `role:metadata` 会话。
+    list_foreign_keys_core_for_session(state, connection_id, database, schema, table, None).await
 }
 
 pub async fn list_foreign_keys_for_database_core(

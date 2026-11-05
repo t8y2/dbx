@@ -494,6 +494,18 @@ pub struct AppState {
     pub write_unlock_windows: crate::write_unlock::WriteUnlockWindows,
     pub native_jobs: crate::schema::native_jobs::NativeJobRegistry,
     metadata_gates: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
+    /// The `SCAN COUNT` each Redis server answered at, keyed by connection id.
+    ///
+    /// Redis treats `COUNT` as a hint and caps nothing, but servers that
+    /// implement the protocol with a hard per-command return limit do (TongRDS:
+    /// `Server.Common.MaxItemsReturned`, 10000 by default) and reject the whole
+    /// request when the count exceeds it. Only that refusal names the
+    /// configured limit, so the driver negotiates it; what is kept here is the
+    /// `COUNT` the server finally answered at. Every later page starts there
+    /// instead of paying for the refusal again, and a server that answers the
+    /// caller's own `COUNT` stores nothing. Dropped together with the
+    /// connection's pools, so a reconnect re-discovers the server it reached.
+    redis_scan_count_limits: Arc<RwLock<HashMap<String, usize>>>,
     /// Backend-confirmed liveness losses plus resync requests (#4339). The keepalive task
     /// publishes here once a connection has no pools left; each shell relays it to its own
     /// frontend, so DBX core never needs a UI handle of its own.
@@ -2129,6 +2141,7 @@ impl AppState {
             write_unlock_windows: crate::write_unlock::WriteUnlockWindows::default(),
             native_jobs: crate::schema::native_jobs::NativeJobRegistry::default(),
             metadata_gates: Arc::new(Mutex::new(HashMap::new())),
+            redis_scan_count_limits: Arc::new(RwLock::new(HashMap::new())),
             // Bounded so a shell that stops draining cannot grow memory without bound. A
             // lagged receiver re-syncs from the read-only status check on its next use, so
             // dropping events here is safe.
@@ -6268,6 +6281,21 @@ impl AppState {
         self.mysql_preserved_transactions.write().await.remove(pool_key);
     }
 
+    /// The `SCAN COUNT` this connection's server has answered at, once known.
+    pub(crate) async fn redis_scan_count_limit(&self, connection_id: &str) -> Option<usize> {
+        self.redis_scan_count_limits.read().await.get(connection_id).copied()
+    }
+
+    /// Remembers a `COUNT` the connection's server actually answered.
+    pub(crate) async fn set_redis_scan_count_limit(&self, connection_id: &str, max_count: usize) {
+        self.redis_scan_count_limits.write().await.insert(connection_id.to_string(), max_count);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn redis_scan_count_limit_count(&self) -> usize {
+        self.redis_scan_count_limits.read().await.len()
+    }
+
     pub async fn remove_pool_by_key(&self, pool_key: &str) -> bool {
         self.stop_keepalive_task(pool_key).await;
         self.pool_activity.write().await.remove(pool_key);
@@ -7614,6 +7642,7 @@ impl AppState {
             }
         }
         self.session_credentials.remove_pool_owners(&keys_to_remove);
+        self.redis_scan_count_limits.write().await.remove(connection_id);
         let mut conns = self.connections.write().await;
         let mut removed = Vec::with_capacity(keys_to_remove.len());
         for key in keys_to_remove {

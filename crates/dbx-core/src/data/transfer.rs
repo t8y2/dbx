@@ -15367,6 +15367,7 @@ for line in sys.stdin:
 
     fn jdbc_transfer_config(connection_string: &str, driver_class: &str, profile: &str) -> ConnectionConfig {
         ConnectionConfig {
+            environment: None,
             oracle_oci_nls_lang: None,
             oracle_oci_tns_admin: None,
             id: "test-jdbc".to_string(),
@@ -23728,6 +23729,7 @@ SELECT 1 FROM dual"#
     #[test]
     fn resolve_external_transfer_catalog_for_config_accepts_starrocks_driver_profile() {
         let config = crate::models::connection::ConnectionConfig {
+            environment: None,
             oracle_oci_nls_lang: None,
             oracle_oci_tns_admin: None,
             docs_notes_path: None,

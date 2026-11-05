@@ -642,6 +642,7 @@ mod tests {
         let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let mut cfg = crate::models::connection::ConnectionConfig {
+            environment: None,
             oracle_oci_nls_lang: None,
             oracle_oci_tns_admin: None,
             docs_notes_path: None,
@@ -734,6 +735,7 @@ mod tests {
         let storage = crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let cfg = crate::models::connection::ConnectionConfig {
+            environment: None,
             oracle_oci_nls_lang: None,
             oracle_oci_tns_admin: None,
             docs_notes_path: None,

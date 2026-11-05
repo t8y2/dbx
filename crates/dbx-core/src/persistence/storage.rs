@@ -12480,6 +12480,7 @@ mod tests {
             auth_method: "password".to_string(),
             allow_exec_channel_proxy: false,
             proxy_command: String::new(),
+            totp_secret: None,
             profile_id: String::new(),
         })
     }

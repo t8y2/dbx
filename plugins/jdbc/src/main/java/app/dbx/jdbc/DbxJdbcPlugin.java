@@ -1881,7 +1881,10 @@ public final class DbxJdbcPlugin {
         boolean preserveOracleDateTime = isOracleUrl(jdbcUrl(connection));
         ZoneId timestampZone = tdengineTimestampZone(connection, conn);
         boolean bitStringColumns = usesBitStringColumns(connection);
-        boolean restoreAutoCommit = beginPagedQueryTransaction(connection, conn);
+        // DDL has no cursor to keep alive across pages, and wrapping it in the
+        // paged transaction changes how PostgreSQL-compatible engines execute
+        // it (see pagedQueryCannotReturnRows).
+        boolean restoreAutoCommit = !pagedQueryCannotReturnRows(sql) && beginPagedQueryTransaction(connection, conn);
         Statement statement;
         try {
             statement = createPagedQueryStatement(conn);
@@ -1961,6 +1964,34 @@ public final class DbxJdbcPlugin {
         } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError ignored) {
             return connection.createStatement();
         }
+    }
+
+    /**
+     * Keywords for statements that never leave a result-set cursor behind.
+     * The paged transaction exists only to keep a cursor readable across pages;
+     * for these statements it changes engine semantics instead of adding value
+     * (issue #14243: PostgreSQL-compatible engines may commit a `CREATE TABLE AS`
+     * on their own while the selected rows stay inside the transaction, so the
+     * client sees 42P07 on a retry and an empty table is left behind). Running
+     * them in auto-commit matches psql and DBeaver.
+     */
+    private static final Set<String> NO_RESULT_SET_KEYWORDS = Set.of(
+        "ALTER",
+        "ANALYZE",
+        "CLUSTER",
+        "COMMENT",
+        "CREATE",
+        "DROP",
+        "GRANT",
+        "REINDEX",
+        "REFRESH",
+        "REVOKE",
+        "TRUNCATE",
+        "VACUUM"
+    );
+
+    private static boolean pagedQueryCannotReturnRows(String sql) {
+        return NO_RESULT_SET_KEYWORDS.contains(firstSqlKeyword(sql));
     }
 
     private static boolean beginPagedQueryTransaction(JsonNode connectionConfig, Connection connection)

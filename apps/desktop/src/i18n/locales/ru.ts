@@ -12167,6 +12167,7 @@ export default withEnglishFallback({
     deepLinkConnectionConfirmModeUpdateDescription: "Ссылки с id сразу обновляют сохранённое подключение; для новых подключений по-прежнему открывается диалоговое окно для подтверждения.",
     deepLinkConnectionConfirmModeAll: "Все ссылки подключения",
     deepLinkConnectionConfirmModeAllDescription: "Новые подключения и ссылки обновления с id сохраняются сразу, без подтверждения. Если предварительно заполненные параметры не проходят проверку, диалоговое окно останется открытым, и вы сможете дополнить их вручную.",
+    shortcutConvertSelectionToDelimited: "Преобразовать выделение в список с разделителями",
   },
   driverStore: {
     jreDirRemoveFailed: "Не удалось удалить старый каталог JRE: {path} (исходная ошибка: {error})",

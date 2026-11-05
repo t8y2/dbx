@@ -10578,6 +10578,7 @@ export default withEnglishFallback({
     shortcutExecuteAllSql: "Esegui tutto il SQL",
     showConnectionGroupPath: "Mostra il percorso completo del gruppo per le connessioni query",
     showConnectionGroupPathDescription: "Se attivato, il selettore di connessione nell'angolo in alto a destra della pagina query mostrerà il percorso completo del gruppo prima del nome della connessione; se disattivato, mostrerà solo il nome della connessione.",
+    shortcutConvertSelectionToDelimited: "Converti il contenuto selezionato in un elenco delimitato",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

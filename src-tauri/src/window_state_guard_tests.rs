@@ -2,10 +2,13 @@
 //! together with the window-state logic that restores the main window.
 
 use crate::window_geometry::{
-    fit_logical, matching_monitor, monitor_for_logical, offset_in_monitor, to_logical, LogicalRect, MonitorRect,
-    PhysicalWindowRect,
+    fit_logical, matching_monitor, monitor_for_logical, offset_in_monitor, shared_frame_base, to_logical, LogicalRect,
+    MonitorRect, PhysicalWindowRect,
 };
-use crate::window_state_guard::{corrected_window_rect, sane_window_size, WindowGeometry};
+use crate::window_state_guard::{
+    corrected_window_rect, parse_geometry_file, restore_geometry, sane_window_size, updated_geometry_file,
+    PersistedWindowState, WindowGeometry,
+};
 use tauri_plugin_window_state::StateFlags;
 
 fn rect(x: i32, y: i32, width: u32, height: u32) -> PhysicalWindowRect {
@@ -26,6 +29,27 @@ fn monitor(x: i32, y: i32, width: u32, height: u32, scale_factor: f64) -> Monito
 /// gives back the AppKit points.
 fn mixed_dpi() -> Vec<MonitorRect> {
     vec![monitor(0, 0, 3456, 2234, 2.0), monitor(1728, -323, 2560, 1440, 1.0)]
+}
+
+/// A 2x built-in main display (1800×1169 pt) with a 1x 3440×1440 external
+/// display placed above it and shifted left, so its points start at
+/// (-890, -1440): both coordinates negative.
+fn external_above_left() -> Vec<MonitorRect> {
+    vec![monitor(0, 0, 3600, 2338, 2.0), monitor(-890, -1440, 3440, 1440, 1.0)]
+}
+
+fn legacy_state(x: i32, y: i32, width: u32, height: u32) -> PersistedWindowState {
+    PersistedWindowState {
+        width,
+        height,
+        x,
+        y,
+        prev_x: x,
+        prev_y: y,
+        maximized: false,
+        decorated: true,
+        fullscreen: false,
+    }
 }
 
 #[test]
@@ -183,4 +207,99 @@ fn issue_13168_restores_the_frame_of_a_window_closed_on_the_2x_display() {
 fn the_halved_restore_is_the_reported_symptom() {
     // What `set_position(Physical…)`/`set_size(Physical…)` did to 1x pixels at 2x.
     assert_eq!(to_logical(rect(2368, 183, 1280, 800), 2.0), logical(1184.0, 91.5, 640.0, 400.0));
+}
+
+#[test]
+fn shared_frame_only_needs_the_main_display_at_the_origin() {
+    // Both layouts are the macOS shared point frame: the issue's (external
+    // display at y = -323) and one placed above-left of the main display.
+    for monitors in [mixed_dpi(), external_above_left()] {
+        assert_eq!(shared_frame_base(monitors.first()), Some(monitors[0].logical()));
+    }
+    assert_eq!(shared_frame_base(Some(&monitor(1920, 0, 1920, 1080, 1.0))), None);
+    assert_eq!(shared_frame_base(None), None);
+}
+
+#[test]
+fn stored_geometry_is_absolute_points() {
+    // On the 1x external display a reported frame is its points.
+    let external = WindowGeometry::from_reported(rect(-500, -1200, 2000, 1100), 1.0);
+    assert_eq!(external.logical(), logical(-500.0, -1200.0, 2000.0, 1100.0));
+    // On the 2x built-in display a reported frame is points × 2.
+    let built_in = WindowGeometry::from_reported(rect(582, 244, 3000, 1800), 2.0);
+    assert_eq!(built_in.logical(), logical(291.0, 122.0, 1500.0, 900.0));
+    assert_eq!(built_in.scale_factor, 2.0);
+}
+
+#[test]
+fn stored_geometry_round_trips_on_every_display() {
+    let monitors = external_above_left();
+    for (reported, factor) in [(rect(-500, -1200, 2000, 1100), 1.0), (rect(582, 244, 3000, 1800), 2.0)] {
+        let stored = WindowGeometry::from_reported(reported, factor);
+        assert_eq!(restore_geometry(Some(stored), None, &monitors), Some(stored), "{reported:?} at {factor}");
+    }
+}
+
+#[test]
+fn a_window_closed_on_the_external_display_reopens_there_at_full_size() {
+    // Before the fix the stored position was relative to its display and read
+    // back as absolute, and this layout skipped the logical path altogether.
+    let monitors = external_above_left();
+    let stored = WindowGeometry::from_reported(rect(-500, -1200, 2000, 1100), 1.0);
+    let restored = restore_geometry(Some(stored), None, &monitors).expect("restorable");
+    assert_eq!(restored.logical(), logical(-500.0, -1200.0, 2000.0, 1100.0));
+    assert_eq!(monitor_for_logical(restored.logical(), &monitors), Some(monitors[1]));
+}
+
+#[test]
+fn stored_geometry_wins_over_the_plugin_pixels() {
+    let monitors = external_above_left();
+    let stored = WindowGeometry::from_reported(rect(582, 244, 3000, 1800), 2.0);
+    let state = legacy_state(582, 244, 2560, 1600);
+    assert_eq!(restore_geometry(Some(stored), Some(&state), &monitors), Some(stored));
+}
+
+#[test]
+fn a_window_on_a_disconnected_display_is_centered_on_the_main_display() {
+    let stored = WindowGeometry::from_reported(rect(-500, -1200, 2000, 1100), 1.0);
+    let built_in_only = vec![monitor(0, 0, 3600, 2338, 2.0)];
+    let restored = restore_geometry(Some(stored), None, &built_in_only).expect("restorable");
+    // Capped to the 1800×1169 pt display and centered on it.
+    assert_eq!(restored.logical(), logical(0.0, 35.0, 1800.0, 1100.0));
+}
+
+#[test]
+fn corrupt_stored_size_falls_back_to_the_default() {
+    let stored = WindowGeometry { x: 100.0, y: 100.0, width: 160.0, height: 28.0, scale_factor: 2.0 };
+    let restored = restore_geometry(Some(stored), None, &external_above_left()).expect("restorable");
+    assert_eq!(restored.logical(), logical(100.0, 100.0, 1280.0, 800.0));
+}
+
+#[test]
+fn without_stored_geometry_the_plugin_pixels_are_read_at_their_display_factor() {
+    let monitors = external_above_left();
+    // The user's actual state file: 2560×1600 px at (582, 244) on the 2x display.
+    let restored = restore_geometry(None, Some(&legacy_state(582, 244, 2560, 1600)), &monitors).expect("restorable");
+    assert_eq!(restored.logical(), logical(291.0, 122.0, 1280.0, 800.0));
+    assert_eq!(restore_geometry(None, None, &monitors), None);
+}
+
+#[test]
+fn geometry_file_keeps_other_entries_and_survives_garbage() {
+    let geometry = WindowGeometry::from_reported(rect(582, 244, 3000, 1800), 2.0);
+    let fresh = updated_geometry_file(None, "main", &geometry).expect("encoded");
+    assert_eq!(parse_geometry_file(&fresh, "main"), Some(geometry));
+
+    let other = br#"{"other":{"x":1.0,"y":2.0,"width":1000.0,"height":700.0,"scale_factor":1.0}}"#;
+    let merged = updated_geometry_file(Some(other), "main", &geometry).expect("encoded");
+    assert_eq!(parse_geometry_file(&merged, "main"), Some(geometry));
+    assert!(parse_geometry_file(&merged, "other").is_some());
+
+    let replaced = updated_geometry_file(Some(b"not json"), "main", &geometry).expect("encoded");
+    assert_eq!(parse_geometry_file(&replaced, "main"), Some(geometry));
+
+    assert_eq!(parse_geometry_file(b"not json", "main"), None);
+    assert_eq!(parse_geometry_file(br#"{"main":{"x":0.0}}"#, "main"), None);
+    let unusable = br#"{"main":{"x":0.0,"y":0.0,"width":0.0,"height":800.0,"scale_factor":2.0}}"#;
+    assert_eq!(parse_geometry_file(unusable, "main"), None);
 }

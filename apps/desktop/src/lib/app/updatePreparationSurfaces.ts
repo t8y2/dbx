@@ -10,6 +10,8 @@ export type UpdateConfigTranslator = (key: string, named?: Record<string, unknow
 
 export interface UpdateBlockingConfigState {
   pendingAppClose: boolean;
+  saveCloseConfirm: boolean;
+  exitCloseConfirm: boolean;
   connectionDialog: boolean;
   saveSqlDialog: boolean;
   ddlDialog: boolean;
@@ -36,7 +38,7 @@ export interface UpdateBlockingConfigState {
 }
 
 export interface UpdateConfigBlock {
-  readonly code: Extract<UpdatePreparationBlockCode, "config" | "config_busy">;
+  readonly code: Extract<UpdatePreparationBlockCode, "config" | "config_busy" | "window_operation">;
   readonly message: string;
 }
 
@@ -49,7 +51,6 @@ export interface UpdateBlockingConfigSurface {
 
 /** Ordered: the first open surface is the one reported to the user. */
 export const UPDATE_BLOCKING_CONFIG_SURFACES: readonly UpdateBlockingConfigSurface[] = [
-  { id: "pendingAppClose", open: (state) => state.pendingAppClose, label: (_state, translate) => translate("settings.closeActionPromptTitle") },
   { id: "connectionDialog", open: (state) => state.connectionDialog, label: (_state, translate) => translate("updates.surfaceConnection") },
   { id: "saveSqlDialog", open: (state) => state.saveSqlDialog, label: (_state, translate) => translate("savedSql.saveToLibrary") },
   { id: "ddlDialog", open: (state) => state.ddlDialog, label: (_state, translate) => translate("updates.surfaceDdl") },
@@ -89,10 +90,15 @@ export const UPDATE_BLOCKING_CONFIG_SURFACES: readonly UpdateBlockingConfigSurfa
   { id: "importLayoutConfirm", open: (state) => state.importLayoutConfirm, label: (_state, translate) => translate("configExport.importLayoutTitle") },
 ];
 
-/** Busy config I/O has no dialog to close, so it needs its own instruction. */
+/** Describe visible confirmations separately from in-flight close/config I/O. */
 export function describeConfigUpdateBlock(state: UpdateBlockingConfigState, translate: UpdateConfigTranslator): UpdateConfigBlock | null {
   if (state.configExportBusy || state.importApplying) return { code: "config_busy", message: translate("updates.preparationConfigBusy") };
+  if (state.saveCloseConfirm) return { code: "config", message: translate("updates.preparationSaveConfirmation") };
+  if (state.exitCloseConfirm) return { code: "config", message: translate("updates.preparationAppClose") };
   const surface = UPDATE_BLOCKING_CONFIG_SURFACES.find((item) => item.open(state));
-  if (!surface) return null;
-  return { code: "config", message: translate("updates.preparationConfigDetail", { surface: surface.label(state, translate) }) };
+  if (surface) return { code: "config", message: translate("updates.preparationConfigDetail", { surface: surface.label(state, translate) }) };
+  // Saving may temporarily suspend the confirmation. Keep that operation safe,
+  // but never invent an open dialog from the pending close request alone.
+  if (state.pendingAppClose) return { code: "window_operation", message: translate("updates.preparationWindowOperation") };
+  return null;
 }

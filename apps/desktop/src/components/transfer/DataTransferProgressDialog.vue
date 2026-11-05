@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlertCircle, ArrowRightLeft, CheckCircle2, ChevronDown, ChevronRight, Loader2, Minimize2, X, XCircle } from "@lucide/vue";
+import { AlertCircle, ArrowRightLeft, CheckCircle2, ChevronDown, ChevronRight, Loader2, Minimize2, RotateCcw, X, XCircle } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { formatDataTransferDuration, useExportTracker, type ExportTask } from "@/composables/useExportTracker";
+import { formatDataTransferDuration, useExportTracker, canReexecuteDataTransferTask, type ExportTask } from "@/composables/useExportTracker";
+import { reexecuteDataTransferTask } from "@/composables/useDialogSources";
 import { translateBackendError } from "@/i18n/backend-errors";
 import SchemaDiffDeployStep from "@/components/diff/SchemaDiffDeployStep.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
@@ -32,8 +33,17 @@ const showPackageReview = ref(true);
 const packageDraftSql = computed(() => packageDeployment.value?.drafts.find((draft) => draft.objectId === packageDeployment.value?.selectedObjectId)?.sql ?? "");
 const packageConfirmOpen = ref(false);
 const packageConfirmSql = ref("");
+const emit = defineEmits<{
+  (e: "reexecute", task: ExportTask): void;
+}>();
 let resolvePackageConfirmation: ((confirmed: boolean) => void) | undefined;
 const { cancelTask } = useExportTracker();
+const canReexecute = computed(() => canReexecuteDataTransferTask(props.task));
+
+function handleReexecute() {
+  emit("reexecute", props.task);
+  reexecuteDataTransferTask(props.task);
+}
 const currentTime = ref(Date.now());
 let elapsedTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -213,7 +223,13 @@ onBeforeUnmount(() => {
             {{ task.status === "Cancelling" ? t("databaseBackup.cancelling") : t("exportProgress.cancel") }}
           </Button>
         </template>
-        <Button v-else variant="outline" size="sm" @click="open = false">{{ t("exportProgress.close") }}</Button>
+        <template v-else>
+          <Button variant="outline" size="sm" @click="open = false">{{ t("exportProgress.close") }}</Button>
+          <Button v-if="canReexecute" size="sm" @click="handleReexecute">
+            <RotateCcw class="mr-1 h-3.5 w-3.5" />
+            {{ t("transfer.reexecute") }}
+          </Button>
+        </template>
       </DialogFooter>
     </DialogContent>
   </Dialog>

@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   redisSetTtl: vi.fn(),
   redisSetExpireAt: vi.fn(),
   redisLoadMore: vi.fn(),
+  redisHashFieldUpdate: vi.fn(),
   toast: vi.fn(),
 }));
 
@@ -19,6 +20,7 @@ vi.mock("@/lib/backend/api", () => ({
   redisSetTtl: mocks.redisSetTtl,
   redisSetExpireAt: mocks.redisSetExpireAt,
   redisLoadMore: mocks.redisLoadMore,
+  redisHashFieldUpdate: mocks.redisHashFieldUpdate,
 }));
 
 vi.mock("@/composables/useEditorFontFamilyStyle", () => ({
@@ -152,6 +154,7 @@ function listValue() {
 
 const testI18nMessages = {
   en: {
+    grid: { save: "Save", discard: "Discard" },
     redis: {
       searchFields: "Search fields and values",
       searchMembers: "Search members",
@@ -384,6 +387,36 @@ describe("Redis collection member search", () => {
     expect(rows[1].textContent).toContain("new");
     expect(rows[1].textContent).toContain("50s");
   });
+  it("keeps the hash field search after saving an edited value (#14322)", async () => {
+    mocks.redisGetValue.mockResolvedValue({ key_display: "hash", key_raw: "key", ttl: -1, redis_type: "hash", data: { kind: "hash", items: [], total: 2, scan_cursor: 10 } });
+    mocks.redisLoadMore.mockResolvedValue({ kind: "hash", items: [{ field: blob("field-a"), value: blob("one") }], scan_cursor: undefined });
+    mocks.redisHashFieldUpdate.mockResolvedValue(undefined);
+    mountViewer();
+    await settle();
+
+    await typeSearch("field");
+    expect(searchInput()?.value).toBe("field");
+
+    document.querySelector<HTMLElement>("[data-redis-value-row]")!.click();
+    await settle();
+    document.querySelector<HTMLElement>("[data-redis-member-utf8-viewer]")!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+    await settle();
+    const editor = document.querySelector<HTMLTextAreaElement>("[data-redis-member-utf8-editor]")!;
+    editor.value = "two";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+
+    [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "Save")!.click();
+    await settle();
+    for (let i = 0; i < 4; i++) await settle();
+
+    expect(mocks.redisHashFieldUpdate).toHaveBeenCalled();
+    // The filter box and the applied query survive the post-save reload.
+    expect(searchInput()?.value).toBe("field");
+    const calls = mocks.redisLoadMore.mock.calls;
+    expect(calls[calls.length - 1]?.[6]).toBe("field");
+  });
+
   it("retries an initial load that settled while the viewer was inactive", async () => {
     let finish!: (value: unknown) => void;
     mocks.redisGetValue

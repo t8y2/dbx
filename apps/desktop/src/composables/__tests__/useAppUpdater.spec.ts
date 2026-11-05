@@ -124,6 +124,30 @@ describe("prepared update reconciliation (#13562)", () => {
 });
 
 describe("silent update lifecycle", () => {
+  it("restores the saved beta channel without opening the update center before initialization", async () => {
+    const version = "0.6.65-beta.20261103.1";
+    mocks.checkForUpdates.mockResolvedValue({ ...info, current_version: version, latest_version: version, channel: "beta", update_available: false });
+    const updater = mount();
+
+    // Settings are loaded asynchronously after the composable is created.
+    settings.updateChannel = "beta";
+    await flush();
+
+    expect(mocks.checkForUpdates).not.toHaveBeenCalled();
+    expect(updater.showUpdateDialog.value).toBe(false);
+
+    await updater.initialize();
+    await flush();
+
+    expect(mocks.checkForUpdates).toHaveBeenCalledExactlyOnceWith("en", "official", "beta");
+    expect(updater.updateInfo.value?.update_available).toBe(false);
+    expect(updater.showUpdateDialog.value).toBe(false);
+
+    // An explicit check must still open the center, even when already up to date.
+    await updater.checkUpdates();
+    expect(updater.showUpdateDialog.value).toBe(true);
+  });
+
   it("discards the promoted stable cache when its beta binary is already running", async () => {
     mocks.getAppVersion.mockResolvedValue("1.1.0-beta.20261029.1");
     mocks.getDownloadedUpdate.mockResolvedValue(cache);

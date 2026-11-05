@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { usesLightweightMysqlBrowser } from "@/lib/database/mysqlBrowserLoading";
 import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
 import { ArrowDown, ArrowUp, Check, Copy, Database, GripVertical, Grid3X3, LayoutGrid, List, Loader2, RefreshCw, Search, Settings2, TerminalSquare, X } from "@lucide/vue";
@@ -15,6 +16,8 @@ import { objectBrowserTargetForNamespaceRow } from "@/lib/database/objectBrowser
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "@/components/sidebar/SidebarTreeItemDialogs.vue";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
+import { useToast } from "@/composables/useToast";
+import { translateBackendError } from "@/i18n/backend-errors";
 import * as api from "@/lib/backend/api";
 import { filterDatabaseNamesForConnection, filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
 import { formatObjectBrowserBytes, formatObjectBrowserTimestamp } from "@/lib/table/objectBrowserRows";
@@ -77,6 +80,7 @@ const search = ref(restoredUiState.search ?? "");
 const rows = ref<DatabaseRow[]>([]);
 const loading = ref(false);
 const error = ref("");
+const { toast } = useToast();
 const sortKey = ref<DatabaseBrowserSortKey>(DATABASE_BROWSER_COLUMN_KEYS.includes(restoredUiState.sortKey as DatabaseBrowserColumnKey) ? restoredUiState.sortKey! : "name");
 const sortDirection = ref<SortDirection>(restoredUiState.sortDirection === "desc" ? "desc" : "asc");
 const columnWidths = ref<Record<DatabaseBrowserColumnKey, number>>(
@@ -182,14 +186,41 @@ function openDatabase(database: string) {
   void nextTick(() => requestObjectBrowserSearchFocus(tabId));
 }
 
+const pendingCapacity = new Set<string>();
+async function loadDatabaseCapacity(name: string) {
+  const generation = refreshGeneration;
+  const connectionId = props.connection.id;
+  const key = JSON.stringify([connectionId, generation, name]);
+  if (pendingCapacity.has(key)) return;
+  pendingCapacity.add(key);
+  try {
+    const sizes = await api.listDatabaseStorage(connectionId, [name]);
+    if (generation !== refreshGeneration || connectionId !== props.connection.id) return;
+    const size = sizes.find((item) => item.name === name);
+    if (size) rows.value = rows.value.map((row) => (row.name === name ? { ...row, sizeBytes: size.size_bytes ?? null } : row));
+  } catch (cause) {
+    if (generation === refreshGeneration && connectionId === props.connection.id) toast(translateBackendError(t, cause), 5000);
+  } finally {
+    pendingCapacity.delete(key);
+  }
+}
+
 function databaseContextMenuItems(row: DatabaseRow): ContextMenuItem[] {
   const target = objectBrowserTargetForNamespaceRow(props.connection, row.name);
   const node: TreeNode = { id: `${props.connection.id}:${row.name}`, label: row.name, type: "database", connectionId: props.connection.id, database: target.database, schema: target.schema };
+  const capacityItem: ContextMenuItem = {
+    label: t("objects.loadCapacity"),
+    icon: Database,
+    action: () => {
+      void loadDatabaseCapacity(row.name);
+    },
+  };
   const runtimeItems = sidebarRuntimeHost.value?.buildContextMenu(node);
-  if (runtimeItems?.length) return presentMenu(removeUnsupportedDatabaseItems(runtimeItems), "database");
+  if (runtimeItems?.length) return presentMenu([...removeUnsupportedDatabaseItems(runtimeItems), ...(usesLightweightMysqlBrowser(props.connection) ? [capacityItem] : [])], "database");
   const isDefault = props.connection.database === row.name;
   return presentMenu(
     [
+      ...(usesLightweightMysqlBrowser(props.connection) ? [capacityItem] : []),
       { sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: () => openDatabase(row.name), icon: Database },
       {
         sidebarActionId: "contextMenu.viewDdl",
@@ -465,8 +496,8 @@ async function refresh(): Promise<boolean> {
     restoreScrollPosition();
 
     // Name enumeration is cheap and should render immediately. Enrich the
-    // rows separately because MySQL metadata calculates sizes by aggregating
-    // information_schema.TABLES, which can be expensive for large servers.
+    // rows separately. MySQL capacity is requested explicitly; this read only
+    // supplies its inexpensive schema attributes.
     try {
       const metadata = await api.listDatabaseMetadata(props.connection.id);
       if (generation !== refreshGeneration) return true;
@@ -476,7 +507,7 @@ async function refresh(): Promise<boolean> {
         return database
           ? {
               ...row,
-              sizeBytes: database.size_bytes ?? null,
+              sizeBytes: usesLightweightMysqlBrowser(props.connection) ? row.sizeBytes : (database.size_bytes ?? null),
               createdAt: database.created_at ?? null,
               updatedAt: database.updated_at ?? null,
               comment: database.comment ?? null,
@@ -557,6 +588,7 @@ onActivated(() => {
 });
 
 onBeforeUnmount(() => {
+  refreshGeneration++;
   stopColumnResize?.();
   if (restoreScrollFrame) window.cancelAnimationFrame(restoreScrollFrame);
 });

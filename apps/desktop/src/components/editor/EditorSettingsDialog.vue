@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { SIDEBAR_HOVER_DELAY_MIN, SIDEBAR_HOVER_DELAY_MAX, normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import { cleanupMcpHistoryRetention, loadMcpHistoryRetentionLimit, saveMcpHistoryRetentionLimit } from "@/lib/backend/api";
 import { HISTORY_RETENTION_LIMITS, useHistoryRetentionSetting } from "@/composables/useHistoryRetentionSetting";
 import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } from "vue";
@@ -128,6 +129,7 @@ import {
   type WebLogoPosition,
   type SnippetTriggerKey,
   type SqlCompletionTriggerMode,
+  type SqlCompletionMatchMode,
   type SqlTableCompletionSchemaQualification,
   type TableHoverLookupMode,
   normalizeTabMaxWidth,
@@ -349,6 +351,7 @@ import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import AppLogo from "@/components/icons/AppLogo.vue";
 import ChangelogPanel from "@/components/settings/ChangelogPanel.vue";
+import WebLoginCaptchaSetting from "@/components/settings/WebLoginCaptchaSetting.vue";
 import SettingsTransferPanel from "@/components/settings/SettingsTransferPanel.vue";
 import McpCapabilityBrowser from "@/components/settings/McpCapabilityBrowser.vue";
 import McpPluginToolsModeSetting from "@/components/settings/McpPluginToolsModeSetting.vue";
@@ -811,7 +814,15 @@ const showSqlServerSpaceConfirmsCompletion = computed(() => hasSqlServerConnecti
 const editSortCompletionColumnsAlphabetically = ref(settingsStore.editorSettings.sortCompletionColumnsAlphabetically);
 const editSelectFirstCompletionOnOpen = ref(settingsStore.editorSettings.selectFirstCompletionOnOpen);
 const editCompletionTriggerMode = ref<SqlCompletionTriggerMode>(settingsStore.editorSettings.completionTriggerMode);
+const editCompletionMatchMode = ref<SqlCompletionMatchMode>(settingsStore.editorSettings.completionMatchMode);
 const editExcludedCompletionItems = ref(settingsStore.editorSettings.excludedCompletionItems.join("\n"));
+const completionMatchModeDescription = computed(() => {
+  const key = {
+    contains: "settings.completionMatchModeContainsDescription",
+    fuzzy: "settings.completionMatchModeFuzzyDescription",
+  }[editCompletionMatchMode.value];
+  return t(key);
+});
 const completionTriggerModeDescription = computed(() => {
   const key = {
     manual: "settings.completionTriggerModeManualDescription",
@@ -1061,6 +1072,8 @@ const editRedisDatabaseDisplayLimit = ref(settingsStore.editorSettings.redisData
 const editSidebarObjectInfoMode = ref<SidebarObjectInfoMode>(settingsStore.editorSettings.sidebarObjectInfoMode);
 const editSidebarAllowHorizontalScroll = ref(settingsStore.editorSettings.sidebarAllowHorizontalScroll);
 const editSidebarShowConnectionEndpoints = ref(settingsStore.editorSettings.sidebarShowConnectionEndpoints);
+const editSidebarHoverEnabled = ref(settingsStore.editorSettings.sidebarHoverEnabled);
+const editSidebarHoverDelay = ref(settingsStore.editorSettings.sidebarHoverDelay);
 const editSidebarShowTooltips = ref(settingsStore.editorSettings.sidebarShowTooltips);
 const editSidebarIndent = ref(settingsStore.editorSettings.sidebarIndent);
 const editSidebarFontSize = ref(settingsStore.editorSettings.sidebarFontSize);
@@ -1070,6 +1083,7 @@ const editPreferredExportPath = ref(settingsStore.editorSettings.preferredExport
 const editDamengClientBinDir = ref(settingsStore.editorSettings.damengClientBinDir);
 const editAutoOpenExportFolder = ref(settingsStore.editorSettings.autoOpenExportFolder);
 const editApplyColumnFormattersOnExport = ref(settingsStore.editorSettings.applyColumnFormattersOnExport);
+const editCsvWithoutBom = ref(settingsStore.editorSettings.csvWithoutBom);
 const editCsvQuoteMode = ref<CsvQuoteMode>(settingsStore.editorSettings.csvQuoteMode);
 const editCsvNullMode = ref<CsvNullMode>(settingsStore.editorSettings.csvNullMode);
 const editQueryResultExportFileNameSource = ref<QueryResultExportFileNameSource>(settingsStore.editorSettings.queryResultExportFileNameSource);
@@ -1338,6 +1352,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sortCompletionColumnsAlphabetically: editSortCompletionColumnsAlphabetically.value,
     selectFirstCompletionOnOpen: editSelectFirstCompletionOnOpen.value,
     completionTriggerMode: editCompletionTriggerMode.value,
+    completionMatchMode: editCompletionMatchMode.value,
     excludedCompletionItems: normalizeExcludedCompletionItems(editExcludedCompletionItems.value),
     wordWrap: editWordWrap.value,
     showWhitespace: editShowWhitespace.value,
@@ -1448,6 +1463,8 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarObjectInfoMode: editSidebarObjectInfoMode.value,
     sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll.value,
     sidebarShowConnectionEndpoints: editSidebarShowConnectionEndpoints.value,
+    sidebarHoverEnabled: editSidebarHoverEnabled.value,
+    sidebarHoverDelay: editSidebarHoverDelay.value,
     sidebarShowTooltips: editSidebarShowTooltips.value,
     sidebarIndent: editSidebarIndent.value,
     sidebarFontSize: editSidebarFontSize.value,
@@ -1462,6 +1479,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     damengClientBinDir: editDamengClientBinDir.value,
     autoOpenExportFolder: editAutoOpenExportFolder.value,
     applyColumnFormattersOnExport: editApplyColumnFormattersOnExport.value,
+    csvWithoutBom: editCsvWithoutBom.value,
     csvQuoteMode: editCsvQuoteMode.value,
     csvNullMode: editCsvNullMode.value,
     queryResultExportFileNameSource: editQueryResultExportFileNameSource.value,
@@ -2048,6 +2066,7 @@ function syncEditorSettingsDraftFromStore() {
   editSortCompletionColumnsAlphabetically.value = settingsStore.editorSettings.sortCompletionColumnsAlphabetically;
   editSelectFirstCompletionOnOpen.value = settingsStore.editorSettings.selectFirstCompletionOnOpen;
   editCompletionTriggerMode.value = settingsStore.editorSettings.completionTriggerMode;
+  editCompletionMatchMode.value = settingsStore.editorSettings.completionMatchMode;
   editExcludedCompletionItems.value = settingsStore.editorSettings.excludedCompletionItems.join("\n");
   editWordWrap.value = settingsStore.editorSettings.wordWrap;
   editShowWhitespace.value = settingsStore.editorSettings.showWhitespace;
@@ -2164,6 +2183,8 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarObjectInfoMode.value = settingsStore.editorSettings.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = settingsStore.editorSettings.sidebarAllowHorizontalScroll;
   editSidebarShowConnectionEndpoints.value = settingsStore.editorSettings.sidebarShowConnectionEndpoints;
+  editSidebarHoverEnabled.value = settingsStore.editorSettings.sidebarHoverEnabled;
+  editSidebarHoverDelay.value = settingsStore.editorSettings.sidebarHoverDelay;
   editSidebarShowTooltips.value = settingsStore.editorSettings.sidebarShowTooltips;
   editSidebarIndent.value = settingsStore.editorSettings.sidebarIndent;
   editSidebarFontSize.value = settingsStore.editorSettings.sidebarFontSize;
@@ -2173,6 +2194,7 @@ function syncEditorSettingsDraftFromStore() {
   editDamengClientBinDir.value = settingsStore.editorSettings.damengClientBinDir;
   editAutoOpenExportFolder.value = settingsStore.editorSettings.autoOpenExportFolder;
   editApplyColumnFormattersOnExport.value = settingsStore.editorSettings.applyColumnFormattersOnExport;
+  editCsvWithoutBom.value = settingsStore.editorSettings.csvWithoutBom;
   editCsvQuoteMode.value = settingsStore.editorSettings.csvQuoteMode;
   editCsvNullMode.value = settingsStore.editorSettings.csvNullMode;
   editQueryResultExportFileNameSource.value = settingsStore.editorSettings.queryResultExportFileNameSource;
@@ -2339,6 +2361,8 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sidebarObjectInfoMode: editSidebarObjectInfoMode,
   sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll,
   sidebarShowConnectionEndpoints: editSidebarShowConnectionEndpoints,
+  sidebarHoverEnabled: editSidebarHoverEnabled,
+  sidebarHoverDelay: editSidebarHoverDelay,
   sidebarShowTooltips: editSidebarShowTooltips,
   sidebarIndent: editSidebarIndent,
   sidebarFontSize: editSidebarFontSize,
@@ -2353,6 +2377,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   damengClientBinDir: editDamengClientBinDir,
   autoOpenExportFolder: editAutoOpenExportFolder,
   applyColumnFormattersOnExport: editApplyColumnFormattersOnExport,
+  csvWithoutBom: editCsvWithoutBom,
   csvQuoteMode: editCsvQuoteMode,
   csvNullMode: editCsvNullMode,
   queryResultExportFileNameSource: editQueryResultExportFileNameSource,
@@ -2374,6 +2399,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   clickTableNavigationTarget: editClickTableNavigationTarget,
   objectBrowserAutoOpenDetailPanel: editObjectBrowserAutoOpenDetailPanel,
   completionTriggerMode: editCompletionTriggerMode,
+  completionMatchMode: editCompletionMatchMode,
   excludedCompletionItems: editExcludedCompletionItems,
   defaultTransactionMode: editDefaultTransactionMode,
   keepExplicitTransactionInAutoCommit: editKeepExplicitTransactionInAutoCommit,
@@ -2716,6 +2742,7 @@ async function persistSettings() {
   if (hasApplyBlocker.value) return;
   await historyRetention.save();
   await mcpHistoryRetention.save();
+  editSidebarHoverDelay.value = normalizeSidebarHoverDelay(editSidebarHoverDelay.value);
   const editorSettingsPatch = editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value);
   const sidebarObjectDisplayChanged = editorSettingsPatch.sidebarObjectDisplay !== undefined && editorSettingsPatch.sidebarObjectDisplay !== settingsStore.editorSettings.sidebarObjectDisplay;
   const sidebarTablePageSizeChanged = editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
@@ -2856,6 +2883,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSortCompletionColumnsAlphabetically.value = DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically;
     editSelectFirstCompletionOnOpen.value = DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen;
     editCompletionTriggerMode.value = DEFAULT_EDITOR_SETTINGS.completionTriggerMode;
+    editCompletionMatchMode.value = DEFAULT_EDITOR_SETTINGS.completionMatchMode;
     editExcludedCompletionItems.value = DEFAULT_EDITOR_SETTINGS.excludedCompletionItems.join("\n");
     editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
     editShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.showWhitespace;
@@ -2938,6 +2966,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
     editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
     editSidebarShowConnectionEndpoints.value = DEFAULT_EDITOR_SETTINGS.sidebarShowConnectionEndpoints;
+    editSidebarHoverEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarHoverEnabled;
+    editSidebarHoverDelay.value = DEFAULT_EDITOR_SETTINGS.sidebarHoverDelay;
     editSidebarShowTooltips.value = DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips;
     editSidebarIndent.value = DEFAULT_EDITOR_SETTINGS.sidebarIndent;
     editSidebarFontSize.value = DEFAULT_EDITOR_SETTINGS.sidebarFontSize;
@@ -3003,6 +3033,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDamengClientBinDir.value = DEFAULT_EDITOR_SETTINGS.damengClientBinDir;
     editAutoOpenExportFolder.value = DEFAULT_EDITOR_SETTINGS.autoOpenExportFolder;
     editApplyColumnFormattersOnExport.value = DEFAULT_EDITOR_SETTINGS.applyColumnFormattersOnExport;
+    editCsvWithoutBom.value = DEFAULT_EDITOR_SETTINGS.csvWithoutBom;
     editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
     editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
     editQueryResultExportFileNameSource.value = DEFAULT_EDITOR_SETTINGS.queryResultExportFileNameSource;
@@ -3065,6 +3096,7 @@ function resetAllDefaults() {
   editSequenceCompletionEnabled.value = DEFAULT_EDITOR_SETTINGS.sequenceCompletionEnabled;
   editSortCompletionColumnsAlphabetically.value = DEFAULT_EDITOR_SETTINGS.sortCompletionColumnsAlphabetically;
   editSelectFirstCompletionOnOpen.value = DEFAULT_EDITOR_SETTINGS.selectFirstCompletionOnOpen;
+  editCompletionMatchMode.value = DEFAULT_EDITOR_SETTINGS.completionMatchMode;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
   editShowWhitespace.value = DEFAULT_EDITOR_SETTINGS.showWhitespace;
   editDdlOpenMode.value = DEFAULT_EDITOR_SETTINGS.ddlOpenMode;
@@ -3173,6 +3205,8 @@ function resetAllDefaults() {
   editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
   editSidebarShowConnectionEndpoints.value = DEFAULT_EDITOR_SETTINGS.sidebarShowConnectionEndpoints;
+  editSidebarHoverEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarHoverEnabled;
+  editSidebarHoverDelay.value = DEFAULT_EDITOR_SETTINGS.sidebarHoverDelay;
   editSidebarShowTooltips.value = DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips;
   editSidebarIndent.value = DEFAULT_EDITOR_SETTINGS.sidebarIndent;
   editSidebarFontSize.value = DEFAULT_EDITOR_SETTINGS.sidebarFontSize;
@@ -3187,6 +3221,7 @@ function resetAllDefaults() {
   editDamengClientBinDir.value = DEFAULT_EDITOR_SETTINGS.damengClientBinDir;
   editAutoOpenExportFolder.value = DEFAULT_EDITOR_SETTINGS.autoOpenExportFolder;
   editApplyColumnFormattersOnExport.value = DEFAULT_EDITOR_SETTINGS.applyColumnFormattersOnExport;
+  editCsvWithoutBom.value = DEFAULT_EDITOR_SETTINGS.csvWithoutBom;
   editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
   editCsvNullMode.value = DEFAULT_EDITOR_SETTINGS.csvNullMode;
   editQueryResultExportFileNameSource.value = DEFAULT_EDITOR_SETTINGS.queryResultExportFileNameSource;
@@ -3339,6 +3374,12 @@ function onDefaultTransactionModeChange(v: any) {
 function onCompletionTriggerModeChange(v: any) {
   if (v === "manual" || v === "require-prefix" || v === "positional") {
     editCompletionTriggerMode.value = v;
+  }
+}
+
+function onCompletionMatchModeChange(v: any) {
+  if (v === "contains" || v === "fuzzy") {
+    editCompletionMatchMode.value = v;
   }
 }
 
@@ -3911,8 +3952,8 @@ const settingsSearchEntries = computed(() =>
     settingsSearchCategoryLabels.value,
   ),
 );
-const settingsSearchResults = computed(() => searchSettings(settingsSearchEntries.value, settingsSearchQuery.value, currentLocale(), Infinity));
 const settingsSearchActive = computed(() => Boolean(settingsSearchQuery.value.trim()));
+const settingsSearchResults = computed(() => (settingsSearchActive.value ? searchSettings(settingsSearchEntries.value, settingsSearchQuery.value, currentLocale(), Infinity) : []));
 const settingsSearchVisible = computed(() => settingsSearchOpen.value && settingsSearchActive.value);
 const settingsSearchResultGroups = computed(() => {
   const groups = new Map<SettingsCategory, { categoryLabel: string; results: (typeof settingsSearchResults.value)[number][] }>();
@@ -4077,12 +4118,13 @@ async function selectSettingsSearchResult(result: SettingsSearchEntry) {
 }
 
 function onSettingsSearchKeydown(event: KeyboardEvent) {
-  const results = settingsSearchResults.value;
   if (event.key === "Escape") {
     event.preventDefault();
     exitSettingsSearch();
     return;
   }
+  if (!settingsSearchActive.value || !["ArrowDown", "ArrowUp", "Enter"].includes(event.key)) return;
+  const results = settingsSearchResults.value;
   if (!results.length) return;
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     event.preventDefault();
@@ -8533,6 +8575,24 @@ onUnmounted(() => {
                   </Select>
                 </div>
 
+                <div class="settings-item flex items-start justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" data-editor-completion-match-mode>
+                  <div class="min-w-0 space-y-1">
+                    <Label>{{ t("settings.completionMatchMode") }}</Label>
+                    <p class="text-xs leading-tight text-muted-foreground">
+                      {{ completionMatchModeDescription }}
+                    </p>
+                  </div>
+                  <Select :model-value="editCompletionMatchMode" @update:model-value="onCompletionMatchModeChange">
+                    <SelectTrigger class="h-8 w-44 shrink-0">
+                      <SelectValue :placeholder="t('settings.completionMatchMode')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="contains">{{ t("settings.completionMatchModeContains") }}</SelectItem>
+                      <SelectItem value="fuzzy">{{ t("settings.completionMatchModeFuzzy") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
                 <div class="space-y-2 md:col-span-2" data-editor-excluded-completion-items>
                   <Label for="editor-excluded-completion-items">{{ t("settings.excludedCompletionItems") }}</Label>
                   <textarea
@@ -9383,7 +9443,7 @@ onUnmounted(() => {
               </div>
 
               <div class="settings-appearance-group">
-                <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+                <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
                   <div class="space-y-2">
                     <Label>{{ t("settings.tabPlacement") }}</Label>
                     <Select :model-value="editTabPlacement" @update:model-value="setTabPlacement($event as TabPlacement)">
@@ -9453,13 +9513,6 @@ onUnmounted(() => {
                       </SelectContent>
                     </Select>
                   </div>
-                </div>
-                <div class="space-y-1 text-xs text-muted-foreground">
-                  <p>{{ t("settings.tabPlacementDescription") }}</p>
-                  <p>{{ t("settings.tabOrganizationDescription") }}</p>
-                  <p>{{ t("settings.tabGroupRowsDescription") }}</p>
-                  <p>{{ t("settings.tabMaxWidthDescription") }}</p>
-                  <p>{{ t("settings.tabDoubleClickActionDescription") }}</p>
                 </div>
               </div>
 
@@ -10079,6 +10132,35 @@ onUnmounted(() => {
                   </HelpTooltip>
                 </div>
                 <Switch id="sidebar-show-connection-endpoints" v-model="editSidebarShowConnectionEndpoints" />
+              </div>
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="sidebar-hover-enabled">{{ t("settings.sidebarHoverEnabled") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.sidebarHoverEnabledDescription") }}</p>
+                </div>
+                <Switch id="sidebar-hover-enabled" v-model="editSidebarHoverEnabled" />
+              </div>
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="sidebar-hover-delay">{{ t("settings.sidebarHoverDelay") }}</Label>
+                  <p class="text-xs text-muted-foreground">{{ t("settings.sidebarHoverDelayDescription") }}</p>
+                </div>
+                <Input
+                  id="sidebar-hover-delay"
+                  type="number"
+                  class="w-24 text-right"
+                  :disabled="!editSidebarHoverEnabled"
+                  :min="SIDEBAR_HOVER_DELAY_MIN"
+                  :max="SIDEBAR_HOVER_DELAY_MAX"
+                  :step="50"
+                  :model-value="editSidebarHoverDelay"
+                  @update:model-value="
+                    (value: string | number) => {
+                      const n = typeof value === 'string' ? Number(value) : value;
+                      if (Number.isFinite(n)) editSidebarHoverDelay = n;
+                    }
+                  "
+                />
               </div>
               <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
@@ -11036,6 +11118,10 @@ onUnmounted(() => {
               <div class="space-y-3">
                 <div class="text-sm font-medium text-muted-foreground">
                   {{ t("settings.exportSection") }}
+                </div>
+                <div class="flex items-center justify-between gap-4">
+                  <Label for="csv-without-bom">{{ t("settings.csvWithoutBom") }}</Label>
+                  <Switch id="csv-without-bom" v-model="editCsvWithoutBom" />
                 </div>
                 <div class="flex items-start justify-between gap-4">
                   <div class="min-w-0 space-y-0.5">
@@ -13850,6 +13936,10 @@ LIMIT 100;</pre>
                 <p v-if="passwordMessage" class="text-xs" :class="passwordError ? 'text-destructive' : 'text-green-500'">
                   {{ passwordMessage }}
                 </p>
+              </div>
+
+              <div class="border-t border-border/60 pt-5 space-y-3">
+                <WebLoginCaptchaSetting />
               </div>
 
               <div class="border-t border-border/60 pt-5 space-y-3">

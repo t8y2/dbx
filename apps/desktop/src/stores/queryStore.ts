@@ -7107,15 +7107,18 @@ export const useQueryStore = defineStore("query", () => {
     const comments: Array<string | undefined> = [];
     const typeLabels: Array<string | undefined> = [];
     const mapping: Array<QueryResultSourceColumnRef | undefined> = [];
-    for (const ref of refs) {
+    for (let index = 0; index < refs.length; index++) {
+      const ref = refs[index];
+      const loaded = ref ? loadedSources.find((entry) => entry.source.key === ref.sourceKey) : undefined;
+      let column = ref ? loaded?.tableMeta.columns.find((candidate) => candidate.name === ref.sourceColumn) : undefined;
       if (!ref) {
-        comments.push(undefined);
-        typeLabels.push(undefined);
-        mapping.push(undefined);
-        continue;
+        // Aggregates keep the base column's label (e.g. MAX(updated_at) AS
+        // updated_at) but contain no direct column reference, so ordinal
+        // binding intentionally leaves them unresolved. With a single source
+        // there is no other table whose comment could leak, so resolve the
+        // label/expression back to that source column for display only.
+        column = singleSourceFallbackColumn(analysis, resultColumns[index], index, loadedSources, refs.length);
       }
-      const loaded = loadedSources.find((entry) => entry.source.key === ref.sourceKey);
-      const column = loaded?.tableMeta.columns.find((candidate) => candidate.name === ref.sourceColumn);
       const comment = column?.comment?.trim();
       comments.push(comment || undefined);
       typeLabels.push(
@@ -7128,14 +7131,44 @@ export const useQueryStore = defineStore("query", () => {
             }) || undefined
           : undefined,
       );
-      mapping.push({
-        ...ref,
-        database: loaded?.tableMeta.database,
-        schema: loaded?.tableMeta.schema,
-        tableName: loaded?.tableMeta.tableName,
-      });
+      if (ref && loaded) {
+        mapping.push({
+          ...ref,
+          database: loaded.tableMeta.database,
+          schema: loaded.tableMeta.schema,
+          tableName: loaded.tableMeta.tableName,
+        });
+      } else {
+        // A name-based display fallback is not proof of source identity; leave
+        // the ordinal unmapped so writes/attribution never use a guess.
+        mapping.push(undefined);
+      }
     }
     return { comments, typeLabels, mapping };
+  }
+
+  /**
+   * Resolve an otherwise unmapped result ordinal to a unique column of a single
+   * source table. Used only for display metadata (comments/declared types).
+   */
+  function singleSourceFallbackColumn(analysis: EditableQueryInfo, resultColumn: string | undefined, index: number, loadedSources: LoadedEditableSource[], resultColumnCount: number) {
+    if (loadedSources.length !== 1) return undefined;
+    const source = loadedSources[0]!;
+    const projection = !analysis.selectStar && analysis.columns.length === resultColumnCount ? analysis.columns[index] : undefined;
+    const label = resultColumn?.trim();
+    // A projection that aliases another expression must keep its exact bound
+    // column when one exists; otherwise only use the label when the projection
+    // expression actually refers to that identifier (MAX(updated_at)).
+    const expressionReferencesLabel = !!projection?.expression && !!label && projectionExpressionReferencesIdentifier(projection.expression, label);
+    const candidateName = projection?.sourceName ?? (expressionReferencesLabel || (analysis.selectStar && label) ? label : undefined);
+    if (!candidateName) return undefined;
+    const matches = source.tableMeta.columns.filter((column) => column.name.toLowerCase() === candidateName.toLowerCase());
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+
+  function projectionExpressionReferencesIdentifier(expression: string, identifier: string): boolean {
+    const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|[^A-Za-z0-9_$])${escaped}([^A-Za-z0-9_$]|$)`, "i").test(expression);
   }
 
   function mysqlColumnIsGenerated(column: { extra: string | null }): boolean {
@@ -11581,6 +11614,7 @@ export const useQueryStore = defineStore("query", () => {
         totalRows,
         timeoutSecs: queryTimeoutSecsForConnection(conn, settings.globalQueryTimeoutSecs),
         keysetOptimizationEnabled: settings.queryExportKeysetOptimizationEnabled,
+        csvWithoutBom: settings.csvWithoutBom,
         csvQuoteMode: settings.csvQuoteMode,
         clientSessionId,
         txnSessionId,
@@ -11630,6 +11664,7 @@ export const useQueryStore = defineStore("query", () => {
       totalRows: null,
       timeoutSecs: queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs),
       keysetOptimizationEnabled: settings.queryExportKeysetOptimizationEnabled,
+      csvWithoutBom: settings.csvWithoutBom,
       csvQuoteMode: settings.csvQuoteMode,
       clientSessionId: `${tabClientSessionId(tab, "export")}:${exportId}`,
       txnSessionId: exportTxnSessionId(tab),

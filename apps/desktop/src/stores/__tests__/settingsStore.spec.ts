@@ -27,10 +27,22 @@ import {
   COMPACT_TAB_TITLE_DEFAULT_VERSION,
 } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
-import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION, DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
+  it("defaults sidebar hover to enabled with a 300ms delay and validates saved values", () => {
+    const defaults = { sidebarHoverEnabled: true, sidebarHoverDelay: 300 };
+    expect(DEFAULT_EDITOR_SETTINGS).toMatchObject(defaults);
+    expect(normalizeEditorSettings({})).toMatchObject(defaults);
+    expect(normalizeEditorSettings({ sidebarHoverEnabled: false, sidebarHoverDelay: 750 })).toMatchObject({ sidebarHoverEnabled: false, sidebarHoverDelay: 750 });
+    expect(normalizeEditorSettings({ sidebarHoverEnabled: "false", sidebarHoverDelay: "500" } as any)).toMatchObject(defaults);
+    for (const invalid of [NaN, Infinity, null]) expect(normalizeEditorSettings({ sidebarHoverDelay: invalid } as any).sidebarHoverDelay).toBe(300);
+    expect(normalizeEditorSettings({ sidebarHoverDelay: 0 }).sidebarHoverDelay).toBe(100);
+    expect(normalizeEditorSettings({ sidebarHoverDelay: 9999 }).sidebarHoverDelay).toBe(2000);
+    expect(normalizeEditorSettings({ sidebarHoverDelay: 499.7 }).sidebarHoverDelay).toBe(500);
+  });
+
   it("keeps manual export and toolbar preferences across updates and reloads", async () => {
     const defaults = { defaultExportMode: "immediate", dataGridHideToolbarLabels: false };
     expect(DEFAULT_EDITOR_SETTINGS).toMatchObject(defaults);
@@ -784,9 +796,24 @@ describe("normalizeEditorSettings", () => {
     expect(configured.dsv.quotePolicy).toBe("always");
     expect(configured.sql.insertMode).toBe("row-by-row");
     expect(configured.json.pretty).toBe(false);
-    const visible = normalizeEditorSettings({ dataGridVisibleCopyExtractors: ["php", "php", "unknown"] }).dataGridVisibleCopyExtractors;
+    const visible = normalizeEditorSettings({ dataGridVisibleCopyExtractorsMigrationVersion: DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION, dataGridVisibleCopyExtractors: ["php", "php", "unknown"] }).dataGridVisibleCopyExtractors;
     expect(visible).toEqual(["php"]);
     expect(normalizeEditorSettings({ dataGridVisibleCopyExtractors: [] }).dataGridVisibleCopyExtractors).toEqual([]);
+  });
+
+  it("adds SQL DELETE to legacy visible copy formats without restoring hidden formats", () => {
+    const legacy = normalizeEditorSettings({ dataGridVisibleCopyExtractors: ["raw", "php"] });
+    expect(legacy.dataGridVisibleCopyExtractors).toEqual(["raw", "sql-deletes", "php"]);
+    expect(legacy.dataGridVisibleCopyExtractorsMigrationVersion).toBe(DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION);
+
+    const current = normalizeEditorSettings({
+      dataGridVisibleCopyExtractorsMigrationVersion: DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION,
+      dataGridVisibleCopyExtractors: ["raw", "php"],
+    });
+    expect(current.dataGridVisibleCopyExtractors).toEqual(["raw", "php"]);
+
+    const intentionallyEmpty = normalizeEditorSettings({ dataGridVisibleCopyExtractors: [] });
+    expect(intentionallyEmpty.dataGridVisibleCopyExtractors).toEqual([]);
   });
 
   it("migrates the legacy NULL clipboard sentinel once", () => {
@@ -1769,6 +1796,29 @@ describe("settingsStore persisted settings initialization", () => {
   beforeEach(() => {
     vi.resetModules();
     setActivePinia(createPinia());
+  });
+
+  it("persists sidebar hover preferences across restarts and restores defaults", async () => {
+    let saved: Record<string, unknown> | null = null;
+    vi.doMock("@/lib/backend/api", () => ({
+      loadEditorSettings: async () => saved,
+      saveEditorSettings: async (settings: Record<string, unknown>) => {
+        saved = JSON.parse(JSON.stringify(settings));
+      },
+    }));
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    store.updateEditorSettings({ sidebarHoverEnabled: false, sidebarHoverDelay: 750 });
+    await store.persistEditorSettings();
+    setActivePinia(createPinia());
+    const restarted = useSettingsStore();
+    await restarted.initEditorSettings();
+    expect(restarted.editorSettings).toMatchObject({ sidebarHoverEnabled: false, sidebarHoverDelay: 750 });
+    restarted.updateEditorSettings({ sidebarHoverDelay: 9999 });
+    expect(restarted.editorSettings.sidebarHoverDelay).toBe(2000);
+    restarted.updateEditorSettings({ sidebarHoverEnabled: DEFAULT_EDITOR_SETTINGS.sidebarHoverEnabled, sidebarHoverDelay: DEFAULT_EDITOR_SETTINGS.sidebarHoverDelay });
+    expect(restarted.editorSettings).toMatchObject({ sidebarHoverEnabled: true, sidebarHoverDelay: 300 });
   });
 
   it("persists and restores the chosen selection statistic after restarting the store", async () => {

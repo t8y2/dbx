@@ -26,6 +26,21 @@ describe("objectBrowserRowsCache", () => {
   beforeEach(() => clearObjectBrowserRowsCache());
   afterEach(() => vi.useRealTimers());
 
+  it("retains enrichment completeness with stale scaffolds and rejects invalidated completion", () => {
+    vi.useFakeTimers();
+    const scope = { connectionId: "mysql", database: "db", schema: "db" };
+    const token = createObjectBrowserRowsCacheWriteToken(scope);
+    cacheObjectBrowserRows(token, [row], { detailsComplete: false });
+    expect(getCachedObjectBrowserRowsForScaffold(scope)?.detailsComplete).toBe(false);
+    vi.advanceTimersByTime(30_001);
+    expect(getCachedObjectBrowserRowsForScaffold(scope)).toMatchObject({ stale: true, detailsComplete: false });
+    cacheObjectBrowserRows(token, [{ ...row, comment: "loaded" }]);
+    expect(getCachedObjectBrowserRowsForScaffold(scope)).toMatchObject({ stale: false, detailsComplete: true });
+    invalidateObjectBrowserRowsCache(scope);
+    cacheObjectBrowserRows(token, [row]);
+    expect(getCachedObjectBrowserRowsForScaffold(scope)).toBeUndefined();
+  });
+
   it("restores cached rows only for the same object browser scope", () => {
     const scope = { connectionId: "c1", database: "db", schema: "public" };
     cacheRows(scope);

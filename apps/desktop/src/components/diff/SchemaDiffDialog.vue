@@ -1024,7 +1024,15 @@ function handleRecompare(): void {
   const config = previous?.config;
   // Comparing a group's schema again, from its result or after a failure, replaces
   // only that schema and keeps the others' results. Anything else is a new compare.
-  const repeatsGroupSchema = !!previous?.group && !additionalSchemas.value.length && config?.sourceConnectionId === sourceConnectionId.value && config.sourceDatabase === sourceDatabase.value && config.sourceSchema === sourceSchema.value && config.targetConnectionId === targetConnectionId.value && config.targetDatabase === targetDatabase.value && config.targetSchema === targetSchema.value;
+  const repeatsGroupSchema =
+    !!previous?.group &&
+    !additionalSchemas.value.length &&
+    config?.sourceConnectionId === sourceConnectionId.value &&
+    config.sourceDatabase === sourceDatabase.value &&
+    config.sourceSchema === sourceSchema.value &&
+    config.targetConnectionId === targetConnectionId.value &&
+    config.targetDatabase === targetDatabase.value &&
+    config.targetSchema === targetSchema.value;
   const session = handleCompare();
   if (previous && session && repeatsGroupSchema) replaceSchemaDiffSessionInGroup(previous, session);
 }
@@ -1715,7 +1723,16 @@ const targetConnectionInfo = computed(() => {
 
       <!-- Stays on the config step too, which is where a failed schema's session lands. -->
       <div v-if="schemaSessionGroup.length > 1" role="group" :aria-label="t('diff.schemaResults')" class="flex shrink-0 flex-wrap items-center gap-1 border-b px-3 py-1.5">
-        <Button v-for="session in schemaSessionGroup" :key="session.id" :variant="session.id === activeSessionId ? 'secondary' : 'ghost'" :aria-pressed="session.id === activeSessionId" :disabled="deployIsBusy" size="sm" :class="['h-7 gap-1 text-xs', session.status === 'failed' && 'text-destructive']" @click="handleSwitchSchemaSession(session)">
+        <Button
+          v-for="session in schemaSessionGroup"
+          :key="session.id"
+          :variant="session.id === activeSessionId ? 'secondary' : 'ghost'"
+          :aria-pressed="session.id === activeSessionId"
+          :disabled="deployIsBusy"
+          size="sm"
+          :class="['h-7 gap-1 text-xs', session.status === 'failed' && 'text-destructive']"
+          @click="handleSwitchSchemaSession(session)"
+        >
           <Loader2 v-if="session.status === 'running'" class="h-3 w-3 animate-spin" />
           {{ session.config.sourceSchema }}
           <span v-if="session.result" class="text-muted-foreground">({{ resultObjectCount(session.result) }})</span>

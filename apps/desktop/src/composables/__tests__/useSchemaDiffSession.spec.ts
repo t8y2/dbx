@@ -49,14 +49,22 @@ test("runs grouped schema sessions one at a time and keeps going after a failure
   assert.deepEqual(first.group, [first.id, second.id]);
   assert.equal(second.group, first.group);
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.deepEqual(lists.map((list) => list.schema), ["dbo", "dbo"]);
+  assert.deepEqual(
+    lists.map((list) => list.schema),
+    ["dbo", "dbo"],
+  );
   assert.equal(second.status, "running");
 
   lists[0].fail(new Error("dbo unavailable"));
   lists[1].settle([]);
   await waitForSession(first);
   assert.equal(first.status, "failed");
-  await vi.waitFor(() => assert.deepEqual(lists.slice(2).map((list) => list.schema), ["audit", "audit"]));
+  await vi.waitFor(() =>
+    assert.deepEqual(
+      lists.slice(2).map((list) => list.schema),
+      ["audit", "audit"],
+    ),
+  );
   lists[2].settle([]);
   lists[3].settle([]);
   await waitForSession(second);

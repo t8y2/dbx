@@ -2509,7 +2509,8 @@ mod table_reference_qualifier_tests {
         let orders = table(&analysis, "orders");
 
         assert_eq!(orders.database, None);
-        assert_eq!(orders.schema.as_deref(), Some("shop"));    }
+        assert_eq!(orders.schema.as_deref(), Some("shop"));
+    }
 }
 
 #[cfg(test)]

@@ -12161,6 +12161,12 @@ export default withEnglishFallback({
     deepLinkConnectionConfirmModeUpdateDescription: "Ссылки с id сразу обновляют сохранённое подключение; для новых подключений по-прежнему открывается диалоговое окно для подтверждения.",
     deepLinkConnectionConfirmModeAll: "Все ссылки подключения",
     deepLinkConnectionConfirmModeAllDescription: "Новые подключения и ссылки обновления с id сохраняются сразу, без подтверждения. Если предварительно заполненные параметры не проходят проверку, диалоговое окно останется открытым, и вы сможете дополнить их вручную.",
+    duplicateTabTitleMode: "Различение вкладок с одинаковыми названиями",
+    duplicateTabTitleModeDescription: "Выберите, как различать вкладки с одинаковым заголовком. Применяется только когда две или более вкладок показывают одно имя.",
+    duplicateTabTitleModeOrdinal: "Имя объекта + номер",
+    duplicateTabTitleModeOrdinalDescription: "Показывает users 1, users 2… Номер сохраняется за вкладкой до её закрытия, даже если другие повторяющиеся вкладки закрыли раньше.",
+    duplicateTabTitleModeConnection: "Имя объекта + имя подключения",
+    duplicateTabTitleModeConnectionDescription: "Показывает users prod-db, users staging-db… Возврат к номерам, если повторяющиеся вкладки относятся к одному подключению или заголовок уже содержит его имя.",
   },
   driverStore: {
     jreDirRemoveFailed: "Не удалось удалить старый каталог JRE: {path} (исходная ошибка: {error})",

@@ -705,6 +705,18 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ deepLinkConnectionConfirmMode: "sometimes" } as any).deepLinkConnectionConfirmMode).toBe("always");
   });
 
+  it("keeps duplicate tab titles on ordinal by default and accepts the connection-name mode", () => {
+    // 老配置文件没有这个字段时保持历史行为（序号），升级不该改变已有标签栏。
+    expect(normalizeEditorSettings({}).duplicateTabTitleMode).toBe("ordinal");
+    expect(DEFAULT_EDITOR_SETTINGS.duplicateTabTitleMode).toBe("ordinal");
+    expect(normalizeEditorSettings({ duplicateTabTitleMode: "ordinal" }).duplicateTabTitleMode).toBe("ordinal");
+    expect(normalizeEditorSettings({ duplicateTabTitleMode: "connection" }).duplicateTabTitleMode).toBe("connection");
+    // 非法值（含旧版布尔/数字）一律回落默认值。
+    for (const invalid of ["connection-name", "", null, true, 1] as unknown[]) {
+      expect(normalizeEditorSettings({ duplicateTabTitleMode: invalid } as any).duplicateTabTitleMode).toBe("ordinal");
+    }
+  });
+
   it("remembers connection databases by default and sanitizes the stored map", () => {
     expect(normalizeEditorSettings({}).rememberConnectionDatabaseOnDelete).toBe(true);
     expect(normalizeEditorSettings({ rememberConnectionDatabaseOnDelete: false }).rememberConnectionDatabaseOnDelete).toBe(false);

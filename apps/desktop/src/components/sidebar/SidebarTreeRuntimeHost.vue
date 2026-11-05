@@ -461,7 +461,7 @@ const settingsStore = useSettingsStore();
 
 const savedSqlStore = useSavedSqlStore();
 
-const { toast } = useToast();
+const { toast, dismissToast } = useToast();
 const installedPlugins = ref<InstalledPlugin[]>([]);
 const sidebarPluginRegistry = computed(() => createFrontendPluginRegistry(installedPlugins.value, appLocale.value));
 const pluginDialog = shallowRef<{ plugin: InstalledPlugin; contribution: PluginWorkbenchContribution; context: PluginWorkbenchContext; title: string } | null>(null);
@@ -6126,8 +6126,16 @@ async function confirmDuplicateStructureImpl() {
 }
 
 async function confirmPasteTable() {
-  const hasOceanbaseClone = pasteTableEntries.value.some((entry) => entry.connectionId && effectiveDatabaseTypeForConnection(connectionStore.getConfig(entry.connectionId)) === "oceanbase-oracle");
-  return hasOceanbaseClone ? cloneDialog.run(confirmPasteTableImpl) : confirmPasteTableImpl();
+  const databaseTypes = pasteTableEntries.value.filter((entry) => entry.targetName.trim()).map((entry) => (entry.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(entry.connectionId)) : undefined));
+  if (databaseTypes.includes("oceanbase-oracle")) return cloneDialog.run(confirmPasteTableImpl);
+  if (databaseTypes.every((type) => type === "mysql")) return confirmPasteTableImpl();
+
+  const progressToast = toast(`${t("tableCopyTask.title")} · ${t("tableCopyTask.running")}`, { persistent: true, loading: true });
+  try {
+    await confirmPasteTableImpl();
+  } finally {
+    if (progressToast !== undefined) dismissToast(progressToast);
+  }
 }
 
 async function confirmPasteTableImpl() {

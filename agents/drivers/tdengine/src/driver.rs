@@ -77,6 +77,10 @@ struct QueryCursor {
     last_accessed_at: Instant,
 }
 
+pub fn ensure_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 impl TdengineDriver {
     pub fn new() -> Self {
         Self {
@@ -90,6 +94,7 @@ impl TdengineDriver {
     }
 
     pub async fn connect(&mut self, params: ConnectParams) -> Result<()> {
+        ensure_crypto_provider();
         self.disconnect().await;
         let dsn = build_dsn(&params)?;
         let builder =

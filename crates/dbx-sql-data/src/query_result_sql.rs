@@ -72,6 +72,9 @@ pub struct QueryPaginationExecutionPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count_sql: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Exact upper bound from a literal LIMIT/TOP, not an exact result count.
+    /// The actual result may contain fewer rows; consumers must observe
+    /// exhaustion, reach this bound, or execute COUNT to know the total.
     pub exact_query_row_bound: Option<usize>,
     pub use_agent_result_session: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

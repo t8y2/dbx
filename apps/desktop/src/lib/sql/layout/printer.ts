@@ -264,7 +264,7 @@ function printRuleElement(writer: Writer, nodes: AstNode[], baseColumn: number, 
     printCondition(writer, operands, baseColumn, ctx);
     return;
   }
-  for (let index = 0; index < nodes.length; ) {
+  for (let index = 0; index < nodes.length;) {
     const node = nodes[index];
     if (node.type === "line_comment" || node.type === "block_comment" || node.type === "disable_comment") {
       if (/[\r\n]/.test(node.precedingWhitespace) && writer.column !== baseColumn) writer.newline(baseColumn);
@@ -288,6 +288,7 @@ function printRuleElement(writer: Writer, nodes: AstNode[], baseColumn: number, 
       printRuleComments(writer, node.trailingComments, writer.column, ctx);
       index += 1;
     } else if (node.type === "property_access") {
+      writer.space();
       printRuleComments(writer, node.leadingComments, writer.column, ctx);
       printRuleElement(writer, [node.object], baseColumn, ctx);
       writer.write(node.operator);

@@ -975,13 +975,23 @@ fn default_backlog_quota_type() -> String {
     "destination_storage".to_string()
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetentionPolicy {
     /// Retention time in minutes. `-1` = infinite.
     pub retention_time_in_minutes: i32,
     /// Retention size in MB. `-1` = infinite.
     pub retention_size_in_mb: i32,
+    /// Whether to submit the time field. Defaults to true so existing callers keep writing both fields.
+    #[serde(default = "retention_write_default")]
+    pub write_retention_time: bool,
+    /// Whether to submit the size field. Defaults to true so existing callers keep writing both fields.
+    #[serde(default = "retention_write_default")]
+    pub write_retention_size: bool,
+}
+
+fn retention_write_default() -> bool {
+    true
 }
 
 /// Authorization actions that can be granted to a role on a namespace/topic.

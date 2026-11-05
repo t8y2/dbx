@@ -894,6 +894,16 @@ export type ClickTableNavigationTarget = (typeof CLICK_TABLE_NAVIGATION_TARGETS)
 const DEEP_LINK_CONNECTION_CONFIRM_MODES = ["always", "create", "update", "all"] as const;
 export type DeepLinkConnectionConfirmMode = (typeof DEEP_LINK_CONNECTION_CONFIRM_MODES)[number];
 
+/**
+ * 标签页标题重名时，用哪种后缀区分。
+ *
+ * - `ordinal`：对象名 + 序号（`users 1`、`users 2`），历史默认行为
+ * - `connection`：对象名 + 连接名（`users prod-db`）；当同一连接下存在多个同名
+ *   标签，或标题本身已带连接名时，整组退回序号，避免仍然无法区分或出现重复文字
+ */
+const DUPLICATE_TAB_TITLE_MODES = ["ordinal", "connection"] as const;
+export type DuplicateTabTitleMode = (typeof DUPLICATE_TAB_TITLE_MODES)[number];
+
 export interface CustomThemeColors {
   keyword: string;
   field: string;
@@ -1062,6 +1072,8 @@ export interface EditorSettings {
   welcomePageModeDefaultVersion: number;
   compactTabTitle: boolean;
   compactTabTitleDefaultVersion: number;
+  /** 重名标签页的区分方式：序号或连接名。见 {@link DuplicateTabTitleMode}。 */
+  duplicateTabTitleMode: DuplicateTabTitleMode;
   tabLayout: TabLayoutMode;
   tabPlacement: TabPlacement;
   colorizeConnectionTabs: boolean;
@@ -1476,6 +1488,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
   compactTabTitle: true,
   compactTabTitleDefaultVersion: COMPACT_TAB_TITLE_DEFAULT_VERSION,
+  duplicateTabTitleMode: "ordinal",
   tabLayout: "scroll",
   tabPlacement: "top",
   colorizeConnectionTabs: true,
@@ -1900,6 +1913,11 @@ function normalizeDeepLinkConnectionConfirmMode(value: unknown, legacyAutoCreate
   if (value === "update-only") return "update";
   if (legacyAutoCreate === true) return "create";
   return DEFAULT_EDITOR_SETTINGS.deepLinkConnectionConfirmMode;
+}
+
+/** 重名标签页后缀策略：只接受白名单取值，其余一律回落默认（历史行为 = 序号）。 */
+function normalizeDuplicateTabTitleMode(value: unknown): DuplicateTabTitleMode {
+  return DUPLICATE_TAB_TITLE_MODES.includes(value as DuplicateTabTitleMode) ? (value as DuplicateTabTitleMode) : DEFAULT_EDITOR_SETTINGS.duplicateTabTitleMode;
 }
 
 /** 记住的连接名 → 数据库映射：只保留合法条目，并限制条目数量避免无限增长。 */
@@ -2364,6 +2382,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
       // 上一版布尔开关，已从类型里移除，只在这里读一次做迁移。
       (settings as { deepLinkConnectionAutoCreate?: unknown }).deepLinkConnectionAutoCreate,
     ),
+    duplicateTabTitleMode: normalizeDuplicateTabTitleMode(settings.duplicateTabTitleMode),
     dataTabReuseMode: normalizeDataTabReuseMode(
       settings.dataTabReuseMode,
       (
@@ -3317,6 +3336,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.rememberConnectionDatabaseOnDelete !== undefined) editorSettings.value.rememberConnectionDatabaseOnDelete = partial.rememberConnectionDatabaseOnDelete === true;
     if (partial.rememberedConnectionDatabases !== undefined) editorSettings.value.rememberedConnectionDatabases = normalizeRememberedConnectionDatabases(partial.rememberedConnectionDatabases);
     if (partial.deepLinkConnectionConfirmMode !== undefined) editorSettings.value.deepLinkConnectionConfirmMode = normalizeDeepLinkConnectionConfirmMode(partial.deepLinkConnectionConfirmMode);
+    if (partial.duplicateTabTitleMode !== undefined) editorSettings.value.duplicateTabTitleMode = normalizeDuplicateTabTitleMode(partial.duplicateTabTitleMode);
     if (partial.dataTabReuseMode !== undefined) editorSettings.value.dataTabReuseMode = normalizeDataTabReuseMode(partial.dataTabReuseMode);
     if (partial.openDataTabsNextToActive !== undefined) editorSettings.value.openDataTabsNextToActive = partial.openDataTabsNextToActive === true;
     if (partial.openTablesInDetachedWindow !== undefined) editorSettings.value.openTablesInDetachedWindow = partial.openTablesInDetachedWindow === true;

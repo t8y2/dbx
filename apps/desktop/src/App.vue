@@ -360,6 +360,8 @@ const {
   openLatestRelease,
   changeUpdateDownloadSource,
   ignoreCurrentVersion,
+  restoreIgnoredVersion,
+  ignoredReleaseVersion,
   downloadUpdateInBackground,
   cancelDownload,
   installDownloadedUpdate,
@@ -5977,7 +5979,9 @@ onUnmounted(() => {
           @cancel-download="cancelDownload"
           @install-downloaded="installDownloadedUpdateWithComponentUpdates"
           @restart="restartAppWithComponentUpdates"
+          :ignored-release-version="ignoredReleaseVersion"
           @ignore-version="ignoreCurrentVersion"
+          @restore-ignored-version="restoreIgnoredVersion"
           @install-component-updates="installComponentUpdates"
           @update-all="updateAllAvailable"
         />

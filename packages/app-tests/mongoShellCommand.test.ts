@@ -833,6 +833,19 @@ test("parseMongoWriteCommand accepts unquoted insert and update commands", () =>
   });
 });
 
+test("parseMongoWriteCommand accepts template literal strings", () => {
+  assert.deepEqual(parseMongoWriteCommand('db.issue_demo.insert({\n    name: "demo",\n    text: `line1\nline2`\n});'), {
+    kind: "insert",
+    collection: "issue_demo",
+    docsJson: '{\n    "name": "demo",\n    "text": "line1\\nline2"\n}',
+  });
+  const tricky = parseMongoWriteCommand("db.notes.insertOne({body: `a, b) 'c' \"d\" // e`, tag: 'x'})");
+  assert.ok(tricky?.kind === "insert");
+  assert.deepEqual(JSON.parse(tricky.docsJson), { body: `a, b) 'c' "d" // e`, tag: "x" });
+  assert.deepEqual(JSON.parse(parseMongoFindCommand("db.notes.find({title: `multi\nline`})")!.filter), { title: "multi\nline" });
+  assert.equal(parseMongoWriteCommand("db.notes.insertOne({body: `hi ${name}`})"), null);
+});
+
 test("parseMongoWriteCommand reads renameCollection", () => {
   assert.deepEqual(parseMongoWriteCommand('db.orders.renameCollection("orders_2024");'), { kind: "renameCollection", collection: "orders", newName: "orders_2024" });
   assert.equal(parseMongoWriteCommand("db[\"a-b\"].renameCollection('c')")?.kind, "renameCollection");

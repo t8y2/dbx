@@ -53,6 +53,11 @@ pub struct SqlReferenceAnalysis {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SqlTableReference {
     pub name: String,
+    /// Database part of a three-part name such as SQL Server's `db.dbo.orders`.
+    /// Without it the editor looked the table up in the current database and
+    /// flagged cross-database references as unknown (#13947).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
     pub schema: Option<String>,
     pub alias: Option<String>,
     pub span: SqlTextSpan,
@@ -1983,8 +1988,16 @@ fn table_reference_from_name(
     let parts: Vec<&Ident> = name.0.iter().filter_map(ObjectNamePart::as_ident).collect();
     let table = parts.last()?;
     let schema = if parts.len() >= 2 { parts.get(parts.len() - 2).map(|ident| ident.value.clone()) } else { None };
+    let database = if parts.len() >= 3 { parts.get(parts.len() - 3).map(|ident| ident.value.clone()) } else { None };
 
-    Some(SqlTableReference { name: table.value.clone(), schema, alias, span: table.span.into(), scope_id: scope_id? })
+    Some(SqlTableReference {
+        name: table.value.clone(),
+        database,
+        schema,
+        alias,
+        span: table.span.into(),
+        scope_id: scope_id?,
+    })
 }
 
 fn object_name_last_ident(name: &ObjectName) -> Option<&Ident> {
@@ -2292,5 +2305,44 @@ mod mysql_table_comment_tests {
         assert_eq!(analysis.tables[0].span.start_line, 2);
         assert_eq!(analysis.columns[0].name, "id");
         assert_eq!(analysis.columns[0].span.start_line, 2);
+    }
+}
+
+#[cfg(test)]
+mod table_reference_qualifier_tests {
+    use super::*;
+
+    fn table<'a>(analysis: &'a SqlReferenceAnalysis, name: &str) -> &'a SqlTableReference {
+        analysis
+            .tables
+            .iter()
+            .find(|table| table.name.eq_ignore_ascii_case(name))
+            .unwrap_or_else(|| panic!("{name} must be reported as a table reference"))
+    }
+
+    #[test]
+    fn sqlserver_three_part_name_keeps_the_database_qualifier() {
+        // #13947 / #13959: dropping `mk_passport_api` made the editor look the table
+        // up in the current database and flag a valid cross-database query as unknown.
+        let analysis = analyze_sql_references(
+            "select top 10 * from mk_passport_api.dbo.orders order by id desc",
+            Some("sqlserver"),
+        )
+        .unwrap();
+        let orders = table(&analysis, "orders");
+
+        assert_eq!(orders.database.as_deref(), Some("mk_passport_api"));
+        assert_eq!(orders.schema.as_deref(), Some("dbo"));
+    }
+
+    #[test]
+    fn two_part_name_has_no_database_qualifier() {
+        // MySQL reads `db.table` as database.table, so the middle qualifier stays in
+        // the schema slot and nothing may be lifted into `database`.
+        let analysis = analyze_sql_references("select * from shop.orders", Some("mysql")).unwrap();
+        let orders = table(&analysis, "orders");
+
+        assert_eq!(orders.database, None);
+        assert_eq!(orders.schema.as_deref(), Some("shop"));
     }
 }

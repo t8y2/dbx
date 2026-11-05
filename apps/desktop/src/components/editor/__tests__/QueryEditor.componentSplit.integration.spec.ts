@@ -91,6 +91,29 @@ function foldedRangeCount(view: EditorView): number {
 }
 
 describe("QueryEditor component split integration", () => {
+  it("returns keyboard focus without changing SQL, cursor selection, or scroll position", async () => {
+    const { editor, view } = await mountEditor({ modelValue: Array.from({ length: 80 }, (_, index) => `SELECT ${index};`).join("\n") });
+    const selection = EditorSelection.range(37, 45);
+    view.dispatch({ selection });
+    view.scrollDOM.scrollTop = 240;
+    view.scrollDOM.scrollLeft = 32;
+    const sql = view.state.doc.toString();
+    const grid = document.createElement("div");
+    grid.tabIndex = 0;
+    document.body.append(grid);
+    try {
+      grid.focus();
+      expect(view.hasFocus).toBe(false);
+      expect(editor.focusEditor()).toBe(true);
+      expect(view.hasFocus).toBe(true);
+      expect(view.state.doc.toString()).toBe(sql);
+      expect(view.state.selection.main).toEqual(selection);
+      expect(view.scrollDOM.scrollTop).toBe(240);
+      expect(view.scrollDOM.scrollLeft).toBe(32);
+    } finally {
+      grid.remove();
+    }
+  });
   it.each(["elasticsearch", "easysearch"] as const)("enables nested JSON folding and linting for %s without changing execution text", async (databaseType) => {
     const text = 'POST /orders/_search\n{\n  "query": {\n    "match_all": {}\n  }\n}';
     const { editor, view, onExecute } = await mountEditor({ databaseType, modelValue: text });
@@ -295,6 +318,10 @@ describe("QueryEditor component split integration", () => {
     vi.spyOn(host.querySelector("[data-query-editor-root]")!, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 800, 600));
     expect(editor.requestExecute()).toBe(true);
     await nextTick();
+    // Vue guards newly attached listeners by timestamp; nextTick alone can still
+    // dispatch a synthetic key in the same millisecond as the picker mount.
+    const firstMountTime = Date.now();
+    await vi.waitFor(() => expect(Date.now()).toBeGreaterThan(firstMountTime), { interval: 1 });
     let picker = host.querySelector<HTMLElement>('[role="listbox"]')!;
     expect(picker).not.toBeNull();
     expect(picker.style.left).toBe("400px");
@@ -309,6 +336,8 @@ describe("QueryEditor component split integration", () => {
     expect(view.hasFocus).toBe(true);
     editor.requestExecute();
     await nextTick();
+    const secondMountTime = Date.now();
+    await vi.waitFor(() => expect(Date.now()).toBeGreaterThan(secondMountTime), { interval: 1 });
     picker = host.querySelector<HTMLElement>('[role="listbox"]')!;
     keydown(picker, "ArrowDown");
     await nextTick();

@@ -1,3 +1,4 @@
+import { shouldReportOracleCompilationErrors } from "@/lib/query/oracleCompilationErrors";
 import { hasShortDataGridSqlPage } from "@/lib/dataGrid/dataGridPagination";
 import { createQueryRequestTiming } from "@/lib/queryRequestTiming";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
@@ -154,7 +155,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useExportTracker } from "@/composables/useExportTracker";
-import { showExportExecutionModeDialog } from "@/lib/export/exportExecutionMode";
+import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode";
 import { recordQueryCancellationLatency, resourceLifecycleDiagnostics } from "@/lib/diagnostics/resourceLifecycleDiagnostics";
 import { appendDebugLog } from "@/lib/backend/debugLog";
 import { BackendErrorException, formatError, isManualTransactionSessionExpired, isUnsupportedManualTransactionMethod, normalizeBackendError, type BackendError } from "@/lib/backend/errorUtils";
@@ -5970,12 +5971,14 @@ export const useQueryStore = defineStore("query", () => {
     return refreshDataTabInternal(id);
   }
 
-  async function refreshDataTabsForTable(target: TableDataRefreshTarget): Promise<number> {
+  async function refreshDataTabsForTable(target: TableDataRefreshTarget, options?: { skipPendingChanges?: boolean }): Promise<number> {
     const matchingTabs = tabs.value.filter((tab) => tabMatchesTableDataRefreshTarget(tab, target));
     if (matchingTabs.length === 0) return 0;
 
     let refreshed = 0;
     for (const tab of matchingTabs) {
+      // Background imports must preserve unsaved grid edits and cell drafts.
+      if (options?.skipPendingChanges && ((tab.pendingDataChangeCount ?? 0) > 0 || tab.hasPendingDataEditorDraft)) continue;
       if (await refreshDataTabInternal(tab.id, { supersedeBusy: true, propagateBuildError: true })) refreshed += 1;
     }
 
@@ -7111,15 +7114,18 @@ export const useQueryStore = defineStore("query", () => {
     const comments: Array<string | undefined> = [];
     const typeLabels: Array<string | undefined> = [];
     const mapping: Array<QueryResultSourceColumnRef | undefined> = [];
-    for (const ref of refs) {
+    for (let index = 0; index < refs.length; index++) {
+      const ref = refs[index];
+      const loaded = ref ? loadedSources.find((entry) => entry.source.key === ref.sourceKey) : undefined;
+      let column = ref ? loaded?.tableMeta.columns.find((candidate) => candidate.name === ref.sourceColumn) : undefined;
       if (!ref) {
-        comments.push(undefined);
-        typeLabels.push(undefined);
-        mapping.push(undefined);
-        continue;
+        // Aggregates keep the base column's label (e.g. MAX(updated_at) AS
+        // updated_at) but contain no direct column reference, so ordinal
+        // binding intentionally leaves them unresolved. With a single source
+        // there is no other table whose comment could leak, so resolve the
+        // label/expression back to that source column for display only.
+        column = singleSourceFallbackColumn(analysis, resultColumns[index], index, loadedSources, refs.length);
       }
-      const loaded = loadedSources.find((entry) => entry.source.key === ref.sourceKey);
-      const column = loaded?.tableMeta.columns.find((candidate) => candidate.name === ref.sourceColumn);
       const comment = column?.comment?.trim();
       comments.push(comment || undefined);
       typeLabels.push(
@@ -7132,14 +7138,44 @@ export const useQueryStore = defineStore("query", () => {
             }) || undefined
           : undefined,
       );
-      mapping.push({
-        ...ref,
-        database: loaded?.tableMeta.database,
-        schema: loaded?.tableMeta.schema,
-        tableName: loaded?.tableMeta.tableName,
-      });
+      if (ref && loaded) {
+        mapping.push({
+          ...ref,
+          database: loaded.tableMeta.database,
+          schema: loaded.tableMeta.schema,
+          tableName: loaded.tableMeta.tableName,
+        });
+      } else {
+        // A name-based display fallback is not proof of source identity; leave
+        // the ordinal unmapped so writes/attribution never use a guess.
+        mapping.push(undefined);
+      }
     }
     return { comments, typeLabels, mapping };
+  }
+
+  /**
+   * Resolve an otherwise unmapped result ordinal to a unique column of a single
+   * source table. Used only for display metadata (comments/declared types).
+   */
+  function singleSourceFallbackColumn(analysis: EditableQueryInfo, resultColumn: string | undefined, index: number, loadedSources: LoadedEditableSource[], resultColumnCount: number) {
+    if (loadedSources.length !== 1) return undefined;
+    const source = loadedSources[0]!;
+    const projection = !analysis.selectStar && analysis.columns.length === resultColumnCount ? analysis.columns[index] : undefined;
+    const label = resultColumn?.trim();
+    // A projection that aliases another expression must keep its exact bound
+    // column when one exists; otherwise only use the label when the projection
+    // expression actually refers to that identifier (MAX(updated_at)).
+    const expressionReferencesLabel = !!projection?.expression && !!label && projectionExpressionReferencesIdentifier(projection.expression, label);
+    const candidateName = projection?.sourceName ?? (expressionReferencesLabel || (analysis.selectStar && label) ? label : undefined);
+    if (!candidateName) return undefined;
+    const matches = source.tableMeta.columns.filter((column) => column.name.toLowerCase() === candidateName.toLowerCase());
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+
+  function projectionExpressionReferencesIdentifier(expression: string, identifier: string): boolean {
+    const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|[^A-Za-z0-9_$])${escaped}([^A-Za-z0-9_$]|$)`, "i").test(expression);
   }
 
   function mysqlColumnIsGenerated(column: { extra: string | null }): boolean {
@@ -8588,7 +8624,10 @@ export const useQueryStore = defineStore("query", () => {
       if (conn?.db_type === "mongodb" && mongoCommands.length === 0 && sql.trim()) {
         // Avoid falling through to the SQL executor, which only returns the generic
         // "Use MongoDB-specific commands" rejection and hides parse/syntax details.
-        throw new Error(describeMongoCommandParseFailure(sql));
+        // Shell JavaScript is the rare case; load its parser only when needed.
+        const { expandMongoScriptCommands, isMongoScriptSyntax } = await import("@/lib/mongo/mongoScriptRunner");
+        if (!isMongoScriptSyntax(sql)) throw new Error(describeMongoCommandParseFailure(sql));
+        mongoCommands = await expandMongoScriptCommands(sql);
       }
 
       if (mongoCommands.length > 0) {
@@ -9376,6 +9415,7 @@ export const useQueryStore = defineStore("query", () => {
           continueOnError: continueOnBatchError,
           // MySQL-family connections only use this; other drivers ignore it.
           ...(settingsStore.editorSettings.keepExplicitTransactionInAutoCommit ? { preserveExplicitTransaction: true } : {}),
+          ...(tab.mode === "query" && shouldReportOracleCompilationErrors(effectiveDbType, sqlToExecute) ? { reportCompilationErrors: true } : {}),
         };
         queryExecutionLog("info", "execute-multi:invoke", {
           traceId,
@@ -9464,7 +9504,14 @@ export const useQueryStore = defineStore("query", () => {
                   useAgentResultSession ? resultSessionId : undefined,
                   resultSessionId ? undefined : classificationSql,
                 ] as const;
-                const results = await (effectiveDbType === "sqlserver" ? api.executeInManualTransaction(...args, executionId, frontendTimeoutSecs) : deferLobs ? api.executeInManualTransaction(...args, executionId, frontendTimeoutSecs, undefined, true) : api.executeInManualTransaction(...args));
+                const reportCompilationErrors = tab.mode === "query" && shouldReportOracleCompilationErrors(effectiveDbType, sqlToExecute);
+                const results = await (effectiveDbType === "sqlserver"
+                  ? api.executeInManualTransaction(...args, executionId, frontendTimeoutSecs)
+                  : deferLobs
+                    ? api.executeInManualTransaction(...args, executionId, frontendTimeoutSecs, undefined, true, ...(reportCompilationErrors ? [true] : []))
+                    : reportCompilationErrors
+                      ? api.executeInManualTransaction(...args, undefined, undefined, undefined, undefined, true)
+                      : api.executeInManualTransaction(...args));
                 bindLargeValueContext(results, sessionId);
                 for (const result of results) {
                   if (result.session_id) result.manual_transaction_session_id = sessionId;
@@ -11574,6 +11621,7 @@ export const useQueryStore = defineStore("query", () => {
         totalRows,
         timeoutSecs: queryTimeoutSecsForConnection(conn, settings.globalQueryTimeoutSecs),
         keysetOptimizationEnabled: settings.queryExportKeysetOptimizationEnabled,
+        csvWithoutBom: settings.csvWithoutBom,
         csvQuoteMode: settings.csvQuoteMode,
         clientSessionId,
         txnSessionId,
@@ -11623,6 +11671,7 @@ export const useQueryStore = defineStore("query", () => {
       totalRows: null,
       timeoutSecs: queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs),
       keysetOptimizationEnabled: settings.queryExportKeysetOptimizationEnabled,
+      csvWithoutBom: settings.csvWithoutBom,
       csvQuoteMode: settings.csvQuoteMode,
       clientSessionId: `${tabClientSessionId(tab, "export")}:${exportId}`,
       txnSessionId: exportTxnSessionId(tab),
@@ -11634,8 +11683,7 @@ export const useQueryStore = defineStore("query", () => {
     };
 
     const transactionEpoch = manualTransactionTargetEpoch(tab);
-    const mode = await showExportExecutionModeDialog();
-    if (mode === null) return;
+    const mode = getDefaultExportExecutionMode();
 
     function assertQueuedSourceAvailable() {
       if (mode !== "queued") return;

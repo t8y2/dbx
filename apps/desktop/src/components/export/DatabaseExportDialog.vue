@@ -10,11 +10,11 @@ import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import * as api from "@/lib/backend/api";
-import type { ExportProgress } from "@/lib/backend/api";
+import type { DatabaseExportSelectedObject, ExportProgress } from "@/lib/backend/api";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { buildAllDatabaseExportPlan, filterExportableSchemas, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, shouldUseDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
-import { buildSelectedTablesPayload, isDatabaseExportTableSelectionValid } from "@/lib/export/databaseExportSelection";
+import { buildSelectedTablesPayload, databaseExportSelectedObjectsRequest, isDatabaseExportTableSelectionValid, splitDatabaseExportObjectSelection } from "@/lib/export/databaseExportSelection";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { promptExportSavePath } from "@/lib/export/exportPath";
 import { useToast } from "@/composables/useToast";
@@ -28,10 +28,12 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { databaseExportFileStem, loadSavedDatabaseExportOptions, MAX_SPLIT_SQL_PART_MB, MIN_SPLIT_SQL_PART_MB, saveDatabaseExportOptions, sortDatabaseTableNames } from "@/lib/export/databaseExportOptions";
 import { notifyExportComplete } from "@/lib/export/exportReveal";
 import ExportExecutionMode from "@/components/export/ExportExecutionMode.vue";
+import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode";
 import type { ManualExportMode } from "@/lib/export/manualExportQueue";
 import type { ExportTask } from "@/composables/useExportTracker";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
+import { filterTableNames } from "./databaseExportTableFilter";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -46,6 +48,7 @@ const props = defineProps<{
   prefillSchema?: string;
   prefillTable?: string;
   prefillTables?: string[];
+  prefillObjects?: DatabaseExportSelectedObject[];
   prefillAllDatabases?: boolean;
 }>();
 
@@ -64,12 +67,15 @@ const schemas = ref<string[]>([]);
 const loadingMeta = ref(false);
 const tables = ref<string[]>([]);
 const selectedTables = ref<string[]>([]);
+// Set when the dialog opens with objects picked in the object browser: the picked
+// objects the table list cannot show (routines, sequences, packages, ...). The whole
+// selection is then sent as typed `selectedObjects` (#13940).
+const selectedOtherObjects = ref<DatabaseExportSelectedObject[] | null>(null);
+const viewNames = ref<ReadonlySet<string>>(new Set());
 const loadingTables = ref(false);
 const tableFilter = ref("");
 const filteredTables = computed(() => {
-  const q = tableFilter.value.trim().toLowerCase();
-  if (!q) return tables.value;
-  return tables.value.filter((name) => name.toLowerCase().includes(q));
+  return filterTableNames(tables.value, tableFilter.value);
 });
 const tableError = ref<string | null>(null);
 const POSTGRES_ALL_SCHEMAS = "__DBX_ALL_SCHEMAS__";
@@ -158,6 +164,7 @@ async function revealExportFile() {
 const currentTime = ref(Date.now());
 const pendingPrefillTable = ref("");
 const pendingPrefillTables = ref<string[]>([]);
+const pendingPrefillObjects = ref<DatabaseExportSelectedObject[]>([]);
 const exportAllDatabases = ref(false);
 const batchDatabaseIndex = ref(0);
 const batchDatabaseTotal = ref(0);
@@ -197,14 +204,30 @@ const canExport = computed(() => {
     schema.value &&
     !loadingTables.value &&
     !tableError.value &&
-    isDatabaseExportTableSelectionValid({
-      allTableCount: tables.value.length,
-      selectedTableCount: selectedTables.value.length,
-      includeStructure: includeStructure.value,
-      includeData: includeData.value,
-    })
+    (selectedOtherObjects.value
+      ? // Picked routines, sequences and packages are only exported with "include objects".
+        selectedTables.value.length > 0 || (includeObjects.value && selectedOtherObjects.value.length > 0)
+      : isDatabaseExportTableSelectionValid({
+          allTableCount: tables.value.length,
+          selectedTableCount: selectedTables.value.length,
+          includeStructure: includeStructure.value,
+          includeData: includeData.value,
+        }))
   );
 });
+
+function selectedTablesRequest(): string[] | undefined {
+  if (isPostgresAllSchemas.value || selectedOtherObjects.value) return undefined;
+  return includeStructure.value || includeData.value ? buildSelectedTablesPayload(tables.value, selectedTables.value) : undefined;
+}
+
+function selectedObjectsRequest(): DatabaseExportSelectedObject[] | undefined {
+  if (isPostgresAllSchemas.value || !selectedOtherObjects.value) return undefined;
+  return databaseExportSelectedObjectsRequest(selectedTables.value, viewNames.value, selectedOtherObjects.value);
+}
+
+const selectedObjectCount = computed(() => selectedTables.value.length + (selectedOtherObjects.value?.length ?? 0));
+const selectedObjectNames = () => [...selectedTables.value, ...(selectedOtherObjects.value ?? []).map((object) => object.name)];
 
 const selectedTableSet = computed(() => new Set(selectedTables.value));
 const selectedDatabaseSet = computed(() => new Set(selectedDatabases.value));
@@ -324,7 +347,7 @@ async function loadSchemas(preferredSchema = "") {
   schema.value = selected;
 }
 
-async function loadTables(preferredTable = "", preferredTables: string[] = []) {
+async function loadTables(preferredTable = "", preferredTables: string[] = [], preferredObjects: DatabaseExportSelectedObject[] = []) {
   if (schema.value === POSTGRES_ALL_SCHEMAS) {
     tables.value = [];
     selectedTables.value = [];
@@ -337,6 +360,7 @@ async function loadTables(preferredTable = "", preferredTables: string[] = []) {
   tableError.value = null;
   tables.value = [];
   selectedTables.value = [];
+  selectedOtherObjects.value = null;
   try {
     const tableInfos = await api.listTables(connectionId.value, database.value, schema.value);
     const names = sortDatabaseTableNames(tableInfos.map((table) => table.name));
@@ -344,6 +368,14 @@ async function loadTables(preferredTable = "", preferredTables: string[] = []) {
     // Kingbase 系的 listTables 同时返回视图（relkind v/m）；预填里命中视图的项
     // 必须走 include_objects 通道，否则后端对象门会静默丢弃它们。
     const viewTypeNames = new Set(tableInfos.filter((table) => table.table_type.toUpperCase().includes("VIEW")).map((table) => table.name));
+    viewNames.value = viewTypeNames;
+    if (preferredObjects.length > 0) {
+      const selection = splitDatabaseExportObjectSelection(preferredObjects, names);
+      selectedTables.value = selection.tables;
+      selectedOtherObjects.value = selection.others;
+      if (selection.others.length > 0 || selection.tables.some((name) => viewTypeNames.has(name))) includeObjects.value = true;
+      return;
+    }
     const preferredSet = new Set(preferredTables.filter((name) => names.includes(name) && !viewTypeNames.has(name)));
     const nonTablePrefills = preferredTables.filter((name) => !names.includes(name) || viewTypeNames.has(name));
     if (nonTablePrefills.length > 0) {
@@ -425,10 +457,12 @@ async function startDesktopExport() {
     allDatabases: exportAllDatabases.value,
     databases: [...selectedDatabases.value],
     tables: [...selectedTables.value],
+    objectNames: selectedObjectNames(),
     mode: executionMode.value,
     split: splitSqlOutput.value,
     request: {
-      selectedTables: !isPostgresAllSchemas.value && (includeStructure.value || includeData.value) ? buildSelectedTablesPayload(tables.value, selectedTables.value) : undefined,
+      selectedTables: selectedTablesRequest(),
+      selectedObjects: selectedObjectsRequest(),
       includeStructure: includeStructure.value,
       includeData: includeData.value,
       insertDialect: insertDialect.value,
@@ -451,7 +485,7 @@ async function startDesktopExport() {
       if (typeof path !== "string") return;
       destination = path;
     } else {
-      const name = sanitizeFileName(databaseExportFileStem(captured.database || "database", captured.tables) || "database");
+      const name = sanitizeFileName(databaseExportFileStem(captured.database || "database", captured.objectNames) || "database");
       const path = await promptExportSavePath({ defaultFileName: `${name}.${captured.split ? "zip" : "sql"}`, filters: [{ name: captured.split ? "ZIP" : "SQL", extensions: [captured.split ? "zip" : "sql"] }] });
       if (!path) return;
       destination = path;
@@ -558,7 +592,17 @@ async function startDesktopExport() {
           activeExport = currentId;
           try {
             return await runDatabaseExportUntilTerminal(
-              { ...captured.request, selectedTables: captured.allDatabases ? undefined : captured.request.selectedTables, exportId: currentId, connectionId: captured.connectionId, database: item.database, schema: item.schema, filePath, snapshotSessionId },
+              {
+                ...captured.request,
+                selectedTables: captured.allDatabases ? undefined : captured.request.selectedTables,
+                selectedObjects: captured.allDatabases ? undefined : captured.request.selectedObjects,
+                exportId: currentId,
+                connectionId: captured.connectionId,
+                database: item.database,
+                schema: item.schema,
+                filePath,
+                snapshotSessionId,
+              },
               (progress) => {
                 lastProgress = progress;
                 const nextRows = Math.max(0, progress.rowsExported);
@@ -652,7 +696,7 @@ async function startExport() {
 
   if (isTauriRuntime()) {
     try {
-      const safeName = sanitizeFileName(databaseExportFileStem(database.value || "database", selectedTables.value) || "database");
+      const safeName = sanitizeFileName(databaseExportFileStem(database.value || "database", selectedObjectNames()) || "database");
       const path = await promptExportSavePath({
         defaultFileName: `${safeName}.${splitSqlOutput.value ? "zip" : "sql"}`,
         filters: [{ name: splitSqlOutput.value ? "ZIP" : "SQL", extensions: [splitSqlOutput.value ? "zip" : "sql"] }],
@@ -709,7 +753,8 @@ async function startExport() {
           database: database.value,
           schema: isPostgresAllSchemas.value ? "" : schema.value,
           filePath,
-          selectedTables: !isPostgresAllSchemas.value && (includeStructure.value || includeData.value) ? buildSelectedTablesPayload(tables.value, selectedTables.value) : undefined,
+          selectedTables: selectedTablesRequest(),
+          selectedObjects: selectedObjectsRequest(),
           includeStructure: includeStructure.value,
           includeData: includeData.value,
           insertDialect: insertDialect.value,
@@ -995,7 +1040,7 @@ async function cancelExport() {
 
 function resetState() {
   desktopTaskStatus.value = null;
-  executionMode.value = "immediate";
+  executionMode.value = getDefaultExportExecutionMode();
   connectionId.value = "";
   database.value = "";
   databases.value = [];
@@ -1003,9 +1048,11 @@ function resetState() {
   schemas.value = [];
   tables.value = [];
   selectedTables.value = [];
+  selectedOtherObjects.value = null;
   tableError.value = null;
   pendingPrefillTable.value = "";
   pendingPrefillTables.value = [];
+  pendingPrefillObjects.value = [];
   exportAllDatabases.value = false;
   selectedDatabases.value = [];
   databaseFilter.value = "";
@@ -1105,13 +1152,16 @@ watch(schema, (value) => {
   }
   tables.value = [];
   selectedTables.value = [];
+  selectedOtherObjects.value = null;
   tableError.value = null;
   const preferredTable = pendingPrefillTable.value;
   const preferredTables = pendingPrefillTables.value;
+  const preferredObjects = pendingPrefillObjects.value;
   pendingPrefillTable.value = "";
   pendingPrefillTables.value = [];
+  pendingPrefillObjects.value = [];
   if (value === POSTGRES_ALL_SCHEMAS) return;
-  if (value) loadTables(preferredTable, preferredTables).catch((e) => toast(String(e), 5000));
+  if (value) loadTables(preferredTable, preferredTables, preferredObjects).catch((e) => toast(String(e), 5000));
 });
 
 watch(
@@ -1122,6 +1172,7 @@ watch(
       exportAllDatabases.value = props.prefillAllDatabases ?? false;
       pendingPrefillTable.value = props.prefillTable ?? "";
       pendingPrefillTables.value = props.prefillTables ?? [];
+      pendingPrefillObjects.value = props.prefillObjects ?? [];
       if (props.prefillConnectionId) {
         skipConnectionWatch.value = true;
         connectionId.value = props.prefillConnectionId;
@@ -1237,7 +1288,7 @@ watch([includeStructure, includeData, insertDialect, insertMode, includeObjects,
             <div class="flex items-center justify-between gap-2">
               <Label class="text-xs">{{ t("databaseExport.tableSelection") }}</Label>
               <div v-if="tables.length" class="text-[11px] text-muted-foreground">
-                {{ t("databaseExport.selectedTables", { selected: selectedTables.length, total: tables.length }) }}
+                {{ t("databaseExport.selectedTables", { selected: selectedObjectCount, total: tables.length }) }}
               </div>
             </div>
 

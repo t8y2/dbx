@@ -118,6 +118,7 @@ async fn live_postgres_export_restores_tables_that_depend_on_functions() {
             schema: "public".to_string(),
             file_path: export_path.display().to_string(),
             selected_tables: Vec::new(),
+            selected_objects: None,
             excluded_tables: Vec::new(),
             include_structure: true,
             include_data: true,

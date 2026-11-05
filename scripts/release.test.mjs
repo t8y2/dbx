@@ -128,6 +128,36 @@ test("app release workflows preserve beta tags and stable package URLs", () => {
   assert.match(release, /RELEASE_TAG:/);
 });
 
+test("promoting a beta moves its Release to the plain version tag", () => {
+  const publish = readFileSync(appPublishWorkflow, "utf8");
+  const has = (text) => assert.ok(publish.includes(text), `publish-packages.yml is missing: ${text}`);
+
+  // The Release is retagged in place so its assets are reused, not copied.
+  has("stable_tag: ${{ steps.version.outputs.stable_tag }}");
+  has("current_tag: ${{ steps.release.outputs.current_tag }}");
+  has('echo "stable_tag=v${VERSION}"');
+  has('gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs"');
+  has('-f "ref=refs/tags/${STABLE_TAG}" -f "sha=${SOURCE_SHA}"');
+  has('edit_args+=(--tag "$STABLE_TAG")');
+  has('gh release edit "${SOURCE_TAG}" "${edit_args[@]}"');
+  // A rerun finds the Release under the stable tag; two Releases for one version is ambiguous.
+  has("Both $TAG and $STABLE_TAG have a Release");
+  has("points to ${STABLE_SHA}, not the promoted build");
+  // The R2 directory, manifest and aliases are keyed by the plain tag.
+  has('echo "tag=${{ needs.validate-candidate.outputs.stable_tag }}" >> "$GITHUB_OUTPUT"');
+  has('gh release download "${{ needs.validate-candidate.outputs.current_tag }}"');
+  has('SOURCE_TAG="${{ needs.validate-candidate.outputs.current_tag }}"');
+  // The GitHub manifest copy points its package URLs at the new tag.
+  has('"https://github.com/t8y2/dbx/releases/download/" + $tag + "/"');
+  // Everything user-facing follows the Release to its new tag.
+  has("TAG: ${{ needs.validate-candidate.outputs.stable_tag }}");
+  has('stable-asset-aliases.mjs pairs "$BETA_TAG"');
+  has('notify_feishu.py "${{ needs.validate-candidate.outputs.stable_tag }}"');
+  // inputs.tag only identifies the build; nothing after validation may link to it.
+  const uses = publish.split("\n").filter((line) => line.includes("github.event.inputs.tag"));
+  assert.deepEqual(uses.map((line) => line.trim()), ['- run: echo "Stable promotion approved for ${{ github.event.inputs.tag }}"']);
+});
+
 test("rollback dispatches each distribution workflow after validation", () => {
   const mockBin = createMockGh();
   const logPath = join(mockBin, "gh.log");

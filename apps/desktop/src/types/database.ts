@@ -141,7 +141,7 @@ export interface ConnectionConfig {
   id: string;
   name: string;
   /** Read-only response identity retained when a saved JDBC URL is protected. */
-  readonly jdbc_dialect?: "oceanbase-oracle";
+  readonly jdbc_dialect?: "oceanbase-oracle" | "oracle";
   note?: string;
   db_type: DatabaseType;
   driver_profile?: string;
@@ -1595,6 +1595,7 @@ export interface TriggerInfo {
 
 /** Missing metadata means a provider has not established exact identity. */
 export interface MetadataReadOptions {
+  lightweight?: boolean;
   identityMode?: "exact";
   catalog?: string;
 }
@@ -2440,6 +2441,8 @@ export interface TableStructureEditorDraft {
   createPartitioningColumns?: string[];
   createPartitioningExpression?: string;
   loadedMetadataFacets?: import("@/lib/metadata/objectMetadataCache").ObjectMetadataFacet[];
+  /** A failed index read must keep restored index edits blocked until an explicit reload succeeds. */
+  indexMetadataReadError?: string;
   scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
   /** Request id of the structureInitialTab the editor already applied; remounts must not replay a consumed initial tab over the restored draft. */
   appliedInitialTabRequestId?: number;

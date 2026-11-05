@@ -220,6 +220,10 @@ describe("connectionSupportsProcessList", () => {
   it("resolves JDBC connections by their effective engine", () => {
     expect(connectionSupportsProcessList(conn({ db_type: "jdbc", connection_string: "jdbc:mysql://db:3306/app" }))).toBe(true);
     expect(connectionSupportsProcessList(conn({ db_type: "jdbc", connection_string: "jdbc:postgresql://db:5432/app" }))).toBe(true);
+    expect(connectionSupportsProcessList(conn({ db_type: "jdbc", connection_string: "jdbc:oracle:thin:@db:1521:app" }))).toBe(true);
+    expect(connectionSupportsProcessList(conn({ db_type: "jdbc", connection_string: "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=app)))" }))).toBe(true);
+    expect(connectionSupportsProcessList(conn({ db_type: "jdbc", connection_string: "__DBX_SAVED_CREDENTIAL__:xyz", jdbc_driver_paths: ["/opt/ojdbc8.jar"] }))).toBe(true);
+    expect(connectionSupportsProcessList(conn({ db_type: "jdbc", connection_string: "__DBX_SAVED_CREDENTIAL__:xyz", jdbc_dialect: "oracle" as any }))).toBe(true);
   });
 
   it("excludes Kyuubi / Hive2 JDBC that infer as MySQL but cannot serve SHOW PROCESSLIST", () => {
@@ -232,5 +236,13 @@ describe("resolveProcessListDriverForConnection", () => {
   it("returns the engine driver for a JDBC MySQL connection and null for lookalikes", () => {
     expect(resolveProcessListDriverForConnection(conn({ db_type: "jdbc", connection_string: "jdbc:mysql://db/app" }))?.buildCancelQuerySql(9)).toBe("KILL QUERY 9");
     expect(resolveProcessListDriverForConnection(conn({ db_type: "jdbc", connection_string: "jdbc:hive2://hs2/default" }))).toBeNull();
+  });
+
+  it("returns the engine driver for a JDBC Oracle connection", () => {
+    const driver = resolveProcessListDriverForConnection(conn({ db_type: "jdbc", connection_string: "jdbc:oracle:thin:@db:1521:app" }));
+    expect(driver?.diagnosticEngine).toBe("oracle");
+    expect(driver?.listSqlForVersion?.(11)).toContain("GV$SESSION");
+    const savedDriver = resolveProcessListDriverForConnection(conn({ db_type: "jdbc", connection_string: "__DBX_SAVED_CREDENTIAL__:xyz", jdbc_dialect: "oracle" }));
+    expect(savedDriver?.diagnosticEngine).toBe("oracle");
   });
 });

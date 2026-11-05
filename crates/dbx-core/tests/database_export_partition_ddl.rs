@@ -128,6 +128,7 @@ async fn run_database_export_of_partition_tree_has_no_duplicates_and_replays() {
         schema: "public".to_string(),
         file_path: file_path.to_string_lossy().to_string(),
         selected_tables: Vec::new(),
+        selected_objects: None,
         excluded_tables: Vec::new(),
         include_structure: true,
         include_data: false,

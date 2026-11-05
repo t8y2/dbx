@@ -147,7 +147,9 @@ describe("savedSqlStore directory sync", () => {
 
   it("waits for an in-flight initial read before reading the restored library", async () => {
     let finishInitial!: (value: ReturnType<typeof library>) => void;
-    const initialRead = new Promise<ReturnType<typeof library>>((resolve) => { finishInitial = resolve; });
+    const initialRead = new Promise<ReturnType<typeof library>>((resolve) => {
+      finishInitial = resolve;
+    });
     const restored = library(false);
     restored.files = [{ ...restored.files[0], id: "restored", name: "restored.sql" }];
     vi.mocked(api.loadSavedSqlLibrary).mockReturnValueOnce(initialRead).mockResolvedValueOnce(restored);

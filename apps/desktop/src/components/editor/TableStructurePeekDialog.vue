@@ -8,7 +8,7 @@ import { formatMetadataColumnTypeLabel } from "@/lib/dataGrid/dataGridColumnType
 import { STRUCTURE_PEEK_MIN_HEIGHT, STRUCTURE_PEEK_MIN_WIDTH, centeredStructurePeekRect, clampStructurePeekRect, defaultStructurePeekSize, resizeStructurePeekRect, type StructurePeekResizeEdge } from "@/lib/editor/structurePeekPanel";
 import { shouldPreserveEditorFocusOnPeekPointerDown } from "@/lib/editor/focusedQueryEditorView";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
-import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
+import { filterObjectBrowserTableColumns, sortObjectBrowserTableColumns, type ObjectBrowserTableColumnSort, type ObjectBrowserTableColumnSortKey } from "@/lib/table/objectBrowserTableInfo";
 import type { ColumnInfo } from "@/types/database";
 
 export type TableStructurePeekInsertKind = "identifier" | "raw";
@@ -58,6 +58,23 @@ const title = computed(() => {
 });
 
 const filteredColumns = computed(() => filterObjectBrowserTableColumns(props.columns, searchQuery.value));
+
+const columnSort = ref<ObjectBrowserTableColumnSort | null>(null);
+
+const sortedColumns = computed(() => sortObjectBrowserTableColumns(filteredColumns.value, columnSort.value));
+
+function toggleColumnSort(key: ObjectBrowserTableColumnSortKey) {
+  columnSort.value = columnSort.value?.key === key ? (columnSort.value.direction === "asc" ? { key, direction: "desc" } : null) : { key, direction: "asc" };
+}
+
+function columnSortDirection(key: ObjectBrowserTableColumnSortKey): ObjectBrowserTableColumnSort["direction"] | undefined {
+  return columnSort.value?.key === key ? columnSort.value.direction : undefined;
+}
+
+function columnSortIndicator(key: ObjectBrowserTableColumnSortKey): string {
+  const direction = columnSortDirection(key);
+  return direction === "asc" ? "▲" : direction === "desc" ? "▼" : "↕";
+}
 
 const panelStyle = computed(() => {
   const style: Record<string, string> = {
@@ -246,9 +263,10 @@ onBeforeUnmount(() => {
 });
 
 watch(
-  () => props.tableName,
+  () => [props.tableName, props.schema] as const,
   () => {
     searchQuery.value = "";
+    columnSort.value = null;
   },
 );
 </script>
@@ -301,15 +319,31 @@ watch(
           <thead class="sticky top-0 z-10 bg-muted text-muted-foreground">
             <tr class="border-b">
               <th class="w-8 px-3 py-2 text-left font-medium text-nowrap">#</th>
-              <th class="px-3 py-2 text-left font-medium text-nowrap">{{ t("grid.columnName") }}</th>
-              <th class="px-3 py-2 text-left font-medium text-nowrap">{{ t("grid.columnType") }}</th>
-              <th class="px-3 py-2 text-left font-medium text-nowrap">{{ t("grid.tableInfoNullable") }}</th>
-              <th class="px-3 py-2 text-left font-medium text-nowrap">{{ t("structureEditor.defaultValue") }}</th>
+              <th class="px-3 py-2 text-left font-medium text-nowrap" :aria-sort="columnSortDirection('name') === 'asc' ? 'ascending' : columnSortDirection('name') === 'desc' ? 'descending' : 'none'">
+                <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleColumnSort('name')">
+                  {{ t("grid.columnName") }} <span class="text-[10px]">{{ columnSortIndicator("name") }}</span>
+                </button>
+              </th>
+              <th class="px-3 py-2 text-left font-medium text-nowrap" :aria-sort="columnSortDirection('dataType') === 'asc' ? 'ascending' : columnSortDirection('dataType') === 'desc' ? 'descending' : 'none'">
+                <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleColumnSort('dataType')">
+                  {{ t("grid.columnType") }} <span class="text-[10px]">{{ columnSortIndicator("dataType") }}</span>
+                </button>
+              </th>
+              <th class="px-3 py-2 text-left font-medium text-nowrap" :aria-sort="columnSortDirection('nullable') === 'asc' ? 'ascending' : columnSortDirection('nullable') === 'desc' ? 'descending' : 'none'">
+                <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleColumnSort('nullable')">
+                  {{ t("grid.tableInfoNullable") }} <span class="text-[10px]">{{ columnSortIndicator("nullable") }}</span>
+                </button>
+              </th>
+              <th class="px-3 py-2 text-left font-medium text-nowrap" :aria-sort="columnSortDirection('defaultValue') === 'asc' ? 'ascending' : columnSortDirection('defaultValue') === 'desc' ? 'descending' : 'none'">
+                <button type="button" class="inline-flex items-center gap-1 cursor-pointer select-none" @click.stop="toggleColumnSort('defaultValue')">
+                  {{ t("structureEditor.defaultValue") }} <span class="text-[10px]">{{ columnSortIndicator("defaultValue") }}</span>
+                </button>
+              </th>
               <th class="px-3 py-2 text-left font-medium text-nowrap">{{ t("structureEditor.comment") }}</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(column, index) in filteredColumns" :key="column.name" class="border-b hover:bg-muted/40">
+            <tr v-for="(column, index) in sortedColumns" :key="column.name" class="border-b hover:bg-muted/40">
               <td class="w-8 px-3 py-2 text-muted-foreground">{{ index + 1 }}</td>
               <td class="cursor-pointer px-3 py-2 font-medium" :title="t('editor.structurePeek.doubleClickInsert')" @dblclick.stop="onCellDblClick(column.name, 'identifier')">
                 <span class="inline-flex items-center gap-1.5">

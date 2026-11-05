@@ -51,6 +51,12 @@ Runtime reuse keys include the Agent driver key, executable or JAR path, launch 
 
 ZooKeeper retains the legacy single-session path because its Agent does not advertise the `multi_session` capability; etcd Agents (v3 and v2) run on the shared multi-session path like the SQL Agents. Older Agent binaries and JARs also remain on the legacy path.
 
+### ZooKeeper endpoint routes
+
+ZooKeeper Agents may advertise the optional `zookeeper_endpoint_routes` capability without changing their protocol version or single-session lifecycle. When transport layers are configured, DBX preserves the logical `zookeeper_connect_string` (including its ensemble and chroot) and supplies a runtime-only `zookeeper_endpoint_routes` object mapping each logical `host:port` to a loopback `IP:port`. All reachability, session/reconnect, and server-info dials must use this map; missing or invalid routes fail without a direct-dial fallback. TLS verifies the logical host, not the loopback destination.
+
+DBX requires this advertised capability before sending a routed connect, test, or open-session request. DBX rejects Agents that do not advertise it with an update-driver error before sending the RPC, instead of bypassing transport. The protocol's `allCapabilities` registry records the optional capability; default SQL/Java handshake capability lists do not advertise ZooKeeper routing.
+
 ## Resource limits and recovery
 
 A runtime accepts at most 256 logical sessions. Closing the final session starts a 30-second grace period before the process exits, preventing rapid tab open/close cycles from repeatedly starting a runtime. Process EOF fails all pending requests; the failed runtime is removed from reuse and recreated on demand. Connection validation and reconnect operate on a single logical session.

@@ -440,16 +440,30 @@ impl MessageQueueAdmin for KafkaAdmin {
             PolicyScope::Namespace { .. } => return Err("Kafka retention can only be set on topics".to_string()),
         };
 
-        let retention_ms = if retention.retention_time_in_minutes < 0 {
-            "-1".to_string()
-        } else {
-            (retention.retention_time_in_minutes as i64 * 60 * 1000).to_string()
-        };
-
-        let mut configs = vec![serde_json::json!({ "key": "retention.ms", "value": retention_ms })];
-        if retention.retention_size_in_mb >= 0 {
-            let retention_bytes = (retention.retention_size_in_mb as i64 * 1024 * 1024).to_string();
+        let mut configs = Vec::new();
+        // 只下发用户实际改过的字段；未修改字段保持 broker 原值，避免未回显时被 -1 覆盖。
+        if retention.write_retention_time {
+            let retention_ms = if retention.retention_time_in_minutes < 0 {
+                "-1".to_string()
+            } else {
+                (retention.retention_time_in_minutes as i64 * 60 * 1000).to_string()
+            };
+            configs.push(serde_json::json!({ "key": "retention.ms", "value": retention_ms }));
+        }
+        if retention.write_retention_size {
+            if retention.retention_size_in_mb < -1 {
+                return Err("retention size must be >= -1 MB".to_string());
+            }
+            // 表单 MB 按二进制口径换算；-1 表示不限，需显式下发以覆盖 topic 原有配置。
+            let retention_bytes = if retention.retention_size_in_mb < 0 {
+                "-1".to_string()
+            } else {
+                (retention.retention_size_in_mb as i64 * 1024 * 1024).to_string()
+            };
             configs.push(serde_json::json!({ "key": "retention.bytes", "value": retention_bytes }));
+        }
+        if configs.is_empty() {
+            return Ok(());
         }
 
         self.call_ok(

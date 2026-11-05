@@ -65,6 +65,35 @@ describe("queryStore pending object source tab", () => {
     mocks.connectionStore.dbType = "oracle";
   });
 
+  it.each(["VIEW", "PROCEDURE"] as const)("positions a pending %s next to the active tab and keeps its position after loading", async (objectType) => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const first = store.createTab(CONNECTION_ID, DATABASE, "First");
+    const last = store.createTab(CONNECTION_ID, DATABASE, "Last");
+    store.switchTab(first);
+    let resolveSource!: (value: unknown) => void;
+    mocks.getObjectSource.mockReturnValueOnce(new Promise((resolve) => (resolveSource = resolve)));
+    const options = pendingOptions({ name: "adjacent_source", objectType });
+    const id = store.openObjectSourceTabPending(options);
+    const expectedOrder = [first, id, last];
+    expect(store.tabs.map((tab) => tab.id)).toEqual(expectedOrder);
+    expect(store.groups[0].tabIds).toEqual(expectedOrder);
+    expect(store.tabs.find((tab) => tab.id === id)?.sourceLoad).toBeDefined();
+
+    store.switchTab(last);
+    expect(store.openObjectSourceTabPending(options)).toBe(id);
+    expect(store.groups[0].tabIds).toEqual(expectedOrder);
+    store.switchTab(last);
+    await settle();
+    resolveSource({ ...objectSource("loaded definition"), object_type: objectType });
+    await settle();
+
+    expect(store.tabs.find((tab) => tab.id === id)?.sql).toBe("loaded definition");
+    expect(store.tabs.find((tab) => tab.id === id)?.sourceLoad).toBeUndefined();
+    expect(store.groups[0].tabIds).toEqual(expectedOrder);
+    expect(store.activeTabId).toBe(last);
+  });
+
   it("rejects a late source response after migration and preserves a dirty old draft", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

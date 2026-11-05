@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 use super::file_validator::validate_file_path;
 use crate::execution::{await_stream_with_progress_timeout, DbOperationBudget, StreamProgressClock};
 use crate::models::connection::DatabaseType;
-use crate::sql::starts_with_executable_sql_keyword;
+use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_keyword_sequence};
 use crate::types::{
     ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate, CompletionAssistantCandidateKind,
     CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest,
@@ -9047,6 +9047,15 @@ pub fn postgres_statement_returns_rows(sql: &str) -> bool {
         return true;
     }
 
+    // GaussDB executes the inner statement on the named data nodes and returns
+    // its rows. The first word alone cannot decide this: `EXECUTE prepared` is a
+    // different statement whose row count depends on the prepared SQL, so keep
+    // it on the command path (#13870).
+    // ON separates this routing syntax from a prepared statement named DIRECT.
+    if starts_with_executable_sql_keyword_sequence(sql, &["EXECUTE", "DIRECT", "ON"]) {
+        return true;
+    }
+
     // A leading `WITH` is usually a CTE query, but PostgreSQL also allows a CTE
     // to be followed directly by INSERT/UPDATE/DELETE/MERGE, which only returns
     // rows with `RETURNING`. The prefix alone cannot decide, so parse it and
@@ -12778,6 +12787,29 @@ mod tests {
             "CLOSE c1",
             "FETCHING c1",
             "DO $$ BEGIN FETCH c1 INTO value; END $$",
+        ] {
+            assert!(!postgres_statement_returns_rows(sql), "expected command result for: {sql}");
+        }
+    }
+
+    #[test]
+    fn postgres_statement_returns_rows_for_gaussdb_execute_direct() {
+        for sql in [
+            "EXECUTE DIRECT ON (dn_6001_6002_6003) $$ SELECT indexname FROM pg_indexes $$;",
+            "-- run on every datanode\nexecute direct on (dn_1, dn_2) 'SELECT 1'",
+            "EXECUTE /* route to datanode */ DIRECT ON (dn_1) 'SELECT 1'",
+            "  execute direct on (dn_1) 'SELECT 1'",
+        ] {
+            assert!(postgres_statement_returns_rows(sql), "expected rows for: {sql}");
+        }
+
+        // A plain prepared-statement EXECUTE may be DML, so it keeps using the
+        // command path and its affected-row count.
+        for sql in [
+            "EXECUTE prepared_statement",
+            "EXECUTE DIRECT",
+            "EXECUTE DIRECT(1)",
+            "EXECUTED DIRECT ON (dn_1) 'SELECT 1'",
         ] {
             assert!(!postgres_statement_returns_rows(sql), "expected command result for: {sql}");
         }

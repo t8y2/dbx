@@ -735,7 +735,7 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
-    void executeQueryPageCommitsStatementWithoutResultSet() throws Exception {
+    void executeQueryPageRunsCtasInAutoCommitWithoutPagedTransaction() throws Exception {
         List<String> calls = new ArrayList<>();
         Driver driver = testDriver("jdbc:postgresql:dbx-ctas", scriptedPostgresConnection(calls, false, 2, false));
         DriverManager.registerDriver(driver);
@@ -755,13 +755,37 @@ final class DbxJdbcPluginTest {
             assertFalse(response.has("error"), response.toString());
             assertEquals(2, response.path("result").path("affected_rows").asInt());
             assertEquals(true, response.path("result").path("session_id").isNull());
-            int begin = callIndex(calls, call -> call.equals("setAutoCommit:false"));
-            int commit = callIndex(calls, call -> call.equals("commit"));
-            int restore = callIndex(calls, call -> call.equals("setAutoCommit:true"));
-            assertTrue(begin >= 0 && begin < commit && commit < restore, calls.toString());
+            // DDL runs in auto-commit: no paged transaction, hence no
+            // commit/rollback of it. See #14243.
+            assertEquals(-1, callIndex(calls, call -> call.equals("setAutoCommit:false")), calls.toString());
+            assertFalse(calls.contains("commit"), calls.toString());
             assertFalse(calls.contains("rollback"), calls.toString());
         } finally {
             closeAndDeregister(connection, driver);
+        }
+    }
+
+    @Test
+    void pagedQueryCannotReturnRowsSkipsLeadingCommentsAndKeepsQueriesInTheTransaction() throws Exception {
+        Method method = DbxJdbcPlugin.class.getDeclaredMethod("pagedQueryCannotReturnRows", String.class);
+        method.setAccessible(true);
+
+        for (String sql : new String[] {
+            "create table t as select 1",
+            "  \n-- note\n/* block */ truncate table t",
+            "ALTER TABLE t ADD COLUMN c int",
+        }) {
+            assertTrue((boolean) method.invoke(null, sql), sql);
+        }
+        for (String sql : new String[] {
+            "select 1",
+            "with x as (select 1) select * from x",
+            "explain analyze select 1",
+            "(select 1)",
+            "insert into t(a) values (1) returning a",
+            "call refresh_stats()",
+        }) {
+            assertFalse((boolean) method.invoke(null, sql), sql);
         }
     }
 

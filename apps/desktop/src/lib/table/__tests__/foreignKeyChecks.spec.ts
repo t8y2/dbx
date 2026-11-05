@@ -28,18 +28,32 @@ describe("foreign key checks option", () => {
     expect(foreignKeyChecksPreview("TRUNCATE a", "disable", "postgres")).toBe("TRUNCATE a");
   });
 
-  it("runs one continue-on-error batch and maps results back to the caller's statements", async () => {
-    const execute = vi.fn(async (_sql: string, onProgress: (p: { completed: number; total: number; success: boolean }) => void) => {
-      for (let i = 1; i <= 5; i += 1) onProgress({ completed: i, total: 5, success: i !== 4 });
-      return [result(0), result(1), result(2), result(3, { execution_error: true, error: { code: "Q", detail: "locked" } as QueryResult["error"] }), result(4)];
+  it("runs setup, body, and restore on one session", async () => {
+    const calls: string[] = [];
+    const execute = vi.fn(async (sql: string, onProgress: (p: { completed: number; total: number; success: boolean }) => void) => {
+      calls.push(sql);
+      if (sql.includes("DROP TABLE")) {
+        onProgress({ completed: 1, total: 2, success: true });
+        onProgress({ completed: 2, total: 2, success: false });
+        return [result(0), result(1, { execution_error: true, error: { code: "Q", detail: "locked" } as QueryResult["error"] })];
+      }
+      return [result(0)];
     });
     const progress: number[] = [];
-    const results = await runForeignKeyChecksBatch(["DROP TABLE `a`", "DROP TABLE `b`"], "disable", execute, (p) => progress.push(p.completed));
+    const results = await runForeignKeyChecksBatch(
+      ["DROP TABLE `a`", "DROP TABLE `b`"],
+      "disable",
+      {
+        open: vi.fn(),
+        execute,
+        close: vi.fn(),
+      },
+      (p) => progress.push(p.completed),
+    );
 
-    expect(execute).toHaveBeenCalledTimes(1);
-    expect(execute.mock.calls[0]![0]).toContain("SET FOREIGN_KEY_CHECKS = 0;");
-    expect(execute.mock.calls[0]![2]).toEqual({ continueOnError: true });
-    expect(progress).toEqual([1, 2, 2]);
+    expect(execute).toHaveBeenCalledTimes(4);
+    expect(calls).toEqual(["SET @dbx_saved_foreign_key_checks = @@SESSION.FOREIGN_KEY_CHECKS", "SET FOREIGN_KEY_CHECKS = 0", "DROP TABLE `a`;\nDROP TABLE `b`;", "SET FOREIGN_KEY_CHECKS = @dbx_saved_foreign_key_checks"]);
+    expect(progress).toEqual([1, 2]);
     expect(results.map((r) => r.statement_index)).toEqual([0, 1]);
 
     const outcome = foreignKeyChecksTargetResults([{ target: "a" }, { target: "b" }], results);
@@ -48,9 +62,58 @@ describe("foreign key checks option", () => {
     expect(outcome.failed[0]!.error.message).toBe("locked");
   });
 
-  it("fails when the setup statement fails instead of reporting success", async () => {
-    const execute = vi.fn(async () => [result(0), result(1, { execution_error: true, error: { code: "Q", detail: "denied" } as QueryResult["error"] }), result(2), result(3)]);
-    await expect(runForeignKeyChecksBatch(["DROP TABLE `a`"], "disable", execute)).rejects.toThrow("Failed to set FOREIGN_KEY_CHECKS: denied");
+  it("does not run the body when setup fails and still closes the session", async () => {
+    const calls: string[] = [];
+    const executor = {
+      open: vi.fn(),
+      execute: vi.fn(async (sql: string) => {
+        calls.push(sql);
+        return [sql.startsWith("SET @") ? result(0) : result(0, { execution_error: true, error: { code: "Q", detail: "denied" } as QueryResult["error"] })];
+      }),
+      close: vi.fn(),
+    };
+    await expect(runForeignKeyChecksBatch(["DROP TABLE `a`"], "disable", executor)).rejects.toThrow("Failed to set FOREIGN_KEY_CHECKS: denied");
+    expect(calls).toEqual(["SET @dbx_saved_foreign_key_checks = @@SESSION.FOREIGN_KEY_CHECKS", "SET FOREIGN_KEY_CHECKS = 0", "SET FOREIGN_KEY_CHECKS = @dbx_saved_foreign_key_checks"]);
+    expect(executor.close).toHaveBeenCalledOnce();
+  });
+
+  it("does not restore when saving the original value fails", async () => {
+    const executor = {
+      open: vi.fn(),
+      execute: vi.fn().mockResolvedValue([result(0, { execution_error: true, error: { code: "Q", detail: "save denied" } as QueryResult["error"] })]),
+      close: vi.fn(),
+    };
+    await expect(runForeignKeyChecksBatch(["DROP TABLE `a`"], "disable", executor)).rejects.toThrow("Failed to save FOREIGN_KEY_CHECKS: save denied");
+    expect(executor.execute).toHaveBeenCalledOnce();
+    expect(executor.close).toHaveBeenCalledOnce();
+  });
+
+  it("restores after body cancellation and reports restore failure", async () => {
+    const executor = {
+      open: vi.fn(),
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce([result(0)])
+        .mockResolvedValueOnce([result(0)])
+        .mockRejectedValueOnce(new Error("cancelled"))
+        .mockResolvedValueOnce([result(0)]),
+      close: vi.fn(),
+    };
+    await expect(runForeignKeyChecksBatch(["DROP TABLE `a`"], "disable", executor)).rejects.toThrow("cancelled");
+    expect(executor.execute).toHaveBeenCalledTimes(4);
+
+    const restoreFailure = {
+      open: vi.fn(),
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce([result(0)])
+        .mockResolvedValueOnce([result(0)])
+        .mockResolvedValueOnce([result(0)])
+        .mockResolvedValueOnce([result(0, { execution_error: true, error: { code: "Q", detail: "restore denied" } as QueryResult["error"] })]),
+      close: vi.fn(),
+    };
+    await expect(runForeignKeyChecksBatch(["DROP TABLE `a`"], "disable", restoreFailure)).rejects.toThrow("restore denied");
+    expect(restoreFailure.close).toHaveBeenCalledOnce();
   });
 
   it("treats a missing statement result as failed", () => {

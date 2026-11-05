@@ -631,10 +631,17 @@ const batchEmptyDisplaySql = computed(() => foreignKeyChecksPreview(batchEmptyPr
 async function runObjectBrowserForeignKeyChecksBatch<T>(plan: readonly { target: T; sql: string }[], onProgress?: (completed: number) => void) {
   const mode = batchForeignKeyChecks.value;
   if (mode === "default") throw new Error("Foreign key checks override is not selected");
+  const clientSessionId = `foreign-key-checks:${uuid()}`;
   const results = await runForeignKeyChecksBatch(
     plan.map(({ sql }) => sql),
     mode,
-    (sql, progress, options) => api.executeMultiWithProgress(props.connection.id, props.database, sql, progress, undefined, { continueOnError: options.continueOnError }),
+    {
+      open: () => api.prewarmConnection(props.connection.id, props.database, undefined, clientSessionId),
+      execute: (sql, progress, options) => api.executeMultiWithProgress(props.connection.id, props.database, sql, progress, undefined, { continueOnError: options.continueOnError, clientSessionId }),
+      close: async () => {
+        await api.closeClientConnectionSession(props.connection.id, props.database, clientSessionId);
+      },
+    },
     (progress) => onProgress?.(progress.completed),
   );
   return foreignKeyChecksTargetResults(plan, results);

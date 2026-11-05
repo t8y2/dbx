@@ -8,8 +8,9 @@ import type { DatabaseType, QueryResult } from "@/types/database";
  * - `disable`: force `FOREIGN_KEY_CHECKS = 0`, so referenced tables can be
  *              truncated / emptied / dropped in any order.
  *
- * `FOREIGN_KEY_CHECKS` is a MySQL *session* variable, so a non-default mode runs the whole
- * batch as one `executeMulti` call (one pooled connection) and restores the previous value.
+ * `FOREIGN_KEY_CHECKS` is a MySQL *session* variable, so a non-default mode pins one client
+ * session, runs setup and the body through that session, restores the previous value, and
+ * closes the session before it can be reused.
  */
 export type ForeignKeyChecksMode = "default" | "enable" | "disable";
 
@@ -17,9 +18,6 @@ export const FOREIGN_KEY_CHECKS_MODES: readonly ForeignKeyChecksMode[] = ["defau
 
 const SAVE_STATEMENT = "SET @dbx_saved_foreign_key_checks = @@SESSION.FOREIGN_KEY_CHECKS";
 const RESTORE_STATEMENT = "SET FOREIGN_KEY_CHECKS = @dbx_saved_foreign_key_checks";
-
-/** Statements inserted before the user statements; result indexes are shifted back by this. */
-export const FOREIGN_KEY_CHECKS_PREFIX_COUNT = 2;
 
 /** Only MySQL honours the session variable (same scope as Schema Diff's "ignore foreign key checks"). */
 export function supportsForeignKeyChecksOption(databaseType: DatabaseType | string | undefined): boolean {
@@ -60,7 +58,13 @@ export interface ForeignKeyChecksBatchProgress {
   success: boolean;
 }
 
-export type ForeignKeyChecksBatchExecutor = (sql: string, onProgress: (progress: ForeignKeyChecksBatchProgress) => void, options: { continueOnError: boolean }) => Promise<QueryResult[]>;
+export type ForeignKeyChecksBatchExecute = (sql: string, onProgress: (progress: ForeignKeyChecksBatchProgress) => void, options: { continueOnError: boolean }) => Promise<QueryResult[]>;
+
+export interface ForeignKeyChecksBatchExecutor {
+  open: () => Promise<void>;
+  execute: ForeignKeyChecksBatchExecute;
+  close: () => Promise<void>;
+}
 
 function resultIndex(result: QueryResult, position: number): number {
   return Number.isInteger(result.statement_index) ? result.statement_index! : position;
@@ -70,38 +74,73 @@ function resultError(result: QueryResult, fallback: string): string {
   return String(result.error?.detail || result.rows?.[0]?.[0] || fallback);
 }
 
+function assertSuccessfulStatement(results: readonly QueryResult[], description: string): void {
+  const result = results.find((item) => !item.server_message) ?? results[0];
+  if (!result) throw new Error(`${description}: no result returned`);
+  if (result.execution_error !== true) return;
+  throw new Error(`${description}: ${resultError(result, "unknown error")}`);
+}
+
+function combineErrors(primary: unknown, secondary: unknown): Error {
+  const primaryError = primary instanceof Error ? primary : new Error(String(primary));
+  const secondaryError = secondary instanceof Error ? secondary : new Error(String(secondary));
+  return new AggregateError([primaryError, secondaryError], `${primaryError.message}; ${secondaryError.message}`);
+}
+
 /**
- * Run `statements` wrapped with the FOREIGN_KEY_CHECKS save / set / restore statements.
+ * Run `statements` with setup, body, and restore on one pinned client session.
  * Returned results and progress refer to the caller's statements only (`statement_index`
  * 0..n-1), so existing per-target result mapping keeps working.
- *
- * Continue-on-error keeps the restore statement running even when a user statement fails.
- * A failed setup statement aborts with an error instead of reporting partial success.
  */
-export async function runForeignKeyChecksBatch(statements: readonly string[], mode: "enable" | "disable", execute: ForeignKeyChecksBatchExecutor, onProgress?: (progress: ForeignKeyChecksBatchProgress) => void): Promise<QueryResult[]> {
+export async function runForeignKeyChecksBatch(statements: readonly string[], mode: "enable" | "disable", executor: ForeignKeyChecksBatchExecutor, onProgress?: (progress: ForeignKeyChecksBatchProgress) => void): Promise<QueryResult[]> {
   const count = statements.length;
   if (count === 0) return [];
-  const script = foreignKeyChecksScript(statements, mode, "mysql");
-  const results = await execute(
-    script,
-    (progress) => {
-      if (progress.completed <= FOREIGN_KEY_CHECKS_PREFIX_COUNT) return;
-      onProgress?.({ completed: Math.min(progress.completed - FOREIGN_KEY_CHECKS_PREFIX_COUNT, count), total: count, success: progress.success });
-    },
-    { continueOnError: true },
-  );
+  let failure: unknown;
+  let mapped: QueryResult[] = [];
+  let opened = false;
+  let saved = false;
 
-  const mapped: QueryResult[] = [];
-  results.forEach((result, position) => {
-    if (result.server_message) return;
-    const index = resultIndex(result, position);
-    if (index < FOREIGN_KEY_CHECKS_PREFIX_COUNT) {
-      if (result.execution_error === true) throw new Error(`Failed to set FOREIGN_KEY_CHECKS: ${resultError(result, "unknown error")}`);
-      return;
+  try {
+    await executor.open();
+    opened = true;
+
+    const saveResult = await executor.execute(SAVE_STATEMENT, () => {}, { continueOnError: false });
+    assertSuccessfulStatement(saveResult, "Failed to save FOREIGN_KEY_CHECKS");
+    saved = true;
+
+    const set = await executor.execute(`SET FOREIGN_KEY_CHECKS = ${mode === "disable" ? 0 : 1}`, () => {}, { continueOnError: false });
+    assertSuccessfulStatement(set, "Failed to set FOREIGN_KEY_CHECKS");
+
+    const results = await executor.execute(
+      statements
+        .map(stripTrailingSemicolons)
+        .filter(Boolean)
+        .map((sql) => `${sql};`)
+        .join("\n"),
+      (progress) => onProgress?.({ completed: Math.min(progress.completed, count), total: count, success: progress.success }),
+      { continueOnError: true },
+    );
+    mapped = results.filter((result) => !result.server_message).map((result, position) => ({ ...result, statement_index: resultIndex(result, position) }));
+  } catch (error) {
+    failure = error;
+  }
+
+  if (opened && saved) {
+    try {
+      const restored = await executor.execute(RESTORE_STATEMENT, () => {}, { continueOnError: false });
+      assertSuccessfulStatement(restored, "Failed to restore FOREIGN_KEY_CHECKS");
+    } catch (error) {
+      failure = failure === undefined ? error : combineErrors(failure, error);
     }
-    if (index >= FOREIGN_KEY_CHECKS_PREFIX_COUNT + count) return; // restore statement
-    mapped.push({ ...result, statement_index: index - FOREIGN_KEY_CHECKS_PREFIX_COUNT });
-  });
+  }
+
+  try {
+    await executor.close();
+  } catch (error) {
+    failure = failure === undefined ? error : combineErrors(failure, error);
+  }
+
+  if (failure !== undefined) throw failure;
   return mapped;
 }
 

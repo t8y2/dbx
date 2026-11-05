@@ -823,10 +823,17 @@ function batchForeignKeyChecksSelect(targets: readonly TreeNode[]): SidebarDange
 async function runSidebarForeignKeyChecksBatch<T>(scope: { connectionId: string; database: string }, plan: readonly { target: T; sql: string }[], onProgress?: (completed: number) => void) {
   const mode = batchForeignKeyChecks.value;
   if (mode === "default") throw new Error("Foreign key checks override is not selected");
+  const clientSessionId = `foreign-key-checks:${uuid()}`;
   const results = await runForeignKeyChecksBatch(
     plan.map(({ sql }) => sql),
     mode,
-    (sql, progress, options) => api.executeMultiWithProgress(scope.connectionId, scope.database, sql, progress, undefined, { continueOnError: options.continueOnError }),
+    {
+      open: () => api.prewarmConnection(scope.connectionId, scope.database, undefined, clientSessionId),
+      execute: (sql, progress, options) => api.executeMultiWithProgress(scope.connectionId, scope.database, sql, progress, undefined, { continueOnError: options.continueOnError, clientSessionId }),
+      close: async () => {
+        await api.closeClientConnectionSession(scope.connectionId, scope.database, clientSessionId);
+      },
+    },
     (progress) => onProgress?.(progress.completed),
   );
   return foreignKeyChecksTargetResults(plan, results);

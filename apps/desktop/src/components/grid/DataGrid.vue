@@ -9900,6 +9900,7 @@ const copyExtractorLabels = computed<Record<DataGridCopyExtractorId, string>>(()
   "one-row": t("grid.copyExtractorOneRow"),
   "sql-in-list": t("grid.copyExtractorSqlInList"),
   "sql-inserts": t("grid.copyExtractorSqlInserts"),
+  "sql-deletes": t("grid.copyExtractorSqlDeletes"),
   "sql-deletes-inserts": t("grid.copyExtractorSqlDeletesInserts"),
   "sql-updates": t("grid.copyExtractorSqlUpdates"),
   "sql-select": t("grid.copyExtractorSqlSelect"),
@@ -10017,7 +10018,7 @@ const copyPreferenceMenuItems = computed(() =>
     return {
       value: preference,
       label: copyPreferenceLabel(preference),
-      disabled: extractor ? extractorUnavailableForDatabase(extractor, props.databaseType) || ((extractor === "sql-updates" || extractor === "sql-deletes-inserts") && !props.tableMeta?.primaryKeys.length) : false,
+      disabled: extractor ? extractorUnavailableForDatabase(extractor, props.databaseType) || ((extractor === "sql-updates" || extractor === "sql-deletes" || extractor === "sql-deletes-inserts") && !props.tableMeta?.primaryKeys.length) : false,
       separatorBefore: extractor ? DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor].separatorBefore : false,
     };
   }),
@@ -10026,7 +10027,7 @@ const visibleCopyExtractorItems = computed(() =>
   DATA_GRID_COPY_EXTRACTOR_IDS.map((extractor) => ({
     value: extractor,
     label: copyExtractorLabel(extractor),
-    disabled: extractorUnavailableForDatabase(extractor, props.databaseType) || ((extractor === "sql-updates" || extractor === "sql-deletes-inserts") && !props.tableMeta?.primaryKeys.length),
+    disabled: extractorUnavailableForDatabase(extractor, props.databaseType) || ((extractor === "sql-updates" || extractor === "sql-deletes" || extractor === "sql-deletes-inserts") && !props.tableMeta?.primaryKeys.length),
   })),
 );
 function openExtractorConfiguration() {

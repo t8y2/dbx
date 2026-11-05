@@ -27,7 +27,7 @@ import {
   COMPACT_TAB_TITLE_DEFAULT_VERSION,
 } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
-import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION, DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
@@ -796,9 +796,24 @@ describe("normalizeEditorSettings", () => {
     expect(configured.dsv.quotePolicy).toBe("always");
     expect(configured.sql.insertMode).toBe("row-by-row");
     expect(configured.json.pretty).toBe(false);
-    const visible = normalizeEditorSettings({ dataGridVisibleCopyExtractors: ["php", "php", "unknown"] }).dataGridVisibleCopyExtractors;
+    const visible = normalizeEditorSettings({ dataGridVisibleCopyExtractorsMigrationVersion: DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION, dataGridVisibleCopyExtractors: ["php", "php", "unknown"] }).dataGridVisibleCopyExtractors;
     expect(visible).toEqual(["php"]);
     expect(normalizeEditorSettings({ dataGridVisibleCopyExtractors: [] }).dataGridVisibleCopyExtractors).toEqual([]);
+  });
+
+  it("adds SQL DELETE to legacy visible copy formats without restoring hidden formats", () => {
+    const legacy = normalizeEditorSettings({ dataGridVisibleCopyExtractors: ["raw", "php"] });
+    expect(legacy.dataGridVisibleCopyExtractors).toEqual(["raw", "sql-deletes", "php"]);
+    expect(legacy.dataGridVisibleCopyExtractorsMigrationVersion).toBe(DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION);
+
+    const current = normalizeEditorSettings({
+      dataGridVisibleCopyExtractorsMigrationVersion: DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION,
+      dataGridVisibleCopyExtractors: ["raw", "php"],
+    });
+    expect(current.dataGridVisibleCopyExtractors).toEqual(["raw", "php"]);
+
+    const intentionallyEmpty = normalizeEditorSettings({ dataGridVisibleCopyExtractors: [] });
+    expect(intentionallyEmpty.dataGridVisibleCopyExtractors).toEqual([]);
   });
 
   it("migrates the legacy NULL clipboard sentinel once", () => {

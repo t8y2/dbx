@@ -2312,6 +2312,7 @@ export default withEnglishFallback({
     copyExtractorJsonArray: "Tablica JSON",
     copyExtractorSqlInList: "Lista SQL IN",
     copyExtractorSqlInserts: "Instrukcje SQL INSERT",
+    copyExtractorSqlDeletes: "Instrukcje SQL DELETE",
     copyExtractorSqlInsertsWithPrimaryKeys: "Instrukcje SQL INSERT (z kluczami głównymi)",
     copyExtractorSqlInsertsWithoutPrimaryKeys: "Instrukcje SQL INSERT (bez kluczy głównych)",
     copyExtractorSqlUpdates: "Instrukcje SQL UPDATE",

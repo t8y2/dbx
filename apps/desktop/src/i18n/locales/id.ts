@@ -2245,6 +2245,7 @@ export default withEnglishFallback({
     copyExtractorJsonArray: "Larik JSON",
     copyExtractorSqlInList: "Daftar IN SQL",
     copyExtractorSqlInserts: "SQL Insert",
+    copyExtractorSqlDeletes: "SQL DELETE",
     copyExtractorSqlInsertsWithPrimaryKeys: "SQL Insert (dengan Kunci Utama)",
     copyExtractorSqlInsertsWithoutPrimaryKeys: "SQL Insert (tanpa Kunci Utama yang Dibuat Otomatis)",
     copyExtractorSqlInsertsWithoutAllPrimaryKeys: "SQL Insert (tanpa Kunci Utama Apa Pun)",

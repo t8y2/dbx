@@ -8265,12 +8265,12 @@ fn session_scoped_pool_key(base_pool_key: String, client_session_id: Option<&str
         .unwrap_or(base_pool_key)
 }
 
-fn is_session_scoped_pool_key(pool_key: &str) -> bool {
+pub(crate) fn is_session_scoped_pool_key(pool_key: &str) -> bool {
     pool_key.contains(":session:")
 }
 
 fn is_manual_transaction_pool_key(pool_key: &str) -> bool {
-    pool_key.contains(":session:manual-txn-")
+    pool_key.contains(":session:manual-txn-") || pool_key.contains(":session:batch-txn-")
 }
 
 /// Whether `pool_key` names a pool owned by `connection_id`.

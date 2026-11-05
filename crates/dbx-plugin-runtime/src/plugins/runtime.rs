@@ -1161,9 +1161,9 @@ fn trim_ascii_whitespace(mut bytes: &[u8]) -> &[u8] {
 fn decode_response_value(plugin_id: &str, value: serde_json::Value) -> Result<serde_json::Value, String> {
     if let Some(error) = value.get("error") {
         let message = error
-            .get("message")
-            .and_then(serde_json::Value::as_str)
+            .as_str()
             .map(str::to_string)
+            .or_else(|| error.get("message").and_then(serde_json::Value::as_str).map(str::to_string))
             .unwrap_or_else(|| error.to_string());
         return Err(message);
     }
@@ -1345,6 +1345,10 @@ mod tests {
         assert_eq!(
             decode_response_value("sample", serde_json::json!({ "id": 1, "error": { "message": "boom" } }))
                 .unwrap_err(),
+            "boom"
+        );
+        assert_eq!(
+            decode_response_value("sample", serde_json::json!({ "id": 1, "error": "boom" })).unwrap_err(),
             "boom"
         );
     }

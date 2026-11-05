@@ -1163,7 +1163,7 @@ defineExpose({
             </div>
           </template>
         </SearchableSelect>
-        <Tooltip v-if="activeDatabaseValue">
+        <Tooltip v-if="showDatabaseHelperButtons && activeDatabaseValue">
           <TooltipTrigger as-child>
             <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:text-foreground" data-copy-database-name :aria-label="t('contextMenu.copyName')" @click="copyDatabaseName">
               <Copy class="h-3.5 w-3.5" />

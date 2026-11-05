@@ -2096,6 +2096,16 @@ export interface SqlGroupByViolation {
   qualifier?: string | null;
 }
 
+/**
+ * A two-part column qualifier that names neither a table nor an alias visible
+ * in the statement, e.g. `b.id` when only `a` and `qb` are declared.
+ * The span covers the qualifier itself.
+ */
+export interface SqlUnknownQualifier {
+  qualifier: string;
+  span: SqlTextSpan;
+}
+
 export interface SqlReferenceScope {
   id: number;
   parent_id?: number | null;
@@ -2106,6 +2116,7 @@ export interface SqlReferenceAnalysis {
   columns: SqlColumnReference[];
   scopes?: SqlReferenceScope[];
   group_by_violations?: SqlGroupByViolation[];
+  unknown_qualifiers?: SqlUnknownQualifier[];
 }
 
 export type TreeNodeType =

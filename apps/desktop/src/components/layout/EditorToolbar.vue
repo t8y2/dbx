@@ -152,6 +152,17 @@ function setMongoQueryLanguage(language: MongoQueryLanguage) {
   queryStore.setMongoQueryLanguage(props.activeTab.id, language);
 }
 
+async function copyDatabaseName() {
+  const database = activeDatabaseValue.value;
+  if (!database) return;
+  try {
+    await copyToClipboard(database);
+    toast(t("connection.copied"));
+  } catch (error) {
+    toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
+
 async function copyGeneratedMongoShell() {
   const shell = props.activeTab.mongoGeneratedShell;
   if (!shell) return;
@@ -1152,6 +1163,14 @@ defineExpose({
             </div>
           </template>
         </SearchableSelect>
+        <Tooltip v-if="activeDatabaseValue">
+          <TooltipTrigger as-child>
+            <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:text-foreground" data-copy-database-name :aria-label="t('contextMenu.copyName')" @click="copyDatabaseName">
+              <Copy class="h-3.5 w-3.5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{{ t("contextMenu.copyName") }}</TooltipContent>
+        </Tooltip>
         <Tooltip v-if="showDatabaseHelperButtons && activeDatabaseValue && !isSingleDb">
           <TooltipTrigger as-child>
             <Button variant="ghost" size="icon" class="h-6 w-6 text-muted-foreground hover:text-foreground" @click="emit('changeDatabase', '')">

@@ -7,6 +7,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -18,6 +19,50 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 class FirebirdAgentTest {
+    @Test
+    void tableDdlPlacesDefaultBeforeNotNull() {
+        for (String value : List.of("'{}'", "'ECF'", "'NOT NULL DEFAULT'", "''")) {
+            FirebirdAgent agent = agentWithColumns(row(
+                "COLUMN_NAME", "RAIZ", "TYPE_NAME", "VARCHAR", "COLUMN_SIZE", 20,
+                "NULLABLE", DatabaseMetaData.columnNoNulls, "COLUMN_DEF", value
+            ));
+
+            Assertions.assertEquals(
+                "CREATE TABLE \"ECF\" (\n  \"RAIZ\" VARCHAR(20) DEFAULT " + value + " NOT NULL\n);\n",
+                agent.getTableDdl(null, "ECF")
+            );
+        }
+    }
+
+    @Test
+    void tableDdlKeepsNullableColumnsAndColumnsWithoutDefaults() {
+        FirebirdAgent agent = agentWithColumns(
+            row(
+                "COLUMN_NAME", "QUANTITY", "TYPE_NAME", "INTEGER",
+                "NULLABLE", DatabaseMetaData.columnNoNulls, "COLUMN_DEF", "42"
+            ),
+            row(
+                "COLUMN_NAME", "OPTIONAL_VALUE", "TYPE_NAME", "VARCHAR", "COLUMN_SIZE", 20,
+                "NULLABLE", DatabaseMetaData.columnNullable, "COLUMN_DEF", "'{}'"
+            ),
+            row(
+                "COLUMN_NAME", "REQUIRED_VALUE", "TYPE_NAME", "INTEGER",
+                "NULLABLE", DatabaseMetaData.columnNoNulls
+            )
+        );
+
+        Assertions.assertEquals(
+            """
+            CREATE TABLE "ECF" (
+              "QUANTITY" INTEGER DEFAULT 42 NOT NULL,
+              "OPTIONAL_VALUE" VARCHAR(20) DEFAULT '{}',
+              "REQUIRED_VALUE" INTEGER NOT NULL
+            );
+            """,
+            agent.getTableDdl(null, "ECF")
+        );
+    }
+
     private static final String EXPECTED_PROCEDURE_SOURCE_SQL = """
         SELECT
             CASE WHEN METADATA_ROW = 1 THEN PROCEDURE_SOURCE ELSE NULL END AS PROCEDURE_SOURCE,
@@ -377,6 +422,24 @@ class FirebirdAgentTest {
     }
 
     @SafeVarargs
+    private static FirebirdAgent agentWithColumns(Map<String, Object>... columns) {
+        DatabaseMetaData metadata = proxy(DatabaseMetaData.class, (method, args) -> {
+            if ("getColumns".equals(method.getName())) return resultSet(List.of(columns));
+            if (List.of("getPrimaryKeys", "getIndexInfo", "getImportedKeys", "getTables").contains(method.getName())) {
+                return resultSet(List.of());
+            }
+            return defaultValue(method.getReturnType());
+        });
+        Connection connection = proxy(Connection.class, (method, args) -> {
+            if ("getMetaData".equals(method.getName())) return metadata;
+            return defaultValue(method.getReturnType());
+        });
+        FirebirdAgent agent = new FirebirdAgent();
+        TestSupport.setPrivateConnection(agent, connection);
+        return agent;
+    }
+
+    @SafeVarargs
     private static FirebirdAgent agentWithRows(
         List<String> sql,
         List<String> parameters,
@@ -425,6 +488,11 @@ class FirebirdAgentTest {
                 Object value = rows.get(index[0]).get(String.valueOf(args[0]));
                 wasNull[0] = value == null;
                 return value == null ? 0 : ((Number) value).intValue();
+            }
+            if ("getObject".equals(method.getName())) {
+                Object value = rows.get(index[0]).get(String.valueOf(args[0]));
+                wasNull[0] = value == null;
+                return value;
             }
             if ("wasNull".equals(method.getName())) {
                 return wasNull[0];

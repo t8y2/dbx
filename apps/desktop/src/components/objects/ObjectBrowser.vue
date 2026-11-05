@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import { usesLightweightMysqlBrowser } from "@/lib/database/mysqlBrowserLoading";
 import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { uuid } from "@/lib/common/utils";
 import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
+import { applyDdlSearchMarks } from "@/lib/sql/ddlSearchMarks";
 import DatabaseActionsMenu from "@/components/objects/DatabaseActionsMenu.vue";
 import FirebirdObjectManager from "@/components/objects/FirebirdObjectManager.vue";
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
@@ -26,6 +28,7 @@ import {
   Copy,
   CopyPlus,
   ChevronDown,
+  ChevronUp,
   ChevronRight,
   Download,
   Eraser,
@@ -211,6 +214,8 @@ import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
+import { foreignKeyChecksPreview, foreignKeyChecksTargetResults, isForeignKeyChecksOverride, runForeignKeyChecksBatch, supportsForeignKeyChecksOption, type ForeignKeyChecksMode } from "@/lib/table/foreignKeyChecks";
+import ForeignKeyChecksSelect from "@/components/objects/ForeignKeyChecksSelect.vue";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { matchesTableNameFilter } from "@/lib/table/tableVGroup";
 import { filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
@@ -249,6 +254,7 @@ import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRowsForScaffold, type ObjectBrowserRowsCacheScope, type ObjectBrowserRowsCacheWriteToken } from "@/lib/table/objectBrowserRowsCache";
 import { createObjectBrowserRowsLoadGuard, type ObjectBrowserRowsLoadHandle } from "@/lib/table/objectBrowserRowsLoadGuard";
 import { metadataLoadBudgetMs } from "@/lib/metadata/metadataLoadBudget";
+import { shareObjectBrowserRead } from "@/lib/table/objectBrowserPendingReads";
 import { loadObjectDdl, type ObjectDdlRequest } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
@@ -428,6 +434,8 @@ watch(tableInfoSearchQuery, () => {
   selectedTableInfoColumns.value = [];
 });
 const tableInfoDdlPreRef = ref<HTMLPreElement | null>(null);
+const tableInfoDdlMatchCount = ref(0);
+const tableInfoDdlMatchIndex = ref(0);
 const activeTableInfoLoading = computed(() => {
   if (tableInfoTab.value === "info") return tableOverviewLoading.value;
   if (tableInfoTab.value === "ddl") return tableDdlLoading.value;
@@ -618,6 +626,33 @@ const batchTruncateCascade = ref(false);
 const showBatchEmptyConfirm = ref(false);
 const batchEmptyPreviewSql = ref("");
 const batchEmptyPlan = ref<BatchTableEmptyPlanItem<ObjectBrowserRow>[]>([]);
+// Navicat-style "Foreign Key Checks: Default / Enable / Disable" for batch truncate / empty / drop.
+const batchForeignKeyChecks = ref<ForeignKeyChecksMode>("default");
+const supportsBatchForeignKeyChecks = computed(() => supportsForeignKeyChecksOption(effectiveDatabaseType.value));
+const batchForeignKeyChecksOverride = computed(() => isForeignKeyChecksOverride(batchForeignKeyChecks.value, effectiveDatabaseType.value));
+const batchDropDisplaySql = computed(() => foreignKeyChecksPreview(batchDropPreviewSql.value, batchForeignKeyChecks.value, effectiveDatabaseType.value));
+const batchTruncateDisplaySql = computed(() => foreignKeyChecksPreview(batchTruncatePreviewSql.value, batchForeignKeyChecks.value, effectiveDatabaseType.value));
+const batchEmptyDisplaySql = computed(() => foreignKeyChecksPreview(batchEmptyPreviewSql.value, batchForeignKeyChecks.value, effectiveDatabaseType.value));
+
+/** Run one statement per row with the chosen FOREIGN_KEY_CHECKS on a single session. */
+async function runObjectBrowserForeignKeyChecksBatch<T>(plan: readonly { target: T; sql: string }[], onProgress?: (completed: number) => void) {
+  const mode = batchForeignKeyChecks.value;
+  if (mode === "default") throw new Error("Foreign key checks override is not selected");
+  const clientSessionId = `foreign-key-checks:${uuid()}`;
+  const results = await runForeignKeyChecksBatch(
+    plan.map(({ sql }) => sql),
+    mode,
+    {
+      open: () => api.prewarmConnection(props.connection.id, props.database, undefined, clientSessionId),
+      execute: (sql, progress, options) => api.executeMultiWithProgress(props.connection.id, props.database, sql, progress, undefined, { continueOnError: options.continueOnError, clientSessionId }),
+      close: async () => {
+        await api.closeClientConnectionSession(props.connection.id, props.database, clientSessionId);
+      },
+    },
+    (progress) => onProgress?.(progress.completed),
+  );
+  return foreignKeyChecksTargetResults(plan, results);
+}
 // Paste table dialog state
 const showPasteDialog = ref(false);
 const pasteTableMode = ref<PasteTableMode>("structure-and-data");
@@ -1625,16 +1660,54 @@ const filteredTableConstraints = computed(() => {
   return base.filter((c) => c.name.toLowerCase().includes(q) || c.constraint_type.toLowerCase().includes(q) || c.columns.some((col) => col.toLowerCase().includes(q)) || c.definition.toLowerCase().includes(q));
 });
 
-const filteredTableDdlContent = computed(() => {
-  if (!tableDdlContent.value) return "";
-  const html = highlight(tableDdlContent.value);
-  if (!tableInfoSearchQuery.value) return html;
-  const escaped = tableInfoSearchQuery.value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const regex = new RegExp(`(${escaped})`, "gi");
-  return html.replace(/>([^<]*)</g, (_, text) => {
-    return `>${text.replace(regex, "<mark>$1</mark>")}<`;
-  });
-});
+const highlightedTableDdlContent = computed(() => (tableDdlContent.value ? highlight(tableDdlContent.value) : ""));
+
+function syncTableInfoDdlMatches(scrollToActive = false) {
+  const pre = tableInfoDdlPreRef.value;
+  const matches = pre && tableInfoTab.value === "ddl" && tableInfoSearchQuery.value ? Array.from(pre.querySelectorAll<HTMLElement>("mark.ddl-search-match")) : [];
+  tableInfoDdlMatchCount.value = matches.length;
+  tableInfoDdlMatchIndex.value = matches.length ? Math.min(tableInfoDdlMatchIndex.value, matches.length - 1) : 0;
+  matches.forEach((match, index) => match.classList.toggle("ddl-search-match-active", index === tableInfoDdlMatchIndex.value));
+  const activeMatch = matches[tableInfoDdlMatchIndex.value];
+  if (!scrollToActive || !pre || !activeMatch) return;
+
+  // 只滚动 DDL 容器，避免带动对象列表和外层页面。
+  const preRect = pre.getBoundingClientRect();
+  const matchRect = activeMatch.getBoundingClientRect();
+  pre.scrollTop += matchRect.top - preRect.top - (pre.clientHeight - matchRect.height) / 2;
+  pre.scrollLeft += matchRect.left - preRect.left - (pre.clientWidth - matchRect.width) / 2;
+}
+
+function navigateTableInfoDdlSearch(delta: -1 | 1) {
+  const count = tableInfoDdlMatchCount.value;
+  if (!count) return;
+  tableInfoDdlMatchIndex.value = (tableInfoDdlMatchIndex.value + delta + count) % count;
+  syncTableInfoDdlMatches(true);
+}
+
+function onTableInfoSearchKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    tableInfoSearchQuery.value = "";
+    return;
+  }
+  if (event.key !== "Enter" || tableInfoTab.value !== "ddl") return;
+  event.preventDefault();
+  event.stopPropagation();
+  navigateTableInfoDdlSearch(event.shiftKey ? -1 : 1);
+}
+
+watch(
+  [highlightedTableDdlContent, tableInfoSearchQuery, tableInfoDdlPreRef],
+  () => {
+    tableInfoDdlMatchIndex.value = 0;
+    applyDdlSearchMarks(tableInfoDdlPreRef.value, tableInfoSearchQuery.value);
+    syncTableInfoDdlMatches(true);
+  },
+  { flush: "post" },
+);
 
 async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab, focusObject?: NonNullable<QueryTab["objectPropertiesRequest"]>["focusObject"]) {
   if (!confirmTriggerDraftDiscard()) return;
@@ -3581,6 +3654,7 @@ function requestBatchDropTables() {
     return;
   }
   batchDropCascade.value = false;
+  batchForeignKeyChecks.value = "default";
   batchDropProgress.value = { completed: 0, total: 0 };
   batchDropPreviewSql.value = "";
   showBatchDropConfirm.value = true;
@@ -3610,9 +3684,16 @@ async function confirmBatchDropTables() {
         sql: await buildDropSqlForRow(target, { cascade: useCascade }),
       })),
     );
-    batchSql = plan.map(({ sql }) => sql).join(";\n");
-    const result = await executeObjectBrowserSqlWithProductionGuard(batchSql, () =>
-      runBatchTableDrop({
+    const useForeignKeyChecks = batchForeignKeyChecksOverride.value;
+    batchSql = useForeignKeyChecks ? foreignKeyChecksPreview(plan.map(({ sql }) => sql).join("\n"), batchForeignKeyChecks.value, effectiveDatabaseType.value) : plan.map(({ sql }) => sql).join(";\n");
+    const result = await executeObjectBrowserSqlWithProductionGuard(batchSql, async () => {
+      if (useForeignKeyChecks) {
+        const outcome = await runObjectBrowserForeignKeyChecksBatch(plan, (completed) => {
+          batchDropProgress.value = { completed, total: targets.length };
+        });
+        return { succeeded: outcome.succeeded, failed: outcome.failed[0]?.error };
+      }
+      return runBatchTableDrop({
         databaseType: effectiveDatabaseType.value,
         plan,
         executeStatement: (sql) => api.executeQuery(props.connection.id, props.database, sql),
@@ -3620,8 +3701,8 @@ async function confirmBatchDropTables() {
         onProgress: (progress) => {
           batchDropProgress.value = { completed: Math.min(progress.completed, targets.length), total: targets.length };
         },
-      }),
-    );
+      });
+    });
     if (!result) return;
 
     batchDropRecorded = true;
@@ -3679,6 +3760,7 @@ async function refreshBatchTruncatePreviewSql() {
 function requestBatchTruncateTables() {
   if (selectedTableCount.value === 0 || !supportsTruncateTable.value) return;
   batchTruncateCascade.value = false;
+  batchForeignKeyChecks.value = "default";
   batchTruncatePreviewSql.value = "";
   void refreshBatchTruncatePreviewSql();
   showBatchTruncateConfirm.value = true;
@@ -3720,8 +3802,16 @@ async function confirmBatchTruncateTables() {
         sql: await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: useCascade })),
       })),
     );
-    batchSql = statements.map(({ sql }) => sql).join(";\n");
+    const useForeignKeyChecks = batchForeignKeyChecksOverride.value;
+    batchSql = useForeignKeyChecks ? foreignKeyChecksPreview(statements.map(({ sql }) => sql).join("\n"), batchForeignKeyChecks.value, effectiveDatabaseType.value) : statements.map(({ sql }) => sql).join(";\n");
     const executed = await executeObjectBrowserSqlWithProductionGuard(batchSql, async () => {
+      if (useForeignKeyChecks) {
+        const outcome = await runObjectBrowserForeignKeyChecksBatch(statements.map((item) => ({ target: item.row, sql: item.sql })));
+        if (outcome.succeeded.length) await refreshMutatedTableDataTabsForRows(outcome.succeeded);
+        const failure = outcome.failed[0];
+        if (failure) throw new Error(`${failure.target.name}: ${failure.error.message}`);
+        return true;
+      }
       await runBatchTableTruncate(
         statements,
         async ({ sql }) => {
@@ -3776,6 +3866,7 @@ function requestBatchEmptyTables() {
   if (targets.length === 0) return;
   batchEmptyPlan.value = [];
   batchEmptyPreviewSql.value = "";
+  batchForeignKeyChecks.value = "default";
   void refreshBatchEmptyPreviewSql(targets)
     .then(() => {
       showBatchEmptyConfirm.value = true;
@@ -3791,8 +3882,14 @@ async function confirmBatchEmptyTables() {
   if (plan.length === 0) return;
   const start = Date.now();
   const asynchronousMutation = effectiveDatabaseType.value === "clickhouse";
-  const reviewSql = plan.map(({ sql }) => sql).join(";\n");
-  const result = await executeObjectBrowserSqlWithProductionGuard(reviewSql, () => {
+  const useForeignKeyChecks = batchForeignKeyChecksOverride.value;
+  const reviewSql = useForeignKeyChecks ? foreignKeyChecksPreview(plan.map(({ sql }) => sql).join("\n"), batchForeignKeyChecks.value, effectiveDatabaseType.value) : plan.map(({ sql }) => sql).join(";\n");
+  const result = await executeObjectBrowserSqlWithProductionGuard(reviewSql, async () => {
+    if (useForeignKeyChecks) {
+      // Keep the plan items as targets so the existing empty-result feedback stays unchanged.
+      const outcome = await runObjectBrowserForeignKeyChecksBatch(plan.map((item) => ({ target: item, sql: item.sql })));
+      return { succeeded: outcome.succeeded, failed: outcome.failed.map(({ target, error }) => ({ target, error: error.message })) };
+    }
     return runBatchTableEmpty(plan, async ({ sql }) => {
       await api.executeQuery(props.connection.id, props.database, sql);
     });
@@ -5202,7 +5299,7 @@ watch([() => props.initialEventName, () => props.initialEventOpenRequestId, () =
 // 匹配 0 行；schema 解析失败（loadSchemas 抛错或返回空列表）时标签会整体空白
 // (#8301)。经 objectListSchemaForConnection 回退到连接用户名（大写），仅限
 // 达梦；oracle/oceanbase-oracle 维持空 schema 由后端解析当前 schema。
-async function loadObjects(options?: { allowCached?: boolean; preserveExistingRows?: boolean }) {
+async function loadObjects(options?: { allowCached?: boolean; preserveExistingRows?: boolean; details?: boolean }) {
   clearTimeout(objectSearchTimer);
   if (usesServerObjectPaging.value) return loadObjectPage(false, options);
   error.value = "";
@@ -5243,7 +5340,7 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     finishOnce();
     // 行数/大小是随对象列表一起缓存的，直接返回缓存会让这两列一直停在上一次统计
     // （#10461）。对象列表本身仍按上面的约定不动，只把统计信息在后台补一次。
-    if (cached.stale) void revalidateCachedObjectStatistics(request, cacheWriteToken);
+    if (cached.stale && !usesLightweightMysqlBrowser(props.connection)) void revalidateCachedObjectStatistics(request, cacheWriteToken);
     return;
   } else {
     // No scaffold: first load in this scope, cache invalidated by a DDL mutation,
@@ -5260,12 +5357,12 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
   }
 
   try {
-    const load = props.connection.db_type === "mongodb" ? loadMongoObjectBrowserRows(request.scope.connectionId, request.scope.database) : loadSqlObjectBrowserRows(request);
+    const load = props.connection.db_type === "mongodb" ? loadMongoObjectBrowserRows(request.scope.connectionId, request.scope.database) : loadSqlObjectBrowserRows(request, options?.details);
     const nextRows = await objectBrowserRowsLoadGuard.wait(request.epoch, load, metadataLoadBudgetMs(props.connection.query_timeout_secs));
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     applyObjectBrowserRows(nextRows);
     const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows);
-    void loadObjectStatistics(request, cacheWriteToken, cachedAt);
+    if (!usesLightweightMysqlBrowser(props.connection) || options?.details) void loadObjectStatistics(request, cacheWriteToken, cachedAt);
   } catch (e: any) {
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     // Keep visible rows on a background revalidate failure — surface a lightweight
@@ -5289,7 +5386,7 @@ function objectPageAnchor(object: ObjectInfo): string {
   return exactOracleTriggerMetadata(object.trigger) ? tablePageRowAnchorKey(object.name, object.schema, undefined, object.trigger) : JSON.stringify([object.schema, object.name, object.object_type, object.signature]);
 }
 
-async function loadObjectPage(append: boolean, options?: { preserveExistingRows?: boolean }) {
+async function loadObjectPage(append: boolean, options?: { preserveExistingRows?: boolean; details?: boolean }) {
   if (append && (loadingObjects.value || refreshingObjects.value || loadingMoreObjects.value || !hasMoreObjects.value)) return;
   const schema = exactIndexList.value ? indexParentSchema() : needsSchema.value ? objectListSchemaForConnection(props.connection, selectedSchema.value) : props.database;
   const request = objectBrowserRowsLoadGuard.start(objectBrowserRowsCacheScope(schema));
@@ -5377,14 +5474,17 @@ async function loadObjectPage(append: boolean, options?: { preserveExistingRows?
   }
 }
 
-async function loadSqlObjectBrowserRows(request: ObjectBrowserRowsLoadHandle) {
+async function loadSqlObjectBrowserRows(request: ObjectBrowserRowsLoadHandle, details = false) {
   // Schema indexes use their dedicated exact, server-paged filter. Mixing an
   // unbounded exact subset into the legacy all view defeats both contracts.
   const types = supportsSchemaIndexes.value ? sidebarObjectKindsForDatabase(effectiveDatabaseType.value).filter((type) => type !== "INDEX") : undefined;
-  const readOptions = oracleTriggerObjectReadOptions(props.connection, types, request.scope.catalog);
-  const objects: ObjectInfo[] = await (readOptions
-    ? api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog, undefined, undefined, readOptions)
-    : api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog));
+  const readOptions = usesLightweightMysqlBrowser(props.connection) ? { lightweight: !details } : oracleTriggerObjectReadOptions(props.connection, types, request.scope.catalog);
+  const readKey = JSON.stringify([createObjectBrowserRowsCacheWriteToken(request.scope), types, readOptions]);
+  const objects: ObjectInfo[] = await shareObjectBrowserRead(readKey, () =>
+    readOptions
+      ? api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog, undefined, undefined, readOptions)
+      : api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog),
+  );
   return buildObjectBrowserRows({
     objects: objects.filter((object) => !supportsSchemaIndexes.value || object.object_type !== "INDEX"),
     database: request.scope.database,
@@ -5401,10 +5501,11 @@ async function loadMongoObjectBrowserRows(connectionId: string, database: string
 async function loadObjectStatistics(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
   if (!rows.value.some((row) => row.type === "TABLE")) return;
   try {
-    const stats = await api.listObjectStatistics(request.scope.connectionId, request.scope.database, request.scope.schema);
+    const stats = await shareObjectBrowserRead(JSON.stringify(["statistics", cacheWriteToken]), () => api.listObjectStatistics(request.scope.connectionId, request.scope.database, request.scope.schema));
     if (!objectBrowserRowsLoadGuard.isCurrent(request) || stats.length === 0) return;
     mergeObjectStatistics(stats, request.scope.schema, cacheWriteToken, cachedAt);
   } catch (e) {
+    if (usesLightweightMysqlBrowser(props.connection) && objectBrowserRowsLoadGuard.isCurrent(request)) scaffoldRefreshError.value = translateBackendError(t, e);
     console.debug("[ObjectBrowser] table statistics unavailable", e);
   }
 }
@@ -6127,6 +6228,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <Button v-if="showInlineSidePanelToggle" variant="ghost" size="icon" class="h-7 w-7" :class="{ 'text-primary': isSidePanelOpen }" :title="isSidePanelOpen ? t('objects.closeDetailPanel') : t('objects.openDetailPanel')" @click="toggleSidePanel">
         <PanelRight class="h-3.5 w-3.5" />
       </Button>
+      <Button v-if="usesLightweightMysqlBrowser(props.connection)" variant="ghost" size="sm" :disabled="loadingObjects || refreshingObjects" @click="loadObjects({ preserveExistingRows: true, details: true })">{{ t("objects.loadDetails") }}</Button>
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="refreshTooltip" :disabled="loadingObjects" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingObjects || refreshingObjects }" />
       </Button>
@@ -6561,7 +6663,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <div v-if="tableInfoTab !== 'relations'" class="flex items-center gap-1 px-2 py-1.5 border-b shrink-0 bg-background">
             <div class="relative min-w-0 flex-1">
               <Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-              <input v-model="tableInfoSearchQuery" data-table-info-search :placeholder="t('grid.tableInfoSearch')" class="w-full h-7 pl-7 pr-6 text-xs bg-muted/50 rounded border border-border focus:outline-none focus:border-primary/50" @keydown.escape="tableInfoSearchQuery = ''" />
+              <input v-model="tableInfoSearchQuery" data-table-info-search :placeholder="t('grid.tableInfoSearch')" class="w-full h-7 pl-7 pr-6 text-xs bg-muted/50 rounded border border-border focus:outline-none focus:border-primary/50" @keydown="onTableInfoSearchKeydown" />
               <button v-if="tableInfoSearchQuery" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="tableInfoSearchQuery = ''">
                 <X class="w-3 h-3" />
               </button>
@@ -6569,6 +6671,17 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="activeTableInfoLoading" :title="t('structureEditor.refresh')" :aria-label="t('structureEditor.refresh')" @click="refreshActiveTableInfo">
               <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': activeTableInfoLoading }" />
             </Button>
+            <template v-if="tableInfoTab === 'ddl'">
+              <span aria-live="polite" class="w-9 shrink-0 text-center text-[11px] tabular-nums text-muted-foreground">
+                {{ tableInfoSearchQuery ? (tableInfoDdlMatchCount > 0 ? `${tableInfoDdlMatchIndex + 1}/${tableInfoDdlMatchCount}` : "0") : "" }}
+              </span>
+              <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('editor.search.prevMatch')" :aria-label="t('editor.search.prevMatch')" :disabled="tableInfoDdlMatchCount === 0" @click="navigateTableInfoDdlSearch(-1)">
+                <ChevronUp class="h-3.5 w-3.5" />
+              </Button>
+              <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('editor.search.nextMatch')" :aria-label="t('editor.search.nextMatch')" :disabled="tableInfoDdlMatchCount === 0" @click="navigateTableInfoDdlSearch(1)">
+                <ChevronDown class="h-3.5 w-3.5" />
+              </Button>
+            </template>
           </div>
           <div v-if="tableInfoTab === 'ddl' && (effectiveDatabaseType === 'oracle' || effectiveDatabaseType === 'oceanbase-oracle')" class="border-b px-3 py-2">
             <DdlStorageToggle :database-type="effectiveDatabaseType" :disabled="tableDdlLoading" />
@@ -6754,9 +6867,9 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             ref="tableInfoDdlPreRef"
             data-native-clipboard
             tabindex="0"
-            class="flex-1 min-w-0 text-xs font-mono p-3 overflow-auto ddl-code leading-5 select-text outline-none"
+            class="flex-1 min-h-0 min-w-0 text-xs font-mono p-3 overflow-auto ddl-code leading-5 select-text outline-none"
             :class="settingsStore.editorSettings.tableDdlWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
-            v-html="filteredTableDdlContent"
+            v-html="highlightedTableDdlContent"
             @keydown="onTableInfoDdlKeydown"
           ></pre>
           <div v-else class="flex-1 flex items-center justify-center">
@@ -6886,7 +6999,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     v-model:open="showBatchDropConfirm"
     :title="batchDropConfirmTitle"
     :message="batchDropConfirmMessage"
-    :sql="batchDropPreviewSql"
+    :sql="batchDropDisplaySql"
     :confirm-label="t('objects.dropSelected')"
     :loading="batchDropExecuting && !batchTriggerDropRequested"
     :confirm-disabled="batchTriggerDropRequested && (!batchTriggerDropPreview?.isCurrent() || browserTriggerBusy)"
@@ -6905,6 +7018,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <div class="h-full bg-primary transition-[width] duration-200" :style="{ width: `${batchDropProgressPercent}%` }" />
         </div>
       </div>
+      <ForeignKeyChecksSelect v-if="supportsBatchForeignKeyChecks && !batchTriggerDropRequested" v-model="batchForeignKeyChecks" :disabled="batchDropExecuting" />
       <label v-if="canBatchDropCascade" class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
         <input v-model="batchDropCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshBatchDropPreviewSql()" />
         <span class="grid gap-0.5">
@@ -6919,12 +7033,13 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     v-model:open="showBatchTruncateConfirm"
     :title="t('objects.confirmBatchTruncateTitle')"
     :message="t('objects.confirmBatchTruncateMessage', { count: selectedTableCount })"
-    :sql="batchTruncatePreviewSql"
+    :sql="batchTruncateDisplaySql"
     :confirm-label="t('objects.truncateSelected')"
     @confirm="confirmBatchTruncateTables"
   >
-    <template v-if="canBatchTruncateCascade" #options>
-      <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+    <template v-if="canBatchTruncateCascade || supportsBatchForeignKeyChecks" #options>
+      <ForeignKeyChecksSelect v-if="supportsBatchForeignKeyChecks" v-model="batchForeignKeyChecks" />
+      <label v-if="canBatchTruncateCascade" class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
         <input v-model="batchTruncateCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshBatchTruncatePreviewSql()" />
         <span class="grid gap-0.5">
           <span class="font-medium text-foreground">{{ t("contextMenu.truncateTableCascade") }}</span>
@@ -6938,10 +7053,14 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     v-model:open="showBatchEmptyConfirm"
     :title="t('contextMenu.confirmBatchEmptyTitle', { count: batchEmptyPlan.length })"
     :message="t('contextMenu.confirmBatchEmptyMessage', { count: batchEmptyPlan.length })"
-    :sql="batchEmptyPreviewSql"
+    :sql="batchEmptyDisplaySql"
     :confirm-label="t('contextMenu.batchEmpty', { count: batchEmptyPlan.length })"
     @confirm="confirmBatchEmptyTables"
-  />
+  >
+    <template v-if="supportsBatchForeignKeyChecks" #options>
+      <ForeignKeyChecksSelect v-model="batchForeignKeyChecks" />
+    </template>
+  </DangerConfirmDialog>
 
   <OraclePackageSaveAsDialog
     :open="packageSaveAsOpen"
@@ -7303,7 +7422,28 @@ html.dbx-legacy-webview.dark .object-browser-scroller:hover::-webkit-scrollbar-t
 }
 
 .ddl-code {
+  --ddl-search-bg: rgb(253, 245, 184);
+  --ddl-current-search-bg: rgba(253, 224, 71, 0.52);
+  --ddl-current-search-border: rgba(234, 179, 8, 0.82);
   container-type: inline-size;
+}
+
+.dark .ddl-code {
+  --ddl-search-bg: rgb(72, 57, 8);
+  --ddl-current-search-bg: rgb(116, 87, 0);
+  --ddl-current-search-border: rgb(239, 177, 0);
+}
+
+.ddl-code :deep(.ddl-search-match) {
+  border-radius: 2px;
+  background: var(--ddl-search-bg);
+  color: inherit;
+  padding: 0;
+}
+
+.ddl-code :deep(.ddl-search-match-active) {
+  background: var(--ddl-current-search-bg);
+  outline: 1px solid var(--ddl-current-search-border);
 }
 
 .object-browser-side-panel {

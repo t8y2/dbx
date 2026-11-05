@@ -1373,6 +1373,7 @@ export async function listObjects(
       table_name_filter: tableNameFilter ? JSON.stringify(tableNameFilter) : undefined,
       execution_id: executionId,
       identity_mode: readOptions?.identityMode,
+      lightweight: readOptions?.lightweight,
       exact_identity: options === true || undefined,
     })}`,
   );

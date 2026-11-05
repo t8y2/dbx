@@ -165,6 +165,56 @@ describe("table virtual group context menus and dialog", () => {
     expect(tableVGroupDialogTableNames.value).toEqual([]);
   });
 
+  it("lists existing groups for a search-projected table row the live tree does not contain (#14228)", async () => {
+    const host = await mountHost();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+    const connectionStore = useConnectionStore();
+    connectionStore.treeNodes = [
+      {
+        id: connection.id,
+        type: "connection",
+        label: connection.name,
+        connectionId: connection.id,
+        children: [
+          {
+            id: `${connection.id}:app`,
+            type: "database",
+            label: "app",
+            connectionId: connection.id,
+            database: "app",
+            children: [
+              {
+                id: `${connection.id}:app:public:group-tables`,
+                type: "group-tables",
+                label: "Tables",
+                connectionId: connection.id,
+                database: "app",
+                schema: "public",
+                children: [{ id: `${connection.id}:app:public:t_a`, label: "t_a", type: "table", connectionId: connection.id, database: "app", schema: "public" }],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+    const scope = { connectionId: connection.id, database: "app", schema: "public", objectType: "tables" as const };
+    const groupId = connectionStore.createTableVGroup(scope, "Group A");
+    expect(groupId).toBeTruthy();
+
+    // 首页之外的表：搜索投影出该行，但 live 树里没有同 id 节点。
+    const projectedRow: TreeNode = { id: `${connection.id}:app:public:t_hidden`, label: "t_hidden", type: "table", connectionId: connection.id, database: "app", schema: "public" };
+    const items = host.buildContextMenu(projectedRow);
+    const moveItem = items.find((item) => item.label === tr("tableVGroup.moveToGroup"));
+    expect(moveItem).toBeDefined();
+    const groupEntry = moveItem?.children?.find((child) => child.label === "Group A");
+    expect(groupEntry).toBeDefined();
+    expect(groupEntry?.disabled).toBe(false);
+
+    groupEntry?.action?.();
+    expect(connectionStore.tableVGroupPathForTable(scope, "t_hidden", "table")).toContain(groupId!);
+  });
+
   it("dynamically sets the dialog title for container group creation, subgroup, and move-in", async () => {
     await mountDialog();
     showTableVGroupDialog.value = true;

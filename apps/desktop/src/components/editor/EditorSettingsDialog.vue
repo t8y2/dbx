@@ -14274,7 +14274,7 @@ LIMIT 100;</pre>
           <template v-if="sqlShortcutFormIsBuiltin && sqlShortcutForm.kind === 'select-limit'">
             <div class="flex flex-col gap-1.5">
               <Label for="sql-shortcut-limit">{{ t("settings.sqlShortcutsLimit") }}</Label>
-              <Input id="sql-shortcut-limit" type="number" min="1" max="100000" v-model.number="sqlShortcutForm.limit" class="w-32" />
+              <Input id="sql-shortcut-limit" type="number" min="1" max="2147483647" v-model.number="sqlShortcutForm.limit" class="w-32" />
             </div>
             <div class="flex flex-col gap-1.5">
               <div class="flex items-center justify-between gap-2">

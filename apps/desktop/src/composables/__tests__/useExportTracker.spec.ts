@@ -708,6 +708,19 @@ describe("SQL-file failure details", () => {
     expect(task.targetSchema).toBe("public");
     expect(task.sqlFilePreviews).toEqual(previews);
   });
+
+  it("stores manual transaction and execution status on sql-file task", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("sql-txn-id", "test.sql", "/tmp/test.sql", {
+      txnSessionId: "session-123",
+      isExecuting: true,
+      manualTransaction: true,
+    });
+
+    expect(task.sqlFileTxnSessionId).toBe("session-123");
+    expect(task.sqlFileIsExecuting).toBe(true);
+    expect(task.sqlFileManualTransaction).toBe(true);
+  });
 });
 
 describe("formatDataTransferDuration", () => {

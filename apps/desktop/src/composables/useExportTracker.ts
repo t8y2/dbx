@@ -40,6 +40,9 @@ export interface AddSqlFileTaskOptions {
   targetDatabase?: string;
   targetSchema?: string;
   previews?: api.SqlFilePreview[];
+  txnSessionId?: string;
+  isExecuting?: boolean;
+  manualTransaction?: boolean;
 }
 
 export interface SqlFileFailureContext {
@@ -107,6 +110,11 @@ export interface ExportTask {
   sqlFileFailuresOmitted?: number;
   sqlFilePerFileResults?: SqlFilePerFileResult[];
   sqlFilePreviews?: api.SqlFilePreview[];
+  sqlFileTxnSessionId?: string;
+  sqlFileIsExecuting?: boolean;
+  sqlFileManualTransaction?: boolean;
+  sqlFileCommitUncertain?: boolean;
+  sqlFileResolvingTransaction?: boolean;
   multiDbSourceTabId?: string;
   multiDbTotal?: number;
   multiDbCompleted?: number;
@@ -663,6 +671,9 @@ export function useExportTracker() {
       targetDatabase: options?.targetDatabase,
       targetSchema: options?.targetSchema,
       sqlFilePreviews: options?.previews ? [...options.previews] : undefined,
+      sqlFileTxnSessionId: options?.txnSessionId,
+      sqlFileIsExecuting: options?.isExecuting,
+      sqlFileManualTransaction: options?.manualTransaction,
       onOpen: options?.onOpen,
     });
     taskMap.set(executionId, task);
@@ -950,6 +961,9 @@ export function useExportTracker() {
     task.statementSummary = progress.statementSummary;
     task.rowsExported = progress.successCount + progress.failureCount;
     task.totalRows = null;
+    if (progress.status === "done" || progress.status === "error" || progress.status === "cancelled") {
+      task.sqlFileIsExecuting = false;
+    }
   }
 
   function updateDataTransferTask(transferId: string, progress: api.TransferProgress) {

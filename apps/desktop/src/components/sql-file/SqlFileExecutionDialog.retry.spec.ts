@@ -222,6 +222,10 @@ function findButton(label: string): HTMLButtonElement {
   return button!;
 }
 
+function queryButton(label: string): HTMLButtonElement | undefined {
+  return Array.from(root!.querySelectorAll("button")).find((item) => item.textContent?.trim().endsWith(label));
+}
+
 async function mountReadyDialog(onOpenChange = vi.fn()) {
   root = document.createElement("div");
   document.body.append(root);
@@ -313,6 +317,9 @@ beforeEach(() => {
       targetDatabase: options?.targetDatabase,
       targetSchema: options?.targetSchema,
       sqlFilePreviews: options?.previews,
+      sqlFileTxnSessionId: options?.txnSessionId,
+      sqlFileIsExecuting: options?.isExecuting,
+      sqlFileManualTransaction: options?.manualTransaction,
       onOpen: options?.onOpen,
     });
     mocks.trackerTasks.push(task);
@@ -771,6 +778,423 @@ describe("SqlFileExecutionDialog retries", () => {
 
     // Clean up running task B
     gateB.resolve();
+  });
+
+  it("does not enable commit or allow rollback of unfinished manual transaction task B when viewing task A", async () => {
+    let taskCount = 0;
+    mocks.uuid.mockReset().mockImplementation(() => `task-${++taskCount}`);
+    let txnIdCount = 0;
+    mocks.beginManualTransaction.mockReset().mockImplementation(async () => `txn-${++txnIdCount}`);
+    mocks.commitManualTransaction.mockClear();
+    mocks.rollbackManualTransaction.mockClear();
+
+    const onOpenChange = vi.fn();
+    const { open, taskId } = await mountDialogWrapper(true, null, onOpenChange);
+
+    await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalled());
+    findButton("sqlFile.browse").click();
+    await vi.waitFor(() => expect(mocks.previewSqlFile).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+
+    // 1. Task A finishes (status: Done)
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "running", { fileIndex: 0, fileName: "first.sql" }));
+      mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 10, successCount: 10 }));
+    });
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.trackerTasks.some((t: any) => t.exportId === "task-1" && t.status === "Done")).toBe(true));
+
+    // 2. Open fresh execution dialog for Task B with manual transaction enabled
+    open.value = false;
+    await nextTick();
+    open.value = true;
+    taskId.value = null;
+    await nextTick();
+
+    const manualTxnLabel = Array.from(root!.querySelectorAll("label")).find((item) => item.textContent?.includes("toolbar.manualTransaction"));
+    expect(manualTxnLabel).toBeDefined();
+    manualTxnLabel!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
+    await nextTick();
+
+    findButton("sqlFile.browse").click();
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+
+    // Start Task B with manual transaction; leave B executing (unfinished)
+    const gateB = deferred();
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "running", { fileIndex: 0, fileName: "second.sql", statementIndex: 1 }));
+      return gateB.promise;
+    });
+
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.beginManualTransaction).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(mocks.trackerTasks.some((t: any) => t.exportId === "task-2" && t.status === "Running")).toBe(true));
+
+    // 3. View Task A from the task list
+    taskId.value = "task-1";
+    await nextTick();
+
+    // Assert: Viewing Task A
+    await vi.waitFor(() => expect(root!.textContent).toContain("sqlFile.status.done"));
+    // Commit button is NOT enabled (and not rendered)
+    const commitButton = queryButton("toolbar.commit");
+    expect(commitButton === undefined || commitButton.disabled).toBe(true);
+    // Rollback button is NOT rendered
+    const rollbackButton = queryButton("toolbar.rollback");
+    expect(rollbackButton).toBeUndefined();
+
+    // Closing Task A must NOT rollback B or commit B
+    findButton("common.close").click();
+    await nextTick();
+    expect(mocks.rollbackManualTransaction).not.toHaveBeenCalled();
+    expect(mocks.commitManualTransaction).not.toHaveBeenCalled();
+
+    // Clean up task B
+    gateB.resolve();
+  });
+
+  it("restores pending transaction state and allows commit, rollback, and close when switching back to task B", async () => {
+    let taskCount = 0;
+    mocks.uuid.mockReset().mockImplementation(() => `task-${++taskCount}`);
+    let txnIdCount = 0;
+    mocks.beginManualTransaction.mockReset().mockImplementation(async () => `txn-${++txnIdCount}`);
+    mocks.commitManualTransaction.mockClear();
+    mocks.rollbackManualTransaction.mockClear();
+
+    const onOpenChange = vi.fn();
+    const { open, taskId } = await mountDialogWrapper(true, null, onOpenChange);
+
+    await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalled());
+    findButton("sqlFile.browse").click();
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+
+    // 1. Task A finishes
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 5, successCount: 5 }));
+    });
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.trackerTasks.some((t: any) => t.exportId === "task-1" && t.status === "Done")).toBe(true));
+
+    // 2. Start Task B with manual transaction and finish execution so it is awaiting commit
+    open.value = false;
+    await nextTick();
+    open.value = true;
+    taskId.value = null;
+    await nextTick();
+
+    const manualTxnLabel = Array.from(root!.querySelectorAll("label")).find((item) => item.textContent?.includes("toolbar.manualTransaction"));
+    manualTxnLabel!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
+    await nextTick();
+
+    findButton("sqlFile.browse").click();
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "running", { fileIndex: 0, fileName: "second.sql", statementIndex: 1 }));
+      mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 2, successCount: 2 }));
+    });
+
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(findButton("toolbar.commit").disabled).toBe(false));
+
+    // 3. View Task A: commit button for B is NOT enabled or present
+    taskId.value = "task-1";
+    await nextTick();
+    await vi.waitFor(() => expect(root!.textContent).toContain("sqlFile.status.done"));
+    expect(queryButton("toolbar.commit")).toBeUndefined();
+    expect(queryButton("toolbar.rollback")).toBeUndefined();
+
+    // 4. Back to Task B: commit button is ENABLED and acts on B
+    taskId.value = "task-2";
+    await nextTick();
+    await vi.waitFor(() => expect(findButton("toolbar.commit").disabled).toBe(false));
+    expect(findButton("toolbar.rollback").disabled).toBe(false);
+
+    findButton("toolbar.commit").click();
+    await vi.waitFor(() => expect(mocks.commitManualTransaction).toHaveBeenCalledWith("txn-1"));
+    expect(mocks.rollbackManualTransaction).not.toHaveBeenCalled();
+  });
+
+  it("rolls back task B when rollback is triggered after switching back from task A", async () => {
+    let taskCount = 0;
+    mocks.uuid.mockReset().mockImplementation(() => `task-${++taskCount}`);
+    let txnIdCount = 0;
+    mocks.beginManualTransaction.mockReset().mockImplementation(async () => `txn-${++txnIdCount}`);
+    mocks.commitManualTransaction.mockClear();
+    mocks.rollbackManualTransaction.mockClear();
+
+    const onOpenChange = vi.fn();
+    const { open, taskId } = await mountDialogWrapper(true, null, onOpenChange);
+
+    await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalled());
+    findButton("sqlFile.browse").click();
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+
+    // 1. Task A finishes
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 5, successCount: 5 }));
+    });
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.trackerTasks.some((t: any) => t.exportId === "task-1" && t.status === "Done")).toBe(true));
+
+    // 2. Start Task B with manual transaction and finish execution
+    open.value = false;
+    await nextTick();
+    open.value = true;
+    taskId.value = null;
+    await nextTick();
+
+    const manualTxnLabel = Array.from(root!.querySelectorAll("label")).find((item) => item.textContent?.includes("toolbar.manualTransaction"));
+    manualTxnLabel!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
+    await nextTick();
+
+    findButton("sqlFile.browse").click();
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 2, successCount: 2 }));
+    });
+
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(findButton("toolbar.rollback").disabled).toBe(false));
+
+    // 3. Switch to A, then back to B, then rollback
+    taskId.value = "task-1";
+    await nextTick();
+    expect(queryButton("toolbar.rollback")).toBeUndefined();
+
+    taskId.value = "task-2";
+    await nextTick();
+    await vi.waitFor(() => expect(findButton("toolbar.rollback").disabled).toBe(false));
+
+    findButton("toolbar.rollback").click();
+    await vi.waitFor(() => expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("txn-1"));
+  });
+
+  it("isolates manual transaction actions when switching between tasks A and B in both directions", async () => {
+    let txnIdCount = 0;
+    mocks.beginManualTransaction.mockReset().mockImplementation(async () => `txn-${++txnIdCount}`);
+    mocks.commitManualTransaction.mockClear();
+    mocks.rollbackManualTransaction.mockClear();
+
+    mocks.trackerTasks.push(
+      reactive({
+        exportId: "task-1",
+        kind: "sql-file",
+        tableName: "first.sql",
+        format: "sql",
+        filePath: "/tmp/first.sql",
+        status: "Running",
+        statementIndex: 5,
+        successCount: 5,
+        failureCount: 0,
+        affectedRows: 10,
+        sqlFileFailures: [],
+        sqlFileTxnSessionId: "txn-1",
+        sqlFileIsExecuting: false,
+        sqlFileManualTransaction: true,
+        targetConnectionId: "mysql-1",
+        targetDatabase: "app",
+      }),
+      reactive({
+        exportId: "task-2",
+        kind: "sql-file",
+        tableName: "second.sql",
+        format: "sql",
+        filePath: "/tmp/second.sql",
+        status: "Running",
+        statementIndex: 3,
+        successCount: 3,
+        failureCount: 0,
+        affectedRows: 6,
+        sqlFileFailures: [],
+        sqlFileTxnSessionId: "txn-2",
+        sqlFileIsExecuting: false,
+        sqlFileManualTransaction: true,
+        targetConnectionId: "mysql-1",
+        targetDatabase: "app",
+      }),
+    );
+
+    const onOpenChange = vi.fn();
+    const { taskId } = await mountDialogWrapper(true, "task-1", onOpenChange);
+
+    // 1. Initial view is Task A
+    await vi.waitFor(() => expect(findButton("toolbar.commit").disabled).toBe(false));
+    expect(findButton("toolbar.rollback").disabled).toBe(false);
+
+    // 2. Switch to Task B
+    taskId.value = "task-2";
+    await nextTick();
+    await vi.waitFor(() => expect(findButton("toolbar.commit").disabled).toBe(false));
+
+    // 3. Switch back to Task A
+    taskId.value = "task-1";
+    await nextTick();
+    await vi.waitFor(() => expect(findButton("toolbar.commit").disabled).toBe(false));
+
+    // Commit Task A
+    findButton("toolbar.commit").click();
+    await vi.waitFor(() => expect(mocks.commitManualTransaction).toHaveBeenCalledWith("txn-1"));
+    expect(mocks.commitManualTransaction).not.toHaveBeenCalledWith("txn-2");
+    expect(mocks.rollbackManualTransaction).not.toHaveBeenCalled();
+
+    // After commit, Task A has no pending transaction
+    await vi.waitFor(() => expect(queryButton("toolbar.commit")).toBeUndefined());
+
+    // 4. Switch back to Task B: Task B still has txn-2
+    taskId.value = "task-2";
+    await nextTick();
+    await vi.waitFor(() => expect(findButton("toolbar.rollback").disabled).toBe(false));
+    findButton("toolbar.rollback").click();
+
+    await vi.waitFor(() => expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("txn-2"));
+  });
+
+  it("isolates manual transaction actions in reverse direction (commits B then rolls back A)", async () => {
+    let txnIdCount = 0;
+    mocks.beginManualTransaction.mockReset().mockImplementation(async () => `txn-${++txnIdCount}`);
+    mocks.commitManualTransaction.mockClear();
+    mocks.rollbackManualTransaction.mockClear();
+
+    mocks.trackerTasks.push(
+      reactive({
+        exportId: "task-1",
+        kind: "sql-file",
+        tableName: "first.sql",
+        format: "sql",
+        filePath: "/tmp/first.sql",
+        status: "Running",
+        statementIndex: 5,
+        successCount: 5,
+        failureCount: 0,
+        affectedRows: 10,
+        sqlFileFailures: [],
+        sqlFileTxnSessionId: "txn-1",
+        sqlFileIsExecuting: false,
+        sqlFileManualTransaction: true,
+        targetConnectionId: "mysql-1",
+        targetDatabase: "app",
+      }),
+      reactive({
+        exportId: "task-2",
+        kind: "sql-file",
+        tableName: "second.sql",
+        format: "sql",
+        filePath: "/tmp/second.sql",
+        status: "Running",
+        statementIndex: 3,
+        successCount: 3,
+        failureCount: 0,
+        affectedRows: 6,
+        sqlFileFailures: [],
+        sqlFileTxnSessionId: "txn-2",
+        sqlFileIsExecuting: false,
+        sqlFileManualTransaction: true,
+        targetConnectionId: "mysql-1",
+        targetDatabase: "app",
+      }),
+    );
+
+    const onOpenChange = vi.fn();
+    const { taskId } = await mountDialogWrapper(true, "task-2", onOpenChange);
+
+    // Initial view is Task B
+    await vi.waitFor(() => expect(findButton("toolbar.commit").disabled).toBe(false));
+
+    // Switch to Task A, then back to Task B
+    taskId.value = "task-1";
+    await nextTick();
+    await vi.waitFor(() => expect(findButton("toolbar.commit").disabled).toBe(false));
+
+    taskId.value = "task-2";
+    await nextTick();
+    await vi.waitFor(() => expect(findButton("toolbar.commit").disabled).toBe(false));
+
+    // Commit Task B
+    findButton("toolbar.commit").click();
+    await vi.waitFor(() => expect(mocks.commitManualTransaction).toHaveBeenCalledWith("txn-2"));
+    expect(mocks.commitManualTransaction).not.toHaveBeenCalledWith("txn-1");
+
+    // Switch to Task A and rollback
+    taskId.value = "task-1";
+    await nextTick();
+    await vi.waitFor(() => expect(findButton("toolbar.rollback").disabled).toBe(false));
+    findButton("toolbar.rollback").click();
+
+    await vi.waitFor(() => expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("txn-1"));
+  });
+
+  it("prompts rollback before closing when viewing task B with pending transaction, but not task A", async () => {
+    let taskCount = 0;
+    mocks.uuid.mockReset().mockImplementation(() => `task-${++taskCount}`);
+    let txnIdCount = 0;
+    mocks.beginManualTransaction.mockReset().mockImplementation(async () => `txn-${++txnIdCount}`);
+    mocks.commitManualTransaction.mockClear();
+    mocks.rollbackManualTransaction.mockClear();
+
+    const originalConfirm = window.confirm;
+    const confirmSpy = vi.fn(() => true);
+    window.confirm = confirmSpy;
+    vi.stubGlobal("confirm", confirmSpy);
+
+    try {
+      const onOpenChange = vi.fn();
+      const { open, taskId } = await mountDialogWrapper(true, null, onOpenChange);
+
+      await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalled());
+      findButton("sqlFile.browse").click();
+      await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+
+      // 1. Task A finishes without transaction
+      mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+        mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 5, successCount: 5 }));
+      });
+      findButton("sqlFile.execute").click();
+      await vi.waitFor(() => expect(mocks.trackerTasks.some((t: any) => t.exportId === "task-1" && t.status === "Done")).toBe(true));
+
+      // 2. Start Task B with manual transaction and finish awaiting commit
+      open.value = false;
+      await nextTick();
+      open.value = true;
+      taskId.value = null;
+      await nextTick();
+
+      const manualTxnLabel = Array.from(root!.querySelectorAll("label")).find((item) => item.textContent?.includes("toolbar.manualTransaction"));
+      manualTxnLabel!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
+      await nextTick();
+
+      findButton("sqlFile.browse").click();
+      await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+
+      mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+        mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 2, successCount: 2 }));
+      });
+      findButton("sqlFile.execute").click();
+      await vi.waitFor(() => expect(findButton("toolbar.rollback").disabled).toBe(false));
+
+      // 3. Switch to Task A: closing does NOT prompt confirm or rollback
+      taskId.value = "task-1";
+      await nextTick();
+      await vi.waitFor(() => expect(root!.textContent).toContain("sqlFile.status.done"));
+      mocks.changeDialogOpen!(false);
+      await nextTick();
+      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(mocks.rollbackManualTransaction).not.toHaveBeenCalled();
+
+      // 4. Reopen Task B: closing DOES prompt confirm and rolls back Task B
+      open.value = true;
+      taskId.value = "task-2";
+      await nextTick();
+      await vi.waitFor(() => expect(findButton("toolbar.rollback").disabled).toBe(false));
+
+      mocks.changeDialogOpen!(false);
+      await vi.waitFor(() => expect(confirmSpy).toHaveBeenCalledWith("sqlFile.rollbackBeforeClose"));
+      await vi.waitFor(() => expect(mocks.rollbackManualTransaction).toHaveBeenCalledWith("txn-1"));
+    } finally {
+      window.confirm = originalConfirm;
+      vi.unstubAllGlobals();
+    }
   });
 
   it("does not display a different task when taskId cannot be restored", async () => {

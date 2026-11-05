@@ -201,7 +201,9 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
    * Without it the dialog fell through to "up to date", which is untrue while a
    * newer release exists (#13880), and there was no way to undo the ignore.
    */
-  const ignoredReleaseVersion = computed(() => (updateDownloaded.value || updateReady.value || !isUpdateIgnored(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion) ? "" : (settingsStore.editorSettings.ignoredUpdateVersion ?? "")));
+  // `isUpdateIgnored` is only a version comparison, so it also matches once the user
+  // has upgraded past the ignored version; require a release that is actually on offer.
+  const ignoredReleaseVersion = computed(() => (updateDownloaded.value || updateReady.value || updateInfo.value?.update_available !== true || !isUpdateIgnored(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion) ? "" : (settingsStore.editorSettings.ignoredUpdateVersion ?? "")));
   const latestReleaseUrl = "https://github.com/t8y2/dbx/releases/latest";
   let generation = 0;
   let activeDownload: Promise<void> | undefined;
@@ -479,12 +481,16 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     isIgnoringUpdate.value = true;
     try {
       await settingsStore.updateEditorSettingsAndPersist({ ignoredUpdateVersion: "" });
-      await checkUpdates({ silent: true });
     } catch (error) {
       fail(error);
+      return;
     } finally {
       isIgnoringUpdate.value = false;
     }
+    // Release the guard first: checkUpdates() returns early while isIgnoringUpdate is set,
+    // and a silent check is skipped when the toolbar entry is hidden. The dialog is open
+    // here, so a normal check cannot surprise anyone.
+    await checkUpdates();
   }
   async function performInstall(restartOnly: boolean) {
     if (!isTauriRuntime() || isInstallingUpdate.value || isIgnoringUpdate.value || (!restartOnly && !downloaded.value)) return;

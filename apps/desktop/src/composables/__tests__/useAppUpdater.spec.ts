@@ -744,9 +744,24 @@ describe("ignoring a version (#13626)", () => {
     await flush();
 
     expect(mocks.persist).toHaveBeenCalledWith({ ignoredUpdateVersion: "" });
+    // The guard must be released before the re-check, otherwise checkUpdates() returns early
+    // and the dialog keeps a stale snapshot.
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(1);
     expect(updater.ignoredReleaseVersion.value).toBe("");
     expect(updater.hasUpdateAvailable.value).toBe(true);
     expect(updater.visibleUpdateInfo.value?.update_available).toBe(true);
+  });
+
+  it("does not report an ignored version when no release is being offered", async () => {
+    // The user ignored 1.1.0 and then upgraded to it; the backend now says up to date.
+    settings.ignoredUpdateVersion = "1.1.0";
+    mocks.checkForUpdates.mockResolvedValue({ ...info, current_version: "1.1.0", update_available: false });
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+
+    expect(updater.updateInfo.value?.update_available).toBe(false);
+    expect(updater.ignoredReleaseVersion.value).toBe("");
   });
 
   it("clears the reported ignored version when a newer release is published", async () => {

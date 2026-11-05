@@ -11511,7 +11511,7 @@ export default withEnglishFallback({
     locateActiveFile: "Trova il file corrente",
     activeFileNotFound: "File corrente non trovato. Verifica che esista o che non sia nascosto dal filtro dei file.",
     title: "File SQL",
-    storageHelp: "Sono file sul disco aperti con Apri cartella. Per impostazione predefinita vengono mostrati i file .sql e .ddl; puoi personalizzare il filtro. Le modifiche vengono salvate direttamente nel file originale.",
+    storageHelp: "Sono file sul disco aperti con Apri cartella. Per impostazione predefinita vengono mostrati i file di script di database come .sql, .ddl, .psql, .prc e .pkb; puoi personalizzare il filtro. Le modifiche vengono salvate direttamente nel file originale.",
     openFolder: "Apri cartella",
     closePanel: "Chiudi",
     loading: "Caricamento in corso...",

@@ -9470,7 +9470,7 @@ export default withEnglishFallback({
     locateActiveFile: "定位当前文件",
     activeFileNotFound: "未找到当前文件，请检查文件是否存在或被文件筛选隐藏",
     title: "SQL 文件",
-    storageHelp: "此处列出通过「打开文件夹」打开的磁盘文件，默认显示 .sql 和 .ddl 文件，可通过过滤设置调整；编辑后直接保存回原文件。",
+    storageHelp: "此处列出通过「打开文件夹」打开的磁盘文件，默认显示 .sql、.ddl、.psql、.prc、.pkb 等数据库脚本文件，可通过过滤设置调整；编辑后直接保存回原文件。",
     openFolder: "打开文件夹",
     closePanel: "关闭",
     loading: "加载中...",

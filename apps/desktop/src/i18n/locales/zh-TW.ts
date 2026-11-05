@@ -11485,7 +11485,7 @@ export default withEnglishFallback({
     locateActiveFile: "定位目前檔案",
     activeFileNotFound: "找不到目前檔案，請檢查檔案是否存在或被檔案篩選隱藏",
     title: "SQL 檔案",
-    storageHelp: "此處列出透過「開啟資料夾」開啟的磁碟檔案，預設顯示 .sql 和 .ddl 檔案，可透過篩選設定調整；編輯後直接儲存回原檔案。",
+    storageHelp: "此處列出透過「開啟資料夾」開啟的磁碟檔案，預設顯示 .sql、.ddl、.psql、.prc、.pkb 等資料庫腳本檔案，可透過篩選設定調整；編輯後直接儲存回原檔案。",
     openFolder: "開啟資料夾",
     closePanel: "關閉",
     loading: "載入中...",

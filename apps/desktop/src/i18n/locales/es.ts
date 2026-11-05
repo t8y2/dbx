@@ -11763,7 +11763,7 @@ export default withEnglishFallback({
     locateActiveFile: "Localizar archivo actual",
     activeFileNotFound: "No se encontró el archivo actual. Comprueba si existe o si el filtro de archivos lo oculta.",
     title: "Archivos SQL",
-    storageHelp: "Son archivos del disco abiertos con Abrir carpeta. De forma predeterminada se muestran archivos .sql y .ddl; puede personalizar el filtro. Las ediciones se guardan directamente en el archivo original.",
+    storageHelp: "Son archivos del disco abiertos con Abrir carpeta. De forma predeterminada se muestran archivos de script de base de datos como .sql, .ddl, .psql, .prc y .pkb; puede personalizar el filtro. Las ediciones se guardan directamente en el archivo original.",
     openFolder: "Abrir carpeta",
     closePanel: "Cerrar",
     loading: "Cargando...",

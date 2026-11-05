@@ -9504,7 +9504,7 @@ export default {
     locateActiveFile: "Locate current file",
     activeFileNotFound: "Current file not found. Check whether it exists or is hidden by the file filter.",
     title: "SQL Files",
-    storageHelp: "These are files on disk opened via Open Folder. By default, .sql and .ddl files are shown; you can customize the file filter. Edits are saved straight back to the original file.",
+    storageHelp: "These are files on disk opened via Open Folder. By default, database script files such as .sql, .ddl, .psql, .prc and .pkb are shown; you can customize the file filter. Edits are saved straight back to the original file.",
     openFolder: "Open Folder",
     closePanel: "Close",
     loading: "Loading...",

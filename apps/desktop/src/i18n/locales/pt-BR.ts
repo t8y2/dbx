@@ -11505,7 +11505,7 @@ export default withEnglishFallback({
     locateActiveFile: "Localizar arquivo atual",
     activeFileNotFound: "Arquivo atual não encontrado. Verifique se ele existe ou está oculto pelo filtro de arquivos.",
     title: "Arquivos SQL",
-    storageHelp: "São arquivos no disco abertos com Abrir pasta. Por padrão, são exibidos arquivos .sql e .ddl; você pode personalizar o filtro. As edições são salvas diretamente no arquivo original.",
+    storageHelp: "São arquivos no disco abertos com Abrir pasta. Por padrão, são exibidos arquivos de script de banco de dados como .sql, .ddl, .psql, .prc e .pkb; você pode personalizar o filtro. As edições são salvas diretamente no arquivo original.",
     openFolder: "Abrir pasta",
     closePanel: "Fechar",
     loading: "Carregando...",

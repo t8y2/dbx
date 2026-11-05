@@ -7090,7 +7090,7 @@ export default withEnglishFallback({
     locateActiveFile: "Cari faylı tap",
     activeFileNotFound: "Cari fayl tapılmadı. Faylın mövcud olduğunu və ya fayl filtri ilə gizlədilmədiyini yoxlayın.",
     title: "SQL faylları",
-    storageHelp: "Bunlar Qovluq aç ilə açılan diskdəki fayllardır. Standart olaraq .sql və .ddl faylları göstərilir; fayl süzgəcini dəyişə bilərsiniz. Düzəlişlər birbaşa orijinal fayla yazılır.",
+    storageHelp: "Bunlar Qovluq aç ilə açılan diskdəki fayllardır. Standart olaraq .sql, .ddl, .psql, .prc və .pkb kimi verilənlər bazası skript faylları göstərilir; fayl süzgəcini dəyişə bilərsiniz. Düzəlişlər birbaşa orijinal fayla yazılır.",
     openFolder: "Qovluq aç",
     closePanel: "Bağla",
     loading: "Yüklənir...",

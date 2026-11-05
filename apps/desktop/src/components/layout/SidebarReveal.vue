@@ -105,7 +105,15 @@ defineExpose({ dismiss });
 <template>
   <div v-if="enabled && hoverEnabled && !pinned" data-sidebar-reveal-edge aria-hidden="true" class="sidebar-reveal-edge" @pointerenter="enterEdge" @pointerleave="leave" />
   <Transition :name="pinned ? '' : 'sidebar-reveal'">
-    <div v-show="visible" ref="panel" data-sidebar-reveal-panel :data-sidebar-preview="!pinned && revealed ? '' : undefined" :class="pinned ? 'h-full shrink-0' : ['sidebar-reveal-overlay bg-background', { 'sidebar-reveal-inset': !classicLayout }]" @pointerenter="enterPanel" @pointerleave="leave">
+    <div
+      v-show="visible"
+      ref="panel"
+      data-sidebar-reveal-panel
+      :data-sidebar-preview="!pinned && revealed ? '' : undefined"
+      :class="pinned ? 'h-full shrink-0' : ['sidebar-reveal-overlay bg-background-solid', { 'sidebar-reveal-inset': !classicLayout }]"
+      @pointerenter="enterPanel"
+      @pointerleave="leave"
+    >
       <slot />
     </div>
   </Transition>

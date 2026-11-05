@@ -2307,3 +2307,42 @@ mod mysql_table_comment_tests {
         assert_eq!(analysis.columns[0].span.start_line, 2);
     }
 }
+
+#[cfg(test)]
+mod table_reference_qualifier_tests {
+    use super::*;
+
+    fn table<'a>(analysis: &'a SqlReferenceAnalysis, name: &str) -> &'a SqlTableReference {
+        analysis
+            .tables
+            .iter()
+            .find(|table| table.name.eq_ignore_ascii_case(name))
+            .unwrap_or_else(|| panic!("{name} must be reported as a table reference"))
+    }
+
+    #[test]
+    fn sqlserver_three_part_name_keeps_the_database_qualifier() {
+        // #13947 / #13959: dropping `mk_passport_api` made the editor look the table
+        // up in the current database and flag a valid cross-database query as unknown.
+        let analysis = analyze_sql_references(
+            "select top 10 * from mk_passport_api.dbo.orders order by id desc",
+            Some("sqlserver"),
+        )
+        .unwrap();
+        let orders = table(&analysis, "orders");
+
+        assert_eq!(orders.database.as_deref(), Some("mk_passport_api"));
+        assert_eq!(orders.schema.as_deref(), Some("dbo"));
+    }
+
+    #[test]
+    fn two_part_name_has_no_database_qualifier() {
+        // MySQL reads `db.table` as database.table, so the middle qualifier stays in
+        // the schema slot and nothing may be lifted into `database`.
+        let analysis = analyze_sql_references("select * from shop.orders", Some("mysql")).unwrap();
+        let orders = table(&analysis, "orders");
+
+        assert_eq!(orders.database, None);
+        assert_eq!(orders.schema.as_deref(), Some("shop"));
+    }
+}

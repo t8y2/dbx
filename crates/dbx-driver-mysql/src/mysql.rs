@@ -10655,6 +10655,7 @@ mod tests {
         AccessDenied,
         LegacyEof,
         Accept,
+        CachingSha2AcceptWithEmptyInfo,
     }
 
     async fn mysql_tls_test_packet(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
@@ -10699,7 +10700,11 @@ mod tests {
                     | Caps::CLIENT_DEPRECATE_EOF,
                 33,
                 StatusFlags::SERVER_STATUS_AUTOCOMMIT,
-                Some(&b"mysql_native_password"[..]),
+                Some(if matches!(reply, MysqlTlsTestReply::CachingSha2AcceptWithEmptyInfo) {
+                    &b"caching_sha2_password"[..]
+                } else {
+                    &b"mysql_native_password"[..]
+                }),
             );
             let mut payload = Vec::new();
             greeting.serialize(&mut payload);
@@ -10734,9 +10739,14 @@ mod tests {
                     assert!(capabilities.contains(Caps::CLIENT_DEPRECATE_EOF));
                     mysql_tls_test_write(&mut socket, 3, &[0, 0, 0, 2, 0, 0, 0]).await;
                 }
-                MysqlTlsTestReply::Accept => {
+                MysqlTlsTestReply::Accept | MysqlTlsTestReply::CachingSha2AcceptWithEmptyInfo => {
                     assert!(!capabilities.contains(Caps::CLIENT_SSL));
-                    mysql_tls_test_write(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+                    let ok_packet = if matches!(reply, MysqlTlsTestReply::CachingSha2AcceptWithEmptyInfo) {
+                        &[0, 0, 0, 2, 0, 0, 0, 0][..]
+                    } else {
+                        &[0, 0, 0, 2, 0, 0, 0][..]
+                    };
+                    mysql_tls_test_write(&mut socket, 2, ok_packet).await;
                     loop {
                         let command = mysql_tls_test_packet(&mut socket).await;
                         if command[0] == 1 {
@@ -10783,6 +10793,19 @@ mod tests {
         verify_pool_connection(&pool, Duration::from_secs(2)).await.unwrap();
         pool.disconnect().await.unwrap();
         assert_eq!(servers.join_next().await.unwrap().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn mysql_caching_sha2_immediate_ok_with_empty_info_returns_a_working_pool() {
+        let (result, mut servers) =
+            mysql_tls_test_connect(vec![MysqlTlsTestReply::CachingSha2AcceptWithEmptyInfo], "disabled").await;
+        let pool = result.unwrap();
+        verify_pool_connection(&pool, Duration::from_secs(2)).await.unwrap();
+        pool.get_conn().await.unwrap().query_drop("DO 1").await.unwrap();
+        pool.disconnect().await.unwrap();
+        let attempts = servers.join_next().await.unwrap().unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert!(!attempts[0].contains(mysql_async::consts::CapabilityFlags::CLIENT_SSL));
     }
 
     #[tokio::test]

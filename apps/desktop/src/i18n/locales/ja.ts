@@ -8200,6 +8200,9 @@ export default withEnglishFallback({
     completedWithErrors: "実行が完了しました: 成功 {succeeded} 件、失敗 {failed} 件",
   },
   diff: {
+    additionalSchemas: "これらのスキーマも比較",
+    additionalSchemasHint: "それぞれターゲットの同名スキーマと比較し、個別に確認してデプロイします。",
+    schemaResults: "スキーマごとの結果",
     progress: {
       loadingObjects: "ソースとターゲットのデータベースオブジェクトを読み込み中...",
       loadingSourceDetails: "ソースデータベースのテーブル構造を読み込み中",

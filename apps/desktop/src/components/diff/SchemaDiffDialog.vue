@@ -54,7 +54,7 @@ import {
   canRegenerateOracleRoutineDeployment,
 } from "@/lib/schema/oracleRoutineDeploy";
 import type { SchemaDiffCompareOptions, SchemaDiffConfig, FieldMappingEntry, SchemaDiffTableMapping, SchemaDiffRoutineMapping, OracleRoutineKind, OracleRoutineIdentity } from "@/types/schemaDiff";
-import { getSchemaDiffSession, schemaDiffSessionObjects, startSchemaDiffSession, type SchemaDiffSession } from "@/composables/useSchemaDiffSession";
+import { getSchemaDiffSession, replaceSchemaDiffSessionInGroup, resultObjectCount, schemaDiffSessionObjects, startSchemaDiffSessions, type SchemaDiffSession } from "@/composables/useSchemaDiffSession";
 import type { DatabaseType, ObjectSourceKind } from "@/types/database";
 import {
   detectDestructiveSchemaDiffStatements,
@@ -210,6 +210,10 @@ const showNoDifferences = computed(() => showTableResultTab.value && tableDiffOb
 const routineInventoriesComplete = computed(() => !!comparisonSession.value?.routineSnapshots?.source?.enumerationComplete && !!comparisonSession.value?.routineSnapshots?.target?.enumerationComplete);
 const showRoutineNoDifferences = computed(() => showRoutineResultTab.value && routineDiffObjects.value.length === 0 && (!isOracleRoutineComparison.value || routineInventoriesComplete.value));
 const comparisonSession = computed(() => getSchemaDiffSession(activeSessionId.value));
+const additionalSchemas = ref<string[]>([]);
+const schemaSessionGroup = computed(() => (comparisonSession.value?.group ?? []).flatMap((id) => getSchemaDiffSession(id) ?? []));
+// A recompare starts at once, so waiting for the group keeps its sessions one at a time.
+const schemaSessionGroupRunning = computed(() => schemaSessionGroup.value.some((session) => session.status === "running"));
 const isOracleRoutineComparison = computed(() => {
   const snapshots = comparisonSession.value?.routineSnapshots;
   return !!snapshots?.source && !!snapshots.target && [snapshots.source.endpoint.databaseType, snapshots.target.endpoint.databaseType].every((type) => type === "oracle" || type === "oceanbase-oracle");
@@ -698,6 +702,22 @@ function restoreSchemaDiffSession(session: SchemaDiffSession): void {
   schemaDiffHasExtraObjectPhase.value = shouldLoadSchemaDiffExtraObjectPhase(schemaDiffRoutineProductType(config.sourceDbType, config.sourceEngineDbType), schemaDiffRoutineProductType(config.targetDbType, config.targetEngineDbType), config.options);
 }
 
+function showSchemaDiffSession(session: SchemaDiffSession | undefined): void {
+  activeSessionId.value = session?.id ?? null;
+  additionalSchemas.value = [];
+  appliedSessionResult = null;
+  shownSessionError = "";
+  resetComparisonResultState();
+  if (!session) return;
+  restoreSchemaDiffSession(session);
+  applySchemaDiffSession(session);
+}
+
+function handleSwitchSchemaSession(session: SchemaDiffSession): void {
+  if (session.id === activeSessionId.value || !confirmDiscardDeployEdits()) return;
+  showSchemaDiffSession(session);
+}
+
 function applySchemaDiffSession(session: SchemaDiffSession | undefined): void {
   if (!session) return;
   schemaDiffHasExtraObjectPhase.value = shouldLoadSchemaDiffExtraObjectPhase(schemaDiffRoutineProductType(session.config.sourceDbType, session.config.sourceEngineDbType), schemaDiffRoutineProductType(session.config.targetDbType, session.config.targetEngineDbType), session.config.options);
@@ -774,15 +794,8 @@ watch(
       return;
     }
     const session = getSchemaDiffSession(props.sessionId);
-    activeSessionId.value = session?.id ?? null;
-    appliedSessionResult = null;
-    shownSessionError = "";
-    resetComparisonResultState();
-    if (session) {
-      restoreSchemaDiffSession(session);
-      applySchemaDiffSession(session);
-      return;
-    }
+    showSchemaDiffSession(session);
+    if (session) return;
 
     ensureDefaultConfig();
     if (props.prefillConnectionId) {
@@ -1006,7 +1019,17 @@ function handleFieldMappingsUpdate(mappings: FieldMappingEntry[]) {
   }
 }
 
-function handleCompare(): void {
+function handleRecompare(): void {
+  const previous = comparisonSession.value;
+  const config = previous?.config;
+  // Comparing a group's schema again, from its result or after a failure, replaces
+  // only that schema and keeps the others' results. Anything else is a new compare.
+  const repeatsGroupSchema = !!previous?.group && !additionalSchemas.value.length && config?.sourceConnectionId === sourceConnectionId.value && config.sourceDatabase === sourceDatabase.value && config.sourceSchema === sourceSchema.value && config.targetConnectionId === targetConnectionId.value && config.targetDatabase === targetDatabase.value && config.targetSchema === targetSchema.value;
+  const session = handleCompare();
+  if (previous && session && repeatsGroupSchema) replaceSchemaDiffSessionInGroup(previous, session);
+}
+
+function handleCompare(): SchemaDiffSession | undefined {
   if (!confirmDiscardDeployEdits()) return;
   const sourceConfig = store.getConfig(sourceConnectionId.value);
   const targetConfig = store.getConfig(targetConnectionId.value);
@@ -1019,26 +1042,28 @@ function handleCompare(): void {
   shownSessionError = "";
   resetComparisonResultState();
   schemaDiffHasExtraObjectPhase.value = shouldLoadSchemaDiffExtraObjectPhase(schemaDiffRoutineProductType(sourceDbType, sourceEngineDbType.value), schemaDiffRoutineProductType(targetDbType, targetEngineDbType.value), options);
-  const session = startSchemaDiffSession(
-    {
+  const pairs = [{ source: sourceSchema.value, target: targetSchema.value }, ...additionalSchemas.value.map((schema) => ({ source: schema, target: schema }))];
+  const [session] = startSchemaDiffSessions(
+    pairs.map(({ source, target }) => ({
       sourceConnectionId: sourceConnectionId.value,
       sourceDatabase: sourceDatabase.value,
-      sourceSchema: sourceSchema.value,
+      sourceSchema: source,
       targetConnectionId: targetConnectionId.value,
       targetDatabase: targetDatabase.value,
-      targetSchema: targetSchema.value,
+      targetSchema: target,
       sourceDbType,
       targetDbType,
       sourceEngineDbType: sourceEngineDbType.value,
       targetEngineDbType: targetEngineDbType.value,
       options,
       ignoreComments: ignoreComments.value,
-      label: `${comparisonEndpointLabel(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value)} → ${comparisonEndpointLabel(targetConnectionId.value, targetDatabase.value, targetSchema.value)}`,
-    },
+      label: `${comparisonEndpointLabel(sourceConnectionId.value, sourceDatabase.value, source)} → ${comparisonEndpointLabel(targetConnectionId.value, targetDatabase.value, target)}`,
+    })),
     { tableListLoader: schemaDiffTableListLoader },
   );
   activeSessionId.value = session.id;
   applySchemaDiffSession(session);
+  return session;
 }
 
 function handleToggleGroup(operationType: DiffOperationType) {
@@ -1688,6 +1713,15 @@ const targetConnectionInfo = computed(() => {
         </DialogTitle>
       </DialogHeader>
 
+      <!-- Stays on the config step too, which is where a failed schema's session lands. -->
+      <div v-if="schemaSessionGroup.length > 1" role="group" :aria-label="t('diff.schemaResults')" class="flex shrink-0 flex-wrap items-center gap-1 border-b px-3 py-1.5">
+        <Button v-for="session in schemaSessionGroup" :key="session.id" :variant="session.id === activeSessionId ? 'secondary' : 'ghost'" :aria-pressed="session.id === activeSessionId" :disabled="deployIsBusy" size="sm" :class="['h-7 gap-1 text-xs', session.status === 'failed' && 'text-destructive']" @click="handleSwitchSchemaSession(session)">
+          <Loader2 v-if="session.status === 'running'" class="h-3 w-3 animate-spin" />
+          {{ session.config.sourceSchema }}
+          <span v-if="session.result" class="text-muted-foreground">({{ resultObjectCount(session.result) }})</span>
+        </Button>
+      </div>
+
       <!-- Result step relies on splitpanes to manage its own scroll/heights, so it keeps
            `overflow-hidden`; the config step's tall content (e.g. the table multi-select
            added in the "compare specific tables" feature) can overflow a fixed-height
@@ -1711,10 +1745,11 @@ const targetConnectionInfo = computed(() => {
           :options="schemaDiffPanelOptions"
           :selected-tables="schemaDiffPanelOptions.selectedTables"
           :selected-routines="schemaDiffPanelOptions.selectedRoutines"
+          v-model:additional-schemas="additionalSchemas"
           :table-list-loader="schemaDiffTableListLoader"
-          :loading="loading"
+          :loading="loading || schemaSessionGroupRunning"
           :recent-configs="recentConfigs"
-          @compare="handleCompare"
+          @compare="handleRecompare"
           @swap="handleSwap"
           @show-options="showOptionsPanel = true"
           @save-config="handleSaveConfig"
@@ -1962,7 +1997,7 @@ const targetConnectionInfo = computed(() => {
             <ArrowLeft class="w-3.5 h-3.5 mr-1" />
             {{ t("diff.prevStep") }}
           </Button>
-          <Button variant="outline" size="sm" :disabled="loading" @click="handleCompare">
+          <Button variant="outline" size="sm" :disabled="loading || schemaSessionGroupRunning" @click="handleRecompare">
             <GitCompareArrows class="w-3.5 h-3.5 mr-1" />
             {{ t("diff.recompare") }}
           </Button>

@@ -9551,6 +9551,9 @@ export default withEnglishFallback({
     warnings: "警告",
   },
   diff: {
+    additionalSchemas: "同时比较这些模式",
+    additionalSchemasHint: "每个模式都会与目标端同名模式比较，并分别审查和部署。",
+    schemaResults: "模式比较结果",
     progress: {
       loadingObjects: "正在读取源库和目标库对象…",
       loadingSourceDetails: "正在读取源数据库表结构",

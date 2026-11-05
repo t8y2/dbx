@@ -22,7 +22,97 @@ vi.mock("@/composables/useExportTracker", () => ({ useExportTracker: () => track
 vi.mock("@/lib/schema/schemaDiffMetadataLoad", () => ({ loadSchemaDetails: vi.fn().mockResolvedValue([]) }));
 vi.mock("@/lib/metadata/objectMetadataCache", () => ({ invalidateObjectMetadataCache: vi.fn().mockResolvedValue(undefined) }));
 
-const { startSchemaDiffSession } = await import("../useSchemaDiffSession.ts");
+const { replaceSchemaDiffSessionInGroup, startSchemaDiffSession, startSchemaDiffSessions } = await import("../useSchemaDiffSession.ts");
+
+function schemaPair(schema: string) {
+  return {
+    sourceConnectionId: "group-source",
+    sourceDatabase: "app",
+    sourceSchema: schema,
+    targetConnectionId: "group-target",
+    targetDatabase: "app",
+    targetSchema: schema,
+    sourceDbType: "sqlserver",
+    targetDbType: "sqlserver" as const,
+    options: {},
+    ignoreComments: false,
+    label: schema,
+  };
+}
+
+test("runs grouped schema sessions one at a time and keeps going after a failure", async () => {
+  vi.clearAllMocks();
+  apiMock.prepareSchemaDiff.mockResolvedValue({ diffs: [], renameCandidates: [], syncSql: "", rollbackSyncSql: "" });
+  const lists: Array<{ schema: string; settle: (tables: never[]) => void; fail: (error: Error) => void }> = [];
+  const load = vi.fn(({ schema }: { schema: string }) => new Promise<never[]>((resolve, reject) => lists.push({ schema, settle: resolve, fail: reject })));
+  const [first, second] = startSchemaDiffSessions([schemaPair("dbo"), schemaPair("audit")], { tableListLoader: { load } });
+  assert.deepEqual(first.group, [first.id, second.id]);
+  assert.equal(second.group, first.group);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(lists.map((list) => list.schema), ["dbo", "dbo"]);
+  assert.equal(second.status, "running");
+
+  lists[0].fail(new Error("dbo unavailable"));
+  lists[1].settle([]);
+  await waitForSession(first);
+  assert.equal(first.status, "failed");
+  await vi.waitFor(() => assert.deepEqual(lists.slice(2).map((list) => list.schema), ["audit", "audit"]));
+  lists[2].settle([]);
+  lists[3].settle([]);
+  await waitForSession(second);
+  assert.equal(second.status, "completed");
+  vi.clearAllMocks();
+});
+
+test("does not group a single schema and does not read a queued schema after a disconnect", async () => {
+  const { cancelSchemaDiffTasksForConnection } = await import("@/lib/schema/schemaDiffCancellation");
+  vi.clearAllMocks();
+  const finish: Array<(tables: never[]) => void> = [];
+  const load = vi.fn(() => new Promise<never[]>((resolve) => finish.push(resolve)));
+  const [only] = startSchemaDiffSessions([schemaPair("solo")], { tableListLoader: { load: vi.fn().mockResolvedValue([]) } });
+  assert.equal(only.group, undefined);
+  await waitForSession(only);
+
+  const [first, queued] = startSchemaDiffSessions([schemaPair("dbo"), schemaPair("audit")], { tableListLoader: { load } });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(load.mock.calls.length, 2);
+  const cancellation = cancelSchemaDiffTasksForConnection("group-source", new Error("connection disconnected"));
+  finish.splice(0).forEach((settle) => settle([]));
+  await cancellation;
+  assert.equal(first.status, "failed");
+  assert.equal(queued.status, "failed");
+  assert.equal(queued.error, "connection disconnected");
+  assert.equal(load.mock.calls.length, 2);
+  vi.clearAllMocks();
+});
+
+test("an invalid table filter fails each grouped session instead of leaving it running", async () => {
+  vi.clearAllMocks();
+  const load = vi.fn().mockResolvedValue([]);
+  const invalid = (schema: string) => ({ ...schemaPair(schema), options: { tableIncludePattern: "(" } });
+  const [first, second] = startSchemaDiffSessions([invalid("dbo"), invalid("audit")], { tableListLoader: { load } });
+  await waitForSession(first);
+  await waitForSession(second);
+  assert.equal(first.status, "failed");
+  assert.equal(second.status, "failed");
+  assert.match(second.error ?? "", /Invalid include table name regex/);
+  assert.equal(load.mock.calls.length, 0);
+  vi.clearAllMocks();
+});
+
+test("swaps a recompared session into its group's place", async () => {
+  vi.clearAllMocks();
+  const dependencies = { tableListLoader: { load: vi.fn().mockResolvedValue([]) } };
+  const [dbo, audit] = startSchemaDiffSessions([schemaPair("dbo"), schemaPair("audit")], dependencies);
+  await waitForSession(dbo);
+  await waitForSession(audit);
+  const rerun = startSchemaDiffSession(schemaPair("dbo"), dependencies);
+  await waitForSession(rerun);
+  replaceSchemaDiffSessionInGroup(dbo, rerun);
+  assert.deepEqual(audit.group, [rerun.id, audit.id]);
+  assert.equal(rerun.group, audit.group);
+  vi.clearAllMocks();
+});
 
 test("disconnecting either side stops the compare after its issued table-list requests settle", async () => {
   const { cancelSchemaDiffTasksForConnection } = await import("@/lib/schema/schemaDiffCancellation");

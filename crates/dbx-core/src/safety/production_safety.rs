@@ -1,6 +1,10 @@
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use regex::Regex;
+use sqlparser::ast::{Expr, ObjectName, Query, Select, SetExpr, Statement, TableFactor, Visit, Visitor};
+use sqlparser::dialect::{Dialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect};
+use sqlparser::parser::Parser;
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::sync::LazyLock;
 
 const IDENTIFIER_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*";
@@ -16,12 +20,9 @@ static APPLY_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static APPLY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)\b(?:CROSS|OUTER)\s+APPLY\b").expect("valid APPLY regex"));
-static FROM_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)\bFROM\s+").expect("valid FROM regex"));
-static FROM_CLAUSE_BOUNDARY_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?is)[()]|\b(?:WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|OFFSET|FETCH|FOR|UNION|EXCEPT|INTERSECT|JOIN)\b",
-    )
-    .expect("valid FROM clause boundary regex")
+static FROM_CLAUSE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)\bFROM\s+(.+?)(?:\b(?:WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|OFFSET|FETCH|FOR|UNION|EXCEPT|INTERSECT|JOIN)\b|$)")
+        .expect("valid FROM clause regex")
 });
 static LEADING_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(r"(?is)^\s*({TARGET_NAME_PATTERN})(?:\s+(?:AS\s+)?{IDENTIFIER_PATTERN})?\s*$"))
@@ -248,6 +249,11 @@ fn referenced_databases(
     let cleaned = sql_target_safety_text(sql, db_type);
     let mut use_database = String::new();
     let normalized_active_database = normalize_database_name(active_database);
+    let query_databases =
+        include_read_references.then(|| parsed_query_databases(sql, db_type, &normalized_active_database)).flatten();
+    if let Some(databases) = &query_databases {
+        assessment.databases.extend(databases.iter().cloned());
+    }
 
     for statement in cleaned.text.split(';').map(str::trim).filter(|statement| !statement.is_empty()) {
         let mut statement_databases = HashSet::new();
@@ -289,6 +295,7 @@ fn referenced_databases(
             ],
         );
         if include_read_references
+            && query_databases.is_none()
             && collect_comma_separated_from_databases(
                 statement,
                 db_type,
@@ -376,6 +383,145 @@ fn collect_qualified_target_databases(
     }
 }
 
+/// Resolves query table references without treating expression FROM keywords or
+/// commas in other query blocks as tables. Unsupported input keeps the legacy scan.
+fn parsed_query_databases(sql: &str, db_type: &DatabaseType, current_database: &str) -> Option<HashSet<String>> {
+    // The parser ignores executable comments; the safety lexer expands them.
+    if sql.contains("/*!") || sql.contains("/*M!") || sql.contains("/*m!") {
+        return None;
+    }
+    let rules = SqlScanLexerRules::for_database_type(db_type);
+    let dialect: Box<dyn Dialect> = if rules.hash_line_comments {
+        Box::new(MySqlDialect {})
+    } else if rules.postgres_escape_strings {
+        Box::new(PostgreSqlDialect {})
+    } else if matches!(db_type, DatabaseType::SqlServer) {
+        Box::new(MsSqlDialect {})
+    } else {
+        return None;
+    };
+    let statements = Parser::parse_sql(dialect.as_ref(), sql).ok()?;
+    if statements.is_empty() || statements.iter().any(|statement| !matches!(statement, Statement::Query(_))) {
+        return None;
+    }
+    let mut visitor = QueryDatabaseReferences { db_type, current_database, databases: HashSet::new() };
+    match statements.visit(&mut visitor) {
+        ControlFlow::Continue(()) => Some(visitor.databases),
+        ControlFlow::Break(()) => None,
+    }
+}
+
+/// Collects static relations while leaving opaque table functions on the legacy path.
+struct QueryDatabaseReferences<'a> {
+    db_type: &'a DatabaseType,
+    current_database: &'a str,
+    databases: HashSet<String>,
+}
+
+impl QueryDatabaseReferences<'_> {
+    /// TABLE query bodies do not receive the parser's relation visitor callback.
+    fn collect_table_query_bodies(&mut self, body: &SetExpr) -> ControlFlow<()> {
+        match body {
+            SetExpr::Table(table) => {
+                let Some(name) = &table.table_name else {
+                    return ControlFlow::Break(());
+                };
+                let parts: Vec<String> = table
+                    .schema_name
+                    .iter()
+                    .chain(std::iter::once(name))
+                    .map(|part| normalize_database_name(part))
+                    .collect();
+                let Some(database) = database_from_name_parts(&parts, self.db_type, self.current_database) else {
+                    return ControlFlow::Break(());
+                };
+                self.databases.insert(database);
+            }
+            SetExpr::SetOperation { left, right, .. } => {
+                self.collect_table_query_bodies(left)?;
+                self.collect_table_query_bodies(right)?;
+            }
+            SetExpr::Select(_) | SetExpr::Query(_) | SetExpr::Values(_) => {}
+            SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Delete(_) | SetExpr::Merge(_) => {
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+impl Visitor for QueryDatabaseReferences<'_> {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        self.collect_table_query_bodies(&query.body)
+    }
+
+    fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<Self::Break> {
+        // SELECT INTO also omits the relation callback for its destination.
+        if let Some(into) = &select.into {
+            return self.pre_visit_relation(&into.name);
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Self::Break> {
+        if let Expr::Function(function) = expression {
+            // SQL Server also parses alias.column.method() as a qualified call.
+            if matches!(self.db_type, DatabaseType::SqlServer) && function.name.0.len() >= 3 {
+                return ControlFlow::Break(());
+            }
+            if function.name.0.len() > 1 {
+                return self.pre_visit_relation(&function.name);
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<Self::Break> {
+        let Some(parts) = relation
+            .0
+            .iter()
+            .map(|part| part.as_ident().map(|identifier| normalize_database_name(&identifier.value)))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return ControlFlow::Break(());
+        };
+        let Some(database) = database_from_name_parts(&parts, self.db_type, self.current_database)
+            .filter(|database| !database.is_empty())
+        else {
+            return ControlFlow::Break(());
+        };
+        self.databases.insert(database);
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_table_factor(&mut self, table: &TableFactor) -> ControlFlow<Self::Break> {
+        match table {
+            TableFactor::Table { args: None, .. }
+            | TableFactor::Derived { .. }
+            | TableFactor::NestedJoin { .. }
+            | TableFactor::JsonTable { .. }
+            | TableFactor::OpenJsonTable { .. }
+            | TableFactor::UNNEST { .. } => ControlFlow::Continue(()),
+            TableFactor::Table { name, .. } | TableFactor::Function { name, .. }
+                if SqlScanLexerRules::for_database_type(self.db_type).postgres_escape_strings
+                    && matches!(
+                        name.0
+                            .iter()
+                            .map(|part| part.as_ident().map(|identifier| identifier.value.as_str()))
+                            .collect::<Option<Vec<_>>>()
+                            .as_deref(),
+                        Some(["generate_series"]) | Some(["pg_catalog", "generate_series"])
+                    ) =>
+            {
+                ControlFlow::Continue(())
+            }
+            _ => ControlFlow::Break(()),
+        }
+    }
+}
+
 /// Collects every table factor in a comma-separated FROM list. Table aliases
 /// are accepted, while derived tables and other forms this lightweight parser
 /// cannot safely resolve are reported to the caller as uncertain.
@@ -387,10 +533,10 @@ fn collect_comma_separated_from_databases(
     databases: &mut HashSet<String>,
 ) -> bool {
     let mut uncertain = false;
-    // Match each FROM independently so a nested query cannot consume the next
-    // query block's FROM, including any later cross-database comma targets.
-    for from in FROM_RE.find_iter(statement) {
-        let from_body = from_clause_body(&statement[from.end()..]);
+    for capture in FROM_CLAUSE_RE.captures_iter(statement) {
+        let Some(from_body) = capture.get(1).map(|value| value.as_str()) else {
+            continue;
+        };
         let factors = split_top_level_comma_separated_targets(from_body);
         if factors.len() < 2 {
             continue;
@@ -406,22 +552,6 @@ fn collect_comma_separated_from_databases(
         }
     }
     uncertain
-}
-
-/// Returns the FROM body up to a closing parenthesis or clause boundary at
-/// the current query level. Expects safety-lexer output with literals/comments
-/// removed and quoted identifiers replaced by tokens.
-fn from_clause_body(value: &str) -> &str {
-    let mut depth = 0usize;
-    for boundary in FROM_CLAUSE_BOUNDARY_RE.find_iter(value) {
-        match boundary.as_str() {
-            "(" => depth += 1,
-            ")" if depth > 0 => depth -= 1,
-            _ if depth == 0 => return &value[..boundary.start()],
-            _ => {}
-        }
-    }
-    value
 }
 
 fn split_top_level_comma_separated_targets(value: &str) -> Vec<&str> {
@@ -478,6 +608,11 @@ fn database_from_qualified_name(
         .map(|part| normalize_target_database_name(part, quoted_identifiers))
         .filter(|part| !part.is_empty())
         .collect();
+    database_from_name_parts(&parts, db_type, current_database)
+}
+
+/// Applies the database-versus-schema qualifier rules to already separated identifiers.
+fn database_from_name_parts(parts: &[String], db_type: &DatabaseType, current_database: &str) -> Option<String> {
     if parts.len() < 2 {
         return (!current_database.is_empty()).then(|| current_database.to_string());
     }
@@ -1110,7 +1245,7 @@ mod tests {
             "reporting",
             &allowed,
         ));
-        assert!(sql_references_disallowed_database(
+        assert!(!sql_references_disallowed_database(
             "SELECT * FROM (SELECT * FROM reporting.users) AS users, reporting.audit_log AS audit_log",
             &mysql,
             "reporting",
@@ -1242,12 +1377,12 @@ mod tests {
                  FROM reporting.audit_log;",
                 true,
             ),
-            // Derived tables in comma-separated FROM lists remain uncertain and
-            // are rejected even when every named database is allowed.
+            // Parsed derived tables expose their actual references rather than
+            // making an otherwise authorized comma list uncertain.
             (
                 "SELECT * FROM (SELECT * FROM reporting.users WHERE id = 1) AS users,
                  reporting.audit_log;",
-                true,
+                false,
             ),
             (
                 "SELECT * FROM (SELECT * FROM reporting.users LIMIT 1) AS users,
@@ -1302,6 +1437,171 @@ mod tests {
                 sql_references_disallowed_database(sql, &DatabaseType::SqlServer, "reporting", &allowed),
                 disallowed,
                 "SQL Server nested FROM list scope: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn parsed_query_scope_keeps_authorized_table_expressions() {
+        // Nested joins, hints and built-in table functions must not turn valid
+        // references into an uncertain comma-list assessment.
+        let allowed = vec!["reporting".to_string()];
+        for (db_type, sql) in [
+            (
+                DatabaseType::Mysql,
+                "SELECT a.id FROM (reporting.users a JOIN reporting.audit_log b ON a.id = b.id), reporting.accounts c",
+            ),
+            (
+                DatabaseType::Mysql,
+                "SELECT d.id FROM (SELECT id FROM reporting.users GROUP BY id HAVING COUNT(*) > 0) d, reporting.audit_log a",
+            ),
+            (
+                DatabaseType::Mysql,
+                "SELECT d.id FROM (SELECT id FROM reporting.users LIMIT 1) d, reporting.audit_log a",
+            ),
+            (
+                DatabaseType::Mysql,
+                "SELECT jt.n FROM JSON_TABLE('[1,2]', '$[*]' COLUMNS (n FOR ORDINALITY)) jt, reporting.audit_log a",
+            ),
+            (
+                DatabaseType::Mysql,
+                "SELECT d.id FROM (SELECT a.id FROM reporting.users a USE INDEX (idx_id), reporting.audit_log b) d",
+            ),
+            (
+                DatabaseType::Mysql,
+                "WITH c AS (SELECT * FROM `reporting`.`users.with.dots`) SELECT 1, 2 FROM c, reporting.audit_log",
+            ),
+            (
+                DatabaseType::Postgres,
+                "SELECT * FROM (SELECT a IS DISTINCT FROM b AS changed, id FROM public.users) d",
+            ),
+            (
+                DatabaseType::Postgres,
+                "SELECT * FROM (SELECT a IS NOT DISTINCT FROM b AS changed, id FROM public.users) d",
+            ),
+            (
+                DatabaseType::Postgres,
+                "SELECT * FROM (SELECT g, u.id FROM generate_series(1, 2) g, public.users u) d",
+            ),
+            (
+                DatabaseType::Postgres,
+                "SELECT d.id FROM LATERAL (SELECT id FROM public.users WHERE id = 1) d, public.audit_log a",
+            ),
+            (
+                DatabaseType::SqlServer,
+                "SELECT d.id FROM (SELECT a.id FROM reporting.dbo.users a WITH (NOLOCK), reporting.dbo.audit_log b) d",
+            ),
+            (
+                DatabaseType::SqlServer,
+                "SELECT d.id FROM (SELECT TOP (1) id FROM reporting.dbo.users ORDER BY id) d, reporting.dbo.audit_log a",
+            ),
+        ] {
+            assert!(
+                !sql_references_disallowed_database(sql, &db_type, "reporting", &allowed),
+                "authorized query rejected: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn parsed_query_scope_checks_comma_targets_after_joins() {
+        // A JOIN does not end the FROM list: later comma targets still need
+        // checking when its derived table or ON expression contains a subquery.
+        let allowed = vec!["reporting".to_string()];
+        for (db_type, source, forbidden) in [
+            (DatabaseType::Mysql, "reporting", "production"),
+            (DatabaseType::SqlServer, "reporting.dbo", "production.dbo"),
+        ] {
+            for sql in [
+                format!("SELECT a.id FROM {source}.users a JOIN {source}.audit_log b ON a.id = b.id, {forbidden}.secrets s"),
+                format!("SELECT a.id FROM {source}.users a JOIN (SELECT id FROM {source}.audit_log) b ON a.id = b.id, {forbidden}.secrets s"),
+                format!("SELECT a.id FROM {source}.users a JOIN {source}.audit_log b ON a.id IN (SELECT id FROM {source}.accounts), {forbidden}.secrets s"),
+                format!("WITH c AS (SELECT id FROM {source}.users) SELECT 1, 2 FROM c JOIN {source}.audit_log b ON c.id = b.id, {forbidden}.secrets s"),
+            ] {
+                assert!(
+                    sql_references_disallowed_database(&sql, &db_type, "reporting", &allowed),
+                    "cross-database comma target missed: {sql}"
+                );
+                let allowed_sql = sql.replace(forbidden, source);
+                assert!(
+                    !sql_references_disallowed_database(&allowed_sql, &db_type, "reporting", &allowed),
+                    "authorized JOIN query rejected: {allowed_sql}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn query_parser_fallback_preserves_scope_checks() {
+        // Unsupported syntax, executable comments and opaque functions must
+        // retain the existing scan instead of being accepted on a partial AST.
+        let allowed = vec!["reporting".to_string()];
+        for sql in [
+            "SELECT * FROM reporting.users /*! , production.secrets */",
+            "SELECT * FROM reporting.users /*M! , production.secrets */",
+            "SELECT * FROM reporting.users, production.secrets UNSUPPORTED SYNTAX",
+            "SELECT * FROM reporting.users; USE production; SELECT * FROM secrets",
+            "INSERT INTO reporting.audit_log SELECT * FROM reporting.users, production.secrets",
+            "SELECT * FROM dynamic_table('production.users') d, reporting.audit_log a",
+        ] {
+            assert!(
+                sql_references_disallowed_database(sql, &DatabaseType::Mysql, "reporting", &allowed),
+                "fallback lost its existing scope check: {sql}"
+            );
+        }
+        assert!(!sql_references_disallowed_database(
+            "SELECT * FROM reporting.users; SELECT * FROM reporting.audit_log",
+            &DatabaseType::Mysql,
+            "reporting",
+            &allowed,
+        ));
+        for sql in [
+            "SELECT t.geom.STArea() AS area, t.id FROM reporting.dbo.shapes t",
+            "SELECT t.payload.value('(/root/id)[1]', 'int') AS value, t.id FROM reporting.dbo.shapes t",
+            "SELECT id FROM linked_server..dbo.users",
+        ] {
+            assert!(
+                !sql_references_disallowed_database(sql, &DatabaseType::SqlServer, "reporting", &allowed),
+                "SQL Server fallback changed an accepted query: {sql}"
+            );
+        }
+        assert!(sql_references_disallowed_database(
+            "WITH c AS (SELECT id FROM reporting.dbo.users) SELECT production.dbo.read_secrets(c.id), 2 FROM c",
+            &DatabaseType::SqlServer,
+            "reporting",
+            &allowed,
+        ));
+    }
+
+    #[test]
+    fn parsed_query_scope_checks_non_relation_ast_targets() {
+        // Qualified calls, INTO destinations and TABLE set operands are not
+        // relation callbacks, but still carry database-qualified object names.
+        let allowed = vec!["reporting".to_string()];
+        for (db_type, sql) in [
+            (
+                DatabaseType::SqlServer,
+                "WITH c AS (SELECT * FROM reporting.dbo.users) SELECT 1 AS a, 2 AS b INTO production..secrets FROM c",
+            ),
+            (
+                DatabaseType::Mysql,
+                "WITH c AS (SELECT id FROM reporting.users) SELECT id, 2 FROM c UNION ALL TABLE production.secrets",
+            ),
+            (
+                DatabaseType::Mysql,
+                "WITH c AS (SELECT id FROM reporting.users) SELECT production.read_secrets(c.id), 2 FROM c",
+            ),
+            (DatabaseType::SqlServer, "SELECT id FROM production..users"),
+            (DatabaseType::Mysql, "WITH c AS (TABLE production.secrets) SELECT id, 2 FROM c"),
+        ] {
+            assert!(
+                sql_references_disallowed_database(sql, &db_type, "reporting", &allowed),
+                "non-relation database reference missed: {sql}"
+            );
+            let allowed_sql = sql.replace("production", "reporting");
+            assert!(
+                !sql_references_disallowed_database(&allowed_sql, &db_type, "reporting", &allowed),
+                "authorized non-relation reference rejected: {allowed_sql}"
             );
         }
     }

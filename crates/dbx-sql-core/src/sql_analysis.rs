@@ -197,7 +197,7 @@ struct Analyzer {
 
 pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlReferenceAnalysis, String> {
     let normalized_dialect = normalize_dialect(dialect);
-    if normalized_dialect == "duckdb" && starts_with_duckdb_parser_gap_sql(sql) {
+    if normalized_dialect.id == "duckdb" && starts_with_duckdb_parser_gap_sql(sql) {
         return Ok(SqlReferenceAnalysis {
             tables: vec![],
             columns: vec![],
@@ -206,7 +206,7 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
             unknown_qualifiers: vec![],
         });
     }
-    if normalized_dialect == "postgres" && starts_with_postgres_parser_gap_sql(sql) {
+    if normalized_dialect.id == "postgres" && starts_with_postgres_parser_gap_sql(sql) {
         return Ok(SqlReferenceAnalysis {
             tables: vec![],
             columns: vec![],
@@ -215,13 +215,13 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
             unknown_qualifiers: vec![],
         });
     }
-    let parser_sql = if normalized_dialect == "clickhouse" {
+    let parser_sql = if normalized_dialect.id == "clickhouse" {
         normalize_clickhouse_join_order_for_parser(sql)
     } else {
         sql.to_string()
     };
 
-    let parsed_statements = match normalized_dialect.as_str() {
+    let parsed_statements = match normalized_dialect.id {
         "postgres" => Parser::parse_sql(&PostgreSqlDialect {}, &parser_sql),
         "mysql" => parse_mysql(&parser_sql),
         "sqlite" => Parser::parse_sql(&SQLiteDialect {}, &parser_sql),
@@ -233,13 +233,13 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
     };
     let statements = match parsed_statements {
         Ok(statements) => {
-            if normalized_dialect == "postgres" && postgres_create_procedure_is_missing_body(&parser_sql) {
+            if normalized_dialect.id == "postgres" && postgres_create_procedure_is_missing_body(&parser_sql) {
                 return Err("Expected: procedure body after AS, found: EOF".to_string());
             }
             statements
         }
         Err(error)
-            if normalized_dialect == "postgres" && is_postgres_create_procedure_parser_gap(&parser_sql, &error) =>
+            if normalized_dialect.id == "postgres" && is_postgres_create_procedure_parser_gap(&parser_sql, &error) =>
         {
             return Ok(SqlReferenceAnalysis {
                 tables: vec![],
@@ -256,8 +256,8 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
     };
 
     let mut analyzer = Analyzer {
-        is_sqlserver: normalized_dialect == "sqlserver",
-        is_spark: normalized_dialect == "spark",
+        is_sqlserver: normalized_dialect.id == "sqlserver",
+        is_spark: normalized_dialect.id == "spark",
         ..Analyzer::default()
     };
     for statement in statements {
@@ -267,7 +267,7 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
     // Oracle-family dialects may resolve a qualifier as a schema name, so the
     // check only runs where the FROM scope is authoritative.
     let unknown_qualifiers =
-        if dialect_scopes_qualifiers(&normalized_dialect) { analyzer.unknown_qualifiers() } else { Vec::new() };
+        if normalized_dialect.scopes_qualifiers { analyzer.unknown_qualifiers() } else { Vec::new() };
     let mut analysis = SqlReferenceAnalysis {
         tables: analyzer.tables,
         columns: analyzer.columns,
@@ -280,7 +280,7 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
     // enforces ONLY_FULL_GROUP_BY by default since 5.7 but the frontend has no
     // access to the connection's sql_mode, so skipping is the conservative
     // choice — flagging them there would be noise.
-    if matches!(normalized_dialect.as_str(), "mysql" | "sqlite" | "duckdb" | "clickhouse" | "spark") {
+    if matches!(normalized_dialect.id, "mysql" | "sqlite" | "duckdb" | "clickhouse" | "spark") {
         analysis.group_by_violations.clear();
     }
     Ok(analysis)
@@ -1419,30 +1419,52 @@ fn normalize_clickhouse_join_order_for_parser(sql: &str) -> String {
         .into_owned()
 }
 
-fn normalize_dialect(dialect: Option<&str>) -> String {
-    match dialect.unwrap_or("generic").to_ascii_lowercase().as_str() {
-        "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "highgo" | "uxdb" | "questdb" => {
-            "postgres".to_string()
-        }
-        "mysql" | "mariadb" | "doris" | "starrocks" | "manticoresearch" | "oceanbase" => "mysql".to_string(),
-        "sqlite" => "sqlite".to_string(),
-        "sqlserver" | "mssql" => "sqlserver".to_string(),
-        "clickhouse" => "clickhouse".to_string(),
-        "duckdb" => "duckdb".to_string(),
-        "spark" | "sparksql" => "spark".to_string(),
-        _ => "generic".to_string(),
+/// A dialect the analyzer knows by name, plus whether its FROM scope is
+/// authoritative for a two-part qualifier (`alias.column`).
+///
+/// Oracle-family dialects resolve a qualifier as a schema name
+/// (`SELECT emp.no FROM dual`), so the qualifier is legitimately absent from
+/// the scope there and the unknown-alias check must not run. Every dialect the
+/// analyzer only knows generically is treated the same way — it may well be an
+/// Oracle-compatible engine.
+///
+/// Both properties live together on purpose: adding a dialect to
+/// `normalize_dialect` forces a decision here instead of silently leaving the
+/// check off for it.
+struct NormalizedDialect {
+    id: &'static str,
+    scopes_qualifiers: bool,
+}
+
+impl NormalizedDialect {
+    /// The FROM scope owns the qualifier: `alias.column` has to resolve to a
+    /// table or an alias of the statement's scope.
+    const fn scoped(id: &'static str) -> Self {
+        Self { id, scopes_qualifiers: true }
+    }
+
+    /// The qualifier may name something outside the scope (a schema), so the
+    /// unknown-alias check does not apply.
+    const fn opaque(id: &'static str) -> Self {
+        Self { id, scopes_qualifiers: false }
     }
 }
 
-/// Dialects where a two-part qualifier (`alias.column`) has to resolve to a
-/// table or an alias of the statement's FROM scope.
-///
-/// Oracle-family dialects are excluded: `SELECT emp.no FROM dual` resolves
-/// `emp` as a schema rather than as an alias, so the qualifier is legitimately
-/// absent from the scope. Every dialect the analyzer only knows generically is
-/// excluded for the same reason — it may well be an Oracle-compatible engine.
-fn dialect_scopes_qualifiers(dialect: &str) -> bool {
-    matches!(dialect, "mysql" | "postgres" | "sqlite" | "sqlserver" | "clickhouse" | "duckdb" | "spark")
+fn normalize_dialect(dialect: Option<&str>) -> NormalizedDialect {
+    match dialect.unwrap_or("generic").to_ascii_lowercase().as_str() {
+        "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "highgo" | "uxdb" | "questdb" => {
+            NormalizedDialect::scoped("postgres")
+        }
+        "mysql" | "mariadb" | "doris" | "starrocks" | "manticoresearch" | "oceanbase" => {
+            NormalizedDialect::scoped("mysql")
+        }
+        "sqlite" => NormalizedDialect::scoped("sqlite"),
+        "sqlserver" | "mssql" => NormalizedDialect::scoped("sqlserver"),
+        "clickhouse" => NormalizedDialect::scoped("clickhouse"),
+        "duckdb" => NormalizedDialect::scoped("duckdb"),
+        "spark" | "sparksql" => NormalizedDialect::scoped("spark"),
+        _ => NormalizedDialect::opaque("generic"),
+    }
 }
 
 impl Analyzer {
@@ -2565,10 +2587,20 @@ mod unknown_qualifier_tests {
     fn skips_dialects_where_a_qualifier_may_name_a_schema() {
         // `SELECT emp.no FROM dual` resolves `emp` as a schema in Oracle, so the
         // qualifier is legitimately absent from the FROM scope.
-        for dialect in ["oracle", "dameng", "generic"] {
+        for dialect in ["oracle", "dameng", "snowflake", "generic"] {
             assert!(qualifiers("SELECT emp.no FROM dual", Some(dialect)).is_empty(), "{dialect}");
         }
+        assert!(qualifiers("SELECT emp.no FROM dual", None).is_empty());
         // The same shape is invalid where the FROM scope is authoritative.
         assert_eq!(qualifiers("SELECT emp.no FROM dual", Some("mysql")), vec!["emp".to_string()]);
+    }
+
+    #[test]
+    fn reports_unknown_qualifiers_for_every_scoped_dialect() {
+        // Every dialect whose FROM scope is authoritative has to run the check.
+        // Narrowing that list would otherwise keep this suite green.
+        for dialect in ["mysql", "postgres", "sqlite", "sqlserver", "clickhouse", "duckdb", "spark"] {
+            assert_eq!(qualifiers("SELECT b.id FROM t a", Some(dialect)), vec!["b".to_string()], "{dialect}");
+        }
     }
 }

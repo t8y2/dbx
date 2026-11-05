@@ -3251,9 +3251,12 @@ export const useQueryStore = defineStore("query", () => {
       ...(mode === "query" ? { autoCommit: defaultAutoCommitForDbTypeWithSetting(dbType) } : {}),
     };
     if (mode === "query") tab.originalSql = initialSql ?? "";
+    // Keep newly opened definitions beside the current session, while allowing
+    // callers to explicitly retain append-at-end placement.
+    const insertAfterActive = options.insertAfterActive ?? options.sourceView;
     return registerOpenTab(tab, {
       ...(options.activate === false ? { activate: false } : {}),
-      ...(options.insertAfterActive && activeTabId.value ? { insertAfterTabId: activeTabId.value } : {}),
+      ...(insertAfterActive && activeTabId.value ? { insertAfterTabId: activeTabId.value } : {}),
     });
   }
 

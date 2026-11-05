@@ -6434,6 +6434,47 @@ fn build_database_export_object_source_sql(
     schema: &str,
     drop_if_exists: bool,
 ) -> String {
+    let source = build_database_export_object_source_sql_unwrapped(
+        database_type,
+        object_type,
+        object_name,
+        source,
+        schema,
+        drop_if_exists,
+    );
+    wrap_sqlserver_export_batch(database_type, object_type, source)
+}
+
+/// SQL Server requires `CREATE VIEW` / `PROCEDURE` / `FUNCTION` / `TRIGGER` to be
+/// the first statement in a batch. `;` only ends a statement, so an exported
+/// script that places one of these after a table DDL or INSERT fails with
+/// "CREATE VIEW must be the first statement in a query batch". `GO` is the
+/// client-side batch separator; the exporter emits it around exactly those
+/// objects, while every other statement keeps `;` (#14295).
+fn wrap_sqlserver_export_batch(database_type: DatabaseType, object_type: &ObjectSourceKind, source: String) -> String {
+    if source.is_empty()
+        || database_type != DatabaseType::SqlServer
+        || !matches!(
+            object_type,
+            ObjectSourceKind::View
+                | ObjectSourceKind::Procedure
+                | ObjectSourceKind::Function
+                | ObjectSourceKind::Trigger
+        )
+    {
+        return source;
+    }
+    format!("GO\n{source}\nGO")
+}
+
+fn build_database_export_object_source_sql_unwrapped(
+    database_type: DatabaseType,
+    object_type: &ObjectSourceKind,
+    object_name: &str,
+    source: &str,
+    schema: &str,
+    drop_if_exists: bool,
+) -> String {
     let wrapped_source;
     let source = if matches!(object_type, ObjectSourceKind::View | ObjectSourceKind::MaterializedView)
         && !source.trim().to_ascii_uppercase().starts_with("CREATE")
@@ -7384,6 +7425,68 @@ mod tests {
                 true
             ),
             "CREATE DEFINER=`root`@`%` VIEW public.v AS SELECT 1;"
+        );
+    }
+
+    #[test]
+    fn sqlserver_export_wraps_batch_scoped_objects_with_go() {
+        let cases = [
+            (ObjectSourceKind::View, "CREATE VIEW [dbo].[v] AS SELECT 1;"),
+            (ObjectSourceKind::Procedure, "CREATE PROCEDURE [dbo].[p] AS SELECT 1;"),
+            (ObjectSourceKind::Function, "CREATE FUNCTION [dbo].[f]() RETURNS INT AS BEGIN RETURN 1 END;"),
+            (ObjectSourceKind::Trigger, "CREATE TRIGGER [dbo].[trg] ON [dbo].[orders] AFTER INSERT AS SELECT 1;"),
+        ];
+        for (kind, source) in cases {
+            let ddl =
+                build_database_export_object_source_sql(DatabaseType::SqlServer, &kind, "obj", source, "dbo", false);
+            assert_eq!(ddl, format!("GO\n{source}\nGO"), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn sqlserver_export_keeps_non_batch_scoped_objects_unchanged() {
+        let source = "CREATE SEQUENCE [dbo].[s] START WITH 1;";
+        let ddl = build_database_export_object_source_sql(
+            DatabaseType::SqlServer,
+            &ObjectSourceKind::Sequence,
+            "s",
+            source,
+            "dbo",
+            false,
+        );
+        assert_eq!(ddl, source);
+    }
+
+    #[test]
+    fn sqlserver_export_batches_place_each_create_first() {
+        let view = build_database_export_object_source_sql(
+            DatabaseType::SqlServer,
+            &ObjectSourceKind::View,
+            "v",
+            "CREATE VIEW [dbo].[v] AS SELECT 1;",
+            "dbo",
+            false,
+        );
+        let trigger = build_database_export_object_source_sql(
+            DatabaseType::SqlServer,
+            &ObjectSourceKind::Trigger,
+            "trg",
+            "CREATE TRIGGER [dbo].[trg] ON [dbo].[orders] AFTER INSERT AS SELECT 1;",
+            "dbo",
+            false,
+        );
+        let script = format!(
+            "CREATE TABLE [dbo].[orders] ([id] int);\nINSERT INTO [dbo].[orders] VALUES (1);\n{view}\n{trigger}\n"
+        );
+
+        let batches = crate::sql::split_sql_batches(&script);
+        assert!(
+            batches.iter().any(|batch| batch.trim_start().starts_with("CREATE VIEW [dbo].[v]")),
+            "view must start its own batch: {batches:?}"
+        );
+        assert!(
+            batches.iter().any(|batch| batch.trim_start().starts_with("CREATE TRIGGER [dbo].[trg]")),
+            "trigger must start its own batch: {batches:?}"
         );
     }
 

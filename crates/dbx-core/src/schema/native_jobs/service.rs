@@ -451,10 +451,14 @@ pub(super) async fn runtime_identity_in_session(
         (None, saved) => saved,
     };
     let engine = resolve_engine(config, info.as_ref())?;
+    let sql = match engine {
+        NativeJobEngine::Dameng => "SELECT CURRENT_USER AS DBX_SESSION_USER FROM DUAL",
+        _ => "SELECT USER AS DBX_SESSION_USER FROM DUAL",
+    };
     let query = NativeJobCatalogQuery {
         source: "session-user",
         coverage: NativeJobCatalogCoverage::CurrentUser,
-        sql: "SELECT USER AS DBX_SESSION_USER FROM DUAL".into(),
+        sql: sql.into(),
         limit: 1,
     };
     let raw = execute_catalog_query_in_session(engine, pool, database, query, timeout, physical)

@@ -1,8 +1,8 @@
 import { ref, type Ref } from "vue";
 
 export type ToastAction = { label: string; onClick: () => void };
-export type ToastOptions = { persistent: true };
-export type PersistentToast = { id: number; message: string; action?: ToastAction };
+export type ToastOptions = { persistent: true; loading?: boolean };
+export type PersistentToast = { id: number; message: string; action?: ToastAction; loading?: boolean };
 
 type ToastState = {
   message: Ref<string>;
@@ -35,8 +35,9 @@ toastState.nextId ??= 1;
 export function useToast() {
   function toast(msg: string, duration: number | ToastOptions = 2000, action?: ToastAction) {
     if (typeof duration === "object" && duration.persistent) {
-      toastState.persistentMessages.value.push({ id: toastState.nextId++, message: msg, action });
-      return;
+      const id = toastState.nextId++;
+      toastState.persistentMessages.value.push({ id, message: msg, action, loading: duration.loading });
+      return id;
     }
     toastState.message.value = msg;
     toastState.action.value = action;

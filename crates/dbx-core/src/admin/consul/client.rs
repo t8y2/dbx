@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::connection::{AppState, PoolKind};
 use crate::path_utils::expand_tilde;
+use crate::plugins::PluginRuntimeProxy;
 
 use super::config::ConsulScope;
 use super::config::{ConsulConfig, ConsulConsistency};
@@ -18,7 +19,14 @@ pub struct ConsulClient {
 }
 
 impl ConsulClient {
-    pub async fn new(mut config: ConsulConfig) -> Result<Self, String> {
+    pub async fn new(config: ConsulConfig) -> Result<Self, String> {
+        Self::new_with_proxy(config, None).await
+    }
+
+    pub async fn new_with_proxy(
+        mut config: ConsulConfig,
+        runtime_proxy: Option<PluginRuntimeProxy>,
+    ) -> Result<Self, String> {
         // The desktop build unifies reqwest with both `default-tls` and `rustls-tls`,
         // and `TlsBackend` defaults to native-tls there, which rejects the PEM identity
         // below with `incompatible TLS identity type`. Pin rustls like the etcd metrics
@@ -63,7 +71,24 @@ impl ConsulClient {
                 .map_err(|error| format!("Failed to parse Consul client identity: {error}"))?;
             builder = builder.identity(identity);
         }
-        if let Some((override_host, override_port)) = config.connect_override.clone() {
+        if let Some(proxy) = runtime_proxy {
+            let scheme = match proxy.proxy_type.as_str() {
+                "socks5" => "socks5h",
+                "http" => "http",
+                other => return Err(format!("Unsupported Consul transport proxy type: {other}")),
+            };
+            let host = if proxy.host.contains(':') && !proxy.host.starts_with('[') {
+                format!("[{}]", proxy.host)
+            } else {
+                proxy.host
+            };
+            let mut http_proxy = reqwest::Proxy::all(format!("{scheme}://{host}:{}", proxy.port))
+                .map_err(|error| format!("Invalid Consul transport proxy address: {error}"))?;
+            if !proxy.username.is_empty() || !proxy.password.is_empty() {
+                http_proxy = http_proxy.basic_auth(&proxy.username, &proxy.password);
+            }
+            builder = builder.proxy(http_proxy);
+        } else if let Some((override_host, override_port)) = config.connect_override.clone() {
             let original_host = config.base_url.host_str().ok_or("Consul server address has no host")?.to_string();
             let ip = override_host
                 .parse::<IpAddr>()
@@ -250,6 +275,7 @@ pub(crate) async fn ensure_writable_core(state: &AppState, connection_id: &str, 
 mod tests {
     use super::*;
     use crate::consul::test_support::serve_once;
+    use crate::plugins::PluginRuntimeProxy;
 
     #[tokio::test]
     async fn connect_override_replaces_explicit_base_url_port() {
@@ -273,6 +299,31 @@ mod tests {
 
         let request = request_rx.await.unwrap();
         assert!(request.starts_with("GET /proxy/v1/kv/?"));
+    }
+
+    #[tokio::test]
+    async fn proxy_route_handles_ip_literal_without_dns_override() {
+        let body = "[]";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (proxy_url, request_rx) = serve_once(response).await;
+        let mut config = test_config("");
+        config.base_url = Url::parse("http://192.0.2.51:8500").unwrap();
+
+        let proxy = PluginRuntimeProxy {
+            proxy_type: "http".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: proxy_url.port().unwrap(),
+            username: String::new(),
+            password: String::new(),
+        };
+        let client = ConsulClient::new_with_proxy(config, Some(proxy)).await.unwrap();
+        client.probe().await.unwrap();
+
+        let request = request_rx.await.unwrap();
+        assert!(request.starts_with("GET http://192.0.2.51:8500/v1/kv/?"));
     }
 
     #[tokio::test]

@@ -525,6 +525,18 @@ pub async fn save_ai_conversation(state: State<'_, Arc<AppState>>, conversation:
     state.storage.save_ai_conversation(&conversation).await
 }
 
+/// Column-only pin write (#14226). Deliberately separate from
+/// `save_ai_conversation`: a pin toggle must never rewrite the transcript.
+#[tauri::command]
+pub async fn save_ai_conversation_pin(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    pinned: bool,
+    pinned_at: Option<String>,
+) -> Result<(), String> {
+    state.storage.save_ai_conversation_pin(&id, pinned, pinned_at).await
+}
+
 #[tauri::command]
 pub async fn load_ai_conversations(state: State<'_, Arc<AppState>>) -> Result<Vec<AiConversation>, String> {
     state.storage.load_ai_conversations().await

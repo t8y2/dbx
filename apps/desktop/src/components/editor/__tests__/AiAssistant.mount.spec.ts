@@ -36,6 +36,18 @@ const aiAssistantMountApi = vi.hoisted(() => ({
   // Fifth argument: the custom prompt context (globals, templates, skill listing).
   runAgentStreamCustoms: [] as unknown[],
   savedConversations: [] as Array<Record<string, unknown>>,
+  /** Pin-save behavior for the #14226 failure/ordering tests: when set, each
+   *  saveAiConversation call awaits it (a test resolves/rejects the returned
+   *  promise) instead of resolving immediately. */
+  pinSaveGate: undefined as undefined | (() => Promise<void>),
+  /** Reached after each of those gated saves has been recorded. */
+  pinSaveStarted: [] as string[],
+  /** Records the streamed snapshots the pin path flushes before writing. */
+  savedRunStateConversations: [] as Array<Record<string, unknown>>,
+  /** Column-only pin writes, in call order. */
+  savedPins: [] as Array<{ id: string; pinned: boolean; pinnedAt?: string }>,
+  /** Overrides the "disk" answer for `loadAiConversations`. */
+  loadConversations: undefined as undefined | (() => Promise<Array<Record<string, unknown>>>),
   // Namespace listings the composer asks for when its pickers open (#12972).
   // Empty by default, so no existing test's behavior changes.
   databaseNames: [] as string[],
@@ -162,10 +174,38 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
   const empty = () => Promise.resolve([]);
   return {
     ...actual,
-    loadAiConversations: () => Promise.resolve(aiAssistantMountApi.conversations),
+    // A test can swap the list the "disk" answers with, so a reload during an
+    // in-flight pin write can return the stale pre-pin record (#14226 review).
+    loadAiConversations: () => (aiAssistantMountApi.loadConversations ?? (() => Promise.resolve(aiAssistantMountApi.conversations)))(),
     loadAiRuns: empty,
     saveAiConversation: (conversation: Record<string, unknown>) => {
       aiAssistantMountApi.savedConversations.push(conversation);
+      const gate = aiAssistantMountApi.pinSaveGate;
+      if (!gate) return Promise.resolve();
+      // Gated saves are the pin tests' stand-in for a slow/failing write.
+      aiAssistantMountApi.pinSaveStarted.push(String(conversation.id));
+      return gate();
+    },
+    // The pin toggle is a column-only write (#14226); it shares the same gate so
+    // the failure/ordering tests drive one knob. A gated call is recorded only
+    // once it succeeded, so `savedPins` is what actually reached disk.
+    saveAiConversationPin: (id: string, pinned: boolean, pinnedAt?: string) => {
+      const record = { id, pinned, pinnedAt };
+      const gate = aiAssistantMountApi.pinSaveGate;
+      if (!gate) {
+        aiAssistantMountApi.savedPins.push(record);
+        return Promise.resolve();
+      }
+      aiAssistantMountApi.pinSaveStarted.push(id);
+      return gate().then(() => {
+        aiAssistantMountApi.savedPins.push(record);
+      });
+    },
+    // The pin path flushes a run's streamed snapshot first; the panel only
+    // mirrors that record into the list once the write succeeds, so the mock has
+    // to resolve for the "#14226 review" test to exercise the flushed state.
+    saveAiRunState: (conversation: Record<string, unknown>) => {
+      aiAssistantMountApi.savedRunStateConversations.push(conversation);
       return Promise.resolve();
     },
     // The send path consults the skill catalog (metadata only — bodies are read
@@ -220,6 +260,11 @@ afterEach(() => {
   aiAssistantMountApi.runAgentStreamHistories = [];
   aiAssistantMountApi.runAgentStreamCustoms = [];
   aiAssistantMountApi.savedConversations = [];
+  aiAssistantMountApi.pinSaveGate = undefined;
+  aiAssistantMountApi.pinSaveStarted = [];
+  aiAssistantMountApi.savedRunStateConversations = [];
+  aiAssistantMountApi.savedPins = [];
+  aiAssistantMountApi.loadConversations = undefined;
   aiAssistantMountApi.databaseNames = [];
   aiAssistantMountApi.schemaNames = [];
   aiAssistantMountApi.codeHighlighterDelayMs = 0;
@@ -2247,5 +2292,367 @@ describe("AiAssistant mount", () => {
       finish();
       await settle();
     }
+  });
+
+  // --- History pinning (#14226) ---
+
+  /** Opens the history popover and returns its content. */
+  async function openHistory(container: HTMLElement): Promise<HTMLElement> {
+    const trigger = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.getAttribute("title") === i18n.global.t("history.title"))!;
+    expect(trigger).toBeTruthy();
+    trigger.click();
+    await settle();
+    const popover = container.querySelector<HTMLElement>('[data-slot="popover-content"]');
+    expect(popover).not.toBeNull();
+    return popover!;
+  }
+
+  /** The pin toggle on the history row that shows `title`. */
+  function pinButton(popover: HTMLElement, title: string): HTMLButtonElement {
+    const button = Array.from(popover.querySelectorAll<HTMLButtonElement>("[data-ai-conversation-pin]")).find((candidate) => candidate.closest("div")?.textContent?.includes(title));
+    expect(button, `pin button for ${title}`).toBeTruthy();
+    return button!;
+  }
+
+  it("groups a pinned conversation above recent ones and persists the pin", async () => {
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-pinned", title: "Pinned chat", updatedAt: "2026-01-01T00:00:00.000Z", pinned: true, pinnedAt: "2026-01-02T00:00:00.000Z" }), storedConversation({ id: "conv-new", title: "Newest chat", updatedAt: "2026-10-01T00:00:00.000Z" })];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+    const popover = await openHistory(container);
+    const labels = [...popover.querySelectorAll("[data-ai-conversation-group]")].map((element) => element.textContent?.trim());
+    expect(labels).toEqual([i18n.global.t("history.pinnedGroup"), i18n.global.t("history.recentGroup")]);
+    // The pinned row renders first despite carrying the older timestamp.
+    const rowTitles = [...popover.querySelectorAll<HTMLElement>("[data-ai-conversation-pin]")].map((button) => button.closest("div")?.textContent ?? "");
+    expect(rowTitles[0]).toContain("Pinned chat");
+    expect(rowTitles[1]).toContain("Newest chat");
+
+    // Pin then unpin, asserting each write reaches the backend.
+    pinButton(popover, "Newest chat").click();
+    await settle();
+    expect(aiAssistantMountApi.savedPins.at(-1)).toMatchObject({ id: "conv-new", pinned: true });
+
+    pinButton(popover, "Newest chat").click();
+    await settle();
+    expect(aiAssistantMountApi.savedPins.at(-1)).toMatchObject({ id: "conv-new", pinned: false });
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("keeps a conversation pinned when a later message snapshot is saved", async () => {
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-a", pinned: true, pinnedAt: "2026-09-27T00:00:00.000Z", assistantMode: "ask" })];
+    const { container, panelRef, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    panelRef.value!.selectConversationById("conv-a");
+    await settle();
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    textarea.value = "follow up";
+    textarea.dispatchEvent(new Event("input"));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedConversations.length).toBeGreaterThan(0));
+    const saved = aiAssistantMountApi.savedConversations.at(-1) as { pinned?: boolean; pinnedAt?: string };
+    expect(saved.pinned).toBe(true);
+    expect(saved.pinnedAt).toBe("2026-09-27T00:00:00.000Z");
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  it("restores the newest conversation rather than the pinned one", async () => {
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-pinned", title: "Pinned chat", updatedAt: "2026-01-01T00:00:00.000Z", pinned: true }), storedConversation({ id: "conv-new", title: "Newest chat", updatedAt: "2026-10-01T00:00:00.000Z" })];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    expect(container.querySelector("[data-tauri-drag-region]")?.textContent?.trim()).toBe("Newest chat");
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: a failed pin write must not roll the whole record back. The
+  // snapshot flush that runs before the write has already synced newer content
+  // into the list entry, and a wholesale restore would put the stale transcript
+  // back — where a later record-based save (a rebind) would persist it.
+  it("rolls back only the pin when the pin write fails after a snapshot flush", async () => {
+    useToast().dismissToast();
+    useToast().message.value = "";
+    aiAssistantMountApi.tauriRuntime = true;
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-a", title: "Chat A", assistantMode: "agent" })];
+    const { container, panelRef, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    panelRef.value!.selectConversationById("conv-a");
+    await settle();
+
+    // Start a streaming run so a run-snapshot flush happens inside the pin write.
+    let emit!: (event: { type: string; [key: string]: unknown }) => void;
+    let finish!: () => void;
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      emit = onEvent;
+      await running;
+      onEvent({ type: "agent_end" });
+      return "streamed answer";
+    };
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    textarea.value = "stream please";
+    textarea.dispatchEvent(new Event("input"));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+    emit({ type: "text_delta", delta: "streamed answer" });
+    await settle();
+
+    // The pin write itself fails.
+    aiAssistantMountApi.pinSaveGate = () => Promise.reject(new Error("disk full"));
+    const popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(useToast().message.value).toBe(i18n.global.t("ai.conversationPinFailed")));
+
+    // The snapshot flushed before the failed pin carried the OLD pin, so nothing
+    // the pin write did reached disk: the UI and a reload agree.
+    const flushed = aiAssistantMountApi.savedRunStateConversations.at(-1)!;
+    expect(flushed.pinned).toBe(false);
+    expect((flushed.messages as Array<{ content: string }>).some((message) => message.content.includes("streamed answer"))).toBe(true);
+    // …and the failed pin never reached disk.
+    expect(aiAssistantMountApi.savedPins).toEqual([]);
+    // The popover stays open across the failure, so the row is the one the user
+    // is looking at: it must show the restored (unpinned) state.
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("false");
+
+    // Retrying succeeds and persists the pin, while the transcript the flush
+    // already made durable is still what a later record save carries.
+    aiAssistantMountApi.pinSaveGate = undefined;
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedPins.at(-1)?.pinned).toBe(true));
+    expect(aiAssistantMountApi.savedPins.at(-1)).toMatchObject({ id: "conv-a", pinned: true });
+
+    finish();
+    await settle();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: with two failed clicks in a row, the second click's "before"
+  // value is the first click's never-persisted optimistic value. Rolling back to
+  // it (or leaving it) would show a pin that is not on disk.
+  it("rolls back to the last persisted pin when consecutive pin writes fail", async () => {
+    useToast().dismissToast();
+    useToast().message.value = "";
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-a", title: "Chat A" })];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+    aiAssistantMountApi.pinSaveGate = () => Promise.reject(new Error("disk full"));
+    const popover = await openHistory(container);
+
+    // Unpinned on disk. Pin (fails), then unpin (fails again).
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(useToast().message.value).toBe(i18n.global.t("ai.conversationPinFailed")));
+    useToast().dismissToast();
+    useToast().message.value = "";
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(useToast().message.value).toBe(i18n.global.t("ai.conversationPinFailed")));
+
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("false");
+    expect(aiAssistantMountApi.savedPins).toEqual([]);
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: the pre-write snapshot flush replaces the list entry with a
+  // record carrying the OLD pin. A successful pin must therefore put the
+  // optimistic value back, or the row shows unpinned while the DB says pinned —
+  // and the next click would try to pin again.
+  it("keeps a streaming conversation showing pinned after the pin write succeeds", async () => {
+    aiAssistantMountApi.tauriRuntime = true;
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-a", title: "Chat A", assistantMode: "agent" })];
+    const { container, panelRef, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    panelRef.value!.selectConversationById("conv-a");
+    await settle();
+
+    let emit!: (event: { type: string; [key: string]: unknown }) => void;
+    let finish!: () => void;
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      emit = onEvent;
+      await running;
+      onEvent({ type: "agent_end" });
+      return "streamed answer";
+    };
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    textarea.value = "stream please";
+    textarea.dispatchEvent(new Event("input"));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+    emit({ type: "text_delta", delta: "streamed answer" });
+    await settle();
+
+    const popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedPins.at(-1)?.pinned).toBe(true));
+
+    // The row reflects the write that just succeeded, even though the flush that
+    // ran before it synced a record with the old pin.
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+    // A later delta's snapshot carries the now-confirmed pin, so the row stays.
+    emit({ type: "text_delta", delta: " still streaming" });
+    await settle();
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+
+    finish();
+    await settle();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: a snapshot can be scheduled WHILE the pin column write is
+  // still in flight — the stream keeps flushing every throttle interval. That
+  // snapshot carries the pre-pin value, and its `syncPersistedConversation` must
+  // not overwrite what the user is being shown.
+  it("keeps the row pinned when a throttled snapshot lands during the pin write", async () => {
+    aiAssistantMountApi.tauriRuntime = true;
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-a", title: "Chat A", assistantMode: "agent" })];
+    const { container, panelRef, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = true;
+    });
+    panelRef.value!.selectConversationById("conv-a");
+    await settle();
+
+    let emit!: (event: { type: string; [key: string]: unknown }) => void;
+    let finish!: () => void;
+    const running = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    aiAssistantMountApi.runAgentStream = async (onEvent) => {
+      emit = onEvent;
+      await running;
+      onEvent({ type: "agent_end" });
+      return "streamed answer";
+    };
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea.ai-conversation-text")!;
+    textarea.value = "stream please";
+    textarea.dispatchEvent(new Event("input"));
+    await settle();
+    sendControl(container).click();
+    await vi.waitFor(() => expect(emit).toBeTypeOf("function"));
+    // Schedules the run's throttled snapshot for the next interval.
+    emit({ type: "text_delta", delta: "streamed answer" });
+    await settle();
+
+    // Hold the column write open so a throttled snapshot can land behind it.
+    let releasePin!: () => void;
+    const pinGate = new Promise<void>((resolve) => {
+      releasePin = resolve;
+    });
+    aiAssistantMountApi.pinSaveGate = () => pinGate;
+    const popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(1));
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+
+    // Let the throttle fire: that snapshot reaches syncPersistedConversation with
+    // the pre-pin value while the column write is still pending.
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+    expect(aiAssistantMountApi.savedPins).toEqual([]);
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+
+    releasePin();
+    await vi.waitFor(() => expect(aiAssistantMountApi.savedPins.at(-1)?.pinned).toBe(true));
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+
+    finish();
+    await settle();
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: reopening the history panel reloads the list from disk. If the
+  // pin write is still in flight, that reload returns the pre-pin record, so the
+  // reload must merge the displayed pin in — otherwise the row looks unpinned and
+  // a second click re-pins instead of undoing the first one.
+  it.each([
+    { outcome: "succeeds", fails: false, expectedDiskPin: true },
+    { outcome: "fails", fails: true, expectedDiskPin: false },
+  ])("keeps the pending pin across a panel reopen when the write $outcome", async ({ fails, expectedDiskPin }) => {
+    useToast().dismissToast();
+    useToast().message.value = "";
+    const stale = storedConversation({ id: "conv-a", title: "Chat A" });
+    aiAssistantMountApi.conversations = [stale];
+    // Every reload answers the OLD disk state, as if the write had not landed yet.
+    aiAssistantMountApi.loadConversations = () => Promise.resolve([{ ...stale, pinned: false }]);
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+
+    let releasePin!: () => void;
+    const pinGate = new Promise<void>((resolve, reject) => {
+      releasePin = () => (fails ? reject(new Error("disk full")) : resolve());
+    });
+    aiAssistantMountApi.pinSaveGate = () => pinGate;
+
+    // Pin, then close the panel while the write is still pending.
+    let popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(1));
+    const trigger = () => Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.getAttribute("title") === i18n.global.t("history.title"))!;
+    trigger().click();
+    await settle();
+
+    // Reopen: the reloaded row must still show the pin the user just set.
+    popover = await openHistory(container);
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe("true");
+
+    releasePin();
+    if (fails) {
+      await vi.waitFor(() => expect(useToast().message.value).toBe(i18n.global.t("ai.conversationPinFailed")));
+    } else {
+      await vi.waitFor(() => expect(aiAssistantMountApi.savedPins.at(-1)?.pinned).toBe(true));
+    }
+    // Either way the row matches what is now on disk.
+    expect(pinButton(popover, "Chat A").getAttribute("aria-pressed")).toBe(String(expectedDiskPin));
+    expect(errors.map(String)).toEqual([]);
+  });
+
+  // #14226 review: rapid clicks must reach disk in click order. Without a
+  // per-conversation write chain the slower first write lands last and the
+  // persisted pin disagrees with what the list shows.
+  it("serializes rapid pin clicks so the last click wins on disk", async () => {
+    aiAssistantMountApi.conversations = [storedConversation({ id: "conv-a", title: "Chat A" })];
+    const { container, errors } = await mountPanel(true, CONN_A, (settings) => {
+      configureAiPanel(settings);
+      settings.restoreLastConversation = false;
+    });
+
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let call = 0;
+    aiAssistantMountApi.pinSaveGate = () => {
+      call += 1;
+      return call === 1 ? firstGate : Promise.resolve();
+    };
+
+    const popover = await openHistory(container);
+    pinButton(popover, "Chat A").click();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(1));
+    // Second click while the first write is still in flight.
+    pinButton(popover, "Chat A").click();
+    await settle();
+    expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(1);
+
+    releaseFirst();
+    await vi.waitFor(() => expect(aiAssistantMountApi.pinSaveStarted).toHaveLength(2));
+    expect(aiAssistantMountApi.savedPins.map((record) => record.pinned)).toEqual([true, false]);
+    expect(errors.map(String)).toEqual([]);
   });
 });

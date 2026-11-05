@@ -749,8 +749,9 @@ const largeStringPreviewHint = computed(() => {
 
 function redisDownloadFileName(keyDisplay: string, encoding: RedisBlob["encoding"]): string {
   const safe =
-    keyDisplay
-      .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
+    Array.from(keyDisplay, (character) => (character.charCodeAt(0) < 0x20 ? "_" : character))
+      .join("")
+      .replace(/[\\/:*?"<>|]/g, "_")
       .trim()
       .slice(0, 120) || "redis-value";
   return `${safe}.${encoding === "utf8" ? "txt" : "bin"}`;

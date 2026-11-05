@@ -1240,7 +1240,8 @@ describe("ProcessListPanel linked diagnostics", () => {
     [...processRow("21").querySelectorAll("button")].find((button) => button.textContent?.trim() === "诊断")?.click();
     await vi.waitFor(() => expect(root?.querySelector("select")?.options.length).toBe(3), { timeout: 5000 });
     await vi.waitFor(() => expect(findDialogButton("刷新")?.disabled).toBe(false));
-    const select = root?.querySelector("select")!;
+    const select = root?.querySelector("select");
+    if (!select) throw new Error("Expected a diagnostic plan selector");
     expect(select.options[0]?.disabled).toBe(true);
     select.value = select.options[1]!.value;
     select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -1275,7 +1276,8 @@ describe("ProcessListPanel linked diagnostics", () => {
     await vi.waitFor(() => expect(root?.querySelector("select")?.options.length).toBe(3));
     expect(root?.querySelector("select")?.options[0]?.disabled).toBe(true);
     const choose = (id: string) => {
-      const select = root?.querySelector("select")!;
+      const select = root?.querySelector("select");
+      if (!select) throw new Error("Expected a diagnostic plan selector");
       select.value = [...select.options].find((option) => option.textContent?.startsWith(`计划 ${id} ·`))!.value;
       select.dispatchEvent(new Event("change", { bubbles: true }));
     };

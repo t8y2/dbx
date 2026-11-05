@@ -1,10 +1,10 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import i18n from "@/i18n";
-import type { DatabaseSearchResultItem, DatabaseSearchTabState } from "@/types/database";
+import type { DatabaseSearchTabState } from "@/types/database";
 import type { NavigationTarget } from "@/composables/useNavigationTargets";
 
 vi.mock("@/components/ui/dialog", async () => {

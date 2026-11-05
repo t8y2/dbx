@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { createApp, nextTick, type Component } from "vue";
+import { createApp, nextTick } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";

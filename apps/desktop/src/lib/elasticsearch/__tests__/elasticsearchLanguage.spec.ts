@@ -47,7 +47,7 @@ describe("Elasticsearch REST JSON language", () => {
     expect(foldedText(state, 5)).toBe('\n        { "term": { "status": "paid" } }\n      ');
     expect(foldedText(state, 8)).toContain('"match"');
     expect(foldedText(state, 15)).toContain('"match_all"');
-    expect(foldedText(state, 17)).toContain('"match_all"');
+    expect(foldedText(state, 16)).toContain('"match_all"');
     expect(elasticsearchJsonDiagnostics(state)).toEqual([]);
   });
 

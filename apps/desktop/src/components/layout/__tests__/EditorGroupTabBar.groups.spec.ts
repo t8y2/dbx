@@ -341,7 +341,7 @@ describe("EditorGroupTabBar group behavior", () => {
     settings.editorSettings.tabGroupMode = "connection";
     const pgA = store.createTab("pg-1", "app", "PG 1", "query");
     store.createTab("pg-1", "app", "PG 2", "query");
-    const my = store.createTab("mysql-1", "app", "MY 1", "query");
+    store.createTab("mysql-1", "app", "MY 1", "query");
     const mainGroup = store.groups[0];
     const { app, host } = mountBar(mainGroup.id, store.tabs.slice(), pgA, pinia);
     await settle();
@@ -513,7 +513,7 @@ describe("EditorGroupTabBar group behavior", () => {
     settings.editorSettings.tabGroupMode = "database";
     const pgApp = store.createTab("pg-1", "app", "PG app", "query");
     store.createTab("mysql-1", "app", "MY app", "query");
-    const pgConn = store.createTab("pg-1", "", "PG conn", "query");
+    store.createTab("pg-1", "", "PG conn", "query");
     const mainGroup = store.groups[0];
     const { app, host } = mountBar(mainGroup.id, store.tabs.slice(), pgApp, pinia);
     await settle();

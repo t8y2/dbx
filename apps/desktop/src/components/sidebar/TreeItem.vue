@@ -91,7 +91,7 @@ import { isTableVGroupGroupableRowType, selectedTableVGroupMoveTargets, tableVGr
 import { findTreeNodeById } from "@/lib/sql/newQueryContext";
 import { resolveTableVGroupDropTarget, setTableVGroupDropTargetNodeId, tableVGroupDropTargetNodeId } from "@/lib/sidebar/sidebarTableVGroupDrag";
 import { connectionEndpointUserLabel } from "@/lib/connection/connectionPresentation";
-import { isExecuteSqlShortcut, isFocusSearchShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCancelSearchShortcut, isExecuteSqlShortcut, isFocusSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { connectionDetailRows, type ConnectionDetailRow } from "@/lib/connection/connectionDetailRows";
 import { hexToRgba } from "@/lib/common/color";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
@@ -1022,6 +1022,16 @@ function onTableSearchControlKeydown(event: KeyboardEvent) {
     const input = control?.querySelector<HTMLInputElement>("[data-sidebar-table-search-parent-id]");
     input?.focus();
     input?.select();
+    event.stopPropagation();
+    return;
+  }
+  if (isCancelSearchShortcut(event)) {
+    if (tableSearchValue.value) {
+      event.preventDefault();
+      clearTableSearchQuery();
+    }
+    event.stopPropagation();
+    return;
   }
   // Let the app-level shortcut handler open the database default query while
   // the table-search input remains focused. Other tree-local key handling
@@ -1873,7 +1883,7 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 .sidebar-object-comment--windows {
-  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  /* Inherit the interface font; only adjust readability on Windows. */
   font-size: 1em;
   font-weight: 500;
   opacity: 1;

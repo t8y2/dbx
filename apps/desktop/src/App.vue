@@ -360,6 +360,8 @@ const {
   openLatestRelease,
   changeUpdateDownloadSource,
   ignoreCurrentVersion,
+  restoreIgnoredVersion,
+  ignoredReleaseVersion,
   downloadUpdateInBackground,
   cancelDownload,
   installDownloadedUpdate,
@@ -3312,6 +3314,10 @@ async function newQuery(options: NewQueryOptions = {}) {
   }
   connectionStore.activeConnectionId = target.connectionId;
   const connectionTarget = quickConnectionOpenTarget(conn);
+  // Capture before ensureConnected: focusing another tab while connecting must
+  // not borrow that tab's plugin workspace as the source of this New Query.
+  const sourceTab = activeTab.value;
+  const sourceWorkbenchId = sourceTab?.mode === "plugin-workbench" && sourceTab.connectionId === target.connectionId ? sourceTab.pluginWorkbench?.context?.workbenchId : undefined;
   if (connectionTarget.kind !== "query") {
     try {
       await connectionStore.ensureConnected(target.connectionId);
@@ -3321,7 +3327,7 @@ async function newQuery(options: NewQueryOptions = {}) {
         await connectionStore.loadNacosNamespaces(target.connectionId);
         queryStore.openNacosAdmin(target.connectionId);
       } else if (connectionTarget.kind === "plugin-workbench") {
-        await queryStore.openPluginConnection(target.connectionId);
+        await queryStore.openPluginConnection(target.connectionId, { forceNew: true, sourceWorkbenchId: typeof sourceWorkbenchId === "string" ? sourceWorkbenchId : undefined });
       } else {
         queryStore.createTab(target.connectionId, "", `${conn.name}:keys`, connectionTarget.kind);
       }
@@ -5977,7 +5983,9 @@ onUnmounted(() => {
           @cancel-download="cancelDownload"
           @install-downloaded="installDownloadedUpdateWithComponentUpdates"
           @restart="restartAppWithComponentUpdates"
+          :ignored-release-version="ignoredReleaseVersion"
           @ignore-version="ignoreCurrentVersion"
+          @restore-ignored-version="restoreIgnoredVersion"
           @install-component-updates="installComponentUpdates"
           @update-all="updateAllAvailable"
         />

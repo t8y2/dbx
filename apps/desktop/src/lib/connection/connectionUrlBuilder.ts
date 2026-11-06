@@ -74,6 +74,7 @@ const STANDARD_URL_SCHEMES: Partial<Record<DatabaseType, string>> = {
   iris: "iris",
   trino: "trino",
   databend: "databend",
+  tdengine: "taosws",
 };
 
 /** Schemes that are plain HTTP(S) endpoints. */
@@ -255,6 +256,8 @@ function standardUrlScheme(config: ConnectionUrlCopyConfig): string | null {
       return profile === GAUSSDB_M_JDBC_DRIVER_PROFILE ? "jdbc:gaussdb" : "postgresql";
     case "iris":
       return profile === "cache" ? "cache" : "iris";
+    case "tdengine":
+      return config.ssl ? "taoswss" : "taosws";
     default: {
       if (HTTP_URL_DB_TYPES.has(config.db_type)) return config.db_type === "dynamodb" ? "https" : config.ssl ? "https" : "http";
       return STANDARD_URL_SCHEMES[config.db_type] ?? null;
@@ -276,6 +279,8 @@ function standardUrlQuery(config: ConnectionUrlCopyConfig, scheme: string): stri
       extras.push("secure=1");
     } else if (scheme === "cassandra" && !queryHasParam(raw, ["ssl"])) {
       extras.push("ssl=true");
+    } else if (scheme === "taoswss" && !queryHasParam(raw, ["ssl", "usessl"])) {
+      extras.push("useSSL=true");
     }
   }
   return joinNonEmpty("&", [raw, ...extras]);
@@ -467,6 +472,8 @@ function jdbcQuery(config: ConnectionUrlCopyConfig, prefix: string, withCredenti
       parts.push("sslMode=REQUIRED");
     } else if (prefix === "jdbc:clickhouse" && !queryHasParam(raw, ["ssl", "sslmode", "secure"])) {
       parts.push("ssl=true");
+    } else if ((prefix === "jdbc:TAOS-WS" || prefix === "jdbc:TAOS-RS") && !queryHasParam(raw, ["ssl", "usessl"])) {
+      parts.push("useSSL=true");
     }
   }
   return joinNonEmpty("&", parts);

@@ -43,6 +43,13 @@ pub struct SaveAiConversationRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpdateConversationPluginConnectionsRequest {
+    pub conversation_id: String,
+    pub plugin_connection_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AiCompleteRequest {
     pub request: AiCompletionRequest,
 }
@@ -94,6 +101,10 @@ pub struct AiAgentStreamRequest {
     pub database: String,
     #[serde(default)]
     pub selected_databases: Vec<String>,
+    /// Plugin connections the user attached to this conversation. Absent means
+    /// "nothing attached": opening a connection is not consent for the agent.
+    #[serde(default)]
+    pub plugin_connection_ids: Vec<String>,
     #[serde(default)]
     pub schema: Option<String>,
     pub db_type: String,
@@ -255,6 +266,21 @@ pub async fn save_ai_conversation(
     Json(body): Json<SaveAiConversationRequest>,
 ) -> Result<Json<()>, AppError> {
     state.app.storage.save_ai_conversation(&body.conversation).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+/// Patches only the plugin attachment list; used by attachment toggles and the
+/// stale-snapshot repair so an older transcript is never re-written.
+pub async fn update_ai_conversation_plugin_connections(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<UpdateConversationPluginConnectionsRequest>,
+) -> Result<Json<()>, AppError> {
+    state
+        .app
+        .storage
+        .update_ai_conversation_plugin_connection_ids(&body.conversation_id, &body.plugin_connection_ids)
+        .await
+        .map_err(AppError::from)?;
     Ok(Json(()))
 }
 
@@ -510,6 +536,7 @@ pub async fn ai_agent_stream(
         connection_id: body.connection_id,
         database: body.database,
         selected_databases: body.selected_databases,
+        plugin_connection_ids: body.plugin_connection_ids,
         schema: body.schema,
         db_type: parsed_db_type,
         cli_mcp_server_command: None,

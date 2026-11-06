@@ -148,7 +148,9 @@ describe("Dameng AI context routing", () => {
       vi.fn(),
       "session-1",
     );
-    expect(apiMock.aiAgentStream).toHaveBeenCalledWith("session-1", expect.any(Object), "dameng-1", "APPDB", "REPORTING", "dameng", expect.any(Function), "agent", false, undefined, undefined, undefined, undefined, undefined, undefined, false);
+    // Trailing positional args: signal, selected databases, skills, then the
+    // plugin connections this conversation attached (#13978; empty = no plugin tools).
+    expect(apiMock.aiAgentStream).toHaveBeenCalledWith("session-1", expect.any(Object), "dameng-1", "APPDB", "REPORTING", "dameng", expect.any(Function), "agent", false, undefined, undefined, undefined, undefined, undefined, undefined, false, []);
   });
 
   it("models the AI selector as a schema and chooses the connected user by default", () => {
@@ -312,7 +314,7 @@ describe("PostgreSQL AI schema routing", () => {
       vi.fn(),
       "session-postgres",
     );
-    expect(apiMock.aiAgentStream).toHaveBeenCalledWith("session-postgres", expect.any(Object), "postgres-1", "app", "main_chatdr", "postgres", expect.any(Function), "agent", false, undefined, undefined, undefined, undefined, undefined, undefined, false);
+    expect(apiMock.aiAgentStream).toHaveBeenCalledWith("session-postgres", expect.any(Object), "postgres-1", "app", "main_chatdr", "postgres", expect.any(Function), "agent", false, undefined, undefined, undefined, undefined, undefined, undefined, false, []);
   });
 });
 

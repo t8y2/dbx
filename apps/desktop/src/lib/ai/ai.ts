@@ -207,6 +207,13 @@ export interface AiRequestInput {
    * without a listing gives the model tools with nothing to resolve.
    */
   allowSkills?: boolean;
+  /**
+   * Plugin connections the user attached to this conversation. The backend
+   * exposes plugin tools only on these open connections (plus the target
+   * connection when it is itself a plugin connection); opening a connection
+   * elsewhere in DBX does not authorize the assistant.
+   */
+  pluginConnectionIds?: string[];
 }
 
 export interface AiNamespaceSelection {
@@ -342,7 +349,7 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
     input.confirmedDatabase,
     input.confirmedSchema,
   ] as const;
-  return api.aiAgentStream(...args, undefined, selectedDatabases, input.allowSkills === true);
+  return api.aiAgentStream(...args, undefined, selectedDatabases, input.allowSkills === true, input.pluginConnectionIds ?? []);
 }
 
 export function buildUserPrompt(action: AiAction, context: AiContext, instruction: string, isZh: boolean): string {

@@ -723,6 +723,14 @@ pub struct AiConversation {
     /// [`AiConversation::assistant_mode`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_action: Option<String>,
+    /// Plugin connections the user attached to this conversation's AI runs.
+    ///
+    /// Plugin tools are scoped to these connections (plus the target when it is
+    /// itself a plugin connection); a running connection that is not listed
+    /// contributes nothing. Absent/empty for legacy records means "nothing
+    /// attached", which is the safe default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_connection_ids: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
 }

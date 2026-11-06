@@ -81,6 +81,8 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import StarRocksAlterStatus from "@/components/structure/StarRocksAlterStatus.vue";
 import StarRocksSortKeyEditor from "@/components/structure/StarRocksSortKeyEditor.vue";
 import StarRocksLayoutCopyDialog from "@/components/structure/StarRocksLayoutCopyDialog.vue";
+import DorisLayoutPanel from "@/components/structure/DorisLayoutPanel.vue";
+import { loadDorisTableLayout } from "@/lib/table/dorisLayout";
 import StarRocksPhysicalOptionsEditor from "@/components/structure/StarRocksPhysicalOptionsEditor.vue";
 import { buildStarRocksDialectOptions, emptyStarRocksPhysicalOptions, hasStarRocksPhysicalOptions, restoreStarRocksPhysicalOptions } from "@/lib/table/starrocksPhysicalOptions";
 import TablePhysicalOptionsEditor from "@/components/structure/TablePhysicalOptionsEditor.vue";
@@ -156,7 +158,7 @@ import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataG
 import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { postgresListRolesSql, usersFromPostgresRolesResult } from "@/lib/database/databaseUserAdmin";
-import type { CatalogInfo, ColumnInfo, ConnectionConfig, ConstraintInfo, PgPartitionKind, PgPartitionNode, PgTablePartitioning, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
+import type { CatalogInfo, ColumnInfo, ConnectionConfig, ConstraintInfo, DorisTableLayout, PgPartitionKind, PgPartitionNode, PgTablePartitioning, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
 import {
   applyManticoreDdlColumnExtras,
   buildStructureTargetLabel,
@@ -760,6 +762,14 @@ const constraintsLoaded = ref(false);
 const partitioning = ref<PgTablePartitioning | null>(null);
 const partitionsLoading = ref(false);
 const partitionsError = ref("");
+// Doris partition/bucket layout. Loaded lazily when the tab is opened; a
+// SHOW PARTITIONS failure still leaves the DDL-derived table summary visible.
+const dorisLayout = ref<DorisTableLayout | null>(null);
+const dorisLayoutLoading = ref(false);
+const dorisLayoutError = ref("");
+let dorisLayoutLoaded = false;
+let dorisLayoutGeneration = 0;
+const dorisLayoutSearch = ref("");
 // Pending partition operations (not yet saved). Unlike columns/indexes these
 // are explicit actions on the live catalog, so they are never diffed — they
 // accumulate here until Save, then are cleared and the tree reloaded.
@@ -2284,6 +2294,9 @@ const isCreateMode = computed(() => !props.tableName);
 // Hidden for an existing table that is not partitioned: the tab could only ever
 // render an empty state. Create mode keeps it so partitioning can be declared.
 const showPartitionsTab = computed(() => tableMetadataCapabilities.value.partitions && (isCreateMode.value || isPartitionedParent.value || isTablePartition.value));
+// Doris/SelectDB OLAP tables always have a bucket layout, even when they are
+// unpartitioned, so this tab is not gated on a partition probe.
+const showLayoutTab = computed(() => tableMetadataCapabilities.value.layout && !isCreateMode.value);
 
 /**
  * Whether the edited table already stores a lowercase or mixed-case identifier.
@@ -7633,6 +7646,10 @@ async function applyChanges() {
       skipNextRefreshVersion = true;
       emit("saved", tableComment.value !== originalTableComment.value);
       await refreshStructureAfterSave(refreshScope, characterLengthUnitsAfterSave);
+      if (showLayoutTab.value) {
+        dorisLayoutLoaded = false;
+        void fetchDorisLayout(true);
+      }
     }
     return true;
   } catch (e: any) {
@@ -8155,6 +8172,15 @@ watch(
   { deep: true, immediate: true },
 );
 
+watch([() => props.connectionId, () => props.database, () => props.schema, () => props.catalog, () => props.tableName, databaseType], () => {
+  dorisLayoutGeneration++;
+  dorisLayout.value = null;
+  dorisLayoutLoaded = false;
+  dorisLayoutError.value = "";
+  dorisLayoutLoading.value = false;
+  dorisLayoutSearch.value = "";
+});
+
 watch(activeTab, () => {
   stopStructureHorizontalScrollbarDrag();
   if (activeTab.value !== "ddl") destroyDdlEditor();
@@ -8169,7 +8195,7 @@ watch([activeTab, loading, indexesLoading, visibleColWidths, indexColWidths], ob
 
 // Tab availability, density and translations all change the space the actions
 // need. Re-measure the full layout instead of keeping widths from another view.
-watch([activeTab, isCreateMode, databaseType, tableMetadataCapabilities, showPartitionsTab, localStructureDensity, structureDensityOptions], () => {
+watch([activeTab, isCreateMode, databaseType, tableMetadataCapabilities, showPartitionsTab, showLayoutTab, localStructureDensity, structureDensityOptions], () => {
   structureToolbarRequiredWidths = {};
   structureToolbarCondensedAtWidth = 0;
   structureToolbarTier.value = 0;
@@ -8226,8 +8252,39 @@ watch(refreshVersion, (version, previous) => {
   void loadStructure(true, visibleTableStructureRefreshScope(activeTab.value), true, { preserveDraft: props.exactIdentity === true });
 });
 
+async function fetchDorisLayout(force = false) {
+  if (!props.connectionId || !props.tableName || (!force && dorisLayoutLoaded)) return;
+  const generation = ++dorisLayoutGeneration;
+  dorisLayoutLoading.value = true;
+  dorisLayoutError.value = "";
+  try {
+    const next = await loadDorisTableLayout({
+      connectionId: props.connectionId,
+      database: props.database,
+      schema: metadataSchema.value,
+      tableName: props.tableName,
+      catalog: props.catalog,
+      queryTimeoutSecs: connection.value?.query_timeout_secs,
+      forceDdl: force,
+    });
+    if (generation !== dorisLayoutGeneration) return;
+    dorisLayout.value = next;
+    dorisLayoutLoaded = true;
+  } catch (error) {
+    if (generation !== dorisLayoutGeneration) return;
+    dorisLayout.value = null;
+    dorisLayoutError.value = String((error as Error)?.message ?? error);
+  } finally {
+    if (generation === dorisLayoutGeneration) dorisLayoutLoading.value = false;
+  }
+}
+
 async function loadActiveTableStructureMetadataIfNeeded() {
   if (!structureEditorReady || isCreateMode.value) return;
+  if (activeTab.value === "layout") {
+    await fetchDorisLayout();
+    return;
+  }
   if (activeTab.value === "ddl") {
     // Explicit navigation refreshes a clean editor; ordinary tab switches keep its baseline.
     const refreshNavigation = pendingDdlNavigation;
@@ -8499,6 +8556,7 @@ watch(
               <TabsTrigger v-if="tableMetadataCapabilities.constraints" value="constraints">{{ t("structureEditor.constraints") }}</TabsTrigger>
               <TabsTrigger v-if="tableMetadataCapabilities.triggers" value="triggers">{{ t("structureEditor.triggers") }}</TabsTrigger>
               <TabsTrigger v-if="showPartitionsTab" value="partitions">{{ t("structureEditor.partitions") }}</TabsTrigger>
+              <TabsTrigger v-if="showLayoutTab" value="layout">{{ t("dorisLayout.tab") }}</TabsTrigger>
             </TabsList>
             <div class="structure-toolbar-actions flex shrink-0 items-center gap-1.5">
               <Button v-if="!isCreateMode" size="sm" variant="outline" :class="[structureToolbarButtonClass, 'structure-toolbar-action structure-toolbar-secondary']" :title="t('contextMenu.viewData')" :aria-label="t('contextMenu.viewData')" data-structure-view-data @click="emit('viewData')">
@@ -9977,6 +10035,13 @@ watch(
                 </div>
               </div>
             </template>
+          </TabsContent>
+
+          <TabsContent v-if="showLayoutTab" value="layout" class="col-start-1 row-start-2 structure-card-scroller m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]" @scroll.passive="onStructureContentScroll('layout', $event)">
+            <div class="mb-2 max-w-sm">
+              <Input v-model="dorisLayoutSearch" :placeholder="t('dorisLayout.searchPlaceholder')" class="h-8" />
+            </div>
+            <DorisLayoutPanel :layout="dorisLayout" :loading="dorisLayoutLoading" :error="dorisLayoutError" :search-query="dorisLayoutSearch" />
           </TabsContent>
 
           <TabsContent

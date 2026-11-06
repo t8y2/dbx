@@ -9,7 +9,7 @@ import type { ConstraintInfo } from "@/types/database";
 
 const mountedApps: ReturnType<typeof createApp>[] = [];
 
-async function renderConstraints(constraints: ConstraintInfo[], constraintsError = "") {
+async function renderPanels(overrides: Record<string, unknown> = {}) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const app = createApp(DataGridTableInfoPanels, {
@@ -34,20 +34,28 @@ async function renderConstraints(constraints: ConstraintInfo[], constraintsError
     triggers: [],
     triggersLoading: false,
     triggersError: "",
-    constraints,
+    constraints: [],
     constraintsLoading: false,
-    constraintsError,
+    constraintsError: "",
     partitioning: null,
     partitionsLoading: false,
     partitionsError: "",
+    layout: null,
+    layoutLoading: false,
+    layoutError: "",
     isProtectedMongoIndex: () => false,
     formatColumnType: (value: string) => value,
+    ...overrides,
   });
   app.use(createI18n({ legacy: false, locale: "en", messages: { en } }));
   app.mount(container);
   mountedApps.push(app);
   await nextTick();
   return container;
+}
+
+async function renderConstraints(constraints: ConstraintInfo[], constraintsError = "") {
+  return renderPanels({ constraints, constraintsError });
 }
 
 afterEach(() => {
@@ -100,6 +108,28 @@ describe("structured constraint information", () => {
     ]);
     expect(container.textContent).toContain(enabledLabel);
     expect(container.textContent).toContain(validLabel);
+  });
+
+  it("renders the Doris layout panel through the shared table-info panels", async () => {
+    const container = await renderPanels({
+      activeTab: "layout",
+      layout: {
+        kind: "olap",
+        model: "duplicate",
+        keyColumns: ["id"],
+        partition: { enabled: true, mode: "range", auto: false, columns: ["dt"], expression: null, clause: "PARTITION BY RANGE(`dt`)" },
+        distribution: { method: "hash", columns: ["id"], buckets: 4, autoBuckets: false },
+        properties: { replication_num: "1" },
+        colocateWith: null,
+        dynamicPartition: false,
+        partitions: [{ name: "p1", range: "[2024-01-01, 2024-02-01)", buckets: 4, state: "NORMAL", dataSize: "1 KB" }],
+        warnings: [],
+      },
+      layoutLoading: false,
+      layoutError: "",
+    });
+    expect(container.textContent).toContain("p1");
+    expect(container.textContent).toContain("Duplicate key");
   });
 
   it("shows a metadata permission error instead of an empty result", async () => {

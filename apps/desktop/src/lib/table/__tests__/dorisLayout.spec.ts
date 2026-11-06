@@ -126,26 +126,29 @@ DISTRIBUTED BY HASH(\`id\`) BUCKETS 5;`;
   });
 
   it("parses the exact SHOW CREATE TABLE shape returned by Doris 4.1.3", () => {
-    const range = "CREATE TABLE `orders_range` (\n  `id` bigint NOT NULL,\n  `dt` date NOT NULL,\n  `amount` decimal(18,2) SUM NULL\n) ENGINE=OLAP\nAGGREGATE KEY(`id`, `dt`)\nCOMMENT 'orders'\nPARTITION BY RANGE(`dt`)\n(PARTITION p202401 VALUES [('2024-01-01'), ('2024-02-01')))\nDISTRIBUTED BY HASH(`id`) BUCKETS 3\nPROPERTIES (\n\"replication_allocation\" = \"tag.location.default: 1\",\n\"storage_medium\" = \"hdd\"\n);";
+    const range =
+      'CREATE TABLE `orders_range` (\n  `id` bigint NOT NULL,\n  `dt` date NOT NULL,\n  `amount` decimal(18,2) SUM NULL\n) ENGINE=OLAP\nAGGREGATE KEY(`id`, `dt`)\nCOMMENT \'orders\'\nPARTITION BY RANGE(`dt`)\n(PARTITION p202401 VALUES [(\'2024-01-01\'), (\'2024-02-01\')))\nDISTRIBUTED BY HASH(`id`) BUCKETS 3\nPROPERTIES (\n"replication_allocation" = "tag.location.default: 1",\n"storage_medium" = "hdd"\n);';
     const rangeLayout = dorisLayoutFromDdl(range);
     expect(rangeLayout.model).toBe("aggregate");
     expect(rangeLayout.partition).toMatchObject({ enabled: true, mode: "range", auto: false, columns: ["dt"], expression: null });
     expect(rangeLayout.distribution).toEqual({ method: "hash", columns: ["id"], buckets: 3, autoBuckets: false });
     expect(rangeLayout.properties.replication_allocation).toBe("tag.location.default: 1");
 
-    const list = "CREATE TABLE `region_list` (\n  `id` bigint NOT NULL,\n  `region` varchar(32) NOT NULL\n) ENGINE=OLAP\nUNIQUE KEY(`id`, `region`)\nPARTITION BY LIST (`region`)\n(PARTITION p_east VALUES IN (\"east\"))\nDISTRIBUTED BY HASH(`id`) BUCKETS 2\nPROPERTIES (\n\"replication_allocation\" = \"tag.location.default: 1\"\n);";
+    const list =
+      'CREATE TABLE `region_list` (\n  `id` bigint NOT NULL,\n  `region` varchar(32) NOT NULL\n) ENGINE=OLAP\nUNIQUE KEY(`id`, `region`)\nPARTITION BY LIST (`region`)\n(PARTITION p_east VALUES IN ("east"))\nDISTRIBUTED BY HASH(`id`) BUCKETS 2\nPROPERTIES (\n"replication_allocation" = "tag.location.default: 1"\n);';
     const listLayout = dorisLayoutFromDdl(list);
     expect(listLayout.model).toBe("unique");
     expect(listLayout.partition).toMatchObject({ enabled: true, mode: "list", columns: ["region"] });
     expect(listLayout.distribution).toEqual({ method: "hash", columns: ["id"], buckets: 2, autoBuckets: false });
 
-    const auto = "CREATE TABLE `events_auto` (\n  `id` bigint NOT NULL,\n  `dt` date NOT NULL\n) ENGINE=OLAP\nUNIQUE KEY(`id`, `dt`)\nAUTO PARTITION BY RANGE (date_trunc(`dt`, 'month'))\n()\nDISTRIBUTED BY HASH(`id`) BUCKETS AUTO\nPROPERTIES (\n\"replication_allocation\" = \"tag.location.default: 1\"\n);";
+    const auto =
+      'CREATE TABLE `events_auto` (\n  `id` bigint NOT NULL,\n  `dt` date NOT NULL\n) ENGINE=OLAP\nUNIQUE KEY(`id`, `dt`)\nAUTO PARTITION BY RANGE (date_trunc(`dt`, \'month\'))\n()\nDISTRIBUTED BY HASH(`id`) BUCKETS AUTO\nPROPERTIES (\n"replication_allocation" = "tag.location.default: 1"\n);';
     const autoLayout = dorisLayoutFromDdl(auto);
     expect(autoLayout.partition).toMatchObject({ enabled: true, mode: "range", auto: true, columns: [] });
     expect(autoLayout.partition.expression).toContain("date_trunc");
     expect(autoLayout.distribution).toEqual({ method: "hash", columns: ["id"], buckets: null, autoBuckets: true });
 
-    const unpartitioned = "CREATE TABLE `tiny_unpartitioned` (\n  `id` bigint NOT NULL\n) ENGINE=OLAP\nDUPLICATE KEY(`id`)\nDISTRIBUTED BY HASH(`id`) BUCKETS 2\nPROPERTIES (\n\"replication_allocation\" = \"tag.location.default: 1\"\n);";
+    const unpartitioned = 'CREATE TABLE `tiny_unpartitioned` (\n  `id` bigint NOT NULL\n) ENGINE=OLAP\nDUPLICATE KEY(`id`)\nDISTRIBUTED BY HASH(`id`) BUCKETS 2\nPROPERTIES (\n"replication_allocation" = "tag.location.default: 1"\n);';
     const unpartitionedLayout = dorisLayoutFromDdl(unpartitioned);
     expect(unpartitionedLayout.partition.enabled).toBe(false);
     expect(unpartitionedLayout.distribution.buckets).toBe(2);

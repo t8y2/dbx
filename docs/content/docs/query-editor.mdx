@@ -171,6 +171,7 @@ Semantic diagnostics flag selected unresolved tables, columns, aliases, and SQL 
 - Locate the table referenced at the cursor in the sidebar
 - Use Quick Open to search connections, databases, tables, SQL Files, and the SQL Library
 - Search embedded object-source views and open SQL in the editor for further work
+- Views, routines, and triggers are editable in the source tab; saving with `Ctrl/Cmd+S` writes the change back to the database (PostgreSQL-family trigger sources open read-only)
 
 Navigation depends on SQL parsing and current metadata. Dynamic SQL, ambiguous names, or references without a schema may require manual confirmation.
 

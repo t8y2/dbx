@@ -6520,6 +6520,9 @@ func isOraclePlSQLBlock(sqlText string) bool {
 
 func isQuerySQL(sqlText string) bool {
 	executable := trimLeadingSQLComments(sqlText)
+	// A set query can start with a parenthesized SELECT. Only unwrap the
+	// prefix for classification so the driver's SQL keeps its grouping.
+	executable = strings.TrimPrefix(executable, "(")
 	return startsWithSQLKeyword(executable, "select") || startsWithSQLKeyword(executable, "with")
 }
 

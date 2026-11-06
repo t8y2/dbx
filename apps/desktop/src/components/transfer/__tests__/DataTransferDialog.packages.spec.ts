@@ -201,15 +201,13 @@ beforeEach(() => {
     started?.();
     progress({ transferId: request.transferId, table: "", tableIndex: 0, totalTables: 0, rowsTransferred: 0, totalRows: null, status: "done", terminal: true, error: null });
   });
-  calls.load.mockImplementation(
-    async (id: string, database: string, schema: string): Promise<OracleRoutineSnapshot> => ({
-      endpoint: { connectionId: id, database, schema, databaseType: id === "source" ? "oracle" : "oceanbase-oracle", generation: 1 },
-      state: "complete",
-      enumerationComplete: true,
-      objects: [{ version: { identity: { owner: schema, name: "P", kind: "PACKAGE_BODY" }, objectId: `${id}-body`, status: "VALID", lastDdlTime: "1" }, source: generated.replace('"T"', `"${schema}"`), sourceComplete: true, dependencies: [], dependenciesComplete: true, issues: [] }],
-      issues: [],
-    }),
-  );
+  calls.load.mockImplementation(async (id: string, database: string, schema: string): Promise<OracleRoutineSnapshot> => ({
+    endpoint: { connectionId: id, database, schema, databaseType: id === "source" ? "oracle" : "oceanbase-oracle", generation: 1 },
+    state: "complete",
+    enumerationComplete: true,
+    objects: [{ version: { identity: { owner: schema, name: "P", kind: "PACKAGE_BODY" }, objectId: `${id}-body`, status: "VALID", lastDdlTime: "1" }, source: generated.replace('"T"', `"${schema}"`), sourceComplete: true, dependencies: [], dependenciesComplete: true, issues: [] }],
+    issues: [],
+  }));
   calls.compare.mockResolvedValue({
     diffs: [],
     functionDiffs: [{ type: "modified", name: "P", programKind: "PACKAGE_BODY", source: { name: "P", arguments: "", function_type: "PACKAGE_BODY", definition: generated }, target: { name: "P", arguments: "", function_type: "PACKAGE_BODY", definition: "old target body" } }],

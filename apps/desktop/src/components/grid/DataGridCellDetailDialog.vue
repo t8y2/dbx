@@ -252,8 +252,7 @@ watch(
             :style="valueTransformOpen ? { display: 'none' } : null"
             class="dbx-data-grid-value-font max-h-[44vh] overflow-auto rounded border bg-muted/20 p-3 text-xs whitespace-pre-wrap break-words"
             :class="[detail.value === null ? 'italic text-muted-foreground' : '', detail.imagePreviewUrl ? 'col-start-1 row-start-2' : '']"
-            >{{ presentedValuePreview }}</pre
-          >
+            >{{ presentedValuePreview }}</pre>
           <div v-if="detail.isValuePreviewTruncated && !jsonView" :style="valueTransformOpen ? { display: 'none' } : null" :class="detail.imagePreviewUrl ? 'col-start-1' : ''" class="text-[11px] text-muted-foreground">
             {{ t("grid.largeValuePreviewHint", { count: detail.rawValuePreview.length }) }}
           </div>

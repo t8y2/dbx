@@ -127,8 +127,7 @@ async function diagnostic() {
             </div>
           </div>
           <p v-if="status?.dataDir" class="break-all text-xs text-muted-foreground">
-            {{ t("migration.dataDir")
-            }}<!--
+            {{ t("migration.dataDir") }}<!--
             --><button
               type="button"
               class="break-all text-left underline decoration-dotted underline-offset-2 hover:text-foreground disabled:cursor-default disabled:no-underline"
@@ -190,8 +189,7 @@ async function diagnostic() {
             <h2 class="font-medium">{{ t("migration.successTitle") }}</h2>
             <p class="mt-2 text-sm text-muted-foreground">{{ t("migration.successIntro") }}</p>
             <p v-if="status?.backupPath" class="mt-3 break-all text-xs text-muted-foreground">
-              {{ t("migration.backupPath")
-              }}<!--
+              {{ t("migration.backupPath") }}<!--
               --><button
                 type="button"
                 class="break-all text-left underline decoration-dotted underline-offset-2 hover:text-foreground disabled:cursor-default disabled:no-underline"

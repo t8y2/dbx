@@ -198,7 +198,7 @@ function maskTriggerCommentsAndStrings(source: string) {
   const mask = (start: number, end: number) => {
     for (let index = start; index < end; index++) if (source[index] !== "\n" && source[index] !== "\r") output[index] = " ";
   };
-  for (let index = 0; index < source.length; ) {
+  for (let index = 0; index < source.length;) {
     if (source.startsWith("--", index)) {
       const newline = source.indexOf("\n", index + 2);
       const end = newline < 0 ? source.length : newline;

@@ -521,7 +521,7 @@ async function executeTriggerSequence(
       if (result.steps[0]) result.steps[0].error = formatError(error);
       return result;
     }
-    for (let index = 0; index < sequence.statements.length; ) {
+    for (let index = 0; index < sequence.statements.length;) {
       if (!options.isCurrent()) break;
       const row = result.steps[index];
       try {

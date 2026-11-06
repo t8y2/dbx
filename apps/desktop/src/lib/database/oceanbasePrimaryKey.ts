@@ -204,7 +204,17 @@ export async function readOceanbasePrimaryKeySnapshot(target: PrimaryKeyTarget, 
       fail("unsupportedIndex");
     if (!same(indexUsers, [[target.schema, target.tableName, change.name, "P"]])) fail("sharedIndex");
     const reportedIndexes = indexes.filter((index) => index.name === indexName);
-    if (reportedIndexes.length !== 1 || !same(reportedIndexes[0]?.columns, indexColumns.map((row) => row[0])) || reportedIndexes[0]?.is_unique !== (uniqueness === "UNIQUE") || reportedIndexes[0]?.is_primary !== true || reportedIndexes[0]?.index_type !== "NORMAL") fail("incompleteMetadata");
+    if (
+      reportedIndexes.length !== 1 ||
+      !same(
+        reportedIndexes[0]?.columns,
+        indexColumns.map((row) => row[0]),
+      ) ||
+      reportedIndexes[0]?.is_unique !== (uniqueness === "UNIQUE") ||
+      reportedIndexes[0]?.is_primary !== true ||
+      reportedIndexes[0]?.index_type !== "NORMAL"
+    )
+      fail("incompleteMetadata");
   }
   if (oracle && change.oracleIndex && (change.oracleIndex.name || change.oracleIndex.policy === "none")) {
     const index = change.oracleIndex;

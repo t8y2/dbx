@@ -193,7 +193,7 @@ function sortedJson(value: unknown): string {
 
 function expressionTokens(expression: string): string[] {
   const tokens: string[] = [];
-  for (let i = 0; i < expression.length; ) {
+  for (let i = 0; i < expression.length;) {
     const ch = expression[i]!;
     if (/\s/.test(ch)) {
       i++;

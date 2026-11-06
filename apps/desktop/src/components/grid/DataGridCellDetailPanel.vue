@@ -236,8 +236,7 @@ defineExpose({ openSearch });
             valueFillsHeight && !detail.imagePreviewUrl ? 'min-h-0 flex-1' : '',
           ]"
           @dblclick="emit('startEdit')"
-          >{{ presentedValuePreview }}</pre
-        >
+          >{{ presentedValuePreview }}</pre>
         <div v-if="detail.isValuePreviewTruncated && !sideJsonView" :style="transformOpen ? { display: 'none' } : null" :class="valueBesideImage ? 'col-start-1' : ''" class="text-[11px] text-muted-foreground">{{ t("grid.largeValuePreviewHint", { count: detail.rawValuePreview.length }) }}</div>
       </div>
     </div>

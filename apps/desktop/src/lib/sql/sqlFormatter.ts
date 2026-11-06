@@ -281,7 +281,7 @@ function restoreProtectedEmptyLines(sql: string, markers: readonly string[]): st
   // Keep each terminator: normalizing the whole result would also rewrite
   // line breaks inside string literals and block comments.
   const lines = Array.from(sql.matchAll(/[^\r\n]*(?:\r\n|\r|\n|$)/g), ([line]) => line);
-  for (let index = 0; index < lines.length; ) {
+  for (let index = 0; index < lines.length;) {
     if (!markerSet.has(lines[index].trim())) {
       index += 1;
       continue;

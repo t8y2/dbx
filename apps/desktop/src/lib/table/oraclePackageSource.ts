@@ -9,7 +9,7 @@ type Token = {
 
 function tokens(source: string): Token[] {
   const result: Token[] = [];
-  for (let index = 0; index < source.length; ) {
+  for (let index = 0; index < source.length;) {
     const start = index;
     const char = source[index]!;
     if (/\s/.test(char)) {

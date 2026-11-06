@@ -19,15 +19,13 @@ vi.mock("@/lib/tabs/tabUiState", () => ({
 }));
 
 vi.mock("@/lib/backend/api", () => ({
-  mqttGetBrokerInfo: vi.fn(
-    async (): Promise<MqttBrokerInfo> => ({
-      brokerUrl: "mqtt://localhost:1883",
-      clientId: "dbx-test",
-      connected: true,
-      protocolVersion: "5.0",
-      subscriptionCount: 1,
-    }),
-  ),
+  mqttGetBrokerInfo: vi.fn(async (): Promise<MqttBrokerInfo> => ({
+    brokerUrl: "mqtt://localhost:1883",
+    clientId: "dbx-test",
+    connected: true,
+    protocolVersion: "5.0",
+    subscriptionCount: 1,
+  })),
   mqttListTopics: vi.fn(async () => [["sensors/temperature", "atmostonce"]]),
   mqttListSavedTopicConfigs: vi.fn(async () => [{ topic: "sensors/temperature", qos: "atmostonce", enabled: true, noLocal: false }]),
   mqttGetMessages: mqttGetMessagesMock,

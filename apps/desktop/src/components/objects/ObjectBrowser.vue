@@ -214,6 +214,8 @@ import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
+import { foreignKeyChecksPreview, foreignKeyChecksTargetResults, isForeignKeyChecksOverride, runForeignKeyChecksBatch, supportsForeignKeyChecksOption, type ForeignKeyChecksMode } from "@/lib/table/foreignKeyChecks";
+import ForeignKeyChecksSelect from "@/components/objects/ForeignKeyChecksSelect.vue";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { matchesTableNameFilter } from "@/lib/table/tableVGroup";
 import { filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
@@ -303,7 +305,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const cloneDialog = useOceanbaseCloneDialog(t);
 const { state: cloneDialogState, open: cloneDialogOpen } = cloneDialog;
-const { toast } = useToast();
+const { toast, dismissToast } = useToast();
 const { highlight } = useSqlHighlighter();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
@@ -343,6 +345,12 @@ let invalidObjectsDialogGeneration = 0;
 let invalidObjectSourceRequestGeneration = 0;
 let objectBrowserUnmounted = false;
 const rows = ref<ObjectBrowserRow[]>([]);
+// MySQL browser split (#14139): names first, details automatically afterwards.
+// Phase-two (details) reads are tracked per cache write token; see
+// scheduleObjectBrowserDetails(). Declared here because loadObjects() starts the
+// passes and helpers below only read from it.
+const objectBrowserDetailsPasses = new Map<ObjectBrowserRowsCacheWriteToken, Promise<unknown>>();
+const detailsPassEnabled = computed(() => usesLightweightMysqlBrowser(props.connection));
 const rootRef = ref<HTMLElement>();
 const search = ref(props.initialSearchQuery ?? "");
 function initialObjectBrowserFilter(): ObjectFilter {
@@ -624,6 +632,33 @@ const batchTruncateCascade = ref(false);
 const showBatchEmptyConfirm = ref(false);
 const batchEmptyPreviewSql = ref("");
 const batchEmptyPlan = ref<BatchTableEmptyPlanItem<ObjectBrowserRow>[]>([]);
+// Navicat-style "Foreign Key Checks: Default / Enable / Disable" for batch truncate / empty / drop.
+const batchForeignKeyChecks = ref<ForeignKeyChecksMode>("default");
+const supportsBatchForeignKeyChecks = computed(() => supportsForeignKeyChecksOption(effectiveDatabaseType.value));
+const batchForeignKeyChecksOverride = computed(() => isForeignKeyChecksOverride(batchForeignKeyChecks.value, effectiveDatabaseType.value));
+const batchDropDisplaySql = computed(() => foreignKeyChecksPreview(batchDropPreviewSql.value, batchForeignKeyChecks.value, effectiveDatabaseType.value));
+const batchTruncateDisplaySql = computed(() => foreignKeyChecksPreview(batchTruncatePreviewSql.value, batchForeignKeyChecks.value, effectiveDatabaseType.value));
+const batchEmptyDisplaySql = computed(() => foreignKeyChecksPreview(batchEmptyPreviewSql.value, batchForeignKeyChecks.value, effectiveDatabaseType.value));
+
+/** Run one statement per row with the chosen FOREIGN_KEY_CHECKS on a single session. */
+async function runObjectBrowserForeignKeyChecksBatch<T>(plan: readonly { target: T; sql: string }[], onProgress?: (completed: number) => void) {
+  const mode = batchForeignKeyChecks.value;
+  if (mode === "default") throw new Error("Foreign key checks override is not selected");
+  const clientSessionId = `foreign-key-checks:${uuid()}`;
+  const results = await runForeignKeyChecksBatch(
+    plan.map(({ sql }) => sql),
+    mode,
+    {
+      open: () => api.prewarmConnection(props.connection.id, props.database, undefined, clientSessionId),
+      execute: (sql, progress, options) => api.executeMultiWithProgress(props.connection.id, props.database, sql, progress, undefined, { continueOnError: options.continueOnError, clientSessionId }),
+      close: async () => {
+        await api.closeClientConnectionSession(props.connection.id, props.database, clientSessionId);
+      },
+    },
+    (progress) => onProgress?.(progress.completed),
+  );
+  return foreignKeyChecksTargetResults(plan, results);
+}
 // Paste table dialog state
 const showPasteDialog = ref(false);
 const pasteTableMode = ref<PasteTableMode>("structure-and-data");
@@ -3625,6 +3660,7 @@ function requestBatchDropTables() {
     return;
   }
   batchDropCascade.value = false;
+  batchForeignKeyChecks.value = "default";
   batchDropProgress.value = { completed: 0, total: 0 };
   batchDropPreviewSql.value = "";
   showBatchDropConfirm.value = true;
@@ -3654,9 +3690,16 @@ async function confirmBatchDropTables() {
         sql: await buildDropSqlForRow(target, { cascade: useCascade }),
       })),
     );
-    batchSql = plan.map(({ sql }) => sql).join(";\n");
-    const result = await executeObjectBrowserSqlWithProductionGuard(batchSql, () =>
-      runBatchTableDrop({
+    const useForeignKeyChecks = batchForeignKeyChecksOverride.value;
+    batchSql = useForeignKeyChecks ? foreignKeyChecksPreview(plan.map(({ sql }) => sql).join("\n"), batchForeignKeyChecks.value, effectiveDatabaseType.value) : plan.map(({ sql }) => sql).join(";\n");
+    const result = await executeObjectBrowserSqlWithProductionGuard(batchSql, async () => {
+      if (useForeignKeyChecks) {
+        const outcome = await runObjectBrowserForeignKeyChecksBatch(plan, (completed) => {
+          batchDropProgress.value = { completed, total: targets.length };
+        });
+        return { succeeded: outcome.succeeded, failed: outcome.failed[0]?.error };
+      }
+      return runBatchTableDrop({
         databaseType: effectiveDatabaseType.value,
         plan,
         executeStatement: (sql) => api.executeQuery(props.connection.id, props.database, sql),
@@ -3664,8 +3707,8 @@ async function confirmBatchDropTables() {
         onProgress: (progress) => {
           batchDropProgress.value = { completed: Math.min(progress.completed, targets.length), total: targets.length };
         },
-      }),
-    );
+      });
+    });
     if (!result) return;
 
     batchDropRecorded = true;
@@ -3723,6 +3766,7 @@ async function refreshBatchTruncatePreviewSql() {
 function requestBatchTruncateTables() {
   if (selectedTableCount.value === 0 || !supportsTruncateTable.value) return;
   batchTruncateCascade.value = false;
+  batchForeignKeyChecks.value = "default";
   batchTruncatePreviewSql.value = "";
   void refreshBatchTruncatePreviewSql();
   showBatchTruncateConfirm.value = true;
@@ -3764,8 +3808,16 @@ async function confirmBatchTruncateTables() {
         sql: await buildTruncateTableSql(tableAdminSqlOptions(row, { cascade: useCascade })),
       })),
     );
-    batchSql = statements.map(({ sql }) => sql).join(";\n");
+    const useForeignKeyChecks = batchForeignKeyChecksOverride.value;
+    batchSql = useForeignKeyChecks ? foreignKeyChecksPreview(statements.map(({ sql }) => sql).join("\n"), batchForeignKeyChecks.value, effectiveDatabaseType.value) : statements.map(({ sql }) => sql).join(";\n");
     const executed = await executeObjectBrowserSqlWithProductionGuard(batchSql, async () => {
+      if (useForeignKeyChecks) {
+        const outcome = await runObjectBrowserForeignKeyChecksBatch(statements.map((item) => ({ target: item.row, sql: item.sql })));
+        if (outcome.succeeded.length) await refreshMutatedTableDataTabsForRows(outcome.succeeded);
+        const failure = outcome.failed[0];
+        if (failure) throw new Error(`${failure.target.name}: ${failure.error.message}`);
+        return true;
+      }
       await runBatchTableTruncate(
         statements,
         async ({ sql }) => {
@@ -3820,6 +3872,7 @@ function requestBatchEmptyTables() {
   if (targets.length === 0) return;
   batchEmptyPlan.value = [];
   batchEmptyPreviewSql.value = "";
+  batchForeignKeyChecks.value = "default";
   void refreshBatchEmptyPreviewSql(targets)
     .then(() => {
       showBatchEmptyConfirm.value = true;
@@ -3835,8 +3888,14 @@ async function confirmBatchEmptyTables() {
   if (plan.length === 0) return;
   const start = Date.now();
   const asynchronousMutation = effectiveDatabaseType.value === "clickhouse";
-  const reviewSql = plan.map(({ sql }) => sql).join(";\n");
-  const result = await executeObjectBrowserSqlWithProductionGuard(reviewSql, () => {
+  const useForeignKeyChecks = batchForeignKeyChecksOverride.value;
+  const reviewSql = useForeignKeyChecks ? foreignKeyChecksPreview(plan.map(({ sql }) => sql).join("\n"), batchForeignKeyChecks.value, effectiveDatabaseType.value) : plan.map(({ sql }) => sql).join(";\n");
+  const result = await executeObjectBrowserSqlWithProductionGuard(reviewSql, async () => {
+    if (useForeignKeyChecks) {
+      // Keep the plan items as targets so the existing empty-result feedback stays unchanged.
+      const outcome = await runObjectBrowserForeignKeyChecksBatch(plan.map((item) => ({ target: item, sql: item.sql })));
+      return { succeeded: outcome.succeeded, failed: outcome.failed.map(({ target, error }) => ({ target, error: error.message })) };
+    }
     return runBatchTableEmpty(plan, async ({ sql }) => {
       await api.executeQuery(props.connection.id, props.database, sql);
     });
@@ -4497,7 +4556,16 @@ function onObjectBrowserKeydown(event: KeyboardEvent) {
 }
 
 async function confirmPasteTable() {
-  return effectiveDatabaseType.value === "oceanbase-oracle" ? cloneDialog.run(confirmPasteTableImpl) : confirmPasteTableImpl();
+  const databaseType = effectiveDatabaseType.value;
+  if (databaseType === "oceanbase-oracle") return cloneDialog.run(confirmPasteTableImpl);
+  if (databaseType === "mysql" || !pasteTableEntries.value.some((entry) => entry.targetName.trim())) return confirmPasteTableImpl();
+
+  const progressToast = toast(`${t("tableCopyTask.title")} · ${t("tableCopyTask.running")}`, { persistent: true, loading: true });
+  try {
+    await confirmPasteTableImpl();
+  } finally {
+    if (progressToast !== undefined) dismissToast(progressToast);
+  }
 }
 
 async function confirmPasteTableImpl() {
@@ -5246,9 +5314,12 @@ watch([() => props.initialEventName, () => props.initialEventOpenRequestId, () =
 // 匹配 0 行；schema 解析失败（loadSchemas 抛错或返回空列表）时标签会整体空白
 // (#8301)。经 objectListSchemaForConnection 回退到连接用户名（大写），仅限
 // 达梦；oracle/oceanbase-oracle 维持空 schema 由后端解析当前 schema。
-async function loadObjects(options?: { allowCached?: boolean; preserveExistingRows?: boolean; details?: boolean }) {
+// MySQL is two-phase and automatic (#14139 follow-up): this pass only enumerates
+// names, and scheduleObjectBrowserDetails() upgrades the rows on screen in the
+// background. No caller has to ask for "details" any more.
+async function loadObjects(options?: { allowCached?: boolean; preserveExistingRows?: boolean }) {
   clearTimeout(objectSearchTimer);
-  if (usesServerObjectPaging.value) return loadObjectPage(false, options);
+  if (usesServerObjectPaging.value) return loadObjectPage(false, { preserveExistingRows: options?.preserveExistingRows });
   error.value = "";
   // A new load supersedes any in-flight one, so reset the transient refresh flags
   // on entry. A superseded request's finally() can no longer run (the guard's
@@ -5287,7 +5358,14 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     finishOnce();
     // 行数/大小是随对象列表一起缓存的，直接返回缓存会让这两列一直停在上一次统计
     // （#10461）。对象列表本身仍按上面的约定不动，只把统计信息在后台补一次。
-    if (cached.stale && !usesLightweightMysqlBrowser(props.connection)) void revalidateCachedObjectStatistics(request, cacheWriteToken);
+    if (cached.stale && !detailsPassEnabled.value) void revalidateCachedObjectStatistics(request, cacheWriteToken);
+    // 轻量枚举过的缓存只有名字，注释/时间戳/统计都要回读：陈旧缓存先让统计回源再补
+    // 详情，避免两条重读同时打库；新鲜缓存直接补详情。
+    if (detailsPassEnabled.value && !rows.value.some((row) => row.comment?.trim() || row.created_at?.trim() || row.updated_at?.trim())) {
+      const start = detailsPassStarter(request, cacheWriteToken, undefined);
+      if (cached.stale) void revalidateCachedObjectStatistics(request, cacheWriteToken).then(start);
+      else start();
+    }
     return;
   } else {
     // No scaffold: first load in this scope, cache invalidated by a DDL mutation,
@@ -5304,12 +5382,15 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
   }
 
   try {
-    const load = props.connection.db_type === "mongodb" ? loadMongoObjectBrowserRows(request.scope.connectionId, request.scope.database) : loadSqlObjectBrowserRows(request, options?.details);
+    const load = props.connection.db_type === "mongodb" ? loadMongoObjectBrowserRows(request.scope.connectionId, request.scope.database) : loadSqlObjectBrowserRows(request);
     const nextRows = await objectBrowserRowsLoadGuard.wait(request.epoch, load, metadataLoadBudgetMs(props.connection.query_timeout_secs));
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     applyObjectBrowserRows(nextRows);
     const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows);
-    if (!usesLightweightMysqlBrowser(props.connection) || options?.details) void loadObjectStatistics(request, cacheWriteToken, cachedAt);
+    // Row/size statistics come from a separate aggregate read; the MySQL split only
+    // skips them on the enumeration, not for the whole view.
+    if (!detailsPassEnabled.value) void loadObjectStatistics(request, cacheWriteToken, cachedAt);
+    else detailsPassStarter(request, cacheWriteToken, cachedAt)();
   } catch (e: any) {
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     // Keep visible rows on a background revalidate failure — surface a lightweight
@@ -5333,7 +5414,7 @@ function objectPageAnchor(object: ObjectInfo): string {
   return exactOracleTriggerMetadata(object.trigger) ? tablePageRowAnchorKey(object.name, object.schema, undefined, object.trigger) : JSON.stringify([object.schema, object.name, object.object_type, object.signature]);
 }
 
-async function loadObjectPage(append: boolean, options?: { preserveExistingRows?: boolean; details?: boolean }) {
+async function loadObjectPage(append: boolean, options?: { preserveExistingRows?: boolean }) {
   if (append && (loadingObjects.value || refreshingObjects.value || loadingMoreObjects.value || !hasMoreObjects.value)) return;
   const schema = exactIndexList.value ? indexParentSchema() : needsSchema.value ? objectListSchemaForConnection(props.connection, selectedSchema.value) : props.database;
   const request = objectBrowserRowsLoadGuard.start(objectBrowserRowsCacheScope(schema));
@@ -5426,8 +5507,7 @@ async function loadSqlObjectBrowserRows(request: ObjectBrowserRowsLoadHandle, de
   // unbounded exact subset into the legacy all view defeats both contracts.
   const types = supportsSchemaIndexes.value ? sidebarObjectKindsForDatabase(effectiveDatabaseType.value).filter((type) => type !== "INDEX") : undefined;
   const readOptions = usesLightweightMysqlBrowser(props.connection) ? { lightweight: !details } : oracleTriggerObjectReadOptions(props.connection, types, request.scope.catalog);
-  const readKey = JSON.stringify([createObjectBrowserRowsCacheWriteToken(request.scope), types, readOptions]);
-  const objects: ObjectInfo[] = await shareObjectBrowserRead(readKey, () =>
+  const objects: ObjectInfo[] = await shareObjectBrowserRead(objectBrowserReadKey(request, types, readOptions), () =>
     readOptions
       ? api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog, undefined, undefined, readOptions)
       : api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog),
@@ -5445,6 +5525,105 @@ async function loadMongoObjectBrowserRows(connectionId: string, database: string
   return buildMongoObjectBrowserRows({ collections: visibleMongoCollections(collections), database });
 }
 
+interface ObjectBrowserDetailsPass {
+  epoch: number;
+  cacheWriteToken: ObjectBrowserRowsCacheWriteToken;
+  waitFor?: Promise<unknown>;
+}
+
+/**
+ * Phase two of the MySQL browser read (#14139 follow-up).
+ *
+ * The lightweight enumeration ships names immediately and leaves comments,
+ * create/update times and row/size statistics for later. Instead of a manual
+ * toolbar button, run that detail read in the background as soon as the names
+ * are visible: rows are patched in place (never blanked), failures stay silent
+ * (names remain usable), and a superseded scope drops its result.
+ *
+ * The pass is started through a bound starter that defers it onto a timer:
+ * calling it inline from `loadObjects()` reaches the pass bookkeeping while the
+ * row list is still being applied, and deferring one task keeps the list's own
+ * render ahead of the second read.
+ */
+function detailsPassStarter(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined): () => void {
+  const epoch = request.epoch;
+  const waitFor = cachedAt !== undefined ? Promise.resolve(cachedAt) : undefined;
+  return () => {
+    // The pass is decorative and must never surface as a load failure: defer it and
+    // keep any throw inside the pass.
+    window.setTimeout(() => {
+      void scheduleObjectBrowserDetails({ epoch, scope: cacheWriteToken.scope } as ObjectBrowserRowsLoadHandle, cacheWriteToken, waitFor);
+    }, 0);
+  };
+}
+
+function scheduleObjectBrowserDetails(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, waitFor?: Promise<unknown>): Promise<unknown> {
+  const existing = objectBrowserDetailsPasses.get(cacheWriteToken);
+  if (existing) return existing;
+  const pending = startObjectBrowserDetails({ epoch: request.epoch, cacheWriteToken, waitFor });
+  objectBrowserDetailsPasses.set(cacheWriteToken, pending);
+  void pending
+    .finally(() => {
+      if (objectBrowserDetailsPasses.get(cacheWriteToken) === pending) objectBrowserDetailsPasses.delete(cacheWriteToken);
+    })
+    .catch(() => undefined);
+  return pending;
+}
+
+function startObjectBrowserDetails(pass: ObjectBrowserDetailsPass): Promise<unknown> {
+  // `loadSqlObjectBrowserRows()` carries no cache-write-token argument, so this handle
+  // only has to describe the same scope and epoch for the load guard.
+  const request: ObjectBrowserRowsLoadHandle = { epoch: pass.epoch, scope: pass.cacheWriteToken.scope };
+  return (async () => {
+    // Let the background statistics read finish first: both statements hit
+    // information_schema on the same metadata pool.
+    await pass.waitFor?.catch(() => undefined);
+    if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+    // A previous full read may have filled the rows while this pass waited on the
+    // statistics; then there is nothing left to fetch.
+    if (rows.value.some((row) => Boolean(row.comment?.trim()))) return;
+    try {
+      const details = await loadSqlObjectBrowserRows(request, true);
+      if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+      applyObjectBrowserDetails(details);
+      cacheObjectBrowserRows(pass.cacheWriteToken, rows.value);
+      void loadObjectStatistics(request, pass.cacheWriteToken, undefined);
+    } catch (e) {
+      // Details are decorative: keep the names already rendered and stay quiet.
+      console.debug("[ObjectBrowser] object details unavailable", e);
+    }
+  })();
+}
+
+/**
+ * Merges the details read into the rendered list by object identity: the
+ * lightweight pass and the details pass may return different orders, and any
+ * other field already on screen must survive untouched.
+ */
+function applyObjectBrowserDetails(details: readonly ObjectBrowserRow[]) {
+  const byId = new Map(details.map((row) => [row.id, row]));
+  rows.value = rows.value.map((row) => {
+    const detail = byId.get(row.id);
+    if (!detail) return row;
+    return {
+      ...row,
+      comment: detail.comment ?? row.comment,
+      created_at: detail.created_at ?? row.created_at,
+      updated_at: detail.updated_at ?? row.updated_at,
+    };
+  });
+}
+
+/**
+ * Shared-read key for an object enumeration. Built from plain values only: the
+ * previous `JSON.stringify([writeToken, ...])` embedded the token's generation and
+ * frozen scope, so two equivalent browsers never shared a pending read.
+ */
+function objectBrowserReadKey(request: ObjectBrowserRowsLoadHandle, types: (SidebarObjectKind | "EVENT")[] | undefined, readOptions: import("@/types/database").MetadataReadOptions | undefined): string {
+  const { connectionId, database, schema, catalog } = request.scope;
+  return JSON.stringify([connectionId, database, schema, catalog ?? "", types ?? null, readOptions?.lightweight ?? null, readOptions?.identityMode ?? null]);
+}
+
 async function loadObjectStatistics(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
   if (!rows.value.some((row) => row.type === "TABLE")) return;
   try {
@@ -5452,7 +5631,8 @@ async function loadObjectStatistics(request: ObjectBrowserRowsLoadHandle, cacheW
     if (!objectBrowserRowsLoadGuard.isCurrent(request) || stats.length === 0) return;
     mergeObjectStatistics(stats, request.scope.schema, cacheWriteToken, cachedAt);
   } catch (e) {
-    if (usesLightweightMysqlBrowser(props.connection) && objectBrowserRowsLoadGuard.isCurrent(request)) scaffoldRefreshError.value = translateBackendError(t, e);
+    // Statistics are decorative for every dialect: the name list stays usable and
+    // a background pass must not raise the banner an explicit read used to.
     console.debug("[ObjectBrowser] table statistics unavailable", e);
   }
 }
@@ -6175,7 +6355,6 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <Button v-if="showInlineSidePanelToggle" variant="ghost" size="icon" class="h-7 w-7" :class="{ 'text-primary': isSidePanelOpen }" :title="isSidePanelOpen ? t('objects.closeDetailPanel') : t('objects.openDetailPanel')" @click="toggleSidePanel">
         <PanelRight class="h-3.5 w-3.5" />
       </Button>
-      <Button v-if="usesLightweightMysqlBrowser(props.connection)" variant="ghost" size="sm" :disabled="loadingObjects || refreshingObjects" @click="loadObjects({ preserveExistingRows: true, details: true })">{{ t("objects.loadDetails") }}</Button>
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="refreshTooltip" :disabled="loadingObjects" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingObjects || refreshingObjects }" />
       </Button>
@@ -6946,7 +7125,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     v-model:open="showBatchDropConfirm"
     :title="batchDropConfirmTitle"
     :message="batchDropConfirmMessage"
-    :sql="batchDropPreviewSql"
+    :sql="batchDropDisplaySql"
     :confirm-label="t('objects.dropSelected')"
     :loading="batchDropExecuting && !batchTriggerDropRequested"
     :confirm-disabled="batchTriggerDropRequested && (!batchTriggerDropPreview?.isCurrent() || browserTriggerBusy)"
@@ -6965,6 +7144,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <div class="h-full bg-primary transition-[width] duration-200" :style="{ width: `${batchDropProgressPercent}%` }" />
         </div>
       </div>
+      <ForeignKeyChecksSelect v-if="supportsBatchForeignKeyChecks && !batchTriggerDropRequested" v-model="batchForeignKeyChecks" :disabled="batchDropExecuting" />
       <label v-if="canBatchDropCascade" class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
         <input v-model="batchDropCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshBatchDropPreviewSql()" />
         <span class="grid gap-0.5">
@@ -6979,12 +7159,13 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     v-model:open="showBatchTruncateConfirm"
     :title="t('objects.confirmBatchTruncateTitle')"
     :message="t('objects.confirmBatchTruncateMessage', { count: selectedTableCount })"
-    :sql="batchTruncatePreviewSql"
+    :sql="batchTruncateDisplaySql"
     :confirm-label="t('objects.truncateSelected')"
     @confirm="confirmBatchTruncateTables"
   >
-    <template v-if="canBatchTruncateCascade" #options>
-      <label class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
+    <template v-if="canBatchTruncateCascade || supportsBatchForeignKeyChecks" #options>
+      <ForeignKeyChecksSelect v-if="supportsBatchForeignKeyChecks" v-model="batchForeignKeyChecks" />
+      <label v-if="canBatchTruncateCascade" class="mb-3 flex items-start gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm">
         <input v-model="batchTruncateCascade" type="checkbox" class="mt-0.5 h-3.5 w-3.5 shrink-0 accent-primary" @change="refreshBatchTruncatePreviewSql()" />
         <span class="grid gap-0.5">
           <span class="font-medium text-foreground">{{ t("contextMenu.truncateTableCascade") }}</span>
@@ -6998,10 +7179,14 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     v-model:open="showBatchEmptyConfirm"
     :title="t('contextMenu.confirmBatchEmptyTitle', { count: batchEmptyPlan.length })"
     :message="t('contextMenu.confirmBatchEmptyMessage', { count: batchEmptyPlan.length })"
-    :sql="batchEmptyPreviewSql"
+    :sql="batchEmptyDisplaySql"
     :confirm-label="t('contextMenu.batchEmpty', { count: batchEmptyPlan.length })"
     @confirm="confirmBatchEmptyTables"
-  />
+  >
+    <template v-if="supportsBatchForeignKeyChecks" #options>
+      <ForeignKeyChecksSelect v-model="batchForeignKeyChecks" />
+    </template>
+  </DangerConfirmDialog>
 
   <OraclePackageSaveAsDialog
     :open="packageSaveAsOpen"

@@ -46,6 +46,7 @@ export type ShortcutActionId =
   | "lowercaseSelection"
   | "toggleCaseSelection"
   | "convertNamingStyle"
+  | "convertSelectionToDelimited"
   | "exPasteSqlInCondition"
   | "toggleFold"
   | "foldAll"
@@ -446,6 +447,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutConvertNamingStyle",
     scope: "editor",
     defaultShortcut: "Shift+Alt+C",
+  },
+  {
+    id: "convertSelectionToDelimited",
+    labelKey: "settings.shortcutConvertSelectionToDelimited",
+    scope: "editor",
+    defaultShortcut: "Mod+Alt+,",
   },
   {
     id: "exPasteSqlInCondition",

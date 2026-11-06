@@ -110,20 +110,17 @@ defineExpose({ focusWhere });
 const filterBuilderRef = ref<InstanceType<typeof DataGridFilterBuilder>>();
 const pendingFirstEmptyRuleColumnSearch = ref(false);
 let openingFirstEmptyRuleColumnSearch = false;
+const DEFAULT_WHERE_PANE_RATIO = 0.7;
 const whereWidth = ref<number | null>(null);
 const resizing = ref(false);
 let resizeStartX = 0;
 let resizeStartWidth = 0;
 
-const wherePaneStyle = computed(() =>
-  whereWidth.value == null
-    ? {}
-    : {
-        // Retain the dragged preference while keeping both panes visible when
-        // their container later shrinks, without a reactive resize loop.
-        flex: `0 0 clamp(min(${MIN_SEARCH_SPLIT_PANE_WIDTH}px, 50%), ${whereWidth.value}px, max(50%, calc(100% - ${MIN_SEARCH_SPLIT_PANE_WIDTH}px)))`,
-      },
-);
+const wherePaneStyle = computed(() => ({
+  // Give conditions more room by default, but retain the dragged preference and
+  // keep ORDER BY visible when the container shrinks.
+  flex: `0 0 clamp(min(${MIN_SEARCH_SPLIT_PANE_WIDTH}px, 50%), ${whereWidth.value == null ? `${DEFAULT_WHERE_PANE_RATIO * 100}%` : `${whereWidth.value}px`}, max(50%, calc(100% - ${MIN_SEARCH_SPLIT_PANE_WIDTH}px)))`,
+}));
 
 function containerWidth(): number {
   return containerRef.value?.getBoundingClientRect().width ?? 0;
@@ -135,7 +132,7 @@ function onResizeStart(event: MouseEvent) {
   event.preventDefault();
   resizing.value = true;
   resizeStartX = event.clientX;
-  resizeStartWidth = clampSearchSplitWidth({ containerWidth: width, desiredWidth: whereWidth.value ?? undefined });
+  resizeStartWidth = clampSearchSplitWidth({ containerWidth: width, desiredWidth: whereWidth.value ?? undefined, defaultRatio: DEFAULT_WHERE_PANE_RATIO });
   whereWidth.value = resizeStartWidth;
   document.body.classList.add("select-none", "cursor-col-resize");
   window.addEventListener("mousemove", onResizeMove);
@@ -157,8 +154,7 @@ function onResizeEnd() {
 }
 
 function resetWidth() {
-  const width = containerWidth();
-  whereWidth.value = width > 0 ? clampSearchSplitWidth({ containerWidth: width }) : null;
+  whereWidth.value = null;
 }
 
 function updateRule(id: string, patch: Partial<DataGridStructuredFilterRule>) {

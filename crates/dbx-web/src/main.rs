@@ -1,4 +1,5 @@
 mod auth;
+mod captcha;
 mod credentials;
 mod demo;
 mod error;
@@ -589,6 +590,18 @@ async fn serve() -> Result<(), String> {
 
     let public_base_path = normalize_public_base_path(std::env::var("DBX_PUBLIC_BASE_PATH").ok());
 
+    // `DBX_WEB_CAPTCHA` pins the policy for managed deployments; otherwise the
+    // value saved from `设置 → 安全` wins, and `auto` is the default.
+    let captcha_env_raw = std::env::var("DBX_WEB_CAPTCHA").ok();
+    let captcha_env_locked = captcha_env_raw.as_deref().is_some_and(|raw| !raw.trim().is_empty());
+    let captcha_mode = match captcha_env_raw.as_deref().filter(|raw| !raw.trim().is_empty()) {
+        Some(raw) => captcha::CaptchaMode::parse(raw),
+        None => match app_state.storage.load_web_login_captcha_mode().await.unwrap_or(None).as_deref() {
+            Some(stored) => captcha::CaptchaMode::parse(stored),
+            None => captcha::CaptchaMode::Auto,
+        },
+    };
+
     let demo_mode = demo::demo_mode_from_env();
 
     let migration_ready = storage_migration_ready(&app_state).await;
@@ -617,6 +630,9 @@ async fn serve() -> Result<(), String> {
         managed_sql_previews: Default::default(),
         nacos_imports: RwLock::new(HashMap::new()),
         login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
+        captchas: captcha::CaptchaStore::new(),
+        captcha_mode: tokio::sync::RwLock::new(captcha_mode),
+        captcha_env_locked,
         export_files: RwLock::new(HashMap::new()),
         ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
         migration_ready: Arc::new(AtomicBool::new(migration_ready)),
@@ -649,6 +665,7 @@ async fn serve() -> Result<(), String> {
         // global limit so the extractor cannot buffer an unauthenticated DoS
         // body before any rate limiting runs.
         .route("/auth/login", post(auth::login).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
+        .route("/auth/captcha", get(auth::captcha))
         .route("/auth/check", get(auth::check))
         .route("/auth/setup", post(auth::setup).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
         .route("/auth/change-password", post(auth::change_password).layer(DefaultBodyLimit::max(AUTH_BODY_LIMIT_BYTES)))
@@ -1500,6 +1517,10 @@ async fn serve() -> Result<(), String> {
             "/app-settings/mcp-policy",
             get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
         )
+        .route(
+            "/app-settings/web-login-captcha",
+            get(routes::app_settings::load_web_login_captcha).put(routes::app_settings::save_web_login_captcha),
+        )
         .route("/app-settings/mcp-tool-catalog", get(routes::app_settings::load_mcp_tool_catalog))
         .route("/app-settings/mcp-access-policy", get(routes::app_settings::load_mcp_access_policy))
         .route("/app-settings/mcp-access-policy/recover", post(routes::app_settings::reset_invalid_mcp_access_policy))
@@ -1636,8 +1657,11 @@ async fn serve() -> Result<(), String> {
     }
     if password_disabled {
         tracing::info!("Password protection is disabled");
-    } else if std::env::var("DBX_PASSWORD").is_ok() {
-        tracing::info!("Password protection is enabled");
+    } else {
+        if std::env::var("DBX_PASSWORD").is_ok() {
+            tracing::info!("Password protection is enabled");
+        }
+        tracing::info!("Login captcha mode: {}", captcha_mode.as_str());
     }
     if !password_viewer_enabled {
         tracing::info!("Saved connection password viewing is disabled");

@@ -714,6 +714,65 @@ fn normalize_etcd_endpoints(config: &ConnectionConfig, host: &str, port: u16) ->
     format!("{scheme}://{host}:{port}")
 }
 
+/// Apply runtime-only forwarding destinations without rewriting logical TLS peers.
+pub fn with_zookeeper_endpoint_routes(
+    mut params: serde_json::Value,
+    routes: Option<&std::collections::BTreeMap<String, String>>,
+) -> serde_json::Value {
+    if let Some(routes) = routes {
+        params["zookeeper_endpoint_routes"] = serde_json::json!(routes);
+    }
+    params
+}
+
+/// Logical ensemble members, using the same default port and chroot split as the Agent.
+pub fn zookeeper_connection_endpoints(config: &ConnectionConfig) -> Result<Vec<(String, u16)>, String> {
+    let value = normalize_zookeeper_connect_string(config, &config.host, config.port);
+    let value = value.strip_prefix("zookeeper://").unwrap_or(&value);
+    let hosts = value.split('/').next().unwrap_or("");
+    let mut endpoints = Vec::new();
+    for server in hosts.split(',').map(str::trim).filter(|server| !server.is_empty()) {
+        let invalid = || format!("Invalid ZooKeeper endpoint: {server}");
+        let (host, port) = if let Some(rest) = server.strip_prefix('[') {
+            let (host, suffix) = rest.split_once(']').ok_or_else(invalid)?;
+            let port = if suffix.is_empty() {
+                2181
+            } else {
+                suffix.strip_prefix(':').ok_or_else(invalid)?.parse::<u16>().map_err(|_| invalid())?
+            };
+            if host.parse::<std::net::Ipv6Addr>().is_err() {
+                return Err(invalid());
+            }
+            (host.to_owned(), port)
+        } else if server.parse::<std::net::Ipv6Addr>().is_ok() {
+            (server.to_owned(), 2181)
+        } else if let Some((host, port)) = server.split_once(':') {
+            (host.to_owned(), port.parse::<u16>().map_err(|_| invalid())?)
+        } else {
+            (server.to_owned(), 2181)
+        };
+        if host.is_empty() || host.chars().any(char::is_whitespace) || port == 0 {
+            return Err(invalid());
+        }
+        let endpoint = (host, port);
+        if !endpoints.contains(&endpoint) {
+            endpoints.push(endpoint);
+        }
+    }
+    if endpoints.is_empty() {
+        return Err("ZooKeeper connect string contains no servers".to_owned());
+    }
+    Ok(endpoints)
+}
+
+pub fn zookeeper_endpoint_address(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{}]:{port}", host.trim_matches(['[', ']']))
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 fn normalize_zookeeper_connect_string(config: &ConnectionConfig, host: &str, port: u16) -> String {
     config
         .connection_string
@@ -721,7 +780,7 @@ fn normalize_zookeeper_connect_string(config: &ConnectionConfig, host: &str, por
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| format!("{host}:{port}"))
+        .unwrap_or_else(|| zookeeper_endpoint_address(host, port))
 }
 
 fn normalize_agent_url_params(params: Option<&str>) -> &str {
@@ -867,6 +926,40 @@ mod tests {
             production_databases: vec![],
             production_badge_scope: None,
             database_info: None,
+        }
+    }
+
+    #[test]
+    fn zookeeper_routes_preserve_full_logical_ensemble_and_namespace() {
+        let mut cfg = config(DatabaseType::ZooKeeper, None);
+        cfg.connection_string = Some("zookeeper:// zk1, [2001:db8::1]:2281,zk3:2182/app".into());
+        let endpoints = super::zookeeper_connection_endpoints(&cfg).unwrap();
+        assert_eq!(endpoints, vec![("zk1".into(), 2181), ("2001:db8::1".into(), 2281), ("zk3".into(), 2182)]);
+        let routes = std::collections::BTreeMap::from([
+            ("zk1:2181".into(), "127.0.0.1:31001".into()),
+            ("[2001:db8::1]:2281".into(), "127.0.0.1:31002".into()),
+            ("zk3:2182".into(), "127.0.0.1:31003".into()),
+        ]);
+        let params =
+            super::with_zookeeper_endpoint_routes(agent_connect_params(&cfg, "zk1", 2181, "").unwrap(), Some(&routes));
+        assert_eq!(params["zookeeper_connect_string"], cfg.connection_string.unwrap());
+        assert_eq!(params["zookeeper_endpoint_routes"], serde_json::json!(routes));
+    }
+
+    #[test]
+    fn zookeeper_endpoint_parser_handles_empty_string_ipv6_and_rejects_bad_ports() {
+        let mut cfg = config(DatabaseType::ZooKeeper, None);
+        cfg.host = "2001:db8::2".into();
+        cfg.port = 2281;
+        assert_eq!(super::zookeeper_connection_endpoints(&cfg).unwrap(), vec![("2001:db8::2".into(), 2281)]);
+        cfg.connection_string = Some("[::1], ::2, zk1,zk1:2181/root".into());
+        assert_eq!(
+            super::zookeeper_connection_endpoints(&cfg).unwrap(),
+            vec![("::1".into(), 2181), ("::2".into(), 2181), ("zk1".into(), 2181)]
+        );
+        for value in ["/app", "zk:0", "zk:65536", "zk:bad", "[bad]:2181"] {
+            cfg.connection_string = Some(value.into());
+            assert!(super::zookeeper_connection_endpoints(&cfg).is_err(), "{value}");
         }
     }
 

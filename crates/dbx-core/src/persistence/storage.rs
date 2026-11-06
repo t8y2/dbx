@@ -7585,12 +7585,47 @@ impl Storage {
     }
 
     pub async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        self.add_connection_for_mcp_in_group(config, None).await
+    }
+
+    /// Add a connection and, when `group_id` is set, place it in that sidebar
+    /// group in the same transaction. A missing group rolls the connection
+    /// insert back, so MCP never reports an added connection that silently
+    /// stayed ungrouped.
+    pub async fn add_connection_for_mcp_in_group(
+        &self,
+        config: ConnectionConfig,
+        group_id: Option<&str>,
+    ) -> Result<ConnectionConfig, String> {
         let config = config.canonicalized();
+        let group_id = group_id.map(str::to_string);
         let codec = self.secret_codec_for_write(connection_config_has_inline_secrets(&config)).await?;
         self.with_conn(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
             ensure_mcp_connection_change_allowed_in_tx(&tx, None)?;
             persist_connection_in_tx(&tx, &codec, &config)?;
+            if let Some(group_id) = group_id.as_deref() {
+                let layout_json: Option<String> = tx
+                    .query_row("SELECT layout_json FROM sidebar_layout WHERE id = 1", [], |row| row.get(0))
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+                let layout = match layout_json {
+                    Some(layout) => Some(
+                        serde_json::from_str::<serde_json::Value>(&layout)
+                            .map_err(|error| format!("INVALID_SIDEBAR_LAYOUT: {error}"))?,
+                    ),
+                    None => None,
+                };
+                let next = crate::ai::sidebar_groups::append_connection(
+                    layout.as_ref(),
+                    &config.id,
+                    &crate::ai::sidebar_groups::GroupSelector::Id(group_id.to_string()),
+                )
+                .map_err(|error| error.to_string())?;
+                let next_json = serde_json::to_string(&next).map_err(|error| error.to_string())?;
+                tx.execute("INSERT OR REPLACE INTO sidebar_layout (id, layout_json) VALUES (1, ?1)", [next_json])
+                    .map_err(|error| error.to_string())?;
+            }
             tx.commit().map_err(|e| e.to_string())?;
             Ok(config)
         })
@@ -8958,6 +8993,47 @@ impl Storage {
             })
             .await?;
         json.map(|value| serde_json::from_str(&value).map_err(|e| e.to_string())).transpose()
+    }
+
+    /// Persist `next` only when the row still holds `expected`. `None` means
+    /// the caller read an absent row. The read and write share one immediate
+    /// transaction, so two MCP calls cannot silently overwrite each other's
+    /// group move; `false` tells the caller to re-read and retry.
+    ///
+    /// The comparison is semantic (parsed JSON), not textual: the desktop may
+    /// rewrite the same tree with different key order or whitespace.
+    pub async fn replace_sidebar_layout_if_unchanged(
+        &self,
+        expected: Option<&serde_json::Value>,
+        next: &serde_json::Value,
+    ) -> Result<bool, String> {
+        let next_json = serde_json::to_string(next).map_err(|error| error.to_string())?;
+        let expected = match expected {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => Some(value.clone()),
+        };
+        self.with_conn(move |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            let current_json: Option<String> = tx
+                .query_row("SELECT layout_json FROM sidebar_layout WHERE id = 1", [], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let current = match current_json {
+                Some(current) => Some(
+                    serde_json::from_str::<serde_json::Value>(&current)
+                        .map_err(|error| format!("INVALID_SIDEBAR_LAYOUT: {error}"))?,
+                ),
+                None => None,
+            };
+            if current != expected {
+                return Ok(false);
+            }
+            tx.execute("INSERT OR REPLACE INTO sidebar_layout (id, layout_json) VALUES (1, ?1)", [next_json])
+                .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(true)
+        })
+        .await
     }
 
     pub async fn save_table_vgroups(&self, scope_key: &str, layout: &serde_json::Value) -> Result<(), String> {

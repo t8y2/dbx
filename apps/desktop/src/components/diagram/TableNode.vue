@@ -5,6 +5,7 @@ import { Table2, KeyRound, Link2 } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import type { DiagramTable, DiagramRelationship } from "@/lib/diagram/erDiagram";
 import { isDraftTable } from "@/lib/diagram/erDiagram";
+import { FOCUSED_TABLE_COLOR } from "@/lib/diagram/focused-table";
 import type { InferredRelationship } from "@/types/diagram";
 import { useLayerStore } from "@/lib/diagram/layer-store";
 import { CARD_WIDTH, COLUMN_TYPE_WIDTH, COLUMN_NAME_MAX_CHARS, COLUMN_TYPE_MAX_CHARS, TABLE_NAME_MAX_CHARS, EDGE_HANDLE_OUTSET, diagramVisibleColumns } from "@/lib/diagram/diagram-constants";
@@ -16,6 +17,7 @@ const props = defineProps<{
     table: DiagramTable;
     relationships?: (DiagramRelationship | InferredRelationship)[];
     isMultiSchema?: boolean;
+    isFocused?: boolean;
   };
   selected?: boolean;
 }>();
@@ -41,9 +43,7 @@ function isForeignKeyColumn(table: DiagramTable, columnName: string): boolean {
 function isRelationshipColumn(table: DiagramTable, columnName: string): boolean {
   if (!props.data.relationships) return false;
   const tableId = props.data.isMultiSchema && table.schema ? `${table.schema}.${table.name}` : table.name;
-  return props.data.relationships.some(
-    (relationship) => ((relationship.sourceTable === tableId || relationship.sourceTable === table.name) && relationship.sourceColumn === columnName) || ((relationship.targetTable === tableId || relationship.targetTable === table.name) && relationship.targetColumn === columnName),
-  );
+  return props.data.relationships.some((relationship) => (relationship.sourceTable === tableId && relationship.sourceColumn === columnName) || (relationship.targetTable === tableId && relationship.targetColumn === columnName));
 }
 
 function truncateLabel(value: string, maxChars: number): string {
@@ -68,7 +68,12 @@ const handleOffsetStyle = computed(() =>
 </script>
 
 <template>
-  <div class="relative rounded-md border bg-background shadow-sm" :class="selected ? 'border-primary ring-1 ring-primary/30' : 'border-border'" :style="{ width: `${CARD_WIDTH}px`, borderLeft: `3px solid ${layerColor}` }" @dblclick.stop="emit('dblclick', $event)">
+  <div
+    class="relative rounded-md border bg-background shadow-sm"
+    :class="selected ? 'border-primary ring-2 ring-primary/60' : 'border-border'"
+    :style="{ width: `${CARD_WIDTH}px`, borderColor: data.isFocused ? FOCUSED_TABLE_COLOR : undefined, borderLeft: `3px solid ${layerColor}` }"
+    @dblclick.stop="emit('dblclick', $event)"
+  >
     <Handle id="left" type="source" :position="Position.Left" class="!h-2 !w-2 !min-h-0 !min-w-0 !border-0 !bg-transparent !opacity-0" :style="handleOffsetStyle.left" />
     <Handle id="left-target" type="target" :position="Position.Left" class="!h-2 !w-2 !min-h-0 !min-w-0 !border-0 !bg-transparent !opacity-0" :style="handleOffsetStyle.left" />
     <Handle id="right" type="source" :position="Position.Right" class="!h-2 !w-2 !min-h-0 !min-w-0 !border-0 !bg-transparent !opacity-0" :style="handleOffsetStyle.right" />
@@ -78,24 +83,24 @@ const handleOffsetStyle = computed(() =>
     <Handle id="bottom" type="source" :position="Position.Bottom" class="!h-2 !w-2 !min-h-0 !min-w-0 !border-0 !bg-transparent !opacity-0" :style="handleOffsetStyle.bottom" />
     <Handle id="bottom-target" type="target" :position="Position.Bottom" class="!h-2 !w-2 !min-h-0 !min-w-0 !border-0 !bg-transparent !opacity-0" :style="handleOffsetStyle.bottom" />
     <div class="overflow-hidden rounded-[inherit]">
-      <div class="flex h-11 cursor-grab items-center gap-2 border-b bg-muted/40 px-3 active:cursor-grabbing">
-        <Table2 class="h-4 w-4 shrink-0 text-muted-foreground" />
+      <div class="flex h-11 cursor-grab items-center gap-2 border-b bg-muted/40 px-3 active:cursor-grabbing" :style="data.isFocused ? { backgroundColor: FOCUSED_TABLE_COLOR, color: 'white' } : undefined">
+        <Table2 class="h-4 w-4 shrink-0" :class="data.isFocused ? 'text-white/90' : 'text-muted-foreground'" />
         <div class="min-w-0 flex-1 flex flex-col justify-center">
-          <span v-if="data.isMultiSchema && data.table.schema" class="truncate text-[10px] text-muted-foreground font-mono leading-none mb-0.5" :title="data.table.schema">
+          <span v-if="data.isMultiSchema && data.table.schema" class="truncate text-[10px] font-mono leading-none mb-0.5" :class="data.isFocused ? 'text-white/90' : 'text-muted-foreground'" :title="data.table.schema">
             {{ data.table.schema }}
           </span>
           <span class="min-w-0 truncate text-sm font-medium leading-tight" :title="data.isMultiSchema && data.table.schema ? `${data.table.schema}.${data.table.name}` : data.table.name">
             {{ truncateLabel(data.table.name, TABLE_NAME_MAX_CHARS) }}
           </span>
         </div>
-        <Badge v-if="isDraft" variant="outline" class="h-5 shrink-0 px-1.5 text-[10px] border-amber-500/50 text-amber-700 dark:text-amber-400">Draft</Badge>
-        <Badge variant="outline" class="h-5 px-1.5 text-[10px]">{{ visibleColumns(data.table).length }}</Badge>
+        <Badge v-if="isDraft" variant="outline" class="h-5 shrink-0 px-1.5 text-[10px]" :class="data.isFocused ? 'border-white/60 text-white' : 'border-amber-500/50 text-amber-700 dark:text-amber-400'">Draft</Badge>
+        <Badge variant="outline" class="h-5 px-1.5 text-[10px]" :class="data.isFocused ? 'border-white/60 text-white' : ''">{{ visibleColumns(data.table).length }}</Badge>
       </div>
       <div v-if="commentText(data.table.comment)" class="flex h-4 items-center gap-1.5 border-b border-border/40 bg-muted/20 px-3">
         <span class="min-w-0 flex-1 truncate text-[10px] leading-none text-muted-foreground" :title="commentText(data.table.comment)">{{ commentText(data.table.comment) }}</span>
       </div>
       <div>
-        <div v-for="column in visibleColumns(data.table)" :key="column.name" class="border-b border-border/40 last:border-b-0">
+        <div v-for="column in visibleColumns(data.table)" :key="column.name" :data-column="column.name" class="border-b border-border/40 last:border-b-0" :class="isForeignKeyColumn(data.table, column.name) || isRelationshipColumn(data.table, column.name) ? 'bg-rose-100 dark:bg-rose-950/60' : ''">
           <div class="flex h-6 min-w-0 items-center gap-1.5 px-3 text-xs">
             <KeyRound v-if="column.is_primary_key" class="h-3 w-3 shrink-0 text-amber-500" />
             <Link2 v-else-if="isForeignKeyColumn(data.table, column.name)" class="h-3 w-3 shrink-0 text-primary" />

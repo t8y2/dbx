@@ -3,6 +3,19 @@
 DBX vendors Wry 0.55.1 to pass `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` directly
 to both WebView2 Runtime discovery and environment creation on the Win7 target.
 
+On Windows, DBX also separates custom canvas pinch input from browser zoom
+hotkeys. With JavaScript enabled, `IsPinchZoomEnabled` remains enabled even
+when `zoom_hotkeys_enabled` is false. A document-created script cancels the
+default action of Ctrl-wheel and multi-touch events without stopping their
+propagation, allowing diagram/editor handlers to update their own viewport
+while the application page keeps its scale. `IsZoomControlEnabled` still
+follows `zoom_hotkeys_enabled`, preserving the browser keyboard zoom policy.
+The guard is registered before navigation and applies to child frames too.
+Script-disabled views keep the upstream native pinch setting. This change
+requires rebuilding the desktop host; frontend hot reload cannot apply it.
+Physical WebView2 pinch validation is pending; DOM tests do not establish
+whether a specific runtime/touchpad delivers the expected wheel events.
+
 Upstream Wry passes a null browser folder to these APIs. That works with the
 Evergreen Runtime but prevents DBX's Windows 7 build from reliably selecting
 its bundled WebView2 109 Fixed Runtime. Other Windows targets retain the

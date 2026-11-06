@@ -2760,6 +2760,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "Filas seleccionadas",
+    exportSelectedCellsScope: "Celdas seleccionadas",
+    exportSelectedColumnsScope: "Columnas seleccionadas",
     exportFormat: "Formato",
     exportPageScope: "Página actual",
     exportResultScope: "Todos los resultados",

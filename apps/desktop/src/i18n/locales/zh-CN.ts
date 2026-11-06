@@ -2970,6 +2970,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "选中行",
+    exportSelectedCellsScope: "选区",
+    exportSelectedColumnsScope: "选中列",
     exportFormat: "格式",
     exportPageScope: "当前页",
     exportResultScope: "全部结果",

@@ -8171,9 +8171,11 @@ fn consul_config_for_endpoint(
     // Proxy routes preserve the logical URL and therefore work for both host
     // names and IP literals. Keep the override marker as a transport safety
     // signal even though the proxy client does not use it for DNS routing.
-    if runtime_proxy.is_some() {
-        Ok(consul_config.with_connect_override(host, port))
-    } else if config.has_effective_transport_layers() || host != original_host || port != original_port {
+    if runtime_proxy.is_some()
+        || config.has_effective_transport_layers()
+        || host != original_host
+        || port != original_port
+    {
         Ok(consul_config.with_connect_override(host, port))
     } else {
         Ok(consul_config)

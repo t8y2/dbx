@@ -3047,6 +3047,8 @@ export default withEnglishFallback({
     filterBuilderNotContains: "No contiene",
     filterBuilderBeginsWith: "Empieza por",
     filterBuilderEndsWith: "Termina por",
+    filterBuilderNotBeginsWith: "No empieza con",
+    filterBuilderNotEndsWith: "No termina con",
     filterBuilderGreaterThan: "Mayor que",
     filterBuilderGreaterThanOrEqual: "Mayor o igual que",
     filterBuilderLessThan: "Menor que",

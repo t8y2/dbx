@@ -2527,6 +2527,8 @@ export default withEnglishFallback({
     filterBuilderNotContains: "Tidak mengandung",
     filterBuilderBeginsWith: "Diawali dengan",
     filterBuilderEndsWith: "Diakhiri dengan",
+    filterBuilderNotBeginsWith: "Tidak diawali dengan",
+    filterBuilderNotEndsWith: "Tidak diakhiri dengan",
     filterBuilderGreaterThan: "Lebih besar dari",
     filterBuilderGreaterThanOrEqual: "Lebih besar dari atau sama dengan",
     filterBuilderLessThan: "Lebih kecil dari",

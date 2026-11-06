@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatFilterRawValue, formatFilterRawValues, parseFilterValue, parseFilterValues } from "@/lib/dataGrid/dataGridColumnFilter";
+import { filterModeIsSupportedForDatabase, filterModeNeedsValue, filterModeUsesList, filterModeUsesRange, formatFilterRawValue, formatFilterRawValues, parseFilterValue, parseFilterValues } from "@/lib/dataGrid/dataGridColumnFilter";
 import { dataGridNullSuggestionFilterMode, toggleAllDataGridDistinctValueOptions } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
 
 describe("data grid filter candidate value serialization", () => {
@@ -57,5 +57,15 @@ describe("data grid filter candidate value serialization", () => {
 
     const cleared = toggleAllDataGridDistinctValueOptions(selected, options);
     expect([...cleared.entries()]).toEqual([["str:manual", "manual"]]);
+  });
+
+  it("treats the negated prefix/suffix modes as supported value filters (#14365)", () => {
+    for (const mode of ["not-begins-with", "not-ends-with"] as const) {
+      expect(filterModeIsSupportedForDatabase(mode, "postgres")).toBe(true);
+      expect(filterModeIsSupportedForDatabase(mode, "mysql")).toBe(true);
+      expect(filterModeNeedsValue(mode)).toBe(true);
+      expect(filterModeUsesList(mode)).toBe(false);
+      expect(filterModeUsesRange(mode)).toBe(false);
+    }
   });
 });

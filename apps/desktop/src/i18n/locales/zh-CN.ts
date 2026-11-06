@@ -5552,6 +5552,8 @@ export default withEnglishFallback({
     loadFailed: "加载数据库失败：{message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "普通 Schema",
+    systemGroup: "系统 Schema",
     title: "模式过滤器",
     detailLabel: "可见模式",
     detailActionLabel: "配置「{connection}」的可见模式",

@@ -4527,6 +4527,8 @@ export default withEnglishFallback({
     loadFailed: "Gagal memuat database: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "Skema pengguna",
+    systemGroup: "Skema sistem",
     title: "Filter Skema",
     detailLabel: "Skema yang terlihat",
     detailActionLabel: 'Konfigurasikan skema yang terlihat untuk "{connection}"',

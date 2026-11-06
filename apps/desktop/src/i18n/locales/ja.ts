@@ -5173,6 +5173,8 @@ export default withEnglishFallback({
     loadFailed: "データベースの読み込みに失敗しました: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "ユーザースキーマ",
+    systemGroup: "システムスキーマ",
     title: "スキーマフィルター",
     detailLabel: "表示スキーマ",
     detailActionLabel: "「{connection}」の表示スキーマを設定",

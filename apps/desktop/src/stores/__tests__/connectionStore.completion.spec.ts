@@ -194,7 +194,7 @@ describe("connectionStore completion assistant", () => {
     setActivePinia(createPinia());
   });
 
-  it.each(["oracle", "oceanbase-oracle"] as const)("%s scopes warm completion candidates before limiting and keeps explicit owners separate", async (dbType) => {
+  it.each(["oracle", "oceanbase-oracle"] as const)("%s scopes warm completion candidates before limiting and permits explicitly qualified hidden owners", async (dbType) => {
     const candidates = [
       { name: "A_OTHER", schema: "B", kind: "table", data_type: "TABLE" },
       { name: "A_SYSTEM", schema: "SYS", kind: "table", data_type: "TABLE" },
@@ -209,7 +209,7 @@ describe("connectionStore completion assistant", () => {
     vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch, listTables }));
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const store = useConnectionStore();
-    store.connections = [{ ...oracleConnection(), db_type: dbType }];
+    store.connections = [{ ...oracleConnection(), db_type: dbType, visible_schemas: { ORCL: ["A"] } }];
     store.connectedIds.add("oracle-1");
     await store.listCompletionTables("oracle-1", "ORCL", "", 100, undefined, true, "A");
     const unknown = await store.listCompletionTables("oracle-1", "ORCL", "", 100, undefined, false);

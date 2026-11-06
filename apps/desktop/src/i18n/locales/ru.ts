@@ -5271,6 +5271,8 @@ export default withEnglishFallback({
     loadFailed: "Не удалось загрузить базы данных: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "Пользовательские схемы",
+    systemGroup: "Системные схемы",
     title: "Фильтр схем",
     detailLabel: "Видимые схемы",
     detailActionLabel: "Настроить видимые схемы для «{connection}»",

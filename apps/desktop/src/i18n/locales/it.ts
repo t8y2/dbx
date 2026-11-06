@@ -5152,6 +5152,8 @@ export default withEnglishFallback({
     loadFailed: "Impossibile caricare i database: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "Schemi utente",
+    systemGroup: "Schemi di sistema",
     title: "Filtro Schema",
     detailLabel: "Schema visibili",
     detailActionLabel: 'Configura gli schema visibili per "{connection}"',

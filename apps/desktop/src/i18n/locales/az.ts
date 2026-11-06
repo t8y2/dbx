@@ -4210,6 +4210,8 @@ export default withEnglishFallback({
     loadFailed: "Verilənlər bazalarını yükləmək mümkün olmadı: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "İstifadəçi sxemləri",
+    systemGroup: "Sistem sxemləri",
     title: "Sxem süzgəci",
     detailLabel: "Görünən sxemlər",
     detailActionLabel: '"{connection}" üçün görünən sxemləri tənzimlə',

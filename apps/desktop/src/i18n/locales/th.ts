@@ -5444,6 +5444,8 @@ export default withEnglishFallback({
     loadFailed: "โหลดฐานข้อมูลไม่สำเร็จ: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "Schema ผู้ใช้",
+    systemGroup: "Schema ระบบ",
     title: "ตัวกรอง Schema",
     detailLabel: "Schema ที่มองเห็นได้",
     detailActionLabel: "กำหนดค่า Schema ที่มองเห็นได้สำหรับ “{connection}”",

@@ -5129,6 +5129,8 @@ export default withEnglishFallback({
     loadFailed: "載入資料庫失敗：{message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "一般 Schema",
+    systemGroup: "系統 Schema",
     title: "Schema 過濾器",
     detailLabel: "可見 Schema",
     detailActionLabel: "設定「{connection}」的可見 Schema",

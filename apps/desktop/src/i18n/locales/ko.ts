@@ -5085,6 +5085,8 @@ export default withEnglishFallback({
     loadFailed: "데이터베이스를 불러오는 데 실패했습니다: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "사용자 스키마",
+    systemGroup: "시스템 스키마",
     title: "스키마 필터",
     detailLabel: "표시할 스키마",
     detailActionLabel: '"{connection}"의 표시할 스키마 구성',

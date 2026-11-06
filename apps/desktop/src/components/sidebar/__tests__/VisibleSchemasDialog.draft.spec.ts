@@ -51,11 +51,13 @@ describe("connection editor schema selection draft", () => {
     expect(closed).toHaveBeenCalledWith(false);
     for (const operation of Object.values(backend)) expect(operation).not.toHaveBeenCalled();
   });
-  it("emits show-all without storing a filter", async () => {
+  it("selects all current candidates and saves a snapshot without storing directly", async () => {
     const { all, saved, closed } = await mount();
-    button("visibleSchemas.showAll").click();
-    expect(all).toHaveBeenCalledOnce();
-    expect(saved).not.toHaveBeenCalled();
+    button("visibleSchemas.selectAll").click();
+    await nextTick();
+    button("visibleSchemas.save").click();
+    expect(all).not.toHaveBeenCalled();
+    expect(saved).toHaveBeenCalledWith(["public", "sales", "pg_catalog"]);
     expect(closed).toHaveBeenCalledWith(false);
     expect(backend.clearVisibleSchemas).not.toHaveBeenCalled();
   });

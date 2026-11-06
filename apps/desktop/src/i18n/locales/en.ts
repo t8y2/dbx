@@ -5626,6 +5626,8 @@ export default {
     loadFailed: "Failed to load databases: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "User schemas",
+    systemGroup: "System schemas",
     title: "Schema Filter",
     detailLabel: "Visible schemas",
     detailActionLabel: 'Configure visible schemas for "{connection}"',

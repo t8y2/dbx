@@ -57,6 +57,20 @@ beforeEach(() => {
 });
 
 describe("navigation visibility coordinated saves", () => {
+  it.each(["oracle", "postgres"] as const)("saves an empty schema snapshot without changing execution defaults for %s", async (dbType) => {
+    const { store, writes, persisted } = await fixture();
+    store.connections[0] = { ...store.connections[0], db_type: dbType, default_schema: "APP", show_system_schemas: true, visible_databases: ["app"], visible_database_patterns: ["app%"], visible_schemas: { archive: ["history"] } };
+    const save = store.setVisibleSchemas("a", "app", []);
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    expect(store.getConfig("a")?.visible_schemas?.app).toBeUndefined();
+    writes[0].commit();
+    await save;
+    expect(persisted.get("a")?.visible_schemas).toEqual({ archive: ["history"], app: [] });
+    expect(store.getConfig("a")?.default_schema).toBe("APP");
+    expect(store.getConfig("a")?.database).toBe("app");
+    expect(store.getConfig("a")?.visible_databases).toEqual(dbType === "oracle" ? undefined : ["app"]);
+    expect(store.getConfig("a")?.visible_database_patterns).toEqual(dbType === "oracle" ? undefined : ["app%"]);
+  });
   it("keeps schema edit context local to one edit session without changing or persisting its connection target", async () => {
     const { store, writes, persisted } = await fixture();
     store.startEditing("a", { visibleSchemaDatabase: "archive" });

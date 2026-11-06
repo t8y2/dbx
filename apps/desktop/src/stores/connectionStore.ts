@@ -1505,7 +1505,8 @@ export const useConnectionStore = defineStore("connection", () => {
     const config = getConfig(connectionId);
     const fingerprint = config ? connectionConfigFingerprint(config) : undefined;
     const configuredSystemSchemas = config?.show_system_schemas === true;
-    const showSystemSchemas = systemSchemasOverride ?? configuredSystemSchemas;
+    const hasExplicitSchemaSelection = Array.isArray(config?.visible_schemas?.[database === "_" ? "" : database]);
+    const showSystemSchemas = systemSchemasOverride ?? (configuredSystemSchemas || hasExplicitSchemaSelection);
     const revision = completionCacheRevision(connectionId, database);
     const generation = metadataGenerationFor(connectionId, database);
     const connectionRevision = connectionStateRevision(connectionId);
@@ -1523,22 +1524,24 @@ export const useConnectionStore = defineStore("connection", () => {
     const infos = await metadataLoadCoordinator.run(scope, () => {
       const cached = metadataListPageCache.get(scope, { allowStale: true });
       if (cached) return Promise.resolve(cached.value as SchemaInfo[]);
-      return loadCachedMetadataListPage<SchemaInfo[]>(scope, () => withMetadataLoadTimeout(connectionId, systemSchemasOverride === undefined ? api.listSchemaInfos(connectionId, database) : api.listSchemaInfos(connectionId, database, showSystemSchemas), "schemas"), { isCurrent });
+      return loadCachedMetadataListPage<SchemaInfo[]>(scope, () => withMetadataLoadTimeout(connectionId, systemSchemasOverride === undefined && !hasExplicitSchemaSelection ? api.listSchemaInfos(connectionId, database) : api.listSchemaInfos(connectionId, database, showSystemSchemas), "schemas"), {
+        isCurrent,
+      });
     });
-    if (isCurrent() && showSystemSchemas === configuredSystemSchemas) {
+    if (isCurrent() && (systemSchemasOverride === undefined || showSystemSchemas === configuredSystemSchemas)) {
       schemaListCache.value[key] = infos.map((schema) => schema.name);
       evictOldestCacheEntries(schemaListCache.value, COMPLETION_CACHE_MAX);
     }
     return infos;
   }
 
-  async function listNavigationSchemaChoices(connectionId: string, database: string, showSystemSchemas: boolean): Promise<string[]> {
+  async function listNavigationSchemaChoices(connectionId: string, database: string, showSystemSchemas: boolean, force = false): Promise<string[]> {
     const config = getConfig(connectionId);
     if (!config) return [];
     const fingerprint = connectionConfigFingerprint(config);
     const generation = metadataGenerationFor(connectionId, database);
     const revision = connectionStateRevision(connectionId);
-    const [infos, oracleMaintainedSchemas] = await Promise.all([readSharedSchemaInfos(connectionId, database, false, showSystemSchemas), readOracleMaintainedSchemas(connectionId, database, false, showSystemSchemas)]);
+    const [infos, oracleMaintainedSchemas] = await Promise.all([readSharedSchemaInfos(connectionId, database, force, showSystemSchemas), readOracleMaintainedSchemas(connectionId, database, force, showSystemSchemas)]);
     const current = getConfig(connectionId);
     if (!current || fingerprint !== connectionConfigFingerprint(current) || generation !== metadataGenerationFor(connectionId, database) || revision !== connectionStateRevision(connectionId)) throw new Error(SUPERSEDED_CONNECTION_ATTEMPT_MESSAGE);
     return filterSchemaNamesForVisiblePicker(
@@ -6124,7 +6127,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const config = getConfig(connectionId);
     if (!config) return;
     const key = database || "";
-    await updateVisibleSchemasConfig(connectionId, key, schemaNames);
+    await updateNavigationVisibility(connectionId, key, { filterSchemas: true, schemaNames, clearLegacyDatabaseFilter: connectionUsesVisibleSchemaFilter(config) });
     await reloadSchemaChildren(connectionId, database);
   }
 

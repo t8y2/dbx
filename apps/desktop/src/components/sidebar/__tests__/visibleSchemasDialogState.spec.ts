@@ -16,12 +16,12 @@ describe("visibleSchemasDialogState", () => {
     expect([...filtered]).toEqual(["sales", "audit"]);
   });
 
-  it("keeps draft empty or absent selections as all selected", () => {
+  it("distinguishes an absent selection from an explicit empty selection", () => {
     expect([...initialVisibleSchemaSelection(schemaNames, undefined)]).toEqual(schemaNames);
-    expect([...initialVisibleSchemaSelection(schemaNames, [])]).toEqual(schemaNames);
+    expect([...initialVisibleSchemaSelection(schemaNames, [])]).toEqual([]);
   });
 
-  it("normalizes configured schemas against the available list", () => {
-    expect([...initialVisibleSchemaSelection(schemaNames, ["missing", "audit", "audit"])]).toEqual(["audit"]);
+  it("retains configured names temporarily absent from the candidate list", () => {
+    expect([...initialVisibleSchemaSelection(schemaNames, ["missing", "audit", "audit"])]).toEqual(["missing", "audit"]);
   });
 });

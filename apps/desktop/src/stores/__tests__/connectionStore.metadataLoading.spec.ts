@@ -236,6 +236,17 @@ describe("connectionStore metadata loading", () => {
     expect(listSchemaInfos).toHaveBeenCalledOnce();
   });
 
+  it("reads selected system schemas despite the retired toggle and keeps completion unfiltered", async () => {
+    const listSchemaInfos = vi.fn(async (_id: string, _database: string, override?: boolean) => [{ name: "public", comment: null }, ...(override ? [{ name: "pg_catalog", comment: null }] : [])]);
+    const { store, connection, node } = await sharedSchemaFixture(listSchemaInfos);
+    store.connections = [{ ...connection, show_system_schemas: false, visible_schemas: { app: ["pg_catalog"] } }];
+    await store.loadSchemas(connection.id, "app", { force: true, background: true, connectedOnly: true });
+    expect(node.children?.filter((child) => child.type === "schema").map((child) => child.label)).toEqual(["pg_catalog"]);
+    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "app", true);
+    expect(await store.listCompletionSchemas(connection.id, "app")).toEqual(["public", "pg_catalog"]);
+    expect(store.lookupLocalCompletionSchemas(connection.id, "app")).toEqual(["public", "pg_catalog"]);
+  });
+
   it.each([false, true])("keeps system-schema picker drafts separate from saved configuration (%s)", async (saved) => {
     const rows = (system: boolean) => [{ name: "public", comment: null }, ...(system ? [{ name: "pg_catalog", comment: null }] : [])];
     const listSchemaInfos = vi.fn(async (_id: string, _database: string, override?: boolean) => rows(override ?? saved));

@@ -4579,6 +4579,8 @@ export default withEnglishFallback({
     loadFailed: "Nie udało się załadować baz danych: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "Schematy użytkownika",
+    systemGroup: "Schematy systemowe",
     title: "Aktualizacja zabezpieczeń danych",
     detailLabel: "Widoczne schematy",
     detailActionLabel: "Skonfiguruj widoczne schematy dla „{connection}”",

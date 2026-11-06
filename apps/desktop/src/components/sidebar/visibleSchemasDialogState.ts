@@ -1,8 +1,6 @@
-import { normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
-
 export function initialVisibleSchemaSelection(schemaNames: string[], configured: string[] | undefined): Set<string> {
-  if (!configured?.length) return new Set(schemaNames);
-  return new Set(normalizeVisibleSchemaSelection(configured, schemaNames));
+  if (!configured) return new Set(schemaNames);
+  return new Set(configured);
 }
 
 export function selectVisibleSchemas(schemaNames: string[]): Set<string> {

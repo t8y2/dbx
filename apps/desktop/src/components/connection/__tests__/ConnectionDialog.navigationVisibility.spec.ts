@@ -38,6 +38,7 @@ const fixture = vi.hoisted(() => ({
     connectDb: vi.fn(),
     disconnectDb: vi.fn(),
     listSchemas: vi.fn(),
+    executeQuery: vi.fn(),
     listDatabases: vi.fn(),
     redisListDatabases: vi.fn(),
     testConnectionWithInfo: vi.fn(),
@@ -167,11 +168,10 @@ async function inputWithValue(value: string, next: string) {
   input!.dispatchEvent(new Event("input", { bubbles: true }));
   await settle();
 }
-function systemSchemasControl() {
-  const label = [...document.querySelectorAll<HTMLLabelElement>("label")].find((entry) => entry.textContent?.trim() === i18n.global.t("connection.showSystemSchemas"));
-  const input = label?.querySelector<HTMLInputElement>('input[type="checkbox"]') ?? (label?.htmlFor ? (document.getElementById(label.htmlFor) as HTMLInputElement | null) : null);
-  expect(input, "editable system schema control in the connection form").toBeTruthy();
-  return input!;
+function expandSystemGroup() {
+  const button = document.querySelector<HTMLButtonElement>('[data-schema-group="system"] button[aria-expanded]');
+  expect(button).toBeTruthy();
+  if (button!.getAttribute("aria-expanded") === "false") button!.click();
 }
 async function mount(saved: ConnectionConfig, creating = false, initialVisibleSchemaDatabase?: string) {
   fixture.stored = reactive(saved);
@@ -217,6 +217,7 @@ beforeEach(() => {
   for (const operation of Object.values(fixture.backend)) operation.mockResolvedValue([]);
   fixture.backend.listenAgentInstallProgress.mockResolvedValue(() => {});
   fixture.backend.listSchemas.mockResolvedValue(["public", "sales"]);
+  fixture.backend.executeQuery.mockResolvedValue({ columns: ["USERNAME"], rows: [["SYS"], ["SYSRAC"]] });
   fixture.store.getConfig.mockImplementation((id) => (fixture.stored?.id === id ? fixture.stored : undefined));
   fixture.store.applyGlobalTimeouts.mockImplementation((value) => value);
   fixture.store.connect.mockResolvedValue(undefined);
@@ -241,6 +242,51 @@ afterEach(() => {
 });
 
 describe("connection form navigation visibility persistence", () => {
+  it("discards late root-schema choices after another saved connection replaces the draft", async () => {
+    fixture.backend.listInstalledAgentsLocal.mockResolvedValue([{ db_type: "oracle", installed: true }]);
+    let complete!: (names: string[]) => void;
+    fixture.backend.listSchemas.mockImplementationOnce(
+      () =>
+        new Promise<string[]>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const first = config({ id: "root-a", db_type: "oracle", driver_profile: "oracle", visible_databases: undefined, visible_database_patterns: undefined, visible_schemas: { orders: ["APP"] } });
+    const state = await mount(first);
+    button(i18n.global.t("visibleSchemas.selectedCount", { selected: 1, total: 0 })).click();
+    await vi.waitFor(() => expect(fixture.backend.listSchemas).toHaveBeenCalledOnce());
+    const next = { ...first, id: "root-b", visible_schemas: { orders: ["B_APP"] } };
+    fixture.stored = reactive(next);
+    state.editConfig = next;
+    await settle();
+    complete(["LATE_A"]);
+    await settle();
+    expect(document.querySelector('[data-schema-row="LATE_A"]')).toBeNull();
+    button("Save").click();
+    await settle();
+    expect(fixture.store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ id: "root-b", visible_schemas: { orders: ["B_APP"] } }), expect.anything());
+  });
+  it("migrates root legacy filters into checked names and saves an explicit empty scope only on confirmation", async () => {
+    fixture.backend.listInstalledAgentsLocal.mockResolvedValue([{ db_type: "oracle", installed: true }]);
+    fixture.backend.listSchemas.mockResolvedValue(["APP", "SALES", "SYS"]);
+    await mount(config({ db_type: "oracle", driver_profile: "oracle", visible_schemas: undefined, visible_databases: ["SYS"], visible_database_patterns: ["SA%"], default_schema: "APP" }));
+    await vi.waitFor(() => expect(button(i18n.global.t("visibleSchemas.selectedCount", { selected: 1, total: 3 })).disabled).toBe(false));
+    button(i18n.global.t("visibleSchemas.selectedCount", { selected: 1, total: 3 })).click();
+    await vi.waitFor(() => expect(document.querySelector('[data-schema-row="SYS"]')).toBeTruthy());
+    expect(document.querySelector('[data-schema-row="SYS"]')?.getAttribute("aria-checked")).toBe("true");
+    expect(document.querySelector('[data-schema-row="SALES"]')?.getAttribute("aria-checked")).toBe("true");
+    expect(fixture.store.updateConnection).not.toHaveBeenCalled();
+    button(i18n.global.t("visibleDatabases.clear")).click();
+    await settle();
+    button(i18n.global.t("visibleSchemas.save"), true).click();
+    await settle();
+    button("Save").click();
+    await settle();
+    expect(fixture.store.updateConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ database: "orders", default_schema: "APP", visible_schemas: { orders: [] }, visible_databases: undefined, visible_database_patterns: undefined }),
+      expect.objectContaining({ updatedVisibleSchemaKeys: ["orders"] }),
+    );
+  });
   it("rejects pending schema choices when another saved id with the same name and physical target replaces the draft", async () => {
     let complete!: (names: string[]) => void;
     fixture.backend.listSchemas.mockImplementationOnce(
@@ -284,10 +330,10 @@ describe("connection form navigation visibility persistence", () => {
     expect(fixture.store.updateConnection).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: "saved-c", visible_schemas: next.visible_schemas }), expect.objectContaining({ preserveNavigationVisibility: expect.arrayContaining(navigationKeys) }));
     expect(fixture.store.updateConnection.mock.calls[0][1].updatedVisibleSchemaKeys).toBeUndefined();
   });
-  it("offers system schema and schema filter controls for a known PostgreSQL JDBC dialect without connecting", async () => {
+  it("offers one schema filter without the obsolete system toggle for a known PostgreSQL JDBC dialect", async () => {
     fixture.tab = "advanced";
     await mount(config({ db_type: "jdbc", driver_profile: "jdbc", driver_label: "JDBC", connection_string: "jdbc:postgresql://initial.test:5432/orders", jdbc_driver_class: "org.postgresql.Driver", visible_schemas: undefined, visible_databases: undefined, visible_database_patterns: undefined }));
-    expect(systemSchemasControl().checked).toBe(false);
+    expect(document.getElementById("connection-show-system-schemas")).toBeNull();
     expect(button(i18n.global.t("visibleSchemas.title"))).toBeDefined();
     expect(fixture.store.connect).not.toHaveBeenCalled();
     expect(fixture.store.ensureConnected).not.toHaveBeenCalled();
@@ -304,11 +350,7 @@ describe("connection form navigation visibility persistence", () => {
     const hasSchema = (name: string) => [...document.querySelectorAll("button")].some((entry) => entry.textContent?.trim() === name);
     expect(hasSchema("pg_catalog")).toBe(false);
     expect(hasSchema("information_schema")).toBe(false);
-    const systemLabel = [...document.querySelectorAll("label")].find((entry) => entry.textContent?.trim() === i18n.global.t("visibleSchemas.showSystemSchemas"));
-    const toggle = systemLabel?.querySelector<HTMLInputElement>('input[type="checkbox"]');
-    expect(toggle).toBeTruthy();
-    expect(toggle!.checked).toBe(false);
-    toggle!.click();
+    expandSystemGroup();
     await settle();
     expect(hasSchema("pg_catalog")).toBe(true);
     expect(hasSchema("information_schema")).toBe(true);
@@ -322,7 +364,7 @@ describe("connection form navigation visibility persistence", () => {
       expect.objectContaining({ id: saved.id, db_type: "jdbc", driver_profile: "jdbc", connection_string: saved.connection_string, jdbc_driver_class: saved.jdbc_driver_class, host: saved.host, port: saved.port, database: "orders", visible_schemas: { orders: ["public", "pg_catalog"] } }),
       expect.objectContaining({ updatedVisibleSchemaKeys: ["orders"] }),
     );
-    expect(fixture.backend.listSchemas).toHaveBeenCalledExactlyOnceWith(expect.any(String), "orders");
+    expect(fixture.backend.listSchemas).toHaveBeenCalledExactlyOnceWith(expect.any(String), "orders", false, true);
     expect(fixture.store.addEphemeralConnection).toHaveBeenCalledWith(expect.objectContaining({ db_type: "jdbc", connection_string: saved.connection_string, database: "orders" }));
     expect(fixture.store.connect).not.toHaveBeenCalled();
   });
@@ -331,7 +373,7 @@ describe("connection form navigation visibility persistence", () => {
     await mount(config({ visible_databases: undefined, visible_database_patterns: undefined }), false, "archive");
     button(i18n.global.t("visibleSchemas.selectedCount", { selected: 1, total: 0 })).click();
     await vi.waitFor(() => expect([...document.querySelectorAll("button")].some((entry) => entry.textContent?.trim() === "archive_extra")).toBe(true));
-    expect(fixture.backend.listSchemas).toHaveBeenCalledExactlyOnceWith(expect.any(String), "archive");
+    expect(fixture.backend.listSchemas).toHaveBeenCalledExactlyOnceWith(expect.any(String), "archive", false, true);
     expect(fixture.store.addEphemeralConnection).toHaveBeenCalledWith(expect.objectContaining({ database: "archive" }));
     button("archive_extra").click();
     button(i18n.global.t("visibleSchemas.save"), true).click();
@@ -377,32 +419,37 @@ describe("connection form navigation visibility persistence", () => {
     expect(fixture.store.updateConnection).not.toHaveBeenCalled();
     expect(fixture.store.removeConnection).toHaveBeenCalledOnce();
   });
-  it("saves system schema visibility once through the form and refreshes only its navigation without reconnecting", async () => {
-    fixture.tab = "advanced";
+  it("saves a selected system schema and refreshes navigation without changing the connection target", async () => {
+    fixture.backend.listSchemas.mockResolvedValue(["public", "sales", "pg_catalog"]);
     const saved = config({ visible_databases: undefined, visible_database_patterns: undefined });
     await mount(saved);
-    const checkbox = systemSchemasControl();
-    expect(checkbox.checked).toBe(false);
-    checkbox.click();
+    button(i18n.global.t("visibleSchemas.selectedCount", { selected: 1, total: 0 })).click();
+    await vi.waitFor(() => expect(document.querySelector('[data-schema-group="system"]')).toBeTruthy());
+    expandSystemGroup();
+    await settle();
+    button("pg_catalog").click();
+    button(i18n.global.t("visibleSchemas.save"), true).click();
     await settle();
     expect(fixture.store.updateConnection).not.toHaveBeenCalled();
     button("Save").click();
     await settle();
     expect(fixture.store.updateConnection).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({ show_system_schemas: true, visible_schemas: saved.visible_schemas }),
-      expect.objectContaining({ preserveNavigationVisibility: expect.arrayContaining(navigationKeys.filter((key) => key !== "show_system_schemas")), expectedFingerprint: connectionConfigFingerprint(saved) }),
+      expect.objectContaining({ database: "orders", visible_schemas: { orders: ["public", "pg_catalog"], archive: ["history"] } }),
+      expect.objectContaining({ preserveNavigationVisibility: expect.arrayContaining(navigationKeys.filter((key) => key !== "visible_schemas")), expectedFingerprint: connectionConfigFingerprint(saved) }),
     );
-    expect(fixture.store.updateConnection.mock.calls[0][1].preserveNavigationVisibility).not.toContain("show_system_schemas");
+    expect(fixture.store.updateConnection.mock.calls[0][1].preserveNavigationVisibility).toContain("show_system_schemas");
     expect(fixture.store.refreshNavigationPresentation).toHaveBeenCalledExactlyOnceWith(saved.id, { visibilityChanged: true });
     expect(fixture.store.connect).not.toHaveBeenCalled();
-    expect(fixture.store.ensureConnected).not.toHaveBeenCalled();
+    expect(fixture.store.ensureConnected).toHaveBeenCalledOnce();
     expect(fixture.backend.connectDb).not.toHaveBeenCalled();
   });
-  it("discards a system schema draft when the connection dialog closes without saving", async () => {
-    fixture.tab = "advanced";
+  it("discards a schema selection draft when the connection dialog closes without saving", async () => {
     const saved = config();
     const state = await mount(saved);
-    systemSchemasControl().click();
+    button(i18n.global.t("visibleSchemas.selectedCount", { selected: 1, total: 0 })).click();
+    await vi.waitFor(() => expect(document.querySelector('[data-schema-row="sales"]')).toBeTruthy());
+    button("sales").click();
+    button(i18n.global.t("visibleSchemas.save"), true).click();
     await settle();
     state.open = false;
     await settle();
@@ -411,18 +458,20 @@ describe("connection form navigation visibility persistence", () => {
     expect(fixture.store.refreshNavigationPresentation).not.toHaveBeenCalled();
     state.open = true;
     await settle();
-    expect(systemSchemasControl().checked).toBe(false);
+    expect([...document.querySelectorAll("button")].map((entry) => entry.textContent?.trim()).join(" | ")).toContain(i18n.global.t("visibleSchemas.selectedCount", { selected: 1, total: 0 }));
   });
-  it("retains a failed system schema draft without refreshing or reconnecting", async () => {
-    fixture.tab = "advanced";
+  it("retains a failed schema selection draft without refreshing or reconnecting", async () => {
     await mount(config());
-    systemSchemasControl().click();
+    button(i18n.global.t("visibleSchemas.selectedCount", { selected: 1, total: 0 })).click();
+    await vi.waitFor(() => expect(document.querySelector('[data-schema-row="sales"]')).toBeTruthy());
+    button("sales").click();
+    button(i18n.global.t("visibleSchemas.save"), true).click();
     await settle();
     fixture.store.updateConnection.mockRejectedValueOnce(new Error("fixture save failed"));
     button("Save").click();
     await settle();
     expect(fixture.store.updateConnection).toHaveBeenCalledOnce();
-    expect(systemSchemasControl().checked).toBe(true);
+    expect(fixture.store.updateConnection.mock.calls[0][0].visible_schemas.orders).toEqual(["public", "sales"]);
     expect(fixture.store.refreshNavigationPresentation).not.toHaveBeenCalled();
     expect(fixture.store.connect).not.toHaveBeenCalled();
     expect(button("Save").disabled).toBe(false);
@@ -485,19 +534,21 @@ describe("connection form navigation visibility persistence", () => {
     expect(options.preserveNavigationVisibility).not.toContain("visible_databases");
     expect(options.preserveNavigationVisibility).not.toContain("visible_database_patterns");
   });
-  it("clears only the current schema bucket when Show all follows a host change", async () => {
+  it("saves all current schemas as a snapshot after a host change", async () => {
     fixture.backend.listInstalledAgentsLocal.mockResolvedValue([{ db_type: "oracle", installed: true }]);
     await mount(config({ db_type: "oracle", driver_profile: "oracle", driver_label: "Oracle", port: 1521, visible_databases: undefined, visible_database_patterns: undefined }));
     await inputWithValue("initial.test", "edited.test");
     button(i18n.global.t("contextMenu.configureVisibleObjects")).click();
-    await vi.waitFor(() => expect([...document.querySelectorAll("button")].some((entry) => entry.textContent?.trim() === i18n.global.t("visibleDatabases.showAll"))).toBe(true));
-    button(i18n.global.t("visibleDatabases.showAll")).click();
+    await vi.waitFor(() => expect(document.querySelector('[data-schema-row="public"]')).toBeTruthy());
+    button(i18n.global.t("visibleDatabases.selectAll")).click();
+    await settle();
+    button(i18n.global.t("visibleSchemas.save"), true).click();
     await settle();
     button("Save").click();
     await settle();
     expect(fixture.store.updateConnection).toHaveBeenCalledOnce();
     const [submitted, options] = fixture.store.updateConnection.mock.calls[0];
-    expect(submitted.visible_schemas?.orders).toBeUndefined();
+    expect(submitted.visible_schemas?.orders).toEqual(["public", "sales"]);
     expect(options.preserveNavigationVisibility).not.toContain("visible_schemas");
     expect(options.updatedVisibleSchemaKeys).toEqual(["orders"]);
   });

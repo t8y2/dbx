@@ -4179,6 +4179,8 @@ export default withEnglishFallback({
     loadFailed: "Veritabanları yüklenemedi: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "Kullanıcı şemaları",
+    systemGroup: "Sistem şemaları",
     title: "Şema Filtresi",
     detailLabel: "Görünür şemalar",
     detailActionLabel: '"{connection}" için görünür şemaları yapılandır',

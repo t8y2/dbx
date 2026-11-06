@@ -24,6 +24,7 @@ export function useSchemaOptions() {
   const schemaOptions = ref<Record<string, string[]>>({});
   const loadingSchemaOptions = ref<Record<string, boolean>>({});
   const schemaRequests = new Map<string, Promise<void>>();
+  const loadedSelections = new Map<string, string | undefined>();
 
   function cacheKey(connectionId: string, database: string) {
     return schemaOptionsCacheKey(connectionId, database, connectionStore.getConfig(connectionId)?.show_system_schemas === true);
@@ -39,7 +40,11 @@ export function useSchemaOptions() {
     const dbType = connection?.db_type;
     if (!database && !isSingleDatabase(dbType) && !usesTreeSchemaMode(dbType)) return;
     const key = cacheKey(connectionId, database);
-    if (hasSchemaOptionsCacheEntry(schemaOptions.value, key)) return;
+    const selected = connection?.visible_schemas?.[database === "_" ? "" : database];
+    const signature = JSON.stringify(selected);
+    const cached = schemaOptions.value[key];
+    const refresh = hasSchemaOptionsCacheEntry(schemaOptions.value, key) && loadedSelections.get(key) !== signature && selected?.some((name) => !cached!.includes(name)) === true;
+    if (hasSchemaOptionsCacheEntry(schemaOptions.value, key) && !refresh) return;
     const pending = schemaRequests.get(key);
     if (pending) return pending;
 
@@ -47,8 +52,10 @@ export function useSchemaOptions() {
       loadingSchemaOptions.value[key] = true;
       try {
         await connectionStore.ensureConnected(connectionId);
-        schemaOptions.value[key] = schemaOptionsForConnection(await connectionStore.listCompletionSchemas(connectionId, database), connection, database);
+        schemaOptions.value[key] = await connectionStore.listNavigationSchemaChoices(connectionId, database, true, refresh);
+        loadedSelections.set(key, signature);
       } catch (e) {
+        loadedSelections.set(key, signature);
         schemaOptions.value[key] = [];
         throw e;
       } finally {
@@ -61,7 +68,7 @@ export function useSchemaOptions() {
   }
 
   function getSchemaOptionsForDb(connectionId: string, database: string): string[] {
-    return schemaOptions.value[cacheKey(connectionId, database)] ?? [];
+    return schemaOptionsForConnection(schemaOptions.value[cacheKey(connectionId, database)] ?? [], connectionStore.getConfig(connectionId), database);
   }
 
   function isLoadingSchemas(connectionId: string, database: string): boolean {

@@ -188,20 +188,13 @@ import {
 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
 import { initialVisibleDatabaseDialogSelection, resolveVisibleDatabaseSaveAction, visibleDatabaseFilterShowsNothing, visibleDatabasePatternMatches, visibleDatabasePatternsWithoutMatchAll } from "@/components/sidebar/visibleDatabasesDialogState";
-import {
-  MATCH_ALL_VISIBLE_DATABASE_PATTERN,
-  canSaveVisibleDatabaseSelection,
-  connectionUsesVisibleSchemaFilter,
-  filterDatabaseNamesForVisiblePicker,
-  filterVisibleDatabaseNames,
-  filterSchemaNamesForVisiblePicker,
-  buildDraftVisibleSchemasConnectionId,
-  normalizeVisibleSchemaSelection,
-} from "@/lib/database/visibleDatabases";
+import { MATCH_ALL_VISIBLE_DATABASE_PATTERN, canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterVisibleDatabaseNames, filterSchemaNamesForVisiblePicker, buildDraftVisibleSchemasConnectionId } from "@/lib/database/visibleDatabases";
 import { isSchemaAware, isSingleDatabase, supportsDataDictionary, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
 import { normalizeConnectionIdentityFields, normalizeConnectionScope, normalizeConnectionTimeouts } from "@/lib/connection/connectionSubmitNormalization";
 import { databaseConnectionFormKind, databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
+import SchemaSelectionList from "@/components/sidebar/SchemaSelectionList.vue";
+import { loadSchemaSelection } from "@/lib/database/schemaSelection";
 import CloudflareD1ConnectionFields from "@/components/connection/CloudflareD1ConnectionFields.vue";
 import SpannerConnectionFields from "@/components/connection/SpannerConnectionFields.vue";
 import { oceanbaseModeConnectionPatch, oceanbaseSubModeFromConfig } from "@/lib/database/oceanbaseConnectionMode";
@@ -418,6 +411,9 @@ const visibleDatabaseSelection = ref<Set<string>>(new Set());
 const visibleDatabaseSearchText = ref("");
 const visibleDatabaseError = ref("");
 const visibleDatabaseShowSystem = ref(false);
+let visibleDatabaseRequest = 0;
+const visibleDatabaseSystemSchemas = ref<ReadonlySet<string>>();
+const visibleSchemaSystemNames = ref<ReadonlySet<string>>();
 const showVisibleNacosNamespacesDialog = ref(false);
 const isLoadingVisibleNacosNamespaces = ref(false);
 const visibleNacosNamespaces = ref<NacosNamespaceInfo[]>([]);
@@ -3265,6 +3261,7 @@ function switchGbaseProfile(profile: GbaseProfile) {
 }
 
 let applyingConnectionUpdate = false;
+let hydratingConnectionDraft = false;
 let appliedConnectionUpdate: ConnectionDeepLinkUpdate | null = null;
 
 /**
@@ -3306,6 +3303,7 @@ watch(
     editGlobalQueryTimeoutSecs.value = settingsStore.editorSettings.globalQueryTimeoutSecs;
     editRedisValuePreviewLimitKiB.value = settingsStore.editorSettings.redisValuePreviewLimitKiB;
     if (syncAction === "hydrate" && config) {
+      hydratingConnectionDraft = true;
       visibleSchemaDatabaseContext.value = props.initialVisibleSchemaDatabase === "_" ? "" : props.initialVisibleSchemaDatabase;
       editingTargetFingerprint = connectionConfigFingerprint(savedConfig!);
       appliedConnectionUpdate = connectionUpdate;
@@ -3477,6 +3475,7 @@ watch(
       // the saved baseline afterwards so those initial changes are not treated
       // as user edits that invalidate persisted database metadata.
       void nextTick(() => {
+        hydratingConnectionDraft = false;
         if (open.value && props.editConfig?.id === config.id) {
           if (!isSaving.value) rememberNavigationVisibilityDraft();
           if (!props.updatePrefill) applySavedDatabaseInfo(config);
@@ -4363,7 +4362,7 @@ const defaultListedVisibleDatabaseNames = computed(() => {
   if (visibleFilterUsesSchemas.value) return filterSchemaNamesForVisiblePicker(visibleDatabaseNames.value, connection);
   return filterDatabaseNamesForVisiblePicker(visibleDatabaseNames.value, connection);
 });
-const listedVisibleDatabaseNames = computed(() => (visibleDatabaseShowSystem.value ? visibleDatabaseNames.value : defaultListedVisibleDatabaseNames.value));
+const listedVisibleDatabaseNames = computed(() => (visibleFilterUsesSchemas.value || visibleDatabaseShowSystem.value ? visibleDatabaseNames.value : defaultListedVisibleDatabaseNames.value));
 const filteredVisibleDatabaseNames = computed(() => {
   const query = visibleDatabaseSearchText.value.trim().toLowerCase();
   if (!query) return listedVisibleDatabaseNames.value;
@@ -4375,7 +4374,7 @@ const visibleDatabaseSelectedCount = computed(() => {
   return listedVisibleDatabaseNames.value.filter((name) => visibleDatabaseSelection.value.has(name) || visibleDatabasePatternMatchedNames.value.has(name)).length;
 });
 const visibleDatabaseTotalCount = computed(() => listedVisibleDatabaseNames.value.length);
-const visibleDatabaseCanSave = computed(() => canSaveVisibleDatabaseSelection([...visibleDatabaseSelection.value], visibleDatabaseUserPatterns.value));
+const visibleDatabaseCanSave = computed(() => visibleFilterUsesSchemas.value || canSaveVisibleDatabaseSelection([...visibleDatabaseSelection.value], visibleDatabaseUserPatterns.value));
 const visibleDatabaseShowsNothing = computed(() => visibleDatabaseFilterShowsNothing(visibleDatabaseSelection.value, visibleDatabaseUserPatterns.value, visibleDatabasePatternMatchedNames.value));
 const visibleDatabaseHasSystemObjects = computed(() => defaultListedVisibleDatabaseNames.value.length < visibleDatabaseNames.value.length);
 const visibleSystemObjectsLabelKey = computed(() => (visibleFilterUsesSchemas.value ? "visibleSchemas.showSystemSchemas" : "visibleDatabases.showSystemDatabases"));
@@ -5948,6 +5947,7 @@ function resetTestState() {
 }
 
 function resetVisibleDatabaseDraftState() {
+  visibleDatabaseRequest++;
   showVisibleDatabasesDialog.value = false;
   isLoadingVisibleDatabases.value = false;
   visibleDatabaseNames.value = [];
@@ -6013,39 +6013,49 @@ async function openVisibleDatabasesPicker() {
   visibleDatabaseError.value = "";
   visibleDatabaseSearchText.value = "";
   const draftId = buildDraftVisibleDatabasesConnectionId(uuid());
+  const request = ++visibleDatabaseRequest;
+  const editing = editingId.value;
+  const target = connectionConfigForSubmit(draftId);
+  const selectionConfig = { ...target, visible_databases: form.value.visible_databases, visible_database_patterns: form.value.visible_database_patterns };
+  const fingerprint = connectionConfigFingerprint(target);
+  const isSchemaFilter = connectionUsesVisibleSchemaFilter(target);
+  const isCurrent = () => open.value && request === visibleDatabaseRequest && editing === editingId.value && fingerprint === connectionConfigFingerprint(connectionConfigForSubmit(draftId));
+  let schemaSelection: Awaited<ReturnType<typeof loadSchemaSelection>> | undefined;
 
   try {
     const draftConfig = {
-      ...connectionConfigForSubmit(draftId),
+      ...target,
       id: draftId,
       one_time: true,
     };
     const names = await loadVisibleDatabasesPickerNames({
       connect: () => api.connectDb(draftConfig),
-      listNames: () => loadVisibleDatabaseNames(draftId, draftConfig),
+      listNames: async () => {
+        if (!isSchemaFilter) return loadVisibleDatabaseNames(draftId, draftConfig);
+        schemaSelection = await loadSchemaSelection(draftId, draftConfig.database || "", selectionConfig);
+        return schemaSelection.names;
+      },
       disconnect: () => api.disconnectDb(draftId),
       queryTimeoutSecs: form.value.query_timeout_secs,
     });
+    if (!isCurrent()) return;
     visibleDatabaseNames.value = names;
+    visibleDatabaseSystemSchemas.value = schemaSelection?.systemNames;
     visibleDatabaseShowSystem.value = false;
-    const configuredSchemas = visibleSchemaObjectSelection.value;
-    const initialSelection = visibleFilterUsesSchemas.value
-      ? Array.isArray(configuredSchemas)
-        ? normalizeVisibleSchemaSelection(configuredSchemas, names)
-        : filterSchemaNamesForVisiblePicker(names, draftConfig)
-      : initialVisibleDatabaseDialogSelection(names, { ...draftConfig, visible_databases: form.value.visible_databases, visible_database_patterns: form.value.visible_database_patterns });
+    const initialSelection = isSchemaFilter ? schemaSelection!.selected : initialVisibleDatabaseDialogSelection(names, { ...draftConfig, visible_databases: form.value.visible_databases, visible_database_patterns: form.value.visible_database_patterns });
     visibleDatabaseSelection.value = new Set(initialSelection);
     const defaultVisible = new Set(defaultListedVisibleDatabaseNames.value);
     visibleDatabaseShowSystem.value = initialSelection.some((name) => !defaultVisible.has(name));
     showVisibleDatabasesDialog.value = true;
   } catch (e: any) {
+    if (!isCurrent()) return;
     visibleDatabaseNames.value = [];
     visibleDatabaseSelection.value = new Set();
     visibleDatabaseError.value = mongodbAuthFailureHint(errorMessage(e));
     testResult.value = { ok: false, message: visibleDatabaseError.value };
     showVisibleDatabasesDialog.value = true;
   } finally {
-    isLoadingVisibleDatabases.value = false;
+    if (request === visibleDatabaseRequest) isLoadingVisibleDatabases.value = false;
   }
 }
 
@@ -6222,7 +6232,8 @@ async function saveVisibleNacosNamespaceSelection() {
 
 async function loadVisibleDatabaseNames(connectionId: string, config: ConnectionConfig): Promise<string[]> {
   if (connectionUsesVisibleSchemaFilter(config)) {
-    return api.listSchemas(connectionId, config.database || "");
+    const result = await loadSchemaSelection(connectionId, config.database || "", config);
+    return result.names;
   }
   if (config.db_type === "redis") {
     return (await api.redisListDatabases(connectionId)).map((database) => String(database.db));
@@ -6346,17 +6357,10 @@ function clearVisibleDatabaseSelection() {
 function showAllVisibleDatabases() {
   editedNavigationVisibilityFields.add("visible_databases");
   editedNavigationVisibilityFields.add("visible_database_patterns");
-  if (visibleFilterUsesSchemas.value) {
-    handleDraftSchemasShowAll();
-    form.value.visible_databases = undefined;
-    // schema 模式下的兜底通配符同样会重新隐藏对象；"显示全部"要一并清掉。
-    form.value.visible_database_patterns = undefined;
-  } else {
-    form.value.visible_databases = undefined;
-    // 未筛选时系统库默认隐藏。用户展开系统库后点“显示全部”，说明全选范围包含系统库：
-    // 用全匹配通配符记住这一意图，既不冻结当前库名，之后新建的库也仍然自动可见。
-    form.value.visible_database_patterns = visibleDatabaseShowSystem.value && visibleDatabaseHasSystemObjects.value ? [MATCH_ALL_VISIBLE_DATABASE_PATTERN] : undefined;
-  }
+  form.value.visible_databases = undefined;
+  // 未筛选时系统库默认隐藏。用户展开系统库后点“显示全部”，说明全选范围包含系统库：
+  // 用全匹配通配符记住这一意图，既不冻结当前库名，之后新建的库也仍然自动可见。
+  form.value.visible_database_patterns = visibleDatabaseShowSystem.value && visibleDatabaseHasSystemObjects.value ? [MATCH_ALL_VISIBLE_DATABASE_PATTERN] : undefined;
   visibleDatabaseSelection.value = new Set();
   visibleDatabaseNames.value = [];
   showVisibleDatabasesDialog.value = false;
@@ -6366,8 +6370,10 @@ function saveVisibleDatabaseSelection() {
   if (!visibleDatabaseCanSave.value) return;
   if (visibleFilterUsesSchemas.value) {
     editedNavigationVisibilityFields.add("visible_databases");
+    editedNavigationVisibilityFields.add("visible_database_patterns");
     form.value.visible_databases = undefined;
-    handleDraftSchemasSave(normalizeVisibleSchemaSelection([...visibleDatabaseSelection.value], visibleDatabaseNames.value));
+    form.value.visible_database_patterns = undefined;
+    handleDraftSchemasSave([...visibleDatabaseSelection.value]);
   } else {
     // "全选"等价于不筛选：存成当时的库名快照会让之后新建的库永远看不到。
     const action = resolveVisibleDatabaseSaveAction({
@@ -6424,12 +6430,13 @@ async function openVisibleSchemasPicker() {
     if (!isCurrent()) return;
     await store.ensureConnected(draftId);
     if (!isCurrent()) return;
-    const names = await api.listSchemas(draftId, key);
+    const selection = await loadSchemaSelection(draftId, key, target);
     if (!isCurrent()) return;
+    const names = selection.names;
     visibleSchemaNames.value = names;
+    visibleSchemaSystemNames.value = selection.systemNames;
     visibleSchemaPickerDatabase = key;
-    const configured = form.value.visible_schemas?.[key];
-    visibleSchemaInitialSelection.value = Array.isArray(configured) ? configured : [];
+    visibleSchemaInitialSelection.value = selection.selected;
     showVisibleSchemasDialog.value = true;
   } catch (e: any) {
     if (!isCurrent()) return;
@@ -6447,17 +6454,6 @@ function handleDraftSchemasSave(selectedNames: string[]) {
   editedNavigationVisibilityFields.add("visible_schemas");
   editedVisibleSchemaKeys.add(key);
   form.value.visible_schemas = { ...form.value.visible_schemas, [key]: selectedNames };
-}
-
-function handleDraftSchemasShowAll() {
-  const key = visibleSchemaPickerDatabase ?? visibleSchemasDatabaseKey.value;
-  editedNavigationVisibilityFields.add("visible_schemas");
-  editedVisibleSchemaKeys.add(key);
-  if (form.value.visible_schemas) {
-    const next = { ...form.value.visible_schemas };
-    delete next[key];
-    form.value.visible_schemas = Object.keys(next).length > 0 ? next : undefined;
-  }
 }
 
 function applyConnectionUrl() {
@@ -6767,7 +6763,7 @@ watch([() => form.value.db_type, () => form.value.username], () => {
 watch(
   () => connectionConfigSnapshotForVisibleDatabases(),
   (current, previous) => {
-    if (applyingConnectionUpdate || !previous || !visibleObjectFiltersNeedReset(previous, current)) return;
+    if (!open.value || hydratingConnectionDraft || applyingConnectionUpdate || !previous || !visibleObjectFiltersNeedReset(previous, current)) return;
     form.value.visible_databases = undefined;
     form.value.visible_schemas = undefined;
     navigationVisibilityBaseline.visible_databases = undefined;
@@ -6798,6 +6794,7 @@ watch(
 );
 
 watch(visibleDatabaseShowSystem, (show) => {
+  if (visibleFilterUsesSchemas.value) return;
   if (show) return;
   const connection = connectionConfigSnapshotForVisibleDatabases();
   const visible = new Set(visibleFilterUsesSchemas.value ? filterSchemaNamesForVisiblePicker(visibleDatabaseNames.value, connection) : filterDatabaseNamesForVisiblePicker(visibleDatabaseNames.value, connection));
@@ -11062,13 +11059,6 @@ function openExternalUrl(url: string) {
                       <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.autoLoadAllTablesHint") }}</p>
                     </div>
                   </div>
-                  <div v-if="canChooseVisibleSchemas" class="grid grid-cols-4 items-center gap-4">
-                    <Label for="connection-show-system-schemas" :class="connectionLabelSmallClass">{{ t("connection.showSystemSchemas") }}</Label>
-                    <label class="col-span-3 flex cursor-pointer items-center gap-2">
-                      <input id="connection-show-system-schemas" v-model="form.show_system_schemas" type="checkbox" @change="editedNavigationVisibilityFields.add('show_system_schemas')" />
-                      <span class="text-xs text-muted-foreground">{{ t("connection.showSystemSchemasHint") }}</span>
-                    </label>
-                  </div>
                   <!-- Documentation notes are a relational-only feature, so this
                      follows the same isSchemaAware gate as the row above. -->
                   <div v-if="isSchemaAware(form.db_type)" class="grid grid-cols-4 items-center gap-x-4 gap-y-1">
@@ -11690,7 +11680,7 @@ function openExternalUrl(url: string) {
           <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingVisibleDatabases" @click="clearVisibleDatabaseSelection">
             {{ t("visibleDatabases.clear") }}
           </button>
-          <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingVisibleDatabases" @click="showAllVisibleDatabases">
+          <button v-if="!visibleFilterUsesSchemas" class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingVisibleDatabases" @click="showAllVisibleDatabases">
             {{ t("visibleDatabases.showAll") }}
           </button>
         </div>
@@ -11702,12 +11692,20 @@ function openExternalUrl(url: string) {
         {{ t("visibleDatabases.patternsNoMatch") }}
       </p>
 
-      <label v-if="visibleDatabaseHasSystemObjects" class="flex h-8 items-center gap-2 rounded-md px-1 text-xs text-muted-foreground">
+      <label v-if="!visibleFilterUsesSchemas && visibleDatabaseHasSystemObjects" class="flex h-8 items-center gap-2 rounded-md px-1 text-xs text-muted-foreground">
         <input v-model="visibleDatabaseShowSystem" type="checkbox" class="h-3.5 w-3.5 accent-primary" :disabled="isLoadingVisibleDatabases || !!visibleDatabaseError" />
         <span>{{ t(visibleSystemObjectsLabelKey) }}</span>
       </label>
 
-      <div class="h-72 overflow-y-auto rounded-md border bg-background/50 p-1">
+      <SchemaSelectionList
+        v-if="visibleFilterUsesSchemas && !isLoadingVisibleDatabases && !visibleDatabaseError"
+        v-model="visibleDatabaseSelection"
+        :names="visibleDatabaseNames"
+        :database-type="effectiveDatabaseTypeForConnection(form)"
+        :system-names="visibleDatabaseSystemSchemas"
+        :search="visibleDatabaseSearchText"
+      />
+      <div v-else class="h-72 overflow-y-auto rounded-md border bg-background/50 p-1">
         <div v-if="isLoadingVisibleDatabases" class="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
           <Loader2 class="h-4 w-4 animate-spin" />
           {{ t("common.loading") }}
@@ -11818,11 +11816,11 @@ function openExternalUrl(url: string) {
     :database-type="effectiveDatabaseTypeForConnection(form)"
     :username="form.username"
     :draft-schema-names="visibleSchemaNames"
+    :system-schema-names="visibleSchemaSystemNames"
     :draft-initial-selection="visibleSchemaInitialSelection"
     :draft-loading="isLoadingVisibleSchemas"
     :draft-error="visibleSchemaError"
     @draft:save="handleDraftSchemasSave"
-    @draft:show-all="handleDraftSchemasShowAll"
   />
 </template>
 

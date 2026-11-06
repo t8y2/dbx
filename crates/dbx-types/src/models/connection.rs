@@ -1376,6 +1376,7 @@ impl ConnectionConfig {
                 format!("{scheme}://{host}:{port}")
             }
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
+            DatabaseType::CosmosDb => cosmos_endpoint_url(raw_host, self.ssl, port),
             DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
             | DatabaseType::Solr
@@ -1567,6 +1568,8 @@ impl ConnectionConfig {
             DatabaseType::Oracle => {
                 format!("oracle://{}:{}@{host}:{port}{db_part}", username, password)
             }
+            // The account key is a request-signing secret, never part of the URL.
+            DatabaseType::CosmosDb => cosmos_endpoint_url(raw_host, self.ssl, port),
             DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
             | DatabaseType::Solr
@@ -3117,6 +3120,28 @@ fn bracket_ipv6(host: &str) -> String {
 /// (`https://acme.my.salesforce.com`) or a bare hostname. The access token
 /// lives in the password field and never appears in the URL, so the redacted
 /// and full forms are identical.
+/// Azure Cosmos DB endpoint `https://host:port`. Accepts a bare account host
+/// or a pasted account URI (`https://acct.documents.azure.com:443/`); the
+/// separate `port` argument wins so tunnels can substitute a local port.
+fn cosmos_endpoint_url(raw_host: &str, ssl: bool, port: u16) -> String {
+    let trimmed = raw_host.trim();
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .or_else(|| trimmed.strip_prefix("cosmosdb://"))
+        .unwrap_or(trimmed);
+    let authority = without_scheme.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or_default()
+    } else if authority.matches(':').count() == 1 {
+        authority.split(':').next().unwrap_or_default()
+    } else {
+        authority
+    };
+    let scheme = if ssl { "https" } else { "http" };
+    format!("{scheme}://{}:{port}", bracket_ipv6(host))
+}
+
 fn salesforce_instance_url(raw_host: &str, ssl: bool, port: u16) -> String {
     let trimmed = raw_host.trim().trim_end_matches('/');
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {

@@ -1,10 +1,10 @@
 import type { ComposerTranslation } from "vue-i18n";
 import { normalizeJsonArgument } from "@dbx-app/mongo-shell";
-import { isCouchDbDatabaseType, isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
+import { isCosmosDbDatabaseType, isCouchDbDatabaseType, isElasticsearchCompatibleDatabaseType, isMeilisearchDatabaseType, isSolrDatabaseType, type DatabaseType } from "@/types/database";
 import { quoteUnquotedObjectKeys } from "@/lib/mongo/mongoShellCommand";
 import { formatMongoShellLiteral, normalizeMongoDateInput } from "@/lib/mongo/mongoDocumentValues";
 
-export type DocumentStoreKind = "mongodb" | "dynamodb" | "elasticsearch" | "meilisearch" | "solr" | "couchdb";
+export type DocumentStoreKind = "mongodb" | "dynamodb" | "elasticsearch" | "meilisearch" | "solr" | "couchdb" | "cosmosdb";
 export type DocumentFilterMode = "equals" | "not-equals" | "like" | "not-like" | "begins-with" | "ends-with" | "greater-than" | "greater-than-or-equal" | "less-than" | "less-than-or-equal" | "in" | "not-in" | "between" | "not-between" | "is-null" | "is-not-null";
 export type DocumentFilterValueType = "auto" | "string" | "number" | "boolean" | "object-id" | "date" | "int32" | "int64" | "decimal128" | "json";
 export type ElasticsearchBoolClause = "filter" | "must" | "should" | "must_not";
@@ -82,7 +82,8 @@ export function documentFilterModeOptionsFor(kind: DocumentStoreKind): Array<{ v
   if (kind === "meilisearch") return documentFilterModeOptions.filter((option) => option.value !== "like" && option.value !== "not-like" && !MONGO_ONLY_DOCUMENT_FILTER_MODES.has(option.value));
   // Solr's driver translates every mode — including $in/$nin and range pairs —
   // into fq clauses, so the full Mongo-style operator set is available.
-  if (kind === "mongodb" || kind === "solr" || kind === "couchdb") return documentFilterModeOptions;
+  // Cosmos DB translates the same Mongo-style operators into parameterized Cosmos SQL.
+  if (kind === "mongodb" || kind === "solr" || kind === "couchdb" || kind === "cosmosdb") return documentFilterModeOptions;
   return documentFilterModeOptions.filter((option) => !MONGO_ONLY_DOCUMENT_FILTER_MODES.has(option.value));
 }
 
@@ -200,6 +201,22 @@ const couchdbDocumentProvider: DocumentStoreProvider = {
   sortInputForColumn: mongoDocumentProvider.sortInputForColumn,
 };
 
+const cosmosdbDocumentProvider: DocumentStoreProvider = {
+  kind: "cosmosdb",
+  filterInputLabel: "filter",
+  sortInputLabel: "sort",
+  documentsLabel: ({ total, totalIsExact }) => `${totalIsExact ? "" : "≥"}${total} Documents`,
+  queryPreview: ({ collection, filterJson, sortJson, limit }) => {
+    const lines = ["DBX COSMOSDB QUERY DOCUMENTS", `container: ${JSON.stringify(collection)}`, `limit: ${limit}`];
+    const filter = documentStorePreviewJson(filterJson);
+    if (filter) lines.push("filter:", filter);
+    const sort = documentStorePreviewJson(sortJson);
+    if (sort) lines.push("sort:", sort);
+    return lines.join("\n");
+  },
+  sortInputForColumn: mongoDocumentProvider.sortInputForColumn,
+};
+
 const dynamodbDocumentProvider: DocumentStoreProvider = {
   kind: "dynamodb",
   filterInputLabel: "filter",
@@ -233,6 +250,7 @@ export function documentStoreProviderFor(databaseType?: DatabaseType): DocumentS
   if (isMeilisearchDatabaseType(databaseType)) return meilisearchDocumentProvider;
   if (isSolrDatabaseType(databaseType)) return solrDocumentProvider;
   if (isCouchDbDatabaseType(databaseType)) return couchdbDocumentProvider;
+  if (isCosmosDbDatabaseType(databaseType)) return cosmosdbDocumentProvider;
   return mongoDocumentProvider;
 }
 
@@ -634,7 +652,7 @@ function mongoDocumentFilterKind(options: DocumentFilterParseOptions): boolean {
   // Solr shares the Mongo-style filter document — the driver translates $in,
   // $gte/$lte and anchored $regex into fq clauses — so it uses the same
   // operator-rich condition shapes.
-  return options.kind === undefined || options.kind === "mongodb" || options.kind === "solr" || options.kind === "couchdb";
+  return options.kind === undefined || options.kind === "mongodb" || options.kind === "solr" || options.kind === "couchdb" || options.kind === "cosmosdb";
 }
 
 /** Splits a comma/newline separated filter value list, keeping quoted values intact. */
@@ -872,6 +890,7 @@ const documentQueryInputNormalizers: Record<DocumentStoreKind, DocumentQueryInpu
   meilisearch: quoteUnquotedObjectKeys,
   solr: quoteUnquotedObjectKeys,
   couchdb: quoteUnquotedObjectKeys,
+  cosmosdb: quoteUnquotedObjectKeys,
 };
 
 function normalizeDocumentQueryObjectInput(input: string, kind?: DocumentStoreKind): string {

@@ -1954,6 +1954,12 @@ export default withEnglishFallback({
     customColorPlaceholder: "#ff0000 или rgba(…)",
     tursoHostPlaceholder: "your-database.turso.io или libsql://your-database.turso.io",
     tursoHostHint: "Поддерживаются протоколы libsql:// и https://. Можно также ввести только имя хоста (HTTPS используется автоматически).",
+    cosmosDbEndpoint: "Конечная точка учетной записи",
+    cosmosDbEndpointPlaceholder: "your-account.documents.azure.com",
+    cosmosDbEndpointHint: "Вставьте URI или ОСНОВНУЮ СТРОКУ ПОДКЛЮЧЕНИЯ со страницы «Ключи» на портале Azure — конечная точка и ключ заполнятся автоматически.",
+    cosmosDbAccountKey: "Ключ учетной записи",
+    cosmosDbUrlParamsPlaceholder: "tlsverify=false (только локальный эмулятор)",
+    cosmosDbCredentialsRequired: "Для Azure Cosmos DB нужны конечная точка и ключ учетной записи",
     tursoTokenHint: "Создайте токен командой:",
     tursoUrlParamsPlaceholder: "authToken=xxx (необязательно; поле Auth Token выше имеет приоритет)",
     driverInstall: {
@@ -8703,6 +8709,11 @@ export default withEnglishFallback({
     importFailed: "Не удалось выполнить импорт: {message}",
     importInvalidJson: "JSON должен содержать объект или массив объектов",
     exportSearchUnsupported: "Полный экспорт недоступен для текстового, гибридного поиска или поиска с порогом оценки, поскольку Meilisearch ограничивает постраничный поиск. Снимите эти параметры, чтобы экспортировать все отфильтрованные документы.",
+  },
+  cosmosdb: {
+    jsonReplaceHint: "Сохранение JSON полностью заменяет документ и завершается ошибкой, если документ изменился после загрузки (_etag). Изменение id или ключа секции создает новый документ и удаляет старый; _id и системные свойства игнорируются.",
+    pageCursorUnavailable: "Токен продолжения Azure Cosmos DB недоступен. Загрузите данные заново с первой страницы.",
+    repeatedCursor: "Azure Cosmos DB вернул повторяющийся токен продолжения. Экспорт остановлен.",
   },
   dynamodb: {
     tableMetadataUnavailable: "Метаданные таблицы DynamoDB не загружены. Обновите и повторите попытку.",

@@ -18,6 +18,7 @@ export const DATABASE_TYPES = [
   "meilisearch",
   "solr",
   "couchdb",
+  "cosmosdb",
   "hbase",
   "qdrant",
   "chromadb",

@@ -5,7 +5,7 @@ import { sidebarDatabaseOpenKey } from "@/lib/sidebar/sidebarDatabaseOpenState";
 // Mirrors the sidebar "database opened" indicator (sidebarDatabaseOpenState):
 // a database participates in the automatic search only when the user actually
 // opened it — children loaded in the tree or referenced by an open editor tab.
-const searchScopeDatabaseTypes = new Set<TreeNodeType>(["database", "mongo-db", "vector-database"]);
+const searchScopeDatabaseTypes = new Set<TreeNodeType>(["database", "mongo-db", "cosmosdb-database", "vector-database"]);
 
 export interface SidebarSearchDatabaseScopeOptions {
   enabled: boolean;

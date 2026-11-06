@@ -7803,6 +7803,17 @@ export const useQueryStore = defineStore("query", () => {
       };
     }
 
+    // Azure Cosmos DB SQL is read-only; documents are edited in the document browser.
+    const connectionType = (connection ?? (tab.connectionId ? useConnectionStore().getConfig(tab.connectionId) : undefined))?.db_type;
+    if (connectionType === "cosmosdb") {
+      return {
+        queryAnalysis: undefined,
+        querySourceColumns: undefined,
+        queryEditabilityReason: undefined,
+        tableMeta: undefined,
+      };
+    }
+
     queryExecutionLog("info", "metadata:editability:start", { traceId, elapsed: elapsed?.() });
     if (hasUnparsedQuerySource(sql)) {
       return {

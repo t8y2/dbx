@@ -2541,6 +2541,7 @@ dependencies = [
  "deadpool-postgres",
  "flate2",
  "futures",
+ "hmac 0.12.1",
  "json5",
  "libsqlite3-hotbundle",
  "log",

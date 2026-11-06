@@ -918,6 +918,7 @@ fn unsupported_pagination_type(database_type: Option<DatabaseType>) -> bool {
                 | DatabaseType::Salesforce
                 | DatabaseType::Solr
                 | DatabaseType::CouchDb
+                | DatabaseType::CosmosDb
                 | DatabaseType::DynamoDb
         )
     )

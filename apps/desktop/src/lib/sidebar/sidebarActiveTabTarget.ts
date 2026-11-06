@@ -353,7 +353,7 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
     if (target.schema) {
       return node.type === "schema" && node.connectionId === target.connectionId && node.database === target.database && node.label === target.schema;
     }
-    return (node.type === "database" || node.type === "mongo-db" || node.type === "redis-db" || node.type === "vector-database") && node.connectionId === target.connectionId && (node.database ?? node.label) === target.database;
+    return (node.type === "database" || node.type === "mongo-db" || node.type === "cosmosdb-database" || node.type === "redis-db" || node.type === "vector-database") && node.connectionId === target.connectionId && (node.database ?? node.label) === target.database;
   }
 
   if (target.type === "etcd-root") {

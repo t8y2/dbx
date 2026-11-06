@@ -1732,6 +1732,12 @@ export default withEnglishFallback({
     customColorPlaceholder: "#ff0000 ou rgba(…)",
     tursoHostPlaceholder: "your-database.turso.io ou libsql://your-database.turso.io",
     tursoHostHint: "Suporta os protocolos libsql:// e https://. Você também pode informar apenas o nome do host (HTTPS é usado automaticamente).",
+    cosmosDbEndpoint: "Ponto de extremidade da conta",
+    cosmosDbEndpointPlaceholder: "your-account.documents.azure.com",
+    cosmosDbEndpointHint: "Cole o URI ou a CADEIA DE CONEXÃO PRIMÁRIA da página Chaves do portal do Azure; o ponto de extremidade e a chave são preenchidos automaticamente.",
+    cosmosDbAccountKey: "Chave da conta",
+    cosmosDbUrlParamsPlaceholder: "tlsverify=false (somente emulador local)",
+    cosmosDbCredentialsRequired: "O Azure Cosmos DB exige um ponto de extremidade e uma chave da conta",
     tursoTokenHint: "Crie um token com:",
     tursoUrlParamsPlaceholder: "authToken=xxx (opcional, o campo Auth Token acima tem prioridade)",
     driverInstall: {
@@ -7317,6 +7323,11 @@ export default withEnglishFallback({
     importFailed: "Falha ao importar: {message}",
     importInvalidJson: "O JSON deve conter um objeto ou uma matriz de objetos",
     exportSearchUnsupported: "O Meilisearch limita a paginação de buscas por texto, híbridas ou com limite de pontuação. Limpe essas opções para exportar todos os documentos filtrados.",
+  },
+  cosmosdb: {
+    jsonReplaceHint: "Salvar o JSON substitui o documento inteiro e falha se ele mudou desde o carregamento (_etag). Alterar id ou a chave de partição cria um novo documento e exclui o antigo; _id e as propriedades do sistema são ignorados.",
+    pageCursorUnavailable: "O token de continuação do Azure Cosmos DB não está disponível. Recarregue a partir da primeira página.",
+    repeatedCursor: "O Azure Cosmos DB retornou um token de continuação repetido. A exportação foi interrompida.",
   },
   dynamodb: {
     tableMetadataUnavailable: "Os metadados da tabela DynamoDB não foram carregados. Atualize e tente novamente.",

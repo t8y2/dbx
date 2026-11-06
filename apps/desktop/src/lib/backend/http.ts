@@ -5319,9 +5319,11 @@ export async function documentFindDocuments(
   });
 }
 
-export async function documentCountDocuments(connectionId: string, collection: string, filter?: string, executionId?: string): Promise<number> {
+/** `database` is required by stores whose collections live inside a database (Azure Cosmos DB). */
+export async function documentCountDocuments(connectionId: string, collection: string, filter?: string, executionId?: string, database?: string): Promise<number> {
   return post("/api/document-store/count-documents", {
     connectionId,
+    database,
     collection,
     filter,
     executionId,

@@ -386,6 +386,10 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Table, colorClass: "text-green-400" };
     case "dynamodb-table":
       return { icon: Table, colorClass: "text-amber-500" };
+    case "cosmosdb-database":
+      return { icon: Database, colorClass: "text-sky-500" };
+    case "cosmosdb-container":
+      return { icon: Table, colorClass: "text-sky-400" };
     case "vector-collection":
       return { icon: TableProperties, colorClass: "text-cyan-400" };
     case "elasticsearch-index":
@@ -475,7 +479,7 @@ function treeNodeSecondaryValue(node: TreeNode): string | undefined {
 
 function visibleLabel(node: TreeNode): string {
   const withValidity = (label: string) => (node.valid === false ? `${label} · INVALID` : label);
-  if (node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection" || node.type === "dynamodb-table" || node.type === "vector-collection" || node.type === "elasticsearch-index") {
+  if (node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection" || node.type === "dynamodb-table" || node.type === "cosmosdb-container" || node.type === "vector-collection" || node.type === "elasticsearch-index") {
     return withValidity(sidebarDisplayTableName(node.label, settingsStore.editorSettings.sidebarHiddenTablePrefixes));
   }
   return withValidity(displayLabel(node));
@@ -790,7 +794,7 @@ const isPinned = computed(() => activeNode.value.pinned || connectionStore.isTre
 
 const isNodeDefaultDatabase = computed(
   () =>
-    (activeNode.value.type === "database" || activeNode.value.type === "redis-db" || activeNode.value.type === "mongo-db") &&
+    (activeNode.value.type === "database" || activeNode.value.type === "redis-db" || activeNode.value.type === "mongo-db" || activeNode.value.type === "cosmosdb-database") &&
     !!activeNode.value.connectionId &&
     typeof activeNode.value.database === "string" &&
     connectionStore.isDefaultDatabase(activeNode.value.connectionId, activeNode.value.database),

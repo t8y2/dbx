@@ -1263,6 +1263,12 @@ export default withEnglishFallback({
     customColorPlaceholder: "#ff0000 veya rgba(…)",
     tursoHostPlaceholder: "your-database.turso.io veya libsql://your-database.turso.io",
     tursoHostHint: "libsql:// ve https:// protokollerini destekler. Yalnızca sunucu adını da girebilirsiniz (otomatik olarak HTTPS kullanılır).",
+    cosmosDbEndpoint: "Hesap uç noktası",
+    cosmosDbEndpointPlaceholder: "your-account.documents.azure.com",
+    cosmosDbEndpointHint: "Azure portalındaki Anahtarlar sayfasından URI'yi veya BİRİNCİL BAĞLANTI DİZESİNİ yapıştırın; uç nokta ve anahtar otomatik olarak doldurulur.",
+    cosmosDbAccountKey: "Hesap anahtarı",
+    cosmosDbUrlParamsPlaceholder: "tlsverify=false (yalnızca yerel öykünücü)",
+    cosmosDbCredentialsRequired: "Azure Cosmos DB için hesap uç noktası ve hesap anahtarı gerekir",
     tursoTokenHint: "Şununla bir belirteç oluşturun:",
     tursoUrlParamsPlaceholder: "authToken=xxx (isteğe bağlı, yukarıdaki Auth Token alanı önceliklidir)",
     driverInstall: {
@@ -6048,6 +6054,11 @@ export default withEnglishFallback({
     importFailed: "İçe aktarma başarısız: {message}",
     importInvalidJson: "JSON bir nesne veya nesne dizisi içermelidir",
     exportSearchUnsupported: "Meilisearch arama sayfalamasını sınırladığı için metin, karma veya puan eşikli aramalarda tam dışa aktarma kullanılamaz. Filtrelenen tüm belgeleri dışa aktarmak için bu seçenekleri temizleyin.",
+  },
+  cosmosdb: {
+    jsonReplaceHint: "JSON kaydı belgenin tamamını değiştirir ve belge yüklendikten sonra değiştiyse (_etag) başarısız olur. id veya bölüm anahtarını değiştirmek yeni bir belge oluşturur ve eskisini siler; _id ve sistem özellikleri yok sayılır.",
+    pageCursorUnavailable: "Azure Cosmos DB devamlılık belirteci kullanılamıyor. İlk sayfadan yeniden yükleyin.",
+    repeatedCursor: "Azure Cosmos DB yinelenen bir devamlılık belirteci döndürdü. Dışa aktarma durduruldu.",
   },
   dynamodb: {
     tableMetadataUnavailable: "DynamoDB tablo meta verisi yüklenmedi. Yenileyip tekrar deneyin.",

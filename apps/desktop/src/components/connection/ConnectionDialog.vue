@@ -114,6 +114,7 @@ import {
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connection/connectionPresentation";
 import { MYSQL_DATA_CHARSETS, mysqlDataCharset, setMysqlDataCharset, mysqlDataCharsetValidation, supportsMysqlDataCharset } from "@/lib/connection/mysqlDataCharset";
 import { parseGaussdbHosts, serializeGaussdbHosts, type GaussdbHostEntry } from "@/lib/connection/gaussdbHosts";
+import { parseCosmosDbEndpointInput } from "@/lib/cosmosdb/cosmosDbConnection";
 import { h2ConnectionModeForConfig, h2FileJdbcUrlWithPath, h2FilePathFromJdbcUrl, isH2SplitJdbcUrl, type H2ConnectionMode } from "@/lib/database/h2Connection";
 import { firstZooKeeperEndpoint, normalizeZooKeeperConnectString } from "@/lib/zookeeper/zookeeperConnection";
 import { setZooKeeperAuthScheme, zooKeeperAuthScheme as resolveZooKeeperAuthScheme, type ZooKeeperAuthScheme } from "@/lib/zookeeper/zookeeperConnectionOptions";
@@ -287,7 +288,7 @@ const DREMIO_ARROW_FLIGHT_SQL_JDBC_DRIVER_CLASS = "org.apache.arrow.driver.jdbc.
 const DREMIO_LEGACY_JDBC_URL = "jdbc:dremio:direct=127.0.0.1:31010";
 const DREMIO_LEGACY_JDBC_DRIVER_CLASS = "com.dremio.jdbc.Driver";
 const DEFAULT_SSH_USER = "root";
-const DIRECT_SIDEBAR_OBJECT_TYPES = new Set<DatabaseType>(["redis", "etcd", "zookeeper", "consul", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "milvus", "qdrant", "weaviate", "chromadb", "mq", "mqtt", "nacos", "plugin"]);
+const DIRECT_SIDEBAR_OBJECT_TYPES = new Set<DatabaseType>(["redis", "etcd", "zookeeper", "consul", "mongodb", "dynamodb", "cosmosdb", "elasticsearch", "easysearch", "meilisearch", "solr", "milvus", "qdrant", "weaviate", "chromadb", "mq", "mqtt", "nacos", "plugin"]);
 const ETCD_GRPC_MAX_INBOUND_DEFAULT_MIB = 32;
 const ETCD_GRPC_MAX_INBOUND_MIN_MIB = 1;
 const ETCD_GRPC_MAX_INBOUND_MAX_MIB = 256;
@@ -532,6 +533,25 @@ const elasticsearchConnectionPorts = ref<Record<ElasticsearchConnectionMode, num
   direct: 9200,
   kibana: 5601,
 });
+/** Splits a pasted Cosmos DB account URI or portal connection string into host, port, TLS, and key. */
+function applyCosmosDbEndpointInput() {
+  if (form.value.db_type !== "cosmosdb") return;
+  const endpoint = parseCosmosDbEndpointInput(form.value.host);
+  if (!endpoint) return;
+  form.value.host = endpoint.host;
+  form.value.port = endpoint.port;
+  form.value.ssl = endpoint.ssl;
+  if (endpoint.accountKey) form.value.password = endpoint.accountKey;
+}
+
+function onCosmosDbEndpointPaste(event: ClipboardEvent) {
+  const text = event.clipboardData?.getData("text") ?? "";
+  if (!/accountendpoint\s*=|:\/\//i.test(text) || !parseCosmosDbEndpointInput(text)) return;
+  event.preventDefault();
+  form.value.host = text;
+  applyCosmosDbEndpointInput();
+}
+
 function switchElasticsearchAuthType(authType: ElasticsearchAuthType) {
   if (authType === elasticsearchAuthType.value) return;
   elasticsearchAuthType.value = authType;
@@ -3041,6 +3061,12 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.connection_string = undefined;
       form.value.ssl = true;
     }
+    if (profile.type === "cosmosdb") {
+      form.value.username = "";
+      form.value.database = undefined;
+      form.value.connection_string = undefined;
+      form.value.ssl = true;
+    }
     if (profile.type === "h2") {
       h2ConnectionMode.value = "file";
       form.value.host = "";
@@ -5126,6 +5152,21 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.database = config.database?.trim() || undefined;
     if (!hasGbase8cConnectionDatabase(config.database, config.connection_string)) {
       throw new Error(t("connection.gbase8cDatabaseRequired"));
+    }
+  }
+  if (config.db_type === "cosmosdb") {
+    const endpoint = parseCosmosDbEndpointInput(config.host);
+    if (endpoint) {
+      config.host = endpoint.host;
+      config.port = endpoint.port;
+      config.ssl = endpoint.ssl;
+      if (endpoint.accountKey && !config.password.trim()) config.password = endpoint.accountKey;
+    }
+    config.username = "";
+    config.password = config.password.trim();
+    config.connection_string = undefined;
+    if (!config.host.trim() || !config.password) {
+      throw new Error(t("connection.cosmosDbCredentialsRequired"));
     }
   }
   if (config.db_type === "dynamodb") {
@@ -9249,6 +9290,30 @@ function openExternalUrl(url: string) {
                     <div class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelClass">{{ t("connection.urlParams") }}</Label>
                       <Input v-model="form.url_params" class="col-span-3" :placeholder="influxDbVersion === '2' ? 'precision=ns' : influxDbVersion === '3' ? '' : 'epoch=ms'" />
+                    </div>
+                  </template>
+
+                  <!-- Azure Cosmos DB for NoSQL: account endpoint + account key -->
+                  <template v-else-if="form.db_type === 'cosmosdb'">
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.cosmosDbEndpoint") }}</Label>
+                      <div class="col-span-3 flex gap-2">
+                        <Input v-model="form.host" class="flex-1" :placeholder="t('connection.cosmosDbEndpointPlaceholder')" @change="applyCosmosDbEndpointInput" @paste="onCosmosDbEndpointPaste" />
+                        <Input v-model.number="form.port" type="number" class="w-24 shrink-0" />
+                      </div>
+                    </div>
+                    <div class="grid grid-cols-4 items-start gap-4">
+                      <span />
+                      <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.cosmosDbEndpointHint") }}</p>
+                    </div>
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.cosmosDbAccountKey") }}</Label>
+                      <PasswordInput v-model="form.password" class="col-span-3" autocomplete="new-password" />
+                    </div>
+                    <SavePasswordCheckbox v-model="form.save_password" />
+                    <div class="grid grid-cols-4 items-center gap-4">
+                      <Label :class="connectionLabelClass">{{ t("connection.urlParams") }}</Label>
+                      <Input v-model="form.url_params" class="col-span-3" :placeholder="t('connection.cosmosDbUrlParamsPlaceholder')" />
                     </div>
                   </template>
 

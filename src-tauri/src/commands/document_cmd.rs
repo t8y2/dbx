@@ -93,14 +93,16 @@ pub async fn document_count_documents(
     collection: String,
     filter: Option<String>,
     execution_id: Option<String>,
+    database: Option<String>,
 ) -> Result<u64, String> {
     let app = state.inner().clone();
     run_cancellable(
         &app,
         execution_id,
-        dbx_core::document_ops::count_document_store_documents_core(
+        dbx_core::document_ops::count_document_store_documents_in_database_core(
             &app,
             &connection_id,
+            database.as_deref(),
             &collection,
             filter.as_deref(),
         ),

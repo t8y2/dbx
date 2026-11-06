@@ -36,6 +36,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   salesforce: { deferred: "sObject metadata is managed in Salesforce Setup" },
   solr: { deferred: "core settings are not database properties" },
   couchdb: { deferred: "database settings are not SQL database properties" },
+  cosmosdb: { deferred: "database throughput is managed in the Azure portal" },
   hbase: { deferred: "namespace and table properties need a dedicated HBase workflow" },
   qdrant: { deferred: "collection settings are not database properties" },
   milvus: { deferred: "collection/database settings need a dedicated vector workflow" },

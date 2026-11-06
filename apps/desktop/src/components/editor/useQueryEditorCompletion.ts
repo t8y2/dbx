@@ -507,6 +507,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       props.databaseType !== "meilisearch" &&
       props.databaseType !== "solr" &&
       props.databaseType !== "couchdb" &&
+      props.databaseType !== "cosmosdb" &&
       props.databaseType !== "victoriametrics" &&
       props.databaseType !== "salesforce"
     );
@@ -881,7 +882,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       if (props.mongoQueryLanguage === "sql") return null;
       return provideMongoCompletions(currentState, position, explicit);
     }
-    if (props.databaseType === "meilisearch" || props.databaseType === "solr" || props.databaseType === "couchdb") return null;
+    if (props.databaseType === "meilisearch" || props.databaseType === "solr" || props.databaseType === "couchdb" || props.databaseType === "cosmosdb") return null;
     if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch") {
       if (!isSqlLikeCompletionStatement(fullDoc, position, sqlCompletionDialectOptions())) {
         return provideElasticsearchCompletions(currentState, position, explicit);
@@ -1243,7 +1244,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     if (props.databaseType === "mongodb") {
       return !!(insertedText || removedText) && shouldAutoOpenMongoCompletion(fullDoc, position);
     }
-    if (props.databaseType === "victoriametrics" || props.databaseType === "meilisearch" || props.databaseType === "solr" || props.databaseType === "couchdb") return false;
+    if (props.databaseType === "victoriametrics" || props.databaseType === "meilisearch" || props.databaseType === "solr" || props.databaseType === "couchdb" || props.databaseType === "cosmosdb") return false;
     if (props.databaseType === "redis" || props.databaseType === "elasticsearch" || props.databaseType === "easysearch") {
       // Preserve old character-based checks for non-SQL providers.
       if (!insertedText && removedText) {

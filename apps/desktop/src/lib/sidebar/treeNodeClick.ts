@@ -22,7 +22,7 @@ export type SidebarSelectionCopyAction = "copy-name" | "none";
 export type SidebarActivation = "single" | "double";
 
 const dataNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
-const documentBrowserNodeTypes = new Set<TreeNodeType>(["mongo-collection", "mongo-bucket", "dynamodb-table"]);
+const documentBrowserNodeTypes = new Set<TreeNodeType>(["mongo-collection", "mongo-bucket", "dynamodb-table", "cosmosdb-container"]);
 const toggleLeafNodeTypes = new Set<TreeNodeType>([
   "redis-db",
   "mq-tenant",
@@ -39,6 +39,7 @@ const toggleLeafNodeTypes = new Set<TreeNodeType>([
   "mongo-collection",
   "mongo-bucket",
   "dynamodb-table",
+  "cosmosdb-container",
   "vector-collection",
   "elasticsearch-index",
   "meilisearch-system",
@@ -70,7 +71,7 @@ const databaseActivationNodeTypes = new Set<TreeNodeType>(["database", "schema",
 export function shouldBrowseObjectsOnDatabaseActivation(type: TreeNodeType, enabled: boolean): boolean {
   return enabled && databaseActivationNodeTypes.has(type);
 }
-const queryOnActivationNodeTypes = new Set<TreeNodeType>(["connection", "database", "schema", "mongo-db"]);
+const queryOnActivationNodeTypes = new Set<TreeNodeType>(["connection", "database", "schema", "mongo-db", "cosmosdb-database"]);
 
 /**
  * Whether activating this row should open (or focus) the connection's query

@@ -10126,6 +10126,9 @@ export default withEnglishFallback({
     warnings: "คำเตือน",
   },
   diff: {
+    additionalSchemas: "เปรียบเทียบ Schema เหล่านี้ด้วย",
+    additionalSchemasHint: "แต่ละรายการจะถูกเปรียบเทียบกับ Schema ชื่อเดียวกันบนปลายทาง แล้วตรวจสอบและปรับใช้แยกกัน",
+    schemaResults: "ผลลัพธ์ตาม Schema",
     progress: {
       loadingObjects: "กำลังอ่านออบเจ็กต์ฐานข้อมูลต้นทางและปลายทาง…",
       loadingSourceDetails: "กำลังอ่านโครงสร้างตารางฐานข้อมูลต้นทาง",

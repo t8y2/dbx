@@ -8306,6 +8306,9 @@ export default withEnglishFallback({
     openWithDefaultAppFailed: "시스템 기본 앱으로 열기 실패: {message}",
   },
   diff: {
+    additionalSchemas: "다음 스키마도 비교",
+    additionalSchemasHint: "각 스키마는 대상의 같은 이름 스키마와 비교한 뒤 개별적으로 검토하고 배포합니다.",
+    schemaResults: "스키마별 결과",
     progress: {
       loadingObjects: "원본 및 대상 데이터베이스 객체를 읽는 중...",
       loadingSourceDetails: "원본 데이터베이스 테이블 구조를 읽는 중",

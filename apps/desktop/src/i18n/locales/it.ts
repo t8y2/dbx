@@ -8183,6 +8183,9 @@ export default withEnglishFallback({
     completedWithErrors: "Esecuzione completata: {succeeded} riusciti, {failed} non riusciti",
   },
   diff: {
+    additionalSchemas: "Confronta anche questi schemi",
+    additionalSchemasHint: "Ognuno viene confrontato con lo schema omonimo sulla destinazione, poi rivisto e distribuito separatamente.",
+    schemaResults: "Risultati per schema",
     progress: {
       loadingObjects: "Lettura degli oggetti dei database sorgente e di destinazione...",
       loadingSourceDetails: "Lettura della struttura delle tabelle del database sorgente",

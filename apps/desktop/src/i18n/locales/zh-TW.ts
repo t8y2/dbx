@@ -7305,6 +7305,9 @@ export default withEnglishFallback({
     runInBackground: "背景執行",
   },
   diff: {
+    additionalSchemas: "同時比較這些結構描述",
+    additionalSchemasHint: "每個結構描述都會與目標端同名的結構描述比較，並分別檢視與部署。",
+    schemaResults: "結構描述比較結果",
     progress: {
       loadingObjects: "正在讀取來源與目標資料庫物件……",
       loadingSourceDetails: "正在讀取來源資料庫資料表結構",

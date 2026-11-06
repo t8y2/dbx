@@ -4,7 +4,7 @@ import { createApp, h, nextTick, reactive, type App } from "vue";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import SchemaDiffDialog from "@/components/diff/SchemaDiffDialog.vue";
 import SchemaDiffDeployStep from "@/components/diff/SchemaDiffDeployStep.vue";
-import { startSchemaDiffSession, removeSchemaDiffSession } from "@/composables/useSchemaDiffSession";
+import { startSchemaDiffSession, startSchemaDiffSessions, removeSchemaDiffSession } from "@/composables/useSchemaDiffSession";
 import type { OracleRoutineKind, OracleRoutineOperation, OracleRoutinePlanInput, OracleRoutineSnapshot } from "@/types/schemaDiff";
 
 const calls = vi.hoisted(() => ({
@@ -38,6 +38,7 @@ vi.mock("@/stores/connectionStore", () => {
         return connections();
       },
       getConfig: (id: string) => connections().find((connection) => connection.id === id),
+      sidebarLayout: { groups: [], order: [] },
       ensureConnected: vi.fn().mockResolvedValue(undefined),
     }),
   };
@@ -58,6 +59,9 @@ vi.mock("@/lib/backend/api", () => ({
   observeOracleRoutineOperation: calls.observe,
   generateSchemaSyncPlan: calls.genericPlan,
   executeQuery: vi.fn().mockResolvedValue({ rows: [] }),
+  listTables: vi.fn().mockResolvedValue([]),
+  listDatabases: vi.fn().mockResolvedValue([{ name: "tenant" }]),
+  listSchemas: vi.fn().mockResolvedValue(["Source", "Target", "audit", "meta"]),
   listFunctions: vi.fn().mockResolvedValue([]),
   executeScriptWith2pc: calls.transaction,
   executeMulti: calls.multi,
@@ -528,6 +532,126 @@ it("loads independent DDL from each mapped comparison side without mutating comp
   expect(document.body.textContent).toContain("OLD_ID");
   expect(session.result?.diffs[0].ddl).toBe(sourceDdl);
   expect(session.result?.diffs[0].targetDdl).toBe(targetDdl);
+});
+
+it("switches between grouped schema results and recompares only the schema on screen", async () => {
+  calls.databaseType = "sqlserver";
+  calls.sourceDatabaseType = "sqlserver";
+  calls.compare.mockImplementation(async (request: any) => ({ diffs: [{ type: "added", name: request.targetSchema === "dbo" ? "DBO_ONLY" : "AUDIT_ONLY", ddl: "CREATE TABLE x (id int);", columns: [] }], functionDiffs: [], syncSql: "", renameCandidates: [] }));
+  const pair = (schema: string) => ({
+    sourceConnectionId: "source",
+    sourceDatabase: "tenant",
+    sourceSchema: schema,
+    sourceDbType: "sqlserver",
+    targetConnectionId: "target",
+    targetDatabase: "tenant",
+    targetSchema: schema,
+    targetDbType: "sqlserver" as const,
+    options: { tables: true, views: false, functions: false, sequences: false, rules: false, owners: false },
+    ignoreComments: false,
+    label: schema,
+  });
+  const group = startSchemaDiffSessions([pair("dbo"), pair("audit")], { tableListLoader: { load: vi.fn().mockResolvedValue([]) } });
+  const groupIds = group[0].group!;
+  sessions.push(...groupIds);
+  await flush();
+  const host = document.createElement("div");
+  document.body.append(host);
+  const app = createApp({ setup: () => () => h(SchemaDiffDialog, { open: true, sessionId: group[0].id }) });
+  apps.push(app);
+  app.mount(host);
+  await flush();
+  expect(document.body.textContent).toContain("DBO_ONLY");
+  const groupButton = (schema: string) => [...document.querySelectorAll<HTMLButtonElement>('[aria-label="diff.schemaResults"] button')].find((candidate) => candidate.textContent?.includes(schema))!;
+  expect(groupButton("dbo").textContent).toContain("(1)");
+
+  groupButton("audit").click();
+  await flush();
+  expect(document.body.textContent).toContain("AUDIT_ONLY");
+  expect(document.body.textContent).not.toContain("DBO_ONLY");
+
+  const compares = calls.compare.mock.calls.length;
+  button("diff.recompare").click();
+  await flush();
+  expect(calls.compare.mock.calls.length).toBe(compares + 1);
+  expect(calls.compare.mock.calls.at(-1)?.[0].targetSchema).toBe("audit");
+  sessions.push(groupIds[1]);
+  expect(groupIds[0]).toBe(group[0].id);
+  expect(groupIds[1]).not.toBe(group[1].id);
+  expect([...document.querySelectorAll('[aria-label="diff.schemaResults"] button')].map((candidate) => candidate.textContent?.trim().split(/\s+/)[0])).toEqual(["dbo", "audit"]);
+});
+
+it("retrying a failed grouped schema from the config step keeps its place and waits for running siblings", async () => {
+  calls.databaseType = "sqlserver";
+  calls.sourceDatabaseType = "sqlserver";
+  let finishSibling: (value: unknown) => void = () => {};
+  const emptyResult = { diffs: [], functionDiffs: [], syncSql: "", renameCandidates: [] };
+  calls.compare.mockImplementation(async (request: any) => {
+    if (request.targetSchema === "meta") return new Promise((resolve) => (finishSibling = () => resolve(emptyResult)));
+    if (request.targetSchema === "audit" && calls.compare.mock.calls.filter((call) => call[0].targetSchema === "audit").length === 1) throw new Error("audit unavailable");
+    return emptyResult;
+  });
+  const pair = (schema: string) => ({
+    sourceConnectionId: "source",
+    sourceDatabase: "tenant",
+    sourceSchema: schema,
+    sourceDbType: "sqlserver",
+    targetConnectionId: "target",
+    targetDatabase: "tenant",
+    targetSchema: schema,
+    targetDbType: "sqlserver" as const,
+    options: { tables: true, views: false, functions: false, sequences: false, rules: false, owners: false },
+    ignoreComments: false,
+    label: schema,
+  });
+  const group = startSchemaDiffSessions([pair("Source"), pair("audit"), pair("meta")], { tableListLoader: { load: vi.fn().mockResolvedValue([]) } });
+  const groupIds = group[0].group!;
+  sessions.push(...groupIds);
+  await flush();
+  expect(group[1].status).toBe("failed");
+  expect(group[2].status).toBe("running");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const app = createApp({ setup: () => () => h(SchemaDiffDialog, { open: true, sessionId: group[1].id }) });
+  apps.push(app);
+  app.mount(host);
+  await flush();
+  expect([...document.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent?.trim() === "common.loading")?.disabled).toBe(true);
+
+  finishSibling(undefined);
+  await flush();
+  button("diff.compare").click();
+  await flush();
+  expect(calls.compare.mock.calls.at(-1)?.[0].targetSchema).toBe("audit");
+  expect(groupIds[0]).toBe(group[0].id);
+  expect(groupIds[1]).not.toBe(group[1].id);
+  sessions.push(groupIds[1]);
+  expect(document.querySelectorAll('[aria-label="diff.schemaResults"] button').length).toBe(3);
+});
+
+it("starts one compare per chosen schema from the config step, one at a time", async () => {
+  let finishFirst: (value: unknown) => void = () => {};
+  calls.compare.mockImplementation((request: any) => {
+    const result = { diffs: [{ type: "added", name: `IN_${request.targetSchema}`, ddl: "CREATE TABLE x (id int);", columns: [] }], functionDiffs: [], syncSql: "", renameCandidates: [] };
+    return request.targetSchema === "Target" ? new Promise((resolve) => (finishFirst = () => resolve(result))) : Promise.resolve(result);
+  });
+  calls.compare.mockResolvedValueOnce({ diffs: [], functionDiffs: [], syncSql: "", renameCandidates: [] });
+  const { session } = await mountComparison("sqlserver", "sqlserver", undefined, true);
+  button("diff.prevStep").click();
+  await flush();
+
+  document.querySelector<HTMLButtonElement>('[data-table-name="audit"]')!.click();
+  await flush();
+  button("diff.compare").click();
+  await flush();
+  expect(calls.compare.mock.calls.slice(1).map((call) => call[0].targetSchema)).toEqual(["Target"]);
+
+  finishFirst(undefined);
+  await flush();
+  expect(calls.compare.mock.calls.slice(1).map((call) => call[0].targetSchema)).toEqual(["Target", "audit"]);
+  const schemas = [...document.querySelectorAll('[aria-label="diff.schemaResults"] button')].map((candidate) => candidate.textContent?.trim().split(/\s+/)[0]);
+  expect(schemas).toEqual(["Source", "audit"]);
+  expect(session.group).toBeUndefined();
 });
 
 it("drops a late independent comparison preview after switching the option off (#13224)", async () => {

@@ -9758,6 +9758,9 @@ export default withEnglishFallback({
     openWithDefaultAppFailed: "Не удалось открыть с помощью системного приложения по умолчанию: {message}",
   },
   diff: {
+    additionalSchemas: "Также сравнить эти схемы",
+    additionalSchemasHint: "Каждая сравнивается со схемой с тем же именем в целевой базе, затем проверяется и развёртывается отдельно.",
+    schemaResults: "Результаты по схемам",
     progress: {
       loadingObjects: "Чтение объектов исходной и целевой баз данных...",
       loadingSourceDetails: "Чтение структур таблиц исходной базы данных",

@@ -7141,6 +7141,9 @@ export default withEnglishFallback({
     fileFilterHint: "*.sql və ya *.sh kimi fayl şablonundan, yaxud {regex} kimi müntəzəm ifadədən istifadə edin.",
   },
   diff: {
+    additionalSchemas: "Bu sxemləri də müqayisə et",
+    additionalSchemasHint: "Hər biri hədəfdəki eyni adlı sxemlə müqayisə olunur, sonra ayrıca yoxlanılır və tətbiq edilir.",
+    schemaResults: "Sxem nəticələri",
     progress: {
       loadingObjects: "Mənbə və hədəf verilənlər bazası obyektləri oxunur...",
       loadingSourceDetails: "Mənbə verilənlər bazasının cədvəl strukturları oxunur",

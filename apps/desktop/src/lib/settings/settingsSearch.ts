@@ -598,6 +598,8 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
       "connection.sshUser",
       "connection.sshAuthMethod",
       "connection.sshPassword",
+      "connection.sshTotpSecret",
+      "connection.sshTotpSecretHint",
       "connection.sshKeyPath",
       "connection.sshKeyPassphrase",
       "connection.sshAgentSockPath",

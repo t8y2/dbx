@@ -580,6 +580,7 @@ function defaultSshTunnel(): SshTunnelConfig {
     auth_method: "password",
     allow_exec_channel_proxy: false,
     proxy_command: "",
+    totp_secret: "",
   };
 }
 
@@ -604,6 +605,10 @@ function normalizeSshTunnel(hop: Partial<SshTunnelConfig>): SshTunnelConfig {
     allow_exec_channel_proxy: !!hop.allow_exec_channel_proxy,
     proxy_command: hop.proxy_command || "",
     profile_id: hop.profile_id || undefined,
+    // Three-state on purpose: `undefined` keeps whatever the backend stored,
+    // while an empty string is a deliberate clear. Collapsing these would make
+    // a saved secret impossible to delete.
+    totp_secret: hop.totp_secret === undefined ? undefined : hop.totp_secret || "",
   };
 }
 
@@ -11239,6 +11244,13 @@ function openExternalUrl(url: string) {
                     <div v-if="!selectedSshLayer.auth_method || selectedSshLayer.auth_method === 'password' || selectedSshLayer.auth_method === 'key+password'" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.sshPassword") }}</Label>
                       <PasswordInput v-model="selectedSshLayer.password" class="col-span-3" :placeholder="t('connection.sshPasswordPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
+                    </div>
+                    <div v-if="!selectedSshLayer.auth_method || selectedSshLayer.auth_method === 'password' || selectedSshLayer.auth_method === 'key+password'" class="grid grid-cols-4 items-start gap-4">
+                      <Label :class="connectionLabelSmallClass">{{ t("connection.sshTotpSecret") }}</Label>
+                      <div class="col-span-3 space-y-1">
+                        <PasswordInput v-model="selectedSshLayer.totp_secret" :placeholder="t('connection.sshTotpSecretPlaceholder')" :disabled="selectedSshLayer.enabled === false" />
+                        <p class="text-xs text-muted-foreground">{{ t("connection.sshTotpSecretHint") }}</p>
+                      </div>
                     </div>
                     <div v-if="selectedSshLayer.auth_method === 'none'" class="grid grid-cols-4 items-center gap-4">
                       <span />

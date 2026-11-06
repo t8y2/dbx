@@ -8863,22 +8863,22 @@ watch(
                             :allow-custom="true"
                             :option-tooltip="dataTypeTooltip"
                             :display-name="gaussdbMDataTypeDisplayName"
-                            :trigger-class="[structureMonoControlClass, 'w-full']"
+                            :trigger-class="[structureControlClass, 'w-full']"
                             @update:model-value="(v: string) => updateColumnDataType(column, v)"
                           >
                             <template #option-label="{ option, label }">
-                              <span :class="['structure-data-type-option block truncate font-mono', structureDataTypeToneClass(option)]">{{ label }}</span>
+                              <span :class="['structure-data-type-option block truncate', structureDataTypeToneClass(option)]">{{ label }}</span>
                             </template>
                             <template #custom-option-label="{ value }">
-                              <span :class="['structure-data-type-option block truncate font-mono', structureDataTypeToneClass(value)]">{{ value }}</span>
+                              <span :class="['structure-data-type-option block truncate', structureDataTypeToneClass(value)]">{{ value }}</span>
                             </template>
                           </SearchableSelect>
-                          <Input v-else :model-value="gaussdbMDataTypeDisplayName(dataTypeBaseInputValue(databaseType, column.dataType))" :class="[structureMonoControlClass, 'w-full']" disabled />
+                          <Input v-else :model-value="gaussdbMDataTypeDisplayName(dataTypeBaseInputValue(databaseType, column.dataType))" :class="[structureControlClass, 'w-full']" disabled />
                         </td>
                         <td v-if="columnEditorControls.length" :class="[structureCellClass, structureColumnSelectionClass('length')]" :title="structureColumnClipboardValue(column, 'length') || undefined">
                           <Popover v-if="isMysqlEnumDataType(databaseType, column.dataType)">
                             <PopoverTrigger as-child>
-                              <Button variant="outline" size="sm" :class="[structureMonoControlClass, 'w-full justify-between px-2']" :disabled="isColumnTypeDisabled(column)">
+                              <Button variant="outline" size="sm" :class="[structureControlClass, 'w-full justify-between px-2']" :disabled="isColumnTypeDisabled(column)">
                                 <span>{{ t("structureEditor.enumValueCount", { count: column.enumValues?.length ?? 0 }) }}</span>
                                 <ListChevronsUpDown :class="structureIconClass" />
                               </Button>
@@ -8893,7 +8893,7 @@ watch(
                               </div>
                               <div class="max-h-64 space-y-1.5 overflow-y-auto pr-1">
                                 <div v-for="(value, valueIndex) in column.enumValues" :key="valueIndex" class="flex items-center gap-1.5">
-                                  <Input :model-value="value" :class="structureMonoControlClass" :placeholder="t('structureEditor.enumValuePlaceholder')" @update:model-value="updateMysqlEnumValue(column, Number(valueIndex), $event)" />
+                                  <Input :model-value="value" :class="structureControlClass" :placeholder="t('structureEditor.enumValuePlaceholder')" @update:model-value="updateMysqlEnumValue(column, Number(valueIndex), $event)" />
                                   <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0" :disabled="(column.enumValues?.length ?? 0) <= 1" :title="t('structureEditor.removeEnumValue')" @click="removeMysqlEnumValue(column, Number(valueIndex))">
                                     <Trash2 class="h-3.5 w-3.5" />
                                   </Button>
@@ -8911,13 +8911,13 @@ watch(
                                 :placeholder="t('structureEditor.geometryTypePlaceholder')"
                                 :search-placeholder="t('structureEditor.geometryTypePlaceholder')"
                                 :empty-text="t('structureEditor.noMatchingType')"
-                                :trigger-class="[structureMonoControlClass, 'min-w-0 flex-1']"
+                                :trigger-class="[structureControlClass, 'min-w-0 flex-1']"
                                 :disabled="isColumnTypeDisabled(column)"
                                 @update:model-value="(v: string) => updatePostgresGeometryColumn(column, v, postgresGeometrySridValue(column.dataType))"
                               />
                               <Input
                                 :model-value="postgresGeometrySridValue(column.dataType)"
-                                :class="[structureMonoControlClass, 'w-20 shrink-0']"
+                                :class="[structureControlClass, 'w-20 shrink-0']"
                                 type="number"
                                 min="0"
                                 max="999999"
@@ -8932,14 +8932,9 @@ watch(
                             </p>
                           </div>
                           <div v-else class="flex min-w-0 items-center gap-1">
-                            <Input :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="[structureMonoControlClass, 'min-w-0 flex-1']" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
+                            <Input :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="[structureControlClass, 'min-w-0 flex-1']" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
                             <Select v-if="columnLengthUnitOptions(column).length" :model-value="dataTypeLengthUnitValue(databaseType, column.dataType) || '__default'" :disabled="isColumnLengthUnitDisabled(column)" @update:model-value="updateColumnDataTypeLengthUnit(column, $event)">
-                              <SelectTrigger
-                                :aria-label="t('structureEditor.lengthUnit')"
-                                :title="t('structureEditor.lengthUnit')"
-                                size="sm"
-                                class="structure-grid-control h-[var(--structure-control-height)] w-16 shrink-0 rounded-[6px] px-[var(--structure-control-px)] py-0 font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25"
-                              >
+                              <SelectTrigger :aria-label="t('structureEditor.lengthUnit')" :title="t('structureEditor.lengthUnit')" size="sm" :class="[structureControlClass, 'w-16 shrink-0']">
                                 <SelectValue :placeholder="t('structureEditor.unitPlaceholder')" />
                               </SelectTrigger>
                               <SelectContent>

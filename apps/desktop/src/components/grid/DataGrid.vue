@@ -439,7 +439,6 @@ import {
   dataGridDropTargetTabs,
   dataGridSqlTextReferencesAnyColumn,
   isDataGridColumnNameCaseSensitive,
-  isDataGridViewTable,
   sameOptionalScope as sameOptionalDropScope,
   type DataGridDropColumnCandidate,
 } from "@/lib/dataGrid/dataGridDropColumn";
@@ -5639,7 +5638,7 @@ const dropColumnOpenTabsPending = () => {
 
 const dropColumnToolbarState = computed(() =>
   dataGridDropColumnToolbarState({
-    available: props.context === "table-data" && resolvedDatabaseType.value === "mysql" && !!props.tableMeta?.tableName && !!props.connectionId && !!props.database && !isDataGridViewTable(props.tableMeta.tableType) && tableStructureCapabilities.value.dropColumn,
+    available: false,
     busy: props.loading === true || isSaving.value || dropColumnLoading.value,
     pendingChanges: hasPendingChanges.value || dropColumnOpenTabsPending(),
     tableColumnCount: props.tableMeta?.columns.length ?? 0,

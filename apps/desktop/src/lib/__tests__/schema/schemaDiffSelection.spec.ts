@@ -59,10 +59,7 @@ describe("schema diff SQL selection projections", () => {
     result.diffs[0].tableCharset = charset;
     const objects = convertToSchemaDiffObjects(result.diffs);
     const tableOptions = objects[0].children?.find((child) => child.objectKind === "tableOption");
-    expect(tableOptions?.changes).toEqual([
-      "character set: latin1 → utf8mb4",
-      "collation: latin1_swedish_ci → utf8mb4_0900_ai_ci",
-    ]);
+    expect(tableOptions?.changes).toEqual(["character set: latin1 → utf8mb4", "collation: latin1_swedish_ci → utf8mb4_0900_ai_ci"]);
     expect(selectSchemaDiffInput(result, objects).diffs[0].tableCharset).toEqual(charset);
     setSchemaDiffObjectSelected(objects, tableOptions!.id, false);
     expect(selectSchemaDiffInput(result, objects).diffs[0].tableCharset).toBeUndefined();

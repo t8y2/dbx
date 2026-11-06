@@ -127,6 +127,9 @@ DBX MCP provides the following tools (availability depends on build features and
 | `dbx_add_connection` | Add a connection to DBX storage |
 | `dbx_duplicate_connection` | Duplicate a DBX connection with its complete settings |
 | `dbx_remove_connection` | Remove a connection from DBX storage |
+| `dbx_list_sidebar_groups` | List sidebar groups with stable ids, full paths, their connections, and ungrouped connections |
+| `dbx_create_sidebar_group` | Create a sidebar group (optionally nested, or along a full multi-level path); idempotent for the same name under the same parent |
+| `dbx_move_connections_to_group` | Move existing connections into a sidebar group by stable id (preferred) or display path |
 | `dbx_list_tables` | List tables, views, or collections |
 | `dbx_describe_table` | Return columns and table metadata |
 | `dbx_list_routines` | List stored procedures and functions in a schema, with an optional `routine_type` filter (PROCEDURE or FUNCTION) |
@@ -185,6 +188,26 @@ The public Nacos namespace uses `public` in permission rules; an omitted or empt
 Nacos user, role, and namespace administration, and Consul ACL and Intentions administration, are not exposed by default. Snapshot restore, Raft or cluster-member changes, License writes, and other cluster operations whose risk cannot be reliably classified are not provided as MCP tools.
 
 `dbx_list_connections` and `dbx://connections` include saved connection notes regardless of the sidebar display setting. Notes are visible to MCP clients that can access the connection; do not store passwords or other secrets in notes.
+
+### Sidebar connection groups
+
+`dbx_list_sidebar_groups` reads the persisted sidebar hierarchy. Every group reports its stable `id` and full `path`, so an importer can create `本地 / MySQL / MySQL 8.0` once and reuse the returned ids instead of guessing names.
+
+`dbx_create_sidebar_group` accepts either:
+
+- `name` plus an optional `parent_group_id` (preferred) or `parent_group_path`; set `create_missing_parents: true` to create missing levels of a parent path;
+- `path`, a full array such as `["本地", "MySQL", "MySQL 8.0"]`, which creates every missing level.
+
+The call is idempotent for the same name under the same parent: it returns the existing group and `created: false` instead of duplicating it.
+
+`dbx_add_connection` accepts `group_id` (preferred) or `group_path`; the connection insert and the layout update happen in one storage transaction. `dbx_move_connections_to_group` accepts `connection_ids` (preferred) or unique `connection_names`, plus `group_id` or `group_path`, and writes the layout with a compare-and-swap so a concurrent UI edit is not silently overwritten.
+
+Group management follows the MCP policy:
+
+- global read-only mode blocks all three mutating calls;
+- policies that derive visibility or execution permissions from sidebar groups block grouped adds and moves, because changing membership would change permissions;
+- connection-scoped sessions hide the group tools;
+- groups whose members are all outside the MCP visibility scope are hidden from `dbx_list_sidebar_groups`.
 
 `dbx_execute_query` row controls:
 

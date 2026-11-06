@@ -684,3 +684,169 @@ async fn call_query(client: &rmcp::service::RunningService<rmcp::RoleClient, ()>
     assert_ne!(result.is_error, Some(true), "MongoDB command failed: {text}");
     text
 }
+
+async fn call_tool_text(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    name: &str,
+    arguments: Value,
+) -> (bool, String) {
+    let arguments = arguments.as_object().cloned().unwrap_or_else(Map::<String, Value>::new);
+    let result = client
+        .peer()
+        .call_tool(CallToolRequestParams::new(name.to_string()).with_arguments(arguments))
+        .await
+        .expect("call MCP tool");
+    let text = result.content[0].as_text().expect("text result").text.clone();
+    (result.is_error == Some(true), text)
+}
+
+#[tokio::test]
+async fn sidebar_group_tools_round_trip_through_local_storage() {
+    let directory = tempdir().expect("temporary data directory");
+    let db_path = directory.path().join("dbx.db");
+    let storage = dbx_core::persistence::test_storage::open(&db_path).await.expect("open isolated storage");
+    storage
+        .save_mcp_global_policy(&dbx_core::storage::McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allowed_connection_ids: None,
+            ..Default::default()
+        })
+        .await
+        .expect("enable MCP connection management");
+
+    let backend = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
+    let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize client");
+
+    let (failed, text) =
+        call_tool_text(&client, "dbx_create_sidebar_group", json!({ "path": ["本地", "MySQL"] })).await;
+    assert!(!failed, "create group failed: {text}");
+    assert!(text.contains("Created 2 sidebar group(s)"), "{text}");
+
+    let (failed, text) =
+        call_tool_text(&client, "dbx_create_sidebar_group", json!({ "path": ["本地", "MySQL"] })).await;
+    assert!(!failed, "idempotent create failed: {text}");
+    assert!(text.contains("already exists"), "{text}");
+
+    let (failed, text) = call_tool_text(
+        &client,
+        "dbx_add_connection",
+        json!({
+            "name": "MySQL 8.0",
+            "db_type": "mysql",
+            "host": "127.0.0.1",
+            "port": 3306,
+            "username": "root",
+            "password": "",
+            "database": "app",
+            "group_path": ["本地", "MySQL"]
+        }),
+    )
+    .await;
+    assert!(!failed, "grouped add failed: {text}");
+    assert!(text.contains("in sidebar group \"本地 / MySQL\""), "{text}");
+
+    let (failed, text) = call_tool_text(
+        &client,
+        "dbx_add_connection",
+        json!({
+            "name": "Redis 7.4",
+            "db_type": "redis",
+            "host": "127.0.0.1",
+            "port": 6379,
+            "username": "",
+            "password": ""
+        }),
+    )
+    .await;
+    assert!(!failed, "ungrouped add failed: {text}");
+
+    let (failed, text) = call_tool_text(
+        &client,
+        "dbx_move_connections_to_group",
+        json!({ "connection_names": ["Redis 7.4"], "group_path": ["本地", "MySQL"] }),
+    )
+    .await;
+    assert!(!failed, "move failed: {text}");
+    assert!(text.contains("Moved 1 connection(s)"), "{text}");
+
+    let (failed, text) = call_tool_text(&client, "dbx_list_sidebar_groups", json!({})).await;
+    assert!(!failed, "list groups failed: {text}");
+    assert!(text.contains("path: 本地 / MySQL"), "{text}");
+    assert!(text.contains("connection: MySQL 8.0"), "{text}");
+    assert!(text.contains("connection: Redis 7.4"), "{text}");
+
+    let (failed, text) = call_tool_text(&client, "dbx_list_connections", json!({})).await;
+    assert!(!failed, "list connections failed: {text}");
+    assert!(text.contains("本地 / MySQL"), "{text}");
+
+    // A failed grouped add must roll back the connection insert rather than
+    // leaving it ungrouped.
+    let (failed, text) = call_tool_text(
+        &client,
+        "dbx_add_connection",
+        json!({
+            "name": "Broken Group Target",
+            "db_type": "sqlite",
+            "host": ":memory:",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "group_id": "missing-group"
+        }),
+    )
+    .await;
+    assert!(failed, "unknown group must fail: {text}");
+    assert!(text.contains("GROUP_NOT_FOUND"), "{text}");
+    let (failed, text) = call_tool_text(&client, "dbx_list_connections", json!({})).await;
+    assert!(!failed, "list connections failed: {text}");
+    assert!(!text.contains("Broken Group Target"), "rolled-back connection leaked: {text}");
+
+    let (failed, text) = call_tool_text(
+        &client,
+        "dbx_move_connections_to_group",
+        json!({ "connection_ids": ["missing-connection"], "group_path": ["本地", "MySQL"] }),
+    )
+    .await;
+    assert!(failed, "unknown connection must fail: {text}");
+    assert!(text.contains("UNKNOWN_CONNECTION"), "{text}");
+
+    client.cancel().await.expect("close client");
+    server_task.abort();
+
+    // Re-read the persisted layout directly: the hierarchy and membership must
+    // survive the MCP process, not just the in-memory tool response.
+    let layout = storage.load_sidebar_layout().await.expect("load layout").expect("sidebar layout");
+    let groups = layout["groups"].as_array().expect("groups");
+    let mysql_group = groups.iter().find(|group| group["name"] == "MySQL").expect("MySQL group");
+    assert!(mysql_group["id"].as_str().is_some(), "MySQL group id");
+    let paths = dbx_core::mcp_policy::connection_group_paths(&layout).expect("group paths");
+
+    let connections = storage.load_connections().await.expect("load connections");
+    let mysql = connections.iter().find(|connection| connection.name == "MySQL 8.0").expect("MySQL connection");
+    let redis = connections.iter().find(|connection| connection.name == "Redis 7.4").expect("Redis connection");
+    assert_eq!(paths[&mysql.id].names, vec!["本地".to_string(), "MySQL".to_string()]);
+    assert_eq!(paths[&redis.id].names, vec!["本地".to_string(), "MySQL".to_string()]);
+    assert!(!connections.iter().any(|connection| connection.name == "Broken Group Target"));
+}
+
+#[tokio::test]
+async fn sidebar_layout_compare_and_swap_rejects_stale_writes() {
+    let directory = tempdir().expect("temporary data directory");
+    let db_path = directory.path().join("dbx.db");
+    let storage = dbx_core::persistence::test_storage::open(&db_path).await.expect("open isolated storage");
+    let first = json!({ "groups": [], "order": [{ "type": "connection", "id": "a" }] });
+    let second = json!({ "groups": [], "order": [{ "type": "connection", "id": "b" }] });
+    let third = json!({ "groups": [], "order": [{ "type": "connection", "id": "c" }] });
+
+    assert!(storage.replace_sidebar_layout_if_unchanged(None, &first).await.expect("insert"));
+    assert!(!storage.replace_sidebar_layout_if_unchanged(None, &second).await.expect("absent precondition"));
+    assert!(storage.replace_sidebar_layout_if_unchanged(Some(&first), &third).await.expect("cas update"));
+    assert!(!storage.replace_sidebar_layout_if_unchanged(Some(&first), &second).await.expect("stale update"));
+    assert_eq!(storage.load_sidebar_layout().await.unwrap().unwrap(), third);
+    assert!(storage.replace_sidebar_layout_if_unchanged(Some(&third), &second).await.expect("retry after reread"));
+    assert_eq!(storage.load_sidebar_layout().await.unwrap().unwrap(), second);
+}

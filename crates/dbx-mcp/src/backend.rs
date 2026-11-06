@@ -342,6 +342,19 @@ pub trait DbxBackend: Send + Sync {
             .map(|(connection_id, names)| (connection_id, McpConnectionGroupPath { ids: Vec::new(), names }))
             .collect())
     }
+    /// Raw persisted sidebar tree, used by the MCP connection-group tools.
+    async fn load_sidebar_layout(&self) -> Result<Option<Value>, String> {
+        Err("Sidebar layout is not supported by this backend.".to_string())
+    }
+    /// Compare-and-swap write of the whole sidebar tree. Returning `false`
+    /// means another writer changed the row first and the caller must retry.
+    async fn replace_sidebar_layout_if_unchanged(
+        &self,
+        _expected: Option<&Value>,
+        _next: &Value,
+    ) -> Result<bool, String> {
+        Err("Conditional sidebar layout writes are not supported by this backend.".to_string())
+    }
     async fn execute_agent_tool(
         &self,
         connection: &ConnectionConfig,
@@ -423,6 +436,19 @@ pub trait DbxBackend: Send + Sync {
         dbx_core::sql::sql_execution_plan_for_database(sql, connection.db_type)
     }
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String>;
+    /// Add a connection directly into a sidebar group. Backends that cannot
+    /// do it atomically must reject the grouped form instead of silently
+    /// leaving the connection ungrouped.
+    async fn add_connection_for_mcp_in_group(
+        &self,
+        config: ConnectionConfig,
+        group_id: Option<&str>,
+    ) -> Result<ConnectionConfig, String> {
+        match group_id {
+            None => self.add_connection_for_mcp(config).await,
+            Some(_) => Err("Grouped connection adds are not supported by this backend.".to_string()),
+        }
+    }
     async fn duplicate_connection_for_mcp(
         &self,
         source_id: &str,
@@ -1405,14 +1431,24 @@ impl DbxBackend for LocalBackend {
     }
 
     async fn load_connection_group_details(&self) -> Result<HashMap<String, McpConnectionGroupPath>, String> {
-        self.state
-            .storage
-            .load_sidebar_layout()
+        self.load_sidebar_layout()
             .await?
             .as_ref()
             .map(connection_group_paths)
             .transpose()
             .map(Option::unwrap_or_default)
+    }
+
+    async fn load_sidebar_layout(&self) -> Result<Option<Value>, String> {
+        self.state.storage.load_sidebar_layout().await
+    }
+
+    async fn replace_sidebar_layout_if_unchanged(
+        &self,
+        expected: Option<&Value>,
+        next: &Value,
+    ) -> Result<bool, String> {
+        self.state.storage.replace_sidebar_layout_if_unchanged(expected, next).await
     }
 
     async fn execute_agent_tool(
@@ -1583,7 +1619,15 @@ impl DbxBackend for LocalBackend {
     }
 
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
-        let config = self.state.storage.add_connection_for_mcp(config).await?;
+        self.add_connection_for_mcp_in_group(config, None).await
+    }
+
+    async fn add_connection_for_mcp_in_group(
+        &self,
+        config: ConnectionConfig,
+        group_id: Option<&str>,
+    ) -> Result<ConnectionConfig, String> {
+        let config = self.state.storage.add_connection_for_mcp_in_group(config, group_id).await?;
         self.state.configs.write().await.insert(config.id.clone(), config.clone());
         self.notify_connections_changed().await;
         Ok(config)
@@ -1883,13 +1927,36 @@ impl DbxBackend for WebBackend {
     }
 
     async fn load_connection_group_details(&self) -> Result<HashMap<String, McpConnectionGroupPath>, String> {
-        let layout = self
-            .request(reqwest::Method::GET, "/api/layout/sidebar", None)
+        self.load_sidebar_layout()
+            .await?
+            .as_ref()
+            .map(connection_group_paths)
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
+    async fn load_sidebar_layout(&self) -> Result<Option<Value>, String> {
+        self.request(reqwest::Method::GET, "/api/layout/sidebar", None)
             .await?
             .json::<Option<Value>>()
             .await
-            .map_err(|error| format!("Invalid sidebar layout response: {error}"))?;
-        layout.as_ref().map(connection_group_paths).transpose().map(Option::unwrap_or_default)
+            .map_err(|error| format!("Invalid sidebar layout response: {error}"))
+    }
+
+    async fn replace_sidebar_layout_if_unchanged(
+        &self,
+        expected: Option<&Value>,
+        next: &Value,
+    ) -> Result<bool, String> {
+        let response = self
+            .request(
+                reqwest::Method::POST,
+                "/api/layout/sidebar/conditional",
+                Some(json!({ "layout": next, "expected": expected })),
+            )
+            .await?;
+        let body = response.json::<Value>().await.map_err(|error| format!("Invalid sidebar save response: {error}"))?;
+        Ok(body.get("saved").and_then(Value::as_bool).unwrap_or(false))
     }
 
     async fn execute_agent_tool(
@@ -2110,11 +2177,23 @@ impl DbxBackend for WebBackend {
     }
 
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
-        self.request(reqwest::Method::POST, "/api/connection/mcp/add", Some(json!({ "config": config })))
-            .await?
-            .json()
-            .await
-            .map_err(|error| format!("Invalid MCP connection response: {error}"))
+        self.add_connection_for_mcp_in_group(config, None).await
+    }
+
+    async fn add_connection_for_mcp_in_group(
+        &self,
+        config: ConnectionConfig,
+        group_id: Option<&str>,
+    ) -> Result<ConnectionConfig, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/connection/mcp/add",
+            Some(json!({ "config": config, "groupId": group_id })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid MCP connection response: {error}"))
     }
 
     async fn duplicate_connection_for_mcp(

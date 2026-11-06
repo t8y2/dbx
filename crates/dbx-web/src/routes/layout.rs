@@ -21,6 +21,35 @@ pub async fn save_sidebar_layout(
     Ok(Json(()))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConditionalSaveLayoutRequest {
+    pub layout: serde_json::Value,
+    /// The layout the caller read. `null` means "the row must still be absent".
+    #[serde(default)]
+    pub expected: Option<serde_json::Value>,
+}
+
+#[derive(serde::Serialize)]
+pub struct ConditionalSaveLayoutResponse {
+    pub saved: bool,
+}
+
+/// Compare-and-swap save used by MCP group moves. The desktop's plain
+/// `POST /layout/sidebar` keeps its last-writer-wins behavior.
+pub async fn replace_sidebar_layout_if_unchanged(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<ConditionalSaveLayoutRequest>,
+) -> Result<Json<ConditionalSaveLayoutResponse>, AppError> {
+    let saved = state
+        .app
+        .storage
+        .replace_sidebar_layout_if_unchanged(body.expected.as_ref(), &body.layout)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(ConditionalSaveLayoutResponse { saved }))
+}
+
 pub async fn load_sidebar_layout(State(state): State<Arc<WebState>>) -> Result<Json<serde_json::Value>, AppError> {
     let layout = state.app.storage.load_sidebar_layout().await.map_err(AppError::from)?;
     Ok(Json(layout.unwrap_or(serde_json::json!(null))))

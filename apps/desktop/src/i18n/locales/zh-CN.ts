@@ -3177,6 +3177,8 @@ export default withEnglishFallback({
     copyRow: "复制整行（JSON 对象）",
     copyColumnJson: "复制列 (JSON)",
     copyColumnNames: "复制全部列名",
+    copyColumnNamesComma: "复制列名（逗号分隔）",
+    copyColumnNamesQuotedComma: "复制列名（单引号 + 逗号）",
     copyColumnNamesSelected: "复制选中列名（{count} 列）",
     copyColumnNamesTitle: "复制列名（{count} 列）",
     copyColumnNamesSeparator: "列分隔符",

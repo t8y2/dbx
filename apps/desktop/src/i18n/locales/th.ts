@@ -3101,6 +3101,8 @@ export default withEnglishFallback({
     copyRow: "คัดลอกทั้งแถว (ออบเจ็กต์ JSON)",
     copyColumnJson: "คัดลอกคอลัมน์ (JSON)",
     copyColumnNames: "คัดลอกชื่อคอลัมน์",
+    copyColumnNamesComma: "คัดลอกชื่อคอลัมน์ (คั่นด้วยจุลภาค)",
+    copyColumnNamesQuotedComma: "คัดลอกชื่อคอลัมน์ (อัญประกาศเดี่ยว + จุลภาค)",
     copyColumnNamesSelected: "คัดลอกชื่อคอลัมน์ที่เลือก ({count})",
     copyColumnNamesTitle: "คัดลอกชื่อคอลัมน์ ({count})",
     copyColumnNamesSeparator: "ตัวคั่นคอลัมน์",

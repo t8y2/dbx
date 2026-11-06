@@ -2745,6 +2745,8 @@ export default withEnglishFallback({
     copyRow: "Copiar linha inteira (objeto JSON)",
     copyColumnJson: "Copiar Coluna (JSON)",
     copyColumnNames: "Copiar Nomes das Colunas",
+    copyColumnNamesComma: "Copiar nomes das colunas (separados por vírgula)",
+    copyColumnNamesQuotedComma: "Copiar nomes das colunas (entre aspas simples, por vírgula)",
     copyColumnNamesSelected: "Copiar Nomes das Colunas Selecionadas ({count})",
     copyColumnNamesTitle: "Copiar Nomes das Colunas ({count})",
     copyColumnNamesSeparator: "Separador de colunas",

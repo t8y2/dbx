@@ -4,6 +4,13 @@ import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStor
 
 export type ColumnNameCopySeparator = "tab" | "comma" | "newline" | "comma-newline";
 
+/**
+ * `identifier` wraps names in the database's identifier quote; `single` wraps them in
+ * single quotes as SQL string literals, which is what an `IN ('a','b')` list needs and
+ * works for any database (no identifier-quote support implied).
+ */
+export type ColumnNameCopyQuoteStyle = "identifier" | "single";
+
 export const COLUMN_NAME_COPY_SEPARATOR_VALUES: Record<ColumnNameCopySeparator, string> = {
   tab: "\t",
   comma: ",",
@@ -55,10 +62,11 @@ export function columnNamesForCopy(options: ColumnNamesForCopyOptions): string[]
   return options.displayableIndexes.map((index) => options.allColumnNames[index]).filter((name): name is string => name !== undefined);
 }
 
-export function formatColumnNamesForCopy(names: readonly string[], options: { separator: ColumnNameCopySeparator; quote?: boolean; databaseType?: DatabaseType; showByComment?: boolean; commentByColumn?: Map<string, string> }): string {
-  const quote = !!options.quote && supportsColumnNameQuoting(options.databaseType);
+export function formatColumnNamesForCopy(names: readonly string[], options: { separator: ColumnNameCopySeparator; quote?: boolean; quoteStyle?: ColumnNameCopyQuoteStyle; databaseType?: DatabaseType; showByComment?: boolean; commentByColumn?: Map<string, string> }): string {
+  const singleQuoted = !!options.quote && options.quoteStyle === "single";
+  const quote = singleQuoted || (!!options.quote && supportsColumnNameQuoting(options.databaseType));
   const displayNames = options.showByComment && options.commentByColumn ? names.map((name) => options.commentByColumn!.get(name) || name) : [...names];
-  const parts = quote ? displayNames.map((name) => quoteTableIdentifier(options.databaseType, name)) : displayNames;
+  const parts = quote ? displayNames.map((name) => (singleQuoted ? `'${name.replaceAll("'", "''")}'` : quoteTableIdentifier(options.databaseType, name))) : displayNames;
   return parts.join(COLUMN_NAME_COPY_SEPARATOR_VALUES[options.separator]);
 }
 

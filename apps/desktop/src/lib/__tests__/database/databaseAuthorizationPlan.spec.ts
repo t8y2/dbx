@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { dorisUserAdminProvider, mysqlUserAdminProvider, postgresUserAdminProvider, starrocksUserAdminProvider } from "@/lib/database/databaseUserAdmin";
-import { authorizationPlanSql, buildCreateDatabaseAuthorizationPlan, buildCreateUserAuthorizationPlan, buildGrantAuthorizationPlan, databaseAuthorizationsFromTableGrants, executeAuthorizationPlan } from "@/lib/database/databaseAuthorizationPlan";
+import { authorizationPlanSql, authorizationPresetPrivileges, buildCreateDatabaseAuthorizationPlan, buildCreateUserAuthorizationPlan, buildGrantAuthorizationPlan, databaseAuthorizationsFromTableGrants, executeAuthorizationPlan } from "@/lib/database/databaseAuthorizationPlan";
 
 describe("database authorization plans", () => {
   it("grants PostgreSQL presets across user schemas and future objects", () => {
@@ -360,5 +360,14 @@ describe("database authorization plans", () => {
     const plan = buildGrantAuthorizationPlan({ provider: dorisUserAdminProvider, user: { user: "app_user", host: "%" }, databases: [{ database: "app_db", preset: "readOnly" }] });
 
     expect(plan.steps).toEqual([]);
+  });
+
+  it("uses Doris privilege names instead of the MySQL spellings", () => {
+    // Doris rejects `SELECT` / `SHOW VIEW` with "Unknown privilege type" (#14428).
+    expect(authorizationPresetPrivileges(dorisUserAdminProvider, "readOnly")).toEqual(["SELECT_PRIV", "SHOW_VIEW_PRIV"]);
+    expect(authorizationPresetPrivileges(dorisUserAdminProvider, "dml")).toEqual(["SELECT_PRIV", "LOAD_PRIV", "ALTER_PRIV"]);
+    expect(authorizationPresetPrivileges(dorisUserAdminProvider, "readWrite")).toEqual(["SELECT_PRIV", "LOAD_PRIV", "ALTER_PRIV", "CREATE_PRIV", "DROP_PRIV", "SHOW_VIEW_PRIV"]);
+    // The MySQL provider itself must stay on the MySQL spellings.
+    expect(authorizationPresetPrivileges(mysqlUserAdminProvider, "readOnly")).toEqual(["SELECT", "SHOW VIEW"]);
   });
 });

@@ -27,7 +27,8 @@ export function useSchemaOptions() {
   const loadedSelections = new Map<string, string | undefined>();
 
   function cacheKey(connectionId: string, database: string) {
-    return schemaOptionsCacheKey(connectionId, database, connectionStore.getConfig(connectionId)?.show_system_schemas === true);
+    const config = connectionStore.getConfig(connectionId);
+    return schemaOptionsCacheKey(connectionId, database, config?.show_system_schemas === true || Array.isArray(config?.visible_schemas?.[database === "_" ? "" : database]));
   }
 
   function isSchemaAware(connectionId: string): boolean {
@@ -52,7 +53,7 @@ export function useSchemaOptions() {
       loadingSchemaOptions.value[key] = true;
       try {
         await connectionStore.ensureConnected(connectionId);
-        schemaOptions.value[key] = await connectionStore.listNavigationSchemaChoices(connectionId, database, true, refresh);
+        schemaOptions.value[key] = refresh ? await connectionStore.listNavigationSchemaChoices(connectionId, database, true, true) : await connectionStore.listCompletionSchemas(connectionId, database);
         loadedSelections.set(key, signature);
       } catch (e) {
         loadedSelections.set(key, signature);

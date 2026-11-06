@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { schemaOptionsCacheKey, schemaOptionsForConnection, useSchemaOptions } from "@/composables/useSchemaOptions";
 import type { ConnectionConfig } from "@/types/database";
-const store = vi.hoisted(() => ({ config: undefined as Partial<ConnectionConfig> | undefined, ensureConnected: vi.fn(), listNavigationSchemaChoices: vi.fn() }));
+const store = vi.hoisted(() => {
+  const readSchemas = vi.fn();
+  return { config: undefined as Partial<ConnectionConfig> | undefined, ensureConnected: vi.fn(), listCompletionSchemas: readSchemas, listNavigationSchemaChoices: readSchemas };
+});
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ ...store, getConfig: () => store.config }) }));
 
 describe("schemaOptionsForConnection", () => {
@@ -55,12 +58,13 @@ describe("live schema options", () => {
   });
   it("loads complete candidates before a legacy hidden-system scope becomes an explicit system selection", async () => {
     store.config = { db_type: "postgres", show_system_schemas: false };
-    store.listNavigationSchemaChoices.mockResolvedValue(["public", "pg_catalog"]);
+    store.listCompletionSchemas.mockResolvedValueOnce(["public"]).mockResolvedValue(["public", "pg_catalog"]);
     const options = useSchemaOptions();
     await options.loadSchemaOptions("c", "orders");
-    expect(store.listNavigationSchemaChoices).toHaveBeenLastCalledWith("c", "orders", true, false);
+    expect(store.listCompletionSchemas).toHaveBeenLastCalledWith("c", "orders");
     expect(options.getSchemaOptionsForDb("c", "orders")).toEqual(["public"]);
     store.config = { ...store.config, visible_schemas: { orders: ["pg_catalog"] } };
+    await options.loadSchemaOptions("c", "orders");
     expect(options.getSchemaOptionsForDb("c", "orders")).toEqual(["pg_catalog"]);
   });
   it("filters raw cached names using the latest saved scope without reloading", async () => {

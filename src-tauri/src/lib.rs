@@ -2312,11 +2312,18 @@ pub fn run() {
                     let _ = window.emit("dbx:detached-tab-close-requested", serde_json::json!({ "tabId": tab_id }));
                     return;
                 }
-                if !should_hide_window_on_close(std::env::consts::OS) {
+                let app = window.app_handle();
+                let close_behavior = app.try_state::<CloseBehaviorState>();
+                // Only intercept Linux close requests when the tray can restore
+                // the main window and the frontend can handle the close event.
+                let linux_tray_close = cfg!(target_os = "linux")
+                    && window.label() == "main"
+                    && close_behavior.as_ref().is_some_and(|state| state.is_frontend_ready())
+                    && app.tray_by_id(DESKTOP_TRAY_ID).is_some();
+                if !should_hide_window_on_close(std::env::consts::OS) && !linux_tray_close {
                     return;
                 }
-                let app = window.app_handle();
-                if app.try_state::<CloseBehaviorState>().is_none() {
+                if close_behavior.is_none() {
                     api.prevent_close();
                     hide_main_window_for_close(app, window);
                     return;

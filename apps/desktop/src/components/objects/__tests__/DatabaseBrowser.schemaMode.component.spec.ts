@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, type App } from "vue";
+import { createApp, h, reactive, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DatabaseBrowser from "../DatabaseBrowser.vue";
 import type { ConnectionConfig } from "@/types/database";
@@ -102,6 +102,31 @@ describe("DatabaseBrowser connection-root schema mode (#13646)", () => {
     app = undefined;
     host = undefined;
     vi.clearAllMocks();
+  });
+
+  it.each([false, true])("shows explicitly selected system schemas with the old toggle off and reacts to scope edits (fallback=%s)", async (fallback) => {
+    const target = reactive({ id: "selected-system", name: "Oracle", db_type: "oracle", database: "XE", show_system_schemas: false, visible_schemas: { XE: ["SYS"] } } as ConnectionConfig);
+    mocks.listSchemaInfos.mockImplementation(async (_id, _database, system) => {
+      if (fallback) throw new Error("infos unavailable");
+      return (system ? ["APP", "SYS"] : ["APP"]).map((name) => ({ name, comment: null }));
+    });
+    mocks.listSchemas.mockImplementation(async (_id, _database, _filter, system) => (system ? ["APP", "SYS"] : ["APP"]));
+    host = document.createElement("div");
+    document.body.append(host);
+    app = createApp({ render: () => h(DatabaseBrowser, { connection: target }) });
+    app.mount(host);
+    const names = () => [...host!.querySelectorAll(".contents > .flex.items-center.text-\\[13px\\]")].map((row) => row.textContent?.trim());
+    await vi.waitFor(() => expect(names()).toEqual(["SYS"]));
+    if (fallback) expect(mocks.listSchemas).toHaveBeenCalledWith(target.id, "XE", true, true);
+    else expect(mocks.listSchemaInfos).toHaveBeenCalledWith(target.id, "XE", true);
+    target.visible_schemas = { XE: ["APP"] };
+    await vi.waitFor(() => expect(names()).toEqual(["APP"]));
+    target.visible_schemas = { XE: [] };
+    await vi.waitFor(() => expect(names()).toEqual([]));
+    const requests = mocks.listSchemaInfos.mock.calls.length;
+    target.visible_schemas = { XE: [], archive: ["HISTORY"] };
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mocks.listSchemaInfos).toHaveBeenCalledTimes(requests);
   });
 
   it("loads and displays schemas for Oracle JDBC connection (#13646)", async () => {

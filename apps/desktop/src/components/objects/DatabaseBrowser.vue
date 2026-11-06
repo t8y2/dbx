@@ -437,11 +437,12 @@ async function refresh(): Promise<boolean> {
   try {
     if (connectionUsesConnectionRootSchemaMode(props.connection)) {
       const database = props.connection.database || "";
+      const hasSelection = Array.isArray(props.connection.visible_schemas?.[database]);
       let schemas: Array<{ name: string; comment?: string | null }> = [];
       try {
-        schemas = await api.listSchemaInfos(props.connection.id, database);
+        schemas = await (hasSelection ? api.listSchemaInfos(props.connection.id, database, true) : api.listSchemaInfos(props.connection.id, database));
       } catch {
-        const names = await api.listSchemas(props.connection.id, database, true).catch(() => []);
+        const names = await (hasSelection ? api.listSchemas(props.connection.id, database, true, true) : api.listSchemas(props.connection.id, database, true)).catch(() => []);
         schemas = names.map((name) => ({ name, comment: null }));
       }
       if (generation !== refreshGeneration) return true;
@@ -567,7 +568,11 @@ watch([sortKey, sortDirection], () => {
 
 let initialConnectionWatch = true;
 watch(
-  () => props.connection.id,
+  () =>
+    JSON.stringify([
+      props.connection.id,
+      connectionUsesConnectionRootSchemaMode(props.connection) ? [props.connection.database, props.connection.show_system_schemas, props.connection.visible_schemas?.[props.connection.database || ""], props.connection.visible_databases, props.connection.visible_database_patterns] : undefined,
+    ]),
   () => {
     if (initialConnectionWatch) initialConnectionWatch = false;
     else {

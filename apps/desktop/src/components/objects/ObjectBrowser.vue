@@ -216,7 +216,7 @@ import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, 
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { matchesTableNameFilter } from "@/lib/table/tableVGroup";
-import { filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
+import { connectionUsesVisibleSchemaFilter, filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
 import {
   buildObjectBrowserRows,
   buildMongoObjectBrowserRows,
@@ -682,6 +682,7 @@ const exportTracker = useExportTracker();
 const { addTask: addExportTask, updateTableExportTask } = exportTracker;
 
 const needsSchema = computed(() => isSchemaAware(props.connection.db_type) && !connectionUsesDatabaseObjectTreeMode(props.connection));
+const schemaFilterDatabase = computed(() => (connectionUsesVisibleSchemaFilter(props.connection) ? props.connection.database || "" : props.database === "_" ? "" : props.database));
 const canDropTargetCascade = computed(() => dropTarget.value?.type === "TABLE" && supportsDropTableCascade(effectiveDatabaseType.value));
 const canTruncateTargetCascade = computed(() => !!truncateTarget.value && supportsTruncateTableCascade(effectiveDatabaseType.value));
 const objectNameFilters = computed(() => {
@@ -947,10 +948,10 @@ watch(objectFilter, () => {
 });
 watch([() => props.initialEventName, () => props.initialEventOpenRequestId, rows, loadingObjects], openInitialEventIfNeeded, { flush: "post" });
 watch(
-  () => props.connection.show_system_schemas,
+  () => JSON.stringify([props.connection.show_system_schemas, props.connection.visible_schemas?.[schemaFilterDatabase.value], ...(connectionUsesVisibleSchemaFilter(props.connection) ? [props.connection.visible_databases, props.connection.visible_database_patterns] : [])]),
   (value, oldValue) => {
     if (value === oldValue) return;
-    void reload();
+    void loadSchemas(schemaListLoadGuard.invalidate(), true).catch((error) => console.warn("[ObjectBrowser] schema choices refresh failed", error));
   },
 );
 
@@ -5149,27 +5150,29 @@ async function runBrowserTriggerAction(row: ObjectBrowserRow, action: "enable" |
   }
 }
 
-async function loadSchemas(epoch: number): Promise<boolean> {
+async function loadSchemas(epoch: number, preserveSelection = false): Promise<boolean> {
   if (!schemaListLoadGuard.isEpochCurrent(epoch)) return false;
   if (!needsSchema.value) {
     schemas.value = [];
-    selectedSchema.value = undefined;
+    if (!preserveSelection) selectedSchema.value = undefined;
     return true;
   }
   loadingSchemas.value = true;
   const connectionId = props.connection.id;
   const database = props.database;
   try {
-    const names = filterSchemaNamesForConnection(await schemaListLoadGuard.wait(epoch, api.listSchemas(connectionId, database), metadataLoadBudgetMs(props.connection.query_timeout_secs)), props.connection, database, {
+    const hasSelection = Array.isArray(props.connection.visible_schemas?.[schemaFilterDatabase.value]);
+    const request = hasSelection ? api.listSchemas(connectionId, database, false, true) : api.listSchemas(connectionId, database);
+    const names = filterSchemaNamesForConnection(await schemaListLoadGuard.wait(epoch, request, metadataLoadBudgetMs(props.connection.query_timeout_secs)), props.connection, schemaFilterDatabase.value, {
       showSystemSchemas: props.connection.show_system_schemas === true,
     });
     if (!schemaListLoadGuard.isEpochCurrent(epoch)) return false;
     schemas.value = names;
     if (names.length === 0) {
-      selectedSchema.value = undefined;
+      if (!preserveSelection) selectedSchema.value = undefined;
       return true;
     }
-    if (!selectedSchema.value || !names.includes(selectedSchema.value)) {
+    if (!preserveSelection && (!selectedSchema.value || !names.includes(selectedSchema.value))) {
       selectedSchema.value = names.includes("public") ? "public" : names[0];
     }
     return true;

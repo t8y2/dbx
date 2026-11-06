@@ -61,4 +61,42 @@ describe("sidebar search for view groups (#12901)", () => {
     expect(localTableSearchParentTypes.has("group-views")).toBe(true);
     expect(localTableSearchParentTypes.has("group-materialized-views")).toBe(true);
   });
+
+  it("matches a schema-qualified query only inside the named schema (#14316)", () => {
+    const schema = (name: string, tables: string[]): TreeNode => ({
+      id: `conn:db@schema:${name}`,
+      label: name,
+      type: "schema",
+      connectionId: "conn",
+      database: "app",
+      schema: name,
+      isExpanded: true,
+      children: tables.map((table) => ({ ...child("table", table), schema: name })),
+    });
+    const tree = [schema("public", ["users", "orders"]), schema("audit", ["users"])];
+
+    const usersInPublic = filterLocallySearchedTables(tree, { enabled: true, queries: { "conn:db@schema:public": "public.users", "conn:db@schema:audit": "public.users" }, indexedResults: {} });
+    expect(usersInPublic[0]?.children?.map((node) => node.label)).toEqual(["users"]);
+    // The other schema lists its own "users" too, but the qualifier only names public.
+    expect(usersInPublic[1]?.children).toEqual([]);
+
+    // A plain query still matches every schema by name.
+    const plain = filterLocallySearchedTables(tree, { enabled: true, queries: { "conn:db@schema:public": "users" }, indexedResults: {} });
+    expect(plain[0]?.children?.map((node) => node.label)).toEqual(["users"]);
+  });
+
+  it("matches a schema-qualified query against indexed entries by their parent schema (#14316)", () => {
+    const databaseNode: TreeNode = { id: "conn:db", label: "app", type: "database", connectionId: "conn", database: "app", isExpanded: true, children: [] };
+    const filtered = filterLocallySearchedTables([databaseNode], {
+      enabled: true,
+      queries: { "conn:db": "public.users" },
+      indexedResults: {
+        "conn:db": [
+          { name: "users", table_type: "TABLE", parent_schema: "public" },
+          { name: "users", table_type: "TABLE", parent_schema: "audit" },
+        ],
+      },
+    });
+    expect(filtered[0]?.children?.map((node) => node.label)).toEqual(["users"]);
+  });
 });

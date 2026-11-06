@@ -7062,6 +7062,7 @@ export default withEnglishFallback({
     jsonView: "Visualizzazione JSON",
     jsonViewRaw: "Originale",
     jsonViewDecoded: "Decodificato",
+    looseJsonHint: "Non è JSON standard. Mostrato solo indentato e in sola lettura qui; passa a UTF-8 per modificare.",
     rawContent: "Contenuto grezzo",
     wordWrap: "A capo automatico",
     codecNone: "Nessuno",
@@ -8535,6 +8536,8 @@ export default withEnglishFallback({
       batchPatterns: "Pattern tabella (separati da virgola)",
       dialectAuto: "auto",
       refreshMetadata: "Aggiorna i metadati prima del confronto",
+      compareCharsetHelp: "Se disattivato: i campi esistenti mantengono il set di caratteri e la collazione di destinazione; i nuovi campi o le tabelle ereditano le impostazioni predefinite di destinazione.",
+      charsetSyncDisabled: "Sincronizzazione del set di caratteri disattivata: i campi esistenti mantengono le impostazioni di destinazione; i nuovi oggetti ereditano i valori predefiniti di destinazione.",
     },
   },
   tableMultiSelect: {

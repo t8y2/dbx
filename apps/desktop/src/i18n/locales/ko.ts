@@ -7011,6 +7011,7 @@ export default withEnglishFallback({
     jsonView: "JSON 보기",
     jsonViewRaw: "원본",
     jsonViewDecoded: "디코딩",
+    looseJsonHint: "표준 JSON이 아닙니다. 들여쓰기만 적용해 표시하며 여기서는 편집할 수 없습니다. 편집하려면 UTF-8로 전환하세요.",
     rawContent: "원시 내용",
     wordWrap: "자동 줄바꿈",
     codecNone: "없음",
@@ -8658,6 +8659,8 @@ export default withEnglishFallback({
       batchPatterns: "테이블 패턴 (쉼표로 구분)",
       dialectAuto: "자동",
       refreshMetadata: "비교 전 메타데이터 새로 고침",
+      compareCharsetHelp: "비활성화하면: 기존 필드는 대상 문자 집합 및 콜레이션을 유지하고, 새 필드 또는 테이블은 대상 기본 설정을 상속합니다.",
+      charsetSyncDisabled: "문자 집합 동기화가 비활성화되었습니다: 기존 필드는 대상 설정을 유지하고, 새 객체는 대상 기본값을 상속합니다.",
     },
   },
   dataCompare: {

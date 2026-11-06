@@ -24,6 +24,8 @@ use crate::types::{
     TableInfo, TriggerInfo,
 };
 
+mod mysql_charset;
+pub use mysql_charset::{MysqlTableCharset, TableCharsetDiff};
 mod oracle_indexes;
 mod oracle_routines;
 mod sqlserver_dependencies;
@@ -256,6 +258,8 @@ pub struct TableDiff {
     pub source_table_comment: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_table_comment: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_charset: Option<TableCharsetDiff>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_sql: Option<String>,
 }
@@ -1570,6 +1574,7 @@ impl RollbackGraph {
             target_ddl: if recreates_removed_table { diff.target_ddl.clone() } else { diff.ddl.clone() },
             source_table_comment: source_comment,
             target_table_comment: target_comment,
+            table_charset: diff.table_charset.as_ref().map(TableCharsetDiff::inverted),
             sync_sql: None,
         }
     }
@@ -1631,7 +1636,19 @@ pub fn generate_rollback_sync_sql_with_missing(
     cascade_delete: bool,
 ) -> (String, Vec<MissingRollbackObject>) {
     let rollback_diffs: Vec<TableDiff> = rollback_graph.rollback_nodes.iter().map(|n| n.table_diff.clone()).collect();
-    generate_schema_sync_sql_inner(&rollback_diffs, &[], &[], &[], &[], db_type, schema, cascade_delete, None, &[])
+    generate_schema_sync_sql_inner(
+        &rollback_diffs,
+        &[],
+        &[],
+        &[],
+        &[],
+        db_type,
+        schema,
+        cascade_delete,
+        None,
+        &[],
+        true,
+    )
 }
 
 // ============================================================================
@@ -2162,6 +2179,7 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
                 target_ddl: target_detail.and_then(|d| d.ddl.clone()),
                 source_table_comment: None,
                 target_table_comment: None,
+                table_charset: None,
                 sync_sql: None,
             });
         }
@@ -2230,6 +2248,7 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
             options.cascade_delete,
             options.source_dialect,
             &options.field_mappings,
+            options.compare_charset,
         );
         if !sync_sql.is_empty() {
             diff.sync_sql = Some(sync_sql);
@@ -2247,6 +2266,7 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
         options.cascade_delete,
         options.source_dialect,
         &options.field_mappings,
+        options.compare_charset,
     );
     if let Some(context) = &options.oracle_routines {
         for diff in &function_diffs {
@@ -2562,6 +2582,7 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             }),
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         });
     }
@@ -2620,6 +2641,7 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             target_ddl: target_detail.and_then(|detail| detail.ddl.clone()),
             source_table_comment: None,
             target_table_comment: target_table_comments.get(name_clone.as_str()).cloned(),
+            table_charset: None,
             sync_sql: None,
         });
     }
@@ -2639,6 +2661,7 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         });
     }
@@ -2658,6 +2681,7 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             target_ddl: target_details.get(name_clone.as_str()).and_then(|detail| detail.ddl.clone()),
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         });
     }
@@ -2686,6 +2710,7 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             target_ddl: Some(target_ddl.clone()),
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         });
     }
@@ -2737,12 +2762,18 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
         let target_comment = target_table_comments.get(target_name.as_str()).cloned().unwrap_or(None);
         let comment_changed = !options.ignore_comments
             && source_comment.clone().unwrap_or_default() != target_comment.clone().unwrap_or_default();
+        let table_charset = if compare_mysql_column_charset(options) {
+            mysql_charset::compare_table_defaults(source.ddl.as_deref(), target.ddl.as_deref())
+        } else {
+            None
+        };
 
         let has_diff = !column_diffs.is_empty()
             || !index_diffs.is_empty()
             || !foreign_key_diffs.is_empty()
             || !trigger_diffs.is_empty()
-            || comment_changed;
+            || comment_changed
+            || table_charset.is_some();
 
         result.push(TableDiff {
             diff_type: if has_diff { "modified".to_string() } else { "none".to_string() },
@@ -2757,6 +2788,7 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             target_ddl: target.ddl.clone(),
             source_table_comment: if has_diff { comment_changed.then_some(source_comment) } else { None },
             target_table_comment: if has_diff { comment_changed.then_some(target_comment) } else { None },
+            table_charset,
             sync_sql: None,
         });
     }
@@ -4396,7 +4428,10 @@ fn column_def_with_charset(
     }
     let profile = profile_for(db_type);
     let mut definition = format!("{} {}", quote_id(&col.name, db_type), col.data_type);
-    if include_charset && matches!(db_type, DatabaseType::Mysql | DatabaseType::Goldendb) {
+    if include_charset
+        && matches!(db_type, DatabaseType::Mysql | DatabaseType::Goldendb)
+        && mysql_charset::supports_charset(&col.data_type)
+    {
         if let Some(character_set) = mysql_charset_value(col.character_set.as_deref()) {
             definition.push_str(&format!(" CHARACTER SET {}", quote_id(character_set, db_type)));
         }
@@ -5864,6 +5899,22 @@ fn generate_create_table_sql(
     };
     let table = qualified_name(name, db_type, schema);
 
+    let charset_clause = |col: &ColumnInfo, data_type: &str| {
+        let mut clause = String::new();
+        if effective_source_dialect(source_dialect, db_type) == DialectKind::Mysql
+            && matches!(db_type, DatabaseType::Mysql | DatabaseType::Goldendb)
+            && mysql_charset::supports_charset(data_type)
+        {
+            if let Some(charset) = mysql_charset_value(col.character_set.as_deref()) {
+                clause.push_str(&format!(" CHARACTER SET {}", quote_id(charset, db_type)));
+            }
+            if let Some(collation) = mysql_charset_value(col.collation.as_deref()) {
+                clause.push_str(&format!(" COLLATE {}", quote_id(collation, db_type)));
+            }
+        }
+        clause
+    };
+
     // Collect column definitions
     let mut col_defs = Vec::new();
     let mut pk_cols = Vec::new();
@@ -5912,6 +5963,7 @@ fn generate_create_table_sql(
                     mapped_type.as_str()
                 };
                 let mut def = format!("{} {}", col_name, effective_type);
+                def.push_str(&charset_clause(col, effective_type));
                 def.push_str(&column_modifier_tail(&profile, col, &mapped_type, db_type, source_dialect, skip_default));
                 if profile.inline_column_comment {
                     if let Some(comment) = col.comment.as_deref().filter(|c| !c.is_empty()) {
@@ -5938,6 +5990,7 @@ fn generate_create_table_sql(
             }
             AutoIncColumnBuild::Normal { skip_default } => {
                 let mut def = format!("{} {}", col_name, mapped_type);
+                def.push_str(&charset_clause(col, &mapped_type));
                 def.push_str(&column_modifier_tail(&profile, col, &mapped_type, db_type, source_dialect, skip_default));
                 if profile.inline_column_comment {
                     if let Some(comment) = col.comment.as_deref().filter(|c| !c.is_empty()) {
@@ -6253,6 +6306,7 @@ pub fn generate_schema_sync_sql(
         cascade_delete,
         source_dialect,
         field_mappings,
+        true,
     )
     .0
 }
@@ -6329,6 +6383,42 @@ pub fn generate_schema_sync_sql_plan_with_oracle_ddl(
     ignore_foreign_key_checks: bool,
     oracle_ddl: Option<&OracleSchemaSyncDdlSources>,
 ) -> SchemaSyncSqlPlan {
+    generate_schema_sync_sql_plan_with_charset(
+        diffs,
+        function_diffs,
+        sequence_diffs,
+        rule_diffs,
+        owner_diffs,
+        db_type,
+        schema,
+        cascade_delete,
+        source_dialect,
+        field_mappings,
+        enable_rollback,
+        ignore_foreign_key_checks,
+        oracle_ddl,
+        true,
+    )
+}
+
+/// Apply the comparison charset policy to forward SQL; rollback restores target metadata.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_schema_sync_sql_plan_with_charset(
+    diffs: &[TableDiff],
+    function_diffs: &[FunctionDiff],
+    sequence_diffs: &[SequenceDiff],
+    rule_diffs: &[RuleDiff],
+    owner_diffs: &[OwnerDiff],
+    db_type: DatabaseType,
+    schema: Option<&str>,
+    cascade_delete: bool,
+    source_dialect: Option<DialectKind>,
+    field_mappings: &[FieldMapping],
+    enable_rollback: bool,
+    ignore_foreign_key_checks: bool,
+    oracle_ddl: Option<&OracleSchemaSyncDdlSources>,
+    compare_charset: bool,
+) -> SchemaSyncSqlPlan {
     let (sync_sql, forward_issues) = generate_schema_sync_sql_inner_with_oracle_ddl(
         diffs,
         function_diffs,
@@ -6342,6 +6432,7 @@ pub fn generate_schema_sync_sql_plan_with_oracle_ddl(
         field_mappings,
         oracle_ddl.map(|sources| sources.forward.as_slice()),
         oracle_ddl.map_or(&[], |sources| sources.table_mappings.as_slice()),
+        compare_charset,
     );
     let sync_sql =
         if ignore_foreign_key_checks { wrap_script_with_foreign_key_checks(&sync_sql, db_type) } else { sync_sql };
@@ -6365,6 +6456,7 @@ pub fn generate_schema_sync_sql_plan_with_oracle_ddl(
                 &[],
                 Some(&sources.rollback),
                 &[],
+                true,
             )
         } else {
             generate_rollback_sync_sql_with_missing(&rollback_graph, db_type, schema, cascade_delete)
@@ -6380,12 +6472,14 @@ pub fn generate_schema_sync_sql_plan_with_oracle_ddl(
         RollbackCompleteness::Incomplete
     };
 
-    let forward_completeness = if oracle_ddl.is_some() && !forward_issues.is_empty() {
+    let report_generation_issues =
+        oracle_ddl.is_some() || (!compare_charset && matches!(db_type, DatabaseType::Mysql | DatabaseType::Goldendb));
+    let forward_completeness = if report_generation_issues && !forward_issues.is_empty() {
         RollbackCompleteness::Incomplete
     } else {
         RollbackCompleteness::Complete
     };
-    let generation_issues = if oracle_ddl.is_some() {
+    let generation_issues = if report_generation_issues {
         forward_issues
             .iter()
             .map(|issue| ("forward", issue))
@@ -6558,6 +6652,7 @@ fn order_diffs_for_execution(diffs: &[TableDiff]) -> Vec<&TableDiff> {
     ordered.into_iter().map(|index| &diffs[index]).collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_schema_sync_sql_inner(
     diffs: &[TableDiff],
     function_diffs: &[FunctionDiff],
@@ -6569,6 +6664,7 @@ fn generate_schema_sync_sql_inner(
     cascade_delete: bool,
     source_dialect: Option<DialectKind>,
     field_mappings: &[FieldMapping],
+    compare_charset: bool,
 ) -> (String, Vec<MissingRollbackObject>) {
     generate_schema_sync_sql_inner_with_oracle_ddl(
         diffs,
@@ -6583,6 +6679,7 @@ fn generate_schema_sync_sql_inner(
         field_mappings,
         None,
         &[],
+        compare_charset,
     )
 }
 
@@ -6600,6 +6697,7 @@ fn generate_schema_sync_sql_inner_with_oracle_ddl(
     field_mappings: &[FieldMapping],
     oracle_ddl: Option<&[OracleSchemaSyncTableDdl]>,
     table_mappings: &[SchemaDiffTableMapping],
+    compare_charset: bool,
 ) -> (String, Vec<MissingRollbackObject>) {
     let mut lines = Vec::new();
     let mut deferred_oracle_foreign_keys = Vec::new();
@@ -6657,6 +6755,7 @@ fn generate_schema_sync_sql_inner_with_oracle_ddl(
         }
 
         if diff.diff_type == "added" && diff.object_type.as_deref() != Some("view") {
+            let create_start = lines.len();
             if let Some(captured) = captured {
                 let trigger_snapshots = diff
                     .triggers
@@ -6798,6 +6897,22 @@ fn generate_schema_sync_sql_inner_with_oracle_ddl(
                 }
                 missing_objects.extend(missing);
             }
+            if !compare_charset && matches!(db_type, DatabaseType::Mysql | DatabaseType::Goldendb) {
+                for sql in &mut lines[create_start..] {
+                    match mysql_charset::without_create_charset(sql) {
+                        Ok(filtered) => *sql = filtered,
+                        Err(reason) => {
+                            sql.clear();
+                            missing_objects.push(MissingRollbackObject {
+                                kind: "table".into(),
+                                name: diff.name.clone(),
+                                table: Some(target_name.into()),
+                                reason,
+                            });
+                        }
+                    }
+                }
+            }
             continue;
         }
 
@@ -6864,8 +6979,8 @@ fn generate_schema_sync_sql_inner_with_oracle_ddl(
                             // inherits the target table default, so a source column that differs
                             // from that default would show up again as a collation change on the
                             // next comparison (#11802).
-                            let include_charset =
-                                effective_source_dialect(source_dialect, db_type) == DialectKind::Mysql;
+                            let include_charset = compare_charset
+                                && effective_source_dialect(source_dialect, db_type) == DialectKind::Mysql;
                             let definition =
                                 column_def_with_charset(&convert_col(source), db_type, source_dialect, include_charset);
                             // Oracle has no `COLUMN` keyword here: it parenthesizes the whole
@@ -6929,14 +7044,24 @@ fn generate_schema_sync_sql_inner_with_oracle_ddl(
                                     parts.push(format!("  {modify_keyword} ({definition})"));
                                 }
                             } else if profile.alter_uses_modify_column {
-                                if column.changes.iter().any(|change| !change.starts_with("order:")) {
+                                if column.changes.iter().any(|change| {
+                                    !change.starts_with("order:")
+                                        && (compare_charset
+                                            || (!change.starts_with("character set:")
+                                                && !change.starts_with("collation:")))
+                                }) {
                                     let modify_keyword = profile.alter_modify_keyword();
-                                    let include_charset = column.changes.iter().any(|change| {
-                                        change.starts_with("character set:") || change.starts_with("collation:")
-                                    });
+                                    // MODIFY must retain the target column charset when ignored.
+                                    let use_source_charset = compare_charset
+                                        && effective_source_dialect(source_dialect, db_type) == DialectKind::Mysql;
+                                    if !use_source_charset {
+                                        mapped.character_set =
+                                            column.target.as_ref().and_then(|col| col.character_set.clone());
+                                        mapped.collation = column.target.as_ref().and_then(|col| col.collation.clone());
+                                    }
                                     parts.push(format!(
                                         "  {modify_keyword} {}",
-                                        column_def_with_charset(&mapped, db_type, source_dialect, include_charset)
+                                        column_def_with_charset(&mapped, db_type, source_dialect, true)
                                     ));
                                 }
                             } else {
@@ -6972,14 +7097,20 @@ fn generate_schema_sync_sql_inner_with_oracle_ddl(
                     "renamed" => {
                         if let (Some(source), Some(target_col)) = (&column.source, &column.target) {
                             use crate::sql_dialect::ddl_profile::RenameColumnSyntax;
-                            let mapped = convert_col(source);
+                            let mut mapped = convert_col(source);
                             match profile.rename_column {
                                 RenameColumnSyntax::MysqlChangeColumn => {
+                                    let use_source_charset = compare_charset
+                                        && effective_source_dialect(source_dialect, db_type) == DialectKind::Mysql;
+                                    if !use_source_charset {
+                                        mapped.character_set = target_col.character_set.clone();
+                                        mapped.collation = target_col.collation.clone();
+                                    }
                                     let old_name = quote_id(&target_col.name, db_type);
                                     parts.push(format!(
                                         "  CHANGE COLUMN {} {}",
                                         old_name,
-                                        column_def(&mapped, db_type, source_dialect)
+                                        column_def_with_charset(&mapped, db_type, source_dialect, true,)
                                     ));
                                 }
                                 RenameColumnSyntax::RenameColumn => {
@@ -7083,6 +7214,20 @@ fn generate_schema_sync_sql_inner_with_oracle_ddl(
         if diff.source_table_comment.is_some() && diff.source_table_comment != diff.target_table_comment {
             let comment = diff.source_table_comment.as_ref().and_then(|comment| comment.as_deref()).unwrap_or_default();
             lines.extend(table_comment_sql(target_name, comment, db_type, schema));
+        }
+        if compare_charset && matches!(db_type, DatabaseType::Mysql | DatabaseType::Goldendb) {
+            if let Some(charset) = &diff.table_charset {
+                let mut clauses = Vec::new();
+                if let Some(value) = mysql_charset_value(charset.source.character_set.as_deref()) {
+                    clauses.push(format!("DEFAULT CHARACTER SET {}", quote_id(value, db_type)));
+                }
+                if let Some(value) = mysql_charset_value(charset.source.collation.as_deref()) {
+                    clauses.push(format!("COLLATE {}", quote_id(value, db_type)));
+                }
+                if !clauses.is_empty() {
+                    lines.push(format!("ALTER TABLE {table} {};", clauses.join(" ")));
+                }
+            }
         }
 
         if let Some(indexes) = &diff.indexes {
@@ -7539,9 +7684,16 @@ mod tests {
         options.source_details[0].ddl =
             Some("CREATE TABLE users (name varchar(64)) DEFAULT CHARSET=utf8mb4".to_string());
         options.target_details[0].ddl =
-            Some("CREATE TABLE users (name varchar(64)) DEFAULT CHARSET=latin1".to_string());
+            Some("CREATE TABLE users (name varchar(64)) DEFAULT CHARSET=utf8mb4".to_string());
 
-        assert!(prepare_schema_diff(options).diffs.is_empty());
+        assert!(prepare_schema_diff(options.clone()).diffs.is_empty());
+
+        // Unknown column metadata does not hide a known table-default change.
+        options.target_details[0].ddl =
+            Some("CREATE TABLE users (name varchar(64)) DEFAULT CHARSET=latin1".to_string());
+        let result = prepare_schema_diff(options);
+        assert!(result.diffs[0].columns.is_none());
+        assert!(result.diffs[0].table_charset.is_some());
     }
 
     #[test]
@@ -7562,6 +7714,193 @@ mod tests {
             result.sync_sql
         );
         assert!(result.sync_sql.contains("ADD COLUMN `amount` int NOT NULL AFTER `name`"), "{}", result.sync_sql);
+    }
+
+    fn mysql_charset_plan(result: &SchemaDiffPreparation, enabled: bool) -> SchemaSyncSqlPlan {
+        generate_schema_sync_sql_plan_with_charset(
+            &result.diffs,
+            &[],
+            &[],
+            &[],
+            &[],
+            DatabaseType::Mysql,
+            None,
+            false,
+            Some(DialectKind::Mysql),
+            &[],
+            true,
+            false,
+            None,
+            enabled,
+        )
+    }
+
+    #[test]
+    fn mysql_disabled_charset_additions_inherit_target_defaults_even_after_regeneration() {
+        let mut options = mysql_charset_options(false);
+        options.target_details[0].columns.clear();
+        let result = prepare_schema_diff(options);
+        let plan = mysql_charset_plan(&result, false);
+        for sql in [&result.sync_sql, result.diffs[0].sync_sql.as_ref().unwrap(), &plan.sync_sql] {
+            assert!(sql.contains("ADD COLUMN `name` varchar(64)"), "{sql}");
+            assert!(!sql.contains("CHARACTER SET"), "{sql}");
+            assert!(!sql.contains("COLLATE"), "{sql}");
+        }
+        assert!(mysql_charset_plan(&result, true).sync_sql.contains("COLLATE `utf8mb4_0900_ai_ci`"));
+    }
+
+    #[test]
+    fn mysql_disabled_charset_modifications_and_rollback_preserve_target_column_settings() {
+        let mut options = mysql_charset_options(false);
+        options.source_details[0].columns[0].data_type = "varchar(128)".into();
+        let result = prepare_schema_diff(options);
+        let plan = mysql_charset_plan(&result, false);
+        for sql in [&result.sync_sql, &plan.sync_sql] {
+            assert!(
+                sql.contains("MODIFY COLUMN `name` varchar(128) CHARACTER SET `latin1` COLLATE `latin1_swedish_ci`"),
+                "{sql}"
+            );
+            assert!(!sql.contains("utf8mb4_0900_ai_ci"), "{sql}");
+        }
+        let rollback = plan.rollback_sync_sql.unwrap();
+        assert!(rollback.contains("varchar(64) CHARACTER SET `latin1` COLLATE `latin1_swedish_ci`"), "{rollback}");
+        let enabled = mysql_charset_plan(&result, true).sync_sql;
+        assert!(enabled.contains("varchar(128) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_0900_ai_ci`"), "{enabled}");
+    }
+
+    #[test]
+    fn mysql_charset_is_not_applied_when_converting_a_character_column_to_a_number() {
+        let mut options = mysql_charset_options(false);
+        let source = &mut options.source_details[0].columns[0];
+        source.data_type = "int".into();
+        source.character_set = None;
+        source.collation = None;
+        let result = prepare_schema_diff(options);
+        let sql = mysql_charset_plan(&result, false).sync_sql;
+        assert!(sql.contains("MODIFY COLUMN `name` int"), "{sql}");
+        assert!(!sql.contains("CHARACTER SET"), "{sql}");
+        assert!(!sql.contains("COLLATE"), "{sql}");
+    }
+
+    #[test]
+    fn mysql_target_keeps_ignored_charset_when_the_source_is_postgres() {
+        let mut options = mysql_charset_options(false);
+        options.source_dialect = Some(DialectKind::Postgres);
+        let source = &mut options.source_details[0].columns[0];
+        source.data_type = "varchar(128)".into();
+        source.character_set = None;
+        source.collation = None;
+        let result = prepare_schema_diff(options);
+        assert!(result.sync_sql.contains("CHARACTER SET `latin1` COLLATE `latin1_swedish_ci`"), "{}", result.sync_sql);
+        for renamed in [false, true] {
+            let mut diffs = result.diffs.clone();
+            if renamed {
+                let column = &mut diffs[0].columns.as_mut().unwrap()[0];
+                column.diff_type = "renamed".into();
+                column.name = "new_name".into();
+                column.source.as_mut().unwrap().name = "new_name".into();
+            }
+            let plan = generate_schema_sync_sql_plan_with_charset(
+                &diffs,
+                &[],
+                &[],
+                &[],
+                &[],
+                DatabaseType::Mysql,
+                None,
+                false,
+                Some(DialectKind::Postgres),
+                &[],
+                true,
+                false,
+                None,
+                false,
+            );
+            assert!(
+                plan.sync_sql.contains("varchar(128) CHARACTER SET `latin1` COLLATE `latin1_swedish_ci`"),
+                "{}",
+                plan.sync_sql
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_disabled_charset_rename_preserves_target_settings_in_change_column() {
+        let mut options = mysql_charset_options(false);
+        options.source_details[0].columns[0].data_type = "varchar(128)".into();
+        let mut result = prepare_schema_diff(options);
+        let column = &mut result.diffs[0].columns.as_mut().unwrap()[0];
+        column.diff_type = "renamed".into();
+        column.name = "new_name".into();
+        column.source.as_mut().unwrap().name = "new_name".into();
+        let plan = mysql_charset_plan(&result, false);
+        assert!(
+            plan.sync_sql.contains(
+                "CHANGE COLUMN `name` `new_name` varchar(128) CHARACTER SET `latin1` COLLATE `latin1_swedish_ci`"
+            ),
+            "{}",
+            plan.sync_sql
+        );
+        let rollback = plan.rollback_sync_sql.unwrap();
+        assert!(
+            rollback.contains(
+                "CHANGE COLUMN `new_name` `name` varchar(64) CHARACTER SET `latin1` COLLATE `latin1_swedish_ci`"
+            ),
+            "{rollback}"
+        );
+    }
+
+    #[test]
+    fn mysql_new_table_charset_policy_covers_native_and_structured_creation() {
+        for native in [false, true] {
+            let mut options = mysql_charset_options(false);
+            options.target_tables.clear();
+            options.target_details.clear();
+            if native {
+                options.source_details[0].ddl = Some(
+                    "CREATE TABLE `users` (`name` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci COMMENT 'CHARSET=utf8') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci".into(),
+                );
+            }
+            let result = prepare_schema_diff(options);
+            let plan = mysql_charset_plan(&result, false);
+            for sql in [&result.sync_sql, &plan.sync_sql] {
+                assert!(sql.contains("CREATE TABLE"), "{sql}");
+                assert!(!sql.contains("CHARACTER SET"), "{sql}");
+                assert!(!sql.contains("COLLATE"), "{sql}");
+                assert!(!sql.contains("DEFAULT CHARSET"), "{sql}");
+                if native {
+                    assert!(sql.contains("COMMENT 'CHARSET=utf8'"), "{sql}");
+                    assert!(sql.contains("ENGINE=InnoDB"), "{sql}");
+                }
+            }
+            let enabled = mysql_charset_plan(&result, true).sync_sql;
+            assert!(enabled.contains("CHARACTER SET"), "{enabled}");
+            assert!(enabled.contains("utf8mb4_0900_ai_ci"), "{enabled}");
+        }
+    }
+
+    #[test]
+    fn mysql_table_default_charset_difference_is_optional_and_reversible() {
+        let mut options = mysql_charset_options(false);
+        options.target_details[0].columns = options.source_details[0].columns.clone();
+        options.source_details[0].ddl =
+            Some("CREATE TABLE users (name varchar(64)) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci".into());
+        options.target_details[0].ddl =
+            Some("CREATE TABLE users (name varchar(64)) DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci".into());
+        assert!(prepare_schema_diff(options.clone()).diffs.is_empty());
+        options.compare_charset = true;
+        let result = prepare_schema_diff(options);
+        assert!(result.diffs[0].table_charset.is_some());
+        assert!(result.diffs[0].columns.is_none());
+        let plan = mysql_charset_plan(&result, true);
+        assert!(
+            plan.sync_sql.contains("DEFAULT CHARACTER SET `utf8mb4` COLLATE `utf8mb4_0900_ai_ci`"),
+            "{}",
+            plan.sync_sql
+        );
+        let rollback = plan.rollback_sync_sql.unwrap();
+        assert!(rollback.contains("DEFAULT CHARACTER SET `latin1` COLLATE `latin1_swedish_ci`"), "{rollback}");
+        assert!(mysql_charset_plan(&result, false).sync_sql.trim().is_empty());
     }
 
     #[test]
@@ -7821,6 +8160,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         }
     }
@@ -8569,6 +8909,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: Some(Some("new table description".into())),
             target_table_comment: Some(Some("old table description".into())),
+            table_charset: None,
             sync_sql: None,
         };
 
@@ -9784,6 +10125,7 @@ mod tests {
                 target_ddl: None,
                 source_table_comment: None,
                 target_table_comment: None,
+                table_charset: None,
                 sync_sql: None,
             }],
             &[],
@@ -9887,6 +10229,7 @@ mod tests {
                 target_ddl: None,
                 source_table_comment: None,
                 target_table_comment: None,
+                table_charset: None,
                 sync_sql: None,
             }],
             &[],
@@ -9962,6 +10305,7 @@ mod tests {
                 target_ddl: None,
                 source_table_comment: None,
                 target_table_comment: None,
+                table_charset: None,
                 sync_sql: None,
             }],
             &[],
@@ -10029,6 +10373,7 @@ mod tests {
                 target_ddl: None,
                 source_table_comment: None,
                 target_table_comment: None,
+                table_charset: None,
                 sync_sql: None,
             }],
             &[],
@@ -10101,6 +10446,7 @@ mod tests {
                 target_ddl: None,
                 source_table_comment: None,
                 target_table_comment: None,
+                table_charset: None,
                 sync_sql: None,
             }],
             &[],
@@ -10175,6 +10521,7 @@ mod tests {
                     target_ddl: None,
                     source_table_comment: None,
                     target_table_comment: None,
+                    table_charset: None,
                     sync_sql: None,
                 }],
                 &[],
@@ -10303,6 +10650,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         }];
 
@@ -10340,6 +10688,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: Some(Some("用户表".to_string())),
             target_table_comment: Some(Some("Users".to_string())),
+            table_charset: None,
             sync_sql: None,
         }];
 
@@ -10378,6 +10727,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         }];
 
@@ -10425,6 +10775,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         }];
 
@@ -10780,6 +11131,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         }];
 
@@ -11411,6 +11763,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         }
     }
@@ -11782,6 +12135,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         }];
 
@@ -12838,6 +13192,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         };
         let sql =
@@ -12886,6 +13241,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         };
         let sql =
@@ -12984,6 +13340,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         }];
         let dep_graph = DependencyGraph::build(&[], &[]);
@@ -13017,6 +13374,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         }];
         let dep_graph = DependencyGraph::build(&[], &[]);
@@ -13091,6 +13449,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: Some(Some("new".to_string())),
             target_table_comment: Some(Some("old".to_string())),
+            table_charset: None,
             sync_sql: None,
         };
         let sql =
@@ -13228,6 +13587,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: Some(Some("新表".to_string())),
             target_table_comment: Some(Some("旧表".to_string())),
+            table_charset: None,
             sync_sql: None,
         };
         let sql =
@@ -13848,6 +14208,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         };
         let sql = generate_schema_sync_sql(
@@ -14148,6 +14509,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         };
         let sql =
@@ -14706,6 +15068,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         }
     }
@@ -14854,6 +15217,7 @@ mod tests {
                     target_ddl: None,
                     source_table_comment: None,
                     target_table_comment: None,
+                    table_charset: None,
                     sync_sql: None,
                 };
                 let sql = generate_schema_sync_sql(&[td], &[], &[], &[], &[], db, None, false, src_dialect, &[]);
@@ -14941,6 +15305,7 @@ mod tests {
                     target_ddl: None,
                     source_table_comment: None,
                     target_table_comment: None,
+                    table_charset: None,
                     sync_sql: None,
                 };
                 let sql = generate_schema_sync_sql(&[td], &[], &[], &[], &[], db, None, false, src_dialect, &[]);
@@ -15000,6 +15365,7 @@ mod tests {
                 target_ddl: None,
                 source_table_comment: None,
                 target_table_comment: None,
+                table_charset: None,
                 sync_sql: None,
             };
             let sql = generate_schema_sync_sql(&[td], &[], &[], &[], &[], db, None, false, None, &[]);
@@ -15054,6 +15420,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         };
         let sql = generate_schema_sync_sql(&[td], &[], &[], &[], &[], db, None, false, Some(src), &[]);
@@ -15105,6 +15472,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         };
         let sql = generate_schema_sync_sql(&[td], &[], &[], &[], &[], db, None, false, Some(src), &[]);
@@ -15155,6 +15523,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         };
         let sql = generate_schema_sync_sql(&[td], &[], &[], &[], &[], db, None, false, Some(src), &[]);
@@ -15203,6 +15572,7 @@ mod tests {
             target_ddl: None,
             source_table_comment: None,
             target_table_comment: None,
+            table_charset: None,
             sync_sql: None,
         };
         let sql = generate_schema_sync_sql(

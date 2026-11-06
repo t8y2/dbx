@@ -11,6 +11,11 @@ on:
         required: false
         default: true
         type: boolean
+      notes:
+        description: "Optional release notes body written during promotion (DBX-style sections; empty keeps the existing body)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   actions: read
@@ -489,9 +494,17 @@ jobs:
           SOURCE_TAG: ${{ needs.validate-candidate.outputs.current_tag }}
           STABLE_TAG: ${{ needs.validate-candidate.outputs.stable_tag }}
           SOURCE_SHA: ${{ needs.validate-candidate.outputs.source_sha }}
+          PROMOTION_NOTES: ${{ inputs.notes }}
         run: |
           set -euo pipefail
           edit_args=(--repo "${GITHUB_REPOSITORY}" --prerelease=false --latest)
+          if [[ -n "$PROMOTION_NOTES" ]]; then
+            # Replace the auto-generated "What's Changed" body in the same edit
+            # that flips prerelease/latest, so there is no unstyled window.
+            notes_file="$RUNNER_TEMP/promotion-notes.md"
+            printf '%s\n' "$PROMOTION_NOTES" > "$notes_file"
+            edit_args+=(--notes-file "$notes_file")
+          fi
           if [[ "${{ needs.validate-candidate.outputs.is_beta }}" == "true" ]]; then
             edit_args+=(--title "DBX v${{ needs.validate-candidate.outputs.version }}")
           fi

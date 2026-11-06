@@ -41,8 +41,8 @@ use dbx_core::{
     models::connection::ConnectionConfig,
     models::connection::DatabaseType,
     production_safety::{
-        is_production_database, mongo_pipeline_targets_production_database, sql_references_disallowed_database,
-        targets_production_database,
+        is_production_database, mongo_pipeline_targets_production_database,
+        sql_references_disallowed_database_for_connection, targets_production_database,
     },
     query_execution_sql::{classify_salesforce_statement_risk, is_write_sql_for_database, SalesforceStatementRisk},
     sql_risk::{
@@ -6630,7 +6630,7 @@ fn ensure_sql_database_scope(
     let DatabaseScope::Selected(allowed_databases) = scope else {
         return Ok(());
     };
-    if sql_references_disallowed_database(sql, &connection.db_type, active_database, allowed_databases) {
+    if sql_references_disallowed_database_for_connection(sql, connection, active_database, allowed_databases) {
         return Err(tool_error(
             "DATABASE_OUT_OF_SCOPE",
             "SQL references a database that is not allowed by DBX MCP settings for this connection.",
@@ -11187,18 +11187,35 @@ mod tests {
 
     #[test]
     fn configured_database_allowlist_blocks_qualified_sql_references() {
-        let connection = connection("sql", "sql", "mysql", "reporting");
+        // PostgreSQL query blocks need the connection profile: a compatible
+        // engine can use the same database type with different qualifier rules.
+        let mut connection = connection("sql", "sql", "mysql", "reporting");
         let scope = DatabaseScope::Selected(vec!["reporting".to_string()]);
 
         assert!(ensure_sql_database_scope(&scope, &connection, "reporting", "SELECT * FROM reporting.users").is_ok());
         let error =
             ensure_sql_database_scope(&scope, &connection, "reporting", "SELECT * FROM production.users").unwrap_err();
         assert!(result_text(&error).contains("DATABASE_OUT_OF_SCOPE"));
+
+        connection.db_type = DatabaseType::Postgres;
+        let cte = "WITH c AS (SELECT id FROM public.users) SELECT id, 2 FROM c";
+        assert!(ensure_sql_database_scope(&scope, &connection, "reporting", cte).is_ok());
+        connection.driver_profile = Some("cockroachdb".to_string());
+        let error = ensure_sql_database_scope(
+            &scope,
+            &connection,
+            "reporting",
+            "WITH c AS (SELECT id FROM reporting.public.users) SELECT c.id, 2 FROM c, production.public.secrets s",
+        )
+        .unwrap_err();
+        assert!(result_text(&error).contains("DATABASE_OUT_OF_SCOPE"));
     }
 
     #[test]
     fn database_execution_policy_overrides_connection_and_global_defaults_and_blocks_cross_database_sql() {
-        let connection = connection("sql", "sql", "mysql", "operations");
+        // Database-specific execution policy must apply the same profile-aware
+        // scope check as the explicit database allowlist.
+        let mut connection = connection("sql", "sql", "mysql", "operations");
         let policy = McpGlobalPolicy {
             connection_policies: vec![dbx_core::storage::McpConnectionPolicy {
                 connection_id: "sql".to_string(),
@@ -11241,6 +11258,103 @@ mod tests {
         )
         .unwrap_err();
         assert!(result_text(&error).contains("DATABASE_EXECUTION_POLICY_OUT_OF_SCOPE"));
+
+        connection.db_type = DatabaseType::Postgres;
+        let cte = "WITH c AS (SELECT id FROM public.users) SELECT id, 2 FROM c";
+        assert!(ensure_sql_database_execution_scope(&policy, &connection, "operations", cte).is_ok());
+        connection.driver_profile = Some("cockroachdb".to_string());
+        let error = ensure_sql_database_execution_scope(
+            &policy,
+            &connection,
+            "operations",
+            "WITH c AS (SELECT id FROM operations.public.users) SELECT c.id, 2 FROM c, reporting.public.secrets s",
+        )
+        .unwrap_err();
+        assert!(result_text(&error).contains("DATABASE_EXECUTION_POLICY_OUT_OF_SCOPE"));
+    }
+
+    #[tokio::test]
+    async fn postgres_query_scope_preserves_legacy_rejections_for_unreviewed_calls() {
+        // Exercise both permission gates through the tool entry point: these
+        // query shapes retain their original rejection before reaching the backend.
+        let cases = [
+            (
+                "WITH samples(state) AS (VALUES ('new'), ('other')), compared AS (SELECT CASE WHEN state = 'new' THEN CAST(1 AS integer) ELSE 0 END AS changed FROM samples) SELECT COUNT(*), SUM(changed) FROM compared",
+                true,
+            ),
+            (
+                "WITH c(x) AS (VALUES (1), (2)), compared AS (SELECT x FROM c) SELECT COUNT(*), SUM(x) FROM compared",
+                true,
+            ),
+            ("WITH c AS (VALUES (1)), compared AS (SELECT * FROM c) SELECT 1, 2 FROM compared", true),
+            (
+                "WITH c AS (SELECT id FROM public.users) SELECT dblink_connect('remote', 'dbname=production'), 2 FROM c",
+                false,
+            ),
+            (
+                "WITH c AS (SELECT id FROM public.users) SELECT dblink_exec('dbname=production', 'SET application_name = ''scope_review'''), 2 FROM c",
+                false,
+            ),
+            ("WITH c AS (SELECT id FROM public.users) SELECT public.read_remote_value(), 2 FROM c", false),
+            (r#"WITH c AS (SELECT id FROM public.users) SELECT "COUNT"(id), 2 FROM c"#, false),
+        ];
+        for database_policy in [false, true] {
+            let rule = dbx_core::storage::McpConnectionPolicy {
+                connection_id: "sql".to_string(),
+                read_only: true,
+                allow_dangerous_sql: false,
+                execution_mode_configured: true,
+                execution_mode_policy_version: Some(dbx_core::mcp_policy::MCP_EXECUTION_POLICY_VERSION),
+                database_scope: if database_policy { McpDatabaseScope::All } else { McpDatabaseScope::Selected },
+                allowed_databases: vec!["reporting".to_string()],
+                database_policies: if database_policy {
+                    vec![dbx_core::storage::McpDatabasePolicy {
+                        database_name: "reporting".to_string(),
+                        read_only: true,
+                        allow_dangerous_sql: false,
+                    }]
+                } else {
+                    Vec::new()
+                },
+                allow_salesforce_dml: false,
+            };
+            let backend = Arc::new(FakeBackend {
+                connections: vec![connection("sql", "sql", "postgres", "reporting")],
+                policy: McpGlobalPolicy { connection_policies: vec![rule], ..Default::default() },
+                ..Default::default()
+            });
+            let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+            for (sql, allowed) in cases {
+                backend.recorded_arguments.lock().unwrap().clear();
+                let result = server
+                    .execute_query(Parameters(ExecuteQueryRequest {
+                        selector: selector("sql"),
+                        database: Some("reporting".to_string()),
+                        sql: sql.to_string(),
+                        session_id: None,
+                        cell_char_offset: None,
+                        cell_char_limit: None,
+                        max_rows: Some(5),
+                    }))
+                    .await;
+                let recorded = backend.recorded_arguments.lock().unwrap();
+                if allowed {
+                    assert!(!result.is_error.unwrap_or(false), "{}: {sql}", result_text(&result));
+                    assert_eq!(recorded.len(), 1, "allowed SQL must reach the backend: {sql}");
+                    assert_eq!(recorded[0].0, "execute_query");
+                    assert_eq!(recorded[0].1["sql"], sql);
+                } else {
+                    let code = if database_policy {
+                        "DATABASE_EXECUTION_POLICY_OUT_OF_SCOPE"
+                    } else {
+                        "DATABASE_OUT_OF_SCOPE"
+                    };
+                    assert_eq!(result.is_error, Some(true), "rejected SQL returned success: {sql}");
+                    assert!(result_text(&result).contains(code), "{}: {sql}", result_text(&result));
+                    assert!(recorded.is_empty(), "rejected SQL reached the backend: {sql}");
+                }
+            }
+        }
     }
 
     #[tokio::test]

@@ -304,7 +304,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: FolderOpen, colorClass: "text-amber-500" };
     }
     case "table":
-      return externalTableKind(node) ? { icon: Link2, colorClass: "text-cyan-500" } : { icon: Table, colorClass: "text-green-500" };
+      if (externalTableKind(node)) return { icon: Link2, colorClass: "text-cyan-500" };
+      return { icon: Table, colorClass: "text-green-500" };
     case "view":
       return { icon: Eye, colorClass: "text-purple-500" };
     case "materialized_view":

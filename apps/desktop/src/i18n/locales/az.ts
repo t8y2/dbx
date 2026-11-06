@@ -2235,6 +2235,8 @@ export default withEnglishFallback({
     filterBuilderNotContains: "Ehtiva etmir",
     filterBuilderBeginsWith: "Bununla başlayır",
     filterBuilderEndsWith: "Bununla bitir",
+    filterBuilderNotBeginsWith: "İlə başlamır",
+    filterBuilderNotEndsWith: "İlə bitmir",
     filterBuilderGreaterThan: "Böyükdür",
     filterBuilderGreaterThanOrEqual: "Böyükdür və ya bərabərdir",
     filterBuilderLessThan: "Kiçikdir",

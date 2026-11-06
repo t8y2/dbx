@@ -3305,6 +3305,8 @@ export default withEnglishFallback({
     filterBuilderNotContains: "ไม่มี",
     filterBuilderBeginsWith: "ขึ้นต้นด้วย",
     filterBuilderEndsWith: "ลงท้ายด้วย",
+    filterBuilderNotBeginsWith: "ไม่ขึ้นต้นด้วย",
+    filterBuilderNotEndsWith: "ไม่ลงท้ายด้วย",
     filterBuilderGreaterThan: "มากกว่า",
     filterBuilderGreaterThanOrEqual: "มากกว่าหรือเท่ากับ",
     filterBuilderLessThan: "น้อยกว่า",

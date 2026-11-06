@@ -237,6 +237,8 @@ pub enum DataGridContextFilterMode {
     NotLike,
     BeginsWith,
     EndsWith,
+    NotBeginsWith,
+    NotEndsWith,
     LessThan,
     LessThanOrEqual,
     GreaterThan,
@@ -926,6 +928,22 @@ pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterCo
         )),
         DataGridContextFilterMode::EndsWith => Some(format!(
             "{like_column} LIKE {}",
+            format_grid_sql_literal(
+                &Value::String(format!("%{}", value_to_filter_text(value))),
+                options.database_type,
+                None
+            )
+        )),
+        DataGridContextFilterMode::NotBeginsWith => Some(format!(
+            "{like_column} NOT LIKE {}",
+            format_grid_sql_literal(
+                &Value::String(format!("{}%", value_to_filter_text(value))),
+                options.database_type,
+                None
+            )
+        )),
+        DataGridContextFilterMode::NotEndsWith => Some(format!(
+            "{like_column} NOT LIKE {}",
             format_grid_sql_literal(
                 &Value::String(format!("%{}", value_to_filter_text(value))),
                 options.database_type,
@@ -7337,6 +7355,34 @@ mod tests {
             })
             .as_deref(),
             Some("`file_name` LIKE '%.sql'")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode: DataGridContextFilterMode::NotBeginsWith,
+                value: json!("tmp"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .as_deref(),
+            Some("`file_name` NOT LIKE 'tmp%'")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode: DataGridContextFilterMode::NotEndsWith,
+                value: json!(".log"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .as_deref(),
+            Some("`file_name` NOT LIKE '%.log'")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {

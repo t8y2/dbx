@@ -33,6 +33,7 @@ import type { ManualExportMode } from "@/lib/export/manualExportQueue";
 import type { ExportTask } from "@/composables/useExportTracker";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
+import { filterTableNames } from "./databaseExportTableFilter";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -74,9 +75,7 @@ const viewNames = ref<ReadonlySet<string>>(new Set());
 const loadingTables = ref(false);
 const tableFilter = ref("");
 const filteredTables = computed(() => {
-  const q = tableFilter.value.trim().toLowerCase();
-  if (!q) return tables.value;
-  return tables.value.filter((name) => name.toLowerCase().includes(q));
+  return filterTableNames(tables.value, tableFilter.value);
 });
 const tableError = ref<string | null>(null);
 const POSTGRES_ALL_SCHEMAS = "__DBX_ALL_SCHEMAS__";

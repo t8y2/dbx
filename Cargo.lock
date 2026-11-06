@@ -2164,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.65"
+version = "0.6.66"
 dependencies = [
  "anyhow",
  "axum",
@@ -2252,7 +2252,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.138"
+version = "0.4.139"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2595,7 +2595,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.138"
+version = "0.4.139"
 dependencies = [
  "async-trait",
  "axum",
@@ -2629,6 +2629,7 @@ name = "dbx-platform"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "httpdate",
  "nix 0.31.3",
  "reqwest 0.12.28",
  "semver",
@@ -2780,7 +2781,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.65"
+version = "0.6.66"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",

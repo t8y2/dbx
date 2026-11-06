@@ -2338,7 +2338,7 @@ export interface TableNameFilter {
   excludePatterns: string[];
 }
 
-export type TableInfoTab = "info" | "columns" | "indexes" | "foreignKeys" | "constraints" | "triggers" | "partitions" | "ddl" | "relations";
+export type TableInfoTab = "info" | "columns" | "indexes" | "foreignKeys" | "constraints" | "triggers" | "partitions" | "layout" | "ddl" | "relations";
 
 /** PostgreSQL declarative partitioning strategy (`pg_partitioned_table.partstrat`). */
 export type PgPartitionKind = "range" | "list" | "hash";
@@ -2374,6 +2374,69 @@ export interface PgTablePartitioning {
   partitions: PgPartitionNode[];
   /** `server_version_num`, used to gate `DETACH PARTITION CONCURRENTLY` (14+). */
   serverVersionNum?: number;
+}
+
+/** Doris table data model. Doris has no MySQL-style PRIMARY KEY constraint. */
+export type DorisTableModel = "duplicate" | "unique" | "aggregate";
+
+/** One row of `SHOW PARTITIONS FROM db.table`. Column presence varies by Doris version. */
+export interface DorisPartitionInfo {
+  partitionId?: number | null;
+  name: string;
+  visibleVersion?: number | null;
+  visibleVersionTime?: string | null;
+  state?: string | null;
+  partitionKey?: string | null;
+  range?: string | null;
+  distributionKey?: string | null;
+  buckets?: number | null;
+  /** Raw `Buckets` text; keeps `AUTO` / `1/3` forms that do not parse as a plain integer. */
+  bucketsRaw?: string | null;
+  replicationNum?: number | null;
+  storageMedium?: string | null;
+  dataSize?: string | null;
+  dataSizeBytes?: number | null;
+  isMutable?: boolean | null;
+  isInMemory?: boolean | null;
+  replicaAllocation?: string | null;
+  lastConsistencyCheckTime?: string | null;
+}
+
+export type DorisLayoutUnavailableReason = "externalCatalog" | "permissionDenied" | "notOlap" | "unsupported";
+
+/** Read-only Doris partition/bucket layout. Table-level fields come from DDL; `partitions` from SHOW PARTITIONS. */
+export interface DorisTableLayout {
+  kind: "olap" | "nonOlap" | "unknown";
+  model: DorisTableModel | null;
+  keyColumns: string[];
+  partition: {
+    enabled: boolean;
+    mode: "range" | "list" | null;
+    auto: boolean;
+    columns: string[];
+    expression: string | null;
+    /** Raw `PARTITION BY ...` clause, kept for troubleshooting. */
+    clause: string | null;
+  };
+  distribution: {
+    method: "hash" | "random" | null;
+    columns: string[];
+    buckets: number | null;
+    autoBuckets: boolean;
+  };
+  properties: Record<string, string>;
+  colocateWith: string | null;
+  dynamicPartition: boolean;
+  partitions: DorisPartitionInfo[];
+  unavailableReason?: DorisLayoutUnavailableReason;
+  warnings: string[];
+}
+
+/** Backend response for the Doris partition listing. `supported=false` is not "no partitions". */
+export interface DorisPartitionsResult {
+  supported: boolean;
+  reason?: string | null;
+  partitions: DorisPartitionInfo[];
 }
 
 export interface TableStructureEditorTarget {

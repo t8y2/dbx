@@ -2949,6 +2949,16 @@ export async function getTablePartitioning(connectionId: string, database: strin
   });
 }
 
+export async function listDorisPartitions(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<import("@/types/database").DorisPartitionsResult> {
+  return invoke("list_doris_partitions", {
+    connectionId,
+    database,
+    schema,
+    table,
+    catalog,
+  });
+}
+
 export async function listInvalidIndexes(connectionId: string, database: string, schema: string, table: string): Promise<string[]> {
   return invoke("list_invalid_indexes", {
     connectionId,

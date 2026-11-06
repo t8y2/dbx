@@ -4,10 +4,11 @@ import { KeyRound, Loader2, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import TablePartitionsPanel from "@/components/structure/TablePartitionsPanel.vue";
+import DorisLayoutPanel from "@/components/structure/DorisLayoutPanel.vue";
 import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPresentation";
 import { sortObjectBrowserTableColumns, type ObjectBrowserTableColumnSort, type ObjectBrowserTableColumnSortKey } from "@/lib/table/objectBrowserTableInfo";
 import { formatObjectBrowserBytes, formatObjectBrowserCount } from "@/lib/table/objectBrowserRows";
-import type { ColumnInfo, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectStatistics, PgTablePartitioning, TableInfoTab, TriggerInfo } from "@/types/database";
+import type { ColumnInfo, ConstraintInfo, DorisTableLayout, ForeignKeyInfo, IndexInfo, ObjectStatistics, PgTablePartitioning, TableInfoTab, TriggerInfo } from "@/types/database";
 
 interface DataGridTableInfoPanelsProps {
   activeTab: TableInfoTab;
@@ -37,6 +38,9 @@ interface DataGridTableInfoPanelsProps {
   partitioning: PgTablePartitioning | null;
   partitionsLoading: boolean;
   partitionsError: string;
+  layout: DorisTableLayout | null;
+  layoutLoading: boolean;
+  layoutError: string;
   isProtectedMongoIndex: (index: IndexInfo) => boolean;
   formatColumnType: (dataType: string) => string;
 }
@@ -301,6 +305,7 @@ const overviewRows = computed(() => {
   </div>
 
   <TablePartitionsPanel v-else-if="props.activeTab === 'partitions'" :partitioning="props.partitioning" :loading="props.partitionsLoading" :error="props.partitionsError" :search-query="props.searchQuery" />
+  <DorisLayoutPanel v-else-if="props.activeTab === 'layout'" :layout="props.layout" :loading="props.layoutLoading" :error="props.layoutError" :search-query="props.searchQuery" />
 </template>
 
 <style scoped>

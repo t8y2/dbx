@@ -7,6 +7,8 @@ export interface TableMetadataCapabilities {
   constraints: boolean;
   triggers: boolean;
   partitions: boolean;
+  /** Doris (and later StarRocks) partition/bucket layout tab. */
+  layout: boolean;
   ddl: boolean;
 }
 
@@ -23,6 +25,7 @@ const defaultCapabilities: TableMetadataCapabilities = {
   // Declarative partitioning metadata (pg_partitioned_table / pg_get_partkeydef)
   // is PostgreSQL-only for now; other dialects leave the tab hidden.
   partitions: false,
+  layout: false,
   ddl: true,
 };
 
@@ -37,6 +40,9 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
   kingbase: {
     constraints: true,
     partitions: true,
+  },
+  doris: {
+    layout: true,
   },
   vastbase: {
     constraints: true,
@@ -193,6 +199,7 @@ export function isStructureMetadataTabSupported(tab: TableInfoTab, capabilities:
     (tab === "constraints" && capabilities.constraints) ||
     (tab === "triggers" && capabilities.triggers) ||
     (tab === "partitions" && capabilities.partitions) ||
+    (tab === "layout" && capabilities.layout) ||
     (tab === "ddl" && capabilities.ddl && !isCreateMode)
   );
 }

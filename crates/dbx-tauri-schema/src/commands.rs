@@ -824,6 +824,19 @@ pub async fn get_table_partitioning(
 }
 
 #[tauri::command]
+pub async fn list_doris_partitions(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+    catalog: Option<String>,
+) -> Result<dbx_core::db::DorisPartitionsResult, String> {
+    dbx_core::schema::list_doris_partitions_core(&state, &connection_id, &database, &schema, &table, catalog.as_deref())
+        .await
+}
+
+#[tauri::command]
 pub async fn list_subpartitions(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

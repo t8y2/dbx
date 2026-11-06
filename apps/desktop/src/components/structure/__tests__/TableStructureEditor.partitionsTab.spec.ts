@@ -4,6 +4,15 @@ import { createApp, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const TABLE_DDL = "CREATE TABLE `users` (\n  `id` bigint NOT NULL AUTO_INCREMENT,\n  `email` varchar(255) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB";
+const DORIS_DDL = `CREATE TABLE \`demo\`.\`orders\` (
+  \`order_id\` BIGINT NOT NULL,
+  \`dt\` DATE NOT NULL
+) ENGINE=OLAP
+AGGREGATE KEY(\`order_id\`, \`dt\`)
+PARTITION BY RANGE(\`dt\`)
+(PARTITION p202401 VALUES [('2024-01-01'), ('2024-02-01')))
+DISTRIBUTED BY HASH(\`order_id\`) BUCKETS 10
+PROPERTIES ("replication_num" = "3");`;
 
 const mocks = vi.hoisted(() => ({
   connection: {
@@ -23,6 +32,7 @@ const mocks = vi.hoisted(() => ({
   buildTableOwnerChangeSql: vi.fn(),
   getTablePartitionStatus: vi.fn(),
   getTablePartitioning: vi.fn(),
+  listDorisPartitions: vi.fn(),
   getTableOwner: vi.fn(),
   updateEditorSettings: vi.fn(),
   loadObjectDdl: vi.fn(),
@@ -312,6 +322,7 @@ vi.mock("@/lib/backend/api", () => ({
   buildTableOwnerChangeSql: mocks.buildTableOwnerChangeSql,
   getTablePartitionStatus: mocks.getTablePartitionStatus,
   getTablePartitioning: mocks.getTablePartitioning,
+  listDorisPartitions: mocks.listDorisPartitions,
   buildTablePartitionOperationSql: mocks.buildTablePartitionOperationSql,
   buildCreatePartitionedTableSql: mocks.buildCreatePartitionedTableSql,
   getTableOwner: mocks.getTableOwner,
@@ -416,6 +427,7 @@ beforeEach(() => {
 afterEach(() => {
   for (const app of mountedApps.splice(0)) app.unmount();
   document.body.innerHTML = "";
+  mocks.connection.db_type = "postgres";
 });
 
 describe("TableStructureEditor partitions tab", () => {
@@ -431,6 +443,35 @@ describe("TableStructureEditor partitions tab", () => {
     expect(text).toContain("sales_2024");
     expect(text).toContain("sales_default");
     expect(text).toContain("structureEditor.partitionsDefault");
+  });
+
+  it("renders the Doris layout tab and loads SHOW PARTITIONS for a Doris connection", async () => {
+    mocks.connection.db_type = "doris";
+    mocks.loadObjectDdl.mockResolvedValue({ ddl: DORIS_DDL, cacheStatus: "remote" });
+    mocks.listDorisPartitions.mockResolvedValue({
+      supported: true,
+      partitions: [
+        {
+          partitionId: 1,
+          name: "p202401",
+          range: "[types: [DATE]; keys: [2024-01-01]; ..types: [DATE]; keys: [2024-02-01]; )",
+          buckets: 10,
+          replicationNum: 3,
+          state: "NORMAL",
+          dataSize: "1.2 GB",
+          visibleVersion: 5,
+        },
+      ],
+    });
+    const root = await mountStructureEditor({ initialTab: "layout", initialTabRequestId: 1 });
+    await settle();
+
+    expect(root.querySelector('[data-tab-trigger="layout"]')).not.toBeNull();
+    expect(mocks.listDorisPartitions).toHaveBeenCalledWith(mocks.connection.id, "test", "test", "users", undefined);
+    const text = root.textContent ?? "";
+    expect(text).toContain("dorisLayout.modelAggregate");
+    expect(text).toContain("p202401");
+    expect(text).toContain("1.2 GB");
   });
 
   it("shows the empty state for a table that is not partitioned", async () => {

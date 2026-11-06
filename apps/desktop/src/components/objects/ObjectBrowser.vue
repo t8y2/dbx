@@ -86,6 +86,8 @@ import { launchPlDebug } from "@/components/debug/plDebugLaunch";
 import { supportsPlDebugRoutine } from "@/lib/database/databaseFeatureSupport";
 import CustomTypeInfoPanel from "@/components/objects/CustomTypeInfoPanel.vue";
 import TablePartitionsPanel from "@/components/structure/TablePartitionsPanel.vue";
+import DorisLayoutPanel from "@/components/structure/DorisLayoutPanel.vue";
+import { loadDorisTableLayout } from "@/lib/table/dorisLayout";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import * as api from "@/lib/backend/api";
 import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
@@ -96,6 +98,7 @@ import type {
   ColumnInfo,
   ConnectionConfig,
   ConstraintInfo,
+  DorisTableLayout,
   ForeignKeyInfo,
   IndexInfo,
   ObjectBrowserViewMode,
@@ -427,6 +430,10 @@ const tableConstraintsError = ref("");
 const tablePartitions = ref<PgTablePartitioning | null>(null);
 const tablePartitionsLoading = ref(false);
 const tablePartitionsLoaded = ref(false);
+const tableLayout = ref<DorisTableLayout | null>(null);
+const tableLayoutLoading = ref(false);
+const tableLayoutLoaded = ref(false);
+const tableLayoutError = ref("");
 // Only tables that actually are partitioned get the Partitions tab; the cheap
 // partition-status probe decides before the full tree is fetched.
 const tableIsPartitioned = ref(false);
@@ -449,6 +456,7 @@ const activeTableInfoLoading = computed(() => {
   if (tableInfoTab.value === "indexes") return tableIndexesLoading.value;
   if (tableInfoTab.value === "foreignKeys") return tableForeignKeysLoading.value;
   if (tableInfoTab.value === "partitions") return tablePartitionsLoading.value;
+  if (tableInfoTab.value === "layout") return tableLayoutLoading.value;
   if (tableInfoTab.value === "constraints") return tableConstraintsLoading.value;
   return tableInfoTab.value === "triggers" && tableTriggersLoading.value;
 });
@@ -1510,6 +1518,9 @@ const tableInfoTabs = computed<TableInfoTabItem[]>(() => {
   if (tableMetadataCapabilities.value.partitions && tableIsPartitioned.value) {
     tabs.push({ id: "partitions", label: t("structureEditor.partitions"), icon: Network, count: tablePartitions.value?.partitions.length });
   }
+  if (tableMetadataCapabilities.value.layout && sidePanelRow.value?.type === "TABLE") {
+    tabs.push({ id: "layout", label: t("dorisLayout.tab"), icon: Network, count: tableLayout.value?.partitions.length });
+  }
   if (dependencyTarget.value) tabs.push({ id: "relations", label: t("objectRelations.title"), icon: Network });
   return sidePanelRow.value?.type === "INDEX" ? tabs.filter((tab) => ["info", "ddl", "columns", "indexes", "relations"].includes(tab.id)) : tabs;
 });
@@ -1751,6 +1762,10 @@ async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab, f
   tablePartitions.value = null;
   tablePartitionsLoaded.value = false;
   tablePartitionsLoading.value = false;
+  tableLayout.value = null;
+  tableLayoutLoaded.value = false;
+  tableLayoutLoading.value = false;
+  tableLayoutError.value = "";
   tableIsPartitioned.value = false;
   tablePartitionStatusResolved.value = false;
   tableColumnsLoaded.value = false;
@@ -1789,6 +1804,7 @@ async function selectTableInfoTab(tab: TableInfoTab) {
   else if (nextTab === "constraints") await fetchTableConstraints();
   else if (nextTab === "triggers") await fetchTableTriggers();
   else if (nextTab === "partitions") await fetchTablePartitions();
+  else if (nextTab === "layout") await fetchTableLayout();
 }
 
 async function fetchTableOverview(force = false) {
@@ -2049,6 +2065,44 @@ async function fetchTablePartitions(force = false) {
   }
 }
 
+async function fetchTableLayout(force = false) {
+  const row = sidePanelRow.value;
+  if (!row || row.type !== "TABLE" || (tableLayoutLoaded.value && !force)) return;
+  const epoch = sidePanelGuard.capture();
+  tableLayoutLoading.value = true;
+  tableLayoutError.value = "";
+  let loadedSuccessfully = false;
+  try {
+    const request = tableMetadataRequest(row);
+    const value = await sidePanelGuard.wait(
+      epoch,
+      loadDorisTableLayout({
+        connectionId: request.connectionId,
+        database: request.database,
+        schema: request.schema || request.database,
+        tableName: request.tableName,
+        catalog: request.catalog,
+        queryTimeoutSecs: props.connection.query_timeout_secs,
+        forceDdl: force,
+      }),
+      metadataLoadBudgetMs(props.connection.query_timeout_secs),
+    );
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableLayout.value = value;
+    loadedSuccessfully = true;
+  } catch (error) {
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableLayout.value = null;
+    tableLayoutError.value = String((error as Error)?.message ?? error);
+    toast(translateBackendError(t, error), 5000);
+  } finally {
+    if (sidePanelGuard.isFresh(epoch)) {
+      tableLayoutLoaded.value = loadedSuccessfully;
+      tableLayoutLoading.value = false;
+    }
+  }
+}
+
 async function fetchTableConstraints(force = false) {
   const row = sidePanelRow.value;
   if (!row || (tableConstraintsLoaded.value && !force)) return;
@@ -2123,6 +2177,11 @@ async function refreshActiveTableInfo() {
     tablePartitions.value = null;
     tablePartitionsLoaded.value = false;
     await fetchTablePartitions(true);
+  } else if (tableInfoTab.value === "layout") {
+    tableLayout.value = null;
+    tableLayoutLoaded.value = false;
+    tableLayoutError.value = "";
+    await fetchTableLayout(true);
   }
 }
 
@@ -6988,6 +7047,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             </div>
           </div>
           <TablePartitionsPanel v-else-if="tableInfoTab === 'partitions'" :partitioning="tablePartitions" :loading="tablePartitionsLoading" :error="''" :search-query="tableInfoSearchQuery" />
+          <DorisLayoutPanel v-else-if="tableInfoTab === 'layout'" :layout="tableLayout" :loading="tableLayoutLoading" :error="tableLayoutError" :search-query="tableInfoSearchQuery" />
           <pre
             v-else-if="tableInfoTab === 'ddl' && !tableDdlLoading"
             ref="tableInfoDdlPreRef"

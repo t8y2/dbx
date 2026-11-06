@@ -43,6 +43,14 @@ pub struct SaveAiConversationRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SaveAiConversationPinRequest {
+    pub id: String,
+    pub pinned: bool,
+    pub pinned_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AiCompleteRequest {
     pub request: AiCompletionRequest,
 }
@@ -255,6 +263,15 @@ pub async fn save_ai_conversation(
     Json(body): Json<SaveAiConversationRequest>,
 ) -> Result<Json<()>, AppError> {
     state.app.storage.save_ai_conversation(&body.conversation).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+/// Column-only pin write (#14226): the pin toggle must not rewrite the transcript.
+pub async fn save_ai_conversation_pin(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SaveAiConversationPinRequest>,
+) -> Result<Json<()>, AppError> {
+    state.app.storage.save_ai_conversation_pin(&body.id, body.pinned, body.pinned_at).await.map_err(AppError::from)?;
     Ok(Json(()))
 }
 

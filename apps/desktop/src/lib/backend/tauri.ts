@@ -1616,6 +1616,12 @@ export interface AiConversation {
    *  the record keeps the ENTRY the user chose, not the action a send routed
    *  to. Same semantics as `assistantMode`. */
   assistantAction?: string;
+  /** Pinned to the top of the history list (#14226). Absent means unpinned, so
+   *  legacy records and records written before the field existed load fine. */
+  pinned?: boolean;
+  /** When the user pinned it. Deliberately separate from `updatedAt` so pinning
+   *  an old conversation does not make it the restore-last target. */
+  pinnedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -1645,6 +1651,13 @@ export interface AiRun {
 
 export async function saveAiConversation(conversation: AiConversation): Promise<void> {
   return invoke("save_ai_conversation", { conversation });
+}
+
+/** Writes only the pin columns (#14226). Pinning is a property toggle, so it must
+ *  not rewrite the transcript: a whole-record write races every streaming
+ *  snapshot and would make a failed pin stick on disk via the snapshot path. */
+export async function saveAiConversationPin(id: string, pinned: boolean, pinnedAt?: string): Promise<void> {
+  return invoke("save_ai_conversation_pin", { id, pinned, pinnedAt: pinnedAt ?? null });
 }
 
 export async function loadAiConversations(): Promise<AiConversation[]> {

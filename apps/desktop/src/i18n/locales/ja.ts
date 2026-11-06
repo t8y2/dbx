@@ -499,6 +499,10 @@ export default withEnglishFallback({
     pickFormatPlaceholder: "形式を選択…",
     radixHint: "整数のみ対応します。0x、0o、0b 接頭辞は不要です。正負の符号を使用できます。",
     urlHint: "URL コンポーネントを UTF-8 でエンコード・デコードします。デコード時に + は空白に変換されません。",
+    pluginCodec: "デコーダー",
+    pluginCodecPlaceholder: "デコーダーを選択…",
+    pluginHint: "変換時に、このセルの値だけを選択したプラグインに送ります。結果は読み取り専用のプレビューで、書き戻されません。",
+    pluginDecoding: "デコード中…",
     kinds: {
       timestamp: "タイムスタンプ → 日時",
       json: "JSON 整形",
@@ -512,6 +516,7 @@ export default withEnglishFallback({
       urlEncode: "URL コンポーネントのエンコード",
       urlDecode: "URL コンポーネントのデコード",
       radix: "整数の基数変換",
+      plugin: "プラグインでデコード",
     },
     units: {
       auto: "自動（10/13 桁）",
@@ -529,6 +534,10 @@ export default withEnglishFallback({
       invalidInteger: "選択した基数に対応する整数を、接頭辞なしで入力してください。",
       invalidBase64: "有効な Base64 を入力してください。デコード結果は UTF-8 テキストである必要があります。",
       invalidBase64Binary: "Base64 内容が無効です。データが切り詰められているか、Base64 以外の文字が含まれています。",
+      pluginNoCodec: "先にデコーダーを選択してください。",
+      pluginTooLarge: "値がプラグインデコードの上限 2 MiB を超えています。",
+      pluginUndecodableBinary: "このバイナリ値の元のバイト列を読み取れません。",
+      pluginFailed: "プラグインでのデコードに失敗しました：{message}",
     },
   },
   customType: {
@@ -3240,6 +3249,7 @@ export default withEnglishFallback({
     collapseCellDetailMetadata: "セルのメタ情報を折りたたむ",
     expandCellDetailMetadata: "セルのメタ情報を展開",
     openCellDetailsDialog: "セル詳細を開く",
+    pluginDecode: "プラグインでデコード",
     rowDetails: "行詳細",
     rowDetailsFor: "行 {row} の詳細",
     openRowDetailsDialog: "行詳細を開く",

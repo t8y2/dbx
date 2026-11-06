@@ -456,6 +456,10 @@ export default withEnglishFallback({
     pickFormatPlaceholder: "เลือกรูปแบบ…",
     radixHint: "ใช้จำนวนเต็มเท่านั้น ป้อนตัวเลขโดยไม่ใส่ 0x, 0o หรือ 0b นำหน้า จะใส่เครื่องหมาย + หรือ - นำหน้าก็ได้",
     urlHint: "การเข้ารหัสส่วนประกอบ URL (UTF-8) การถอดรหัสจะเก็บ + เป็นเครื่องหมายบวกตามตัวอักษร",
+    pluginCodec: "ตัวถอดรหัส",
+    pluginCodecPlaceholder: "เลือกตัวถอดรหัส…",
+    pluginHint: "เมื่อแปลง จะส่งเฉพาะค่าของเซลล์นี้ไปยังปลั๊กอินที่เลือก ผลลัพธ์เป็นตัวอย่างแบบอ่านอย่างเดียวและจะไม่ถูกเขียนกลับ",
+    pluginDecoding: "กำลังถอดรหัส…",
     kinds: {
       timestamp: "Timestamp → วันที่/เวลา",
       json: "จัดรูปแบบ JSON",
@@ -469,6 +473,7 @@ export default withEnglishFallback({
       urlEncode: "เข้ารหัสส่วนประกอบ URL",
       urlDecode: "ถอดรหัสส่วนประกอบ URL",
       radix: "การแปลงฐานจำนวนเต็ม",
+      plugin: "ถอดรหัสด้วยปลั๊กอิน",
     },
     units: {
       auto: "อัตโนมัติ (10/13 หลัก)",
@@ -486,6 +491,10 @@ export default withEnglishFallback({
       invalidInteger: "ป้อนจำนวนเต็มที่มีตัวเลขถูกต้องตามฐานต้นทางที่เลือก โดยไม่มีคำนำหน้าฐาน",
       invalidBase64: "ป้อน Base64 ที่ถูกต้อง และเนื้อหาที่ถอดรหัสต้องเป็นข้อความ UTF-8 ที่ถูกต้อง",
       invalidBase64Binary: "เนื้อหา Base64 ไม่ถูกต้อง ข้อมูลอาจถูกตัดจบหรือมีอักขระที่ไม่ใช่ Base64",
+      pluginNoCodec: "โปรดเลือกตัวถอดรหัสก่อน",
+      pluginTooLarge: "ค่ามีขนาดเกินขีดจำกัด 2 MiB ของการถอดรหัสด้วยปลั๊กอิน",
+      pluginUndecodableBinary: "ไม่สามารถอ่านไบต์ต้นฉบับของค่าไบนารีนี้ได้",
+      pluginFailed: "ถอดรหัสด้วยปลั๊กอินไม่สำเร็จ: {message}",
     },
   },
   redisGrouping: {
@@ -3620,6 +3629,7 @@ export default withEnglishFallback({
     collapseCellDetailMetadata: "ยุบเมทาดาทาเซลล์",
     expandCellDetailMetadata: "ขยายเมทาดาทาเซลล์",
     openCellDetailsDialog: "เปิดรายละเอียดเซลล์",
+    pluginDecode: "ถอดรหัสด้วยปลั๊กอิน",
     rowDetails: "รายละเอียดแถว",
     rowDetailsFor: "รายละเอียดแถว {row}",
     openRowDetailsDialog: "เปิดรายละเอียดแถว",

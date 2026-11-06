@@ -27,6 +27,7 @@ fn mysql_config(username: &str, password: &str, database: Option<&str>) -> Conne
         visible_databases: None,
         visible_database_patterns: None,
         visible_schemas: None,
+        schema_visibility: None,
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
         show_database_links: None,

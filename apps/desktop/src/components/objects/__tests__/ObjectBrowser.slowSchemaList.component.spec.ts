@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ObjectBrowser from "@/components/objects/ObjectBrowser.vue";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 import type { ConnectionConfig } from "@/types/database";
+import { filterSchemaNamesForConnection, schemaVisibilityDatabaseKey } from "@/lib/database/visibleDatabases";
 
 const mocks = vi.hoisted(() => ({
   listObjects: vi.fn(),
@@ -20,7 +21,9 @@ vi.mock("@/lib/backend/api", () => ({
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     getConfig: () => connection,
+    completionCacheRevision: () => schemaChoicesRevision.value,
     ensureConnected: mocks.ensureConnected,
+    readVisibleSchemaSelection: async (id: string, database: string) => ({ visibleNames: filterSchemaNamesForConnection(await mocks.listSchemas(id, database, false, true), activeConnection, schemaVisibilityDatabaseKey(activeConnection, database)) }),
     tableNameFilterForScope: () => undefined,
     orderByPinnedTreeNodes: (rows: unknown[]) => rows,
   }),
@@ -79,9 +82,12 @@ const connection = {
 } as unknown as ConnectionConfig;
 
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
+const schemaChoicesRevision = ref(0);
+let activeConnection = connection;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  schemaChoicesRevision.value = 0;
   mocks.listObjects.mockImplementation(async (...args: unknown[]) => (args[10] === true ? [] : [{ name: "TEST2026", object_type: "TABLE" }]));
   mocks.ensureConnected.mockResolvedValue(undefined);
   invalidateObjectBrowserRowsCache({});
@@ -96,6 +102,7 @@ afterEach(() => {
 });
 
 async function mountBrowser(config = connection, database = "TEST", schema = "TEST") {
+  activeConnection = config;
   const host = document.createElement("div");
   document.body.append(host);
   const app = createApp({ setup: () => () => h(ObjectBrowser, { connection: config, database, schema }) });
@@ -105,6 +112,18 @@ async function mountBrowser(config = connection, database = "TEST", schema = "TE
 }
 
 describe("ObjectBrowser with a slow schema list", () => {
+  it("refreshes newly discovered ordinary choices when overrides remain empty without switching the open target", async () => {
+    const config = reactive({ ...connection, schema_visibility: { migrate_legacy: false, databases: { TEST: {} } } });
+    mocks.listSchemas.mockReset().mockResolvedValueOnce(["APP"]).mockResolvedValue(["APP", "NEW_APP"]);
+    const host = await mountBrowser(config, "APP", "APP");
+    const options = () => host.querySelector("[data-schema-options]")?.getAttribute("data-schema-options");
+    await vi.waitFor(() => expect(options()).toBe('["APP"]'));
+    const objectLoads = mocks.listObjects.mock.calls.length;
+    schemaChoicesRevision.value++;
+    await vi.waitFor(() => expect(options()).toBe('["APP","NEW_APP"]'));
+    expect(host.querySelector("[data-schema-target]")?.getAttribute("data-schema-target")).toBe("APP");
+    expect(mocks.listObjects).toHaveBeenCalledTimes(objectLoads);
+  });
   it("rejects old candidate responses after the current scope changes again", async () => {
     let complete!: (names: string[]) => void;
     mocks.listSchemas
@@ -164,7 +183,7 @@ describe("ObjectBrowser with a slow schema list", () => {
     expect(mocks.listObjects).toHaveBeenCalledWith("dameng-slow-schemas", "TEST", "TEST", expect.arrayContaining(["TABLE", "VIEW", "TRIGGER"]), undefined, undefined, undefined, undefined, undefined, undefined, { identityMode: "exact" });
     expect(mocks.listObjects.mock.calls[0][3]).not.toContain("INDEX");
     expect(mocks.listObjects).toHaveBeenCalledTimes(1);
-    expect(mocks.listSchemas).toHaveBeenCalledWith("dameng-slow-schemas", "TEST");
+    expect(mocks.listSchemas).toHaveBeenCalledWith("dameng-slow-schemas", "TEST", false, true);
     expect(host.textContent).not.toContain("objects.empty");
   });
 

@@ -223,7 +223,7 @@ describe("native Job navigation through the real stores", () => {
     const { connections, queries } = await stores("oracle");
     const original = queries.createTab("c", "Service-not-owner", "Existing", "query", "A");
     mocks.listSchemas.mockResolvedValueOnce(["A", "B", "Owner"]);
-    mocks.executeQuery.mockResolvedValueOnce({ columns: ["CURRENT_SCHEMA"], rows: [["B"]] });
+    mocks.executeQuery.mockImplementation(async (_id, _database, sql) => (sql.includes("CURRENT_SCHEMA") ? { columns: ["CURRENT_SCHEMA"], rows: [["B"]] } : { columns: ["USERNAME"], rows: [] }));
     await connections.loadDatabases("c", { force: true, connectedOnly: true, background: true });
     const picker = connections.projectRelationalNavigationTree(connections.treeNodes)[0].children!.find((node) => node.type === "relational-scope")!;
     expect(picker.relationalNavigationSelection).toEqual({ kind: "named", name: "B" });
@@ -244,7 +244,7 @@ describe("native Job navigation through the real stores", () => {
     connections.getConfig("c")!.show_system_schemas = true;
     await connections.loadDatabases("c", { connectedOnly: true, force: true });
     expect(connections.treeNodes[0].children?.some((node) => node.schema === "SYSRAC")).toBe(true);
-    expect(mocks.executeQuery).toHaveBeenCalledOnce();
+    expect(mocks.executeQuery).toHaveBeenCalledTimes(2);
   });
   it("falls back to known Oracle system names when the maintenance column is unavailable", async () => {
     const { connections } = await stores("oracle", { default_schema: "APP" });
@@ -344,14 +344,17 @@ describe("native Job navigation through the real stores", () => {
     const { connections } = await stores("oracle");
     connections.setRelationalNavigationSelection({ connectionId: "c", kind: "schema" }, { kind: "named", name: "Gone" });
     mocks.listSchemas.mockResolvedValueOnce(["A", "B"]);
-    mocks.executeQuery.mockResolvedValueOnce({ columns: ["CURRENT_SCHEMA"], rows: [["B"]] });
+    mocks.executeQuery.mockImplementation(async (_id, _database, sql) => (sql.includes("CURRENT_SCHEMA") ? { columns: ["CURRENT_SCHEMA"], rows: [["B"]] } : { columns: ["USERNAME"], rows: [] }));
     await connections.loadDatabases("c", { force: true, connectedOnly: true, background: true });
     expect(connections.projectRelationalNavigationTree(connections.treeNodes)[0].children!.find((node) => node.type === "relational-scope")?.relationalNavigationSelection).toEqual({ kind: "named", name: "B" });
   });
   it("uses all when the default cannot be read and never substitutes the first schema", async () => {
     const { connections } = await stores("oracle");
     mocks.listSchemas.mockResolvedValueOnce(["A", "B"]);
-    mocks.executeQuery.mockRejectedValueOnce(new Error("default unreadable"));
+    mocks.executeQuery.mockImplementation(async (_id, _database, sql) => {
+      if (sql.includes("CURRENT_SCHEMA")) throw new Error("default unreadable");
+      return { columns: ["USERNAME"], rows: [] };
+    });
     await connections.loadDatabases("c", { force: true, connectedOnly: true, background: true });
     expect(connections.projectRelationalNavigationTree(connections.treeNodes)[0].children!.find((node) => node.type === "relational-scope")?.relationalNavigationSelection).toEqual({ kind: "all" });
   });
@@ -1501,7 +1504,7 @@ describe("native Job navigation through the real stores", () => {
     }
     expect(mocks.nativeJobOpenContext).not.toHaveBeenCalled();
     expect(mocks.nativeJobList).not.toHaveBeenCalled();
-    expect(mocks.executeQuery.mock.calls.map((call) => call[2])).toEqual(["SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL", "SELECT USERNAME FROM ALL_USERS WHERE ORACLE_MAINTAINED = 'Y'"]);
+    expect(mocks.executeQuery.mock.calls.map((call) => call[2])).toEqual(["SELECT USERNAME FROM ALL_USERS WHERE ORACLE_MAINTAINED = 'Y'", "SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL"]);
     expect(root.children?.some((node) => node.type === "oracle-db-links" || node.type === "database-job-admin")).toBe(false);
   });
 

@@ -5,7 +5,7 @@ import { Loader2, Search } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { filterSchemaNamesForVisiblePicker } from "@/lib/database/visibleDatabases";
+import { isSystemSchemaName } from "@/lib/database/visibleDatabases";
 import type { DatabaseType } from "@/types/database";
 import { addVisibleSchemas, initialVisibleSchemaSelection, selectVisibleSchemas } from "./visibleSchemasDialogState";
 import SchemaSelectionList from "./SchemaSelectionList.vue";
@@ -33,7 +33,6 @@ const searchText = ref("");
 
 const isLoadingState = computed(() => props.draftLoading);
 const errorMessageState = computed(() => props.draftError || "");
-const connection = computed(() => ({ db_type: props.databaseType, username: props.username || "" }));
 const allSchemaNames = computed(() => props.draftSchemaNames || []);
 const listedSchemaNames = allSchemaNames;
 
@@ -66,7 +65,7 @@ function initDraftMode() {
 
 function initializeSelection(names: string[], configured: string[] | undefined) {
   const hasExplicitSelection = Array.isArray(configured);
-  const initial = hasExplicitSelection ? initialVisibleSchemaSelection(names, configured) : selectVisibleSchemas(filterSchemaNamesForVisiblePicker(names, connection.value));
+  const initial = hasExplicitSelection ? initialVisibleSchemaSelection(names, configured) : selectVisibleSchemas(names.filter((name) => !(props.systemSchemaNames?.has(name) ?? isSystemSchemaName(props.databaseType, name))));
   selectedNames.value = initial;
 }
 

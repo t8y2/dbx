@@ -4821,9 +4821,9 @@ async function changeCopySourceScope(level: "connection" | "catalog" | "database
       copySourceSchema.value = copySourceDatabase.value;
     } else if (copySourceHasSchema.value && level !== "schema") {
       const database = copySourceDatabase.value;
-      const schemas = await api.listSchemas(config.id, database);
+      const selection = await store.readVisibleSchemaSelection(config.id, database);
       if (!current()) return;
-      copySourceSchemas.value = schemaOptionsForConnection(schemas, config, database);
+      copySourceSchemas.value = schemaOptionsForConnection(selection.names, store.getConfig(config.id), database, selection.oracleMaintainedSchemas);
       const preferred = prefill ? metadataSchema.value : "";
       copySourceSchema.value = copySourceSchemas.value.includes(preferred) ? preferred : (copySourceSchemas.value[0] ?? "");
     }

@@ -39,6 +39,11 @@ vi.mock("@/stores/connectionStore", () => ({
     treeClipboard: null,
     ensureConnected: mocks.ensureConnected,
     getConfig: () => connection,
+    completionCacheRevision: () => 0,
+    readVisibleSchemaSelection: async (...args: unknown[]) => {
+      const names = await mocks.listSchemas(...args);
+      return { names, infos: [], systemNames: new Set<string>(), visibleNames: names, oracleMaintainedSchemas: undefined };
+    },
     tableNameFilterForScope: () => undefined,
     orderByPinnedTreeNodes: (rows: unknown[]) => rows,
   }),

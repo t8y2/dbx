@@ -1,6 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getSqlCompletionContext } from "@/lib/sql/sqlCompletion";
+import { filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
 
 function installLocalStorage() {
@@ -1642,7 +1643,7 @@ describe("connectionStore completion assistant", () => {
     expect(completionAssistantSearch).not.toHaveBeenCalled();
   });
 
-  it("keeps explicit Oracle schema completion on the shared assistant path", async () => {
+  it.each([false, true])("keeps explicit completion for a hidden Oracle schema on the shared assistant path (migrated=%s)", async (migrated) => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({
       candidates: [{ name: "EXPLICIT_ID", kind: "column", schema: "REPORTING", parent_schema: "REPORTING", parent_name: "SHARED_TABLE", data_type: "NUMBER" }],
       incomplete: false,
@@ -1659,8 +1660,10 @@ describe("connectionStore completion assistant", () => {
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const store = useConnectionStore();
-    store.connections = [oracleConnection()];
+    store.connections = [{ ...oracleConnection(), visible_schemas: { ORCL: [] }, schema_visibility: migrated ? { migrate_legacy: false, databases: { ORCL: { REPORTING: false } } } : undefined }];
     store.connectedIds.add("oracle-1");
+
+    expect(filterSchemaNamesForConnection(["REPORTING"], store.connections[0], "ORCL")).toEqual([]);
 
     const columns = await store.listCompletionColumns("oracle-1", "ORCL", "SHARED_TABLE", "REPORTING", { clientSessionId: "tab-a", version: 2 });
 

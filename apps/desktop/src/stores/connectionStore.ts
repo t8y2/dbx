@@ -169,7 +169,12 @@ import {
   filterSchemaNamesForVisiblePicker,
   filterVisibleDatabaseNames,
   isDraftVisibleSchemasConnectionId,
+  isSystemSchemaName,
+  migrateSchemaVisibility,
   normalizeVisibleDatabaseSelection,
+  schemaVisibilityDatabaseKey,
+  schemaVisibilityNeedsMigration,
+  schemaVisibilityOverrides,
   visibleDatabasePatternsAreEnabled,
 } from "@/lib/database/visibleDatabases";
 import {
@@ -502,6 +507,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const settingsStore = useSettingsStore();
   const tunnelProfileStore = useTunnelProfileStore();
   const connections = ref<ConnectionConfig[]>([]);
+  const ephemeralConnectionIds = new Set<string>();
   const isDesktop = isTauriRuntime();
   // Prefer a safe read so Node/vitest (missing or partial storage mocks) do not
   // throw when query tabs resolve connection db_type defaults via this store.
@@ -621,6 +627,7 @@ export const useConnectionStore = defineStore("connection", () => {
       node.connectionId ? metadataGenerationFor(node.connectionId, node.type === "connection" ? undefined : node.database) : null,
       config?.visible_databases,
       config?.visible_schemas,
+      config?.schema_visibility,
       config?.visible_database_patterns,
       config?.show_system_schemas,
     ]);
@@ -1505,8 +1512,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const config = getConfig(connectionId);
     const fingerprint = config ? connectionConfigFingerprint(config) : undefined;
     const configuredSystemSchemas = config?.show_system_schemas === true;
-    const hasExplicitSchemaSelection = Array.isArray(config?.visible_schemas?.[database === "_" ? "" : database]);
-    const showSystemSchemas = systemSchemasOverride ?? (configuredSystemSchemas || hasExplicitSchemaSelection);
+    const showSystemSchemas = systemSchemasOverride ?? true;
     const revision = completionCacheRevision(connectionId, database);
     const generation = metadataGenerationFor(connectionId, database);
     const connectionRevision = connectionStateRevision(connectionId);
@@ -1524,15 +1530,52 @@ export const useConnectionStore = defineStore("connection", () => {
     const infos = await metadataLoadCoordinator.run(scope, () => {
       const cached = metadataListPageCache.get(scope, { allowStale: true });
       if (cached) return Promise.resolve(cached.value as SchemaInfo[]);
-      return loadCachedMetadataListPage<SchemaInfo[]>(scope, () => withMetadataLoadTimeout(connectionId, systemSchemasOverride === undefined && !hasExplicitSchemaSelection ? api.listSchemaInfos(connectionId, database) : api.listSchemaInfos(connectionId, database, showSystemSchemas), "schemas"), {
+      return loadCachedMetadataListPage<SchemaInfo[]>(scope, () => withMetadataLoadTimeout(connectionId, api.listSchemaInfos(connectionId, database, showSystemSchemas), "schemas"), {
         isCurrent,
       });
     });
-    if (isCurrent() && (systemSchemasOverride === undefined || showSystemSchemas === configuredSystemSchemas)) {
+    if (isCurrent() && showSystemSchemas) {
       schemaListCache.value[key] = infos.map((schema) => schema.name);
       evictOldestCacheEntries(schemaListCache.value, COMPLETION_CACHE_MAX);
     }
     return infos;
+  }
+
+  function needsPersistentSchemaMigration(config: ConnectionConfig | undefined, database: string): boolean {
+    return !!config && !config.one_time && !ephemeralConnectionIds.has(config.id) && !isDraftVisibleSchemasConnectionId(config.id) && schemaVisibilityNeedsMigration(config, database);
+  }
+
+  async function readVisibleSchemaSelection(connectionId: string, database: string, force = false) {
+    const initial = getConfig(connectionId);
+    if (!initial) throw new Error("Connection not found");
+    const fingerprint = connectionConfigFingerprint(initial);
+    const generation = metadataGenerationFor(connectionId, database);
+    const revision = connectionStateRevision(connectionId);
+    const isCurrent = () => {
+      const current = getConfig(connectionId);
+      return !!current && fingerprint === connectionConfigFingerprint(current) && generation === metadataGenerationFor(connectionId, database) && revision === connectionStateRevision(connectionId);
+    };
+    const infos = await readSharedSchemaInfos(connectionId, database, force, true);
+    if (!isCurrent()) throw new Error(SUPERSEDED_CONNECTION_ATTEMPT_MESSAGE);
+    const oracleMaintainedSchemas = await readOracleMaintainedSchemas(connectionId, database, force, false);
+    if (!isCurrent()) throw new Error(SUPERSEDED_CONNECTION_ATTEMPT_MESSAGE);
+    const names = infos.map((schema) => schema.name);
+    const databaseType = effectiveDatabaseTypeForConnection(initial);
+    const systemNames = new Set(names.filter((name) => (oracleMaintainedSchemas ? oracleMaintainedSchemas.has(name) : isSystemSchemaName(databaseType, name))));
+    if (needsPersistentSchemaMigration(getConfig(connectionId), database)) {
+      await runConnectionConfigWrite(connectionId, async () => {
+        if (!isCurrent()) throw new Error(SUPERSEDED_CONNECTION_ATTEMPT_MESSAGE);
+        const current = getConfig(connectionId)!;
+        if (!needsPersistentSchemaMigration(current, database)) return;
+        const schema_visibility = migrateSchemaVisibility(current, database, names, systemNames);
+        await persistConnections([{ ...current, schema_visibility }]);
+        if (!isCurrent()) throw new Error(SUPERSEDED_CONNECTION_ATTEMPT_MESSAGE);
+        connections.value = connections.value.map((connection) => (connection.id === connectionId ? { ...connection, schema_visibility } : connection));
+      });
+    }
+    if (!isCurrent()) throw new Error(SUPERSEDED_CONNECTION_ATTEMPT_MESSAGE);
+    const visibleNames = filterSchemaNamesForConnection(names, getConfig(connectionId), database, { oracleMaintainedSchemas });
+    return { infos, names, systemNames, visibleNames, oracleMaintainedSchemas };
   }
 
   async function listNavigationSchemaChoices(connectionId: string, database: string, showSystemSchemas: boolean, force = false): Promise<string[]> {
@@ -5494,39 +5537,37 @@ export const useConnectionStore = defineStore("connection", () => {
   async function addConnection(config: ConnectionConfig, targetGroupId?: string | null) {
     const normalized = normalizeConnection(config);
     if (normalized.save_password === false) normalized.password = "";
-    const isNewConnection = !connections.value.some((c) => c.id === normalized.id);
-    // 新建同名同类型连接时回填「记住的数据库」，让删除连接后重建的流程少一步手选。
-    if (isNewConnection && !normalized.database?.trim()) {
-      const remembered = settingsStore.rememberedDatabaseForConnection(normalized.name, normalized.db_type);
-      if (remembered) normalized.database = remembered;
-    }
-    await persistTimeoutInheritance(normalized.id, normalized.connect_timeout_inherit === true, normalized.query_timeout_inherit === true);
-    const existing = connections.value.findIndex((c) => c.id === normalized.id);
-    const nextConnections = [...connections.value];
-    if (existing >= 0) {
-      nextConnections[existing] = normalized;
-    } else {
-      nextConnections.push(normalized);
-      const groupId = targetGroupId !== undefined ? targetGroupId : newConnectionGroupId.value;
-      // Bump before the assignment: the persist below awaits, and a poll that read
-      // the pre-add connection list must not reconcile the new entry away.
-      sidebarLayoutRevision += 1;
-      sidebarLayout.value = appendConnectionToLayout(sidebarLayout.value, normalized.id, groupId);
-    }
-    await persistConnections([normalized]);
-    connections.value = nextConnections;
-    syncTimeoutInheritanceBackup();
-    rebuildTreeNodes();
-    persistSidebarLayoutDebounced();
-    stopCreatingConnectionInGroup();
-    // 删除连接时保留下来的 SQL 页签按连接名重新绑定到新连接上（含数据库回填）。
-    if (isNewConnection) {
-      const { useQueryStore } = await import("@/stores/queryStore");
-      const queryStore = useQueryStore();
-      if (queryStore.rebindDetachedTabs(normalized.name, normalized.id, normalized.database) > 0) {
-        await queryStore.flushPendingPersist().catch(() => undefined);
+    return runConnectionConfigWrite(normalized.id, async () => {
+      const isNewConnection = !connections.value.some((c) => c.id === normalized.id);
+      // 新建同名同类型连接时回填「记住的数据库」，让删除连接后重建的流程少一步手选。
+      if (isNewConnection && !normalized.database?.trim()) {
+        const remembered = settingsStore.rememberedDatabaseForConnection(normalized.name, normalized.db_type);
+        if (remembered) normalized.database = remembered;
       }
-    }
+      await persistTimeoutInheritance(normalized.id, normalized.connect_timeout_inherit === true, normalized.query_timeout_inherit === true);
+      if (!connections.value.some((connection) => connection.id === normalized.id)) {
+        const groupId = targetGroupId !== undefined ? targetGroupId : newConnectionGroupId.value;
+        // Bump before the assignment: the persist below awaits, and a poll that read
+        // the pre-add connection list must not reconcile the new entry away.
+        sidebarLayoutRevision += 1;
+        sidebarLayout.value = appendConnectionToLayout(sidebarLayout.value, normalized.id, groupId);
+      }
+      await persistConnections([normalized]);
+      ephemeralConnectionIds.delete(normalized.id);
+      connections.value = connections.value.some((connection) => connection.id === normalized.id) ? connections.value.map((connection) => (connection.id === normalized.id ? normalized : connection)) : [...connections.value, normalized];
+      syncTimeoutInheritanceBackup();
+      rebuildTreeNodes();
+      persistSidebarLayoutDebounced();
+      stopCreatingConnectionInGroup();
+      // 删除连接时保留下来的 SQL 页签按连接名重新绑定到新连接上（含数据库回填）。
+      if (isNewConnection) {
+        const { useQueryStore } = await import("@/stores/queryStore");
+        const queryStore = useQueryStore();
+        if (queryStore.rebindDetachedTabs(normalized.name, normalized.id, normalized.database) > 0) {
+          await queryStore.flushPendingPersist().catch(() => undefined);
+        }
+      }
+    });
   }
 
   function copyConnectionsToTreeClipboard(connectionIds: Iterable<string>): number {
@@ -5651,6 +5692,11 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function removeConnections(ids: Iterable<string>) {
+    const connectionIds = [...new Set(ids)];
+    await runConnectionConfigWrites(connectionIds, () => removeConnectionsInQueue(connectionIds));
+  }
+
+  async function removeConnectionsInQueue(ids: Iterable<string>) {
     const connectionIds = [...new Set(ids)].filter((id) => connections.value.some((c) => c.id === id));
     if (!connectionIds.length) return;
 
@@ -5665,7 +5711,7 @@ export const useConnectionStore = defineStore("connection", () => {
     await persistConnectionDeletion(nextConnections, applyDeletion);
     // Re-apply against the live layout: an edit that landed while the write was in
     // flight must survive, and removing connections is a pure transform of the tree.
-    applyConnectionRemoval(removedIds, nextConnections, applyDeletion(sidebarLayout.value));
+    applyConnectionRemoval(removedIds, applyDeletion(sidebarLayout.value));
     // 连接已不存在，"用户已关闭"标记没有意义，留着只会泄漏失效 id。
     for (const id of removedIds) clearConnectionClosedByUser(id);
     purgeTableVGroupsForConnections(removedIds);
@@ -5694,8 +5740,8 @@ export const useConnectionStore = defineStore("connection", () => {
     if (removed) tableVGroupLayouts.value = nextLayouts;
     for (const id of removedIds) void api.deleteTableVGroupsForConnection(id).catch(() => {});
   }
-  function applyConnectionRemoval(removedIds: ReadonlySet<string>, nextConnections: ConnectionConfig[], nextLayout: SidebarLayout) {
-    connections.value = nextConnections;
+  function applyConnectionRemoval(removedIds: ReadonlySet<string>, nextLayout: SidebarLayout) {
+    connections.value = connections.value.filter((connection) => !removedIds.has(connection.id));
     syncTimeoutInheritanceBackup();
     let nextPinnedOrder = pinnedTreeNodeOrder.value;
     for (const id of removedIds) {
@@ -5706,6 +5752,7 @@ export const useConnectionStore = defineStore("connection", () => {
     persistPinnedTreeNodeIds();
     removeSidebarTableNameFiltersForConnections(removedIds);
     for (const id of removedIds) {
+      ephemeralConnectionIds.delete(id);
       clearConnectionError(id);
       connectionErrorRevisions.delete(id);
       reusableTreeCacheRevisions.delete(id);
@@ -5756,24 +5803,40 @@ export const useConnectionStore = defineStore("connection", () => {
     return pending;
   }
 
-  async function updateConnection(config: ConnectionConfig, options?: { preserveNavigationVisibility?: readonly ("show_system_schemas" | "visible_schemas" | "visible_databases" | "visible_database_patterns")[]; updatedVisibleSchemaKeys?: readonly string[]; expectedFingerprint?: string }) {
+  function runConnectionConfigWrites<T>(connectionIds: Iterable<string>, write: () => Promise<T>): Promise<T> {
+    const ordered = [...new Set(connectionIds)].sort();
+    const acquire = (index: number): Promise<T> => (index === ordered.length ? write() : runConnectionConfigWrite(ordered[index]!, () => acquire(index + 1)));
+    return acquire(0);
+  }
+
+  async function updateConnection(
+    config: ConnectionConfig,
+    options?: { preserveNavigationVisibility?: readonly ("show_system_schemas" | "visible_schemas" | "schema_visibility" | "visible_databases" | "visible_database_patterns")[]; updatedVisibleSchemaKeys?: readonly string[]; expectedFingerprint?: string; patch?: Partial<ConnectionConfig> },
+  ) {
     config = normalizeConnection(config);
     if (config.save_password === false) config.password = "";
-    return runConnectionConfigWrite(config.id, async () => {
+    let reloadChildren = false;
+    const committed = await runConnectionConfigWrite(config.id, async () => {
       const idx = connections.value.findIndex((c) => c.id === config.id);
       if (idx < 0) return;
       const previousFingerprint = connectionConfigFingerprint(connections.value[idx]);
       if (options?.expectedFingerprint !== undefined && options.expectedFingerprint !== previousFingerprint) throw new Error(SUPERSEDED_CONNECTION_ATTEMPT_MESSAGE);
       const previousConfig = normalizeConnection(connections.value[idx]);
+      if (options?.patch) config = { ...previousConfig, ...options.patch };
       for (const field of options?.preserveNavigationVisibility ?? []) Object.assign(config, { [field]: previousConfig[field] });
       if (options?.updatedVisibleSchemaKeys) {
-        const schemas = { ...previousConfig.visible_schemas };
+        const schemas = new Map(Object.entries(previousConfig.visible_schemas ?? {}));
+        const databases = new Map(Object.entries(previousConfig.schema_visibility?.databases ?? {}));
         for (const database of options.updatedVisibleSchemaKeys) {
-          const names = config.visible_schemas?.[database];
-          if (names !== undefined) schemas[database] = [...names];
-          else delete schemas[database];
+          const names = config.visible_schemas && Object.hasOwn(config.visible_schemas, database) ? config.visible_schemas[database] : undefined;
+          if (names !== undefined) schemas.set(database, [...names]);
+          else schemas.delete(database);
+          const overrides = config.schema_visibility && Object.hasOwn(config.schema_visibility.databases, database) ? config.schema_visibility.databases[database] : undefined;
+          if (overrides !== undefined) databases.set(database, { ...overrides });
+          else databases.delete(database);
         }
-        config.visible_schemas = Object.keys(schemas).length ? schemas : undefined;
+        config.visible_schemas = schemas.size ? Object.fromEntries(schemas) : undefined;
+        if (previousConfig.schema_visibility || config.schema_visibility) config.schema_visibility = { migrate_legacy: previousConfig.schema_visibility?.migrate_legacy ?? config.schema_visibility?.migrate_legacy ?? true, databases: Object.fromEntries(databases) };
       }
       const keepsSavedJdbcTarget = previousConfig.db_type === "jdbc" && config.db_type === "jdbc" && previousConfig.driver_profile === config.driver_profile && previousConfig.connection_string === config.connection_string && isSavedCredential(config.connection_string);
       // Edit forms do not own server-derived hints. Retain the previous hint only
@@ -5795,6 +5858,10 @@ export const useConnectionStore = defineStore("connection", () => {
       const current = getConfig(config.id);
       if (!current || connectionConfigFingerprint(current) !== previousFingerprint) throw new Error(SUPERSEDED_CONNECTION_ATTEMPT_MESSAGE);
       connections.value = connections.value.map((connection) => (connection.id === config.id ? config : connection));
+      if (options?.updatedVisibleSchemaKeys?.length) {
+        if (connectionUsesVisibleSchemaFilter(config)) invalidateCompletionCache(config.id);
+        else for (const database of options.updatedVisibleSchemaKeys) invalidateCompletionCache(config.id, database);
+      } else if (JSON.stringify(previousConfig.schema_visibility) !== JSON.stringify(config.schema_visibility)) invalidateCompletionCache(config.id);
       if (JSON.stringify(previousConfig.visible_databases) !== JSON.stringify(config.visible_databases) || JSON.stringify(previousConfig.visible_database_patterns) !== JSON.stringify(config.visible_database_patterns)) delete completionDatabasesCache.value[config.id];
       syncTimeoutInheritanceBackup();
       rebuildTreeNodes();
@@ -5817,38 +5884,38 @@ export const useConnectionStore = defineStore("connection", () => {
       await invalidateSidebarTableSearchIndexesForConnection(config.id);
       clearLoadedChildrenCache(config.id);
       const node = findConnectionNode(config.id);
-      if (node?.isExpanded) {
-        await reloadConnectionDatabaseChildren(config.id);
-      }
+      reloadChildren = node?.isExpanded === true;
       if (shouldReconnectPlugin) await reconnectPluginConnectionAfterConfigUpdate(config);
       return config;
     });
+    // A reload can prompt to remember a password, which writes through this queue.
+    if (reloadChildren) await reloadConnectionDatabaseChildren(config.id);
+    return committed;
   }
 
   async function updateRedisKeyGrouping(connectionId: string, grouping: import("@/lib/redis/redisKeyGrouping").RedisKeyGrouping) {
     const { validateRedisKeyGrouping } = await import("@/lib/redis/redisKeyGrouping");
     const validated = validateRedisKeyGrouping(grouping);
-    const index = connections.value.findIndex((connection) => connection.id === connectionId);
-    if (index < 0) throw new Error("Connection not found");
-    const next = [...connections.value];
-    next[index] = { ...next[index]!, redis_key_grouping: validated };
-    await persistConnections([next[index]!]);
-    // Presentation-only preferences must not invalidate a live connection.
-    connections.value = next;
+    return runConnectionConfigWrite(connectionId, async () => {
+      const current = getConfig(connectionId);
+      if (!current) throw new Error("Connection not found");
+      await persistConnections([{ ...current, redis_key_grouping: validated }]);
+      // Presentation-only preferences must not invalidate a live connection.
+      connections.value = connections.value.map((connection) => (connection.id === connectionId ? { ...connection, redis_key_grouping: validated } : connection));
+    });
   }
 
   async function renameConnection(connectionId: string, name: string): Promise<boolean> {
     const trimmed = name.trim();
     if (!trimmed) return false;
-    const index = connections.value.findIndex((connection) => connection.id === connectionId);
-    if (index < 0 || connections.value[index].name === trimmed) return false;
-
-    const nextConnections = [...connections.value];
-    nextConnections[index] = { ...nextConnections[index], name: trimmed };
-    await persistConnections([nextConnections[index]!]);
-    connections.value = nextConnections;
-    rebuildTreeNodes();
-    return true;
+    return runConnectionConfigWrite(connectionId, async () => {
+      const current = getConfig(connectionId);
+      if (!current || current.name === trimmed) return false;
+      await persistConnections([{ ...current, name: trimmed }]);
+      connections.value = connections.value.map((connection) => (connection.id === connectionId ? { ...connection, name: trimmed } : connection));
+      rebuildTreeNodes();
+      return true;
+    });
   }
 
   async function updateConnectionDatabaseInfo(connectionId: string, databaseInfo: DatabaseConnectionInfo, expectedConfigFingerprint?: string, isCurrent?: () => boolean): Promise<void> {
@@ -5957,20 +6024,14 @@ export const useConnectionStore = defineStore("connection", () => {
     const config = getConfig(connectionId);
     if (config?.db_type === "cloudflare-d1") return;
     if (!config || config.database === database) return;
-    await updateConnection({
-      ...config,
-      database,
-    });
+    await updateConnection(config, { patch: { database } });
   }
 
   async function clearDefaultDatabase(connectionId: string) {
     const config = getConfig(connectionId);
     if (config?.db_type === "cloudflare-d1") return;
     if (!config || !config.database) return;
-    await updateConnection({
-      ...config,
-      database: undefined,
-    });
+    await updateConnection(config, { patch: { database: undefined } });
   }
 
   function isDefaultDatabase(connectionId: string, database: string): boolean {
@@ -5983,19 +6044,13 @@ export const useConnectionStore = defineStore("connection", () => {
     const config = getConfig(connectionId);
     const defaultSchema = schema.trim();
     if (!config || !defaultSchema || config.default_schema === defaultSchema || (config.db_type === "xugu" && isXuguSyntheticScope(defaultSchema))) return;
-    await updateConnection({
-      ...config,
-      default_schema: defaultSchema,
-    });
+    await updateConnection(config, { patch: { default_schema: defaultSchema } });
   }
 
   async function clearDefaultSchema(connectionId: string) {
     const config = getConfig(connectionId);
     if (!config?.default_schema) return;
-    await updateConnection({
-      ...config,
-      default_schema: undefined,
-    });
+    await updateConnection(config, { patch: { default_schema: undefined } });
   }
 
   function isDefaultSchema(connectionId: string, schema: string): boolean {
@@ -6008,29 +6063,25 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function setRedisDatabaseAlias(connectionId: string, database: string | number, alias?: string) {
     const index = typeof database === "number" ? database : Number(database);
-    const configIndex = connections.value.findIndex((connection) => connection.id === connectionId);
-    const config = connections.value[configIndex];
-    if (!config || config.db_type !== "redis" || !Number.isInteger(index) || index < 0) return;
+    if (!Number.isInteger(index) || index < 0) return;
+    return runConnectionConfigWrite(connectionId, async () => {
+      const config = getConfig(connectionId);
+      if (!config || config.db_type !== "redis") return;
+      const key = String(index);
+      const aliases = { ...(config.redis_database_aliases || {}) };
+      const normalizedAlias = alias?.trim() || "";
+      if (normalizedAlias) aliases[key] = normalizedAlias;
+      else delete aliases[key];
 
-    const key = String(index);
-    const aliases = { ...(config.redis_database_aliases || {}) };
-    const normalizedAlias = alias?.trim() || "";
-    if (normalizedAlias) aliases[key] = normalizedAlias;
-    else delete aliases[key];
+      const redisDatabaseAliases = normalizeRedisDatabaseAliases(aliases);
+      await persistConnections([{ ...config, redis_database_aliases: redisDatabaseAliases }]);
+      connections.value = connections.value.map((connection) => (connection.id === connectionId ? { ...connection, redis_database_aliases: redisDatabaseAliases } : connection));
 
-    const redisDatabaseAliases = normalizeRedisDatabaseAliases(aliases);
-    const nextConnections = [...connections.value];
-    nextConnections[configIndex] = {
-      ...config,
-      redis_database_aliases: redisDatabaseAliases,
-    };
-    await persistConnections([nextConnections[configIndex]!]);
-    connections.value = nextConnections;
-
-    const node = findNode(treeNodes.value, `${connectionId}:db${key}`);
-    if (node?.type === "redis-db") {
-      node.label = redisDatabaseLabel(index, redisDatabaseAliases, node.totalKeyCount);
-    }
+      const node = findNode(treeNodes.value, `${connectionId}:db${key}`);
+      if (node?.type === "redis-db") {
+        node.label = redisDatabaseLabel(index, redisDatabaseAliases, node.totalKeyCount);
+      }
+    });
   }
 
   async function setVisibleDatabases(connectionId: string, databaseNames: string[]) {
@@ -6045,17 +6096,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const config = getConfig(connectionId);
     if (!config) return;
     const normalizedPatterns = patterns.map((pattern) => pattern.trim()).filter((pattern) => pattern !== "");
-    const idx = connections.value.findIndex((connection) => connection.id === connectionId);
-    if (idx < 0) return;
-    const nextConnections = [...connections.value];
-    nextConnections[idx] = {
-      ...nextConnections[idx],
-      // 空名单等于"一个库都不显示"，只可能是误写；弹窗层的"全选"已折算成 undefined。
-      visible_databases: databaseNames && databaseNames.length > 0 ? normalizeVisibleDatabaseSelection(databaseNames, databaseNames) : undefined,
-      visible_database_patterns: normalizedPatterns.length > 0 ? normalizedPatterns : undefined,
-    };
-    await persistConnections([nextConnections[idx]!]);
-    connections.value = nextConnections;
+    await updateNavigationVisibility(connectionId, "", { filterSchemas: false, databaseNames: databaseNames?.length ? normalizeVisibleDatabaseSelection(databaseNames, databaseNames) : undefined, databasePatterns: normalizedPatterns.length ? normalizedPatterns : undefined });
     invalidateCompletionCache(connectionId);
     rebuildTreeNodes();
     await reloadConnectionDatabaseChildren(connectionId);
@@ -6093,20 +6134,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function clearVisibleDatabases(connectionId: string) {
     const config = getConfig(connectionId);
     if (!config || (!Array.isArray(config.visible_databases) && !visibleDatabasePatternsAreEnabled(config.visible_database_patterns))) return;
-    if (visibleDatabasePatternsAreEnabled(config.visible_database_patterns)) {
-      const idx = connections.value.findIndex((connection) => connection.id === connectionId);
-      if (idx >= 0) {
-        const nextConnections = [...connections.value];
-        nextConnections[idx] = { ...nextConnections[idx], visible_databases: undefined, visible_database_patterns: undefined };
-        await persistConnections([nextConnections[idx]!]);
-        connections.value = nextConnections;
-        invalidateCompletionCache(connectionId);
-        rebuildTreeNodes();
-        await reloadConnectionDatabaseChildren(connectionId);
-        return;
-      }
-    }
-    await updateVisibleDatabasesConfig(connectionId, undefined);
+    await updateNavigationVisibility(connectionId, "", { filterSchemas: false });
     await reloadConnectionDatabaseChildren(connectionId);
   }
 
@@ -6123,18 +6151,31 @@ export const useConnectionStore = defineStore("connection", () => {
     await updateNavigationVisibility(connectionId, "", { filterSchemas: false, databaseNames: visibleDatabases, preserveDatabasePatterns: true });
   }
 
-  async function setVisibleSchemas(connectionId: string, database: string, schemaNames: string[]) {
+  async function setVisibleSchemas(connectionId: string, database: string, schemaNames: string[], candidates?: { names: string[]; systemNames: ReadonlySet<string> }) {
     const config = getConfig(connectionId);
     if (!config) return;
-    const key = database || "";
-    await updateNavigationVisibility(connectionId, key, { filterSchemas: true, schemaNames, clearLegacyDatabaseFilter: connectionUsesVisibleSchemaFilter(config) });
+    const key = schemaVisibilityDatabaseKey(config, database);
+    await updateNavigationVisibility(connectionId, key, { filterSchemas: true, schemaNames, schemaCandidates: candidates?.names, systemSchemaNames: candidates?.systemNames, clearLegacyDatabaseFilter: connectionUsesVisibleSchemaFilter(config) });
     await reloadSchemaChildren(connectionId, database);
   }
 
   async function updateNavigationVisibility(
     connectionId: string,
     database: string,
-    patch: { showSystemSchemas?: boolean; schemaNames?: string[]; databaseNames?: string[]; filterSchemas: boolean; updateFilter?: boolean; clearLegacyDatabaseFilter?: boolean; preserveDatabasePatterns?: boolean; expectedFingerprint?: string },
+    patch: {
+      showSystemSchemas?: boolean;
+      schemaNames?: string[];
+      schemaCandidates?: string[];
+      systemSchemaNames?: ReadonlySet<string>;
+      resetSchemaVisibility?: boolean;
+      databaseNames?: string[];
+      databasePatterns?: string[];
+      filterSchemas: boolean;
+      updateFilter?: boolean;
+      clearLegacyDatabaseFilter?: boolean;
+      preserveDatabasePatterns?: boolean;
+      expectedFingerprint?: string;
+    },
   ) {
     const initial = getConfig(connectionId);
     if (!initial) throw new Error("Connection not found");
@@ -6143,9 +6184,18 @@ export const useConnectionStore = defineStore("connection", () => {
     const apply = (config: ConnectionConfig): ConnectionConfig => {
       const next = { ...config };
       if (update.showSystemSchemas !== undefined) next.show_system_schemas = update.showSystemSchemas;
-      if (update.filterSchemas && update.updateFilter !== false) {
-        const schemas = { ...config.visible_schemas };
-        if (update.schemaNames !== undefined) schemas[database] = [...update.schemaNames];
+      if (update.filterSchemas && update.updateFilter !== false && (update.schemaCandidates || update.resetSchemaVisibility)) {
+        const visibility = config.schema_visibility;
+        const names = update.schemaCandidates ?? [];
+        const systemNames = update.systemSchemaNames ?? new Set<string>();
+        const previous = schemaVisibilityNeedsMigration(config, database) ? migrateSchemaVisibility(config, database, names, systemNames).databases[database] : visibility?.databases[database];
+        next.schema_visibility = {
+          migrate_legacy: visibility?.migrate_legacy ?? true,
+          databases: { ...visibility?.databases, [database]: update.resetSchemaVisibility ? {} : schemaVisibilityOverrides(names, update.schemaNames ?? [], systemNames, previous) },
+        };
+      } else if (update.filterSchemas && update.updateFilter !== false) {
+        let schemas = { ...config.visible_schemas };
+        if (update.schemaNames !== undefined) schemas = { ...schemas, [database]: [...update.schemaNames] };
         else delete schemas[database];
         next.visible_schemas = Object.keys(schemas).length ? schemas : undefined;
         if (update.clearLegacyDatabaseFilter) {
@@ -6154,7 +6204,7 @@ export const useConnectionStore = defineStore("connection", () => {
         }
       } else if (!update.filterSchemas && update.updateFilter !== false) {
         next.visible_databases = update.databaseNames?.slice();
-        if (!update.preserveDatabasePatterns) next.visible_database_patterns = undefined;
+        if (!update.preserveDatabasePatterns) next.visible_database_patterns = update.databasePatterns?.slice();
       }
       return next;
     };
@@ -6166,6 +6216,7 @@ export const useConnectionStore = defineStore("connection", () => {
       if (!current || expectedFingerprint !== connectionConfigFingerprint(current)) throw new Error(SUPERSEDED_CONNECTION_ATTEMPT_MESSAGE);
       const committed = apply(current);
       connections.value = connections.value.map((connection) => (connection.id === connectionId ? committed : connection));
+      if (update.schemaCandidates || update.resetSchemaVisibility) invalidateCompletionCache(connectionId, connectionUsesVisibleSchemaFilter(committed) ? undefined : database);
       if (JSON.stringify(current.visible_databases) !== JSON.stringify(committed.visible_databases) || JSON.stringify(current.visible_database_patterns) !== JSON.stringify(committed.visible_database_patterns)) delete completionDatabasesCache.value[connectionId];
       rebuildTreeNodes();
       return committed;
@@ -6221,9 +6272,10 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function clearVisibleSchemas(connectionId: string, database: string) {
     const config = getConfig(connectionId);
-    if (!config || !config.visible_schemas) return;
-    const key = database || "";
-    await updateVisibleSchemasConfig(connectionId, key, undefined);
+    if (!config || (!config.visible_schemas && !config.schema_visibility)) return;
+    const key = schemaVisibilityDatabaseKey(config, database);
+    if (config.schema_visibility) await updateNavigationVisibility(connectionId, key, { filterSchemas: true, resetSchemaVisibility: true });
+    else await updateVisibleSchemasConfig(connectionId, key, undefined);
     await reloadSchemaChildren(connectionId, database);
   }
 
@@ -6374,20 +6426,20 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function persistRememberedConnectionPassword(config: ConnectionConfig, rememberPassword: boolean, expectedConfigFingerprint: string, localAttempt: number): Promise<string | undefined> {
     if (!rememberPassword || !isCurrentLocalConnectionAttempt(config.id, localAttempt)) return;
-    const index = connections.value.findIndex((connection) => connection.id === config.id);
-    if (index < 0) return;
-    if (connectionConfigFingerprint(connections.value[index]) !== expectedConfigFingerprint) return;
-    const nextConnections = [...connections.value];
-    nextConnections[index] = { ...nextConnections[index], password: config.password, save_password: true };
-    await persistConnections([nextConnections[index]!]);
-    const current = getConfig(config.id);
-    if (!isCurrentLocalConnectionAttempt(config.id, localAttempt) || !current || connectionConfigFingerprint(current) !== expectedConfigFingerprint) {
-      await persistConnections(current && !current.one_time ? [current] : [], current && !current.one_time ? [] : [config.id]);
-      return;
-    }
-    connections.value = nextConnections;
-    rebuildTreeNodes();
-    return connectionConfigFingerprint(nextConnections[index]!);
+    return runConnectionConfigWrite(config.id, async () => {
+      const initial = getConfig(config.id);
+      if (!isCurrentLocalConnectionAttempt(config.id, localAttempt) || !initial || connectionConfigFingerprint(initial) !== expectedConfigFingerprint) return;
+      await persistConnections([{ ...initial, password: config.password, save_password: true }]);
+      const current = getConfig(config.id);
+      if (!isCurrentLocalConnectionAttempt(config.id, localAttempt) || !current || connectionConfigFingerprint(current) !== expectedConfigFingerprint) {
+        await persistConnections(current && !current.one_time ? [current] : [], current && !current.one_time ? [] : [config.id]);
+        return;
+      }
+      const committed = { ...current, password: config.password, save_password: true };
+      connections.value = connections.value.map((connection) => (connection.id === config.id ? committed : connection));
+      rebuildTreeNodes();
+      return connectionConfigFingerprint(committed);
+    });
   }
 
   async function connectDbWithPasswordRetry(config: ConnectionConfig, localAttempt: number): Promise<{ config: ConnectionConfig; id: string; rememberPassword: boolean }> {
@@ -7236,7 +7288,8 @@ export const useConnectionStore = defineStore("connection", () => {
   async function loadDatabases(connectionId: string, options?: LoadTreeOptions) {
     const configForScope = getConfig(connectionId);
     const searchFilter = activeTreeLoadSearchFilter(options);
-    if (!options?.force && !options?.connectedOnly && !searchFilter) {
+    const needsSchemaMigration = configForScope && (connectionUsesVisibleSchemaFilter(configForScope) || configForScope.db_type === "duckdb") && needsPersistentSchemaMigration(configForScope, configForScope.db_type === "duckdb" ? "main" : configForScope.database || "");
+    if (!needsSchemaMigration && !options?.force && !options?.connectedOnly && !searchFilter) {
       const cacheHit = await hydrateConnectionRootFromCache(connectionId, configForScope);
       if (cacheHit) {
         // Render the last known metadata immediately; network validation and refresh
@@ -7263,7 +7316,7 @@ export const useConnectionStore = defineStore("connection", () => {
             load = reclaimTreeNodeLoad(load, node);
           }
           const config = getConfig(connectionId);
-          if (useCachedChildren(node, options, load)) {
+          if (!needsSchemaMigration && useCachedChildren(node, options, load)) {
             scheduleMissingPrimaryVisibleObjectNamesRefresh(connectionId, config, options);
             return;
           }
@@ -7271,8 +7324,8 @@ export const useConnectionStore = defineStore("connection", () => {
           relationalNavigationDiscovery.delete(node.id);
 
           if (config?.db_type === "duckdb") {
-            const cacheKey = schemaCacheKey(connectionId, "duckdb-root");
-            if (!options?.force) {
+            const cacheKey = schemaCacheKey(connectionId, "duckdb-root-visibility-v1", JSON.stringify(config.schema_visibility?.databases.main) ?? "legacy");
+            if (!needsSchemaMigration && !options?.force) {
               const cached = await loadPersistedTreeChildren(node, cacheKey, load, { freshOnly: options?.background, background: options?.background });
               if (cached.hit) {
                 if (cached.isStale) refreshStaleTreeNode(node);
@@ -7280,8 +7333,8 @@ export const useConnectionStore = defineStore("connection", () => {
                 return;
               }
             }
-            const [databases, schemaInfos] = await Promise.all([withMetadataLoadTimeout(connectionId, api.listDatabases(connectionId), "databases"), readSharedSchemaInfos(connectionId, "main", options?.force === true && !options?.background)]);
-            const schemas = schemaInfos.map((schema) => schema.name);
+            const [databases, selection] = await Promise.all([withMetadataLoadTimeout(connectionId, api.listDatabases(connectionId), "databases"), readVisibleSchemaSelection(connectionId, "main", options?.force === true && !options?.background)]);
+            const schemas = selection.visibleNames;
             setDatabaseCompatibilityModesFromDatabases(connectionId, databases);
             const databaseNames = databases.map((database) => database.name);
             const visibleNames = filterDatabaseNamesForConnection(databaseNames, config);
@@ -7296,11 +7349,9 @@ export const useConnectionStore = defineStore("connection", () => {
             setChildren(targetNode, children, { trustEmptyConnectionChildren: databaseNames.length > 0 && visibleNames.length === 0 });
             await savePersistedConnectionTreeChildren(cacheKey, targetNode.children || children);
           } else if (config && connectionUsesVisibleSchemaFilter(config)) {
-            const schemaFilterConfig = config;
-            const effectiveDb = schemaFilterConfig.database || "";
-            const showSystemSchemas = schemaFilterConfig.show_system_schemas === true;
-            const cacheKey = schemaCacheKey(connectionId, effectiveDb, effectiveDatabaseTypeForConnection(config) === "oracle" ? "schemas-v5-oracle-maintained" : "schemas", showSystemSchemas ? "show-system" : "hide-system");
-            if (!options?.force) {
+            const effectiveDb = config.database || "";
+            const cacheKey = schemaCacheKey(connectionId, effectiveDb, "schemas-visibility-v1", JSON.stringify(config.schema_visibility?.databases[effectiveDb]) ?? "legacy");
+            if (!needsSchemaMigration && !options?.force) {
               const cached = await loadPersistedTreeChildren(node, cacheKey, load, { freshOnly: options?.background, background: options?.background });
               if (cached.hit) {
                 if (cached.isStale) refreshStaleTreeNode(node);
@@ -7308,12 +7359,10 @@ export const useConnectionStore = defineStore("connection", () => {
                 return;
               }
             }
-            const schemas = (await readSharedSchemaInfos(connectionId, effectiveDb, options?.force === true && !options?.background)).map((schema) => schema.name);
+            const { names: schemas, visibleNames: visibleSchemas } = await readVisibleSchemaSelection(connectionId, effectiveDb, options?.force === true && !options?.background);
             if (!treeNodeLoadTarget(load)) return;
             if (effectiveDatabaseTypeForConnection(config) === "oracle") await readRelationalNavigationDefault({ connectionId, kind: "schema" });
             if (!treeNodeLoadTarget(load)) return;
-            const oracleMaintainedSchemas = await readOracleMaintainedSchemas(connectionId, effectiveDb, options?.force === true && !options?.background);
-            const visibleSchemas = filterSchemaNamesForConnection(schemas, schemaFilterConfig, effectiveDb || "", { showSystemSchemas, oracleMaintainedSchemas });
             const schemaNodes: TreeNode[] = sortSidebarNames(visibleSchemas).map((s) => ({
               id: `${connectionId}:${s}:${s}`,
               label: s,
@@ -7434,6 +7483,7 @@ export const useConnectionStore = defineStore("connection", () => {
           }
           if (options?.force && !options.background) void loadSidebarDatabaseStorage(connectionId, { force: true });
         } catch (e) {
+          if (!treeNodeLoadTarget(load)) return;
           recordMetadataLoadError(connectionId, e, load);
           throw e;
         } finally {
@@ -8064,16 +8114,17 @@ export const useConnectionStore = defineStore("connection", () => {
             if (!connectedIds.value.has(connectionId) || isConnectionClosedByUser(connectionId)) return;
           } else await ensureConnected(connectionId);
           load = reclaimTreeNodeLoad(load, node);
-          if (useCachedChildren(node, options, load)) return;
           const config = getConfig(connectionId);
+          const needsMigration = needsPersistentSchemaMigration(config, database);
+          if (!needsMigration && useCachedChildren(node, options, load)) return;
           const showSystemSchemas = config?.show_system_schemas === true;
           // schemas-v5 invalidates cached children created before the public
           // synonym scope was placed after all real schemas.
           const schemaCacheBase = effectiveDatabaseTypeForConnection(config) === "oracle" ? "schemas-v6-oracle-maintained" : supportsOracleDatabaseLinks(effectiveDatabaseTypeForConnection(config)) ? "schemas-v3-schema-navigation-v1" : config?.db_type === "xugu" ? "schemas-v5" : "schemas-v3";
           relationalNavigationDiscovery.delete(node.id);
           const cacheVersion = ownerAwareMetadataCacheVersion(config, schemaCacheBase);
-          const cacheKey = schemaCacheKey(connectionId, database, cacheVersion, showSystemSchemas ? "show-system" : "hide-system");
-          if (!options?.force) {
+          const cacheKey = schemaCacheKey(connectionId, database, `${cacheVersion}-visibility-v1`, showSystemSchemas ? "show-system" : "hide-system", JSON.stringify(config?.schema_visibility?.databases[schemaVisibilityDatabaseKey(config, database)]) ?? "legacy");
+          if (!needsMigration && !options?.force) {
             const cached = await loadPersistedTreeChildren(node, cacheKey, load, { freshOnly: options?.background, background: options?.background });
             if (cached.hit) {
               if (cached.isStale) refreshStaleTreeNode(node);
@@ -8081,20 +8132,12 @@ export const useConnectionStore = defineStore("connection", () => {
             }
           }
 
-          const schemaInfos = await readSharedSchemaInfos(connectionId, database, options?.force === true && !options?.background);
+          const { infos: schemaInfos, visibleNames } = await readVisibleSchemaSelection(connectionId, database, options?.force === true && !options?.background);
           const schemas = sortSidebarSchemaInfos([...schemaInfos], effectiveDatabaseTypeForConnection(config) === "spanner");
           if (!treeNodeLoadTarget(load)) return;
           if (effectiveDatabaseTypeForConnection(config) === "oracle") await readRelationalNavigationDefault({ connectionId, database, kind: "schema", catalog: node.catalog });
           if (!treeNodeLoadTarget(load)) return;
-          const oracleMaintainedSchemas = await readOracleMaintainedSchemas(connectionId, database, options?.force === true && !options?.background);
-          const visibleSchemaNames = new Set(
-            filterSchemaNamesForConnection(
-              schemas.map((schema) => schema.name),
-              getConfig(connectionId),
-              database,
-              { showSystemSchemas, oracleMaintainedSchemas },
-            ),
-          );
+          const visibleSchemaNames = new Set(visibleNames);
           // The public-synonym scope is a protocol namespace, not a user
           // schema. Keep it discoverable even when a visible-schema filter is
           // configured, while preserving the raw key for object routing.
@@ -8144,6 +8187,7 @@ export const useConnectionStore = defineStore("connection", () => {
             await markRelationalNavigationDiscovered(currentTargetNode);
           }
         } catch (e) {
+          if (!treeNodeLoadTarget(load)) return;
           recordMetadataLoadError(connectionId, e, load);
           throw e;
         } finally {
@@ -8164,24 +8208,20 @@ export const useConnectionStore = defineStore("connection", () => {
         if (!connectedIds.value.has(connectionId) || isConnectionClosedByUser(connectionId)) return;
       } else await ensureConnected(connectionId);
       load = reclaimTreeNodeLoad(load, node);
-      if (useCachedChildren(node, options, load)) return;
       const config = getConfig(connectionId);
+      const needsMigration = needsPersistentSchemaMigration(config, database);
+      if (!needsMigration && useCachedChildren(node, options, load)) return;
       const showSystemSchemas = config?.show_system_schemas === true;
-      const cacheKey = schemaCacheKey(connectionId, database, "sqlserver-schemas-v5", showSystemSchemas ? "show-system" : "hide-system");
+      const cacheKey = schemaCacheKey(connectionId, database, "sqlserver-schemas-v6-visibility", showSystemSchemas ? "show-system" : "hide-system", JSON.stringify(config?.schema_visibility?.databases[database]) ?? "legacy");
       relationalNavigationDiscovery.delete(node.id);
-      if (!options?.force) {
+      if (!needsMigration && !options?.force) {
         const cached = await loadPersistedTreeChildren(node, cacheKey, load, { freshOnly: options?.background, background: options?.background });
         if (cached.hit) {
           if (cached.isStale) refreshStaleTreeNode(node);
           return;
         }
       }
-      const schemas = filterSchemaNamesForConnection(
-        (await readSharedSchemaInfos(connectionId, database, options?.force === true && !options?.background)).map((schema) => schema.name),
-        config,
-        database,
-        { showSystemSchemas },
-      );
+      const { visibleNames: schemas } = await readVisibleSchemaSelection(connectionId, database, options?.force === true && !options?.background);
       const children = buildSqlServerDatabaseTreeNodes(connectionId, database, schemas);
       if (isSidebarSearchQueryChanged(options)) return;
       const targetNode = treeNodeLoadTarget(load);
@@ -8194,6 +8234,7 @@ export const useConnectionStore = defineStore("connection", () => {
         await markRelationalNavigationDiscovered(currentTargetNode);
       }
     } catch (e) {
+      if (!treeNodeLoadTarget(load)) return;
       recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {
@@ -11996,17 +12037,25 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function applyGlobalTimeouts({ connectTimeoutSecs, queryTimeoutSecs }: { connectTimeoutSecs?: number; queryTimeoutSecs?: number }) {
-    const nextConnections = connections.value.map((connection) => {
-      const nextConnectTimeout = connectTimeoutSecs !== undefined && connection.connect_timeout_inherit === true ? connectTimeoutSecs : connection.connect_timeout_secs;
-      const nextQueryTimeout = queryTimeoutSecs !== undefined && connection.query_timeout_inherit === true ? queryTimeoutSecs : connection.query_timeout_secs;
-      if (nextConnectTimeout === connection.connect_timeout_secs && nextQueryTimeout === connection.query_timeout_secs) return connection;
-      return { ...connection, connect_timeout_secs: nextConnectTimeout, query_timeout_secs: nextQueryTimeout };
+    const connectionIds = connections.value.filter((connection) => (connectTimeoutSecs !== undefined && connection.connect_timeout_inherit === true) || (queryTimeoutSecs !== undefined && connection.query_timeout_inherit === true)).map((connection) => connection.id);
+    await runConnectionConfigWrites(connectionIds, async () => {
+      const affectedIds = new Set(connectionIds);
+      const updates = new Map<string, Pick<ConnectionConfig, "connect_timeout_secs" | "query_timeout_secs">>();
+      const changed = connections.value.flatMap((connection) => {
+        if (!affectedIds.has(connection.id)) return [];
+        const nextConnectTimeout = connectTimeoutSecs !== undefined && connection.connect_timeout_inherit === true ? connectTimeoutSecs : connection.connect_timeout_secs;
+        const nextQueryTimeout = queryTimeoutSecs !== undefined && connection.query_timeout_inherit === true ? queryTimeoutSecs : connection.query_timeout_secs;
+        if (nextConnectTimeout === connection.connect_timeout_secs && nextQueryTimeout === connection.query_timeout_secs) return [];
+        const update = { connect_timeout_secs: nextConnectTimeout, query_timeout_secs: nextQueryTimeout };
+        updates.set(connection.id, update);
+        return [{ ...connection, ...update }];
+      });
+      if (changed.length) {
+        await persistConnections(changed);
+        connections.value = connections.value.map((connection) => (updates.has(connection.id) ? { ...connection, ...updates.get(connection.id) } : connection));
+      }
+      syncTimeoutInheritanceBackup();
     });
-    if (nextConnections.some((connection, index) => connection !== connections.value[index])) {
-      await persistConnections(nextConnections.filter((connection, index) => connection !== connections.value[index]));
-      connections.value = nextConnections;
-    }
-    syncTimeoutInheritanceBackup();
   }
 
   async function migrateTimeoutInheritance(saved: ConnectionConfig[]) {
@@ -12383,8 +12432,13 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function removeConnectionGroups(groupIds: Iterable<string>, deleteConnections = false): Promise<string[]> {
     const uniqueGroupIds = [...new Set(groupIds)];
+    const connectionIds = deleteConnections ? connectionIdsInGroupsOp(sidebarLayout.value, uniqueGroupIds) : [];
+    return runConnectionConfigWrites(connectionIds, () => removeConnectionGroupsInQueue(uniqueGroupIds, connectionIds));
+  }
+
+  async function removeConnectionGroupsInQueue(uniqueGroupIds: string[], requestedConnectionIds: string[]): Promise<string[]> {
     const previousLayout = sidebarLayout.value;
-    const connectionIds = deleteConnections ? connectionIdsInGroupsOp(sidebarLayout.value, uniqueGroupIds).filter((id) => connections.value.some((connection) => connection.id === id)) : [];
+    const connectionIds = requestedConnectionIds.filter((id) => connections.value.some((connection) => connection.id === id));
     const oneTimeIds = connectionIds.filter((id) => getConfig(id)?.one_time === true);
     const removedConnectionIds = new Set(connectionIds);
     // 删除策略需要连接配置，applyConnectionRemoval 之后就读不到了，先抓快照。
@@ -12403,7 +12457,7 @@ export const useConnectionStore = defineStore("connection", () => {
     await persistConnectionDeletion(nextConnections, applyGroupDeletion);
     nextLayout = applyGroupDeletion(sidebarLayout.value);
     if (removedConnectionIds.size) {
-      applyConnectionRemoval(removedConnectionIds, nextConnections, nextLayout);
+      applyConnectionRemoval(removedConnectionIds, nextLayout);
       purgeTableVGroupsForConnections(removedConnectionIds);
       // 删除已经落盘完成；页签处理失败只告警，不能让已成功的删除以异常收场。
       try {
@@ -12970,6 +13024,7 @@ export const useConnectionStore = defineStore("connection", () => {
   function addEphemeralConnection(config: ConnectionConfig) {
     const normalized = normalizeConnection(config);
     if (!connections.value.find((c) => c.id === normalized.id)) {
+      ephemeralConnectionIds.add(normalized.id);
       connections.value.push(normalized);
     }
     markConnectionConnected(normalized.id);
@@ -13175,6 +13230,7 @@ export const useConnectionStore = defineStore("connection", () => {
     listCompletionForeignKeys,
     listCompletionSchemas,
     listNavigationSchemaChoices,
+    readVisibleSchemaSelection,
     listCompletionDatabases,
     getSqlServerCompletionContext,
     lookupLocalCompletionTables,

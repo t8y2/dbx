@@ -91,6 +91,10 @@ async function mountEntry(surface: "sidebar" | "objects") {
   const pinia = createPinia();
   setActivePinia(pinia);
   const store = useConnectionStore();
+  vi.spyOn(store, "readVisibleSchemaSelection").mockImplementation(async (id, database) => {
+    const names = await api.listSchemas(id, database);
+    return { names, infos: [], systemNames: new Set<string>(), visibleNames: names, oracleMaintainedSchemas: undefined };
+  });
   store.connections = [{ ...connection }];
   store.connectedIds.add(connection.id);
   vi.spyOn(store, "ensureConnected").mockResolvedValue(undefined);

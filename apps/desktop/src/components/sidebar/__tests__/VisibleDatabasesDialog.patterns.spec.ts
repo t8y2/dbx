@@ -147,17 +147,17 @@ describe("VisibleDatabasesDialog schema migration", () => {
     expect(root!.querySelector('[data-schema-row="NEW_SCHEMA"]')?.getAttribute("aria-checked")).toBe("false");
     expect(store.setVisibleSchemas).not.toHaveBeenCalled();
     await click(button("visibleDatabases.save"));
-    expect(store.setVisibleSchemas).toHaveBeenCalledWith("conn-1", "XE", ["SALES", "SYS"]);
+    expect(store.setVisibleSchemas).toHaveBeenCalledWith("conn-1", "XE", ["SALES", "SYS"], { names: ["APP", "SALES", "SYS", "SYSRAC", "NEW_SCHEMA"], systemNames: new Set(["SYS", "SYSRAC"]) });
   });
   it("keeps an explicit scope ahead of old settings and allows saving no schemas", async () => {
     await mountDialog({ db_type: "oracle", database: "XE", visible_schemas: { XE: ["APP", "UNAVAILABLE"] }, visible_database_patterns: ["%"], show_system_schemas: true });
     expect(root!.querySelector('[data-schema-row="SALES"]')?.getAttribute("aria-checked")).toBe("false");
     await click(button("visibleDatabases.save"));
-    expect(store.setVisibleSchemas).toHaveBeenLastCalledWith("conn-1", "XE", ["APP", "UNAVAILABLE"]);
+    expect(store.setVisibleSchemas).toHaveBeenLastCalledWith("conn-1", "XE", ["APP", "UNAVAILABLE"], expect.objectContaining({ names: ["APP", "SALES", "SYS", "SYSRAC", "NEW_SCHEMA"], systemNames: new Set(["SYS", "SYSRAC"]) }));
     await click(button("visibleDatabases.clear"));
     expect(button("visibleDatabases.save").disabled).toBe(false);
     await click(button("visibleDatabases.save"));
-    expect(store.setVisibleSchemas).toHaveBeenLastCalledWith("conn-1", "XE", []);
+    expect(store.setVisibleSchemas).toHaveBeenLastCalledWith("conn-1", "XE", [], expect.objectContaining({ names: ["APP", "SALES", "SYS", "SYSRAC", "NEW_SCHEMA"], systemNames: new Set(["SYS", "SYSRAC"]) }));
   });
 });
 

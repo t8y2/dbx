@@ -152,6 +152,12 @@ pub enum ProductionBadgeScope {
     Table,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SchemaVisibility {
+    pub migrate_legacy: bool,
+    pub databases: HashMap<String, HashMap<String, bool>>,
+}
+
 #[derive(Clone, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     pub id: String,
@@ -180,6 +186,8 @@ pub struct ConnectionConfig {
     pub visible_database_patterns: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_visibility: Option<SchemaVisibility>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub show_system_schemas: bool,
     /// Frontend navigation preference: exhaust the paginated Tables group when opened.
@@ -771,6 +779,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
     #[serde(default)]
+    pub schema_visibility: Option<SchemaVisibility>,
+    #[serde(default)]
     pub show_system_schemas: bool,
     #[serde(default)]
     pub sidebar_auto_load_all_tables: bool,
@@ -904,6 +914,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             visible_databases: data.visible_databases,
             visible_database_patterns: data.visible_database_patterns,
             visible_schemas: data.visible_schemas,
+            schema_visibility: data.schema_visibility,
             show_system_schemas: data.show_system_schemas,
             sidebar_auto_load_all_tables: data.sidebar_auto_load_all_tables,
             show_database_links: data.show_database_links,
@@ -3489,6 +3500,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn schema_visibility_round_trips_legacy_and_initialized_databases() {
+        let base = serde_json::json!({
+            "id": "schema", "name": "Schema", "db_type": "oracle", "host": "localhost",
+            "port": 1521, "username": "test", "password": ""
+        });
+        let legacy: ConnectionConfig = serde_json::from_value(base.clone()).unwrap();
+        assert!(legacy.schema_visibility.is_none());
+        assert!(serde_json::to_value(legacy).unwrap().get("schema_visibility").is_none());
+        for migrate_legacy in [true, false] {
+            let mut input = base.clone();
+            input["schema_visibility"] = serde_json::json!({
+                "migrate_legacy": migrate_legacy,
+                "databases": {"empty": {}, "ORCL": {"APP": true, "SYS": false}}
+            });
+            let config: ConnectionConfig = serde_json::from_value(input.clone()).unwrap();
+            assert_eq!(serde_json::to_value(config).unwrap()["schema_visibility"], input["schema_visibility"]);
+        }
+    }
+
     fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
             oracle_oci_nls_lang: None,
@@ -3511,6 +3542,7 @@ mod tests {
             visible_databases: None,
             visible_database_patterns: None,
             visible_schemas: None,
+            schema_visibility: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,

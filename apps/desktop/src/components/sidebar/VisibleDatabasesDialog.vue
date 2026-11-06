@@ -150,7 +150,7 @@ function selectAll() {
 }
 
 function selectFiltered() {
-  selectedNames.value = new Set(filteredObjectNames.value);
+  selectedNames.value = new Set([...(isSchemaFilterMode.value ? selectedNames.value : []), ...filteredObjectNames.value]);
 }
 
 function clearSelection() {
@@ -171,7 +171,7 @@ async function showAllDatabases() {
 async function saveSelection() {
   if (!canSaveSelection.value) return;
   if (isSchemaFilterMode.value) {
-    await connectionStore.setVisibleSchemas(props.connectionId, databaseKey.value, [...selectedNames.value]);
+    await connectionStore.setVisibleSchemas(props.connectionId, databaseKey.value, [...selectedNames.value], { names: objectNames.value, systemNames: schemaSystemNames.value ?? new Set() });
     emit("update:open", false);
     return;
   }

@@ -158,6 +158,10 @@ export interface ConnectionConfig {
   visible_databases?: string[];
   visible_database_patterns?: string[];
   visible_schemas?: Record<string, string[]>;
+  schema_visibility?: {
+    migrate_legacy: boolean;
+    databases: Record<string, Record<string, boolean>>;
+  };
   show_system_schemas?: boolean;
   /** Legacy sidebar preferences accepted on import and omitted from effective writes. */
   show_database_links?: boolean;

@@ -37,6 +37,7 @@ fn sqlite_config(id: &str, path: &str) -> ConnectionConfig {
         visible_databases: None,
         visible_database_patterns: None,
         visible_schemas: None,
+        schema_visibility: None,
         attached_databases: Vec::new(),
         init_script: None,
         color: None,

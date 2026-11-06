@@ -162,6 +162,7 @@ fn credential_target(config: &ConnectionConfig) -> Value {
         "visible_databases",
         "visible_database_patterns",
         "visible_schemas",
+        "schema_visibility",
         "show_system_schemas",
         "show_extensions",
         "production_badge_scope",
@@ -433,6 +434,19 @@ mod tests {
         changed.password = reference(&original.id, "/host");
         assert!(restore(changed, &saved).is_err());
         assert!(restore(redact(&original), &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn schema_visibility_changes_preserve_saved_credentials() {
+        let original = config();
+        let saved = HashMap::from([(original.id.clone(), original.clone())]);
+        let mut draft = serde_json::to_value(redact(&original)).unwrap();
+        draft["schema_visibility"] = serde_json::json!({
+            "migrate_legacy": true, "databases": {"app": {"public": true}}
+        });
+        let restored = restore(serde_json::from_value(draft).unwrap(), &saved).unwrap();
+        assert_eq!(restored.password, original.password);
+        assert!(restored.schema_visibility.is_some());
     }
 
     #[test]

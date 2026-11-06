@@ -106,6 +106,7 @@ export function connectionConfigFingerprint(config: ConnectionConfig, sourceName
     sidebar_auto_load_all_tables: _sidebarAutoLoadAllTables,
     show_system_schemas: _showSystemSchemas,
     visible_schemas: _visibleSchemas,
+    schema_visibility: _schemaVisibility,
     visible_databases: _visibleDatabases,
     visible_database_patterns: _visibleDatabasePatterns,
     color: _color,

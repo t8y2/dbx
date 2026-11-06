@@ -288,6 +288,62 @@ export function visibleSchemaFilterIsEnabled(visibleSchemas: Record<string, stri
 }
 
 export function filterSchemaNamesForConnection(schemaNames: string[], connection: VisibleDatabaseConnection | undefined, database: string, options?: SchemaFilterOptions): string[] {
+  const key = schemaVisibilityDatabaseKey(connection, database);
+  const visibility = connection?.schema_visibility;
+  if (visibility && (!visibility.migrate_legacy || Object.hasOwn(visibility.databases, key))) {
+    const overrides = Object.hasOwn(visibility.databases, key) ? visibility.databases[key] : undefined;
+    const databaseType = effectiveDatabaseTypeForConnection(connection);
+    return schemaNames.filter((name) => (overrides && Object.hasOwn(overrides, name) ? overrides[name] : !(databaseType === "oracle" && options?.oracleMaintainedSchemas ? options.oracleMaintainedSchemas.has(name) : isSystemSchemaName(databaseType, name))));
+  }
+  return filterLegacySchemaNamesForConnection(schemaNames, connection, database, options);
+}
+
+export function schemaVisibilityDatabaseKey(connection: VisibleDatabaseConnection | undefined, database: string): string {
+  if (connectionUsesVisibleSchemaFilter(connection)) return connection?.database || "";
+  return database === "_" ? "" : database;
+}
+
+export function schemaVisibilityNeedsMigration(connection: VisibleDatabaseConnection, database: string): boolean {
+  const visibility = connection.schema_visibility;
+  return !visibility || (visibility.migrate_legacy && !Object.hasOwn(visibility.databases, schemaVisibilityDatabaseKey(connection, database)));
+}
+
+export function schemaVisibilityOverrides(names: readonly string[], selected: readonly string[], systemNames: ReadonlySet<string>, previous: Record<string, boolean> = {}): Record<string, boolean> {
+  const overrides = new Map(Object.entries(previous));
+  const chosen = new Set(selected);
+  for (const name of names) {
+    const visible = chosen.has(name);
+    if (visible === !systemNames.has(name)) overrides.delete(name);
+    else overrides.set(name, visible);
+  }
+  // Explicit legacy selections can include names temporarily unavailable to this account.
+  const available = new Set(names);
+  for (const name of selected) if (!available.has(name)) overrides.set(name, true);
+  return Object.fromEntries(overrides);
+}
+
+export function migrateSchemaVisibility(connection: VisibleDatabaseConnection, database: string, names: string[], systemNames: ReadonlySet<string>): NonNullable<ConnectionConfig["schema_visibility"]> {
+  const key = schemaVisibilityDatabaseKey(connection, database);
+  const configuredSchemas = Array.isArray(connection.visible_schemas?.[key]) ? connection.visible_schemas![key] : undefined;
+  const rootFilter = connectionUsesVisibleSchemaFilter(connection) && (visibleDatabaseFilterIsEnabled(connection.visible_databases) || visibleDatabasePatternsAreEnabled(connection.visible_database_patterns));
+  let selected: string[];
+  if (Array.isArray(configuredSchemas)) selected = names.filter((name) => configuredSchemas.includes(name));
+  else if (rootFilter) selected = filterVisibleDatabaseNames(names, connection.visible_databases, connection.visible_database_patterns);
+  else if (connection.show_system_schemas === true) selected = names;
+  else {
+    const login = connection.username?.trim().toLowerCase();
+    // Main's login-schema exception is intentional. Its missing system-name
+    // matches are not user choices: those adopt the corrected system default.
+    selected = names.filter((name) => !systemNames.has(name) || name.toLowerCase() === login || name.toLowerCase() === login?.split("@")[0]);
+  }
+  const explicit = configuredSchemas ?? (rootFilter ? connection.visible_databases : undefined);
+  return {
+    migrate_legacy: true,
+    databases: { ...connection.schema_visibility?.databases, [key]: schemaVisibilityOverrides(names, [...selected, ...(explicit ?? [])], systemNames) },
+  };
+}
+
+function filterLegacySchemaNamesForConnection(schemaNames: string[], connection: VisibleDatabaseConnection | undefined, database: string, options?: SchemaFilterOptions): string[] {
   const visibleSchemas = connection?.visible_schemas;
   // Single-database connections persist their schema filter under the empty
   // database key while the editor toolbar addresses the same bucket with its

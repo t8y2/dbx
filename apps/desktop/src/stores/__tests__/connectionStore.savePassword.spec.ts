@@ -81,6 +81,46 @@ describe("connectionStore save_password opt-out", () => {
     vi.restoreAllMocks();
   });
 
+  it("keeps another connection's migrated visibility when remembering a password finishes later", async () => {
+    const pending = deferred<void>();
+    const saveConnections = vi
+      .fn()
+      .mockResolvedValue(undefined)
+      .mockImplementationOnce(() => pending.promise);
+    installApiMocks({ saveConnections, listSchemaInfos: vi.fn().mockResolvedValue([{ name: "public" }, { name: "reporting" }]) });
+    installPasswordPromptMock();
+    requestPassword.mockResolvedValue({ password: "remembered-input", rememberPassword: true });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const config = postgresConnection({ save_password: false });
+    store.connections = [config, postgresConnection({ id: "other", visible_schemas: { app: [] } })];
+    const connecting = store.connect(config);
+    await vi.waitFor(() => expect(saveConnections).toHaveBeenCalledTimes(1));
+    await store.readVisibleSchemaSelection("other", "app");
+    pending.resolve();
+    await connecting;
+    expect(store.getConfig("other")?.schema_visibility?.databases.app).toEqual({ public: false, reporting: false });
+    expect(store.getConfig(config.id)?.save_password).toBe(true);
+  });
+
+  it("allows an expanded connection edit to remember a password while reloading its tree", async () => {
+    const saveConnections = vi.fn().mockResolvedValue(undefined);
+    installApiMocks({ saveConnections });
+    installPasswordPromptMock();
+    requestPassword.mockResolvedValue({ password: "remembered-input", rememberPassword: true });
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const config = postgresConnection({ save_password: false });
+    store.connections = [config];
+    store.connectedIds.add(config.id);
+    store.sidebarLayout = { groups: [], order: [{ type: "connection", id: config.id }] };
+    store.treeNodes = [{ id: config.id, label: config.name, type: "connection", connectionId: config.id, children: [{ id: `${config.id}:app`, label: "app", type: "database", connectionId: config.id, database: "app", children: [] }], isExpanded: true }];
+    await store.updateConnection({ ...config, host: "changed.invalid" });
+    expect(requestPassword).toHaveBeenCalledOnce();
+    expect(store.getConfig(config.id)).toMatchObject({ host: "changed.invalid", save_password: true, password: "remembered-input" });
+    expect(saveConnections).toHaveBeenCalledTimes(2);
+  });
+
   it.each(["connect", "ensureConnected"] as const)("installs late OceanBase mode after %s finishes without saving the prompted password", async (entry) => {
     const metadata = deferred<{ productName: string; compatibilityMode: string }>();
     const saveInfo = vi.fn().mockResolvedValue(undefined);
@@ -630,7 +670,7 @@ describe("connectionStore save_password opt-out", () => {
     expect(store.getConfig("mysql-1")).toEqual(expect.objectContaining({ host: "new.example.com", password: "" }));
   });
 
-  it("restores the latest config when it changes while a recovered password is being saved", async () => {
+  it("queues a target edit behind password persistence without keeping old-endpoint credentials", async () => {
     const passwordSave = deferred<void>();
     const connectDb = vi.fn().mockRejectedValueOnce(new Error("MySQL connection failed: Access denied for user 'root'@'192.168.100.133' (using password: NO)")).mockResolvedValueOnce("mysql-1");
     const saveConnections = vi
@@ -656,11 +696,13 @@ describe("connectionStore save_password opt-out", () => {
 
     const connecting = store.connect(connection);
     await vi.waitFor(() => expect(saveConnections).toHaveBeenCalledTimes(1));
-    await store.updateConnection({ ...connection, host: "new.example.com" });
+    const editing = store.updateConnection({ ...connection, host: "new.example.com" });
+    expect(saveConnections).toHaveBeenCalledTimes(1);
     passwordSave.resolve();
     await connecting;
+    await editing;
 
-    expect(saveConnections).toHaveBeenCalledTimes(3);
+    expect(saveConnections).toHaveBeenCalledTimes(2);
     expect(saveConnections).toHaveBeenLastCalledWith(
       expect.arrayContaining([
         expect.objectContaining({

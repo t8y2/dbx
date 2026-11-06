@@ -152,6 +152,7 @@ pub fn postgres_test_config(id: &str, port: u16) -> ConnectionConfig {
         visible_databases: None,
         visible_database_patterns: None,
         visible_schemas: None,
+        schema_visibility: None,
         attached_databases: Vec::new(),
         init_script: None,
         color: None,

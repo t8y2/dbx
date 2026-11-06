@@ -6,10 +6,10 @@ import { clearObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache"
 import { clearMetadataRuntimeCache } from "@/lib/metadata/metadataRuntimeCache";
 import type { ConnectionConfig, ObjectInfo } from "@/types/database";
 
-const mocks = vi.hoisted(() => ({ listObjects: vi.fn(), store: { databaseExportSource: null as unknown } }));
+const mocks = vi.hoisted(() => ({ listObjects: vi.fn(), listSchemas: vi.fn().mockResolvedValue(["public"]), store: { databaseExportSource: null as unknown } }));
 vi.mock("@/lib/backend/api", () => ({
   listObjects: mocks.listObjects,
-  listSchemas: vi.fn().mockResolvedValue(["public"]),
+  listSchemas: mocks.listSchemas,
   listObjectStatistics: vi.fn().mockResolvedValue([]),
   loadSchemaCache: vi.fn().mockResolvedValue(null),
   saveSchemaCache: vi.fn(),
@@ -19,6 +19,11 @@ vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () =>
     Object.assign(mocks.store, {
       getConfig: () => connection,
+      completionCacheRevision: () => 0,
+      readVisibleSchemaSelection: async () => {
+        const names = await mocks.listSchemas();
+        return { names, infos: [], systemNames: new Set<string>(), visibleNames: names, oracleMaintainedSchemas: undefined };
+      },
       ensureConnected: vi.fn().mockResolvedValue(undefined),
       tableNameFilterForScope: () => undefined,
       orderByPinnedTreeNodes: (rows: unknown[]) => rows,

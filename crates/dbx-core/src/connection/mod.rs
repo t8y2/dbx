@@ -8401,6 +8401,7 @@ pub fn connection_configs_pool_equivalent(a: &ConnectionConfig, b: &ConnectionCo
         config.production_badge_scope = None;
         config.show_system_schemas = false;
         config.visible_schemas = None;
+        config.schema_visibility = None;
         config.visible_databases = None;
         config.visible_database_patterns = None;
         config.driver_profile = connection_config_identity_driver_profile(config).map(str::to_owned);
@@ -8449,6 +8450,7 @@ pub fn connection_configs_session_credentials_compatible(a: &ConnectionConfig, b
         config.visible_databases = None;
         config.visible_database_patterns = None;
         config.visible_schemas = None;
+        config.schema_visibility = None;
         config.show_system_schemas = false;
         config.sidebar_auto_load_all_tables = false;
         config.show_database_links = None;
@@ -9242,6 +9244,7 @@ mod tests {
             visible_databases: None,
             visible_database_patterns: None,
             visible_schemas: None,
+            schema_visibility: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
@@ -9365,6 +9368,10 @@ mod tests {
         b.visible_databases = Some(vec!["app".to_string()]);
         b.visible_schemas = Some(std::collections::HashMap::from([("app".to_string(), vec!["public".to_string()])]));
         b.visible_database_patterns = Some(vec!["app*".to_string()]);
+        b.schema_visibility = Some(dbx_types::models::connection::SchemaVisibility {
+            migrate_legacy: true,
+            databases: std::collections::HashMap::from([("app".to_string(), std::collections::HashMap::new())]),
+        });
         assert!(connection_configs_pool_equivalent(&a, &b));
         assert!(connection_configs_session_credentials_compatible(&a, &b));
         b.host = "different-host".to_string();
@@ -13069,6 +13076,7 @@ sleep 30
             visible_databases: None,
             visible_database_patterns: None,
             visible_schemas: None,
+            schema_visibility: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,

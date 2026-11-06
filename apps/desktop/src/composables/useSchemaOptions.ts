@@ -2,7 +2,7 @@ import { ref } from "vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { isSchemaAware as isSchemaAwareType, isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { sortSidebarNames } from "@/lib/database/databaseTree";
-import { filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
+import { filterSchemaNamesForConnection, schemaVisibilityDatabaseKey } from "@/lib/database/visibleDatabases";
 import type { ConnectionConfig } from "@/types/database";
 
 export function hasSchemaOptionsCacheEntry(options: Record<string, string[]>, key: string): boolean {
@@ -13,9 +13,9 @@ export function schemaOptionsCacheKey(connectionId: string, database: string, sh
   return `${connectionId}:${database}:${showSystemSchemas ? "show-system" : "hide-system"}`;
 }
 
-export function schemaOptionsForConnection(schemaNames: string[], connection: Pick<ConnectionConfig, "db_type" | "driver_profile" | "visible_databases" | "visible_schemas" | "show_system_schemas"> | undefined, database = ""): string[] {
+export function schemaOptionsForConnection(schemaNames: string[], connection: Partial<ConnectionConfig> | undefined, database = "", oracleMaintainedSchemas?: ReadonlySet<string>): string[] {
   // Keep numeric schema suffixes in human order (SCHEMA2 before SCHEMA10), matching the database tree.
-  return sortSidebarNames(filterSchemaNamesForConnection(schemaNames, connection, database));
+  return sortSidebarNames(filterSchemaNamesForConnection(schemaNames, connection, database, { oracleMaintainedSchemas }));
 }
 
 export function useSchemaOptions() {
@@ -25,10 +25,11 @@ export function useSchemaOptions() {
   const loadingSchemaOptions = ref<Record<string, boolean>>({});
   const schemaRequests = new Map<string, Promise<void>>();
   const loadedSelections = new Map<string, string | undefined>();
+  const maintainedSchemas = new Map<string, ReadonlySet<string> | undefined>();
+  const loadedRevisions = new Map<string, number>();
 
   function cacheKey(connectionId: string, database: string) {
-    const config = connectionStore.getConfig(connectionId);
-    return schemaOptionsCacheKey(connectionId, database, config?.show_system_schemas === true || Array.isArray(config?.visible_schemas?.[database === "_" ? "" : database]));
+    return schemaOptionsCacheKey(connectionId, database, true);
   }
 
   function isSchemaAware(connectionId: string): boolean {
@@ -41,11 +42,14 @@ export function useSchemaOptions() {
     const dbType = connection?.db_type;
     if (!database && !isSingleDatabase(dbType) && !usesTreeSchemaMode(dbType)) return;
     const key = cacheKey(connectionId, database);
-    const selected = connection?.visible_schemas?.[database === "_" ? "" : database];
+    const databaseKey = schemaVisibilityDatabaseKey(connection, database);
+    const overrides = connection?.schema_visibility?.databases[databaseKey];
+    const selected = overrides ? Object.keys(overrides).filter((name) => overrides[name]) : connection?.visible_schemas?.[databaseKey];
     const signature = JSON.stringify(selected);
     const cached = schemaOptions.value[key];
+    const revision = connectionStore.completionCacheRevision(connectionId, database);
     const refresh = hasSchemaOptionsCacheEntry(schemaOptions.value, key) && loadedSelections.get(key) !== signature && selected?.some((name) => !cached!.includes(name)) === true;
-    if (hasSchemaOptionsCacheEntry(schemaOptions.value, key) && !refresh) return;
+    if (hasSchemaOptionsCacheEntry(schemaOptions.value, key) && !refresh && loadedRevisions.get(key) === revision) return;
     const pending = schemaRequests.get(key);
     if (pending) return pending;
 
@@ -53,11 +57,16 @@ export function useSchemaOptions() {
       loadingSchemaOptions.value[key] = true;
       try {
         await connectionStore.ensureConnected(connectionId);
-        schemaOptions.value[key] = refresh ? await connectionStore.listNavigationSchemaChoices(connectionId, database, true, true) : await connectionStore.listCompletionSchemas(connectionId, database);
+        const selectionRequest = connectionStore.readVisibleSchemaSelection(connectionId, database, refresh);
+        const requestRevision = connectionStore.completionCacheRevision(connectionId, database);
+        const selection = await selectionRequest;
+        schemaOptions.value[key] = selection.names;
+        maintainedSchemas.set(key, selection.oracleMaintainedSchemas);
+        loadedRevisions.set(key, requestRevision);
         loadedSelections.set(key, signature);
       } catch (e) {
         loadedSelections.set(key, signature);
-        schemaOptions.value[key] = [];
+        delete schemaOptions.value[key];
         throw e;
       } finally {
         loadingSchemaOptions.value[key] = false;
@@ -69,7 +78,8 @@ export function useSchemaOptions() {
   }
 
   function getSchemaOptionsForDb(connectionId: string, database: string): string[] {
-    return schemaOptionsForConnection(schemaOptions.value[cacheKey(connectionId, database)] ?? [], connectionStore.getConfig(connectionId), database);
+    const key = cacheKey(connectionId, database);
+    return schemaOptionsForConnection(schemaOptions.value[key] ?? [], connectionStore.getConfig(connectionId), database, maintainedSchemas.get(key));
   }
 
   function isLoadingSchemas(connectionId: string, database: string): boolean {

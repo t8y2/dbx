@@ -216,7 +216,7 @@ import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, 
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { matchesTableNameFilter } from "@/lib/table/tableVGroup";
-import { connectionUsesVisibleSchemaFilter, filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
+import { connectionUsesVisibleSchemaFilter } from "@/lib/database/visibleDatabases";
 import {
   buildObjectBrowserRows,
   buildMongoObjectBrowserRows,
@@ -948,7 +948,14 @@ watch(objectFilter, () => {
 });
 watch([() => props.initialEventName, () => props.initialEventOpenRequestId, rows, loadingObjects], openInitialEventIfNeeded, { flush: "post" });
 watch(
-  () => JSON.stringify([props.connection.show_system_schemas, props.connection.visible_schemas?.[schemaFilterDatabase.value], ...(connectionUsesVisibleSchemaFilter(props.connection) ? [props.connection.visible_databases, props.connection.visible_database_patterns] : [])]),
+  () =>
+    JSON.stringify([
+      needsSchema.value ? connectionStore.completionCacheRevision(props.connection.id, props.database) : 0,
+      props.connection.schema_visibility?.databases[schemaFilterDatabase.value],
+      props.connection.show_system_schemas,
+      props.connection.visible_schemas?.[schemaFilterDatabase.value],
+      ...(connectionUsesVisibleSchemaFilter(props.connection) ? [props.connection.visible_databases, props.connection.visible_database_patterns] : []),
+    ]),
   (value, oldValue) => {
     if (value === oldValue) return;
     void loadSchemas(schemaListLoadGuard.invalidate(), true).catch((error) => console.warn("[ObjectBrowser] schema choices refresh failed", error));
@@ -5161,18 +5168,15 @@ async function loadSchemas(epoch: number, preserveSelection = false): Promise<bo
   const connectionId = props.connection.id;
   const database = props.database;
   try {
-    const hasSelection = Array.isArray(props.connection.visible_schemas?.[schemaFilterDatabase.value]);
-    const request = hasSelection ? api.listSchemas(connectionId, database, false, true) : api.listSchemas(connectionId, database);
-    const names = filterSchemaNamesForConnection(await schemaListLoadGuard.wait(epoch, request, metadataLoadBudgetMs(props.connection.query_timeout_secs)), props.connection, schemaFilterDatabase.value, {
-      showSystemSchemas: props.connection.show_system_schemas === true,
-    });
+    const request = connectionStore.readVisibleSchemaSelection(connectionId, database);
+    const { visibleNames: names } = await schemaListLoadGuard.wait(epoch, request, metadataLoadBudgetMs(props.connection.query_timeout_secs));
     if (!schemaListLoadGuard.isEpochCurrent(epoch)) return false;
     schemas.value = names;
     if (names.length === 0) {
-      if (!preserveSelection) selectedSchema.value = undefined;
+      if (!preserveSelection && props.schema === undefined) selectedSchema.value = undefined;
       return true;
     }
-    if (!preserveSelection && (!selectedSchema.value || !names.includes(selectedSchema.value))) {
+    if (!preserveSelection && props.schema === undefined && (!selectedSchema.value || !names.includes(selectedSchema.value))) {
       selectedSchema.value = names.includes("public") ? "public" : names[0];
     }
     return true;

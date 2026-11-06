@@ -43,6 +43,7 @@ vi.mock("@/stores/connectionStore", () => ({
       return undefined;
     },
     ensureConnected: mocks.ensureConnected,
+    readVisibleSchemaSelection: async (...args: unknown[]) => ({ names: await mocks.listSchemas(...args) }),
     invalidateMetadataCache: vi.fn(),
     refreshObjectListTreeNode: vi.fn().mockResolvedValue(undefined),
   }),

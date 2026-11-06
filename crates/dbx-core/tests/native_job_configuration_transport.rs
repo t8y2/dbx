@@ -77,8 +77,15 @@ fn native_job_configuration_rpc_fixture() {
                 }
                 "execute_query" => {
                     let sql = params["sql"].as_str().unwrap();
-                    if sql == "SELECT USER AS DBX_SESSION_USER FROM DUAL" {
-                        if mode == "oracle-query-failed" {
+                    if matches!(
+                        sql,
+                        "SELECT USER AS DBX_SESSION_USER FROM DUAL"
+                            | "SELECT CURRENT_USER AS DBX_SESSION_USER FROM DUAL"
+                    ) {
+                        if mode == "oracle-query-failed"
+                            || (mode == "dameng-current-user"
+                                && sql != "SELECT CURRENT_USER AS DBX_SESSION_USER FROM DUAL")
+                        {
                             json!({"columns":[],"rows":[],"execution_error":true,"error":{"diagnostics":{"category":"sql","vendorCode":942}}})
                         } else {
                             query_result(
@@ -241,7 +248,7 @@ async fn dameng_catalog_rpc_fetch_size_respects_the_row_bound_and_retains_the_ca
     assert!(status.outcome == NativeJobOperationOutcome::Verified, "{:?}", status.reason);
     let identity = requests
         .iter()
-        .find(|request| request["params"]["sql"] == "SELECT USER AS DBX_SESSION_USER FROM DUAL")
+        .find(|request| request["params"]["sql"] == "SELECT CURRENT_USER AS DBX_SESSION_USER FROM DUAL")
         .expect("production runtime identity must query the actual login");
     assert_eq!(identity["params"]["maxRows"], 2, "retain the extra row used to reject ambiguous identity");
     assert_eq!(identity["params"]["fetchSize"], 2, "DM rejects a fetch size larger than maxRows");

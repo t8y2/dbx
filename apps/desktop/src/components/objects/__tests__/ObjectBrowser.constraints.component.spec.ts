@@ -7,10 +7,10 @@ import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsC
 import { invalidateMetadataRuntimeCachePrefix } from "@/lib/metadata/metadataRuntimeCache";
 import type { ConnectionConfig } from "@/types/database";
 
-const mocks = vi.hoisted(() => ({ listConstraints: vi.fn(), getTableComment: vi.fn(), getTablePartitionStatus: vi.fn(), getTablePartitioning: vi.fn(), toast: vi.fn(), executeQuery: vi.fn(), cancelQuery: vi.fn(async () => true) }));
+const mocks = vi.hoisted(() => ({ listSchemas: vi.fn().mockResolvedValue(["TESTER"]), listConstraints: vi.fn(), getTableComment: vi.fn(), getTablePartitionStatus: vi.fn(), getTablePartitioning: vi.fn(), toast: vi.fn(), executeQuery: vi.fn(), cancelQuery: vi.fn(async () => true) }));
 vi.mock("@/lib/backend/api", () => ({
   listObjects: vi.fn().mockResolvedValue([{ name: "O01_CONSTRAINTS", object_type: "TABLE", schema: "TESTER" }]),
-  listSchemas: vi.fn().mockResolvedValue(["TESTER"]),
+  listSchemas: mocks.listSchemas,
   listObjectStatistics: vi.fn().mockResolvedValue([]),
   getTableDisplayDdl: vi.fn().mockResolvedValue("CREATE TABLE O01_CONSTRAINTS (A NUMBER, B NUMBER)"),
   loadSchemaCache: vi.fn().mockResolvedValue(null),
@@ -26,6 +26,11 @@ vi.mock("@/lib/backend/api", () => ({
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     getConfig: () => connection,
+    completionCacheRevision: () => 0,
+    readVisibleSchemaSelection: async () => {
+      const names = await mocks.listSchemas();
+      return { names, infos: [], systemNames: new Set<string>(), visibleNames: names, oracleMaintainedSchemas: undefined };
+    },
     ensureConnected: vi.fn().mockResolvedValue(undefined),
     tableNameFilterForScope: () => undefined,
     orderByPinnedTreeNodes: (rows: unknown[]) => rows,

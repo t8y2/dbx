@@ -8,7 +8,7 @@ import ObjectBrowser from "@/components/objects/ObjectBrowser.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
-import { listObjects } from "@/lib/backend/api";
+import { listObjects, listSchemas } from "@/lib/backend/api";
 import type { ConnectionConfig } from "@/types/database";
 
 vi.mock("@/lib/backend/api", async (importOriginal) => ({
@@ -55,6 +55,10 @@ const connection = { id: "filter-13599", name: "HighGo", db_type: "highgo", data
 
 async function mountBrowser(config = connection, selectedObjectFilter?: "all" | "tables", readySelector = '[title="orders"]') {
   const store = useConnectionStore();
+  vi.spyOn(store, "readVisibleSchemaSelection").mockImplementation(async (id, database) => {
+    const names = await listSchemas(id, database);
+    return { names, infos: [], systemNames: new Set<string>(), visibleNames: names, oracleMaintainedSchemas: undefined };
+  });
   vi.spyOn(store, "ensureConnected").mockResolvedValue(undefined);
   useSettingsStore().editorSettings.objectBrowserViewMode = "list";
   const props = reactive({ connection: config, database: "app", schema: "public", selectedObjectFilter, catalog: undefined as string | undefined });

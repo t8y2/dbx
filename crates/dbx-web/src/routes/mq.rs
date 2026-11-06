@@ -1629,6 +1629,7 @@ mod tests {
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
             migration_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             web_mcp: Arc::new(crate::web_mcp::WebMcpRuntime::disabled()),
+            audit: None,
         });
         (state, dir)
     }

@@ -90,6 +90,18 @@ impl HttpAuth {
         self.config.read().unwrap_or_else(|error| error.into_inner()).token.is_some()
     }
 
+    /// Whether an `Authorization` header carries the configured bearer token,
+    /// using the same parsing and constant-time comparison as
+    /// [`authorize_request`]. Lets outer layers tell authenticated callers
+    /// apart without duplicating the check.
+    pub fn bearer_is_valid(&self, authorization: Option<&HeaderValue>) -> bool {
+        let Some(token) = bearer_token(authorization) else {
+            return false;
+        };
+        let config = self.config.read().unwrap_or_else(|error| error.into_inner());
+        token_matches(&config, token)
+    }
+
     #[cfg(test)]
     fn token_matches(&self, candidate: &str) -> bool {
         let config = self.config.read().unwrap_or_else(|error| error.into_inner());
@@ -275,6 +287,25 @@ fn parse_host_rule(value: &str) -> Result<HostRule, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bearer_is_valid_matches_only_the_configured_token() {
+        let auth = HttpAuth::new("secret-token".to_string(), Vec::<String>::new(), false).unwrap();
+        for (value, expected) in [
+            ("Bearer secret-token", true),
+            ("bearer secret-token", true),
+            ("Bearer secret-tokenX", false),
+            ("Bearer other", false),
+            ("Basic secret-token", false),
+            ("Bearer ", false),
+        ] {
+            assert_eq!(auth.bearer_is_valid(Some(&HeaderValue::from_static(value))), expected, "{value}");
+        }
+        assert!(!auth.bearer_is_valid(None));
+
+        let disabled = HttpAuth::new_with_hosts(None, Vec::<String>::new(), Vec::<String>::new(), false).unwrap();
+        assert!(!disabled.bearer_is_valid(Some(&HeaderValue::from_static("Bearer secret-token"))));
+    }
 
     #[test]
     fn live_rotation_rejects_old_token_and_updates_hosts_and_origins() {

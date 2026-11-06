@@ -7078,6 +7078,7 @@ export default withEnglishFallback({
     jsonView: "JSONビュー",
     jsonViewRaw: "原文",
     jsonViewDecoded: "デコード",
+    looseJsonHint: "標準の JSON ではありません。インデント表示のみで、ここでは編集できません。編集するには UTF-8 に切り替えてください。",
     rawContent: "生コンテンツ",
     wordWrap: "折り返し",
     codecNone: "なし",

@@ -7011,6 +7011,7 @@ export default withEnglishFallback({
     jsonView: "JSON 보기",
     jsonViewRaw: "원본",
     jsonViewDecoded: "디코딩",
+    looseJsonHint: "표준 JSON이 아닙니다. 들여쓰기만 적용해 표시하며 여기서는 편집할 수 없습니다. 편집하려면 UTF-8로 전환하세요.",
     rawContent: "원시 내용",
     wordWrap: "자동 줄바꿈",
     codecNone: "없음",

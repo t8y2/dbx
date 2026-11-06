@@ -8227,6 +8227,7 @@ export default {
     jsonView: "JSON view",
     jsonViewRaw: "Raw",
     jsonViewDecoded: "Decoded",
+    looseJsonHint: "Not standard JSON. Shown indented only and read-only here; switch to UTF-8 to edit.",
     rawContent: "Raw content",
     wordWrap: "Word wrap",
     codecNone: "None",

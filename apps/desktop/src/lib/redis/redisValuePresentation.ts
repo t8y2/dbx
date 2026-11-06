@@ -1,6 +1,7 @@
 import type { BinaryHexViewRow } from "@/lib/dataGrid/binaryHexViewer";
 import { buildBinaryHexViewRows } from "@/lib/dataGrid/binaryHexViewer";
 import { decodeJsonUnicodeEscapes, formatJsonSource, isLosslessJsonNumber, parseJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
+import { formatLooseJsonText } from "@/lib/common/looseJsonFormat";
 import type { RedisBlob, RedisCollectionPage, RedisHashItem, RedisListItem, RedisSetItem, RedisValue, RedisZsetItem } from "@/lib/backend/api";
 import { decodeMsgpack, decodePhpSerialized, decodePickle, isPickleMagic, parseJavaSerializedDetail, type RedisJavaSerializedDetail, type RedisMsgpackDetail, type RedisPhpSerializedDetail, type RedisPickleDetail } from "@/lib/redis/codec";
 
@@ -43,6 +44,8 @@ export interface RedisMemberDetail {
   binaryText: string;
   format: RedisMemberDetailFormat;
   json?: RedisJsonDetail;
+  /** Indented display of JSON-shaped text that strict JSON rejects (issue #14384); set only when `json` is not. */
+  looseJson?: RedisLooseJsonDetail;
   javaSerialized?: RedisJavaSerializedDetail;
   pickle?: RedisPickleDetail;
   msgpack?: RedisMsgpackDetail;
@@ -63,6 +66,11 @@ export interface RedisJsonDetail {
   formattedText: string;
   value: unknown;
   serializedLevel?: number;
+}
+
+/** Read-only: the text is re-indented, not parsed, so it has no value to edit or convert. */
+export interface RedisLooseJsonDetail {
+  formattedText: string;
 }
 
 export type RedisJsonDraftNormalizationResult =
@@ -123,6 +131,7 @@ export function formatRedisMemberDetail(value: unknown, options: RedisMemberDeta
   if (typeof value === "string") {
     const bytes = new TextEncoder().encode(value);
     const json = options.allowJsonText ? (parseRedisJsonDetail(value) ?? undefined) : undefined;
+    const looseJson = options.allowJsonText && !json ? parseRedisLooseJsonDetail(value) : undefined;
     const extra = detectStructuredCodecs(bytes);
     const textFormats: RedisValueFormat[] = ["utf8", "ascii", "binary"];
     const extraFormats: RedisValueFormat[] = json ? JSON_DERIVED_FORMATS : [];
@@ -135,6 +144,7 @@ export function formatRedisMemberDetail(value: unknown, options: RedisMemberDeta
       binaryText: binaryBytesToText(bytes),
       format: "text",
       json,
+      looseJson,
       javaSerialized: extra.javaSerialized,
       pickle: extra.pickle,
       msgpack: extra.msgpack,
@@ -344,6 +354,15 @@ export function formatRedisConsoleError(message: unknown): string {
   return `(error) ${text || "Unknown Redis error"}`;
 }
 
+/**
+ * JSON-shaped text strict JSON rejects, e.g. Fastjson `WriteClassName` output
+ * with `1L` or `Set[...]` (issue #14384). Only indentation changes.
+ */
+function parseRedisLooseJsonDetail(text: string): RedisLooseJsonDetail | undefined {
+  const formattedText = formatLooseJsonText(text, 2);
+  return formattedText == null ? undefined : { formattedText };
+}
+
 export function parseRedisJsonDetail(value: unknown): RedisJsonDetail | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -504,7 +523,7 @@ export function preferredRedisValueFormat(value: unknown, preferred?: RedisValue
  */
 export function autoRedisValueFormat(detail: RedisMemberDetail, stored: RedisValueFormat | null): RedisValueFormat {
   if (stored != null && shouldReuseRedisValueFormatPreference(detail, stored)) return stored;
-  if (stored == null && isRedisJsonContainerValue(detail.json?.value)) return "json";
+  if (stored == null && (isRedisJsonContainerValue(detail.json?.value) || detail.looseJson)) return "json";
   return detail.defaultFormat;
 }
 
@@ -778,6 +797,7 @@ function formatRedisBlobDetail(blob: RedisBlob, options: RedisMemberDetailOption
   const extra = detectStructuredCodecs(bytes);
   const defaultFormat: RedisValueFormat = strictUtf8Text != null ? "utf8" : "hex";
   const json = options.allowJsonText && strictUtf8Text != null ? (parseRedisJsonDetail(strictUtf8Text) ?? undefined) : undefined;
+  const looseJson = options.allowJsonText && strictUtf8Text != null && !json ? parseRedisLooseJsonDetail(strictUtf8Text) : undefined;
   const textFormats: RedisValueFormat[] = strictUtf8Text != null ? ["utf8", "ascii", "binary"] : ["binary"];
   const extraFormats: RedisValueFormat[] = json ? JSON_DERIVED_FORMATS : [];
   return {
@@ -789,6 +809,7 @@ function formatRedisBlobDetail(blob: RedisBlob, options: RedisMemberDetailOption
     binaryText,
     format: "text",
     json,
+    looseJson,
     javaSerialized: extra.javaSerialized,
     pickle: extra.pickle,
     msgpack: extra.msgpack,

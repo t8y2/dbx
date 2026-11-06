@@ -8602,6 +8602,7 @@ export default withEnglishFallback({
     jsonView: "มุมมอง JSON",
     jsonViewRaw: "ดิบ",
     jsonViewDecoded: "ถอดรหัสแล้ว",
+    looseJsonHint: "ไม่ใช่ JSON มาตรฐาน แสดงแบบจัดย่อหน้าเท่านั้นและแก้ไขที่นี่ไม่ได้ สลับเป็น UTF-8 เพื่อแก้ไข",
     rawContent: "เนื้อหาดิบ",
     wordWrap: "ตัดบรรทัด",
     codecNone: "ไม่มี",

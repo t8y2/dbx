@@ -8341,6 +8341,7 @@ export default withEnglishFallback({
     jsonView: "Просмотр JSON",
     jsonViewRaw: "Необработанный",
     jsonViewDecoded: "Декодированный",
+    looseJsonHint: "Это не стандартный JSON. Показан только с отступами и здесь доступен только для чтения; для редактирования переключитесь на UTF-8.",
     rawContent: "Необработанное содержимое",
     wordWrap: "Перенос по словам",
     codecNone: "Нет",

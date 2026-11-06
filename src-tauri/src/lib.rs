@@ -285,6 +285,23 @@ fn should_confirm_app_exit_request(target_os: &str, exit_code: Option<i32>, conf
     should_hide_window_on_close(target_os) && exit_code != Some(tauri::RESTART_EXIT_CODE) && !confirmed_exit
 }
 
+/// Route a Linux compositor close request (Wayland `xdg_toplevel.close`, X11
+/// `WM_DELETE_WINDOW`) through the tray-aware close flow instead of the default
+/// window destroy, which would bypass the "minimize to tray on close" setting.
+/// Requires the main window, a ready frontend listener, and a registered tray.
+/// The tray is only created when the tray setting is on with AppIndicator
+/// available and is never destroyed or hidden at runtime, so its presence is a
+/// sound proxy for the window being restorable; any missed premise keeps the
+/// native close.
+fn should_route_linux_close_through_tray(
+    target_os: &str,
+    window_label: &str,
+    frontend_ready: bool,
+    tray_registered: bool,
+) -> bool {
+    target_os == "linux" && window_label == "main" && frontend_ready && tray_registered
+}
+
 fn should_fallback_to_native_quit(target: &str, frontend_ready: bool) -> bool {
     target == "quit" && !frontend_ready
 }
@@ -1212,9 +1229,9 @@ mod tests {
         linux_webkit_rendering_workarounds, native_window_decorations_override, run_shutdown_on_dedicated_thread,
         should_confirm_app_exit_request, should_enable_linux_floating_frame, should_enable_single_instance,
         should_fallback_to_native_quit, should_hide_window_before_exit, should_hide_window_on_close,
-        should_setup_desktop_tray, should_show_main_window_after_setup, should_show_main_window_before_setup_tasks,
-        startup_data_dir_mode, tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice,
-        LinuxNvidiaDriver,
+        should_route_linux_close_through_tray, should_setup_desktop_tray, should_show_main_window_after_setup,
+        should_show_main_window_before_setup_tasks, startup_data_dir_mode, tray_menu_labels_for_locale,
+        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
     };
     use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
@@ -1432,6 +1449,17 @@ mod tests {
     #[test]
     fn does_not_hide_window_on_close_for_other_platforms() {
         assert!(!should_hide_window_on_close("linux"));
+    }
+
+    #[test]
+    fn routes_linux_close_through_tray_only_with_main_window_frontend_and_tray() {
+        assert!(should_route_linux_close_through_tray("linux", "main", true, true));
+        assert!(!should_route_linux_close_through_tray("linux", "main", true, false));
+        assert!(!should_route_linux_close_through_tray("linux", "main", false, true));
+        assert!(!should_route_linux_close_through_tray("linux", "detached-tab-1", true, true));
+        assert!(!should_route_linux_close_through_tray("linux", "plugin-floating-audio", true, true));
+        assert!(!should_route_linux_close_through_tray("macos", "main", true, true));
+        assert!(!should_route_linux_close_through_tray("windows", "main", true, true));
     }
 
     #[test]
@@ -2312,11 +2340,20 @@ pub fn run() {
                     let _ = window.emit("dbx:detached-tab-close-requested", serde_json::json!({ "tabId": tab_id }));
                     return;
                 }
-                if !should_hide_window_on_close(std::env::consts::OS) {
+                let app = window.app_handle();
+                let close_behavior = app.try_state::<CloseBehaviorState>();
+                // Only intercept Linux close requests when the tray can restore
+                // the main window and the frontend can handle the close event.
+                let linux_tray_close = should_route_linux_close_through_tray(
+                    std::env::consts::OS,
+                    window.label(),
+                    close_behavior.as_ref().is_some_and(|state| state.is_frontend_ready()),
+                    app.tray_by_id(DESKTOP_TRAY_ID).is_some(),
+                );
+                if !should_hide_window_on_close(std::env::consts::OS) && !linux_tray_close {
                     return;
                 }
-                let app = window.app_handle();
-                if app.try_state::<CloseBehaviorState>().is_none() {
+                if close_behavior.is_none() {
                     api.prevent_close();
                     hide_main_window_for_close(app, window);
                     return;

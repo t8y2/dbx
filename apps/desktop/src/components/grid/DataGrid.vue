@@ -122,7 +122,7 @@ import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/
 import { resolveDataGridBusyStartedAt } from "@/lib/dataGrid/dataGridBusyElapsed";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
-import { buildTableSelectSql, qualifyTableReferencesInSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
+import { buildTableSelectSql, qualifyTableReferencesInSql, quoteTableDataIdentifier, quoteTableIdentifierIfNeeded } from "@/lib/table/tableSelectSql";
 import { dataGridExecutedQueryConditions } from "@/lib/dataGrid/dataGridExecutedQuery";
 import { uuid } from "@/lib/common/utils";
 import { generateCellValues, type CellValueGenerationKind, type CellValueGenerationOptions } from "@/lib/dataGrid/cellValueGeneration";
@@ -4656,6 +4656,7 @@ async function refreshSavedRows(request: { dirtyRows: ReadonlyMap<number, Readon
     tableType: tableMeta.tableType,
     columns: tableMeta.columns.map((column) => column.name),
     includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+    quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
     primaryKeys: tableMeta.primaryKeys,
     ...largeValuePreviewOptions,
     whereInput: identityConditions.join(" OR "),
@@ -8325,6 +8326,7 @@ async function applyOrderBySearch(_value?: string, structuredOrderByOverride?: s
       tableType: tableMeta.tableType,
       columns: tableMeta.columns.map((column) => column.name),
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       primaryKeys: tableMeta.primaryKeys,
       ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value, !!props.connectionId && connectionStore.getConfig(props.connectionId)?.db_type === "jdbc"),
       orderBy: orderByClause,
@@ -8368,6 +8370,7 @@ async function applyWhereFilter() {
       tableType: tableMeta.tableType,
       columns: tableMeta.columns.map((column) => column.name),
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       primaryKeys: tableMeta.primaryKeys,
       ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value, !!props.connectionId && connectionStore.getConfig(props.connectionId)?.db_type === "jdbc"),
       orderBy: effectiveOrderBy(),
@@ -8520,7 +8523,12 @@ function columnTypeCacheSignature(): string {
 watch(() => [props.result.columns.join("\u0000"), columnFormatterSignatures.value.join("\u0000"), columnTypeCacheSignature()], clearCellFormatCache);
 
 function quoteIdent(name: string): string {
-  return quoteTableDataIdentifier(props.databaseType, name, connectionStore.connectionIdentifierQuote?.(props.connectionId));
+  const identifierQuote = connectionStore.connectionIdentifierQuote?.(props.connectionId);
+  // 主开关关闭时（#12878），排序/筛选引用的列名与生成的 SELECT 一致地省略可省的引号。
+  if (!settingsStore.editorSettings.generateSqlQuoteIdentifiers) {
+    return quoteTableIdentifierIfNeeded(props.databaseType, name, identifierQuote);
+  }
+  return quoteTableDataIdentifier(props.databaseType, name, identifierQuote);
 }
 
 function queryColumnRef(name: string): string {
@@ -9749,6 +9757,7 @@ async function syncUserFacingSql() {
       tableName: props.tableMeta.tableName,
       tableType: props.tableMeta.tableType,
       includeDatabaseName,
+      quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       injectDefaultTimeSeriesWhere: true,
       whereInput: conditions.whereInput,
       orderBy: conditions.orderBy,
@@ -9762,7 +9771,21 @@ async function syncUserFacingSql() {
 }
 
 watch(
-  () => [props.sql, props.pageSql, props.result, props.result.sqlPage, props.result.sourceStatement, props.context, props.tableMeta, props.pageLimit, props.pageOffset, props.executedPageLimit, props.executedPageOffset, settingsStore.editorSettings.generateSqlIncludeDatabaseName],
+  () => [
+    props.sql,
+    props.pageSql,
+    props.result,
+    props.result.sqlPage,
+    props.result.sourceStatement,
+    props.context,
+    props.tableMeta,
+    props.pageLimit,
+    props.pageOffset,
+    props.executedPageLimit,
+    props.executedPageOffset,
+    settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+    settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+  ],
   () => void syncUserFacingSql(),
   { immediate: true },
 );
@@ -14090,6 +14113,7 @@ async function loadForeignKeyDisplayLabels() {
             tableName: config.refTable,
             columns: [config.refColumn, config.displayColumn],
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             whereInput: lookupWhereInput,
             limit: batch.length,
           });

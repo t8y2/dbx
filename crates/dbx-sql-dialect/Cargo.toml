@@ -17,4 +17,5 @@ tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
 insta = { version = "1", features = ["json", "glob"] }
+serde_json = "1"
 tempfile = "3"

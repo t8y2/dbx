@@ -444,6 +444,7 @@ export function useSidebarDataOpenRuntime() {
           primaryKeys,
           ...tableDataLargeValuePreviewOptions(effectiveDbType, columns, primaryKeys, limit, config?.db_type === "jdbc"),
           includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+          quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
           limit,
           includeRowId: withRowId,
           injectDefaultTimeSeriesWhere: true,

@@ -105,6 +105,12 @@ pub struct BackendErrorDiagnostics {
     adapter_code: Option<String>,
 }
 
+impl BackendErrorDiagnostics {
+    pub fn category(&self) -> Option<&str> {
+        self.category.as_deref()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransactionOutcome {
@@ -435,6 +441,14 @@ impl BackendError {
 
     pub fn diagnostics(&self) -> Option<&BackendErrorDiagnostics> {
         self.diagnostics.as_ref()
+    }
+
+    /// Whether the envelope carries a SQL-category failure (syntax/execution
+    /// error reported by the engine or driver). HTTP boundaries map this to a
+    /// 4xx status instead of 500 so user-side SQL mistakes are not counted as
+    /// server faults by gateways and monitoring.
+    pub fn is_sql_error(&self) -> bool {
+        self.diagnostics.as_ref().and_then(|diagnostics| diagnostics.category()).is_some_and(|category| category == "sql")
     }
 
     pub fn error_position(&self) -> Option<crate::sql_error_position::SqlErrorPosition> {

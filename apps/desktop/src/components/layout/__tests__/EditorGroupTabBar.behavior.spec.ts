@@ -939,4 +939,37 @@ describe("active tab reveal scrolling (issue #12010)", () => {
       host.remove();
     }
   });
+
+  // Opening a plugin tab swaps the workspace to its content-suppressed branch,
+  // which mounts a new tab bar whose tab is already active. No activeTabId
+  // change follows, so the bar must reveal the active tab on mount (#14416).
+  it("reveals the already-active tab when a tab bar mounts", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "none";
+    const tabIds = Array.from({ length: 8 }, (_, index) => store.createTab("pg-1", "app", `Query ${index}`, "query"));
+    const activeTabId = tabIds[tabIds.length - 1]!;
+
+    const scrollIntoView = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
+    const requestAnimationFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback: FrameRequestCallback) => {
+      callback(0);
+      return 0;
+    });
+    let mounted: Mounted | undefined;
+    try {
+      mounted = mountBar(store.groups[0]!.id, tabIds, activeTabId, pinia);
+      await settle();
+
+      const revealed = scrollIntoView.mock.contexts.map((element) => (element as HTMLElement).getAttribute("data-active-tab"));
+      expect(revealed).toContain("true");
+      expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "auto", block: "nearest", inline: "nearest" });
+    } finally {
+      mounted?.app.unmount();
+      mounted?.host.remove();
+      requestAnimationFrame.mockRestore();
+      scrollIntoView.mockRestore();
+    }
+  });
 });

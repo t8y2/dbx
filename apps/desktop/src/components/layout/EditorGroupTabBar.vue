@@ -27,7 +27,7 @@ const TAB_DRAG_HORIZONTAL_THRESHOLD = 24;
 </script>
 
 <script setup lang="ts">
-import { computed, inject, nextTick, onUnmounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import type { Component, CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
 import {
@@ -375,11 +375,19 @@ function onHorizontalTabWheel(event: WheelEvent) {
   }
 }
 
-function revealActiveTabAfterLayout() {
+function revealActiveTabAfterLayout(behavior: ScrollBehavior = tabScrollBehavior.value) {
   const activeTab = tabsContainerRef.value?.querySelector<HTMLElement>('[data-active-tab="true"]');
   if (!activeTab) return;
-  activeTab.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: "nearest" });
+  activeTab.scrollIntoView({ behavior, block: "nearest", inline: "nearest" });
 }
+
+// Opening a plugin tab swaps SqlEditorWorkspace to its content-suppressed
+// branch, which mounts a fresh tab bar after the tab is already active, so the
+// activeTabId watcher below never fires for it. Reveal the active tab once the
+// new strip has laid out, or it starts scrolled to the first tab (#14416).
+onMounted(() => {
+  nextTick(() => requestAnimationFrame(() => revealActiveTabAfterLayout("auto")));
+});
 
 const showOverflowControl = computed(() => {
   void tabLayoutRevision.value;
@@ -2060,7 +2068,7 @@ watch(
             }),
           );
         } else {
-          nextTick(() => requestAnimationFrame(revealActiveTabAfterLayout));
+          nextTick(() => requestAnimationFrame(() => revealActiveTabAfterLayout()));
         }
       }),
     );

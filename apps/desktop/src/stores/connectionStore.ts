@@ -1526,7 +1526,7 @@ export const useConnectionStore = defineStore("connection", () => {
         fingerprint === (currentConfig ? connectionConfigFingerprint(currentConfig) : undefined)
       );
     };
-    const scope = metadataListCacheScope({ kind: "database-schema-infos", connectionId, database, extra: { connectionRevision, metadataGeneration: generation, completionRevision: revision, configFingerprint: fingerprint ?? "", showSystemSchemas } });
+    const scope = metadataListCacheScope({ kind: "database-schema-infos", connectionId, database, extra: { connectionRevision, metadataGeneration: generation, completionRevision: revision, configFingerprint: fingerprint ?? "", showSystemSchemas, configuredSystemSchemas } });
     const infos = await metadataLoadCoordinator.run(scope, () => {
       const cached = metadataListPageCache.get(scope, { allowStale: true });
       if (cached) return Promise.resolve(cached.value as SchemaInfo[]);
@@ -6151,11 +6151,11 @@ export const useConnectionStore = defineStore("connection", () => {
     await updateNavigationVisibility(connectionId, "", { filterSchemas: false, databaseNames: visibleDatabases, preserveDatabasePatterns: true });
   }
 
-  async function setVisibleSchemas(connectionId: string, database: string, schemaNames: string[], candidates?: { names: string[]; systemNames: ReadonlySet<string> }) {
+  async function setVisibleSchemas(connectionId: string, database: string, schemaNames: string[], candidates: { names: string[]; systemNames: ReadonlySet<string> }) {
     const config = getConfig(connectionId);
     if (!config) return;
     const key = schemaVisibilityDatabaseKey(config, database);
-    await updateNavigationVisibility(connectionId, key, { filterSchemas: true, schemaNames, schemaCandidates: candidates?.names, systemSchemaNames: candidates?.systemNames, clearLegacyDatabaseFilter: connectionUsesVisibleSchemaFilter(config) });
+    await updateNavigationVisibility(connectionId, key, { filterSchemas: true, schemaNames, schemaCandidates: candidates.names, systemSchemaNames: candidates.systemNames });
     await reloadSchemaChildren(connectionId, database);
   }
 
@@ -7483,7 +7483,6 @@ export const useConnectionStore = defineStore("connection", () => {
           }
           if (options?.force && !options.background) void loadSidebarDatabaseStorage(connectionId, { force: true });
         } catch (e) {
-          if (!treeNodeLoadTarget(load)) return;
           recordMetadataLoadError(connectionId, e, load);
           throw e;
         } finally {
@@ -8187,7 +8186,6 @@ export const useConnectionStore = defineStore("connection", () => {
             await markRelationalNavigationDiscovered(currentTargetNode);
           }
         } catch (e) {
-          if (!treeNodeLoadTarget(load)) return;
           recordMetadataLoadError(connectionId, e, load);
           throw e;
         } finally {
@@ -8234,7 +8232,6 @@ export const useConnectionStore = defineStore("connection", () => {
         await markRelationalNavigationDiscovered(currentTargetNode);
       }
     } catch (e) {
-      if (!treeNodeLoadTarget(load)) return;
       recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {

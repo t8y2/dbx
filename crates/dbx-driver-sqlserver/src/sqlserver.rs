@@ -2554,19 +2554,31 @@ fn linked_i32(row: &tiberius::Row, index: usize) -> Option<i32> {
 }
 
 pub async fn list_schemas(client: &mut SqlServerClient) -> Result<Vec<String>, String> {
-    let sql = sqlserver_list_schemas_sql();
+    list_schemas_with_system(client, false).await
+}
+
+pub async fn list_schemas_with_system(
+    client: &mut SqlServerClient,
+    show_system_schemas: bool,
+) -> Result<Vec<String>, String> {
+    let sql = sqlserver_list_schemas_sql(show_system_schemas);
     let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
     Ok(rows.iter().map(|row| row.get::<&str, _>(0).unwrap_or("").to_string()).collect())
 }
 
-fn sqlserver_list_schemas_sql() -> String {
-    let excluded_schemas =
-        sqlserver_hidden_schema_names().iter().map(|name| format!("'{name}'")).collect::<Vec<_>>().join(",");
+fn sqlserver_list_schemas_sql(show_system_schemas: bool) -> String {
+    let predicate = if show_system_schemas {
+        String::new()
+    } else {
+        let excluded_schemas =
+            sqlserver_hidden_schema_names().iter().map(|name| format!("'{name}'")).collect::<Vec<_>>().join(",");
+        format!("WHERE s.name NOT IN ({excluded_schemas}) ")
+    };
     format!(
         "SELECT s.name \
          FROM sys.schemas s \
-         WHERE s.name NOT IN ({excluded_schemas}) \
+         {predicate}\
          ORDER BY CASE WHEN s.name = 'dbo' THEN 0 ELSE 1 END, s.name"
     )
 }
@@ -6272,13 +6284,23 @@ mod tests {
 
     #[test]
     fn sqlserver_list_schemas_includes_empty_user_schemas() {
-        let sql = sqlserver_list_schemas_sql();
+        let sql = sqlserver_list_schemas_sql(false);
 
         assert!(!sql.contains("sys.objects"));
         assert!(sql.contains("s.name NOT IN"));
         assert!(sql.contains("'db_owner'"));
         assert!(sql.contains("'db_datareader'"));
         assert!(sqlserver_hidden_schema_names().contains(&"sys"));
+    }
+
+    #[test]
+    fn sqlserver_complete_schema_candidates_do_not_exclude_system_or_empty_schemas() {
+        let sql = sqlserver_list_schemas_sql(true);
+
+        assert!(sql.contains("FROM sys.schemas s"));
+        assert!(!sql.contains("WHERE"));
+        assert!(!sql.contains("sys.objects"));
+        assert!(sql.contains("ORDER BY CASE WHEN s.name = 'dbo' THEN 0 ELSE 1 END, s.name"));
     }
 
     #[test]

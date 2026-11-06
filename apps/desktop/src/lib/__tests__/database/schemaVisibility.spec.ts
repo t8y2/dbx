@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterSchemaNamesForConnection, migrateSchemaVisibility, schemaVisibilityNeedsMigration, schemaVisibilityOverrides } from "@/lib/database/visibleDatabases";
+import { filterDatabaseNamesForConnection, filterSchemaNamesForConnection, isSystemSchemaName, migrateSchemaVisibility, schemaVisibilityNeedsMigration, schemaVisibilityOverrides } from "@/lib/database/visibleDatabases";
 import type { ConnectionConfig } from "@/types/database";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 
@@ -12,6 +12,19 @@ function migrate(connection: Partial<ConnectionConfig>, candidates = names) {
 }
 
 describe("schema visibility defaults and migration", () => {
+  it.each([
+    { fields: {}, expected: ["dbo", "sys_business", "db_owner_app"] },
+    { fields: { visible_schemas: { app: ["sys"] }, show_system_schemas: true }, expected: ["sys"] },
+    { fields: { visible_schemas: { app: [] }, show_system_schemas: true }, expected: [] },
+  ])("migrates SQL Server main fields without treating real database filters as Schema choices: $fields", ({ fields, expected }) => {
+    const candidates = ["dbo", "sys", "INFORMATION_SCHEMA", "guest", "db_owner", "sys_business", "db_owner_app"];
+    const connection = { db_type: "sqlserver" as const, username: "app_user", visible_databases: ["app"], visible_database_patterns: ["archive%"], ...fields };
+    const systemNames = new Set(candidates.filter((name) => isSystemSchemaName("sqlserver", name)));
+    expect([...systemNames]).toEqual(["sys", "INFORMATION_SCHEMA", "guest", "db_owner"]);
+    const schema_visibility = migrateSchemaVisibility(connection, "app", candidates, systemNames);
+    expect(filterSchemaNamesForConnection(candidates, { ...connection, schema_visibility }, "app")).toEqual(expected);
+    expect(filterDatabaseNamesForConnection(["app", "archive_old", "other", "master"], { ...connection, schema_visibility })).toEqual(["app", "archive_old"]);
+  });
   it.each([
     { db_type: "oracle" as const, connection_string: "oracle-service" },
     { db_type: "jdbc" as const, connection_string: "jdbc:oracle:thin:@//localhost:1521/XE" },

@@ -140,6 +140,9 @@ const SYSTEM_SCHEMA_RULES: Partial<Record<DatabaseType, SystemNameRules>> = {
   dameng: {
     exact: new Set(["_sys_statistics", "ctisys", "dba", "sys", "sys_dba", "sys_phm", "sysauditor", "sysdba", "sysdbo", "syssso", "system"]),
   },
+  sqlserver: {
+    exact: new Set(["guest", "information_schema", "sys", "db_owner", "db_accessadmin", "db_securityadmin", "db_ddladmin", "db_backupoperator", "db_datareader", "db_datawriter", "db_denydatareader", "db_denydatawriter"]),
+  },
   postgres: POSTGRES_LIKE_SYSTEM_SCHEMA_RULES,
   gaussdb: {
     exact: new Set(["blockchain", "coverage", "cstore", "db4ai", "dbe_perf", "dbe_pldebugger", "dbe_pldeveloper", "dbe_sql_util", "information_schema", "pg_catalog", "pg_toast", "pkg_service", "snapshot", "sqladvisor", "xmltype"]),

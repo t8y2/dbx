@@ -1035,7 +1035,8 @@ async fn list_schemas_once(
                 )
                 .await;
         }
-        try_sqlserver!(pool_handle, list_schemas);
+        // SQL Server's default enumeration has always excluded system schemas.
+        try_sqlserver!(pool_handle, list_schemas_with_system, system_schemas_override.unwrap_or(false));
         if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
             let fallback_config = db_config.clone();
             let mut client = client.lock().await;

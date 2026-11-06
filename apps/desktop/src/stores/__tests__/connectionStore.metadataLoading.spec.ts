@@ -252,13 +252,13 @@ describe("connectionStore metadata loading", () => {
     const listSchemaInfos = vi.fn(async (_id: string, _database: string, override?: boolean) => rows(override ?? saved));
     const { store, connection } = await sharedSchemaFixture(listSchemaInfos);
     store.connections = [{ ...connection, show_system_schemas: saved }];
-    expect(await store.listCompletionSchemas(connection.id, "app")).toEqual(rows(saved).map((row) => row.name));
+    expect(await store.listCompletionSchemas(connection.id, "app")).toEqual(rows(true).map((row) => row.name));
     expect(await store.listNavigationSchemaChoices(connection.id, "app", !saved)).toEqual(rows(!saved).map((row) => row.name));
     expect(listSchemaInfos).toHaveBeenLastCalledWith(connection.id, "app", !saved);
     expect(store.getConfig(connection.id)?.show_system_schemas).toBe(saved);
-    expect(store.lookupLocalCompletionSchemas(connection.id, "app")).toEqual(rows(saved).map((row) => row.name));
-    expect(await store.listCompletionSchemas(connection.id, "app")).toEqual(rows(saved).map((row) => row.name));
-    expect(listSchemaInfos).toHaveBeenCalledTimes(2);
+    expect(store.lookupLocalCompletionSchemas(connection.id, "app")).toEqual(rows(true).map((row) => row.name));
+    expect(await store.listCompletionSchemas(connection.id, "app")).toEqual(rows(true).map((row) => row.name));
+    expect(listSchemaInfos).toHaveBeenCalledTimes(saved ? 2 : 1);
   });
 
   it("shares the Oracle maintained-schema filter between picker drafts and the tree", async () => {
@@ -323,21 +323,23 @@ describe("connectionStore metadata loading", () => {
 
   it("joins concurrent Oracle default-schema initialization within the same scope", async () => {
     let finish!: (result: { columns: string[]; rows: string[][] }) => void;
-    const executeQuery = vi.fn().mockReturnValue(
-      new Promise((resolve) => {
-        finish = resolve;
-      }),
+    const executeQuery = vi.fn((_id: string, _database: string, sql: string) =>
+      sql.includes("ORACLE_MAINTAINED")
+        ? Promise.resolve({ columns: ["USERNAME"], rows: [] })
+        : new Promise((resolve) => {
+            finish = resolve;
+          }),
     );
     const listSchemaInfos = vi.fn().mockResolvedValue([{ name: "APP", comment: null }]);
     const { store, connection } = await sharedSchemaFixture(listSchemaInfos, executeQuery);
     store.connections = [{ ...connection, db_type: "oracle", show_system_schemas: true }];
     const first = store.loadDatabases(connection.id, { force: true, background: true, connectedOnly: true });
-    await vi.waitFor(() => expect(executeQuery).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(executeQuery.mock.calls.filter(([, , sql]) => !sql.includes("ORACLE_MAINTAINED"))).toHaveLength(1));
     const second = store.loadDatabases(connection.id, { force: true, background: true, connectedOnly: true });
     await vi.waitFor(() => expect(listSchemaInfos).toHaveBeenCalledOnce());
     finish({ columns: ["DEFAULT_SCHEMA"], rows: [["APP"]] });
     await Promise.all([first, second]);
-    expect(executeQuery).toHaveBeenCalledOnce();
+    expect(executeQuery.mock.calls.filter(([, , sql]) => !sql.includes("ORACLE_MAINTAINED"))).toHaveLength(1);
   });
 
   it.each([
@@ -848,7 +850,7 @@ describe("connectionStore metadata loading", () => {
 
     await store.loadTreeNodeChildren(databaseNode, { force: true });
 
-    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "testdb");
+    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "testdb", true);
     expect(listTables).not.toHaveBeenCalled();
     expect(databaseNode.children?.map((node) => [node.type, node.label, node.schema])).toEqual([
       ["schema", "app", "app"],
@@ -890,7 +892,7 @@ describe("connectionStore metadata loading", () => {
 
     await store.loadTreeNodeChildren(databaseNode, { force: true });
 
-    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "vpnccw");
+    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "vpnccw", true);
     expect(listTables).not.toHaveBeenCalled();
     const schemaNode = databaseNode.children!.find((node) => node.type === "schema")!;
     expect([schemaNode.label, schemaNode.schema]).toEqual(["APP", "APP"]);
@@ -1051,7 +1053,7 @@ describe("connectionStore metadata loading", () => {
     await store.loadDatabases(connection.id, { force: true });
 
     expect(listDatabases).not.toHaveBeenCalled();
-    expect(listSchemas).toHaveBeenCalledWith(connection.id, "");
+    expect(listSchemas).toHaveBeenCalledWith(connection.id, "", true);
     expect(connectionNode.children?.map((node) => [node.type, node.label, node.database, node.schema])).toEqual([
       ["schema", "DBX_TEST", "DBX_TEST", "DBX_TEST"],
       ["oracle-shared-objects", "tree.publicObjects", "", undefined],
@@ -1153,7 +1155,7 @@ describe("connectionStore metadata loading", () => {
 
     await store.loadTreeNodeChildren(databaseNode, { force: true });
 
-    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "testdb");
+    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "testdb", true);
     const parent = mode === "simple" ? databaseNode : databaseNode.children!.find((child) => child.type === "group-tables")!;
     if (mode === "grouped") await store.loadTreeNodeChildren(parent);
     expect(listTables).toHaveBeenCalled();
@@ -1218,7 +1220,7 @@ describe("connectionStore metadata loading", () => {
 
     await store.loadTreeNodeChildren(databaseNode, { force: true });
 
-    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "dbx_test");
+    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "dbx_test", true);
     expect(listTables).toHaveBeenCalled();
     expect(databaseNode.children?.map((node) => [node.type, node.label, node.schema])).toEqual([["table", "connection_smoke", undefined]]);
   });
@@ -2017,7 +2019,7 @@ describe("connectionStore metadata loading", () => {
     expect(reconnectedDatabaseNode.children?.map((child) => child.label)).toEqual(["fresh"]);
   });
 
-  it.each(["opengauss", "kingbase"] as const)("reloads %s sidebar schemas when system visibility changes", async (dbType) => {
+  it.each(["opengauss", "kingbase"] as const)("reloads %s sidebar schemas when per-item system visibility changes", async (dbType) => {
     const listSchemaInfos = vi.fn().mockResolvedValue([
       { name: "information_schema", comment: null },
       { name: "pg_catalog", comment: null },
@@ -2067,12 +2069,13 @@ describe("connectionStore metadata loading", () => {
     await store.loadSchemas(connection.id, "app");
     expect(databaseNode.children?.filter((node) => node.type === "schema").map((node) => node.label)).toEqual(["public"]);
 
-    store.connections[0]!.show_system_schemas = true;
+    store.connections[0]!.schema_visibility!.databases.app = { information_schema: true, pg_catalog: true };
     databaseNode.children = [];
     databaseNode.isExpanded = false;
     await store.loadSchemas(connection.id, "app");
 
-    expect(loadSchemaCache.mock.calls.map(([key]) => key)).toEqual([`${connection.id}:app:schemas-v3:hide-system`, `${connection.id}:app:schemas-v3:show-system`]);
+    expect(loadSchemaCache).toHaveBeenCalledOnce();
+    expect(loadSchemaCache.mock.calls[0][0]).toContain("schemas-v3-visibility-v1");
     expect(databaseNode.children?.filter((node) => node.type === "schema").map((node) => node.label)).toEqual(["information_schema", "pg_catalog", "public"]);
   });
 
@@ -5406,10 +5409,10 @@ describe("connectionStore metadata loading", () => {
     expect(defaultDatabase().isExpanded).toBe(true);
     expect(schemaLabels()).toEqual(["APP_USER", "APP_USER_ARCHIVE", "SYS"]);
 
-    await store.setVisibleSchemas(connection.id, "", ["APP_USER"]);
+    await store.setVisibleSchemas(connection.id, "", ["APP_USER"], { names: ["APP_USER", "APP_USER_ARCHIVE", "SYS"], systemNames: new Set() });
 
     // The saved filter must show without a manual refresh of the connection.
-    expect(store.getConfig(connection.id)?.visible_schemas).toEqual({ "": ["APP_USER"] });
+    expect(store.getConfig(connection.id)?.schema_visibility?.databases[""]).toEqual({ APP_USER_ARCHIVE: false, SYS: false });
     expect(schemaLabels()).toEqual(["APP_USER"]);
   });
 });

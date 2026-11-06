@@ -43,6 +43,23 @@ beforeEach(() => {
 });
 
 describe("successful Schema reads migrate legacy visibility", () => {
+  it("reads SQL Server system candidates, hides them by default and keeps an explicit choice after reload", async () => {
+    const { store, listSchemaInfos, persisted } = await fixture({ db_type: "sqlserver", username: "app_user", default_schema: "dbo", visible_databases: ["app"], visible_database_patterns: ["app%"] });
+    listSchemaInfos.mockResolvedValue([{ name: "dbo" }, { name: "sales" }, { name: "sys" }, { name: "INFORMATION_SCHEMA" }, { name: "db_owner" }]);
+    const selection = await store.readVisibleSchemaSelection("pg", "app");
+    expect(listSchemaInfos).toHaveBeenCalledWith("pg", "app", true);
+    expect(selection.names).toEqual(["dbo", "sales", "sys", "INFORMATION_SCHEMA", "db_owner"]);
+    expect([...selection.systemNames]).toEqual(["sys", "INFORMATION_SCHEMA", "db_owner"]);
+    expect(selection.visibleNames).toEqual(["dbo", "sales"]);
+    expect(persisted.get("pg")?.schema_visibility?.databases.app).toEqual({});
+    await store.setVisibleSchemas("pg", "app", ["dbo", "sys"], { names: selection.names, systemNames: selection.systemNames });
+    store.connections = [JSON.parse(JSON.stringify(persisted.get("pg")))];
+    expect((await store.readVisibleSchemaSelection("pg", "app", true)).visibleNames).toEqual(["dbo", "sys"]);
+    expect(store.getConfig("pg")?.default_schema).toBe("dbo");
+    expect(store.getConfig("pg")?.database).toBe("app");
+    expect(store.getConfig("pg")?.visible_databases).toEqual(["app"]);
+    expect(store.getConfig("pg")?.visible_database_patterns).toEqual(["app%"]);
+  });
   it("shares one root bucket without replacing the API execution owner when database is absent", async () => {
     const { store, saveConnections, listSchemaInfos } = await fixture({ db_type: "oracle", database: undefined, visible_schemas: { "": [] } });
     listSchemaInfos.mockResolvedValue([{ name: "APP" }, { name: "SYS" }]);

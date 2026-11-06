@@ -12487,6 +12487,7 @@ const transposeEndSpacerWidth = computed(() => {
   return transposeEndAlignmentSpacerWidth({
     viewportWidth: transposeViewportWidth.value,
     pinnedWidth: transposePinnedWidth.value,
+    recordsWidth: transposeRecordOffsets.value[transposeRecordOffsets.value.length - 1],
     lastRecordWidth: getTransposeRecordWidth(transposeScopeRecordIndexes.value[transposeScopeRecordIndexes.value.length - 1]),
   });
 });
@@ -15837,11 +15838,68 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   <X class="w-3 h-3" />
                 </Button>
               </div>
-              <div class="relative min-h-0 flex-1 overflow-hidden">
+              <div class="relative flex min-h-0 flex-1 flex-col overflow-hidden">
                 <ProductionWatermark v-if="productionContext.active" />
+                <div data-grid-transpose-header class="data-grid-transpose-header data-grid-header-shell relative z-20 h-7 w-full shrink-0 overflow-hidden border-b border-border font-semibold text-muted-foreground">
+                  <div class="absolute left-0 top-0 z-30 h-full" :style="{ width: `${transposePinnedWidth}px` }">
+                    <div class="data-grid-header-cell relative flex h-full w-full shrink-0 items-center border-r border-border px-3 py-1.5 truncate">
+                      <span class="min-w-0 flex-1 truncate">{{ t("grid.columnName") }}</span>
+                      <button
+                        data-grid-transpose-column-sort
+                        type="button"
+                        class="ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                        :title="columnHeaderLabels.sort"
+                        :aria-label="t('grid.sort')"
+                        @mousedown.stop
+                        @click.stop="toggleTransposeColumnSort"
+                      >
+                        <ArrowUp v-if="transposeColumnSortDirection === 'asc'" class="h-3 w-3" />
+                        <ArrowDown v-else-if="transposeColumnSortDirection === 'desc'" class="h-3 w-3" />
+                        <ArrowUpDown v-else class="h-3 w-3" />
+                      </button>
+                      <div class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposePinnedResizeStart" />
+                    </div>
+                  </div>
+                  <div
+                    class="absolute top-0 flex h-full"
+                    :style="{
+                      left: `${transposePinnedWidth}px`,
+                      width: `${transposeTotalWidth - transposePinnedWidth}px`,
+                      transform: `translateX(-${transposeScrollLeft}px)`,
+                    }"
+                  >
+                    <div class="shrink-0" :style="{ width: `${transposeBeforeSpacerWidth}px` }" />
+                    <div
+                      v-for="recordIndex in activeTransposeRecordIndexes"
+                      :key="`transpose-head-${recordIndex}`"
+                      data-grid-transpose-record-header
+                      :data-grid-transpose-record-index="recordIndex"
+                      class="shrink-0 border-r border-border px-2 py-1.5 text-left tabular-nums relative"
+                      :class="{
+                        'transpose-record-header-selected text-primary font-semibold': transposeRecordUsesFramedHeader(recordIndex),
+                        'transpose-record-header-active text-primary': transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
+                        'data-grid-header-cell': !transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
+                        'crosshair-column': !!crosshairTarget?.rowCrosshair && crosshairTarget.rowIndex === recordIndex && !transposeRecordUsesFramedHeader(recordIndex) && !transposeRecordUsesActiveHighlight(recordIndex),
+                      }"
+                      :style="{
+                        width: `${getTransposeRecordWidth(recordIndex)}px`,
+                      }"
+                      @click="selectTransposeRecord(recordIndex, $event)"
+                      @contextmenu="selectTransposeRecord(recordIndex, $event)"
+                    >
+                      {{ rowNumberText(displayItems[recordIndex]) }}
+                      <div data-grid-transpose-record-resize-handle class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposeRecordResizeStart(recordIndex, $event)" @dblclick.stop="autoFitTransposeRecord(recordIndex)" />
+                    </div>
+                    <div class="shrink-0" :style="{ width: `${transposeAfterSpacerWidth}px` }" />
+                    <div v-if="transposeMetadataInInfoColumn" class="data-grid-header-cell relative flex shrink-0 items-center border-r border-border px-3 py-1.5 truncate" :style="{ width: `${transposeInfoWidth}px` }">
+                      <span class="min-w-0 flex-1 truncate">{{ t("grid.columnInfo") }}</span>
+                      <div data-grid-transpose-info-resize-handle class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposeInfoResizeStart" @dblclick.stop="autoFitTransposeInfo" />
+                    </div>
+                  </div>
+                </div>
                 <RecycleScroller
                   ref="transposeScrollRef"
-                  class="transpose-grid-scroller h-full overflow-auto overscroll-none bg-background"
+                  class="transpose-grid-scroller min-h-0 flex-1 overflow-auto overscroll-none bg-background"
                   :class="{ 'is-scrolling': isScrolling }"
                   :style="{
                     '--transpose-total-w': `${transposeTotalWidth}px`,
@@ -15854,54 +15912,6 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   @scroll="onTransposeScroll"
                   @resize="updateTransposeViewport"
                 >
-                  <template #before>
-                    <div class="data-grid-transpose-header data-grid-header-shell sticky top-0 z-20 flex h-7 border-b border-border font-semibold text-muted-foreground" :style="{ width: `${transposeTotalWidth}px` }">
-                      <div class="data-grid-header-cell sticky left-0 z-30 flex shrink-0 items-center border-r border-border px-3 py-1.5 truncate relative" :style="{ width: `${transposePinnedWidth}px` }">
-                        <span class="min-w-0 flex-1 truncate">{{ t("grid.columnName") }}</span>
-                        <button
-                          data-grid-transpose-column-sort
-                          type="button"
-                          class="ml-1 flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
-                          :title="columnHeaderLabels.sort"
-                          :aria-label="t('grid.sort')"
-                          @mousedown.stop
-                          @click.stop="toggleTransposeColumnSort"
-                        >
-                          <ArrowUp v-if="transposeColumnSortDirection === 'asc'" class="h-3 w-3" />
-                          <ArrowDown v-else-if="transposeColumnSortDirection === 'desc'" class="h-3 w-3" />
-                          <ArrowUpDown v-else class="h-3 w-3" />
-                        </button>
-                        <div class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposePinnedResizeStart" />
-                      </div>
-                      <div class="shrink-0" :style="{ width: `${transposeBeforeSpacerWidth}px` }" />
-                      <div
-                        v-for="recordIndex in activeTransposeRecordIndexes"
-                        :key="`transpose-head-${recordIndex}`"
-                        data-grid-transpose-record-header
-                        :data-grid-transpose-record-index="recordIndex"
-                        class="shrink-0 border-r border-border px-2 py-1.5 text-left tabular-nums relative"
-                        :class="{
-                          'transpose-record-header-selected text-primary font-semibold': transposeRecordUsesFramedHeader(recordIndex),
-                          'transpose-record-header-active text-primary': transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
-                          'data-grid-header-cell': !transposeRecordUsesActiveHighlight(recordIndex) && !transposeRecordUsesFramedHeader(recordIndex),
-                          'crosshair-column': !!crosshairTarget?.rowCrosshair && crosshairTarget.rowIndex === recordIndex && !transposeRecordUsesFramedHeader(recordIndex) && !transposeRecordUsesActiveHighlight(recordIndex),
-                        }"
-                        :style="{
-                          width: `${getTransposeRecordWidth(recordIndex)}px`,
-                        }"
-                        @click="selectTransposeRecord(recordIndex, $event)"
-                        @contextmenu="selectTransposeRecord(recordIndex, $event)"
-                      >
-                        {{ rowNumberText(displayItems[recordIndex]) }}
-                        <div class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposeRecordResizeStart(recordIndex, $event)" @dblclick.stop="autoFitTransposeRecord(recordIndex)" />
-                      </div>
-                      <div class="shrink-0" :style="{ width: `${transposeAfterSpacerWidth}px` }" />
-                      <div v-if="transposeMetadataInInfoColumn" class="data-grid-header-cell relative flex shrink-0 items-center border-r border-border px-3 py-1.5 truncate" :style="{ width: `${transposeInfoWidth}px` }">
-                        <span class="min-w-0 flex-1 truncate">{{ t("grid.columnInfo") }}</span>
-                        <div data-grid-transpose-info-resize-handle class="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onTransposeInfoResizeStart" @dblclick.stop="autoFitTransposeInfo" />
-                      </div>
-                    </div>
-                  </template>
                   <template #default="{ item }">
                     <div
                       class="data-grid-transpose-row flex border-b border-border/60"

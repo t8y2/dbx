@@ -20,6 +20,7 @@ function createResizeState(options: {
   headerTextWidth?: number;
   viewportWidth?: number | ReturnType<typeof ref<number>>;
   widthMode?: DataGridColumnWidthMode | Ref<DataGridColumnWidthMode>;
+  appendMarker?: Ref<number | undefined>;
   displayValue?: (value: string | number | boolean | null, columnIndex: number) => string | number | boolean | null;
 }) {
   const compact = ref(options.compactColumnHeaderActions ?? true);
@@ -39,6 +40,7 @@ function createResizeState(options: {
     compactColumnHeaderActions: computed(() => compact.value),
     columnIndexIndicators: computed(() => options.columns.map((_, index) => indexIndicatorColumnIndexes.value.includes(index))),
     cacheKey: computed(() => options.cacheKey),
+    resultAppendMarker: computed(() => options.appendMarker?.value),
     columnStructureSignature: computed(() => createDataGridColumnStructureSignature(options.columns, options.columnTypes)),
     measureHeaderText: () => headerTextWidth.value,
     headerMeasurementKey,
@@ -766,6 +768,61 @@ describe("useDataGridColumnResize", () => {
     expect(state.hasUserSizedColumns.value).toBe(false);
     expect(state.columnWidths.value[0]).toBe(autoWidth);
     expect(localStorage.getItem(`dbx-data-grid-column-widths:${cacheKey}`)).toBeNull();
+  });
+
+  it("refits auto widths to the new rows when a fresh result narrows (#14439)", async () => {
+    const longText = "x".repeat(200);
+    const state = createResizeState({
+      columns: ["id", "note"],
+      rows: [
+        [1, longText],
+        [2, longText],
+      ],
+    });
+    state.initColumnWidths();
+    const wideNote = state.columnWidths.value[1];
+    expect(wideNote).toBeGreaterThan(DATA_GRID_COL_MIN_WIDTH);
+
+    // A new, shorter result replaces the rows; the machine-chosen width must follow it.
+    state.rows.value = [
+      [1, "s"],
+      [2, "s"],
+    ];
+    await nextTick();
+
+    expect(state.columnWidths.value[1]).toBeLessThan(wideNote);
+  });
+
+  it("keeps the widths when a load-more page appends to the same result (#14439)", async () => {
+    const longText = "x".repeat(200);
+    const appendMarker = ref<number | undefined>(undefined);
+    const state = createResizeState({ columns: ["id", "note"], rows: [[1, longText]], appendMarker });
+    state.initColumnWidths();
+    const wideNote = state.columnWidths.value[1];
+
+    // Load more appends rows to the same result; the page must not jump.
+    appendMarker.value = 1;
+    state.rows.value = [
+      [1, longText],
+      [2, "s"],
+    ];
+    await nextTick();
+
+    expect(state.columnWidths.value[1]).toBe(wideNote);
+  });
+
+  it("keeps a user-resized width when a fresh result refits the others (#14439)", async () => {
+    const longText = "x".repeat(200);
+    const state = createResizeState({ columns: ["id", "note"], rows: [[1, longText]] });
+    state.initColumnWidths();
+    state.onResizeStart(1, new MouseEvent("mousedown", { clientX: 100, cancelable: true }));
+    document.dispatchEvent(new MouseEvent("mouseup", { clientX: 160 }));
+    const manual = state.columnWidths.value[1];
+
+    state.rows.value = [[1, "s"]];
+    await nextTick();
+
+    expect(state.columnWidths.value[1]).toBe(manual);
   });
 });
 

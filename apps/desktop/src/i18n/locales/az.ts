@@ -5914,6 +5914,7 @@ export default withEnglishFallback({
     jsonView: "JSON görünüşü",
     jsonViewRaw: "Xam",
     jsonViewDecoded: "Dekodlaşdırılmış",
+    looseJsonHint: "Standart JSON deyil. Yalnız formatlanaraq göstərilir və burada redaktə edilə bilməz; dəyişmək üçün UTF-8 görünüşünə keçin.",
     rawContent: "Xam məzmun",
     wordWrap: "Sətirə keçirmə",
     codecNone: "Yoxdur",

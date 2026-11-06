@@ -6576,6 +6576,7 @@ export default withEnglishFallback({
     jsonView: "Tampilan JSON",
     jsonViewRaw: "Mentah",
     jsonViewDecoded: "Didekode",
+    looseJsonHint: "Bukan JSON standar. Hanya ditampilkan dengan indentasi dan hanya-baca di sini; beralih ke UTF-8 untuk mengedit.",
     rawContent: "Konten mentah",
     wordWrap: "Bungkus kata",
     codecNone: "Tidak ada",

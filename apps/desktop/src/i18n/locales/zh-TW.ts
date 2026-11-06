@@ -6179,6 +6179,7 @@ export default withEnglishFallback({
     jsonView: "JSON 檢視",
     jsonViewRaw: "原始",
     jsonViewDecoded: "解碼",
+    looseJsonHint: "非標準 JSON，僅格式化顯示，此處不可編輯；如需修改請切換到 UTF-8。",
     rawContent: "原始內容",
     wordWrap: "自動換行",
     codecNone: "無",

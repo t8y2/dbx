@@ -499,6 +499,9 @@ const isStringValueTruncated = computed(() => {
 });
 const stringValueDetail = computed(() => (stringBlob.value ? formatRedisMemberDetail(stringBlob.value, { allowJsonText: !isBitmapKind.value }) : null));
 const selectedMemberDetail = computed(() => formatRedisMemberDetail(selectedMemberRaw.value, { allowJsonText: true }));
+// Issue #14384: JSON-shaped text strict JSON rejects gets a read-only JSON view of the raw bytes, so no codec may be active.
+const stringLooseJsonText = computed(() => (stringValueCodec.value === "none" ? (stringValueDetail.value?.looseJsonText ?? null) : null));
+const memberLooseJsonText = computed(() => (memberValueCodec.value === "none" ? (selectedMemberDetail.value.looseJsonText ?? null) : null));
 
 // Decompression depends on the value/codec refs above, so these watchers and
 // computeds live here rather than next to the state declarations.
@@ -662,7 +665,8 @@ const redisJsonAppearance = computed(() => (isDark.value ? "dark" : "light"));
 const isBinaryStringValue = computed(() => Boolean(stringValueDetail.value?.binary));
 const selectedMemberCanEdit = computed(() => selectedMemberContext.value?.canEdit ?? false);
 // kvrocks 位图不是字符串，写回会成为字符串，因此位图详情只读
-const canEditCurrentStringFormat = computed(() => !isBitmapKind.value && !isStringValueTruncated.value && Boolean(stringValueDetail.value?.editable) && (stringValueView.value === "utf8" || stringValueView.value === "json"));
+// The JSON view edits only strictly parsed JSON; loosely indented text (#14384) is read-only there.
+const canEditCurrentStringFormat = computed(() => !isBitmapKind.value && !isStringValueTruncated.value && Boolean(stringValueDetail.value?.editable) && (stringValueView.value === "utf8" || (stringValueView.value === "json" && Boolean(stringValueDetail.value?.json))));
 const showStringEditActions = computed(() => !stringPluginCodecView.value && canEditCurrentStringFormat.value);
 const originalStringEditValue = computed(() => (stringBlob.value ? rawRedisValueText(stringBlob.value) : ""));
 const stringJsonRawBaseline = ref("");
@@ -1620,6 +1624,9 @@ function setStringValueFormat(format: RedisValueFormat) {
       if (!(stringDraftFormat.value === "json" && isStringDraftDirty("json"))) stringDraftFormat.value = "utf8";
     }
     rememberRedisValueFormat(format);
+  } else if (format === "json" && stringLooseJsonText.value != null) {
+    // Read-only loose JSON has no draft to convert, but picking the view is still a preference.
+    rememberRedisValueFormat(format);
   }
 }
 
@@ -1648,6 +1655,8 @@ function setMemberValueFormat(format: RedisValueFormat) {
         memberDraftFormat.value = "utf8";
       }
     }
+    rememberRedisValueFormat(format);
+  } else if (format === "json" && memberLooseJsonText.value != null) {
     rememberRedisValueFormat(format);
   }
 }
@@ -1716,6 +1725,7 @@ function isTextRedisFormat(format: RedisValueFormat): boolean {
 function canRenderStringValueView(format: RedisValueFormat): boolean {
   if (!isJsonDerivedView(format)) return true;
   if (stringValueDetail.value?.json) return true;
+  if (format === "json" && stringLooseJsonText.value != null) return true;
   if (activeStructuredStringDetail.value) return true;
   if (stringValueCodec.value === "base64") return stringBase64Detail.value?.json != null;
   return isDecompressCodec(stringValueCodec.value) && decompressedState.value.status === "success" && decompressedJsonDetail.value != null;
@@ -1724,6 +1734,7 @@ function canRenderStringValueView(format: RedisValueFormat): boolean {
 function canRenderMemberValueView(format: RedisValueFormat): boolean {
   if (!isJsonDerivedView(format)) return true;
   if (selectedMemberDetail.value.json) return true;
+  if (format === "json" && memberLooseJsonText.value != null) return true;
   if (activeStructuredMemberDetail.value) return true;
   if (memberValueCodec.value === "base64") return memberBase64Detail.value?.json != null;
   return isDecompressCodec(memberValueCodec.value) && decompressedState.value.status === "success" && decompressedJsonDetail.value != null;
@@ -1746,7 +1757,7 @@ function detailTextForFormat(detail: ReturnType<typeof formatRedisMemberDetail>,
     case "binary":
       return detail.binaryText;
     case "json":
-      return detail.json?.formattedText ?? detail.rawText;
+      return detail.json?.formattedText ?? detail.looseJsonText ?? detail.rawText;
     case "unicodejson":
       return detail.json ? decodeJsonUnicodeEscapes(detail.json.formattedText) : detail.rawText;
     case "yaml":
@@ -1892,7 +1903,7 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
       stringJsonRawBaseline.value = detail.json?.formattedText ?? "";
       stringJsonDraftBaseline.value = jsonDraftBaseline(stringJsonRawBaseline.value, redisJsonDecoded.value);
       editValue.value = stringValueView.value === "json" && detail.json ? stringJsonDraftBaseline.value : detail.rawText;
-      stringDraftFormat.value = stringValueView.value === "json" ? "json" : "utf8";
+      stringDraftFormat.value = stringValueView.value === "json" && detail.json ? "json" : "utf8";
       clearSelectedMember();
     } else if (loadedValue.data.kind === "json") {
       const pair = jsonDraftPairForEditor(redisJsonValueText(loadedValue.data));
@@ -3263,6 +3274,10 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <Button v-if="!(showMemberDetail ? memberCodecMismatch : stringCodecMismatch) && decompressedState.status === 'error' && decompressedState.reason !== 'limit'" variant="outline" size="sm" @click="retryDecompressAsDeflate">{{ t("redis.decompressedRetryAsDeflate") }}</Button>
           </div>
         </div>
+        <div v-else-if="stringValueView === 'json' && stringLooseJsonText != null" data-redis-loose-json class="min-h-0 flex-1 flex flex-col overflow-hidden">
+          <RedisJsonEditor :model-value="stringLooseJsonText" read-only presentation="viewer" class="min-h-0 flex-1" :word-wrap="redisJsonWordWrap" :search-highlights="stringSearchHighlights" :enable-builtin-find="false" />
+          <div class="flex shrink-0 items-center gap-2 border-t px-4 py-2 text-xs text-muted-foreground">{{ t("redis.looseJsonHint") }}</div>
+        </div>
         <div v-else-if="activeStructuredStringDetail && stringValueView !== 'hex' && stringValueView !== 'base64'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
           <JsonTree
             ref="stringSearchTreeRef"
@@ -4123,6 +4138,10 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           </div>
           <div v-else-if="memberValueView === 'json' && selectedMemberDetail.json && memberValueCodec === 'none'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
             <JsonTree ref="memberSearchTreeRef" :search-matches="showMemberDetail ? treeSearchMatches : []" :active-search-index="contentSearchActiveIndex" :value="selectedMemberDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
+          </div>
+          <div v-else-if="memberValueView === 'json' && memberLooseJsonText != null" data-redis-loose-json class="min-h-0 flex-1 flex flex-col overflow-hidden">
+            <RedisJsonEditor :model-value="memberLooseJsonText" read-only presentation="viewer" class="min-h-0 flex-1" :word-wrap="redisJsonWordWrap" :search-highlights="memberSearchHighlights" :enable-builtin-find="false" />
+            <div class="flex shrink-0 items-center gap-2 border-t px-5 py-2 text-xs text-muted-foreground">{{ t("redis.looseJsonHint") }}</div>
           </div>
           <div v-else-if="activeStructuredMemberDetail && memberValueView !== 'hex' && memberValueView !== 'base64'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
             <JsonTree

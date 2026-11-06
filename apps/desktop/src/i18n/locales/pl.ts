@@ -6597,6 +6597,7 @@ export default withEnglishFallback({
     jsonView: "Widok JSON",
     jsonViewRaw: "Surowe dane",
     jsonViewDecoded: "Zdekodowany",
+    looseJsonHint: "To nie jest standardowy JSON. Wyświetlany tylko z wcięciami i tutaj tylko do odczytu; przełącz na UTF-8, aby edytować.",
     rawContent: "Treść surowa",
     wordWrap: "Zawijanie wierszy",
     codecNone: "Brak",

@@ -5807,6 +5807,7 @@ export default withEnglishFallback({
     jsonView: "JSON görünümü",
     jsonViewRaw: "Ham",
     jsonViewDecoded: "Çözülmüş",
+    looseJsonHint: "Standart JSON değil. Yalnızca girintili gösterilir ve burada salt okunurdur; düzenlemek için UTF-8'e geçin.",
     rawContent: "Ham içerik",
     wordWrap: "Sözcük kaydırma",
     codecNone: "Yok",

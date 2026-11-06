@@ -7060,6 +7060,7 @@ export default withEnglishFallback({
     jsonView: "Visão JSON",
     jsonViewRaw: "Original",
     jsonViewDecoded: "Decodificado",
+    looseJsonHint: "Não é JSON padrão. Exibido apenas com indentação e somente leitura aqui; mude para UTF-8 para editar.",
     rawContent: "Conteúdo bruto",
     wordWrap: "Quebra de linha",
     codecNone: "Nenhum",

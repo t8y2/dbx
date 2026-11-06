@@ -10144,37 +10144,37 @@ function openExternalUrl(url: string) {
                       </PopoverContent>
                     </Popover>
                   </div>
+                </template>
 
-                  <div class="grid grid-cols-4 items-start gap-4">
-                    <Label :class="connectionLabelTopClass">{{ t("connection.note") }}</Label>
-                    <div class="col-span-3 flex min-w-0 items-start gap-3">
-                      <textarea
-                        ref="noteTextareaRef"
-                        v-model="form.note"
-                        rows="1"
-                        class="min-h-8 min-w-0 flex-1 resize-none overflow-y-hidden rounded-md border border-input bg-transparent px-2.5 py-1 text-base leading-5 transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 md:text-sm"
-                        :placeholder="t('connection.notePlaceholder')"
-                        @input="resizeNoteTextarea"
-                      />
-                      <div class="mt-1.5 flex shrink-0 items-center gap-2">
-                        <div class="flex items-center gap-1">
-                          <Label for="connection-note-sidebar-visibility" class="text-sm font-normal text-muted-foreground">
-                            {{ t("connection.noteShow") }}
-                          </Label>
-                          <Tooltip>
-                            <TooltipTrigger as-child>
-                              <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
-                            </TooltipTrigger>
-                            <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
-                              {{ t("connection.noteShowInSidebar") }}
-                            </TooltipContent>
-                          </Tooltip>
-                        </div>
-                        <Switch id="connection-note-sidebar-visibility" v-model="showConnectionNotesInSidebar" :aria-label="t('connection.noteShowInSidebar')" />
+                <div class="grid grid-cols-4 items-start gap-4">
+                  <Label :class="connectionLabelTopClass">{{ t("connection.note") }}</Label>
+                  <div class="col-span-3 flex min-w-0 items-start gap-3">
+                    <textarea
+                      ref="noteTextareaRef"
+                      v-model="form.note"
+                      rows="1"
+                      class="min-h-8 min-w-0 flex-1 resize-none overflow-y-hidden rounded-md border border-input bg-transparent px-2.5 py-1 text-base leading-5 transition-colors outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 md:text-sm"
+                      :placeholder="t('connection.notePlaceholder')"
+                      @input="resizeNoteTextarea"
+                    />
+                    <div class="mt-1.5 flex shrink-0 items-center gap-2">
+                      <div class="flex items-center gap-1">
+                        <Label for="connection-note-sidebar-visibility" class="text-sm font-normal text-muted-foreground">
+                          {{ t("connection.noteShow") }}
+                        </Label>
+                        <Tooltip>
+                          <TooltipTrigger as-child>
+                            <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                          </TooltipTrigger>
+                          <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
+                            {{ t("connection.noteShowInSidebar") }}
+                          </TooltipContent>
+                        </Tooltip>
                       </div>
+                      <Switch id="connection-note-sidebar-visibility" v-model="showConnectionNotesInSidebar" :aria-label="t('connection.noteShowInSidebar')" />
                     </div>
                   </div>
-                </template>
+                </div>
               </div>
             </TabsContent>
 

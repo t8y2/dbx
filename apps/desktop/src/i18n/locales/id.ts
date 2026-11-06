@@ -8808,6 +8808,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabaseDescription: "Saat diaktifkan, database default akan muncul di bagian atas daftar database. Saat dinonaktifkan, akan diurutkan berdasarkan abjad.",
     sidebarBrowseObjectsOnDatabaseActivation: "Jelajahi objek saat mengaktifkan database",
     sidebarBrowseObjectsOnDatabaseActivationDescription: 'Jika diaktifkan, mengaktifkan node database atau skema menggunakan mode klik tunggal atau ganda yang dipilih juga membuka tab "Jelajahi Objek".',
+    sidebarAutoExpandOnDatabaseActivation: "Perluas bilah samping secara otomatis saat mengaktifkan basis data",
+    sidebarAutoExpandOnDatabaseActivationDescription: "Jika penelusuran objek saat aktivasi basis data diaktifkan, bilah samping juga diperluas dengan mode klik tunggal atau ganda yang dipilih. Jika dinonaktifkan, buka atau fokuskan Telusuri Objek dan pertahankan status perluasan bilah samping.",
     openTabsRestoreMode: "Pulihkan tab saat peluncuran",
     openTabsRestoreModeDescription: "Pilih bagaimana DBX memulihkan tab yang terbuka terakhir kali.",
     openTabsRestoreModeAll: "Simpan semua tab",

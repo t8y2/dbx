@@ -1,3 +1,8 @@
+const CLOSING_BRACKET: Record<string, string> = { "{": "}", "[": "]" };
+
+/** First character of an array's first entry: a value (container, string, number, true/false/null) or `]`. */
+const ARRAY_FIRST_ENTRY_START = /^[[{"\-\d\]tfn]$/;
+
 /**
  * Indent text that is shaped like JSON but is not valid JSON, for display only.
  *
@@ -8,117 +13,80 @@
  * so nothing in the value is changed or dropped. The result must never be
  * written back to a database.
  *
- * Returns null unless the text is a bracket-balanced object or array whose
- * first entry starts like JSON (a quoted key for objects), so plain text that
- * merely starts with `{` or `[` keeps its normal view.
+ * Returns null unless the text is one bracket-balanced object or array whose
+ * first entry starts like JSON (a quoted key for objects), so truncated values
+ * and plain text that merely starts with `{` or `[` keep their normal view.
  */
 export function formatLooseJsonText(text: string, indent = 2): string | null {
   const source = text.trim();
-  if (!isLooseJsonContainer(source)) return null;
+  if (!looksLikeJsonContainer(source)) return null;
 
   const unit = " ".repeat(indent);
+  const openClosers: string[] = [];
   let output = "";
-  let depth = 0;
   const newline = () => {
-    output += `\n${unit.repeat(depth)}`;
+    output += `\n${unit.repeat(openClosers.length)}`;
   };
 
   let index = 0;
   while (index < source.length) {
+    // Anything after the top-level container closes means this is not one value.
+    if (index > 0 && openClosers.length === 0) return null;
     const char = source[index];
-    if (char === '"' || char === "'") {
+
+    if (char === '"') {
       const end = stringLiteralEnd(source, index);
+      if (end < 0) return null;
       output += source.slice(index, end);
       index = end;
-      continue;
-    }
-    if (char === "{" || char === "[") {
-      output += char;
+    } else if (char === "{" || char === "[") {
+      const closer = CLOSING_BRACKET[char];
       const next = nextSignificantIndex(source, index + 1);
-      if (source[next] === (char === "{" ? "}" : "]")) {
-        output += source[next];
+      output += char;
+      if (source[next] === closer) {
+        output += closer;
         index = next + 1;
-        continue;
+      } else {
+        openClosers.push(closer);
+        newline();
+        index = next;
       }
-      depth += 1;
-      newline();
-      index = next;
-      continue;
-    }
-    if (char === "}" || char === "]") {
-      depth = Math.max(0, depth - 1);
+    } else if (char === "}" || char === "]") {
+      if (openClosers.pop() !== char) return null;
       output = output.trimEnd();
       newline();
       output += char;
       index += 1;
-      continue;
-    }
-    if (char === ",") {
+    } else if (char === ",") {
       output += ",";
       newline();
       index = nextSignificantIndex(source, index + 1);
-      continue;
-    }
-    if (char === ":") {
+    } else if (char === ":") {
       output += ": ";
       index = nextSignificantIndex(source, index + 1);
-      continue;
-    }
-    if (isJsonWhitespace(char)) {
+    } else {
+      if (!isJsonWhitespace(char)) output += char;
       index += 1;
-      continue;
     }
-    output += char;
-    index += 1;
   }
-  return output;
+  return openClosers.length === 0 ? output : null;
 }
 
-function isLooseJsonContainer(source: string): boolean {
-  const open = source[0];
-  const close = open === "{" ? "}" : open === "[" ? "]" : null;
-  if (!close || source[source.length - 1] !== close) return false;
-
+/** Cheap checks that reject plain and truncated text before any formatting work. */
+function looksLikeJsonContainer(source: string): boolean {
+  const closer = CLOSING_BRACKET[source[0]];
+  if (!closer || source[source.length - 1] !== closer) return false;
   const firstEntry = source[nextSignificantIndex(source, 1)];
-  if (open === "{" && firstEntry !== '"' && firstEntry !== "'" && firstEntry !== "}") return false;
-  if (open === "[" && !/^[[{"'\-\d\]tfn]$/.test(firstEntry ?? "")) return false;
-
-  // Brackets must balance outside string literals, otherwise the text is a
-  // truncated or unrelated value and indentation would only mislead.
-  const stack: string[] = [];
-  let index = 0;
-  while (index < source.length) {
-    const char = source[index];
-    if (char === '"' || char === "'") {
-      const end = stringLiteralEnd(source, index);
-      // An unterminated literal runs to the end, where the closing bracket is not a quote.
-      if (source[end - 1] !== char) return false;
-      index = end;
-      continue;
-    }
-    if (char === "{" || char === "[") stack.push(char === "{" ? "}" : "]");
-    else if ((char === "}" || char === "]") && stack.pop() !== char) return false;
-    index += 1;
-    // The top-level container must end at the last character.
-    if (stack.length === 0 && index < source.length) return false;
-  }
-  return stack.length === 0;
+  return source[0] === "{" ? firstEntry === '"' || firstEntry === "}" : ARRAY_FIRST_ENTRY_START.test(firstEntry);
 }
 
-/** Index just past the closing quote of the literal starting at `start`, or the text length if unterminated. */
+/** Index just past the closing quote of the string literal starting at `start`, or -1 if it is unterminated. */
 function stringLiteralEnd(source: string, start: number): number {
-  const quote = source[start];
-  let index = start + 1;
-  while (index < source.length) {
-    const char = source[index];
-    if (char === "\\") {
-      index += 2;
-      continue;
-    }
-    if (char === quote) return index + 1;
-    index += 1;
+  for (let index = start + 1; index < source.length; index += 1) {
+    if (source[index] === "\\") index += 1;
+    else if (source[index] === '"') return index + 1;
   }
-  return source.length;
+  return -1;
 }
 
 function nextSignificantIndex(source: string, start: number): number {

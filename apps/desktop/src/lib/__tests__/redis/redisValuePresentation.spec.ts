@@ -298,7 +298,7 @@ describe("redisValuePresentation", () => {
     const detail = formatRedisMemberDetail(value, { allowJsonText: true });
 
     expect(detail.json).toBeUndefined();
-    expect(detail.looseJson?.formattedText).toBe(["[", "  {", '    "@type": "SysDictData",', '    "dictCode": 1L,', '    "roles": Set[', '      "admin"', "    ]", "  }", "]"].join("\n"));
+    expect(detail.looseJsonText).toBe(["[", "  {", '    "@type": "SysDictData",', '    "dictCode": 1L,', '    "roles": Set[', '      "admin"', "    ]", "  }", "]"].join("\n"));
     expect(detail.rawText).toBe('[{"@type":"SysDictData","dictCode":1L,"roles":Set["admin"]}]');
     expect(autoRedisValueFormat(detail, null)).toBe("json");
     // YAML/XML and editing need a parsed value, which loose text does not have.
@@ -311,7 +311,7 @@ describe("redisValuePresentation", () => {
     ["an unbalanced value", '[{"dictCode":1L}', { allowJsonText: true }],
     ["a list row preview", '[{"dictCode":1L}]', {}],
   ])("does not mark %s as loose JSON", (_, value, options) => {
-    expect(formatRedisMemberDetail(value, options).looseJson).toBeUndefined();
+    expect(formatRedisMemberDetail(value, options).looseJsonText).toBeUndefined();
   });
 
   it("lets a pinned format preference win over JSON detection", () => {

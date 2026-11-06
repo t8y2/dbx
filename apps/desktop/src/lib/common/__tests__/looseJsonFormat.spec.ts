@@ -34,7 +34,7 @@ describe("formatLooseJsonText", () => {
     ["brackets and separators inside strings", '{"text":"a, b: [c] {d}","n":1L}', ["{", '  "text": "a, b: [c] {d}",', '  "n": 1L', "}"]],
     ["escaped quotes inside strings", '{"q":"say \\"hi\\", ok","n":1L}', ["{", '  "q": "say \\"hi\\", ok",', '  "n": 1L', "}"]],
     ["whitespace inside strings", '{ "s" : "  two  spaces  " , "n" : 1L }', ["{", '  "s": "  two  spaces  ",', '  "n": 1L', "}"]],
-    ["single-quoted keys", "{'n':1L}", ["{", "  'n': 1L", "}"]],
+    ["an escaped backslash before a closing quote", '{"p":"C:\\\\","n":1L}', ["{", '  "p": "C:\\\\",', '  "n": 1L', "}"]],
     ["a trailing comma", '{"n":1L,}', ["{", '  "n": 1L,', "}"]],
     ["already indented text", '{\n    "n": 1L,\n    "m": [ ]\n}', ["{", '  "n": 1L,', '  "m": []', "}"]],
   ])("keeps %s intact", (_, source, expected) => {

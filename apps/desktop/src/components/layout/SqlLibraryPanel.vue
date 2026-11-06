@@ -45,6 +45,7 @@ import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.v
 import HelpTooltip from "@/components/ui/tooltip/HelpTooltip.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import SqlLibrarySearchSnippet from "@/components/layout/SqlLibrarySearchSnippet.vue";
+import SqlFileInteractionSettingsDialog from "@/components/layout/SqlFileInteractionSettingsDialog.vue";
 import type { SavedSqlLineMatch } from "@/lib/savedSql/savedSqlSearch";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -107,6 +108,7 @@ const searchMode = useSqlPanelSearchMode("library");
 const loadingSearchContent = ref(false);
 const unloadedSearchFiles = computed(() => savedSqlStore.allFiles.filter((file) => file.sqlLoaded === false));
 const contentSearchActive = computed(() => searchMode.value === "content" && !!searchQuery.value);
+let lastClickedKey: string | null = null;
 
 async function loadSearchContent() {
   if (searchInputPending.value || loadingSearchContent.value || !contentSearchActive.value || unloadedSearchFiles.value.length === 0) return;
@@ -123,6 +125,7 @@ async function loadSearchContent() {
 watch(
   () => [searchMode.value, searchQuery.value, searchInputPending.value, unloadedSearchFiles.value.map((file) => file.id).join("\n")],
   () => {
+    lastClickedKey = null;
     void loadSearchContent();
   },
 );
@@ -132,7 +135,6 @@ const sortMode = ref<"folder" | "date">("folder");
 const interactionSettingsOpen = ref(false);
 const openMode = useSqlFileOpenMode();
 const openModeDraft = ref<SqlFileOpenMode>(openMode.value);
-let lastClickedKey: string | null = null;
 
 function openInteractionSettings() {
   openModeDraft.value = openMode.value;
@@ -571,6 +573,7 @@ const libraryTree = ref<HTMLElement | null>(null);
 const currentSavedSqlFile = computed(() => (activeSavedSqlId.value ? savedSqlStore.getFile(activeSavedSqlId.value) : undefined));
 
 async function locateFile(fileId: string) {
+  lastClickedKey = null;
   const file = savedSqlStore.getFile(fileId);
   if (!file) return;
   if (searchInputPending.value || !treeRows.value.some((row) => row.type === "file" && row.file.id === file.id)) {
@@ -786,6 +789,7 @@ function clearSelection() {
 
 function clearPanelSelection() {
   clearSelection();
+  lastClickedKey = null;
   activeItemId.value = null;
   activeItemType.value = null;
 }
@@ -1042,6 +1046,7 @@ async function openFile(file: SavedSqlFile, targetMode?: SavedSqlOpenTargetMode,
 
 function handleMatchClick(file: SavedSqlFile, match: SavedSqlLineMatch) {
   if (suppressNextRowClick.value) return;
+  lastClickedKey = null;
   const currentIndex = allSelectableItems.value.findIndex((item) => item.type === "file" && item.id === file.id);
   if (currentIndex >= 0) {
     clearSelection();
@@ -1884,24 +1889,7 @@ defineExpose({
       </CustomContextMenu>
     </div>
 
-    <Dialog v-model:open="interactionSettingsOpen">
-      <DialogContent class="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>{{ t("sqlFileTree.panelSettings") }}</DialogTitle>
-        </DialogHeader>
-        <div class="grid gap-2 py-2">
-          <label for="sql-library-open-mode" class="text-sm font-medium">{{ t("sqlFileTree.openMode") }}</label>
-          <select id="sql-library-open-mode" v-model="openModeDraft" class="h-8 rounded-md border border-input bg-background px-2 text-sm">
-            <option value="single">{{ t("sqlFileTree.openModeSingle") }}</option>
-            <option value="double">{{ t("sqlFileTree.openModeDouble") }}</option>
-          </select>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" size="sm" @click="interactionSettingsOpen = false">{{ t("common.cancel") }}</Button>
-          <Button size="sm" @click="saveInteractionSettings">{{ t("common.save") }}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <SqlFileInteractionSettingsDialog v-model:open="interactionSettingsOpen" v-model:open-mode="openModeDraft" open-mode-id="sql-library-open-mode" @save="saveInteractionSettings" />
 
     <Dialog v-model:open="showDeleteConfirm">
       <DialogContent class="sm:max-w-[380px]">

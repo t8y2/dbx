@@ -36,6 +36,7 @@ import { orderedListSelectionIntent, type OrderedListSelectionItem } from "@/lib
 import { saveSqlFileOpenMode, useSqlFileOpenMode, type SqlFileOpenMode } from "@/lib/sqlFile/sqlFileInteraction";
 import { getSqlFileOrder, saveSqlFileOrder, reorderSqlFiles, remapSqlFileOrder, sqlFileParentPath, type SqlFileOrder } from "@/lib/sqlFile/sqlFileOrder";
 import { useSqlFileReorder } from "@/composables/useSqlFileReorder";
+import SqlFileInteractionSettingsDialog from "@/components/layout/SqlFileInteractionSettingsDialog.vue";
 
 const props = defineProps<{ locateRequest?: { id: number; path: string } | null }>();
 
@@ -136,6 +137,7 @@ const userCollapsedDuringSearch = ref<Set<string>>(new Set());
 
 watch([searchQuery, searchMode], () => {
   userCollapsedDuringSearch.value.clear();
+  lastClickedKey = null;
 });
 
 function setSortOrder(order: SqlFileSortOrder) {
@@ -210,6 +212,7 @@ function findFileTarget(filePath: string) {
 }
 
 async function locateFileTarget(path: string) {
+  lastClickedKey = null;
   if (disposed) return;
   const target = findFileTarget(path);
   if (!target) return;
@@ -314,6 +317,7 @@ async function locateCurrentFile() {
 }
 
 async function locateFile(path: string) {
+  lastClickedKey = null;
   if (disposed) return;
   if (findFileTarget(path)) {
     await locateFileTarget(path);
@@ -624,6 +628,7 @@ async function openFile(path: string, reveal?: { line: number; column: number })
 }
 
 function handleSearchMatch(rootPath: string, path: string, match: SavedSqlLineMatch) {
+  lastClickedKey = null;
   const key = nodeKey(rootPath, "file", path);
   selectedKeys.value = new Set();
   activeKey.value = key;
@@ -929,7 +934,10 @@ function handlePathClick(rootPath: string, path: string, type: NodeKind, event: 
 
 function handlePanelClick(event: MouseEvent) {
   const target = event.target as HTMLElement | null;
-  if (!target?.closest("[data-sql-file-row='true']")) clearSelection();
+  if (!target?.closest("[data-sql-file-row='true']")) {
+    clearSelection();
+    lastClickedKey = null;
+  }
 }
 
 function normalizedSqlFileName(name: string) {
@@ -1530,28 +1538,12 @@ function clearContextTarget() {
       </template>
     </CustomContextMenu>
 
-    <Dialog v-model:open="filterSettingsOpen">
-      <DialogContent class="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>{{ t("sqlFileTree.panelSettings") }}</DialogTitle>
-        </DialogHeader>
-        <div class="grid gap-2 py-2">
-          <Label for="sql-file-open-mode">{{ t("sqlFileTree.openMode") }}</Label>
-          <select id="sql-file-open-mode" v-model="openModeDraft" class="h-8 rounded-md border border-input bg-background px-2 text-sm">
-            <option value="single">{{ t("sqlFileTree.openModeSingle") }}</option>
-            <option value="double">{{ t("sqlFileTree.openModeDouble") }}</option>
-          </select>
-          <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.keyboardHelp") }}</p>
-          <Label for="sql-file-filter">{{ t("sqlFileTree.fileFilter") }}</Label>
-          <Input id="sql-file-filter" v-model="fileFilterDraft" :placeholder="t('sqlFileTree.fileFilterPlaceholder')" @keydown.enter="saveFileFilter" />
-          <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.fileFilterHint", { regex: fileFilterRegexExample }) }}</p>
-        </div>
-        <DialogFooter>
-          <Button type="button" variant="outline" @click="filterSettingsOpen = false">{{ t("common.cancel") }}</Button>
-          <Button type="button" @click="saveFileFilter">{{ t("common.save") }}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <SqlFileInteractionSettingsDialog v-model:open="filterSettingsOpen" v-model:open-mode="openModeDraft" @save="saveFileFilter">
+      <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.keyboardHelp") }}</p>
+      <Label for="sql-file-filter">{{ t("sqlFileTree.fileFilter") }}</Label>
+      <Input id="sql-file-filter" v-model="fileFilterDraft" :placeholder="t('sqlFileTree.fileFilterPlaceholder')" @keydown.enter="saveFileFilter" />
+      <p class="text-xs text-muted-foreground">{{ t("sqlFileTree.fileFilterHint", { regex: fileFilterRegexExample }) }}</p>
+    </SqlFileInteractionSettingsDialog>
 
     <Dialog :open="showCreateDialog" @update:open="(open) => (showCreateDialog = open)">
       <DialogContent class="sm:max-w-[380px]">

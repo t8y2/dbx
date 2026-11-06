@@ -20,7 +20,16 @@ vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast
 vi.mock("@/stores/productionSafetyStore", () => ({ useProductionSafetyStore: () => ({ requestConfirmation: mocks.requestConfirmation }) }));
 vi.mock("@/composables/useSqlHighlighter", () => ({ useSqlHighlighter: () => ({ highlight: (sql: string) => sql }) }));
 vi.mock("@/lib/tabs/tabUiState", () => ({ useTabUiState: () => ({ initialState: {}, track: vi.fn() }) }));
-vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ ensureConnected: mocks.ensureConnected, retirePasswordAfterChange: mocks.retirePasswordAfterChange }) }));
+vi.mock("@/stores/connectionStore", () => ({
+  useConnectionStore: () => ({
+    ensureConnected: mocks.ensureConnected,
+    retirePasswordAfterChange: mocks.retirePasswordAfterChange,
+    readVisibleSchemaSelection: async (id: string, database: string) => {
+      const names = await mocks.listSchemas(id, database);
+      return { names, visibleNames: names, infos: [], systemNames: new Set<string>(), oracleMaintainedSchemas: undefined };
+    },
+  }),
+}));
 vi.mock("@/lib/backend/api", () => ({ executeQuery: mocks.executeQuery, executeMulti: mocks.executeMulti, listSchemas: mocks.listSchemas, listDatabases: mocks.listDatabases }));
 vi.mock("@/components/ui/button", () => ({
   Button: defineComponent({

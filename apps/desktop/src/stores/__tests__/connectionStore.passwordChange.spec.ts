@@ -195,8 +195,15 @@ describe("connectionStore password retirement", () => {
 
       if (reconnect !== "none") {
         requestPassword.mockResolvedValueOnce({ password: "fixture-new", rememberPassword: reconnect === "remembered" });
-        await store.connect(unsaved);
+        const fresh = store.connect(unsaved);
+        await vi.waitFor(() => expect(api.connectDb).toHaveBeenLastCalledWith(expect.objectContaining({ password: "fixture-new" }), expect.any(Number)));
+        if (reconnect === "remembered") {
+          expect(store.getConfig(config.id)).toMatchObject({ password: "", save_password: false });
+          oldSave.resolve();
+        }
+        await fresh;
         expect(api.connectDb).toHaveBeenLastCalledWith(expect.objectContaining({ password: "fixture-new" }), expect.any(Number));
+        if (reconnect === "remembered") expect(store.getConfig(config.id)).toMatchObject({ password: "fixture-new", save_password: true });
       }
       const current = store.connections.map((connection) => ({ ...connection }));
       const active = store.activeConnectionId;

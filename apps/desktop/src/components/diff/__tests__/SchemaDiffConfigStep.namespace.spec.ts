@@ -10,10 +10,15 @@ const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn().mockResolvedValue(undefined),
   listDatabases: vi.fn().mockResolvedValue([]),
   listSchemas: vi.fn().mockResolvedValue(["APP", "REPORTING"]),
+  readVisibleSchemaSelection: vi.fn(),
   executeQuery: vi.fn().mockResolvedValue({ rows: [] }),
 }));
 
 vi.mock("@/stores/connectionStore", () => {
+  mocks.readVisibleSchemaSelection.mockImplementation(async (id: string, database: string) => {
+    const names = await mocks.listSchemas(id, database, true);
+    return { names, visibleNames: names, infos: [], systemNames: new Set<string>(), oracleMaintainedSchemas: undefined };
+  });
   const connection = { id: "oracle-11g", name: "Oracle 11g", db_type: "oracle", driver_profile: "oracle", database: "XE" };
   const connections = [connection, { id: "pg-1", name: "PostgreSQL 1", db_type: "postgres" }, { id: "pg-2", name: "PostgreSQL 2", db_type: "postgres" }];
   return {
@@ -22,6 +27,8 @@ vi.mock("@/stores/connectionStore", () => {
       sidebarLayout: { groups: [], order: connections.map(({ id }) => ({ type: "connection", id })) },
       getConfig: (id: string) => connections.find((item) => item.id === id),
       ensureConnected: mocks.ensureConnected,
+      completionCacheRevision: () => 0,
+      readVisibleSchemaSelection: mocks.readVisibleSchemaSelection,
     }),
   };
 });
@@ -135,7 +142,7 @@ it("offers Oracle schemas as schema-diff database choices", async () => {
   const options = [...document.querySelectorAll<HTMLButtonElement>(".dbx-searchable-select-list button")].map((button) => button.textContent?.trim());
   expect(options).toEqual(expect.arrayContaining(["APP", "REPORTING"]));
   expect(mocks.listDatabases).not.toHaveBeenCalled();
-  expect(mocks.listSchemas).toHaveBeenCalledWith("oracle-11g", "XE", true);
+  expect(mocks.readVisibleSchemaSelection).toHaveBeenCalledWith("oracle-11g", "XE");
 });
 
 it.each(["source", "target"] as const)("keeps pending %s database choices when the user selects another schema", async (side) => {

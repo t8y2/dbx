@@ -7324,9 +7324,9 @@ export const useConnectionStore = defineStore("connection", () => {
           relationalNavigationDiscovery.delete(node.id);
 
           if (config?.db_type === "duckdb") {
-            const cacheKey = schemaCacheKey(connectionId, "duckdb-root-visibility-v1", JSON.stringify(config.schema_visibility?.databases.main) ?? "legacy");
+            const cacheKey = () => schemaCacheKey(connectionId, "duckdb-root-visibility-v1", JSON.stringify(getConfig(connectionId)?.schema_visibility?.databases.main) ?? "legacy");
             if (!needsSchemaMigration && !options?.force) {
-              const cached = await loadPersistedTreeChildren(node, cacheKey, load, { freshOnly: options?.background, background: options?.background });
+              const cached = await loadPersistedTreeChildren(node, cacheKey(), load, { freshOnly: options?.background, background: options?.background });
               if (cached.hit) {
                 if (cached.isStale) refreshStaleTreeNode(node);
                 else scheduleMissingPrimaryVisibleObjectNamesRefresh(connectionId, config, options);
@@ -7347,12 +7347,12 @@ export const useConnectionStore = defineStore("connection", () => {
             if (!targetNode) return;
             recordPrimaryVisibleObjectNames(connectionId, databaseNames);
             setChildren(targetNode, children, { trustEmptyConnectionChildren: databaseNames.length > 0 && visibleNames.length === 0 });
-            await savePersistedConnectionTreeChildren(cacheKey, targetNode.children || children);
+            await savePersistedConnectionTreeChildren(cacheKey(), targetNode.children || children);
           } else if (config && connectionUsesVisibleSchemaFilter(config)) {
             const effectiveDb = config.database || "";
-            const cacheKey = schemaCacheKey(connectionId, effectiveDb, "schemas-visibility-v1", JSON.stringify(config.schema_visibility?.databases[effectiveDb]) ?? "legacy");
+            const cacheKey = () => schemaCacheKey(connectionId, effectiveDb, "schemas-visibility-v1", JSON.stringify(getConfig(connectionId)?.schema_visibility?.databases[effectiveDb]) ?? "legacy");
             if (!needsSchemaMigration && !options?.force) {
-              const cached = await loadPersistedTreeChildren(node, cacheKey, load, { freshOnly: options?.background, background: options?.background });
+              const cached = await loadPersistedTreeChildren(node, cacheKey(), load, { freshOnly: options?.background, background: options?.background });
               if (cached.hit) {
                 if (cached.isStale) refreshStaleTreeNode(node);
                 else scheduleMissingPrimaryVisibleObjectNamesRefresh(connectionId, config, options);
@@ -7378,7 +7378,7 @@ export const useConnectionStore = defineStore("connection", () => {
             if (!targetNode) return;
             recordPrimaryVisibleObjectNames(connectionId, schemas);
             setChildren(targetNode, withSavedSqlRoot(connectionId, schemaNodes, targetNode), { trustEmptyConnectionChildren: schemas.length > 0 && visibleSchemas.length === 0 });
-            await savePersistedConnectionTreeChildren(cacheKey, targetNode.children || schemaNodes);
+            await savePersistedConnectionTreeChildren(cacheKey(), targetNode.children || schemaNodes);
           } else {
             // Doris / StarRocks multi-catalog: when external catalogs exist,
             // render a catalog grouping layer (catalog → database → tables).
@@ -7483,6 +7483,7 @@ export const useConnectionStore = defineStore("connection", () => {
           }
           if (options?.force && !options.background) void loadSidebarDatabaseStorage(connectionId, { force: true });
         } catch (e) {
+          if (isSupersededConnectionAttempt(e) && !treeNodeLoadTarget(load)) return;
           recordMetadataLoadError(connectionId, e, load);
           throw e;
         } finally {
@@ -8122,9 +8123,9 @@ export const useConnectionStore = defineStore("connection", () => {
           const schemaCacheBase = effectiveDatabaseTypeForConnection(config) === "oracle" ? "schemas-v6-oracle-maintained" : supportsOracleDatabaseLinks(effectiveDatabaseTypeForConnection(config)) ? "schemas-v3-schema-navigation-v1" : config?.db_type === "xugu" ? "schemas-v5" : "schemas-v3";
           relationalNavigationDiscovery.delete(node.id);
           const cacheVersion = ownerAwareMetadataCacheVersion(config, schemaCacheBase);
-          const cacheKey = schemaCacheKey(connectionId, database, `${cacheVersion}-visibility-v1`, showSystemSchemas ? "show-system" : "hide-system", JSON.stringify(config?.schema_visibility?.databases[schemaVisibilityDatabaseKey(config, database)]) ?? "legacy");
+          const cacheKey = () => schemaCacheKey(connectionId, database, `${cacheVersion}-visibility-v1`, showSystemSchemas ? "show-system" : "hide-system", JSON.stringify(getConfig(connectionId)?.schema_visibility?.databases[schemaVisibilityDatabaseKey(config, database)]) ?? "legacy");
           if (!needsMigration && !options?.force) {
-            const cached = await loadPersistedTreeChildren(node, cacheKey, load, { freshOnly: options?.background, background: options?.background });
+            const cached = await loadPersistedTreeChildren(node, cacheKey(), load, { freshOnly: options?.background, background: options?.background });
             if (cached.hit) {
               if (cached.isStale) refreshStaleTreeNode(node);
               return;
@@ -8179,13 +8180,14 @@ export const useConnectionStore = defineStore("connection", () => {
           const targetNode = treeNodeLoadTarget(load);
           if (!targetNode) return;
           setChildren(targetNode, children);
-          await savePersistedTreeChildren(cacheKey, children);
+          await savePersistedTreeChildren(cacheKey(), children);
           const currentTargetNode = treeNodeLoadTarget(load);
           if (currentTargetNode) {
             if (!options?.background) currentTargetNode.isExpanded = true;
             await markRelationalNavigationDiscovered(currentTargetNode);
           }
         } catch (e) {
+          if (isSupersededConnectionAttempt(e) && !treeNodeLoadTarget(load)) return;
           recordMetadataLoadError(connectionId, e, load);
           throw e;
         } finally {
@@ -8210,10 +8212,10 @@ export const useConnectionStore = defineStore("connection", () => {
       const needsMigration = needsPersistentSchemaMigration(config, database);
       if (!needsMigration && useCachedChildren(node, options, load)) return;
       const showSystemSchemas = config?.show_system_schemas === true;
-      const cacheKey = schemaCacheKey(connectionId, database, "sqlserver-schemas-v6-visibility", showSystemSchemas ? "show-system" : "hide-system", JSON.stringify(config?.schema_visibility?.databases[database]) ?? "legacy");
+      const cacheKey = () => schemaCacheKey(connectionId, database, "sqlserver-schemas-v6-visibility", showSystemSchemas ? "show-system" : "hide-system", JSON.stringify(getConfig(connectionId)?.schema_visibility?.databases[database]) ?? "legacy");
       relationalNavigationDiscovery.delete(node.id);
       if (!needsMigration && !options?.force) {
-        const cached = await loadPersistedTreeChildren(node, cacheKey, load, { freshOnly: options?.background, background: options?.background });
+        const cached = await loadPersistedTreeChildren(node, cacheKey(), load, { freshOnly: options?.background, background: options?.background });
         if (cached.hit) {
           if (cached.isStale) refreshStaleTreeNode(node);
           return;
@@ -8225,13 +8227,14 @@ export const useConnectionStore = defineStore("connection", () => {
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
       setChildren(targetNode, children);
-      await savePersistedTreeChildren(cacheKey, children);
+      await savePersistedTreeChildren(cacheKey(), children);
       const currentTargetNode = treeNodeLoadTarget(load);
       if (currentTargetNode) {
         if (!options?.background) currentTargetNode.isExpanded = true;
         await markRelationalNavigationDiscovered(currentTargetNode);
       }
     } catch (e) {
+      if (isSupersededConnectionAttempt(e) && !treeNodeLoadTarget(load)) return;
       recordMetadataLoadError(connectionId, e, load);
       throw e;
     } finally {

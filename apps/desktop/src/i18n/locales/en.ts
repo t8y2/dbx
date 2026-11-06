@@ -9935,6 +9935,8 @@ export default {
       sequenceLastValues: "Compare sequence last values",
       compareColumnOrder: "Compare column order",
       compareCharset: "Compare character sets and collations",
+      compareCharsetHelp: "When disabled, existing columns retain their target character set and collation; new columns and tables inherit target defaults.",
+      charsetSyncDisabled: "Character set sync is off: existing columns retain target settings; new objects inherit target defaults.",
       ignoreTableNameCase: "Ignore table name case",
       ignoreColumnNameCase: "Ignore column name case",
       refreshMetadata: "Refresh metadata before comparing",

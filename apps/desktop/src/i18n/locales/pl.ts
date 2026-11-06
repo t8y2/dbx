@@ -8189,6 +8189,8 @@ export default withEnglishFallback({
       sequenceLastValues: "Porównuj ostatnie wartości sekwencji",
       compareColumnOrder: "Porównuj kolejność kolumn",
       compareCharset: "Porównuj zestawy znaków i collations",
+      compareCharsetHelp: "Po wyłączeniu istniejące kolumny zachowują zestaw znaków i porządek sortowania celu; nowe kolumny i tabele dziedziczą domyślne ustawienia celu.",
+      charsetSyncDisabled: "Synchronizacja zestawów znaków wyłączona: istniejące kolumny zachowują ustawienia celu; nowe obiekty dziedziczą ustawienia domyślne celu.",
       ignoreTableNameCase: "Ignoruj wielkość liter w nazwach tabel",
       ignoreColumnNameCase: "Ignoruj wielkość liter w nazwach kolumn",
       refreshMetadata: "Odśwież metadane przed porównaniem",

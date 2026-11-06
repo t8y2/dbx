@@ -7658,6 +7658,8 @@ export default withEnglishFallback({
       batchPatterns: "資料表模式（逗號分隔）",
       dialectAuto: "自動",
       refreshMetadata: "比較前重新整理中繼資料",
+      compareCharsetHelp: "關閉後：現有欄位保留目標字元集與排序規則，新增欄位或資料表則繼承目標預設設定。",
+      charsetSyncDisabled: "字元集同步已關閉：現有欄位保留目標設定，新增物件繼承目標預設值。",
     },
   },
   tableMultiSelect: {

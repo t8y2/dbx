@@ -8141,6 +8141,8 @@ export default withEnglishFallback({
       sequenceLastValues: "Bandingkan nilai terakhir sequence",
       compareColumnOrder: "Bandingkan urutan kolom",
       compareCharset: "Bandingkan character set dan collation",
+      compareCharsetHelp: "Jika dinonaktifkan, kolom yang ada mempertahankan set karakter dan kolasi target; kolom dan tabel baru mewarisi default target.",
+      charsetSyncDisabled: "Sinkronisasi set karakter nonaktif: kolom yang ada mempertahankan pengaturan target; objek baru mewarisi default target.",
       ignoreTableNameCase: "Abaikan huruf besar/kecil pada nama tabel",
       ignoreColumnNameCase: "Abaikan huruf besar/kecil pada nama kolom",
       refreshMetadata: "Muat ulang metadata sebelum membandingkan",

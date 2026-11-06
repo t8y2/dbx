@@ -1096,6 +1096,7 @@ function buildSchemaSyncPlanOptions(options: SchemaDiffCompareOptions) {
   const engineDbType = targetEngineDbType.value ?? getDbType();
   return {
     databaseType: engineDbType,
+    compareCharset: options.compareCharset,
     targetSchema: schemaDiffDeployTargetSchema(getDbType(), targetDatabase.value, targetSchema.value),
     cascadeDelete: options.cascadeDelete,
     sourceDialect: options.sourceDialect ? normalizeDialectKind(options.sourceDialect) : sourceEngineDbType.value ? databaseTypeToDialectKind(sourceEngineDbType.value) : undefined,
@@ -1844,6 +1845,7 @@ const targetConnectionInfo = computed(() => {
                     :target-db-type="targetDbType"
                     :deploy-sql="focusedDeploySql"
                     :deploy-sql-all="selectedDeploySql"
+                    :charset-sync-disabled="['mysql', 'goldendb'].includes(targetEngineDbType ?? '') && schemaDiffPanelOptions.compareCharset === false"
                     :rollback-forward-sql="selectedForwardDeploySql"
                     :compatibility-warnings="selectedCompatibilityWarnings"
                     :rollback-sql="rollbackSql"

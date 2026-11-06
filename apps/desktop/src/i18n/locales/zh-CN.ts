@@ -9901,6 +9901,8 @@ export default withEnglishFallback({
       sequenceLastValues: "比较序列最后值",
       compareColumnOrder: "比较字段顺序",
       compareCharset: "比较字符集和排序规则",
+      compareCharsetHelp: "关闭后：已有字段保留目标字符集和排序规则，新增字段或表继承目标默认设置。",
+      charsetSyncDisabled: "字符集同步已关闭：已有字段保留目标设置，新增对象继承目标默认值。",
       ignoreTableNameCase: "忽略表名大小写",
       ignoreColumnNameCase: "忽略字段名大小写",
       refreshMetadata: "比较前刷新元数据",

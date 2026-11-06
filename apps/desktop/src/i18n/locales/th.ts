@@ -10475,6 +10475,8 @@ export default withEnglishFallback({
       sequenceLastValues: "เปรียบเทียบค่าล่าสุดของ Sequence",
       compareColumnOrder: "เปรียบเทียบลำดับคอลัมน์",
       compareCharset: "เปรียบเทียบชุดอักขระและ Collation",
+      compareCharsetHelp: "เมื่อปิดใช้งาน คอลัมน์เดิมจะคงชุดอักขระและการเรียงลำดับของปลายทาง ส่วนคอลัมน์และตารางใหม่จะใช้ค่าเริ่มต้นของปลายทาง",
+      charsetSyncDisabled: "ปิดการซิงค์ชุดอักขระ: คอลัมน์เดิมคงการตั้งค่าปลายทาง ส่วนวัตถุใหม่ใช้ค่าเริ่มต้นของปลายทาง",
       ignoreTableNameCase: "ละเว้นตัวพิมพ์เล็กใหญ่ของชื่อตาราง",
       ignoreColumnNameCase: "ละเว้นตัวพิมพ์เล็กใหญ่ของชื่อคอลัมน์",
       refreshMetadata: "รีเฟรชเมทาดาทาก่อนเปรียบเทียบ",

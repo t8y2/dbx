@@ -8554,6 +8554,8 @@ export default withEnglishFallback({
       batchPatterns: "テーブルパターン（カンマ区切り）",
       dialectAuto: "自動",
       refreshMetadata: "比較前にメタデータを更新",
+      compareCharsetHelp: "オフの場合：既存のフィールドはターゲットの文字セットと照合順序を保持し、新しいフィールドまたはテーブルはターゲットのデフォルト設定を継承します。",
+      charsetSyncDisabled: "文字セットの同期はオフです：既存のフィールドはターゲット設定を保持し、新しいオブジェクトはターゲットのデフォルト値を継承します。",
     },
   },
   tableMultiSelect: {

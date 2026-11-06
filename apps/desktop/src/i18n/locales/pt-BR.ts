@@ -8533,6 +8533,8 @@ export default withEnglishFallback({
       batchPatterns: "Padrões de tabela (separados por vírgula)",
       dialectAuto: "automático",
       refreshMetadata: "Atualizar metadados antes da comparação",
+      compareCharsetHelp: "Quando desativado: os campos existentes mantêm o conjunto de caracteres e a collation de destino, e os campos ou tabelas novos herdam as configurações padrão de destino.",
+      charsetSyncDisabled: "A sincronização de conjunto de caracteres está desativada: os campos existentes mantêm as configurações de destino e os novos objetos herdam os valores padrão de destino.",
     },
   },
   tableMultiSelect: {

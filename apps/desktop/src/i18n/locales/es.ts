@@ -8743,6 +8743,8 @@ export default withEnglishFallback({
       sequenceLastValues: "Compare sequence last values",
       compareColumnOrder: "Compare column order",
       compareCharset: "Comparar conjuntos de caracteres y collations",
+      compareCharsetHelp: "Al desactivar esta opción, las columnas existentes conservan el juego de caracteres y la intercalación de destino; las columnas y tablas nuevas heredan los valores predeterminados del destino.",
+      charsetSyncDisabled: "Sincronización de juegos de caracteres desactivada: se conservan los ajustes de destino y los objetos nuevos heredan sus valores predeterminados.",
       ignoreTableNameCase: "Ignorar mayúsculas y minúsculas del nombre de la tabla",
       ignoreColumnNameCase: "Ignorar mayúsculas y minúsculas del nombre de la columna",
       refreshMetadata: "Actualizar metadatos antes de comparar",

@@ -565,10 +565,11 @@ mod tests {
         bridge_request_is_local_client, clear_mcp_sql_approvals, effective_database_execution_policy,
         ensure_connection_in_mcp_scope, ensure_mcp_connection_sql_write_allowed, ensure_mcp_execute_and_show_supported,
         ensure_mcp_mongo_pipeline_target_allowed_by_id, ensure_mcp_sql_database_switch_allowed,
-        is_terminal_routed_exec, mongo_filter_is_effectively_unbounded, mongo_pipeline_has_write_stage,
-        parse_content_length, plugin_connection_summaries, plugin_connection_summary, read_bridge_request,
-        resolve_call_plugin_target, resolve_connection, resolve_mongo_database, resolve_mongo_target_values,
-        sql_approvals, take_sql_approval, write_port_file, AppState, SqlApprovalGrant, TimedSqlApproval,
+        ensure_mcp_sql_file_attachment_allowed, is_terminal_routed_exec, mongo_filter_is_effectively_unbounded,
+        mongo_pipeline_has_write_stage, parse_content_length, plugin_connection_summaries, plugin_connection_summary,
+        read_bridge_request, resolve_call_plugin_target, resolve_connection, resolve_mongo_database,
+        resolve_mongo_target_values, sql_approvals, take_sql_approval, write_port_file, AppState, SqlApprovalGrant,
+        TimedSqlApproval,
     };
     use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
     use dbx_core::storage::{McpConnectionPolicy, McpDatabasePolicy, McpDatabaseScope, McpGlobalPolicy};
@@ -987,12 +988,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn resolve_connection_rejects_the_configuration_database() {
+        let root = std::env::temp_dir().join(format!(
+            "dbx-mcp-bridge-config-db-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let storage_path = root.join("dbx.db");
+        let storage = dbx_core::persistence::test_storage::open(&storage_path).await.unwrap();
+
+        let sqlite_config = |id: &str, host: &std::path::Path| {
+            serde_json::from_value::<ConnectionConfig>(serde_json::json!({
+                "id": id,
+                "name": id,
+                "db_type": "sqlite",
+                "host": host.to_string_lossy(),
+                "port": 0,
+                "username": "",
+                "password": "",
+                "database": "main",
+            }))
+            .unwrap()
+        };
+        let protected = sqlite_config("protected", &storage_path);
+        let mut attached = sqlite_config("attached", &root.join("sibling.db"));
+        attached.attached_databases = vec![dbx_core::models::connection::AttachedDatabaseConfig {
+            name: "cfg".to_string(),
+            path: storage_path.to_string_lossy().into_owned(),
+        }];
+        let allowed = sqlite_config("allowed", &root.join("sibling.db"));
+        storage.save_connections(&[protected, attached, allowed]).await.unwrap();
+        let state = Arc::new(AppState::new_with_plugin_dir(storage, root.join("plugins")));
+
+        // A desktop-saved connection to the configuration database is refused by
+        // id and by name; a sibling SQLite database keeps working.
+        let error = resolve_connection(&state, Some("protected"), "").await.unwrap_err();
+        assert!(error.starts_with("CONFIG_DB_PATH_FORBIDDEN:"), "{error}");
+        let error = resolve_connection(&state, None, "attached").await.unwrap_err();
+        assert!(error.starts_with("CONFIG_DB_PATH_FORBIDDEN:"), "{error}");
+        assert!(resolve_connection(&state, Some("allowed"), "").await.is_ok());
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
-    fn mcp_sql_rejects_persistent_database_switches() {
+    fn mcp_sql_rejects_persistent_database_switches_and_file_attachments() {
         assert!(ensure_mcp_sql_database_switch_allowed(DatabaseType::Mysql, "SELECT 1").is_ok());
         assert_eq!(
             ensure_mcp_sql_database_switch_allowed(DatabaseType::Mysql, "USE production").unwrap_err(),
             "SQL_BLOCKED: MCP does not allow USE or persistent database switching."
+        );
+        assert_eq!(
+            ensure_mcp_sql_file_attachment_allowed(DatabaseType::Sqlite, "ATTACH DATABASE '/tmp/other.db' AS other")
+                .unwrap_err(),
+            "SQL_BLOCKED: MCP does not allow ATTACH or DETACH. Configure attached databases on the connection instead."
+        );
+        assert_eq!(
+            ensure_mcp_sql_file_attachment_allowed(DatabaseType::DuckDb, "DETACH other").unwrap_err(),
+            "SQL_BLOCKED: MCP does not allow ATTACH or DETACH. Configure attached databases on the connection instead."
         );
     }
 
@@ -1262,6 +1318,7 @@ async fn resolve_connection(
         find_config_by_name(&configs, connection_name).ok_or_else(|| "Connection not found".to_string())?
     };
     ensure_connection_in_mcp_scope_with_groups(&policy, group_paths.get(&config.id), &config.id)?;
+    ensure_mcp_target_allowed_for_connection(state, config)?;
     let mut state_configs = state.configs.write().await;
     if !state_configs.contains_key(&config.id) {
         state_configs.insert(config.id.clone(), config.clone());
@@ -1303,6 +1360,19 @@ fn mcp_policy_unavailable(error: String) -> String {
     } else {
         format!("MCP_POLICY_UNAVAILABLE: {error}")
     }
+}
+
+/// #9108: the desktop bridge is a separate MCP entry point from the standalone
+/// `dbx-mcp` server, so it re-checks saved connections against DBX's own
+/// configuration database here. Without this, a connection created in the
+/// desktop UI with `host = dbx.db` (or one that restores it as an attached
+/// database) would still be reachable through the bridge's query and approval
+/// handlers.
+fn ensure_mcp_target_allowed_for_connection(
+    state: &Arc<AppState>,
+    config: &crate::models::connection::ConnectionConfig,
+) -> Result<(), String> {
+    dbx_core::persistence::mcp_target_guard::ensure_mcp_target_allowed(state.storage.storage_db_path(), config)
 }
 
 #[cfg(test)]
@@ -1411,6 +1481,7 @@ pub(crate) async fn ensure_mcp_read_allowed_by_id(
         .iter()
         .find(|config| config.id == connection_id)
         .ok_or_else(|| format!("Connection with id '{connection_id}' not found"))?;
+    ensure_mcp_target_allowed_for_connection(state, config)?;
     check_visible_database(config, database)
 }
 
@@ -1449,6 +1520,7 @@ async fn ensure_mcp_mongo_pipeline_target_allowed_by_id(
         .iter()
         .find(|config| config.id == connection_id)
         .ok_or_else(|| format!("Connection with id '{connection_id}' not found"))?;
+    ensure_mcp_target_allowed_for_connection(state, config)?;
     if dbx_core::production_safety::mongo_pipeline_targets_production_database(config, database, pipeline_json) {
         return Err(
             "PRODUCTION_DATABASE_READ_ONLY: MongoDB aggregate write targeting production scope is blocked.".to_string()
@@ -1473,6 +1545,7 @@ async fn ensure_mcp_write_allowed_by_id_with_risk(
         .iter()
         .find(|config| config.id == connection_id)
         .ok_or_else(|| format!("Connection with id '{connection_id}' not found"))?;
+    ensure_mcp_target_allowed_for_connection(state, config)?;
     ensure_mcp_write_allowed_with_risk(state, config, database, action, dangerous).await
 }
 
@@ -1771,6 +1844,7 @@ async fn ensure_mcp_sql_allowed_with_approval(
             );
         }
     }
+    ensure_mcp_sql_file_attachment_allowed(config.db_type, sql)?;
     ensure_mcp_sql_database_switch_allowed(config.db_type, sql)?;
     let risk = dbx_core::sql_risk::classify_sql_risk_for_database(sql, config.db_type)
         .map_err(|error| format!("SQL_BLOCKED: {error}"))?;
@@ -2093,6 +2167,21 @@ fn ensure_mcp_sql_database_switch_allowed(
     Ok(())
 }
 
+/// The desktop bridge must enforce the same local-file boundary as the
+/// standalone MCP server: an ATTACH could otherwise reach DBX's own state DB.
+fn ensure_mcp_sql_file_attachment_allowed(
+    database_type: crate::models::connection::DatabaseType,
+    sql: &str,
+) -> Result<(), String> {
+    if dbx_core::sql_risk::mcp_sql_has_forbidden_file_attach(sql, database_type) {
+        return Err(
+            "SQL_BLOCKED: MCP does not allow ATTACH or DETACH. Configure attached databases on the connection instead."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn ensure_mcp_connection_sql_write_allowed(
     config: &crate::models::connection::ConnectionConfig,
     is_write: bool,
@@ -2387,6 +2476,11 @@ async fn handle_list_plugin_connections(state: &Arc<AppState>, body: &str, strea
             return;
         }
     };
+    // #9108: never advertise a configuration-database connection to an agent.
+    let configs = configs
+        .into_iter()
+        .filter(|config| ensure_mcp_target_allowed_for_connection(state, config).is_ok())
+        .collect::<Vec<_>>();
     let connections = plugin_connection_summaries(&configs, req.plugin_id.trim());
     respond_json(stream, &serde_json::json!({ "connections": connections })).await;
 }

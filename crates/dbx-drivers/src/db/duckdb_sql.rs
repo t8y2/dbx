@@ -121,13 +121,67 @@ fn dollar_quote_end(bytes: &[u8], start: usize) -> Option<usize> {
 /// skipped so `-- note\nATTACH ...` is still recognized.
 pub fn attached_name_from_attach_sql(sql: &str) -> Option<String> {
     let trimmed = strip_leading_comments(sql);
-    let first_word = trimmed.split(|ch: char| ch.is_whitespace() || ch == ';').next().unwrap_or_default();
-    if !first_word.eq_ignore_ascii_case("ATTACH") {
+    if !is_attach_statement(trimmed) {
         return None;
     }
 
     let as_index = find_as_keyword_outside_quotes(trimmed)?;
     parse_identifier_after_as(&trimmed[as_index + 2..])
+}
+
+/// Returns the file path or URI targeted by an `ATTACH` statement, or `None`
+/// when the statement is not an ATTACH or its target cannot be read without a
+/// full parser (`ATTACH E'...'`, an expression, ...).
+///
+/// DuckDB accepts `ATTACH [DATABASE] [IF NOT EXISTS] '<target>' [AS alias]`;
+/// the target is always a single-quoted literal.
+pub fn attached_target_from_attach_sql(sql: &str) -> Option<String> {
+    let trimmed = strip_leading_comments(sql);
+    if !is_attach_statement(trimmed) {
+        return None;
+    }
+    let rest = trimmed["ATTACH".len()..].trim_start();
+    let rest = strip_keyword(rest, "DATABASE").unwrap_or(rest).trim_start();
+    let rest = match strip_keyword(rest, "IF") {
+        Some(after_if) => {
+            let after_not = strip_keyword(after_if.trim_start(), "NOT")?;
+            strip_keyword(after_not.trim_start(), "EXISTS")?
+        }
+        None => rest,
+    };
+    parse_single_quoted_literal(rest.trim_start())
+}
+
+/// True when the statement's first word is `ATTACH`; leading comments are
+/// skipped so `-- note\nATTACH ...` is still recognized.
+pub fn is_attach_statement(sql: &str) -> bool {
+    let trimmed = strip_leading_comments(sql);
+    let first_word = trimmed.split(|ch: char| ch.is_whitespace() || ch == ';').next().unwrap_or_default();
+    first_word.eq_ignore_ascii_case("ATTACH")
+}
+
+fn strip_keyword<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    let end = input.find(|ch: char| !ch.is_ascii_alphabetic())?;
+    input[..end].eq_ignore_ascii_case(keyword).then(|| &input[end..])
+}
+
+fn parse_single_quoted_literal(input: &str) -> Option<String> {
+    let mut chars = input.strip_prefix('\'')?.chars();
+    let mut value = String::new();
+    while let Some(ch) = chars.next() {
+        if ch != '\'' {
+            value.push(ch);
+            continue;
+        }
+        if chars.as_str().starts_with('\'') {
+            chars.next();
+            value.push('\'');
+            continue;
+        }
+        return Some(value);
+    }
+    // Unterminated literal: refuse to guess what DuckDB would open.
+    None
 }
 
 pub fn strip_leading_comments(sql: &str) -> &str {
@@ -289,5 +343,35 @@ mod tests {
     fn init_script_names_collects_attach_aliases() {
         let script = "INSTALL httpfs; LOAD httpfs;\nCREATE SECRET (TYPE s3, KEY_ID 'k', SECRET 's');\nATTACH 'ducklake:postgres:dbname=lake' AS lake;\nATTACH 'sales.duckdb' AS \"sales db\";";
         assert_eq!(init_script_attached_names(script), vec!["lake".to_string(), "sales db".to_string()]);
+    }
+
+    #[test]
+    fn attach_target_parser_reads_file_targets() {
+        assert_eq!(
+            attached_target_from_attach_sql("ATTACH 'D:\\tmp\\sales.duckdb' AS \"sales db\";"),
+            Some("D:\\tmp\\sales.duckdb".to_string())
+        );
+        assert_eq!(
+            attached_target_from_attach_sql("attach database if not exists '/tmp/x.db' as x"),
+            Some("/tmp/x.db".to_string())
+        );
+        assert_eq!(
+            attached_target_from_attach_sql("-- note\n/* block */ ATTACH 'a''b.db' AS x"),
+            Some("a'b.db".to_string())
+        );
+        assert_eq!(
+            attached_target_from_attach_sql("ATTACH 'ducklake:postgres:dbname=lake' (READ_ONLY)"),
+            Some("ducklake:postgres:dbname=lake".to_string())
+        );
+    }
+
+    #[test]
+    fn attach_target_parser_refuses_unreadable_targets() {
+        assert_eq!(attached_target_from_attach_sql("SELECT 'attach'"), None);
+        assert_eq!(attached_target_from_attach_sql("ATTACH E'C:\\x.db' AS x"), None);
+        assert_eq!(attached_target_from_attach_sql("ATTACH"), None);
+        assert_eq!(attached_target_from_attach_sql("ATTACH 'unterminated"), None);
+        assert!(is_attach_statement("  -- note\nATTACH 'x.db'"));
+        assert!(!is_attach_statement("CREATE TABLE attached (id INT)"));
     }
 }

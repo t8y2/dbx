@@ -82,6 +82,11 @@ export function shouldDrawLinuxFloatingFrame(state: LinuxFloatingFrameState): bo
   return state.isDesktop && state.isLinux && state.isMainWindow && state.compositing && !state.showingAuthPage && !state.isMaximized && !state.isFullscreen;
 }
 
+export async function minimizeCurrentWindow(): Promise<void> {
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  await getCurrentWindow().minimize();
+}
+
 export function useWindowControls() {
   const isMaximized = ref(false);
   const isFullscreen = ref(false);
@@ -111,8 +116,7 @@ export function useWindowControls() {
   }
 
   async function minimize() {
-    const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    await getCurrentWindow().minimize();
+    await minimizeCurrentWindow();
   }
 
   async function toggleMaximize() {

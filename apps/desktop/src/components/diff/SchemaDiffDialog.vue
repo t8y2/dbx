@@ -9,7 +9,7 @@ import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { useToast } from "@/composables/useToast";
-import { GitCompareArrows, ArrowLeft, Play, Loader2, Maximize2, Minimize2, AlertTriangle, CircleCheck, ChevronDown, ChevronRight } from "@lucide/vue";
+import { GitCompareArrows, ArrowLeft, Play, Loader2, Maximize2, Minimize2, Minus, AlertTriangle, CircleCheck, ChevronDown, ChevronRight } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
@@ -89,11 +89,15 @@ import {
 import { swapSchemaDiffTableMappings } from "@/lib/schema/schemaDiffTableMapping";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
+import { minimizeCurrentWindow, shouldShowWindowControls } from "@/composables/useWindowControls";
+import { isMacOS } from "@/lib/backend/platform";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
 type SchemaDiffResultTab = "tables" | "routines";
 
 const { t } = useI18n();
 const { toast } = useToast();
+const showWindowControls = shouldShowWindowControls(isMacOS(), isTauriRuntime());
 const open = defineModel<boolean>("open", { default: false });
 const store = useConnectionStore();
 const settingsStore = useSettingsStore();
@@ -1679,6 +1683,9 @@ const targetConnectionInfo = computed(() => {
         <Maximize2 v-if="!isMaximized" class="w-4 h-4" />
         <Minimize2 v-else class="w-4 h-4" />
         <span class="sr-only">{{ isMaximized ? t("diff.restore") : t("diff.maximize") }}</span>
+      </Button>
+      <Button v-if="showWindowControls" variant="ghost" size="icon-sm" class="absolute top-2 right-18 z-10" :aria-label="t('tabs.minimizeWindow')" :title="t('tabs.minimizeWindow')" @click="minimizeCurrentWindow">
+        <Minus class="w-4 h-4" />
       </Button>
 
       <DialogHeader>

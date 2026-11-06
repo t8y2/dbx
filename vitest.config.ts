@@ -15,7 +15,9 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["packages/app-tests/*.test.ts", "apps/desktop/src/**/*.spec.ts", "docs/lib/*.test.ts"],
+    // `*.component.spec.ts` is not matched by `*.spec.ts` (the glob ends at the
+    // extension), which silently skipped every mounted-component regression test.
+    include: ["packages/app-tests/*.test.ts", "apps/desktop/src/**/*.spec.ts", "apps/desktop/src/**/*.component.spec.ts", "docs/lib/*.test.ts"],
     globalSetup: "packages/test-globals.ts",
     // Many specs dynamically import the large store modules (connectionStore,
     // queryStore) inside test bodies; when several workers pay that first

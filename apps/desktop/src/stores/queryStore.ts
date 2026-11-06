@@ -128,7 +128,7 @@ import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock }
 import { appendIndexedResultCells, remapIndexedResultCells, appendLargeValueCells, canUseTableDataLargeValuePreview, remapLargeValueCells, supportsTableDataLargeValuePreview, tableDataLargeValuePreviewOptions, TABLE_DATA_RESULT_MAX_BYTES } from "@/lib/dataGrid/dataGridLargeValues";
 import { simpleDataGridOrderByReferencesMissingColumn, sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
-import { agentProtocolQueryResultMaxRows, capQueryResultTotal, effectiveQueryResultMaxRows, limitQueryPagination, queryResultLimitReached } from "@/lib/dataGrid/queryResultRowLimit";
+import { agentProtocolQueryResultMaxRows, effectiveQueryResultMaxRows, limitQueryPagination, queryResultLimitReached } from "@/lib/dataGrid/queryResultRowLimit";
 import { elasticsearchRestRequestRanges, executableStatementRanges, splitSqlStatementRanges, sqlStatementParameterOptionsForCompatibility, stripMysqlClientDisplayCommand } from "@/lib/sql/sqlStatementRanges";
 import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
 import { replaceSqlServerLeadingUseQuery, sqlServerLeadingUseScript, switchesDatabaseWithUseStatement, useDatabaseFromStatement } from "@/lib/sql/sqlCompletionLookupTarget";
@@ -1691,6 +1691,7 @@ export const useQueryStore = defineStore("query", () => {
   const savedSqlEditorPositionTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const pendingTabSessionResets = new Map<string, Promise<void>>();
   const pendingResultRunRestores = new Map<string, string>();
+  const pendingQueryTotalCounts = new Map<string, { key: string; promise: Promise<void> }>();
   const pendingResultRunPreparations = new WeakMap<QueryTab, string>();
   const multiDbExecutionWorkers = new Map<string, QueryTab>();
   const multiDbExecutionWorkerScopes = new Map<string, Set<string>>();
@@ -4627,7 +4628,7 @@ export const useQueryStore = defineStore("query", () => {
     return registerOpenTab(tab);
   }
 
-  async function openPluginConnection(connectionId: string) {
+  async function openPluginConnection(connectionId: string, options: { forceNew?: boolean; sourceWorkbenchId?: string } = {}) {
     const connectionStore = useConnectionStore();
     const connection = connectionStore.getConfig(connectionId);
     if (!connection || connection.db_type !== "plugin") throw new Error("Plugin connection config not found");
@@ -4643,11 +4644,16 @@ export const useQueryStore = defineStore("query", () => {
       return openPluginWorkbench(pluginId, workbench.contribution.id, {
         title: connection.name,
         connectionId,
+        forceNew: options.forceNew,
         context: {
           connectionId,
           providerId,
           connectionType: connection.plugin_connection_type,
           workbenchId: uuid(),
+          // An explicit New Query creates a blank, independent workspace.
+          // Plugins may resolve their own current scope from the source id;
+          // never copy arbitrary source context (results, drafts or secrets).
+          ...(options.forceNew ? { newQuery: true, ...(options.sourceWorkbenchId ? { sourceWorkbenchId: options.sourceWorkbenchId } : {}) } : {}),
           connection: {
             id: connection.id,
             name: connection.name,
@@ -4665,6 +4671,7 @@ export const useQueryStore = defineStore("query", () => {
     return openPluginFilesystem(pluginId, filesystem.contribution.id, {
       title: `${connection.name} · SFTP`,
       connectionId,
+      forceNew: options.forceNew,
       rootUri: filesystem.contribution.root_uri,
     });
   }
@@ -8061,6 +8068,7 @@ export const useQueryStore = defineStore("query", () => {
     elapsed: () => string;
     timeoutSecs: number;
     txnSessionId?: string;
+    preserveTotalRowCountDuringExecution?: boolean;
   }) {
     const resultRowCount = options.result.rows.length;
     if (resultRowCount <= 0) {
@@ -8084,10 +8092,18 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     const countExecutionId = `${options.executionId}:count`;
-    void (async () => {
+    const countKey = options.countSql ? [options.connectionId, options.database, options.schema ?? "", options.catalog ?? "", options.countSql].join("\u0000") : undefined;
+    const pendingCount = pendingQueryTotalCounts.get(options.tabId);
+    if (countKey && options.preserveTotalRowCountDuringExecution && pendingCount?.key === countKey) return;
+    // The promise's own branches compare themselves with the pending entry for this
+    // tab, so they need a reference that exists before the async body can run.
+    const countHandle: { promise?: Promise<void> } = {};
+    const countPromise = (async () => {
       let isolatedClientSessionId: string | undefined;
+      let countTargetSql: string | undefined;
       try {
         const countTarget = options.countSql ? { sql: options.countSql, schema: options.schema } : await options.countSqlTarget?.();
+        countTargetSql = countTarget?.sql;
         if (!countTarget?.sql) {
           setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, undefined);
           return;
@@ -8111,19 +8127,46 @@ export const useQueryStore = defineStore("query", () => {
         }
         const total = Number(countResult?.rows?.[0]?.[0] ?? 0);
         if (!Number.isFinite(total) || total < 0) {
-          setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, undefined);
+          const current = tabs.value.find((tab) => tab.id === options.tabId);
+          const pendingEntry = countKey ? pendingQueryTotalCounts.get(options.tabId) : undefined;
+          if (countKey && pendingEntry?.promise !== countHandle.promise) return;
+          if (pendingEntry?.promise === countHandle.promise && countTargetSql && current?.resultCountSql === countTargetSql) {
+            current.resultTotalRowCount = undefined;
+            current.resultTotalRowCountLoading = false;
+          } else {
+            setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, undefined);
+          }
           return;
         }
         // COUNT describes all matching rows; the configured result limit only
         // constrains how many of them pagination may load and retain.
-        setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, total);
+        const current = tabs.value.find((tab) => tab.id === options.tabId);
+        const pendingEntry = countKey ? pendingQueryTotalCounts.get(options.tabId) : undefined;
+        if (countKey && pendingEntry?.promise !== countHandle.promise) return;
+        // Match on the counted statement, not just the tab: a page whose countSql
+        // changed must not publish the previous statement's total.
+        if (pendingEntry?.promise === countHandle.promise && !!countTarget.sql && current?.resultCountSql === countTarget.sql) {
+          current.resultTotalRowCount = total;
+          current.resultTotalRowCountLoading = false;
+          if (activeResultRunOwnsDisplayedResult(current)) syncActiveResultRunFromDisplayed(current);
+        } else {
+          setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, total);
+        }
         queryExecutionLog("info", "count:done", {
           traceId: options.traceId,
           total,
           elapsed: options.elapsed(),
         });
       } catch (error) {
-        setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, undefined);
+        const current = tabs.value.find((tab) => tab.id === options.tabId);
+        const pendingEntry = countKey ? pendingQueryTotalCounts.get(options.tabId) : undefined;
+        if (countKey && pendingEntry?.promise !== countHandle.promise) return;
+        if (pendingEntry?.promise === countHandle.promise && countTargetSql && current?.resultCountSql === countTargetSql) {
+          current.resultTotalRowCount = undefined;
+          current.resultTotalRowCountLoading = false;
+        } else {
+          setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, undefined);
+        }
         queryExecutionLog("warn", "count:error", {
           traceId: options.traceId,
           elapsed: options.elapsed(),
@@ -8135,6 +8178,14 @@ export const useQueryStore = defineStore("query", () => {
         }
       }
     })();
+    countHandle.promise = countPromise;
+    if (countKey) {
+      pendingQueryTotalCounts.set(options.tabId, { key: countKey, promise: countPromise });
+      const clearPendingCount = () => {
+        if (pendingQueryTotalCounts.get(options.tabId)?.promise === countHandle.promise) pendingQueryTotalCounts.delete(options.tabId);
+      };
+      void countPromise.then(clearPendingCount, clearPendingCount);
+    }
   }
 
   async function countTabResultRows(id: string): Promise<number | undefined> {
@@ -8338,6 +8389,7 @@ export const useQueryStore = defineStore("query", () => {
     }
     if (!options?.preserveTotalRowCountDuringExecution) {
       tab.resultTotalRowCount = undefined;
+      pendingQueryTotalCounts.delete(id);
     }
     tab.resultTotalRowCountLoading = false;
     const previousResultSessionClose = closeResultSession(tab, options?.pagination?.sessionId);
@@ -9810,6 +9862,10 @@ export const useQueryStore = defineStore("query", () => {
         current.resultCountSql = countSql;
         current.resultSessionId = current.result?.session_id ?? undefined;
         current.resultClientSessionId = current.resultSessionId ? executionClientSessionId : undefined;
+        // A refreshed page keeps reporting its totals as loading: the stale-total
+        // pass just below only checks the preserved value, and the COUNT that
+        // replaces it is started further down.
+        const preserveTotalRowCountPending = options?.preserveTotalRowCountDuringExecution === true && typeof current.resultTotalRowCount === "number";
         if (!options?.preserveTotalRowCountDuringExecution) {
           current.resultTotalRowCount = undefined;
         }
@@ -9836,10 +9892,26 @@ export const useQueryStore = defineStore("query", () => {
           current.resultTotalRowCount = undefined;
         }
         if (current.mode === "query" && current.result && !isQueryExecutionErrorResult(current.result) && typeof exactQueryRowBound === "number") {
-          const boundedTotal = capQueryResultTotal(exactQueryRowBound, queryResultMaxRows);
-          current.resultTotalRowCount = Math.min(boundedTotal, exactIncompletePageTotal ?? boundedTotal);
-          current.resultTotalRowCountLoading = false;
-          totalRowCountResolved = true;
+          // LIMIT/TOP is an upper bound, not a count. A full page below that
+          // bound must still follow the user's automatic/manual count policy.
+          // Use the logical start for appends: current.result already includes
+          // earlier segments, so adding the latest page offset double-counts.
+          const observedExtent = (resultStartOffset ?? 0) + resultRowCount;
+          const reachedQueryBound = resultRowCount > 0 && current.result.truncated !== true && current.result.has_more !== true && current.result.page_has_more !== true && observedExtent === exactQueryRowBound;
+          const exactTotal = exactIncompletePageTotal ?? (reachedQueryBound ? exactQueryRowBound : undefined);
+          if (typeof exactTotal === "number") {
+            current.resultTotalRowCount = Math.min(exactQueryRowBound, exactTotal);
+            current.resultTotalRowCountLoading = false;
+            totalRowCountResolved = true;
+          }
+        }
+        // Pagination keeps a previously confirmed total while loading another
+        // page. A page that proves nothing about the total must not mark it
+        // resolved either: the background COUNT below still owns it, so the list
+        // keeps reporting the previous total as loading.
+        if (!totalRowCountResolved && preserveTotalRowCountPending) {
+          current.resultTotalRowCountLoading = !totalKnownFromIncompletePage;
+          totalRowCountResolved = totalKnownFromIncompletePage;
         }
         const dataCountTarget =
           current.mode === "data"
@@ -9868,7 +9940,9 @@ export const useQueryStore = defineStore("query", () => {
           !totalRowCountResolved &&
           settingsStore.editorSettings.autoCalculateTotalRows &&
           ((current.mode === "query" && !!countSql) || (current.mode === "data" && !!dataCountTarget));
-        current.resultTotalRowCountLoading = canAutoCalculateTotalRows;
+        // A refreshed page whose total is being recounted keeps the spinner on even
+        // though auto-count is served by the same background COUNT below.
+        current.resultTotalRowCountLoading = canAutoCalculateTotalRows || (preserveTotalRowCountPending && typeof current.resultTotalRowCount === "number");
         // Server-side pagination without a countSql: the backend (currently
         // the Elasticsearch driver) already reports the true match total via
         // affected_rows. Use it directly so the result-grid can compute the
@@ -9908,6 +9982,7 @@ export const useQueryStore = defineStore("query", () => {
             elapsed,
             timeoutSecs: queryTimeoutSecs,
             txnSessionId: current.autoCommit === false ? current.txnSessionId : undefined,
+            preserveTotalRowCountDuringExecution: options?.preserveTotalRowCountDuringExecution,
           });
         }
         queryExecutionLog("info", "result:assigned", {

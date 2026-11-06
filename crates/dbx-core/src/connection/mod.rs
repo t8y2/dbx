@@ -5,8 +5,10 @@ pub mod parameters;
 pub mod runtime_config;
 pub mod session_credentials;
 pub mod task_supervisor;
+mod zookeeper_transport;
+pub use zookeeper_transport::ZooKeeperTransportCancellation;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -22,7 +24,7 @@ use crate::agent_connection::{
     is_h2_file_connection, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
     oracle_alternate_connect_config_labels, oracle_alternate_connect_configs, oracle_error_with_driver_hint,
     pick_legacy_postgres_like_database, should_retry_mongo_with_legacy_driver, trino_like_jdbc_connection_string,
-    AgentSessionRole,
+    with_zookeeper_endpoint_routes, zookeeper_connection_endpoints, zookeeper_endpoint_address, AgentSessionRole,
 };
 use crate::agent_manager::{AgentManager, JavaRuntimeMode, DEFAULT_JRE_KEY};
 use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
@@ -455,14 +457,14 @@ pub struct AppState {
     pub configs: RwLock<HashMap<String, ConnectionConfig>>,
     pub running_queries: RunningQueries,
     pub routine_operations: crate::schema::oracle_routines::RoutineOperationRegistry,
-    pub tunnels: TunnelManager,
-    pub proxy_tunnels: ProxyTunnelManager,
-    pub http_tunnels: HttpTunnelManager,
+    pub tunnels: Arc<TunnelManager>,
+    pub proxy_tunnels: Arc<ProxyTunnelManager>,
+    pub http_tunnels: Arc<HttpTunnelManager>,
     pub storage: Storage,
     pub plugins: PluginRegistry,
     pub plugin_host: PluginHost,
     pub agent_manager: crate::agent_manager::AgentManager,
-    pub pl_debug: crate::query::pl_debug::PlDebugRegistry,
+    pub pl_debug: Arc<crate::query::pl_debug::PlDebugRegistry>,
     pub nacos_registry: crate::nacos::NacosAdminRegistry,
     duckdb_worker_process_isolation: AtomicBool,
     duckdb_worker_max_processes: AtomicUsize,
@@ -745,6 +747,10 @@ impl Eq for ConnectionTransportPlan {}
 
 #[derive(Clone, PartialEq, Eq)]
 enum ConnectionTransportRoute {
+    ZooKeeper {
+        endpoints: Vec<(String, u16)>,
+        fixed_local_port: Option<u16>,
+    },
     SqliteWorker {
         host: String,
         port: u16,
@@ -2100,9 +2106,9 @@ impl AppState {
             configs: RwLock::new(HashMap::new()),
             running_queries: RunningQueries::default(),
             routine_operations: crate::schema::oracle_routines::RoutineOperationRegistry::default(),
-            tunnels: TunnelManager::new(data_dir),
-            proxy_tunnels: ProxyTunnelManager::new(),
-            http_tunnels: HttpTunnelManager::new(),
+            tunnels: Arc::new(TunnelManager::new(data_dir)),
+            proxy_tunnels: Arc::new(ProxyTunnelManager::new()),
+            http_tunnels: Arc::new(HttpTunnelManager::new()),
             storage,
             plugins,
             plugin_host,
@@ -2110,7 +2116,7 @@ impl AppState {
                 agent_dir,
                 app_version,
             ),
-            pl_debug: crate::query::pl_debug::PlDebugRegistry::default(),
+            pl_debug: Arc::new(crate::query::pl_debug::PlDebugRegistry::default()),
             nacos_registry: crate::nacos::NacosAdminRegistry::new(),
             duckdb_worker_process_isolation: AtomicBool::new(false),
             duckdb_worker_max_processes: AtomicUsize::new(DUCKDB_WORKER_MAX_PROCESSES_DEFAULT),
@@ -3329,6 +3335,7 @@ impl AppState {
         self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
         let plan = self.prepare_connection_transport_with_claimant(connection_id, &db_config, claimant).await?;
         let attempt = self.start_connection_transport_attempt(connection_id, &plan, claimant).await?;
+        let mut cancellation = ZooKeeperTransportCancellation::new(self, connection_id, &attempt);
         let transport_stamp = attempt.stamp;
         let result = async {
             let endpoint = attempt.endpoint?;
@@ -3336,7 +3343,10 @@ impl AppState {
             if let Some(database) = self.resolve_legacy_postgres_like_database(connection_id, &db_config).await {
                 db_config.database = Some(database);
             }
-            if db_config.db_type != DatabaseType::Plugin && endpoint.proxy.is_none() {
+            if db_config.db_type != DatabaseType::Plugin
+                && endpoint.proxy.is_none()
+                && endpoint.zookeeper_endpoint_routes.is_none()
+            {
                 probe_connection_endpoint(&db_config, &endpoint.host, endpoint.port).await?;
             }
             self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
@@ -3351,6 +3361,9 @@ impl AppState {
             })
         }
         .await;
+        if result.is_ok() {
+            cancellation.disarm();
+        }
         result.map_err(|message| ConnectionPreparationFailure { message, transport_stamp: Some(transport_stamp) })
     }
 
@@ -3508,6 +3521,8 @@ impl AppState {
         let PreparedConnectionRuntime { config: db_config, endpoint, url, connect_timeout, transport_stamp } = self
             .prepare_connection_runtime(connection_id, &config, database, catalog, connection_attempt, None)
             .await?;
+        let _cancellation =
+            ZooKeeperTransportCancellation::for_endpoint(self, connection_id, &transport_stamp, Some(&endpoint));
         let (host, port) = (endpoint.host, endpoint.port);
         let runtime_proxy = endpoint.proxy;
         let idle_timeout = std::time::Duration::from_secs(db_config.idle_timeout_secs);
@@ -3925,13 +3940,13 @@ impl AppState {
                 PoolKind::Consul(client)
             }
             agent_connection_pool_database_type!() => {
-                let connect_params = agent_connect_params_with_role(
+                let connect_params = with_zookeeper_endpoint_routes(agent_connect_params_with_role(
                     &db_config,
                     &host,
                     port,
                     db_config.effective_database().unwrap_or(""),
                     session_role,
-                )?;
+                )?, endpoint.zookeeper_endpoint_routes.as_ref());
                 if db_config.db_type != DatabaseType::ZooKeeper {
                     let agent_session_id = uuid::Uuid::new_v4().simple().to_string();
                     let agent_env = transport_stamp.agent_launch_env();
@@ -4413,6 +4428,12 @@ impl AppState {
         config: &ConnectionConfig,
     ) -> Result<(String, u16), String> {
         let endpoint = self.connection_endpoint(connection_id, config).await?;
+        if let Some(routes) = &endpoint.zookeeper_endpoint_routes {
+            let logical = zookeeper_endpoint_address(&endpoint.host, endpoint.port);
+            let dial = routes.get(&logical).ok_or("ZooKeeper primary endpoint has no transport route")?;
+            let (host, port) = dial.rsplit_once(':').ok_or("Invalid ZooKeeper transport route")?;
+            return Ok((host.to_owned(), port.parse().map_err(|_| "Invalid ZooKeeper transport port")?));
+        }
         Ok((endpoint.host, endpoint.port))
     }
 
@@ -4661,6 +4682,17 @@ impl AppState {
             );
         }
         let fixed_local_port = self.static_tunnel_fixed_local_port(connection_id, config, &transport_layers)?;
+        if config.db_type == DatabaseType::ZooKeeper {
+            return Ok(ConnectionTransportPlan {
+                source_profile_ids,
+                agent_env,
+                layers: resolved_transport,
+                route: ConnectionTransportRoute::ZooKeeper {
+                    endpoints: zookeeper_connection_endpoints(config)?,
+                    fixed_local_port,
+                },
+            });
+        }
         Ok(ConnectionTransportPlan {
             source_profile_ids,
             agent_env,
@@ -4707,6 +4739,45 @@ impl AppState {
         plan: &ConnectionTransportPlan,
     ) -> Result<ConnectionEndpoint, String> {
         match &plan.route {
+            ConnectionTransportRoute::ZooKeeper { endpoints, fixed_local_port } => {
+                let guard = Arc::new(zookeeper_transport::ZooKeeperTransportGuard::new(
+                    connection_id,
+                    self.tunnels.clone(),
+                    self.proxy_tunnels.clone(),
+                    self.http_tunnels.clone(),
+                ));
+                let mut routes = BTreeMap::new();
+                for (index, (host, port)) in endpoints.iter().enumerate() {
+                    let local_port = match plan
+                        .layers
+                        .start_with_final_ssh_local_port(
+                            &guard.endpoint_id(index),
+                            host,
+                            *port,
+                            if index == 0 { *fixed_local_port } else { None },
+                            &self.tunnels,
+                            &self.proxy_tunnels,
+                            &self.http_tunnels,
+                        )
+                        .await
+                    {
+                        Ok(port) => port,
+                        Err(error) => {
+                            guard.stop().await;
+                            return Err(error);
+                        }
+                    };
+                    routes.insert(zookeeper_endpoint_address(host, *port), format!("127.0.0.1:{local_port}"));
+                }
+                let (host, port) = endpoints.first().ok_or("ZooKeeper connect string contains no servers")?;
+                Ok(ConnectionEndpoint {
+                    host: host.clone(),
+                    port: *port,
+                    proxy: None,
+                    zookeeper_endpoint_routes: Some(routes),
+                    _zookeeper_transport: Some(guard),
+                })
+            }
             ConnectionTransportRoute::Direct { host, port, .. }
             | ConnectionTransportRoute::SqliteWorker { host, port, .. } => {
                 Ok(ConnectionEndpoint::direct(host.clone(), *port))
@@ -4740,14 +4811,14 @@ impl AppState {
                     .clickhouse_proxy_for_transport_layers(connection_id, &plan.layers)
                     .await?
                     .expect("prepared HTTP client proxy has an SSH or proxy final layer");
-                Ok(ConnectionEndpoint { host: host.clone(), port: *port, proxy: Some(proxy) })
+                Ok(ConnectionEndpoint { proxy: Some(proxy), ..ConnectionEndpoint::direct(host.clone(), *port) })
             }
             ConnectionTransportRoute::SocksProxy { host, port } => {
                 let proxy = self
                     .socks5_route_for_transport_layers(connection_id, &plan.layers)
                     .await?
                     .expect("prepared SOCKS route has an SSH or SOCKS5 final layer");
-                Ok(ConnectionEndpoint { host: host.clone(), port: *port, proxy: Some(proxy) })
+                Ok(ConnectionEndpoint { proxy: Some(proxy), ..ConnectionEndpoint::direct(host.clone(), *port) })
             }
             #[cfg(feature = "mq-admin")]
             ConnectionTransportRoute::RocketMqProxy { host, port } => {
@@ -6825,6 +6896,10 @@ impl AppState {
     }
 
     async fn stop_connection_transport_layers(&self, connection_id: &str, layer_count: usize) {
+        let zookeeper_prefix = zookeeper_transport::transport_prefix(connection_id);
+        self.tunnels.stop_tunnels_with_prefix(&zookeeper_prefix).await;
+        self.proxy_tunnels.stop_tunnels_with_prefix(&zookeeper_prefix).await;
+        self.http_tunnels.stop_tunnels_with_prefix(&zookeeper_prefix).await;
         let redis_cluster_prefix = redis_cluster_transport_prefix(connection_id);
         self.tunnels.stop_tunnels_with_prefix(&redis_cluster_prefix).await;
         self.proxy_tunnels.stop_tunnels_with_prefix(&redis_cluster_prefix).await;
@@ -7940,11 +8015,24 @@ pub struct ConnectionEndpoint {
     pub host: String,
     pub port: u16,
     pub proxy: Option<PluginRuntimeProxy>,
+    pub zookeeper_endpoint_routes: Option<BTreeMap<String, String>>,
+    // Keep cleanup ownership through startup, publication and any in-flight endpoint clones.
+    _zookeeper_transport: Option<Arc<zookeeper_transport::ZooKeeperTransportGuard>>,
 }
 
 impl ConnectionEndpoint {
+    pub(crate) fn mark_zookeeper_transport_published(&self) {
+        if let Some(guard) = &self._zookeeper_transport {
+            guard.mark_published();
+        }
+    }
+
+    pub(crate) fn has_unpublished_zookeeper_transport(&self) -> bool {
+        self._zookeeper_transport.as_ref().is_some_and(|guard| !guard.is_published())
+    }
+
     fn direct(host: String, port: u16) -> Self {
-        Self { host, port, proxy: None }
+        Self { host, port, proxy: None, zookeeper_endpoint_routes: None, _zookeeper_transport: None }
     }
 }
 
@@ -10883,6 +10971,154 @@ mod tests {
             let result = ssh_local_port_config_error(&config_of_type(*db_type), &layers, None);
             assert_eq!(result.is_err(), rejected.contains(db_type), "{db_type:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn zookeeper_canceled_test_retires_route_and_stale_cleanup_preserves_replacement() {
+        let (state, _dir) = test_app_state().await;
+        let state = Arc::new(state);
+        let mut config = config_of_type(DatabaseType::ZooKeeper);
+        config.connection_string = Some("zk1,zk2".into());
+        let mut proxy = proxy_layer("proxy", "");
+        proxy.host = "127.0.0.1".into();
+        proxy.port = 1;
+        config.transport_layers = vec![TransportLayerConfig::Proxy(proxy)];
+        let pending_state = state.clone();
+        let pending_config = config.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let pending = tokio::spawn(async move {
+            let first = pending_state.connection_endpoint_attempt(&pending_config.id, &pending_config).await.unwrap();
+            assert_eq!(first.endpoint.as_ref().unwrap().zookeeper_endpoint_routes.as_ref().unwrap().len(), 2);
+            let _cleanup = super::ZooKeeperTransportCancellation::new(&pending_state, &pending_config.id, &first);
+            ready_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        ready_rx.await.unwrap();
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while crate::query::pl_debug::current_transport(&state, &config.id).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let old = state.connection_endpoint_attempt(&config.id, &config).await.unwrap();
+        let cleanup = super::ZooKeeperTransportCancellation::new(&state, &config.id, &old);
+        config.connection_string = Some("zk2,zk3".into());
+        let replacement = state.connection_endpoint_attempt(&config.id, &config).await.unwrap();
+        drop(old);
+        drop(cleanup);
+        tokio::task::yield_now().await;
+        let current = crate::query::pl_debug::current_transport(&state, &config.id).unwrap();
+        assert!(current.same_token(&replacement.stamp));
+        let reused = state.connection_endpoint_attempt(&config.id, &config).await.unwrap();
+        assert_eq!(
+            replacement.endpoint.as_ref().unwrap().zookeeper_endpoint_routes,
+            reused.endpoint.as_ref().unwrap().zookeeper_endpoint_routes
+        );
+        let cleanup = super::ZooKeeperTransportCancellation::new(&state, &config.id, &reused);
+        crate::query::pl_debug::adopt_published_transport(&state, &config.id, &reused.stamp);
+        drop(cleanup);
+        assert!(crate::query::pl_debug::current_transport(&state, &config.id).is_some());
+        state.reset_connection_transport_if_current(&config.id, &reused.stamp).await;
+        assert!(crate::query::pl_debug::current_transport(&state, &config.id).is_none());
+    }
+
+    #[tokio::test]
+    async fn zookeeper_cancellation_waits_for_in_flight_pool_publication() {
+        for publish in [true, false] {
+            let (state, _dir) = test_app_state().await;
+            let mut config = config_of_type(DatabaseType::ZooKeeper);
+            config.connection_string = Some("zk1,zk2".into());
+            let mut proxy = proxy_layer("proxy", "");
+            proxy.host = "127.0.0.1".into();
+            proxy.port = 1;
+            config.transport_layers = vec![TransportLayerConfig::Proxy(proxy)];
+            let older = state.connection_endpoint_attempt(&config.id, &config).await.unwrap();
+            let newer = state.connection_endpoint_attempt(&config.id, &config).await.unwrap();
+            assert!(older.stamp.same_runtime(&newer.stamp));
+            assert!(!older.stamp.same_token(&newer.stamp));
+            let routes = older.endpoint.as_ref().unwrap().zookeeper_endpoint_routes.clone().unwrap();
+            let cancellation = super::ZooKeeperTransportCancellation::new(&state, &config.id, &newer);
+            // Hold the actual pool map lock. Polling insertion to Pending acquires
+            // the publication gate first, reproducing the review's precise race.
+            let pool_map = state.connections.write().await;
+            let pool = PoolKind::Sqlite(db::sqlite::connect_path(":memory:").await.unwrap());
+            let mut publishing = Box::pin(state.insert_connection_pool_inner(
+                config.id.clone(),
+                pool,
+                &config,
+                false,
+                false,
+                Some(&older.stamp),
+                None,
+            ));
+            assert!(futures::poll!(publishing.as_mut()).is_pending());
+            drop(cancellation);
+            tokio::task::yield_now().await;
+            assert!(crate::query::pl_debug::current_transport(&state, &config.id).is_some());
+            if publish {
+                drop(pool_map);
+                publishing.await.unwrap();
+                drop(older);
+                drop(newer);
+                tokio::task::yield_now().await;
+                let current = crate::query::pl_debug::current_transport(&state, &config.id).unwrap();
+                assert!(state.pool_handle(&config.id).await.is_some());
+                for address in routes.values() {
+                    assert!(tokio::net::TcpStream::connect(address).await.is_ok());
+                }
+                state.remove_connection_pools(&config.id).await;
+                state.reset_connection_transport_if_current(&config.id, &current).await;
+            } else {
+                drop(publishing);
+                drop(pool_map);
+                drop(older);
+                drop(newer);
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while crate::query::pl_debug::current_transport(&state, &config.id).is_some() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(state.pool_handle(&config.id).await.is_none());
+            }
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let mut all_closed = true;
+                    for address in routes.values() {
+                        all_closed &= tokio::net::TcpStream::connect(address).await.is_err();
+                    }
+                    if all_closed {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn zookeeper_transport_plan_tracks_every_endpoint_and_order() {
+        let (state, _dir) = test_app_state().await;
+        let mut config = config_of_type(DatabaseType::ZooKeeper);
+        config.connection_string = Some("zk1,zk2:2281,zk3/app".into());
+        config.transport_layers = vec![unreachable_ssh_layer(4059)];
+        let original = state.prepare_connection_transport(&config.id, &config).await.unwrap();
+        let super::ConnectionTransportRoute::ZooKeeper { endpoints, .. } = &original.route else {
+            panic!("expected ensemble route");
+        };
+        assert_eq!(endpoints, &vec![("zk1".into(), 2181), ("zk2".into(), 2281), ("zk3".into(), 2181)]);
+        config.connection_string = Some("zk1,zk3,zk2:2281/app".into());
+        let reordered = state.prepare_connection_transport(&config.id, &config).await.unwrap();
+        assert!(original != reordered);
+        config.transport_layers.clear();
+        let direct = state.prepare_connection_transport(&config.id, &config).await.unwrap();
+        assert!(matches!(direct.route, super::ConnectionTransportRoute::Direct { .. }));
     }
 
     #[tokio::test]

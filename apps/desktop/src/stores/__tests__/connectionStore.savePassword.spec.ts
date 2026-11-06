@@ -430,6 +430,39 @@ describe("connectionStore save_password opt-out", () => {
     expect(connectDb).toHaveBeenCalledWith(expect.objectContaining({ id: "impala-1", password: "", save_password: false }), expect.any(Number));
   });
 
+  it.each(["connect", "ensureConnected"] as const)("does not prompt for a login password when opening an MQTT certificate connection via %s", async (entry) => {
+    const connectDb = vi.fn().mockResolvedValue("mqtt-1");
+    installApiMocks({ connectDb });
+    installPasswordPromptMock();
+    requestPassword.mockResolvedValue(null);
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection({
+      id: "mqtt-1",
+      name: "MQTT",
+      db_type: "mqtt",
+      host: "localhost",
+      port: 8883,
+      username: "",
+      database: undefined,
+      save_password: false,
+      external_config: {
+        host: "localhost",
+        port: 8883,
+        clientId: "dbx-test",
+        tls: true,
+        auth: { kind: "certificate", caCertPath: "/ca.pem", clientCertPath: "/client.pem", clientKeyPath: "/client.key" },
+      },
+    });
+    store.connections = [connection];
+
+    if (entry === "connect") await store.connect(connection);
+    else await store.ensureConnected(connection.id);
+
+    expect(requestPassword).not.toHaveBeenCalled();
+    expect(connectDb).toHaveBeenCalledWith(expect.objectContaining({ id: connection.id, password: "", external_config: connection.external_config }), expect.any(Number));
+  });
+
   it("remembers an explicitly submitted empty password", async () => {
     installApiMocks();
     installPasswordPromptMock();

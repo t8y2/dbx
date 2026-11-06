@@ -149,7 +149,8 @@ export function joinTabTitleParts(parts: TabTitleParts): string {
  *
  * 编号不在这里计算，而是由 `syncTabTitleNumbers` 一次性写进标签（见该函数）：渲染
  * 函数只看标签上已有的编号，这样关闭一个重名标签不会让后面的标签被重新编号
- * （#9938）。未分配编号的标签按原样显示。
+ * （#9938）。未分配编号的标签按原样显示。编号同时也是「该标签参与重名」的标记，
+ * 具体显示成序号还是连接名由 `duplicateTabTitleMode` 决定。
  */
 export function tabDisplayTitles(tabs: QueryTab[], t: Translate): Map<string, string> {
   const titles = new Map<string, string>();
@@ -163,9 +164,10 @@ export function tabDisplayTitles(tabs: QueryTab[], t: Translate): Map<string, st
  */
 export function tabDisplayTitleParts(tabs: QueryTab[], t: Translate): Map<string, TabTitleParts> {
   const parts = new Map<string, TabTitleParts>();
+  const connectionNameIds = connectionNameSuffixTabIds(tabs, t);
   for (const tab of tabs) {
     const base = tabDisplayTitle(tab, t);
-    parts.set(tab.id, { base, suffix: tabTitleSuffix(tab, base) });
+    parts.set(tab.id, { base, suffix: tabTitleSuffix(tab, base, connectionNameIds.has(tab.id)) });
   }
   return parts;
 }
@@ -174,25 +176,62 @@ function customTitleSuffix(tab: QueryTab): string | undefined {
   return tab.titleSuffix?.trim() || undefined;
 }
 
-/** The suffix a tab currently shows: its custom one, else its automatic number. */
-function tabTitleSuffix(tab: QueryTab, title: string): string {
+/**
+ * 在「对象名 + 连接名」策略下，挑出真正可以用连接名当后缀的标签。
+ *
+ * `syncTabTitleNumbers` 已经把「参与重名分组」记录在 `titleNumber` 上，这里只决定
+ * 这个标记最终渲染成序号还是连接名，不在渲染路径里写标签状态。按整组判定，保证
+ * 同一组不会混用两种后缀：
+ * 1. 组内每个标签必须属于不同连接，否则连接名本身也重复，仍然区分不了；
+ * 2. 组内标题不能已经带连接名（query 页签的完整标题就是 `连接名@数据库`，再加
+ *    一次会变成 `prod@app prod`），这种情况保持序号。
+ * 任一条件不满足就整组退回序号；序号策略下直接返回空集合，历史行为完全不变。
+ */
+function connectionNameSuffixTabIds(tabs: QueryTab[], t: Translate): Set<string> {
+  const ids = new Set<string>();
+  if (useSettingsStore().editorSettings.duplicateTabTitleMode !== "connection") return ids;
+
+  const groups = new Map<string, { tab: QueryTab; base: string }[]>();
+  for (const tab of tabs) {
+    const base = tabDisplayTitle(tab, t);
+    const key = `${tab.mode || "query"}\u0000${base}`;
+    const group = groups.get(key);
+    if (group) group.push({ tab, base });
+    else groups.set(key, [{ tab, base }]);
+  }
+
+  for (const group of groups.values()) {
+    const candidates = group.filter(({ tab, base }) => !customTitleSuffix(tab) && tabTitleNumber(tab, base) !== undefined);
+    if (candidates.length === 0) continue;
+    const names = candidates.map(({ tab }) => connectionDisplayName(tab.connectionId));
+    if (new Set(names).size !== names.length) continue;
+    if (names.some((name, index) => candidates[index]!.base.includes(name))) continue;
+    for (const { tab } of candidates) ids.add(tab.id);
+  }
+  return ids;
+}
+
+/** The suffix a tab currently shows: its custom one, else the automatic disambiguator. */
+function tabTitleSuffix(tab: QueryTab, title: string, useConnectionName = false): string {
   const custom = customTitleSuffix(tab);
   if (custom) return custom;
   const number = tabTitleNumber(tab, title);
-  return number !== undefined ? String(number) : "";
+  if (number === undefined) return "";
+  return useConnectionName ? connectionDisplayName(tab.connectionId) : String(number);
 }
 
 /**
  * Finds another open tab that would show exactly the same label as `target`
  * once `suffix` is applied to it — same title and same suffix, whether the other
- * tab's suffix is custom or an automatic number.
+ * tab's suffix is custom, a connection name or an automatic number.
  */
 export function findTabWithSameTitleSuffix(tabs: QueryTab[], target: QueryTab, suffix: string, t: Translate): QueryTab | undefined {
   const wanted = suffix.trim();
   if (!wanted) return undefined;
   const base = tabDisplayTitle(target, t);
   const targetMode = target.mode || "query";
-  return tabs.find((tab) => tab.id !== target.id && (tab.mode || "query") === targetMode && tabDisplayTitle(tab, t) === base && tabTitleSuffix(tab, base) === wanted);
+  const connectionNameIds = connectionNameSuffixTabIds(tabs, t);
+  return tabs.find((tab) => tab.id !== target.id && (tab.mode || "query") === targetMode && tabDisplayTitle(tab, t) === base && tabTitleSuffix(tab, base, connectionNameIds.has(tab.id)) === wanted);
 }
 
 function tabTitleNumber(tab: QueryTab, title: string): number | undefined {

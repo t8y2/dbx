@@ -260,6 +260,7 @@ pub async fn list_tables(
     catalog: Option<String>,
     table_name_filter: Option<dbx_core::schema::TableNameFilter>,
     exact_identity: Option<bool>,
+    page_table_roots: Option<bool>,
 ) -> Result<Vec<db::TableInfo>, String> {
     if exact_identity.unwrap_or(false) {
         return dbx_core::schema::exact_metadata::tables(
@@ -281,6 +282,20 @@ pub async fn list_tables(
             &connection_id,
             &catalog,
             &database,
+            filter.as_deref(),
+            limit,
+            offset,
+            object_types.as_deref(),
+            table_name_filter.as_ref(),
+        )
+        .await;
+    }
+    if page_table_roots.unwrap_or(false) {
+        return dbx_core::schema::list_table_roots_page_core(
+            &state,
+            &connection_id,
+            &database,
+            &schema,
             filter.as_deref(),
             limit,
             offset,
@@ -355,6 +370,7 @@ pub async fn list_objects(
     execution_id: Option<String>,
     identity_mode: Option<dbx_core::schema::MetadataIdentityMode>,
     exact_identity: Option<bool>,
+    lightweight: Option<bool>,
 ) -> Result<Vec<db::ObjectInfo>, String> {
     let app = Arc::clone(state.inner());
     let operation_app = Arc::clone(&app);
@@ -406,7 +422,7 @@ pub async fn list_objects(
                 })
                 .collect());
         }
-        dbx_core::schema::list_objects_core_with_options(
+        dbx_core::schema::list_objects_core_with_loading_options(
             &operation_app,
             &connection_id,
             &database,
@@ -417,6 +433,7 @@ pub async fn list_objects(
             object_types.as_deref(),
             table_name_filter.as_ref(),
             &dbx_core::schema::MetadataReadOptions { identity_mode, catalog },
+            lightweight,
         )
         .await
     })

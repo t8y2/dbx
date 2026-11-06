@@ -1,6 +1,9 @@
 use super::dialect::{is_oracle_like, StructureDialect};
 use super::types::{EditableStructureColumn, TableStructureSqlOptions};
-use super::util::{clean, format_default_for_sql, normalize_default, quote_ident, quote_string};
+use super::util::{
+    clean, format_default_for_sql, mysql_temporal_default_carries_on_update, normalize_default, quote_ident,
+    quote_string,
+};
 use crate::models::connection::DatabaseType;
 
 /// Drops the `CHARACTER SET` / `COLLATE` inputs of MySQL columns that merely
@@ -95,7 +98,10 @@ pub(super) fn column_definition(
     }
     if mysql_generated_clause.is_none() {
         if let Some(on_update) = column.extra.as_ref().and_then(|e| e.on_update_current_timestamp).filter(|v| *v) {
-            if on_update && dialect == StructureDialect::Mysql {
+            if on_update
+                && dialect == StructureDialect::Mysql
+                && !mysql_temporal_default_carries_on_update(&default_value)
+            {
                 parts.push(mysql_on_update_current_timestamp_clause(&column.data_type));
             }
         }

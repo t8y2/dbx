@@ -440,16 +440,30 @@ impl MessageQueueAdmin for KafkaAdmin {
             PolicyScope::Namespace { .. } => return Err("Kafka retention can only be set on topics".to_string()),
         };
 
-        let retention_ms = if retention.retention_time_in_minutes < 0 {
-            "-1".to_string()
-        } else {
-            (retention.retention_time_in_minutes as i64 * 60 * 1000).to_string()
-        };
-
-        let mut configs = vec![serde_json::json!({ "key": "retention.ms", "value": retention_ms })];
-        if retention.retention_size_in_mb >= 0 {
-            let retention_bytes = (retention.retention_size_in_mb as i64 * 1024 * 1024).to_string();
+        let mut configs = Vec::new();
+        // 只下发用户实际改过的字段；未修改字段保持 broker 原值，避免未回显时被 -1 覆盖。
+        if retention.write_retention_time {
+            let retention_ms = if retention.retention_time_in_minutes < 0 {
+                "-1".to_string()
+            } else {
+                (retention.retention_time_in_minutes as i64 * 60 * 1000).to_string()
+            };
+            configs.push(serde_json::json!({ "key": "retention.ms", "value": retention_ms }));
+        }
+        if retention.write_retention_size {
+            if retention.retention_size_in_mb < -1 {
+                return Err("retention size must be >= -1 MB".to_string());
+            }
+            // 表单 MB 按二进制口径换算；-1 表示不限，需显式下发以覆盖 topic 原有配置。
+            let retention_bytes = if retention.retention_size_in_mb < 0 {
+                "-1".to_string()
+            } else {
+                (retention.retention_size_in_mb as i64 * 1024 * 1024).to_string()
+            };
             configs.push(serde_json::json!({ "key": "retention.bytes", "value": retention_bytes }));
+        }
+        if configs.is_empty() {
+            return Ok(());
         }
 
         self.call_ok(
@@ -670,6 +684,20 @@ fn build_connection_params(cfg: &MqAdminConfig) -> serde_json::Value {
     let zookeeper_connect_string = extra_str(extra, "zookeeperServers").unwrap_or("");
     let properties =
         extra.get("properties").filter(|value| value.is_object()).cloned().unwrap_or_else(|| serde_json::json!({}));
+    // 仅透传非空路径，空字段保持缺省，避免旧 agent（无 PEM 能力）收到无意义键。
+    let mut tls = serde_json::json!({ "skip_verify": cfg.tls_skip_verify });
+    if let Some(kafka_tls) = &cfg.tls {
+        let paths = [
+            ("ca_cert_path", kafka_tls.ca_cert_path.trim()),
+            ("client_cert_path", kafka_tls.client_cert_path.trim()),
+            ("client_key_path", kafka_tls.client_key_path.trim()),
+        ];
+        for (key, value) in paths {
+            if !value.is_empty() {
+                tls[key] = serde_json::Value::String(value.to_string());
+            }
+        }
+    }
 
     serde_json::json!({
         "bootstrap_servers": bootstrap_servers(cfg),
@@ -679,9 +707,7 @@ fn build_connection_params(cfg: &MqAdminConfig) -> serde_json::Value {
         "sasl_username": sasl_username,
         "sasl_password": sasl_password,
         "tls_skip_verify": cfg.tls_skip_verify,
-        "tls": {
-            "skip_verify": cfg.tls_skip_verify,
-        },
+        "tls": tls,
         "properties": properties,
         "request_timeout_ms": cfg.request_timeout_ms(),
     })
@@ -899,6 +925,7 @@ mod tests {
             admin_url: String::new(),
             auth,
             tls_skip_verify,
+            tls: None,
             pinned_version: None,
             token_signing: None,
             connect_override: None,
@@ -920,6 +947,36 @@ mod tests {
             message_type: None,
             ..TopicRef::default()
         }
+    }
+
+    #[test]
+    fn connection_params_propagate_kafka_pem_tls_paths() {
+        let mut cfg = kafka_config(
+            serde_json::json!({ "bootstrapServers": "broker:9092", "securityProtocol": "SASL_SSL" }),
+            MqAuth::None,
+            false,
+        );
+        cfg.tls = Some(crate::mq::config::MqKafkaTlsConfig {
+            ca_cert_path: "/certs/ca-chain.pem".into(),
+            client_cert_path: "/certs/client.crt".into(),
+            client_key_path: "/certs/client.key".into(),
+        });
+        let tls = build_connection_params(&cfg).get("tls").cloned().expect("tls object");
+        assert_eq!(tls["ca_cert_path"], "/certs/ca-chain.pem");
+        assert_eq!(tls["client_cert_path"], "/certs/client.crt");
+        assert_eq!(tls["client_key_path"], "/certs/client.key");
+        assert_eq!(tls["skip_verify"], false);
+    }
+
+    #[test]
+    fn connection_params_keep_tls_paths_absent_when_unset() {
+        let mut cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        cfg.tls = Some(crate::mq::config::MqKafkaTlsConfig::default());
+        let tls = build_connection_params(&cfg).get("tls").cloned().expect("tls object");
+        assert!(tls.get("ca_cert_path").is_none());
+        assert!(tls.get("client_cert_path").is_none());
+        assert!(tls.get("client_key_path").is_none());
+        assert_eq!(tls["skip_verify"], false);
     }
 
     #[test]

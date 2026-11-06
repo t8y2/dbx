@@ -5,6 +5,8 @@ import { UPDATE_BLOCKING_CONFIG_SURFACES, describeConfigUpdateBlock, type Update
 
 const closedState: UpdateBlockingConfigState = {
   pendingAppClose: false,
+  saveCloseConfirm: false,
+  exitCloseConfirm: false,
   connectionDialog: false,
   saveSqlDialog: false,
   ddlDialog: false,
@@ -72,6 +74,17 @@ describe("update config blocking surfaces", () => {
     expect(describeConfigUpdateBlock({ ...closedState, importApplying: true }, translate)).toEqual({ code: "config_busy", message: "updates.preparationConfigBusy" });
   });
 
+  it("describes the visible confirmation rather than treating the close request as a dialog", () => {
+    expect(describeConfigUpdateBlock({ ...closedState, pendingAppClose: true, saveCloseConfirm: true }, translate)).toEqual({ code: "config", message: "updates.preparationSaveConfirmation" });
+    expect(describeConfigUpdateBlock({ ...closedState, exitCloseConfirm: true }, translate)).toEqual({ code: "config", message: "updates.preparationAppClose" });
+    expect(describeConfigUpdateBlock({ ...closedState, pendingAppClose: true, saveSqlDialog: true }, translate)).toEqual({ code: "config", message: "updates.preparationConfigDetail[savedSql.saveToLibrary]" });
+    expect(describeConfigUpdateBlock({ ...closedState, pendingAppClose: true, configExportBusy: true }, translate)?.code).toBe("config_busy");
+  });
+
+  it("asks to wait during an in-flight close without inventing a confirmation dialog", () => {
+    expect(describeConfigUpdateBlock({ ...closedState, pendingAppClose: true }, translate)).toEqual({ code: "window_operation", message: "updates.preparationWindowOperation" });
+  });
+
   it("reports a busy transfer before an open dialog, because the transfer cannot be closed yet", () => {
     expect(describeConfigUpdateBlock({ ...closedState, transferDialog: true, configExportBusy: true }, translate)?.code).toBe("config_busy");
   });
@@ -92,7 +105,7 @@ describe("update config blocking surfaces", () => {
   });
 
   it("renders the reason with the dialog name in every shipped locale", async () => {
-    const locales = ["zh-CN", "zh-TW", "en", "ja", "ko", "es", "it", "pt-BR", "tr", "az"];
+    const locales = ["zh-CN", "zh-TW", "en", "ja", "ko", "es", "it", "pt-BR", "tr", "az", "ru", "th", "id", "pl"];
     const previous = i18n.global.locale.value;
     try {
       for (const locale of locales) {
@@ -103,10 +116,19 @@ describe("update config blocking surfaces", () => {
         expect(block?.code).toBe("config");
         expect(block?.message).toContain(i18n.global.t("transfer.title"));
         expect(block?.message).not.toContain("{surface}");
+        for (const [state, key] of [
+          [{ ...closedState, exitCloseConfirm: true }, "updates.preparationAppClose"],
+          [{ ...closedState, pendingAppClose: true, saveCloseConfirm: true }, "updates.preparationSaveConfirmation"],
+        ] as const) {
+          expect(i18n.global.te(key, locale)).toBe(true);
+          const closeBlock = describeConfigUpdateBlock(state, t);
+          expect(closeBlock?.message).toBe(i18n.global.t(key));
+          expect(closeBlock?.message).not.toContain("{surface}");
+        }
       }
     } finally {
       i18n.global.locale.value = previous;
     }
-    // Loading ten locale bundles is slow when the whole suite runs in parallel.
+    // Loading all locale bundles is slow when the whole suite runs in parallel.
   }, 60000);
 });

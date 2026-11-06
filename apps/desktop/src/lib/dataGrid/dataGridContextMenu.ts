@@ -135,12 +135,14 @@ export function createDataGridColumnContextMenuItems(options: {
   /** 当前被隐藏的列数量，用于决定是否显示「显示全部列」。 */
   hiddenColumnCount?: number;
   canHideIdenticalColumns?: boolean;
+  canDeleteColumn?: boolean;
+  deferDeleteToDangerousMenu?: boolean;
   labels: Record<
     "copyName" | "copyComment" | "copyNames" | "details" | "copyAlterSql" | "databaseAscending" | "databaseDescending" | "localAscending" | "localDescending" | "clearSort" | "freezeToColumn" | "freezeSelectedColumns" | "unfreezeColumns" | "hideColumn" | "hideSelectedColumns" | "showAllColumnsMenu",
     string
   > &
-    Partial<Record<"freezeCurrentColumn" | "unfreezeCurrentColumn" | "hideIdenticalColumns" | "copyMetadata" | "clearRememberedColumnWidths", string>>;
-  icons: Pick<DataGridContextMenuIcons, "copy" | "columnDetails" | "database" | "ascending" | "descending" | "clearSort"> & Partial<Record<"clearRememberedColumnWidths", Component>>;
+    Partial<Record<"freezeCurrentColumn" | "unfreezeCurrentColumn" | "hideIdenticalColumns" | "copyMetadata" | "clearRememberedColumnWidths" | "deleteColumn", string>>;
+  icons: Pick<DataGridContextMenuIcons, "copy" | "columnDetails" | "database" | "ascending" | "descending" | "clearSort"> & Partial<Record<"clearRememberedColumnWidths" | "deleteColumn", Component>>;
   actions: {
     copyName: () => void;
     copyComment: () => void;
@@ -158,6 +160,7 @@ export function createDataGridColumnContextMenuItems(options: {
     hideSelectedColumns: () => void;
     hideIdenticalColumns?: () => void;
     showAllColumnsMenu: () => void;
+    deleteColumn?: () => void;
     clearRememberedColumnWidths?: () => void;
   };
   filterSubmenu: DataGridContextMenuItem;
@@ -219,6 +222,10 @@ export function createDataGridColumnContextMenuItems(options: {
     if ((options.frozenColumnCount ?? 0) > 0) {
       if ((options.contextVisibleColIdx ?? -1) < (options.frozenColumnCount ?? 0) && options.labels.unfreezeCurrentColumn && options.actions.unfreezeCurrentColumn) items.push({ label: options.labels.unfreezeCurrentColumn, action: options.actions.unfreezeCurrentColumn });
       items.push({ label: options.labels.unfreezeColumns, action: options.actions.unfreezeColumns });
+    }
+    if (!options.deferDeleteToDangerousMenu && options.canDeleteColumn !== undefined && options.actions.deleteColumn) {
+      items.push({ label: "", separator: true });
+      items.push({ label: options.labels.deleteColumn ?? "Delete column", action: options.actions.deleteColumn, disabled: !options.canDeleteColumn, variant: "destructive" });
     }
     if (options.hasColumnSelection) {
       items.push({ label: options.labels.freezeSelectedColumns, action: options.actions.freezeSelectedColumns });
@@ -292,6 +299,7 @@ export function createDataGridRowContextMenuItems(options: {
   canClone: boolean;
   deleted: boolean;
   canDelete: boolean;
+  deferDeleteToDangerousMenu?: boolean;
   labels: Record<"clone" | "restore" | "delete", string>;
   icons: Pick<DataGridContextMenuIcons, "clone" | "restore" | "delete">;
   actions: Record<"clone" | "restore" | "delete", () => void>;
@@ -300,7 +308,7 @@ export function createDataGridRowContextMenuItems(options: {
   const items: DataGridContextMenuItem[] = [{ label: "", separator: true }];
   if (options.canClone) items.push({ label: options.labels.clone, action: options.actions.clone, icon: options.icons.clone });
   if (options.deleted) items.push({ label: options.labels.restore, action: options.actions.restore, icon: options.icons.restore });
-  else if (options.canDelete) items.push({ label: options.labels.delete, action: options.actions.delete, icon: options.icons.delete, variant: "destructive" });
+  else if (options.canDelete && !options.deferDeleteToDangerousMenu) items.push({ label: options.labels.delete, action: options.actions.delete, icon: options.icons.delete, variant: "destructive" });
   items.push({ label: "", separator: true });
   return items;
 }

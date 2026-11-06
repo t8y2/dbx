@@ -145,8 +145,24 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 - `host.data:read` 允许 `window.dbxPlugin.queryData` 在用户授权给插件的连接上执行一条只读 SQL（见 [只读数据查询](#只读数据查询)）。每个连接都需要用户同意；它不会授予写入、DDL 或重连。
 - `host.connections:read` 允许通过 `window.dbxPlugin.getConnections()` 或 `window.dbxPlugin.connections.list()` 获取当前所有已配置连接的只读脱敏信息（见 [连接信息读取](#连接信息读取)）。
 - `host.network:https://host[:port]` 声明浏览器可访问的 HTTPS origin，DBX 将它加入 CSP 的 `connect-src`；最多 8 个，不允许路径、通配符或 Token。仍受目标服务 CORS 规则约束。该权限不是原生 Sidecar 的网络防火墙。
+- `host.openUrl:http(s)://host[:port]` 允许请求打开指定站点，最多 8 个精确 origin；与网络权限独立，不允许路径、凭据、通配符或尾部斜杠。使用标准化的 `URL.origin`（默认端口应省略）；IPv6 地址使用方括号。
+
 - `backend.transport` 默认是 `stdio-jsonl`；需要二进制帧时使用 `stdio-framed`，并同时声明 `host.binary`。
 - `backend.executable`、`ui.root` 和 `ui.entry` 必须指向包内文件；带原生后端的包必须为每个目标平台提供对应可执行文件。
+
+### 打开外部网址
+
+在 manifest 中声明例如 `"host.openUrl:https://dbxio.com"`，再调用：
+
+```js
+if (window.dbxPlugin.capabilities?.openUrl) {
+  const { opened } = await window.dbxPlugin.openUrl("https://dbxio.com/cn/docs/plugins");
+}
+```
+
+每次请求都由 DBX 显示插件名称和完整目标网址，只有用户在宿主确认后才打开。Web / Docker 通过宿主的可信链接点击打开新标签页，桌面端使用系统浏览器；取消或关闭工作台返回 `{ opened: false }`，非法网址或未声明站点会拒绝请求。同一工作台同时只接受一个待确认请求。`opened: true` 表示已发起打开，不代表目标网页成功加载。
+
+接口只接受不带用户名、密码的 HTTP / HTTPS URL，最长 4,096 字符；不支持 `javascript:`、`file:` 等协议。iframe 仍保留 `sandbox="allow-scripts"`，不会获得任意弹窗、顶层导航或网络访问能力。旧宿主可能在安装时拒绝新权限；宿主或 SDK Dev Host 没有 `capabilities.openUrl` 时应隐藏入口，不要探测调用。
 
 ### Connection Provider
 

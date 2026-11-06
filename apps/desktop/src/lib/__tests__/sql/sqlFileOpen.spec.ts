@@ -9,8 +9,11 @@ import {
   externalSqlFileDisplayTitles,
   externalSqlFileOpenErrorMessage,
   formatSqlFileSize,
+  isDdlFilePath,
   isScriptFilePath,
   isSqlFilePath,
+  isSqlOrScriptFilePath,
+  isSpreadsheetFilePath,
   MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES,
   MAX_EXTERNAL_SQL_EDITOR_FILE_MB,
   MIN_EXTERNAL_SQL_EDITOR_FILE_MB,
@@ -40,6 +43,51 @@ describe("external SQL file paths", () => {
     expect(isScriptFilePath("C:\\work\\demo.SQL")).toBe(true);
     expect(isScriptFilePath("/work/mongo_query.js")).toBe(true);
     expect(isScriptFilePath("/work/script.py")).toBe(false);
+  });
+
+  it("identifies DDL files correctly", () => {
+    expect(isDdlFilePath("schema.ddl")).toBe(true);
+    expect(isDdlFilePath("C:\\work\\SCHEMA.DDL")).toBe(true);
+    expect(isDdlFilePath("query.sql")).toBe(false);
+    expect(isDdlFilePath("data.xlsx")).toBe(false);
+  });
+
+  it("identifies SQL and script files (.sql, .ddl, .js) for in-editor opening", () => {
+    expect(isSqlOrScriptFilePath("query.sql")).toBe(true);
+    expect(isSqlOrScriptFilePath("SCHEMA.DDL")).toBe(true);
+    expect(isSqlOrScriptFilePath("/app/script.js")).toBe(true);
+    expect(isSqlOrScriptFilePath("C:\\work\\financial_data.xlsx")).toBe(false);
+    expect(isSqlOrScriptFilePath("/docs/readme.pdf")).toBe(false);
+    expect(isSqlOrScriptFilePath("memo.docx")).toBe(false);
+  });
+
+  it("treats per-engine database script extensions as editable scripts (#14204)", () => {
+    expect(isSqlOrScriptFilePath("schema_dump.psql")).toBe(true);
+    expect(isSqlOrScriptFilePath("report.PLPGSQL")).toBe(true);
+    expect(isSqlOrScriptFilePath("migration.sqlpg")).toBe(true);
+    expect(isSqlOrScriptFilePath("add_salary.prc")).toBe(true);
+    expect(isSqlOrScriptFilePath("calc_bonus.fnc")).toBe(true);
+    expect(isSqlOrScriptFilePath("pkg_header.pks")).toBe(true);
+    expect(isSqlOrScriptFilePath("pkg_body.pkb")).toBe(true);
+    expect(isSqlOrScriptFilePath("types.pck")).toBe(true);
+    expect(isSqlOrScriptFilePath("lib.pls")).toBe(true);
+    expect(isSqlOrScriptFilePath("procedures.plsql")).toBe(true);
+    expect(isSqlOrScriptFilePath("audit_trg.trg")).toBe(true);
+    expect(isSqlOrScriptFilePath("batch.tsql")).toBe(true);
+    expect(isSqlOrScriptFilePath("proc.spc")).toBe(true);
+    expect(isSqlOrScriptFilePath("sync.rout")).toBe(true);
+    expect(isSqlOrScriptFilePath("mongosh.mjs")).toBe(true);
+    expect(isSqlOrScriptFilePath("archive.zip")).toBe(false);
+    expect(isSqlOrScriptFilePath("notes.txt")).toBe(false);
+  });
+
+  it("identifies spreadsheet files for dedicated icon rendering", () => {
+    expect(isSpreadsheetFilePath("data.xlsx")).toBe(true);
+    expect(isSpreadsheetFilePath("legacy.XLS")).toBe(true);
+    expect(isSpreadsheetFilePath("/export/result.csv")).toBe(true);
+    expect(isSpreadsheetFilePath("dump.tsv")).toBe(true);
+    expect(isSpreadsheetFilePath("query.sql")).toBe(false);
+    expect(isSpreadsheetFilePath("doc.pdf")).toBe(false);
   });
 
   it("uses the shortest unique parent path for duplicate filenames", () => {

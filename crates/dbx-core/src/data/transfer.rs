@@ -2861,6 +2861,7 @@ fn keeps_backslash_literal(target_db: &DatabaseType) -> bool {
         DatabaseType::Oracle
             | DatabaseType::OceanbaseOracle
             | DatabaseType::Dameng
+            | DatabaseType::Xugu
             | DatabaseType::Sqlite
             | DatabaseType::Rqlite
             | DatabaseType::Turso
@@ -2934,15 +2935,49 @@ fn format_mysql_default_literal(raw: &str, data_type: &str) -> String {
     format!("'{}'", trimmed.replace('\'', "''"))
 }
 
+fn dameng_to_postgres_default(value: &str, target_type: &str) -> Option<String> {
+    static STRING_LITERAL: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"\A'([^'\x00]|'')*'\z").expect("valid string literal regex"));
+    static TIMESTAMP_DEFAULT: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"\A(?:CURRENT_TIMESTAMP|LOCALTIMESTAMP)(?:\([ \t]*[0-6][ \t]*\))?\z")
+            .expect("valid timestamp default regex")
+    });
+
+    // Dameng returns SQL expressions. Keep defaults with a PostgreSQL equivalent
+    // for the mapped column type, without copying Dameng functions or sequences.
+    let target_base_type = target_type.split('(').next().unwrap_or(target_type).trim();
+    let upper = value.to_ascii_uppercase();
+    match (target_base_type, upper.as_str()) {
+        (_, "NULL") => Some(upper),
+        ("BOOLEAN", "1" | "TRUE") => Some("TRUE".to_string()),
+        ("BOOLEAN", "0" | "FALSE") => Some("FALSE".to_string()),
+        ("DATE" | "TIMESTAMP", "CURRENT_DATE") => Some(upper),
+        ("DATE" | "TIMESTAMP", _) if TIMESTAMP_DEFAULT.is_match(&upper) => Some(upper),
+        ("SMALLINT", _) if value.parse::<i16>().is_ok() => Some(value.to_string()),
+        ("INTEGER", _) if value.parse::<i32>().is_ok() => Some(value.to_string()),
+        ("BIGINT", _) if value.parse::<i64>().is_ok() => Some(value.to_string()),
+        ("NUMERIC" | "DECIMAL" | "DOUBLE PRECISION", _) if looks_like_numeric_literal(value) => Some(value.to_string()),
+        ("VARCHAR" | "CHAR" | "TEXT", _) if STRING_LITERAL.is_match(value) => {
+            Some(quote_postgres_string_literal(&value[1..value.len() - 1].replace("''", "'")))
+        }
+        _ => None,
+    }
+}
+
 fn column_default_clause(
     column: &db::ColumnInfo,
     source_schema: &str,
     target_schema: &str,
     source_db: &DatabaseType,
     target_db: &DatabaseType,
+    target_type: &str,
 ) -> Option<String> {
     if is_postgres_compat_transfer(source_db, target_db) {
         return postgres_default_clause(column, source_schema, target_schema, source_db, target_db);
+    }
+    if matches!((source_db, target_db), (DatabaseType::Dameng, DatabaseType::Postgres)) {
+        let value = column.column_default.as_deref()?.trim();
+        return dameng_to_postgres_default(value, target_type).map(|value| format!("DEFAULT {value}"));
     }
     if is_mysql_family_target(target_db) {
         let default_value = column.column_default.as_deref()?.trim();
@@ -2952,6 +2987,44 @@ fn column_default_clause(
         return Some(format!("DEFAULT {}", format_mysql_default_literal(default_value, &column.data_type)));
     }
     None
+}
+
+fn mysql_default_for_dameng(column: &db::ColumnInfo) -> Option<String> {
+    static CURRENT_TIMESTAMP: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"\ACURRENT_TIMESTAMP(?:\([0-6]?\))?\z").expect("valid timestamp default regex")
+    });
+    let value = column.column_default.as_deref()?;
+    let trimmed = value.trim();
+    let base_type = column.data_type.split(['(', ' ']).next().unwrap_or_default().to_ascii_lowercase();
+    let upper = trimmed.to_ascii_uppercase();
+    if matches!(base_type.as_str(), "timestamp" | "datetime") && CURRENT_TIMESTAMP.is_match(&upper) {
+        return Some(upper.strip_suffix("()").unwrap_or(&upper).to_string());
+    }
+    if column
+        .extra
+        .as_deref()
+        .is_some_and(|extra| extra.split_ascii_whitespace().any(|part| part.eq_ignore_ascii_case("DEFAULT_GENERATED")))
+    {
+        return None;
+    }
+
+    // COLUMN_DEFAULT is the raw string on MySQL. Quote it even when it looks
+    // like NULL or a function, and check integer bounds after type mapping.
+    let compatible_number = match base_type.as_str() {
+        "tinyint" => trimmed.parse::<i8>().is_ok(),
+        "smallint" => trimmed.parse::<i16>().is_ok(),
+        "mediumint" | "int" | "integer" => trimmed.parse::<i32>().is_ok(),
+        "bigint" => trimmed.parse::<i64>().is_ok(),
+        "numeric" | "decimal" | "double" => looks_like_numeric_literal(trimmed),
+        _ => false,
+    };
+    if compatible_number {
+        Some(trimmed.to_string())
+    } else if matches!(base_type.as_str(), "char" | "varchar") && !value.contains('\0') {
+        Some(quote_string_literal(value))
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -4974,7 +5047,38 @@ fn generate_create_table_ddl_with_column_quoting(
     catalog: Option<&str>,
     quote_target_column_names: bool,
 ) -> String {
+    generate_create_table_ddl_with_source_profile(
+        columns,
+        table,
+        source_schema,
+        schema,
+        target_db,
+        source_db,
+        None,
+        table_comment,
+        catalog,
+        quote_target_column_names,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_create_table_ddl_with_source_profile(
+    columns: &[db::ColumnInfo],
+    table: &str,
+    source_schema: &str,
+    schema: &str,
+    target_db: &DatabaseType,
+    source_db: &DatabaseType,
+    source_driver_profile: Option<&str>,
+    table_comment: Option<&str>,
+    catalog: Option<&str>,
+    quote_target_column_names: bool,
+) -> String {
     let full_table = qualified_table(table, schema, target_db, catalog);
+    // MySQL-compatible profiles can return SQL literals instead of raw string values.
+    let preserve_mysql_defaults_in_dameng =
+        matches!((source_db, target_db), (DatabaseType::Mysql, DatabaseType::Dameng))
+            && matches!(source_driver_profile, None | Some("mysql"));
 
     let is_mysql_family = matches!(
         target_db,
@@ -5089,10 +5193,16 @@ fn generate_create_table_ddl_with_column_quoting(
                             || mysql_extra_clauses.as_ref().is_some_and(|extra| extra.auto_increment));
                     if !skip_default && !mysql_auto_increment {
                         if let Some(default_clause) =
-                            column_default_clause(c, source_schema, schema, source_db, target_db)
+                            column_default_clause(c, source_schema, schema, source_db, target_db, &mapped_type)
                         {
                             line.push(' ');
                             line.push_str(&default_clause);
+                        }
+                    }
+                    if preserve_mysql_defaults_in_dameng && !skip_default && !column_is_auto_increment(c) {
+                        if let Some(value) = mysql_default_for_dameng(c) {
+                            line.push_str(" DEFAULT ");
+                            line.push_str(&value);
                         }
                     }
                     if !c.is_nullable
@@ -15695,6 +15805,57 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
         assert_eq!(
             escape_value_typed(&json!(r"C:\tmp\o'clock"), &DatabaseType::Mysql, Some("varchar(64)")),
             r"'C:\\tmp\\o''clock'"
+        );
+    }
+
+    #[test]
+    fn xugu_transfer_preserves_text_and_json_escape_sequences() {
+        let values = [
+            "".to_string(),
+            r"C:\tmp\o'clock\".to_string(),
+            r"\\server\share\\file".to_string(),
+            "中文\nactual\ttab\r\nnext".to_string(),
+            r"literal\n\r\t\u4e2d".to_string(),
+            r#"{"path":"C:\\tmp\\o'clock","quoted":"\"value\"","newline":"a\nb","unicode":"\u4e2d"}"#.to_string(),
+            "中文\\'\"\n".repeat(25_000),
+        ];
+        for kind in [None, Some("VARCHAR(500)"), Some("CHAR(500)"), Some("CLOB"), Some("JSON"), Some("XML")] {
+            for text in &values {
+                assert_eq!(
+                    escape_value_typed(&json!(text), &DatabaseType::Xugu, kind),
+                    quote_string_literal(text),
+                    "Xugu literal must retain source characters for {kind:?}"
+                );
+            }
+            assert_eq!(escape_value_typed(&serde_json::Value::Null, &DatabaseType::Xugu, kind), "NULL");
+        }
+    }
+
+    #[test]
+    fn xugu_insert_preserves_text_without_modifying_binary_literals() {
+        let text = r"C:\tmp\o'clock\";
+        let document = r#"{"path":"C:\\tmp","line":"a\nb"}"#;
+        let sql = generate_insert_typed(
+            &["ID".into(), "V".into(), "L".into(), "J".into(), "B".into()],
+            &[
+                Some("INT".into()),
+                Some("VARCHAR(100)".into()),
+                Some("CLOB".into()),
+                Some("JSON".into()),
+                Some("BLOB".into()),
+            ],
+            &[vec![json!(1), json!(text), json!(text), json!(document), json!("0x005C27FF")]],
+            "ESCAPE_TEST",
+            "APP",
+            &DatabaseType::Xugu,
+            None,
+        );
+        assert_eq!(
+            sql,
+            format!(
+                "INSERT INTO \"APP\".\"ESCAPE_TEST\" (\"ID\", \"V\", \"L\", \"J\", \"B\") VALUES\n(1, {}, {}, {}, X'005C27FF')",
+                quote_string_literal(text), quote_string_literal(text), quote_string_literal(document)
+            )
         );
     }
 

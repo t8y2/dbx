@@ -27,9 +27,9 @@ use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_
 use crate::types::{
     is_opaque_aggregate_state_type, ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate,
     CompletionAssistantCandidateKind, CompletionAssistantMatchMode, CompletionAssistantObjectKind,
-    CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo, ForeignKeyInfo, IndexInfo, LargeValueCell,
-    ObjectInfo, ObjectStatistics, OriginalKeyCell, QueryMessage, QueryResult, SpatialColumnBuilder, TableInfo,
-    TriggerInfo,
+    CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo, DatabaseStorageInfo, ForeignKeyInfo,
+    IndexInfo, LargeValueCell, ObjectInfo, ObjectStatistics, OriginalKeyCell, QueryMessage, QueryResult,
+    SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
 use dbx_types::metadata_filter::{table_name_filter_matches, TableNameFilter};
 
@@ -1720,6 +1720,7 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
     let mut retry_url = url.to_string();
     let mut retry_ca_cert_path = ca_cert_path;
     let mut tls_error = None;
+    let eof_mode = MySqlEofMode::default_for_setup_mode(setup_mode);
     let mut result = connect_pool_attempt(
         url,
         ca_cert_path,
@@ -1729,7 +1730,7 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
         setup_database,
         extra_setup_queries,
         setup_mode,
-        MySqlEofMode::Deprecate,
+        eof_mode,
     )
     .await;
 
@@ -1748,13 +1749,15 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
                 setup_database,
                 extra_setup_queries,
                 setup_mode,
-                MySqlEofMode::Deprecate,
+                eof_mode,
             )
             .await;
         }
     }
 
-    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error)) {
+    if eof_mode == MySqlEofMode::Deprecate
+        && result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error))
+    {
         log::info!("MySQL proxy returned legacy EOF packets; retrying with CLIENT_DEPRECATE_EOF disabled");
         result = connect_pool_attempt(
             &retry_url,
@@ -1898,6 +1901,17 @@ enum MySqlTcpKeepaliveMode {
 impl MySqlEofMode {
     fn deprecate_eof(self) -> bool {
         self == Self::Deprecate
+    }
+
+    fn default_for_setup_mode(setup_mode: MySqlSetupMode) -> Self {
+        match setup_mode {
+            // Doris and other MySQL-compatible servers append an empty info
+            // field to the login OK packet when CLIENT_DEPRECATE_EOF is set.
+            // Keep the legacy protocol for this compatibility path so the
+            // handshake does not depend on mysql_async accepting that quirk.
+            MySqlSetupMode::Compatible => Self::Legacy,
+            MySqlSetupMode::Standard | MySqlSetupMode::LiteralFloor => Self::Deprecate,
+        }
     }
 }
 
@@ -3366,6 +3380,7 @@ pub async fn connect_bare_with_pool_limit_and_setup_database(
     extra_setup_queries: &[String],
 ) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
+    let eof_mode = MySqlEofMode::default_for_setup_mode(MySqlSetupMode::Compatible);
     let result = connect_pool_attempt(
         url,
         None,
@@ -3375,10 +3390,12 @@ pub async fn connect_bare_with_pool_limit_and_setup_database(
         setup_database,
         extra_setup_queries,
         MySqlSetupMode::Compatible,
-        MySqlEofMode::Deprecate,
+        eof_mode,
     )
     .await;
-    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error)) {
+    if eof_mode == MySqlEofMode::Deprecate
+        && result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error))
+    {
         log::info!(
             "MySQL proxy returned legacy EOF packets; retrying bare connection with CLIENT_DEPRECATE_EOF disabled"
         );
@@ -3409,6 +3426,140 @@ const DATABASE_METADATA_SQL: &str = "SELECT s.SCHEMA_NAME, \
      LEFT JOIN information_schema.TABLES t ON t.TABLE_SCHEMA = s.SCHEMA_NAME \
      GROUP BY s.SCHEMA_NAME, s.DEFAULT_CHARACTER_SET_NAME, s.DEFAULT_COLLATION_NAME \
      ORDER BY s.SCHEMA_NAME";
+const DATABASE_ATTRIBUTES_SQL: &str = "SELECT SCHEMA_NAME, DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME";
+const BROWSER_METADATA_TIMEOUT: Duration = Duration::from_secs(5);
+
+// Hold the original connection until cancellation finishes: returning it to the
+// pool before KILL could interrupt an unrelated subsequent query on that ID.
+struct BrowserMetadataConnection {
+    conn: Option<mysql_async::Conn>,
+    cancel_timeout: Duration,
+}
+
+impl BrowserMetadataConnection {
+    async fn cancel(&mut self) -> Result<(), String> {
+        let Some(conn) = self.conn.take() else { return Ok(()) };
+        let timeout = self.cancel_timeout;
+        // Keep cleanup alive even if the caller is cancelled while awaiting KILL.
+        tokio::spawn(async move { cancel_browser_metadata_connection(conn, timeout).await })
+            .await
+            .map_err(|error| format!("MySQL metadata cancellation task failed: {error}"))?
+    }
+}
+
+impl Drop for BrowserMetadataConnection {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            let timeout = self.cancel_timeout;
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    if let Err(error) = cancel_browser_metadata_connection(conn, timeout).await {
+                        log::warn!("[mysql:metadata:cancel] {error}");
+                    }
+                });
+            }
+        }
+    }
+}
+
+async fn cancel_browser_metadata_connection(conn: mysql_async::Conn, timeout: Duration) -> Result<(), String> {
+    let result = kill_query_with_opts(conn.opts().clone(), conn.id(), timeout).await;
+    // Never recycle a connection whose query was interrupted or abandoned.
+    let _ = tokio::time::timeout(timeout, conn.disconnect()).await;
+    result
+}
+
+async fn browser_metadata_rows(pool: &MySqlPool, sql: &str) -> Result<Vec<mysql_async::Row>, String> {
+    browser_metadata_rows_with_budget(pool, sql, false, BROWSER_METADATA_TIMEOUT).await
+}
+
+async fn browser_metadata_rows_with_fresh_statistics(
+    pool: &MySqlPool,
+    sql: &str,
+    fresh_statistics: bool,
+) -> Result<Vec<mysql_async::Row>, String> {
+    browser_metadata_rows_with_budget(pool, sql, fresh_statistics, BROWSER_METADATA_TIMEOUT).await
+}
+
+/// `budget` bounds interactive browsing (enumeration keeps the snappy default) and
+/// user-initiated reads (details/storage), which pass the session-derived budget.
+async fn browser_metadata_rows_with_budget(
+    pool: &MySqlPool,
+    sql: &str,
+    fresh_statistics: bool,
+    budget: Duration,
+) -> Result<Vec<mysql_async::Row>, String> {
+    let conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
+    let mut guard = BrowserMetadataConnection { conn: Some(conn), cancel_timeout: pool.checkout_timeout().min(budget) };
+    let result = tokio::time::timeout(budget, async {
+        let conn = guard.conn.as_mut().expect("metadata connection is held until completion");
+        if fresh_statistics {
+            enable_fresh_table_statistics(conn, "reading object statistics").await;
+        }
+        let result = conn.query_iter(sql).await.map_err(|error| error.to_string())?;
+        result.collect_and_drop::<mysql_async::Row>().await.map_err(|error| error.to_string())
+    })
+    .await;
+    match result {
+        Ok(result) => {
+            // Completed protocol exchange: returning this connection to its pool is safe.
+            let _ = guard.conn.take();
+            result
+        }
+        Err(_) => {
+            let cancellation = guard.cancel().await;
+            let budget_secs = budget.as_secs();
+            Err(match cancellation {
+                Ok(()) => format!("MySQL browser metadata timed out after {budget_secs}s; query cancelled"),
+                Err(error) => {
+                    format!("MySQL browser metadata timed out after {budget_secs}s; cancellation failed: {error}")
+                }
+            })
+        }
+    }
+}
+
+fn database_storage_sql(databases: &[String]) -> Option<String> {
+    if databases.is_empty() {
+        return None;
+    }
+    Some(format!("SELECT TABLE_SCHEMA, SUM(COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0)) AS SIZE_BYTES FROM information_schema.TABLES WHERE TABLE_SCHEMA IN ({}) GROUP BY TABLE_SCHEMA ORDER BY TABLE_SCHEMA", databases.iter().map(|name| quote_value(name)).collect::<Vec<_>>().join(", ")))
+}
+
+pub async fn list_database_storage(pool: &MySqlPool, databases: &[String]) -> Result<Vec<DatabaseStorageInfo>, String> {
+    list_database_storage_with_budget(pool, databases, BROWSER_METADATA_TIMEOUT).await
+}
+
+pub async fn list_database_storage_with_budget(
+    pool: &MySqlPool,
+    databases: &[String],
+    budget: Duration,
+) -> Result<Vec<DatabaseStorageInfo>, String> {
+    let Some(sql) = database_storage_sql(databases) else { return Ok(Vec::new()) };
+    let rows = browser_metadata_rows_with_budget(pool, &sql, false, budget).await?;
+    let sizes = rows
+        .iter()
+        .map(|row| (get_str_by_name(row, "TABLE_SCHEMA"), get_opt_i64(row, "SIZE_BYTES")))
+        .collect::<HashMap<_, _>>();
+    Ok(databases
+        .iter()
+        .map(|name| DatabaseStorageInfo { name: name.clone(), size_bytes: sizes.get(name).copied().flatten() })
+        .collect())
+}
+
+pub async fn list_database_attributes(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
+    let rows = browser_metadata_rows(pool, DATABASE_ATTRIBUTES_SQL).await?;
+    Ok(rows
+        .iter()
+        .map(|row| DatabaseInfo {
+            name: get_str_by_name(row, "SCHEMA_NAME"),
+            default_charset: get_opt_str(row, "DEFAULT_CHARACTER_SET_NAME"),
+            default_collation: get_opt_str(row, "DEFAULT_COLLATION_NAME"),
+            ..Default::default()
+        })
+        .collect())
+}
+
 const DATABASE_LIST_QUERY_PLAN: [(&str, bool); 2] =
     [(SHOW_DATABASES_SQL, true), (INFORMATION_SCHEMA_DATABASES_SQL, false)];
 
@@ -4100,8 +4251,11 @@ async fn query_table_status_sql_with_conn(
 ) -> Result<HashMap<String, TableStatusMeta>, String> {
     let result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    Ok(rows
-        .iter()
+    Ok(table_status_from_rows(&rows))
+}
+
+fn table_status_from_rows(rows: &[mysql_async::Row]) -> HashMap<String, TableStatusMeta> {
+    rows.iter()
         .map(|row| {
             (
                 get_str_by_name(row, "Name"),
@@ -4116,7 +4270,7 @@ async fn query_table_status_sql_with_conn(
             )
         })
         .filter(|(name, _)| !name.is_empty())
-        .collect())
+        .collect()
 }
 
 pub async fn get_table_auto_increment(pool: &MySqlPool, database: &str, table: &str) -> Result<Option<String>, String> {
@@ -4502,6 +4656,21 @@ fn list_tables_objects_sql(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> String {
+    list_tables_objects_sql_with_loading(database, object_types, limit, offset, false)
+}
+
+fn list_tables_objects_sql_with_loading(
+    database: &str,
+    object_types: Option<&[String]>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    lightweight: bool,
+) -> String {
+    let details = if lightweight {
+        "NULL AS object_comment, NULL AS created_at, NULL AS updated_at"
+    } else {
+        "TABLE_COMMENT AS object_comment, CREATE_TIME AS created_at, UPDATE_TIME AS updated_at"
+    };
     let wants_tables = requested_object_type(object_types, "TABLE");
     let wants_views = requested_object_type(object_types, "VIEW");
     let type_filter = match (wants_tables, wants_views) {
@@ -4512,9 +4681,7 @@ fn list_tables_objects_sql(
     format!(
         "SELECT TABLE_NAME AS object_name, \
            CASE WHEN TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW') THEN 'VIEW' ELSE 'TABLE' END AS object_type, \
-           TABLE_COMMENT AS object_comment, \
-           CREATE_TIME AS created_at, \
-           UPDATE_TIME AS updated_at, \
+           {details}, \
            NULL AS parent_schema, NULL AS parent_name, \
            CASE WHEN TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW') THEN 1 ELSE 0 END AS sort_order \
          FROM information_schema.TABLES \
@@ -4806,6 +4973,88 @@ pub async fn list_objects(
     Ok(PagedObjectList { objects, paging_applied })
 }
 
+/// Explicit browser mode; existing metadata consumers retain the full legacy API.
+pub async fn list_objects_for_browser(
+    pool: &MySqlPool,
+    database: &str,
+    object_types: Option<&[String]>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    lightweight: bool,
+    budget: Duration,
+) -> Result<PagedObjectList, String> {
+    let paging_applied = limit.is_some() && object_query_supports_paging(object_types);
+    let (query_limit, query_offset) = if paging_applied { (limit, offset) } else { (None, None) };
+    let mut objects = Vec::new();
+    if wants_table_objects(object_types) {
+        let sql = list_tables_objects_sql_with_loading(database, object_types, query_limit, query_offset, lightweight);
+        match browser_metadata_rows_with_budget(pool, &sql, false, budget).await {
+            Ok(rows) if !rows.is_empty() => objects.extend(rows.iter().map(|row| row_to_object(row, database))),
+            Err(error) if error.contains("timed out") => return Err(error),
+            _ => {
+                // SHOW fallback must not reintroduce SHOW TABLE STATUS into name enumeration.
+                let rows =
+                    browser_metadata_rows_with_budget(pool, &logical_show_full_tables_sql(database), false, budget)
+                        .await?;
+                let status = if lightweight {
+                    HashMap::new()
+                } else {
+                    let rows =
+                        browser_metadata_rows_with_budget(pool, &show_table_status_sql(database, None), false, budget)
+                            .await?;
+                    table_status_from_rows(&rows)
+                };
+                let mut fallback = table_infos_to_objects(table_infos_from_show_rows(&rows), &status, database);
+                fallback.sort_by(|a, b| (a.object_type == "VIEW", &a.name).cmp(&(b.object_type == "VIEW", &b.name)));
+                objects.extend(filter_table_objects_fallback(fallback, object_types, query_limit, query_offset));
+            }
+        }
+    }
+    if wants_routine_objects(object_types) {
+        let sql = list_routines_sql(database, object_types, query_limit, query_offset);
+        let rows = match browser_metadata_rows_with_budget(pool, &sql, false, budget).await {
+            Ok(rows) => Ok(rows),
+            Err(error) if error.contains("timed out") => Err(error),
+            Err(_) => {
+                browser_metadata_rows_with_budget(
+                    pool,
+                    &list_routines_sql_for_query(
+                        database,
+                        object_types,
+                        query_limit,
+                        query_offset,
+                        RoutineMetadataQuery::Legacy,
+                    ),
+                    false,
+                    budget,
+                )
+                .await
+            }
+        };
+        match rows {
+            Ok(rows) => objects.extend(rows.iter().map(|row| row_to_object(row, database))),
+            // A timeout must surface through the refresh-error channel instead of silently
+            // dropping routines from the browser; other failures keep the graceful skip.
+            Err(error) if error.contains("timed out") => return Err(error),
+            Err(error) => log::warn!("Skipping browser routines: {error}"),
+        }
+    }
+    for sql in [
+        wants_trigger_objects(object_types).then(|| list_triggers_objects_sql(database)),
+        wants_event_objects(object_types).then(|| list_events_objects_sql(database)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        match browser_metadata_rows_with_budget(pool, &sql, false, budget).await {
+            Ok(rows) => objects.extend(rows.iter().map(|row| row_to_object(row, database))),
+            Err(error) if error.contains("timed out") => return Err(error),
+            Err(error) => log::warn!("Skipping supplemental browser objects: {error}"),
+        }
+    }
+    Ok(PagedObjectList { objects, paging_applied })
+}
+
 pub async fn list_objects_with_logical_tables(
     pool: &MySqlPool,
     database: &str,
@@ -4834,6 +5083,15 @@ pub async fn list_object_statistics(
     database: &str,
     include_mysql_details: bool,
 ) -> Result<Vec<ObjectStatistics>, String> {
+    list_object_statistics_with_budget(pool, database, include_mysql_details, false).await
+}
+
+pub async fn list_object_statistics_with_budget(
+    pool: &MySqlPool,
+    database: &str,
+    include_mysql_details: bool,
+    bounded: bool,
+) -> Result<Vec<ObjectStatistics>, String> {
     let columns = if include_mysql_details {
         "TABLE_NAME, TABLE_ROWS, DATA_LENGTH, ENGINE, CREATE_TIME, UPDATE_TIME, TABLE_COLLATION, ROW_FORMAT, AVG_ROW_LENGTH, MAX_DATA_LENGTH, CHECK_TIME, INDEX_LENGTH, AUTO_INCREMENT, DATA_FREE, COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) AS TOTAL_BYTES"
     } else {
@@ -4845,12 +5103,14 @@ pub async fn list_object_statistics(
          ORDER BY TABLE_NAME",
         quote_value(database),
     );
-    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
-    // The session-scoped statistics cache is what makes the tree keep showing
-    // a stale row count for tables written after the first read (#9736).
-    enable_fresh_table_statistics(&mut conn, "reading object statistics").await;
-    let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    let rows = if bounded {
+        browser_metadata_rows_with_fresh_statistics(pool, &sql, true).await?
+    } else {
+        let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
+        enable_fresh_table_statistics(&mut conn, "reading object statistics").await;
+        let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
+        result.collect_and_drop::<mysql_async::Row>().await.map_err(|e| e.to_string())?
+    };
     Ok(rows
         .iter()
         .filter_map(|row| {
@@ -7612,10 +7872,16 @@ fn skip_sql_whitespace_and_comments(bytes: &[u8], mut i: usize) -> usize {
     }
 }
 
-fn mysql_list_indexes_sql(database: &str, table: &str, include_expression: bool) -> String {
+fn mysql_list_indexes_sql(
+    database: &str,
+    table: &str,
+    include_expression: bool,
+    include_index_comment: bool,
+) -> String {
     let expression_column = if include_expression { "EXPRESSION, " } else { "" };
+    let comment_column = if include_index_comment { ", INDEX_COMMENT" } else { "" };
     format!(
-        "SELECT INDEX_NAME, COLUMN_NAME, {expression_column}SEQ_IN_INDEX, NON_UNIQUE, INDEX_TYPE, INDEX_COMMENT \
+        "SELECT INDEX_NAME, COLUMN_NAME, {expression_column}SEQ_IN_INDEX, NON_UNIQUE, INDEX_TYPE{comment_column} \
          FROM information_schema.STATISTICS \
          WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
          ORDER BY INDEX_NAME, SEQ_IN_INDEX",
@@ -7641,67 +7907,116 @@ fn mysql_statistics_expression_is_unsupported(error: &mysql_async::Error) -> boo
     }
 }
 
+fn append_mysql_index_row(
+    row: &mysql_async::Row,
+    include_expression: bool,
+    include_index_comment: bool,
+    indexes: &mut Vec<IndexInfo>,
+    index_positions: &mut HashMap<String, usize>,
+) -> Result<(), String> {
+    let name = get_str_by_name(row, "INDEX_NAME");
+    let index_position = if let Some(index_position) = index_positions.get(&name) {
+        *index_position
+    } else {
+        let index_position = indexes.len();
+        index_positions.insert(name.clone(), index_position);
+        indexes.push(IndexInfo {
+            owner: None,
+            key_directions: Vec::new(),
+            visibility: None,
+            key_metadata_complete: false,
+            name: name.clone(),
+            columns: Vec::new(),
+            is_unique: get_opt_i32(row, "NON_UNIQUE").unwrap_or(1) == 0,
+            is_primary: name == "PRIMARY",
+            filter: None,
+            index_type: Some(get_str_by_name(row, "INDEX_TYPE")),
+            included_columns: None,
+            comment: if include_index_comment {
+                get_opt_str(row, "INDEX_COMMENT").filter(|value| !value.is_empty())
+            } else {
+                // MySQL 5.0/5.1 STATISTICS has no INDEX_COMMENT column (#14021).
+                None
+            },
+            key_is_expression: Vec::new(),
+            column_opclasses: vec![],
+            key_options: Vec::new(),
+            constraint_backed: false,
+        });
+        index_position
+    };
+
+    let index_part = if include_expression {
+        get_opt_str(row, "EXPRESSION")
+            // TiDB 4.0 returns the text "NULL", not SQL NULL, for ordinary
+            // index keys. Only EXPRESSION uses this sentinel; a column can
+            // legitimately be named NULL and must retain its original bytes.
+            .filter(|value| !value.trim().is_empty() && !value.trim().eq_ignore_ascii_case("NULL"))
+            .map(|expression| format!("({})", expression.trim()))
+            .or_else(|| get_opt_str(row, "COLUMN_NAME").filter(|value| !value.is_empty()))
+    } else {
+        get_opt_str(row, "COLUMN_NAME").filter(|value| !value.is_empty())
+    };
+    let index_part = index_part
+        .ok_or_else(|| format!("MySQL index metadata for {name:?} has a key without a column name or expression"))?;
+    indexes[index_position].columns.push(index_part);
+    Ok(())
+}
+
 pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<IndexInfo>, String> {
     let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
-    let expression_sql = mysql_list_indexes_sql(database, table, true);
-    let legacy_sql = mysql_list_indexes_sql(database, table, false);
-    let (result, include_expression) = match conn.query_iter(&expression_sql).await {
-        Ok(result) => (result, true),
-        Err(error) if mysql_statistics_expression_is_unsupported(&error) => {
-            // MySQL 5.7 and older compatible servers do not expose EXPRESSION; keep the legacy metadata path.
-            log::debug!("MySQL index expressions are unavailable, retrying without EXPRESSION: {error}");
-            (conn.query_iter(&legacy_sql).await.map_err(|e| e.to_string())?, false)
-        }
-        Err(error) => return Err(error.to_string()),
-    };
-    let mut indexes = Vec::new();
-    let mut index_positions = HashMap::new();
-
-    result
-        .for_each_and_drop(|row| {
-            let name = get_str_by_name(&row, "INDEX_NAME");
-            let index_position = if let Some(index_position) = index_positions.get(&name) {
-                *index_position
-            } else {
-                let index_position = indexes.len();
-                index_positions.insert(name.clone(), index_position);
-                indexes.push(IndexInfo {
-                    owner: None,
-                    key_directions: Vec::new(),
-                    visibility: None,
-                    key_metadata_complete: false,
-                    name: name.clone(),
-                    columns: Vec::new(),
-                    is_unique: get_opt_i32(&row, "NON_UNIQUE").unwrap_or(1) == 0,
-                    is_primary: name == "PRIMARY",
-                    filter: None,
-                    index_type: Some(get_str_by_name(&row, "INDEX_TYPE")),
-                    included_columns: None,
-                    comment: get_opt_str(&row, "INDEX_COMMENT").filter(|value| !value.is_empty()),
-                    key_is_expression: Vec::new(),
-                    column_opclasses: vec![],
-                    key_options: Vec::new(),
-                    constraint_backed: false,
-                });
-                index_position
-            };
-
-            let index_part = if include_expression {
-                get_opt_str(&row, "EXPRESSION")
-                    .filter(|value| !value.trim().is_empty())
-                    .map(|expression| format!("({})", expression.trim()))
-                    .or_else(|| get_opt_str(&row, "COLUMN_NAME").filter(|value| !value.is_empty()))
-            } else {
-                get_opt_str(&row, "COLUMN_NAME").filter(|value| !value.is_empty())
-            };
-            if let Some(index_part) = index_part {
-                indexes[index_position].columns.push(index_part);
+    // Column sets shrink in steps: MySQL 8+ carries both EXPRESSION and
+    // INDEX_COMMENT, 5.5–5.7 lost EXPRESSION, and 5.0/5.1 also lack
+    // INDEX_COMMENT — each gap reports ER_BAD_FIELD_ERROR (1054), so the
+    // query walks down the ladder until the server accepts it (#14021).
+    let column_sets = [(true, true), (false, true), (false, false)];
+    let mut last_unsupported_error: Option<mysql_async::Error> = None;
+    for (with_expression, with_comment) in column_sets {
+        let sql = mysql_list_indexes_sql(database, table, with_expression, with_comment);
+        let result = match conn.query_iter(&sql).await {
+            Ok(result) => result,
+            Err(error) if mysql_statistics_expression_is_unsupported(&error) => {
+                log::debug!(
+                    "MySQL STATISTICS columns are unavailable (expression={with_expression}, comment={with_comment}), retrying with a smaller column set: {error}"
+                );
+                last_unsupported_error = Some(error);
+                continue;
             }
-        })
-        .await
-        .map_err(|e| e.to_string())?;
+            Err(error) => return Err(error.to_string()),
+        };
+        let include_expression = with_expression;
+        let include_index_comment = with_comment;
+        let mut indexes = Vec::new();
+        let mut index_positions = HashMap::new();
+        let mut metadata_error = None;
 
-    Ok(indexes)
+        // Drain the result even if one key cannot be decoded, but never expose
+        // a partial composite index to consumers that can generate DDL.
+        result
+            .for_each_and_drop(|row| {
+                if metadata_error.is_none() {
+                    metadata_error = append_mysql_index_row(
+                        &row,
+                        include_expression,
+                        include_index_comment,
+                        &mut indexes,
+                        &mut index_positions,
+                    )
+                    .err();
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if let Some(error) = metadata_error {
+            return Err(error);
+        }
+        return Ok(indexes);
+    }
+    Err(match last_unsupported_error {
+        Some(error) => error.to_string(),
+        None => "MySQL STATISTICS metadata query failed on every known column set".to_string(),
+    })
 }
 
 pub async fn show_create_table_ddl(pool: &MySqlPool, database: &str, table: &str) -> Result<String, String> {
@@ -8912,6 +9227,111 @@ mod tests {
     fn numeric_metadata_ignores_values_outside_frontend_range() {
         assert_eq!(numeric_metadata_u64_to_i32(Some(i32::MAX as u64 + 1)), None);
         assert_eq!(numeric_metadata_u64_to_i32(None), None);
+    }
+
+    #[test]
+    fn mysql_browser_queries_separate_names_from_details_and_capacity() {
+        let types = vec!["VIEW".to_string()];
+        let light = list_tables_objects_sql_with_loading("app's", Some(&types), Some(7), Some(14), true);
+        for heavy in ["TABLE_COMMENT", "CREATE_TIME", "UPDATE_TIME", "DATA_LENGTH", "INDEX_LENGTH"] {
+            assert!(!light.contains(heavy), "unexpected heavy field: {heavy}");
+        }
+        assert!(light.contains("NULL AS object_comment"));
+        assert!(light.contains("TABLE_TYPE IN ('VIEW', 'SYSTEM VIEW')"));
+        assert!(light.contains(r"TABLE_SCHEMA = 'app\'s'"));
+        assert!(light.contains("LIMIT 7 OFFSET 14"));
+        assert!(light.contains("ORDER BY sort_order, object_name"));
+        assert!(DATABASE_ATTRIBUTES_SQL.contains("information_schema.SCHEMATA"));
+        assert!(!DATABASE_ATTRIBUTES_SQL.contains("TABLES"));
+        assert!(!DATABASE_ATTRIBUTES_SQL.contains("SIZE_BYTES"));
+        assert!(database_storage_sql(&[]).is_none());
+        let capacity = database_storage_sql(&["app's".to_string(), "other".to_string()]).unwrap();
+        assert!(capacity.contains(r"WHERE TABLE_SCHEMA IN ('app\'s', 'other')"));
+        assert!(!capacity.contains("JOIN"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires isolated fixture via DBX_LIVE_MYSQL_METADATA_URL"]
+    async fn live_mysql_browser_metadata_loading_and_cancellation() {
+        let url = std::env::var("DBX_LIVE_MYSQL_METADATA_URL").expect("isolated fixture URL required");
+        let opts = mysql_async::Opts::from_url(&url).unwrap();
+        let database = opts.db_name().expect("fixture database required").to_string();
+        assert!(database.starts_with("dbx_14139"), "use only task-owned fixture");
+        let pool = MySqlPool::new_with_checkout_timeout(opts, 2, Duration::from_secs(5));
+        let types = vec!["TABLE".to_string(), "VIEW".to_string()];
+        let start = Instant::now();
+        let light =
+            list_objects_for_browser(&pool, &database, Some(&types), None, None, true, BROWSER_METADATA_TIMEOUT)
+                .await
+                .unwrap();
+        eprintln!("light objects={} elapsed_ms={}", light.objects.len(), start.elapsed().as_millis());
+        assert!(!light.objects.is_empty());
+        assert!(light
+            .objects
+            .iter()
+            .all(|object| object.comment.is_none() && object.created_at.is_none() && object.updated_at.is_none()));
+        let start = Instant::now();
+        let full =
+            list_objects_for_browser(&pool, &database, Some(&types), None, None, false, BROWSER_METADATA_TIMEOUT)
+                .await
+                .unwrap();
+        eprintln!("full objects={} elapsed_ms={}", full.objects.len(), start.elapsed().as_millis());
+        assert_eq!(
+            light.objects.iter().map(|object| (&object.name, &object.object_type)).collect::<Vec<_>>(),
+            full.objects.iter().map(|object| (&object.name, &object.object_type)).collect::<Vec<_>>()
+        );
+        assert!(full.objects.iter().any(|object| object.created_at.is_some()));
+        let page =
+            list_objects_for_browser(&pool, &database, Some(&types), Some(7), Some(14), true, BROWSER_METADATA_TIMEOUT)
+                .await
+                .unwrap();
+        assert!(page.paging_applied);
+        assert_eq!(
+            page.objects.iter().map(|object| &object.name).collect::<Vec<_>>(),
+            light.objects.iter().skip(14).take(7).map(|object| &object.name).collect::<Vec<_>>()
+        );
+        let attributes = list_database_attributes(&pool).await.unwrap();
+        assert!(attributes.iter().all(|entry| entry.size_bytes.is_none()));
+        assert!(attributes.iter().any(|entry| entry.name == database));
+        let capacity = list_database_storage(&pool, std::slice::from_ref(&database)).await.unwrap();
+        assert_eq!(capacity.len(), 1);
+        assert_eq!(capacity[0].name, database);
+        assert!(capacity[0].size_bytes.is_some());
+        let start = Instant::now();
+        let error = browser_metadata_rows(&pool, "SELECT SLEEP(30) AS dbx14139_timeout_probe").await.unwrap_err();
+        assert!(error.contains("query cancelled"), "{error}");
+        assert!(start.elapsed() < Duration::from_secs(15));
+        let processes = browser_metadata_rows(&pool, "SHOW FULL PROCESSLIST").await.unwrap();
+        assert!(!processes.iter().any(|row| get_str_by_name(row, "Info").contains("dbx14139_timeout_probe")));
+        let abandoned_pool = pool.clone();
+        let abandoned = tokio::spawn(async move {
+            browser_metadata_rows(&abandoned_pool, "SELECT SLEEP(30) AS dbx14139_abandoned_probe").await
+        });
+        let mut observed = false;
+        for _ in 0..100 {
+            let processes = browser_metadata_rows(&pool, "SHOW FULL PROCESSLIST").await.unwrap();
+            if processes.iter().any(|row| get_str_by_name(row, "Info").contains("dbx14139_abandoned_probe")) {
+                observed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(observed, "abandoned probe must be running before cancellation");
+        abandoned.abort();
+        assert!(abandoned.await.unwrap_err().is_cancelled());
+        let mut cancelled = false;
+        for _ in 0..100 {
+            let processes = browser_metadata_rows(&pool, "SHOW FULL PROCESSLIST").await.unwrap();
+            if !processes.iter().any(|row| get_str_by_name(row, "Info").contains("dbx14139_abandoned_probe")) {
+                cancelled = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(cancelled, "dropped browser request must retire its server query");
+        // A new query still succeeds after the timed-out connection was retired.
+        assert_eq!(browser_metadata_rows(&pool, "SELECT 1").await.unwrap().len(), 1);
+        pool.disconnect().await.unwrap();
     }
 
     #[test]
@@ -10252,6 +10672,8 @@ mod tests {
         AccessDenied,
         LegacyEof,
         Accept,
+        DorisAccept,
+        CachingSha2Accept,
     }
 
     async fn mysql_tls_test_packet(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
@@ -10296,7 +10718,11 @@ mod tests {
                     | Caps::CLIENT_DEPRECATE_EOF,
                 33,
                 StatusFlags::SERVER_STATUS_AUTOCOMMIT,
-                Some(&b"mysql_native_password"[..]),
+                Some(if matches!(reply, MysqlTlsTestReply::CachingSha2Accept) {
+                    &b"caching_sha2_password"[..]
+                } else {
+                    &b"mysql_native_password"[..]
+                }),
             );
             let mut payload = Vec::new();
             greeting.serialize(&mut payload);
@@ -10331,9 +10757,16 @@ mod tests {
                     assert!(capabilities.contains(Caps::CLIENT_DEPRECATE_EOF));
                     mysql_tls_test_write(&mut socket, 3, &[0, 0, 0, 2, 0, 0, 0]).await;
                 }
-                MysqlTlsTestReply::Accept => {
+                MysqlTlsTestReply::Accept | MysqlTlsTestReply::DorisAccept | MysqlTlsTestReply::CachingSha2Accept => {
                     assert!(!capabilities.contains(Caps::CLIENT_SSL));
-                    mysql_tls_test_write(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+                    let ok_packet = if matches!(reply, MysqlTlsTestReply::DorisAccept)
+                        && capabilities.contains(Caps::CLIENT_DEPRECATE_EOF)
+                    {
+                        &[0, 0, 0, 2, 0, 0, 0, 0][..]
+                    } else {
+                        &[0, 0, 0, 2, 0, 0, 0][..]
+                    };
+                    mysql_tls_test_write(&mut socket, 2, ok_packet).await;
                     loop {
                         let command = mysql_tls_test_packet(&mut socket).await;
                         if command[0] == 1 {
@@ -10359,6 +10792,45 @@ mod tests {
         let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode={mode}&max_allowed_packet=65536&wait_timeout=60&sessionVariables=group_concat_max_len%3D1024");
         let result = connect_with_ca_cert_and_pool_limit(&url, None, Duration::from_secs(2), 1).await;
         (result, servers)
+    }
+
+    async fn mysql_bare_test_connect(
+        reply: MysqlTlsTestReply,
+    ) -> (Result<MySqlPool, String>, tokio::task::JoinSet<Vec<mysql_async::consts::CapabilityFlags>>) {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut servers = tokio::task::JoinSet::new();
+        servers.spawn(mysql_tls_test_server(listener, vec![reply]));
+        let url =
+            format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled&max_allowed_packet=65536&wait_timeout=60");
+        let result = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await;
+        (result, servers)
+    }
+
+    #[tokio::test]
+    async fn mysql_caching_sha2_immediate_ok_returns_a_working_pool() {
+        // Router may return OK directly after the caching_sha2 handshake response.
+        let (result, mut servers) =
+            mysql_tls_test_connect(vec![MysqlTlsTestReply::CachingSha2Accept], "disabled").await;
+        let pool = result.unwrap();
+        verify_pool_connection(&pool, Duration::from_secs(2)).await.unwrap();
+        pool.get_conn().await.unwrap().query_drop("DO 1").await.unwrap();
+        pool.disconnect().await.unwrap();
+        let attempts = servers.join_next().await.unwrap().unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert!(!attempts[0].contains(mysql_async::consts::CapabilityFlags::CLIENT_SSL));
+        assert!(attempts[0].contains(mysql_async::consts::CapabilityFlags::CLIENT_DEPRECATE_EOF));
+    }
+
+    #[tokio::test]
+    async fn mysql_bare_compatible_connection_uses_legacy_eof_for_doris_login_ok() {
+        let (result, mut servers) = mysql_bare_test_connect(MysqlTlsTestReply::DorisAccept).await;
+        let pool = result.unwrap();
+        pool.disconnect().await.unwrap();
+        let attempts = servers.join_next().await.unwrap().unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert!(!attempts[0].contains(mysql_async::consts::CapabilityFlags::CLIENT_DEPRECATE_EOF));
     }
 
     #[tokio::test]
@@ -10691,14 +11163,131 @@ mod tests {
         );
     }
 
+    fn mysql_index_metadata_row(
+        name: &str,
+        column: Value,
+        expression: Value,
+        sequence: i64,
+        non_unique: i64,
+    ) -> mysql_async::Row {
+        let columns =
+            ["INDEX_NAME", "COLUMN_NAME", "EXPRESSION", "SEQ_IN_INDEX", "NON_UNIQUE", "INDEX_TYPE", "INDEX_COMMENT"]
+                .into_iter()
+                .map(|name| Column::new(ColumnType::MYSQL_TYPE_VAR_STRING).with_name(name.as_bytes()))
+                .collect();
+        mysql_test_row_with_columns(
+            vec![
+                name.into(),
+                column,
+                expression,
+                Value::Int(sequence),
+                Value::Int(non_unique),
+                "BTREE".into(),
+                "kept comment".into(),
+            ],
+            columns,
+        )
+    }
+
+    fn decode_mysql_index_metadata(
+        rows: &[mysql_async::Row],
+        expression: bool,
+        comment: bool,
+    ) -> Result<Vec<IndexInfo>, String> {
+        let mut indexes = Vec::new();
+        let mut positions = HashMap::new();
+        for row in rows {
+            append_mysql_index_row(row, expression, comment, &mut indexes, &mut positions)?;
+        }
+        Ok(indexes)
+    }
+
+    #[test]
+    fn mysql_index_metadata_tidb_null_expression_preserves_keys_and_names() {
+        let rows = vec![
+            mysql_index_metadata_row("PRIMARY", "id".into(), "NULL".into(), 1, 0),
+            mysql_index_metadata_row("custom_lookup", " display_name".into(), "NULL".into(), 1, 1),
+            mysql_index_metadata_row("custom_unique", "tenant_id".into(), "NULL".into(), 1, 0),
+            mysql_index_metadata_row("custom_unique", "code".into(), "NULL".into(), 2, 0),
+        ];
+        let indexes = decode_mysql_index_metadata(&rows, true, true).unwrap();
+        assert_eq!(indexes.len(), 3);
+        assert_eq!(indexes[0].name, "PRIMARY");
+        assert!(indexes[0].is_primary && indexes[0].is_unique);
+        assert_eq!(indexes[0].columns, vec!["id"]);
+        assert_eq!(indexes[1].name, "custom_lookup");
+        assert!(!indexes[1].is_unique);
+        assert_eq!(indexes[1].columns, vec![" display_name"]);
+        assert_eq!(indexes[1].index_type.as_deref(), Some("BTREE"));
+        assert_eq!(indexes[1].comment.as_deref(), Some("kept comment"));
+        assert_eq!(indexes[2].name, "custom_unique");
+        assert!(indexes[2].is_unique);
+        assert_eq!(indexes[2].columns, vec!["tenant_id", "code"]);
+    }
+
+    #[test]
+    fn mysql_index_metadata_preserves_null_named_columns_and_real_expressions() {
+        for expression in [Value::NULL, "".into(), "  ".into(), "NULL".into(), " null ".into()] {
+            let row = mysql_index_metadata_row("literal_column", "NULL".into(), expression, 1, 1);
+            let indexes = decode_mysql_index_metadata(&[row], true, true).unwrap();
+            assert_eq!(indexes[0].columns, vec!["NULL"]);
+        }
+        for (column, expression, expected) in [
+            (Value::NULL, "lower(`email`)", "(lower(`email`))"),
+            ("NULL".into(), "(lower(`email`))", "((lower(`email`)))"),
+            (Value::NULL, "(NULL)", "((NULL))"),
+            (Value::NULL, "'NULL'", "('NULL')"),
+        ] {
+            let row = mysql_index_metadata_row("functional", column, expression.into(), 1, 1);
+            let indexes = decode_mysql_index_metadata(&[row], true, true).unwrap();
+            assert_eq!(indexes[0].columns, vec![expected]);
+        }
+    }
+
+    #[test]
+    fn mysql_index_metadata_missing_composite_key_rejects_entire_result() {
+        for expression in [Value::NULL, "".into(), "NULL".into()] {
+            let rows = vec![
+                mysql_index_metadata_row("custom_unique", "tenant_id".into(), "NULL".into(), 1, 0),
+                mysql_index_metadata_row("custom_unique", Value::NULL, expression, 2, 0),
+            ];
+            assert!(decode_mysql_index_metadata(&rows, true, true).is_err());
+        }
+    }
+
+    #[test]
+    fn mysql_index_metadata_legacy_column_sets_keep_identifiers() {
+        let row = mysql_index_metadata_row("legacy", "NULL".into(), "ignored".into(), 1, 1);
+        for comment in [true, false] {
+            let indexes = decode_mysql_index_metadata(std::slice::from_ref(&row), false, comment).unwrap();
+            assert_eq!(indexes[0].columns, vec!["NULL"]);
+            assert_eq!(indexes[0].comment.as_deref(), comment.then_some("kept comment"));
+        }
+        let invalid = mysql_index_metadata_row("invalid", Value::NULL, Value::NULL, 1, 1);
+        assert!(decode_mysql_index_metadata(&[invalid], false, false).is_err());
+    }
+
     #[test]
     fn mysql_index_metadata_query_has_expression_compatibility_fallback() {
-        let with_expression = mysql_list_indexes_sql("db", "users", true);
+        let with_expression = mysql_list_indexes_sql("db", "users", true, true);
         assert!(with_expression.contains("EXPRESSION, SEQ_IN_INDEX"));
+        assert!(with_expression.contains("INDEX_COMMENT"));
 
-        let without_expression = mysql_list_indexes_sql("db", "users", false);
+        let without_expression = mysql_list_indexes_sql("db", "users", false, true);
         assert!(!without_expression.contains("EXPRESSION"));
+        assert!(without_expression.contains("INDEX_COMMENT"));
         assert!(without_expression.contains("ORDER BY INDEX_NAME, SEQ_IN_INDEX"));
+    }
+
+    #[test]
+    fn mysql_index_metadata_query_has_minimal_column_set_for_mysql_5_0() {
+        // MySQL 5.0/5.1 STATISTICS predates both EXPRESSION (8.0) and
+        // INDEX_COMMENT (5.5); the minimal set must select neither (#14021).
+        let minimal = mysql_list_indexes_sql("db", "users", false, false);
+        assert!(!minimal.contains("EXPRESSION"));
+        assert!(!minimal.contains("INDEX_COMMENT"));
+        assert!(minimal.contains("INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE, INDEX_TYPE"));
+        assert!(minimal.contains("ORDER BY INDEX_NAME, SEQ_IN_INDEX"));
     }
 
     #[test]

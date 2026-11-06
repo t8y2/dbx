@@ -1,5 +1,7 @@
 // Message queue admin types, matching dbx-core/src/mq/types.rs
 
+import type { KafkaTlsConfig } from "@/lib/connection/kafkaTlsOptions";
+
 export type MqSystemKind = "pulsar" | "kafka" | "rocketmq" | "rabbitmq";
 
 export interface MqCapabilities {
@@ -68,6 +70,7 @@ export interface MqAdminConfig {
   adminUrl: string;
   auth?: MqAuth;
   tlsSkipVerify?: boolean;
+  tls?: KafkaTlsConfig;
   pinnedVersion?: string;
   tokenSigning?: MqTokenSigningConfig;
   extra?: unknown;
@@ -401,6 +404,10 @@ export interface BacklogQuota {
 export interface RetentionPolicy {
   retentionTimeInMinutes: number;
   retentionSizeInMb: number;
+  /** Kafka 专用：仅当用户改过保留时间才下发，避免未修改字段被覆盖。 */
+  writeRetentionTime?: boolean;
+  /** Kafka 专用：仅当用户改过保留大小才下发。 */
+  writeRetentionSize?: boolean;
 }
 
 export type AuthAction = "produce" | "consume" | "functions" | "sources" | "sinks" | "packages";

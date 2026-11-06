@@ -12,6 +12,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, DatabaseBackup, FileCode, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, Maximize2, Minimize2, Plus, RefreshCw, Square, Trash2, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
 import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -37,7 +38,7 @@ import {
 import { importPreviewInput, importSourceDisplayName, uploadedImportSourceFromPreview } from "@/lib/import/importSource";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
 import { uniqueKeyModelColumns } from "@/lib/table/tableEditing";
-import { metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { connectionObjectTreeNodeSchema, metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { isSchemaAware } from "@/lib/database/databaseFeatureSupport";
 import { schemaOptionsForConnection } from "@/composables/useSchemaOptions";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
@@ -680,6 +681,7 @@ function applySuggestedColumnDataTypes(currentPreview = preview.value) {
 // 200+ 列时 SearchableSelect 太重，换成一个全局 popover，
 // 只有点击输入框时才挂载，避免创建上百分组件实例。
 const activeDataTypeColumn = ref<string | null>(null);
+const activeDataTypeTrigger = ref<HTMLElement | null>(null);
 const dataTypePickerOpen = ref(false);
 const dataTypePickerStyle = ref<Record<string, string>>({});
 const activeDataTypeOptionIndex = ref(-1);
@@ -690,23 +692,51 @@ const dataTypePickerOptions = computed(() => {
   return currentValue && !options.includes(currentValue) ? [...options, currentValue] : options;
 });
 
+function updateDataTypePickerPosition() {
+  const trigger = activeDataTypeTrigger.value;
+  if (!trigger || !dataTypePickerOpen.value) return;
+
+  if (!trigger.isConnected) {
+    closeDataTypePicker();
+    return;
+  }
+
+  const scrollParent = trigger.closest(".overflow-auto");
+  const triggerRect = trigger.getBoundingClientRect();
+  if (scrollParent) {
+    const parentRect = scrollParent.getBoundingClientRect();
+    if (triggerRect.bottom < parentRect.top || triggerRect.top > parentRect.bottom) {
+      closeDataTypePicker();
+      return;
+    }
+  }
+
+  dataTypePickerStyle.value = {
+    position: "fixed",
+    top: `${triggerRect.bottom + 2}px`,
+    left: `${triggerRect.left}px`,
+    width: `${Math.max(triggerRect.width, 200)}px`,
+  };
+}
+
 function closeDataTypePicker() {
   dataTypePickerOpen.value = false;
   activeDataTypeColumn.value = null;
+  activeDataTypeTrigger.value = null;
   activeDataTypeOptionIndex.value = -1;
+  checkSyncListeners();
 }
 
 function openDataTypePicker(sourceColumn: string, input: HTMLInputElement) {
-  const rect = input.getBoundingClientRect();
-  dataTypePickerStyle.value = {
-    position: "fixed",
-    top: `${rect.bottom + 2}px`,
-    left: `${rect.left}px`,
-    width: `${Math.max(rect.width, 200)}px`,
-  };
+  if (generatorPickerOpen.value) {
+    closeGeneratorPicker();
+  }
+  activeDataTypeTrigger.value = input;
   activeDataTypeColumn.value = sourceColumn;
   activeDataTypeOptionIndex.value = -1;
   dataTypePickerOpen.value = true;
+  updateDataTypePickerPosition();
+  checkSyncListeners();
 }
 
 function selectDataTypeOption(value: string) {
@@ -1184,24 +1214,126 @@ function updateColumnDataType(sourceColumn: string, value: any) {
 }
 
 const generatorPickerOpen = ref(false);
+const activeGeneratorTrigger = ref<HTMLElement | null>(null);
 const activeGeneratorColumn = ref<{ type: "source"; sourceColumn: string } | { type: "generated"; id: string } | null>(null);
 const generatorPickerStyle = ref<Record<string, string>>({});
 
-function openGeneratorPicker(target: { type: "source"; sourceColumn: string } | { type: "generated"; id: string }, trigger: HTMLElement) {
-  const rect = trigger.getBoundingClientRect();
+function updateGeneratorPickerPosition() {
+  const trigger = activeGeneratorTrigger.value;
+  if (!trigger || !generatorPickerOpen.value) return;
+
+  if (!trigger.isConnected) {
+    closeGeneratorPicker();
+    return;
+  }
+
+  const scrollParent = trigger.closest(".overflow-auto");
+  const triggerRect = trigger.getBoundingClientRect();
+  if (scrollParent) {
+    const parentRect = scrollParent.getBoundingClientRect();
+    if (triggerRect.bottom < parentRect.top || triggerRect.top > parentRect.bottom) {
+      closeGeneratorPicker();
+      return;
+    }
+  }
+
   generatorPickerStyle.value = {
     position: "fixed",
-    top: `${rect.bottom + 2}px`,
-    left: `${Math.max(10, Math.min(rect.left, window.innerWidth - 260))}px`,
+    top: `${triggerRect.bottom + 2}px`,
+    left: `${Math.max(10, Math.min(triggerRect.left, window.innerWidth - 260))}px`,
     width: "250px",
   };
+}
+
+function openGeneratorPicker(target: { type: "source"; sourceColumn: string } | { type: "generated"; id: string }, trigger: HTMLElement) {
+  if (dataTypePickerOpen.value) {
+    closeDataTypePicker();
+  }
+  activeGeneratorTrigger.value = trigger;
   activeGeneratorColumn.value = target;
   generatorPickerOpen.value = true;
+  updateGeneratorPickerPosition();
+  checkSyncListeners();
 }
 
 function closeGeneratorPicker() {
   generatorPickerOpen.value = false;
   activeGeneratorColumn.value = null;
+  activeGeneratorTrigger.value = null;
+  checkSyncListeners();
+}
+
+let syncListenersAttached = false;
+
+function onPickerScroll(event: Event) {
+  const dtMenu = document.getElementById("table-import-data-type-options");
+  const genMenu = document.getElementById("table-import-generator-options");
+  if (event.target instanceof Node && (dtMenu?.contains(event.target) || genMenu?.contains(event.target))) {
+    return;
+  }
+  if (dataTypePickerOpen.value) {
+    updateDataTypePickerPosition();
+  }
+  if (generatorPickerOpen.value) {
+    updateGeneratorPickerPosition();
+  }
+}
+
+function onPickerResize() {
+  if (dataTypePickerOpen.value) {
+    updateDataTypePickerPosition();
+  }
+  if (generatorPickerOpen.value) {
+    updateGeneratorPickerPosition();
+  }
+}
+
+function onOutsidePointerDown(event: PointerEvent) {
+  const target = event.target as Node | null;
+  if (!target) return;
+
+  if (dataTypePickerOpen.value) {
+    const dtMenu = document.getElementById("table-import-data-type-options");
+    if (!dtMenu?.contains(target) && !activeDataTypeTrigger.value?.contains(target)) {
+      closeDataTypePicker();
+    }
+  }
+
+  if (generatorPickerOpen.value) {
+    const genMenu = document.getElementById("table-import-generator-options");
+    if (!genMenu?.contains(target) && !activeGeneratorTrigger.value?.contains(target)) {
+      closeGeneratorPicker();
+    }
+  }
+}
+
+function onGlobalKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    if (generatorPickerOpen.value) {
+      event.preventDefault();
+      closeGeneratorPicker();
+    } else if (dataTypePickerOpen.value) {
+      event.preventDefault();
+      closeDataTypePicker();
+    }
+  }
+}
+
+function checkSyncListeners() {
+  const needsListeners = dataTypePickerOpen.value || generatorPickerOpen.value;
+  if (needsListeners && !syncListenersAttached) {
+    syncListenersAttached = true;
+    window.addEventListener("scroll", onPickerScroll, true);
+    window.addEventListener("resize", onPickerResize);
+    window.addEventListener("pointerdown", onOutsidePointerDown, true);
+    window.addEventListener("keydown", onGlobalKeydown);
+  } else if (!needsListeners && syncListenersAttached) {
+    syncListenersAttached = false;
+    window.removeEventListener("scroll", onPickerScroll, true);
+    window.removeEventListener("resize", onPickerResize);
+    window.removeEventListener("pointerdown", onOutsidePointerDown, true);
+    window.removeEventListener("keydown", onGlobalKeydown);
+  }
 }
 
 function selectGeneratorOption(generator: string) {
@@ -1354,6 +1486,30 @@ async function goNext() {
   wizardStep.value = nextTableImportWizardStep(wizardStep.value);
 }
 
+async function refreshImportedTable(target: Pick<api.TableImportRequest, "connectionId" | "database" | "schema" | "table">) {
+  try {
+    store.invalidateMetadataCache(target.connectionId, target.database, target.schema || undefined, target.table);
+    // Respect an explicit disconnect while an import finishes in the background.
+    if (!store.connectedIds.has(target.connectionId)) return;
+    const schema = target.schema || undefined;
+    // MySQL metadata uses the database as schema; open data tabs may omit it.
+    const schemaCandidates = [...new Set([schema, connectionObjectTreeNodeSchema(store.getConfig(target.connectionId), target.database, schema)])];
+    await useQueryStore().refreshDataTabsForTable({ connectionId: target.connectionId, database: target.database, schema, schemaCandidates, name: target.table }, { skipPendingChanges: true });
+  } catch (error) {
+    // Refresh failure must not turn committed writes into a failed import.
+    console.warn("[DBX][table-import:refresh-data-failed]", error);
+  }
+}
+
+async function importTableFileAndRefresh(request: api.TableImportRequest, onProgress: (progress: api.TableImportProgress) => void) {
+  try {
+    return await api.importTableFile(request, onProgress);
+  } finally {
+    // Truncate or earlier batches can commit even when import fails/cancels.
+    void refreshImportedTable(request);
+  }
+}
+
 async function startImport() {
   saveActiveBatchTask();
   if (!canImport.value) return;
@@ -1367,6 +1523,7 @@ async function startImport() {
   const currentPreview = preview.value;
   const tableName = targetTableName.value;
   if (!canImport.value || !currentPreview || !props.prefillConnectionId || !tableName) return;
+  const target = { connectionId: props.prefillConnectionId, database: props.prefillDatabase || "", schema: targetSchema.value, table: tableName };
   backgroundMode.value = true;
   running.value = true;
   progressPercentFloor.value = 0;
@@ -1388,13 +1545,10 @@ async function startImport() {
   };
 
   try {
-    const summary = await api.importTableFile(
+    const summary = await importTableFileAndRefresh(
       {
         importId: importId.value,
-        connectionId: props.prefillConnectionId,
-        database: props.prefillDatabase || "",
-        schema: targetSchema.value,
-        table: tableName,
+        ...target,
         filePath: currentPreview.filePath,
         sourceRef: currentPreview.sourceRef || null,
         sourceFormat: sourceFormat.value,
@@ -1425,9 +1579,8 @@ async function startImport() {
       failuresTruncated: summary.failuresTruncated ?? false,
     };
     toast(importSummaryMessage(summary.rowsImported, summary.rowsFailed ?? 0), 2500);
-    store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined, tableName);
     if (targetMode.value === "create") {
-      store.refreshObjectListTreeNode(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined).catch((error) => {
+      store.refreshObjectListTreeNode(target.connectionId, target.database, target.schema || undefined).catch((error) => {
         console.warn("[DBX][table-import:refresh-created-table-failed]", error);
       });
     }
@@ -1507,13 +1660,11 @@ async function startBatchImport() {
         throw new Error(validation.errors[0] || "Target table name is required");
       }
 
-      const summary = await api.importTableFile(
+      const target = { connectionId: props.prefillConnectionId, database: props.prefillDatabase || "", schema: targetSchema.value, table: task.tableName };
+      const summary = await importTableFileAndRefresh(
         {
           importId: importId.value,
-          connectionId: props.prefillConnectionId,
-          database: props.prefillDatabase || "",
-          schema: targetSchema.value,
-          table: task.tableName,
+          ...target,
           filePath: task.preview.filePath,
           sourceRef: task.preview.sourceRef || null,
           sourceFormat: task.format,
@@ -1559,7 +1710,6 @@ async function startBatchImport() {
       completedFailureList = [...completedFailureList, ...(summary.failures ?? [])];
       completedFailuresTruncated ||= summary.failuresTruncated ?? false;
       completedBytes += task.preview.sizeBytes;
-      store.invalidateMetadataCache(props.prefillConnectionId, props.prefillDatabase || "", targetSchema.value || undefined, task.tableName);
     }
     refreshImportElapsedClock();
     progress.value = {
@@ -1697,12 +1847,16 @@ watch(
         previewReloadTimer = null;
       }
       if (!running.value) void releaseTableImportSources();
+      closeDataTypePicker();
+      closeGeneratorPicker();
     }
   },
   { immediate: true },
 );
 
 onBeforeUnmount(() => {
+  closeDataTypePicker();
+  closeGeneratorPicker();
   stopDialogDrag();
   if (previewReloadTimer) {
     clearTimeout(previewReloadTimer);
@@ -2224,7 +2378,6 @@ watch(rawProgressPercent, (percent) => {
                       :aria-activedescendant="activeDataTypeColumn === sourceColumn && activeDataTypeOptionIndex >= 0 ? `table-import-data-type-option-${activeDataTypeOptionIndex}` : undefined"
                       class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none hover:bg-muted/30 focus-visible:ring-1 focus-visible:ring-ring/25"
                       @focus="(event) => openDataTypePicker(sourceColumn, event.currentTarget as HTMLInputElement)"
-                      @blur="closeDataTypePicker"
                       @keydown="(event) => handleDataTypePickerKeydown(event, sourceColumn, event.currentTarget as HTMLInputElement)"
                       @input="(e) => updateColumnDataType(sourceColumn, (e.target as HTMLInputElement).value)"
                     />
@@ -2528,7 +2681,6 @@ watch(rawProgressPercent, (percent) => {
 
       <!-- 全局生成器 popover -->
       <Teleport to="body">
-        <div v-if="generatorPickerOpen" class="fixed inset-0 z-[9998]" @click="closeGeneratorPicker" />
         <div v-if="generatorPickerOpen" id="table-import-generator-options" role="listbox" :style="generatorPickerStyle" class="pointer-events-auto z-[9999] max-h-60 overflow-auto rounded-md border bg-popover p-1 shadow-md">
           <div class="px-2 py-1 text-[11px] font-semibold text-muted-foreground">
             {{ t("tableImport.valueSource") }}

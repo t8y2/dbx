@@ -168,7 +168,7 @@ jobs:
         run: node .github/scripts/set-release-version.mjs "${RELEASE_TAG}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -370,7 +370,7 @@ jobs:
         run: node .github/scripts/set-release-version.mjs "${env:RELEASE_TAG}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -651,7 +651,7 @@ jobs:
         run: node .github/scripts/set-release-version.mjs "${env:RELEASE_TAG}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -792,7 +792,7 @@ jobs:
         run: node .github/scripts/set-release-version.mjs "${env:RELEASE_TAG}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -893,7 +893,7 @@ jobs:
         run: node .github/scripts/set-release-version.mjs "${RELEASE_TAG}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -1195,7 +1195,8 @@ jobs:
           versioned="s3://${R2_BUCKET_NAME}/releases/beta/${{ inputs.release_tag || github.ref_name }}/"
           if aws s3api head-object --bucket "$R2_BUCKET_NAME" --key "releases/beta/${{ inputs.release_tag || github.ref_name }}/latest.json" --endpoint-url "$endpoint" >/dev/null 2>&1; then
             aws s3 cp "${versioned}latest.json" "$RUNNER_TEMP/existing-beta-manifest.json" --endpoint-url "$endpoint"
-            if ! cmp -s "$RUNNER_TEMP/manifest/latest.json" "$RUNNER_TEMP/existing-beta-manifest.json"; then
+            # sync-changelog fills in `notes` after publishing; ignore it on reruns.
+            if ! cmp -s <(jq -S 'del(.notes)' "$RUNNER_TEMP/manifest/latest.json") <(jq -S 'del(.notes)' "$RUNNER_TEMP/existing-beta-manifest.json"); then
               echo "::error::Immutable beta manifest already exists for ${{ inputs.release_tag || github.ref_name }} with different contents."
               exit 1
             fi
@@ -1222,8 +1223,9 @@ jobs:
 
   sync-release-to-cnb:
     name: Sync release to CNB
+    # Beta and stable tags both mirror here. Promotion later re-syncs the plain
+    # version tag through publish-packages.yml with --make-latest.
     needs: publish
-    if: ${{ !contains(inputs.release_tag || github.ref_name, '-beta.') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -1263,9 +1265,17 @@ jobs:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
           CURRENT_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
+          set -euo pipefail
+          # Beta and stable releases are retained independently so daily betas
+          # never evict stable releases from CNB.
+          if [[ "$CURRENT_TAG" == *-beta.* ]]; then
+            tag_pattern='^v[0-9]+[.][0-9]+[.][0-9]+-beta[.][0-9]{8}[.][0-9]+$'
+          else
+            tag_pattern='^(?!.*-beta[.])v[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z.-]+)?$'
+          fi
           node .github/scripts/cleanup-cnb-releases.mjs \
             --current-tag "$CURRENT_TAG" \
-            --tag-pattern '^v[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z.-]+)?$' \
+            --tag-pattern "$tag_pattern" \
             --retain 5 \
             --apply
 

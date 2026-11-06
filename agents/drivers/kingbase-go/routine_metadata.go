@@ -20,11 +20,22 @@ func (s *server) routineQuery(withIdentity bool, build func(kind, filter, identi
 	return s.routineQueryContext(context.Background(), withIdentity, build)
 }
 
-func (s *server) routineQueryContext(ctx context.Context, withIdentity bool, build func(kind, filter, identity string) string) (*sql.Rows, error) {
+// routineCatalogQuery runs one catalog query. The pool holds a single
+// connection (SetMaxOpenConns(1)) and an open interactive transaction pinned
+// it, so a catalog query has to run on that connection instead of waiting for
+// the pool.
+func (s *server) routineCatalogQuery(ctx context.Context, query string) (*sql.Rows, error) {
+	if s.manualConn != nil {
+		return s.manualConn.QueryContext(ctx, query)
+	}
 	db, err := s.requireDB()
 	if err != nil {
 		return nil, err
 	}
+	return db.QueryContext(ctx, query)
+}
+
+func (s *server) routineQueryContext(ctx context.Context, withIdentity bool, build func(kind, filter, identity string) string) (*sql.Rows, error) {
 	_, prefix := s.routineCatalog()
 	for {
 		kind := "CASE p.prokind WHEN 'p' THEN 'PROCEDURE' WHEN 'f' THEN 'FUNCTION' END"
@@ -44,7 +55,7 @@ func (s *server) routineQueryContext(ctx context.Context, withIdentity bool, bui
 			identityFunction = "oidvectortypes"
 			identity = identityFunction + "(p.proargtypes)"
 		}
-		rows, err := db.QueryContext(ctx, build(kind, filter, identity))
+		rows, err := s.routineCatalogQuery(ctx, build(kind, filter, identity))
 		if err == nil {
 			return rows, nil
 		}
@@ -191,11 +202,10 @@ func (s *server) getLegacyRoutineSource(ctx context.Context, schema, name, kind 
 	}
 	query := fmt.Sprintf("SELECT DBMS_METADATA.%s(CAST(%s AS varchar(128)), CAST(%s AS varchar(128)))", function, quoteLiteral(name), quoteLiteral(schema))
 	var source sql.NullString
-	db, err := s.requireDB()
-	if err != nil {
-		return "", err
-	}
-	if err := db.QueryRowContext(ctx, query).Scan(&source); err != nil {
+	// The legacy lookup shares the deadline the fallback chain started with,
+	// and runs on the pinned connection while an interactive transaction is
+	// open, so it cannot block on the pool.
+	if err := s.requireDBQueryRowContext(ctx, query, &source); err != nil {
 		return "", err
 	}
 	if !source.Valid || strings.TrimSpace(source.String) == "" {

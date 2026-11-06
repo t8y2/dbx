@@ -1308,6 +1308,39 @@ describe("queryStore table data refresh", () => {
     expect(tab.executionId).toBeUndefined();
   });
 
+  it.each([{ pendingDataChangeCount: 1 }, { hasPendingDataEditorDraft: true }])("preserves unsaved edits during an import refresh: %j", async (pending) => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    mocks.getConnectionConfig.mockReturnValue({ id: "mysql-1", db_type: "mysql", database: "app" });
+    mocks.buildTableSelectSql.mockResolvedValue("SELECT id FROM users LIMIT 100");
+    mocks.executeMulti.mockResolvedValue([{ columns: ["id"], rows: [[1], [2]], affected_rows: 0, execution_time_ms: 1 }]);
+    const createDataTab = (database: string) => {
+      const id = store.createTab("mysql-1", database, "users", "data", undefined, undefined, undefined, { forceNew: true });
+      store.setTableMeta(id, {
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }],
+        primaryKeys: ["id"],
+      });
+      const tab = store.tabs.find((candidate) => candidate.id === id)!;
+      tab.result = { columns: ["id"], rows: [], affected_rows: 0, execution_time_ms: 1 };
+      tab.resultTotalRowCount = 0;
+      return tab;
+    };
+    const edited = createDataTab("app");
+    Object.assign(edited, pending);
+    const clean = createDataTab("app");
+    const unrelated = createDataTab("other");
+
+    await expect(store.refreshDataTabsForTable({ connectionId: "mysql-1", database: "app", schema: "app", schemaCandidates: [undefined, "app"], name: "users" }, { skipPendingChanges: true })).resolves.toBe(1);
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
+    expect(clean.result?.rows).toEqual([[1], [2]]);
+    expect(clean.resultTotalRowCount).toBe(2);
+    expect(edited.result?.rows).toEqual([]);
+    expect(edited).toMatchObject(pending);
+    expect(unrelated.result?.rows).toEqual([]);
+  });
+
   it("keeps bulk SQL build failures observable to callers", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

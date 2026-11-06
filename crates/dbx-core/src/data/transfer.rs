@@ -2945,12 +2945,52 @@ fn column_default_clause(
     if is_postgres_compat_transfer(source_db, target_db) {
         return postgres_default_clause(column, source_schema, target_schema, source_db, target_db);
     }
+    if is_postgres_family_target(target_db) {
+        return cross_dialect_postgres_default_clause(column);
+    }
     if is_mysql_family_target(target_db) {
         let default_value = column.column_default.as_deref()?.trim();
         if default_value.is_empty() {
             return None;
         }
         return Some(format!("DEFAULT {}", format_mysql_default_literal(default_value, &column.data_type)));
+    }
+    None
+}
+
+/// Defaults carried into a PostgreSQL-family target from a non-PostgreSQL
+/// source (a Dameng/MySQL/Oracle table, #14135). Only values whose syntax is
+/// already valid PostgreSQL are emitted: literals, booleans, and the current
+/// date/time functions. Engine-specific expressions (`to_char(...)`, sequence
+/// calls, DM's `SYSDATE` is mapped) are dropped rather than guessed, because
+/// the generated DDL must execute on the target.
+fn cross_dialect_postgres_default_clause(column: &db::ColumnInfo) -> Option<String> {
+    let raw = column.column_default.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.eq_ignore_ascii_case("NULL") {
+        return Some("DEFAULT NULL".to_string());
+    }
+    let upper = raw.to_ascii_uppercase();
+    if upper == "SYSDATE" || upper == "SYSTIMESTAMP" {
+        return Some("DEFAULT CURRENT_TIMESTAMP".to_string());
+    }
+    if matches!(upper.as_str(), "TRUE" | "FALSE" | "CURRENT_DATE" | "CURRENT_TIME" | "NOW()")
+        || upper == "CURRENT_TIMESTAMP"
+        || upper.starts_with("CURRENT_TIMESTAMP(")
+    {
+        return Some(format!("DEFAULT {raw}"));
+    }
+    // National-character literals carry an N prefix the target doesn't need.
+    if raw.len() >= 3 && raw[..2].eq_ignore_ascii_case("n'") && raw.ends_with('\'') {
+        return Some(format!("DEFAULT {}", &raw[1..]));
+    }
+    if raw.len() >= 2 && raw.starts_with('\'') && raw.ends_with('\'') {
+        return Some(format!("DEFAULT {raw}"));
+    }
+    if looks_like_numeric_literal(raw) {
+        return Some(format!("DEFAULT {raw}"));
     }
     None
 }
@@ -24670,6 +24710,37 @@ SELECT 1 FROM dual"#
 
         assert!(ddl.contains("ON UPDATE CURRENT_TIMESTAMP(3)"), "ddl: {ddl}");
         assert!(!ddl.contains("DEFAULT"), "ddl should not emit DEFAULT when none was set: {ddl}");
+    }
+
+    #[test]
+    fn postgres_target_keeps_literal_defaults_from_dameng_source() {
+        let cols = vec![
+            db::ColumnInfo { column_default: Some("0".to_string()), ..test_column("qty", "int") },
+            db::ColumnInfo { column_default: Some("'new'".to_string()), ..test_column("status", "varchar(16)") },
+            db::ColumnInfo { column_default: Some("SYSDATE".to_string()), ..test_column("created_at", "datetime") },
+            db::ColumnInfo { column_default: Some("N'中文'".to_string()), ..test_column("label", "nvarchar(16)") },
+            db::ColumnInfo {
+                column_default: Some("to_char(SYSDATE, 'YYYY')".to_string()),
+                ..test_column("fiscal_year", "varchar(4)")
+            },
+        ];
+
+        let ddl = generate_create_table_ddl(
+            &cols,
+            "items",
+            "etl",
+            "etl",
+            &DatabaseType::Postgres,
+            &DatabaseType::Dameng,
+            None,
+            None,
+        );
+
+        assert!(ddl.contains("DEFAULT 0"), "ddl: {ddl}");
+        assert!(ddl.contains("DEFAULT 'new'"), "ddl: {ddl}");
+        assert!(ddl.contains("DEFAULT CURRENT_TIMESTAMP"), "ddl: {ddl}");
+        assert!(ddl.contains("DEFAULT '中文'"), "ddl: {ddl}");
+        assert!(!ddl.contains("to_char"), "engine-specific defaults must be dropped, not guessed: {ddl}");
     }
 
     #[test]

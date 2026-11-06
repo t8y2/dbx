@@ -81,3 +81,33 @@ it("shows the selected-row column only while selected-row actions exist", async 
   await nextTick();
   expect(document.body.textContent).not.toContain(i18n.global.t("grid.exportSelectedRowsScope"));
 });
+
+it("gives the selection and selected-column scopes their own columns (#14469)", async () => {
+  const items = [
+    { value: "csv", label: "All CSV" },
+    { value: "page-csv", label: "Page CSV" },
+    { value: "selected-csv", label: "Selected rows CSV" },
+    { value: "selected-cells-csv", label: "Selected cells CSV" },
+    { value: "selected-columns-csv", label: "Selected columns CSV" },
+    { value: "database", label: "Database" },
+  ];
+  const host = document.createElement("div");
+  document.body.append(host);
+  const app = createApp({ render: () => h(DataGridExportMenu, { items, label: "Export", onSelect: vi.fn() }) });
+  app.use(i18n);
+  app.mount(host);
+  unmount = () => app.unmount();
+  host.querySelector<HTMLButtonElement>("button")!.click();
+  await nextTick();
+  await nextTick();
+
+  // The two scopes used to fall through to the loose list under the grid.
+  expect(document.body.textContent).toContain(i18n.global.t("grid.exportSelectedCellsScope"));
+  expect(document.body.textContent).toContain(i18n.global.t("grid.exportSelectedColumnsScope"));
+  expect(document.querySelectorAll('button[aria-label="Selected cells CSV"]')).toHaveLength(1);
+  expect(document.querySelectorAll('button[aria-label="Selected columns CSV"]')).toHaveLength(1);
+
+  // 格式 | 选中行 | 选区 | 选中列 | 当前页 | 全部结果
+  const grid = [...document.querySelectorAll<HTMLElement>("div")].find((element) => element.style.gridTemplateColumns);
+  expect(grid?.style.gridTemplateColumns).toBe("minmax(0,1fr) 80px 80px 80px 80px 88px");
+});

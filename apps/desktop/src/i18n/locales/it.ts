@@ -2654,6 +2654,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "Righe selezionate",
+    exportSelectedCellsScope: "Celle selezionate",
+    exportSelectedColumnsScope: "Colonne selezionate",
     exportFormat: "Formato",
     exportPageScope: "Pagina attuale",
     exportResultScope: "Tutti i risultati",

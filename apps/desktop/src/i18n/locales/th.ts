@@ -2890,6 +2890,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "แถวที่เลือก",
+    exportSelectedCellsScope: "เซลล์ที่เลือก",
+    exportSelectedColumnsScope: "คอลัมน์ที่เลือก",
     exportFormat: "รูปแบบ",
     exportPageScope: "หน้าปัจจุบัน",
     exportResultScope: "ผลลัพธ์ทั้งหมด",

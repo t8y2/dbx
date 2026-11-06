@@ -68,7 +68,14 @@ test("load-all selects the last loaded row only after a valid append completes",
   // App.vue's inline handler must forward appendResult, or "load all" silently
   // degrades into replacing the result with the fetched segment.
   assert.match(appSource, /@paginate="\(tabId: string, offset: number, limit: number, whereInput\?: string, orderBy\?: string, appendResult\?: boolean\) => onPaginate\(tabId, offset, limit, whereInput, orderBy, appendResult\)"/);
-  assert.equal(contentAreaSource.match(/emit\('paginate', activeTab\.id, offset, limit, whereInput, orderBy, appendResult\)/g)?.length, 2);
+  // ContentArea.vue gains a forwarding site per result surface (grid, document browser,
+  // Elasticsearch split view), so assert the invariant — every @paginate binding forwards
+  // appendResult unchanged — instead of a hard-coded site count that each new view
+  // would have to bump.
+  const paginateBindings = contentAreaSource.match(/@paginate="/g) ?? [];
+  assert.ok(paginateBindings.length >= 2, "ContentArea.vue must forward @paginate for the result surfaces");
+  const paginateForwarders = contentAreaSource.match(/@paginate="[^"]*emit\('paginate', activeTab\.id, offset, limit, whereInput, orderBy, appendResult\)"/g) ?? [];
+  assert.equal(paginateForwarders.length, paginateBindings.length, "every @paginate binding must forward appendResult unchanged");
   assert.match(documentBrowserSource, /:load-all-rows-enabled="false"/);
   // A non-append result replacement must clear the all-loaded marker (stale all-loaded
   // used to lock scrolling and degrade the load-all button to locate-only after WHERE edits) —

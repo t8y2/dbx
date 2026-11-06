@@ -586,9 +586,7 @@ fn effective_layer_label(config: &ConnectionConfig, effective_index: usize) -> S
 /// not depend on the connection id or on `honor_fixed_ssh_local_ports`: Test
 /// and Connect agree, whether the config came from the dialog, an import, a
 /// cloud sync, or a hand-edited config. A layer that references a shared tunnel
-/// profile supplies its own configuration and is not checked. Kafka with a
-/// single loopback bootstrap server keeps its own rule,
-/// `kafka_loopback_local_port_error`.
+/// profile supplies its own configuration and is not checked.
 fn ssh_local_port_config_error(
     config: &ConnectionConfig,
     transport_layers: &[TransportLayerConfig],
@@ -615,37 +613,6 @@ fn ssh_local_port_config_error(
         )),
         None => Ok(()),
     }
-}
-
-/// Kafka with a single `127.0.0.1` bootstrap server binds its SSH tunnel to the
-/// bootstrap port so the advertised listeners stay reachable, which leaves no
-/// room for a separate fixed local port.
-#[cfg(any(feature = "mq-admin", test))]
-fn kafka_loopback_local_port_error(bootstrap_port: u16, transport_layers: &[TransportLayerConfig]) -> Option<String> {
-    last_ssh_layer_local_port(transport_layers).filter(|port| *port != bootstrap_port).map(|_| {
-        format!(
-            "Kafka with a single 127.0.0.1 bootstrap server listens on bootstrap port {bootstrap_port}; leave Local Port empty or set it to {bootstrap_port}."
-        )
-    })
-}
-
-/// Bootstrap port of a Kafka connection whose single `127.0.0.1` bootstrap
-/// server is reached through a final SSH layer.
-#[cfg(feature = "mq-admin")]
-fn kafka_ssh_loopback_bootstrap_port(
-    config: &ConnectionConfig,
-    transport_layers: &[TransportLayerConfig],
-) -> Result<Option<u16>, String> {
-    if config.db_type != DatabaseType::MessageQueue
-        || !matches!(transport_layers.last(), Some(TransportLayerConfig::Ssh(_)))
-    {
-        return Ok(None);
-    }
-    let mqc = crate::mq::config::MqAdminConfig::from_connection(config)?;
-    if mqc.system_kind != crate::mq::types::MqSystemKind::Kafka {
-        return Ok(None);
-    }
-    Ok(kafka_single_loopback_bootstrap_endpoint(&mqc.extra).map(|(_, port)| port))
 }
 
 /// Short-lived connection preparation shared by pools and dedicated runtimes.
@@ -779,7 +746,7 @@ enum ConnectionTransportRoute {
         port: u16,
     },
     #[cfg(feature = "mq-admin")]
-    RocketMqProxy {
+    MqSocksProxy {
         host: String,
         port: u16,
     },
@@ -4634,16 +4601,23 @@ impl AppState {
         }
 
         #[cfg(feature = "mq-admin")]
-        if config.db_type == DatabaseType::MessageQueue
-            && crate::mq::config::MqAdminConfig::from_connection(config)?.system_kind
-                == crate::mq::types::MqSystemKind::RocketMq
-        {
-            return Ok(ConnectionTransportPlan {
-                source_profile_ids,
-                agent_env,
-                layers: resolved_transport,
-                route: ConnectionTransportRoute::RocketMqProxy { host: config.host.clone(), port: config.port },
-            });
+        if config.db_type == DatabaseType::MessageQueue {
+            use crate::mq::types::MqSystemKind;
+            let system_kind = crate::mq::config::MqAdminConfig::from_connection(config)?.system_kind;
+            if matches!(system_kind, MqSystemKind::RocketMq | MqSystemKind::Kafka) {
+                // Both clients resolve endpoints beyond the configured host:
+                // RocketMQ follows name servers to brokers, Kafka follows
+                // bootstrap servers to advertised listeners. A static tunnel
+                // can only reach one endpoint, so route the whole chain through
+                // the host-managed SOCKS5 endpoint and let the client dial each
+                // broker itself.
+                return Ok(ConnectionTransportPlan {
+                    source_profile_ids,
+                    agent_env,
+                    layers: resolved_transport,
+                    route: ConnectionTransportRoute::MqSocksProxy { host: config.host.clone(), port: config.port },
+                });
+            }
         }
 
         // Multi-endpoint plugin providers (Kafka bootstrap + advertised
@@ -4821,8 +4795,8 @@ impl AppState {
                 Ok(ConnectionEndpoint { proxy: Some(proxy), ..ConnectionEndpoint::direct(host.clone(), *port) })
             }
             #[cfg(feature = "mq-admin")]
-            ConnectionTransportRoute::RocketMqProxy { host, port } => {
-                self.rocketmq_socks_proxy_for_transport_layers(connection_id, &plan.layers).await?;
+            ConnectionTransportRoute::MqSocksProxy { host, port } => {
+                self.mq_socks_proxy_for_transport_layers(connection_id, &plan.layers).await?;
                 Ok(ConnectionEndpoint::direct(host.clone(), *port))
             }
             ConnectionTransportRoute::Static { host, port, fixed_local_port } => {
@@ -4868,12 +4842,6 @@ impl AppState {
         config: &ConnectionConfig,
         transport_layers: &[TransportLayerConfig],
     ) -> Result<Option<u16>, String> {
-        // `mq_admin_config_for_connection` binds the bootstrap port itself for this Kafka
-        // layout and would tear down a tunnel opened here on the user's port first.
-        #[cfg(feature = "mq-admin")]
-        if let Some(bootstrap_port) = kafka_ssh_loopback_bootstrap_port(config, transport_layers)? {
-            return kafka_loopback_local_port_error(bootstrap_port, transport_layers).map_or(Ok(None), Err);
-        }
         Ok(primary_tunnel_fixed_local_port(
             self.honor_fixed_ssh_local_ports.load(Ordering::Relaxed),
             connection_id,
@@ -5187,7 +5155,7 @@ impl AppState {
     }
 
     #[cfg(feature = "mq-admin")]
-    async fn rocketmq_socks_proxy_for_transport_layers(
+    async fn mq_socks_proxy_for_transport_layers(
         &self,
         connection_id: &str,
         resolved_transport: &ResolvedTransportLayers,
@@ -5238,10 +5206,11 @@ impl AppState {
                 }
             }
             TransportLayerConfig::Proxy(_) => {
-                Err("RocketMQ requires a SOCKS5 proxy as the final proxy layer".to_string())
+                Err("This message queue connection requires a SOCKS5 proxy as the final proxy layer".to_string())
             }
             TransportLayerConfig::HttpTunnel(_) => {
-                Err("RocketMQ does not support an HTTP tunnel as the final transport layer".to_string())
+                Err("This message queue connection does not support an HTTP tunnel as the final transport layer"
+                    .to_string())
             }
         }
     }
@@ -5267,9 +5236,9 @@ impl AppState {
         let transport_layers = self.resolved_transport_layers(config).await?;
         self.ensure_ssh_local_port_supported(config, &transport_layers)?;
 
-        if mqc.system_kind == crate::mq::types::MqSystemKind::RocketMq {
+        if matches!(mqc.system_kind, crate::mq::types::MqSystemKind::RocketMq | crate::mq::types::MqSystemKind::Kafka) {
             let resolved_transport = ResolvedTransportLayers::resolve(&transport_layers)?;
-            let proxy = self.rocketmq_socks_proxy_for_transport_layers(connection_id, &resolved_transport).await?;
+            let proxy = self.mq_socks_proxy_for_transport_layers(connection_id, &resolved_transport).await?;
             return Ok(mqc.with_socks_proxy(&proxy.host, proxy.port, &proxy.username, &proxy.password));
         }
 
@@ -5330,28 +5299,6 @@ impl AppState {
                 mqc = mqc.with_management_connect_override("127.0.0.1", management_local_port);
             }
             return Ok(mqc);
-        }
-
-        if mqc.system_kind == crate::mq::types::MqSystemKind::Kafka {
-            if let Some((bootstrap_host, bootstrap_port)) = kafka_single_loopback_bootstrap_endpoint(&mqc.extra) {
-                if matches!(transport_layers.last(), Some(TransportLayerConfig::Ssh(_))) {
-                    if let Some(error) = kafka_loopback_local_port_error(bootstrap_port, &transport_layers) {
-                        return Err(error);
-                    }
-                    let local_port = db::transport_layer_tunnel::start_transport_layers_with_final_ssh_local_port(
-                        connection_id,
-                        &transport_layers,
-                        &bootstrap_host,
-                        bootstrap_port,
-                        Some(bootstrap_port),
-                        &self.tunnels,
-                        &self.proxy_tunnels,
-                        &self.http_tunnels,
-                    )
-                    .await?;
-                    return Ok(mqc.with_connect_override("127.0.0.1", local_port));
-                }
-            }
         }
 
         let (host, port) = self.connection_host_port(connection_id, config).await?;
@@ -8104,30 +8051,6 @@ fn parse_mq_admin_host_port(config: &ConnectionConfig) -> Option<(String, u16)> 
     Some((host, port))
 }
 
-#[cfg(any(feature = "mq-admin", test))]
-fn kafka_single_loopback_bootstrap_endpoint(extra: &serde_json::Value) -> Option<(String, u16)> {
-    let value = extra.get("bootstrapServers").or_else(|| extra.get("bootstrap_servers"))?.as_str()?.trim();
-    let mut endpoints = value
-        .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | '，' | '；'))
-        .filter(|endpoint| !endpoint.is_empty());
-    let endpoint = endpoints.next()?;
-    if endpoints.next().is_some() {
-        return None;
-    }
-    let address = endpoint.rsplit_once("://").map_or(endpoint, |(_, address)| address);
-    let url = reqwest::Url::parse(&format!("kafka://{address}")).ok()?;
-    if url.host_str()? != "127.0.0.1"
-        || url.username() != ""
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || !matches!(url.path(), "" | "/")
-    {
-        return None;
-    }
-    Some(("127.0.0.1".to_string(), url.port()?))
-}
-
 fn parse_nacos_server_host_port(config: &ConnectionConfig) -> Option<(String, u16)> {
     let value = config
         .external_config
@@ -8983,15 +8906,15 @@ mod tests {
         connection_configs_session_credentials_compatible, connection_probe_endpoints, connection_remote_endpoint,
         connection_url_for_endpoint, database_connection_config, database_connection_config_with_catalog,
         gaussdb_identifier_quote_from_query_result, gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver,
-        kafka_loopback_local_port_error, kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead,
-        metadata_connection_config, metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries,
-        oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint, primary_tunnel_fixed_local_port,
-        redact_transport_url, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
-        redis_sentinel_transport_prefix, report_connection_liveness_lost, sqlserver_legacy_agent_config,
-        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, ssh_local_port_config_error,
-        task_client_session_id, transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool,
-        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
-        TxnConnection, CLOUDFLARE_D1_LOCAL_PORT_ERROR, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE,
+        keepalive_failure_proves_pool_dead, metadata_connection_config, metadata_pool_database,
+        mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
+        prestosql_jdbc_config_for_endpoint, primary_tunnel_fixed_local_port, redact_transport_url,
+        redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
+        report_connection_liveness_lost, sqlserver_legacy_agent_config, sqlserver_legacy_driver_error,
+        sqlserver_uses_legacy_driver, ssh_local_port_config_error, task_client_session_id,
+        transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
+        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind, TxnConnection,
+        CLOUDFLARE_D1_LOCAL_PORT_ERROR, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE,
         PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
@@ -10654,30 +10577,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn kafka_loopback_bootstrap_rejects_a_different_fixed_local_port() {
-        let ssh = |port: Option<u16>, profile_id: &str| {
-            let mut layer = ssh_layer("ssh", profile_id);
-            layer.local_port = port;
-            TransportLayerConfig::Ssh(layer)
-        };
-        let proxy = || TransportLayerConfig::Proxy(proxy_layer("proxy", ""));
-        let rejected = "Kafka with a single 127.0.0.1 bootstrap server listens on bootstrap port 9093; leave Local Port empty or set it to 9093.";
-
-        let cases = [
-            ("no local port", vec![ssh(None, "")], None),
-            ("local port equals the bootstrap port", vec![ssh(Some(9093), "")], None),
-            ("local port zero", vec![ssh(Some(0), "")], None),
-            ("local port differs", vec![ssh(Some(4059), "")], Some(rejected)),
-            ("local port differs behind a proxy", vec![proxy(), ssh(Some(4059), "")], Some(rejected)),
-            ("tunnel profile owns its own port", vec![ssh(Some(4059), "shared")], None),
-        ];
-
-        for (label, layers, expected) in cases {
-            assert_eq!(kafka_loopback_local_port_error(9093, &layers).as_deref(), expected, "{label}");
-        }
-    }
-
     fn unsupported_local_port(kind: &str, route: &str) -> String {
         format!(
             "Local Port is not supported for {kind} connections because they connect through {route}; clear Local Port in the SSH layer."
@@ -10958,7 +10857,6 @@ mod tests {
             let layers = config.effective_transport_layers();
             assert_eq!(ssh_local_port_config_error(&config, &layers, plugin_proxy_route).err(), expected, "{label}");
         }
-        assert!(kafka_loopback_local_port_error(9093, &[ssh(Some(4059))]).is_some());
     }
 
     #[test]
@@ -15324,34 +15222,6 @@ for line in sys.stdin:
         assert_eq!(super::sqlserver_tcp_endpoint("[::1],70000", 1433), ("[::1],70000".to_string(), 1433));
     }
 
-    #[test]
-    fn kafka_loopback_bootstrap_endpoint_requires_one_ipv4_loopback_server() {
-        assert_eq!(
-            kafka_single_loopback_bootstrap_endpoint(&serde_json::json!({
-                "bootstrapServers": "127.0.0.1:9093"
-            })),
-            Some(("127.0.0.1".to_string(), 9093))
-        );
-        assert_eq!(
-            kafka_single_loopback_bootstrap_endpoint(&serde_json::json!({
-                "bootstrap_servers": "PLAINTEXT://127.0.0.1:19093"
-            })),
-            Some(("127.0.0.1".to_string(), 19093))
-        );
-        assert_eq!(
-            kafka_single_loopback_bootstrap_endpoint(&serde_json::json!({
-                "bootstrapServers": "127.0.0.1:9093,127.0.0.1:9094"
-            })),
-            None
-        );
-        assert_eq!(
-            kafka_single_loopback_bootstrap_endpoint(&serde_json::json!({
-                "bootstrapServers": "broker.internal:9093"
-            })),
-            None
-        );
-    }
-
     #[cfg(feature = "mq-admin")]
     #[tokio::test]
     async fn mq_admin_config_preserves_admin_url_and_uses_forwarded_connect_override() {
@@ -15430,6 +15300,54 @@ for line in sys.stdin:
         assert_eq!(socks_proxy.password, "proxy-secret");
         assert!(mqc.connect_override.is_none());
         assert!(state.proxy_tunnels.local_port("proxied-rocketmq:transport:0").await.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn kafka_transport_passes_socks_proxy_to_multi_endpoint_client() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "proxied-kafka".to_string();
+        config.db_type = DatabaseType::MessageQueue;
+        config.host = "broker.internal".to_string();
+        config.port = 9092;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "kafka",
+            "adminUrl": "",
+            "auth": { "kind": "none" },
+            "extra": { "bootstrapServers": "broker.internal:9092" }
+        }));
+        config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            profile_id: String::new(),
+            id: "proxy".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "proxy.internal".to_string(),
+            port: 1080,
+            username: "proxy-user".to_string(),
+            password: "proxy-secret".to_string(),
+            test_target: None,
+        })];
+
+        // Kafka follows bootstrap servers to every advertised broker, so the
+        // endpoint must not open a static tunnel to the first broker only.
+        let endpoint = state.connection_endpoint("proxied-kafka", &config).await.unwrap();
+        assert_eq!(endpoint.host, "broker.internal");
+        assert_eq!(endpoint.port, 9092);
+        assert!(endpoint.proxy.is_none());
+        assert!(state.proxy_tunnels.local_port("proxied-kafka:transport:0").await.is_none());
+
+        let mqc = state.mq_admin_config_for_connection("proxied-kafka", &config).await.unwrap();
+
+        let socks_proxy = mqc.socks_proxy.expect("Kafka transport should configure SOCKS5 routing");
+        assert_eq!(socks_proxy.host, "proxy.internal");
+        assert_eq!(socks_proxy.port, 1080);
+        assert_eq!(socks_proxy.username, "proxy-user");
+        assert_eq!(socks_proxy.password, "proxy-secret");
+        assert!(mqc.connect_override.is_none());
+        assert!(state.proxy_tunnels.local_port("proxied-kafka:transport:0").await.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -15554,49 +15472,6 @@ for line in sys.stdin:
 
         let probe = state.mq_admin_config_for_connection("fixed-rabbitmq:test", &config).await.unwrap_err();
         assert!(!probe.contains(&bind_error), "{probe}");
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[cfg(feature = "mq-admin")]
-    #[tokio::test]
-    async fn kafka_loopback_bootstrap_over_ssh_keeps_the_bootstrap_port_instead_of_the_fixed_local_port() {
-        let (state, dir) = test_app_state().await;
-        state.set_honor_fixed_ssh_local_ports(true);
-        let bootstrap = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let bootstrap_port = bootstrap.local_addr().unwrap().port();
-        let other = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let other_port = other.local_addr().unwrap().port();
-        let rejected = format!(
-            "Kafka with a single 127.0.0.1 bootstrap server listens on bootstrap port {bootstrap_port}; leave Local Port empty or set it to {bootstrap_port}."
-        );
-
-        for (label, local_port, expect_rejected) in
-            [("same as the bootstrap port", bootstrap_port, false), ("different from it", other_port, true)]
-        {
-            let mut config = mysql_config(None);
-            config.id = "fixed-kafka".to_string();
-            config.db_type = DatabaseType::MessageQueue;
-            config.host = String::new();
-            config.port = 0;
-            config.external_config = Some(serde_json::json!({
-                "systemKind": "kafka",
-                "adminUrl": "",
-                "auth": { "kind": "none" },
-                "extra": { "bootstrapServers": format!("127.0.0.1:{bootstrap_port}") }
-            }));
-            config.transport_layers = vec![unreachable_ssh_layer(local_port)];
-            let bind_error = format!("Failed to bind requested local port {local_port}");
-
-            let endpoint = state.connection_host_port(&config.id, &config).await.unwrap_err();
-            assert_eq!(endpoint == rejected, expect_rejected, "{label}: {endpoint}");
-            assert!(!endpoint.contains(&bind_error), "{label}: {endpoint}");
-
-            if expect_rejected {
-                let admin = state.mq_admin_config_for_connection(&config.id, &config).await.unwrap_err();
-                assert_eq!(admin, rejected, "{label}");
-            }
-        }
 
         let _ = std::fs::remove_dir_all(dir);
     }

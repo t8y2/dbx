@@ -50,6 +50,7 @@ public final class KafkaAgent {
     private static final int MAX_PEEK_SCAN_RECORDS = 1_000;
     private static final int DEFAULT_SESSION_TIMEOUT_MS = 30_000;
     private static final int DEFAULT_ZOOKEEPER_CONNECTION_TIMEOUT_MS = 10_000;
+    private static final int DEFAULT_SOCKS_CONNECT_TIMEOUT_MS = 10_000;
     private static final String ZOOKEEPER_PROPERTY_PREFIX = "zookeeper.";
     private static final Set<String> SASL_MECHANISMS_WITHOUT_SERVER_NAME = Set.of(
         "PLAIN",
@@ -74,6 +75,7 @@ public final class KafkaAgent {
     private static final List<AdminClient> groupQueryAdmins = new ArrayList<>();
     private static KafkaProducer<String, byte[]> producer;
     private static JsonObject activeConnection;
+    private static KafkaSocksBridge socksBridge;
     private static volatile boolean shutdownRequested;
 
     private KafkaAgent() {}
@@ -148,11 +150,13 @@ public final class KafkaAgent {
             case "test_connection" -> testConnection(params);
             case "disconnect" -> {
                 closeClients();
+                closeSocksBridge();
                 DbxInetAddressResolverProvider.setAvoidReverseDns(false);
                 yield Collections.singletonMap("ok", true);
             }
             case "shutdown" -> {
                 closeClients();
+                closeSocksBridge();
                 DbxInetAddressResolverProvider.setAvoidReverseDns(false);
                 shutdownRequested = true;
                 yield Collections.singletonMap("ok", true);
@@ -195,7 +199,7 @@ public final class KafkaAgent {
     }
 
     private static Object connect(JsonObject params) throws Exception {
-        JsonObject conn = resolveBrokerConnection(connectionObject(params));
+        JsonObject conn = prepareConnection(connectionObject(params));
         boolean previousReverseDnsMode = DbxInetAddressResolverProvider.setAvoidReverseDns(
             shouldAvoidSaslReverseDns(conn)
         );
@@ -228,7 +232,7 @@ public final class KafkaAgent {
     }
 
     private static Object testConnection(JsonObject params) throws Exception {
-        JsonObject conn = resolveBrokerConnection(connectionObject(params));
+        JsonObject conn = prepareConnection(connectionObject(params));
         boolean previousReverseDnsMode = DbxInetAddressResolverProvider.setAvoidReverseDns(
             shouldAvoidSaslReverseDns(conn)
         );
@@ -303,6 +307,41 @@ public final class KafkaAgent {
         }
         activeConnection = null;
         restoreKerberosSystemProperties(BASELINE_KERBEROS_SYSTEM_PROPERTIES);
+    }
+
+    /**
+     * Resolves the broker endpoints and, when the connection configures a SOCKS5
+     * proxy, routes bootstrap servers and discovered broker endpoints through a
+     * local SOCKS bridge. The bridge must be installed before ZooKeeper discovery
+     * so the JVM-wide proxy properties apply to the ZooKeeper socket.
+     */
+    private static JsonObject prepareConnection(JsonObject conn) throws Exception {
+        installSocksBridge(conn);
+        JsonObject resolved = resolveBrokerConnection(conn);
+        JsonObject rewritten = socksBridge == null ? resolved : socksBridge.rewriteConnection(resolved);
+        if (socksBridge != null) {
+            logger().info(
+                "Kafka SOCKS5 bridge active: bootstrap {} -> {} via {}:{}",
+                bootstrapServers(resolved),
+                bootstrapServers(rewritten),
+                socksBridge.proxyHost(),
+                socksBridge.proxyPort()
+            );
+        }
+        return rewritten;
+    }
+
+    private static void installSocksBridge(JsonObject conn) {
+        KafkaSocksBridge.ProxyConfig config = KafkaSocksBridge.ProxyConfig.fromConnection(conn);
+        int connectTimeoutMs = intOrDefault(conn, "connect_timeout_ms", DEFAULT_SOCKS_CONNECT_TIMEOUT_MS);
+        socksBridge = KafkaSocksBridge.ensure(socksBridge, config, connectTimeoutMs);
+    }
+
+    private static void closeSocksBridge() {
+        if (socksBridge != null) {
+            socksBridge.close();
+            socksBridge = null;
+        }
     }
 
     // -----------------------------------------------------------------------

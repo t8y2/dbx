@@ -24,6 +24,12 @@ const props = defineProps<{
   zIndex?: number;
   /** 0-based index among open panels; used only for initial cascade placement. */
   cascadeIndex?: number;
+  /**
+   * Whether cells can be inserted into a query editor. Callers without an editor
+   * cursor (for example the sidebar) turn this off so no insertion affordance is
+   * advertised.
+   */
+  insertEnabled?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -133,7 +139,18 @@ function insertValue(value: string | null | undefined, kind: TableStructurePeekI
   emit("insertValue", trimmed, kind);
 }
 
+const insertEnabled = computed(() => props.insertEnabled !== false);
+
+function insertableColumn(value: string | null | undefined): boolean {
+  return insertEnabled.value && insertableValue(value) !== null;
+}
+
+function insertTitle(value: string | null | undefined): string | undefined {
+  return insertableColumn(value) ? t("editor.structurePeek.doubleClickInsert") : undefined;
+}
+
 function onCellDblClick(value: string | null | undefined, kind: TableStructurePeekInsertKind) {
+  if (!insertEnabled.value) return;
   insertValue(value, kind);
 }
 
@@ -296,7 +313,7 @@ watch(
         </button>
         <div class="min-w-0 flex-1 select-none">
           <div class="truncate text-sm font-medium">{{ t("editor.structurePeek.title", { name: title }) }}</div>
-          <div class="truncate text-xs text-muted-foreground">{{ t("editor.structurePeek.hint") }}</div>
+          <div v-if="insertEnabled" class="truncate text-xs text-muted-foreground">{{ t("editor.structurePeek.hint") }}</div>
         </div>
         <Button type="button" variant="ghost" size="sm" data-no-drag class="h-7 w-7 shrink-0 p-0" :title="t('common.close')" :aria-label="t('common.close')" @pointerdown.stop @click="closePanel">
           <X class="h-4 w-4" />
@@ -345,27 +362,22 @@ watch(
           <tbody>
             <tr v-for="(column, index) in sortedColumns" :key="column.name" class="border-b hover:bg-muted/40">
               <td class="w-8 px-3 py-2 text-muted-foreground">{{ index + 1 }}</td>
-              <td class="cursor-pointer px-3 py-2 font-medium" :title="t('editor.structurePeek.doubleClickInsert')" @dblclick.stop="onCellDblClick(column.name, 'identifier')">
+              <td class="px-3 py-2 font-medium" :class="{ 'cursor-pointer': insertableColumn(column.name) }" :title="insertTitle(column.name)" @dblclick.stop="onCellDblClick(column.name, 'identifier')">
                 <span class="inline-flex items-center gap-1.5">
                   <KeyRound v-if="column.is_primary_key" class="h-3 w-3 text-amber-500" />
                   {{ column.name }}
                 </span>
               </td>
-              <td class="cursor-pointer px-3 py-2 font-mono text-[11px] text-muted-foreground" :title="t('editor.structurePeek.doubleClickInsert')" @dblclick.stop="onCellDblClick(formatColumnType(column), 'raw')">
+              <td class="px-3 py-2 font-mono text-[11px] text-muted-foreground" :class="{ 'cursor-pointer': insertableColumn(formatColumnType(column)) }" :title="insertTitle(formatColumnType(column))" @dblclick.stop="onCellDblClick(formatColumnType(column), 'raw')">
                 {{ formatColumnType(column) }}
               </td>
-              <td class="cursor-pointer px-3 py-2" :title="t('editor.structurePeek.doubleClickInsert')" @dblclick.stop="onCellDblClick(column.is_nullable ? 'YES' : 'NO', 'raw')">
+              <td class="px-3 py-2" :class="{ 'cursor-pointer': insertEnabled }" :title="insertEnabled ? t('editor.structurePeek.doubleClickInsert') : undefined" @dblclick.stop="onCellDblClick(column.is_nullable ? 'YES' : 'NO', 'raw')">
                 {{ column.is_nullable ? "YES" : "NO" }}
               </td>
-              <td
-                class="max-w-48 px-3 py-2 font-mono text-[11px]"
-                :class="insertableValue(column.column_default) ? 'cursor-pointer' : 'text-muted-foreground/70'"
-                :title="insertableValue(column.column_default) ? t('editor.structurePeek.doubleClickInsert') : undefined"
-                @dblclick.stop="onCellDblClick(column.column_default, 'raw')"
-              >
+              <td class="max-w-48 px-3 py-2 font-mono text-[11px]" :class="insertableColumn(column.column_default) ? 'cursor-pointer' : 'text-muted-foreground/70'" :title="insertTitle(column.column_default)" @dblclick.stop="onCellDblClick(column.column_default, 'raw')">
                 <span class="block truncate">{{ tableColumnDefaultDisplayValue(column.column_default) }}</span>
               </td>
-              <td class="max-w-56 px-3 py-2 text-muted-foreground" :class="{ 'cursor-pointer': !!insertableValue(column.comment) }" :title="insertableValue(column.comment) ? t('editor.structurePeek.doubleClickInsert') : undefined" @dblclick.stop="onCellDblClick(column.comment, 'raw')">
+              <td class="max-w-56 px-3 py-2 text-muted-foreground" :class="{ 'cursor-pointer': insertableColumn(column.comment) }" :title="insertTitle(column.comment)" @dblclick.stop="onCellDblClick(column.comment, 'raw')">
                 <span class="block truncate">{{ column.comment || "—" }}</span>
               </td>
             </tr>

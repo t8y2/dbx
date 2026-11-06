@@ -945,6 +945,8 @@ async function loadPreview(fileOrPath = selectedSource.value) {
     preview.value = null;
     columnMapping.value = {};
     columnDataTypes.value = {};
+    if (await openMultiTableSqlFile(fileOrPath, e, requestId)) return;
+    if (requestId !== previewRequestId) return;
     errorMessage.value = String(e?.message || e);
     if (sourceFormat.value === "sql") sqlScriptFallbackSource.value = fileOrPath;
   } finally {
@@ -1009,6 +1011,7 @@ function saveActiveBatchTask() {
 }
 
 async function prepareBatchSources(sources: ImportSource[]) {
+  const requestId = ++previewRequestId;
   loadingPreview.value = true;
   errorMessage.value = "";
   const tasks: BatchImportTask[] = [];
@@ -1033,6 +1036,7 @@ async function prepareBatchSources(sources: ImportSource[]) {
         parseOptions: taskParseOptions(format),
         previewLimit: Math.max(1, Number(previewLimit.value) || 50),
       });
+      if (requestId !== previewRequestId) return;
       const sheets = format === "excel" && initialPreview.sheets?.length ? initialPreview.sheets : [""];
       for (const sheetName of sheets) {
         const input = importPreviewInput(uploadedImportSourceFromPreview(initialPreview), source);
@@ -1047,6 +1051,7 @@ async function prepareBatchSources(sources: ImportSource[]) {
               previewLimit: Math.max(1, Number(previewLimit.value) || 50),
             })
           : initialPreview;
+        if (requestId !== previewRequestId) return;
         const tableBase = sheetName ? `${suggestedTableName(sourceName(source))}_${sheetName}` : sourceName(source);
         tasks.push({
           id: uuid(),
@@ -1073,11 +1078,16 @@ async function prepareBatchSources(sources: ImportSource[]) {
       wizardStep.value = "options";
     }
   } catch (e: any) {
+    if (requestId !== previewRequestId) return;
     batchTasks.value = [];
+    // A multi-table dump is one script, rather than one row-import task. Keep
+    // mixed batches here so switching modes never discards the other files.
+    if (sources.length === 1 && previewingSource !== undefined && (await openMultiTableSqlFile(previewingSource, e, requestId))) return;
+    if (requestId !== previewRequestId) return;
     errorMessage.value = String(e?.message || e);
     if (previewingSource !== undefined && detectFormat(sourceName(previewingSource)) === "sql") sqlScriptFallbackSource.value = previewingSource;
   } finally {
-    loadingPreview.value = false;
+    if (requestId === previewRequestId) loadingPreview.value = false;
   }
 }
 
@@ -1142,15 +1152,31 @@ async function handleNavicatBackupInputChange(event: Event) {
   if (file && !running.value) await openSqlFileExecutor(file);
 }
 
+async function openMultiTableSqlFile(source: ImportSource, error: unknown, requestId: number): Promise<boolean> {
+  const message = error instanceof Error ? error.message : String(error);
+  if (detectFormat(sourceName(source)) !== "sql" || !props.prefillConnectionId || !message.startsWith("SQL import supports one table per file; found ")) return false;
+  if (previewReloadTimer) {
+    clearTimeout(previewReloadTimer);
+    previewReloadTimer = null;
+  }
+  sqlScriptFallbackSource.value = source;
+  // This only opens the existing preview/target window. The script is not run
+  // until the user starts execution there, including its normal write checks.
+  await openSqlFileExecutor(source, requestId);
+  return true;
+}
+
 /**
  * Navicat archives and whole-database SQL dumps hold DDL, rows, routines and triggers rather
  * than rows for one table, so they run through the streaming SQL file executor, prefilled
  * with this dialog's target database.
  */
-async function openSqlFileExecutor(source: ImportSource) {
+async function openSqlFileExecutor(source: ImportSource, requestId = previewRequestId) {
   const connectionId = props.prefillConnectionId;
   if (!connectionId) return;
   const target = { connectionId, database: props.prefillDatabase || "", ...(props.prefillSchema ? { schema: props.prefillSchema } : {}) };
+  const targetIsCurrent = () => open.value && requestId === previewRequestId && props.prefillConnectionId === connectionId && (props.prefillDatabase || "") === target.database && (props.prefillSchema || "") === (target.schema || "");
+  if (!targetIsCurrent()) return;
   if (typeof source === "string") {
     store.sqlFileSource = { ...target, filePath: source };
   } else {
@@ -1159,12 +1185,17 @@ async function openSqlFileExecutor(source: ImportSource) {
     errorMessage.value = "";
     try {
       const { previewSqlFile } = await import("@/lib/backend/http");
-      store.sqlFileSource = { ...target, preview: await previewSqlFile(source) };
+      const sqlPreview = await previewSqlFile(source);
+      if (!targetIsCurrent()) {
+        if (sqlPreview.cleanupToken) await api.releaseSqlFilePreview(sqlPreview.cleanupToken).catch((error) => console.warn("[DBX][table-import:release-sql-preview-failed]", error));
+        return;
+      }
+      store.sqlFileSource = { ...target, preview: sqlPreview };
     } catch (e: any) {
-      errorMessage.value = String(e?.message || e);
+      if (targetIsCurrent()) errorMessage.value = String(e?.message || e);
       return;
     } finally {
-      loadingPreview.value = false;
+      if (open.value && requestId === previewRequestId) loadingPreview.value = false;
     }
   }
   open.value = false;
@@ -1839,6 +1870,7 @@ watch(
       void loadTargetColumns();
       void loadDataTypeOptions();
     } else {
+      previewRequestId++;
       minimized.value = false;
       backgroundMode.value = false;
       dialogDragOffset.value = { x: 0, y: 0 };
@@ -1855,6 +1887,7 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  previewRequestId++;
   closeDataTypePicker();
   closeGeneratorPicker();
   stopDialogDrag();

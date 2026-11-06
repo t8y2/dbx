@@ -7,12 +7,12 @@ use std::time::Duration;
 use fs2::FileExt;
 use reqwest::redirect::Policy;
 use reqwest::{Client, Url};
-use semver::Version;
+use semver::{BuildMetadata, Op, Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::installer::{ensure_update_continuity, validate_key_id, PluginPackageExpectation};
-use super::manifest::{parse_host_network_permission, MAX_PLUGIN_NETWORK_ORIGINS};
+use super::manifest::{parse_host_network_permission, MAX_PLUGIN_NETWORK_ORIGINS, SUPPORTED_PLUGIN_HOST_API_VERSION};
 use super::{
     current_plugin_target, PluginInstallPolicy, PluginInstallResult, PluginPackageInstaller, PluginTrustStore,
     MAX_PLUGIN_PACKAGE_BYTES, SUPPORTED_PLUGIN_PERMISSIONS,
@@ -94,6 +94,49 @@ pub struct PluginMarketplaceVersion {
     pub release_notes: Option<String>,
     #[serde(default)]
     pub artifacts: Vec<PluginMarketplaceArtifact>,
+    /// Filled by the host from the catalog's `compatibility` table after parsing; absent means the
+    /// catalog declared nothing for this version and the host treats it as compatible. Computed in
+    /// Rust so the desktop and the web host share one semver implementation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<PluginVersionCompatibility>,
+}
+
+/// Host-side verdict for one catalog version. The declared requirements are echoed back so the UI
+/// can explain *why* an update is unavailable without re-parsing semver in TypeScript.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginVersionCompatibility {
+    pub compatible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dbx: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_api: Option<String>,
+    /// Which declaration failed (`dbx` or `hostApi`); absent when the version is compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_by: Option<String>,
+    /// `Some(true)` when a newer DBX could satisfy the failing requirement, `Some(false)` when it
+    /// could not (upper bound, exact older version); absent when the version is compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrade_required: Option<bool>,
+}
+
+/// One engine requirement declared by the catalog for a concrete plugin version. Catalogs are
+/// produced by the store from the package manifest; the field is additive and root-scoped because
+/// `PluginMarketplacePlugin`/`PluginMarketplaceVersion` deny unknown fields — the objects old
+/// clients already parse must not grow keys.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCompatibilityDeclaration {
+    // Lenient on purpose: a store typo must drop one entry, not abort the whole catalog. The
+    // published JSON schema keeps `required: [pluginId, version]` for catalog authors.
+    #[serde(default)]
+    pub plugin_id: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dbx: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_api: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -136,6 +179,10 @@ pub struct PluginMarketplaceCatalog {
     pub repository: PluginMarketplaceRepositoryMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_at: Option<String>,
+    /// Input-only: the host folds these declarations into each version's computed `compatibility`
+    /// and never echoes the raw table back to clients.
+    #[serde(default, skip_serializing, deserialize_with = "deserialize_compatibility_declarations")]
+    pub compatibility: Vec<PluginCompatibilityDeclaration>,
     #[serde(default)]
     pub plugins: Vec<PluginMarketplacePlugin>,
 }
@@ -389,6 +436,7 @@ impl PluginMarketplace {
         let mut catalog: PluginMarketplaceCatalog = serde_json::from_slice(&raw)
             .map_err(|error| format!("Failed to parse plugin catalog from {catalog_url}: {error}"))?;
         validate_and_resolve_catalog(&mut catalog, repository, &catalog_url)?;
+        annotate_catalog_compatibility(&mut catalog, &self.app_version);
         Ok(catalog)
     }
 
@@ -663,6 +711,207 @@ fn validate_and_resolve_catalog(
     Ok(())
 }
 
+/// Parses the root-level `compatibility` table element by element so one malformed store entry
+/// (a non-object, a null id, a numeric requirement, …) cannot abort the whole catalog: the
+/// repository's plugin list stays usable, and the package manifest remains the authoritative engine
+/// gate at install time.
+fn deserialize_compatibility_declarations<'de, D>(
+    deserializer: D,
+) -> Result<Vec<PluginCompatibilityDeclaration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let entries = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    let mut declarations = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        match parse_compatibility_declaration(entry) {
+            Some(declaration) => declarations.push(declaration),
+            None => log::warn!("Ignoring malformed plugin catalog compatibility entry: {entry}"),
+        }
+    }
+    Ok(declarations)
+}
+
+/// Lenient per-entry parse of a catalog compatibility declaration. `null` for an optional field is
+/// treated as absent, mirroring how the rest of the catalog reads optional data.
+fn parse_compatibility_declaration(value: &serde_json::Value) -> Option<PluginCompatibilityDeclaration> {
+    let object = value.as_object()?;
+    let identity = |field: &str| match object.get(field) {
+        Some(serde_json::Value::String(text)) => Some(text.clone()),
+        _ => None,
+    };
+    let requirement = |field: &str| match object.get(field) {
+        None | Some(serde_json::Value::Null) => Some(None),
+        Some(serde_json::Value::String(text)) => Some(Some(text.clone())),
+        // A non-string requirement is a store typo; drop the entry rather than guess its meaning.
+        Some(_) => None,
+    };
+    Some(PluginCompatibilityDeclaration {
+        plugin_id: identity("pluginId")?,
+        version: identity("version")?,
+        dbx: requirement("dbx")?,
+        host_api: requirement("hostApi")?,
+    })
+}
+
+/// Folds the catalog's root-level `compatibility` table into each listed version. Anything that
+/// does not resolve (unknown plugin/version, duplicate, unparsable requirement) is dropped with a
+/// warning instead of failing the catalog: a store typo must never hide every plugin from the
+/// store, and the package manifest remains the authoritative engine gate at install time.
+fn annotate_catalog_compatibility(catalog: &mut PluginMarketplaceCatalog, app_version: &str) {
+    // `compatibility` is host-computed: the version objects now have a known serde field for it, so
+    // a catalog could smuggle an arbitrary verdict through. Always discard catalog input first, then
+    // annotate only the versions covered by the root table below.
+    for plugin in &mut catalog.plugins {
+        for version in &mut plugin.versions {
+            version.compatibility = None;
+        }
+    }
+    if catalog.compatibility.is_empty() {
+        return;
+    }
+    let mut declarations: BTreeMap<(String, String), PluginCompatibilityDeclaration> = BTreeMap::new();
+    for declaration in std::mem::take(&mut catalog.compatibility) {
+        if declaration.plugin_id.trim().is_empty() || declaration.version.trim().is_empty() {
+            log::warn!("Ignoring plugin catalog compatibility entry without pluginId/version: {declaration:?}");
+            continue;
+        }
+        let well_formed = requirement_is_well_formed(declaration.dbx.as_deref())
+            && requirement_is_well_formed(declaration.host_api.as_deref());
+        if !well_formed {
+            log::warn!(
+                "Ignoring plugin catalog compatibility entry for {} {}: unparsable engine requirement",
+                declaration.plugin_id,
+                declaration.version
+            );
+            continue;
+        }
+        let key = (declaration.plugin_id.clone(), declaration.version.clone());
+        if declarations.contains_key(&key) {
+            log::warn!(
+                "Ignoring duplicate plugin catalog compatibility entry for {} {}",
+                declaration.plugin_id,
+                declaration.version
+            );
+            continue;
+        }
+        declarations.insert(key, declaration);
+    }
+
+    let mut resolved = BTreeSet::new();
+    for plugin in &mut catalog.plugins {
+        for version in &mut plugin.versions {
+            let key = (plugin.id.clone(), version.version.clone());
+            let Some(declaration) = declarations.get(&key) else { continue };
+            resolved.insert(key);
+            version.compatibility = Some(evaluate_catalog_compatibility(declaration, app_version));
+        }
+    }
+    for (plugin_id, version) in declarations.keys() {
+        if !resolved.contains(&(plugin_id.clone(), version.clone())) {
+            log::warn!(
+                "Ignoring plugin catalog compatibility entry for {plugin_id} {version}: not listed by this catalog"
+            );
+        }
+    }
+}
+
+fn requirement_is_well_formed(requirement: Option<&str>) -> bool {
+    requirement.is_none_or(|requirement| {
+        let requirement = requirement.trim();
+        requirement.is_empty() || VersionReq::parse(requirement).is_ok()
+    })
+}
+
+fn evaluate_catalog_compatibility(
+    declaration: &PluginCompatibilityDeclaration,
+    app_version: &str,
+) -> PluginVersionCompatibility {
+    let dbx_ok = requirement_matches(declaration.dbx.as_deref(), app_version);
+    let host_api_ok = requirement_matches(declaration.host_api.as_deref(), SUPPORTED_PLUGIN_HOST_API_VERSION);
+    let compatible = dbx_ok && host_api_ok;
+    let blocked_by = if compatible {
+        None
+    } else if !dbx_ok && declaration.dbx.is_some() {
+        Some("dbx".to_string())
+    } else {
+        Some("hostApi".to_string())
+    };
+    // A newer DBX only helps when every failing requirement has a lower bound that the current
+    // host is below. `<0.7.0`, `=0.6.0` or an unsatisfiable host API range cannot be fixed by
+    // upgrading, and the UI must not offer "Upgrade DBX" for them.
+    let upgrade_required = if compatible {
+        None
+    } else {
+        Some(
+            (dbx_ok || requirement_upgradable(declaration.dbx.as_deref(), app_version))
+                && (host_api_ok
+                    || requirement_upgradable(declaration.host_api.as_deref(), SUPPORTED_PLUGIN_HOST_API_VERSION)),
+        )
+    };
+    PluginVersionCompatibility {
+        compatible,
+        dbx: declaration.dbx.clone(),
+        host_api: declaration.host_api.clone(),
+        blocked_by,
+        upgrade_required,
+    }
+}
+
+/// Whether some version strictly greater than `actual` satisfies `requirement`.
+/// Only a lower bound (>=, >, =, ^, ~, wildcard) can be met by a higher host; an upper-bound-only
+/// requirement (`<0.7.0`) is satisfied by *older* hosts, so upgrading can never fix it.
+fn requirement_upgradable(requirement: Option<&str>, actual: &str) -> bool {
+    let Some(requirement) = requirement.map(str::trim).filter(|requirement| !requirement.is_empty()) else {
+        return false;
+    };
+    let (Ok(requirement), Ok(actual)) = (VersionReq::parse(requirement), Version::parse(actual.trim())) else {
+        return false;
+    };
+    let mut lower_bound: Option<Version> = None;
+    for comparator in &requirement.comparators {
+        if matches!(comparator.op, Op::Less | Op::LessEq) {
+            continue;
+        }
+        let candidate = Version {
+            major: comparator.major,
+            minor: comparator.minor.unwrap_or(0),
+            patch: comparator.patch.unwrap_or(0),
+            pre: comparator.pre.clone(),
+            build: BuildMetadata::EMPTY,
+        };
+        if lower_bound.as_ref().is_none_or(|bound| candidate > *bound) {
+            lower_bound = Some(candidate);
+        }
+    }
+    let Some(bound) = lower_bound else { return false };
+    // The lowest version the requirement admits is already behind the running host: no future
+    // version can be any better.
+    if bound < actual {
+        return false;
+    }
+    // Probe one patch above the bound so empty ranges (`>=0.8.0, <0.8.0`) are rejected instead of
+    // being reported as "upgrading would help".
+    requirement.matches(&bound) || requirement.matches(&Version::new(bound.major, bound.minor, bound.patch + 1))
+}
+
+/// Mirrors `PluginManifest::compatibility`: a missing requirement is unrestricted, and a host that
+/// cannot identify its own version skips the gate instead of failing it (#9595). Parse failures
+/// stay fail-open here because callers drop malformed declarations before evaluation.
+fn requirement_matches(requirement: Option<&str>, actual: &str) -> bool {
+    let Some(requirement) = requirement.map(str::trim).filter(|requirement| !requirement.is_empty()) else {
+        return true;
+    };
+    let actual = actual.trim();
+    if actual.is_empty() {
+        return true;
+    }
+    let (Ok(requirement), Ok(actual)) = (VersionReq::parse(requirement), Version::parse(actual)) else {
+        return true;
+    };
+    requirement.matches(&actual)
+}
+
 fn validate_plugin_id(id: &str) -> Result<(), String> {
     if id.is_empty() || id.len() > 128 {
         return Err("Marketplace plugin id must be between 1 and 128 bytes".to_string());
@@ -838,6 +1087,7 @@ mod tests {
                 homepage: None,
             },
             generated_at: None,
+            compatibility: Vec::new(),
             plugins: vec![PluginMarketplacePlugin {
                 id: "example.hello".to_string(),
                 name: "Hello".to_string(),
@@ -863,6 +1113,7 @@ mod tests {
                         signing_key_id: "example.release".to_string(),
                         size: Some(100),
                     }],
+                    compatibility: None,
                 }],
                 localizations: BTreeMap::new(),
             }],
@@ -901,6 +1152,201 @@ mod tests {
             plugin.versions[0].artifacts[0].url,
             "https://plugins.example.com/team-marketplace/dist/plugin.dbxp"
         );
+    }
+
+    fn catalog_with_compatibility(repository_id: &str, compatibility: serde_json::Value) -> PluginMarketplaceCatalog {
+        let mut catalog = catalog(repository_id);
+        // Round-trip through JSON so the test exercises the real parse path (including the
+        // unknown-root-key tolerance old clients depend on).
+        let mut value = serde_json::to_value(&catalog).unwrap();
+        value["futureRootField"] = serde_json::json!({ "ignored": true });
+        value["compatibility"] = compatibility;
+        catalog = serde_json::from_value(value).unwrap();
+        catalog
+    }
+
+    #[test]
+    fn catalog_compatibility_annotates_listed_versions() {
+        let repository = custom_repository("team-marketplace");
+        let catalog_url = Url::parse(repository.catalog_url.as_deref().unwrap()).unwrap();
+        let mut catalog = catalog_with_compatibility(
+            &repository.id,
+            serde_json::json!([
+                { "pluginId": "example.hello", "version": "1.0.0", "dbx": ">=0.7.0", "hostApi": "^1.0" }
+            ]),
+        );
+        validate_and_resolve_catalog(&mut catalog, &repository, &catalog_url).unwrap();
+        annotate_catalog_compatibility(&mut catalog, "0.6.60");
+
+        let compatibility = catalog.plugins[0].versions[0].compatibility.clone().unwrap();
+        assert!(!compatibility.compatible);
+        assert_eq!(compatibility.dbx.as_deref(), Some(">=0.7.0"));
+        assert_eq!(compatibility.host_api.as_deref(), Some("^1.0"));
+        assert_eq!(compatibility.blocked_by.as_deref(), Some("dbx"));
+
+        // The raw table is input-only and never echoed to clients.
+        assert!(serde_json::to_value(&catalog).unwrap().get("compatibility").is_none());
+
+        let mut newer_host = catalog_with_compatibility(
+            &repository.id,
+            serde_json::json!([{ "pluginId": "example.hello", "version": "1.0.0", "dbx": ">=0.7.0" }]),
+        );
+        annotate_catalog_compatibility(&mut newer_host, "0.7.0");
+        assert!(newer_host.plugins[0].versions[0].compatibility.as_ref().unwrap().compatible);
+
+        // A host API requirement the running host does not advertise is equally fatal.
+        let mut old_host_api = catalog_with_compatibility(
+            &repository.id,
+            serde_json::json!([{ "pluginId": "example.hello", "version": "1.0.0", "hostApi": ">=2.0.0" }]),
+        );
+        annotate_catalog_compatibility(&mut old_host_api, "0.7.0");
+        let blocked = old_host_api.plugins[0].versions[0].compatibility.as_ref().unwrap();
+        assert!(!blocked.compatible);
+        assert_eq!(blocked.blocked_by.as_deref(), Some("hostApi"));
+    }
+
+    #[test]
+    fn catalog_compatibility_distinguishes_unfixable_requirements() {
+        fn annotate(
+            repository_id: &str,
+            declaration: serde_json::Value,
+            app_version: &str,
+        ) -> PluginVersionCompatibility {
+            let mut catalog = catalog_with_compatibility(repository_id, serde_json::json!([declaration]));
+            annotate_catalog_compatibility(&mut catalog, app_version);
+            catalog.plugins[0].versions[0].compatibility.clone().unwrap()
+        }
+
+        let repository = custom_repository("team-marketplace");
+        let repository_id = repository.id.as_str();
+
+        // A lower bound above the running host: a newer DBX satisfies it.
+        let upgradable = annotate(
+            repository_id,
+            serde_json::json!({ "pluginId": "example.hello", "version": "1.0.0", "dbx": ">=0.7.0" }),
+            "0.6.60",
+        );
+        assert!(!upgradable.compatible);
+        assert_eq!(upgradable.upgrade_required, Some(true));
+
+        // Upper bound: satisfied by *older* hosts, so upgrading can never help.
+        let upper_bound = annotate(
+            repository_id,
+            serde_json::json!({ "pluginId": "example.hello", "version": "1.0.0", "dbx": "<0.7.0" }),
+            "0.7.0",
+        );
+        assert!(!upper_bound.compatible);
+        assert_eq!(upper_bound.upgrade_required, Some(false));
+
+        // Exact requirement pinned to a version below the running host.
+        let exact_older = annotate(
+            repository_id,
+            serde_json::json!({ "pluginId": "example.hello", "version": "1.0.0", "dbx": "=0.6.0" }),
+            "0.7.0",
+        );
+        assert!(!exact_older.compatible);
+        assert_eq!(exact_older.upgrade_required, Some(false));
+
+        // Host API is a capability, not the app version: a newer DBX does not advertise it either.
+        let host_api = annotate(
+            repository_id,
+            serde_json::json!({ "pluginId": "example.hello", "version": "1.0.0", "hostApi": "=1.0.0" }),
+            "0.7.0",
+        );
+        assert!(!host_api.compatible);
+        assert_eq!(host_api.upgrade_required, Some(false));
+
+        // Compatible verdicts carry no upgrade hint at all.
+        let compatible = annotate(
+            repository_id,
+            serde_json::json!({ "pluginId": "example.hello", "version": "1.0.0", "dbx": ">=0.0.1" }),
+            "0.7.0",
+        );
+        assert!(compatible.compatible);
+        assert_eq!(compatible.upgrade_required, None);
+    }
+
+    #[test]
+    fn catalog_compatibility_skips_unresolvable_and_malformed_entries() {
+        let repository = custom_repository("team-marketplace");
+        let mut catalog = catalog_with_compatibility(
+            &repository.id,
+            serde_json::json!([
+                { "pluginId": "unknown.plugin", "version": "1.0.0", "dbx": ">=0.7.0" },
+                { "pluginId": "example.hello", "version": "9.9.9", "dbx": ">=0.7.0" },
+                { "pluginId": "example.hello", "version": "1.0.0", "dbx": "not a version" },
+                { "pluginId": "example.hello", "version": "1.0.0", "dbx": ">=0.7.0" },
+                { "pluginId": "example.hello", "version": "1.0.0", "dbx": ">=0.0.1" }
+            ]),
+        );
+        annotate_catalog_compatibility(&mut catalog, "0.6.60");
+
+        // The first valid declaration wins and the duplicate is dropped, so the strict
+        // requirement (not the later permissive one) decides the verdict.
+        let compatibility = catalog.plugins[0].versions[0].compatibility.as_ref().unwrap();
+        assert!(!compatibility.compatible);
+    }
+
+    #[test]
+    fn catalog_without_compatibility_leaves_versions_unannotated() {
+        let mut catalog = catalog("team-marketplace");
+        annotate_catalog_compatibility(&mut catalog, "0.6.60");
+        assert!(catalog.plugins[0].versions[0].compatibility.is_none());
+    }
+
+    #[test]
+    fn catalog_compatibility_discards_store_provided_version_verdicts() {
+        let mut value = serde_json::to_value(catalog("team-marketplace")).unwrap();
+        // `compatibility` is a host-computed field; a catalog must not be able to claim a verdict.
+        value["plugins"][0]["versions"][0]["compatibility"] = serde_json::json!({ "compatible": true });
+        let mut catalog: PluginMarketplaceCatalog = serde_json::from_value(value).unwrap();
+        assert!(catalog.plugins[0].versions[0].compatibility.is_some());
+
+        annotate_catalog_compatibility(&mut catalog, "0.6.60");
+
+        assert!(catalog.plugins[0].versions[0].compatibility.is_none());
+    }
+
+    #[test]
+    fn catalog_compatibility_skips_entries_missing_identity() {
+        let catalog = catalog_with_compatibility(
+            "team-marketplace",
+            // Missing pluginId/version: the schema requires them, and the per-entry parse drops the
+            // entry so one store typo cannot abort the whole catalog.
+            serde_json::json!([{ "dbx": ">=9.9.9" }]),
+        );
+        assert!(catalog.compatibility.is_empty());
+
+        // An identity that is present but empty still reaches the fold and is skipped there.
+        let mut blank_identity = catalog_with_compatibility(
+            "team-marketplace",
+            serde_json::json!([{ "pluginId": "", "version": "", "dbx": ">=9.9.9" }]),
+        );
+        assert_eq!(blank_identity.compatibility.len(), 1);
+        annotate_catalog_compatibility(&mut blank_identity, "0.6.60");
+
+        assert!(blank_identity.plugins[0].versions[0].compatibility.is_none());
+    }
+
+    #[test]
+    fn catalog_compatibility_tolerates_malformed_entries() {
+        // Non-object / null identity / non-string requirement entries would each fail a plain
+        // `Vec<PluginCompatibilityDeclaration>` deserialize and abort the whole catalog.
+        let mut catalog = catalog_with_compatibility(
+            "team-marketplace",
+            serde_json::json!([
+                "garbage",
+                { "pluginId": null, "version": "1.0.0" },
+                { "pluginId": "example.hello", "version": "1.0.0", "dbx": 123 },
+                { "pluginId": "example.hello", "version": "1.0.0", "dbx": ">=0.7.0" }
+            ]),
+        );
+        assert_eq!(catalog.compatibility.len(), 1);
+        annotate_catalog_compatibility(&mut catalog, "0.6.60");
+
+        let compatibility = catalog.plugins[0].versions[0].compatibility.as_ref().unwrap();
+        assert!(!compatibility.compatible);
+        assert_eq!(compatibility.blocked_by.as_deref(), Some("dbx"));
     }
 
     #[test]
@@ -948,6 +1394,7 @@ mod tests {
                     size: None,
                 },
             ],
+            compatibility: None,
         };
 
         assert_eq!(
@@ -969,6 +1416,7 @@ mod tests {
                 signing_key_id: "example.release".to_string(),
                 size: None,
             }],
+            compatibility: None,
         };
 
         assert_eq!(
@@ -1115,6 +1563,7 @@ mod tests {
                 homepage: None,
             },
             generated_at: None,
+            compatibility: Vec::new(),
             plugins: vec![PluginMarketplacePlugin {
                 id: "marketplace.install".to_string(),
                 name: "Marketplace Install".to_string(),
@@ -1140,6 +1589,7 @@ mod tests {
                         signing_key_id: key_id.to_string(),
                         size: Some(package.len() as u64),
                     }],
+                    compatibility: None,
                 }],
                 localizations: BTreeMap::new(),
             }],

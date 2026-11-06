@@ -4454,11 +4454,11 @@ const canChooseVisibleSchemas = computed(() => isSchemaAware(effectiveDatabaseTy
 const visibleSchemasDatabaseKey = computed(() => schemaVisibilityDatabaseKey(form.value, visibleSchemaDatabaseContext.value ?? form.value.database ?? ""));
 const hasVisibleSchemaFilter = computed(() => {
   const key = visibleSchemasDatabaseKey.value;
-  if (form.value.schema_visibility) return Object.hasOwn(form.value.schema_visibility.databases, key);
+  if (form.value.schema_visibility) return Object.prototype.hasOwnProperty.call(form.value.schema_visibility.databases, key);
   return Array.isArray(form.value.visible_schemas?.[key]);
 });
 const visibleSchemaObjectSelection = computed(() => {
-  if (form.value.schema_visibility && (!form.value.schema_visibility.migrate_legacy || Object.hasOwn(form.value.schema_visibility.databases, visibleSchemasDatabaseKey.value)))
+  if (form.value.schema_visibility && (!form.value.schema_visibility.migrate_legacy || Object.prototype.hasOwnProperty.call(form.value.schema_visibility.databases, visibleSchemasDatabaseKey.value)))
     return filterSchemaNamesForConnection(visibleDatabaseNames.value, form.value, visibleSchemasDatabaseKey.value, { oracleMaintainedSchemas: visibleDatabaseSystemSchemas.value });
   const configured = form.value.visible_schemas?.[visibleSchemasDatabaseKey.value];
   if (Array.isArray(configured)) return configured;

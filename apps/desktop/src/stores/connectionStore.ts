@@ -5828,10 +5828,10 @@ export const useConnectionStore = defineStore("connection", () => {
         const schemas = new Map(Object.entries(previousConfig.visible_schemas ?? {}));
         const databases = new Map(Object.entries(previousConfig.schema_visibility?.databases ?? {}));
         for (const database of options.updatedVisibleSchemaKeys) {
-          const names = config.visible_schemas && Object.hasOwn(config.visible_schemas, database) ? config.visible_schemas[database] : undefined;
+          const names = config.visible_schemas && Object.prototype.hasOwnProperty.call(config.visible_schemas, database) ? config.visible_schemas[database] : undefined;
           if (names !== undefined) schemas.set(database, [...names]);
           else schemas.delete(database);
-          const overrides = config.schema_visibility && Object.hasOwn(config.schema_visibility.databases, database) ? config.schema_visibility.databases[database] : undefined;
+          const overrides = config.schema_visibility && Object.prototype.hasOwnProperty.call(config.schema_visibility.databases, database) ? config.schema_visibility.databases[database] : undefined;
           if (overrides !== undefined) databases.set(database, { ...overrides });
           else databases.delete(database);
         }

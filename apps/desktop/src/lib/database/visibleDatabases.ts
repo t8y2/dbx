@@ -290,10 +290,10 @@ export function visibleSchemaFilterIsEnabled(visibleSchemas: Record<string, stri
 export function filterSchemaNamesForConnection(schemaNames: string[], connection: VisibleDatabaseConnection | undefined, database: string, options?: SchemaFilterOptions): string[] {
   const key = schemaVisibilityDatabaseKey(connection, database);
   const visibility = connection?.schema_visibility;
-  if (visibility && (!visibility.migrate_legacy || Object.hasOwn(visibility.databases, key))) {
-    const overrides = Object.hasOwn(visibility.databases, key) ? visibility.databases[key] : undefined;
+  if (visibility && (!visibility.migrate_legacy || Object.prototype.hasOwnProperty.call(visibility.databases, key))) {
+    const overrides = Object.prototype.hasOwnProperty.call(visibility.databases, key) ? visibility.databases[key] : undefined;
     const databaseType = effectiveDatabaseTypeForConnection(connection);
-    return schemaNames.filter((name) => (overrides && Object.hasOwn(overrides, name) ? overrides[name] : !(databaseType === "oracle" && options?.oracleMaintainedSchemas ? options.oracleMaintainedSchemas.has(name) : isSystemSchemaName(databaseType, name))));
+    return schemaNames.filter((name) => (overrides && Object.prototype.hasOwnProperty.call(overrides, name) ? overrides[name] : !(databaseType === "oracle" && options?.oracleMaintainedSchemas ? options.oracleMaintainedSchemas.has(name) : isSystemSchemaName(databaseType, name))));
   }
   return filterLegacySchemaNamesForConnection(schemaNames, connection, database, options);
 }
@@ -305,7 +305,7 @@ export function schemaVisibilityDatabaseKey(connection: VisibleDatabaseConnectio
 
 export function schemaVisibilityNeedsMigration(connection: VisibleDatabaseConnection, database: string): boolean {
   const visibility = connection.schema_visibility;
-  return !visibility || (visibility.migrate_legacy && !Object.hasOwn(visibility.databases, schemaVisibilityDatabaseKey(connection, database)));
+  return !visibility || (visibility.migrate_legacy && !Object.prototype.hasOwnProperty.call(visibility.databases, schemaVisibilityDatabaseKey(connection, database)));
 }
 
 export function schemaVisibilityOverrides(names: readonly string[], selected: readonly string[], systemNames: ReadonlySet<string>, previous: Record<string, boolean> = {}): Record<string, boolean> {

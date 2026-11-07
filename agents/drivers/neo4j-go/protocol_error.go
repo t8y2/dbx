@@ -9,8 +9,7 @@ import (
 	"net"
 	"strings"
 
-	neo4j "github.com/neo4j/neo4j-go-driver/v6/neo4j"
-	neo4jdb "github.com/neo4j/neo4j-go-driver/v6/neo4j/db"
+	neo4j "github.com/t8y2/dbx/agents/drivers/neo4j-go/internal/neo4jcompat"
 )
 
 type rpcError struct {
@@ -48,7 +47,7 @@ func classifyRPCError(method, agentSessionID string, err error) *rpcError {
 		AgentSessionID:     strings.TrimSpace(agentSessionID),
 	}
 
-	var databaseError *neo4jdb.Neo4jError
+	var databaseError *neo4j.Neo4jError
 	if errors.As(err, &databaseError) {
 		// Neo4j error codes are not SQLSTATE values; the code remains in err.Error().
 		data.Retryable = neo4j.IsRetryable(err)

@@ -775,7 +775,6 @@ jobs:
             ["linux-aarch64"]="linux/arm64"
             ["linux-x64"]="linux/amd64"
             ["windows-aarch64"]="windows/arm64"
-            ["windows-x64"]="windows/amd64"
           )
           for platform in "${!TARGETS[@]}"; do
             IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
@@ -787,6 +786,14 @@ jobs:
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
           done
           ls -lh ../../../release-native
+      - name: Setup Windows-compatible Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.20.14"
+          cache-dependency-path: agents/drivers/neo4j-go/go.windows-legacy.sum
+      - name: Build Windows-compatible Neo4j agent
+        shell: bash
+        run: bash agents/drivers/neo4j-go/build-windows-legacy.sh "$GITHUB_WORKSPACE/release-native/dbx-agent-neo4j-windows-x64.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: neo4j-native

@@ -1193,6 +1193,7 @@ jobs:
           set -euo pipefail
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
           versioned="s3://${R2_BUCKET_NAME}/releases/beta/${{ inputs.release_tag || github.ref_name }}/"
+          latest_dir="s3://${R2_BUCKET_NAME}/releases/beta/latest/"
           if aws s3api head-object --bucket "$R2_BUCKET_NAME" --key "releases/beta/${{ inputs.release_tag || github.ref_name }}/latest.json" --endpoint-url "$endpoint" >/dev/null 2>&1; then
             aws s3 cp "${versioned}latest.json" "$RUNNER_TEMP/existing-beta-manifest.json" --endpoint-url "$endpoint"
             # sync-changelog fills in `notes` after publishing; ignore it on reruns.
@@ -1204,12 +1205,36 @@ jobs:
           else
             aws s3 cp "$RUNNER_TEMP/manifest/latest.json" "${versioned}latest.json" --endpoint-url "$endpoint" --cache-control "no-cache"
           fi
+          # R2 intermittently rejects CompleteMultipartUpload (InvalidPart) on the
+          # hundreds-of-megabytes installers. Retry every transfer, and let the
+          # retry resume from what is already in R2 instead of restarting it.
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              echo "::warning::R2 publish attempt ${attempt}/3 failed: $*"
+              sleep $((attempt * 15))
+            done
+            return 1
+          }
           # gh release download fetched the signed installers and portable
           # archives as well as latest.json. Keep those immutable assets beside
           # the versioned beta manifest so the manifest's R2 URLs are usable.
-          aws s3 sync "$RUNNER_TEMP/manifest/" "$versioned" --endpoint-url "$endpoint" --cache-control "no-cache"
-          aws s3 sync "$RUNNER_TEMP/manifest/" "s3://${R2_BUCKET_NAME}/releases/beta/latest/" --endpoint-url "$endpoint" --cache-control "no-cache" --delete
-          aws s3 cp "$RUNNER_TEMP/manifest/latest.json" "s3://${R2_BUCKET_NAME}/releases/beta/latest.json" --endpoint-url "$endpoint" --cache-control "no-cache"
+          # Assets are immutable for a tag, so --size-only retries only copy what
+          # is still missing instead of re-uploading the full ~1.6 GiB.
+          retry aws s3 sync "$RUNNER_TEMP/manifest/" "$versioned" \
+            --endpoint-url "$endpoint" --cache-control "no-cache" --size-only
+          # Mirror the versioned prefix into releases/beta/latest/ server-side. The
+          # old client-side sync re-uploaded the same assets a second time, which
+          # doubled the multipart failure surface; the size-only sync after the
+          # copy only prunes entries this beta no longer ships.
+          retry aws s3 cp "$versioned" "$latest_dir" --recursive --endpoint-url "$endpoint"
+          retry aws s3 sync "$versioned" "$latest_dir" \
+            --endpoint-url "$endpoint" --delete --size-only
+          retry aws s3 cp "$RUNNER_TEMP/manifest/latest.json" "s3://${R2_BUCKET_NAME}/releases/beta/latest.json" \
+            --endpoint-url "$endpoint" --cache-control "no-cache"
 
       - name: Keep latest five beta releases in R2
         continue-on-error: true

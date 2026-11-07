@@ -1,13 +1,14 @@
 import { productionContextForDatabase, productionDatabases } from "@/lib/database/productionSafety";
 import type { ConnectionConfig, ProductionBadgeScope, TreeNode } from "@/types/database";
 
-const productionContainerTypes: ReadonlySet<TreeNode["type"]> = new Set(["database", "schema", "redis-db", "mongo-db", "mq-tenant", "nacos-namespace", "consul-root"]);
+const productionContainerTypes: ReadonlySet<TreeNode["type"]> = new Set(["database", "schema", "redis-db", "mongo-db", "cosmosdb-database", "mq-tenant", "nacos-namespace", "consul-root"]);
 
 const productionObjectTypes: ReadonlySet<TreeNode["type"]> = new Set([
   "database",
   "schema",
   "redis-db",
   "mongo-db",
+  "cosmosdb-database",
   "mq-tenant",
   "nacos-namespace",
   "consul-root",
@@ -27,6 +28,7 @@ const productionObjectTypes: ReadonlySet<TreeNode["type"]> = new Set([
   "oracle-db-link",
   "mongo-collection",
   "dynamodb-table",
+  "cosmosdb-container",
   "vector-collection",
   "elasticsearch-index",
 ]);

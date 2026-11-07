@@ -124,6 +124,7 @@ pub enum PoolKind {
     Easysearch(db::easysearch_driver::EasysearchClient),
     Solr(db::solr_driver::SolrClient),
     CouchDb(db::couchdb_driver::CouchDbClient),
+    CosmosDb(db::cosmosdb_driver::CosmosDbClient),
     Meilisearch(db::meilisearch_driver::MeilisearchClient),
     Salesforce(db::salesforce_driver::SfClient),
     HBase(db::hbase_driver::HBaseClient),
@@ -3851,6 +3852,11 @@ impl AppState {
                 db::couchdb_driver::test_connection(&client, connect_timeout).await?;
                 PoolKind::CouchDb(client)
             }
+            DatabaseType::CosmosDb => {
+                let client = cosmosdb_client_for_config(&db_config, &url, runtime_proxy.as_ref(), connect_timeout)?;
+                db::cosmosdb_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::CosmosDb(client)
+            }
             DatabaseType::Meilisearch => {
                 let client = db::meilisearch_driver::MeilisearchClient::new_for_config(
                     &url,
@@ -5712,6 +5718,17 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::CosmosDb(client) => {
+                    let client = client.clone();
+                    let timeout = crate::db::connection_timeout();
+                    match db::cosmosdb_driver::test_connection(&client, timeout).await {
+                        Ok(()) => false,
+                        Err(err) => {
+                            log::warn!("Azure Cosmos DB connection pool '{pool_key}' is stale: {err}");
+                            true
+                        }
+                    }
+                }
                 PoolKind::Meilisearch(client) => {
                     let client = client.clone();
                     let timeout = crate::db::connection_timeout();
@@ -7171,6 +7188,16 @@ impl AppState {
                         }
                     }
                 }
+                PoolKind::CosmosDb(client) => {
+                    let client = client.clone();
+                    match db::cosmosdb_driver::test_connection(&client, timeout).await {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log::warn!("Azure Cosmos DB connection pool '{key}' is unhealthy: {e}");
+                            false
+                        }
+                    }
+                }
                 PoolKind::Meilisearch(client) => {
                     let client = client.clone();
                     match db::meilisearch_driver::test_connection(&client, timeout).await {
@@ -7754,6 +7781,7 @@ enum KeepaliveTarget {
     Salesforce(db::salesforce_driver::SfClient),
     Solr(db::solr_driver::SolrClient),
     CouchDb(db::couchdb_driver::CouchDbClient),
+    CosmosDb(db::cosmosdb_driver::CosmosDbClient),
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
@@ -7914,6 +7942,7 @@ fn keepalive_target_from_pool(pool: &PoolKind, config: &ConnectionConfig) -> Opt
         PoolKind::Salesforce(client) => Some(KeepaliveTarget::Salesforce(client.clone())),
         PoolKind::Solr(client) => Some(KeepaliveTarget::Solr(client.clone())),
         PoolKind::CouchDb(client) => Some(KeepaliveTarget::CouchDb(client.clone())),
+        PoolKind::CosmosDb(client) => Some(KeepaliveTarget::CosmosDb(client.clone())),
         PoolKind::HBase(client) => Some(KeepaliveTarget::HBase(client.clone())),
         PoolKind::VectorDb(client) => Some(KeepaliveTarget::VectorDb(client.clone())),
         PoolKind::InfluxDb(client) => Some(KeepaliveTarget::InfluxDb(client.clone())),
@@ -7968,6 +7997,9 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
         KeepaliveTarget::Solr(client) => db::solr_driver::test_connection(client, timeout).await.map_err(Into::into),
         KeepaliveTarget::CouchDb(client) => {
             db::couchdb_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
+        KeepaliveTarget::CosmosDb(client) => {
+            db::cosmosdb_driver::test_connection(client, timeout).await.map_err(Into::into)
         }
         KeepaliveTarget::HBase(client) => {
             db::hbase_driver::test_connection(client, timeout).await.map(|_| ()).map_err(Into::into)
@@ -8461,6 +8493,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::Easysearch(client) => PoolKind::Easysearch(client.clone()),
         PoolKind::Solr(client) => PoolKind::Solr(client.clone()),
         PoolKind::CouchDb(client) => PoolKind::CouchDb(client.clone()),
+        PoolKind::CosmosDb(client) => PoolKind::CosmosDb(client.clone()),
         PoolKind::Meilisearch(client) => PoolKind::Meilisearch(client.clone()),
         PoolKind::Salesforce(client) => PoolKind::Salesforce(client.clone()),
         PoolKind::HBase(client) => PoolKind::HBase(client.clone()),
@@ -8536,6 +8569,9 @@ async fn close_pool_kind_inner(pool: PoolKind, report_completion: bool) -> Resul
             drop(client);
         }
         PoolKind::CouchDb(client) => {
+            drop(client);
+        }
+        PoolKind::CosmosDb(client) => {
             drop(client);
         }
         PoolKind::Meilisearch(client) => {
@@ -8673,6 +8709,7 @@ fn base_pool_key_for_with_catalog(
                         | DatabaseType::Easysearch
                         | DatabaseType::Solr
                         | DatabaseType::CouchDb
+                        | DatabaseType::CosmosDb
                         | DatabaseType::Qdrant
                         | DatabaseType::Milvus
                         | DatabaseType::Weaviate
@@ -8747,6 +8784,30 @@ pub fn connection_url_for_endpoint(config: &ConnectionConfig, host: &str, port: 
     } else {
         config.connection_url_with_host(host, port)
     }
+}
+
+/// Builds the Azure Cosmos DB client for a prepared connection. `url` is the
+/// endpoint DBX connects to, which a tunnel may have rewritten to a local
+/// address; the configured account host is kept for TLS validation.
+pub fn cosmosdb_client_for_config(
+    config: &ConnectionConfig,
+    url: &str,
+    proxy: Option<&PluginRuntimeProxy>,
+    connect_timeout: Duration,
+) -> Result<db::cosmosdb_driver::CosmosDbClient, String> {
+    let configured_endpoint = config.connection_url();
+    db::cosmosdb_driver::CosmosDbClient::from_config(db::cosmosdb_driver::CosmosClientOptions {
+        configured_endpoint: &configured_endpoint,
+        transport_url: url,
+        account_key: &config.password,
+        tls_enabled: config.ssl,
+        url_params: config.url_params.as_deref(),
+        timeout: connect_timeout,
+        ca_cert_path: Some(config.ca_cert_path.as_str()),
+        client_cert_path: Some(config.client_cert_path.as_str()),
+        client_key_path: Some(config.client_key_path.as_str()),
+        proxy: clickhouse_http_proxy(proxy)?,
+    })
 }
 
 pub fn clickhouse_http_proxy(proxy: Option<&PluginRuntimeProxy>) -> Result<Option<reqwest::Proxy>, String> {

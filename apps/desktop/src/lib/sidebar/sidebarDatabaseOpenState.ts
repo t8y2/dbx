@@ -5,7 +5,7 @@ export function sidebarDatabaseOpenKey(connectionId: string, database: string): 
 }
 
 export function isSidebarDatabaseOpened(node: TreeNode, isTreeNodeChildrenLoaded: (nodeId: string) => boolean): boolean {
-  return (node.type === "database" || node.type === "mongo-db" || node.type === "vector-database") && !!node.connectionId && node.database != null && isTreeNodeChildrenLoaded(node.id);
+  return (node.type === "database" || node.type === "mongo-db" || node.type === "cosmosdb-database" || node.type === "vector-database") && !!node.connectionId && node.database != null && isTreeNodeChildrenLoaded(node.id);
 }
 
 /** Sidebar "open" visual: tree loaded and/or still referenced by an open editor tab. */

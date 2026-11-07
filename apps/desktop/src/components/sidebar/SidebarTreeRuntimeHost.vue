@@ -23,6 +23,7 @@ import { supportsPlDebugRoutine } from "@/lib/database/databaseFeatureSupport";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { normalizeBackendError } from "@/lib/backend/errorUtils";
 import { isConnectionTimeoutErrorMessage } from "@/lib/sql/queryError";
+import { cosmosDbContainerQueryTemplate } from "@/lib/cosmosdb/cosmosDbQuery";
 import {
   Ban,
   BarChart3,
@@ -1193,6 +1194,8 @@ async function toggle(requestId = beginNavigationRequest()) {
         await connectionStore.loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "dynamodb") {
         await connectionStore.loadDynamoDbTables(node.connectionId);
+      } else if (config?.db_type === "cosmosdb") {
+        await connectionStore.loadCosmosDbDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch" || config?.db_type === "meilisearch" || config?.db_type === "solr" || config?.db_type === "couchdb") {
         // Expand: list indices/cores (like other db types list databases).
         await connectionStore.loadElasticsearchIndices(node.connectionId);
@@ -1247,6 +1250,8 @@ async function toggle(requestId = beginNavigationRequest()) {
       queryStore.openDamengRoles(node.connectionId);
     } else if (node.type === "mongo-db" && node.connectionId && node.database) {
       await connectionStore.loadMongoCollections(node.connectionId, node.database);
+    } else if (node.type === "cosmosdb-database" && node.connectionId && node.database) {
+      await connectionStore.loadCosmosDbContainers(node.connectionId, node.database);
     } else if (node.type === "vector-database" && node.connectionId && node.database) {
       await connectionStore.loadVectorCollections(node.connectionId, node.database);
     } else if (node.type === "mongo-collection" && node.connectionId && node.database) {
@@ -1967,6 +1972,23 @@ function openMongoTreeData(node: TreeNode) {
     queryStore.openMongoBucket(node.connectionId, node.database, node.label);
     return;
   }
+  if (node.type === "cosmosdb-container") {
+    const existing = queryStore.tabs.find((tab) => tab.mode === "mongo" && tab.connectionId === node.connectionId && tab.database === node.database && tab.tableMeta?.tableName === node.label);
+    if (existing) {
+      queryStore.switchTab(existing.id);
+      return;
+    }
+    const tab = queryStore.createTab(node.connectionId, node.database, tabTitle, "mongo");
+    queryStore.updateSql(tab, node.label);
+    queryStore.setTableMeta(tab, {
+      database: node.database,
+      tableName: node.label,
+      tableType: "COSMOSDB CONTAINER",
+      columns: [],
+      primaryKeys: [],
+    });
+    return;
+  }
   if (node.type === "dynamodb-table") {
     const tab = queryStore.createTab(node.connectionId, node.database, `${node.database}.${node.label}`, "mongo");
     queryStore.updateSql(tab, node.label);
@@ -2357,6 +2379,10 @@ async function newQuery(options: { reuseQueryTabByScope?: boolean } = {}) {
           columns: [],
         });
         openSqlTemplateTab(node.connectionId, node.database, node.schema, node.catalog, sql);
+        return;
+      }
+      if (node.type === "cosmosdb-container") {
+        openSqlTemplateTab(node.connectionId, node.database, undefined, undefined, cosmosDbContainerQueryTemplate(node.label));
         return;
       }
       if (openDefault) await queryStore.openDefaultQuery({ connectionId: node.connectionId, database: node.database, catalog: node.catalog });
@@ -6472,7 +6498,7 @@ const canOpenSqlFileExecution = computed(() => {
 const canExportAllDatabases = computed(() => {
   if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
   const dbType = connectionStore.getConfig(activeNode.value.connectionId)?.db_type;
-  return !["redis", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "couchdb", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos", "plugin", "salesforce", "neo4j", "nebula"].includes(dbType || "");
+  return !["redis", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "couchdb", "cosmosdb", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos", "plugin", "salesforce", "neo4j", "nebula"].includes(dbType || "");
 });
 
 const canOpenScheduledBackups = computed(() => {
@@ -8004,7 +8030,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
-  if (node.type === "redis-db" || node.type === "mongo-db" || node.type === "vector-database") {
+  if (node.type === "redis-db" || node.type === "mongo-db" || node.type === "cosmosdb-database" || node.type === "vector-database") {
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
     if (node.type === "mongo-db" && canOpenObjectBrowser.value) {
       items.push({ label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
@@ -8068,6 +8094,14 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.viewData"), action: toggle, icon: TableProperties });
+    return true;
+  }
+
+  if (node.type === "cosmosdb-container") {
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    items.push({ label: "", separator: true });
+    items.push({ label: t("contextMenu.viewData"), action: () => openMongoTreeData(node), icon: TableProperties });
+    items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
     return true;
   }
 

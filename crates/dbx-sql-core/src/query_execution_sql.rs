@@ -339,6 +339,7 @@ pub fn supports_sql_query(database_type: DatabaseType) -> bool {
             | DatabaseType::Easysearch
             | DatabaseType::Solr
             | DatabaseType::CouchDb
+            | DatabaseType::CosmosDb
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
             | DatabaseType::Weaviate
@@ -600,6 +601,11 @@ pub enum SearchEngineQueryRisk {
 }
 
 pub fn classify_search_engine_query_risk(source: &str, database_type: DatabaseType) -> Option<SearchEngineQueryRisk> {
+    if database_type == DatabaseType::CosmosDb {
+        // The Cosmos DB for NoSQL query language has no write statements, and
+        // the driver only executes SELECT queries.
+        return Some(SearchEngineQueryRisk::ReadOnly);
+    }
     if database_type == DatabaseType::CouchDb {
         return classify_couchdb_query_risk(source);
     }
@@ -3316,6 +3322,13 @@ mod tests {
             Some(SearchEngineQueryRisk::Dangerous)
         );
 
+        assert_eq!(
+            classify_search_engine_query_risk(
+                "-- partitionKey: [\"t1\"]\nSELECT * FROM orders o WHERE o.status = 'DELETE'",
+                DatabaseType::CosmosDb
+            ),
+            Some(SearchEngineQueryRisk::ReadOnly)
+        );
         assert_eq!(
             classify_search_engine_query_risk("GET /_all_dbs", DatabaseType::CouchDb),
             Some(SearchEngineQueryRisk::ReadOnly)

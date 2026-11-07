@@ -33,6 +33,7 @@ const assetIcons: Record<string, string> = {
   meilisearch: "meilisearch",
   solr: "solr",
   couchdb: "couchdb",
+  cosmosdb: "cosmosdb",
   oracle: "oracle",
   "oracle-10g": "oracle",
   "oracle-legacy": "oracle",

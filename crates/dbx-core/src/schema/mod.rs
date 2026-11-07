@@ -773,6 +773,9 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
         #[cfg(feature = "duckdb-sidecar")]
         PoolKind::DuckDbWorker(client) => client.list_databases().await,
         PoolKind::CloudflareD1(client) => db::cloudflare_d1_driver::list_databases(client).await,
+        PoolKind::CosmosDb(client) => db::cosmosdb_driver::list_databases(client)
+            .await
+            .map(|names| names.into_iter().map(|name| db::DatabaseInfo { name, ..Default::default() }).collect()),
         _ => Ok(vec![]),
     }
 }
@@ -9914,6 +9917,9 @@ async fn get_columns_core_for_session_inner_with_pool(
             }
             PoolKind::CouchDb(client) => {
                 db::couchdb_driver::get_columns(client, table).await.map(deduplicate_column_infos)
+            }
+            PoolKind::CosmosDb(client) => {
+                db::cosmosdb_driver::get_columns(client, database, table).await.map(deduplicate_column_infos)
             }
             PoolKind::Meilisearch(client) => {
                 db::meilisearch_driver::get_columns(client, table).await.map(deduplicate_column_infos)

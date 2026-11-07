@@ -222,3 +222,22 @@ fn postgres_url_maps_mysql_ssl_mode_require_to_sslmode() {
     assert_eq!(config.connection_url(), "postgres://postgres:secret@10.1.2.3:2883/test?sslmode=require");
     tokio_postgres::Config::from_str(&config.connection_url()).unwrap();
 }
+
+#[test]
+fn cosmosdb_url_keeps_the_account_key_out_and_accepts_pasted_account_uris() {
+    let mut config = mysql_config("", "c2VjcmV0LWtleQ==", Some("app"));
+    config.db_type = DatabaseType::CosmosDb;
+    config.ssl = true;
+    config.host = "acct.documents.azure.com".to_string();
+    config.port = 443;
+    assert_eq!(config.connection_url(), "https://acct.documents.azure.com:443");
+    assert_eq!(config.redacted_connection_url(), "https://acct.documents.azure.com:443");
+    // A tunnel substitutes its local endpoint; the account key never enters the URL.
+    assert_eq!(config.connection_url_with_host("127.0.0.1", 50123), "https://127.0.0.1:50123");
+
+    config.host = "https://acct.documents.azure.com:443/".to_string();
+    assert_eq!(config.connection_url(), "https://acct.documents.azure.com:443");
+    config.host = "localhost:8081".to_string();
+    config.port = 8081;
+    assert_eq!(config.connection_url(), "https://localhost:8081");
+}

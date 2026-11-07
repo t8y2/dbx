@@ -405,6 +405,7 @@ const typeFilterDatabaseDescendantTypes = new Set<TreeNodeType>([
   "nacos-namespace",
   "consul-root",
   "mongo-db",
+  "cosmosdb-database",
   "doris-catalog",
   "linked-server",
   "linked-server-catalog",
@@ -414,15 +415,16 @@ const typeFilterDatabaseDescendantTypes = new Set<TreeNodeType>([
   "mongo-collection",
   "mongo-bucket",
   "dynamodb-table",
+  "cosmosdb-container",
   "vector-collection",
   "elasticsearch-index",
   "view",
   "materialized_view",
 ]);
 
-const typeFilterSchemaDescendantTypes = new Set<TreeNodeType>(["schema", "linked-server-schema", "table", "mongo-collection", "mongo-bucket", "dynamodb-table", "vector-collection", "elasticsearch-index", "view", "materialized_view"]);
+const typeFilterSchemaDescendantTypes = new Set<TreeNodeType>(["schema", "linked-server-schema", "table", "mongo-collection", "mongo-bucket", "dynamodb-table", "cosmosdb-container", "vector-collection", "elasticsearch-index", "view", "materialized_view"]);
 
-const typeFilterTableDescendantTypes = new Set<TreeNodeType>(["table", "mongo-collection", "mongo-bucket", "dynamodb-table", "vector-collection", "elasticsearch-index", "view", "materialized_view"]);
+const typeFilterTableDescendantTypes = new Set<TreeNodeType>(["table", "mongo-collection", "mongo-bucket", "dynamodb-table", "cosmosdb-container", "vector-collection", "elasticsearch-index", "view", "materialized_view"]);
 
 function isUnloadedTypeFilterContainer(node: TreeNode, searchableNodeTypes: ReadonlySet<TreeNodeType>): boolean {
   if (node.children && node.children.length > 0) return false;
@@ -435,7 +437,7 @@ function isUnloadedTypeFilterContainer(node: TreeNode, searchableNodeTypes: Read
     return false;
   }
 
-  if (node.type === "database" || node.type === "redis-db" || node.type === "mongo-db" || node.type === "doris-catalog" || node.type === "linked-server") {
+  if (node.type === "database" || node.type === "redis-db" || node.type === "mongo-db" || node.type === "cosmosdb-database" || node.type === "doris-catalog" || node.type === "linked-server") {
     for (const type of searchableNodeTypes) {
       if (typeFilterSchemaDescendantTypes.has(type)) return true;
     }

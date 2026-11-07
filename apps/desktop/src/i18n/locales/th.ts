@@ -2096,6 +2096,12 @@ export default withEnglishFallback({
     customColorPlaceholder: "#ff0000 หรือ rgba(…)",
     tursoHostPlaceholder: "your-database.turso.io หรือ libsql://your-database.turso.io",
     tursoHostHint: "รองรับโปรโตคอล libsql:// และ https:// นอกจากนี้ยังป้อนเฉพาะชื่อ Host ได้ (จะใช้ HTTPS โดยอัตโนมัติ)",
+    cosmosDbEndpoint: "ปลายทางบัญชี",
+    cosmosDbEndpointPlaceholder: "your-account.documents.azure.com",
+    cosmosDbEndpointHint: "วาง URI หรือสตริงการเชื่อมต่อหลักจากหน้าคีย์ในพอร์ทัล Azure ระบบจะกรอกปลายทางและคีย์ให้อัตโนมัติ",
+    cosmosDbAccountKey: "คีย์บัญชี",
+    cosmosDbUrlParamsPlaceholder: "tlsverify=false (เฉพาะอีมูเลเตอร์ภายในเครื่อง)",
+    cosmosDbCredentialsRequired: "Azure Cosmos DB ต้องใช้ปลายทางบัญชีและคีย์บัญชี",
     tursoTokenHint: "สร้าง Token ด้วย:",
     tursoUrlParamsPlaceholder: "authToken=xxx (ไม่บังคับ ฟิลด์ Auth Token ด้านบนมีลำดับความสำคัญกว่า)",
     driverInstall: {
@@ -9032,6 +9038,11 @@ export default withEnglishFallback({
     importFailed: "นำเข้าไม่สำเร็จ: {message}",
     importInvalidJson: "JSON ต้องมี Object หรือ Array ของ Objects",
     exportSearchUnsupported: "การส่งออกทั้งหมดใช้ไม่ได้กับการค้นหาแบบ Text, Hybrid หรือ Score-threshold เนื่องจาก Meilisearch จำกัด Pagination ของการค้นหา ล้าง Options เหล่านั้นเพื่อส่งออกทุก Document ที่กรอง",
+  },
+  cosmosdb: {
+    jsonReplaceHint: "การบันทึก JSON จะแทนที่ทั้งเอกสาร และจะล้มเหลวหากเอกสารถูกแก้ไขหลังจากโหลด (_etag ไม่ตรงกัน) การเปลี่ยน id หรือคีย์พาร์ติชันจะสร้างเอกสารใหม่และลบเอกสารเดิม ระบบจะไม่สนใจ _id และคุณสมบัติของระบบ",
+    pageCursorUnavailable: "โทเค็นการต่อเนื่องของ Azure Cosmos DB ใช้ไม่ได้ โปรดโหลดใหม่จากหน้าแรก",
+    repeatedCursor: "Azure Cosmos DB ส่งโทเค็นการต่อเนื่องซ้ำ จึงหยุดการส่งออก",
   },
   dynamodb: {
     tableMetadataUnavailable: "ยังไม่ได้โหลด Metadata ของ Table DynamoDB รีเฟรชแล้วลองอีกครั้ง",

@@ -1721,6 +1721,12 @@ export default withEnglishFallback({
     customColorPlaceholder: "#ff0000 或 rgba(…)",
     tursoHostPlaceholder: "your-database.turso.io 或 libsql://your-database.turso.io",
     tursoHostHint: "支援 libsql:// 或 https:// 協定，也可以只填主機名稱（自動使用 HTTPS）",
+    cosmosDbEndpoint: "帳戶端點",
+    cosmosDbEndpointPlaceholder: "your-account.documents.azure.com",
+    cosmosDbEndpointHint: "可直接貼上 Azure 入口網站「金鑰」頁面中的 URI 或主要連接字串，端點與金鑰會自動填入。",
+    cosmosDbAccountKey: "帳戶金鑰",
+    cosmosDbUrlParamsPlaceholder: "tlsverify=false（僅限本機模擬器）",
+    cosmosDbCredentialsRequired: "Azure Cosmos DB 需要填寫帳戶端點和帳戶金鑰",
     tursoTokenHint: "使用以下指令建立 token：",
     tursoUrlParamsPlaceholder: "authToken=xxx（可選，優先使用上方的 Auth Token 欄位）",
     driverInstall: {
@@ -6440,6 +6446,11 @@ export default withEnglishFallback({
     importFailed: "匯入失敗：{message}",
     importInvalidJson: "JSON 必須是物件或物件陣列",
     exportSearchUnsupported: "Meilisearch 會限制文字、混合或分數閾值搜尋的分頁，無法保證完整匯出。請清除這些選項後匯出全部篩選文件。",
+  },
+  cosmosdb: {
+    jsonReplaceHint: "JSON 儲存會整體取代文件，若文件在載入後已被他人修改（_etag 不一致）則儲存失敗。修改 id 或分割區索引鍵會建立新文件並刪除舊文件；_id 與系統欄位會被忽略。",
+    pageCursorUnavailable: "Azure Cosmos DB 接續權杖無法使用，請從第一頁重新載入。",
+    repeatedCursor: "Azure Cosmos DB 傳回了重複的接續權杖，已停止匯出。",
   },
   dynamodb: {
     tableMetadataUnavailable: "尚未載入 DynamoDB 表結構，請重新整理後再試",

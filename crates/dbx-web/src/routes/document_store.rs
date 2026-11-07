@@ -78,6 +78,9 @@ pub struct DocumentFindRequest {
 #[serde(rename_all = "camelCase")]
 pub struct DocumentCountRequest {
     pub connection_id: String,
+    /// Required by stores whose collections live inside a database (Azure Cosmos DB).
+    #[serde(default)]
+    pub database: Option<String>,
     pub collection: String,
     pub filter: Option<String>,
     pub execution_id: Option<String>,
@@ -370,9 +373,10 @@ pub async fn count_documents(
     let result = run_cancellable(
         &state,
         req.execution_id,
-        dbx_core::document_ops::count_document_store_documents_core(
+        dbx_core::document_ops::count_document_store_documents_in_database_core(
             &state.app,
             &req.connection_id,
+            req.database.as_deref(),
             &req.collection,
             req.filter.as_deref(),
         ),

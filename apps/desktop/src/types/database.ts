@@ -65,6 +65,10 @@ export function isSolrDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "solr";
 }
 
+export function isCosmosDbDatabaseType(dbType?: DatabaseType): boolean {
+  return dbType === "cosmosdb";
+}
+
 export function isCouchDbDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "couchdb";
 }
@@ -2217,6 +2221,8 @@ export type TreeNodeType =
   | "mongo-bucket"
   | "mongo-collection"
   | "dynamodb-table"
+  | "cosmosdb-database"
+  | "cosmosdb-container"
   | "vector-database"
   | "vector-collection"
   | "elasticsearch-index"

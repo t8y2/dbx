@@ -858,5 +858,16 @@ export function parseInsertValueHintsAtCursor(sql: string, cursor: number, optio
  * keep this list in sync instead of re-inlining it at call sites.
  */
 export function supportsInsertValueHints(databaseType: string | undefined | null): boolean {
-  return databaseType !== "redis" && databaseType !== "mongodb" && databaseType !== "elasticsearch" && databaseType !== "easysearch" && databaseType !== "meilisearch" && databaseType !== "solr" && databaseType !== "couchdb" && databaseType !== "victoriametrics" && databaseType !== "salesforce";
+  return (
+    databaseType !== "redis" &&
+    databaseType !== "mongodb" &&
+    databaseType !== "elasticsearch" &&
+    databaseType !== "easysearch" &&
+    databaseType !== "meilisearch" &&
+    databaseType !== "solr" &&
+    databaseType !== "couchdb" &&
+    databaseType !== "cosmosdb" &&
+    databaseType !== "victoriametrics" &&
+    databaseType !== "salesforce"
+  );
 }

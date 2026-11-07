@@ -35,6 +35,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   salesforce: { deferred: "Salesforce orgs do not expose database creation through SOQL" },
   solr: { deferred: "core creation is not modeled as database creation" },
   couchdb: { deferred: "database creation is not modeled as SQL database creation" },
+  cosmosdb: { deferred: "database creation needs dedicated throughput options" },
   hbase: { deferred: "namespace creation needs dedicated HBase namespace options" },
   qdrant: { deferred: "collection creation is separate from database creation" },
   milvus: { deferred: "collection/database lifecycle needs a dedicated vector workflow" },

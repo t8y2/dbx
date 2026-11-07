@@ -1264,6 +1264,12 @@ export default withEnglishFallback({
     customColorPlaceholder: "#ff0000 və ya rgba(…)",
     tursoHostPlaceholder: "your-database.turso.io və ya libsql://your-database.turso.io",
     tursoHostHint: "libsql:// və https:// protokollarını dəstəkləyir. Yalnız host adını da daxil edə bilərsiniz (HTTPS avtomatik istifadə olunur).",
+    cosmosDbEndpoint: "Hesab son nöqtəsi",
+    cosmosDbEndpointPlaceholder: "your-account.documents.azure.com",
+    cosmosDbEndpointHint: "Azure portalındakı Açarlar səhifəsindən URI və ya ƏSAS QOŞULMA SƏTRİNİ yapışdırın; son nöqtə və açar avtomatik doldurulur.",
+    cosmosDbAccountKey: "Hesab açarı",
+    cosmosDbUrlParamsPlaceholder: "tlsverify=false (yalnız yerli emulyator)",
+    cosmosDbCredentialsRequired: "Azure Cosmos DB üçün hesab son nöqtəsi və hesab açarı tələb olunur",
     tursoTokenHint: "Bu əmrlə token yaradın:",
     tursoUrlParamsPlaceholder: "authToken=xxx (istəyə bağlı, yuxarıdakı kimlik doğrulama tokeni sahəsi üstünlük təşkil edir)",
     driverInstall: {
@@ -6156,6 +6162,11 @@ export default withEnglishFallback({
     importFailed: "İdxal uğursuz oldu: {message}",
     importInvalidJson: "JSON obyekt və ya obyektlər massivi olmalıdır",
     exportSearchUnsupported: "Meilisearch axtarış səhifələməsini məhdudlaşdırdığı üçün mətn, hibrid və ya bal həddinə görə axtarışlarda tam ixrac mümkün deyil. Süzgəcdən keçən bütün sənədləri ixrac etmək üçün həmin seçimləri təmizləyin.",
+  },
+  cosmosdb: {
+    jsonReplaceHint: "JSON yadda saxlanması sənədi tam əvəz edir və sənəd yükləndikdən sonra dəyişibsə (_etag) uğursuz olur. id və ya bölmə açarını dəyişmək yeni sənəd yaradır və köhnəsini silir; _id və sistem xüsusiyyətləri nəzərə alınmır.",
+    pageCursorUnavailable: "Azure Cosmos DB davam tokeni əlçatan deyil. Birinci səhifədən yenidən yükləyin.",
+    repeatedCursor: "Azure Cosmos DB təkrarlanan davam tokeni qaytardı. İxrac dayandırıldı.",
   },
   dynamodb: {
     tableMetadataUnavailable: "DynamoDB cədvəlinin metaməlumatları yüklənməyib. Yeniləyin və yenidən cəhd edin.",

@@ -325,6 +325,44 @@ describe("buildSnippetItems", () => {
     const items = buildSnippetItemsForTest("", TEST_SNIPPETS);
     expect(items).toEqual([]);
   });
+
+  it("renumbers a VSCode-style $0 final cursor past the last tabstop", () => {
+    const items = buildSnippetItemsForTest("ssf", [{ id: "1", label: "select", prefix: "ssf", body: "SELECT *\nFROM ${1:table}\nWHERE $0" }]);
+
+    // CodeMirror has no $0: it is renumbered to max tabstop + 1 so Tab walks
+    // ${1} and then lands on the $0 position as the final field.
+    expect(items[0].apply).toBe("SELECT *\nFROM ${1:table}\nWHERE ${2}");
+    // The completion detail keeps showing the body as typed.
+    expect(items[0].detail).toBe("SELECT *\nFROM ${1:table}\nWHERE $0");
+  });
+
+  it("keeps $0 as the only field when the snippet has no other tabstops", () => {
+    const items = buildSnippetItemsForTest("ssf", [{ id: "1", label: "select", prefix: "ssf", body: "SELECT * FROM $0;" }]);
+
+    expect(items[0].apply).toBe("SELECT * FROM ${1};");
+  });
+
+  it.each([
+    ["${0}", "SELECT * FROM ${1:table} ${2};"],
+    ["${0:value}", "SELECT * FROM ${1:table} ${2:value};"],
+  ] as const)("renumbers the braced %s final cursor form", (cursor, expected) => {
+    const items = buildSnippetItemsForTest("ssf", [{ id: "1", label: "select", prefix: "ssf", body: `SELECT * FROM \${1:table} ${cursor};` }]);
+
+    expect(items[0].apply).toBe(expected);
+  });
+
+  it("mirrors repeated $0 positions into one final field", () => {
+    const items = buildSnippetItemsForTest("jf", [{ id: "1", label: "join", prefix: "jf", body: "$0 JOIN $0" }]);
+
+    expect(items[0].apply).toBe("${1} JOIN ${1}");
+  });
+
+  it("keeps escaped and PostgreSQL bind-parameter dollars literal", () => {
+    const items = buildSnippetItemsForTest("pf", [{ id: "1", label: "prepared", prefix: "pf", body: "EXECUTE stmt($1, $2) -- \\$0 stays" }]);
+
+    // $1/$2 are valid PostgreSQL bind parameters, not tabstops; \$0 is escaped.
+    expect(items[0].apply).toBe("EXECUTE stmt($1, $2) -- \\$0 stays");
+  });
 });
 
 describe("snippet ranking", () => {

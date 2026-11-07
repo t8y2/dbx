@@ -23,7 +23,13 @@ https://example.com/dbx/api/auth/check
 
 ## 认证
 
-受保护的路由需要名为 `dbx_session` 的会话 Cookie。
+受保护的路由默认使用 `dbx_session` Cookie。PL 调试需要有效的会话 Cookie。
+
+### 可信 Header 认证
+
+设置 `DBX_WEB_TRUSTED_AUTH_ENABLED`、`DBX_WEB_TRUSTED_AUTH_HEADER` 和 `DBX_WEB_TRUSTED_AUTH_TOKEN` 后，没有有效会话 Cookie 的 Web API 请求可通过精确匹配配置的 Header 值完成认证。原生 `/mcp` 端点使用自己的认证方式。
+
+此功能只能在可信反向代理后启用。代理必须删除客户端传入的同名 Header，并在用户认证成功后自行设置。
 
 ### 检查认证状态
 
@@ -86,6 +92,9 @@ Cookie: dbx_session=...
 | --- | --- |
 | `DBX_PASSWORD` | 容器启动时设置初始密码 |
 | `DBX_DISABLE_PASSWORD=1` | 完全关闭密码保护 |
+| `DBX_WEB_TRUSTED_AUTH_ENABLED` | 启用可信 Header 认证（`1`、`true`、`yes` 或 `on`） |
+| `DBX_WEB_TRUSTED_AUTH_HEADER` | 可信 Header 认证使用的 HTTP Header 名称 |
+| `DBX_WEB_TRUSTED_AUTH_TOKEN` | 可信 Header 认证要求精确匹配的 HTTP Header 值 |
 | `DBX_PORT` | 修改监听端口，默认 `4224` |
 | `DBX_DATA_DIR` | 存放 `dbx.db` 的数据目录 |
 | `DBX_PUBLIC_BASE_PATH` | 在子路径下提供服务，例如 `/dbx` |

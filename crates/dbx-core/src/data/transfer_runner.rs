@@ -75,7 +75,7 @@ fn cancelled_table_counts(
     // Cancellation does not roll back batches already committed to Xugu. Keep
     // the current table's acknowledged writes, never a previous table's count.
     // Preserve the existing terminal-event contract for every other DB pair.
-    if super::transfer::mysql_xugu::is_pair(source, target) {
+    if super::transfer::mysql_xugu::is_pair(source, target) || super::transfer::postgres_xugu::is_pair(source, target) {
         (moved_rows.unwrap_or(0), source_rows)
     } else {
         (0, None)
@@ -108,6 +108,9 @@ where
         super::transfer::validate_transfer_database_pair(&request, &source_db_type, &target_db_type)?;
         if super::transfer::mysql_xugu::is_pair(&source_db_type, &target_db_type) {
             super::transfer::mysql_xugu::preflight(&state, &request, &source_pool_key, &target_pool_key).await?;
+        }
+        if super::transfer::postgres_xugu::is_pair(&source_db_type, &target_db_type) {
+            super::transfer::postgres_xugu::preflight(&state, &request, &source_pool_key, &target_pool_key).await?;
         }
         let routine = crate::schema::oracle_routines::capture_routine_transfer_context(
             &state,
@@ -901,7 +904,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn mysql_xugu_cancellation_preserves_only_current_table_acknowledged_rows() {
+    fn native_xugu_adapters_preserve_only_current_table_acknowledged_rows() {
         assert_eq!(
             cancelled_table_counts(&DatabaseType::Mysql, &DatabaseType::Xugu, Some(413), Some(10_000)),
             (413, Some(10_000))
@@ -911,10 +914,14 @@ mod tests {
             (0, Some(10_000))
         );
         assert_eq!(cancelled_table_counts(&DatabaseType::Mysql, &DatabaseType::Xugu, None, None), (0, None));
+        assert_eq!(
+            cancelled_table_counts(&DatabaseType::Postgres, &DatabaseType::Xugu, Some(413), Some(10_000)),
+            (413, Some(10_000))
+        );
         for (source, target) in [
             (DatabaseType::Mysql, DatabaseType::Mysql),
             (DatabaseType::Xugu, DatabaseType::Xugu),
-            (DatabaseType::Postgres, DatabaseType::Xugu),
+            (DatabaseType::Kingbase, DatabaseType::Xugu),
         ] {
             assert_eq!(cancelled_table_counts(&source, &target, Some(413), Some(10_000)), (0, None));
         }

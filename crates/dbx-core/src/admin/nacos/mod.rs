@@ -182,6 +182,7 @@ mod tests {
             namespace: "public".to_string(),
             context_path: "/nacos".to_string(),
             managed_namespaces: Vec::new(),
+            namespace_discovery: Default::default(),
             rnacos_console_addr: "http://127.0.0.1:10848".to_string(),
             rnacos_history_enabled: Some(true),
             rnacos_console_auth: NacosRNacosConsoleAuth::UsernamePassword {

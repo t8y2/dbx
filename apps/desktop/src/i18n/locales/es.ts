@@ -11622,6 +11622,8 @@ export default withEnglishFallback({
     registerInstance: "Registrar instancia",
     deregister: "Dar de baja",
     nacosContextPathHint: "Cuando se deja vacío, se usa el valor predeterminado del modo de conexión actual; si se usa explícitamente la ruta raíz del servicio, complete /; en escenarios de proxy inverso, puede completar prefijos como /nacos.",
+    nacosManualNamespaceDiscoveryHint: "Introduzca el ID de espacio de nombres; se admiten separadores por comas o saltos de línea. DBX omitirá la consulta del directorio de espacios de nombres y verificará los permisos de lectura de la configuración al conectarse.",
+    nacosManualNamespaceIdsRequired: "Introduzca al menos un ID de espacio de nombres.",
   },
   databaseBrowser: {
     search: "Buscar bases de datos...",

@@ -14637,6 +14637,8 @@ export default withEnglishFallback({
     restore: "คืนค่า",
     registerInstance: "ลงทะเบียน Instance",
     deregister: "ยกเลิกการลงทะเบียน",
+    nacosManualNamespaceDiscoveryHint: "กรอก ID ของเนมสเปซ รองรับการคั่นด้วยเครื่องหมายจุลภาคหรือขึ้นบรรทัดใหม่ DBX จะข้ามการค้นหาไดเรกทอรีเนมสเปซ และตรวจสอบสิทธิ์การอ่านการกำหนดค่าเมื่อเชื่อมต่อ",
+    nacosManualNamespaceIdsRequired: "กรุณากรอก ID ของเนมสเปซอย่างน้อยหนึ่งรายการ",
   },
   doltVersionControl: {
     title: "Dolt Version Control",

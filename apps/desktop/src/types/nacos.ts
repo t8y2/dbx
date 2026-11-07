@@ -254,8 +254,10 @@ export interface NacosAdminConfig {
   contextPath?: string;
   /** Browser URL for the Nacos web console. Nacos 3 uses a separate console endpoint. */
   consoleUrl?: string;
-  /** Namespace IDs used when an official Nacos ordinary user cannot enumerate namespaces or authorization data. */
+  /** Explicit IDs for manual discovery, or the ordinary-user fallback when directory access is denied. */
   managedNamespaces?: string[];
+  /** Manual discovery uses these IDs directly instead of querying the namespace directory. */
+  namespaceDiscovery?: "automatic" | "manual";
   rnacosConsoleAddr?: string;
   /** Undefined keeps the legacy behaviour: history is enabled when a console address exists. */
   rnacosHistoryEnabled?: boolean;

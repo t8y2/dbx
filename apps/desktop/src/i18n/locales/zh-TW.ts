@@ -10491,6 +10491,8 @@ export default withEnglishFallback({
     registerInstance: "註冊實例",
     deregister: "註銷",
     nacosContextPathHint: "留空時使用目前連線模式的預設值；明確使用服務根路徑請填寫 /，反向代理情境可填寫 /nacos 等前綴。",
+    nacosManualNamespaceDiscoveryHint: "填寫命名空間 ID，支援逗號或換行分隔。DBX 將跳過命名空間目錄查詢，連線時驗證配置讀取權限。",
+    nacosManualNamespaceIdsRequired: "請至少填寫一個命名空間 ID。",
   },
   userAdmin: {
     oldPassword: "舊密碼（選填）",

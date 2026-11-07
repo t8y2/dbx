@@ -11370,6 +11370,8 @@ export default withEnglishFallback({
     registerInstance: "Registra istanza",
     deregister: "Rimuovi",
     nacosContextPathHint: "Se lasciato vuoto, viene utilizzato il valore predefinito della modalità di connessione corrente; se si utilizza esplicitamente il percorso radice del servizio, inserire /; in scenari di proxy inverso, è possibile inserire prefissi come /nacos.",
+    nacosManualNamespaceDiscoveryHint: "Inserisci l'ID namespace, separando più valori con una virgola o un ritorno a capo. DBX salterà la query dell'elenco dei namespace e verificherà i permessi di lettura della configurazione al momento della connessione.",
+    nacosManualNamespaceIdsRequired: "Inserisci almeno un ID namespace.",
   },
   databaseBrowser: {
     search: "Cerca database...",

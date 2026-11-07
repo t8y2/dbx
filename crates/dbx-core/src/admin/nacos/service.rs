@@ -616,6 +616,7 @@ mod tests {
             api_plane: None,
             context_path: "/nacos".to_string(),
             managed_namespaces: Vec::new(),
+            namespace_discovery: Default::default(),
             rnacos_console_addr: String::new(),
             rnacos_history_enabled: Some(false),
             rnacos_console_auth: NacosRNacosConsoleAuth::Inherit,

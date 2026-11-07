@@ -12591,6 +12591,8 @@ export default withEnglishFallback({
     restore: "복원",
     registerInstance: "인스턴스 등록",
     deregister: "등록 해제",
+    nacosManualNamespaceDiscoveryHint: "네임스페이스 ID를 입력하세요. 쉼표 또는 줄바꿈으로 구분할 수 있습니다. DBX는 네임스페이스 디렉터리 조회를 건너뛰고 연결 시 구성 읽기 권한을 검증합니다.",
+    nacosManualNamespaceIdsRequired: "네임스페이스 ID를 하나 이상 입력하세요.",
   },
   doltVersionControl: {
     title: "Dolt 버전 관리",

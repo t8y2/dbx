@@ -129,7 +129,20 @@ vi.mock("@/components/ui/PasswordInput.vue", async () => {
   };
 });
 vi.mock("@/components/ui/tabs", async () => {
-  const { defineComponent, h } = await import("vue");
+  const { defineComponent, h, inject, provide } = await import("vue");
+  const scopeKey = Symbol("tabs");
+  const Tabs = defineComponent({
+    props: ["modelValue"],
+    emits: ["update:modelValue"],
+    setup(props, { slots, emit }) {
+      const namespacePicker = props.modelValue === "automatic" || props.modelValue === "manual";
+      provide(scopeKey, {
+        current: () => (namespacePicker ? props.modelValue : visibleTab.value),
+        select: (value: string) => emit("update:modelValue", value),
+      });
+      return () => h("div", slots.default?.());
+    },
+  });
   const pass = defineComponent({
     setup:
       (_props, { slots }) =>
@@ -138,12 +151,19 @@ vi.mock("@/components/ui/tabs", async () => {
   });
   const TabsContent = defineComponent({
     props: ["value"],
-    setup:
-      (props, { slots }) =>
-      () =>
-        props.value === visibleTab.value ? h("div", slots.default?.()) : null,
+    setup(props, { slots }) {
+      const scope = inject<{ current: () => string }>(scopeKey)!;
+      return () => (props.value === scope.current() ? h("div", slots.default?.()) : null);
+    },
   });
-  return { Tabs: pass, TabsContent, TabsList: pass, TabsTrigger: pass };
+  const TabsTrigger = defineComponent({
+    props: ["value"],
+    setup(props, { slots, attrs }) {
+      const scope = inject<{ select: (value: string) => void }>(scopeKey)!;
+      return () => h("button", { ...attrs, onClick: () => scope.select(props.value) }, slots.default?.());
+    },
+  });
+  return { Tabs, TabsContent, TabsList: pass, TabsTrigger };
 });
 vi.mock("@/components/ui/tooltip", async () => {
   const { defineComponent, h } = await import("vue");
@@ -1094,5 +1114,105 @@ describe("JDBC connection parameter entry and driver metadata", () => {
         jdbc_driver_paths: ["/new/postgresql.jar", "/new/helper.jar"],
       }),
     );
+  });
+});
+
+describe("ConnectionDialog manual Nacos namespace discovery", () => {
+  const nacosConnection = () =>
+    savedConnection({
+      db_type: "nacos",
+      driver_profile: "nacos",
+      driver_label: "Nacos",
+      port: 8848,
+      username: "",
+      password: "",
+      external_config: { implementation: "nacos", versionMode: "v2", serverAddr: "http://nacos.example.test:8848", contextPath: "/nacos", auth: { kind: "none" } },
+    });
+
+  it("allows adding namespace IDs without credentials after directory detection fails", async () => {
+    backend.connectDb.mockRejectedValue(new Error("NACOS_ERROR[apiVersionMismatch]: /v1/console/namespaces returned 404"));
+    await mountDialog(nacosConnection(), "");
+    const picker = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === i18n.global.t("nacos.nacosVisibleNamespacesTitle"));
+    expect(picker).toBeTruthy();
+    picker!.click();
+    await vi.waitFor(() => expect(document.body.textContent).toContain("404"));
+    const manual = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === i18n.global.t("nacos.nacosNamespaceAccessManual"));
+    expect(manual).toBeTruthy();
+    manual!.click();
+    await settle();
+    const input = document.querySelector<HTMLTextAreaElement>("textarea[data-nacos-managed-namespaces]");
+    expect(input).toBeTruthy();
+    input!.value = " prod, prod\npre ";
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    const callsBeforeSave = backend.connectDb.mock.calls.length;
+    const innerSave = [...document.querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.textContent?.trim() === "Save").at(-1)!;
+    expect(innerSave.disabled).toBe(false);
+    innerSave.click();
+    await settle();
+    expect(backend.connectDb).toHaveBeenCalledTimes(callsBeforeSave);
+    expect(document.body.textContent).not.toContain("404");
+    const outerSave = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === "Save")!;
+    outerSave.click();
+    await vi.waitFor(() => expect(store.updateConnection).toHaveBeenCalledOnce());
+    expect(store.updateConnection.mock.calls[0][0]).toMatchObject({
+      visible_databases: ["prod", "pre"],
+      external_config: { namespaceDiscovery: "manual", managedNamespaces: ["prod", "pre"], auth: { kind: "none" } },
+    });
+  });
+
+  it("reopens a saved manual scope without making a directory connection", async () => {
+    const config = nacosConnection();
+    config.external_config = { ...config.external_config, namespaceDiscovery: "manual", managedNamespaces: ["prod"] };
+    config.visible_databases = ["prod"];
+    await mountDialog(config, "");
+    const picker = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === i18n.global.t("nacos.nacosVisibleNamespacesTitle"))!;
+    picker.click();
+    await settle();
+    expect(document.querySelector<HTMLTextAreaElement>("textarea[data-nacos-managed-namespaces]")?.value).toBe("prod");
+    expect(backend.connectDb).not.toHaveBeenCalled();
+  });
+
+  it.each(["pre", ""])("preserves the saved scope after canceling draft %j and saving the connection", async (draft) => {
+    const config = nacosConnection();
+    config.external_config = { ...config.external_config, namespaceDiscovery: "manual", managedNamespaces: ["prod"] };
+    config.visible_databases = ["prod"];
+    await mountDialog(config, "");
+    const button = (label: string) => [...document.querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.textContent?.trim() === label).at(-1)!;
+    button(i18n.global.t("nacos.nacosVisibleNamespacesTitle")).click();
+    await settle();
+    const input = document.querySelector<HTMLTextAreaElement>("textarea[data-nacos-managed-namespaces]")!;
+    input.value = draft;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    button(i18n.global.t("dangerDialog.cancel")).click();
+    await settle();
+    button("Save").click();
+    await vi.waitFor(() => expect(store.updateConnection).toHaveBeenCalledOnce());
+    expect(store.updateConnection.mock.calls[0][0]).toMatchObject({
+      visible_databases: ["prod"],
+      external_config: { namespaceDiscovery: "manual", managedNamespaces: ["prod"] },
+    });
+    expect(backend.connectDb).not.toHaveBeenCalled();
+  });
+
+  it.each(["pre", ""])("restores the committed scope when reopening after canceling draft %j", async (draft) => {
+    const config = nacosConnection();
+    config.external_config = { ...config.external_config, namespaceDiscovery: "manual", managedNamespaces: ["prod"] };
+    config.visible_databases = ["prod"];
+    await mountDialog(config, "");
+    const button = (label: string) => [...document.querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.textContent?.trim() === label).at(-1)!;
+    button(i18n.global.t("nacos.nacosVisibleNamespacesTitle")).click();
+    await settle();
+    const input = document.querySelector<HTMLTextAreaElement>("textarea[data-nacos-managed-namespaces]")!;
+    input.value = draft;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    button(i18n.global.t("dangerDialog.cancel")).click();
+    await settle();
+    button(i18n.global.t("nacos.nacosVisibleNamespacesTitle")).click();
+    await settle();
+    expect(document.querySelector<HTMLTextAreaElement>("textarea[data-nacos-managed-namespaces]")?.value).toBe("prod");
+    expect(backend.connectDb).not.toHaveBeenCalled();
   });
 });

@@ -812,6 +812,7 @@ app_memory_usage 1
             namespace: String::new(),
             context_path: context_path.to_string(),
             managed_namespaces: Vec::new(),
+            namespace_discovery: Default::default(),
             rnacos_console_addr: String::new(),
             rnacos_history_enabled: None,
             rnacos_console_auth: Default::default(),

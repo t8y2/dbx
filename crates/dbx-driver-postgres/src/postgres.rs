@@ -8328,6 +8328,46 @@ pub async fn list_schema_infos_with_system(pool: &Pool, show_system_schemas: boo
         .collect())
 }
 
+/// Distinct user-defined type names for the structure editor's type dropdown.
+/// Same predicate as the object browser's TYPE branch (base/composite/domain/
+/// enum/range/multirange types outside the system schemas), so types provided
+/// by installed extensions — `vector`, `hstore`, `ltree`, … — become
+/// selectable in the create/edit column type picker (#14525).
+///
+/// Types visible through `search_path` are returned bare so they stay
+/// interchangeable with the static list; everything else comes back
+/// schema-qualified (quoted only when the identifier requires it) so the
+/// generated `CREATE TABLE` / `ALTER TABLE ... TYPE` still resolves outside
+/// the search path instead of failing with `type "..." does not exist`
+/// (#14525 review).
+pub async fn list_data_types(pool: &Pool) -> Result<Vec<String>, String> {
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
+    let rows = postgres_query_cached(client, list_data_types_sql(), &[]).await.map_err(|e| e.to_string())?;
+
+    Ok(rows.iter().map(|row| pg_row_try_string(row, 0)).filter(|name| !name.is_empty()).collect())
+}
+
+fn list_data_types_sql() -> &'static str {
+    "SELECT DISTINCT CASE \
+       WHEN t.typname ~ '^[a-z_][a-z0-9_$]*$' AND n.nspname = ANY (current_schemas(true)) \
+         THEN t.typname \
+       ELSE format('%I.%I', n.nspname, t.typname) \
+     END AS type_name \
+     FROM pg_catalog.pg_type t \
+     JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+     LEFT JOIN pg_catalog.pg_class c ON c.oid = t.typrelid \
+     WHERE t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm') \
+       AND t.typisdefined \
+       AND t.typelem = 0 \
+       AND (t.typrelid = 0 OR c.relkind = 'c') \
+       AND n.nspname <> 'pg_catalog' \
+       AND n.nspname <> 'information_schema' \
+       AND n.nspname NOT LIKE 'pg_toast%' \
+       AND n.nspname NOT LIKE 'pg_temp%' \
+     ORDER BY type_name"
+}
+
 // Sibling of `postgres_columns_for_relations_sql`/`_compat_sql` above (~line
 // 3086), for a single (schema, table) instead of a batch of oids — see the
 // note there about why these aren't merged into a shared fragment.
@@ -13486,6 +13526,70 @@ mod tests {
             all_names.iter().all(|name| !name.starts_with('_')),
             "auto-generated array companions leaked into the listing: {all:?}"
         );
+    }
+
+    #[test]
+    fn list_data_types_sql_targets_user_defined_types() {
+        let sql = list_data_types_sql();
+        assert!(sql.contains("DISTINCT"), "{sql}");
+        // Types visible through search_path stay bare; everything else comes back
+        // schema-qualified so generated DDL resolves outside the search path.
+        assert!(sql.contains("n.nspname = ANY (current_schemas(true))"), "{sql}");
+        assert!(sql.contains("format('%I.%I', n.nspname, t.typname)"), "{sql}");
+        assert!(sql.contains("t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm')"), "{sql}");
+        assert!(sql.contains("t.typisdefined"), "{sql}");
+        assert!(sql.contains("t.typelem = 0"), "{sql}");
+        assert!(sql.contains("n.nspname <> 'pg_catalog'"), "{sql}");
+        assert!(sql.contains("n.nspname <> 'information_schema'"), "{sql}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
+    async fn postgres_list_data_types_includes_extension_and_user_types() {
+        let url = std::env::var("DBX_TEST_POSTGRES_URL").expect("DBX_TEST_POSTGRES_URL");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect postgres");
+        // hstore is a contrib extension base type (typtype='b') in `public` — the
+        // same catalog shape as pgvector's `vector` type.
+        execute_query(&pool, "CREATE EXTENSION IF NOT EXISTS hstore").await.expect("create hstore extension");
+        let schema = format!("dbx_custom_{}", uuid::Uuid::new_v4().simple());
+        let schema_ident = pg_quote_ident(&schema);
+        execute_query(&pool, &format!("CREATE SCHEMA {schema_ident}")).await.expect("create schema");
+
+        let exercise = async {
+            // The same type name in two schemas must not fold into one entry, and
+            // the search_path-invisible one has to come back schema-qualified.
+            execute_query(&pool, "CREATE TYPE public.mood AS ENUM ('sad', 'ok')").await?;
+            execute_query(&pool, &format!("CREATE TYPE {schema_ident}.mood AS ENUM ('sad', 'ok')")).await?;
+            // Mixed-case identifiers need the %I quoting.
+            execute_query(&pool, &format!("CREATE TYPE {schema_ident}.\"Mood\" AS ENUM ('sad', 'ok')")).await?;
+            let qualified_mood = format!("{schema}.mood");
+
+            // The returned names must be directly usable in DDL: create a column
+            // from the qualified name, then ALTER it to the same-name public type.
+            let probe = format!("{schema_ident}.usage_probe");
+            execute_query(&pool, &format!("CREATE TABLE {probe} (id bigint, m {qualified_mood})")).await?;
+            execute_query(
+                &pool,
+                &format!("ALTER TABLE {probe} ALTER COLUMN m TYPE public.mood USING m::text::public.mood"),
+            )
+            .await?;
+            execute_query(&pool, &format!("DROP TABLE {probe}")).await?;
+
+            list_data_types(&pool).await
+        }
+        .await;
+
+        let cleanup = execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await;
+        cleanup.expect("drop schema");
+        execute_query(&pool, "DROP TYPE IF EXISTS public.mood").await.expect("drop public.mood");
+        let types = exercise.expect("list data types");
+
+        assert!(types.iter().any(|name| name == "hstore"), "search_path extension type stays bare: {types:?}");
+        assert!(types.iter().any(|name| name == "mood"), "public enum stays bare: {types:?}");
+        let qualified_mood = format!("{schema}.mood");
+        assert!(types.iter().any(|name| name == &qualified_mood), "off-search_path enum must be qualified: {types:?}");
+        let qualified_mixed = format!("{schema}.\"Mood\"");
+        assert!(types.iter().any(|name| name == &qualified_mixed), "mixed-case type must keep quoting: {types:?}");
     }
 
     #[tokio::test]

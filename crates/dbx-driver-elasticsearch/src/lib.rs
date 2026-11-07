@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::db::document_result::DocumentQueryResult;
-use crate::types::QueryResult;
+use crate::types::{ObjectStatistics, QueryResult};
 use dbx_driver_support::db::{apply_tls_certificates, http_client_builder, with_connection_timeout};
 
 pub mod db {
@@ -1550,6 +1550,63 @@ pub async fn get_index_settings(client: &EsClient, index: &str) -> Result<Value,
 /// `GET /{index}/_stats` —— 索引统计（文档数、存储大小、各类操作计数）。
 pub async fn get_index_stats(client: &EsClient, index: &str) -> Result<Value, String> {
     get_index_metadata(client, index, "_stats").await
+}
+
+#[derive(Deserialize)]
+struct CatIndexStatsEntry {
+    index: String,
+    #[serde(rename = "docs.count", default)]
+    docs_count: Option<String>,
+    #[serde(rename = "store.size", default)]
+    store_size: Option<String>,
+}
+
+/// Aggregates `_cat/indices` entries into per-object statistics, summing
+/// members of an `index_grouping` wildcard into one row. Pure so the grouping
+/// behavior is covered without a live server.
+fn aggregate_index_statistics(
+    entries: Vec<CatIndexStatsEntry>,
+    grouping: Option<&Regex>,
+) -> Vec<ObjectStatistics> {
+    let mut grouped: BTreeMap<String, (Option<i64>, Option<i64>)> = BTreeMap::new();
+    for entry in entries {
+        let key = match grouping {
+            Some(re) => re.replace(&entry.index, "${1}*").into_owned(),
+            None => entry.index,
+        };
+        let bucket = grouped.entry(key).or_insert((None, None));
+        if let Ok(docs) = entry.docs_count.as_deref().unwrap_or("").parse::<i64>() {
+            bucket.0 = Some(bucket.0.unwrap_or(0).saturating_add(docs));
+        }
+        if let Ok(bytes) = entry.store_size.as_deref().unwrap_or("").parse::<i64>() {
+            bucket.1 = Some(bucket.1.unwrap_or(0).saturating_add(bytes));
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(name, (docs, bytes))| ObjectStatistics {
+            name,
+            estimated_rows: docs,
+            total_bytes: bytes,
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// 对象浏览器的统计列：每个索引的文档数与存储字节数。
+/// `index_grouping` 折叠出的通配行（如 `logs-*`）按成员索引聚合求和。
+/// 统计属于装饰性数据：任何失败都降级为空列表，不让元数据面板报错。
+pub async fn list_object_statistics(client: &EsClient) -> Result<Vec<ObjectStatistics>, String> {
+    let resp = client
+        .get("/_cat/indices?format=json&bytes=b&h=index,docs.count,store.size")
+        .send()
+        .await
+        .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    if !client.response_status(&resp).is_success() {
+        return Ok(Vec::new());
+    }
+    let entries: Vec<CatIndexStatsEntry> = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
+    Ok(aggregate_index_statistics(entries, client.index_grouping.as_ref()))
 }
 
 /// 侧边栏的索引节点可能是 `index_grouping` 折叠出的通配模式（如 `logs-*`）。
@@ -3272,6 +3329,39 @@ fn parse_aggregations(aggs: &serde_json::Map<String, serde_json::Value>) -> (Vec
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn aggregates_index_statistics_with_and_without_grouping() {
+        let entries = vec![
+            CatIndexStatsEntry { index: "logs-2026.01.01".into(), docs_count: Some("10".into()), store_size: Some("100".into()) },
+            CatIndexStatsEntry { index: "logs-2026.01.02".into(), docs_count: Some("5".into()), store_size: Some("50".into()) },
+            CatIndexStatsEntry { index: "products".into(), docs_count: Some("7".into()), store_size: None },
+            CatIndexStatsEntry { index: "failed-import".into(), docs_count: Some("not-a-number".into()), store_size: Some("9".into()) },
+        ];
+        let grouping = Regex::new(r"^(logs)-\d{4}\.\d{2}\.\d{2}$").ok();
+
+        let grouped = super::aggregate_index_statistics(entries.clone(), grouping.as_ref());
+        let find = |name: &str| grouped.iter().find(|stat| stat.name == name).cloned();
+
+        let logs = find("logs-*").expect("grouped logs statistics");
+        assert_eq!(logs.estimated_rows, Some(15));
+        assert_eq!(logs.total_bytes, Some(150));
+
+        let products = find("products").expect("ungrouped products statistics");
+        assert_eq!(products.estimated_rows, Some(7));
+        assert_eq!(products.total_bytes, None);
+
+        // Unparseable counts degrade to null instead of zero.
+        let failed = find("failed-import").expect("failed-import statistics");
+        assert_eq!(failed.estimated_rows, None);
+        assert_eq!(failed.total_bytes, Some(9));
+
+        // Without a grouping regex every index stays its own row.
+        let flat = super::aggregate_index_statistics(entries, None);
+        assert_eq!(flat.len(), 4);
+    }
+
     use super::{
         build_count_documents_body, build_find_documents_body, elasticsearch_accept_invalid_certs,
         elasticsearch_base_url_fallbacks, elasticsearch_index_grouping, group_index_names, merge_index_entries,

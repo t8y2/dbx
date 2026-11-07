@@ -9,8 +9,8 @@ use super::{
 };
 use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
-    ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectSource, ObjectSourceKind, QueryResult, TableInfo,
-    TriggerInfo,
+    ColumnInfo, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectSource, ObjectSourceKind, ObjectStatistics, QueryResult,
+    TableInfo, TriggerInfo,
 };
 
 #[derive(Clone)]
@@ -183,6 +183,39 @@ pub async fn list_tables(client: &TursoClient, _schema: &str) -> Result<Vec<Tabl
             }
         })
         .collect())
+}
+
+/// Object browser statistics: per-table COUNT(*). Turso exposes no per-table
+/// size metadata, so sizes stay null. Decorative data: failed counts degrade
+/// to null instead of erroring.
+pub async fn list_object_statistics(client: &TursoClient, _schema: &str) -> Result<Vec<ObjectStatistics>, String> {
+    let result = query_inner(
+        client,
+        "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )
+    .await?;
+    let names: Vec<String> = result.values.iter().filter_map(|row| value_as_string(row.first())).collect();
+    let mut stats = Vec::with_capacity(names.len());
+    for name in names {
+        let estimated_rows = query_inner(client, &format!("SELECT COUNT(*) FROM {}", sqlite_ident(&name)))
+            .await
+            .ok()
+            .and_then(|result| {
+                result
+                    .values
+                    .first()
+                    .and_then(|row| row.first())
+                    .and_then(|value| value.as_i64().or_else(|| value.as_str().and_then(|s| s.parse().ok())))
+            });
+        stats.push(ObjectStatistics {
+            name,
+            schema: Some("main".to_string()),
+            estimated_rows,
+            total_bytes: None,
+            ..Default::default()
+        });
+    }
+    Ok(stats)
 }
 
 pub async fn get_columns(client: &TursoClient, _schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {

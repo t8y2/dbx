@@ -294,6 +294,55 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     expect(database.isExpanded).toBe(true);
   });
 
+  it("opens the pre-filtered object list and expands a collapsed object group on click", async () => {
+    const group: TreeNode = {
+      id: "mysql:basic:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: "mysql",
+      database: "basic",
+      isExpanded: false,
+      children: [],
+    };
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: group, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.handleRowClick(group, 1);
+
+    await vi.waitFor(() => expect(queryStore.openObjectBrowser).toHaveBeenCalledWith("mysql", "basic", undefined, undefined, undefined, false, "tables", undefined));
+    await vi.waitFor(() => expect(group.isExpanded).toBe(true));
+  });
+
+  it("keeps an expanded object group open on click while focusing its object list", async () => {
+    const group: TreeNode = {
+      id: "mysql:basic:__views",
+      label: "tree.views",
+      type: "group-views",
+      connectionId: "mysql",
+      database: "basic",
+      isExpanded: true,
+      children: [{ id: "mysql:basic:__views:v1", label: "v1", type: "view", connectionId: "mysql", database: "basic" }],
+    };
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: group, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.handleRowClick(group, 1);
+
+    await vi.waitFor(() => expect(queryStore.openObjectBrowser).toHaveBeenCalledWith("mysql", "basic", undefined, undefined, undefined, false, "views", undefined));
+    await nextTick();
+    expect(group.isExpanded).toBe(true);
+  });
+
   it("reuses a Mongo collection tab by identity without replacing its state", async () => {
     const collection: TreeNode = {
       id: "mongo:app:orders",

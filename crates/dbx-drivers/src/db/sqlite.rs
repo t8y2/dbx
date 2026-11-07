@@ -20,7 +20,8 @@ use crate::sql::starts_with_executable_sql_keyword;
 use crate::types::{
     ColumnInfo, ColumnMetadataCapabilities, CompletionAssistantCandidate, CompletionAssistantCandidateKind,
     CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest,
-    CompletionAssistantResponse, DatabaseInfo, ForeignKeyInfo, IndexInfo, QueryResult, TableInfo, TriggerInfo,
+    CompletionAssistantResponse, DatabaseInfo, ForeignKeyInfo, IndexInfo, ObjectStatistics, QueryResult, TableInfo,
+    TriggerInfo,
 };
 
 const SQLITE_DATABASE_HEADER: &[u8; 16] = b"SQLite format 3\0";
@@ -675,6 +676,36 @@ mod tests {
         let result = execute_query(&pool, "SELECT name FROM memory_probe WHERE id = 1;").await.expect("select row");
 
         assert_eq!(result.rows[0][0], serde_json::json!("Ada"));
+    }
+
+    #[tokio::test]
+    async fn list_object_statistics_reports_counts_and_sizes() {
+        let pool = connect_path(":memory:").await.expect("connect in-memory SQLite");
+        execute_query(&pool, "CREATE TABLE stats_a (id INTEGER PRIMARY KEY, name TEXT);")
+            .await
+            .expect("create table");
+        execute_query(&pool, "INSERT INTO stats_a (name) VALUES ('Ada'), ('Grace');").await.expect("insert rows");
+        execute_query(&pool, "CREATE TABLE stats_b (id INTEGER);").await.expect("create second table");
+        execute_query(&pool, "CREATE INDEX stats_b_idx ON stats_b (id);").await.expect("create index");
+        execute_query(&pool, "CREATE VIEW stats_v AS SELECT * FROM stats_a;").await.expect("create view");
+
+        let stats = list_object_statistics(&pool, "").await.expect("list statistics");
+        let find = |name: &str| stats.iter().find(|stat| stat.name == name).cloned();
+
+        let a = find("stats_a").expect("stats_a statistics");
+        assert_eq!(a.estimated_rows, Some(2));
+        assert!(a.total_bytes.unwrap_or(0) > 0, "dbstat sizes should be reported");
+
+        let b = find("stats_b").expect("stats_b statistics");
+        assert_eq!(b.estimated_rows, Some(0));
+        // Index pages roll up into the table's total size.
+        assert!(b.total_bytes.unwrap_or(0) > 0);
+
+        let v = find("stats_v").expect("view statistics");
+        assert_eq!(v.estimated_rows, None);
+
+        // `sqlite_%` internals never surface.
+        assert!(stats.iter().all(|stat| !stat.name.starts_with("sqlite_")));
     }
 
     #[tokio::test]
@@ -1553,6 +1584,101 @@ pub async fn list_tables(pool: &SqliteHandle, schema: &str) -> Result<Vec<TableI
                 })
                 .map_err(|e| e.to_string())?;
             rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Per-table row counts and page usage for the object browser statistics columns.
+/// Decorative only: failures degrade to null fields instead of erroring.
+pub async fn list_object_statistics(pool: &SqliteHandle, schema: &str) -> Result<Vec<ObjectStatistics>, String> {
+    if pool.is_remote() {
+        let schema = remote_schema_name(schema);
+        let sql = format!(
+            "SELECT name, type FROM {}.sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            sqlite_quote_ident(&schema)
+        );
+        let names: Vec<String> = query_remote_rows(pool, &sql)
+            .await?
+            .into_iter()
+            .map(|row| json_cell_text(&row, 0))
+            .collect();
+        let mut stats = Vec::with_capacity(names.len());
+        for name in names {
+            let estimated_rows = query_remote_rows(
+                pool,
+                &format!("SELECT COUNT(*) FROM {}.{}", sqlite_quote_ident(&schema), sqlite_quote_ident(&name)),
+            )
+            .await
+            .ok()
+            .and_then(|rows| rows.first().and_then(|row| row.first().and_then(serde_json::Value::as_i64)));
+            stats.push(ObjectStatistics {
+                name,
+                schema: Some(schema.clone()),
+                estimated_rows,
+                // The remote worker protocol has no dbstat access, so sizes stay null.
+                total_bytes: None,
+                ..Default::default()
+            });
+        }
+        return Ok(stats);
+    }
+    let pool = pool.clone();
+    let requested_schema = schema.to_string();
+    tokio::task::spawn_blocking(move || {
+        pool.with_connection(|conn| {
+            let schema = sqlite_schema_name_for_connection(conn, &requested_schema)?;
+            let sql = format!(
+                "SELECT name, type FROM {}.sqlite_master \
+                 WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name",
+                sqlite_quote_ident(&schema)
+            );
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let names: Vec<String> = stmt
+                .query_map([], |row| row.get(0))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            drop(stmt);
+            // Page usage per table including its indexes; dbstat may be unavailable
+            // in some builds, in which case sizes stay null.
+            let sizes: std::collections::HashMap<String, i64> = (|| {
+                let sql = format!(
+                    "SELECT COALESCE(sm.tbl_name, ds.name), SUM(ds.pgsize) \
+                     FROM {}.dbstat ds LEFT JOIN {}.sqlite_master sm ON sm.name = ds.name GROUP BY 1",
+                    sqlite_quote_ident(&schema),
+                    sqlite_quote_ident(&schema)
+                );
+                let mut stmt = conn.prepare(&sql).ok()?;
+                let rows = stmt
+                    .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+                    .ok()?;
+                let mut map = std::collections::HashMap::new();
+                for row in rows.flatten() {
+                    map.insert(row.0, row.1);
+                }
+                Some(map)
+            })()
+            .unwrap_or_default();
+            let mut stats = Vec::with_capacity(names.len());
+            for name in names {
+                let estimated_rows = conn
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {}.{}", sqlite_quote_ident(&schema), sqlite_quote_ident(&name)),
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .ok();
+                stats.push(ObjectStatistics {
+                    total_bytes: sizes.get(&name).copied(),
+                    name,
+                    schema: Some(schema.clone()),
+                    estimated_rows,
+                    ..Default::default()
+                });
+            }
+            Ok(stats)
         })
     })
     .await

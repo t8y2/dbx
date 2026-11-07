@@ -9,7 +9,7 @@ use super::document_result::DocumentQueryResult;
 use super::{apply_tls_certificates, http_client_builder, with_connection_timeout};
 use crate::db::ColumnInfo;
 use crate::models::connection::DatabaseConnectionInfo;
-use crate::types::QueryResult;
+use crate::types::{ObjectStatistics, QueryResult};
 
 const COUCHDB_PATH_ENCODE_SET: &AsciiSet =
     &CONTROLS.add(b' ').add(b'"').add(b'#').add(b'<').add(b'>').add(b'`').add(b'?').add(b'{').add(b'}').add(b'/');
@@ -146,6 +146,31 @@ pub async fn list_databases(client: &CouchDbClient) -> Result<Vec<String>, Strin
     }
     let dbs: Vec<String> = resp.json().await.map_err(|e| format!("Invalid CouchDB JSON: {e}"))?;
     Ok(dbs)
+}
+
+/// Object browser statistics: document counts and file sizes per database
+/// (`GET /{db}` info endpoint). Decorative data: unreachable databases are
+/// skipped instead of erroring the metadata panel.
+pub async fn list_object_statistics(client: &CouchDbClient) -> Result<Vec<ObjectStatistics>, String> {
+    let mut stats = Vec::new();
+    for database in list_databases(client).await? {
+        let Ok(resp) = client.get(&encode_path_segment(&database)).send().await else {
+            continue;
+        };
+        if !resp.status().is_success() {
+            continue;
+        }
+        let Ok(body) = resp.json::<Value>().await else {
+            continue;
+        };
+        stats.push(ObjectStatistics {
+            name: database,
+            estimated_rows: body.get("doc_count").and_then(Value::as_i64),
+            total_bytes: body.get("sizes").and_then(|sizes| sizes.get("file")).and_then(Value::as_i64),
+            ..Default::default()
+        });
+    }
+    Ok(stats)
 }
 
 pub async fn get_columns(client: &CouchDbClient, database: &str) -> Result<Vec<ColumnInfo>, String> {

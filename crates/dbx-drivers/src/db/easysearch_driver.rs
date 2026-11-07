@@ -114,6 +114,12 @@ pub async fn get_index_stats(client: &EasysearchClient, index: &str) -> Result<V
     elasticsearch_driver::get_index_stats(&client.inner, index).await.map_err(easysearch_error)
 }
 
+pub async fn list_object_statistics(
+    client: &EasysearchClient,
+) -> Result<Vec<elasticsearch_driver::types::ObjectStatistics>, String> {
+    elasticsearch_driver::list_object_statistics(&client.inner).await.map_err(easysearch_error)
+}
+
 pub async fn delete_all_documents(
     client: &EasysearchClient,
     index: &str,

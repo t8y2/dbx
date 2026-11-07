@@ -27,9 +27,11 @@ export type ObjectBrowserRow = {
   partitionParentName?: string;
   estimatedRows?: number | null;
   totalBytes?: number | null;
+  engine?: string | null;
+  collation?: string | null;
 };
 
-export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
+export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment" | "engine" | "collation";
 export type ObjectBrowserSortDirection = "asc" | "desc";
 export type ObjectBrowserFilterCounts = Record<ObjectBrowserFilter, number>;
 

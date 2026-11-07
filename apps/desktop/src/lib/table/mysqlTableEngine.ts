@@ -25,6 +25,10 @@ export function mysqlTableEngineSql(database: string, table: string): string {
   return ["SELECT ENGINE AS engine", "FROM information_schema.TABLES", `WHERE TABLE_SCHEMA = ${mysqlUtf8Literal(database)}`, `  AND TABLE_NAME = ${mysqlUtf8Literal(table)}`, "LIMIT 1"].join("\n");
 }
 
+export function mysqlTableCollationSql(database: string, table: string): string {
+  return ["SELECT TABLE_COLLATION AS collation", "FROM information_schema.TABLES", `WHERE TABLE_SCHEMA = ${mysqlUtf8Literal(database)}`, `  AND TABLE_NAME = ${mysqlUtf8Literal(table)}`, "LIMIT 1"].join("\n");
+}
+
 function columnIndex(result: QueryResult, name: string): number {
   return result.columns.findIndex((column) => column.trim().toLowerCase() === name.toLowerCase());
 }

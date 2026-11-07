@@ -181,7 +181,9 @@ import {
   isDirectNavigationTreeNode,
   isDocumentBrowserTreeNode,
   isRepeatableNavigationTreeNode,
+  objectBrowserFilterForGroupNode,
   objectSourceTargetForTreeNode,
+  shouldActivateTreeNodeOnSingleClick,
   shouldOpenQueryOnTreeNodeActivation,
   shouldRunTreeNodeRowAction,
   treeNodeRowAction,
@@ -1362,9 +1364,14 @@ function runRowClickAction(clickDetail: number) {
     void openObjectBrowser(false, true);
     return;
   }
-  if (node.type === "group-events") {
-    beginNavigationRequest();
+  // 单击对象分组节点（表/视图/存储过程/函数/触发器/事件等）：展开树的同时打开
+  // 按该类型预筛选的对象列表；折叠方向的单击只折叠，不重复打开列表。
+  const groupObjectFilter = !node.tableName && shouldActivateTreeNodeOnSingleClick(node.type, settingsStore.editorSettings.sidebarActivation) ? objectBrowserFilterForGroupNode(node.type) : null;
+  if (groupObjectFilter) {
+    const requestId = beginNavigationRequest();
+    const wasGroupExpanded = !!node.isExpanded;
     void openObjectBrowser();
+    if (!wasGroupExpanded) void toggle(requestId);
     return;
   }
   const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation, currentDatabaseType(), settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation, canOpenObjectBrowser.value);
@@ -1840,9 +1847,14 @@ function onDoubleClick(event: MouseEvent) {
     void openObjectBrowser(false, true);
     return;
   }
-  if (activeNode.value.type === "group-events") {
-    beginNavigationRequest();
-    void openObjectBrowser();
+  // 双击激活模式下，双击对象分组节点：展开方向同时打开预筛选列表，已展开则
+  // 折叠（与 database 节点的双击折叠行为一致）；单击激活模式下首次单击已完成
+  // 该动作，尾部 dblclick 保持惰性。
+  const dblGroupFilter = !activeNode.value.tableName && settingsStore.editorSettings.sidebarActivation === "double" ? objectBrowserFilterForGroupNode(activeNode.value.type) : null;
+  if (dblGroupFilter) {
+    const requestId = beginNavigationRequest();
+    if (!activeNode.value.isExpanded) void openObjectBrowser();
+    void toggle(requestId);
     return;
   }
   const action = treeNodeRowDoubleClickAction(activeNode.value.type, canOpenObjectBrowser.value, settingsStore.editorSettings.sidebarActivation, canExpand.value, currentDatabaseType(), canOpenConnectionDatabaseBrowser.value, settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation);
@@ -2068,7 +2080,7 @@ async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean
 
     const eventName = openEventEditor === true && node.type === "event" ? node.objectName || node.label : undefined;
     const eventCreateRequestId = openEventEditor === "create" && node.type === "group-events" ? ++mysqlEventCreateRequestSeq : undefined;
-    const objectFilter = node.type === "event" || node.type === "group-events" ? "events" : undefined;
+    const objectFilter = node.type === "event" ? "events" : node.tableName ? undefined : (objectBrowserFilterForGroupNode(node.type) ?? undefined);
 
     const connection = connectionStore.getConfig(node.connectionId);
     if (!connection) return;

@@ -1,4 +1,4 @@
-import type { DatabaseType, ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
+import type { DatabaseType, ObjectBrowserFilter, ObjectSourceKind, TreeNode, TreeNodeType } from "@/types/database";
 import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
 import { supportsConnectionQueryActions } from "@/lib/database/databaseFeatureSupport";
 import { matchesShortcut, type ShortcutLikeEvent } from "@/lib/editor/keyboardShortcuts";
@@ -106,6 +106,29 @@ const databaseChildGroupNodeTypes = new Set<TreeNodeType>([
   "group-types",
 ]);
 const displayPathObjectNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger", "event", "sequence", "synonym", "package", "package-body", "type", "type-body"]);
+
+// Schema/database-level object groups whose row click opens the object browser
+// list pre-filtered to that object kind. Table-structure groups (columns,
+// indexes, fkeys, …) carry a tableName and never participate.
+const groupNodeObjectBrowserFilters: Partial<Record<TreeNodeType, ObjectBrowserFilter>> = {
+  "group-tables": "tables",
+  "group-views": "views",
+  "group-materialized-views": "materializedViews",
+  "group-procedures": "procedures",
+  "group-functions": "functions",
+  "group-internal-functions": "functions",
+  "group-udf-functions": "functions",
+  "group-triggers": "triggers",
+  "group-events": "events",
+  "group-sequences": "sequences",
+  "group-database-indexes": "indexes",
+  "group-packages": "packages",
+  "group-types": "types",
+};
+
+export function objectBrowserFilterForGroupNode(type: TreeNodeType): ObjectBrowserFilter | null {
+  return groupNodeObjectBrowserFilters[type] ?? null;
+}
 
 export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKind | null {
   if (type === "view") return "VIEW";

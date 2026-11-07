@@ -8553,6 +8553,38 @@ fn completion_name_matches(name: &str, filter: &str, mode: Option<&db::Completio
     }
 }
 
+/// DuckDB statistics run over the worker's plain `execute` channel (no new
+/// worker RPC): `duckdb_tables()` exposes `estimated_size` per table.
+#[cfg(feature = "duckdb-sidecar")]
+async fn duckdb_list_object_statistics(
+    client: &crate::db::duckdb_worker_process::DuckDbWorkerClient,
+    database: &str,
+    schema: &str,
+) -> Result<Vec<db::ObjectStatistics>, String> {
+    let schema = if schema.trim().is_empty() { "main" } else { schema.trim() };
+    let sql = format!(
+        "SELECT table_name, estimated_size FROM duckdb_tables() \
+         WHERE database_name = current_database() AND schema_name = '{}'",
+        schema.replace('\'', "''")
+    );
+    let result = client.execute(Some(database.to_string()), sql, None, None, None).await?;
+    Ok(result
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            let name = row.first()?.as_str()?.to_string();
+            let estimated_rows = row.get(1).and_then(serde_json::Value::as_i64);
+            Some(db::ObjectStatistics {
+                name,
+                schema: Some(schema.to_string()),
+                estimated_rows,
+                total_bytes: None,
+                ..Default::default()
+            })
+        })
+        .collect())
+}
+
 async fn list_object_statistics_once(
     state: &AppState,
     connection_id: &str,
@@ -8675,6 +8707,19 @@ async fn list_object_statistics_once(
             db::clickhouse_driver::list_object_statistics(client, clickhouse_metadata_database(database, schema)).await
         }
         PoolKind::MongoDb(client) => db::mongo_driver::list_object_statistics(client, database).await,
+        PoolKind::Sqlite(p) => db::sqlite::list_object_statistics(p, schema).await,
+        #[cfg(feature = "duckdb-sidecar")]
+        PoolKind::DuckDbWorker(client) => duckdb_list_object_statistics(client, database, schema).await,
+        PoolKind::Rqlite(client) => db::rqlite_driver::list_object_statistics(client, schema).await,
+        PoolKind::Turso(client) => db::turso_driver::list_object_statistics(client, schema).await,
+        PoolKind::CloudflareD1(client) => db::cloudflare_d1::list_object_statistics(client, schema).await,
+        PoolKind::DynamoDb(client) => db::dynamodb_driver::list_object_statistics(client).await,
+        PoolKind::Elasticsearch(client) => db::elasticsearch_driver::list_object_statistics(client).await,
+        PoolKind::Easysearch(client) => db::easysearch_driver::list_object_statistics(client).await,
+        PoolKind::Solr(client) => db::solr_driver::list_object_statistics(client).await,
+        PoolKind::CouchDb(client) => db::couchdb_driver::list_object_statistics(client).await,
+        PoolKind::Meilisearch(client) => db::meilisearch_driver::list_object_statistics(client).await,
+        PoolKind::InfluxDb(client) => db::influxdb_driver::list_object_statistics(client, database).await,
         _ => Ok(vec![]),
     }
 }

@@ -7856,6 +7856,8 @@ export default withEnglishFallback({
     generatorCurrentTimestamp: "現在時刻 (DATETIME/TIMESTAMP)",
     generatorCurrentDate: "現在日付 (DATE)",
     generatorSequence: "連番 (1, 2, 3...)",
+    generatorFixed: "固定値",
+    fixedValuePlaceholder: "固定値を入力",
     addGeneratedColumn: "生成列を追加",
     removeGeneratedColumn: "生成列を削除",
     generatedColumns: "自動生成列",

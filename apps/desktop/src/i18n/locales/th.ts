@@ -9652,6 +9652,8 @@ export default withEnglishFallback({
     generatorCurrentTimestamp: "เวลาปัจจุบัน (DATETIME/TIMESTAMP)",
     generatorCurrentDate: "วันที่ปัจจุบัน (DATE)",
     generatorSequence: "ลำดับที่เพิ่มขึ้นอัตโนมัติ (1, 2, 3...)",
+    generatorFixed: "ค่าคงที่",
+    fixedValuePlaceholder: "ป้อนค่าคงที่",
     addGeneratedColumn: "เพิ่มคอลัมน์ที่สร้างอัตโนมัติ",
     removeGeneratedColumn: "ลบคอลัมน์ที่สร้างอัตโนมัติ",
     generatedColumns: "คอลัมน์ที่สร้างอัตโนมัติ",

@@ -9112,6 +9112,8 @@ export default {
     generatorCurrentTimestamp: "Current Timestamp (DATETIME/TIMESTAMP)",
     generatorCurrentDate: "Current Date (DATE)",
     generatorSequence: "Incremental Sequence (1, 2, 3...)",
+    generatorFixed: "Fixed Value",
+    fixedValuePlaceholder: "Enter a fixed value",
     addGeneratedColumn: "Add Generated Column",
     removeGeneratedColumn: "Remove Generated Column",
     generatedColumns: "Auto-generated Columns",

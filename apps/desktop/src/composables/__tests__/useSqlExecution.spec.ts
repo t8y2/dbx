@@ -252,6 +252,29 @@ describe("useSqlExecution", () => {
     vi.mocked(objectMetadataCache.invalidateObjectMetadataCache).mockClear();
   });
 
+  it.each(["sqlserver", "kingbase"] as const)("sends undeclared module variables unchanged to the %s server", async (databaseType) => {
+    useSettingsStore().editorSettings.confirmDangerousSqlExecution = false;
+    const sql = "ALTER PROCEDURE dbo.p AS BEGIN DECLARE @known INT; SELECT @undeclared; END";
+    const activeTab = ref<QueryTab | undefined>({ ...queryTab("app"), sql });
+    const config: ConnectionConfig = { ...connection(databaseType), ...(databaseType === "kingbase" ? { database_info: { compatibilityMode: "sqlserver" } } : {}) };
+    const activeConnection = ref<ConnectionConfig | undefined>(config);
+    const activeOutputView = ref<"result" | "summary" | "explain" | "chart">("result");
+    const queryStore = useQueryStore();
+    const error = 'Must declare the scalar variable "@undeclared".';
+    const executeCurrentSql = vi.spyOn(queryStore, "executeCurrentSql").mockImplementation(async () => {
+      activeTab.value!.result = { columns: ["Error"], rows: [[error]], affected_rows: 0, execution_time_ms: 1, execution_error: true };
+    });
+    const addHistory = vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const execution = useSqlExecution({ activeTab: computed(() => activeTab.value), activeConnection: computed(() => activeConnection.value), executableSql: computed(() => sql), activeOutputView });
+
+    const outcome = await execution.tryExecute();
+
+    expect(execution.showSqlParameterDialog.value).toBe(false);
+    expect(executeCurrentSql).toHaveBeenCalledWith(sql, { tabId: "tab-1" });
+    expect(outcome).toMatchObject({ status: "started", ok: false });
+    expect(addHistory).toHaveBeenCalledWith(expect.objectContaining({ sql, success: false, error }));
+  });
+
   it.each([
     ["pg", "SELECT data ? 'name' FROM events"],
     ["oracle", "SELECT 1 FROM DUAL@remote_db"],

@@ -7914,6 +7914,7 @@ export default withEnglishFallback({
     },
   },
   tableImport: {
+    fixedValue: "Valor fijo",
     title: "Importar datos a tabla",
     titleDatabase: "Importar datos",
     minimize: "Minimizar importación",

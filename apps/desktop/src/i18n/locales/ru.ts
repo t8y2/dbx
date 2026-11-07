@@ -9190,6 +9190,7 @@ export default withEnglishFallback({
     },
   },
   tableImport: {
+    fixedValue: "Фиксированное значение",
     title: "Импорт данных таблицы",
     titleDatabase: "Импорт данных",
     minimize: "Свернуть окно импорта",

@@ -9521,6 +9521,7 @@ export default withEnglishFallback({
     },
   },
   tableImport: {
+    fixedValue: "ค่าคงที่",
     title: "นำเข้าข้อมูล Table",
     titleDatabase: "นำเข้าข้อมูล",
     minimize: "ย่อการนำเข้า",

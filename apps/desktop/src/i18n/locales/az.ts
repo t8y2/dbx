@@ -6629,6 +6629,7 @@ export default withEnglishFallback({
     },
   },
   tableImport: {
+    fixedValue: "Sabit dəyər",
     title: "Cədvəl məlumatlarını idxal et",
     titleDatabase: "Məlumatları idxal et",
     target: "Hədəf cədvəl",

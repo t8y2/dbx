@@ -592,6 +592,37 @@ describe("TableImportDialog batch selection", () => {
     expect(sheetInput()?.value).toBe("Third");
   });
 
+  it("retains fixed values per batch task and sends them when creating tables", async () => {
+    await mountDialog();
+    await click("Next");
+    await click("Add Generated Column");
+    const target = document.body.querySelector<HTMLInputElement>('input[placeholder="Target"]')!;
+    target.value = "source";
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    const pickers = document.body.querySelectorAll<HTMLButtonElement>("[data-generator-picker]");
+    pickers[pickers.length - 1].click();
+    await flushAsyncUpdates();
+    await click("Fixed value");
+    const input = document.body.querySelector<HTMLInputElement>('input[aria-label="Fixed value"]')!;
+    input.value = "  imported  ";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    await click("rows_Second");
+    expect(document.body.querySelector('input[aria-label="Fixed value"]')).toBeNull();
+    await click("rows_First");
+    expect(document.body.querySelector<HTMLInputElement>('input[aria-label="Fixed value"]')?.value).toBe("  imported  ");
+    await selectTask("rows_Third", false);
+    await click("Next");
+    await click("Start Import");
+    expect(mocks.importTableFile).toHaveBeenCalledTimes(2);
+    const first = mocks.importTableFile.mock.calls[0]![0];
+    const second = mocks.importTableFile.mock.calls[1]![0];
+    expect(first).toMatchObject({ createTable: true, table: "rows_First" });
+    expect(first.mappings).toContainEqual({ sourceColumn: "", targetColumn: "source", fixedValue: "  imported  ", targetDataType: "TEXT" });
+    expect(second.mappings).toHaveLength(2);
+  });
+
   it("preserves table names and mappings while an active task is excluded and reselected", async () => {
     await mountDialog();
     await editInputWithValue("rows_First", "custom_first");

@@ -9111,6 +9111,7 @@ export default {
     generatorUuidSimple: "UUID (32-char hex without hyphens)",
     generatorCurrentTimestamp: "Current Timestamp (DATETIME/TIMESTAMP)",
     generatorCurrentDate: "Current Date (DATE)",
+    fixedValue: "Fixed value",
     generatorSequence: "Incremental Sequence (1, 2, 3...)",
     addGeneratedColumn: "Add Generated Column",
     removeGeneratedColumn: "Remove Generated Column",

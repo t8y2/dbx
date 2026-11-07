@@ -154,6 +154,7 @@ impl TableImportGenerator {
 pub enum ImportColumnSource {
     SourceIndex(usize),
     Generator(TableImportGenerator),
+    FixedValue(serde_json::Value),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +209,9 @@ pub struct TableImportColumnMapping {
     pub target_data_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Explicit text (including an empty string) overrides source data and generators.
+    pub fixed_value: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4915,7 +4919,7 @@ fn mapping_indexes_with_mappings<'a>(
     for mapping in mappings {
         let generator = mapping.generator.as_deref().and_then(TableImportGenerator::parse);
         let source_index = columns.iter().position(|column| column == &mapping.source_column);
-        if generator.is_none() && source_index.is_none() {
+        if mapping.fixed_value.is_none() && generator.is_none() && source_index.is_none() {
             return Err(format!("Source column not found: {}", mapping.source_column));
         }
         if mapping.target_column.trim().is_empty() {
@@ -4938,7 +4942,9 @@ fn compile_import_plan(
     let mut column_sources = Vec::with_capacity(mapped.len());
     let mut target_columns = Vec::with_capacity(mapped.len());
     for (source_index, mapping) in mapped {
-        let source = if let Some(gen) = mapping.generator.as_deref().and_then(TableImportGenerator::parse) {
+        let source = if let Some(value) = &mapping.fixed_value {
+            ImportColumnSource::FixedValue(serde_json::Value::String(value.clone()))
+        } else if let Some(gen) = mapping.generator.as_deref().and_then(TableImportGenerator::parse) {
             ImportColumnSource::Generator(gen)
         } else if let Some(idx) = source_index {
             ImportColumnSource::SourceIndex(idx)
@@ -5145,6 +5151,11 @@ fn import_value_rows_sql(
                     );
                     values.push_str(&escape_value_typed(normalized.as_ref(), db_type, data_type));
                 }
+                ImportColumnSource::FixedValue(value) => {
+                    let normalized =
+                        normalize_import_value_cow(value, data_type, db_type, kingbase_oracle_mode, date_time_format);
+                    values.push_str(&escape_value_typed(normalized.as_ref(), db_type, data_type));
+                }
                 ImportColumnSource::Generator(generator) => match generator {
                     TableImportGenerator::Uuid => {
                         let uuid_str = uuid::Uuid::new_v4().to_string();
@@ -5194,6 +5205,7 @@ fn map_import_row_with_plan(
                     row.get(*source_index).cloned().unwrap_or(serde_json::Value::Null)
                 }
                 ImportColumnSource::Generator(generator) => generator.generate_value(row_sequence),
+                ImportColumnSource::FixedValue(value) => value.clone(),
             };
             normalize_import_value(&value, data_type, db_type, kingbase_oracle_mode, date_time_format)
         })
@@ -5344,7 +5356,7 @@ fn textual_source_columns_for_import(
 ) -> HashSet<String> {
     mappings
         .iter()
-        .filter(|mapping| mapping.generator.is_none())
+        .filter(|mapping| mapping.generator.is_none() && mapping.fixed_value.is_none())
         .filter(|mapping| {
             target_column_types
                 .iter()
@@ -7607,6 +7619,9 @@ fn sqlserver_bulk_text_row(
             ImportColumnSource::SourceIndex(source_index) => {
                 source_value = row.get(*source_index).unwrap_or(&serde_json::Value::Null);
             }
+            ImportColumnSource::FixedValue(value) => {
+                source_value = value;
+            }
             ImportColumnSource::Generator(generator) => {
                 owned_value = generator.generate_value(row_index as u64 + 1);
                 source_value = &owned_value;
@@ -9444,12 +9459,14 @@ mod tests {
     fn update_existing_requires_supported_dialect_and_complete_primary_key_mapping() {
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "tenant".to_string(),
                 target_column: "tenant_id".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "name".to_string(),
                 target_column: "name".to_string(),
                 target_data_type: None,
@@ -9493,6 +9510,7 @@ mod tests {
         // only the key discovery itself differs (is_unique instead of is_primary_key).
         let mut doris_mappings = mappings.clone();
         doris_mappings.push(TableImportColumnMapping {
+            fixed_value: None,
             source_column: "uid".to_string(),
             target_column: "id".to_string(),
             target_data_type: None,
@@ -9527,12 +9545,14 @@ mod tests {
         let columns = vec!["name".to_string(), "id".to_string()];
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "id".to_string(),
                 target_column: "user_id".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "name".to_string(),
                 target_column: "display_name".to_string(),
                 target_data_type: None,
@@ -10741,12 +10761,14 @@ mod tests {
         let parsed = parse_csv_bytes(b"name,name\nAda,Lovelace\n", 10).unwrap();
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "name".to_string(),
                 target_column: "first_name".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "name_1".to_string(),
                 target_column: "last_name".to_string(),
                 target_data_type: None,
@@ -11444,6 +11466,7 @@ mod tests {
             .columns
             .iter()
             .map(|column| TableImportColumnMapping {
+                fixed_value: None,
                 source_column: column.clone(),
                 target_column: column.clone(),
                 target_data_type: None,
@@ -11873,6 +11896,7 @@ mod tests {
             mapping_indexes(
                 &parsed,
                 &[TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: "name".to_string(),
                     target_column: "display_name".to_string(),
                     target_data_type: None,
@@ -12217,12 +12241,14 @@ mod tests {
             parse_options: TableImportParseOptions::default(),
             mappings: vec![
                 TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: "id".to_string(),
                     target_column: "id".to_string(),
                     target_data_type: None,
                     generator: None,
                 },
                 TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: "name".to_string(),
                     target_column: "name".to_string(),
                     target_data_type: None,
@@ -12311,12 +12337,14 @@ mod tests {
             parse_options: TableImportParseOptions::default(),
             mappings: vec![
                 TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: "id".to_string(),
                     target_column: "id".to_string(),
                     target_data_type: None,
                     generator: None,
                 },
                 TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: "name".to_string(),
                     target_column: "name".to_string(),
                     target_data_type: None,
@@ -12396,12 +12424,14 @@ mod tests {
             parse_options: TableImportParseOptions::default(),
             mappings: vec![
                 TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: "id".to_string(),
                     target_column: "id".to_string(),
                     target_data_type: None,
                     generator: None,
                 },
                 TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: "name".to_string(),
                     target_column: "name".to_string(),
                     target_data_type: None,
@@ -12781,6 +12811,7 @@ mod tests {
         let mappings = target_types
             .iter()
             .map(|(column, _)| TableImportColumnMapping {
+                fixed_value: None,
                 source_column: column.to_string(),
                 target_column: column.to_string(),
                 target_data_type: None,
@@ -12943,6 +12974,7 @@ mod tests {
         let data = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
         assert_eq!(data.rows, vec![vec![serde_json::json!("1,234.56")], vec![serde_json::json!("-1,234")]]);
         let mappings = vec![TableImportColumnMapping {
+            fixed_value: None,
             source_column: "amount".to_string(),
             target_column: "amount".to_string(),
             target_data_type: None,
@@ -12983,6 +13015,7 @@ mod tests {
         let data = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
         assert_eq!(data.rows, vec![vec![serde_json::json!("123,456")], vec![serde_json::json!("1,234.56")]]);
         let mappings = vec![TableImportColumnMapping {
+            fixed_value: None,
             source_column: "amount".to_string(),
             target_column: "amount".to_string(),
             target_data_type: None,
@@ -13007,6 +13040,7 @@ mod tests {
     fn csv_thousands_separator_uses_same_numeric_normalization() {
         let parsed = parse_csv_bytes(b"amount\n\"1,234.56\"\n\"12,345\"\n", 10).unwrap();
         let mappings = vec![TableImportColumnMapping {
+            fixed_value: None,
             source_column: "amount".to_string(),
             target_column: "amount".to_string(),
             target_data_type: None,
@@ -13048,12 +13082,14 @@ mod tests {
 
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "insert_time".to_string(),
                 target_column: "insert_time".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "id".to_string(),
                 target_column: "id".to_string(),
                 target_data_type: None,
@@ -13224,6 +13260,7 @@ mod tests {
             .columns
             .iter()
             .map(|column| TableImportColumnMapping {
+                fixed_value: None,
                 source_column: column.clone(),
                 target_column: column.clone(),
                 target_data_type: None,
@@ -13372,6 +13409,7 @@ mod tests {
             .columns
             .iter()
             .map(|column| TableImportColumnMapping {
+                fixed_value: None,
                 source_column: column.clone(),
                 target_column: column.clone(),
                 target_data_type: None,
@@ -13408,6 +13446,7 @@ mod tests {
             effective_encoding: None,
         };
         let mappings = vec![TableImportColumnMapping {
+            fixed_value: None,
             source_column: "id".to_string(),
             target_column: "id".to_string(),
             target_data_type: None,
@@ -13428,6 +13467,7 @@ mod tests {
             effective_encoding: None,
         };
         let mappings = vec![TableImportColumnMapping {
+            fixed_value: None,
             source_column: "notes".to_string(),
             target_column: "notes".to_string(),
             target_data_type: None,
@@ -13451,6 +13491,7 @@ mod tests {
             .columns
             .iter()
             .map(|column| TableImportColumnMapping {
+                fixed_value: None,
                 source_column: column.clone(),
                 target_column: column.clone(),
                 target_data_type: None,
@@ -13475,6 +13516,7 @@ mod tests {
             .columns
             .iter()
             .map(|column| TableImportColumnMapping {
+                fixed_value: None,
                 source_column: column.clone(),
                 target_column: column.clone(),
                 target_data_type: None,
@@ -13511,6 +13553,7 @@ mod tests {
             .columns
             .iter()
             .map(|column| TableImportColumnMapping {
+                fixed_value: None,
                 source_column: column.clone(),
                 target_column: column.clone(),
                 target_data_type: None,
@@ -13541,12 +13584,14 @@ mod tests {
         };
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "code".to_string(),
                 target_column: "code".to_string(),
                 target_data_type: Some("VARCHAR(32)".to_string()),
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "amount".to_string(),
                 target_column: "amount".to_string(),
                 target_data_type: Some("DECIMAL(10,2)".to_string()),
@@ -13575,6 +13620,7 @@ mod tests {
             effective_encoding: None,
         };
         let mappings = vec![TableImportColumnMapping {
+            fixed_value: None,
             source_column: "name".to_string(),
             target_column: "name".to_string(),
             target_data_type: Some("VARCHAR".to_string()),
@@ -13650,6 +13696,7 @@ mod tests {
         let mappings = columns
             .iter()
             .map(|column| TableImportColumnMapping {
+                fixed_value: None,
                 source_column: column.clone(),
                 target_column: column.clone(),
                 target_data_type: None,
@@ -13689,6 +13736,7 @@ mod tests {
         let typed_mappings = mappings
             .iter()
             .map(|mapping| TableImportColumnMapping {
+                fixed_value: None,
                 target_data_type: Some("VARCHAR(100)".to_string()),
                 ..mapping.clone()
             })
@@ -13717,6 +13765,7 @@ mod tests {
             effective_encoding: None,
         };
         let mappings = vec![TableImportColumnMapping {
+            fixed_value: None,
             source_column: "name".to_string(),
             target_column: "name".to_string(),
             target_data_type: Some("TEXT, injected INT".to_string()),
@@ -13732,12 +13781,14 @@ mod tests {
     fn builds_import_insert_batches_from_mapped_columns() {
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "id".to_string(),
                 target_column: "user_id".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "name".to_string(),
                 target_column: "display_name".to_string(),
                 target_data_type: None,
@@ -13774,12 +13825,14 @@ mod tests {
     fn hana_import_uses_schema_qualified_single_row_insert() {
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "id".to_string(),
                 target_column: "ID".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "name".to_string(),
                 target_column: "NAME".to_string(),
                 target_data_type: None,
@@ -13826,12 +13879,14 @@ mod tests {
     fn db2_import_uses_schema_qualified_multi_row_insert() {
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "id".to_string(),
                 target_column: "ID".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "name".to_string(),
                 target_column: "NAME".to_string(),
                 target_data_type: None,
@@ -13873,6 +13928,7 @@ mod tests {
         let mappings = vec!["id", "label", "payload"]
             .into_iter()
             .map(|name| TableImportColumnMapping {
+                fixed_value: None,
                 source_column: name.to_string(),
                 target_column: name.to_string(),
                 target_data_type: None,
@@ -14020,6 +14076,7 @@ mod tests {
     #[test]
     fn iris_import_uses_single_row_values_statements() {
         let mappings = vec![TableImportColumnMapping {
+            fixed_value: None,
             source_column: "id".to_string(),
             target_column: "id".to_string(),
             target_data_type: None,
@@ -14045,6 +14102,7 @@ mod tests {
     #[test]
     fn oceanbase_oracle_import_batches_rows_through_insert_all() {
         let mappings = vec![TableImportColumnMapping {
+            fixed_value: None,
             source_column: "id".to_string(),
             target_column: "id".to_string(),
             target_data_type: None,
@@ -14072,6 +14130,7 @@ mod tests {
     #[test]
     fn oceanbase_oracle_import_keeps_single_row_values_statement() {
         let mappings = vec![TableImportColumnMapping {
+            fixed_value: None,
             source_column: "id".to_string(),
             target_column: "id".to_string(),
             target_data_type: None,
@@ -14113,12 +14172,14 @@ mod tests {
         let columns = vec!["id".to_string(), "name".to_string()];
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "id".to_string(),
                 target_column: "target".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "name".to_string(),
                 target_column: "target".to_string(),
                 target_data_type: None,
@@ -14136,12 +14197,14 @@ mod tests {
         let columns = vec!["id".to_string(), "name".to_string()];
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "id".to_string(),
                 target_column: "id".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "name".to_string(),
                 target_column: "name".to_string(),
                 target_data_type: None,
@@ -15048,12 +15111,14 @@ mod tests {
             },
             mappings: vec![
                 TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: "id".to_string(),
                     target_column: "id".to_string(),
                     target_data_type: None,
                     generator: None,
                 },
                 TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: "name".to_string(),
                     target_column: "name".to_string(),
                     target_data_type: None,
@@ -15144,12 +15209,14 @@ mod tests {
             },
             mappings: vec![
                 TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: "id".to_string(),
                     target_column: "id".to_string(),
                     target_data_type: None,
                     generator: None,
                 },
                 TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: "name".to_string(),
                     target_column: "name".to_string(),
                     target_data_type: None,
@@ -15242,6 +15309,7 @@ mod tests {
             mappings: ["tenant_id", "id", "name"]
                 .into_iter()
                 .map(|column| TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: column.to_string(),
                     target_column: column.to_string(),
                     target_data_type: None,
@@ -15330,6 +15398,7 @@ mod tests {
             mappings: ["id", "name"]
                 .into_iter()
                 .map(|column| TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: column.to_string(),
                     target_column: column.to_string(),
                     target_data_type: None,
@@ -15418,6 +15487,7 @@ mod tests {
             mappings: ["id", "name"]
                 .into_iter()
                 .map(|column| TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: column.to_string(),
                     target_column: column.to_string(),
                     target_data_type: None,
@@ -15506,6 +15576,7 @@ mod tests {
             mappings: ["id", "name"]
                 .into_iter()
                 .map(|column| TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: column.to_string(),
                     target_column: column.to_string(),
                     target_data_type: None,
@@ -15591,6 +15662,7 @@ mod tests {
             mappings: ["id", "name"]
                 .into_iter()
                 .map(|column| TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: column.to_string(),
                     target_column: column.to_string(),
                     target_data_type: None,
@@ -15648,12 +15720,14 @@ mod tests {
     fn oracle_import_insert_batches_use_insert_all() {
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "id".to_string(),
                 target_column: "id".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "name".to_string(),
                 target_column: "name".to_string(),
                 target_data_type: None,
@@ -15720,12 +15794,14 @@ mod tests {
     fn import_insert_batches_use_target_column_types_for_mysql_temporal_values() {
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "start".to_string(),
                 target_column: "insurance_start_time".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "raw".to_string(),
                 target_column: "raw_text".to_string(),
                 target_data_type: None,
@@ -15765,6 +15841,7 @@ mod tests {
     #[test]
     fn import_insert_batches_normalize_oracle_unpadded_slash_dates() {
         let mappings = vec![TableImportColumnMapping {
+            fixed_value: None,
             source_column: "created_at".to_string(),
             target_column: "created_at".to_string(),
             target_data_type: None,
@@ -15819,12 +15896,14 @@ mod tests {
 
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "id".to_string(),
                 target_column: "id".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "name".to_string(),
                 target_column: "name".to_string(),
                 target_data_type: None,
@@ -15861,6 +15940,7 @@ mod tests {
 
     fn kingbase_date_import_sql(oracle_mode: bool) -> String {
         let mappings = vec![TableImportColumnMapping {
+            fixed_value: None,
             source_column: "created_at".to_string(),
             target_column: "created_at".to_string(),
             target_data_type: None,
@@ -15914,18 +15994,21 @@ mod tests {
     fn import_insert_batch_normalizes_oracle_date_and_timestamp_columns() {
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "event_id".to_string(),
                 target_column: "EVENT_ID".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "created_at".to_string(),
                 target_column: "CREATED_AT".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "updated_at".to_string(),
                 target_column: "UPDATED_AT".to_string(),
                 target_data_type: None,
@@ -15964,6 +16047,7 @@ mod tests {
     #[test]
     fn import_insert_batches_preserve_sqlserver_unicode_text() {
         let mappings = vec![TableImportColumnMapping {
+            fixed_value: None,
             source_column: "name".to_string(),
             target_column: "name".to_string(),
             target_data_type: None,
@@ -16007,6 +16091,7 @@ mod tests {
         let mappings = columns
             .iter()
             .map(|name| TableImportColumnMapping {
+                fixed_value: None,
                 source_column: name.clone(),
                 target_column: name.clone(),
                 target_data_type: None,
@@ -16041,6 +16126,71 @@ mod tests {
     }
 
     #[test]
+    fn fixed_import_values_round_trip_through_sqlite_insert_batches() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE items (id INTEGER, label TEXT, amount INTEGER)").unwrap();
+        for value in ["O'Reilly 中文", "", "NULL", "  padded  ", "x'); DROP TABLE items; --", "line\nnext"] {
+            let mappings: Vec<TableImportColumnMapping> = serde_json::from_value(serde_json::json!([
+                {"sourceColumn": "id", "targetColumn": "id"},
+                {"sourceColumn": "", "targetColumn": "label", "fixedValue": value},
+                {"sourceColumn": "", "targetColumn": "amount", "fixedValue": "42"}
+            ]))
+            .unwrap();
+            let batch = build_import_insert_batch_from_rows(
+                &[vec![serde_json::json!(1)], vec![serde_json::json!(2)]],
+                &["id".to_string()],
+                &mappings,
+                &[("label".to_string(), "TEXT".to_string()), ("amount".to_string(), "INTEGER".to_string())],
+                "items",
+                "",
+                &DatabaseType::Sqlite,
+            )
+            .unwrap()
+            .unwrap();
+            connection.execute_batch(&batch.sql).unwrap();
+            let mut statement = connection.prepare("SELECT label, amount FROM items ORDER BY id").unwrap();
+            let actual = statement
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(actual, vec![(value.to_string(), 42), (value.to_string(), 42)]);
+            connection.execute_batch("DELETE FROM items").unwrap();
+        }
+    }
+
+    #[test]
+    fn fixed_import_values_reach_typed_and_bulk_row_paths() {
+        let mappings: Vec<TableImportColumnMapping> = serde_json::from_value(serde_json::json!([
+            {"sourceColumn": "", "targetColumn": "label", "fixedValue": "O'Reilly 中文"},
+            {"sourceColumn": "", "targetColumn": "amount", "fixedValue": "42"},
+            {"sourceColumn": "", "targetColumn": "empty", "fixedValue": ""}
+        ]))
+        .unwrap();
+        let plan = compile_import_plan(
+            &[],
+            &mappings,
+            &[
+                ("label".to_string(), "TEXT".to_string()),
+                ("amount".to_string(), "INTEGER".to_string()),
+                ("empty".to_string(), "TEXT".to_string()),
+            ],
+        )
+        .unwrap();
+        for sequence in [1, 500, 501] {
+            assert_eq!(
+                map_import_row_with_plan(&[], &plan, &DatabaseType::Postgres, false, None, sequence),
+                vec![serde_json::json!("O'Reilly 中文"), serde_json::json!("42"), serde_json::json!("")]
+            );
+            assert_eq!(
+                sqlserver_bulk_text_row(&[], &plan, None, sequence as usize, usize::MAX).unwrap(),
+                vec![Some("O'Reilly 中文".to_string()), Some("42".to_string()), Some(String::new())]
+            );
+        }
+        assert!(sqlserver_bulk_text_row(&[], &plan, None, 0, 1).is_err());
+    }
+
+    #[test]
     fn table_import_generator_parses_supported_keys() {
         assert_eq!(TableImportGenerator::parse("uuid"), Some(TableImportGenerator::Uuid));
         assert_eq!(TableImportGenerator::parse("uuid_v4"), Some(TableImportGenerator::Uuid));
@@ -16059,24 +16209,28 @@ mod tests {
         let columns = vec!["name".to_string()];
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "".to_string(),
                 target_column: "id".to_string(),
                 target_data_type: None,
                 generator: Some("uuid".to_string()),
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "name".to_string(),
                 target_column: "name".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "".to_string(),
                 target_column: "created_at".to_string(),
                 target_data_type: None,
                 generator: Some("current_timestamp".to_string()),
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "".to_string(),
                 target_column: "seq".to_string(),
                 target_data_type: None,
@@ -16131,18 +16285,21 @@ mod tests {
         };
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "".to_string(),
                 target_column: "id".to_string(),
                 target_data_type: None,
                 generator: Some("uuid".to_string()),
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "username".to_string(),
                 target_column: "username".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "".to_string(),
                 target_column: "created_at".to_string(),
                 target_data_type: None,
@@ -16300,12 +16457,14 @@ mod tests {
         };
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "".to_string(),
                 target_column: "seq".to_string(),
                 target_data_type: Some("integer".to_string()),
                 generator: Some("sequence".to_string()),
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "name".to_string(),
                 target_column: "name".to_string(),
                 target_data_type: None,

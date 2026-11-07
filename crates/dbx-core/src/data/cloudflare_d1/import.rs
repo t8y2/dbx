@@ -35,10 +35,15 @@ pub(crate) fn build_import_insert_batches(
                 .map(|(_, data_type)| data_type.clone())
         })
         .collect::<Vec<_>>();
-    if rows.iter().any(|row| {
-        row.iter()
-            .any(|value| matches!(value, serde_json::Value::String(text) if text.contains(D1_CURRENT_TIMESTAMP_TOKEN)))
-    }) {
+    if mappings
+        .iter()
+        .any(|mapping| mapping.fixed_value.as_deref().is_some_and(|value| value.contains(D1_CURRENT_TIMESTAMP_TOKEN)))
+        || rows.iter().any(|row| {
+            row.iter().any(
+                |value| matches!(value, serde_json::Value::String(text) if text.contains(D1_CURRENT_TIMESTAMP_TOKEN)),
+            )
+        })
+    {
         return Err("import data contains a reserved expression token".to_string());
     }
     let rows = rows
@@ -50,6 +55,9 @@ pub(crate) fn build_import_insert_batches(
                 .iter()
                 .zip(mapped.iter())
                 .map(|(mapping, (source_index, _))| {
+                    if let Some(value) = &mapping.fixed_value {
+                        return serde_json::Value::String(value.clone());
+                    }
                     if let Some(generator) = mapping.generator.as_deref().and_then(TableImportGenerator::parse) {
                         if matches!(generator, TableImportGenerator::CurrentTimestamp) {
                             return serde_json::Value::String(D1_CURRENT_TIMESTAMP_TOKEN.to_string());
@@ -121,6 +129,7 @@ mod tests {
         let rows = vec![vec![serde_json::json!("a".repeat(60_000))], vec![serde_json::json!("b".repeat(60_000))]];
         let columns = vec!["value".to_string()];
         let mappings = vec![TableImportColumnMapping {
+            fixed_value: None,
             source_column: "value".to_string(),
             target_column: "value".to_string(),
             target_data_type: None,
@@ -151,12 +160,14 @@ mod tests {
         let columns = vec!["id".to_string(), "created_at".to_string()];
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "id".to_string(),
                 target_column: "id".to_string(),
                 target_data_type: None,
                 generator: None,
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "created_at".to_string(),
                 target_column: "created_at".to_string(),
                 target_data_type: None,
@@ -186,6 +197,7 @@ mod tests {
         let rows = vec![vec![serde_json::Value::String(D1_CURRENT_TIMESTAMP_TOKEN.to_string())]];
         let columns = vec!["payload".to_string()];
         let mappings = vec![TableImportColumnMapping {
+            fixed_value: None,
             source_column: "payload".to_string(),
             target_column: "payload".to_string(),
             target_data_type: None,
@@ -216,12 +228,14 @@ mod tests {
         let columns = vec!["name".to_string()];
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "".to_string(),
                 target_column: "seq".to_string(),
                 target_data_type: Some("integer".to_string()),
                 generator: Some("sequence".to_string()),
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "name".to_string(),
                 target_column: "name".to_string(),
                 target_data_type: None,
@@ -267,12 +281,14 @@ mod tests {
         let columns = vec!["name".to_string()];
         let mappings = vec![
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "".to_string(),
                 target_column: "created_at".to_string(),
                 target_data_type: Some("text".to_string()),
                 generator: Some("current_timestamp".to_string()),
             },
             TableImportColumnMapping {
+                fixed_value: None,
                 source_column: "name".to_string(),
                 target_column: "name".to_string(),
                 target_data_type: None,
@@ -298,5 +314,21 @@ mod tests {
         assert!(batches[0].sql.contains("(CURRENT_TIMESTAMP, 'row1')"), "sql: {}", batches[0].sql);
         assert!(batches[0].sql.contains("(CURRENT_TIMESTAMP, 'row2')"), "sql: {}", batches[0].sql);
         assert!(!batches[0].sql.contains(D1_CURRENT_TIMESTAMP_TOKEN), "sql: {}", batches[0].sql);
+    }
+    #[test]
+    fn cloudflare_d1_fixed_values_are_literals_and_reserved_tokens_are_rejected() {
+        let mappings: Vec<TableImportColumnMapping> = serde_json::from_value(serde_json::json!([
+            {"sourceColumn": "", "targetColumn": "label", "fixedValue": "O'Reilly"}
+        ]))
+        .unwrap();
+        let batches =
+            build_import_insert_batches(&[vec![], vec![]], &[], &mappings, &[], "items", "", 100, 500).unwrap();
+        assert_eq!(batches[0].row_count, 2);
+        assert!(batches[0].sql.contains("'O''Reilly'"));
+        let mut mappings = mappings;
+        mappings[0].fixed_value = Some(D1_CURRENT_TIMESTAMP_TOKEN.to_string());
+        assert!(build_import_insert_batches(&[vec![]], &[], &mappings, &[], "items", "", 100, 0)
+            .unwrap_err()
+            .contains("reserved expression token"));
     }
 }

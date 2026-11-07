@@ -149,6 +149,7 @@ fn csv_mappings(columns: &[String]) -> Vec<TableImportColumnMapping> {
     columns
         .iter()
         .map(|column| TableImportColumnMapping {
+            fixed_value: None,
             source_column: column.clone(),
             target_column: column.clone(),
             target_data_type: None,

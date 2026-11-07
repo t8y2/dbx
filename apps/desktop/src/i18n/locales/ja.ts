@@ -7737,6 +7737,7 @@ export default withEnglishFallback({
     },
   },
   tableImport: {
+    fixedValue: "固定値",
     title: "テーブルデータをインポート",
     titleDatabase: "データをインポート",
     minimize: "インポートを最小化",

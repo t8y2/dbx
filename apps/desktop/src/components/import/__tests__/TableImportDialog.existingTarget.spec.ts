@@ -934,4 +934,48 @@ describe("TableImportDialog existing targets", () => {
       expect.any(Function),
     );
   });
+  it.each(["O'Reilly 中文", "", "0", "NULL"])("previews and imports a fixed added-column value %j", async (value) => {
+    i18n.global.locale.value = "en";
+    mocks.getColumns.mockResolvedValueOnce([
+      { name: "id", data_type: "INTEGER", is_nullable: false, is_primary_key: true },
+      { name: "name", data_type: "TEXT", is_nullable: false, is_primary_key: false },
+    ]);
+    mocks.previewTableImportFile.mockResolvedValueOnce({
+      fileName: "ids.csv",
+      filePath: "/tmp/ids.csv",
+      fileType: "csv",
+      sizeBytes: 20,
+      columns: ["id"],
+      rows: [[1], [2]],
+      totalRows: 2,
+      sourceFingerprint: "ids",
+    });
+    await mountDialog({ prefillTable: "existing_target" });
+    await selectWorkbook("ids.csv");
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+    document.body.querySelector<HTMLButtonElement>('button[data-action="auto-generate-required"]')?.click();
+    await flushAsyncUpdates();
+    const pickers = document.body.querySelectorAll<HTMLButtonElement>("[data-generator-picker]");
+    pickers[pickers.length - 1].click();
+    await flushAsyncUpdates();
+    const option = buttonContaining("Fixed value");
+    expect(option).toBeTruthy();
+    option?.click();
+    await flushAsyncUpdates();
+    const input = document.body.querySelector<HTMLInputElement>('input[aria-label="Fixed value"]')!;
+    expect(input).toBeTruthy();
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushAsyncUpdates();
+    const rows = [...document.body.querySelectorAll("tbody tr")];
+    expect(rows).toHaveLength(2);
+    for (const row of rows) expect(row.lastElementChild?.textContent?.trim()).toBe(value);
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+    buttonContaining("Start Import")?.click();
+    await flushAsyncUpdates();
+    const request = mocks.importTableFile.mock.calls[0][0];
+    expect(request.mappings[1]).toEqual({ sourceColumn: "", targetColumn: "name", fixedValue: value });
+  });
 });

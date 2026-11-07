@@ -407,6 +407,7 @@ fn import_request(
         mappings: columns(options.columns)
             .into_iter()
             .map(|column| TableImportColumnMapping {
+                fixed_value: None,
                 source_column: column.clone(),
                 target_column: column,
                 target_data_type: None,

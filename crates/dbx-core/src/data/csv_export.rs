@@ -544,6 +544,7 @@ mod tests {
             mappings: ["id", "name", "note"]
                 .into_iter()
                 .map(|column| TableImportColumnMapping {
+                    fixed_value: None,
                     source_column: column.to_string(),
                     target_column: column.to_string(),
                     target_data_type: None,

@@ -6833,6 +6833,7 @@ export default withEnglishFallback({
     },
   },
   tableImport: {
+    fixedValue: "固定值",
     title: "匯入資料表資料",
     titleDatabase: "匯入資料",
     minimize: "最小化匯入視窗",

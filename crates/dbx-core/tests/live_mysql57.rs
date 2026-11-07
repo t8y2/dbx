@@ -601,6 +601,7 @@ async fn live_mysql_csv_temporal_export_round_trip_preserves_dbx_force_text_valu
         .columns
         .iter()
         .map(|column| TableImportColumnMapping {
+            fixed_value: None,
             source_column: column.clone(),
             target_column: column.clone(),
             target_data_type: None,

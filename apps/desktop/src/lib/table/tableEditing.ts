@@ -5,7 +5,7 @@ export const DBX_ROWID_COLUMN = "__DBX_ROWID";
 export const DBX_NEO4J_ELEMENT_ID_COLUMN = "__DBX_ELEMENT_ID";
 export const DBX_TDENGINE_TBNAME_COLUMN = "tbname";
 
-function isViewTableType(tableType?: string): boolean {
+export function isViewTableType(tableType?: string): boolean {
   return tableType?.toUpperCase().includes("VIEW") === true;
 }
 

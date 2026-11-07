@@ -87,6 +87,7 @@ export interface GeneratedColumnItem {
   targetColumn: string;
   generator: TableImportGeneratorKey | string;
   targetDataType?: string;
+  fixedValue?: string;
 }
 
 interface BatchImportTask {
@@ -267,7 +268,7 @@ const mappedColumns = computed<api.TableImportColumnMapping[]>(() => {
       return {
         sourceColumn: "",
         targetColumn,
-        generator,
+        ...(generator === "fixed" ? { fixedValue: item.fixedValue ?? "" } : { generator }),
         ...(targetMode.value === "create" ? { targetDataType } : {}),
       };
     });
@@ -332,7 +333,7 @@ const canImport = computed(() => {
       .map((item) => ({
         sourceColumn: "",
         targetColumn: item.targetColumn.trim(),
-        generator: item.generator || "uuid",
+        ...(item.generator === "fixed" ? { fixedValue: item.fixedValue ?? "" } : { generator: item.generator || "uuid" }),
         targetDataType: item.targetDataType || suggestDataTypeForGenerator(item.generator, structureDatabaseType.value),
       }));
     const mappings = [...sourceMappings, ...extraMappings];
@@ -1348,6 +1349,7 @@ function selectGeneratorOption(generator: string) {
 
 function generatorLabel(key: string | undefined): string {
   if (!key) return t("tableImport.sourceValue");
+  if (key === "fixed") return t("tableImport.fixedValue");
   const opt = TABLE_IMPORT_GENERATOR_OPTIONS.find((o) => o.value === key);
   return opt ? t(opt.labelKey) : key;
 }
@@ -1651,7 +1653,7 @@ async function startBatchImport() {
         .map((item) => ({
           sourceColumn: "",
           targetColumn: item.targetColumn.trim(),
-          generator: item.generator || "uuid",
+          ...(item.generator === "fixed" ? { fixedValue: item.fixedValue ?? "" } : { generator: item.generator || "uuid" }),
           targetDataType: item.targetDataType || suggestDataTypeForGenerator(item.generator, structureDatabaseType.value),
         }));
       const mappings = [...sourceMappings, ...extraMappings];
@@ -2433,6 +2435,14 @@ watch(rawProgressPercent, (percent) => {
                     <button type="button" class="flex h-7 w-7 items-center justify-center rounded-md border text-muted-foreground hover:bg-destructive/10 hover:text-destructive" :title="t('tableImport.removeGeneratedColumn')" @click="removeGeneratedColumn(genCol.id)">
                       <Trash2 class="h-3.5 w-3.5" />
                     </button>
+                    <input
+                      v-if="genCol.generator === 'fixed'"
+                      :value="genCol.fixedValue ?? ''"
+                      :aria-label="t('tableImport.fixedValue')"
+                      :placeholder="t('tableImport.fixedValue')"
+                      class="col-span-full h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none focus-visible:ring-1 focus-visible:ring-ring/25"
+                      @input="(e) => updateGeneratedColumn(genCol.id, { fixedValue: (e.target as HTMLInputElement).value })"
+                    />
                   </div>
                 </div>
               </div>
@@ -2458,7 +2468,7 @@ watch(rawProgressPercent, (percent) => {
                       <th v-for="genCol in activeGeneratedColumns" :key="genCol.id" class="border-b border-r px-2 py-1.5 text-left font-medium transition-colors bg-muted/10">
                         <span class="block max-w-[140px] truncate text-primary font-medium" :title="`${genCol.targetColumn} (${genCol.generator})`">
                           {{ genCol.targetColumn }}
-                          <span class="ml-1 text-[10px] text-muted-foreground">[{{ genCol.generator }}]</span>
+                          <span class="ml-1 text-[10px] text-muted-foreground">[{{ genCol.generator === "fixed" ? t("tableImport.fixedValue") : genCol.generator }}]</span>
                         </span>
                       </th>
                     </tr>
@@ -2480,7 +2490,7 @@ watch(rawProgressPercent, (percent) => {
                       </td>
                       <td v-for="genCol in activeGeneratedColumns" :key="genCol.id" class="max-w-[180px] border-b border-r px-2 py-1.5 font-mono text-primary/80 bg-muted/5 transition-colors">
                         <span class="block truncate">
-                          {{ formatTableImportPreviewCell(null, genCol.generator, rowIndex) }}
+                          {{ genCol.generator === "fixed" ? (genCol.fixedValue ?? "") : formatTableImportPreviewCell(null, genCol.generator, rowIndex) }}
                         </span>
                       </td>
                     </tr>
@@ -2687,6 +2697,9 @@ watch(rawProgressPercent, (percent) => {
           </div>
           <button v-if="activeGeneratorColumn?.type === 'source'" type="button" role="option" class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono hover:bg-accent hover:text-accent-foreground" @click="selectGeneratorOption('')">
             {{ t("tableImport.sourceValue") }}
+          </button>
+          <button v-if="activeGeneratorColumn?.type === 'generated'" type="button" role="option" class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono hover:bg-accent hover:text-accent-foreground" @click="selectGeneratorOption('fixed')">
+            {{ t("tableImport.fixedValue") }}
           </button>
           <button v-for="opt in TABLE_IMPORT_GENERATOR_OPTIONS" :key="opt.value" type="button" role="option" class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono hover:bg-accent hover:text-accent-foreground" @click="selectGeneratorOption(opt.value)">
             {{ t(opt.labelKey) }}

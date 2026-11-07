@@ -112,6 +112,7 @@ async fn live_sqlserver_import_state(
 
 fn live_sqlserver_import_mapping(source: &str, target: &str) -> TableImportColumnMapping {
     TableImportColumnMapping {
+        fixed_value: None,
         source_column: source.to_string(),
         target_column: target.to_string(),
         target_data_type: None,

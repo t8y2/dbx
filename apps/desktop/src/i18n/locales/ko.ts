@@ -7751,6 +7751,7 @@ export default withEnglishFallback({
     },
   },
   tableImport: {
+    fixedValue: "고정 값",
     title: "테이블 데이터 가져오기",
     titleDatabase: "데이터 가져오기",
     minimize: "가져오기 창 최소화",

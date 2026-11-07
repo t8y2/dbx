@@ -6511,6 +6511,7 @@ export default withEnglishFallback({
     },
   },
   tableImport: {
+    fixedValue: "Sabit değer",
     title: "Tablo Verisi İçe Aktar",
     titleDatabase: "Veri İçe Aktar",
     target: "Hedef tablo",

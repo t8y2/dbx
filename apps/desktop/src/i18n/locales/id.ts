@@ -7293,6 +7293,7 @@ export default withEnglishFallback({
   },
 
   tableImport: {
+    fixedValue: "Nilai tetap",
     title: "Impor Data Tabel",
     titleDatabase: "Impor Data",
     minimize: "Perkecil impor",

@@ -6344,6 +6344,7 @@ export interface TableImportColumnMapping {
   targetColumn: string;
   targetDataType?: string | null;
   generator?: string | null;
+  fixedValue?: string | null;
 }
 
 export interface TableImportParseOptions {

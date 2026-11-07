@@ -7326,6 +7326,7 @@ export default withEnglishFallback({
     },
   },
   tableImport: {
+    fixedValue: "Stała wartość",
     title: "Aktualizacja zabezpieczeń danych",
     titleDatabase: "Importuj dane",
     minimize: "Minimalizuj import",

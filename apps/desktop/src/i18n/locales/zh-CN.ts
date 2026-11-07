@@ -9077,6 +9077,7 @@ export default withEnglishFallback({
     generatorUuidSimple: "UUID (32位无短横线)",
     generatorCurrentTimestamp: "当前时间 (DATETIME/TIMESTAMP)",
     generatorCurrentDate: "当前日期 (DATE)",
+    fixedValue: "固定值",
     generatorSequence: "自增序号 (1, 2, 3...)",
     addGeneratedColumn: "添加生成列",
     removeGeneratedColumn: "删除生成列",

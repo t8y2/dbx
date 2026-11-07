@@ -266,6 +266,15 @@ function currentDriverProfile(): string | undefined {
   return activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId)?.driver_profile : undefined;
 }
 
+function externalTableKind(node: TreeNode): string | undefined {
+  if (node.type !== "table") return;
+  const kind = node.tableType
+    ?.trim()
+    .toUpperCase()
+    .replace(/[\s_]+/g, " ");
+  return kind === "FOREIGN TABLE" || kind === "EXTERNAL TABLE" ? kind : undefined;
+}
+
 function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
   switch (node.type) {
     case "connection":
@@ -295,6 +304,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: FolderOpen, colorClass: "text-amber-500" };
     }
     case "table":
+      if (externalTableKind(node)) return { icon: Link2, colorClass: "text-cyan-500" };
       return { icon: Table, colorClass: "text-green-500" };
     case "view":
       return { icon: Eye, colorClass: "text-purple-500" };
@@ -577,9 +587,11 @@ const detailTooltip = computed(() => {
   }
   const column = node.type === "column" ? (node.meta as ColumnInfo | undefined) : undefined;
   const comment = column && "comment" in column ? column.comment : node.comment;
-  if ((!comment && !column) || !isSidebarCommentSupportedType(node.type)) return null;
+  const tableKind = externalTableKind(node);
+  if ((!comment && !column && !tableKind) || !isSidebarCommentSupportedType(node.type)) return null;
   const rows: ConnectionDetailRow[] = [
     { label: t("connection.name"), value: visibleLabel(node) },
+    ...(tableKind ? [{ label: t("postgresForeignTable.tableKind"), value: tableKind }] : []),
     ...(column ? [{ label: t("structureEditor.nullable"), value: t(column.is_nullable ? "structureEditor.nullable" : "structureEditor.notNull") }] : []),
     { label: t("structureEditor.comment"), value: cleanTooltipValue(comment), multiline: true },
   ].filter((row) => row.value);

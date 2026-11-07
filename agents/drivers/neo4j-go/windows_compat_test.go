@@ -23,7 +23,7 @@ func TestWindowsAgentBinaryCompatibility(t *testing.T) {
 	}
 	foundDriver := false
 	for _, dependency := range info.Deps {
-		if dependency.Path == "github.com/neo4j/neo4j-go-driver/v5" && dependency.Version == "v5.28.4" {
+		if dependency.Path == "github.com/neo4j/neo4j-go-driver/v5" && dependency.Version == "v5.28.6" {
 			foundDriver = true
 		}
 		if dependency.Path == "github.com/neo4j/neo4j-go-driver/v6" {

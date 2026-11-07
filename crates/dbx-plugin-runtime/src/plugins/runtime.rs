@@ -160,7 +160,20 @@ struct PluginNotification<'a> {
     params: serde_json::Value,
 }
 
-type PendingResponse = oneshot::Sender<Result<serde_json::Value, String>>;
+struct PendingResponse {
+    sender: oneshot::Sender<Result<serde_json::Value, String>>,
+    connection_state: Option<(String, bool)>,
+}
+
+fn connection_state_from_request(method: &str, params: &serde_json::Value) -> Option<(String, bool)> {
+    let connected = match method {
+        super::PLUGIN_CONNECTION_CONNECT_METHOD => true,
+        super::PLUGIN_CONNECTION_DISCONNECT_METHOD => false,
+        _ => return None,
+    };
+    let id = params.get("connection")?.get("id")?.as_str()?;
+    (!id.trim().is_empty()).then(|| (id.to_string(), connected))
+}
 
 pub struct PluginSidecarSession {
     plugin: InstalledPlugin,
@@ -170,6 +183,10 @@ pub struct PluginSidecarSession {
     shutdown_lock: Mutex<()>,
     stdin: Mutex<ChildStdin>,
     pending: Arc<Mutex<HashMap<u64, PendingResponse>>>,
+    /// Transport state is updated by the ordered stdout dispatcher, before
+    /// notifications reach asynchronous host/UI relays. It belongs to this
+    /// sidecar incarnation, so an old process cannot retire a replacement.
+    connection_states: std::sync::Mutex<HashMap<String, bool>>,
     next_request_id: AtomicU64,
     events: broadcast::Sender<PluginEvent>,
     binary_messages: broadcast::Sender<PluginBinaryMessage>,
@@ -308,6 +325,7 @@ impl PluginSidecarSession {
             shutdown_lock: Mutex::new(()),
             stdin: Mutex::new(stdin),
             pending,
+            connection_states: Default::default(),
             next_request_id: AtomicU64::new(1),
             events,
             binary_messages,
@@ -382,6 +400,21 @@ impl PluginSidecarSession {
 
     pub fn status(&self) -> PluginSessionStatus {
         self.status.borrow().clone()
+    }
+
+    pub(super) fn connection_is_connected(&self, connection_id: &str) -> bool {
+        self.connection_states
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(connection_id)
+            .copied()
+            // Providers without transport-state events retain their existing
+            // lifecycle/process-based behavior.
+            .unwrap_or(true)
+    }
+
+    fn record_connection_state(&self, connection_id: String, connected: bool) {
+        self.connection_states.lock().unwrap_or_else(|error| error.into_inner()).insert(connection_id, connected);
     }
 
     pub async fn handshake(&self) -> Option<PluginHandshake> {
@@ -548,11 +581,12 @@ impl PluginSidecarSession {
     ) -> Result<serde_json::Value, String> {
         self.ensure_running_or_starting()?;
         validate_protocol_name(method)?;
+        let connection_state = connection_state_from_request(method, &params);
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let request = PluginRequest { jsonrpc: "2.0", id: request_id, driver, method, params };
         let payload = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
         let (sender, receiver) = oneshot::channel();
-        self.pending.lock().await.insert(request_id, sender);
+        self.pending.lock().await.insert(request_id, PendingResponse { sender, connection_state });
         if let Err(error) = self.write_json(&payload).await {
             self.pending.lock().await.remove(&request_id);
             return Err(error);
@@ -783,8 +817,20 @@ impl PluginSidecarSession {
         }
         if let Some(request_id) = value.get("id").and_then(serde_json::Value::as_u64) {
             let result = decode_response_value(&self.plugin.manifest.id, value);
-            if let Some(sender) = self.pending.lock().await.remove(&request_id) {
-                let _ = sender.send(result);
+            if let Some(pending) = self.pending.lock().await.remove(&request_id) {
+                // Apply confirmed lifecycle operations in the same order as
+                // transport events, not when the awaiting caller gets CPU.
+                // A disconnect after a successful reconnect must stay offline;
+                // a disconnect before that success must not retire it later.
+                if result
+                    .as_ref()
+                    .is_ok_and(|value| value.get("success").and_then(serde_json::Value::as_bool) != Some(false))
+                {
+                    if let Some((connection_id, connected)) = pending.connection_state {
+                        self.record_connection_state(connection_id, connected);
+                    }
+                }
+                let _ = pending.sender.send(result);
             } else {
                 log::warn!("[plugin:{}] ignored response for unknown request {request_id}", self.plugin.manifest.id);
             }
@@ -816,6 +862,16 @@ impl PluginSidecarSession {
                 method: method.to_string(),
                 params: value.get("params").cloned().unwrap_or(serde_json::Value::Null),
             };
+            if event.method == "ssh/session/state" {
+                if let (Some(connection_id), Some(state)) = (
+                    event.params.get("connectionId").and_then(serde_json::Value::as_str),
+                    event.params.get("state").and_then(serde_json::Value::as_str),
+                ) {
+                    if !connection_id.trim().is_empty() && matches!(state, "connected" | "disconnected") {
+                        self.record_connection_state(connection_id.to_string(), state == "connected");
+                    }
+                }
+            }
             let _ = self.events.send(event);
             return Ok(());
         }
@@ -1175,8 +1231,8 @@ fn decode_response_value(plugin_id: &str, value: serde_json::Value) -> Result<se
 
 async fn fail_pending(pending: &Mutex<HashMap<u64, PendingResponse>>, message: &str) {
     let responses = std::mem::take(&mut *pending.lock().await);
-    for (_, sender) in responses {
-        let _ = sender.send(Err(message.to_string()));
+    for (_, pending) in responses {
+        let _ = pending.sender.send(Err(message.to_string()));
     }
 }
 

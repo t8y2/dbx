@@ -97,7 +97,9 @@ export const migrationRetry = (): Promise<MigrationReport> => invoke("migration_
 export const migrationCleanupBackups = (): Promise<void> => invoke("migration_cleanup_backups");
 import type { DetachedTabHandoff } from "@/lib/app/detachedTabHandoff";
 import { BackendErrorException, type BackendError } from "@/lib/backend/errorUtils";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { resolveWindowContext } from "@/lib/app/windowContext";
+import { CONNECTION_STATE_CHANGED_EVENT, type ConnectionStateChangedEvent } from "@/lib/connection/connectionStateEvents";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import type { MongoBulkWriteResult } from "@/lib/mongo/mongoShellCommand";
 import { ExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
@@ -1759,7 +1761,20 @@ export async function salesforceCurrentUser(connectionId: string): Promise<Sales
 }
 
 export async function connectDb(config: ConnectionConfig, clientAttempt?: number): Promise<string> {
-  return invokeBackend("connect_db", { config, clientAttempt });
+  const id = await invokeBackend<string>("connect_db", { config, clientAttempt });
+  void notifyConnectionStateChanged();
+  return id;
+}
+
+async function notifyConnectionStateChanged(configurationChanged = false): Promise<void> {
+  // A closed recipient window must not turn a successful backend operation into
+  // an error. Never broadcast connection configurations or session credentials.
+  try {
+    const payload: ConnectionStateChangedEvent = { sourceWindowLabel: resolveWindowContext().windowLabel, configurationChanged };
+    await emit(CONNECTION_STATE_CHANGED_EVENT, payload);
+  } catch (error) {
+    console.warn("[DBX] connection state notification failed:", error);
+  }
 }
 
 export async function connectionDatabaseInfo(connectionId: string, database?: string): Promise<DatabaseConnectionInfo | undefined> {
@@ -1797,7 +1812,8 @@ export async function connectionFinalProxyPort(config: ConnectionConfig): Promis
 }
 
 export async function disconnectDb(connectionId: string, clientAttempt?: number): Promise<void> {
-  return invokeBackend("disconnect_db", { connectionId, clientAttempt });
+  await invokeBackend("disconnect_db", { connectionId, clientAttempt });
+  void notifyConnectionStateChanged();
 }
 
 export async function sessionCredentialStatus(connectionId: string): Promise<boolean> {
@@ -1831,10 +1847,11 @@ export async function prewarmConnection(connectionId: string, database?: string,
   return invokeBackend("prewarm_connection", { connectionId, database, catalog, clientSessionId });
 }
 
-export async function connectionIdentifierQuote(connectionId: string, database?: string): Promise<string | undefined> {
+export async function connectionIdentifierQuote(connectionId: string, database?: string, options?: { existingOnly?: boolean }): Promise<string | undefined> {
   const quote = await invoke<string | null>("connection_identifier_quote", {
     connectionId,
     database,
+    ...(options?.existingOnly ? { existingOnly: true } : {}),
   });
   return quote ?? undefined;
 }
@@ -3128,7 +3145,8 @@ export async function exportDocsHtml(filePath: string, snapshot: SchemaSnapshot,
 }
 
 export async function saveConnections(configs: ConnectionConfig[], removedIds: string[] = []): Promise<void> {
-  return invoke("save_connections", { configs, removedIds });
+  await invoke("save_connections", { configs, removedIds });
+  void notifyConnectionStateChanged(true);
 }
 
 export async function loadConnections(legacySidebarShowUserAdmin?: boolean): Promise<ConnectionConfig[]> {

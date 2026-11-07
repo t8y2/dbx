@@ -3031,8 +3031,13 @@ pub async fn connection_identifier_quote(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
     database: Option<String>,
+    existing_only: Option<bool>,
 ) -> Result<Option<String>, String> {
-    state.connection_identifier_quote(&connection_id, database.as_deref()).await
+    if existing_only.unwrap_or(false) {
+        state.existing_connection_identifier_quote(&connection_id, database.as_deref()).await
+    } else {
+        state.connection_identifier_quote(&connection_id, database.as_deref()).await
+    }
 }
 
 #[tauri::command]

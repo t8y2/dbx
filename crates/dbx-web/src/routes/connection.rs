@@ -173,6 +173,7 @@ pub struct ReplaceNacosSessionCredentialRequest {
 pub struct ConnectionIdentifierQuoteRequest {
     pub connection_id: String,
     pub database: Option<String>,
+    pub existing_only: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -992,12 +993,12 @@ pub async fn connection_identifier_quote(
     State(state): State<Arc<WebState>>,
     Json(body): Json<ConnectionIdentifierQuoteRequest>,
 ) -> Result<Json<Option<String>>, AppError> {
-    state
-        .app
-        .connection_identifier_quote(&body.connection_id, body.database.as_deref())
-        .await
-        .map(Json)
-        .map_err(AppError::from)
+    let result = if body.existing_only.unwrap_or(false) {
+        state.app.existing_connection_identifier_quote(&body.connection_id, body.database.as_deref()).await
+    } else {
+        state.app.connection_identifier_quote(&body.connection_id, body.database.as_deref()).await
+    };
+    result.map(Json).map_err(AppError::from)
 }
 
 pub async fn close_database_connection(

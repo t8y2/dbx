@@ -2523,6 +2523,7 @@ export default withEnglishFallback({
     selectConnection: "选择连接",
     selectConnectionRequired: "请先选择连接",
     searchConnection: "搜索连接...",
+    noConnectedConnections: "暂无已建立的连接，请先在侧边栏打开连接。",
     selectCatalog: "选择 Catalog",
     searchCatalog: "搜索 Catalog...",
     selectDatabase: "选择数据库",

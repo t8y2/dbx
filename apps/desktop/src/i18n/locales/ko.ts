@@ -2225,6 +2225,7 @@ export default withEnglishFallback({
     saveAllChanges: "모두 저장",
     selectConnection: "연결 선택",
     searchConnection: "연결 검색...",
+    noConnectedConnections: "활성 연결이 없습니다. 먼저 사이드바에서 연결을 열어 주세요.",
     selectDatabase: "데이터베이스 선택",
     selectConnectionRequired: "먼저 연결을 선택하세요",
     selectDatabaseRequired: "먼저 데이터베이스를 선택하세요",

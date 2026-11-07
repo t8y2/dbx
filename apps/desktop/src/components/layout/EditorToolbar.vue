@@ -69,6 +69,7 @@ import type { MongoQueryLanguage } from "@/lib/mongo/mongoSql";
 import { isObjectDependencySection } from "@/lib/database/objectDependencyDetails";
 import { connectionDetailRows } from "@/lib/connection/connectionDetailRows";
 import { findConnectionGroupPath } from "@/lib/sidebar/sidebarLayout";
+import { isDetachedWindow } from "@/lib/app/windowContext";
 
 const props = defineProps<{
   activeTab: QueryTab;
@@ -277,6 +278,7 @@ const activeProductionContext = computed(() => productionContextForDatabase(prop
 const showConnectionProductionBadge = computed(() => activeProductionContext.value.reason === "connection");
 const showDatabaseProductionBadge = computed(() => activeProductionContext.value.reason === "database");
 const activeConnectionValue = computed(() => props.activeConnection?.id || "");
+const connectedConnections = computed(() => connectionStore.connections.filter((connection) => connectionStore.establishedConnectionIds.has(connection.id)));
 const activeConnectionDetailRows = computed(() => (props.activeConnection ? connectionDetailRows(props.activeConnection, t) : []));
 const activeConnectionGroupPath = computed(() => {
   const connection = props.activeConnection;
@@ -618,6 +620,13 @@ async function changeCatalog(selectedCatalog: string) {
 
 const connectionPickerRef = ref<InstanceType<typeof ConnectionTreeSelect> | null>(null);
 const connectionPickerOpen = ref(false);
+watch(connectionPickerOpen, (open) => {
+  if (!open || !isDetachedWindow()) return;
+  // Also recover changes made before this window subscribed to native events.
+  void connectionStore.refreshConnectedConnections({ reload: true }).catch((error) => {
+    console.warn("[DBX] detached connection picker refresh failed:", error);
+  });
+});
 const databasePickerRef = ref<InstanceType<typeof SearchableSelect> | null>(null);
 const schemaPickerRef = ref<InstanceType<typeof SearchableSelect> | null>(null);
 
@@ -1041,11 +1050,11 @@ defineExpose({
           <ConnectionTreeSelect
             ref="connectionPickerRef"
             :model-value="activeConnectionValue"
-            :connections="connectionStore.connections"
+            :connections="connectedConnections"
             :layout="connectionStore.sidebarLayout"
             :placeholder="t('editor.selectConnection')"
             :search-placeholder="t('editor.searchConnection')"
-            :empty-text="t('grid.noSearchResults')"
+            :empty-text="connectedConnections.length ? t('grid.noSearchResults') : t('editor.noConnectedConnections')"
             :hide-title="activeConnectionDetailRows.length > 0"
             trigger-class="max-w-[min(28rem,36vw)] font-medium text-foreground"
             trigger-icon-class="h-3 w-3"
@@ -1056,8 +1065,8 @@ defineExpose({
             <template #trigger-label="{ label }">
               <div v-if="activeConnection" class="flex min-w-0 items-center gap-0.5">
                 <DatabaseIcon :db-type="connectionIconType(activeConnection)" class="h-3.5 w-3.5 shrink-0" />
-                <ConnectionGroupPath v-if="visibleConnectionGroupPath" :segments="activeConnectionGroupPath" :connection-name="label" />
-                <span v-else class="min-w-0 flex-1 truncate">{{ label }}</span>
+                <ConnectionGroupPath v-if="visibleConnectionGroupPath" :segments="activeConnectionGroupPath" :connection-name="activeConnection.name || label" />
+                <span v-else class="min-w-0 flex-1 truncate">{{ activeConnection.name || label }}</span>
                 <ProductionContextBadge v-if="showConnectionProductionBadge" compact />
               </div>
               <span v-else class="truncate text-muted-foreground">{{ t("editor.selectConnection") }}</span>

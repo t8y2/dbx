@@ -2742,6 +2742,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "Выбранные строки",
+    exportSelectedCellsScope: "Выделенные ячейки",
+    exportSelectedColumnsScope: "Выделенные столбцы",
     exportFormat: "Формат",
     exportPageScope: "Текущая страница",
     exportResultScope: "Все результаты",

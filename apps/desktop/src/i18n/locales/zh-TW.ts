@@ -2634,6 +2634,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "選取列",
+    exportSelectedCellsScope: "選區",
+    exportSelectedColumnsScope: "選中欄",
     exportFormat: "格式",
     exportPageScope: "目前頁",
     exportResultScope: "全部結果",

@@ -25,7 +25,15 @@ if (args[0] === "release" && args[1] === "view") {
   process.exit(1);
 }
 if (args[0] === "api" && args[1]?.includes("/git/ref/tags/")) {
-  process.exit(process.env.MOCK_ORPHAN_TAG && args[1].endsWith(".1") ? 0 : 1);
+  process.exit(1);
+}
+if (args[0] === "api" && args[1]?.includes("/git/matching-refs/tags/")) {
+  // 孤儿 tag（有 ref 无 release）：新逻辑从 matching-refs 取当天最高序列继续，不再复用低位空位
+  if (process.env.MOCK_ORPHAN_TAG) {
+    const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    console.log("refs/tags/v0.6.60-beta." + today + ".1");
+  }
+  process.exit(0);
 }
 if (args[0] === "api" && args[1] === "--method" && args[2] === "POST") {
   state.tag = args.find(arg => arg.startsWith("ref=refs/tags/"))?.slice("ref=refs/tags/".length);

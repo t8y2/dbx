@@ -332,6 +332,14 @@ describe("TableImportDialog popovers lifecycle and positioning", () => {
 
       expect(genButtons[0]!.textContent).toContain("Fixed Value: batch-2026");
 
+      // 预览列头标记只显示国际化名称，不带用户常量（常量在下方单元格逐行展示）
+      const header = [...document.body.querySelectorAll("th")].find((th) => th.textContent?.includes("[Fixed Value]"));
+      expect(header).toBeTruthy();
+      expect(header!.textContent).not.toContain("batch-2026");
+      expect(header!.textContent).not.toContain("fixed:");
+      const previewCells = [...document.body.querySelectorAll("td")].filter((td) => td.textContent?.trim() === "batch-2026");
+      expect(previewCells.length).toBeGreaterThan(0);
+
       // 关闭后重新打开，常量仍在输入框中
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       await flushAsyncUpdates();

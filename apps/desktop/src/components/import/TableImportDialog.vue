@@ -372,7 +372,7 @@ const selectedSourceName = computed(() => {
 });
 const createColumnSummaries = computed(() =>
   mappedColumns.value.map((mapping) => ({
-    sourceColumn: mapping.sourceColumn || (mapping.generator ? `[${mapping.generator}]` : ""),
+    sourceColumn: mapping.sourceColumn || (mapping.generator ? `[${generatorBadgeLabel(mapping.generator)}]` : ""),
     targetColumn: mapping.targetColumn,
     targetDataType: mapping.targetDataType || "",
   })),
@@ -1391,6 +1391,11 @@ function generatorLabel(key: string | undefined): string {
   }
   const opt = TABLE_IMPORT_GENERATOR_OPTIONS.find((o) => o.value === key);
   return opt ? t(opt.labelKey) : key;
+}
+
+// 预览/摘要列头标记：固定值只显示国际化名称，不带用户常量（下方单元格已逐行展示）
+function generatorBadgeLabel(key: string): string {
+  return isFixedValueGenerator(key) ? t("tableImport.generatorFixed") : key;
 }
 
 function updateColumnGenerator(sourceColumn: string, generator: string) {
@@ -2495,13 +2500,13 @@ watch(rawProgressPercent, (percent) => {
                           :title="isSourceColumnSkipped(column) ? `${column} (${t('tableImport.skipColumn')})` : column"
                         >
                           {{ column }}
-                          <span v-if="columnGenerators[column]" class="ml-1 text-[10px] text-primary not-italic font-normal"> [{{ columnGenerators[column] }}] </span>
+                          <span v-if="columnGenerators[column]" class="ml-1 text-[10px] text-primary not-italic font-normal"> [{{ generatorBadgeLabel(columnGenerators[column]) }}] </span>
                         </span>
                       </th>
                       <th v-for="genCol in activeGeneratedColumns" :key="genCol.id" class="border-b border-r px-2 py-1.5 text-left font-medium transition-colors bg-muted/10">
-                        <span class="block max-w-[140px] truncate text-primary font-medium" :title="`${genCol.targetColumn} (${genCol.generator})`">
+                        <span class="block max-w-[140px] truncate text-primary font-medium" :title="`${genCol.targetColumn} (${generatorBadgeLabel(genCol.generator)})`">
                           {{ genCol.targetColumn }}
-                          <span class="ml-1 text-[10px] text-muted-foreground">[{{ genCol.generator }}]</span>
+                          <span class="ml-1 text-[10px] text-muted-foreground">[{{ generatorBadgeLabel(genCol.generator) }}]</span>
                         </span>
                       </th>
                     </tr>

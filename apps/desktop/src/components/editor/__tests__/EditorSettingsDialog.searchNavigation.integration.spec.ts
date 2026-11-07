@@ -417,7 +417,8 @@ describe("settings search navigation", () => {
     const start = dialogSource.indexOf("function onSettingsSearchKeydown(");
     const end = dialogSource.indexOf("async function resetSettingsContentScroll(", start);
     const code = ts.transpileModule(dialogSource.slice(start, end), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-    const keydown = new Function("settingsSearchResults", "settingsSearchActiveIndex", "settingsSearchOpen", "selectSettingsSearchResult", "exitSettingsSearch", "nextTick", `${code}; return onSettingsSearchKeydown;`)(
+    const keydown = new Function("settingsSearchActive", "settingsSearchResults", "settingsSearchActiveIndex", "settingsSearchOpen", "selectSettingsSearchResult", "exitSettingsSearch", "nextTick", `${code}; return onSettingsSearchKeydown;`)(
+      ref(true),
       settingsSearchResults,
       settingsSearchActiveIndex,
       settingsSearchOpen,

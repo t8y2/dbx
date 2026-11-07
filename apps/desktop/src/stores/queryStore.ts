@@ -128,7 +128,7 @@ import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock }
 import { appendIndexedResultCells, remapIndexedResultCells, appendLargeValueCells, canUseTableDataLargeValuePreview, remapLargeValueCells, supportsTableDataLargeValuePreview, tableDataLargeValuePreviewOptions, TABLE_DATA_RESULT_MAX_BYTES } from "@/lib/dataGrid/dataGridLargeValues";
 import { simpleDataGridOrderByReferencesMissingColumn, sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
-import { agentProtocolQueryResultMaxRows, capQueryResultTotal, effectiveQueryResultMaxRows, limitQueryPagination, queryResultLimitReached } from "@/lib/dataGrid/queryResultRowLimit";
+import { agentProtocolQueryResultMaxRows, effectiveQueryResultMaxRows, limitQueryPagination, queryResultLimitReached } from "@/lib/dataGrid/queryResultRowLimit";
 import { elasticsearchRestRequestRanges, executableStatementRanges, isConsoleCommandDatabaseType, splitSqlStatementRanges, sqlStatementParameterOptionsForCompatibility, stripMysqlClientDisplayCommand } from "@/lib/sql/sqlStatementRanges";
 import { consoleEntriesForResult, consoleSqlForSafety, consoleStatementComplete, echoCommandText, supportsSqlConsole, type ConsoleEntry } from "@/lib/console/consoleFormat";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
@@ -181,7 +181,7 @@ import { readOracleTriggerSource, prepareOracleTriggerPlan, type OracleTriggerSn
 import { confirmOracleTriggerPlan } from "@/lib/database/oracleTriggerActions";
 import { restoreOracleTypeManagementDraft, type OracleTypeManagementDraft } from "@/lib/table/oracleTypeManagement";
 import { typeManagementRecordsEqual } from "@/lib/table/oracleTypeManagementRecord";
-import { isOracleFamilyTypeSource } from "@/lib/database/databaseObjectCapabilities";
+import { isOracleFamilyTypeSource, isTriggerSourceSaveSupported } from "@/lib/database/databaseObjectCapabilities";
 import { disposeAllSqlServerActivityTraces, disposeSqlServerActivityTrace } from "@/lib/sqlserver/sqlServerActivityTraceRuntime";
 import type { SavedSqlFile } from "@/types/database";
 import i18n, { currentLocale } from "@/i18n";
@@ -346,6 +346,8 @@ interface OpenPendingObjectSourceTabOptions {
 /**
  * 拿到源码也没有可编辑形态的对象类型：只填内容，不挂 objectSource。
  * （`App.vue` 的 Ctrl+click 路径有一份少了 `JOB` 的旧副本，是既有不一致。）
+ * TRIGGER 例外：MySQL 系走 DROP+CREATE 的可执行语句，Oracle 系走
+ * `runOracleTriggerSourceAction`（#14489）；其余方言的保存语义未适配，保持只读。
  */
 const OBJECT_SOURCE_READ_ONLY_TYPES: readonly ObjectSourceKind[] = ["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY", "JOB"];
 
@@ -1698,6 +1700,7 @@ export const useQueryStore = defineStore("query", () => {
   const savedSqlEditorPositionTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const pendingTabSessionResets = new Map<string, Promise<void>>();
   const pendingResultRunRestores = new Map<string, string>();
+  const pendingQueryTotalCounts = new Map<string, { key: string; promise: Promise<void> }>();
   const pendingResultRunPreparations = new WeakMap<QueryTab, string>();
   const multiDbExecutionWorkers = new Map<string, QueryTab>();
   const multiDbExecutionWorkerScopes = new Map<string, Set<string>>();
@@ -3259,9 +3262,12 @@ export const useQueryStore = defineStore("query", () => {
       ...(mode === "query" ? { autoCommit: defaultAutoCommitForDbTypeWithSetting(dbType) } : {}),
     };
     if (mode === "query") tab.originalSql = initialSql ?? "";
+    // Keep newly opened definitions beside the current session, while allowing
+    // callers to explicitly retain append-at-end placement.
+    const insertAfterActive = options.insertAfterActive ?? options.sourceView;
     return registerOpenTab(tab, {
       ...(options.activate === false ? { activate: false } : {}),
-      ...(options.insertAfterActive && activeTabId.value ? { insertAfterTabId: activeTabId.value } : {}),
+      ...(insertAfterActive && activeTabId.value ? { insertAfterTabId: activeTabId.value } : {}),
     });
   }
 
@@ -3320,6 +3326,29 @@ export const useQueryStore = defineStore("query", () => {
     return { connectionId: context.connectionId, database: context.database, schema: context.schema || context.database, catalog: context.catalog, name: source.name, objectType: source.objectType, section };
   }
 
+  /**
+   * 只读源码 tab（MySQL 触发器、序列等）加载完成后不挂 objectSource，
+   * findMatchingObjectSourceTab 永远匹配不到，只能靠 objectDetails 判重
+   * （issue #14517：否则每次双击触发器都新开一个 tab）。
+   * 查看态 SEQUENCE 展示 CREATE、编辑态才是 ALTER，编辑请求不能复用只读查看 tab。
+   */
+  function findLoadedReadOnlySourceTab(options: OpenPendingObjectSourceTabOptions): QueryTab | undefined {
+    if (options.request.objectType === "SEQUENCE" && options.initialEditing !== false) return undefined;
+    return tabs.value.find(
+      (tab) =>
+        tab.mode === "query" &&
+        !!tab.sourceView &&
+        !tab.objectSource &&
+        !tab.sourceLoad &&
+        tab.connectionId === options.connectionId &&
+        tab.database === options.database &&
+        (tab.schema || "") === (options.schema || "") &&
+        (tab.catalog || "") === (options.catalog || "") &&
+        tab.objectDetails?.name === options.request.name &&
+        tab.objectDetails.objectType === options.request.objectType,
+    );
+  }
+
   function findPendingObjectSourceTab(options: OpenPendingObjectSourceTabOptions): QueryTab | undefined {
     return tabs.value.find(
       (tab) =>
@@ -3375,6 +3404,19 @@ export const useQueryStore = defineStore("query", () => {
       return existing.id;
     }
 
+    const readOnlyLoaded = findLoadedReadOnlySourceTab(options);
+    if (readOnlyLoaded) {
+      readOnlyLoaded.objectDetails = sourceDetails(options, options.request, options.initialSection);
+      switchTab(readOnlyLoaded.id);
+      useConnectionStore().activeConnectionId = options.connectionId;
+      // 复用即刷新；有未保存修改时只切换，不覆盖用户内容
+      if (!isTabDirty(readOnlyLoaded)) {
+        readOnlyLoaded.sourceLoad = { startedAt: Date.now(), initialEditing: options.initialEditing, request: { ...options.request } };
+        void loadObjectSourceIntoTab(readOnlyLoaded.id);
+      }
+      return readOnlyLoaded.id;
+    }
+
     const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, "", options.catalog, { forceNew: true, sourceView: true, schemaQualifiesSql: true });
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (tab) {
@@ -3424,7 +3466,8 @@ export const useQueryStore = defineStore("query", () => {
       assertSourceIdentity(identity);
       if (current?.objectSource !== objectSource || resolvedType !== objectSource.objectType) return;
       if (current.connectionId !== connectionId || current.database !== database || (current.objectSource.schema || current.schema || current.database) !== schema) return;
-      if (raw.editable === false || (OBJECT_SOURCE_READ_ONLY_TYPES.includes(resolvedType) && !(databaseType === "oceanbase-oracle" && resolvedType === "SEQUENCE") && !isOracleFamilyTypeSource(databaseType, resolvedType))) return;
+      if (raw.editable === false || (OBJECT_SOURCE_READ_ONLY_TYPES.includes(resolvedType) && !(databaseType === "oceanbase-oracle" && resolvedType === "SEQUENCE") && !isOracleFamilyTypeSource(databaseType, resolvedType) && !(resolvedType === "TRIGGER" && isTriggerSourceSaveSupported(databaseType))))
+        return;
       if (isTabDirty(current)) return;
       updateSql(id, editableSource);
       markTabClean(current);
@@ -3597,7 +3640,9 @@ export const useQueryStore = defineStore("query", () => {
     const managedType = isOracleFamilyTypeSource(loaded.databaseType, loaded.resolvedType);
     const sourceIsEditable =
       exactTrigger ||
-      (!isViewOnlySourceWithoutEditablePayload(loaded.initialEditing, loaded.resolvedType) && loaded.raw.editable !== false && (!OBJECT_SOURCE_READ_ONLY_TYPES.includes(loaded.resolvedType) || (loaded.databaseType === "oceanbase-oracle" && loaded.resolvedType === "SEQUENCE") || managedType));
+      (!isViewOnlySourceWithoutEditablePayload(loaded.initialEditing, loaded.resolvedType) &&
+        loaded.raw.editable !== false &&
+        (!OBJECT_SOURCE_READ_ONLY_TYPES.includes(loaded.resolvedType) || (loaded.databaseType === "oceanbase-oracle" && loaded.resolvedType === "SEQUENCE") || managedType || (loaded.resolvedType === "TRIGGER" && isTriggerSourceSaveSupported(loaded.databaseType))));
     if (loaded.resolvedType === "TRIGGER" && (loaded.triggerBaseline || loaded.triggerError))
       oracleTriggerSources[id] = { baseline: loaded.triggerBaseline, profile: loaded.triggerBaseline?.raw.trigger ?? oracleTriggerSources[id]?.profile, error: loaded.triggerError, readVersion: ++triggerSourceReadVersion };
     if (sourceIsEditable) {
@@ -4632,7 +4677,7 @@ export const useQueryStore = defineStore("query", () => {
     return registerOpenTab(tab);
   }
 
-  async function openPluginConnection(connectionId: string) {
+  async function openPluginConnection(connectionId: string, options: { forceNew?: boolean; sourceWorkbenchId?: string } = {}) {
     const connectionStore = useConnectionStore();
     const connection = connectionStore.getConfig(connectionId);
     if (!connection || connection.db_type !== "plugin") throw new Error("Plugin connection config not found");
@@ -4648,11 +4693,16 @@ export const useQueryStore = defineStore("query", () => {
       return openPluginWorkbench(pluginId, workbench.contribution.id, {
         title: connection.name,
         connectionId,
+        forceNew: options.forceNew,
         context: {
           connectionId,
           providerId,
           connectionType: connection.plugin_connection_type,
           workbenchId: uuid(),
+          // An explicit New Query creates a blank, independent workspace.
+          // Plugins may resolve their own current scope from the source id;
+          // never copy arbitrary source context (results, drafts or secrets).
+          ...(options.forceNew ? { newQuery: true, ...(options.sourceWorkbenchId ? { sourceWorkbenchId: options.sourceWorkbenchId } : {}) } : {}),
           connection: {
             id: connection.id,
             name: connection.name,
@@ -4670,6 +4720,7 @@ export const useQueryStore = defineStore("query", () => {
     return openPluginFilesystem(pluginId, filesystem.contribution.id, {
       title: `${connection.name} · SFTP`,
       connectionId,
+      forceNew: options.forceNew,
       rootUri: filesystem.contribution.root_uri,
     });
   }
@@ -7127,15 +7178,18 @@ export const useQueryStore = defineStore("query", () => {
     const comments: Array<string | undefined> = [];
     const typeLabels: Array<string | undefined> = [];
     const mapping: Array<QueryResultSourceColumnRef | undefined> = [];
-    for (const ref of refs) {
+    for (let index = 0; index < refs.length; index++) {
+      const ref = refs[index];
+      const loaded = ref ? loadedSources.find((entry) => entry.source.key === ref.sourceKey) : undefined;
+      let column = ref ? loaded?.tableMeta.columns.find((candidate) => candidate.name === ref.sourceColumn) : undefined;
       if (!ref) {
-        comments.push(undefined);
-        typeLabels.push(undefined);
-        mapping.push(undefined);
-        continue;
+        // Aggregates keep the base column's label (e.g. MAX(updated_at) AS
+        // updated_at) but contain no direct column reference, so ordinal
+        // binding intentionally leaves them unresolved. With a single source
+        // there is no other table whose comment could leak, so resolve the
+        // label/expression back to that source column for display only.
+        column = singleSourceFallbackColumn(analysis, resultColumns[index], index, loadedSources, refs.length);
       }
-      const loaded = loadedSources.find((entry) => entry.source.key === ref.sourceKey);
-      const column = loaded?.tableMeta.columns.find((candidate) => candidate.name === ref.sourceColumn);
       const comment = column?.comment?.trim();
       comments.push(comment || undefined);
       typeLabels.push(
@@ -7148,14 +7202,44 @@ export const useQueryStore = defineStore("query", () => {
             }) || undefined
           : undefined,
       );
-      mapping.push({
-        ...ref,
-        database: loaded?.tableMeta.database,
-        schema: loaded?.tableMeta.schema,
-        tableName: loaded?.tableMeta.tableName,
-      });
+      if (ref && loaded) {
+        mapping.push({
+          ...ref,
+          database: loaded.tableMeta.database,
+          schema: loaded.tableMeta.schema,
+          tableName: loaded.tableMeta.tableName,
+        });
+      } else {
+        // A name-based display fallback is not proof of source identity; leave
+        // the ordinal unmapped so writes/attribution never use a guess.
+        mapping.push(undefined);
+      }
     }
     return { comments, typeLabels, mapping };
+  }
+
+  /**
+   * Resolve an otherwise unmapped result ordinal to a unique column of a single
+   * source table. Used only for display metadata (comments/declared types).
+   */
+  function singleSourceFallbackColumn(analysis: EditableQueryInfo, resultColumn: string | undefined, index: number, loadedSources: LoadedEditableSource[], resultColumnCount: number) {
+    if (loadedSources.length !== 1) return undefined;
+    const source = loadedSources[0]!;
+    const projection = !analysis.selectStar && analysis.columns.length === resultColumnCount ? analysis.columns[index] : undefined;
+    const label = resultColumn?.trim();
+    // A projection that aliases another expression must keep its exact bound
+    // column when one exists; otherwise only use the label when the projection
+    // expression actually refers to that identifier (MAX(updated_at)).
+    const expressionReferencesLabel = !!projection?.expression && !!label && projectionExpressionReferencesIdentifier(projection.expression, label);
+    const candidateName = projection?.sourceName ?? (expressionReferencesLabel || (analysis.selectStar && label) ? label : undefined);
+    if (!candidateName) return undefined;
+    const matches = source.tableMeta.columns.filter((column) => column.name.toLowerCase() === candidateName.toLowerCase());
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+
+  function projectionExpressionReferencesIdentifier(expression: string, identifier: string): boolean {
+    const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|[^A-Za-z0-9_$])${escaped}([^A-Za-z0-9_$]|$)`, "i").test(expression);
   }
 
   function mysqlColumnIsGenerated(column: { extra: string | null }): boolean {
@@ -8045,6 +8129,7 @@ export const useQueryStore = defineStore("query", () => {
     elapsed: () => string;
     timeoutSecs: number;
     txnSessionId?: string;
+    preserveTotalRowCountDuringExecution?: boolean;
   }) {
     const resultRowCount = options.result.rows.length;
     if (resultRowCount <= 0) {
@@ -8068,10 +8153,18 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     const countExecutionId = `${options.executionId}:count`;
-    void (async () => {
+    const countKey = options.countSql ? [options.connectionId, options.database, options.schema ?? "", options.catalog ?? "", options.countSql].join("\u0000") : undefined;
+    const pendingCount = pendingQueryTotalCounts.get(options.tabId);
+    if (countKey && options.preserveTotalRowCountDuringExecution && pendingCount?.key === countKey) return;
+    // The promise's own branches compare themselves with the pending entry for this
+    // tab, so they need a reference that exists before the async body can run.
+    const countHandle: { promise?: Promise<void> } = {};
+    const countPromise = (async () => {
       let isolatedClientSessionId: string | undefined;
+      let countTargetSql: string | undefined;
       try {
         const countTarget = options.countSql ? { sql: options.countSql, schema: options.schema } : await options.countSqlTarget?.();
+        countTargetSql = countTarget?.sql;
         if (!countTarget?.sql) {
           setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, undefined);
           return;
@@ -8095,19 +8188,46 @@ export const useQueryStore = defineStore("query", () => {
         }
         const total = Number(countResult?.rows?.[0]?.[0] ?? 0);
         if (!Number.isFinite(total) || total < 0) {
-          setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, undefined);
+          const current = tabs.value.find((tab) => tab.id === options.tabId);
+          const pendingEntry = countKey ? pendingQueryTotalCounts.get(options.tabId) : undefined;
+          if (countKey && pendingEntry?.promise !== countHandle.promise) return;
+          if (pendingEntry?.promise === countHandle.promise && countTargetSql && current?.resultCountSql === countTargetSql) {
+            current.resultTotalRowCount = undefined;
+            current.resultTotalRowCountLoading = false;
+          } else {
+            setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, undefined);
+          }
           return;
         }
         // COUNT describes all matching rows; the configured result limit only
         // constrains how many of them pagination may load and retain.
-        setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, total);
+        const current = tabs.value.find((tab) => tab.id === options.tabId);
+        const pendingEntry = countKey ? pendingQueryTotalCounts.get(options.tabId) : undefined;
+        if (countKey && pendingEntry?.promise !== countHandle.promise) return;
+        // Match on the counted statement, not just the tab: a page whose countSql
+        // changed must not publish the previous statement's total.
+        if (pendingEntry?.promise === countHandle.promise && !!countTarget.sql && current?.resultCountSql === countTarget.sql) {
+          current.resultTotalRowCount = total;
+          current.resultTotalRowCountLoading = false;
+          if (activeResultRunOwnsDisplayedResult(current)) syncActiveResultRunFromDisplayed(current);
+        } else {
+          setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, total);
+        }
         queryExecutionLog("info", "count:done", {
           traceId: options.traceId,
           total,
           elapsed: options.elapsed(),
         });
       } catch (error) {
-        setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, undefined);
+        const current = tabs.value.find((tab) => tab.id === options.tabId);
+        const pendingEntry = countKey ? pendingQueryTotalCounts.get(options.tabId) : undefined;
+        if (countKey && pendingEntry?.promise !== countHandle.promise) return;
+        if (pendingEntry?.promise === countHandle.promise && countTargetSql && current?.resultCountSql === countTargetSql) {
+          current.resultTotalRowCount = undefined;
+          current.resultTotalRowCountLoading = false;
+        } else {
+          setQueryTotalRowCountIfCurrent(options.tabId, options.executionId, options.result, undefined);
+        }
         queryExecutionLog("warn", "count:error", {
           traceId: options.traceId,
           elapsed: options.elapsed(),
@@ -8119,6 +8239,14 @@ export const useQueryStore = defineStore("query", () => {
         }
       }
     })();
+    countHandle.promise = countPromise;
+    if (countKey) {
+      pendingQueryTotalCounts.set(options.tabId, { key: countKey, promise: countPromise });
+      const clearPendingCount = () => {
+        if (pendingQueryTotalCounts.get(options.tabId)?.promise === countHandle.promise) pendingQueryTotalCounts.delete(options.tabId);
+      };
+      void countPromise.then(clearPendingCount, clearPendingCount);
+    }
   }
 
   async function countTabResultRows(id: string): Promise<number | undefined> {
@@ -8571,6 +8699,7 @@ export const useQueryStore = defineStore("query", () => {
     }
     if (!options?.preserveTotalRowCountDuringExecution) {
       tab.resultTotalRowCount = undefined;
+      pendingQueryTotalCounts.delete(id);
     }
     tab.resultTotalRowCountLoading = false;
     const previousResultSessionClose = closeResultSession(tab, options?.pagination?.sessionId);
@@ -10050,6 +10179,10 @@ export const useQueryStore = defineStore("query", () => {
         current.resultCountSql = countSql;
         current.resultSessionId = current.result?.session_id ?? undefined;
         current.resultClientSessionId = current.resultSessionId ? executionClientSessionId : undefined;
+        // A refreshed page keeps reporting its totals as loading: the stale-total
+        // pass just below only checks the preserved value, and the COUNT that
+        // replaces it is started further down.
+        const preserveTotalRowCountPending = options?.preserveTotalRowCountDuringExecution === true && typeof current.resultTotalRowCount === "number";
         if (!options?.preserveTotalRowCountDuringExecution) {
           current.resultTotalRowCount = undefined;
         }
@@ -10076,10 +10209,26 @@ export const useQueryStore = defineStore("query", () => {
           current.resultTotalRowCount = undefined;
         }
         if (current.mode === "query" && current.result && !isQueryExecutionErrorResult(current.result) && typeof exactQueryRowBound === "number") {
-          const boundedTotal = capQueryResultTotal(exactQueryRowBound, queryResultMaxRows);
-          current.resultTotalRowCount = Math.min(boundedTotal, exactIncompletePageTotal ?? boundedTotal);
-          current.resultTotalRowCountLoading = false;
-          totalRowCountResolved = true;
+          // LIMIT/TOP is an upper bound, not a count. A full page below that
+          // bound must still follow the user's automatic/manual count policy.
+          // Use the logical start for appends: current.result already includes
+          // earlier segments, so adding the latest page offset double-counts.
+          const observedExtent = (resultStartOffset ?? 0) + resultRowCount;
+          const reachedQueryBound = resultRowCount > 0 && current.result.truncated !== true && current.result.has_more !== true && current.result.page_has_more !== true && observedExtent === exactQueryRowBound;
+          const exactTotal = exactIncompletePageTotal ?? (reachedQueryBound ? exactQueryRowBound : undefined);
+          if (typeof exactTotal === "number") {
+            current.resultTotalRowCount = Math.min(exactQueryRowBound, exactTotal);
+            current.resultTotalRowCountLoading = false;
+            totalRowCountResolved = true;
+          }
+        }
+        // Pagination keeps a previously confirmed total while loading another
+        // page. A page that proves nothing about the total must not mark it
+        // resolved either: the background COUNT below still owns it, so the list
+        // keeps reporting the previous total as loading.
+        if (!totalRowCountResolved && preserveTotalRowCountPending) {
+          current.resultTotalRowCountLoading = !totalKnownFromIncompletePage;
+          totalRowCountResolved = totalKnownFromIncompletePage;
         }
         const dataCountTarget =
           current.mode === "data"
@@ -10108,7 +10257,9 @@ export const useQueryStore = defineStore("query", () => {
           !totalRowCountResolved &&
           settingsStore.editorSettings.autoCalculateTotalRows &&
           ((current.mode === "query" && !!countSql) || (current.mode === "data" && !!dataCountTarget));
-        current.resultTotalRowCountLoading = canAutoCalculateTotalRows;
+        // A refreshed page whose total is being recounted keeps the spinner on even
+        // though auto-count is served by the same background COUNT below.
+        current.resultTotalRowCountLoading = canAutoCalculateTotalRows || (preserveTotalRowCountPending && typeof current.resultTotalRowCount === "number");
         // Server-side pagination without a countSql: the backend (currently
         // the Elasticsearch driver) already reports the true match total via
         // affected_rows. Use it directly so the result-grid can compute the
@@ -10148,6 +10299,7 @@ export const useQueryStore = defineStore("query", () => {
             elapsed,
             timeoutSecs: queryTimeoutSecs,
             txnSessionId: current.autoCommit === false ? current.txnSessionId : undefined,
+            preserveTotalRowCountDuringExecution: options?.preserveTotalRowCountDuringExecution,
           });
         }
         queryExecutionLog("info", "result:assigned", {
@@ -11858,6 +12010,7 @@ export const useQueryStore = defineStore("query", () => {
         totalRows,
         timeoutSecs: queryTimeoutSecsForConnection(conn, settings.globalQueryTimeoutSecs),
         keysetOptimizationEnabled: settings.queryExportKeysetOptimizationEnabled,
+        csvWithoutBom: settings.csvWithoutBom,
         csvQuoteMode: settings.csvQuoteMode,
         clientSessionId,
         txnSessionId,
@@ -11907,6 +12060,7 @@ export const useQueryStore = defineStore("query", () => {
       totalRows: null,
       timeoutSecs: queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs),
       keysetOptimizationEnabled: settings.queryExportKeysetOptimizationEnabled,
+      csvWithoutBom: settings.csvWithoutBom,
       csvQuoteMode: settings.csvQuoteMode,
       clientSessionId: `${tabClientSessionId(tab, "export")}:${exportId}`,
       txnSessionId: exportTxnSessionId(tab),

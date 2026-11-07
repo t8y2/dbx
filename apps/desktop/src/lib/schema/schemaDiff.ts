@@ -215,6 +215,10 @@ export interface TableDiff {
   ddl?: string;
   targetDdl?: string;
   sourceTableComment?: string | null;
+  tableCharset?: {
+    source: { characterSet?: string | null; collation?: string | null };
+    target: { characterSet?: string | null; collation?: string | null };
+  };
   targetTableComment?: string | null;
   syncSql?: string;
 }
@@ -375,6 +379,7 @@ export interface SchemaSyncSqlPlan {
 
 export interface GenerateSchemaSyncPlanOptions {
   databaseType: DatabaseType;
+  compareCharset?: boolean;
   targetSchema?: string;
   cascadeDelete?: boolean;
   sourceDialect?: string;
@@ -748,7 +753,7 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
               parentId: tableId,
               parentName: diff.name,
             })),
-            ...(diff.sourceTableComment !== diff.targetTableComment
+            ...(diff.sourceTableComment !== diff.targetTableComment || diff.tableCharset
               ? [
                   {
                     id: tableOptionObjectId(diff.name),
@@ -756,7 +761,15 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
                     objectKind: "tableOption" as DiffObjectKind,
                     name: "tableOption",
                     selected: true,
-                    changes: [`comment: ${diff.targetTableComment ?? ""} -> ${diff.sourceTableComment ?? ""}`],
+                    changes: [
+                      ...(diff.sourceTableComment !== diff.targetTableComment ? [`comment: ${diff.targetTableComment ?? ""} -> ${diff.sourceTableComment ?? ""}`] : []),
+                      ...(diff.tableCharset?.source.characterSet && diff.tableCharset?.target.characterSet && diff.tableCharset.source.characterSet.toLowerCase() !== diff.tableCharset.target.characterSet.toLowerCase()
+                        ? [`character set: ${diff.tableCharset.target.characterSet} → ${diff.tableCharset.source.characterSet}`]
+                        : []),
+                      ...(diff.tableCharset?.source.collation && diff.tableCharset?.target.collation && diff.tableCharset.source.collation.toLowerCase() !== diff.tableCharset.target.collation.toLowerCase()
+                        ? [`collation: ${diff.tableCharset.target.collation} → ${diff.tableCharset.source.collation}`]
+                        : []),
+                    ],
                     parentId: tableId,
                     parentName: diff.name,
                   },
@@ -909,6 +922,7 @@ export function selectSchemaDiffInput(result: SchemaDiffPreparation, objects: Sc
         triggers,
         sourceTableComment: includeTableOptions ? diff.sourceTableComment : undefined,
         targetTableComment: includeTableOptions ? diff.targetTableComment : undefined,
+        tableCharset: includeTableOptions ? diff.tableCharset : undefined,
         syncSql: undefined,
       },
     ];

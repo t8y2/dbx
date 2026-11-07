@@ -78,11 +78,14 @@ export function executableStatementRangeCacheForDoc(
   const byExecutableLineStart = new Map<number, SqlTextRange>();
   const sql = doc.toString();
   const ranges = parse(sql, databaseType, parameterOptions);
+  let currentLine = doc.lines > 0 ? doc.line(1) : null;
   for (const range of ranges) {
     byStart.set(range.from, range);
-    const line = doc.lineAt(range.from);
-    if (doc.sliceString(line.from, range.from).trim() === "") {
-      byExecutableLineStart.set(line.from, range);
+    if (!currentLine || currentLine.to < range.from || currentLine.from > range.from) {
+      currentLine = doc.lineAt(range.from);
+    }
+    if (doc.sliceString(currentLine.from, range.from).trim() === "") {
+      byExecutableLineStart.set(currentLine.from, range);
     }
     const executableStart = executableStartAfterLeadingDirective(sql, range, databaseType, parameterOptions);
     if (executableStart !== null) {

@@ -796,3 +796,41 @@ FROM (
     expect(items.filter((item) => item.type === "keyword").map((item) => item.label)).toEqual(expect.arrayContaining(["WHERE", "WHEN", "WITH"]));
   });
 });
+
+describe("implicit join table lists end at the next clause (#14445)", () => {
+  const columnsByTable = new Map<string, SqlCompletionColumn[]>([
+    ["emp", ["id", "emp_name"].map((name) => ({ name, table: "emp" }))],
+    ["dept", ["id", "dept_name"].map((name) => ({ name, table: "dept" }))],
+  ]);
+
+  it.each([
+    ["MySQL", { databaseType: "mysql", dialect: "mysql" }],
+    ["PostgreSQL", { databaseType: "postgres", dialect: "postgres" }],
+    ["Oracle", { databaseType: "oracle" }],
+  ] as const)("offers columns after WHERE in a %s comma join", (_label, options) => {
+    const { context, items } = semanticCompletion("SELECT * FROM emp e, dept d WHERE |", { columnsByTable }, options);
+
+    expect(context.contextKind).toBe("column");
+    expect(context.suggestColumns).toBe(true);
+    const labels = items.filter((item) => item.type === "column").map((item) => item.label);
+    expect(labels).toEqual(expect.arrayContaining(["e.emp_name", "d.dept_name"]));
+  });
+
+  it.each([
+    ["WHERE", "SELECT * FROM emp e, dept d WHERE e.id = 1 AND |"],
+    ["ORDER BY", "SELECT * FROM emp e, dept d ORDER BY |"],
+    ["GROUP BY", "SELECT * FROM emp e, dept d GROUP BY |"],
+  ] as const)("keeps column completion after %s in a comma join", (_label, markedSql) => {
+    const { context } = semanticCompletion(markedSql, { columnsByTable }, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(context.contextKind).toBe("column");
+    expect(context.suggestColumns).toBe(true);
+  });
+
+  it("still treats the slot after a FROM-list comma as a table name", () => {
+    const { context } = semanticCompletion("SELECT * FROM emp e, dept d, |", {}, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(context.contextKind).toBe("table");
+    expect(context.suggestTables).toBe(true);
+  });
+});

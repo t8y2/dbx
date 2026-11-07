@@ -4095,6 +4095,8 @@ mod tests {
                     partition: Some(2),
                     offset: Some(17),
                     timestamp: None,
+                    end_timestamp: None,
+                    sort_order: None,
                 },
             )
             .await

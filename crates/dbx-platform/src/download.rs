@@ -87,16 +87,36 @@ pub async fn race_download_urls(
 
 const RESILIENT_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
 const RESILIENT_RETRY_MAX_DELAY: Duration = Duration::from_millis(4000);
+/// A `Retry-After` may describe a rate-limit window longer than the transport
+/// backoff. Wait for it, but bound the pause so an install cannot hang for an
+/// unbounded time on a hostile or misconfigured server.
+const RESILIENT_RETRY_AFTER_MAX_DELAY: Duration = Duration::from_secs(60);
 
 /// Total attempts made by [`resilient_download_bytes`] for callers without a
 /// custom budget.
 pub const RESILIENT_DOWNLOAD_ATTEMPTS: usize = 4;
 
+struct RetryableDownloadError {
+    message: String,
+    /// Server-requested delay from a `Retry-After` header (429 only).
+    retry_after: Option<Duration>,
+}
+
+impl RetryableDownloadError {
+    fn new(message: impl Into<String>) -> Self {
+        Self { message: message.into(), retry_after: None }
+    }
+
+    fn rate_limited(message: impl Into<String>, retry_after: Option<Duration>) -> Self {
+        Self { message: message.into(), retry_after }
+    }
+}
+
 enum DownloadAttemptError {
     /// Transient: connection dropped mid-body, connect/send error, 5xx. Bytes
     /// received so far are kept and the next attempt resumes with a Range
     /// request.
-    Retryable(String),
+    Retryable(RetryableDownloadError),
     /// Deterministic: size cap exceeded or a plain 4xx. Retrying cannot help.
     Fatal(String),
 }
@@ -113,6 +133,21 @@ fn retry_delay(attempt: usize) -> Duration {
     // attempt is 1-based; the first retry (attempt == 2) waits one base step.
     let steps = 1_u32 << (attempt.saturating_sub(2)).min(16);
     RESILIENT_RETRY_BASE_DELAY.saturating_mul(steps).min(RESILIENT_RETRY_MAX_DELAY)
+}
+
+/// Parse the `Retry-After` header from a 429 response. Both forms allowed by
+/// RFC 9110 are accepted: delay-seconds and an HTTP-date.
+fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    retry_after_delay_at(headers, std::time::SystemTime::now())
+}
+
+fn retry_after_delay_at(headers: &reqwest::header::HeaderMap, now: std::time::SystemTime) -> Option<Duration> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let deadline = httpdate::parse_http_date(value).ok()?;
+    Some(deadline.duration_since(now).unwrap_or_default())
 }
 
 enum ClassifyError {
@@ -180,6 +215,8 @@ fn classify_response(
 /// Downloads an HTTP response body into memory, surviving transient transport
 /// failures that kill a single-connection download: connect/send errors,
 /// mid-body drops ("error decoding response body"), 5xx and 408/429 statuses.
+/// A 429's `Retry-After` header (seconds or HTTP-date) extends the next pause
+/// beyond the normal backoff, capped at [`RESILIENT_RETRY_AFTER_MAX_DELAY`].
 ///
 /// Bytes received before a mid-body drop are reused only when the initial
 /// response includes a strong ETag. The next attempt sends a conditional Range
@@ -204,9 +241,12 @@ pub async fn resilient_download_bytes(
     let mut bytes: Vec<u8> = Vec::new();
     let mut resume_validator = None;
     let mut last_error = String::new();
+    let mut retry_after = None;
     for attempt in 1..=attempts {
         if attempt > 1 {
-            tokio::time::sleep(retry_delay(attempt)).await;
+            let backoff = retry_delay(attempt);
+            let requested = retry_after.take().unwrap_or_default();
+            tokio::time::sleep(backoff.max(requested).min(RESILIENT_RETRY_AFTER_MAX_DELAY)).await;
         }
         match download_attempt(client, &url, label, max_bytes, &mut bytes, &mut resume_validator, &mut on_progress)
             .await
@@ -214,7 +254,8 @@ pub async fn resilient_download_bytes(
             Ok(()) => return Ok(bytes),
             Err(DownloadAttemptError::Fatal(error)) => return Err(error),
             Err(DownloadAttemptError::Retryable(error)) => {
-                last_error = format!("{error} (download attempt {attempt}/{attempts})");
+                last_error = format!("{} (download attempt {attempt}/{attempts})", error.message);
+                retry_after = error.retry_after;
             }
         }
     }
@@ -247,10 +288,11 @@ async fn download_attempt(
             resume_validator.as_ref().expect("partial bytes have a validator").clone(),
         );
     }
-    let response = request
-        .send()
-        .await
-        .map_err(|error| DownloadAttemptError::Retryable(format!("Failed to download {label} from {url}: {error}")))?;
+    let response = request.send().await.map_err(|error| {
+        DownloadAttemptError::Retryable(RetryableDownloadError::new(format!(
+            "Failed to download {label} from {url}: {error}"
+        )))
+    })?;
     let status_error = |status: reqwest::StatusCode| format!("Failed to download {label} from {url}: HTTP {status}");
     match classify_response(response.status(), response.headers(), resume_from) {
         Ok(ResumePlan::Append) => {}
@@ -264,17 +306,23 @@ async fn download_attempt(
         Err(ClassifyError::StaleResume(status)) => {
             bytes.clear();
             *resume_validator = None;
-            return Err(DownloadAttemptError::Retryable(status_error(status)));
+            return Err(DownloadAttemptError::Retryable(RetryableDownloadError::new(status_error(status))));
         }
         Err(ClassifyError::InvalidContentRange) => {
             bytes.clear();
             *resume_validator = None;
-            return Err(DownloadAttemptError::Retryable(format!(
+            return Err(DownloadAttemptError::Retryable(RetryableDownloadError::new(format!(
                 "Failed to download {label} from {url}: invalid Content-Range for resumed response"
-            )));
+            ))));
         }
         Err(ClassifyError::RetryableStatus(status)) => {
-            return Err(DownloadAttemptError::Retryable(status_error(status)));
+            let retry_after = (status == reqwest::StatusCode::TOO_MANY_REQUESTS)
+                .then(|| retry_after_delay(response.headers()))
+                .flatten();
+            return Err(DownloadAttemptError::Retryable(RetryableDownloadError::rate_limited(
+                status_error(status),
+                retry_after,
+            )));
         }
         Err(ClassifyError::FatalStatus(status)) => {
             return Err(DownloadAttemptError::Fatal(status_error(status)));
@@ -292,8 +340,11 @@ async fn download_attempt(
     let total = response.content_length().map(|length| bytes.len() as u64 + length);
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk
-            .map_err(|error| DownloadAttemptError::Retryable(format!("Failed to read {label} from {url}: {error}")))?;
+        let chunk = chunk.map_err(|error| {
+            DownloadAttemptError::Retryable(RetryableDownloadError::new(format!(
+                "Failed to read {label} from {url}: {error}"
+            )))
+        })?;
         if bytes.len().saturating_add(chunk.len()) > max_bytes {
             return Err(DownloadAttemptError::Fatal(format!("{label} exceeds {max_bytes} bytes")));
         }
@@ -301,22 +352,25 @@ async fn download_attempt(
         on_progress(bytes.len() as u64, total);
     }
     if expected_total.is_some_and(|total| bytes.len() as u64 != total) {
-        return Err(DownloadAttemptError::Retryable(format!(
+        return Err(DownloadAttemptError::Retryable(RetryableDownloadError::new(format!(
             "Failed to read {label} from {url}: incomplete Content-Range body"
-        )));
+        ))));
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_response, has_complete_content_range, retry_delay, strong_etag, ClassifyError, ResumePlan};
+    use super::{
+        classify_response, has_complete_content_range, retry_after_delay_at, retry_delay, strong_etag, ClassifyError,
+        ResumePlan,
+    };
     use super::{download_candidate_urls, resilient_download_bytes, DownloadSource};
-    use reqwest::header::{HeaderMap, HeaderValue, CONTENT_RANGE, ETAG};
+    use reqwest::header::{HeaderMap, HeaderValue, CONTENT_RANGE, ETAG, RETRY_AFTER};
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     fn status(code: u16) -> reqwest::StatusCode {
         reqwest::StatusCode::from_u16(code).unwrap()
@@ -486,5 +540,68 @@ mod tests {
         assert_eq!(retry_delay(4), Duration::from_millis(2000));
         assert_eq!(retry_delay(5), Duration::from_millis(4000));
         assert_eq!(retry_delay(20), Duration::from_millis(4000));
+    }
+
+    #[test]
+    fn parses_retry_after_seconds_and_http_date() {
+        let now = SystemTime::now();
+        let mut headers = HeaderMap::new();
+
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("42"));
+        assert_eq!(retry_after_delay_at(&headers, now), Some(Duration::from_secs(42)));
+
+        let future = httpdate::fmt_http_date(now + Duration::from_secs(30));
+        headers.insert(RETRY_AFTER, HeaderValue::from_str(&future).unwrap());
+        let delay = retry_after_delay_at(&headers, now).unwrap();
+        assert!((28..=30).contains(&delay.as_secs()), "unexpected HTTP-date delay: {delay:?}");
+
+        let past = httpdate::fmt_http_date(now - Duration::from_secs(30));
+        headers.insert(RETRY_AFTER, HeaderValue::from_str(&past).unwrap());
+        assert_eq!(retry_after_delay_at(&headers, now), Some(Duration::ZERO));
+
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("not-a-date"));
+        assert_eq!(retry_after_delay_at(&headers, now), None);
+    }
+
+    #[test]
+    fn waits_for_retry_after_before_retrying_a_rate_limited_download() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let _ = read_request_headers(&mut first);
+            first
+                .write_all(
+                    b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nRetry-After: 1\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            first.shutdown(Shutdown::Both).unwrap();
+
+            let (mut second, _) = listener.accept().unwrap();
+            let _ = read_request_headers(&mut second);
+            second.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody").unwrap();
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let client = reqwest::Client::new();
+        let started = std::time::Instant::now();
+        let downloaded = runtime
+            .block_on(resilient_download_bytes(
+                &client,
+                format!("http://{address}/artifact").parse().unwrap(),
+                "test artifact",
+                1024,
+                2,
+                |_, _| {},
+            ))
+            .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(downloaded, b"body");
+        assert!(
+            started.elapsed() >= Duration::from_millis(900),
+            "Retry-After: 1 must delay the retry, elapsed {:?}",
+            started.elapsed()
+        );
     }
 }

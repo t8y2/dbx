@@ -128,6 +128,75 @@ describe("Vim IME command guard", () => {
     expect(view.state.doc.toString()).toBe("xELECT 1;\nSELECT 2;\nSELECT 3;");
   });
 
+  it("replaces the character when an IME commits the literal r waits for (#11240)", () => {
+    const { view } = editor();
+    key(view, "r");
+    expect(getCM(view)?.state.vim?.expectLiteralNext).toBe(true);
+
+    // No keydown for the committed character: an IME only delivers the text.
+    expect(input(view, "中")).toBe(true);
+
+    expect(view.state.doc.toString()).toBe(`中ELECT 1;
+SELECT 2;
+SELECT 3;`);
+    expect(getCM(view)?.state.vim?.expectLiteralNext).toBe(false);
+  });
+
+  // CodeMirror only raises `view.composing` from the first preedit onward, and the
+  // input helper below calls the handlers directly, so tests set the flag by hand.
+  function setComposing(view: EditorView, composing: number) {
+    (view as unknown as { inputState: { composing: number } }).inputState.composing = composing;
+  }
+
+  it("waits for the committed character instead of taking an IME preedit as the literal", () => {
+    const { view } = editor();
+    key(view, "r");
+    view.contentDOM.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    setComposing(view, 1);
+
+    // First preedit of the pinyin the user is still choosing. CodeMirror does put
+    // the preedit in the document; what must not happen is `r` completing with it.
+    input(view, "n");
+
+    expect(view.state.doc.toString()).toBe("n" + sample);
+    expect(getCM(view)?.state.vim?.expectLiteralNext).toBe(true);
+
+    view.contentDOM.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "中" }));
+    setComposing(view, -1);
+    input(view, "中");
+
+    expect(view.state.doc.toString()).toBe(`中ELECT 1;
+SELECT 2;
+SELECT 3;`);
+    expect(getCM(view)?.state.vim?.expectLiteralNext).toBe(false);
+  });
+
+  it("moves to the committed character for f as well", () => {
+    const view = new EditorView({ parent: document.body, state: EditorState.create({ doc: "a-b-c", extensions: [history(), Prec.highest([vim({ status: true }), createVimImeGuard({ EditorView, ViewPlugin }, getCM)])] }) });
+    views.push(view);
+    key(view, "f");
+    expect(getCM(view)?.state.vim?.expectLiteralNext).toBe(true);
+
+    input(view, "c");
+
+    expect(view.state.selection.main.head).toBe(4);
+    expect(view.state.doc.toString()).toBe("a-b-c");
+  });
+
+  it("keeps the literal pending when the composition is cancelled", () => {
+    const { view } = editor();
+    key(view, "r");
+    view.contentDOM.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    setComposing(view, 1);
+    input(view, "n");
+    view.contentDOM.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "" }));
+    setComposing(view, -1);
+
+    // Nothing replaced the character under the cursor, and the command is still waiting.
+    expect(view.state.doc.toString()).toBe("n" + sample);
+    expect(getCM(view)?.state.vim?.expectLiteralNext).toBe(true);
+  });
+
   it("does not consume system shortcuts, dead keys or insert-mode keydowns", () => {
     const { view } = editor();
     expect(key(view, "Process", { code: "KeyJ", keyCode: 229, metaKey: true }).defaultPrevented).toBe(false);

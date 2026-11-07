@@ -2,6 +2,7 @@
 import { onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/composables/useToast";
 import { SidebarDangerConfirmDialog } from "./sidebarAsyncDialogs";
 import { sidebarDangerRunningExecutionId } from "./sidebarTreeDialogState";
@@ -91,6 +92,13 @@ function updateSidebarDangerDialogTextInput(value: string | number) {
   void input.onInput?.(input.value);
 }
 
+function updateSidebarDangerDialogSelect(value: unknown) {
+  const select = sidebarDangerDialogRequest.value?.select;
+  if (!select || typeof value !== "string") return;
+  select.value = value;
+  void select.onChange?.(value);
+}
+
 const unregister = registerSidebarDangerDialogHost(showSidebarDangerDialog);
 onBeforeUnmount(unregister);
 </script>
@@ -146,6 +154,20 @@ onBeforeUnmount(unregister);
         <span class="font-medium text-foreground">{{ sidebarDangerDialogRequest.textInput.label }}</span>
         <Input :model-value="sidebarDangerDialogRequest.textInput.value" :inputmode="sidebarDangerDialogRequest.textInput.inputMode" :placeholder="sidebarDangerDialogRequest.textInput.placeholder" @update:model-value="updateSidebarDangerDialogTextInput" />
       </label>
+      <div v-if="sidebarDangerDialogRequest.select" class="mb-3 grid gap-1 rounded-md border bg-muted/20 px-3 py-2 text-sm" data-testid="danger-dialog-select">
+        <div class="flex items-center gap-3">
+          <span class="font-medium text-foreground">{{ sidebarDangerDialogRequest.select.label }}</span>
+          <Select :model-value="sidebarDangerDialogRequest.select.value" :disabled="sidebarDangerDialogConfirming" @update:model-value="updateSidebarDangerDialogSelect">
+            <SelectTrigger class="h-7 w-32 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="choice in sidebarDangerDialogRequest.select.choices" :key="choice.value" :value="choice.value">{{ choice.label }}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <span v-if="sidebarDangerDialogRequest.select.hint" class="text-xs leading-5 text-muted-foreground">{{ sidebarDangerDialogRequest.select.hint }}</span>
+      </div>
     </template>
   </SidebarDangerConfirmDialog>
 </template>

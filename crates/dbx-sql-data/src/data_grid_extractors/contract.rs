@@ -1,5 +1,6 @@
 use crate::data_grid_sql::{DataGridCopyInsertMode, DataGridPrimaryKeyMode, DataGridTableMeta};
 use crate::models::connection::DatabaseType;
+use dbx_types::types::SpatialColumn;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
@@ -30,6 +31,7 @@ pub enum DataGridExtractorId {
     OneRow,
     SqlInList,
     SqlInserts,
+    SqlDeletes,
     SqlDeletesInserts,
     SqlUpdates,
     SqlSelect,
@@ -335,6 +337,10 @@ pub struct DataGridExtractRequest {
     pub selection_kind: DataGridSelectionKind,
     #[serde(default)]
     pub options: DataGridExtractorOptions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_columns: Option<Vec<SpatialColumn>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_values: Option<Vec<Vec<Option<u32>>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

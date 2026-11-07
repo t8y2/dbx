@@ -451,3 +451,15 @@ describe("raw password copy format", () => {
     expect(connectionUrlCopyFormats(config({ password: "" }))).not.toContain("password");
   });
 });
+
+describe("TDengine connection URL copy", () => {
+  it("builds plain and SSL WebSocket URLs and JDBC URLs", () => {
+    const plain = config({ db_type: "tdengine", host: "td.example.com", port: 6041, username: "root", password: "secret", database: "power", ssl: false });
+    expect(buildConnectionUrlCopy(plain, "url")).toBe("taosws://root@td.example.com:6041/power");
+    expect(buildConnectionUrlCopy(plain, "jdbcUrl")).toBe("jdbc:TAOS-RS://td.example.com:6041/power");
+
+    const secure = config({ db_type: "tdengine", host: "td.example.com", port: 6041, username: "root", password: "secret", database: "power", ssl: true });
+    expect(buildConnectionUrlCopy(secure, "url")).toBe("taoswss://root@td.example.com:6041/power?useSSL=true");
+    expect(buildConnectionUrlCopy(secure, "jdbcUrl")).toBe("jdbc:TAOS-RS://td.example.com:6041/power?useSSL=true");
+  });
+});

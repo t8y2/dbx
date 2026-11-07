@@ -1595,6 +1595,7 @@ export interface TriggerInfo {
 
 /** Missing metadata means a provider has not established exact identity. */
 export interface MetadataReadOptions {
+  lightweight?: boolean;
   identityMode?: "exact";
   catalog?: string;
 }
@@ -2095,6 +2096,16 @@ export interface SqlGroupByViolation {
   qualifier?: string | null;
 }
 
+/**
+ * A two-part column qualifier that names neither a table nor an alias visible
+ * in the statement, e.g. `b.id` when only `a` and `qb` are declared.
+ * The span covers the qualifier itself.
+ */
+export interface SqlUnknownQualifier {
+  qualifier: string;
+  span: SqlTextSpan;
+}
+
 export interface SqlReferenceScope {
   id: number;
   parent_id?: number | null;
@@ -2105,6 +2116,7 @@ export interface SqlReferenceAnalysis {
   columns: SqlColumnReference[];
   scopes?: SqlReferenceScope[];
   group_by_violations?: SqlGroupByViolation[];
+  unknown_qualifiers?: SqlUnknownQualifier[];
 }
 
 export type TreeNodeType =
@@ -2440,6 +2452,8 @@ export interface TableStructureEditorDraft {
   createPartitioningColumns?: string[];
   createPartitioningExpression?: string;
   loadedMetadataFacets?: import("@/lib/metadata/objectMetadataCache").ObjectMetadataFacet[];
+  /** A failed index read must keep restored index edits blocked until an explicit reload succeeds. */
+  indexMetadataReadError?: string;
   scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
   /** Request id of the structureInitialTab the editor already applied; remounts must not replay a consumed initial tab over the restored draft. */
   appliedInitialTabRequestId?: number;

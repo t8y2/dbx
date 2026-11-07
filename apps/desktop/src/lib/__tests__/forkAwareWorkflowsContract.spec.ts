@@ -81,12 +81,13 @@ describe("fork-aware workflow contract", () => {
   it("does not mistake a step-level condition for a job-level guard", () => {
     // A step-level `if:` is nested deeper than the job-level one, so adding one
     // must not change the number of guards the job is considered to have.
-    const workflow = readWorkflow("dockerhub-description.yml");
-    expect(jobGuardLines(workflow, "update"), "the job has one guard").toHaveLength(1);
+    // The fixture is built inline: this exercises the parsing helpers, so it
+    // must not depend on the wording of a real workflow file.
+    const jobWithGuardOnly = ["", "jobs:", "  update:", "    if: github.repository == 't8y2/dbx'", "    steps:", "      - uses: actions/checkout@v7", ""].join("\n");
+    expect(jobGuardLines(jobWithGuardOnly, "update"), "the job has one guard").toHaveLength(1);
 
-    const withStepCondition = workflow.replace("      - uses: actions/checkout@v7", "      - uses: actions/checkout@v7\n        if: github.ref == 'refs/heads/main'");
-    expect(withStepCondition, "the step condition was inserted").not.toBe(workflow);
-    expect(jobGuardLines(withStepCondition, "update"), "the job still has one guard").toHaveLength(1);
+    const jobWithStepCondition = ["", "jobs:", "  update:", "    if: github.repository == 't8y2/dbx'", "    steps:", "      - uses: actions/checkout@v7", "        if: github.ref == 'refs/heads/main'", ""].join("\n");
+    expect(jobGuardLines(jobWithStepCondition, "update"), "the job still has one guard").toHaveLength(1);
   });
 
   it("preserves the triggers, permissions, and destinations of the guarded workflows", () => {

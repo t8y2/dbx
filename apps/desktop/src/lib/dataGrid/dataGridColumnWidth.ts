@@ -153,3 +153,16 @@ export function sampleDataGridColumnValues(rows: readonly CellValue[][], columnI
   }
   return values;
 }
+
+/**
+ * Whether a rows change should refit the machine-chosen column widths.
+ *
+ * A fresh result replaces the rows array (re-running a query, switching result
+ * tabs), so auto widths must follow the new content — otherwise a wide result
+ * pins the columns for a later narrow one (#14439). A "load more" page appends to
+ * the same result and carries `appended_from_row_count`; refitting then would make
+ * the page jump.
+ */
+export function shouldRefitColumnWidthsOnRowsChange(previousRows: unknown, nextRows: unknown, appendMarker: number | null | undefined): boolean {
+  return previousRows !== undefined && previousRows !== nextRows && appendMarker == null;
+}

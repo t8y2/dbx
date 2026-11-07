@@ -1,5 +1,5 @@
 import { ref, shallowRef, computed, watch, type ComputedRef, type Ref } from "vue";
-import { calculateDataGridColumnWidth, DATA_GRID_AUTO_FIT_VALUE_TEXT_LIMIT, DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH, COLUMN_WIDTH_DENSITY_PRESETS, sampleDataGridColumnValues } from "@/lib/dataGrid/dataGridColumnWidth";
+import { calculateDataGridColumnWidth, DATA_GRID_AUTO_FIT_VALUE_TEXT_LIMIT, DATA_GRID_COL_AUTO_FIT_MAX_WIDTH, DATA_GRID_COL_MIN_WIDTH, COLUMN_WIDTH_DENSITY_PRESETS, sampleDataGridColumnValues, shouldRefitColumnWidthsOnRowsChange } from "@/lib/dataGrid/dataGridColumnWidth";
 import { createDataGridColumnMeasurementSignature, loadDataGridColumnWidthState, removeDataGridColumnWidthState, saveDataGridColumnWidthState } from "@/lib/dataGrid/dataGridColumnWidthState";
 import type { ColumnWidthDensity, DataGridColumnWidthMode } from "@/stores/settingsStore";
 
@@ -44,6 +44,11 @@ export interface UseDataGridColumnResizeOptions {
   headerMeasurementKey?: Ref<unknown>;
   rowNumberWidth?: Ref<number> | ComputedRef<number>;
   viewportWidth?: Ref<number> | ComputedRef<number>;
+  /**
+   * `appended_from_row_count` of the current result. Present means the rows grew by a
+   * "load more" page, where widths must not be refit; absent means a fresh result.
+   */
+  resultAppendMarker?: ComputedRef<number | undefined | null>;
   displayValue?: (value: CellValue, columnIndex: number) => CellValue;
 }
 
@@ -360,7 +365,41 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     // User-sized column widths represent explicit pixel choices and must be preserved.
     recomputeAutoColumnWidths();
   });
+  /**
+   * Refits only the machine-chosen widths to the current rows, shrinking or growing them.
+   * A user drag and an explicit "auto fit" are deliberate choices and keep their width.
+   */
+  function refitAutoColumnWidthsToContent() {
+    if (columnWidths.value.length !== columns.value.length || columns.value.length === 0) return;
+    const nextColumnIndexes = [...columnIndexes.value];
+    const currentNeededWidths = neededColumnWidths.value ?? [];
+    const next = columnWidths.value.slice();
+    let changed = false;
+    for (let colIdx = 0; colIdx < columns.value.length; colIdx++) {
+      const actualColIdx = nextColumnIndexes[colIdx];
+      if (actualColIdx !== undefined && (manualColumnIndexes.value.has(actualColIdx) || autoFittedColumnIndexes.value.has(actualColIdx))) continue;
+      const needed = currentNeededWidths[colIdx] ?? DATA_GRID_COL_MIN_WIDTH;
+      if (next[colIdx] !== needed) {
+        next[colIdx] = needed;
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    columnWidths.value = next;
+    previousColumnIndexes = nextColumnIndexes;
+    persistColumnWidths();
+  }
+
   watch(neededColumnWidthSignature, () => growColumnWidthsToFitSamples(neededColumnWidths.value));
+  watch(
+    () => sourceRows.value,
+    (rows, previousRows) => {
+      if (!shouldRefitColumnWidthsOnRowsChange(previousRows, rows, options.resultAppendMarker?.value)) return;
+      // A fresh result replaced the rows, so machine-chosen widths follow the new content
+      // instead of keeping the width the older, longer rows needed (#14439).
+      refitAutoColumnWidthsToContent();
+    },
+  );
 
   return {
     columnWidths,

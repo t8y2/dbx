@@ -336,6 +336,191 @@ const SET_OPERATION_MODIFIER_KEYWORDS = new Set(["ALL", "DISTINCT"]);
 // language (`CREATE [OR REPLACE] PROCEDURE ... IS BEGIN ... END;`), so its statement
 // ranges must stay whole instead of splitting at every body semicolon.
 const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle", "xugu", "argo", "transwarp"]);
+// Mirrors line_console_family in dbx-sql (dbx-sql-core/src/sql.rs)
+// — keep both in sync. SQL*Plus/yasql and DM8 disql commands are
+// line-terminated and execute client-side.
+const CONSOLE_COMMAND_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "yashandb", "dameng"]);
+// Console verbs the backend recognizes (dbx-sql-core/src/console_command.rs),
+// including the ones it only acknowledges-and-skips. A word outside this set
+// never starts a console line, so ordinary SQL is unaffected.
+const CONSOLE_COMMAND_VERBS = new Set([
+  "DESC",
+  "DESCR",
+  "DESCRIBE",
+  "EXEC",
+  "EXECUTE",
+  "SHO",
+  "SHOW",
+  "PRO",
+  "PROMPT",
+  "SET",
+  "EXIT",
+  "QUIT",
+  "RUN",
+  "APPEND",
+  "ARCHIVE",
+  "BREAK",
+  "BTITLE",
+  "CHANGE",
+  "CLEAR",
+  "COLUMN",
+  "COMPUTE",
+  "CONNECT",
+  "DEFINE",
+  "DEL",
+  "DISCONNECT",
+  "EDIT",
+  "HOST",
+  "INPUT",
+  "LIST",
+  "PASSWORD",
+  "PAUSE",
+  "PRINT",
+  "RECOVER",
+  "REMARK",
+  "SHUTDOWN",
+  "SPOOL",
+  "START",
+  "STARTUP",
+  "STORE",
+  "TTITLE",
+  "UNDEFINE",
+  "VARIABLE",
+  "WHENEVER",
+  "XQUERY",
+]);
+// `SET TRANSACTION|ROLE|CONSTRAINT[S]` is server SQL, not a console command.
+const CONSOLE_SET_SERVER_SQL_FOLLOWERS = new Set(["TRANSACTION", "ROLE", "CONSTRAINT", "CONSTRAINTS"]);
+// Disql client options only; every other SET stays native DM8 SQL.
+const DISQL_SET_CLIENT_OPTIONS = new Set([
+  "ANSWER",
+  "APPINFO",
+  "ARRAY",
+  "ARRAYSIZE",
+  "AUTOCOMMIT",
+  "AUTOPRINT",
+  "AUTORECOVERY",
+  "AUTOTRACE",
+  "BLOCKTERMINATOR",
+  "BTITLE",
+  "BUFFER",
+  "CMDSEP",
+  "COLSEP",
+  "COMPATIBILITY",
+  "CONCAT",
+  "COPYCOMMIT",
+  "COPYTYPECHECK",
+  "DEFINE",
+  "DESCRIBE",
+  "ECHO",
+  "EDITFILE",
+  "EMBEDDED",
+  "ESCAPE",
+  "FEEDBACK",
+  "FLAGGER",
+  "FLUSH",
+  "HEADING",
+  "HEADSEP",
+  "LINESIZE",
+  "LOBOFFSET",
+  "LONG",
+  "LONGCHUNKSIZE",
+  "MARKUP",
+  "NEWPAGE",
+  "NULL",
+  "NUMFORMAT",
+  "NUMWIDTH",
+  "PAGESIZE",
+  "PAUSE",
+  "RECSEP",
+  "RECSEPCHAR",
+  "SERVEROUTPUT",
+  "SHIFTINOUT",
+  "SHOWMODE",
+  "SILENT",
+  "SPOOL",
+  "SQLBLANKLINES",
+  "SQLCASE",
+  "SQLCODE",
+  "SQLCONTINUE",
+  "SQLNUMBER",
+  "SQLPREFIX",
+  "SQLPROMPT",
+  "SQLTERMINATOR",
+  "SUFFIX",
+  "TAB",
+  "TERMOUT",
+  "TIME",
+  "TIMING",
+  "TRIMOUT",
+  "TRIMSPOOL",
+  "UNDERLINE",
+  "VERIFY",
+  "WRAP",
+]);
+
+export function isConsoleCommandDatabaseType(databaseType?: DatabaseType): boolean {
+  return !!databaseType && CONSOLE_COMMAND_DATABASES.has(databaseType);
+}
+
+// Mirrors supports_psql_control_commands in dbx-sql — keep both in sync.
+// psql console commands the backend executes client-side (`\d`, `\dt`).
+const PSQL_CONSOLE_DATABASES: ReadonlySet<DatabaseType> = new Set(["postgres", "opengauss", "gaussdb"]);
+
+/**
+ * Whether the line starting at `index` is an executable psql console command
+ * (`\d [object]`, `\dt [pattern]`), mirroring the backend splitter. Other
+ * backslash commands (including ignorable controls like `\timing`) are left
+ * to the backend's existing handling.
+ */
+function startsPsqlConsoleCommandLine(sql: string, index: number): boolean {
+  const lineEnd = findLineEnd(sql, index);
+  const line = sql.slice(index, lineEnd).trim();
+  return /^\\d\+?(?:\s|$)/.test(line) || /^\\dt\+?(?:\s|$)/.test(line);
+}
+
+/**
+ * psql control lines the backend preprocessor blanks ( `\echo`, `\timing`,
+ * `\set ON_ERROR_STOP/VERBOSITY`). Skipping them here keeps statement ranges
+ * in sync with the backend, which ignores them before splitting.
+ */
+function isIgnorablePsqlControlLine(sql: string, index: number): boolean {
+  const lineEnd = findLineEnd(sql, index);
+  const line = sql.slice(index, lineEnd).trim();
+  return /^\\echo\b/.test(line) || /^\\timing\b/.test(line) || /^\\set\s+(ON_ERROR_STOP|VERBOSITY)\b/i.test(line);
+}
+
+/**
+ * Whether the line starting at `index` is a SQL*Plus console command line
+ * (verb-first, line-terminated). Mirrors the backend splitter: the verb must
+ * be followed by whitespace, `;` or end of line (`EXEC(` stays SQL), and no
+ * executable statement may be pending from previous lines.
+ */
+function startsConsoleCommandLine(sql: string, index: number, databaseType?: DatabaseType): boolean {
+  const lineEnd = findLineEnd(sql, index);
+  const line = sql.slice(index, lineEnd).trim();
+  if (!line) return false;
+  // `@script.sql` is START shorthand.
+  if (line.startsWith("@") && line.length > 1) return true;
+  const word = /^[^\s(;]+/.exec(line)?.[0] ?? "";
+  if (!CONSOLE_COMMAND_VERBS.has(word.toUpperCase())) return false;
+  const after = line[word.length];
+  if (after !== undefined && after !== ";" && !/\s/.test(after)) return false;
+  if (word.toUpperCase() === "SET") {
+    const follower = /^[^\s(;]+/.exec(line.slice(word.length).trimStart())?.[0]?.toUpperCase() ?? "";
+    if (CONSOLE_SET_SERVER_SQL_FOLLOWERS.has(follower)) return false;
+    if (databaseType === "dameng" && !DISQL_SET_CLIENT_OPTIONS.has(follower)) return false;
+    if (databaseType === "dameng" && follower === "TIME" && !/^TIME\s+(?:ON|OFF)(?:\s|$)/i.test(line.slice(word.length).trimStart().replace(/;\s*$/, ""))) return false;
+  }
+  return true;
+}
+
+export function isConsoleCommandLine(line: string, databaseType?: DatabaseType): boolean {
+  const text = line.trim();
+  if (!text || text.includes("\n")) return false;
+  return isConsoleCommandDatabaseType(databaseType) ? startsConsoleCommandLine(text, 0, databaseType) : !!databaseType && PSQL_CONSOLE_DATABASES.has(databaseType) && startsPsqlConsoleCommandLine(text, 0);
+}
+
 const MYSQL_ROUTINE_BLOCK_DATABASES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb"]);
 // PostgreSQL/openGauss are also the connection types users pick for GaussDB/openGauss instances
 // running in Oracle (A) compatibility mode, where a routine body is written in Oracle style
@@ -409,10 +594,19 @@ function isAsciiAlphanumeric(ch: string): boolean {
  * whitespace are excluded so editor highlights stay tight).
  */
 export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): RawStatement[] {
+  return scanSqlStatementRanges(sql, databaseType, parameterOptions).statements;
+}
+
+/** Interactive input must end outside quotes/comments/blocks at a client delimiter. */
+export function isSqlInputComplete(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
+  return scanSqlStatementRanges(sql, databaseType, parameterOptions).complete;
+}
+
+function scanSqlStatementRanges(sql: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): { statements: RawStatement[]; complete: boolean } {
   databaseType = statementParsingDatabaseType(databaseType, parameterOptions);
   if (isHttpJsonRestDatabaseType(databaseType)) {
     const requests = splitElasticsearchRestRequestRanges(sql);
-    if (requests) return requests;
+    if (requests) return { statements: requests, complete: requests.length > 0 };
   }
 
   const statements: RawStatement[] = [];
@@ -432,6 +626,8 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   let dollarTag = "";
   let postgresDollarQuotedRoutine = false;
   let oraclePlSqlStatementEnd: number | null | undefined;
+  let unterminatedBlockComment = false;
+  let awaitingSlash = false;
   let i = 0;
 
   // Incremental cache for the MySQL routine-block check below: without it, every
@@ -584,6 +780,47 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     }
 
     // state === "none"
+    // SQL*Plus console command lines (Oracle, YashanDB) are line-terminated:
+    // cut them here, before `;`/quote interpretation, so their text stays one
+    // statement — mirroring the backend splitter. Only at a line start with no
+    // pending statement (a console verb never continues an unterminated SQL
+    // statement).
+    if (isConsoleCommandDatabaseType(databaseType) && statementStart === -1 && isAtLineStart(sql, i) && startsConsoleCommandLine(sql, i, databaseType)) {
+      const lineEnd = findLineEnd(sql, i);
+      let consoleFrom = i;
+      while (consoleFrom < lineEnd && isWhitespace(sql[consoleFrom])) consoleFrom += 1;
+      let consoleTo = lineEnd;
+      while (consoleTo > consoleFrom && isWhitespace(sql[consoleTo - 1])) consoleTo -= 1;
+      if (consoleTo > consoleFrom) {
+        statements.push({ hitFrom: consoleFrom, from: consoleFrom, to: consoleTo, sql: sql.slice(consoleFrom, consoleTo) });
+      }
+      i = nextLineStart(sql, lineEnd);
+      statementHitStart = i;
+      continue;
+    }
+    // Ignorable psql control lines are blanked by the backend preprocessor;
+    // skip them here so the pending statement does not absorb them.
+    if (!!databaseType && PSQL_CONSOLE_DATABASES.has(databaseType) && statementStart === -1 && isAtLineStart(sql, i) && isIgnorablePsqlControlLine(sql, i)) {
+      const lineEnd = findLineEnd(sql, i);
+      i = nextLineStart(sql, lineEnd);
+      statementHitStart = i;
+      continue;
+    }
+    // Executable psql console commands (`\d emp`, `\dt`) are line-terminated
+    // as well; mirror of the backend psql handling.
+    if (!!databaseType && PSQL_CONSOLE_DATABASES.has(databaseType) && statementStart === -1 && isAtLineStart(sql, i) && startsPsqlConsoleCommandLine(sql, i)) {
+      const lineEnd = findLineEnd(sql, i);
+      let consoleFrom = i;
+      while (consoleFrom < lineEnd && isWhitespace(sql[consoleFrom])) consoleFrom += 1;
+      let consoleTo = lineEnd;
+      while (consoleTo > consoleFrom && isWhitespace(sql[consoleTo - 1])) consoleTo -= 1;
+      if (consoleTo > consoleFrom) {
+        statements.push({ hitFrom: consoleFrom, from: consoleFrom, to: consoleTo, sql: sql.slice(consoleFrom, consoleTo) });
+      }
+      i = nextLineStart(sql, lineEnd);
+      statementHitStart = i;
+      continue;
+    }
     if (supportsDelimiterCommands && isAtLineStart(sql, i) && startsDelimiterCommand(sql, i)) {
       const lineEnd = findLineEnd(sql, i);
       const delimiter = parseDelimiterCommand(sql.slice(i, lineEnd));
@@ -598,6 +835,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     if ((isOracleLikeDatabase(databaseType, parameterOptions) || isPostgresFamilyDatabase(databaseType)) && isAtLineStart(sql, i) && isSlashLine(sql, i)) {
       const lineEnd = findLineEnd(sql, i);
       flush(i);
+      awaitingSlash = false;
       i = nextLineStart(sql, lineEnd);
       statementHitStart = i;
       continue;
@@ -623,6 +861,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       const hintMarker = sql[i + 2];
       if (statementStart === -1 && pendingHintStart === -1 && (hintMarker === "+" || hintMarker === "@" || hintMarker === "&")) pendingHintStart = i;
       const close = sql.indexOf("*/", i + 2);
+      unterminatedBlockComment = close === -1;
       if (statementStart === -1) {
         if (databaseType === "mysql") {
           if (pendingMysqlDirectiveStart === -1 || i > pendingMysqlDirectiveLineEnd) {
@@ -708,7 +947,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       } else {
         if (oraclePlSqlStatementEnd === undefined && !postgresDollarQuotedRoutine && statementStart !== -1 && keepsOracleStyleBlockTogether(sql.slice(statementStart, i), databaseType, parameterOptions)) {
           const statementSoFar = sql.slice(statementStart, i);
-          oraclePlSqlStatementEnd = startsWithOraclePlSqlBlock(statementSoFar) ? statementStart + (oraclePlSqlBlockEnd(sql.slice(statementStart)) ?? sql.length - statementStart) : null;
+          oraclePlSqlStatementEnd = startsWithOraclePlSqlBlock(statementSoFar) ? statementStart + (oraclePlSqlBlockEnd(sql.slice(statementStart)) ?? Infinity) : null;
         }
         const resolvedOraclePlSqlStatementEnd = oraclePlSqlStatementEnd;
         const isOraclePlSql = typeof resolvedOraclePlSqlStatementEnd === "number";
@@ -728,6 +967,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
             i += 1;
             continue;
           }
+          awaitingSlash = isOraclePlSql;
           flush(i + 1);
         } else {
           flush();
@@ -744,11 +984,11 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
     i += 1;
   }
 
-  // Flush any trailing statement that lacks a terminating semicolon.
+  const complete = statements.length > 0 && statementStart === -1 && state === "none" && !unterminatedBlockComment && !awaitingSlash;
+  // Editors still expose unfinished statements; interactive execution does not.
   flush();
 
-  if (databaseType === "sqlserver") return mergeSqlServerControlFlowBatches(sql, statements, databaseType, parameterOptions);
-  return statements;
+  return { statements: databaseType === "sqlserver" ? mergeSqlServerControlFlowBatches(sql, statements, databaseType, parameterOptions) : statements, complete };
 }
 
 /**

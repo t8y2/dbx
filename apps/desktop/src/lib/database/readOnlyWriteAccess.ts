@@ -53,6 +53,7 @@ export interface ReadOnlyWriteAccessOptions {
   connection?: ({ id?: string; name?: string; read_only?: boolean; db_type?: DatabaseType } & MysqlDataCharsetConnection) | null;
   sql?: string;
   source?: string;
+  scopeId?: string;
   treatAsMutation?: boolean;
 }
 
@@ -76,5 +77,6 @@ export async function ensureReadOnlyWriteAccess(options: ReadOnlyWriteAccessOpti
     connectionName: connection.name,
     sql: options.sql,
     source: options.source,
+    scopeId: options.scopeId,
   });
 }

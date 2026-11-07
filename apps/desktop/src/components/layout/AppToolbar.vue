@@ -29,6 +29,7 @@ import {
   CalendarClock,
   Waypoints,
   RefreshCw,
+  SquareTerminal,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -81,6 +82,7 @@ const props = defineProps<{
   hasMcpUpdateAvailable: boolean;
   hasConnections: boolean;
   canNewQuery: boolean;
+  canOpenConsole: boolean;
   hasSqlFileConnections: boolean;
   immediateSyncing: boolean;
   showLogout?: boolean;
@@ -90,6 +92,7 @@ const emit = defineEmits<{
   "expand-sidebar": [];
   "new-connection": [];
   "new-query": [];
+  "open-console": [];
   "open-sql-editor-file": [];
   "set-theme-mode": [mode: AppThemeMode];
   "toggle-ai": [];
@@ -488,6 +491,14 @@ type ToolbarMenuItem = LightDropdownItem & { action: () => void };
 
 function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenuItem[] {
   const items: ToolbarMenuItem[] = [];
+
+  items.push({
+    value: "console",
+    label: t("console.title"),
+    icon: SquareTerminal,
+    action: () => emit("open-console"),
+    disabled: !props.canOpenConsole,
+  });
 
   items.push({
     value: "open-sql-editor-file",

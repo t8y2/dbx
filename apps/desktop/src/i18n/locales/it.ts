@@ -7846,6 +7846,8 @@ export default withEnglishFallback({
     generatorCurrentTimestamp: "Ora corrente (DATETIME/TIMESTAMP)",
     generatorCurrentDate: "Data corrente (DATE)",
     generatorSequence: "Numero incrementale (1, 2, 3...)",
+    generatorFixed: "Valore fisso",
+    fixedValuePlaceholder: "Inserisci un valore fisso",
     addGeneratedColumn: "Aggiungi colonna generata",
     removeGeneratedColumn: "Rimuovi colonna generata",
     generatedColumns: "Colonne generate automaticamente",

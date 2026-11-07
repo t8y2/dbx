@@ -9086,6 +9086,8 @@ export default withEnglishFallback({
     generatorCurrentTimestamp: "当前时间 (DATETIME/TIMESTAMP)",
     generatorCurrentDate: "当前日期 (DATE)",
     generatorSequence: "自增序号 (1, 2, 3...)",
+    generatorFixed: "固定值",
+    fixedValuePlaceholder: "输入固定值",
     addGeneratedColumn: "添加生成列",
     removeGeneratedColumn: "删除生成列",
     generatedColumns: "自动生成列",

@@ -7843,6 +7843,8 @@ export default withEnglishFallback({
     generatorCurrentTimestamp: "Data/hora atual (DATETIME/TIMESTAMP)",
     generatorCurrentDate: "Data atual (DATE)",
     generatorSequence: "Número sequencial autoincremental (1, 2, 3...)",
+    generatorFixed: "Valor fixo",
+    fixedValuePlaceholder: "Digite um valor fixo",
     addGeneratedColumn: "Adicionar coluna gerada",
     removeGeneratedColumn: "Remover coluna gerada",
     generatedColumns: "Colunas geradas automaticamente",

@@ -1122,7 +1122,7 @@ describe("queryStore hidden primary key editing", () => {
     expect(store.tabs.find((item) => item.id === tabId)?.result?.hidden_column_indexes).toEqual([2]);
   });
 
-  it("executes an unqualified Oracle query without enumerating objects when its type is unknown", async () => {
+  it("keeps an unqualified Oracle query editable through the keyless fallback when its type is unknown", async () => {
     getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
     getColumns.mockResolvedValue([
       { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
@@ -1160,8 +1160,10 @@ describe("queryStore hidden primary key editing", () => {
     expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT * FROM CUSTOMER_VIEW", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
     const tab = store.tabs.find((item) => item.id === tabId)!;
     expect(tab.result?.hidden_column_indexes).toBeUndefined();
-    await vi.waitFor(() => expect(tab.queryEditabilityReason).toBe("no-primary-key"));
-    expect(tab.queryAnalysis).toBeUndefined();
+    // #14270: an unknown type must not lock a direct base table out of the
+    // keyless whole-row fallback the table-data tab already offers.
+    await vi.waitFor(() => expect(tab.queryEditabilityReason ?? null).toBeNull());
+    expect(tab.tableMeta?.primaryKeys ?? []).toEqual([]);
   });
 
   it("does not check Oracle ROWID eligibility when query metadata returns no columns", async () => {
@@ -1710,6 +1712,30 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryAnalysis).toBeDefined();
     expect(tab.queryAnalysis?.allowInsertDelete).not.toBe(false);
     expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it("keeps a known Oracle view read-only for keyless editing", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      { name: "PLATFORM", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "PLATFORM_VIEW", type: "view", schema: "APP" }]);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: { schema: "APP", tableName: "PLATFORM_VIEW", selectStar: true, columns: [] },
+    });
+    executeMulti.mockResolvedValue([{ columns: ["ID", "PLATFORM"], rows: [[72, "轻卡"]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, "SELECT * FROM APP.PLATFORM_VIEW");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.tableMeta?.tableType).toBe("VIEW"));
+    expect(tab.queryEditabilityReason).toBe("no-primary-key");
   });
 
   it("does not inject Oracle ROWID into keyless view queries", async () => {

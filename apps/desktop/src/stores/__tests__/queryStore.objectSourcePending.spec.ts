@@ -450,7 +450,9 @@ describe("queryStore pending object source tab", () => {
   });
 
   it("reuses a read-only trigger tab and refreshes its DDL instead of opening a new tab (issue #14517)", async () => {
-    mocks.connectionStore.dbType = "mysql";
+    // PostgreSQL 触发器源码仍为只读（不挂 objectSource），覆盖 findLoadedReadOnlySourceTab
+    // 复用路径；MySQL/Oracle 系触发器已可保存（#14489），走 objectSource 判重分支。
+    mocks.connectionStore.dbType = "postgresql";
     const triggerSource = (source: string) => ({ ...objectSource(source), object_type: "TRIGGER" as const });
     mocks.getObjectSource.mockResolvedValue(triggerSource("CREATE TRIGGER app.trg_audit BEFORE INSERT ON app.t FOR EACH ROW BEGIN END"));
     const { useQueryStore } = await import("@/stores/queryStore");
@@ -475,7 +477,7 @@ describe("queryStore pending object source tab", () => {
   });
 
   it("switches to a dirty read-only trigger tab without refetching or clobbering edits", async () => {
-    mocks.connectionStore.dbType = "mysql";
+    mocks.connectionStore.dbType = "postgresql";
     mocks.getObjectSource.mockResolvedValue({ ...objectSource("CREATE TRIGGER app.trg_audit BEFORE INSERT ON app.t FOR EACH ROW BEGIN END"), object_type: "TRIGGER" as const });
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

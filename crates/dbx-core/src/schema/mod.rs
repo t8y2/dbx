@@ -888,6 +888,9 @@ pub async fn list_data_types_core(
                 .await
                 .map(deduplicate_data_type_names);
         }
+        if let Some(PoolKind::Postgres(pool)) = pool_handle.as_ref() {
+            return db::postgres::list_data_types(pool).await.map(deduplicate_data_type_names);
+        }
         Ok(Vec::new())
     })
     .await

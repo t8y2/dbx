@@ -1263,7 +1263,7 @@ export interface EditorSettings {
   sidebarHoverEnabled: boolean;
   sidebarHoverDelay: number;
   sidebarShowTooltips: boolean;
-  /** Legacy input for the one-time connection visibility migration. */
+  /** Obsolete persisted input; normalization discards it. */
   sidebarShowUserAdmin?: boolean;
   sidebarAllowHorizontalScroll: boolean;
   sidebarIndent: number;
@@ -2430,7 +2430,6 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarHoverEnabled: typeof settings.sidebarHoverEnabled === "boolean" ? settings.sidebarHoverEnabled : DEFAULT_EDITOR_SETTINGS.sidebarHoverEnabled,
     sidebarHoverDelay: normalizeSidebarHoverDelay(settings.sidebarHoverDelay),
     sidebarShowTooltips: settings.sidebarShowTooltips ?? DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips,
-    ...(typeof settings.sidebarShowUserAdmin === "boolean" ? { sidebarShowUserAdmin: settings.sidebarShowUserAdmin } : {}),
     sidebarAllowHorizontalScroll: settings.sidebarAllowHorizontalScroll ?? DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll,
     sidebarIndent: normalizeSidebarIndent(settings.sidebarIndent),
     sidebarFontSize: normalizeSidebarFontSize(settings.sidebarFontSize),
@@ -3445,11 +3444,11 @@ export const useSettingsStore = defineStore("settings", () => {
     return enqueueEditorSettingsOperation(mutation);
   }
 
-  function updateEditorSettingsAndPersist(partial: Partial<EditorSettings>): Promise<void> {
+  function updateEditorSettingsAndPersist(partial: Partial<EditorSettings> | (() => Partial<EditorSettings>)): Promise<void> {
     return enqueueEditorSettingsAtomicMutation(async () => {
       await initEditorSettings();
       const previous = editorSettingsSnapshot(editorSettings.value);
-      const patch = migrateLegacyEditorSettingsPatch(partial);
+      const patch = migrateLegacyEditorSettingsPatch(typeof partial === "function" ? partial() : partial);
       applyEditorSettingsPatch(patch);
       const revision = markEditorSettingsPatch(patch);
       try {

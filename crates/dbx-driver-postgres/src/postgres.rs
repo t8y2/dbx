@@ -7064,6 +7064,92 @@ pub async fn list_objects(
     Ok(object_rows_to_infos(&rows, schema))
 }
 
+fn list_objects_page_sql(sql: &str) -> String {
+    let source = sql.strip_suffix(" ORDER BY sort_order, object_name").unwrap_or(sql);
+    format!(
+        "SELECT * FROM ({source}) objects \
+         WHERE (array_length($4::text[], 1) IS NULL OR object_type = ANY($4::text[])) \
+           AND (object_name ILIKE $2 ESCAPE '\\' OR ($3 <> '' AND object_name ILIKE $3 ESCAPE '\\')) \
+         ORDER BY sort_order, object_name COLLATE \"C\", object_type COLLATE \"C\", \
+                  signature COLLATE \"C\" NULLS FIRST, parent_schema COLLATE \"C\" NULLS FIRST, \
+                  parent_name COLLATE \"C\" NULLS FIRST \
+         LIMIT $5 OFFSET $6"
+    )
+}
+
+pub async fn list_objects_paged(
+    pool: &Pool,
+    schema: &str,
+    include_relations: bool,
+    include_routines: bool,
+    include_custom_types: bool,
+    object_types: Option<&[String]>,
+    filter: Option<&str>,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<ObjectInfo>, String> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let include_custom_types = include_custom_types && !is_postgres_system_schema(schema);
+    if !include_relations && !include_routines && !include_custom_types {
+        return Ok(Vec::new());
+    }
+    let filter = filter.unwrap_or("").trim();
+    let filter_pattern = like_contains_pattern(filter);
+    let fuzzy_filter_pattern =
+        if crate::sql::fuzzy_filter_enabled(filter) { like_fuzzy_pattern(filter) } else { String::new() };
+    let object_types: Vec<String> = object_types
+        .unwrap_or_default()
+        .iter()
+        .map(|object_type| object_type.trim().to_ascii_uppercase().replace(' ', "_"))
+        .collect();
+    let limit = i64::try_from(limit).map_err(|_| "Object page limit exceeds PostgreSQL bigint".to_string())?;
+    let offset = i64::try_from(offset).map_err(|_| "Object page offset exceeds PostgreSQL bigint".to_string())?;
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let client = &EncodingClient::new(&client);
+    let (has_proc_prokind, has_proc_prosp, has_function_identity_arguments) = if include_routines {
+        (
+            postgres_proc_has_prokind(client).await?,
+            postgres_proc_has_prosp(client).await?,
+            postgres_has_function_identity_arguments(client).await?,
+        )
+    } else {
+        (false, false, false)
+    };
+    let params: &[(&(dyn tokio_postgres::types::ToSql + Sync), Type)] = &[
+        (&schema, Type::VARCHAR),
+        (&filter_pattern, Type::VARCHAR),
+        (&fuzzy_filter_pattern, Type::VARCHAR),
+        (&object_types, Type::TEXT_ARRAY),
+        (&limit, Type::INT8),
+        (&offset, Type::INT8),
+    ];
+    let mut primary_error = String::new();
+    for include_timestamps in [true, false] {
+        let source = list_objects_sql(
+            include_timestamps,
+            has_proc_prokind,
+            has_proc_prosp,
+            has_function_identity_arguments,
+            include_relations,
+            include_routines,
+            include_custom_types,
+            false,
+        );
+        let sql = list_objects_page_sql(&source);
+        match client.query_typed(&sql, params).await {
+            Ok(rows) => return Ok(object_rows_to_infos(&rows, schema)),
+            Err(error) if include_timestamps => {
+                primary_error = error.to_string();
+                log::debug!("[postgres][list_objects_paged:timestamp-fallback] primary_error={}", primary_error);
+            }
+            Err(error) => return Err(format!("{primary_error}; timestamp fallback failed: {error}")),
+        }
+    }
+    unreachable!()
+}
+
 /// openGauss variant of [`list_objects`]: top-level routines exclude package
 /// members (`propackage = true`), which are surfaced under their PACKAGE nodes
 /// by [`list_opengauss_packages`] instead.
@@ -16539,6 +16625,51 @@ mod tests {
         assert!(sql.contains("'PROCEDURE'"));
         assert!(sql.contains("'FUNCTION'"));
         assert!(!sql.contains("pg_catalog.pg_type"));
+    }
+
+    #[test]
+    fn list_objects_page_filters_the_combined_catalog_before_its_window() {
+        let source = list_objects_sql(false, true, false, true, true, true, true, false);
+        let sql = list_objects_page_sql(&source);
+        let statements = Parser::parse_sql(&PostgreSqlDialect {}, &sql).expect("valid PostgreSQL catalog query");
+        assert_eq!(statements.len(), 1);
+        assert!(matches!(statements[0], Statement::Query(_)));
+        assert!(sql.starts_with("SELECT * FROM (SELECT"));
+        assert!(sql.contains("FROM pg_catalog.pg_class"));
+        assert!(sql.contains("FROM pg_catalog.pg_proc"));
+        assert!(sql.contains("FROM pg_catalog.pg_type"));
+        let type_filter = sql.find("object_type = ANY($4::text[])").unwrap();
+        let name_filter = sql.find("object_name ILIKE $2 ESCAPE '\\'").unwrap();
+        let ordering = sql.find("ORDER BY sort_order").unwrap();
+        let window = sql.find("LIMIT $5 OFFSET $6").unwrap();
+        assert!(type_filter < ordering && name_filter < ordering && ordering < window);
+        assert_eq!(sql.matches("ORDER BY sort_order").count(), 1);
+        assert!(!source.contains("LIMIT"), "the original full catalog must remain unbounded");
+    }
+
+    #[test]
+    fn list_objects_page_orders_overloads_and_partition_parents_consistently() {
+        let source = list_objects_sql(false, true, false, true, true, true, false, false);
+        let sql = list_objects_page_sql(&source);
+        assert!(sql.contains("object_name COLLATE \"C\", object_type COLLATE \"C\""));
+        assert!(sql.contains("signature COLLATE \"C\" NULLS FIRST"));
+        assert!(sql.contains("parent_schema COLLATE \"C\" NULLS FIRST"));
+        assert!(sql.contains("parent_name COLLATE \"C\" NULLS FIRST"));
+        assert!(sql.contains("pg_get_function_identity_arguments(p.oid) AS signature"));
+        assert!(sql.contains("pc.relkind = 'p'"));
+    }
+
+    #[test]
+    fn list_objects_page_keeps_type_and_partition_metadata_in_both_timestamp_paths() {
+        for include_timestamps in [true, false] {
+            let source = list_objects_sql(include_timestamps, true, false, true, true, true, true, false);
+            let sql = list_objects_page_sql(&source);
+            assert!(sql.contains("obj_description(c.oid) AS object_comment"));
+            assert!(sql.contains("t.typelem = 0"));
+            assert!(sql.contains("t.typrelid = 0 OR c.relkind = 'c'"));
+            assert!(sql.contains("pg_catalog.pg_inherits"));
+            assert!(sql.contains("LIMIT $5 OFFSET $6"));
+        }
     }
 
     #[test]

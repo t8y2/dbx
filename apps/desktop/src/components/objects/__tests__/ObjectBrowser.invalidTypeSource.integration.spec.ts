@@ -63,6 +63,10 @@ beforeEach(() => {
   pinia = createPinia();
   setActivePinia(pinia);
   const connections = useConnectionStore();
+  vi.spyOn(connections, "readVisibleSchemaSelection").mockImplementation(async () => {
+    const names = await backend.listSchemas();
+    return { names, infos: [], systemNames: new Set<string>(), visibleNames: names, oracleMaintainedSchemas: undefined };
+  });
   connections.connections = [connection];
   connections.connectedIds.add(connection.id);
   invalidateObjectBrowserRowsCache({});

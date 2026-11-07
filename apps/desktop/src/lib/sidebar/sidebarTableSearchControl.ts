@@ -117,6 +117,7 @@ export function insertSidebarTableSearchControls(
   options: {
     enabled: boolean;
     sidebarObjectDisplay: "simple" | "grouped";
+    resolveDisplay?: (node: TreeNode) => "simple" | "grouped";
     activeQueries: Readonly<Record<string, string | undefined>>;
   },
 ): FlatTreeNode[] {
@@ -125,7 +126,7 @@ export function insertSidebarTableSearchControls(
   const result: FlatTreeNode[] = [];
   for (const item of flatNodes) {
     result.push(item);
-    if (!shouldInsertTableSearchControl(item, options.sidebarObjectDisplay, options.activeQueries)) continue;
+    if (!shouldInsertTableSearchControl(item, options.resolveDisplay?.(item.node) ?? options.sidebarObjectDisplay, options.activeQueries)) continue;
 
     const node = buildTableSearchControlNode(item.node);
     result.push({

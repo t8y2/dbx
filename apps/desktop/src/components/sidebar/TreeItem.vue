@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { sidebarNavigationSettings } from "@/lib/sidebar/sidebarNavigationPreferences";
 import { ref, computed, inject, nextTick, shallowRef, watch, onBeforeUnmount } from "vue";
 import { useI18n } from "vue-i18n";
 import {
@@ -40,8 +41,6 @@ import {
   Ban,
   RefreshCw,
 } from "@lucide/vue";
-import OracleDatabaseLinksDialog from "@/components/objects/OracleDatabaseLinksDialog.vue";
-const showDatabaseLinks = ref(false);
 import { useConnectionStore } from "@/stores/connectionStore";
 import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useQueryStore } from "@/stores/queryStore";
@@ -121,7 +120,8 @@ import { useDragSort } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
 import { treeNodePinKey } from "@/lib/app/pinnedItems";
 import { customTypeCapabilities, supportsOracleTypeAttributeExpansion } from "@/lib/database/databaseObjectCapabilities";
-import { sidebarTreeDisplayLabel, sidebarTreeSecondaryValue } from "@/lib/sidebar/sidebarTreeLabel";
+import { sidebarTreeDisplayLabel, sidebarTreeSecondaryValue, sidebarTreeObjectCountText } from "@/lib/sidebar/sidebarTreeLabel";
+import { oracleNavigationAuxiliaryText } from "@/lib/sidebar/oracleObjectNavigation";
 import { shouldActivateTreeNodeOnSingleClick } from "@/lib/sidebar/treeNodeClick";
 
 const { t } = useI18n();
@@ -240,6 +240,7 @@ const stopPasteHandlerRegistration = watch(
 );
 
 const activeNode = shallowRef<TreeNode>(props.node);
+const navigationSettings = computed(() => sidebarNavigationSettings(settingsStore.editorSettings, activeNode.value.connectionId));
 
 const isDisabledTrigger = computed(() => {
   const current = activeNode.value;
@@ -403,7 +404,12 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
     case "synonym":
       return { icon: Link2, colorClass: "text-sky-500" };
     case "job":
+    case "native-job":
+    case "native-job-group":
+    case "native-job-scheduler":
       return { icon: Clock, colorClass: "text-orange-400" };
+    case "oracle-shared-objects":
+      return { icon: FolderOpen, colorClass: "text-muted-foreground" };
     case "package":
       return { icon: Package, colorClass: "text-cyan-500" };
     case "package-body":
@@ -447,7 +453,12 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
     case "group-partitions":
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
     case "group-extensions":
+    case "connection-extensions":
       return { icon: Package, colorClass: "text-violet-500" };
+    case "process-list":
+      return { icon: ListTree, colorClass: "text-sky-500" };
+    case "server-dashboard":
+      return { icon: Gauge, colorClass: "text-sky-500" };
     case "group-event-triggers":
       return { icon: Package, colorClass: "text-violet-500" };
     case "group-tablespaces":
@@ -476,7 +487,7 @@ function treeNodeSecondaryValue(node: TreeNode): string | undefined {
 function visibleLabel(node: TreeNode): string {
   const withValidity = (label: string) => (node.valid === false ? `${label} · INVALID` : label);
   if (node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection" || node.type === "dynamodb-table" || node.type === "vector-collection" || node.type === "elasticsearch-index") {
-    return withValidity(sidebarDisplayTableName(node.label, settingsStore.editorSettings.sidebarHiddenTablePrefixes));
+    return withValidity(sidebarDisplayTableName(node.label, navigationSettings.value.sidebarHiddenTablePrefixes));
   }
   return withValidity(displayLabel(node));
 }
@@ -574,6 +585,10 @@ const detailTooltip = computed(() => {
         { label: t("tree.elasticsearchAlias"), value: aliases },
       ],
     };
+  }
+  if (node.type === "native-job-group" || node.type === "group-extensions" || node.type === "group-event-triggers") {
+    const rows = [...(node.type === "native-job-group" && node.comment ? [{ label: t("objects.type"), value: node.comment }] : []), ...(node.database ? [{ label: t("connection.database"), value: node.database }] : [])];
+    return rows.length ? { rows } : null;
   }
   const column = node.type === "column" ? (node.meta as ColumnInfo | undefined) : undefined;
   const comment = column && "comment" in column ? column.comment : node.comment;
@@ -808,7 +823,7 @@ function isLoginUserNode(): boolean {
 }
 
 const trailingComment = computed(() => {
-  if (!settingsStore.editorSettings.sidebarObjectInfoMode.startsWith("comment-")) return null;
+  if (!navigationSettings.value.sidebarObjectInfoMode.startsWith("comment-")) return null;
   return sidebarTreeNodeComment(activeNode.value, settingsStore.editorSettings.sidebarShowConnectionNotes);
 });
 
@@ -818,7 +833,7 @@ const connectionEndpointText = computed(() => {
 });
 
 function isRightAlignedComment(): boolean {
-  return settingsStore.editorSettings.sidebarObjectInfoMode === "comment-right" && !!trailingComment.value;
+  return navigationSettings.value.sidebarObjectInfoMode === "comment-right" && !!trailingComment.value;
 }
 
 function cancelTrailingCommentMeasure() {
@@ -869,17 +884,17 @@ function refreshTrailingCommentMeasurement() {
 }
 
 function formattedObjectStorage(): string {
-  const mode = settingsStore.editorSettings.sidebarObjectInfoMode;
+  const mode = navigationSettings.value.sidebarObjectInfoMode;
   if ((mode !== "size" && mode !== "comment-and-size") || (activeNode.value.type !== "database" && activeNode.value.type !== "table" && activeNode.value.type !== "materialized_view")) return "";
   return formatSidebarObjectStorage(activeNode.value.sizeBytes);
 }
 
 // 连接节点不参与 aligned 对齐：顶层连接各自独立，按同层最大 label 宽对齐只会让短连接名
 // 后留下一大段空白。无论全局是 aligned 还是 inline，连接节点的 comment 都紧跟 label。
-const alignedCommentLabelWidth = computed(() => (settingsStore.editorSettings.sidebarObjectInfoMode === "comment-aligned" && activeNode.value.type !== "connection" ? props.commentLabelWidth : undefined));
+const alignedCommentLabelWidth = computed(() => (navigationSettings.value.sidebarObjectInfoMode === "comment-aligned" && activeNode.value.type !== "connection" ? props.commentLabelWidth : undefined));
 
 function alignedCommentLeadingStyle(): { width: string } | { maxWidth: string } | undefined {
-  if (!usesFullWidthLabel.value && settingsStore.editorSettings.sidebarObjectInfoMode === "comment-and-size" && trailingComment.value) {
+  if (!usesFullWidthLabel.value && navigationSettings.value.sidebarObjectInfoMode === "comment-and-size" && trailingComment.value) {
     // Reserve the inline comment's margin so a long name cannot push into the size column.
     return { maxWidth: "max(0px, calc(100% - 1rem))" };
   }
@@ -1535,27 +1550,14 @@ function onClick(event: MouseEvent) {
   selectSingleTreeNode(props.node);
   rowRef.value?.focus({ preventScroll: true });
   if (!shouldActivateTreeNodeOnSingleClick(props.node.type, settingsStore.editorSettings.sidebarActivation) && props.node.type !== "load-more") return;
-  if (props.node.type === "oracle-db-link") {
-    showDatabaseLinks.value = true;
-    return;
-  }
   treeRuntime.handleRowClick(props.node, event.detail);
 }
 
 function onDoubleClick(event: MouseEvent) {
-  if (props.node.type === "oracle-db-link" || props.node.type === "oracle-db-links") {
-    showDatabaseLinks.value = true;
-    return;
-  }
   treeRuntime.handleRowDoubleClick(props.node, event);
 }
 
 function onTreeItemContextMenu(event: MouseEvent) {
-  if (props.node.type === "oracle-db-link" || props.node.type === "oracle-db-links") {
-    event.preventDefault();
-    showDatabaseLinks.value = true;
-    return;
-  }
   if (!connectionStore.selectedTreeNodeIds.includes(props.node.id)) selectSingleTreeNode(props.node);
   else connectionStore.selectedTreeNodeId = props.node.id;
   rowRef.value?.focus({ preventScroll: true });
@@ -1563,9 +1565,12 @@ function onTreeItemContextMenu(event: MouseEvent) {
 }
 
 function onKeydown(event: KeyboardEvent) {
-  if ((props.node.type === "oracle-db-link" || props.node.type === "oracle-db-links") && event.key === "Enter") {
+  const row = rowRef.value;
+  if (row && event.target === row && !event.ctrlKey && !event.metaKey && !event.altKey && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
     event.preventDefault();
-    showDatabaseLinks.value = true;
+    event.stopPropagation();
+    const bounds = row.getBoundingClientRect();
+    onTreeItemContextMenu(new MouseEvent("contextmenu", { clientX: bounds.left + 16, clientY: bounds.bottom }));
     return;
   }
   treeRuntime.handleRowKeydown(props.node, event);
@@ -1604,6 +1609,18 @@ function onKeydown(event: KeyboardEvent) {
         </button>
       </LightTooltip>
     </div>
+  </div>
+
+  <div v-else-if="node.type === 'relational-scope'" class="flex h-full min-w-0 items-center py-0.5 pr-2" :style="{ paddingLeft }" @click.stop @dblclick.stop @mousedown.stop @contextmenu.stop @keydown.stop>
+    <select
+      class="h-6 w-full min-w-0 rounded border bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      :aria-label="node.label === 'schema' ? 'Schema' : t('common.database')"
+      :value="JSON.stringify(node.relationalNavigationSelection)"
+      @change="node.relationalNavigationContainer && connectionStore.setRelationalNavigationSelection(node.relationalNavigationContainer, JSON.parse(($event.target as HTMLSelectElement).value))"
+    >
+      <option :value="JSON.stringify({ kind: 'all' })">{{ t("common.all") }}</option>
+      <option v-for="name in node.relationalNavigationOptions" :key="name" :value="JSON.stringify({ kind: 'named', name })">{{ name || t("tree.defaultDatabase") }}</option>
+    </select>
   </div>
 
   <div v-else @contextmenu="onTreeItemContextMenu">
@@ -1669,10 +1686,7 @@ function onKeydown(event: KeyboardEvent) {
             <Ban class="h-2.5 w-2.5 stroke-[3]" aria-hidden="true" />
           </span>
         </span>
-        <div
-          ref="trailingCommentLayoutRef"
-          :class="[hasTrailingMetadata() ? (usesFullWidthLabel ? 'flex min-w-max flex-1 items-center' : 'flex flex-1 min-w-0 items-center') : 'contents', { 'overflow-hidden': !usesFullWidthLabel && settingsStore.editorSettings.sidebarObjectInfoMode === 'comment-and-size' }]"
-        >
+        <div ref="trailingCommentLayoutRef" :class="[hasTrailingMetadata() ? (usesFullWidthLabel ? 'flex min-w-max flex-1 items-center' : 'flex flex-1 min-w-0 items-center') : 'contents', { 'overflow-hidden': !usesFullWidthLabel && navigationSettings.sidebarObjectInfoMode === 'comment-and-size' }]">
           <div
             ref="trailingCommentLeadingRef"
             :class="
@@ -1721,9 +1735,6 @@ function onKeydown(event: KeyboardEvent) {
             >
               {{ t((node.meta as ColumnInfo).is_nullable ? "structureEditor.nullable" : "structureEditor.notNull") }}
             </span>
-            <button v-if="node.type === 'oracle-db-links'" class="ml-auto rounded p-0.5 text-muted-foreground hover:bg-muted" :aria-label="t('databaseLinks.manage')" :title="t('databaseLinks.manage')" @click.stop="showDatabaseLinks = true" @dblclick.stop>
-              <TableProperties class="h-3.5 w-3.5" />
-            </button>
             <span v-if="treeNodeSecondaryValue(node)" class="flex min-w-0 items-center gap-1 text-xs text-muted-foreground" :class="usesFullWidthLabel ? 'shrink-0' : 'max-w-[55%] shrink'" :title="node.type === 'elasticsearch-index' ? undefined : treeNodeSecondaryValue(node)">
               <Link2 v-if="node.type === 'elasticsearch-index'" class="h-3 w-3 shrink-0 text-sky-400" />
               <span class="min-w-0 truncate">{{ treeNodeSecondaryValue(node) }}</span>
@@ -1742,8 +1753,10 @@ function onKeydown(event: KeyboardEvent) {
             </button>
             <Pin v-else-if="isPinned" class="h-3 w-3 shrink-0 fill-current text-primary" aria-hidden="true" />
             <ProductionContextBadge v-if="showProductionBadge && !showProductionRowMarker && node.type !== 'connection'" compact />
+            <span v-if="oracleNavigationAuxiliaryText(node, t) !== undefined" class="text-muted-foreground text-[10px] shrink-0" :title="node.oracleNavigationStatus?.reason">{{ oracleNavigationAuxiliaryText(node, t) }}</span>
             <span
               v-if="
+                oracleNavigationAuxiliaryText(node, t) === undefined &&
                 (node.type === 'group-tables' ||
                   node.type === 'group-dolt-system-tables' ||
                   node.type === 'group-views' ||
@@ -1769,11 +1782,10 @@ function onKeydown(event: KeyboardEvent) {
                   node.type === 'group-types' ||
                   node.type === 'group-partitions' ||
                   node.type === 'type-attributes' ||
-                  node.type === 'type-methods') &&
-                node.objectCount != null
+                  node.type === 'type-methods')
               "
               class="text-muted-foreground text-[10px] shrink-0"
-              >{{ node.objectCount }}<span v-if="hasActiveObjectNameFilter(node)"> · {{ t("tree.tableNameFilterActive") }}</span></span
+              >{{ sidebarTreeObjectCountText(node) }}<span v-if="hasActiveObjectNameFilter(node)"> · {{ t("tree.tableNameFilterActive") }}</span></span
             >
             <Badge v-if="isNodeDefaultDatabase" variant="secondary" class="h-4 px-1.5 text-[10px]">
               {{ t("editor.defaultDatabase") }}
@@ -1846,15 +1858,6 @@ function onKeydown(event: KeyboardEvent) {
       </template>
     </LightTooltip>
   </div>
-  <OracleDatabaseLinksDialog
-    v-if="showDatabaseLinks && node.connectionId"
-    v-model:open="showDatabaseLinks"
-    :connection-id="node.connectionId"
-    :database="node.database || ''"
-    :name="node.type === 'oracle-db-link' ? node.label : undefined"
-    :owner="node.schema"
-    @changed="connectionStore.refreshOracleDatabaseLinks(node.connectionId)"
-  />
 </template>
 
 <style>

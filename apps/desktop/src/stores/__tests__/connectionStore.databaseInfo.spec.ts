@@ -284,15 +284,27 @@ describe("connectionStore database info", () => {
     const databaseNode = store.treeNodes[0]?.children?.find((node) => node.type === "database" && node.database === "app");
     expect(databaseNode).toBeDefined();
     await store.loadTreeNodeChildren(databaseNode!, { force: true });
-    expect(databaseNode?.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["async_task_0"]);
+    expect(
+      databaseNode?.children
+        ?.flatMap((node) => (node.type === "group-tables" ? (node.children ?? []) : [node]))
+        .filter((node) => node.type === "table")
+        .map((node) => node.label),
+    ).toEqual(["async_task_0"]);
+    await store.initializeRelationalNavigation(config.id);
+    listTables.mockClear();
 
     resolveDatabaseInfo({ productName: "MySQL", productVersion: "8.0.27-ShardingSphere-Proxy 5.5.2" });
 
     await vi.waitFor(() => {
       const refreshedDatabaseNode = store.treeNodes[0]?.children?.find((node) => node.type === "database" && node.database === "app");
-      expect(refreshedDatabaseNode?.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["async_task"]);
+      expect(
+        refreshedDatabaseNode?.children
+          ?.flatMap((node) => (node.type === "group-tables" ? (node.children ?? []) : [node]))
+          .filter((node) => node.type === "table")
+          .map((node) => node.label),
+      ).toEqual(["async_task"]);
     });
-    expect(listTables).toHaveBeenCalledTimes(2);
+    expect(listTables).toHaveBeenCalledTimes(1);
   });
 
   it("refreshes physical table metadata after delayed Mycat detection", async () => {
@@ -339,15 +351,27 @@ describe("connectionStore database info", () => {
     const databaseNode = store.treeNodes[0]?.children?.find((node) => node.type === "database" && node.database === "app");
     expect(databaseNode).toBeDefined();
     await store.loadTreeNodeChildren(databaseNode!, { force: true });
-    expect(databaseNode?.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["order_info_0"]);
+    expect(
+      databaseNode?.children
+        ?.flatMap((node) => (node.type === "group-tables" ? (node.children ?? []) : [node]))
+        .filter((node) => node.type === "table")
+        .map((node) => node.label),
+    ).toEqual(["order_info_0"]);
+    await store.initializeRelationalNavigation(config.id);
+    listTables.mockClear();
 
     resolveDatabaseInfo({ productName: "MySQL", productVersion: "5.6.29-mycat-1.6-RELEASE-20161028204710" });
 
     await vi.waitFor(() => {
       const refreshedDatabaseNode = store.treeNodes[0]?.children?.find((node) => node.type === "database" && node.database === "app");
-      expect(refreshedDatabaseNode?.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["order_info"]);
+      expect(
+        refreshedDatabaseNode?.children
+          ?.flatMap((node) => (node.type === "group-tables" ? (node.children ?? []) : [node]))
+          .filter((node) => node.type === "table")
+          .map((node) => node.label),
+      ).toEqual(["order_info"]);
     });
-    expect(listTables).toHaveBeenCalledTimes(2);
+    expect(listTables).toHaveBeenCalledTimes(1);
   });
 
   it("refreshes physical table metadata after delayed Mycat detection via serverComment", async () => {
@@ -394,15 +418,27 @@ describe("connectionStore database info", () => {
     const databaseNode = store.treeNodes[0]?.children?.find((node) => node.type === "database" && node.database === "app");
     expect(databaseNode).toBeDefined();
     await store.loadTreeNodeChildren(databaseNode!, { force: true });
-    expect(databaseNode?.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["order_info_0"]);
+    expect(
+      databaseNode?.children
+        ?.flatMap((node) => (node.type === "group-tables" ? (node.children ?? []) : [node]))
+        .filter((node) => node.type === "table")
+        .map((node) => node.label),
+    ).toEqual(["order_info_0"]);
+    await store.initializeRelationalNavigation(config.id);
+    listTables.mockClear();
 
     resolveDatabaseInfo({ productName: "MySQL", serverComment: "Mycat Server 1.6" });
 
     await vi.waitFor(() => {
       const refreshedDatabaseNode = store.treeNodes[0]?.children?.find((node) => node.type === "database" && node.database === "app");
-      expect(refreshedDatabaseNode?.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["order_info"]);
+      expect(
+        refreshedDatabaseNode?.children
+          ?.flatMap((node) => (node.type === "group-tables" ? (node.children ?? []) : [node]))
+          .filter((node) => node.type === "table")
+          .map((node) => node.label),
+      ).toEqual(["order_info"]);
     });
-    expect(listTables).toHaveBeenCalledTimes(2);
+    expect(listTables).toHaveBeenCalledTimes(1);
   });
 
   it("does not let a pre-detection table request overwrite the refreshed logical tables", async () => {
@@ -472,7 +508,12 @@ describe("connectionStore database info", () => {
 
     await vi.waitFor(() => {
       const refreshedDatabaseNode = store.treeNodes[0]?.children?.find((node) => node.type === "database" && node.database === "app");
-      expect(refreshedDatabaseNode?.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["async_task"]);
+      expect(
+        refreshedDatabaseNode?.children
+          ?.flatMap((node) => (node.type === "group-tables" ? (node.children ?? []) : [node]))
+          .filter((node) => node.type === "table")
+          .map((node) => node.label),
+      ).toEqual(["async_task"]);
     });
     expect(useLogicalTables).toBe(true);
   });

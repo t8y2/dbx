@@ -105,8 +105,9 @@ SELECT OBJECT_NAME, TABLE_TYPE, COMMENTS
 FROM (
 SELECT t.TABLE_NAME AS OBJECT_NAME,
        'TABLE' AS TABLE_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       c.COMMENTS AS COMMENTS
 FROM ALL_TABLES t
+LEFT JOIN ALL_TAB_COMMENTS c ON c.OWNER = t.OWNER AND c.TABLE_NAME = t.TABLE_NAME AND c.TABLE_TYPE = 'TABLE'
 WHERE t.OWNER = :1
   AND t.NESTED = 'NO'
   AND NOT EXISTS (
@@ -118,14 +119,16 @@ WHERE t.OWNER = :1
 UNION ALL
 SELECT v.VIEW_NAME AS OBJECT_NAME,
        'VIEW' AS TABLE_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       c.COMMENTS AS COMMENTS
 FROM ALL_VIEWS v
+LEFT JOIN ALL_TAB_COMMENTS c ON c.OWNER = v.OWNER AND c.TABLE_NAME = v.VIEW_NAME AND c.TABLE_TYPE = 'VIEW'
 WHERE v.OWNER = :2
 UNION ALL
 SELECT mv.MVIEW_NAME AS OBJECT_NAME,
        'MATERIALIZED_VIEW' AS TABLE_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       c.COMMENTS AS COMMENTS
 FROM ALL_MVIEWS mv
+LEFT JOIN ALL_MVIEW_COMMENTS c ON c.OWNER = mv.OWNER AND c.MVIEW_NAME = mv.MVIEW_NAME
 WHERE mv.OWNER = :3
 )`
 const oracleListTablesSessionUserBaseSQL = `
@@ -133,8 +136,9 @@ SELECT OBJECT_NAME, TABLE_TYPE, COMMENTS
 FROM (
 SELECT t.TABLE_NAME AS OBJECT_NAME,
        'TABLE' AS TABLE_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       c.COMMENTS AS COMMENTS
 FROM USER_TABLES t
+LEFT JOIN USER_TAB_COMMENTS c ON c.TABLE_NAME = t.TABLE_NAME AND c.TABLE_TYPE = 'TABLE'
 WHERE t.NESTED = 'NO'
   AND NOT EXISTS (
     SELECT 1
@@ -144,13 +148,15 @@ WHERE t.NESTED = 'NO'
 UNION ALL
 SELECT v.VIEW_NAME AS OBJECT_NAME,
        'VIEW' AS TABLE_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       c.COMMENTS AS COMMENTS
 FROM USER_VIEWS v
+LEFT JOIN USER_TAB_COMMENTS c ON c.TABLE_NAME = v.VIEW_NAME AND c.TABLE_TYPE = 'VIEW'
 UNION ALL
 SELECT mv.MVIEW_NAME AS OBJECT_NAME,
        'MATERIALIZED_VIEW' AS TABLE_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       c.COMMENTS AS COMMENTS
 FROM USER_MVIEWS mv
+LEFT JOIN USER_MVIEW_COMMENTS c ON c.MVIEW_NAME = mv.MVIEW_NAME
 )`
 const oracleListTablesOrderSQL = `ORDER BY OBJECT_NAME`
 const oracleListTablesSQL = oracleListTablesBaseSQL + "\n" + oracleListTablesOrderSQL
@@ -159,10 +165,11 @@ SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS, PARENT_SCHEMA, PARENT_NAME
 FROM (
 SELECT t.TABLE_NAME AS OBJECT_NAME,
        'TABLE' AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
+       c.COMMENTS,
        CAST(NULL AS VARCHAR2(128)) AS PARENT_SCHEMA,
        CAST(NULL AS VARCHAR2(128)) AS PARENT_NAME
 FROM ALL_TABLES t
+LEFT JOIN ALL_TAB_COMMENTS c ON c.OWNER = t.OWNER AND c.TABLE_NAME = t.TABLE_NAME
 WHERE t.OWNER = :1
   AND t.NESTED = 'NO'
   AND NOT EXISTS (
@@ -179,10 +186,14 @@ SELECT o.OBJECT_NAME,
          WHEN 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW'
          ELSE o.OBJECT_TYPE
        END AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
+       CASE WHEN o.OBJECT_TYPE = 'MATERIALIZED VIEW' THEN mc.COMMENTS ELSE c.COMMENTS END AS COMMENTS,
        i.TABLE_OWNER AS PARENT_SCHEMA,
        i.TABLE_NAME AS PARENT_NAME
 FROM ALL_OBJECTS o
+LEFT JOIN ALL_TAB_COMMENTS c
+  ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME AND c.TABLE_TYPE = o.OBJECT_TYPE
+LEFT JOIN ALL_MVIEW_COMMENTS mc
+  ON o.OBJECT_TYPE = 'MATERIALIZED VIEW' AND mc.OWNER = o.OWNER AND mc.MVIEW_NAME = o.OBJECT_NAME
 LEFT JOIN ALL_INDEXES i
   ON o.OBJECT_TYPE = 'INDEX' AND i.OWNER = o.OWNER AND i.INDEX_NAME = o.OBJECT_NAME
 WHERE o.OWNER = :2
@@ -195,44 +206,6 @@ SELECT s.SYNONYM_NAME AS OBJECT_NAME,
        CAST(NULL AS VARCHAR2(128)) AS PARENT_NAME
 FROM ALL_SYNONYMS s
 WHERE s.OWNER = :3
-)`
-const oracleListObjectsSessionUserBaseSQL = `
-SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS, PARENT_SCHEMA, PARENT_NAME
-FROM (
-SELECT t.TABLE_NAME AS OBJECT_NAME,
-       'TABLE' AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
-       CAST(NULL AS VARCHAR2(128)) AS PARENT_SCHEMA,
-       CAST(NULL AS VARCHAR2(128)) AS PARENT_NAME
-FROM USER_TABLES t
-WHERE t.NESTED = 'NO'
-  AND NOT EXISTS (
-    SELECT 1
-    FROM USER_OBJECTS mv
-    WHERE mv.OBJECT_NAME = t.TABLE_NAME
-      AND mv.OBJECT_TYPE = 'MATERIALIZED VIEW'
-  )
-UNION ALL
-SELECT o.OBJECT_NAME,
-       CASE o.OBJECT_TYPE
-         WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY'
-         WHEN 'TYPE BODY' THEN 'TYPE_BODY'
-         WHEN 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW'
-         ELSE o.OBJECT_TYPE
-       END AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
-       i.TABLE_OWNER AS PARENT_SCHEMA,
-       i.TABLE_NAME AS PARENT_NAME
-FROM USER_OBJECTS o
-LEFT JOIN USER_INDEXES i ON o.OBJECT_TYPE = 'INDEX' AND i.INDEX_NAME = o.OBJECT_NAME
-WHERE o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'TRIGGER', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY', 'INDEX', 'TYPE', 'TYPE BODY')
-UNION ALL
-SELECT s.SYNONYM_NAME AS OBJECT_NAME,
-       'SYNONYM' AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
-       CAST(NULL AS VARCHAR2(128)) AS PARENT_SCHEMA,
-       CAST(NULL AS VARCHAR2(128)) AS PARENT_NAME
-FROM USER_SYNONYMS s
 )`
 const oracleListObjectsOrderSQL = `ORDER BY CASE OBJECT_TYPE
   WHEN 'TABLE' THEN 0
@@ -839,7 +812,7 @@ func (r *runtimeServer) dispatch(method string, params map[string]json.RawMessag
 		return map[string]any{
 			"protocolVersion":      multiSessionProtocolVersion,
 			"agentProtocolVersion": multiSessionProtocolVersion,
-			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "multi_session", "native_job_legacy_v1", "structured_error_v1", "exact_metadata_identity_v1"},
+			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "multi_session", "native_job_legacy_v1", "structured_error_v1", "exact_metadata_identity_v1", "object_list_comments_v1", "table_list_comments_v1"},
 		}, false, nil
 	case "open_session":
 		agentSessionID := stringParam(params, "agentSessionId")
@@ -1115,7 +1088,7 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return map[string]any{
 			"protocolVersion":      protocolVersion,
 			"agentProtocolVersion": protocolVersion,
-			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "native_job_legacy_v1", "exact_metadata_identity_v1"},
+			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "native_job_legacy_v1", "exact_metadata_identity_v1", "object_list_comments_v1", "table_list_comments_v1"},
 		}, false, nil
 	case "connect":
 		var cp connectParams
@@ -2190,21 +2163,6 @@ WHERE o.OWNER = :4 AND o.OBJECT_TYPE IN ('TYPE', 'TYPE BODY')`
 	)
 }
 
-func oracleListSessionUserObjectsQuery(constraints metadataListConstraints) oracleMetadataListQuery {
-	baseSQL := oracleListObjectsSessionUserBaseSQL
-	if constraints.Exact {
-		baseSQL = strings.Replace(baseSQL, "'PACKAGE BODY', 'INDEX', 'TYPE', 'TYPE BODY')", "'PACKAGE BODY', 'INDEX', 'TYPE', 'TYPE BODY', 'TRIGGER')", 1)
-	}
-	return oracleConstrainedMetadataListQuery(
-		baseSQL,
-		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, PARENT_SCHEMA, PARENT_NAME",
-		"OBJECT_TYPE",
-		oracleListObjectsOrderSQL,
-		nil,
-		constraints,
-	)
-}
-
 func oracleConstrainedMetadataListQuery(baseSQL, selectList, typeColumn, orderSQL string, baseArgs []any, constraints metadataListConstraints) oracleMetadataListQuery {
 	args := append([]any{}, baseArgs...)
 	where := make([]string, 0, 2)
@@ -2327,10 +2285,6 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 		rawTypeOwner = schema
 	}
 	query := oracleListObjectsQueryWithTypeOwner(schema, rawTypeOwner, constraints)
-	useSessionUser := !constraints.Exact && rawTypeOwner == schema && s.metadataSchemaIsSessionUser(schema, constraints.ExactIdentity)
-	if useSessionUser {
-		query = oracleListSessionUserObjectsQuery(constraints)
-	}
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
 		if isOraclePGALimitError(err) && !constraints.Exact && !constraints.ExactIdentity && !metadataIncludesIndexes(constraints.ObjectTypes) {
@@ -2812,6 +2766,9 @@ func oracleCompletionTablesQuery(request completionAssistantRequest, preferredSc
 	if owner != "" {
 		args = append(args, owner)
 		synonymOwnerPredicate = fmt.Sprintf(" AND s.OWNER = :%d", len(args))
+		if strings.TrimSpace(request.ParentSchema) == "" {
+			synonymOwnerPredicate = fmt.Sprintf(" AND (s.OWNER = :%d OR s.OWNER = 'PUBLIC')", len(args))
+		}
 	}
 	args = append(args, preferredSchema)
 	preferredParam := len(args)

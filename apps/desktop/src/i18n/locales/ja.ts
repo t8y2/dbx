@@ -66,6 +66,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  navigationPreferences: { refreshFailed: "設定は保存されましたが、ナビゲーションの更新に失敗しました：{message}", connectionUnavailable: "接続が存在しません。開き直してください。" },
   oracleTrigger: {
     errorPositionUnavailable: "ソースを開きました。エラー位置を確認できないため、表示された行と列を確認してください。",
     reconcileStructure: "実行済みの変更を照合",
@@ -3832,6 +3833,7 @@ export default withEnglishFallback({
     unknown: "予期しないバックエンドエラーが発生しました。",
   },
   common: {
+    all: "すべて",
     fileNotFound: "ファイルが存在しません: {path}",
     loading: "読み込み中...",
     stopping: "停止中...",
@@ -4693,6 +4695,10 @@ export default withEnglishFallback({
     editCancel: "キャンセル",
   },
   contextMenu: {
+    viewObjects: "オブジェクトを表示",
+    refreshObjects: "オブジェクトを更新",
+    confirmDeleteConnectionConfig: "保存済みの接続設定「{name}」を削除しますか？",
+    confirmDeleteSelectedConnectionConfigs: "選択した {count} 件の保存済み接続設定を削除しますか？",
     splitTab: "分割",
     batchCloseTabs: "タブをまとめて閉じる",
     copyTabName: "タブ名をコピー",
@@ -4702,12 +4708,12 @@ export default withEnglishFallback({
     closeConnection: "接続を閉じる",
     closeSelectedConnections: "選択した{count}件の接続を閉じる",
     closeDatabaseConnection: "データベース接続を閉じる",
-    deleteConnection: "接続を削除",
-    deleteSelectedConnections: "選択した{count}件の接続を削除",
+    deleteConnection: "接続を削除…",
+    deleteSelectedConnections: "選択した{count}件の接続を削除…",
     confirmDeleteTitle: "接続を削除",
     confirmDeleteMessage: "本当に「{name}」を削除しますか？この操作は取り消せません。",
     confirmDeleteSelectedMessage: "選択した{count}件の接続を削除しますか？この操作は取り消せません。",
-    editConnection: "接続を編集",
+    editConnection: "接続を編集…",
     revealDatabaseFile: "ファイルマネージャーで表示",
     selectVisibleDatabases: "表示するデータベースを選択",
     userAdmin: "ユーザーと権限",
@@ -5179,6 +5185,8 @@ export default withEnglishFallback({
     loadFailed: "データベースの読み込みに失敗しました: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "ユーザースキーマ",
+    systemGroup: "システムスキーマ",
     title: "スキーマフィルター",
     detailLabel: "表示スキーマ",
     detailActionLabel: "「{connection}」の表示スキーマを設定",
@@ -5195,6 +5203,9 @@ export default withEnglishFallback({
     loadFailed: "スキーマの読み込みに失敗しました: {message}",
   },
   databaseLinks: {
+    foreignPrivateReadOnly: "他のユーザーのプライベートリンクは表示のみ可能です。",
+    privateSchemaUnavailable: "他のユーザーのスキーマにプライベートリンクは作成できません。ログインユーザーのスキーマを使用してください。",
+    permissionUnknown: "削除権限は未確認です。実行時にデータベースが確認します。再確認するには更新してください。",
     remoteTenant: "リモートテナント",
     remoteProtocol: "リモートデータベースのプロトコル",
     remoteCluster: "リモートクラスター（任意）",
@@ -5220,6 +5231,18 @@ export default withEnglishFallback({
     manage: "Manage database links",
   },
   tree: {
+    navigationStatus: { denied: "権限なし", error: "読み込み失敗", unknown: "未確認", unsupported: "未対応", truncated: "一部の結果" },
+    scheduler: "スケジューラー",
+    publicObjects: "パブリックオブジェクト",
+    tenantObjects: "テナントオブジェクト",
+    jobs: "ジョブ",
+    jobCategories: {
+      regular: "スケジュールジョブ",
+      lightweight: "軽量ジョブ",
+      inMemory: "インメモリジョブ",
+      legacy: "従来のジョブ",
+    },
+    openList: "一覧を開く",
     nativeJobs: "ネイティブジョブ",
     databaseLinks: "Database Links",
     savedSql: "SQLライブラリ",
@@ -5437,6 +5460,14 @@ export default withEnglishFallback({
     stepSkipped: "必要な前のステップが失敗したためスキップしました。",
   },
   nativeJobs: {
+    contextChanged: "ジョブのコンテキストが変更されたか、有効期限が切れました。一覧を更新して再試行してください。",
+    scopeRecoveryTitle: "ジョブタブを復元",
+    scopeRecoveryHint: "この旧タブの復元にはスキーマの確認が必要です。オブジェクトツリーから開き直せます。保存済みの内容は保持されています。",
+    retainedContent: "保持された内容を表示",
+    scopeMismatch: "ジョブはこのページのスキーマまたは分類に属していません。所属する分類から開き直してください。",
+    scopeInvalid: "スキーマまたは分類が無効です。オブジェクトツリーから開き直してください。",
+    legacySchemaCreationUnavailable: "この方法では他のユーザーのスキーマに従来のジョブを作成できません。ログインユーザーのスキーマを使用してください。",
+    scopeResolutionUnavailable: "スキーマを確認できませんでした。接続とカタログ権限を確認して再試行してください。",
     datePrecisionMicroseconds: "この OceanBase バージョンのジョブ日付はマイクロ秒精度のみ対応しています。小数秒の 7～9 桁目を 0 にして、もう一度プレビューしてください。元の入力は保持されています。",
     previousContext: "前のコンテキストでの操作結果",
     detachedDraft: "元の下書きは保持されており、現在のオブジェクトには紐付いていません。",

@@ -140,7 +140,16 @@ vi.mock("@/components/ui/select", () => ({
   SelectValue: passthrough("span"),
 }));
 vi.mock("@/stores/connectionStore", () => ({
-  useConnectionStore: () => ({ ensureConnected: mocks.ensureConnected, retirePasswordAfterChange: mocks.retirePasswordAfterChange, connect: mocks.connect, getConfig: mocks.getConfig }),
+  useConnectionStore: () => ({
+    ensureConnected: mocks.ensureConnected,
+    retirePasswordAfterChange: mocks.retirePasswordAfterChange,
+    connect: mocks.connect,
+    getConfig: mocks.getConfig,
+    readVisibleSchemaSelection: async (id: string, database: string) => {
+      const names = await mocks.listSchemas(id, database);
+      return { names, visibleNames: names, infos: [], systemNames: new Set<string>(), oracleMaintainedSchemas: undefined };
+    },
+  }),
 }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/composables/useSqlHighlighter", () => ({ useSqlHighlighter: () => ({ highlight: (sql: string) => sql }) }));

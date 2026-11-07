@@ -4845,6 +4845,63 @@ pub struct PagedObjectList {
     pub paging_applied: bool,
 }
 
+fn list_objects_page_sql(database: &str, object_types: &[String], limit: usize, offset: usize) -> String {
+    let types = Some(object_types);
+    let mut parts = Vec::new();
+    if wants_table_objects(types) {
+        parts.push(list_tables_objects_sql(database, types, None, None));
+    }
+    if wants_routine_objects(types) {
+        parts.push(list_routines_sql(database, types, None, None));
+    }
+    if wants_trigger_objects(types) {
+        parts.push(list_triggers_objects_sql(database));
+    }
+    if wants_event_objects(types) {
+        parts.push(list_events_objects_sql(database));
+    }
+    let union = parts
+        .iter()
+        .map(|sql| sql.rsplit_once(" ORDER BY ").map_or(sql.as_str(), |(query, _)| query))
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    format!(
+        "SELECT object_name, object_type, object_comment, created_at, updated_at, parent_schema, parent_name \
+         FROM ({union}) directory \
+         ORDER BY sort_order, BINARY object_name, BINARY object_type, BINARY parent_schema, BINARY parent_name \
+         LIMIT {limit} OFFSET {offset}"
+    )
+}
+
+pub async fn list_objects_page(
+    pool: &MySqlPool,
+    database: &str,
+    object_types: &[String],
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<ObjectInfo>, String> {
+    if object_types.iter().any(|kind| {
+        !["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]
+            .iter()
+            .any(|supported| kind.eq_ignore_ascii_case(supported))
+    }) {
+        return Err("Unsupported MySQL object directory type".to_string());
+    }
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let sql = list_objects_page_sql(database, object_types, limit, offset);
+    let mut conn = get_conn_with_timeout(pool, pool.checkout_timeout()).await?;
+    let rows = conn
+        .query_iter(&sql)
+        .await
+        .map_err(|error| error.to_string())?
+        .collect_and_drop::<mysql_async::Row>()
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(rows.iter().map(|row| row_to_object(row, database)).collect())
+}
+
 fn object_query_supports_paging(object_types: Option<&[String]>) -> bool {
     let Some(object_types) = object_types.filter(|types| !types.is_empty()) else {
         return false;
@@ -9849,6 +9906,42 @@ mod tests {
         assert!(object_query_supports_paging(Some(&["TABLE".to_string(), "VIEW".to_string()])));
         assert!(!object_query_supports_paging(Some(&["TABLE".to_string(), "PROCEDURE".to_string()])));
         assert!(!object_query_supports_paging(None));
+    }
+
+    #[test]
+    fn mysql_directory_page_filters_sources_before_one_global_window() {
+        let types = vec!["TABLE".to_string(), "FUNCTION".to_string(), "TRIGGER".to_string()];
+        let sql = list_objects_page_sql("Sales'Ops", &types, 1000, 2000);
+
+        assert!(Parser::parse_sql(&MySqlDialect {}, &sql).is_ok());
+        assert!(sql.contains("information_schema.TABLES"));
+        assert!(sql.contains("information_schema.ROUTINES"));
+        assert!(sql.contains("information_schema.TRIGGERS"));
+        assert!(!sql.contains("information_schema.EVENTS"));
+        assert!(sql.contains(r"TABLE_SCHEMA = 'Sales\'Ops'"));
+        assert!(sql.contains(r"ROUTINE_SCHEMA = 'Sales\'Ops'"));
+        assert!(sql.contains(r"TRIGGER_SCHEMA = 'Sales\'Ops'"));
+        assert!(sql.contains("TABLE_TYPE NOT IN ('VIEW', 'SYSTEM VIEW')"));
+        assert!(sql.contains("ROUTINE_TYPE IN ('FUNCTION')"));
+        assert!(sql.contains("EVENT_OBJECT_TABLE AS parent_name"));
+        assert_eq!(sql.matches(" ORDER BY ").count(), 1);
+        assert_eq!(sql.matches(" LIMIT ").count(), 1);
+        assert!(sql.ends_with("LIMIT 1000 OFFSET 2000"));
+        assert!(sql.contains("ORDER BY sort_order, BINARY object_name, BINARY object_type"));
+    }
+
+    #[test]
+    fn mysql_directory_page_supports_complete_and_empty_type_selection() {
+        let sql = list_objects_page_sql("app", &[], 1000, 0);
+        for source in ["TABLES", "ROUTINES", "TRIGGERS", "EVENTS"] {
+            assert!(sql.contains(&format!("information_schema.{source}")));
+        }
+        assert_eq!(sql.matches(" UNION ALL ").count(), 3);
+        let sql = list_objects_page_sql("app", &["EVENT".to_string()], 1000, 1000);
+        assert!(sql.contains("information_schema.EVENTS"));
+        assert!(!sql.contains("information_schema.TABLES"));
+        assert!(!sql.contains("information_schema.ROUTINES"));
+        assert!(sql.ends_with("LIMIT 1000 OFFSET 1000"));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { expect, test, vi } from "vitest";
-import { effectScope, ref } from "vue";
+import { computed, effectScope, reactive, ref } from "vue";
 import { useSidebarRemoteSearch } from "../../apps/desktop/src/composables/useSidebarRemoteSearch";
 import { collectSidebarRemoteSearchResults, mergeSidebarRemoteSearchResults, removeVerifiedSidebarTriggerSearchResult } from "../../apps/desktop/src/lib/sidebar/sidebarRemoteSearch";
 import type { TreeNode, TreeNodeType } from "../../apps/desktop/src/types/database";
@@ -213,4 +213,71 @@ test("merges into the correct catalog and preserves live child state", async () 
   const projected = mergeSidebarRemoteSearchResults([root], await collectSidebarRemoteSearchResults({ ...options, root: { ...root, children: [schema] } }));
   expect(projected[0].children?.[0].children?.[1].children).toEqual([live]);
   expect(projected[0].children?.[1].children?.[0].children).toEqual([]);
+});
+
+test("remote merge shares unchanged reactive branches without reading leaf display metadata", () => {
+  const { root, tables, procedures } = fixture();
+  let labelReads = 0;
+  tables.children = [
+    {
+      id: "table",
+      type: "table",
+      children: [],
+      get label() {
+        labelReads++;
+        return "table";
+      },
+    },
+  ];
+  const nodes = reactive([root]);
+  const result = { parentNodeId: procedures.id, nodeType: procedures.type, connectionId: "conn", database: "app", schema: "public", children: [] };
+
+  expect(mergeSidebarRemoteSearchResults(nodes, [result])).toBe(nodes);
+  expect(labelReads).toBe(0);
+});
+
+test("remote merge keeps reactive metadata current when a matching result adds no new child", () => {
+  const { root, procedures } = fixture();
+  procedures.children = [{ id: "routine", type: "procedure", label: "before", comment: "old", children: [], isLoading: false }];
+  const nodes = reactive([root]);
+  const live = nodes[0].children![0].children![1].children![0];
+  const result = { parentNodeId: procedures.id, nodeType: procedures.type, connectionId: "conn", database: "app", schema: "public", children: [{ ...procedures.children[0], label: "stale response" }] };
+  const merged = computed(() => mergeSidebarRemoteSearchResults(nodes, [result]));
+  expect(merged.value).toBe(nodes);
+  live.label = "renamed";
+  live.comment = "new";
+  live.isLoading = true;
+  live.children = [{ id: "parameter", type: "column", label: "parameter" }];
+  expect(merged.value[0].children![0].children![1].children![0]).toBe(live);
+  expect(merged.value[0].children![0].children![1].children![0]).toMatchObject({ label: "renamed", comment: "new", isLoading: true, children: [{ id: "parameter" }] });
+});
+
+test("remote merge changes only matching ancestors and appends new children in response order", () => {
+  const { root, procedures } = fixture();
+  procedures.children = [{ id: "existing", type: "procedure", label: "live", children: [] }];
+  const nodes = reactive([root]);
+  const schema = nodes[0].children![0];
+  const live = schema.children![1].children![0];
+  const added: TreeNode = { id: "added", type: "procedure", label: "new" };
+  const second: TreeNode = { id: "second", type: "procedure", label: "next" };
+  const merged = mergeSidebarRemoteSearchResults(nodes, [{ parentNodeId: procedures.id, nodeType: procedures.type, connectionId: "conn", database: "app", schema: "public", children: [{ ...live, label: "stale" }, added, added, second] }]);
+  expect(merged).not.toBe(nodes);
+  expect(merged[0]).not.toBe(nodes[0]);
+  expect(merged[0].children![0]).not.toBe(schema);
+  expect(merged[0].children![0].children![1]).not.toBe(schema.children![1]);
+  expect(merged[0].children![0].children![0]).toBe(schema.children![0]);
+  expect(merged[0].children![0].children![2]).toBe(schema.children![2]);
+  expect(merged[0].children![0].children![1].children).toEqual([live, added, second]);
+  expect(merged[0].children![0].children![1].children![0]).toBe(live);
+  expect(schema.children![1].children).toEqual([live]);
+});
+
+test.each([{ connectionId: "other" }, { database: "other" }, { schema: "other" }, { catalog: "other" }, { type: "group-functions" as const }])("remote merge does not clone or cross the same-id scope boundary %j", (difference) => {
+  const { procedures } = fixture();
+  const nodes = reactive([procedures, { ...procedures, ...difference, children: [] }]);
+  const added: TreeNode = { id: "match", type: "procedure", label: "match" };
+  const merged = mergeSidebarRemoteSearchResults(nodes, [{ parentNodeId: procedures.id, nodeType: procedures.type, connectionId: "conn", database: "app", schema: "public", children: [added] }]);
+  expect(merged[0].children).toEqual([added]);
+  expect(merged[1]).toBe(nodes[1]);
+  expect(merged[1].children).toEqual([]);
 });

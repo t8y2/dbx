@@ -16,7 +16,7 @@ const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn(),
   getConfig: vi.fn(),
   listDatabases: vi.fn(),
-  listSchemas: vi.fn(),
+  readSchemaNames: vi.fn(),
   redisListDatabases: vi.fn(),
   mongoListDatabases: vi.fn(),
   listDorisCatalogs: vi.fn(),
@@ -25,7 +25,6 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/backend/api", () => ({
   listDatabases: mocks.listDatabases,
-  listSchemas: mocks.listSchemas,
   redisListDatabases: mocks.redisListDatabases,
   mongoListDatabases: mocks.mongoListDatabases,
   listDorisCatalogs: mocks.listDorisCatalogs,
@@ -36,6 +35,7 @@ vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: mocks.ensureConnected,
     getConfig: mocks.getConfig,
+    readVisibleSchemaSelection: async (...args: unknown[]) => ({ visibleNames: await mocks.readSchemaNames(...args) }),
   }),
 }));
 
@@ -86,7 +86,7 @@ describe("namespace options", () => {
   });
 
   it("uses Dameng schemas so independent schemas remain selectable", async () => {
-    mocks.listSchemas.mockResolvedValue(["APP_USER", "REPORTING", "SYS"]);
+    mocks.readSchemaNames.mockResolvedValue(["APP_USER", "REPORTING"]);
 
     const options = await fetchNamespaceOptionsForConnection("connection-1", {
       db_type: "dameng",
@@ -95,12 +95,12 @@ describe("namespace options", () => {
     });
 
     expect(options).toEqual(["APP_USER", "REPORTING"]);
-    expect(mocks.listSchemas).toHaveBeenCalledWith("connection-1", "APP_USER", true);
+    expect(mocks.readSchemaNames).toHaveBeenCalledWith("connection-1", "APP_USER");
     expect(mocks.listDatabases).not.toHaveBeenCalled();
   });
 
-  it("honors the configured Dameng schema filter before the legacy database filter", async () => {
-    mocks.listSchemas.mockResolvedValue(["APP_USER", "REPORTING", "ARCHIVE"]);
+  it("uses the shared Store choice range instead of reapplying a legacy database filter", async () => {
+    mocks.readSchemaNames.mockResolvedValue(["ARCHIVE"]);
 
     const options = await fetchNamespaceOptionsForConnection("connection-1", {
       db_type: "dameng",
@@ -113,7 +113,7 @@ describe("namespace options", () => {
   });
 
   it("uses schemas for native and inferred JDBC Oracle namespaces", async () => {
-    mocks.listSchemas.mockResolvedValue(["APP", "REPORTING", "SYS"]);
+    mocks.readSchemaNames.mockResolvedValue(["APP", "REPORTING"]);
 
     await expect(
       fetchNamespaceOptionsForConnection("oracle-1", {
@@ -121,10 +121,10 @@ describe("namespace options", () => {
         database: "XE",
       }),
     ).resolves.toEqual(["APP", "REPORTING"]);
-    expect(mocks.listSchemas).toHaveBeenCalledWith("oracle-1", "XE", true);
+    expect(mocks.readSchemaNames).toHaveBeenCalledWith("oracle-1", "XE");
 
     vi.clearAllMocks();
-    mocks.listSchemas.mockResolvedValue(["APP", "REPORTING", "SYS"]);
+    mocks.readSchemaNames.mockResolvedValue(["APP", "REPORTING"]);
 
     await expect(
       fetchNamespaceOptionsForConnection("oracle-jdbc-1", {
@@ -133,7 +133,7 @@ describe("namespace options", () => {
         jdbc_driver_class: "oracle.jdbc.OracleDriver",
       }),
     ).resolves.toEqual(["APP", "REPORTING"]);
-    expect(mocks.listSchemas).toHaveBeenCalledWith("oracle-jdbc-1", "", true);
+    expect(mocks.readSchemaNames).toHaveBeenCalledWith("oracle-jdbc-1", "");
     expect(mocks.listDatabases).not.toHaveBeenCalled();
   });
 
@@ -148,7 +148,7 @@ describe("namespace options", () => {
 
     expect(options).toEqual(["analytics"]);
     expect(mocks.listDatabases).toHaveBeenCalledWith("connection-2");
-    expect(mocks.listSchemas).not.toHaveBeenCalled();
+    expect(mocks.readSchemaNames).not.toHaveBeenCalled();
   });
 
   it("preserves visible database filtering for MongoDB transfer options", () => {
@@ -191,7 +191,7 @@ describe("namespace options", () => {
 
   it("propagates metadata loading errors", async () => {
     const error = new Error("schema metadata failed");
-    mocks.listSchemas.mockRejectedValue(error);
+    mocks.readSchemaNames.mockRejectedValue(error);
 
     await expect(
       fetchNamespaceOptionsForConnection("connection-1", {
@@ -202,7 +202,7 @@ describe("namespace options", () => {
   });
 
   it("keeps the SQL file target on the shared namespace loader", async () => {
-    mocks.listSchemas.mockResolvedValue(["APP_USER", "REPORTING"]);
+    mocks.readSchemaNames.mockResolvedValue(["APP_USER", "REPORTING"]);
 
     await expect(
       fetchSqlFileTargetOptions("connection-1", {
@@ -225,16 +225,15 @@ describe("namespace options", () => {
     expect(namespaceOptionsAreSchemas({ db_type: "postgres" })).toBe(false);
   });
 
-  it("expands Dameng schemas via listSchemas", async () => {
+  it("expands Dameng schemas via the shared visibility reader", async () => {
     mocks.getConfig.mockReturnValue({ db_type: "dameng" });
-    mocks.listSchemas.mockResolvedValue(["APP_USER", "REPORTING", "SYS"]);
+    mocks.readSchemaNames.mockResolvedValue(["APP_USER", "REPORTING"]);
 
     const { databaseOptions, loadDatabaseOptions } = useDatabaseOptions();
     await loadDatabaseOptions("connection-1");
 
-    // 达梦现在通过 listSchemas 获取 schema 列表，SYS 作为系统 schema 被过滤掉
     expect(databaseOptions.value["connection-1"]).toEqual(["APP_USER", "REPORTING"]);
-    expect(mocks.listSchemas).toHaveBeenCalledWith("connection-1", "", true);
+    expect(mocks.readSchemaNames).toHaveBeenCalledWith("connection-1", "");
     expect(mocks.listDatabases).not.toHaveBeenCalled();
   });
 });

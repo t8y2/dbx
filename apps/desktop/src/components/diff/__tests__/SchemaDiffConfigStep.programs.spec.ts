@@ -5,16 +5,28 @@ import i18n from "@/i18n";
 import { getDefaultOptionsForDbType, normalizeSchemaDiffCompareOptions, type OracleRoutineKind, type OracleRoutineIdentity, type SchemaDiffCompareOptions } from "@/types/schemaDiff";
 import SchemaDiffConfigStep from "@/components/diff/SchemaDiffConfigStep.vue";
 
-const backend = vi.hoisted(() => ({ listObjects: vi.fn(), loadSchemaDiffRoutines: vi.fn() }));
+const backend = vi.hoisted(() => ({ listObjects: vi.fn(), loadSchemaDiffRoutines: vi.fn(), listSchemas: vi.fn().mockResolvedValue(["S", "T"]) }));
 vi.mock("@/stores/connectionStore", () => {
   const connections = [
     { id: "source", name: "Source", db_type: "oceanbase-oracle" },
     { id: "target", name: "Target", db_type: "oceanbase-oracle" },
     { id: "mysql", name: "MySQL", db_type: "mysql" },
   ];
-  return { useConnectionStore: () => ({ connections, sidebarLayout: { groups: [], order: [] }, getConfig: (id: string) => connections.find((connection) => connection.id === id), ensureConnected: vi.fn().mockResolvedValue(undefined) }) };
+  return {
+    useConnectionStore: () => ({
+      connections,
+      sidebarLayout: { groups: [], order: [] },
+      getConfig: (id: string) => connections.find((connection) => connection.id === id),
+      ensureConnected: vi.fn().mockResolvedValue(undefined),
+      completionCacheRevision: () => 0,
+      readVisibleSchemaSelection: async (id: string, database: string) => {
+        const names = await backend.listSchemas(id, database, true);
+        return { names, visibleNames: names, infos: [], systemNames: new Set<string>(), oracleMaintainedSchemas: undefined };
+      },
+    }),
+  };
 });
-vi.mock("@/lib/backend/api", () => ({ ...backend, listDatabases: vi.fn().mockResolvedValue(["S", "T"]), listSchemas: vi.fn().mockResolvedValue(["S", "T"]), executeQuery: vi.fn().mockResolvedValue({ rows: [] }) }));
+vi.mock("@/lib/backend/api", () => ({ ...backend, listDatabases: vi.fn().mockResolvedValue(["S", "T"]), executeQuery: vi.fn().mockResolvedValue({ rows: [] }) }));
 
 const name = 'Pkg.With.Dot,"中文😀';
 const rows = (kinds: string[]) => kinds.map((object_type) => ({ name: object_type.startsWith("PACKAGE") ? name : object_type === "FUNCTION" ? "F" : "P", object_type }));

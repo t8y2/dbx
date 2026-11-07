@@ -8,6 +8,7 @@ import { meilisearchManagementRu } from "./meilisearchManagement";
 
 // Russian locale. Entries omitted here fall back to English at runtime.
 export default withEnglishFallback({
+  navigationPreferences: { refreshFailed: "Настройки сохранены, но обновить навигацию не удалось: {message}", connectionUnavailable: "Подключение больше не существует. Откройте заново." },
   oracleTrigger: {
     errorPositionUnavailable: "Исходный код открыт. Не удалось проверить позицию ошибки; проверьте указанные строку и столбец.",
     reconcileStructure: "Сверить применённые изменения",
@@ -3910,6 +3911,7 @@ export default withEnglishFallback({
     unknown: "Произошла непредвиденная ошибка бэкенда.",
   },
   common: {
+    all: "Все",
     fileNotFound: "Файл не существует: {path}",
     loading: "Загрузка...",
     stopping: "Остановка...",
@@ -4778,6 +4780,10 @@ export default withEnglishFallback({
     noDatabasesFound: "Базы данных не найдены",
   },
   contextMenu: {
+    viewObjects: "Просмотр объектов",
+    refreshObjects: "Обновить объекты",
+    confirmDeleteConnectionConfig: "Удалить сохранённую конфигурацию подключения «{name}»?",
+    confirmDeleteSelectedConnectionConfigs: "Удалить выбранные сохранённые конфигурации подключений ({count})?",
     splitTab: "Разделить",
     batchCloseTabs: "Закрыть несколько вкладок",
     copyTabName: "Копировать имя вкладки",
@@ -4785,12 +4791,12 @@ export default withEnglishFallback({
     closeConnection: "Закрыть подключение",
     closeSelectedConnections: "Закрыть выбранные подключения ({count})",
     closeDatabaseConnection: "Закрыть подключение к базе данных",
-    deleteConnection: "Удалить подключение",
-    deleteSelectedConnections: "Удалить выбранные подключения ({count})",
+    deleteConnection: "Удалить подключение…",
+    deleteSelectedConnections: "Удалить выбранные подключения ({count})…",
     confirmDeleteTitle: "Удалить подключение",
     confirmDeleteMessage: 'Вы уверены, что хотите удалить "{name}"? Это действие необратимо.',
     confirmDeleteSelectedMessage: "Вы уверены, что хотите удалить выбранные подключения ({count})? Это действие необратимо.",
-    editConnection: "Изменить подключение",
+    editConnection: "Изменить подключение…",
     revealDatabaseFile: "Показать в проводнике",
     selectVisibleDatabases: "Выбрать видимые базы данных",
     configureVisibleObjects: "Фильтр видимых объектов",
@@ -5277,6 +5283,8 @@ export default withEnglishFallback({
     loadFailed: "Не удалось загрузить базы данных: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "Пользовательские схемы",
+    systemGroup: "Системные схемы",
     title: "Фильтр схем",
     detailLabel: "Видимые схемы",
     detailActionLabel: "Настроить видимые схемы для «{connection}»",
@@ -5293,6 +5301,9 @@ export default withEnglishFallback({
     loadFailed: "Не удалось загрузить схемы: {message}",
   },
   databaseLinks: {
+    foreignPrivateReadOnly: "Частная ссылка другого пользователя доступна только для просмотра.",
+    privateSchemaUnavailable: "Нельзя создать частную ссылку в схеме другого пользователя. Используйте схему текущего пользователя.",
+    permissionUnknown: "Право удаления не подтверждено; база данных проверит его при выполнении. Обновите для повторной проверки.",
     remoteTenant: "Удалённый тенант",
     remoteProtocol: "Протокол удалённой базы данных",
     remoteCluster: "Удалённый кластер (необязательно)",
@@ -5318,6 +5329,18 @@ export default withEnglishFallback({
     manage: "Управление ссылками на базы данных",
   },
   tree: {
+    navigationStatus: { denied: "Нет прав", error: "Ошибка загрузки", unknown: "Неизвестно", unsupported: "Не поддерживается", truncated: "Частичные результаты" },
+    scheduler: "Планировщик",
+    publicObjects: "Общие объекты",
+    tenantObjects: "Объекты арендатора",
+    jobs: "Задания",
+    jobCategories: {
+      regular: "Запланированные задания",
+      lightweight: "Облегчённые задания",
+      inMemory: "Задания в памяти",
+      legacy: "Устаревшие задания",
+    },
+    openList: "Открыть список",
     nativeJobs: "Нативные задания",
     savedSql: "Библиотека SQL",
     queries: "Запросы",
@@ -6122,6 +6145,14 @@ export default withEnglishFallback({
     stepSkipped: "Пропущено из-за сбоя необходимого предыдущего шага.",
   },
   nativeJobs: {
+    contextChanged: "Контекст задания изменился или недействителен. Обновите список и повторите попытку.",
+    scopeRecoveryTitle: "Восстановить вкладку задания",
+    scopeRecoveryHint: "Для старой вкладки нужно подтвердить схему. Откройте её из дерева объектов; сохранённое содержимое остаётся доступным.",
+    retainedContent: "Показать сохранённое содержимое",
+    scopeMismatch: "Задание не относится к схеме или категории этой страницы. Откройте его из соответствующей категории.",
+    scopeInvalid: "Недействительная схема или категория. Откройте страницу из дерева объектов.",
+    legacySchemaCreationUnavailable: "Этот способ не создаёт традиционные задания в схеме другого пользователя. Используйте схему текущего пользователя.",
+    scopeResolutionUnavailable: "Не удалось подтвердить схему. Проверьте соединение и права на каталог, затем повторите попытку.",
     datePrecisionMicroseconds: "Даты заданий в этой версии OceanBase поддерживают только микросекундную точность. Установите цифры 7–9 дробной части секунды в 0 и повторите предварительный просмотр; исходный ввод сохранён.",
     previousContext: "Результат операции из предыдущего контекста",
     detachedDraft: "Исходный черновик сохранён и не связан с текущим объектом.",

@@ -10,6 +10,9 @@ const api = vi.hoisted(() => ({ listSchemas: vi.fn(), listObjects: vi.fn(), chec
 vi.mock("@/lib/backend/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/backend/api")>()),
   ...api,
+  listSchemaInfos: async (...args: unknown[]) => (await api.listSchemas(...args)).map((name: string) => ({ name, comment: null })),
+  saveConnections: vi.fn().mockResolvedValue(undefined),
+  executeQuery: vi.fn().mockResolvedValue({ columns: ["USERNAME"], rows: [] }),
   listPlugins: vi.fn().mockResolvedValue([]),
   listObjectStatistics: vi.fn().mockResolvedValue([]),
   loadSchemaCache: vi.fn().mockResolvedValue(null),
@@ -91,7 +94,9 @@ it.each([
   mounted.push({ app, container });
   await nextTick();
   const host = runtime.value as unknown as { buildContextMenu(node: TreeNode): ContextMenuItem[] };
-  const action = host.buildContextMenu(node).find((item) => item.label === i18n.global.t("contextMenu.openObjectBrowser"))?.action;
+  const browseItem = host.buildContextMenu(node).find((item) => item.sidebarActionId === "contextMenu.openObjectBrowser");
+  expect(browseItem?.label).toBe(i18n.global.t("contextMenu.viewObjects"));
+  const action = browseItem?.action;
   expect(action).toBeDefined();
   await action?.();
   expect(queries.tabs.find((item) => item.mode === "objects")).toMatchObject({ database: expectedDatabase, schema: "APP_OWNER" });

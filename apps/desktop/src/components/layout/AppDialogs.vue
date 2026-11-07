@@ -173,6 +173,7 @@ watch(
     v-if="shouldShowConnectionDialog"
     :open="shouldShowConnectionDialog"
     :edit-config="editConfig"
+    :initial-visible-schema-database="connectionStore.editingVisibleSchemaDatabase"
     :prefill-config="connectionPrefill"
     :update-prefill="connectionUpdate"
     :plugin-provider="connectionPluginProvider"

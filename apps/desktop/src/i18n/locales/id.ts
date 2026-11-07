@@ -8,6 +8,7 @@ import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessag
 import { meilisearchManagementId } from "./meilisearchManagement";
 
 export default withEnglishFallback({
+  navigationPreferences: { refreshFailed: "Pengaturan tersimpan, tetapi navigasi gagal diperbarui: {message}", connectionUnavailable: "Koneksi sudah tidak ada. Buka kembali." },
   tableColumnPaste,
   objectDependencies: {
     dependencies: "Dependensi",
@@ -3258,6 +3259,7 @@ export default withEnglishFallback({
     loadFailed: "Tidak dapat memuat DBX. Silakan coba lagi.",
   },
   common: {
+    all: "Semua",
     fileNotFound: "File tidak ada: {path}",
     loading: "Memuat...",
     stopping: "Menghentikan...",
@@ -4044,16 +4046,20 @@ export default withEnglishFallback({
     noDatabasesFound: "Tidak ada database yang ditemukan",
   },
   contextMenu: {
+    viewObjects: "Lihat objek",
+    refreshObjects: "Segarkan objek",
+    confirmDeleteConnectionConfig: "Hapus konfigurasi koneksi tersimpan “{name}”?",
+    confirmDeleteSelectedConnectionConfigs: "Hapus {count} konfigurasi koneksi tersimpan yang dipilih?",
     openConnection: "Buka Koneksi",
     closeConnection: "Tutup Koneksi",
     closeSelectedConnections: "Tutup {count} Koneksi Terpilih",
     closeDatabaseConnection: "Tutup Koneksi Database",
-    deleteConnection: "Hapus Koneksi",
-    deleteSelectedConnections: "Hapus {count} Koneksi Terpilih",
+    deleteConnection: "Hapus Koneksi…",
+    deleteSelectedConnections: "Hapus {count} Koneksi Terpilih…",
     confirmDeleteTitle: "Hapus Koneksi",
     confirmDeleteMessage: 'Apakah Anda yakin ingin menghapus "{name}"? Tindakan ini tidak dapat dibatalkan.',
     confirmDeleteSelectedMessage: "Apakah Anda yakin ingin menghapus {count} koneksi terpilih? Tindakan ini tidak dapat dibatalkan.",
-    editConnection: "Edit Koneksi",
+    editConnection: "Edit Koneksi…",
     revealDatabaseFile: "Tampilkan di File Manager",
     selectVisibleDatabases: "Pilih Database yang Terlihat",
     configureVisibleObjects: "Filter Objek Terlihat",
@@ -4533,6 +4539,8 @@ export default withEnglishFallback({
     loadFailed: "Gagal memuat database: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "Skema pengguna",
+    systemGroup: "Skema sistem",
     title: "Filter Skema",
     detailLabel: "Skema yang terlihat",
     detailActionLabel: 'Konfigurasikan skema yang terlihat untuk "{connection}"',
@@ -4549,6 +4557,9 @@ export default withEnglishFallback({
     loadFailed: "Gagal memuat skema: {message}",
   },
   databaseLinks: {
+    foreignPrivateReadOnly: "Tautan privat pengguna lain hanya dapat dilihat.",
+    privateSchemaUnavailable: "Tautan database privat tidak dapat dibuat dalam skema pengguna lain. Gunakan skema pengguna yang sedang masuk.",
+    permissionUnknown: "Izin penghapusan belum dikonfirmasi; database akan memeriksanya saat dijalankan. Muat ulang untuk memeriksa kembali.",
     remoteTenant: "Tenant jarak jauh",
     remoteProtocol: "Protokol database jarak jauh",
     remoteCluster: "Cluster jarak jauh (opsional)",
@@ -4574,6 +4585,17 @@ export default withEnglishFallback({
     manage: "Kelola link database",
   },
   tree: {
+    navigationStatus: { denied: "Tanpa izin", error: "Gagal memuat", unknown: "Belum diketahui", unsupported: "Tidak didukung", truncated: "Hasil sebagian" },
+    publicObjects: "Objek publik",
+    tenantObjects: "Objek tenant",
+    jobs: "Pekerjaan",
+    jobCategories: {
+      regular: "Pekerjaan terjadwal",
+      lightweight: "Pekerjaan ringan",
+      inMemory: "Pekerjaan dalam memori",
+      legacy: "Pekerjaan lama",
+    },
+    openList: "Buka daftar",
     savedSql: "Pustaka SQL",
     queries: "Kueri",
     userAdmin: "Pengguna & Hak Akses",

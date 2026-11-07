@@ -1506,10 +1506,12 @@ mod tests {
             visible_databases: None,
             visible_database_patterns: None,
             visible_schemas: None,
+            schema_visibility: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
             show_native_jobs: None,
+            show_extensions: None,
             show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
@@ -2838,33 +2840,49 @@ done
     }
 
     #[tokio::test]
-    async fn load_connections_migrates_visibility_only_for_an_explicit_client() {
+    async fn load_connections_accepts_legacy_visibility_without_rewriting_connections() {
         let (state, dir) = test_web_state().await;
-        let mut config = sqlite_config("visibility", &dir.join("visibility.db").to_string_lossy());
-        config.show_user_admin = None;
-        state.app.storage.save_connections(&[config.clone()]).await.unwrap();
-        let _ = load_connections(State(state.clone()), HeaderMap::new(), Query(super::LoadConnectionsQuery::default()))
+        let config = sqlite_config("visibility", &dir.join("visibility.db").to_string_lossy());
+        state.app.storage.save_connections(&[config]).await.unwrap();
+        let pool = dbx_core::db::sqlite::connect_path(&dir.join("storage.db").to_string_lossy()).await.unwrap();
+        // Seed legacy persisted input directly: current saves intentionally omit these keys.
+        dbx_core::db::sqlite::execute_query(
+            &pool,
+            "UPDATE connections SET config_json = json_set(config_json,
+                '$.show_user_admin', json('true'), '$.show_extensions', json('false'),
+                '$.show_database_links', json('false'), '$.show_native_jobs', json('true'),
+                '$.external_config', json('{\"show_user_admin\":false,\"custom\":\"preserved\"}'))",
+        )
+        .await
+        .unwrap();
+        let read_sql = "SELECT config_json FROM connections WHERE id = 'visibility'";
+        let original = dbx_core::db::sqlite::execute_query(&pool, read_sql).await.unwrap().rows;
+        for legacy_sidebar_show_user_admin in [None, Some(false), Some(true)] {
+            let response = load_connections(
+                State(state.clone()),
+                HeaderMap::new(),
+                Query(super::LoadConnectionsQuery { legacy_sidebar_show_user_admin }),
+            )
             .await
             .unwrap();
-        assert_eq!(state.app.storage.load_connections().await.unwrap()[0].show_user_admin, None);
-        let _ = load_connections(
-            State(state.clone()),
-            HeaderMap::new(),
-            Query(super::LoadConnectionsQuery { legacy_sidebar_show_user_admin: Some(false) }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(state.app.storage.load_connections().await.unwrap()[0].show_user_admin, Some(false));
-        config.show_user_admin = Some(true);
-        state.app.storage.save_connections(&[config]).await.unwrap();
-        let _ = load_connections(
-            State(state.clone()),
-            HeaderMap::new(),
-            Query(super::LoadConnectionsQuery { legacy_sidebar_show_user_admin: Some(false) }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(state.app.storage.load_connections().await.unwrap()[0].show_user_admin, Some(true));
+            assert_eq!(response.0.len(), 1);
+            assert_eq!(dbx_core::db::sqlite::execute_query(&pool, read_sql).await.unwrap().rows, original);
+            assert_eq!(state.app.storage.load_connections().await.unwrap()[0].show_user_admin, Some(true));
+        }
+        let configs = state.app.storage.load_connections().await.unwrap();
+        state.app.storage.save_connections(&configs).await.unwrap();
+        let saved = dbx_core::db::sqlite::execute_query(&pool, read_sql).await.unwrap();
+        let saved: serde_json::Value = serde_json::from_str(saved.rows[0][0].as_str().unwrap()).unwrap();
+        for key in ["show_user_admin", "show_extensions", "show_database_links", "show_native_jobs"] {
+            assert!(saved.get(key).is_none(), "retired top-level key {key} was persisted");
+        }
+        let mut expected: serde_json::Value = serde_json::from_str(original[0][0].as_str().unwrap()).unwrap();
+        for key in ["show_user_admin", "show_extensions", "show_database_links", "show_native_jobs"] {
+            expected.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(saved, expected);
+        drop(pool);
+        drop(state);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -13,6 +13,7 @@ import zhCN from "@/i18n/locales/zh-CN";
 import zhTW from "@/i18n/locales/zh-TW";
 import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNodeComment } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { sidebarTreeSecondaryValue } from "@/lib/sidebar/sidebarTreeLabel";
+import { sidebarNavigationSettings } from "@/lib/sidebar/sidebarNavigationPreferences";
 import { showSidebarRowProductionBadge, isSidebarProductionContainer } from "@/lib/sidebar/sidebarProductionBadge";
 import type { ColumnInfo, TreeNode } from "@/types/database";
 
@@ -55,6 +56,7 @@ function fixture(nodes: TreeNode[], initialLocale: Locale = "en", mode = "commen
     computed,
     store: { getConfig: () => undefined, isDefaultDatabase: () => false, isDefaultSchema: () => false },
     sidebarTreeSecondaryValue,
+    sidebarNavigationSettings,
     showSidebarRowProductionBadge,
     isSidebarProductionContainer,
     locale,

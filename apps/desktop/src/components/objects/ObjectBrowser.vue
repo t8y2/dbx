@@ -219,7 +219,7 @@ import { foreignKeyChecksPreview, foreignKeyChecksTargetResults, isForeignKeyChe
 import ForeignKeyChecksSelect from "@/components/objects/ForeignKeyChecksSelect.vue";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { matchesTableNameFilter } from "@/lib/table/tableVGroup";
-import { filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
+import { connectionUsesVisibleSchemaFilter } from "@/lib/database/visibleDatabases";
 import {
   buildObjectBrowserRows,
   buildMongoObjectBrowserRows,
@@ -727,6 +727,7 @@ const exportTracker = useExportTracker();
 const { addTask: addExportTask, updateTableExportTask } = exportTracker;
 
 const needsSchema = computed(() => isSchemaAware(props.connection.db_type) && !connectionUsesDatabaseObjectTreeMode(props.connection));
+const schemaFilterDatabase = computed(() => (connectionUsesVisibleSchemaFilter(props.connection) ? props.connection.database || "" : props.database === "_" ? "" : props.database));
 const canDropTargetCascade = computed(() => dropTarget.value?.type === "TABLE" && supportsDropTableCascade(effectiveDatabaseType.value));
 const canTruncateTargetCascade = computed(() => !!truncateTarget.value && supportsTruncateTableCascade(effectiveDatabaseType.value));
 const objectNameFilters = computed(() => {
@@ -992,10 +993,17 @@ watch(objectFilter, () => {
 });
 watch([() => props.initialEventName, () => props.initialEventOpenRequestId, rows, loadingObjects], openInitialEventIfNeeded, { flush: "post" });
 watch(
-  () => props.connection.show_system_schemas,
+  () =>
+    JSON.stringify([
+      needsSchema.value ? connectionStore.completionCacheRevision(props.connection.id, props.database) : 0,
+      props.connection.schema_visibility?.databases[schemaFilterDatabase.value],
+      props.connection.show_system_schemas,
+      props.connection.visible_schemas?.[schemaFilterDatabase.value],
+      ...(connectionUsesVisibleSchemaFilter(props.connection) ? [props.connection.visible_databases, props.connection.visible_database_patterns] : []),
+    ]),
   (value, oldValue) => {
     if (value === oldValue) return;
-    void reload();
+    void loadSchemas(schemaListLoadGuard.invalidate(), true).catch((error) => console.warn("[ObjectBrowser] schema choices refresh failed", error));
   },
 );
 
@@ -5230,27 +5238,26 @@ async function runBrowserTriggerAction(row: ObjectBrowserRow, action: "enable" |
   }
 }
 
-async function loadSchemas(epoch: number): Promise<boolean> {
+async function loadSchemas(epoch: number, preserveSelection = false): Promise<boolean> {
   if (!schemaListLoadGuard.isEpochCurrent(epoch)) return false;
   if (!needsSchema.value) {
     schemas.value = [];
-    selectedSchema.value = undefined;
+    if (!preserveSelection) selectedSchema.value = undefined;
     return true;
   }
   loadingSchemas.value = true;
   const connectionId = props.connection.id;
   const database = props.database;
   try {
-    const names = filterSchemaNamesForConnection(await schemaListLoadGuard.wait(epoch, api.listSchemas(connectionId, database), metadataLoadBudgetMs(props.connection.query_timeout_secs)), props.connection, database, {
-      showSystemSchemas: props.connection.show_system_schemas === true,
-    });
+    const request = connectionStore.readVisibleSchemaSelection(connectionId, database);
+    const { visibleNames: names } = await schemaListLoadGuard.wait(epoch, request, metadataLoadBudgetMs(props.connection.query_timeout_secs));
     if (!schemaListLoadGuard.isEpochCurrent(epoch)) return false;
     schemas.value = names;
     if (names.length === 0) {
-      selectedSchema.value = undefined;
+      if (!preserveSelection && props.schema === undefined) selectedSchema.value = undefined;
       return true;
     }
-    if (!selectedSchema.value || !names.includes(selectedSchema.value)) {
+    if (!preserveSelection && props.schema === undefined && (!selectedSchema.value || !names.includes(selectedSchema.value))) {
       selectedSchema.value = names.includes("public") ? "public" : names[0];
     }
     return true;
@@ -6267,7 +6274,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     "
   />
   <div ref="rootRef" data-object-browser-root class="flex h-full min-h-0 min-w-0 flex-col bg-background outline-none" tabindex="0" @keydown="onObjectBrowserKeydown">
-    <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />
+    <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" v-bind="sidebarMenuPreferences" />
     <div v-if="!isEventEditor" ref="toolbarRef" class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
       <Button v-if="effectiveDatabaseType === 'firebird'" variant="outline" size="sm" @click="firebirdManagerOpen = true">{{ t("tree.firebirdObjectManager") }}</Button>
       <Button v-if="canCreateSchemaIndex" data-create-schema-index variant="outline" size="sm" class="h-7 shrink-0 gap-1 px-2 text-xs" @click="createSchemaIndex"> <CopyPlus class="h-3.5 w-3.5" />{{ t("structureEditor.addIndex") }} </Button>

@@ -7,6 +7,7 @@ import { mergeQueryMessages, queryResultMessages } from "@/lib/query/queryResult
 import { appendNeo4jNodeCells, extractNeo4jNodeCells } from "@/lib/neo4j/neo4jNodeResult";
 import { UPDATE_RESTORE_KEY, assertUpdateAllowsInteraction } from "@/lib/app/updatePreparation";
 import { defineStore } from "pinia";
+import { sidebarObjectTemplateForGroup, sidebarViewTemplateSql } from "@/lib/sidebar/databaseObjectTemplates";
 import { usePlDebugStore } from "@/stores/plDebugStore";
 import { isRedisMonitorCommand, startRedisMonitor } from "@/lib/redis/redisMonitor";
 import { uuid } from "@/lib/common/utils";
@@ -15,7 +16,8 @@ import { useI18n } from "vue-i18n";
 import { useToast } from "@/composables/useToast";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { sanitizeTabPageUiState } from "@/lib/tabs/tabUiState";
-import { nativeJobAdminEngine, nativeJobAdminSelection, nativeJobAdminSupported, type NativeJobAdminSelection } from "@/lib/database/nativeJobAdmin";
+import { nativeJobAdminEngine, nativeJobAdminSelection, nativeJobAdminSelectionKey, nativeJobAdminSupported, nativeJobSelectionMatchesPage, nativeJobSelectionFromSaved, nativeJobPageLabelKey, type NativeJobAdminSelection, type NativeJobWorkspaceState } from "@/lib/database/nativeJobAdmin";
+import { nativeJobRefKey } from "@/lib/database/nativeJobs";
 import type { DeletedConnectionTabKeepMode } from "@/lib/tabs/deletedConnectionTabs";
 import type {
   BatchSqlExecution,
@@ -110,6 +112,7 @@ import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/table
 import {
   connectionObjectTreeNodeSchema,
   connectionQueryExecutionSchema,
+  connectionUsesConnectionRootSchemaMode,
   connectionUsesDatabaseObjectTreeMode,
   effectiveDatabaseTypeForConnection,
   gaussdbCountQueryDopHint,
@@ -254,6 +257,8 @@ export interface ClosedTabHistoryEntry {
 function snapshotClosedTab(tab: QueryTab): QueryTab {
   return {
     ...tab,
+    nativeJobCreateRequest: undefined,
+    nativeJobScopeResolution: undefined,
     isExecuting: false,
     isCancelling: false,
     queryExecutionStartedAt: undefined,
@@ -4290,10 +4295,100 @@ export const useQueryStore = defineStore("query", () => {
     return registerOpenTab(tab);
   }
 
-  function openDatabaseJobAdmin(connectionId: string, selection?: NativeJobAdminSelection) {
+  function savedNativeJobSelection(tab: QueryTab) {
+    const pageState = tab.uiState?.page?.["database-jobs"]?.DatabaseJobAdmin as { selectedJob?: unknown } | undefined;
+    return nativeJobSelectionFromSaved(tab.nativeJobAdmin) ?? nativeJobSelectionFromSaved(pageState?.selectedJob);
+  }
+
+  async function resolveNativeJobNavigation(tabId: string) {
+    const tab = tabs.value.find((tab) => tab.id === tabId);
+    if (!tab || tab.mode !== "database-jobs" || tab.nativeJobPage || tab.nativeJobCreationTargets || tab.nativeJobScopeResolution?.status === "loading") return;
+    const connections = useConnectionStore();
+    const config = connections.getConfig(tab.connectionId);
+    if (nativeJobAdminEngine(config) === "dameng") {
+      tab.mode = "dameng-jobs";
+      tab.nativeJobScopeResolution = undefined;
+      return;
+    }
+    const selection = savedNativeJobSelection(tab);
+    if (!config || !nativeJobAdminSupported(config) || !selection || selection.kind === "dameng-native") {
+      tab.nativeJobScopeResolution = { status: "unresolved", retryable: false };
+      return;
+    }
+    const bind = (schema: string, kind: "legacy" | "scheduler") => {
+      // Root-schema trees use database as a schema alias, not the Oracle service.
+      // Resolve legacy ownership through the original source first, then join that tree identity.
+      if (connectionUsesConnectionRootSchemaMode(config)) tab.database = schema;
+      tab.nativeJobAdmin = selection;
+      tab.nativeJobPage = { schema, kind };
+      tab.nativeJobScopeResolution = undefined;
+      if (!tab.customTitle) tab.title = `${schema} · ${t(`nativeJobs.kinds.${kind}`)}`;
+    };
+    if (selection.kind === "scheduler") {
+      bind(selection.owner, "scheduler");
+      return;
+    }
+    const identity = connectionConfigFingerprint(config);
+    const selectionKey = nativeJobAdminSelectionKey(selection);
+    const database = tab.database;
+    const resolution = markRaw({ status: "loading" as const, retryable: true });
+    tab.nativeJobScopeResolution = resolution;
+    const stillCurrent = () => {
+      const currentConfig = connections.getConfig(tab.connectionId);
+      const currentSelection = savedNativeJobSelection(tab);
+      return (
+        tabs.value.find((item) => item.id === tabId) === tab &&
+        tab.mode === "database-jobs" &&
+        tab.database === database &&
+        !tab.nativeJobPage &&
+        tab.nativeJobScopeResolution === resolution &&
+        !!currentConfig &&
+        connectionConfigFingerprint(currentConfig) === identity &&
+        !!currentSelection &&
+        nativeJobAdminSelectionKey(currentSelection) === selectionKey
+      );
+    };
+    try {
+      await connections.ensureConnected(tab.connectionId, { skipIfClosedByUser: true });
+      if (!stillCurrent()) return;
+      const context = await api.nativeJobOpenContext(tab.connectionId, database);
+      if (!stillCurrent()) return;
+      if (context.engine === "dameng") {
+        tab.mode = "dameng-jobs";
+        tab.nativeJobAdmin = selection;
+        tab.nativeJobScopeResolution = undefined;
+        return;
+      }
+      const target = { scope: context.scope, kind: "legacy" as const, jobId: selection.jobId };
+      const details = await api.nativeJobRead(target);
+      if (!stillCurrent()) return;
+      const schema = details.snapshot.definition.status === "available" ? details.snapshot.definition.value.SCHEMA_USER : undefined;
+      if (nativeJobRefKey(details.snapshot.ref) !== nativeJobRefKey(target) || details.consistency.status !== "available" || details.nativeIdentity.status !== "available" || typeof schema !== "string" || !schema || schema.includes("\0")) throw new Error("native_job_scope_resolution_unavailable");
+      bind(schema, "legacy");
+    } catch (error) {
+      if (stillCurrent()) tab.nativeJobScopeResolution = { status: "unresolved", retryable: true, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      if (tab.nativeJobScopeResolution === resolution) tab.nativeJobScopeResolution = { status: "unresolved", retryable: true };
+    }
+  }
+
+  function nativeJobWorkspaceForTab(tabId: string): NativeJobWorkspaceState | undefined {
+    const tab = tabs.value.find((tab) => tab.id === tabId);
+    if (tab?.mode !== "database-jobs") return;
+    return (tab.nativeJobWorkspace ??= markRaw({} as NativeJobWorkspaceState));
+  }
+
+  function openDatabaseJobAdmin(connectionId: string, selection?: NativeJobAdminSelection, page?: { database: string; schema: string; kind: "scheduler" | "legacy"; schedulerCategory?: "regular" | "lightweight" | "in-memory" }) {
     const config = useConnectionStore().getConfig(connectionId);
     if (!nativeJobAdminSupported(config)) return;
-    const existing = tabs.value.find((tab) => (tab.mode === "database-jobs" || tab.mode === "dameng-jobs") && tab.connectionId === connectionId);
+    if (nativeJobAdminEngine(config) !== "dameng" && !page) return;
+    if (!nativeJobSelectionMatchesPage(selection, page)) return;
+    const existing = tabs.value.find(
+      (tab) =>
+        (tab.mode === "database-jobs" || tab.mode === "dameng-jobs") &&
+        tab.connectionId === connectionId &&
+        (page ? tab.database === page.database && tab.nativeJobPage?.schema === page.schema && tab.nativeJobPage.kind === page.kind && tab.nativeJobPage.schedulerCategory === page.schedulerCategory : !tab.nativeJobPage),
+    );
     if (existing) {
       if (selection) existing.nativeJobAdmin = nativeJobAdminSelection(selection);
       switchTab(existing.id);
@@ -4304,7 +4399,36 @@ export const useQueryStore = defineStore("query", () => {
       if (selection) tabs.value.find((tab) => tab.id === id)!.nativeJobAdmin = nativeJobAdminSelection(selection);
       return id;
     }
-    return registerOpenTab({ id: uuid(), title: t("nativeJobs.title"), connectionId, database: "", sql: "", isExecuting: false, isCancelling: false, isExplaining: false, mode: "database-jobs", ...(selection ? { nativeJobAdmin: nativeJobAdminSelection(selection) } : {}) });
+    return registerOpenTab({
+      id: uuid(),
+      title: page ? `${page.schema} · ${t(nativeJobPageLabelKey(page))}` : t("nativeJobs.title"),
+      connectionId,
+      database: page?.database ?? "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "database-jobs",
+      ...(page ? { nativeJobPage: { schema: page.schema, kind: page.kind, ...(page.schedulerCategory ? { schedulerCategory: page.schedulerCategory } : {}) } } : {}),
+      ...(selection ? { nativeJobAdmin: nativeJobAdminSelection(selection) } : {}),
+    });
+  }
+
+  function openDatabaseJobCreation(connectionId: string, targets: NonNullable<QueryTab["nativeJobCreationTargets"]>) {
+    const config = useConnectionStore().getConfig(connectionId);
+    if (!nativeJobAdminSupported(config) || nativeJobAdminEngine(config) === "dameng" || !targets.length) return;
+    return registerOpenTab({
+      id: uuid(),
+      title: t("damengJobAdmin.newJob"),
+      connectionId,
+      database: "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "database-jobs",
+      nativeJobCreationTargets: targets.map((target) => ({ ...target })),
+    });
   }
 
   function openDamengUsers(connectionId: string) {
@@ -4793,6 +4917,57 @@ export const useQueryStore = defineStore("query", () => {
       structureInitialTarget: initialTarget?.name || initialTarget?.action === "create" ? initialTarget : undefined,
     };
     return registerOpenTab(tab);
+  }
+
+  function openTableCreation(connectionId: string, targets: NonNullable<QueryTab["structureCreationTargets"]>) {
+    if (!targets.length) return;
+    const id = openTableStructure(connectionId, "", undefined, "");
+    const tab = tabs.value.find((tab) => tab.id === id)!;
+    tab.structureCreationTargets = targets.map((target) => ({ ...target }));
+    tab.structureExactIdentity = true;
+    return id;
+  }
+
+  function selectTableCreationTarget(tabId: string, index: number) {
+    const tab = tabs.value.find((tab) => tab.id === tabId);
+    const target = tab?.structureCreationTargets?.[index];
+    if (!tab || tab.mode !== "structure" || tab.structureTableName || !target || !Number.isInteger(index)) return;
+    tab.structureCreationTargetIndex = index;
+    tab.database = target.database;
+    tab.schema = target.schema;
+    tab.catalog = target.catalog;
+  }
+
+  function openObjectTemplateCreation(connectionId: string, targets: NonNullable<QueryTab["queryCreation"]>["targets"]) {
+    if (!targets.length) return;
+    const config = useConnectionStore().getConfig(connectionId);
+    const first = targets[0];
+    const template = first.nodeType === "group-views" ? { titleKey: "contextMenu.createView" } : sidebarObjectTemplateForGroup(config, { type: first.nodeType, database: first.database });
+    if (!template) return;
+    const id = createTab(connectionId, "", t(template.titleKey), "query", undefined, "", undefined, { forceNew: true });
+    tabs.value.find((tab) => tab.id === id)!.queryCreation = { targets: targets.map((target) => ({ ...target })) };
+    return id;
+  }
+
+  function selectObjectTemplateTarget(tabId: string, index: number) {
+    const tab = tabs.value.find((tab) => tab.id === tabId);
+    const target = tab?.queryCreation?.targets[index];
+    if (!tab || !target || tab.mode !== "query" || tab.isExecuting || tab.isExplaining || pendingResultRunPreparations.has(tab) || !Number.isInteger(index)) return;
+    const firstSelection = tab.queryCreation!.selected === undefined;
+    if (tab.queryCreation!.selected !== index) clearExplain(tab);
+    tab.database = target.database;
+    tab.schema = target.schema;
+    tab.catalog = target.catalog;
+    tab.queryCreation!.selected = index;
+    if (!firstSelection || tab.sql.trim()) return;
+    const connections = useConnectionStore();
+    const config = connections.getConfig(tab.connectionId);
+    const sql =
+      target.nodeType === "group-views"
+        ? sidebarViewTemplateSql(config, target, { identifierQuote: connections.connectionIdentifierQuote(tab.connectionId), includeDatabaseName: useSettingsStore().editorSettings.generateSqlIncludeDatabaseName, quoteIdentifiers: useSettingsStore().editorSettings.generateSqlQuoteIdentifiers })
+        : sidebarObjectTemplateForGroup(config, { type: target.nodeType, database: target.database })?.sql;
+    if (sql) updateSql(tabId, sql);
+    if (target.nodeType === "group-views") setObjectSource(tabId, { schema: target.schema, name: "new_view", objectType: "VIEW" });
   }
 
   const defaultQuerySaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -5638,6 +5813,10 @@ export const useQueryStore = defineStore("query", () => {
       isExplaining: false,
       explainExecutionId: undefined,
       mode: original.mode,
+      nativeJobPage: original.nativeJobPage ? { ...original.nativeJobPage } : undefined,
+      nativeJobAdmin: original.nativeJobAdmin ? nativeJobAdminSelection(original.nativeJobAdmin) : undefined,
+      nativeJobWorkspace: original.nativeJobWorkspace ? markRaw({ snapshot: original.nativeJobWorkspace.snapshot ? cloneTabDraft(original.nativeJobWorkspace.snapshot) : undefined }) : undefined,
+      ...(original.mode === "database-jobs" && original.uiState ? { uiState: cloneTabDraft(original.uiState) } : {}),
       mqTenant: original.mqTenant,
       mqInitialTab: original.mqInitialTab,
       nacosNamespace: original.nacosNamespace,
@@ -8307,6 +8486,7 @@ export const useQueryStore = defineStore("query", () => {
     assertUpdateAllowsInteraction();
     const tab = findExecutionTab(id);
     if (!tab || !sql.trim()) return;
+    if (tab.queryCreation && tab.queryCreation.selected === undefined) return false;
     if (tab.objectSource?.objectType === "TRIGGER" && oracleTriggerReadOptions(effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)))) {
       if (options?.executionTarget || options?.targetContext) throw new Error(t("oracleTrigger.runFullDefinition"));
       await runOracleTriggerSourceAction(id, "replace", sql);
@@ -10230,7 +10410,7 @@ export const useQueryStore = defineStore("query", () => {
   async function explainTabSql(id: string, sql: string, databaseType?: DatabaseType, explainMode?: string) {
     assertUpdateAllowsInteraction();
     const tab = tabs.value.find((t) => t.id === id);
-    if (!tab) return { ok: false as const, reason: "empty" as const };
+    if (!tab || (tab.queryCreation && tab.queryCreation.selected === undefined)) return { ok: false as const, reason: "empty" as const };
     const conn = useConnectionStore().getConfig(tab.connectionId);
     const queryTimeoutSecs = queryTimeoutSecsForConnection(conn, settingsStore.editorSettings.globalQueryTimeoutSecs);
     const executionId = uuid();
@@ -12016,6 +12196,9 @@ export const useQueryStore = defineStore("query", () => {
     openDamengRoles,
     openDamengJobAdmin,
     openDatabaseJobAdmin,
+    openDatabaseJobCreation,
+    nativeJobWorkspaceForTab,
+    resolveNativeJobNavigation,
     openMqAdmin,
     openMqttAdmin,
     openNacosAdmin,
@@ -12029,6 +12212,10 @@ export const useQueryStore = defineStore("query", () => {
     openPluginConnection,
     clearNacosNavigationTarget,
     openTableStructure,
+    openTableCreation,
+    selectTableCreationTarget,
+    openObjectTemplateCreation,
+    selectObjectTemplateTarget,
     linkSavedSql,
     linkExternalSqlPath,
     openExternalSqlFile,

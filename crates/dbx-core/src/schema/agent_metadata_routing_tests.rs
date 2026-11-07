@@ -165,7 +165,8 @@ async fn oracle_exact_object_list_fills_table_and_view_comments_for_that_exact_o
         json!([["ORDERS", "Upper orders"], ["ACTIVE_ORDERS", "Open orders"]]).to_string(),
     )
     .unwrap();
-    let options = MetadataReadOptions { identity_mode: Some(MetadataIdentityMode::Exact), catalog: None };
+    let options =
+        MetadataReadOptions { identity_mode: Some(MetadataIdentityMode::Exact), catalog: None, ..Default::default() };
 
     let objects = list_objects_core_with_options(
         &fixture.state,
@@ -202,7 +203,8 @@ async fn oracle_exact_object_list_survives_a_failed_comment_lookup() {
     )
     .unwrap();
     std::fs::write(fixture.control_path("statistics"), "sql").unwrap();
-    let options = MetadataReadOptions { identity_mode: Some(MetadataIdentityMode::Exact), catalog: None };
+    let options =
+        MetadataReadOptions { identity_mode: Some(MetadataIdentityMode::Exact), catalog: None, ..Default::default() };
 
     let objects = list_objects_core_with_options(
         &fixture.state,

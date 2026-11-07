@@ -1,7 +1,7 @@
 import { StandardSQL } from "@codemirror/lang-sql";
 import { ensureSyntaxTree, foldable, matchBrackets, syntaxTree } from "@codemirror/language";
 import { EditorState } from "@codemirror/state";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createSqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
 import { elasticsearchJsonDiagnostics, elasticsearchLanguage } from "@/lib/elasticsearch/elasticsearchLanguage";
 
@@ -28,8 +28,8 @@ GET /orders/_count
 
 function stateFor(text: string, databaseType: "elasticsearch" | "easysearch" = "elasticsearch") {
   const state = EditorState.create({ doc: text, extensions: [elasticsearchLanguage(StandardSQL.language.parser), createSqlBlockFoldService(databaseType)] });
-  ensureSyntaxTree(state, text.length, 5_000);
-  return state;
+  expect(ensureSyntaxTree(state, text.length, 5_000)).not.toBeNull();
+  return state.update({}).state;
 }
 
 function foldedText(state: EditorState, lineNumber: number) {
@@ -39,6 +39,17 @@ function foldedText(state: EditorState, lineNumber: number) {
 }
 
 describe("Elasticsearch REST JSON language", () => {
+  it("publishes the completed syntax tree after the initial parse budget expires", () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(21);
+    try {
+      const state = stateFor(doc);
+      expect(foldedText(state, 8)).toContain('"match"');
+      expect(foldedText(state, 17)).toContain('"match_all"');
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it.each(["elasticsearch", "easysearch"] as const)("folds nested objects and arrays while retaining %s request folds", (databaseType) => {
     const state = stateFor(doc, databaseType);
     expect(foldedText(state, 1)).toBe(doc.slice(doc.indexOf("\n"), doc.indexOf("\n\n")));

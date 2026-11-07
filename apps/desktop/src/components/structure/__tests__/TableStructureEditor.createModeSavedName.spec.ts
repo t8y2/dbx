@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, nextTick, type App } from "vue";
+import { createApp, h, nextTick, reactive, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Regression: after creating a table the editor converts itself into the edit
@@ -414,6 +414,69 @@ afterEach(() => {
 });
 
 describe("TableStructureEditor created-table name write-back", () => {
+  it("preserves the new table draft and rejects an old confirmation after its selected schema changes", async () => {
+    mocks.connection.db_type = "postgres";
+    mocks.connection.production_databases = ["APP"];
+    mocks.buildCreateTableSql.mockImplementation(async (options) => ({ statements: [`CREATE TABLE ${options.schema}.${options.tableName} (id integer)`], warnings: [] }));
+    const target = reactive({ database: "APP", schema: "A", catalog: "one" });
+    let draft: TableStructureEditorDraft | undefined;
+    let editor: { applyChanges: () => Promise<boolean> } | undefined;
+    const root = document.createElement("div");
+    document.body.append(root);
+    const initialDraft: TableStructureEditorDraft = {
+      dirty: true,
+      activeTab: "columns",
+      newTableName: "MyTable",
+      tableComment: "",
+      originalTableComment: "",
+      columns: [{ id: "new:id", name: "id", dataType: "integer", isNullable: false, defaultValue: "", comment: "", isPrimaryKey: false, extra: {}, markedForDrop: false }],
+      indexes: [],
+      foreignKeys: [],
+      triggers: [],
+      initialized: true,
+    };
+    const app = createApp({
+      setup: () => () =>
+        h(TableStructureEditor, {
+          connectionId: mocks.connection.id,
+          ...target,
+          tableName: "",
+          exactIdentity: true,
+          draft: initialDraft,
+          ref: (instance: unknown) => {
+            editor = instance as typeof editor;
+          },
+          "onUpdate:draft": (value: TableStructureEditorDraft | undefined) => {
+            draft = value;
+          },
+        }),
+    });
+    mountedApps.push(app);
+    app.mount(root);
+    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenCalledWith(expect.objectContaining({ schema: "A", tableName: "MyTable" }), expect.anything(), undefined));
+    let confirm!: (value: boolean) => void;
+    mocks.requestConfirmation.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          confirm = resolve;
+        }),
+    );
+    let pending!: Promise<boolean>;
+    await vi.waitFor(() => {
+      pending ??= editor!.applyChanges();
+      expect(mocks.requestConfirmation).toHaveBeenCalledTimes(1);
+    });
+    target.schema = "B";
+    target.catalog = "two";
+    await settle();
+    confirm(true);
+    expect(await pending).toBe(false);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(mocks.buildCreateTableSql).toHaveBeenLastCalledWith(expect.objectContaining({ schema: "B", tableName: "MyTable", columns: [expect.objectContaining({ name: "id" })] }), expect.anything(), undefined));
+    expect(draft).toMatchObject({ newTableName: "MyTable", columns: [expect.objectContaining({ name: "id" })] });
+    await vi.waitFor(async () => expect(await editor!.applyChanges()).toBe(true));
+    expect(mocks.executeBatch).toHaveBeenCalledWith(mocks.connection.id, "APP", ["CREATE TABLE B.MyTable (id integer)"], "B", expect.anything(), expect.anything());
+  });
   it("restores a PostgreSQL foreign table draft and saves its generated SQL", async () => {
     const foreign = {
       enabled: true,

@@ -14,6 +14,8 @@ pub enum MetadataIdentityMode {
 #[serde(rename_all = "camelCase")]
 pub struct MetadataReadOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_page: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_mode: Option<MetadataIdentityMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog: Option<String>,

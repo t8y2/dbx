@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::Json;
 use dbx_core::native_jobs::{
     NativeJobContext, NativeJobDetails, NativeJobList, NativeJobListRequest, NativeJobOperationStatus,
-    NativeJobPreparedPlan, NativeJobRef, NativeJobReferenceCatalog, NativeJobReferenceListRequest, NativeJobRequest,
+    NativeJobPreparedPlan, NativeJobReferenceCatalog, NativeJobReferenceListRequest,
 };
 use dbx_core::schema::native_jobs as jobs;
 use serde::Deserialize;
@@ -52,15 +52,22 @@ pub async fn references(
 }
 pub async fn read(
     State(state): State<Arc<WebState>>,
-    Json(target): Json<NativeJobRef>,
+    Json(request): Json<dbx_core::native_jobs::NativeJobReadRequest>,
 ) -> Result<Json<NativeJobDetails>, AppError> {
-    jobs::native_job_read_core(&state.app, &target).await.map(Json).map_err(AppError::from)
+    let (target, page) = match request {
+        dbx_core::native_jobs::NativeJobReadRequest::Scoped { target, page_scope } => (target, Some(page_scope)),
+        dbx_core::native_jobs::NativeJobReadRequest::Legacy(target) => (target, None),
+    };
+    jobs::native_job_read_in_page_core(&state.app, &target, page.as_ref()).await.map(Json).map_err(AppError::from)
 }
 pub async fn prepare(
     State(state): State<Arc<WebState>>,
-    Json(mutation): Json<NativeJobRequest>,
+    Json(request): Json<dbx_core::native_jobs::NativeJobPrepareRequest>,
 ) -> Result<Json<NativeJobPreparedPlan>, AppError> {
-    jobs::native_job_prepare_core(&state.app, mutation).await.map(Json).map_err(AppError::from)
+    jobs::native_job_prepare_in_page_core(&state.app, request.request, request.page_scope.as_ref())
+        .await
+        .map(Json)
+        .map_err(AppError::from)
 }
 pub async fn apply(
     State(state): State<Arc<WebState>>,
@@ -85,6 +92,7 @@ pub async fn cancel(
 mod tests {
     use super::*;
     use dbx_core::connection::AppState;
+    use dbx_core::native_jobs::NativeJobRef;
     use dbx_core::native_jobs::{NativeJobOperationOutcome, NativeJobScope};
 
     async fn setup() -> (tempfile::TempDir, Arc<WebState>) {
@@ -127,7 +135,8 @@ mod tests {
             scope: NativeJobScope { connection_id: "c".into(), database: "".into(), context_id: "".into() },
             job_id: "9007199254740993".into(),
         };
-        let error = read(State(state), Json(target)).await.err().unwrap();
+        let request = serde_json::from_value(serde_json::to_value(target).unwrap()).unwrap();
+        let error = read(State(state), Json(request)).await.err().unwrap();
         assert_eq!(error.message, "native_job_identity_invalid");
     }
 

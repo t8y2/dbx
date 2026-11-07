@@ -65,6 +65,7 @@ export interface SidebarTreeSearchMatcherOptions extends SidebarSearchMatcherOpt
   resolveLabel?: (node: TreeNode) => string;
   /** Partition groups explicitly expanded during the current search projection. */
   searchExpandedIds?: ReadonlySet<string>;
+  scopeControlConnectionIds?: ReadonlySet<string>;
 }
 
 export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds: ReadonlySet<string>, searchableNodeTypes?: ReadonlySet<TreeNodeType>, options?: SidebarTreeSearchMatcherOptions | ((node: TreeNode) => string)): TreeNode[] {
@@ -74,7 +75,7 @@ export function filterSidebarTree(nodes: TreeNode[], query: string, collapsedIds
   const matcherOptions = typeof options === "function" ? undefined : options;
   const matchLabel = query ? createSidebarLabelMatcher(query, matcherOptions) : undefined;
   if (!matchLabel && searchableNodeTypes === undefined) return nodes;
-  return filterSidebarTreeWithMatcher(nodes, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query, matcherOptions?.matchMode === "exact" && !matcherOptions.regexMode, matcherOptions?.searchExpandedIds);
+  return filterSidebarTreeWithMatcher(nodes, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query, matcherOptions?.matchMode === "exact" && !matcherOptions.regexMode, matcherOptions?.searchExpandedIds, matcherOptions?.scopeControlConnectionIds);
 }
 
 export function reuseLiveSidebarTreeNodes(indexedNodes: TreeNode[], liveNodes: readonly TreeNode[]): TreeNode[] {
@@ -461,10 +462,15 @@ function filterSidebarTreeWithMatcher(
   query?: string,
   exactNameOnly = false,
   searchExpandedIds?: ReadonlySet<string>,
+  scopeControlConnectionIds?: ReadonlySet<string>,
 ): TreeNode[] {
   const filteredNodes: { node: TreeNode; score: number }[] = [];
 
   for (const node of nodes) {
+    if (node.type === "relational-scope") {
+      if (!scopeControlConnectionIds || (node.connectionId && scopeControlConnectionIds.has(node.connectionId))) filteredNodes.push({ node, score: Number.POSITIVE_INFINITY });
+      continue;
+    }
     if (node.type === "load-more" && node.loadMore?.searchQuery !== undefined && node.loadMore.searchQuery === query && (!searchableNodeTypes || nodes.some((sibling) => searchableNodeTypes.has(sibling.type)))) {
       filteredNodes.push({ node, score: -1 });
       continue;
@@ -500,7 +506,11 @@ function filterSidebarTreeWithMatcher(
     // Connection utility entries are synthetic navigation actions, not schema
     // search results. Keep real loaded descendants for connection-name matches,
     // but do not let those actions make a disconnected result look expanded.
-    const filteredChildren = preservesSubtree ? preservedSearchChildren(node, collapsedIds, searchExpandedIds) : node.children ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query, exactNameOnly, searchExpandedIds) : undefined;
+    const filteredChildren = preservesSubtree
+      ? preservedSearchChildren(node, collapsedIds, searchExpandedIds)
+      : node.children
+        ? filterSidebarTreeWithMatcher(node.children, matchLabel, collapsedIds, searchableNodeTypes, resolveLabel, query, exactNameOnly, searchExpandedIds, scopeControlConnectionIds)
+        : undefined;
 
     if (selfMatch || (filteredChildren && filteredChildren.length > 0) || isUnloadedContainer) {
       if (!node.children || preservesTypeMatchedTable || isUnloadedContainer) {

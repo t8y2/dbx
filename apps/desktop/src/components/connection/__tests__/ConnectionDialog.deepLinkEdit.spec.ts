@@ -7,6 +7,7 @@ import i18n from "@/i18n";
 import type { ConnectionConfig } from "@/types/database";
 import { CONNECTION_PROFILES } from "@/types/generated/connectionProfiles";
 import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
+import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 
 const visibleTab = vi.hoisted(() => ({ value: "connection" }));
 
@@ -55,6 +56,7 @@ const { store, settings, backend, actualStoreHolder } = vi.hoisted(() => ({
     listenAgentInstallProgress: vi.fn(),
     loadConnections: vi.fn().mockResolvedValue([]),
     saveConnections: vi.fn().mockResolvedValue(undefined),
+    saveConnectionDatabaseInfo: vi.fn().mockResolvedValue(undefined),
     loadEditorSettings: vi.fn().mockResolvedValue(null),
     loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
     loadTableVGroups: vi.fn().mockResolvedValue({}),
@@ -241,7 +243,7 @@ beforeEach(() => {
   settings.editorSettings.deepLinkConnectionConfirmMode = "always";
   for (const fn of Object.values(backend)) fn.mockResolvedValue([]);
   backend.listenAgentInstallProgress.mockResolvedValue(() => {});
-  store.updateConnection.mockResolvedValue(undefined);
+  store.updateConnection.mockImplementation(async (config) => config);
   store.addConnection.mockResolvedValue(undefined);
 });
 
@@ -290,6 +292,7 @@ describe.each([
         name: rename ? "Renamed connection" : originalName,
         password: config.password,
       }),
+      expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }),
     );
     expect(config).toEqual(expect.objectContaining({ ...expected, name: originalName }));
     expect(store.addConnection).not.toHaveBeenCalled();
@@ -440,7 +443,10 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save");
     save!.click();
     await settle();
-    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ db_type: "oceanbase-oracle", driver_profile: "oceanbase-oracle", port, username: "SYS", url_params: "", host: "old.example.test", password: "old-password" }));
+    expect(store.updateConnection).toHaveBeenCalledWith(
+      expect.objectContaining({ db_type: "oceanbase-oracle", driver_profile: "oceanbase-oracle", port, username: "SYS", url_params: "", host: "old.example.test", password: "old-password" }),
+      expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }),
+    );
   });
 
   it("preserves a protected generic JDBC target when only its name changes", async () => {
@@ -491,7 +497,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save");
     save!.click();
     await settle();
-    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ url_params: "charset=utf8mb4&dataCharset=GBK", read_only: undefined }));
+    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ url_params: "charset=utf8mb4&dataCharset=GBK", read_only: undefined }), expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }));
     const persisted = store.updateConnection.mock.calls[0]![0] as ConnectionConfig;
     for (const app of mountedApps.splice(0)) app.unmount();
     document.body.innerHTML = "";
@@ -546,7 +552,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save");
     save!.click();
     await settle();
-    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ production_badge_scope: "table", is_production: true, production_databases: ["orders"] }));
+    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ production_badge_scope: "table", is_production: true, production_databases: ["orders"] }), expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }));
   });
 
   it("shows the default badge picker for an old saved connection", async () => {
@@ -609,6 +615,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
         sidebar_auto_load_all_tables: true,
         url_params: "connectTimeout=25",
       }),
+      expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }),
     );
     expect(store.addConnection).not.toHaveBeenCalled();
     expect(store.connect).not.toHaveBeenCalled();
@@ -656,31 +663,26 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     });
   });
 
-  it.each([undefined, true, false] as const)("saves and reopens two-state sidebar opt-outs without changing production protection (%s)", async (value) => {
+  it.each([undefined, true, false] as const)("removes retired display preferences without changing production protection (%s)", async (value) => {
     visibleTab.value = "advanced";
     backend.listInstalledAgentsLocal.mockResolvedValue([{ db_type: "oracle", installed: true }]);
-    const saved = savedConnection({ db_type: "oracle", driver_profile: "oracle", production_databases: undefined, show_database_links: false, show_native_jobs: value, show_user_admin: value });
+    const saved = savedConnection({ db_type: "oracle", driver_profile: "oracle", production_databases: undefined, show_extensions: value, show_database_links: false, show_native_jobs: false, show_user_admin: false });
     await mountDialog(saved, "");
-    for (const field of ["show_native_jobs", "show_user_admin"] as const) {
-      const checkbox = document.querySelector<HTMLInputElement>(`#sidebar-${field}`)!;
-      expect(checkbox.type).toBe("checkbox");
-      expect(checkbox.checked).toBe(value !== false);
-      checkbox.click();
-      await settle();
-    }
+    expect(document.querySelector("#sidebar-extensions")).toBeNull();
     expect(document.querySelector('input[type="radio"][name^="sidebar-"]')).toBeNull();
     [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save")!.click();
     await settle();
     const submitted = store.updateConnection.mock.calls[0][0] as ConnectionConfig;
-    expect(submitted.show_native_jobs).toBe(value === false ? undefined : false);
-    expect(submitted.show_user_admin).toBe(value === false ? undefined : false);
-    expect(submitted.show_database_links).toBe(false);
+    for (const field of ["show_extensions", "show_database_links", "show_native_jobs", "show_user_admin"] as const) {
+      expect(submitted).not.toHaveProperty(field);
+      expect(document.querySelector(`#sidebar-${field}`)).toBeNull();
+    }
     expect(submitted.is_production).toBe(saved.is_production);
     expect(submitted.production_databases).toEqual(saved.production_databases);
     for (const app of mountedApps.splice(0)) app.unmount();
     document.body.innerHTML = "";
     await mountDialog(submitted, "");
-    for (const field of ["show_native_jobs", "show_user_admin"] as const) expect(document.querySelector<HTMLInputElement>(`#sidebar-${field}`)!.checked).toBe(value === false);
+    expect(document.querySelector("#sidebar-extensions")).toBeNull();
   });
 
   it.each([true, false] as const)("preserves protected target settings through real Store load and Dialog save (%s DB links)", async (showDatabaseLinks) => {
@@ -742,14 +744,15 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
 
     expect(backend.saveConnections).toHaveBeenCalledOnce();
     const persisted = vi.mocked(backend.saveConnections).mock.calls[0][0][0];
-    const persistedUntouched = vi.mocked(backend.saveConnections).mock.calls[0][0].find((config) => config.id === untouched.id)!;
+    expect(vi.mocked(backend.saveConnections).mock.calls[0][0].map((config) => config.id)).toEqual([saved.id]);
+    const persistedUntouched = actualStore.getConfig(untouched.id)!;
     expect(persisted.name).toBe("Renamed JDBC");
     expect(persisted.production_badge_scope).toBeUndefined();
     expect(persisted.host).toBe("db.example.test");
     expect(persisted.port).toBe(2881);
     expect(persisted.connection_string).toBe(saved.connection_string);
     expect(persisted.password).toBe(saved.password);
-    expect(persisted.show_database_links).toBe(showDatabaseLinks);
+    expect(persisted).not.toHaveProperty("show_database_links");
     expect(persistedUntouched).toMatchObject({
       id: untouched.id,
       db_type: untouched.db_type,
@@ -763,6 +766,46 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
       jdbc_driver_paths: untouched.jdbc_driver_paths,
     });
     expect(persistedUntouched.show_database_links).toBeUndefined();
+  });
+
+  it.each([
+    ["oracle", false],
+    ["oracle", true],
+    ["oceanbase-oracle", false],
+    ["oceanbase-oracle", true],
+  ] as const)("keeps %s runtime identity through real Dialog/Store (Rust defaults: %s)", async (engine, rustDefaults) => {
+    setActivePinia(createPinia());
+    visibleTab.value = "advanced";
+    backend.listInstalledAgentsLocal.mockResolvedValue([{ db_type: engine, installed: true }]);
+    const saved = savedConnection({ id: `sparse-${engine}`, db_type: engine, driver_profile: undefined, driver_label: undefined, color: undefined, production_badge_scope: undefined, production_databases: undefined, visible_databases: undefined, show_extensions: false });
+    if (rustDefaults) Object.assign(saved, { sysdba: false, jdbc_driver_paths: [], read_only: undefined, is_production: undefined, connection_string: null, jdbc_driver_class: null, external_config: null });
+    vi.mocked(backend.loadConnections).mockResolvedValue([saved]);
+    vi.mocked(backend.loadSidebarLayout).mockResolvedValue({ groups: [], order: [] });
+    const { useConnectionStore } = await vi.importActual<typeof import("@/stores/connectionStore")>("@/stores/connectionStore");
+    const actualStore = useConnectionStore();
+    actualStoreHolder.value = actualStore;
+    await actualStore.initFromDisk();
+    await actualStore.updateConnectionDatabaseInfo(saved.id, { productName: engine === "oracle" ? "Oracle" : "OceanBase", productVersion: engine === "oracle" ? "19.3.0.0.0" : "4.4.2.2", compatibilityMode: "oracle" });
+    const loaded = actualStore.getConfig(saved.id)!;
+    const fingerprint = connectionConfigFingerprint(loaded);
+    actualStore.connectedIds.add(saved.id);
+    const connectionNode = actualStore.findConnectionNode(saved.id)!;
+    expect(connectionNode).toBeDefined();
+    connectionNode.isExpanded = true;
+    backend.connectDb.mockRejectedValue(new Error("Unexpected reconnect during display save"));
+    await mountDialog(loaded, "");
+    expect(document.querySelector("#sidebar-extensions")).toBeNull();
+    [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Save")!.click();
+    await settle();
+    expect(backend.saveConnections).toHaveBeenCalledOnce();
+    const submitted = vi.mocked(backend.saveConnections).mock.calls[0][0][0];
+    expect(submitted).not.toHaveProperty("show_extensions");
+    expect(submitted.database_info).toEqual(loaded.database_info);
+    expect(backend.connectDb).not.toHaveBeenCalled();
+    expect(connectionConfigFingerprint(submitted)).toBe(fingerprint);
+    expect(actualStore.connectedIds.has(saved.id)).toBe(true);
+    expect(connectionConfigFingerprint(actualStore.getConfig(saved.id)!)).toBe(fingerprint);
+    expect(backend.disconnectDb).not.toHaveBeenCalled();
   });
 
   it("keeps an explicitly selected badge scope on an unchanged generic JDBC target", async () => {
@@ -791,7 +834,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     save!.click();
     await settle();
 
-    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ production_badge_scope: "table", host: "db.example.test", port: 2881 }));
+    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ production_badge_scope: "table", host: "db.example.test", port: 2881 }), expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }));
   });
 
   it("keeps the existing generic JDBC normalization when its URL is replaced", async () => {
@@ -821,6 +864,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
         host: "",
         port: 0,
       }),
+      expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }),
     );
   });
 
@@ -876,6 +920,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
         read_only: true,
         is_production: true,
       }),
+      expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }),
     );
     expect(store.addConnection).not.toHaveBeenCalled();
     expect(store.connect).not.toHaveBeenCalled();
@@ -922,6 +967,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
         visible_schemas: ["approved_schema"],
         default_schema: "archive",
       }),
+      expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }),
     );
     expect(store.addConnection).not.toHaveBeenCalled();
     expect(store.connect).not.toHaveBeenCalled();
@@ -954,7 +1000,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     save!.click();
     await settle();
 
-    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ id: "saved-production", port: expectedPort, external_config: expectedExternal }));
+    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ id: "saved-production", port: expectedPort, external_config: expectedExternal }), expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }));
     expect(store.addConnection).not.toHaveBeenCalled();
     expect(store.connect).not.toHaveBeenCalled();
     expect(backend.connectDb).not.toHaveBeenCalled();
@@ -973,7 +1019,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     save!.click();
     await settle();
 
-    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ id: "saved-production", port: 1445, external_config: { portExplicit: true } }));
+    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ id: "saved-production", port: 1445, external_config: { portExplicit: true } }), expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }));
     expect(store.addConnection).not.toHaveBeenCalled();
   });
 
@@ -991,6 +1037,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
         port: 9005,
         external_config: { portExplicit: true },
       }),
+      expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }),
     );
     expect(store.addConnection).not.toHaveBeenCalled();
   });
@@ -1016,6 +1063,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
         port: 1444,
         external_config: { portExplicit: true },
       }),
+      expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }),
     );
   });
 
@@ -1027,7 +1075,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     await settle();
 
     expect(store.updateConnection).toHaveBeenCalledTimes(1);
-    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ id: "saved-production", host: "new.example.test" }));
+    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ id: "saved-production", host: "new.example.test" }), expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }));
   });
 
   it("keeps an id update link open for confirmation in the default mode", async () => {
@@ -1093,6 +1141,7 @@ describe("JDBC connection parameter entry and driver metadata", () => {
         url_params: "unknown=%2f&ApplicationName=DBX%20metadata",
         jdbc_driver_paths: ["/new/postgresql.jar", "/new/helper.jar"],
       }),
+      expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }),
     );
   });
 });

@@ -2791,8 +2791,9 @@ async function persistSettings() {
   desktopCloseBehaviorResetPending.value = false;
   hasImportedSettingsPendingApply.value = false;
   if (sidebarObjectDisplayChanged) {
-    await connectionStore.refreshAllTree();
-  } else if (sidebarTablePageSizeChanged) {
+    await Promise.all(connectionStore.connections.map((connection) => connectionStore.refreshNavigationPresentation(connection.id)));
+  }
+  if (sidebarTablePageSizeChanged) {
     await connectionStore.refreshSidebarObjectPagination();
   }
   await commitMcpPolicyDraft();

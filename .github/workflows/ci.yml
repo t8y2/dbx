@@ -1102,9 +1102,9 @@ jobs:
         with:
           prefix-key: v1-rust-complete
           workspaces: "./ -> target"
-          shared-key: ci-rust-test-v2-x86_64-unknown-linux-gnu
-          # Test linking dominates this job and sccache cannot cache those crate types.
-          cache-workspace-crates: true
+          shared-key: ci-rust-test-v3-${{ matrix.group }}-x86_64-unknown-linux-gnu
+          # Keep each group's dependency cache separate and omit workspace test binaries.
+          cache-workspace-crates: false
           cache-on-failure: false
           # PR caches are large and branch-scoped; restore them from main without saving per-PR copies.
           save-if: ${{ github.ref == 'refs/heads/main' }}

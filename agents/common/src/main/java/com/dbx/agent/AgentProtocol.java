@@ -204,6 +204,8 @@ public final class AgentProtocol {
     public static final String CAPABILITY_NATIVE_JOB_LEGACY_OB_V1 = "native_job_legacy_ob_v1";
     public static final String CAPABILITY_NATIVE_JOB_SESSION_V1 = "native_job_session_v1";
     public static final String CAPABILITY_EXACT_METADATA_IDENTITY_V1 = "exact_metadata_identity_v1";
+    public static final String CAPABILITY_OBJECT_LIST_COMMENTS_V1 = "object_list_comments_v1";
+    public static final String CAPABILITY_TABLE_LIST_COMMENTS_V1 = "table_list_comments_v1";
     public static final String CAPABILITY_ZOOKEEPER_ENDPOINT_ROUTES = "zookeeper_endpoint_routes";
 
     public static final List<String> CAPABILITIES = Collections.unmodifiableList(Arrays.asList(
@@ -245,7 +247,9 @@ public final class AgentProtocol {
         CAPABILITY_MONGO_FIND_CURSOR,
         CAPABILITY_NATIVE_JOB_LEGACY_V1,
         CAPABILITY_NATIVE_JOB_SESSION_V1,
-        CAPABILITY_EXACT_METADATA_IDENTITY_V1
+        CAPABILITY_EXACT_METADATA_IDENTITY_V1,
+        CAPABILITY_OBJECT_LIST_COMMENTS_V1,
+        CAPABILITY_TABLE_LIST_COMMENTS_V1
     ));
 
     public static final List<String> MULTI_SESSION_CAPABILITIES;

@@ -102,11 +102,29 @@ export function connectionConfigFingerprint(config: ConnectionConfig, sourceName
     show_database_links: _showDatabaseLinks,
     show_native_jobs: _showNativeJobs,
     show_user_admin: _showUserAdmin,
+    show_extensions: _showExtensions,
     sidebar_auto_load_all_tables: _sidebarAutoLoadAllTables,
+    show_system_schemas: _showSystemSchemas,
+    visible_schemas: _visibleSchemas,
+    schema_visibility: _schemaVisibility,
+    visible_databases: _visibleDatabases,
+    visible_database_patterns: _visibleDatabasePatterns,
+    color: _color,
+    production_badge_scope: _productionBadgeScope,
     redis_key_filter: _redisKeyFilter,
     jdbc_dialect: _jdbcDialect,
     ...submittedConfig
   } = config;
+  if (config.db_type === "oracle" || config.db_type === "oceanbase-oracle") {
+    delete submittedConfig.driver_label;
+    if (submittedConfig.driver_profile === undefined || submittedConfig.driver_profile === null || submittedConfig.driver_profile === config.db_type) delete submittedConfig.driver_profile;
+    if (submittedConfig.sysdba === false) delete submittedConfig.sysdba;
+    if (Array.isArray(submittedConfig.jdbc_driver_paths) && submittedConfig.jdbc_driver_paths.length === 0) delete submittedConfig.jdbc_driver_paths;
+    if (submittedConfig.gbase_server === "") delete submittedConfig.gbase_server;
+    if (submittedConfig.informix_server === "") delete submittedConfig.informix_server;
+    if (submittedConfig.external_config === null) delete submittedConfig.external_config;
+    if (config.db_type === "oracle" && submittedConfig.oracle_connection_type === "service_name") delete submittedConfig.oracle_connection_type;
+  }
   const serialized = JSON.stringify(stableValue({ config: submittedConfig, sourceName }));
   const first = fnv1a(serialized, 0x811c9dc5).toString(16).padStart(8, "0");
   const second = fnv1a(serialized, 0x9e3779b9).toString(16).padStart(8, "0");

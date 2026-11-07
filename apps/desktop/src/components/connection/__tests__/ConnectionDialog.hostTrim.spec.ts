@@ -163,7 +163,7 @@ beforeEach(() => {
   i18n.global.locale.value = "en";
   for (const fn of Object.values(backend)) fn.mockResolvedValue([]);
   backend.listenAgentInstallProgress.mockResolvedValue(() => {});
-  store.updateConnection.mockResolvedValue(undefined);
+  store.updateConnection.mockImplementation(async (config) => config);
   store.addConnection.mockResolvedValue(undefined);
 });
 
@@ -196,7 +196,7 @@ describe("ConnectionDialog whitespace trimming", () => {
 
     await saveDialog();
 
-    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ host: "docker.for.mac.host.internal" }));
+    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ host: "docker.for.mac.host.internal" }), expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }));
   });
 
   it("keeps the password untouched so surrounding spaces stay significant", async () => {
@@ -204,7 +204,7 @@ describe("ConnectionDialog whitespace trimming", () => {
 
     await saveDialog();
 
-    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ password: " padded secret " }));
+    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ password: " padded secret " }), expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }));
   });
 
   it("does not trim the host for file-path based connections", async () => {
@@ -225,6 +225,6 @@ describe("ConnectionDialog whitespace trimming", () => {
 
     await saveDialog();
 
-    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ host: "/tmp/ spaced name.db " }));
+    expect(store.updateConnection).toHaveBeenCalledWith(expect.objectContaining({ host: "/tmp/ spaced name.db " }), expect.objectContaining({ preserveNavigationVisibility: expect.any(Array) }));
   });
 });

@@ -6,6 +6,7 @@ import {
   type NativeJobArgumentValue,
   type NativeJobCreateArgument,
   type NativeJobDetails,
+  type NativeJobDamengEditDraft,
   type NativeJobEdit,
   type NativeJobEditDraft,
   type NativeJobEngine,
@@ -14,6 +15,7 @@ import {
   type NativeJobMetadata,
   type NativeJobObjectReference,
   type NativeJobOperationStatus,
+  type NativeJobPreparedPlan,
   type NativeJobReferenceKind,
   type NativeJobRequest,
   type NativeJobRow,
@@ -348,6 +350,69 @@ export function nativeJobDefinitionForEdit(engine: NativeJobEngine, kind: Native
 
 export type NativeJobAdminSelection = { kind: "scheduler"; owner: string; name: string } | { kind: "legacy"; jobId: string } | { kind: "dameng-native"; jobId: string; name: string };
 
+export interface NativeJobRetainedDraft {
+  dameng: NativeJobDamengEditDraft;
+  definition: NativeJobDefinitionDraft;
+  creation?: NativeJobCreationInput;
+  anchor?: { connectionIdentity: string; engine: NativeJobEngine; sessionUser: string; actualDatabase: string | null; details: NativeJobDetails };
+}
+
+export interface NativeJobCreationInput {
+  name: string;
+  kind: NativeJobKind;
+  definition: NativeJobDefinitionDraft;
+  dameng: NativeJobDamengEditDraft;
+}
+
+export interface NativeJobExecutionRecord {
+  prepared: { identity: string; sourceIdentity: string; connectionIdentity: string; database: string; plan: Omit<NativeJobPreparedPlan, "planId"> };
+  status: NativeJobOperationStatus;
+  error: string;
+  notified: boolean;
+  callbackGeneration: number;
+  callbacksRevoked?: boolean;
+  input?: NativeJobCreationInput;
+}
+
+/** Session-only observation of a dispatched operation, never authority to apply. */
+export interface NativeJobExecutionState {
+  execution?: NativeJobExecutionRecord;
+  callbackGeneration?: number;
+}
+
+/** Owned by one tab for this app session, never serialized or used as a prepared plan. */
+export interface NativeJobWorkspaceState {
+  creationTarget?: string;
+  mainExecution?: NativeJobExecutionState;
+  stopExecution?: NativeJobExecutionState;
+  snapshot?: {
+    pageIdentity: string;
+    retained: { selection: NativeJobAdminSelection; draft: NativeJobRetainedDraft }[];
+    detached?: NativeJobRetainedDraft;
+    editing?: NativeJobAdminSelection;
+    create: { open: boolean; name: string; kind: NativeJobKind; scheduler: NativeJobDefinitionDraft; legacy: NativeJobDefinitionDraft; dameng: NativeJobDamengEditDraft };
+  };
+}
+
+export function nativeJobSelectionMatchesPage(selection: NativeJobAdminSelection | undefined, page?: { schema: string; kind: "scheduler" | "legacy"; schedulerCategory?: "regular" | "lightweight" | "in-memory" }): boolean {
+  return !page || !selection || (selection.kind === page.kind && (selection.kind !== "scheduler" || selection.owner === page.schema));
+}
+
+export function nativeJobPageLabelKey(page: { kind: string; schedulerCategory?: "regular" | "lightweight" | "in-memory" }): string {
+  return page.schedulerCategory ? `tree.jobCategories.${page.schedulerCategory === "in-memory" ? "inMemory" : page.schedulerCategory}` : page.kind === "legacy" ? "tree.jobCategories.legacy" : `nativeJobs.kinds.${page.kind}`;
+}
+
+export function nativeJobSelectionFromSaved(value: unknown): NativeJobAdminSelection | undefined {
+  if (!value || typeof value !== "object") return;
+  const row = value as Record<string, unknown>;
+  const text = (value: unknown): value is string => typeof value === "string" && value.length > 0 && !value.includes("\0");
+  if (row.kind === "scheduler" && text(row.owner) && text(row.name)) return { kind: "scheduler", owner: row.owner, name: row.name };
+  if ((row.kind === "legacy" || row.kind === "dameng-native") && typeof row.jobId === "string" && /^\d+$/.test(row.jobId)) {
+    if (row.kind === "legacy") return { kind: "legacy", jobId: row.jobId };
+    if (text(row.name)) return { kind: "dameng-native", jobId: row.jobId, name: row.name };
+  }
+}
+
 export function nativeJobAdminSelection(ref: NativeJobAdminSelection): NativeJobAdminSelection {
   switch (ref.kind) {
     case "scheduler":
@@ -426,7 +491,8 @@ export function buildNativeJobDefinitionCreate(scope: NativeJobScope, engine: Na
       kind,
       owner,
       name,
-      ...(program ? { program: { owner: text("PROGRAM_OWNER", owner), name: program }, numberOfArguments: 0, jobStyle: optional("JOB_STYLE") } : { jobType: text("JOB_TYPE", "PLSQL_BLOCK"), jobAction: text("JOB_ACTION"), numberOfArguments: number("NUMBER_OF_ARGUMENTS") }),
+      ...(program ? { program: { owner: text("PROGRAM_OWNER", owner), name: program }, numberOfArguments: 0 } : { jobType: text("JOB_TYPE", "PLSQL_BLOCK"), jobAction: text("JOB_ACTION"), numberOfArguments: number("NUMBER_OF_ARGUMENTS") }),
+      jobStyle: !program && optional("JOB_STYLE") === "REGULAR" ? undefined : optional("JOB_STYLE"),
       ...(schedule
         ? { schedule: { owner: text("SCHEDULE_OWNER", owner), name: schedule } }
         : event

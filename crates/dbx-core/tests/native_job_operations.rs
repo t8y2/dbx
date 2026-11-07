@@ -45,6 +45,7 @@ struct DbState {
     zone: Option<&'static str>,
     id: &'static str,
     deny_arguments: bool,
+    schema_user: &'static str,
 }
 impl Default for DbState {
     fn default() -> Self {
@@ -56,6 +57,7 @@ impl Default for DbState {
             zone: Some("zone1"),
             id: "41",
             deny_arguments: false,
+            schema_user: "Owner",
         }
     }
 }
@@ -92,7 +94,7 @@ fn query(query: NativeJobCatalogQuery, data: &DbState) -> Result<Value, NativeJo
                 data.zone,
                 "Owner",
                 "Owner",
-                "Owner"
+                data.schema_user
             ]]),
         ));
     }
@@ -139,6 +141,35 @@ async fn prepare(state: &AppState, job: &NativeJobRef, change: NativeJobChange) 
     )
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn legacy_control_rechecks_schema_user_from_definition_before_dispatch() {
+    for engine in ["oracle", "oceanbase-oracle"] {
+        for moved in [false, true] {
+            let (_dir, state, scheduler) = setup(engine).await;
+            let target = NativeJobRef::Legacy { scope: scheduler.scope().clone(), job_id: "41".into() };
+            let plan = prepare(&state, &target, NativeJobChange::Enable).await;
+            let schema_user = if moved { "OtherOwner" } else { "Owner" };
+            let mut session = Session::new(
+                &state,
+                vec![
+                    DbState { schema_user, ..Default::default() },
+                    DbState { schema_user, enabled: true, ..Default::default() },
+                ],
+                vec![NativeJobDispatchOutcome::Applied],
+            );
+            let status = native_job_apply_with(&state, &plan.plan_id, &mut session).await.unwrap();
+            if moved {
+                assert_eq!(status.outcome, NativeJobOperationOutcome::NotApplied);
+                assert_eq!(status.reason.as_deref(), Some("native_job_definition_changed"));
+                assert_eq!(session.calls.load(Ordering::SeqCst), 0);
+            } else {
+                assert_eq!(status.outcome, NativeJobOperationOutcome::Verified);
+                assert_eq!(session.calls.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
 }
 
 struct Session {

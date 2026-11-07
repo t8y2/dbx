@@ -5,7 +5,14 @@ import { elasticsearchIndexAliasLabel } from "@/lib/sidebar/elasticsearchIndexAc
 import { supportsOracleTypeAttributeExpansion } from "@/lib/database/databaseObjectCapabilities";
 export type SidebarTreeTranslate = (key: string, values?: Record<string, number>) => string;
 
+export function sidebarTreeObjectCountText(node: TreeNode): string {
+  if (node.isLoading || node.objectCount == null || node.oracleNavigationStatus || node.children?.some((child) => child.type === "load-more") || node.hiddenChildren?.some((child) => child.type === "load-more")) return "";
+  return String(node.objectCount);
+}
+
 export function sidebarTreeDisplayLabel(node: TreeNode, t: SidebarTreeTranslate, databaseType?: DatabaseType): string {
+  if (node.type === "native-job-scheduler") return t("tree.jobs");
+  if (node.type === "oracle-shared-objects") return t("tree.publicObjects");
   // Synthetic Xugu scopes are persisted with their reserved protocol value.
   // Resolve them at render time as well, so an already-cached tree never
   // exposes that implementation detail after the feature is introduced.
@@ -17,6 +24,7 @@ export function sidebarTreeDisplayLabel(node: TreeNode, t: SidebarTreeTranslate,
   // Use the canonical key for persisted trees created before this label was
   // internationalized; those nodes may still contain the old Chinese text.
   if (node.type === "nacos-access-control") return t("nacos.accessControlSidebarLabel");
+  if (node.type === "process-list" || node.type === "server-dashboard") return t(node.label);
   if (node.type === "user-admin" || node.type === "xugu-user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin" || node.type === "database-job-admin" || node.type === "meilisearch-system") return t(node.label);
   if (node.type === "oracle-db-links" || node.type === "linked-server-root") return t(node.label);
   if (node.type === "saved-sql-root") return t(node.label);
@@ -26,6 +34,10 @@ export function sidebarTreeDisplayLabel(node: TreeNode, t: SidebarTreeTranslate,
 }
 
 export function sidebarTreeSecondaryValue(node: TreeNode, t: SidebarTreeTranslate, databaseType?: DatabaseType): string | undefined {
+  if (node.relationalNavigationOwner) {
+    const detail = sidebarTreeSecondaryValue({ ...node, relationalNavigationOwner: undefined }, t, databaseType);
+    return detail ? `${node.relationalNavigationOwner} · ${detail}` : node.relationalNavigationOwner;
+  }
   if (node.type === "type" && node.customTypeKind) {
     const kindKey = supportsOracleTypeAttributeExpansion(databaseType) ? `oracleType.kinds.${node.customTypeKind in { object: true, collection: true } ? node.customTypeKind : "other"}` : `customType.kinds.${node.customTypeKind}`;
     return t(kindKey);

@@ -5,6 +5,7 @@ import type { MultiDbExecutionTarget, MultiDbResultRunExecution } from "@/types/
 import type { DatabaseType } from "@/types/generated/databaseTypes";
 import type { PluginAiRecommendation } from "@/types/pluginAiRecommendations";
 import type { GraphResult } from "@/lib/graph/graphResult";
+import type { NativeJobWorkspaceState } from "@/lib/database/nativeJobAdmin";
 import type { OracleRoutinePlanDraft } from "@/types/schemaDiff";
 
 export type { DatabaseType } from "@/types/generated/databaseTypes";
@@ -157,11 +158,16 @@ export interface ConnectionConfig {
   visible_databases?: string[];
   visible_database_patterns?: string[];
   visible_schemas?: Record<string, string[]>;
+  schema_visibility?: {
+    migrate_legacy: boolean;
+    databases: Record<string, Record<string, boolean>>;
+  };
   show_system_schemas?: boolean;
-  /** Connection-level sidebar display preferences. Absent means shown. */
+  /** Legacy sidebar preferences accepted on import and omitted from effective writes. */
   show_database_links?: boolean;
   show_native_jobs?: boolean;
   show_user_admin?: boolean;
+  show_extensions?: boolean;
   /** Load every page when the sidebar's Tables group is opened for this connection. */
   sidebar_auto_load_all_tables?: boolean;
   attached_databases?: AttachedDatabaseConfig[];
@@ -1596,6 +1602,7 @@ export interface TriggerInfo {
 /** Missing metadata means a provider has not established exact identity. */
 export interface MetadataReadOptions {
   lightweight?: boolean;
+  directoryPage?: boolean;
   identityMode?: "exact";
   catalog?: string;
 }
@@ -2120,6 +2127,7 @@ export interface SqlReferenceAnalysis {
 }
 
 export type TreeNodeType =
+  | "relational-scope"
   | "connection"
   | "connection-group"
   | "database"
@@ -2167,11 +2175,18 @@ export type TreeNodeType =
   | "group-synonyms"
   | "oracle-db-links"
   | "oracle-db-link"
+  | "oracle-shared-objects"
+  | "native-job-group"
+  | "native-job-scheduler"
+  | "native-job"
   | "group-jobs"
   | "group-packages"
   | "group-package-bodies"
   | "group-partitions"
   | "group-extensions"
+  | "connection-extensions"
+  | "process-list"
+  | "server-dashboard"
   | "group-event-triggers"
   | "group-tablespaces"
   | "group-datafiles"
@@ -2270,6 +2285,9 @@ export interface TreeNode {
   nacosNamespace?: string;
   nacosNamespaceName?: string;
   schema?: string;
+  databaseLinkScope?: { kind: "schema"; schema: string } | { kind: "public" } | { kind: "tenant" };
+  nativeJobPage?: { schema: string; kind: "scheduler" | "legacy"; schedulerCategory?: "regular" | "lightweight" | "in-memory" };
+  nativeJobSelection?: { kind: "scheduler"; owner: string; name: string } | { kind: "legacy"; jobId: string };
   tableName?: string;
   objectName?: string;
   /** Distinguishes schema indexes from the existing table-child index actions. */
@@ -2295,6 +2313,12 @@ export interface TreeNode {
   xuguDatafile?: XuguDatafileInfo;
   xuguDatafilePath?: string;
   objectCount?: number;
+  relationalNavigationSources?: string[];
+  relationalNavigationOwner?: string;
+  relationalNavigationContainer?: import("@/lib/sidebar/relationalNavigationScope").RelationalNavigationContainer;
+  relationalNavigationSelection?: import("@/lib/sidebar/relationalNavigationScope").RelationalNavigationSelection;
+  relationalNavigationOptions?: string[];
+  oracleNavigationStatus?: { kind: "denied" | "error" | "unknown" | "unsupported" | "truncated"; reason: string };
   loadedKeyCount?: number;
   totalKeyCount?: number;
   partitionParentSchema?: string;
@@ -2777,7 +2801,15 @@ export interface QueryTab {
   };
   /** Ephemeral navigation intent; it is consumed by HBaseBrowser and is not persisted. */
   hbaseCreateTableOnOpen?: boolean;
-  /** Connection-level native Job selection; bodies and backend context IDs are not persisted. */
+  /** Stable page scope, separate from the selected object and backend context. */
+  nativeJobPage?: { schema: string; kind: "scheduler" | "legacy"; schedulerCategory?: "regular" | "lightweight" | "in-memory" };
+  nativeJobCreationTargets?: { database: string; schema: string; kind: "scheduler" | "legacy"; schedulerCategory?: "regular" | "lightweight" | "in-memory" }[];
+  /** One-shot category creation intent; not persisted. */
+  nativeJobCreateRequest?: number;
+  /** Session-only inputs and verified draft anchors; excluded from tab persistence. */
+  nativeJobWorkspace?: import("vue").Raw<NativeJobWorkspaceState>;
+  nativeJobScopeResolution?: { status: "loading" | "unresolved"; error?: string; retryable?: boolean };
+  /** Native Job selection; bodies and backend context IDs are not persisted. */
   nativeJobAdmin?: { kind: "scheduler"; owner: string; name: string } | { kind: "legacy"; jobId: string } | { kind: "dameng-native"; jobId: string; name: string };
   mqTenant?: string;
   mqInitialTab?: "topics";
@@ -2790,6 +2822,9 @@ export interface QueryTab {
   nacosTargetRequestId?: number;
   nacosConfigEditorViewport?: NacosConfigEditorViewport;
   structureTableName?: string;
+  structureCreationTargets?: { database: string; schema?: string; catalog?: string }[];
+  structureCreationTargetIndex?: number;
+  queryCreation?: { targets: { database: string; schema?: string; catalog?: string; nodeType: TreeNodeType }[]; selected?: number };
   structureExactIdentity?: boolean;
   /** Navigation type of the opened structure object; views matter for "view data" routing. */
   structureTableType?: "table" | "view";

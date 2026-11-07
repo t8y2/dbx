@@ -804,9 +804,9 @@ async function loadSchemaOptions() {
   loadingSchemas.value = true;
   try {
     await store.ensureConnected(connectionId);
-    const rawSchemas = await api.listSchemas(connectionId, database);
+    const selection = await store.readVisibleSchemaSelection(connectionId, database);
     if (requestId !== schemaOptionsRequestId) return;
-    const filtered = schemaOptionsForConnection(rawSchemas, selectedConnection.value, database);
+    const filtered = schemaOptionsForConnection(selection.names, store.getConfig(connectionId), database, selection.oracleMaintainedSchemas);
     const active = selectedSchema.value || targetSchema.value;
     if (active && !filtered.includes(active)) {
       schemaOptions.value = [active, ...filtered];

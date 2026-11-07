@@ -4984,7 +4984,8 @@ function resolveTableSchemaQualification(
   // Collision mode keeps Oracle's current-schema behavior and qualifies the
   // generic/PostgreSQL/SQL Server paths only when metadata is ambiguous.
   const ambiguousTableName = !isOracleCompletionDatabase(databaseType) && (schemasByTableName.get(normalizeIdentifierPart(table.name))?.size ?? 0) > 1;
-  const schemaQualification = !!table.schema && (schemaQualificationMode === "always" || (schemaQualificationMode === "collision" && (oracleSchemaQualification || ambiguousTableName)));
+  const publicOracleSynonym = isOracleCompletionDatabase(databaseType) && table.schema === "PUBLIC" && (table.type === "synonym" || table.tableType === "SYNONYM");
+  const schemaQualification = !!table.schema && !publicOracleSynonym && (schemaQualificationMode === "always" || (schemaQualificationMode === "collision" && (oracleSchemaQualification || ambiguousTableName)));
   const tableName = applySqlIdentifierCase(table.name, identifierCase, identifierDialect ?? dialect);
   const quotedTable = quoteCasedIdentifier(table.name, tableName, dialect);
   const defaultApplyName = schemaQualification && table.schema ? `${quoteCasedIdentifier(table.schema, applySqlIdentifierCase(table.schema, identifierCase, identifierDialect ?? dialect), dialect)}.${quotedTable}` : quotedTable;

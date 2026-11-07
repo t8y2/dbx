@@ -872,6 +872,44 @@ class OceanBaseOracleAgentTest {
     }
 
     @Test
+    void implicitCompletionIncludesPublicSynonymsWithoutOtherOwners() {
+        CompletionAssistantRequest request = completionRequest("app", null, "ord", false);
+        OceanBaseOracleAgent.CompletionTablesQuery query = OceanBaseOracleAgent.buildCompletionTablesQuery(request, "APP", 21);
+        Assertions.assertTrue(query.sql.contains("AND UPPER(o.OWNER) = ?"));
+        Assertions.assertTrue(query.sql.contains("AND (UPPER(s.OWNER) = ? OR s.OWNER IN ('PUBLIC', '__public'))"));
+        Assertions.assertTrue(query.sql.contains("WHEN OWNER IN ('PUBLIC', '__public') THEN 1"));
+        Assertions.assertEquals("APP", query.args.get(1));
+        Assertions.assertEquals("APP", query.args.get(3));
+        OceanBaseOracleAgent.CompletionTablesQuery explicit = OceanBaseOracleAgent.buildCompletionTablesQuery(completionRequest("APP", "other", "ord", false), "APP", 21);
+        Assertions.assertFalse(explicit.sql.contains("OR s.OWNER IN ('PUBLIC', '__public')"));
+        Assertions.assertEquals("OTHER", explicit.args.get(1));
+        Assertions.assertEquals("OTHER", explicit.args.get(3));
+        OceanBaseOracleAgent.CompletionTablesQuery internal = OceanBaseOracleAgent.buildCompletionTablesQuery(completionRequest("APP", "__public", "ord", false), "APP", 21);
+        Assertions.assertTrue(internal.sql.contains("UPPER(o.OWNER) = ? AND 1 = 0"));
+        Assertions.assertTrue(internal.sql.contains("UPPER(s.OWNER) = ? AND 1 = 0"));
+    }
+
+    @Test
+    void completionAssistantNormalizesOceanBasePublicSynonymOwner() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql,
+            resultSet(new String[]{"OWNER", "OBJECT_NAME", "OBJECT_TYPE", "TARGET_OWNER", "TARGET_NAME"},
+                new Object[][]{
+                    {"APP", "ALIAS", "SYNONYM", "APP", "ORDERS"},
+                    {"__public", "ALIAS", "SYNONYM", "APP", "ORDERS"},
+                    {"PUBLIC", "PUBLIC_ALIAS", "SYNONYM", "APP", "ORDERS"}
+                }),
+            resultSet(new String[]{"OWNER", "OBJECT_NAME"}, new Object[][]{{"APP", "ORDERS"}})
+        ));
+
+        CompletionAssistantResponse response = agent.completionAssistantSearch(completionRequest("APP", null, "", false));
+
+        Assertions.assertEquals(List.of("APP", "PUBLIC", "PUBLIC"), response.getCandidates().stream().map(candidate -> candidate.getSchema()).toList());
+        Assertions.assertEquals(List.of("ALIAS", "ALIAS", "PUBLIC_ALIAS"), response.getCandidates().stream().map(candidate -> candidate.getName()).toList());
+    }
+
+    @Test
     void completionAssistantSearchReturnsBoundedStandaloneRoutines() {
         List<String> sql = new ArrayList<>();
         OceanBaseOracleAgent agent = new OceanBaseOracleAgent();

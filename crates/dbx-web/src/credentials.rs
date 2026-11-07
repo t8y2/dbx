@@ -144,6 +144,14 @@ fn credential_target(config: &ConnectionConfig) -> Value {
     }
     scrub(&mut value);
     let fields = value.as_object_mut().unwrap();
+    fields.insert(
+        "driver_profile".into(),
+        serde_json::to_value(dbx_core::connection::connection_config_identity_driver_profile(config)).unwrap(),
+    );
+    fields.insert(
+        "oracle_connection_type".into(),
+        serde_json::to_value(dbx_core::connection::connection_config_identity_oracle_mode(config)).unwrap(),
+    );
     for key in [
         "id",
         "name",
@@ -154,7 +162,10 @@ fn credential_target(config: &ConnectionConfig) -> Value {
         "visible_databases",
         "visible_database_patterns",
         "visible_schemas",
+        "schema_visibility",
         "show_system_schemas",
+        "show_extensions",
+        "production_badge_scope",
         "color",
         "docs_notes_path",
         "connect_timeout_secs",
@@ -426,6 +437,19 @@ mod tests {
     }
 
     #[test]
+    fn schema_visibility_changes_preserve_saved_credentials() {
+        let original = config();
+        let saved = HashMap::from([(original.id.clone(), original.clone())]);
+        let mut draft = serde_json::to_value(redact(&original)).unwrap();
+        draft["schema_visibility"] = serde_json::json!({
+            "migrate_legacy": true, "databases": {"app": {"public": true}}
+        });
+        let restored = restore(serde_json::from_value(draft).unwrap(), &saved).unwrap();
+        assert_eq!(restored.password, original.password);
+        assert!(restored.schema_visibility.is_some());
+    }
+
+    #[test]
     fn draft_ids_metadata_and_password_replacement_remain_supported() {
         let original = config();
         let saved = HashMap::from([(original.id.clone(), original.clone())]);
@@ -451,6 +475,96 @@ mod tests {
         form.connection_string = Some(String::new());
         form.init_script = Some(String::new());
         assert_eq!(restore(form, &saved).unwrap().password, original.password);
+    }
+
+    #[tokio::test]
+    async fn native_oracle_display_save_restores_redacted_secrets_and_preserves_lifecycle() {
+        use dbx_core::models::connection::{DatabaseType, ProductionBadgeScope};
+        for engine in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            let (state, _dir) = web_state().await;
+            let mut original = config();
+            original.db_type = engine;
+            original.driver_profile = None;
+            original.driver_label = None;
+            original.color = None;
+            original.production_badge_scope = None;
+            state.app.storage.save_connections(std::slice::from_ref(&original)).await.unwrap();
+            let Json(mut listed) = connection::load_connections(
+                State(state.clone()),
+                HeaderMap::new(),
+                axum::extract::Query(Default::default()),
+            )
+            .await
+            .unwrap();
+            assert!(listed[0].config.password.starts_with(REFERENCE_PREFIX));
+            let lifecycle = state.app.connection_lifecycle_snapshot(&original.id);
+            let _ = state.app.session_credentials.set("display-owner", &original.id, "session-fixture");
+            let form = &mut listed[0].config;
+            form.show_extensions = Some(false);
+            form.color = Some(String::new());
+            form.production_badge_scope = Some(ProductionBadgeScope::Database);
+            form.driver_label = Some("Display label".into());
+            form.driver_profile =
+                Some(if engine == DatabaseType::Oracle { "oracle" } else { "oceanbase-oracle" }.into());
+            if engine == DatabaseType::Oracle {
+                form.oracle_connection_type = Some("service_name".into());
+            }
+            let _ = connection::save_connections(
+                State(state.clone()),
+                HeaderMap::new(),
+                Json(SaveConnectionsRequest { configs: vec![form.clone()], removed_ids: Vec::new() }),
+            )
+            .await
+            .unwrap();
+            assert!(state.app.connection_lifecycle_is_current(&original.id, &lifecycle));
+            assert_eq!(
+                state.app.session_credentials.get("display-owner", &original.id).as_deref(),
+                Some("session-fixture")
+            );
+            let stored = state.app.storage.load_connections().await.unwrap().remove(0);
+            assert_eq!(stored.password, original.password);
+            assert_eq!(stored.show_extensions, None);
+            let mut redirected = redact(&stored);
+            redirected.host = "different-target".into();
+            assert!(connection::save_connections(
+                State(state.clone()),
+                HeaderMap::new(),
+                Json(SaveConnectionsRequest { configs: vec![redirected], removed_ids: Vec::new() })
+            )
+            .await
+            .is_err());
+            assert!(state.app.connection_lifecycle_is_current(&original.id, &lifecycle));
+            for field in ["sysdba", "sid", "tns", "jdbc_driver_paths"] {
+                let mut changed = redact(&stored);
+                match field {
+                    "sysdba" => changed.sysdba = true,
+                    "sid" | "tns" => changed.oracle_connection_type = Some(field.into()),
+                    _ => changed.jdbc_driver_paths.push("driver.jar".into()),
+                }
+                assert!(
+                    connection::save_connections(
+                        State(state.clone()),
+                        HeaderMap::new(),
+                        Json(SaveConnectionsRequest { configs: vec![changed], removed_ids: Vec::new() })
+                    )
+                    .await
+                    .is_err(),
+                    "{field}"
+                );
+                assert!(state.app.connection_lifecycle_is_current(&original.id, &lifecycle));
+            }
+            let mut changed_driver = stored;
+            changed_driver.driver_profile = Some("custom-driver".into());
+            let _ = connection::save_connections(
+                State(state.clone()),
+                HeaderMap::new(),
+                Json(SaveConnectionsRequest { configs: vec![changed_driver], removed_ids: Vec::new() }),
+            )
+            .await
+            .unwrap();
+            assert!(!state.app.connection_lifecycle_is_current(&original.id, &lifecycle));
+            assert!(!state.app.session_credentials.has("display-owner", &original.id));
+        }
     }
 
     #[test]

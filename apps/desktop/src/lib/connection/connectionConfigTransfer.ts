@@ -15,6 +15,11 @@ export interface ConnectionConfigSnapshotOptions {
   queryTimeoutSecs: (connection: ConnectionConfig) => number;
 }
 
+function withoutLegacySidebarPreferences(connection: ConnectionConfig): ConnectionConfig {
+  const { show_extensions: _extensions, show_database_links: _links, show_native_jobs: _jobs, show_user_admin: _users, ...rest } = connection;
+  return rest;
+}
+
 export function selectedConnectionIdSet(connectionIds: Iterable<string> | undefined): Set<string> | undefined {
   if (connectionIds == null) return undefined;
   return new Set(Array.from(connectionIds).filter((id) => typeof id === "string" && id.length > 0));
@@ -55,7 +60,7 @@ export function filterTunnelProfilesByIds(profiles: TunnelProfile[], selectedIds
 
 export function snapshotConnectionsForExport(connections: ConnectionConfig[], options: ConnectionConfigSnapshotOptions): ConnectionConfig[] {
   return connections.map((connection) => ({
-    ...connection,
+    ...withoutLegacySidebarPreferences(connection),
     connect_timeout_secs: connection.connect_timeout_inherit === true ? options.connectTimeoutSecs(connection) : connection.connect_timeout_secs,
     query_timeout_secs: connection.query_timeout_inherit === true ? options.queryTimeoutSecs(connection) : connection.query_timeout_secs,
   }));
@@ -155,7 +160,7 @@ function preservedOracleTnsConnectionString(connection: ConnectionConfig): strin
 }
 
 export function buildConnectionConfigBundle(connections: ConnectionConfig[], layout: SidebarLayout | null | undefined, tunnelProfiles: TunnelProfile[], selectedIds?: Iterable<string>): ConnectionConfigBundle {
-  const selectedConnections = filterConnectionsByIds(connections, selectedIds);
+  const selectedConnections = filterConnectionsByIds(connections, selectedIds).map(withoutLegacySidebarPreferences);
   const selectedConnectionIds = selectedConnections.map((connection) => connection.id);
   return {
     connections: selectedConnections,
@@ -216,7 +221,7 @@ export function prepareConnectionConfigImport(bundle: ConnectionConfigBundle, ex
   }
 
   const sourceConnections = bundle.connections.map((connection, index) => ({
-    ...connection,
+    ...withoutLegacySidebarPreferences(connection),
     // Anonymous legacy entries need a stable key for layout/reference remapping.
     id: connection.id?.trim() || `__dbx_import_${index}`,
   }));

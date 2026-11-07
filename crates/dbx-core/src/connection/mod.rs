@@ -494,6 +494,8 @@ pub struct AppState {
     pub write_unlock_windows: crate::write_unlock::WriteUnlockWindows,
     pub native_jobs: crate::schema::native_jobs::NativeJobRegistry,
     metadata_gates: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
+    pub(crate) directory_metadata_sessions:
+        Arc<std::sync::Mutex<HashMap<String, Vec<crate::schema::IdleDirectoryMetadataSession>>>>,
     /// Backend-confirmed liveness losses plus resync requests (#4339). The keepalive task
     /// publishes here once a connection has no pools left; each shell relays it to its own
     /// frontend, so DBX core never needs a UI handle of its own.
@@ -993,6 +995,10 @@ impl Drop for PoolActivityTouch {
 }
 
 impl ClientSessionPoolCleanupGuard {
+    pub(crate) async fn pool_exists(&self) -> bool {
+        self.routing.connections.read().await.contains_key(&self.pool_key)
+    }
+
     pub(crate) fn disarm(&mut self) {
         self.armed = false;
     }
@@ -1417,7 +1423,10 @@ pub fn sqlserver_uses_legacy_driver(config: &ConnectionConfig) -> bool {
         .is_some_and(|profile| profile.eq_ignore_ascii_case(db::sqlserver::SQLSERVER_LEGACY_DRIVER_PROFILE))
 }
 
-fn metadata_pool_database<'a>(config: Option<&ConnectionConfig>, database: Option<&'a str>) -> Option<&'a str> {
+pub(crate) fn metadata_pool_database<'a>(
+    config: Option<&ConnectionConfig>,
+    database: Option<&'a str>,
+) -> Option<&'a str> {
     if config.is_some_and(sqlserver_uses_legacy_driver) {
         // The legacy SQL Server Agent switches catalogs on the borrowed JDBC connection for
         // each metadata request. Reuse the connection-level pool so expanding a database does
@@ -2129,6 +2138,7 @@ impl AppState {
             write_unlock_windows: crate::write_unlock::WriteUnlockWindows::default(),
             native_jobs: crate::schema::native_jobs::NativeJobRegistry::default(),
             metadata_gates: Arc::new(Mutex::new(HashMap::new())),
+            directory_metadata_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
             // Bounded so a shell that stops draining cannot grow memory without bound. A
             // lagged receiver re-syncs from the read-only status check on its next use, so
             // dropping events here is safe.
@@ -2157,6 +2167,40 @@ impl AppState {
 
     pub fn salesforce_browser_opener(&self) -> Option<SfBrowserOpener> {
         self.salesforce_browser_opener.read().expect("Salesforce browser opener lock poisoned").clone()
+    }
+
+    pub(crate) fn schedule_directory_metadata_idle_cleanup(
+        &self,
+        key: String,
+        idle_token: uuid::Uuid,
+        lifecycle: CancellationToken,
+        timeout: Duration,
+    ) {
+        let sessions = self.directory_metadata_sessions.clone();
+        self.task_supervisor.spawn_once(
+            format!("oracle-directory-idle:{key}:{idle_token}"),
+            move |shutdown| async move {
+                tokio::select! {
+                    _ = tokio::time::sleep(timeout) => {},
+                    _ = lifecycle.cancelled() => {},
+                    _ = shutdown.cancelled() => {},
+                }
+                let removed = {
+                    let mut idle = sessions.lock().unwrap_or_else(|error| error.into_inner());
+                    let removed = idle.get_mut(&key).and_then(|entries| {
+                        entries
+                            .iter()
+                            .position(|entry| entry.idle_token == idle_token)
+                            .map(|index| entries.remove(index))
+                    });
+                    if idle.get(&key).is_some_and(Vec::is_empty) {
+                        idle.remove(&key);
+                    }
+                    removed
+                };
+                drop(removed);
+            },
+        );
     }
 
     pub(crate) async fn acquire_metadata_permit(
@@ -8324,6 +8368,22 @@ fn normalize_rocketmq_runtime_credentials(config: &mut ConnectionConfig) {
     }
 }
 
+/// Canonical profile for identity comparisons only, never for driver dispatch.
+pub fn connection_config_identity_driver_profile(config: &ConnectionConfig) -> Option<&str> {
+    match (config.db_type, config.driver_profile.as_deref()) {
+        (DatabaseType::Oracle, Some("oracle")) | (DatabaseType::OceanbaseOracle, Some("oceanbase-oracle")) => None,
+        (_, profile) => profile,
+    }
+}
+
+/// Canonical Oracle mode for identity comparisons only, never for driver dispatch.
+pub fn connection_config_identity_oracle_mode(config: &ConnectionConfig) -> Option<&str> {
+    match (config.db_type, config.oracle_connection_type.as_deref()) {
+        (DatabaseType::Oracle, Some("service_name")) => None,
+        (_, mode) => mode,
+    }
+}
+
 /// 两个运行态连接配置是否视为同一连接（用于决定是否销毁连接池）。
 ///
 /// 忽略展示配置与 no-save 连接的临时密码，包括 RocketMQ auth.password。
@@ -8336,6 +8396,20 @@ pub fn connection_configs_pool_equivalent(a: &ConnectionConfig, b: &ConnectionCo
     let mut b = b.clone();
     normalize_rocketmq_runtime_credentials(&mut a);
     normalize_rocketmq_runtime_credentials(&mut b);
+    for config in [&mut a, &mut b] {
+        config.color = None;
+        config.production_badge_scope = None;
+        config.show_system_schemas = false;
+        config.visible_schemas = None;
+        config.schema_visibility = None;
+        config.visible_databases = None;
+        config.visible_database_patterns = None;
+        config.driver_profile = connection_config_identity_driver_profile(config).map(str::to_owned);
+        config.oracle_connection_type = connection_config_identity_oracle_mode(config).map(str::to_owned);
+        if matches!(config.db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
+            config.driver_label = None;
+        }
+    }
     // Sidebar paging is a presentation preference and cannot change an
     // established database session.
     a.sidebar_auto_load_all_tables = false;
@@ -8346,6 +8420,8 @@ pub fn connection_configs_pool_equivalent(a: &ConnectionConfig, b: &ConnectionCo
     b.show_native_jobs = None;
     a.show_user_admin = None;
     b.show_user_admin = None;
+    a.show_extensions = None;
+    b.show_extensions = None;
     // A default browser filter does not change the established Redis session.
     a.redis_key_filter = None;
     b.redis_key_filter = None;
@@ -8372,13 +8448,19 @@ pub fn connection_configs_session_credentials_compatible(a: &ConnectionConfig, b
         config.driver_label = None;
         config.default_schema = None;
         config.visible_databases = None;
+        config.visible_database_patterns = None;
         config.visible_schemas = None;
+        config.schema_visibility = None;
         config.show_system_schemas = false;
         config.sidebar_auto_load_all_tables = false;
         config.show_database_links = None;
         config.show_native_jobs = None;
         config.show_user_admin = None;
+        config.show_extensions = None;
         config.color = None;
+        config.production_badge_scope = None;
+        config.driver_profile = connection_config_identity_driver_profile(&config).map(str::to_owned);
+        config.oracle_connection_type = connection_config_identity_oracle_mode(&config).map(str::to_owned);
         config.docs_notes_path = None;
         config.connect_timeout_secs = 0;
         config.query_timeout_secs = 0;
@@ -8416,6 +8498,12 @@ pub fn connection_configs_session_credentials_compatible(a: &ConnectionConfig, b
     normalize(a.clone()) == normalize(b.clone())
 }
 
+pub(crate) fn uses_agent_metadata_sessions(config: &ConnectionConfig) -> bool {
+    database_capabilities::is_agent_type(&config.db_type)
+        || sqlserver_uses_legacy_driver(config)
+        || is_postgres_jdbc(config)
+}
+
 fn pool_key_for_session_role(
     config: Option<&ConnectionConfig>,
     base_pool_key: String,
@@ -8423,13 +8511,7 @@ fn pool_key_for_session_role(
     session_role: AgentSessionRole,
 ) -> String {
     let pool_key = session_scoped_pool_key_for(config, base_pool_key, client_session_id);
-    if session_role == AgentSessionRole::Metadata
-        && config.is_some_and(|config| {
-            database_capabilities::is_agent_type(&config.db_type)
-                || sqlserver_uses_legacy_driver(config)
-                || is_postgres_jdbc(config)
-        })
-    {
+    if session_role == AgentSessionRole::Metadata && config.is_some_and(uses_agent_metadata_sessions) {
         // The legacy SQL Server Agent borrows one connection-level pool for metadata across
         // databases and switches catalogs per request. The role suffix keeps that shared
         // pool from colliding with workload pools on the bare connection id.
@@ -9162,10 +9244,12 @@ mod tests {
             visible_databases: None,
             visible_database_patterns: None,
             visible_schemas: None,
+            schema_visibility: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
             show_native_jobs: None,
+            show_extensions: None,
             show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
@@ -9274,6 +9358,25 @@ mod tests {
 
         assert!(connection_configs_pool_equivalent(&a, &b));
         assert!(connection_configs_pool_equivalent(&b, &a));
+    }
+
+    #[test]
+    fn connection_configs_pool_equivalent_ignores_navigation_visibility() {
+        let a = mysql_config(None);
+        let mut b = a.clone();
+        b.show_system_schemas = true;
+        b.visible_databases = Some(vec!["app".to_string()]);
+        b.visible_schemas = Some(std::collections::HashMap::from([("app".to_string(), vec!["public".to_string()])]));
+        b.visible_database_patterns = Some(vec!["app*".to_string()]);
+        b.schema_visibility = Some(dbx_types::models::connection::SchemaVisibility {
+            migrate_legacy: true,
+            databases: std::collections::HashMap::from([("app".to_string(), std::collections::HashMap::new())]),
+        });
+        assert!(connection_configs_pool_equivalent(&a, &b));
+        assert!(connection_configs_session_credentials_compatible(&a, &b));
+        b.host = "different-host".to_string();
+        assert!(!connection_configs_pool_equivalent(&a, &b));
+        assert!(!connection_configs_session_credentials_compatible(&a, &b));
     }
 
     #[test]
@@ -12973,6 +13076,7 @@ sleep 30
             visible_databases: None,
             visible_database_patterns: None,
             visible_schemas: None,
+            schema_visibility: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -13025,6 +13129,7 @@ sleep 30
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
             show_native_jobs: None,
+            show_extensions: None,
             show_user_admin: None,
             database_info: None,
         }

@@ -342,6 +342,11 @@ describe("connectionStore deleting a connection while the layout changes", () =>
     settings.editorSettings.queryTimeoutInheritConnectionIds = ["a"];
     const store = useConnectionStore();
     store.connections = [connection("a"), connection("b")];
+    const savedConnections = new Map(store.connections.map((config) => [config.id, { ...config }]));
+    (api.saveConnections as Mock).mockImplementation(async (configs: ConnectionConfig[], removedIds: string[] = []) => {
+      for (const id of removedIds) savedConnections.delete(id);
+      for (const config of configs) savedConnections.set(config.id, { ...config });
+    });
     store.sidebarLayout = {
       groups: [{ id: "original", name: "Original", collapsed: false }],
       order: [
@@ -350,7 +355,7 @@ describe("connectionStore deleting a connection while the layout changes", () =>
       ],
     };
     vi.useFakeTimers();
-    return { store, settings, api };
+    return { store, settings, api, savedConnections };
   }
 
   it("waits for the deletion's retry to succeed before removing the connection", async () => {
@@ -370,16 +375,13 @@ describe("connectionStore deleting a connection while the layout changes", () =>
   });
 
   it.each(["layout", "connections", "timeout"] as const)("restores memory and storage after %s failure, preserving concurrent group edits", async (failure) => {
-    const { store, settings, api } = await deletionFixture();
+    const { store, settings, api, savedConnections } = await deletionFixture();
     const original = JSON.parse(JSON.stringify(store.sidebarLayout));
-    const disk = { layout: original, ids: ["a", "b"] };
+    const disk = { layout: original };
     const error = new Error(`${failure} failed`);
     let rejectWrite: (error: Error) => void = () => {};
     const blocked = new Promise<void>((_, reject) => {
       rejectWrite = reject;
-    });
-    (api.saveConnections as Mock).mockImplementation(async (configs) => {
-      disk.ids = configs.map((c: ConnectionConfig) => c.id);
     });
     saveSidebarLayout.mockImplementation(async (layout) => {
       disk.layout = JSON.parse(JSON.stringify(layout));
@@ -396,11 +398,13 @@ describe("connectionStore deleting a connection while the layout changes", () =>
     store.moveConnectionToGroup("b", groupId);
     // Commit a newer snapshot before the failed operation resumes.
     await vi.advanceTimersByTimeAsync(300);
+    savedConnections.get("b")!.name = "Edited by another client";
     rejectWrite(error);
     await vi.advanceTimersByTimeAsync(4000);
     expect(await outcome).toBe(error);
     expect(store.connections.map((c) => c.id)).toEqual(["a", "b"]);
-    expect(disk.ids).toEqual(["a", "b"]);
+    expect([...savedConnections.keys()].sort()).toEqual(["a", "b"]);
+    expect(savedConnections.get("b")!.name).toBe("Edited by another client");
     expect(store.groupIdForConnection("a")).toBe("original");
     expect(store.groupIdForConnection("b")).toBe(groupId);
     expect(disk.layout).toEqual(JSON.parse(JSON.stringify(store.sidebarLayout)));
@@ -413,7 +417,7 @@ describe("connectionStore deleting a connection while the layout changes", () =>
   });
 
   it("rejects exhausted retries and restores the original layout and connection settings", async () => {
-    const { store, settings, api } = await deletionFixture();
+    const { store, settings, api, savedConnections } = await deletionFixture();
     const original = JSON.parse(JSON.stringify(store.sidebarLayout));
     const error = new Error("disk unavailable");
     for (let i = 0; i < 4; i++) saveSidebarLayout.mockRejectedValueOnce(error);
@@ -427,7 +431,8 @@ describe("connectionStore deleting a connection while the layout changes", () =>
     expect(saveSidebarLayout.mock.calls.at(-1)?.[0]).toEqual(original);
     expect(store.sidebarLayout).toEqual(original);
     expect(store.connections.map((c) => c.id)).toEqual(["a", "b"]);
-    expect((api.saveConnections as Mock).mock.calls.at(-1)?.[0].map((c: ConnectionConfig) => c.id)).toEqual(["a", "b"]);
+    expect([...savedConnections.keys()].sort()).toEqual(["a", "b"]);
+    expect((api.saveConnections as Mock).mock.calls.at(-1)?.[0].map((c: ConnectionConfig) => c.id)).toEqual(["a"]);
     expect(settings.editorSettings.queryTimeoutInheritConnectionIds).toEqual(["a"]);
   });
 

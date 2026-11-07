@@ -4,8 +4,13 @@ import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabase
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { nativeJobRefKey, type NativeJobOperationStatus, type NativeJobPreparedPlan, type NativeJobRef, type NativeJobRequest, type NativeJobScope } from "@/lib/database/nativeJobs";
 import type { ConnectionConfig } from "@/types/database";
+import type { NativeJobCreationInput, NativeJobExecutionRecord as JobExecution, NativeJobExecutionState } from "@/lib/database/nativeJobAdmin";
+export type { NativeJobExecutionState } from "@/lib/database/nativeJobAdmin";
 
 interface JobExecutionOptions {
+  retainedState?: NativeJobExecutionState;
+  captureInput?: () => NativeJobCreationInput | undefined;
+  pageScope?: () => { schema: string; kind: "scheduler" | "legacy" } | undefined;
   connection: () => ConnectionConfig;
   database: () => string;
   scope: () => NativeJobScope | undefined;
@@ -23,14 +28,6 @@ interface PreparedJob {
   database: string;
 }
 
-interface JobExecution {
-  prepared: PreparedJob;
-  status: NativeJobOperationStatus;
-  error: string;
-  notified: boolean;
-  callbackGeneration: number;
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -42,16 +39,21 @@ function sameScope(left: NativeJobScope, right: NativeJobScope | undefined): boo
 /** One management page's preview/confirmation/result lifecycle; native execution stays in Core. */
 export function useNativeJobExecution(options: JobExecutionOptions) {
   const prepared = shallowRef<PreparedJob>();
-  const execution = shallowRef<JobExecution>();
+  const execution = shallowRef<JobExecution | undefined>(options.retainedState?.execution ? { ...options.retainedState.execution, callbacksRevoked: true } : undefined);
   const preparing = ref(false);
   const confirming = ref(false);
   const observing = ref(false);
   const error = ref("");
-  const callbackGeneration = ref(0);
+  const callbackGeneration = ref(options.retainedState?.callbackGeneration ?? 0);
   let generation = 0;
   let refreshGeneration = 0;
   let disposed = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+
+  function retainExecution(value: JobExecution | undefined) {
+    execution.value = value;
+    if (options.retainedState) options.retainedState.execution = value;
+  }
 
   const sourceIdentity = computed(() => JSON.stringify([connectionConfigFingerprint(options.connection()), options.database(), options.scope()]));
   const identity = computed(() => JSON.stringify([sourceIdentity.value, options.selected() ? nativeJobRefKey(options.selected()!) : null]));
@@ -63,7 +65,9 @@ export function useNativeJobExecution(options: JobExecutionOptions) {
   const visibleExecution = computed(() => (execution.value && isVisible(execution.value) ? execution.value : undefined));
   const previousExecution = computed(() => {
     const current = execution.value;
-    return current && current.callbackGeneration !== callbackGeneration.value && connectionConfigFingerprint(current.prepared.connection) === connectionConfigFingerprint(options.connection()) && current.prepared.database === options.database() ? current : undefined;
+    return current && (current.callbackGeneration !== callbackGeneration.value || current.prepared.sourceIdentity !== sourceIdentity.value) && current.prepared.connectionIdentity === connectionConfigFingerprint(options.connection()) && current.prepared.database === options.database()
+      ? current
+      : undefined;
   });
 
   function invalidatePreview() {
@@ -87,7 +91,8 @@ export function useNativeJobExecution(options: JobExecutionOptions) {
     preparing.value = true;
     error.value = "";
     try {
-      const plan = await api.nativeJobPrepare(request);
+      const pageScope = options.pageScope?.();
+      const plan = await (pageScope ? api.nativeJobPrepare(request, pageScope) : api.nativeJobPrepare(request));
       if (disposed || current !== generation || expectedIdentity !== identity.value) return;
       if (!sameScope(plan.scope, requestedScope) || (request.action !== "create" && (!plan.target || nativeJobRefKey(plan.target) !== nativeJobRefKey(request.target)))) throw new Error("native_job_identity_mismatch");
       prepared.value = { plan, identity: expectedIdentity, sourceIdentity: sourceIdentity.value, connection, database };
@@ -110,15 +115,15 @@ export function useNativeJobExecution(options: JobExecutionOptions) {
     if (status.operationId !== current.prepared.plan.operationId) throw new Error("native_job_identity_mismatch");
     current.status = status;
     current.error = "";
-    execution.value = { ...current };
+    retainExecution({ ...current });
     // Keep this request's identity even if the page now displays another job.
     const updated = execution.value;
     if (status.state === "finished") {
-      if (current.callbackGeneration === callbackGeneration.value && current.prepared.plan.target && isVisible(updated)) {
+      if (!current.callbacksRevoked && current.callbackGeneration === callbackGeneration.value && current.prepared.plan.target && isVisible(updated)) {
         await options.onTargetObserved?.(status, current.prepared.plan.target);
         if (disposed || execution.value !== updated) return;
       }
-      if (updated.callbackGeneration === callbackGeneration.value && !updated.notified) {
+      if (!updated.callbacksRevoked && updated.callbackGeneration === callbackGeneration.value && !updated.notified) {
         updated.notified = true;
         if (isVisible(updated)) await options.onFinished?.(status);
       }
@@ -138,7 +143,7 @@ export function useNativeJobExecution(options: JobExecutionOptions) {
       if (requested !== refreshGeneration) return;
       await acceptStatus(current, status);
     } catch (failure) {
-      if (!disposed && requested === refreshGeneration && execution.value === current) execution.value = { ...current, error: errorMessage(failure) };
+      if (!disposed && requested === refreshGeneration && execution.value === current) retainExecution({ ...current, error: errorMessage(failure) });
     } finally {
       if (requested === refreshGeneration) observing.value = false;
     }
@@ -159,14 +164,15 @@ export function useNativeJobExecution(options: JobExecutionOptions) {
           if (disposed || prepared.value !== selected || identity.value !== selected.identity) throw new Error("native_job_context_changed");
           const plan = selected.plan;
           const current: JobExecution = {
-            prepared: selected,
+            prepared: { identity: selected.identity, sourceIdentity: selected.sourceIdentity, database: selected.database, connectionIdentity: connectionConfigFingerprint(selected.connection), plan: { operationId: plan.operationId, scope: plan.scope, target: plan.target, steps: plan.steps } },
             status: { operationId: plan.operationId, target: plan.target, state: "running", outcome: "unknown", cancelRequested: false, steps: plan.steps.map((step) => ({ id: step.id, state: "pending", reason: null, vendorCode: null })), reason: "native_job_apply_receipt_unknown" },
             error: "",
             notified: false,
             callbackGeneration: callbackGeneration.value,
+            input: options.captureInput ? (JSON.parse(JSON.stringify(options.captureInput() ?? null)) ?? undefined) : undefined,
           };
           prepared.value = undefined;
-          execution.value = current;
+          retainExecution(current);
           schedulePoll(current);
           try {
             await acceptStatus(current, await api.nativeJobApply(plan.planId));
@@ -192,21 +198,28 @@ export function useNativeJobExecution(options: JobExecutionOptions) {
     try {
       await acceptStatus(current, await api.nativeJobCancel(current.prepared.plan.operationId));
     } catch (failure) {
-      if (!disposed && execution.value === current) execution.value = { ...current, error: errorMessage(failure) };
+      if (!disposed && execution.value === current) retainExecution({ ...current, error: errorMessage(failure) });
     }
   }
 
   onScopeDispose(() => {
     disposed = true;
     generation += 1;
+    refreshGeneration += 1;
+    prepared.value = undefined;
+    if (execution.value) retainExecution({ ...execution.value, callbacksRevoked: true });
     if (timer) clearTimeout(timer);
     // Closing the page stops observation, not a native operation already dispatched.
   });
 
   function invalidateContext() {
     callbackGeneration.value++;
+    if (options.retainedState) options.retainedState.callbackGeneration = callbackGeneration.value;
     invalidatePreview();
   }
+
+  // Reattach an observer only. No preview, confirmation or apply is restored.
+  if (execution.value) void refreshExecution();
 
   return { preview, execution: visibleExecution, previousExecution, preparing, confirming, observing, busy, error, prepare, apply, cancel, refresh: () => refreshExecution(), observe: () => refreshExecution(execution.value, true), invalidatePreview, invalidateContext };
 }

@@ -8,17 +8,23 @@ import type { ConnectionConfig, ObjectBrowserViewMode, ObjectInfo } from "@/type
 
 const mocks = vi.hoisted(() => ({
   listObjects: vi.fn(),
+  listSchemas: vi.fn().mockResolvedValue(["APP"]),
   viewMode: "list" as ObjectBrowserViewMode,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
   listObjects: (...args: unknown[]) => mocks.listObjects(...args),
-  listSchemas: vi.fn().mockResolvedValue(["APP"]),
+  listSchemas: mocks.listSchemas,
   listObjectStatistics: vi.fn().mockResolvedValue([]),
 }));
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     getConfig: () => connection,
+    completionCacheRevision: () => 0,
+    readVisibleSchemaSelection: async () => {
+      const names = await mocks.listSchemas();
+      return { names, infos: [], systemNames: new Set<string>(), visibleNames: names, oracleMaintainedSchemas: undefined };
+    },
     ensureConnected: vi.fn().mockResolvedValue(undefined),
     tableNameFilterForScope: () => undefined,
     orderByPinnedTreeNodes: (rows: unknown[]) => rows,

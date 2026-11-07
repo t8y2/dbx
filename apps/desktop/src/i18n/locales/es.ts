@@ -67,6 +67,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  navigationPreferences: { refreshFailed: "Se guardó la configuración, pero no se pudo actualizar la navegación: {message}", connectionUnavailable: "La conexión ya no existe. Vuelve a abrirla." },
   oracleTrigger: {
     errorPositionUnavailable: "Código fuente abierto. No se pudo verificar la ubicación del error; consulte la línea y la columna indicadas.",
     reconcileStructure: "Reconciliar cambios aplicados",
@@ -3958,6 +3959,7 @@ export default withEnglishFallback({
     loadFailed: "No se pudo cargar DBX. Inténtelo de nuevo.",
   },
   common: {
+    all: "Todos",
     fileNotFound: "El archivo no existe: {path}",
     loading: "Cargando...",
     stopping: "Deteniendo...",
@@ -4826,6 +4828,10 @@ export default withEnglishFallback({
     editCancel: "Cancelar",
   },
   contextMenu: {
+    viewObjects: "Ver objetos",
+    refreshObjects: "Actualizar objetos",
+    confirmDeleteConnectionConfig: "¿Eliminar la configuración de conexión guardada «{name}»?",
+    confirmDeleteSelectedConnectionConfigs: "¿Eliminar las {count} configuraciones de conexión guardadas seleccionadas?",
     splitTab: "Dividir",
     batchCloseTabs: "Cerrar varias pestañas",
     copyTabName: "Copiar nombre de pestaña",
@@ -4835,12 +4841,12 @@ export default withEnglishFallback({
     closeConnection: "Cerrar conexión",
     closeSelectedConnections: "Cerrar {count} conexiones seleccionadas",
     closeDatabaseConnection: "Cerrar conexión de base de datos",
-    deleteConnection: "Eliminar conexión",
-    deleteSelectedConnections: "Eliminar {count} conexiones seleccionadas",
+    deleteConnection: "Eliminar conexión…",
+    deleteSelectedConnections: "Eliminar {count} conexiones seleccionadas…",
     confirmDeleteTitle: "Eliminar conexión",
     confirmDeleteMessage: '¿Estás seguro de que deseas eliminar "{name}"? Esta acción no se puede deshacer.',
     confirmDeleteSelectedMessage: "¿Eliminar las {count} conexiones seleccionadas? Esta acción no se puede deshacer.",
-    editConnection: "Editar conexión",
+    editConnection: "Editar conexión…",
     revealDatabaseFile: "Mostrar en el explorador",
     selectVisibleDatabases: "Seleccionar bases visibles",
     configureVisibleObjects: "Filtro de objetos visibles",
@@ -5337,6 +5343,8 @@ export default withEnglishFallback({
     loadFailed: "No se pudieron cargar las bases de datos: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "Esquemas de usuario",
+    systemGroup: "Esquemas del sistema",
     title: "Filtro de Schema",
     detailLabel: "Schemas visibles",
     detailActionLabel: 'Configurar schemas visibles para "{connection}"',
@@ -5353,6 +5361,9 @@ export default withEnglishFallback({
     loadFailed: "No se pudieron cargar los schemas: {message}",
   },
   databaseLinks: {
+    foreignPrivateReadOnly: "El enlace privado de otro usuario es de solo lectura.",
+    privateSchemaUnavailable: "No se puede crear un enlace privado en el esquema de otro usuario. Use el esquema del usuario conectado.",
+    permissionUnknown: "El permiso de eliminación no está confirmado; la base de datos lo comprobará al ejecutar. Actualice para comprobarlo de nuevo.",
     remoteTenant: "Inquilino remoto",
     remoteProtocol: "Protocolo de la base de datos remota",
     remoteCluster: "Clúster remoto (opcional)",
@@ -5378,6 +5389,18 @@ export default withEnglishFallback({
     manage: "Manage database links",
   },
   tree: {
+    navigationStatus: { denied: "Sin permiso", error: "Error de carga", unknown: "Por confirmar", unsupported: "No compatible", truncated: "Resultados parciales" },
+    scheduler: "Planificador",
+    publicObjects: "Objetos públicos",
+    tenantObjects: "Objetos del inquilino",
+    jobs: "Trabajos",
+    jobCategories: {
+      regular: "Trabajos programados",
+      lightweight: "Trabajos ligeros",
+      inMemory: "Trabajos en memoria",
+      legacy: "Trabajos heredados",
+    },
+    openList: "Abrir lista",
     nativeJobs: "Trabajos nativos",
     databaseLinks: "Database Links",
     savedSql: "Biblioteca SQL",
@@ -5555,6 +5578,14 @@ export default withEnglishFallback({
     stepSkipped: "Omitido porque falló un paso anterior requerido.",
   },
   nativeJobs: {
+    contextChanged: "El contexto del trabajo ha cambiado o ha caducado. Actualice la lista e inténtelo de nuevo.",
+    scopeRecoveryTitle: "Restaurar pestaña de trabajo",
+    scopeRecoveryHint: "Esta pestaña antigua necesita un esquema verificado. Ábrala desde el árbol de objetos; se conserva el contenido guardado.",
+    retainedContent: "Ver contenido conservado",
+    scopeMismatch: "El trabajo no pertenece al esquema o categoría de esta página. Ábralo desde su propia categoría.",
+    scopeInvalid: "El esquema o la categoría no son válidos. Abra la página desde el árbol de objetos.",
+    legacySchemaCreationUnavailable: "Este método no crea trabajos heredados en el esquema de otro usuario. Use el esquema del usuario conectado.",
+    scopeResolutionUnavailable: "No se pudo verificar el esquema. Compruebe la conexión y los permisos del catálogo e inténtelo de nuevo.",
     datePrecisionMicroseconds: "Las fechas de los trabajos en esta versión de OceanBase solo admiten precisión de microsegundos. Cambie a 0 los dígitos 7–9 de los segundos fraccionarios y vuelva a generar la vista previa; se conservó la entrada original.",
     previousContext: "Resultado de la operación del contexto anterior",
     detachedDraft: "Se conservó el borrador original; no está vinculado al objeto actual.",

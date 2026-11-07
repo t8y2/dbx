@@ -62,6 +62,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  navigationPreferences: { refreshFailed: "Ayarlar kaydedildi, ancak gezinme yenilenemedi: {message}", connectionUnavailable: "Bağlantı artık mevcut değil. Yeniden açın." },
   tableColumnPaste,
   objectDependencies: {
     dependencies: "Bağımlılıklar",
@@ -2912,6 +2913,7 @@ export default withEnglishFallback({
     unknown: "Beklenmeyen bir arka uç hatası oluştu.",
   },
   common: {
+    all: "Tümü",
     fileNotFound: "Dosya mevcut değil: {path}",
     loading: "Yükleniyor...",
     stopping: "Durduruluyor...",
@@ -3702,16 +3704,20 @@ export default withEnglishFallback({
     noDatabasesFound: "Veritabanı bulunamadı",
   },
   contextMenu: {
+    viewObjects: "Nesneleri görüntüle",
+    refreshObjects: "Nesneleri yenile",
+    confirmDeleteConnectionConfig: "Kaydedilmiş “{name}” bağlantı yapılandırması silinsin mi?",
+    confirmDeleteSelectedConnectionConfigs: "Seçili {count} kayıtlı bağlantı yapılandırması silinsin mi?",
     openConnection: "Bağlantıyı Aç",
     closeConnection: "Bağlantıyı Kapat",
     closeSelectedConnections: "Seçili {count} Bağlantıyı Kapat",
     closeDatabaseConnection: "Veritabanı Bağlantısını Kapat",
-    deleteConnection: "Bağlantıyı Sil",
-    deleteSelectedConnections: "Seçili {count} Bağlantıyı Sil",
+    deleteConnection: "Bağlantıyı Sil…",
+    deleteSelectedConnections: "Seçili {count} Bağlantıyı Sil…",
     confirmDeleteTitle: "Bağlantıyı Sil",
     confirmDeleteMessage: '"{name}" silinsin mi? Bu işlem geri alınamaz.',
     confirmDeleteSelectedMessage: "Seçili {count} bağlantıyı silmek istediğinizden emin misiniz? Bu işlem geri alınamaz.",
-    editConnection: "Bağlantıyı Düzenle",
+    editConnection: "Bağlantıyı Düzenle…",
     revealDatabaseFile: "Dosya Yöneticisinde Göster",
     selectVisibleDatabases: "Görünür Veritabanlarını Seç",
     configureVisibleObjects: "Görünür Nesne Filtresi",
@@ -4180,6 +4186,8 @@ export default withEnglishFallback({
     loadFailed: "Veritabanları yüklenemedi: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "Kullanıcı şemaları",
+    systemGroup: "Sistem şemaları",
     title: "Şema Filtresi",
     detailLabel: "Görünür şemalar",
     detailActionLabel: '"{connection}" için görünür şemaları yapılandır',
@@ -4196,6 +4204,17 @@ export default withEnglishFallback({
     loadFailed: "Şemalar yüklenemedi: {message}",
   },
   tree: {
+    navigationStatus: { denied: "İzin yok", error: "Yüklenemedi", unknown: "Doğrulanmadı", unsupported: "Desteklenmiyor", truncated: "Kısmi sonuçlar" },
+    publicObjects: "Ortak nesneler",
+    tenantObjects: "Kiracı nesneleri",
+    jobs: "İşler",
+    jobCategories: {
+      regular: "Zamanlanmış işler",
+      lightweight: "Hafif işler",
+      inMemory: "Bellek içi işler",
+      legacy: "Eski işler",
+    },
+    openList: "Listeyi aç",
     savedSql: "SQL Kitaplığı",
     queries: "Sorgular",
     userAdmin: "Kullanıcılar ve Yetkiler",

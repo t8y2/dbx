@@ -57,6 +57,7 @@ export interface NativeJobSummary {
   owner: string | null;
   enabled: boolean | null;
   jobType: string | null;
+  jobStyle?: string | null;
   state: string | null;
   nextRun: NativeJobValue;
   comments: string | null;
@@ -70,6 +71,7 @@ export interface NativeJobListRequest {
   scope: NativeJobScope;
   kind: NativeJobKind;
   schema?: string | null;
+  schedulerCategory?: "regular" | "lightweight" | "in-memory";
   filter?: string;
   offset?: number;
   limit?: number;

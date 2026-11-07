@@ -8,10 +8,21 @@ import { invalidateMetadataRuntimeCachePrefix } from "@/lib/metadata/metadataRun
 import { escapeHtml } from "@/lib/sql/sqlHighlighter";
 import type { ConnectionConfig } from "@/types/database";
 
-const mocks = vi.hoisted(() => ({ listConstraints: vi.fn(), getTableComment: vi.fn(), getTablePartitionStatus: vi.fn(), getTablePartitioning: vi.fn(), toast: vi.fn(), getTableDisplayDdl: vi.fn(), highlight: vi.fn(), executeQuery: vi.fn(), cancelQuery: vi.fn(async () => true) }));
+const mocks = vi.hoisted(() => ({
+  listSchemas: vi.fn().mockResolvedValue(["TESTER"]),
+  listConstraints: vi.fn(),
+  getTableComment: vi.fn(),
+  getTablePartitionStatus: vi.fn(),
+  getTablePartitioning: vi.fn(),
+  toast: vi.fn(),
+  getTableDisplayDdl: vi.fn(),
+  highlight: vi.fn(),
+  executeQuery: vi.fn(),
+  cancelQuery: vi.fn(async () => true),
+}));
 vi.mock("@/lib/backend/api", () => ({
   listObjects: vi.fn().mockResolvedValue([{ name: "O01_CONSTRAINTS", object_type: "TABLE", schema: "TESTER" }]),
-  listSchemas: vi.fn().mockResolvedValue(["TESTER"]),
+  listSchemas: mocks.listSchemas,
   listObjectStatistics: vi.fn().mockResolvedValue([]),
   getTableDisplayDdl: (...args: unknown[]) => mocks.getTableDisplayDdl(...args),
   loadSchemaCache: vi.fn().mockResolvedValue(null),
@@ -27,6 +38,11 @@ vi.mock("@/lib/backend/api", () => ({
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     getConfig: () => connection,
+    completionCacheRevision: () => 0,
+    readVisibleSchemaSelection: async () => {
+      const names = await mocks.listSchemas();
+      return { names, infos: [], systemNames: new Set<string>(), visibleNames: names, oracleMaintainedSchemas: undefined };
+    },
     ensureConnected: vi.fn().mockResolvedValue(undefined),
     tableNameFilterForScope: () => undefined,
     orderByPinnedTreeNodes: (rows: unknown[]) => rows,

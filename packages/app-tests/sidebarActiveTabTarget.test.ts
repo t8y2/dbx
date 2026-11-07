@@ -441,7 +441,7 @@ test("Nacos tabs target the matching namespace node", () => {
   assert.equal(findSidebarNodeForActiveTab(tab, [flat(namespace)])?.id, "namespace-node");
 });
 
-test("saved SQL tabs target the matching visible saved SQL file node", () => {
+test("saved SQL tabs locate their execution database while retaining their library association", () => {
   const tab: QueryTab = {
     id: "tab-1",
     title: "report.sql",
@@ -477,12 +477,15 @@ test("saved SQL tabs target the matching visible saved SQL file node", () => {
     children: [database],
   };
 
-  assert.deepEqual(activeTabSidebarTarget(tab), { type: "saved-sql-file", savedSqlId: "sql-1" });
-  assert.equal(findSidebarNodeForActiveTab(tab, [flat(file)])?.id, "file-node");
+  assert.deepEqual(activeTabSidebarTarget(tab), { type: "query-context", connectionId: "conn-1", catalog: undefined, database: "app", schema: undefined });
+  assert.equal(findSidebarNodeForActiveTab(tab, [flat(file)]), null);
+  assert.equal(findSidebarNodeForActiveTab(tab, [flat(database)])?.id, "database-node");
   assert.deepEqual(
     findNodePathForTarget(activeTabSidebarTarget(tab)!, [connection])?.map((node) => node.id),
-    ["conn-1", "database-node", "queries-node", "file-node"],
+    ["conn-1", "database-node"],
   );
+  assert.equal(tab.savedSqlId, "sql-1");
+  assert.equal(tab.sql, "select 1");
 });
 
 test("query tabs target their database node in the sidebar", () => {

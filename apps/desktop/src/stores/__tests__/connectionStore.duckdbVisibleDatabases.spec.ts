@@ -47,14 +47,14 @@ function rootEntries(node: TreeNode | undefined) {
 
 async function setupStore(visibleDatabases?: string[]) {
   const listDatabases = vi.fn().mockResolvedValue([{ name: "main" }, { name: "analytics" }, { name: "warehouse" }]);
-  const listSchemas = vi.fn().mockResolvedValue(["main", "reporting"]);
+  const listSchemaInfos = vi.fn().mockResolvedValue([{ name: "main" }, { name: "reporting" }]);
   const saveConnections = vi.fn().mockResolvedValue(undefined);
   vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
   vi.doMock("@/lib/backend/api", () => ({
     checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
     deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
     listDatabases,
-    listSchemas,
+    listSchemaInfos,
     loadSchemaCache: vi.fn().mockResolvedValue(null),
     saveConnections,
     saveSchemaCache: vi.fn().mockResolvedValue(undefined),

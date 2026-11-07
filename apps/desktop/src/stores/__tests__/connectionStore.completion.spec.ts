@@ -1,6 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getSqlCompletionContext } from "@/lib/sql/sqlCompletion";
+import { filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
 
 function installLocalStorage() {
@@ -192,6 +193,49 @@ describe("connectionStore completion assistant", () => {
     vi.unstubAllGlobals();
     installLocalStorage();
     setActivePinia(createPinia());
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("%s scopes warm completion candidates before limiting and permits explicitly qualified hidden owners", async (dbType) => {
+    const candidates = [
+      { name: "A_OTHER", schema: "B", kind: "table", data_type: "TABLE" },
+      { name: "A_SYSTEM", schema: "SYS", kind: "table", data_type: "TABLE" },
+      { name: "Z_LOCAL", schema: "A", kind: "table", data_type: "TABLE" },
+      { name: "PRIVATE_ALIAS", schema: "A", kind: "table", data_type: "SYNONYM" },
+      { name: "PUBLIC_ALIAS", schema: "PUBLIC", kind: "table", data_type: "SYNONYM" },
+      { name: "Z_LOCAL", schema: "PUBLIC", kind: "table", data_type: "SYNONYM" },
+    ];
+    const completionAssistantSearch = vi.fn().mockResolvedValue({ candidates, incomplete: false, fallback_used: false });
+    const listTables = vi.fn().mockRejectedValue(new Error("metadata unavailable"));
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch, listTables }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [{ ...oracleConnection(), db_type: dbType, visible_schemas: { ORCL: ["A"] } }];
+    store.connectedIds.add("oracle-1");
+    await store.listCompletionTables("oracle-1", "ORCL", "", 100, undefined, true, "A");
+    const unknown = await store.listCompletionTables("oracle-1", "ORCL", "", 100, undefined, false);
+    expect(unknown.map((table) => table.schema)).toEqual(["PUBLIC", "PUBLIC"]);
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(1);
+    const implicit = await store.listCompletionTables("oracle-1", "ORCL", "", 3, undefined, false, "A");
+    expect(implicit.map((table) => [table.schema, table.name]).sort()).toEqual([
+      ["A", "PRIVATE_ALIAS"],
+      ["A", "Z_LOCAL"],
+      ["PUBLIC", "PUBLIC_ALIAS"],
+    ]);
+    const explicit = await store.listCompletionTables("oracle-1", "ORCL", "", 100, "B", false, "A");
+    expect(explicit.map((table) => [table.schema, table.name])).toEqual([["B", "A_OTHER"]]);
+    const calls = completionAssistantSearch.mock.calls.length;
+    expect(await store.listCompletionTables("oracle-1", "ORCL", "", 100, "B", false, "A")).toMatchObject(explicit);
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(calls);
+    expect(await store.listCompletionTables("oracle-1", "ORCL", "", 3, undefined, false, "A")).toMatchObject(implicit);
+    completionAssistantSearch.mockRejectedValue(new Error("metadata timeout"));
+    const fallback = await store.listCompletionTables("oracle-1", "ORCL", "AL", 100, undefined, false, "A");
+    expect(fallback.map((table) => table.schema)).not.toContain("B");
+    expect(fallback.map((table) => table.schema)).not.toContain("SYS");
+    expect(fallback.map((table) => table.name).sort()).toEqual(["PRIVATE_ALIAS", "PUBLIC_ALIAS", "Z_LOCAL"]);
+    listTables.mockResolvedValue([{ name: "UNVERIFIED_OWNER", table_type: "TABLE" }]);
+    const quoted = await store.listCompletionTables("oracle-1", "ORCL", "", 100, "MixedOwner", false, "A", undefined, { oracleScope: { schema: "MixedOwner", includePublicSynonyms: false } });
+    expect(quoted).toEqual([]);
   });
 
   it("does not replace the active connection during a cold metadata search", async () => {
@@ -595,8 +639,9 @@ describe("connectionStore completion assistant", () => {
     const tables = await store.listCompletionTables("oracle-1", "ORCL", "", 20, "scott", false, "APP");
 
     expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ schema: "scott", parent_schema: "scott", global_search: false, mask: "" }));
-    expect(tables).toEqual([expect.objectContaining({ name: "EMP", schema: "SCOTT", applyName: "EMP", boost: 2400 })]);
-    expect(store.lookupLocalCompletionTables("oracle-1", "ORCL", "", 20, "scott")).toEqual(tables);
+    expect(tables).toEqual([expect.objectContaining({ name: "EMP", schema: "SCOTT", applyName: undefined, boost: 2400 })]);
+    expect(store.lookupLocalCompletionTables("oracle-1", "ORCL", "", 20, "scott")).toEqual([expect.objectContaining({ name: "EMP", schema: "SCOTT", applyName: "EMP", boost: 2400 })]);
+    expect(store.lookupLocalCompletionTables("oracle-1", "ORCL", "", 20, "scott", undefined, { schema: "SCOTT", includePublicSynonyms: false })).toEqual(tables);
   });
 
   it("reconciles a non-empty filtered cache with a table added to the sidebar tree", async () => {
@@ -763,7 +808,7 @@ describe("connectionStore completion assistant", () => {
     const tables = await store.listCompletionTables("oceanbase-oracle-1", "OBORCL", "", 20, "staging", false, "DWD");
 
     expect(completionAssistantSearch).toHaveBeenCalledWith(expect.objectContaining({ schema: "staging", parent_schema: "staging", global_search: false, mask: "" }));
-    expect(tables).toEqual([expect.objectContaining({ name: "ORDERS", schema: "STAGING", applyName: "ORDERS", boost: 2400 })]);
+    expect(tables).toEqual([expect.objectContaining({ name: "ORDERS", schema: "STAGING", applyName: undefined, boost: 2400 })]);
   });
 
   it("lets Oracle resolve CURRENT_SCHEMA for unqualified column completion", async () => {
@@ -1598,7 +1643,7 @@ describe("connectionStore completion assistant", () => {
     expect(completionAssistantSearch).not.toHaveBeenCalled();
   });
 
-  it("keeps explicit Oracle schema completion on the shared assistant path", async () => {
+  it.each([false, true])("keeps explicit completion for a hidden Oracle schema on the shared assistant path (migrated=%s)", async (migrated) => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({
       candidates: [{ name: "EXPLICIT_ID", kind: "column", schema: "REPORTING", parent_schema: "REPORTING", parent_name: "SHARED_TABLE", data_type: "NUMBER" }],
       incomplete: false,
@@ -1615,8 +1660,10 @@ describe("connectionStore completion assistant", () => {
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
     const store = useConnectionStore();
-    store.connections = [oracleConnection()];
+    store.connections = [{ ...oracleConnection(), visible_schemas: { ORCL: [] }, schema_visibility: migrated ? { migrate_legacy: false, databases: { ORCL: { REPORTING: false } } } : undefined }];
     store.connectedIds.add("oracle-1");
+
+    expect(filterSchemaNamesForConnection(["REPORTING"], store.connections[0], "ORCL")).toEqual([]);
 
     const columns = await store.listCompletionColumns("oracle-1", "ORCL", "SHARED_TABLE", "REPORTING", { clientSessionId: "tab-a", version: 2 });
 
@@ -1903,7 +1950,7 @@ describe("connectionStore completion assistant", () => {
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       completionAssistantSearch,
       listCompletionObjects,
-      listSchemas: vi.fn().mockResolvedValue(["public"]),
+      listSchemaInfos: vi.fn().mockResolvedValue([{ name: "public", comment: null }]),
     }));
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
@@ -2198,13 +2245,13 @@ describe("connectionStore completion assistant", () => {
     expect(listDatabases).toHaveBeenCalledTimes(2);
   });
 
-  it("evicts old completion schema entries", async () => {
-    const listSchemas = vi.fn(async (_connectionId: string, database: string) => [`schema_${database}`]);
+  it("evicts completion schema index entries while retaining shared metadata", async () => {
+    const listSchemaInfos = vi.fn(async (_connectionId: string, database: string) => [{ name: `schema_${database}`, comment: null }]);
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
-      listSchemas,
+      listSchemaInfos,
     }));
 
     const { useConnectionStore } = await import("@/stores/connectionStore");
@@ -2215,9 +2262,10 @@ describe("connectionStore completion assistant", () => {
       await store.listCompletionSchemas("pg-1", `db_${index}`);
     }
 
-    await store.listCompletionSchemas("pg-1", "db_0");
-
-    expect(listSchemas).toHaveBeenCalledTimes(52);
+    expect(store.lookupLocalCompletionSchemas("pg-1", "db_0")).toEqual([]);
+    expect(await store.listCompletionSchemas("pg-1", "db_0")).toEqual(["schema_db_0"]);
+    expect(store.lookupLocalCompletionSchemas("pg-1", "db_0")).toEqual(["schema_db_0"]);
+    expect(listSchemaInfos).toHaveBeenCalledTimes(51);
   });
 
   it("searches local completion tables and column prefixes by comment (#12033)", async () => {

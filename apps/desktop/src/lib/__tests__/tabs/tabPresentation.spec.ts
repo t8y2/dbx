@@ -42,6 +42,8 @@ const translations: Record<string, string> = {
   "connectionGroup.ungroupedLabel": "Ungrouped",
   "editor.noDatabase": "No database",
   "databaseSearch.title": "Search Database",
+  "nativeJobs.kinds.scheduler": "定时任务",
+  "tree.jobCategories.legacy": "传统作业",
 };
 
 const translate = (key: string) => translations[key] ?? key;
@@ -74,6 +76,21 @@ function queryTab(overrides: Partial<QueryTab>): QueryTab {
     ...overrides,
   } as QueryTab;
 }
+
+describe("native job tab titles", () => {
+  it.each(["scheduler", "legacy"] as const)("localizes restored %s page titles", (kind) => {
+    const tab = queryTab({
+      mode: "database-jobs",
+      title: "OWNER · old label",
+      nativeJobPage: { schema: "OWNER", kind },
+    });
+    expect(tabDisplayTitle(tab, translate)).toBe(`OWNER · ${kind === "legacy" ? "传统作业" : "定时任务"}`);
+    expect(tab.title).toBe("OWNER · old label");
+    tab.customTitle = true;
+    tab.title = "My jobs";
+    expect(tabDisplayTitle(tab, translate)).toBe("My jobs");
+  });
+});
 
 describe("query result SQL selection", () => {
   it("uses the active result source statement for multi-result query actions", () => {

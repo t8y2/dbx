@@ -2,6 +2,7 @@
 
 import { createApp, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ConnectionConfig } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
   connection: {
@@ -10,9 +11,13 @@ const mocks = vi.hoisted(() => ({
     db_type: "mysql",
     driver_profile: "mysql",
     driver_label: "MySQL",
+    schema_visibility: undefined as ConnectionConfig["schema_visibility"],
   },
   copyToClipboard: vi.fn(),
   ensureConnected: vi.fn(),
+  readVisibleSchemaSelection: vi.fn(),
+  listDatabases: vi.fn(),
+  listTables: vi.fn(),
   executeQuery: vi.fn(),
   listDataTypes: vi.fn(),
   buildTableStructureChangeSql: vi.fn(),
@@ -58,6 +63,7 @@ vi.mock("@lucide/vue", async () => {
     Trash2: Icon,
     UserRound: Icon,
     X: Icon,
+    XIcon: Icon,
   };
 });
 
@@ -204,7 +210,9 @@ vi.mock("@/components/ui/select", async () => {
 
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
+    connections: [mocks.connection],
     ensureConnected: mocks.ensureConnected,
+    readVisibleSchemaSelection: mocks.readVisibleSchemaSelection,
     connectionStateRevision: () => 0,
     isCurrentConnectionStateRevision: () => true,
     getConfig: (connectionId: string) => (connectionId === mocks.connection.id ? mocks.connection : undefined),
@@ -229,6 +237,8 @@ vi.mock("@/lib/metadata/objectDdlCache", () => ({
 vi.mock("@/lib/metadata/objectMetadataCache", () => ({ loadObjectMetadataFacet: mocks.loadObjectMetadataFacet, invalidateObjectMetadataCache: mocks.invalidateObjectMetadataCache }));
 vi.mock("@/lib/metadata/tableMetadataCache", () => ({ invalidateTableMetadataCache: mocks.invalidateTableMetadataCache }));
 vi.mock("@/lib/backend/api", () => ({
+  listDatabases: mocks.listDatabases,
+  listTables: mocks.listTables,
   executeQuery: mocks.executeQuery,
   listDataTypes: mocks.listDataTypes,
   buildTableStructureChangeSql: mocks.buildTableStructureChangeSql,
@@ -362,6 +372,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.connection.db_type = "mysql";
   mocks.connection.driver_profile = "mysql";
+  mocks.connection.schema_visibility = undefined;
+  mocks.listDatabases.mockResolvedValue([{ name: "test" }]);
+  mocks.listTables.mockResolvedValue([]);
   mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE user (id int)", cacheStatus: "remote" });
   mocks.loadObjectMetadataFacet.mockResolvedValue({ value: [], cacheStatus: "remote" });
   mocks.getMysqlTableAutoIncrement.mockResolvedValue(null);
@@ -375,6 +388,20 @@ afterEach(() => {
 });
 
 describe("TableStructureEditor header column selection", () => {
+  it("loads the shared Schema range for copy sources", async () => {
+    mocks.connection.db_type = "sqlserver";
+    mocks.connection.driver_profile = "sqlserver";
+    mocks.connection.schema_visibility = { migrate_legacy: false, databases: { test: { test: false } } };
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => ({ value: facet === "owner" ? "test" : [], cacheStatus: "remote" }));
+    mocks.readVisibleSchemaSelection.mockResolvedValue({ names: ["test", "allowed"] });
+    const root = await mountEditor(draftWithColumns(defaultSeed()));
+    const open = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("structureEditor.copyColumns"));
+    open?.click();
+    await vi.waitFor(() => expect(mocks.readVisibleSchemaSelection).toHaveBeenCalledWith(mocks.connection.id, "test"));
+    const picker = () => document.querySelector('[aria-labelledby="copy-source-schema-label"]');
+    await vi.waitFor(() => expect(picker()?.getAttribute("data-options")).toBe('["allowed"]'));
+    expect(picker()?.getAttribute("data-model-value")).toBe("allowed");
+  });
   it("selects a single column on header click and highlights its cells", async () => {
     const root = await mountEditor(draftWithColumns(defaultSeed()));
 

@@ -2,15 +2,21 @@
 import { computed, createApp, defineComponent, h, nextTick, reactive, ref } from "vue";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { useSidebarRemoteSearch } from "@/composables/useSidebarRemoteSearch";
-import { collectSidebarRemoteSearchResults, type SidebarRemoteSearchResult } from "@/lib/sidebar/sidebarRemoteSearch";
-import { findNodePathByIdentity } from "@/lib/sidebar/sidebarSearchTree";
+import { collectSidebarRemoteSearchResults, mergeSidebarRemoteSearchResults, type SidebarRemoteSearchResult } from "@/lib/sidebar/sidebarRemoteSearch";
+import { filterLocallySearchedTables, filterSidebarSearchRootsByConnectionState, filterSidebarTree, filterSidebarTreeToConnectedConnections, findNodePathByIdentity, mergeSidebarRegexIndexScopes, type SidebarRegexIndexScope } from "@/lib/sidebar/sidebarSearchTree";
+import { createSidebarLabelMatcher } from "@/lib/sidebar/sidebarSearch";
+import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
+import { orderSidebarConnectionUtilitiesForDisplay } from "@/lib/sidebar/sidebarNodeOrdering";
 import { sidebarIndexedObjectGroupTypes } from "@/lib/sidebar/sidebarGlobalSearchIndex";
 import { resolveSidebarSearchDatabaseScope } from "@/lib/sidebar/sidebarSearchDatabaseScope";
 import type { TreeNode } from "@/types/database";
 import { runSidebarSearchTasks } from "../sidebarSearchTaskRunner";
 import { compileConnectionTreeTestScript } from "./connectionTreeTestScript";
+import { sidebarNavigationSettings } from "@/lib/sidebar/sidebarNavigationPreferences";
+import { sidebarDatabaseOpenKey } from "@/lib/sidebar/sidebarDatabaseOpenState";
 
 const compiled = compileConnectionTreeTestScript(["globalSearchConnectionRoots", "loadGlobalRemoteSearchResults", "isGlobalTableIndexParent", "discoverGlobalSearchChildren", "globalSearchContext", "remoteSearchResults"]);
+const compiledProjection = compileConnectionTreeTestScript(["filterGloballyIndexedTables", "localSearchTreeNodes", "mergedSearchTreeNodes", "filteredNodes"]);
 const cleanups: Array<() => void> = [];
 
 beforeEach(() => vi.useFakeTimers());
@@ -27,6 +33,10 @@ function mountSearch() {
   const group: TreeNode = { id: "conn:app:__procedures", connectionId: "conn", database: "app", type: "group-procedures", label: "Procedures", children: [] };
   const root: TreeNode = { id: "conn", connectionId: "conn", type: "connection", label: "Connection", children: [group] };
   const store = reactive({
+    relationalNavigationSelections: {},
+    projectRelationalNavigationTree: vi.fn((nodes: readonly TreeNode[]) => nodes),
+    relationalNavigationAllowsScope: () => true,
+    relationalNavigationSearchChildren: (node: TreeNode) => node.children ?? [],
     activeConnectionId: "conn",
     connectedIds: new Set(["conn"]),
     treeNodes: [root],
@@ -38,15 +48,17 @@ function mountSearch() {
     loadConnectedConnectionRootForSidebarSearch: vi.fn(),
   });
   const toast = vi.fn();
+  const queryStore = reactive({ openDatabaseKeys: new Set<string>() });
   const bindings = {
     ref,
     computed,
     searchQuery,
     regexMode,
     settingsStore,
+    sidebarNavigationSettings,
     store,
     toast,
-    queryStore: { openDatabaseKeys: new Set() },
+    queryStore,
     selectedSearchScopes: ref([]),
     searchableNodeTypes: ref(undefined),
     useSidebarRemoteSearch,
@@ -81,8 +93,163 @@ function mountSearch() {
     input.value = query;
     input.dispatchEvent(new Event("input"));
   };
-  return { ...state, store, settingsStore, regexMode, toast, type, app };
+  return { ...state, store, settingsStore, queryStore, regexMode, toast, type, app };
 }
+
+function mountSearchProjection() {
+  const identity = { connectionId: "conn", database: "app", schema: "public" };
+  const live: TreeNode = { ...identity, id: "routine", type: "procedure", label: "DBX_BASE", children: [] };
+  const group: TreeNode = { ...identity, id: "procedures", type: "group-procedures", label: "Procedures", children: [live] };
+  const store = reactive({
+    treeNodes: [{ id: "conn", connectionId: "conn", type: "connection", label: "Connection", children: [group, { ...identity, id: "tables", type: "group-tables", label: "Tables", children: [] }] }] as TreeNode[],
+    connectedIds: new Set(["conn"]),
+    sidebarTableSearchQueries: {},
+    projectRelationalNavigationTree: vi.fn((nodes: TreeNode[]) => nodes),
+  });
+  const remoteSearchResults = ref<SidebarRemoteSearchResult[]>([]);
+  const globalTableSearchScopes = ref<SidebarRegexIndexScope[]>([]);
+  const deferredSearchQuery = ref("DBX");
+  const regexMode = ref(false);
+  const searchableNodeTypes = ref<ReadonlySet<TreeNode["type"]>>();
+  const bindings = {
+    computed,
+    store,
+    remoteSearchResults,
+    globalTableSearchScopes,
+    deferredSearchQuery,
+    regexMode,
+    searchableNodeTypes,
+    settingsStore: reactive({ editorSettings: { sidebarTableSearchLocal: false, sidebarConnectionSortMode: "default" } }),
+    showConnectedConnectionsOnly: ref(false),
+    localTableSearchResults: ref({}),
+    searchCollapsedIds: ref(new Set()),
+    searchExpandedIds: ref(new Set()),
+    searchMatchMode: ref("fuzzy"),
+    filterLocallySearchedTables,
+    filterSidebarSearchRootsByConnectionState,
+    filterSidebarTree,
+    filterSidebarTreeToConnectedConnections,
+    mergeSidebarRegexIndexScopes,
+    mergeSidebarRemoteSearchResults,
+    createSidebarLabelMatcher,
+    sortConnectionListForDisplay,
+    orderSidebarConnectionUtilitiesForDisplay,
+    t: (key: string) => key,
+  };
+  const app = createApp(
+    defineComponent({
+      setup() {
+        const { filteredNodes } = new Function(...Object.keys(bindings), `${compiledProjection}; return { filteredNodes };`)(...Object.values(bindings));
+        return () => h("pre", JSON.stringify(filteredNodes.value));
+      },
+    }),
+  );
+  const host = document.createElement("div");
+  document.body.append(host);
+  app.mount(host);
+  cleanups.push(() => app.unmount());
+  return {
+    store,
+    host,
+    remoteSearchResults,
+    globalTableSearchScopes,
+    deferredSearchQuery,
+    regexMode,
+    searchableNodeTypes,
+    live: store.treeNodes[0].children![0].children![0],
+    result: (children: TreeNode[]): SidebarRemoteSearchResult => ({ ...identity, parentNodeId: group.id, nodeType: group.type, children }),
+  };
+}
+
+test("unchanged remote progress reuses the component projection while new results remain visible", async () => {
+  const view = mountSearchProjection();
+  view.store.projectRelationalNavigationTree.mockClear();
+  for (let index = 0; index < 4; index++) {
+    view.remoteSearchResults.value = [view.result([{ ...view.live, label: "stale response" }])];
+    await nextTick();
+  }
+  expect(view.store.projectRelationalNavigationTree).not.toHaveBeenCalled();
+  expect(view.host.textContent).toContain("DBX_BASE");
+  expect(view.host.textContent).not.toContain("stale response");
+  view.remoteSearchResults.value = [view.result([view.live, { id: "special", type: "procedure", label: "DBX_SPECIAL" }])];
+  await nextTick();
+  expect(view.store.projectRelationalNavigationTree).toHaveBeenCalledOnce();
+  expect(view.host.textContent).toContain("DBX_SPECIAL");
+});
+
+test("component projection remains reactive to leaf metadata and query regex scope and index changes", async () => {
+  const view = mountSearchProjection();
+  view.remoteSearchResults.value = [view.result([view.live])];
+  await nextTick();
+  view.live.label = "renamed";
+  view.live.comment = "DBX comment";
+  await nextTick();
+  expect(view.host.textContent).toContain("renamed");
+  expect(view.host.textContent).toContain("DBX comment");
+  view.live.comment = "not matching";
+  await nextTick();
+  expect(view.host.textContent).not.toContain("renamed");
+  view.deferredSearchQuery.value = "^renamed$";
+  view.regexMode.value = true;
+  await nextTick();
+  expect(view.host.textContent).toContain("renamed");
+  view.searchableNodeTypes.value = new Set(["table"]);
+  await nextTick();
+  expect(view.host.textContent).not.toContain("renamed");
+  view.globalTableSearchScopes.value = [{ parentNodeId: "tables", nodeType: "group-tables", connectionId: "conn", database: "app", schema: "public", entries: [{ name: "renamed", table_type: "TABLE" }] }];
+  await nextTick();
+  expect(view.host.textContent).toContain("renamed");
+  expect(view.host.textContent).toContain('"type":"table"');
+  view.globalTableSearchScopes.value = [];
+  await nextTick();
+  expect(view.host.textContent).not.toContain("renamed");
+});
+
+test("metadata invalidation bursts reuse the unchanged opened database scope projection", () => {
+  const view = mountSearch();
+  view.settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly = true;
+  view.store.projectRelationalNavigationTree.mockClear();
+
+  for (let index = 0; index < 535; index++) view.store.sidebarObjectSearchRevision += 1;
+
+  expect(view.store.projectRelationalNavigationTree).not.toHaveBeenCalled();
+  expect(view.store.searchSidebarObjects).not.toHaveBeenCalled();
+});
+
+test.each(["opened-tab", "loaded-tree"])("%s scope changes still cancel an active request immediately and search the newly opened database", async (source) => {
+  const view = mountSearch();
+  const loadedIds = reactive(new Set<string>());
+  view.store.isTreeNodeChildrenLoaded.mockImplementation((nodeId: string) => loadedIds.has(nodeId));
+  view.store.treeNodes = [
+    {
+      id: "conn",
+      label: "Connection",
+      type: "connection",
+      connectionId: "conn",
+      children: ["app", "other"].map((database) => ({
+        id: `conn:${database}`,
+        label: database,
+        type: "database",
+        connectionId: "conn",
+        database,
+        children: [{ id: `conn:${database}:__procedures`, label: "Procedures", type: "group-procedures", connectionId: "conn", database, children: [] }],
+      })),
+    },
+  ];
+  const openDatabase = (database: string) => (source === "opened-tab" ? view.queryStore.openDatabaseKeys.add(sidebarDatabaseOpenKey("conn", database)) : loadedIds.add(`conn:${database}`));
+  openDatabase("app");
+  view.settingsStore.editorSettings.sidebarSearchOpenedDatabasesOnly = true;
+  view.store.searchSidebarObjects.mockImplementationOnce(() => new Promise(() => undefined));
+  view.type("routine");
+  await vi.advanceTimersByTimeAsync(300);
+  const signal = view.store.searchSidebarObjects.mock.calls[0][2];
+
+  openDatabase("other");
+
+  expect(signal.aborted).toBe(true);
+  await vi.advanceTimersByTimeAsync(300);
+  expect(view.store.searchSidebarObjects.mock.calls.slice(1).map(([node]) => node.database)).toEqual(["app", "other"]);
+});
 
 test("component input debounces fallback and cancels the old request immediately before the next debounce", async () => {
   const view = mountSearch();

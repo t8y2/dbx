@@ -66,6 +66,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  navigationPreferences: { refreshFailed: "Configurações salvas, mas a atualização da navegação falhou: {message}", connectionUnavailable: "A conexão não existe mais. Abra novamente." },
   oracleTrigger: {
     errorPositionUnavailable: "Código-fonte aberto. Não foi possível verificar a posição do erro; confira a linha e a coluna indicadas.",
     reconcileStructure: "Reconciliar alterações aplicadas",
@@ -3808,6 +3809,7 @@ export default withEnglishFallback({
     unknown: "Ocorreu um erro inesperado no backend.",
   },
   common: {
+    all: "Todos",
     fileNotFound: "O arquivo não existe: {path}",
     loading: "Carregando...",
     stopping: "Parando...",
@@ -4670,6 +4672,10 @@ export default withEnglishFallback({
     editCancel: "Cancelar",
   },
   contextMenu: {
+    viewObjects: "Visualizar objetos",
+    refreshObjects: "Atualizar objetos",
+    confirmDeleteConnectionConfig: "Excluir a configuração de conexão salva “{name}”?",
+    confirmDeleteSelectedConnectionConfigs: "Excluir as {count} configurações de conexão salvas selecionadas?",
     splitTab: "Dividir",
     batchCloseTabs: "Fechar várias abas",
     copyTabName: "Copiar nome da aba",
@@ -4679,12 +4685,12 @@ export default withEnglishFallback({
     closeConnection: "Fechar Conexão",
     closeSelectedConnections: "Fechar {count} conexões selecionadas",
     closeDatabaseConnection: "Fechar Conexão do Banco de Dados",
-    deleteConnection: "Excluir Conexão",
-    deleteSelectedConnections: "Excluir {count} conexões selecionadas",
+    deleteConnection: "Excluir Conexão…",
+    deleteSelectedConnections: "Excluir {count} conexões selecionadas…",
     confirmDeleteTitle: "Excluir Conexão",
     confirmDeleteMessage: 'Tem certeza de que deseja excluir "{name}"? Esta ação não pode ser desfeita.',
     confirmDeleteSelectedMessage: "Excluir as {count} conexões selecionadas? Esta ação não pode ser desfeita.",
-    editConnection: "Editar Conexão",
+    editConnection: "Editar Conexão…",
     revealDatabaseFile: "Mostrar no gerenciador de arquivos",
     selectVisibleDatabases: "Selecionar Bancos de Dados Visíveis",
     configureVisibleObjects: "Filtro de Objetos Visíveis",
@@ -5156,6 +5162,8 @@ export default withEnglishFallback({
     loadFailed: "Falha ao carregar bancos de dados: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "Schemas de usuário",
+    systemGroup: "Schemas do sistema",
     title: "Filtro de Schema",
     detailLabel: "Schemas visíveis",
     detailActionLabel: 'Configurar schemas visíveis para "{connection}"',
@@ -5172,6 +5180,9 @@ export default withEnglishFallback({
     loadFailed: "Falha ao carregar schemas: {message}",
   },
   databaseLinks: {
+    foreignPrivateReadOnly: "O link privado de outro usuário é somente leitura.",
+    privateSchemaUnavailable: "Não é possível criar um link privado no esquema de outro usuário. Use o esquema do usuário conectado.",
+    permissionUnknown: "A permissão de exclusão não foi confirmada; o banco de dados a verificará na execução. Atualize para verificar novamente.",
     remoteTenant: "Tenant remoto",
     remoteProtocol: "Protocolo do banco de dados remoto",
     remoteCluster: "Cluster remoto (opcional)",
@@ -5197,6 +5208,18 @@ export default withEnglishFallback({
     manage: "Manage database links",
   },
   tree: {
+    navigationStatus: { denied: "Sem permissão", error: "Falha ao carregar", unknown: "A confirmar", unsupported: "Não suportado", truncated: "Resultados parciais" },
+    scheduler: "Agendador",
+    publicObjects: "Objetos públicos",
+    tenantObjects: "Objetos do locatário",
+    jobs: "Trabalhos",
+    jobCategories: {
+      regular: "Trabalhos agendados",
+      lightweight: "Trabalhos leves",
+      inMemory: "Trabalhos em memória",
+      legacy: "Trabalhos legados",
+    },
+    openList: "Abrir lista",
     nativeJobs: "Jobs nativos",
     databaseLinks: "Database Links",
     savedSql: "Biblioteca SQL",
@@ -5373,6 +5396,14 @@ export default withEnglishFallback({
     stepSkipped: "Ignorado porque uma etapa anterior obrigatória falhou.",
   },
   nativeJobs: {
+    contextChanged: "O contexto do trabalho mudou ou expirou. Atualize a lista e tente novamente.",
+    scopeRecoveryTitle: "Restaurar aba de trabalho",
+    scopeRecoveryHint: "Esta aba antiga precisa de um esquema verificado. Reabra pela árvore de objetos; o conteúdo salvo é mantido.",
+    retainedContent: "Ver conteúdo mantido",
+    scopeMismatch: "O trabalho não pertence ao esquema ou à categoria desta página. Reabra-o pela categoria correspondente.",
+    scopeInvalid: "Esquema ou categoria inválidos. Reabra pela árvore de objetos.",
+    legacySchemaCreationUnavailable: "Este método não cria trabalhos legados no esquema de outro usuário. Use o esquema do usuário conectado.",
+    scopeResolutionUnavailable: "Não foi possível verificar o esquema. Confira a conexão e as permissões do catálogo e tente novamente.",
     datePrecisionMicroseconds: "As datas de jobs nesta versão do OceanBase aceitam apenas precisão de microssegundos. Defina como 0 os dígitos 7–9 dos segundos fracionários e gere a prévia novamente; a entrada original foi mantida.",
     previousContext: "Resultado da operação do contexto anterior",
     detachedDraft: "O rascunho original foi mantido e não está vinculado ao objeto atual.",

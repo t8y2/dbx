@@ -48,7 +48,7 @@ describe("Neo4j sidebar capabilities", () => {
   it("keeps database browsing and queries without relational comparisons or transfers", async () => {
     const host = await mountHost();
     const items = labels(host.buildContextMenu(node("database", "sample")));
-    expect(items).toEqual(expect.arrayContaining([tr("contextMenu.newQuery"), tr("contextMenu.openObjectBrowser"), tr("contextMenu.refreshChildren"), tr("sqlFile.title")]));
+    expect(items).toEqual(expect.arrayContaining([tr("contextMenu.newQuery"), tr("contextMenu.viewObjects"), tr("contextMenu.refreshObjects"), tr("sqlFile.title")]));
     for (const key of ["transfer.dataTransfer", "diff.title", "dataCompare.title", "contextMenu.exportDatabase", "dataDictionary.title"]) expect(items).not.toContain(tr(key));
   });
 

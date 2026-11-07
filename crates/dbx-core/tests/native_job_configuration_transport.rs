@@ -243,6 +243,25 @@ async fn production_owned_pool_binds_all_configuration_reads_and_writes_to_the_n
 }
 
 #[tokio::test]
+async fn dameng_catalog_rpc_fetch_size_respects_the_row_bound_and_retains_the_catalog_batch_cap() {
+    let (status, requests) = run("normal").await;
+    assert!(status.outcome == NativeJobOperationOutcome::Verified, "{:?}", status.reason);
+    let identity = requests
+        .iter()
+        .find(|request| request["params"]["sql"] == "SELECT CURRENT_USER AS DBX_SESSION_USER FROM DUAL")
+        .expect("production runtime identity must query the actual login");
+    assert_eq!(identity["params"]["maxRows"], 2, "retain the extra row used to reject ambiguous identity");
+    assert_eq!(identity["params"]["fetchSize"], 2, "DM rejects a fetch size larger than maxRows");
+
+    let queries: Vec<_> = requests.iter().filter(|request| request["method"] == "execute_query").collect();
+    assert!(queries.iter().any(|request| request["params"]["maxRows"].as_u64().unwrap() > 1_000));
+    for query in queries {
+        let max_rows = query["params"]["maxRows"].as_u64().unwrap();
+        assert_eq!(query["params"]["fetchSize"], max_rows.min(1_000));
+    }
+}
+
+#[tokio::test]
 async fn production_cleanup_does_not_erase_a_native_unknown_close_with_a_successful_disconnect() {
     let (status, requests) = run("close-unknown").await;
     assert!(status.outcome == NativeJobOperationOutcome::Unknown);

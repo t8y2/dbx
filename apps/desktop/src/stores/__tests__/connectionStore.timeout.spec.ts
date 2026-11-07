@@ -40,6 +40,55 @@ describe("connectionStore timeout recovery", () => {
     vi.useRealTimers();
   });
 
+  it.each(["comment", "size", "comment-and-size"] as const)("initializes restored-tab directory counts without capacity prefetch in %s mode", async (mode) => {
+    vi.useRealTimers();
+    const connectDb = vi.fn().mockResolvedValue("pg-1");
+    const listTables = vi.fn().mockResolvedValue([]);
+    const listDatabaseStorage = vi.fn().mockResolvedValue([]);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb,
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases: vi.fn().mockResolvedValue([{ name: "app" }]),
+      listSchemaInfos: vi.fn().mockResolvedValue([{ name: "public" }]),
+      listTables,
+      listDatabaseStorage,
+      listObjects: vi.fn().mockResolvedValue([]),
+      listExtensions: vi.fn().mockResolvedValue([]),
+      listEventTriggers: vi.fn().mockResolvedValue([]),
+      executeQuery: vi.fn().mockResolvedValue({ columns: ["schema"], rows: [["public"]] }),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    useSettingsStore().editorSettings.sidebarObjectInfoMode = mode;
+    const store = useConnectionStore();
+    const connection = postgresConnection();
+    store.connections = [connection];
+    store.treeNodes = [{ id: connection.id, type: "connection", label: connection.name, connectionId: connection.id, children: [], isExpanded: false }];
+    await store.ensureConnected(connection.id, { activate: false });
+    expect(store.connectedIds.has(connection.id)).toBe(true);
+    expect(store.findConnectionNode(connection.id)).toBeDefined();
+    await vi.waitFor(() => {
+      expect(store.connectionErrors[connection.id]).toBeUndefined();
+      const database = store.projectRelationalNavigationTree(store.treeNodes)[0].children!.find((node) => node.type === "database");
+      expect(database?.children?.find((node) => node.type === "group-tables")?.objectCount).toBe(0);
+    });
+    expect(store.treeNodes[0].isExpanded).toBe(false);
+    expect(connectDb).toHaveBeenCalledOnce();
+    expect(listTables).toHaveBeenCalledOnce();
+    expect(listDatabaseStorage).not.toHaveBeenCalled();
+    if (mode !== "comment") {
+      await store.loadDatabases(connection.id, { force: true });
+      expect(listDatabaseStorage).toHaveBeenCalledWith(connection.id, ["app"]);
+    }
+  });
+
   it("times out connected health checks and falls back to reconnect", async () => {
     const checkConnectionHealth = vi.fn(() => new Promise(() => undefined));
     const connectDb = vi.fn().mockResolvedValue(undefined);
@@ -242,7 +291,7 @@ describe("connectionStore timeout recovery", () => {
     await useConnectionStore().initFromDisk();
 
     expect(callOrder).toEqual(["settings", "connections"]);
-    expect(loadConnections).toHaveBeenCalledWith(legacyVisible !== false);
+    expect(loadConnections).toHaveBeenCalledWith();
     expect(saveEditorSettings).toHaveBeenCalledWith(
       expect.objectContaining({
         appLayout: "separated",
@@ -268,7 +317,7 @@ describe("connectionStore timeout recovery", () => {
     expect(saveEditorSettings).not.toHaveBeenCalled();
   });
 
-  it("retries a failed visibility migration with the original legacy opt-out", async () => {
+  it("retries connection loading without reintroducing the legacy visibility migration", async () => {
     const loadConnections = vi.fn().mockRejectedValueOnce(new Error("migration failed")).mockResolvedValue([]);
     vi.doMock("@/lib/backend/api", () => ({
       loadEditorSettings: vi.fn().mockResolvedValue({ sidebarShowUserAdmin: false }),
@@ -284,7 +333,7 @@ describe("connectionStore timeout recovery", () => {
     const store = useConnectionStore();
     await expect(store.initFromDisk()).rejects.toThrow("migration failed");
     await store.initFromDisk();
-    expect(loadConnections.mock.calls).toEqual([[false], [false]]);
+    expect(loadConnections.mock.calls).toEqual([[], []]);
   });
 
   it("migrates legacy timeout defaults to global inheritance and preserves custom overrides", async () => {
@@ -324,13 +373,8 @@ describe("connectionStore timeout recovery", () => {
     expect(settingsStore.editorSettings.connectTimeoutInheritConnectionIds).toEqual(["default", "inherited"]);
     expect(settingsStore.editorSettings.queryTimeoutInheritConnectionIds).toEqual(["default", "inherited"]);
     expect(settingsStore.editorSettings.timeoutInheritanceMigrationVersion).toBe(2);
-    expect(saveConnections).toHaveBeenCalledWith(
-      expect.arrayContaining([
-        expect.objectContaining({ id: "default", connect_timeout_secs: 7, query_timeout_secs: 12 }),
-        expect.objectContaining({ id: "custom", connect_timeout_secs: 45, query_timeout_secs: 300 }),
-        expect.objectContaining({ id: "inherited", connect_timeout_secs: 7, query_timeout_secs: 12 }),
-      ]),
-    );
+    expect(saveConnections).toHaveBeenCalledWith(expect.arrayContaining([expect.objectContaining({ id: "default", connect_timeout_secs: 7, query_timeout_secs: 12 }), expect.objectContaining({ id: "inherited", connect_timeout_secs: 7, query_timeout_secs: 12 })]));
+    expect(saveConnections.mock.calls.flatMap(([configs]) => configs.map((connection: ConnectionConfig) => connection.id))).toEqual(["default", "inherited"]);
   });
 
   it("keeps a persisted global query timeout over a stale backup when upgrading", async () => {
@@ -788,6 +832,9 @@ describe("connectionStore timeout recovery", () => {
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       connectDb,
+      listDatabases: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       disconnectDb,
       listInstalledAgents: vi.fn().mockResolvedValue([]),
@@ -903,6 +950,7 @@ describe("connectionStore timeout recovery", () => {
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       connectDb,
+      listDatabases: vi.fn().mockResolvedValue([]),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       disconnectDb,
       loadSchemaCache: vi.fn().mockResolvedValue(null),

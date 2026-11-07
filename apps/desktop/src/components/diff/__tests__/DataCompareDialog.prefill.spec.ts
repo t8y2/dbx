@@ -32,6 +32,7 @@ const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn().mockResolvedValue(undefined),
   listDatabases: vi.fn().mockResolvedValue([]),
   listSchemas: vi.fn().mockResolvedValue(["DBX_TEST", "REPORTING", "SYS"]),
+  readVisibleSchemaSelection: vi.fn(),
   listTables: vi.fn().mockResolvedValue([{ name: "CODEX_7467_META", table_type: "TABLE" }]),
   getColumns: vi.fn().mockResolvedValue([{ name: "ID", data_type: "NUMBER", is_primary_key: true }]),
   buildDataCompareSyncPlan: vi.fn(),
@@ -59,6 +60,10 @@ vi.mock("@/composables/useDataCompareSession", async (importOriginal) => {
 });
 
 vi.mock("@/stores/connectionStore", () => {
+  mocks.readVisibleSchemaSelection.mockImplementation(async (id: string, database: string) => {
+    const names = await mocks.listSchemas(id, database, true);
+    return { names, visibleNames: names, infos: [], systemNames: new Set<string>(), oracleMaintainedSchemas: undefined };
+  });
   const connections = [
     { id: "oracle-11g", name: "Oracle XE 11g", db_type: "oracle", driver_profile: "oracle", database: "XE" },
     {
@@ -79,6 +84,8 @@ vi.mock("@/stores/connectionStore", () => {
       },
       getConfig: (id: string) => connections.find((connection) => connection.id === id),
       ensureConnected: mocks.ensureConnected,
+      completionCacheRevision: () => 0,
+      readVisibleSchemaSelection: mocks.readVisibleSchemaSelection,
     }),
   };
 });
@@ -363,7 +370,7 @@ describe("DataCompareDialog source prefill", () => {
     await flushAsyncSetup();
 
     expect(mocks.listDatabases).not.toHaveBeenCalled();
-    expect(mocks.listSchemas).toHaveBeenCalledWith("oracle-11g", "XE", true);
+    expect(mocks.readVisibleSchemaSelection).toHaveBeenCalledWith("oracle-11g", "XE");
 
     const searchableSelectTriggers = [...document.querySelectorAll<HTMLButtonElement>("button.dbx-searchable-select-trigger")];
     const sourceDatabaseTrigger = searchableSelectTriggers[0];
@@ -409,7 +416,7 @@ describe("DataCompareDialog source prefill", () => {
     jdbcConnectionOption?.click();
     await flushAsyncSetup();
 
-    expect(mocks.listSchemas).toHaveBeenCalledWith("oracle-jdbc-11g", "", true);
+    expect(mocks.readVisibleSchemaSelection).toHaveBeenCalledWith("oracle-jdbc-11g", "");
 
     const triggersAfterTargetLoad = [...document.querySelectorAll<HTMLButtonElement>("button.dbx-searchable-select-trigger")];
     const targetDatabaseTrigger = triggersAfterTargetLoad[2];
@@ -437,7 +444,7 @@ describe("DataCompareDialog session restore", () => {
 
     await flushAsyncSetup();
 
-    expect(mocks.listSchemas).not.toHaveBeenCalled();
+    expect(mocks.readVisibleSchemaSelection).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain("ORDERS");
     expect(document.body.textContent).toContain("ID=1");
     expect(document.querySelector<HTMLTextAreaElement>("textarea[readonly]")?.value).toBe("INSERT 1;\nINSERT 2;");

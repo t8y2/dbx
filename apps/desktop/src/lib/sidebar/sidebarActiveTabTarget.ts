@@ -1,16 +1,22 @@
 import { SIDEBAR_TREE_ROW_HEIGHT, type FlatTreeNode } from "@/composables/useFlatTree";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import type { QueryTab, TreeNode } from "@/types/database";
+import { nativeJobAdminSelectionKey, nativeJobSelectionMatchesPage, type NativeJobAdminSelection } from "@/lib/database/nativeJobAdmin";
 
 export type ActiveTabSidebarTarget =
+  | { type: "saved-sql-file"; savedSqlId: string }
+  | {
+      type: "native-job";
+      connectionId: string;
+      database: string;
+      schema: string;
+      kind: "scheduler" | "legacy";
+      schedulerCategory?: "regular" | "lightweight" | "in-memory";
+      selection?: NativeJobAdminSelection;
+    }
   | {
       type: "connection";
       connectionId: string;
-    }
-  | {
-      type: "management";
-      connectionId: string;
-      nodeType: "user-admin" | "xugu-user-admin" | "dameng-users" | "dameng-roles" | "dameng-job-admin" | "database-job-admin";
     }
   | {
       type: "table";
@@ -100,11 +106,9 @@ export type ActiveTabSidebarTarget =
       catalog?: string;
       database: string;
       schema?: string;
-    }
-  | {
-      type: "saved-sql-file";
-      savedSqlId: string;
     };
+
+const connectionManagementModes = new Set(["processlist", "mysql-dashboard", "postgres-dashboard", "xugu-dashboard", "nacos-dashboard", "solr-admin", "users", "xugu-users", "dameng-users", "dameng-roles", "dameng-jobs"]);
 
 /**
  * Resolve a connection root without walking its potentially large object tree.
@@ -125,17 +129,15 @@ export function findSidebarConnectionNode(nodes: readonly TreeNode[], connection
 export function activeTabSidebarTarget(tab: QueryTab | undefined | null): ActiveTabSidebarTarget | null {
   if (!tab) return null;
 
-  const managementNodeTypes = {
-    users: "user-admin",
-    "xugu-users": "xugu-user-admin",
-    "dameng-users": "dameng-users",
-    "dameng-roles": "dameng-roles",
-    "dameng-jobs": "dameng-job-admin",
-    "database-jobs": "database-job-admin",
-  } as const;
-  if (Object.prototype.hasOwnProperty.call(managementNodeTypes, tab.mode)) {
+  if (tab.mode === "database-jobs") {
     if (!tab.connectionId) return null;
-    return { type: "management", connectionId: tab.connectionId, nodeType: managementNodeTypes[tab.mode as keyof typeof managementNodeTypes] };
+    const page = tab.nativeJobPage;
+    if (!page) return { type: "connection", connectionId: tab.connectionId };
+    return { type: "native-job", connectionId: tab.connectionId, database: tab.database, schema: page.schema, kind: page.kind, schedulerCategory: page.schedulerCategory, selection: nativeJobSelectionMatchesPage(tab.nativeJobAdmin, page) ? tab.nativeJobAdmin : undefined };
+  }
+  if (connectionManagementModes.has(tab.mode)) {
+    if (!tab.connectionId) return null;
+    return { type: "connection", connectionId: tab.connectionId };
   }
 
   if (tab.mode === "databases") {
@@ -277,10 +279,6 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
     return { type: "nacos-namespace", connectionId: tab.connectionId, namespace: tab.nacosNamespace || "" };
   }
 
-  if (tab.savedSqlId) {
-    return { type: "saved-sql-file", savedSqlId: tab.savedSqlId };
-  }
-
   if (tab.mode === "query") {
     if (!tab.connectionId) return null;
     if (!tab.database) return { type: "connection", connectionId: tab.connectionId };
@@ -310,12 +308,16 @@ function schemaMatches(node: TreeNode, schema: string | undefined): boolean {
 }
 
 export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): boolean {
+  if (target.type === "saved-sql-file") return node.type === "saved-sql-file" && node.savedSqlId === target.savedSqlId;
+  if (target.type === "native-job") {
+    if (target.kind === "scheduler" && !target.schedulerCategory && node.type === "native-job-scheduler") {
+      return node.connectionId === target.connectionId && node.database === target.database && (node.schema === target.schema || (node.relationalNavigationSelection?.kind === "named" && node.relationalNavigationSelection.name === target.schema));
+    }
+    if (node.connectionId !== target.connectionId || node.database !== target.database || node.nativeJobPage?.schema !== target.schema || node.nativeJobPage.kind !== target.kind || node.nativeJobPage.schedulerCategory !== target.schedulerCategory) return false;
+    return target.selection ? node.type === "native-job" && !!node.nativeJobSelection && nativeJobAdminSelectionKey(node.nativeJobSelection) === nativeJobAdminSelectionKey(target.selection) : node.type === "native-job-group";
+  }
   if (target.type === "connection") {
     return node.type === "connection" && node.connectionId === target.connectionId;
-  }
-
-  if (target.type === "management") {
-    return node.type === target.nodeType && node.connectionId === target.connectionId;
   }
 
   if (target.type === "redis-db") {
@@ -390,10 +392,6 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
     return node.type === "nacos-namespace" && node.connectionId === target.connectionId && (node.nacosNamespace || "") === target.namespace;
   }
 
-  if (target.type === "saved-sql-file") {
-    return node.type === "saved-sql-file" && node.savedSqlId === target.savedSqlId;
-  }
-
   return (
     (node.type === "table" || node.type === "view" || node.type === "materialized_view") &&
     (node.catalog || undefined) === (target.catalog || undefined) &&
@@ -407,7 +405,7 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
 export function findSidebarNodeForActiveTab(tab: QueryTab | undefined | null, flatNodes: readonly FlatTreeNode[]): FlatTreeNode | null {
   const target = activeTabSidebarTarget(tab);
   if (!target) return null;
-  return findSidebarNodeForTarget(target, flatNodes);
+  return findSidebarNodeForTarget(target, flatNodes) ?? (target.type === "native-job" ? findSidebarNodeForTarget({ ...target, selection: undefined }, flatNodes) : null);
 }
 
 export function findSidebarNodeForTarget(target: ActiveTabSidebarTarget, flatNodes: readonly FlatTreeNode[]): FlatTreeNode | null {
@@ -508,13 +506,13 @@ function findPath(nodes: readonly TreeNode[], predicate: (node: TreeNode) => boo
   return null;
 }
 
-/** Expand loaded ancestors, including runtime Queries containers without metadata load markers. */
+/** Expand loaded ancestors, including static containers without metadata load markers. */
 export function expandSidebarLocatePath(path: readonly TreeNode[], canToggleLoaded: (node: TreeNode) => boolean): void {
   for (let index = 0; index < path.length; index++) {
     const node = path[index]!;
     const next = path[index + 1];
-    const runtimeSqlAncestor = (node.type === "saved-sql-root" || node.type === "saved-sql-folder") && !!next && !!node.children?.some((child) => child.id === next.id);
+    const staticAncestor = ["saved-sql-root", "saved-sql-folder", "native-job-scheduler", "connection-extensions", "oracle-shared-objects"].includes(node.type) && !!next && !!node.children?.some((child) => child.id === next.id);
     // Keep unloaded table/collection leaves collapsed: their columns were not fetched.
-    if (!node.isExpanded && (runtimeSqlAncestor || canToggleLoaded(node))) node.isExpanded = true;
+    if (!node.isExpanded && (staticAncestor || canToggleLoaded(node))) node.isExpanded = true;
   }
 }

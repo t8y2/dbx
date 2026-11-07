@@ -71,11 +71,65 @@ async fn clone_metadata_pool(state: &AppState, pool_key: &str) -> Option<PoolKin
 struct EphemeralAgentMetadataSession {
     client_session_id: Option<String>,
     cleanup_guard: Option<crate::connection::ClientSessionPoolCleanupGuard>,
+    directory_reuse: Option<(crate::connection::ConnectionLifecycleSnapshot, Duration)>,
+    directory_scope: (bool, bool),
+}
+
+pub(crate) struct IdleDirectoryMetadataSession {
+    session: EphemeralAgentMetadataSession,
+    pub(crate) idle_token: uuid::Uuid,
 }
 
 impl EphemeralAgentMetadataSession {
     async fn open(state: &AppState, connection_id: &str, database: Option<&str>, task_kind: &str) -> Self {
         let db_config = connection_config(state, connection_id).await;
+        let directory_reuse = db_config
+            .as_ref()
+            .filter(|config| {
+                crate::connection::uses_agent_metadata_sessions(config)
+                    && matches!(task_kind, "objects-directory" | "objects-directory-default")
+            })
+            .map(|config| {
+                let idle_seconds = if config.idle_timeout_secs == 0 { 30 } else { config.idle_timeout_secs.min(30) };
+                (state.connection_lifecycle_snapshot(connection_id), Duration::from_secs(idle_seconds))
+            });
+        let directory_scope =
+            (task_kind == "objects-directory-default", database.is_none_or(|database| database.trim().is_empty()));
+        if directory_reuse.is_some() {
+            let key = format!(
+                "{connection_id}\0{}",
+                crate::connection::metadata_pool_database(db_config.as_ref(), database).unwrap_or_default()
+            );
+            loop {
+                let idle = {
+                    let mut sessions =
+                        state.directory_metadata_sessions.lock().unwrap_or_else(|error| error.into_inner());
+                    let idle = sessions.get_mut(&key).and_then(|entries| {
+                        entries
+                            .iter()
+                            .position(|entry| entry.session.directory_scope == directory_scope)
+                            .map(|index| entries.remove(index))
+                    });
+                    if sessions.get(&key).is_some_and(Vec::is_empty) {
+                        sessions.remove(&key);
+                    }
+                    idle
+                };
+                let Some(idle) = idle else { break };
+                if idle
+                    .session
+                    .directory_reuse
+                    .as_ref()
+                    .is_some_and(|(lifecycle, _)| state.connection_lifecycle_is_current(connection_id, lifecycle))
+                {
+                    if let Some(guard) = idle.session.cleanup_guard.as_ref() {
+                        if guard.pool_exists().await {
+                            return idle.session;
+                        }
+                    }
+                }
+            }
+        }
         let client_session_id = ephemeral_agent_metadata_session_id(db_config.as_ref(), task_kind);
         let cleanup_guard = match client_session_id.as_deref() {
             Some(client_session_id) => {
@@ -83,7 +137,7 @@ impl EphemeralAgentMetadataSession {
             }
             None => None,
         };
-        Self { client_session_id, cleanup_guard }
+        Self { client_session_id, cleanup_guard, directory_reuse, directory_scope }
     }
 
     fn client_session_id(&self) -> Option<&str> {
@@ -91,6 +145,31 @@ impl EphemeralAgentMetadataSession {
     }
 
     async fn finish(mut self, state: &AppState, connection_id: &str, database: Option<&str>) {
+        if let Some((lifecycle, timeout)) = self.directory_reuse.as_ref() {
+            if state.connection_lifecycle_is_current(connection_id, lifecycle) {
+                if let Some(guard) = self.cleanup_guard.as_ref() {
+                    if guard.pool_exists().await {
+                        let config = connection_config(state, connection_id).await;
+                        let key = format!(
+                            "{connection_id}\0{}",
+                            crate::connection::metadata_pool_database(config.as_ref(), database).unwrap_or_default()
+                        );
+                        let idle_token = uuid::Uuid::new_v4();
+                        let cancellation = lifecycle.cancellation().clone();
+                        let timeout = *timeout;
+                        let mut idle =
+                            state.directory_metadata_sessions.lock().unwrap_or_else(|error| error.into_inner());
+                        let entries = idle.entry(key.clone()).or_default();
+                        if entries.len() < 2 {
+                            entries.push(IdleDirectoryMetadataSession { session: self, idle_token });
+                            state.schedule_directory_metadata_idle_cleanup(key, idle_token, cancellation, timeout);
+                            drop(idle);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
         if close_ephemeral_agent_metadata_session(state, connection_id, database, self.client_session_id()).await {
             if let Some(cleanup_guard) = self.cleanup_guard.as_mut() {
                 cleanup_guard.disarm();
@@ -827,8 +906,18 @@ pub async fn list_schemas_core_with_visible_filter(
     database: &str,
     apply_visible_filter: bool,
 ) -> Result<Vec<String>, String> {
+    list_schemas_core_with_options(state, connection_id, database, apply_visible_filter, None).await
+}
+
+pub async fn list_schemas_core_with_options(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    apply_visible_filter: bool,
+    system_schemas_override: Option<bool>,
+) -> Result<Vec<String>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || {
-        list_schemas_once(state, connection_id, database, apply_visible_filter)
+        list_schemas_once(state, connection_id, database, apply_visible_filter, system_schemas_override)
     })
     .await
 }
@@ -838,8 +927,17 @@ pub async fn list_schema_infos_core(
     connection_id: &str,
     database: &str,
 ) -> Result<Vec<db::SchemaInfo>, String> {
+    list_schema_infos_core_with_system_schemas(state, connection_id, database, None).await
+}
+
+pub async fn list_schema_infos_core_with_system_schemas(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    system_schemas_override: Option<bool>,
+) -> Result<Vec<db::SchemaInfo>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || {
-        list_schema_infos_once(state, connection_id, database)
+        list_schema_infos_once(state, connection_id, database, system_schemas_override)
     })
     .await
 }
@@ -848,15 +946,17 @@ async fn list_schema_infos_once(
     state: &AppState,
     connection_id: &str,
     database: &str,
+    system_schemas_override: Option<bool>,
 ) -> Result<Vec<db::SchemaInfo>, String> {
     let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
     let db_config = connection_config(state, connection_id).await;
-    let show_system_schemas = db_config.as_ref().is_some_and(|config| config.show_system_schemas);
+    let show_system_schemas =
+        system_schemas_override.unwrap_or_else(|| db_config.as_ref().is_some_and(|config| config.show_system_schemas));
     if let Some(PoolKind::Postgres(pool)) = clone_metadata_pool(state, &pool_key).await {
         return db::postgres::list_schema_infos_with_system(&pool, show_system_schemas).await;
     }
 
-    let schemas = list_schemas_once(state, connection_id, database, false).await?;
+    let schemas = list_schemas_once(state, connection_id, database, false, system_schemas_override).await?;
     Ok(schemas.into_iter().map(|name| db::SchemaInfo { name, comment: None }).collect())
 }
 
@@ -914,10 +1014,12 @@ async fn list_schemas_once(
     connection_id: &str,
     database: &str,
     apply_visible_filter: bool,
+    system_schemas_override: Option<bool>,
 ) -> Result<Vec<String>, String> {
     let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
     let db_config = connection_config(state, connection_id).await;
-    let show_system_schemas = db_config.as_ref().is_some_and(|config| config.show_system_schemas);
+    let show_system_schemas =
+        system_schemas_override.unwrap_or_else(|| db_config.as_ref().is_some_and(|config| config.show_system_schemas));
     let visible_schema_filter = visible_schema_filter(db_config.as_ref(), database, apply_visible_filter);
 
     {
@@ -933,7 +1035,8 @@ async fn list_schemas_once(
                 )
                 .await;
         }
-        try_sqlserver!(pool_handle, list_schemas);
+        // SQL Server's default enumeration has always excluded system schemas.
+        try_sqlserver!(pool_handle, list_schemas_with_system, system_schemas_override.unwrap_or(false));
         if let Some(client) = extract_pool!(pool_handle.as_ref(), Agent) {
             let fallback_config = db_config.clone();
             let mut client = client.lock().await;
@@ -1110,7 +1213,17 @@ async fn list_tables_core_impl(
             return Ok(vec![]);
         }
     }
-    let metadata_session = EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "tables").await;
+    let task_kind = if limit.is_some() && filter.is_none_or(|filter| filter.trim().is_empty()) {
+        if schema.trim().is_empty() {
+            "objects-directory-default"
+        } else {
+            "objects-directory"
+        }
+    } else {
+        "tables"
+    };
+    let mut metadata_session =
+        EphemeralAgentMetadataSession::open(state, connection_id, Some(database), task_kind).await;
     let result = retry_metadata_connection_for_session(
         state,
         connection_id,
@@ -1133,6 +1246,9 @@ async fn list_tables_core_impl(
         },
     )
     .await;
+    if result.is_err() {
+        metadata_session.directory_reuse = None;
+    }
     metadata_session.finish(state, connection_id, Some(database)).await;
     result
 }
@@ -2270,10 +2386,6 @@ fn comment_is_blank(comment: &Option<String>) -> bool {
     comment.as_deref().map(str::trim).unwrap_or("").is_empty()
 }
 
-fn oracle_table_info_can_have_comment(table: &db::TableInfo) -> bool {
-    oracle_type_is_table_or_view(&table.table_type)
-}
-
 fn oracle_object_info_can_have_table_comment(object: &db::ObjectInfo) -> bool {
     oracle_type_is_table_or_view(&object.object_type)
 }
@@ -2283,37 +2395,6 @@ fn oracle_type_is_table_or_view(value: &str) -> bool {
     matches!(normalized.as_str(), "TABLE" | "BASE_TABLE" | "VIEW")
 }
 
-fn oracle_missing_table_comment_names(tables: &[db::TableInfo]) -> Vec<String> {
-    unique_oracle_comment_names(
-        tables
-            .iter()
-            .filter(|table| oracle_table_info_can_have_comment(table) && comment_is_blank(&table.comment))
-            .map(|table| table.name.as_str()),
-    )
-}
-
-fn oracle_missing_object_table_comment_names(objects: &[db::ObjectInfo]) -> Vec<String> {
-    unique_oracle_comment_names(
-        objects
-            .iter()
-            .filter(|object| oracle_object_info_can_have_table_comment(object) && comment_is_blank(&object.comment))
-            .map(|object| object.name.as_str()),
-    )
-}
-
-fn unique_oracle_comment_names<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut unique = Vec::new();
-    for name in names {
-        let name = name.trim();
-        if name.is_empty() || !seen.insert(name.to_string()) {
-            continue;
-        }
-        unique.push(name.to_string());
-    }
-    unique
-}
-
 fn apply_table_comments(tables: &mut [db::TableInfo], comments: &HashMap<String, String>) {
     for table in tables {
         if !comment_is_blank(&table.comment) {
@@ -2321,17 +2402,6 @@ fn apply_table_comments(tables: &mut [db::TableInfo], comments: &HashMap<String,
         }
         if let Some(comment) = oracle_comment_for_name(comments, &table.name) {
             table.comment = Some(comment.clone());
-        }
-    }
-}
-
-fn apply_oracle_object_table_comments(objects: &mut [db::ObjectInfo], comments: &HashMap<String, String>) {
-    for object in objects {
-        if !comment_is_blank(&object.comment) {
-            continue;
-        }
-        if let Some(comment) = oracle_comment_for_name(comments, &object.name) {
-            object.comment = Some(comment.clone());
         }
     }
 }
@@ -2370,6 +2440,11 @@ async fn oracle_table_comments_for_names(
     Ok(comments)
 }
 
+fn unique_oracle_comment_names<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    names.map(str::trim).filter(|name| !name.is_empty() && seen.insert(name.to_string())).map(str::to_string).collect()
+}
+
 async fn load_oracle_table_comments_for_tables(
     client: &mut db::agent_driver::AgentDriverClient,
     database: &str,
@@ -2377,12 +2452,44 @@ async fn load_oracle_table_comments_for_tables(
     tables: &mut [db::TableInfo],
     timeout_duration: Option<Duration>,
 ) -> Result<(), String> {
-    let table_names = oracle_missing_table_comment_names(tables);
-    if table_names.is_empty() {
+    let names = unique_oracle_comment_names(
+        tables
+            .iter()
+            .filter(|table| oracle_type_is_table_or_view(&table.table_type) && comment_is_blank(&table.comment))
+            .map(|table| table.name.as_str()),
+    );
+    if names.is_empty() {
         return Ok(());
     }
-    let comments = oracle_table_comments_for_names(client, database, schema, &table_names, timeout_duration).await?;
+    let comments = oracle_table_comments_for_names(client, database, schema, &names, timeout_duration).await?;
     apply_table_comments(tables, &comments);
+    Ok(())
+}
+
+async fn load_oracle_table_comments_for_objects(
+    client: &mut db::agent_driver::AgentDriverClient,
+    database: &str,
+    schema: &str,
+    objects: &mut [db::ObjectInfo],
+    timeout_duration: Option<Duration>,
+) -> Result<(), String> {
+    let names = unique_oracle_comment_names(
+        objects
+            .iter()
+            .filter(|object| oracle_object_info_can_have_table_comment(object) && comment_is_blank(&object.comment))
+            .map(|object| object.name.as_str()),
+    );
+    if names.is_empty() {
+        return Ok(());
+    }
+    let comments = oracle_table_comments_for_names(client, database, schema, &names, timeout_duration).await?;
+    for object in objects {
+        if comment_is_blank(&object.comment) {
+            if let Some(comment) = oracle_comment_for_name(&comments, &object.name) {
+                object.comment = Some(comment.clone());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2411,22 +2518,6 @@ async fn load_tdengine_table_comments_for_filter(
         .await?;
     let comments = table_comments_from_query_result(result);
     apply_table_comments(tables, &comments);
-    Ok(())
-}
-
-async fn load_oracle_table_comments_for_objects(
-    client: &mut db::agent_driver::AgentDriverClient,
-    database: &str,
-    schema: &str,
-    objects: &mut [db::ObjectInfo],
-    timeout_duration: Option<Duration>,
-) -> Result<(), String> {
-    let table_names = oracle_missing_object_table_comment_names(objects);
-    if table_names.is_empty() {
-        return Ok(());
-    }
-    let comments = oracle_table_comments_for_names(client, database, schema, &table_names, timeout_duration).await?;
-    apply_oracle_object_table_comments(objects, &comments);
     Ok(())
 }
 
@@ -2911,7 +3002,8 @@ async fn list_tables_once(
                 .await
             {
                 Ok(mut tables) if !tables.is_empty() => {
-                    if is_oracle {
+                    if is_oracle && !client.supports_capability(db::agent_driver::AgentCapability::TableListCommentsV1)
+                    {
                         load_oracle_table_comments_for_tables(
                             &mut client,
                             database,
@@ -3840,10 +3932,12 @@ mod tests {
             visible_databases: None,
             visible_database_patterns: None,
             visible_schemas: None,
+            schema_visibility: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
             show_native_jobs: None,
+            show_extensions: None,
             show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
@@ -5328,6 +5422,381 @@ done
         assert_eq!(metadata_error_action(db_type, replace_runtime, false), MetadataErrorAction::ReplaceRuntime);
         assert_eq!(metadata_error_action(db_type, replace_runtime, true), MetadataErrorAction::ReplaceRuntime);
         assert_eq!(metadata_error_action(db_type, sql, false), MetadataErrorAction::Return);
+    }
+
+    #[tokio::test]
+    async fn directory_metadata_capabilities_and_read_scopes_preserve_compatibility() {
+        for (inline_comments, inline_table_comments) in [(false, false), (true, false), (true, true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let calls_path = dir.path().join("calls.jsonl");
+            let script_path = dir.path().join("comments-agent.py");
+            let calls = serde_json::to_string(&calls_path.to_string_lossy()).unwrap();
+            let denied_path = dir.path().join("native-list-denied");
+            let denied = serde_json::to_string(&denied_path.to_string_lossy()).unwrap();
+            let capabilities = if inline_table_comments {
+                "['multi_session','metadata','query','object_list_comments_v1','table_list_comments_v1']"
+            } else if inline_comments {
+                "['multi_session','metadata','query','object_list_comments_v1']"
+            } else {
+                "['multi_session','metadata','query']"
+            };
+            let comment = if inline_comments { "'note'" } else { "None" };
+            let table_comment = if inline_table_comments { "'note'" } else { "None" };
+            std::fs::write(&script_path, format!(r#"import json, pathlib, sys
+calls = pathlib.Path({calls})
+denied = pathlib.Path({denied})
+print(json.dumps({{'ready': True}}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req['method']
+    with calls.open('a') as output: output.write(json.dumps(method) + '\n')
+    if method == 'handshake':
+        result = {{'protocolVersion': 2, 'agentProtocolVersion': 2, 'capabilities': {capabilities}}}
+    elif method == 'list_objects':
+        result = [{{'name':'T','schema':'APP','object_type':'TABLE','comment':{comment}}}, {{'name':'V','schema':'APP','object_type':'VIEW','comment':None}}]
+    elif method == 'list_tables':
+        result = [{{'name':'T','table_type':'TABLE','comment':{table_comment}}}]
+    elif method == 'list_schemas':
+        result = ['APP','SYS'] if req.get('params',{{}}).get('show_system_schemas',False) else ['APP']
+    elif method == 'execute_query':
+        sql = req.get('params',{{}}).get('sql','')
+        if 'DBX_SESSION_USER' in sql:
+            result = {{'columns':['DBX_SESSION_USER'],'rows':[['APP']],'affected_rows':0,'execution_time_ms':0}}
+        elif 'DBX_JOB_ID' in sql:
+            result = {{'error':{{'diagnostics':{{'category':'sql','vendorCode':1031}}}}}} if denied.exists() else {{'columns':['DBX_JOB_ID'],'rows':[],'affected_rows':0,'execution_time_ms':0}}
+        else:
+            result = {{'columns':['TABLE_NAME','COMMENTS'],'column_types':['VARCHAR','VARCHAR'],'rows':[['T','note']],'affected_rows':0,'execution_time_ms':0}}
+    else: result = {{}}
+    print(json.dumps({{'jsonrpc':'2.0','id':req['id'],'result':result}}), flush=True)
+"#)).unwrap();
+            let runtime = crate::db::agent_driver::AgentRuntimeClient::spawn(
+                crate::db::agent_driver::AgentLaunchSpec::new(if cfg!(windows) { "python" } else { "python3" })
+                    .with_args([script_path.to_string_lossy().to_string()]),
+                "test",
+            )
+            .await
+            .unwrap();
+            runtime.increment_session_count();
+            let client = crate::db::agent_driver::AgentDriverClient::shared_session(runtime.clone(), "metadata".into());
+            let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+            let state = AppState::new(storage);
+            let mut config = test_connection_config(DatabaseType::Oracle);
+            config.id = "conn".into();
+            state.configs.write().await.insert("conn".into(), config);
+            state
+                .update_connection_pools(|pools| {
+                    pools.insert("conn:role:metadata".into(), super::PoolKind::agent(client));
+                })
+                .await;
+            let objects = super::list_objects_once(
+                &state,
+                "conn",
+                "configured",
+                "APP",
+                None,
+                Some(1000),
+                Some(0),
+                Some(&["TABLE".into(), "VIEW".into()]),
+                None,
+                None,
+                &Default::default(),
+            )
+            .await
+            .unwrap()
+            .objects;
+            assert_eq!(objects.len(), 2);
+            assert_eq!(objects[0].comment.as_deref(), Some("note"));
+            assert!(objects[1].comment.is_none());
+            let tables = super::list_tables_once(
+                &state,
+                "conn",
+                "configured",
+                "APP",
+                None,
+                Some(1000),
+                Some(0),
+                Some(&["TABLE".into()]),
+                None,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(tables.len(), 1);
+            assert_eq!(tables[0].comment.as_deref(), Some("note"));
+            let calls = std::fs::read_to_string(calls_path).unwrap();
+            assert_eq!(
+                calls.lines().filter(|line| *line == "\"execute_query\"").count(),
+                usize::from(!inline_comments) + usize::from(!inline_table_comments)
+            );
+            state.configs.write().await.get_mut("conn").unwrap().show_system_schemas = true;
+            for visibility in [None, Some(false), Some(true)] {
+                let schemas = super::list_schemas_core_with_options(&state, "conn", "configured", false, visibility)
+                    .await
+                    .unwrap();
+                assert_eq!(schemas, if visibility == Some(false) { vec!["APP"] } else { vec!["APP", "SYS"] });
+                let infos = super::list_schema_infos_core_with_system_schemas(&state, "conn", "configured", visibility)
+                    .await
+                    .unwrap();
+                assert_eq!(infos.iter().map(|info| info.name.as_str()).collect::<Vec<_>>(), schemas);
+            }
+            assert!(state.configs.read().await.get("conn").unwrap().show_system_schemas);
+            let context = super::native_jobs::native_job_open_context_with(&state, "conn", "configured", |_| async {
+                Ok(super::native_jobs::NativeJobRuntimeIdentity { database_info: None, session_user: "APP".into() })
+            })
+            .await
+            .unwrap();
+            let mut explicit_key = String::new();
+            for default_schema in [false, true] {
+                let task = if default_schema { "objects-directory-default" } else { "objects-directory" };
+                let (session, pool_key) =
+                    directory_metadata_test_session_for_scope(&state, task, Some("configured")).await;
+                runtime.increment_session_count();
+                let client = crate::db::agent_driver::AgentDriverClient::shared_session(
+                    runtime.clone(),
+                    session.client_session_id().unwrap().into(),
+                );
+                state
+                    .update_connection_pools(|pools| {
+                        pools.insert(pool_key.clone(), super::PoolKind::agent(client));
+                    })
+                    .await;
+                session.finish(&state, "conn", Some("configured")).await;
+                let request = dbx_types::native_jobs::NativeJobListRequest {
+                    scope: context.scope.clone(),
+                    kind: dbx_types::native_jobs::NativeJobKind::Legacy,
+                    schema: (!default_schema).then(|| "APP".into()),
+                    scheduler_category: None,
+                    filter: String::new(),
+                    offset: 0,
+                    limit: 1000,
+                };
+                for offset in [0, 1000] {
+                    let list = super::native_jobs::native_job_list_core(
+                        &state,
+                        &dbx_types::native_jobs::NativeJobListRequest { offset, ..request.clone() },
+                    )
+                    .await
+                    .unwrap();
+                    assert!(matches!(list.jobs, dbx_types::native_jobs::NativeJobMetadata::Empty));
+                    assert!(
+                        state.pool_handle(&pool_key).await.is_some(),
+                        "successful pages retain their own directory lease"
+                    );
+                }
+                if !default_schema {
+                    explicit_key = pool_key;
+                } else {
+                    assert_ne!(explicit_key, pool_key);
+                }
+            }
+            std::fs::write(denied_path, "deny").unwrap();
+            let failed = super::native_jobs::native_job_list_core(
+                &state,
+                &dbx_types::native_jobs::NativeJobListRequest {
+                    scope: context.scope,
+                    kind: dbx_types::native_jobs::NativeJobKind::Legacy,
+                    schema: Some("APP".into()),
+                    scheduler_category: None,
+                    filter: String::new(),
+                    offset: 0,
+                    limit: 1000,
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(failed.jobs, dbx_types::native_jobs::NativeJobMetadata::Denied { .. }));
+            assert!(
+                state.pool_handle(&explicit_key).await.is_none(),
+                "typed failures must discard the checked out lease"
+            );
+            state.shutdown(std::time::Duration::from_secs(2)).await;
+            runtime.kill();
+        }
+    }
+
+    async fn directory_metadata_test_state() -> (tempfile::TempDir, AppState) {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let mut config = test_connection_config(DatabaseType::Oracle);
+        config.id = "conn".into();
+        config.idle_timeout_secs = 1;
+        state.configs.write().await.insert("conn".into(), config);
+        (dir, state)
+    }
+
+    async fn directory_metadata_test_session(state: &AppState) -> (super::EphemeralAgentMetadataSession, String) {
+        directory_metadata_test_session_for_scope(state, "objects-directory", Some("configured")).await
+    }
+
+    async fn directory_metadata_test_session_for_scope(
+        state: &AppState,
+        task: &str,
+        database: Option<&str>,
+    ) -> (super::EphemeralAgentMetadataSession, String) {
+        let session = super::EphemeralAgentMetadataSession::open(state, "conn", database, task).await;
+        let id = session.client_session_id().unwrap().to_string();
+        let pool_key = format!("conn:session:{}:role:metadata", id.replace(':', "_"));
+        state
+            .update_connection_pools(|pools| {
+                pools.insert(
+                    pool_key.clone(),
+                    super::PoolKind::agent(crate::db::agent_driver::AgentDriverClient::test_stub()),
+                );
+            })
+            .await;
+        (session, pool_key)
+    }
+
+    #[tokio::test]
+    async fn directory_metadata_session_separates_default_schema_and_catalog() {
+        for legacy in [false, true] {
+            let (_dir, state) = directory_metadata_test_state().await;
+            if legacy {
+                let mut configs = state.configs.write().await;
+                let config = configs.get_mut("conn").unwrap();
+                config.db_type = DatabaseType::SqlServer;
+                config.driver_profile = Some(crate::db::sqlserver::SQLSERVER_LEGACY_DRIVER_PROFILE.into());
+            }
+            let (explicit, _) = directory_metadata_test_session(&state).await;
+            let explicit_id = explicit.client_session_id().unwrap().to_string();
+            explicit.finish(&state, "conn", Some("configured")).await;
+            let database = if legacy { None } else { Some("configured") };
+            let task = if legacy { "objects-directory" } else { "objects-directory-default" };
+            let (default, _) = directory_metadata_test_session_for_scope(&state, task, database).await;
+            let default_id = default.client_session_id().unwrap().to_string();
+            assert_ne!(explicit_id, default_id);
+            default.finish(&state, "conn", database).await;
+            let explicit =
+                super::EphemeralAgentMetadataSession::open(&state, "conn", Some("configured"), "objects-directory")
+                    .await;
+            let default = super::EphemeralAgentMetadataSession::open(&state, "conn", database, task).await;
+            assert_eq!(explicit.client_session_id(), Some(explicit_id.as_str()));
+            assert_eq!(default.client_session_id(), Some(default_id.as_str()));
+            drop(explicit);
+            drop(default);
+            state.shutdown(std::time::Duration::from_secs(2)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn directory_metadata_session_retains_two_independent_idle_sessions() {
+        let (_dir, state) = directory_metadata_test_state().await;
+        let (first, first_key) = directory_metadata_test_session(&state).await;
+        let (second, second_key) = directory_metadata_test_session(&state).await;
+        let first_id = first.client_session_id().unwrap().to_string();
+        let second_id = second.client_session_id().unwrap().to_string();
+        first.finish(&state, "conn", Some("configured")).await;
+        second.finish(&state, "conn", Some("configured")).await;
+        let first =
+            super::EphemeralAgentMetadataSession::open(&state, "conn", Some("configured"), "objects-directory").await;
+        let second =
+            super::EphemeralAgentMetadataSession::open(&state, "conn", Some("configured"), "objects-directory").await;
+        let ids = [first.client_session_id().unwrap(), second.client_session_id().unwrap()];
+        assert!(ids.contains(&first_id.as_str()) && ids.contains(&second_id.as_str()));
+        assert_ne!(ids[0], ids[1]);
+        first.finish(&state, "conn", Some("configured")).await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        second.finish(&state, "conn", Some("configured")).await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        // The older timer must release only its own idle entry.
+        let alive = [state.pool_handle(&first_key).await.is_some(), state.pool_handle(&second_key).await.is_some()];
+        assert_eq!(alive.iter().filter(|alive| **alive).count(), 1);
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        assert!(state.pool_handle(&first_key).await.is_none());
+        assert!(state.pool_handle(&second_key).await.is_none());
+        state.shutdown(std::time::Duration::from_secs(2)).await;
+    }
+
+    #[tokio::test]
+    async fn directory_metadata_session_reuses_successful_idle_session() {
+        let (_dir, state) = directory_metadata_test_state().await;
+        let (session, _) = directory_metadata_test_session(&state).await;
+        let id = session.client_session_id().unwrap().to_string();
+        session.finish(&state, "conn", Some("configured")).await;
+        let next =
+            super::EphemeralAgentMetadataSession::open(&state, "conn", Some("configured"), "objects-directory").await;
+        assert_eq!(
+            next.client_session_id(),
+            Some(id.as_str()),
+            "successful directory reads should reuse their exclusive metadata session"
+        );
+        drop(next);
+        state.shutdown(std::time::Duration::from_secs(2)).await;
+    }
+
+    #[tokio::test]
+    async fn directory_metadata_session_concurrent_and_dropped_reads_are_isolated() {
+        let (_dir, state) = directory_metadata_test_state().await;
+        let (first, first_key) = directory_metadata_test_session(&state).await;
+        let (second, _) = directory_metadata_test_session(&state).await;
+        assert_ne!(first.client_session_id(), second.client_session_id());
+        let first_id = first.client_session_id().unwrap().to_string();
+        let second_id = second.client_session_id().unwrap().to_string();
+        drop(first);
+        second.finish(&state, "conn", Some("configured")).await;
+        let next =
+            super::EphemeralAgentMetadataSession::open(&state, "conn", Some("configured"), "objects-directory").await;
+        assert_eq!(next.client_session_id(), Some(second_id.as_str()));
+        assert_ne!(next.client_session_id(), Some(first_id.as_str()));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state.pool_handle(&first_key).await.is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled request pool must be detached");
+        drop(next);
+        state.shutdown(std::time::Duration::from_secs(2)).await;
+    }
+
+    #[tokio::test]
+    async fn directory_metadata_session_failed_and_stale_reads_are_not_reused() {
+        for mode in ["failed", "invalidated", "idle-invalidation"] {
+            let (_dir, state) = directory_metadata_test_state().await;
+            let (mut session, _) = directory_metadata_test_session(&state).await;
+            let id = session.client_session_id().unwrap().to_string();
+            if mode == "failed" {
+                session.directory_reuse = None;
+            }
+            if mode == "invalidated" {
+                state.invalidate_connection_lifecycle("conn");
+            }
+            session.finish(&state, "conn", Some("configured")).await;
+            if mode == "idle-invalidation" {
+                state.invalidate_connection_lifecycle("conn");
+            }
+            let next =
+                super::EphemeralAgentMetadataSession::open(&state, "conn", Some("configured"), "objects-directory")
+                    .await;
+            assert_ne!(next.client_session_id(), Some(id.as_str()), "{mode}");
+            drop(next);
+            state.shutdown(std::time::Duration::from_secs(2)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn directory_metadata_session_idle_expiry_does_not_close_checked_out_session() {
+        let (_dir, state) = directory_metadata_test_state().await;
+        let (session, key) = directory_metadata_test_session(&state).await;
+        let id = session.client_session_id().unwrap().to_string();
+        session.finish(&state, "conn", Some("configured")).await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let active =
+            super::EphemeralAgentMetadataSession::open(&state, "conn", Some("configured"), "objects-directory").await;
+        assert_eq!(active.client_session_id(), Some(id.as_str()));
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        assert!(state.pool_handle(&key).await.is_some(), "old idle timer must not close a checked-out session");
+        active.finish(&state, "conn", Some("configured")).await;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while state.pool_handle(&key).await.is_some() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("returned idle session must expire");
+        state.shutdown(std::time::Duration::from_secs(2)).await;
     }
 
     #[tokio::test]
@@ -7797,65 +8266,6 @@ done
     }
 
     #[test]
-    fn oracle_missing_object_table_comment_names_only_includes_tables_and_views() {
-        let objects = vec![
-            super::db::ObjectInfo {
-                name: "ORDERS".to_string(),
-                object_type: "TABLE".to_string(),
-                schema: Some("DBX_TEST".to_string()),
-                valid: None,
-                signature: None,
-                custom_type_kind: None,
-                has_members: None,
-                comment: None,
-                created_at: None,
-                updated_at: None,
-                parent_schema: None,
-                parent_name: None,
-                trigger: None,
-                xugu_type_members_expandable: None,
-            },
-            super::db::ObjectInfo {
-                name: "ORDERS_VIEW".to_string(),
-                object_type: "VIEW".to_string(),
-                schema: Some("DBX_TEST".to_string()),
-                valid: None,
-                signature: None,
-                custom_type_kind: None,
-                has_members: None,
-                comment: None,
-                created_at: None,
-                updated_at: None,
-                parent_schema: None,
-                parent_name: None,
-                trigger: None,
-                xugu_type_members_expandable: None,
-            },
-            super::db::ObjectInfo {
-                name: "REFRESH_ORDERS".to_string(),
-                object_type: "PROCEDURE".to_string(),
-                schema: Some("DBX_TEST".to_string()),
-                valid: None,
-                signature: None,
-                custom_type_kind: None,
-                has_members: None,
-                comment: None,
-                created_at: None,
-                updated_at: None,
-                parent_schema: None,
-                parent_name: None,
-                trigger: None,
-                xugu_type_members_expandable: None,
-            },
-        ];
-
-        assert_eq!(
-            super::oracle_missing_object_table_comment_names(&objects),
-            vec!["ORDERS".to_string(), "ORDERS_VIEW".to_string()]
-        );
-    }
-
-    #[test]
     fn unsupported_table_comment_is_not_treated_as_a_connection_error() {
         // StarRocks/Doris editors fetch the table comment alongside indexes; a
         // misclassified error rebuilt the shared metadata pool and emptied the
@@ -8047,7 +8457,17 @@ pub async fn list_objects_core_with_options(
             return Ok(vec![]);
         }
     }
-    let metadata_session = EphemeralAgentMetadataSession::open(state, connection_id, Some(database), "objects").await;
+    let task_kind = if options.directory_page == Some(true) && !options.is_exact() {
+        if schema.trim().is_empty() {
+            "objects-directory-default"
+        } else {
+            "objects-directory"
+        }
+    } else {
+        "objects"
+    };
+    let mut metadata_session =
+        EphemeralAgentMetadataSession::open(state, connection_id, Some(database), task_kind).await;
     let result = retry_metadata_connection_for_session(
         state,
         connection_id,
@@ -8076,6 +8496,9 @@ pub async fn list_objects_core_with_options(
         },
     )
     .await;
+    if result.is_err() {
+        metadata_session.directory_reuse = None;
+    }
     metadata_session.finish(state, connection_id, Some(database)).await;
     result
 }
@@ -8122,7 +8545,11 @@ pub async fn list_completion_objects_core(
 
 fn ephemeral_agent_metadata_session_id(config: Option<&ConnectionConfig>, task_kind: &str) -> Option<String> {
     config
-        .filter(|config| crate::database_capabilities::is_agent_type(&config.db_type))
+        .filter(|config| {
+            crate::database_capabilities::is_agent_type(&config.db_type)
+                || (matches!(task_kind, "objects-directory" | "objects-directory-default")
+                    && crate::connection::uses_agent_metadata_sessions(config))
+        })
         .map(|_| task_client_session_id(task_kind, &uuid::Uuid::new_v4().to_string()))
 }
 
@@ -8781,6 +9208,17 @@ async fn list_objects_once(
         }
         if let Some(client) = extract_pool!(pool_handle.as_ref(), SqlServer) {
             let mut client = lock_sqlserver_metadata_client(&client).await?;
+            if options.directory_page == Some(true)
+                && !force_local_table_name_filter
+                && filter.is_none_or(str::is_empty)
+            {
+                if let (Some(limit), Some(types)) = (limit, object_types) {
+                    let objects =
+                        db::sqlserver::list_objects_page(&mut client, schema, types, limit, offset.unwrap_or(0))
+                            .await?;
+                    return Ok(ObjectListOutcome { objects, paging_applied: true });
+                }
+            }
             return db::sqlserver::list_objects(&mut client, schema).await.map(unpaged_object_list);
         }
         if let Some(agent_client) = extract_pool!(pool_handle.as_ref(), Agent) {
@@ -8857,7 +9295,8 @@ async fn list_objects_once(
                     return Ok(ObjectListOutcome { objects, paging_applied: !force_local_table_name_filter });
                 }
                 Ok(mut objects) if !objects.is_empty() => {
-                    if is_oracle {
+                    if is_oracle && !client.supports_capability(db::agent_driver::AgentCapability::ObjectListCommentsV1)
+                    {
                         load_oracle_table_comments_for_objects(
                             &mut client,
                             database,
@@ -8937,6 +9376,16 @@ async fn list_objects_once(
 
     match &pool {
         PoolKind::Mysql(p, mode) => {
+            if options.directory_page == Some(true)
+                && db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Mysql)
+                && !force_local_table_name_filter
+                && filter.is_none_or(str::is_empty)
+            {
+                if let (Some(limit), Some(types)) = (limit, object_types) {
+                    let objects = db::mysql::list_objects_page(p, database, types, limit, offset.unwrap_or(0)).await?;
+                    return Ok(ObjectListOutcome { objects, paging_applied: true });
+                }
+            }
             // Note: mysql and ob_oracle take different second args (database vs schema)
             if *mode == MysqlMode::OceanBaseOracle {
                 db::ob_oracle::list_objects(p, schema).await.map(unpaged_object_list)
@@ -8987,6 +9436,26 @@ async fn list_objects_once(
             let include_routines = object_types_include_routines(object_types);
             let include_custom_types = db_config.as_ref().is_some_and(supports_pg_custom_type_objects)
                 && object_types_include_custom_types(object_types);
+            if options.directory_page == Some(true)
+                && db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Postgres)
+                && !force_local_table_name_filter
+            {
+                if let Some(limit) = limit {
+                    let objects = db::postgres::list_objects_paged(
+                        p,
+                        schema,
+                        include_relations,
+                        include_routines,
+                        include_custom_types,
+                        object_types,
+                        filter,
+                        limit,
+                        offset.unwrap_or(0),
+                    )
+                    .await?;
+                    return Ok(ObjectListOutcome { objects, paging_applied: true });
+                }
+            }
             let mut objects = if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss) {
                 // openGauss variant excludes package members (propackage=true)
                 // from the top-level routine list; they are surfaced under

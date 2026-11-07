@@ -8,6 +8,7 @@ const store = vi.hoisted(() => ({
   config: undefined as Partial<ConnectionConfig> | undefined,
   setVisibleDatabaseFilter: vi.fn(async () => {}),
   clearVisibleDatabases: vi.fn(async () => {}),
+  setVisibleSchemas: vi.fn(async () => {}),
 }));
 
 function passthrough(tag: string) {
@@ -23,6 +24,18 @@ vi.mock("vue-i18n", () => ({
   useI18n: () => ({ t: (key: string, params?: Record<string, unknown>) => (params ? `${key}:${JSON.stringify(params)}` : key) }),
 }));
 vi.mock("@/components/ui/button", () => ({ Button: passthrough("button") }));
+vi.mock("vue-virtual-scroller", () => ({
+  RecycleScroller: {
+    props: ["items"],
+    setup:
+      (props: { items: unknown[] }, { slots }: { slots: { default: (value: { item: unknown }) => unknown[] } }) =>
+      () =>
+        h(
+          "div",
+          props.items.flatMap((item) => slots.default({ item })),
+        ),
+  },
+}));
 vi.mock("@/components/ui/input", () => ({
   Input: defineComponent({
     inheritAttrs: false,
@@ -53,11 +66,13 @@ vi.mock("@/stores/connectionStore", () => ({
     setVisibleDatabaseFilter: store.setVisibleDatabaseFilter,
     clearVisibleDatabases: store.clearVisibleDatabases,
     clearVisibleSchemas: async () => {},
-    setVisibleSchemas: async () => {},
+    setVisibleSchemas: store.setVisibleSchemas,
   }),
 }));
 vi.mock("@/lib/backend/api", () => ({
   listDatabases: async () => ["ak_orders", "ak_users", "billing", "mysql"].map((name) => ({ name })),
+  listSchemas: async () => ["APP", "SALES", "SYS", "SYSRAC", "NEW_SCHEMA"],
+  executeQuery: async () => ({ columns: ["USERNAME"], rows: [["SYS"], ["SYSRAC"]] }),
 }));
 
 import VisibleDatabasesDialog from "@/components/sidebar/VisibleDatabasesDialog.vue";
@@ -68,6 +83,7 @@ let root: HTMLDivElement | undefined;
 beforeEach(() => {
   store.setVisibleDatabaseFilter.mockClear();
   store.clearVisibleDatabases.mockClear();
+  store.setVisibleSchemas.mockClear();
 });
 
 afterEach(() => {
@@ -122,6 +138,28 @@ async function click(element: HTMLElement) {
   element.click();
   await flush();
 }
+
+describe("VisibleDatabasesDialog schema migration", () => {
+  it("initializes old root list and patterns as checked names, including explicitly selected system schemas", async () => {
+    await mountDialog({ db_type: "oracle", database: "XE", visible_databases: ["SYS"], visible_database_patterns: ["SA%"], show_system_schemas: false });
+    expect(root!.querySelector('[data-schema-row="SYS"]')?.getAttribute("aria-checked")).toBe("true");
+    expect(root!.querySelector('[data-schema-row="SALES"]')?.getAttribute("aria-checked")).toBe("true");
+    expect(root!.querySelector('[data-schema-row="NEW_SCHEMA"]')?.getAttribute("aria-checked")).toBe("false");
+    expect(store.setVisibleSchemas).not.toHaveBeenCalled();
+    await click(button("visibleDatabases.save"));
+    expect(store.setVisibleSchemas).toHaveBeenCalledWith("conn-1", "XE", ["SALES", "SYS"], { names: ["APP", "SALES", "SYS", "SYSRAC", "NEW_SCHEMA"], systemNames: new Set(["SYS", "SYSRAC"]) });
+  });
+  it("keeps an explicit scope ahead of old settings and allows saving no schemas", async () => {
+    await mountDialog({ db_type: "oracle", database: "XE", visible_schemas: { XE: ["APP", "UNAVAILABLE"] }, visible_database_patterns: ["%"], show_system_schemas: true });
+    expect(root!.querySelector('[data-schema-row="SALES"]')?.getAttribute("aria-checked")).toBe("false");
+    await click(button("visibleDatabases.save"));
+    expect(store.setVisibleSchemas).toHaveBeenLastCalledWith("conn-1", "XE", ["APP", "UNAVAILABLE"], expect.objectContaining({ names: ["APP", "SALES", "SYS", "SYSRAC", "NEW_SCHEMA"], systemNames: new Set(["SYS", "SYSRAC"]) }));
+    await click(button("visibleDatabases.clear"));
+    expect(button("visibleDatabases.save").disabled).toBe(false);
+    await click(button("visibleDatabases.save"));
+    expect(store.setVisibleSchemas).toHaveBeenLastCalledWith("conn-1", "XE", [], expect.objectContaining({ names: ["APP", "SALES", "SYS", "SYSRAC", "NEW_SCHEMA"], systemNames: new Set(["SYS", "SYSRAC"]) }));
+  });
+});
 
 describe("VisibleDatabasesDialog wildcard patterns (#14221)", () => {
   it("locks pattern matches as checked and saves a pattern-only filter once the checks are cleared", async () => {

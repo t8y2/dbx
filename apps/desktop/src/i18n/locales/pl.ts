@@ -63,6 +63,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  navigationPreferences: { refreshFailed: "Ustawienia zapisano, ale odświeżenie nawigacji nie powiodło się: {message}", connectionUnavailable: "Połączenie już nie istnieje. Otwórz ponownie." },
   tableColumnPaste,
   objectDependencies: {
     dependencies: "Zależności",
@@ -3302,6 +3303,7 @@ export default withEnglishFallback({
     loadFailed: "Nie można uruchomić DBX. Spróbuj ponownie.",
   },
   common: {
+    all: "Wszystkie",
     fileNotFound: "Plik nie istnieje: {path}",
     loading: "Wczytywanie...",
     stopping: "Zatrzymywanie...",
@@ -4096,16 +4098,20 @@ export default withEnglishFallback({
     noDatabasesFound: "Nie znaleziono baz danych",
   },
   contextMenu: {
+    viewObjects: "Wyświetl obiekty",
+    refreshObjects: "Odśwież obiekty",
+    confirmDeleteConnectionConfig: "Czy usunąć zapisaną konfigurację połączenia „{name}”?",
+    confirmDeleteSelectedConnectionConfigs: "Czy usunąć zaznaczone zapisane konfiguracje połączeń ({count})?",
     openConnection: "Otwórz połączenie",
     closeConnection: "Zamknij połączenie",
     closeSelectedConnections: "Zamknij zaznaczone połączenia ({count})",
     closeDatabaseConnection: "Zamknij połączenie z bazą danych",
-    deleteConnection: "Usuń połączenie",
-    deleteSelectedConnections: "Usuń zaznaczone połączenia ({count})",
+    deleteConnection: "Usuń połączenie…",
+    deleteSelectedConnections: "Usuń zaznaczone połączenia ({count})…",
     confirmDeleteTitle: "Usuń połączenie",
     confirmDeleteMessage: "Czy na pewno chcesz usunąć „{name}”? Tej operacji nie można cofnąć.",
     confirmDeleteSelectedMessage: "Czy na pewno chcesz usunąć {count} zaznaczonych połączeń? Tej operacji nie można cofnąć.",
-    editConnection: "Edytuj połączenie",
+    editConnection: "Edytuj połączenie…",
     revealDatabaseFile: "Pokaż w menedżerze plików",
     selectVisibleDatabases: "Wybierz widoczne bazy danych",
     configureVisibleObjects: "Filtr widocznych obiektów",
@@ -4580,6 +4586,8 @@ export default withEnglishFallback({
     loadFailed: "Nie udało się załadować baz danych: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "Schematy użytkownika",
+    systemGroup: "Schematy systemowe",
     title: "Aktualizacja zabezpieczeń danych",
     detailLabel: "Widoczne schematy",
     detailActionLabel: "Skonfiguruj widoczne schematy dla „{connection}”",
@@ -4596,6 +4604,9 @@ export default withEnglishFallback({
     loadFailed: "Nie udało się załadować schematów: {message}",
   },
   databaseLinks: {
+    foreignPrivateReadOnly: "Prywatne łącze innego użytkownika jest tylko do odczytu.",
+    privateSchemaUnavailable: "Nie można utworzyć prywatnego łącza w schemacie innego użytkownika. Użyj schematu zalogowanego użytkownika.",
+    permissionUnknown: "Uprawnienie do usuwania nie jest potwierdzone; baza danych sprawdzi je podczas wykonania. Odśwież, aby sprawdzić ponownie.",
     remoteTenant: "Zdalny tenant",
     remoteProtocol: "Protokół zdalnej bazy danych",
     remoteCluster: "Zdalny klaster (opcjonalnie)",
@@ -4621,6 +4632,17 @@ export default withEnglishFallback({
     manage: "Zarządzaj łączami bazodanowymi",
   },
   tree: {
+    navigationStatus: { denied: "Brak uprawnień", error: "Błąd wczytywania", unknown: "Niepotwierdzone", unsupported: "Nieobsługiwane", truncated: "Częściowe wyniki" },
+    publicObjects: "Obiekty publiczne",
+    tenantObjects: "Obiekty dzierżawcy",
+    jobs: "Zadania",
+    jobCategories: {
+      regular: "Zadania zaplanowane",
+      lightweight: "Zadania lekkie",
+      inMemory: "Zadania w pamięci",
+      legacy: "Zadania tradycyjne",
+    },
+    openList: "Otwórz listę",
     savedSql: "Biblioteka SQL",
     queries: "Zapytania",
     userAdmin: "Użytkownicy i uprawnienia",

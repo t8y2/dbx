@@ -88,7 +88,57 @@ describe("connectionDatabaseInfo", () => {
     expect(connectionConfigFingerprint({ ...original, sidebar_auto_load_all_tables: true })).toBe(connectionConfigFingerprint(original));
     expect(connectionConfigFingerprint({ ...original, show_database_links: false })).toBe(connectionConfigFingerprint(original));
     expect(connectionConfigFingerprint({ ...original, show_native_jobs: false, show_user_admin: true })).toBe(connectionConfigFingerprint(original));
+    expect(connectionConfigFingerprint({ ...original, show_extensions: false })).toBe(connectionConfigFingerprint(original));
     expect(connectionConfigFingerprint({ ...original, jdbc_dialect: "oceanbase-oracle" })).toBe(connectionConfigFingerprint(original));
+  });
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("canonicalizes only %s native defaults and presentation fields", (engine) => {
+    const original = config({ db_type: engine, driver_label: undefined, driver_profile: undefined, external_config: null });
+    const edited = {
+      ...original,
+      external_config: undefined,
+      show_extensions: false,
+      color: "",
+      production_badge_scope: "database" as const,
+      driver_label: "Display label",
+      driver_profile: engine,
+      sysdba: false,
+      jdbc_driver_paths: [],
+      gbase_server: "",
+      informix_server: "",
+      ...(engine === "oracle" ? { oracle_connection_type: "service_name" } : {}),
+    };
+    expect(connectionConfigFingerprint(edited)).toBe(connectionConfigFingerprint(original));
+    for (const driver_profile of ["oci", "oracle-legacy", "oracle-10g", "custom-driver"]) {
+      expect(connectionConfigFingerprint({ ...edited, driver_profile })).not.toBe(connectionConfigFingerprint(original));
+    }
+    for (const change of [
+      { host: "other.test" },
+      { username: "other" },
+      { password: "other" },
+      { read_only: true },
+      { is_production: true },
+      { production_databases: ["other"] },
+      { sysdba: true },
+      { jdbc_driver_paths: ["driver.jar"] },
+      { gbase_server: "nonempty" },
+      { informix_server: "nonempty" },
+      { oracle_connection_type: "sid" },
+      { oracle_connection_type: "tns" },
+    ]) {
+      expect(connectionConfigFingerprint({ ...edited, ...change })).not.toBe(connectionConfigFingerprint(original));
+    }
+    expect(connectionConfigFingerprint({ ...edited, jdbc_driver_paths: ["a.jar", "b.jar"] })).not.toBe(connectionConfigFingerprint({ ...edited, jdbc_driver_paths: ["b.jar", "a.jar"] }));
+    for (const external_config of [{}, { custom: true }, [], "custom"]) {
+      expect(connectionConfigFingerprint({ ...edited, external_config })).not.toBe(connectionConfigFingerprint(original));
+    }
+    expect(connectionConfigFingerprint({ ...edited, external_config: { custom: true } })).not.toBe(connectionConfigFingerprint({ ...edited, external_config: { custom: false } }));
+    for (const db_type of ["jdbc", "plugin"] as const) {
+      const external = config({ db_type, driver_label: "Oracle" });
+      expect(connectionConfigFingerprint({ ...external, driver_label: "PostgreSQL" })).not.toBe(connectionConfigFingerprint(external));
+      expect(connectionConfigFingerprint({ ...external, driver_profile: db_type })).not.toBe(connectionConfigFingerprint(external));
+      expect(connectionConfigFingerprint({ ...external, external_config: null })).not.toBe(connectionConfigFingerprint(external));
+    }
   });
 
   it("formats only database metadata for rows and copied text", () => {

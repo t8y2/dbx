@@ -104,6 +104,87 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}, configureMetad
   return { props, currentView, view, store, settings, runtime, metadata, completion, provide, startCompletion };
 }
 
+describe.each(["oracle", "oceanbase-oracle"] as const)("%s table completion scope", (databaseType) => {
+  beforeEach(() => vi.useRealTimers());
+
+  it.each([
+    ["PUBLIC", "PUBLIC_ALIAS", "always", false, "PUBLIC_ALIAS"],
+    ["PUBLIC", "MixedAlias", "always", true, '"MixedAlias"'],
+    ["A", "MixedCase", "collision", true, '"MixedCase"'],
+    ["A", "Order Items", "collision", true, '"Order Items"'],
+    ["A", "ORDERS", "collision", false, "ORDERS"],
+  ])("accepts %s.%s with %s qualification and quoteIdentifiers=%s", async (schema, name, qualification, quoteIdentifiers, expected) => {
+    const { provide, store, currentView, settings } = createHarness({ databaseType, dialect: "oracle", schema: "A", modelValue: "SELECT * FROM " });
+    settings.editorSettings.tableCompletionSchemaQualification = qualification;
+    settings.editorSettings.generateSqlQuoteIdentifiers = quoteIdentifiers;
+    const table: SqlCompletionTable = { schema, name, type: "table", ...(schema === "PUBLIC" ? { tableType: "SYNONYM", applyName: `PUBLIC.${name}` } : {}) };
+    store.lookupLocalCompletionTables.mockReturnValue([table]);
+    store.listCompletionTables.mockResolvedValue([table]);
+    const result = await provide();
+    const option = result!.options.find((candidate) => candidate.label === name)!;
+    expect(option).toBeDefined();
+    if (typeof option.apply === "function") option.apply(currentView, option, result!.from, currentView.state.doc.length);
+    else currentView.dispatch(insertCompletionText(currentView.state, option.apply ?? option.label, result!.from, currentView.state.doc.length));
+    expect(currentView.state.doc.toString()).toBe(`SELECT * FROM ${expected}`);
+  });
+
+  it("keeps warm other-owner tables out of implicit, explicit and failed completion", async () => {
+    const harness = createHarness({ databaseType, schema: "A", modelValue: "SELECT * FROM " });
+    const tables: SqlCompletionTable[] = [
+      { schema: "B", name: "OTHER_TABLE", type: "table" },
+      { schema: "SYS", name: "SYSTEM_TABLE", type: "table" },
+      { schema: "A", name: "LOCAL_TABLE", type: "table" },
+      { schema: "A", name: "ALIAS", tableType: "SYNONYM", type: "table" },
+      { schema: "PUBLIC", name: "PUBLIC_ALIAS", tableType: "SYNONYM", type: "table" },
+      { schema: "PUBLIC", name: "ALIAS", tableType: "SYNONYM", type: "table" },
+    ];
+    harness.store.lookupLocalCompletionTables.mockReturnValue(tables);
+    harness.store.listCompletionTables.mockResolvedValue(tables);
+    harness.store.listCompletionSchemas.mockResolvedValue(["A", "B", "SYS"]);
+    harness.store.lookupLocalCompletionSchemas.mockReturnValue(["A", "B", "SYS"]);
+    const implicit = await harness.provide();
+    const labels = implicit!.options.map((option) => option.label);
+    expect(labels).toContain("LOCAL_TABLE");
+    expect(labels).toContain("PUBLIC_ALIAS");
+    expect(labels.filter((label) => label === "ALIAS")).toHaveLength(1);
+    expect(labels).not.toContain("OTHER_TABLE");
+    expect(labels).not.toContain("SYSTEM_TABLE");
+    expect(labels).toContain("B");
+    const alias = implicit!.options.find((option) => option.label === "ALIAS")!;
+    if (typeof alias.apply === "function") alias.apply(harness.currentView, alias, implicit!.from, harness.currentView.state.doc.length);
+    else harness.currentView.dispatch({ changes: { from: implicit!.from, to: harness.currentView.state.doc.length, insert: alias.apply ?? alias.label } });
+    expect(harness.currentView.state.doc.toString()).toBe("SELECT * FROM ALIAS");
+    const update = (sql: string) => harness.currentView.dispatch({ changes: { from: 0, to: harness.currentView.state.doc.length, insert: sql }, selection: { anchor: sql.length } });
+    update("SELECT * FROM b.");
+    const explicit = await harness.provide();
+    expect(explicit!.options.map((option) => option.label)).toContain("OTHER_TABLE");
+    expect(explicit!.options.map((option) => option.label)).not.toContain("LOCAL_TABLE");
+    expect(explicit!.options.map((option) => option.label)).not.toContain("PUBLIC_ALIAS");
+    const other = explicit!.options.find((option) => option.label === "OTHER_TABLE")!;
+    if (typeof other.apply === "function") other.apply(harness.currentView, other, explicit!.from, harness.currentView.state.doc.length);
+    else harness.currentView.dispatch(insertCompletionText(harness.currentView.state, other.apply ?? other.label, explicit!.from, harness.currentView.state.doc.length));
+    expect(harness.currentView.state.doc.toString()).toBe("SELECT * FROM b.OTHER_TABLE");
+    harness.store.listCompletionTables.mockRejectedValue(new Error("metadata timeout"));
+    update("SELECT * FROM ");
+    const fallback = await harness.provide();
+    expect(fallback!.options.map((option) => option.label)).not.toContain("OTHER_TABLE");
+    expect(fallback!.options.map((option) => option.label)).toContain("LOCAL_TABLE");
+  });
+
+  it("rejects folded owners for an explicitly quoted mixed-case owner", async () => {
+    const { provide, store } = createHarness({ databaseType, schema: "A", modelValue: 'SELECT * FROM "MixedOwner".' });
+    const tables: SqlCompletionTable[] = [
+      { schema: "MIXEDOWNER", name: "WRONG_OWNER", type: "table" },
+      { schema: "MixedOwner", name: "RIGHT_OWNER", type: "table" },
+    ];
+    store.lookupLocalCompletionTables.mockReturnValue(tables);
+    store.listCompletionTables.mockResolvedValue(tables);
+    const result = await provide();
+    expect(result!.options.map((option) => option.label)).toContain("RIGHT_OWNER");
+    expect(result!.options.map((option) => option.label)).not.toContain("WRONG_OWNER");
+  });
+});
+
 describe.each([false, true])("OceanBase standalone routine completion (semantic=%s)", (semanticCompletionEnabled) => {
   beforeEach(() => vi.useRealTimers());
 

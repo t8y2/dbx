@@ -4,11 +4,13 @@ import type { ConnectionConfig, TableInfo, TreeNode } from "@/types/database";
 import { SCHEMA_TREE_CACHE_TTL_MS } from "@/lib/metadata/schemaTreeCache";
 
 async function setup(mode: "grouped" | "simple", config: Partial<ConnectionConfig> = {}) {
+  const canonical = (config.db_type ?? "postgres") === "postgres" && (!config.driver_profile || config.driver_profile === "postgres");
+  const simpleSource = mode === "simple" && !canonical;
   const cache = new Map<string, any>();
   const roots: TableInfo[] = Array.from({ length: 73 }, (_, i) => ({ name: `root_${String(i).padStart(3, "0")}`, schema: "public", table_type: "TABLE" }));
   const rows = roots.flatMap((root) => [root, ...Array.from({ length: 7 }, (_, i) => ({ name: `${root.name}_p${i}`, schema: "public", table_type: "TABLE", parent_name: root.name }))]);
   const listTables = vi.fn(async (_id: string, _db: string, _schema: string, _filter: string, limit: number, offset = 0, ...rest: unknown[]) => {
-    expect(rest[4]).toBe(true);
+    if (rest[4] !== true) return rows.slice(offset, offset + limit);
     const selected = new Set(roots.slice(offset, offset + limit).map((root) => root.name));
     return rows.filter((row) => selected.has(row.parent_name || row.name));
   });
@@ -23,7 +25,8 @@ async function setup(mode: "grouped" | "simple", config: Partial<ConnectionConfi
     checkConnectionHealth,
     connectDb,
     connectionIdentifierQuote: vi.fn().mockResolvedValue('"'),
-    listDatabases: vi.fn().mockResolvedValue([]),
+    listDatabases: vi.fn().mockResolvedValue([{ name: "app" }]),
+    listSchemaInfos: vi.fn().mockResolvedValue([{ name: "public" }]),
     listInstalledAgents: vi.fn().mockResolvedValue([]),
     listObjects: vi.fn().mockResolvedValue([]),
     deleteSchemaCachePrefix: vi.fn(async (prefix: string) => {
@@ -49,13 +52,26 @@ async function setup(mode: "grouped" | "simple", config: Partial<ConnectionConfi
       label: "PG",
       type: "connection",
       connectionId: "pg",
+      isExpanded: true,
       children: [
-        { id: "pg:app:public", label: "public", type: "schema", connectionId: "pg", database: "app", schema: "public", children: mode === "simple" ? [] : [{ id: "pg:app:public:__tables", label: "Tables", type: "group-tables", connectionId: "pg", database: "app", schema: "public", children: [] }] },
+        {
+          id: "pg:app",
+          label: "app",
+          type: "database",
+          connectionId: "pg",
+          database: "app",
+          isExpanded: true,
+          children: [
+            { id: "pg:app:public", label: "public", type: "schema", connectionId: "pg", database: "app", schema: "public", children: simpleSource ? [] : [{ id: "pg:app:public:__tables", label: "Tables", type: "group-tables", connectionId: "pg", database: "app", schema: "public", children: [] }] },
+          ],
+        },
       ],
     },
   ];
-  const parent = mode === "simple" ? store.treeNodes[0].children![0] : store.treeNodes[0].children![0].children![0];
-  const open = (force = false) => (mode === "simple" ? store.loadTables("pg", "app", "public", { force }) : store.loadObjectGroupChildren(parent, { force }));
+  const schema = store.treeNodes[0].children![0].children![0];
+  schema.isExpanded = true;
+  const parent = simpleSource ? schema : schema.children![0];
+  const open = (force = false) => (simpleSource ? store.loadTables("pg", "app", "public", { force }) : store.loadObjectGroupChildren(parent, { force }));
   const release = () => {
     parent.isExpanded = false;
     expect(store.releaseCollapsedTreeNodeChildren(parent.id)).toBe(true);
@@ -87,6 +103,28 @@ const nativeConfigs: Partial<ConnectionConfig>[] = [
   { db_type: "kwdb" },
   { db_type: "opengauss" },
 ];
+
+it.each(["grouped", "simple"] as const)("loads the shared PostgreSQL directory with complete partitions in %s display", async (mode) => {
+  const f = await setup(mode);
+  await f.store.loadTables("pg", "app", "public");
+  await f.settle();
+  const schema = f.store.treeNodes[0].children![0].children![0];
+  const group = schema.children!.find((node) => node.type === "group-tables")!;
+  const tables = group.children!.filter((node) => node.type === "table");
+  expect(tables).toHaveLength(73);
+  expect(tables.every((node) => node.children?.find((child) => child.type === "group-partitions")?.children?.length === 7)).toBe(true);
+  expect(f.listTables.mock.calls.some((call) => call[4] === 1000 && call[10] !== true)).toBe(true);
+});
+
+it("retains an explicit group load during reconnect with collapsed ancestors", async () => {
+  const f = await setup("grouped");
+  f.store.treeNodes[0].children![0].isExpanded = false;
+  f.store.treeNodes[0].children![0].children![0].isExpanded = false;
+  f.store.connectedIds.delete("pg");
+  await f.open();
+  await f.settle();
+  expect(f.tables()).toHaveLength(70);
+});
 
 describe.each(nativeConfigs.flatMap((config) => (["grouped", "simple"] as const).map((mode) => ({ mode, config }))))("$mode released root window: $config", ({ mode, config }) => {
   it.each(["disconnected", "dead-pool"])("loads the initial page after %s connection recovery", async (reason) => {

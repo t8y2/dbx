@@ -1,4 +1,5 @@
 import { useConnectionStore } from "@/stores/connectionStore";
+import { nativeJobPageLabelKey } from "@/lib/database/nativeJobAdmin";
 import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { hexToRgba } from "@/lib/common/color";
@@ -313,6 +314,9 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
   const settingsStore = useSettingsStore();
   const compact = settingsStore.editorSettings.compactTabTitle;
   if (isPreviewTab(tab)) return tab.title;
+  if (tab.mode === "database-jobs" && tab.nativeJobPage && !tab.customTitle) {
+    return `${tab.nativeJobPage.schema} · ${t(nativeJobPageLabelKey(tab.nativeJobPage))}`;
+  }
   if (useConnectionStore().getConfig(tab.connectionId)?.db_type === "redis") {
     // Redis query tabs normally identify their logical database (db0/db1), but a
     // saved SQL file or external SQL file is a document: show its file title

@@ -66,6 +66,7 @@ const consul = {
 };
 
 export default {
+  navigationPreferences: { refreshFailed: "Settings saved, but navigation refresh failed: {message}", connectionUnavailable: "Connection no longer exists. Please reopen." },
   oracleTrigger: {
     errorPositionUnavailable: "Source opened. The error location could not be verified; check the reported line and column.",
     reconcileStructure: "Reconcile applied changes",
@@ -4247,6 +4248,7 @@ export default {
     loadFailed: "Unable to load DBX. Please try again.",
   },
   common: {
+    all: "All",
     fileNotFound: "File does not exist: {path}",
     loading: "Loading...",
     stopping: "Stopping...",
@@ -5120,6 +5122,10 @@ export default {
     noDatabasesFound: "No databases found",
   },
   contextMenu: {
+    viewObjects: "View objects",
+    refreshObjects: "Refresh objects",
+    confirmDeleteConnectionConfig: "Delete the saved connection configuration “{name}”?",
+    confirmDeleteSelectedConnectionConfigs: "Delete the {count} selected saved connection configurations?",
     splitTab: "Split",
     batchCloseTabs: "Close multiple tabs",
     copyTabName: "Copy Tab Name",
@@ -5127,12 +5133,12 @@ export default {
     closeConnection: "Close Connection",
     closeSelectedConnections: "Close Selected {count} Connections",
     closeDatabaseConnection: "Close Database Connection",
-    deleteConnection: "Delete Connection",
-    deleteSelectedConnections: "Delete Selected {count} Connections",
+    deleteConnection: "Delete Connection…",
+    deleteSelectedConnections: "Delete Selected {count} Connections…",
     confirmDeleteTitle: "Delete Connection",
     confirmDeleteMessage: 'Are you sure you want to delete "{name}"? This cannot be undone.',
     confirmDeleteSelectedMessage: "Are you sure you want to delete the selected {count} connections? This cannot be undone.",
-    editConnection: "Edit Connection",
+    editConnection: "Edit Connection…",
     revealDatabaseFile: "Reveal in File Manager",
     selectVisibleDatabases: "Select Visible Databases",
     configureVisibleObjects: "Visible Object Filter",
@@ -5632,6 +5638,8 @@ export default {
     loadFailed: "Failed to load databases: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "User schemas",
+    systemGroup: "System schemas",
     title: "Schema Filter",
     detailLabel: "Visible schemas",
     detailActionLabel: 'Configure visible schemas for "{connection}"',
@@ -5648,6 +5656,9 @@ export default {
     loadFailed: "Failed to load schemas: {message}",
   },
   databaseLinks: {
+    foreignPrivateReadOnly: "Another user's private link is read-only.",
+    privateSchemaUnavailable: "A private database link cannot be created in another user's schema. Use the logged-in user's schema.",
+    permissionUnknown: "Delete permission is unconfirmed; the database checks it on execution. Refresh to check again.",
     remoteTenant: "Remote tenant",
     remoteProtocol: "Remote database protocol",
     remoteCluster: "Remote cluster (optional)",
@@ -5673,6 +5684,18 @@ export default {
     manage: "Manage database links",
   },
   tree: {
+    navigationStatus: { denied: "No permission", error: "Load failed", unknown: "Unknown", unsupported: "Unsupported", truncated: "Partial results" },
+    scheduler: "Scheduler",
+    publicObjects: "Public objects",
+    tenantObjects: "Tenant objects",
+    jobs: "Jobs",
+    jobCategories: {
+      regular: "Scheduled jobs",
+      lightweight: "Lightweight jobs",
+      inMemory: "In-memory jobs",
+      legacy: "Legacy jobs",
+    },
+    openList: "Open list",
     nativeJobs: "Native jobs",
     savedSql: "SQL Library",
     queries: "Queries",
@@ -6530,6 +6553,14 @@ export default {
     operationFailedWithMessage: "Operation failed: {message}",
   },
   nativeJobs: {
+    contextChanged: "The job context has changed or expired. Refresh the list and try again.",
+    scopeRecoveryTitle: "Restore job tab",
+    scopeRecoveryHint: "This older tab needs a verified schema. Reopen the job from the object tree; saved content is retained.",
+    retainedContent: "View retained content",
+    scopeMismatch: "The job does not belong to this page's schema or category. Reopen it from its own category.",
+    scopeInvalid: "The job page has an invalid schema or category. Reopen it from the object tree.",
+    legacySchemaCreationUnavailable: "This creation method cannot create a legacy job in another user's schema. Use the logged-in user's schema.",
+    scopeResolutionUnavailable: "The job's schema could not be verified. Check the connection and catalog permissions, then retry.",
     datePrecisionMicroseconds: "Job dates in this OceanBase version support microsecond precision only. Set fractional-second digits 7–9 to 0 and preview again; your original input has been retained.",
     previousContext: "Operation result from the previous context",
     detachedDraft: "The original draft was retained and is not bound to the current object.",

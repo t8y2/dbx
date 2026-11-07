@@ -4,7 +4,7 @@ use crate::models::connection::{
     database_info_from_protocol_value, ConnectionConfig, DatabaseConnectionInfo, DatabaseType,
 };
 use crate::session_credentials::current_credential_owner;
-use dbx_sql::native_jobs::native_job_list_queries;
+use dbx_sql::native_jobs::native_job_list_queries_in_category;
 use dbx_types::native_jobs::{
     NativeJobCatalogSource, NativeJobContext, NativeJobEngine, NativeJobKind, NativeJobList, NativeJobListRequest,
     NativeJobScope, NativeJobSummary,
@@ -376,9 +376,16 @@ pub(super) async fn open_pool(
     state: &AppState,
     scope: &NativeJobScope,
 ) -> Result<(super::super::EphemeralAgentMetadataSession, PoolKind), &'static str> {
+    open_pool_for_task(state, scope, "native-jobs").await
+}
+
+async fn open_pool_for_task(
+    state: &AppState,
+    scope: &NativeJobScope,
+    task: &'static str,
+) -> Result<(super::super::EphemeralAgentMetadataSession, PoolKind), &'static str> {
     let database = (!scope.database.is_empty()).then_some(scope.database.as_str());
-    let session =
-        super::super::EphemeralAgentMetadataSession::open(state, &scope.connection_id, database, "native-jobs").await;
+    let session = super::super::EphemeralAgentMetadataSession::open(state, &scope.connection_id, database, task).await;
     let key = state
         .get_or_create_metadata_pool_for_session(&scope.connection_id, database, session.client_session_id())
         .await
@@ -512,8 +519,23 @@ where
 {
     let (scope, kind, offset, limit) = (&request.scope, request.kind, request.offset, request.limit);
     let bound = state.native_jobs.context(state, scope)?;
-    let candidates =
-        native_job_list_queries(bound.context.engine, kind, request.schema.as_deref(), &request.filter, offset, limit)?;
+    let mut candidates = native_job_list_queries_in_category(
+        bound.context.engine,
+        kind,
+        request.schema.as_deref(),
+        &request.filter,
+        offset,
+        limit,
+        request.scheduler_category,
+    )?;
+    if bound.context.engine == NativeJobEngine::Oracle
+        && request.scheduler_category == Some(dbx_types::native_jobs::NativeJobSchedulerCategory::Regular)
+    {
+        candidates.retain(|candidate| {
+            candidate.coverage != NativeJobCatalogCoverage::CurrentUser
+                || request.schema.as_deref() == Some(bound.context.session_user.as_str())
+        });
+    }
     let section = tokio::select! {
         biased;
         _ = bound.lifecycle.cancellation().cancelled() => return Err("native_job_context_changed"),
@@ -609,6 +631,7 @@ fn summaries(
             },
             enabled,
             job_type: text("JOB_TYPE"),
+            job_style: text("JOB_STYLE"),
             state: text("STATE"),
             next_run: row.get(if scheduler { "NEXT_RUN_DATE" } else { "NEXT_DATE" }).cloned(),
             comments: text(if engine == NativeJobEngine::Dameng && !scheduler { "DESCRIBE" } else { "COMMENTS" }),
@@ -628,7 +651,12 @@ pub async fn native_job_list_core(state: &AppState, request: &NativeJobListReque
     let scope = &request.scope;
     let bound = state.native_jobs.context(state, scope).map_err(str::to_string)?;
     let timeout = super::super::agent_metadata_timeout(state.configs.read().await.get(&scope.connection_id));
-    let (session, pool) = open_pool(state, scope).await.map_err(str::to_string)?;
+    let task = if request.schema.as_deref().is_none_or(|schema| schema.trim().is_empty()) {
+        "objects-directory-default"
+    } else {
+        "objects-directory"
+    };
+    let (mut session, pool) = open_pool_for_task(state, scope, task).await.map_err(str::to_string)?;
     let result = async {
         validate_runtime_context(state, &bound, &pool).await?;
         native_job_list_with(state, request, |query| {
@@ -638,6 +666,11 @@ pub async fn native_job_list_core(state: &AppState, request: &NativeJobListReque
     }
     .await
     .map_err(str::to_string);
+    if !matches!(&result, Ok(list) if matches!(list.jobs, NativeJobMetadata::Available { .. } | NativeJobMetadata::Empty | NativeJobMetadata::Truncated { .. }))
+    {
+        session.directory_reuse = None;
+    }
+    drop(pool);
     session.finish(state, &scope.connection_id, (!scope.database.is_empty()).then_some(scope.database.as_str())).await;
     result
 }
@@ -646,13 +679,21 @@ pub async fn native_job_read_core(
     state: &AppState,
     target: &NativeJobRef,
 ) -> Result<dbx_types::native_jobs::NativeJobDetails, String> {
+    native_job_read_in_page_core(state, target, None).await
+}
+
+pub async fn native_job_read_in_page_core(
+    state: &AppState,
+    target: &NativeJobRef,
+    page: Option<&dbx_types::native_jobs::NativeJobPageScope>,
+) -> Result<dbx_types::native_jobs::NativeJobDetails, String> {
     target.validate().map_err(str::to_string)?;
     let bound = state.native_jobs.context(state, target.scope()).map_err(str::to_string)?;
     let timeout = super::super::agent_metadata_timeout(state.configs.read().await.get(&target.scope().connection_id));
     let (session, pool) = open_pool(state, target.scope()).await.map_err(str::to_string)?;
     let result = async {
         validate_runtime_context(state, &bound, &pool).await?;
-        native_job_read_with(state, target, |query| {
+        native_job_read_in_page_with(state, target, page, |query| {
             execute_catalog_query(bound.context.engine, &pool, &target.scope().database, query, timeout)
         })
         .await
@@ -714,12 +755,25 @@ where
     Q: FnMut(NativeJobCatalogQuery) -> F,
     F: Future<Output = Result<Value, NativeJobCatalogFailure>>,
 {
+    native_job_read_in_page_with(state, target, None, query).await
+}
+
+pub async fn native_job_read_in_page_with<Q, F>(
+    state: &AppState,
+    target: &NativeJobRef,
+    page: Option<&dbx_types::native_jobs::NativeJobPageScope>,
+    query: Q,
+) -> Result<dbx_types::native_jobs::NativeJobDetails, &'static str>
+where
+    Q: FnMut(NativeJobCatalogQuery) -> F,
+    F: Future<Output = Result<Value, NativeJobCatalogFailure>>,
+{
     target.validate()?;
     let bound = state.native_jobs.context(state, target.scope())?;
     let mut result = tokio::select! {
         biased;
         _ = bound.lifecycle.cancellation().cancelled() => return Err("native_job_context_changed"),
-        result = super::details::read_native_job_details_with(bound.context.engine, target, query) => result?,
+        result = super::details::read_native_job_details_in_page_with(bound.context.engine, target, page, query) => result?,
     };
     state.native_jobs.context(state, target.scope())?;
     state.native_jobs.remember(bound.context.engine, &mut result);

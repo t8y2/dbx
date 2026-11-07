@@ -62,6 +62,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  navigationPreferences: { refreshFailed: "Parametrlər saxlanıldı, lakin naviqasiyanı yeniləmək mümkün olmadı: {message}", connectionUnavailable: "Bağlantı artıq mövcud deyil. Yenidən açın." },
   tableColumnPaste,
   objectDependencies: {
     dependencies: "Asılılıqlar",
@@ -2937,6 +2938,7 @@ export default withEnglishFallback({
     unknown: "Server tərəfində gözlənilməz xəta baş verdi.",
   },
   common: {
+    all: "Hamısı",
     fileNotFound: "Fayl mövcud deyil: {path}",
     loading: "Yüklənir...",
     stopping: "Dayandırılır...",
@@ -3732,16 +3734,20 @@ export default withEnglishFallback({
     noDatabasesFound: "Verilənlər bazası tapılmadı",
   },
   contextMenu: {
+    viewObjects: "Obyektlərə bax",
+    refreshObjects: "Obyektləri yenilə",
+    confirmDeleteConnectionConfig: "Saxlanmış “{name}” əlaqə konfiqurasiyası silinsin?",
+    confirmDeleteSelectedConnectionConfigs: "Seçilmiş {count} saxlanmış əlaqə konfiqurasiyası silinsin?",
     openConnection: "Əlaqəni aç",
     closeConnection: "Əlaqəni bağla",
     closeSelectedConnections: "Seçilmiş {count} əlaqəni bağla",
     closeDatabaseConnection: "Verilənlər bazası əlaqəsini bağla",
-    deleteConnection: "Əlaqəni sil",
-    deleteSelectedConnections: "Seçilmiş {count} əlaqəni sil",
+    deleteConnection: "Əlaqəni sil…",
+    deleteSelectedConnections: "Seçilmiş {count} əlaqəni sil…",
     confirmDeleteTitle: "Əlaqəni sil",
     confirmDeleteMessage: '"{name}" elementini silmək istədiyinizə əminsiniz? Bunu geri qaytarmaq mümkün deyil.',
     confirmDeleteSelectedMessage: "Seçilmiş {count} əlaqəni silmək istədiyinizə əminsiniz? Bu əməliyyat geri qaytarıla bilməz.",
-    editConnection: "Əlaqəni redaktə et",
+    editConnection: "Əlaqəni redaktə et…",
     revealDatabaseFile: "Fayl menecerində göstər",
     selectVisibleDatabases: "Görünən verilənlər bazalarını seç",
     configureVisibleObjects: "Görünən obyektlərin süzgəci",
@@ -4211,6 +4217,8 @@ export default withEnglishFallback({
     loadFailed: "Verilənlər bazalarını yükləmək mümkün olmadı: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "İstifadəçi sxemləri",
+    systemGroup: "Sistem sxemləri",
     title: "Sxem süzgəci",
     detailLabel: "Görünən sxemlər",
     detailActionLabel: '"{connection}" üçün görünən sxemləri tənzimlə',
@@ -4227,6 +4235,17 @@ export default withEnglishFallback({
     loadFailed: "Sxemləri yükləmək mümkün olmadı: {message}",
   },
   tree: {
+    navigationStatus: { denied: "İcazə yoxdur", error: "Yükləmə alınmadı", unknown: "Təsdiqlənməyib", unsupported: "Dəstəklənmir", truncated: "Qismən nəticələr" },
+    publicObjects: "Ümumi obyektlər",
+    tenantObjects: "İcarəçi obyektləri",
+    jobs: "İşlər",
+    jobCategories: {
+      regular: "Planlaşdırılmış işlər",
+      lightweight: "Yüngül işlər",
+      inMemory: "Yaddaşdaxili işlər",
+      legacy: "Ənənəvi işlər",
+    },
+    openList: "Siyahını aç",
     savedSql: "SQL kitabxanası",
     queries: "Sorğular",
     userAdmin: "İstifadəçilər və imtiyazlar",

@@ -44,6 +44,7 @@ const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn().mockResolvedValue(undefined),
   listDatabases: vi.fn().mockResolvedValue([]),
   listSchemas: vi.fn(),
+  readVisibleSchemaSelection: vi.fn(),
   listTables: vi.fn(),
   getColumns: vi.fn(),
   buildDataCompareSyncPlan: vi.fn(),
@@ -65,6 +66,10 @@ vi.mock("@/composables/useDataCompareSession", async (importOriginal) => {
 });
 
 vi.mock("@/stores/connectionStore", () => {
+  mocks.readVisibleSchemaSelection.mockImplementation(async (id: string, database: string) => {
+    const names = await mocks.listSchemas(id, database, true);
+    return { names, visibleNames: names, infos: [], systemNames: new Set<string>(), oracleMaintainedSchemas: undefined };
+  });
   const connections = [
     { id: "oracle-11g", name: "Oracle XE 11g", db_type: "oracle", driver_profile: "oracle", database: "XE" },
     {
@@ -85,6 +90,8 @@ vi.mock("@/stores/connectionStore", () => {
       },
       getConfig: (id: string) => connections.find((connection) => connection.id === id),
       ensureConnected: mocks.ensureConnected,
+      completionCacheRevision: () => 0,
+      readVisibleSchemaSelection: mocks.readVisibleSchemaSelection,
     }),
   };
 });

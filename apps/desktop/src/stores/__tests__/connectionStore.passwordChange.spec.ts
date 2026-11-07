@@ -129,6 +129,39 @@ describe("connectionStore password retirement", () => {
   });
 
   describe.each(["connect", "ensureConnected"] as const)("%s credential persistence", (method) => {
+    it.each(["deleted", "one-time"] as const)("removes a late remembered-password upsert when its target becomes %s", async (change) => {
+      const store = await storeWithConnection();
+      const unsaved = { ...config, password: "", save_password: false };
+      store.connections[0] = unsaved;
+      store.connectedIds.delete(config.id);
+      const originalOther = { ...store.getConfig("other-connection")! };
+      const persisted = new Map(store.connections.map((connection) => [connection.id, { ...connection }]));
+      const entered = deferred<void>();
+      const finish = deferred<void>();
+      api.saveConnections.mockImplementation(async (configs: ConnectionConfig[], removedIds: string[] = []) => {
+        if (configs.some((connection) => connection.id === config.id && connection.password === config.password)) {
+          entered.resolve();
+          await finish.promise;
+        }
+        for (const id of removedIds) persisted.delete(id);
+        for (const connection of configs) persisted.set(connection.id, { ...connection });
+      });
+      api.sessionCredentialStatus.mockResolvedValue(false);
+      requestPassword.mockResolvedValueOnce({ password: config.password, rememberPassword: true });
+      const connecting = (method === "connect" ? store.connect(unsaved) : store.ensureConnected(config.id)).catch((error: unknown) => error);
+      await entered.promise;
+      if (change === "deleted") store.connections = store.connections.filter((connection) => connection.id !== config.id);
+      else store.connections[0] = { ...store.connections[0]!, one_time: true };
+      persisted.delete(config.id);
+      finish.resolve();
+      await connecting;
+      expect(api.saveConnections).toHaveBeenLastCalledWith([], [config.id]);
+      expect(persisted.has(config.id)).toBe(false);
+      expect(persisted.get("other-connection")).toEqual(originalOther);
+      expect(store.getConfig("other-connection")).toEqual(originalOther);
+      expect(api.saveConnections.mock.calls.every(([saved]) => saved.every((connection: ConnectionConfig) => connection.id === config.id))).toBe(true);
+    });
+
     it.each(["none", "transient", "remembered"] as const)("does not restore a retired password after a delayed save with %s fresh reconnect", async (reconnect) => {
       const store = await storeWithConnection();
       const unsaved = { ...config, password: "", save_password: false };
@@ -139,13 +172,15 @@ describe("connectionStore password retirement", () => {
       const oldSave = deferred<void>();
       const oldSaveEntered = deferred<void>();
       let persisted = store.connections.map((connection) => ({ ...connection }));
-      api.saveConnections.mockImplementation(async (snapshot: ConnectionConfig[]) => {
+      api.saveConnections.mockImplementation(async (snapshot: ConnectionConfig[], removedIds: string[] = []) => {
         const saved = snapshot.map((connection) => ({ ...connection }));
         if (saved.find((connection) => connection.id === config.id)?.password === config.password) {
           oldSaveEntered.resolve();
           await oldSave.promise;
         }
-        persisted = saved;
+        const merged = new Map(persisted.filter((connection) => !removedIds.includes(connection.id)).map((connection) => [connection.id, connection]));
+        for (const connection of saved) merged.set(connection.id, connection);
+        persisted = [...merged.values()];
       });
       api.sessionCredentialStatus.mockResolvedValue(false);
       requestPassword.mockResolvedValueOnce({ password: config.password, rememberPassword: true });
@@ -160,8 +195,15 @@ describe("connectionStore password retirement", () => {
 
       if (reconnect !== "none") {
         requestPassword.mockResolvedValueOnce({ password: "fixture-new", rememberPassword: reconnect === "remembered" });
-        await store.connect(unsaved);
+        const fresh = store.connect(unsaved);
+        await vi.waitFor(() => expect(api.connectDb).toHaveBeenLastCalledWith(expect.objectContaining({ password: "fixture-new" }), expect.any(Number)));
+        if (reconnect === "remembered") {
+          expect(store.getConfig(config.id)).toMatchObject({ password: "", save_password: false });
+          oldSave.resolve();
+        }
+        await fresh;
         expect(api.connectDb).toHaveBeenLastCalledWith(expect.objectContaining({ password: "fixture-new" }), expect.any(Number));
+        if (reconnect === "remembered") expect(store.getConfig(config.id)).toMatchObject({ password: "fixture-new", save_password: true });
       }
       const current = store.connections.map((connection) => ({ ...connection }));
       const active = store.activeConnectionId;
@@ -174,6 +216,7 @@ describe("connectionStore password retirement", () => {
       expect.soft(store.connections).toEqual(current);
       expect.soft(persisted).toEqual(current);
       expect(api.saveConnections).toHaveBeenCalledTimes(reconnect === "remembered" ? 4 : 3);
+      expect(api.saveConnections.mock.calls.every(([saved]) => saved.every((connection: ConnectionConfig) => connection.id === config.id))).toBe(true);
       expect(store.connectedIds.has(config.id)).toBe(reconnect !== "none");
       expect(store.activeConnectionId).toBe(active);
       expect(store.connectionErrors[config.id]).toBe(currentError);
@@ -215,7 +258,7 @@ describe("connectionStore password retirement", () => {
 
       expect(store.connections).toEqual(current);
       expect(api.saveConnections).toHaveBeenCalledTimes(1);
-      expect(api.saveConnections).toHaveBeenLastCalledWith(current);
+      expect(api.saveConnections).toHaveBeenLastCalledWith(current.filter((connection) => connection.id === config.id));
       expect(store.connectedIds.has(config.id)).toBe(reconnect);
       expect(store.activeConnectionId).toBe(active);
       expect(store.connectionErrors[config.id]).toBe(currentError);

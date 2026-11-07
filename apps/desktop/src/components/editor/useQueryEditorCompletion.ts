@@ -53,7 +53,7 @@ import { completionLabelPresentation } from "@/lib/editor/sqlCompletionPresentat
 import { supportsDatabaseNameCompletion } from "@/lib/database/databaseFeatureSupport";
 import { sqlSnippetDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { oracleDatabaseLinkCompletionItems } from "@/lib/sql/oracleDatabaseLinkCompletion";
-import { isOracleCompletionDatabase, isSequenceCompletionDatabase } from "@/lib/sql/oracleCompletionSession";
+import { isOracleCompletionDatabase, isSequenceCompletionDatabase, oracleCompletionTablesForScope, type OracleCompletionTableScope } from "@/lib/sql/oracleCompletionSession";
 import { buildRedisCompletionItemsFromContext, getRedisCompletionContext, getRedisCompletionResultValidFor, shouldAutoOpenRedisCompletion, takesKeyArgument } from "@/lib/redis/redisCompletion";
 import { buildGraphCompletionItems, getGraphCompletionContext, graphCompletionValidFor, shouldAutoOpenGraphCompletion } from "@/lib/graph/graphCompletion";
 import { isGraphQueryDatabase, type GraphQueryDatabase } from "@/lib/graph/graphQueryLanguage";
@@ -1064,12 +1064,14 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
         if (epoch !== completionEpoch) return null;
       }
 
+      const currentSchema = isOracleCompletionDatabase(props.databaseType) && completionContext.suggestTables ? await completionMetadata.resolveOracleCompletionSchema() : props.schema;
+      if (epoch !== completionEpoch) return null;
       const completionScope = resolveSqlCompletionScope({
         sql: fullDoc,
         cursor: position,
         databaseType: props.databaseType,
         currentDatabase: props.database!,
-        currentSchema: props.schema,
+        currentSchema,
         knownDatabases: knownUseDatabases,
         supportsSessionDatabaseSwitch,
         useDatabaseDefaultSchema,
@@ -1267,6 +1269,12 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     return shouldTriggerSqlCompletionForPosition(fullDoc, position);
   }
 
+  function oracleTableCompletionScope(context: ReturnType<typeof getSqlCompletionContext>, scope: CompletionMetadataScope): OracleCompletionTableScope | undefined {
+    if (!isOracleCompletionDatabase(props.databaseType)) return undefined;
+    const qualifier = context.qualifier;
+    return { schema: qualifier ? (context.qualifierQuoted?.[context.qualifierQuoted.length - 1] ? qualifier.replaceAll('""', '"') : qualifier.toUpperCase()) : scope.schema, includePublicSynonyms: !qualifier };
+  }
+
   function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number, scope: CompletionMetadataScope) {
     if (!props.connectionId || props.database == null) return null;
     const databaseNames = localCompletionDatabaseNames(completionContext);
@@ -1287,12 +1295,9 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       completionContext,
       knownDatabases: databaseNames,
     });
-    const globalOracleTableSearch = isOracleCompletionDatabase(props.databaseType) && completionContext.suggestTables && !completionContext.qualifier;
-    const tables = schemaLookupDatabase
-      ? []
-      : shouldLoadTables
-        ? connectionStore.lookupLocalCompletionTables(props.connectionId, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, globalOracleTableSearch ? undefined : tableLookupTarget.schema, props.catalog)
-        : completionMetadata.cachedTables;
+    const oracleScope = oracleTableCompletionScope(completionContext, scope);
+    let tables = schemaLookupDatabase ? [] : shouldLoadTables ? connectionStore.lookupLocalCompletionTables(props.connectionId, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, tableLookupTarget.schema, props.catalog, oracleScope) : completionMetadata.cachedTables;
+    if (oracleScope) tables = oracleCompletionTablesForScope(tables, oracleScope);
 
     const shouldLoadObjects = shouldLoadCompletionObjects(completionContext);
     const completionObjectScope = routineCompletionScopeForContext(completionContext, scope);
@@ -1457,14 +1462,15 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       knownDatabases: databaseNames,
     });
     if (!localOnlyMetadata && !schemaLookupDatabase && (completionContext.suggestTables || (!!completionContext.qualifier && !isReferencedTableQualifier(completionContext)))) {
-      const globalOracleTableSearch = isOracleCompletionDatabase(props.databaseType) && completionContext.suggestTables && !completionContext.qualifier;
+      const oracleScope = oracleTableCompletionScope(completionContext, scope);
       const refreshEpoch = completionEpoch;
       queueTableCompletionRefresh(async () => {
         if (refreshEpoch !== completionEpoch) return;
         try {
-          const tables = await connectionStore.refreshCompletionTables(connectionId, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, tableLookupTarget.schema, globalOracleTableSearch, scope.schema, props.catalog);
+          const schema = oracleScope ? (oracleScope.includePublicSynonyms ? undefined : oracleScope.schema) : tableLookupTarget.schema;
+          const tables = await connectionStore.refreshCompletionTables(connectionId, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, schema, false, scope.schema, props.catalog, oracleScope ? { oracleScope } : undefined);
           if (refreshEpoch !== completionEpoch) return;
-          const scopedTables = tables.map((table) => ({ ...table, database: table.database ?? tableLookupTarget.database }));
+          const scopedTables = (oracleScope ? oracleCompletionTablesForScope(tables, oracleScope) : tables).map((table) => ({ ...table, database: table.database ?? tableLookupTarget.database }));
           completionMetadata.cachedTables = mergeCompletionTables(completionMetadata.cachedTables, scopedTables);
           if (completionContext.suggestJoinConditions && completionContext.referencedTables.length > 0) {
             void ensureForeignKeysForTables(completionContext.referencedTables);
@@ -1724,14 +1730,16 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       completionContext,
       knownDatabases: databaseNames,
     });
-    const globalOracleTableSearch = isOracleCompletionDatabase(props.databaseType) && completionContext.suggestTables && !completionContext.qualifier;
+    const oracleScope = oracleTableCompletionScope(completionContext, scope);
+    const lookupSchema = oracleScope ? (oracleScope.includePublicSynonyms ? undefined : oracleScope.schema) : tableLookupTarget.schema;
     let tables = schemaLookupDatabase
       ? []
       : shouldLoadTables
         ? localOnlyMetadata
-          ? connectionStore.lookupLocalCompletionTables(props.connectionId!, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, globalOracleTableSearch ? undefined : tableLookupTarget.schema, props.catalog)
-          : await listCompletionTablesWithLatencyBudget(props.connectionId!, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, tableLookupTarget.schema, globalOracleTableSearch, props.catalog, scope.schema)
+          ? connectionStore.lookupLocalCompletionTables(props.connectionId!, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, lookupSchema, props.catalog, oracleScope)
+          : await listCompletionTablesWithLatencyBudget(props.connectionId!, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, lookupSchema, false, props.catalog, scope.schema, oracleScope)
         : completionMetadata.cachedTables;
+    if (oracleScope) tables = oracleCompletionTablesForScope(tables, oracleScope);
     if (localOnlyMetadata && tables.length === 0 && supportsDatabaseSchemaQualifierCompletion() && (completionContext.qualifierParts?.length ?? 0) >= 2 && allowsOnDemandQualifiedTableCompletion(completionContext.prefix)) {
       tables = await listCompletionTablesWithLatencyBudget(props.connectionId!, tableLookupTarget.database, tableLookupTarget.filter, PRESTO_ON_DEMAND_TABLE_COMPLETION_LIMIT, tableLookupTarget.schema, false, props.catalog, scope.schema);
     }
@@ -1789,12 +1797,14 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     // If qualifier didn't match any table names, try it as a schema name
     let qualifierIsSchema = false;
     if (completionContext.qualifier && !schemaLookupDatabase && !tableLookupTarget.qualifierDatabase && !isReferencedTableQualifier(completionContext) && tables.length === 0 && (completionContext.suggestTables || completionContext.exclusiveColumnSuggestions)) {
-      let schemaTables = connectionStore.lookupLocalCompletionTables(props.connectionId!, scope.database, completionContext.prefix, MAX_COMPLETION_TABLES, completionContext.qualifier, props.catalog);
+      const schema = oracleScope?.schema ?? completionContext.qualifier;
+      let schemaTables = connectionStore.lookupLocalCompletionTables(props.connectionId!, scope.database, completionContext.prefix, MAX_COMPLETION_TABLES, schema, props.catalog, oracleScope);
       if (!localOnlyMetadata) {
-        schemaTables = await listCompletionTablesWithLatencyBudget(props.connectionId!, scope.database, completionContext.prefix, MAX_COMPLETION_TABLES, completionContext.qualifier, false, props.catalog, scope.schema);
+        schemaTables = await listCompletionTablesWithLatencyBudget(props.connectionId!, scope.database, completionContext.prefix, MAX_COMPLETION_TABLES, schema, false, props.catalog, scope.schema, oracleScope);
       } else if (schemaTables.length === 0 && allowsOnDemandQualifiedTableCompletion(completionContext.prefix)) {
-        schemaTables = await listCompletionTablesWithLatencyBudget(props.connectionId!, scope.database, completionContext.prefix, PRESTO_ON_DEMAND_TABLE_COMPLETION_LIMIT, completionContext.qualifier, false, props.catalog, scope.schema);
+        schemaTables = await listCompletionTablesWithLatencyBudget(props.connectionId!, scope.database, completionContext.prefix, PRESTO_ON_DEMAND_TABLE_COMPLETION_LIMIT, schema, false, props.catalog, scope.schema, oracleScope);
       }
+      if (oracleScope) schemaTables = oracleCompletionTablesForScope(schemaTables, oracleScope);
       if (schemaTables.length > 0) {
         tables = schemaTables;
         qualifierIsSchema = true;

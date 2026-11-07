@@ -1,6 +1,6 @@
 import { ref } from "vue";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { filterDatabaseNamesForConnection, filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
+import { filterDatabaseNamesForConnection } from "@/lib/database/visibleDatabases";
 import { isDorisFamilyCatalogCapable, supportsQueryTargetDatabaseListing } from "@/lib/database/databaseFeatureSupport";
 import { usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { isInternalDorisCatalog } from "@/lib/database/databaseFeatureSupport";
@@ -8,7 +8,10 @@ import { connectionUsesConnectionRootSchemaMode } from "@/lib/database/jdbcDiale
 import type { CatalogInfo, ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
 
-type NamespaceOptionsConnection = Pick<ConnectionConfig, "database" | "db_type" | "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "visible_databases" | "visible_database_patterns" | "visible_schemas" | "username" | "show_system_schemas"> &
+type NamespaceOptionsConnection = Pick<
+  ConnectionConfig,
+  "database" | "db_type" | "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "visible_databases" | "visible_database_patterns" | "visible_schemas" | "schema_visibility" | "username" | "show_system_schemas"
+> &
   Partial<Pick<ConnectionConfig, "database_info">>;
 export function catalogDatabaseOptionsKey(connectionId: string, catalog: string): string {
   return `${connectionId}:${catalog}`;
@@ -51,8 +54,7 @@ export async function fetchNamespaceOptionsForConnection(connectionId: string, c
     // Oracle, Dameng, and their inferred JDBC dialects expose schemas directly
     // below the connection; their catalog/database listing is not the namespace
     // picker used by schema-aware UI surfaces.
-    const schemas = await api.listSchemas(connectionId, database, true);
-    return filterSchemaNamesForConnection(schemas, connection, database);
+    return (await useConnectionStore().readVisibleSchemaSelection(connectionId, database)).visibleNames;
   }
 
   const databases = await api.listDatabases(connectionId);

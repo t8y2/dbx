@@ -19,7 +19,7 @@ import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
 import * as api from "@/lib/backend/api";
-import { filterDatabaseNamesForConnection, filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
+import { filterDatabaseNamesForConnection } from "@/lib/database/visibleDatabases";
 import { formatObjectBrowserBytes, formatObjectBrowserTimestamp } from "@/lib/table/objectBrowserRows";
 import { requestObjectBrowserSearchFocus } from "@/lib/tabs/objectBrowserSearchFocus";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
@@ -437,26 +437,9 @@ async function refresh(): Promise<boolean> {
   try {
     if (connectionUsesConnectionRootSchemaMode(props.connection)) {
       const database = props.connection.database || "";
-      let schemas: Array<{ name: string; comment?: string | null }> = [];
-      try {
-        schemas = await api.listSchemaInfos(props.connection.id, database);
-      } catch {
-        const names = await api.listSchemas(props.connection.id, database, true).catch(() => []);
-        schemas = names.map((name) => ({ name, comment: null }));
-      }
+      const { infos: schemas, visibleNames: names } = await connectionStore.readVisibleSchemaSelection(props.connection.id, database, true);
       if (generation !== refreshGeneration) return true;
-      if (schemas.length === 0) {
-        const databases = await api.listDatabases(props.connection.id).catch(() => []);
-        if (generation !== refreshGeneration) return true;
-        schemas = databases.map((database) => ({ name: database.name, comment: database.comment ?? null }));
-      }
-      const visibleNames = new Set(
-        filterSchemaNamesForConnection(
-          schemas.map((schema) => schema.name),
-          props.connection,
-          database,
-        ),
-      );
+      const visibleNames = new Set(names);
       rows.value = schemas
         .filter((schema) => schema.name.trim() && visibleNames.has(schema.name))
         .map((schema) => ({
@@ -567,7 +550,21 @@ watch([sortKey, sortDirection], () => {
 
 let initialConnectionWatch = true;
 watch(
-  () => props.connection.id,
+  () =>
+    JSON.stringify([
+      props.connection.id,
+      connectionUsesConnectionRootSchemaMode(props.connection)
+        ? [
+            connectionStore.completionCacheRevision(props.connection.id),
+            props.connection.database,
+            props.connection.schema_visibility?.databases[props.connection.database || ""],
+            props.connection.show_system_schemas,
+            props.connection.visible_schemas?.[props.connection.database || ""],
+            props.connection.visible_databases,
+            props.connection.visible_database_patterns,
+          ]
+        : undefined,
+    ]),
   () => {
     if (initialConnectionWatch) initialConnectionWatch = false;
     else {
@@ -794,7 +791,7 @@ defineExpose({ focusSearch, refresh });
         </div>
       </div>
     </div>
-    <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />
+    <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" v-bind="sidebarMenuPreferences" />
     <SidebarTreeRuntimeHost ref="sidebarRuntimeHost" :node="sidebarRuntimeNode" :depth="0" @open-danger-dialog="openSidebarDangerDialog" @open-data="openDatabaseFromSidebar" @open-ddl="openDatabaseFromSidebar" @open-dialog-controller="sidebarDialogController = $event" />
     <SidebarTreeItemDialogs v-if="sidebarDialogController" :controller="sidebarDialogController" @closed="sidebarDialogController = null" />
   </section>

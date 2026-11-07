@@ -42,6 +42,28 @@ const tunnel1 = { type: "ssh", id: "tunnel-1", host: "bastion-1", port: 22, user
 const tunnel2 = { type: "ssh", id: "tunnel-2", host: "bastion-2", port: 22, user: "root" } as TunnelProfile;
 
 describe("connectionConfigTransfer", () => {
+  it("removes only legacy top-level visibility preferences from exports and imports", () => {
+    const original = conn("a", "A", {
+      show_database_links: false,
+      show_native_jobs: false,
+      show_user_admin: false,
+      show_extensions: false,
+      external_config: { show_user_admin: false, show_extensions: true },
+    });
+    const exported = buildConnectionConfigBundle([original], null, []);
+    const imported = prepareConnectionConfigImport({ connections: [original] }, [], [], () => "new-id");
+    for (const result of [exported.connections[0], imported.connections[0]]) {
+      expect(result).not.toHaveProperty("show_extensions");
+      expect(result.external_config).toEqual({ show_user_admin: false, show_extensions: true });
+      expect(result.password).toBe("secret");
+      expect(result).not.toHaveProperty("show_database_links");
+      expect(result).not.toHaveProperty("show_native_jobs");
+      expect(result).not.toHaveProperty("show_user_admin");
+    }
+    expect(original.show_user_admin).toBe(false);
+    expect(original.show_extensions).toBe(false);
+  });
+
   it("filters connections, empty groups, and unused tunnel profiles", () => {
     const connections = [
       conn("a", "A", { transport_layers: [{ type: "ssh", id: "layer-a", host: "", port: 22, user: "", profile_id: "tunnel-1" }] }),

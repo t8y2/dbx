@@ -181,6 +181,167 @@ describe("connectionStore metadata loading", () => {
     setActivePinia(createPinia());
   });
 
+  async function sharedSchemaFixture(listSchemaInfos: ReturnType<typeof vi.fn>, executeQuery = vi.fn().mockResolvedValue({ columns: ["DEFAULT_SCHEMA"], rows: [["public"]] })) {
+    const listSchemas = vi.fn().mockResolvedValue(["public", "pg_catalog"]);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      listSchemaInfos,
+      listSchemas,
+      executeQuery,
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+    }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection();
+    const node: TreeNode = { id: `${connection.id}:app`, type: "database", label: "app", connectionId: connection.id, database: "app", children: [] };
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [{ id: connection.id, type: "connection", label: connection.name, connectionId: connection.id, children: [node] }];
+    return { store, connection, node, listSchemas };
+  }
+
+  it.each(["navigation-first", "completion-first"])("shares full schema metadata between navigation and completion (%s)", async (order) => {
+    let resolve!: (rows: Array<{ name: string; comment: string }>) => void;
+    const listSchemaInfos = vi.fn().mockReturnValue(
+      new Promise<Array<{ name: string; comment: string }>>((done) => {
+        resolve = done;
+      }),
+    );
+    const { store, connection, node, listSchemas } = await sharedSchemaFixture(listSchemaInfos);
+    let navigation: Promise<void>, completion: Promise<string[]>;
+    if (order === "navigation-first") {
+      navigation = store.loadSchemas(connection.id, "app", { force: true, background: true, connectedOnly: true });
+      completion = store.listCompletionSchemas(connection.id, "app");
+    } else {
+      completion = store.listCompletionSchemas(connection.id, "app");
+      navigation = store.loadSchemas(connection.id, "app", { force: true, background: true, connectedOnly: true });
+    }
+    await vi.waitFor(() => expect(listSchemaInfos).toHaveBeenCalledOnce());
+    resolve([
+      { name: "public", comment: "Application schema" },
+      { name: "pg_catalog", comment: "System schema" },
+    ]);
+    await navigation;
+    expect(await completion).toEqual(["public", "pg_catalog"]);
+    expect(listSchemas).not.toHaveBeenCalled();
+    expect(node.children?.filter((child) => child.type === "schema").map((child) => child.label)).toEqual(["public"]);
+    expect(node.children?.find((child) => child.type === "schema")?.comment).toBe("Application schema");
+    expect(await store.listCompletionSchemas(connection.id, "app")).toEqual(["public", "pg_catalog"]);
+    expect(listSchemaInfos).toHaveBeenCalledOnce();
+  });
+
+  it("reads selected system schemas despite the retired toggle and keeps completion unfiltered", async () => {
+    const listSchemaInfos = vi.fn(async (_id: string, _database: string, override?: boolean) => [{ name: "public", comment: null }, ...(override ? [{ name: "pg_catalog", comment: null }] : [])]);
+    const { store, connection, node } = await sharedSchemaFixture(listSchemaInfos);
+    store.connections = [{ ...connection, show_system_schemas: false, visible_schemas: { app: ["pg_catalog"] } }];
+    await store.loadSchemas(connection.id, "app", { force: true, background: true, connectedOnly: true });
+    expect(node.children?.filter((child) => child.type === "schema").map((child) => child.label)).toEqual(["pg_catalog"]);
+    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "app", true);
+    expect(await store.listCompletionSchemas(connection.id, "app")).toEqual(["public", "pg_catalog"]);
+    expect(store.lookupLocalCompletionSchemas(connection.id, "app")).toEqual(["public", "pg_catalog"]);
+  });
+
+  it.each([false, true])("keeps system-schema picker drafts separate from saved configuration (%s)", async (saved) => {
+    const rows = (system: boolean) => [{ name: "public", comment: null }, ...(system ? [{ name: "pg_catalog", comment: null }] : [])];
+    const listSchemaInfos = vi.fn(async (_id: string, _database: string, override?: boolean) => rows(override ?? saved));
+    const { store, connection } = await sharedSchemaFixture(listSchemaInfos);
+    store.connections = [{ ...connection, show_system_schemas: saved }];
+    expect(await store.listCompletionSchemas(connection.id, "app")).toEqual(rows(true).map((row) => row.name));
+    expect(await store.listNavigationSchemaChoices(connection.id, "app", !saved)).toEqual(rows(!saved).map((row) => row.name));
+    expect(listSchemaInfos).toHaveBeenLastCalledWith(connection.id, "app", !saved);
+    expect(store.getConfig(connection.id)?.show_system_schemas).toBe(saved);
+    expect(store.lookupLocalCompletionSchemas(connection.id, "app")).toEqual(rows(true).map((row) => row.name));
+    expect(await store.listCompletionSchemas(connection.id, "app")).toEqual(rows(true).map((row) => row.name));
+    expect(listSchemaInfos).toHaveBeenCalledTimes(saved ? 2 : 1);
+  });
+
+  it("shares the Oracle maintained-schema filter between picker drafts and the tree", async () => {
+    const listSchemaInfos = vi.fn().mockResolvedValue([
+      { name: "APP", comment: null },
+      { name: "SYSRAC", comment: null },
+    ]);
+    const executeQuery = vi.fn().mockResolvedValue({ columns: ["USERNAME"], rows: [["SYSRAC"]] });
+    const { store, connection } = await sharedSchemaFixture(listSchemaInfos, executeQuery);
+    store.connections = [{ ...connection, db_type: "oracle", username: "APP", default_schema: "APP", show_system_schemas: true }];
+    expect(await store.listNavigationSchemaChoices(connection.id, "app", false)).toEqual(["APP"]);
+    expect(store.getConfig(connection.id)?.show_system_schemas).toBe(true);
+    store.connections = [{ ...store.getConfig(connection.id)!, show_system_schemas: false }];
+    await store.loadDatabases(connection.id, { force: true, background: true, connectedOnly: true });
+    expect(store.treeNodes[0]!.children!.filter((node) => node.type === "schema").map((node) => node.schema)).toEqual(["APP"]);
+    expect(executeQuery).toHaveBeenCalledOnce();
+  });
+
+  it.each(["configuration", "invalidation", "system-schema setting"])("does not republish superseded shared schemas after %s", async (mode) => {
+    let resolveOld!: (rows: Array<{ name: string; comment: null }>) => void;
+    const listSchemaInfos = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise((done) => {
+            resolveOld = done;
+          }),
+      )
+      .mockResolvedValue([{ name: "latest", comment: null }]);
+    const { store, connection } = await sharedSchemaFixture(listSchemaInfos);
+    const old = store.listCompletionSchemas(connection.id, "app");
+    await vi.waitFor(() => expect(listSchemaInfos).toHaveBeenCalledOnce());
+    if (mode === "configuration") store.connections = [{ ...connection, host: "new-host" }];
+    else if (mode === "system-schema setting") store.connections = [{ ...connection, show_system_schemas: true }];
+    else store.invalidateCompletionCache(connection.id, "app");
+    expect(await store.listCompletionSchemas(connection.id, "app")).toEqual(["latest"]);
+    resolveOld([{ name: "stale", comment: null }]);
+    expect(await old).toEqual([]);
+    expect(store.lookupLocalCompletionSchemas(connection.id, "app")).toEqual(["latest"]);
+    expect(await store.listCompletionSchemas(connection.id, "app")).toEqual(["latest"]);
+    expect(listSchemaInfos).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["oracle", "sqlserver"] as const)("shares %s root/schema discovery with completion", async (db_type) => {
+    let finish!: (rows: Array<{ name: string; comment: null }>) => void;
+    const listSchemaInfos = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const { store, connection, listSchemas } = await sharedSchemaFixture(listSchemaInfos);
+    store.connections = [{ ...connection, db_type, default_schema: "APP", show_system_schemas: true }];
+    const completion = store.listCompletionSchemas(connection.id, "app");
+    const navigation = db_type === "oracle" ? store.loadDatabases(connection.id, { force: true, background: true, connectedOnly: true }) : store.loadSqlServerDatabaseObjects(connection.id, "app", { force: true, background: true, connectedOnly: true });
+    await vi.waitFor(() => expect(listSchemaInfos).toHaveBeenCalledOnce());
+    finish([{ name: "APP", comment: null }]);
+    await navigation;
+    expect(await completion).toEqual(["APP"]);
+    expect(listSchemaInfos).toHaveBeenCalledOnce();
+    expect(listSchemas).not.toHaveBeenCalled();
+  });
+
+  it("joins concurrent Oracle default-schema initialization within the same scope", async () => {
+    let finish!: (result: { columns: string[]; rows: string[][] }) => void;
+    const executeQuery = vi.fn((_id: string, _database: string, sql: string) =>
+      sql.includes("ORACLE_MAINTAINED")
+        ? Promise.resolve({ columns: ["USERNAME"], rows: [] })
+        : new Promise((resolve) => {
+            finish = resolve;
+          }),
+    );
+    const listSchemaInfos = vi.fn().mockResolvedValue([{ name: "APP", comment: null }]);
+    const { store, connection } = await sharedSchemaFixture(listSchemaInfos, executeQuery);
+    store.connections = [{ ...connection, db_type: "oracle", show_system_schemas: true }];
+    const first = store.loadDatabases(connection.id, { force: true, background: true, connectedOnly: true });
+    await vi.waitFor(() => expect(executeQuery.mock.calls.filter(([, , sql]) => !sql.includes("ORACLE_MAINTAINED"))).toHaveLength(1));
+    const second = store.loadDatabases(connection.id, { force: true, background: true, connectedOnly: true });
+    await vi.waitFor(() => expect(listSchemaInfos).toHaveBeenCalledOnce());
+    finish({ columns: ["DEFAULT_SCHEMA"], rows: [["APP"]] });
+    await Promise.all([first, second]);
+    expect(executeQuery.mock.calls.filter(([, , sql]) => !sql.includes("ORACLE_MAINTAINED"))).toHaveLength(1);
+  });
+
   it.each([
     ["oracle", "group-triggers"],
     ["oceanbase-oracle", "group-triggers"],
@@ -689,12 +850,11 @@ describe("connectionStore metadata loading", () => {
 
     await store.loadTreeNodeChildren(databaseNode, { force: true });
 
-    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "testdb");
+    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "testdb", true);
     expect(listTables).not.toHaveBeenCalled();
     expect(databaseNode.children?.map((node) => [node.type, node.label, node.schema])).toEqual([
       ["schema", "app", "app"],
       ["schema", "reporting", "reporting"],
-      ["saved-sql-root", "tree.queries", undefined],
     ]);
   });
 
@@ -732,7 +892,7 @@ describe("connectionStore metadata loading", () => {
 
     await store.loadTreeNodeChildren(databaseNode, { force: true });
 
-    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "vpnccw");
+    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "vpnccw", true);
     expect(listTables).not.toHaveBeenCalled();
     const schemaNode = databaseNode.children!.find((node) => node.type === "schema")!;
     expect([schemaNode.label, schemaNode.schema]).toEqual(["APP", "APP"]);
@@ -859,12 +1019,11 @@ describe("connectionStore metadata loading", () => {
     const listTables = vi.fn().mockResolvedValue([{ name: "sheet", table_type: "TABLE", comment: null }]);
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
-    const executeQuery = vi.fn().mockResolvedValue({
-      columns: ["OWNER", "DB_LINK", "USERNAME", "HOST", "CREATED"],
-      rows: [
-        ["DBX_TEST", "PRIVATE.EXAMPLE", "REMOTE", "service", ""],
-        ["PUBLIC", "PUBLIC.EXAMPLE", "REMOTE", "service", ""],
-      ],
+    let emptyLinks = false;
+    const executeQuery = vi.fn(async (_connectionId: string, _database: string, sql: string) => {
+      if (sql.startsWith("SELECT SYS_CONTEXT")) return { columns: ["DBX_SESSION_USER"], rows: [["DBX_TEST"]] };
+      const publicScope = sql.includes("WHERE L.OWNER = 'PUBLIC'");
+      return { columns: ["OWNER", "DB_LINK", "USERNAME", "HOST", "CREATED"], rows: emptyLinks ? [] : [[publicScope ? "PUBLIC" : "DBX_TEST", publicScope ? "PUBLIC.EXAMPLE" : "PRIVATE.EXAMPLE", "REMOTE", "service", ""]] };
     });
     vi.doMock("@/lib/backend/api", () => ({
       executeQuery,
@@ -873,6 +1032,7 @@ describe("connectionStore metadata loading", () => {
       listDatabases,
       listObjects: vi.fn().mockResolvedValue([]),
       listSchemas,
+      listSchemaInfos: async (...args: unknown[]) => (await listSchemas(...args)).map((name: string) => ({ name, comment: null })),
       listTables,
       loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),
@@ -893,36 +1053,38 @@ describe("connectionStore metadata loading", () => {
     await store.loadDatabases(connection.id, { force: true });
 
     expect(listDatabases).not.toHaveBeenCalled();
-    expect(listSchemas).toHaveBeenCalledWith(connection.id, "");
+    expect(listSchemas).toHaveBeenCalledWith(connection.id, "", true);
     expect(connectionNode.children?.map((node) => [node.type, node.label, node.database, node.schema])).toEqual([
       ["schema", "DBX_TEST", "DBX_TEST", "DBX_TEST"],
-      ["oracle-db-links", "tree.databaseLinks", "", undefined],
-      ["database-job-admin", "tree.nativeJobs", "", undefined],
-      ["user-admin", "tree.userAdmin", "", undefined],
+      ["oracle-shared-objects", "tree.publicObjects", "", undefined],
     ]);
+    expect(connectionNode.children?.some((node) => node.type === "connection-extensions" || node.type === "user-admin")).toBe(false);
 
-    const linkRoot = connectionNode.children!.find((node) => node.type === "oracle-db-links")!;
+    const linkRoot = connectionNode.children!.find((node) => node.type === "oracle-shared-objects")!.children![0]!;
     await store.loadTreeNodeChildren(linkRoot, { force: true });
-    expect(executeQuery).toHaveBeenCalledWith(connection.id, "", expect.stringContaining("SESSION_USER"), undefined, undefined, { maxRows: 10000, timeoutSecs: 15 });
-    expect(linkRoot.children?.map((node) => [node.type, node.label, node.schema])).toEqual([
-      ["oracle-db-link", "PRIVATE.EXAMPLE", "DBX_TEST"],
-      ["oracle-db-link", "PUBLIC.EXAMPLE", "PUBLIC"],
-    ]);
-    expect(linkRoot.objectCount).toBe(2);
-    executeQuery.mockResolvedValue({ columns: ["OWNER", "DB_LINK"], rows: [] });
+    expect(executeQuery).toHaveBeenCalledWith(connection.id, "", expect.stringContaining("WHERE L.OWNER = 'PUBLIC'"), undefined, undefined, { maxRows: 10000, timeoutSecs: 15 });
+    expect(executeQuery.mock.calls.some((call) => call[2].includes("FROM USER_DB_LINKS"))).toBe(true);
+    expect(linkRoot.children?.map((node) => [node.type, node.label, node.schema])).toEqual([["oracle-db-link", "PUBLIC.EXAMPLE", "PUBLIC"]]);
+    expect(linkRoot.objectCount).toBe(1);
+    emptyLinks = true;
     await store.refreshOracleDatabaseLinks(connection.id);
     expect(linkRoot.children).toEqual([]);
     expect(linkRoot.objectCount).toBe(0);
 
-    const schemaNode = connectionNode.children?.[0];
+    const schemaNode = connectionNode.children?.find((node) => node.type === "schema");
     expect(schemaNode).toBeDefined();
     await store.loadTreeNodeChildren(schemaNode!, { force: true });
 
     expect(listTables.mock.calls[0]?.slice(0, 3)).toEqual([connection.id, "DBX_TEST", "DBX_TEST"]);
-    expect(schemaNode?.children?.map((node) => [node.type, node.label, node.schema])).toEqual([["table", "sheet", "DBX_TEST"]]);
+    expect(schemaNode?.children?.filter((node) => node.type === "table").map((node) => [node.type, node.label, node.schema])).toEqual([["table", "sheet", "DBX_TEST"]]);
+    const privateRoot = schemaNode!.children!.find((node) => node.type === "oracle-db-links")!;
+    expect(privateRoot.databaseLinkScope).toEqual({ kind: "schema", schema: "DBX_TEST" });
+    emptyLinks = false;
+    await store.loadTreeNodeChildren(privateRoot, { force: true });
+    expect(privateRoot.children?.map((node) => [node.type, node.label, node.schema])).toEqual([["oracle-db-link", "PRIVATE.EXAMPLE", "DBX_TEST"]]);
   });
 
-  it("omits oracle-db-links when show_database_links is configured as false", async () => {
+  it("ignores the obsolete database-link visibility preference", async () => {
     vi.resetModules();
     const listDatabases = vi.fn().mockResolvedValue([]);
     const listSchemas = vi.fn().mockResolvedValue(["DBX_TEST"]);
@@ -934,6 +1096,7 @@ describe("connectionStore metadata loading", () => {
       listDatabases,
       listObjects: vi.fn().mockResolvedValue([]),
       listSchemas,
+      listSchemaInfos: async (...args: unknown[]) => (await listSchemas(...args)).map((name: string) => ({ name, comment: null })),
       listTables: vi.fn().mockResolvedValue([]),
       loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),
@@ -953,8 +1116,7 @@ describe("connectionStore metadata loading", () => {
 
     expect(connectionNode.children?.map((node) => [node.type, node.label])).toEqual([
       ["schema", "DBX_TEST"],
-      ["database-job-admin", "tree.nativeJobs"],
-      ["user-admin", "tree.userAdmin"],
+      ["oracle-shared-objects", "tree.publicObjects"],
     ]);
   });
 
@@ -993,7 +1155,7 @@ describe("connectionStore metadata loading", () => {
 
     await store.loadTreeNodeChildren(databaseNode, { force: true });
 
-    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "testdb");
+    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "testdb", true);
     const parent = mode === "simple" ? databaseNode : databaseNode.children!.find((child) => child.type === "group-tables")!;
     if (mode === "grouped") await store.loadTreeNodeChildren(parent);
     expect(listTables).toHaveBeenCalled();
@@ -1058,18 +1220,21 @@ describe("connectionStore metadata loading", () => {
 
     await store.loadTreeNodeChildren(databaseNode, { force: true });
 
-    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "dbx_test");
+    expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, "dbx_test", true);
     expect(listTables).toHaveBeenCalled();
-    expect(databaseNode.children?.map((node) => [node.type, node.label, node.schema])).toEqual([
-      ["table", "connection_smoke", undefined],
-      ["saved-sql-root", "tree.queries", undefined],
-    ]);
+    expect(databaseNode.children?.map((node) => [node.type, node.label, node.schema])).toEqual([["table", "connection_smoke", undefined]]);
   });
 
   it("renders simple-mode table children without waiting for supplemental objects", async () => {
     const tables: TableInfo[] = [{ name: "users", table_type: "BASE TABLE", comment: null }];
     const listTables = vi.fn().mockResolvedValue(tables);
-    const listObjects = vi.fn(() => new Promise(() => undefined));
+    const finishObjects: Array<(objects: ObjectInfo[]) => void> = [];
+    const listObjects = vi.fn(
+      () =>
+        new Promise<ObjectInfo[]>((resolve) => {
+          finishObjects.push(resolve);
+        }),
+    );
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
@@ -1123,14 +1288,17 @@ describe("connectionStore metadata loading", () => {
       },
     ];
 
-    const result = await Promise.race([store.loadTables(connection.id, "app", "public").then(() => "done"), new Promise((resolve) => setTimeout(() => resolve("timeout"), 50))]);
-
-    expect(result).toBe("done");
-    // PostgreSQL sidebar pages count top-level relations and append each page's
-    // partitions, so the simple-mode loader opts into root paging.
-    expect(listTables).toHaveBeenCalledWith(connection.id, "app", "public", undefined, 1001, 0, undefined, undefined, undefined, undefined, true);
+    const loading = store.loadTables(connection.id, "app", "public");
+    await vi.waitFor(() => expect(tableTreeLabels(store.projectRelationalNavigationTree(store.treeNodes))).toEqual(["users"]));
+    expect(schemaNode.isLoading).toBe(true);
+    expect(listTables).toHaveBeenCalledWith(connection.id, "app", "public", undefined, 1000, 0, expect.arrayContaining(["TABLE", "VIEW", "MATERIALIZED_VIEW"]));
     expect(listObjects).toHaveBeenCalled();
-    expect(schemaNode.children?.map((node) => node.label)).toEqual(["users"]);
+    listObjects.mockResolvedValue([]);
+    for (const finish of finishObjects) finish([]);
+    await loading;
+    expect(schemaNode.isLoading).toBe(false);
+    const projectedDatabase = store.projectRelationalNavigationTree(store.treeNodes)[0]!.children!.find((node) => node.type === "database")!;
+    expect(projectedDatabase.children?.filter((node) => node.type === "table").map((node) => node.label)).toEqual(["users"]);
   });
 
   it("keeps concurrent table-tree and local-index refreshes in separate cache entries", async () => {
@@ -1593,7 +1761,7 @@ describe("connectionStore metadata loading", () => {
     await store.loadSchemas(connection.id, "app", { force: true });
 
     expect(store.connectionErrors[connection.id]).toBeUndefined();
-    expect(store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label)).toEqual(["public", "tree.extensions", "tree.eventTriggers", "tree.queries"]);
+    expect(store.treeNodes[0]?.children?.[0]?.children?.map((node) => node.label)).toEqual(["public", "tree.extensions", "tree.eventTriggers"]);
   });
 
   it("preserves the last successful tree snapshot when a forced metadata refresh fails", async () => {
@@ -1710,7 +1878,7 @@ describe("connectionStore metadata loading", () => {
     await olderRefresh;
 
     expect(listSchemaInfos).toHaveBeenCalledTimes(2);
-    expect(databaseNode.children?.map((node) => node.label)).toEqual(["latest", "tree.extensions", "tree.eventTriggers", "tree.queries"]);
+    expect(databaseNode.children?.map((node) => node.label)).toEqual(["latest", "tree.extensions", "tree.eventTriggers"]);
   });
 
   it("does not let an older refresh failure overwrite a newer successful refresh", async () => {
@@ -1766,7 +1934,7 @@ describe("connectionStore metadata loading", () => {
     rejectOlderMetadata(new Error("connection closed"));
     await expect(olderRefresh).rejects.toThrow("connection closed");
 
-    expect(databaseNode.children?.map((node) => node.label)).toEqual(["latest", "tree.extensions", "tree.eventTriggers", "tree.queries"]);
+    expect(databaseNode.children?.map((node) => node.label)).toEqual(["latest", "tree.extensions", "tree.eventTriggers"]);
     expect(store.connectionErrors[connection.id]).toBeUndefined();
     expect(store.connectedIds.has(connection.id)).toBe(true);
   });
@@ -1851,7 +2019,7 @@ describe("connectionStore metadata loading", () => {
     expect(reconnectedDatabaseNode.children?.map((child) => child.label)).toEqual(["fresh"]);
   });
 
-  it.each(["opengauss", "kingbase"] as const)("reloads %s sidebar schemas when system visibility changes", async (dbType) => {
+  it.each(["opengauss", "kingbase"] as const)("reloads %s sidebar schemas when per-item system visibility changes", async (dbType) => {
     const listSchemaInfos = vi.fn().mockResolvedValue([
       { name: "information_schema", comment: null },
       { name: "pg_catalog", comment: null },
@@ -1901,12 +2069,13 @@ describe("connectionStore metadata loading", () => {
     await store.loadSchemas(connection.id, "app");
     expect(databaseNode.children?.filter((node) => node.type === "schema").map((node) => node.label)).toEqual(["public"]);
 
-    store.connections[0]!.show_system_schemas = true;
+    store.connections[0]!.schema_visibility!.databases.app = { information_schema: true, pg_catalog: true };
     databaseNode.children = [];
     databaseNode.isExpanded = false;
     await store.loadSchemas(connection.id, "app");
 
-    expect(loadSchemaCache.mock.calls.map(([key]) => key)).toEqual([`${connection.id}:app:schemas-v3:hide-system`, `${connection.id}:app:schemas-v3:show-system`]);
+    expect(loadSchemaCache).toHaveBeenCalledOnce();
+    expect(loadSchemaCache.mock.calls[0][0]).toContain("schemas-v3-visibility-v1");
     expect(databaseNode.children?.filter((node) => node.type === "schema").map((node) => node.label)).toEqual(["information_schema", "pg_catalog", "public"]);
   });
 
@@ -2345,6 +2514,9 @@ describe("connectionStore metadata loading", () => {
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       listDatabases,
+      listTables: vi.fn().mockResolvedValue([]),
+      listObjects: vi.fn().mockResolvedValue([]),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
       loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),
       saveConnections: vi.fn().mockResolvedValue(undefined),
@@ -2386,11 +2558,12 @@ describe("connectionStore metadata loading", () => {
 
     await store.loadDatabases(connection.id, { force: true });
     expect(listDatabases).toHaveBeenCalledTimes(1);
-    expect(connectionNode.children![0].children?.map((node) => node.type)).toEqual(["saved-sql-root"]);
+    expect(connectionNode.children?.some((node) => node.type === "connection-extensions")).toBe(false);
+    expect(connectionNode.children!.find((node) => node.id === test1Id)?.children).toEqual([]);
     expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(false);
 
     await store.loadTables(connection.id, "test1");
-    expect(connectionNode.children![0].children?.length).toBeGreaterThan(0);
+    expect(connectionNode.children!.find((node) => node.id === test1Id)?.children?.length).toBeGreaterThan(0);
     expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(true);
   });
 
@@ -2524,7 +2697,7 @@ describe("connectionStore metadata loading", () => {
 
     await store.loadTables(connection.id, "test1");
     expect(listTables).toHaveBeenCalledTimes(1);
-    expect(connectionNode.children![0].children?.some((child) => child.label === "users")).toBe(true);
+    expect(tableTreeLabels(store.projectRelationalNavigationTree(store.treeNodes))).toEqual(["users"]);
   });
 
   it("does not refetch a legitimately empty simple-mode database on re-expand", async () => {
@@ -2592,6 +2765,8 @@ describe("connectionStore metadata loading", () => {
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       listTables,
+      listObjects: vi.fn().mockResolvedValue([]),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
       loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),
       saveConnections: vi.fn().mockResolvedValue(undefined),
@@ -2640,13 +2815,23 @@ describe("connectionStore metadata loading", () => {
 
     dbNode.children = [];
     listTables.mockClear();
-    await store.loadTables(connection.id, "test1");
+    let finishTables!: (rows: TableInfo[]) => void;
+    listTables.mockImplementationOnce(
+      () =>
+        new Promise<TableInfo[]>((resolve) => {
+          finishTables = resolve;
+        }),
+    );
+    const reloading = store.loadTables(connection.id, "test1");
+    await vi.waitFor(() => expect(finishTables).toBeDefined());
 
     expect(store.isTreeNodeChildrenLoaded(groupId)).toBe(false);
     expect(store.canUseLoadedTreeNodeToggle({ ...tablesGroup!, id: groupId, children: [] } as TreeNode)).toBe(false);
 
     const refreshedTablesGroup = dbNode.children?.find((child) => child.type === "group-tables");
     expect(refreshedTablesGroup).toBeDefined();
+    finishTables(tables);
+    await reloading;
     await store.loadObjectGroupChildren(refreshedTablesGroup!);
     expect(listTables).toHaveBeenCalledTimes(1);
     expect(refreshedTablesGroup?.children?.length).toBeGreaterThan(0);
@@ -2716,8 +2901,8 @@ describe("connectionStore metadata loading", () => {
     resolveTables(tables);
     await loadPromise;
 
-    expect(staleDbNode.children?.length ?? 0).toBe(0);
-    expect(replacementDb.children?.length ?? 0).toBeGreaterThan(0);
+    expect(connectionNode.children).toEqual([replacementDb]);
+    expect(tableTreeLabels(replacementDb.children)).toEqual(["users"]);
     expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(true);
   });
 
@@ -2814,6 +2999,7 @@ describe("connectionStore metadata loading", () => {
       listDatabases,
       listInstalledAgents: vi.fn().mockResolvedValue([]),
       listTables,
+      listObjects: vi.fn().mockResolvedValue([]),
       loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),
       saveConnections: vi.fn().mockResolvedValue(undefined),
@@ -2871,6 +3057,8 @@ describe("connectionStore metadata loading", () => {
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       listDatabases,
       listTables,
+      listObjects: vi.fn().mockResolvedValue([]),
+      listInstalledAgents: vi.fn().mockResolvedValue([]),
       loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),
       saveConnections: vi.fn().mockResolvedValue(undefined),
@@ -2907,7 +3095,7 @@ describe("connectionStore metadata loading", () => {
     expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(true);
   });
 
-  it("adds the Xugu user-permissions utility only to Xugu connection roots", async () => {
+  it("keeps management shortcuts out of Xugu and MySQL object trees", async () => {
     const listDatabases = vi.fn().mockResolvedValue([{ name: "testdb", comment: null }]);
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
@@ -2941,9 +3129,12 @@ describe("connectionStore metadata loading", () => {
 
     const xuguRoot = store.treeNodes.find((node) => node.connectionId === xugu.id)!;
     const mysqlRoot = store.treeNodes.find((node) => node.connectionId === mysql.id)!;
-    expect(xuguRoot.children?.filter((node) => node.type === "xugu-user-admin")).toHaveLength(1);
-    expect(mysqlRoot.children?.some((node) => node.type === "xugu-user-admin")).toBe(false);
-    expect(mysqlRoot.children?.some((node) => node.type === "user-admin")).toBe(true);
+    const xuguExtensions = xuguRoot.children?.find((node) => node.type === "connection-extensions");
+    const mysqlExtensions = mysqlRoot.children?.find((node) => node.type === "connection-extensions");
+    expect(xuguExtensions).toBeUndefined();
+    expect(mysqlExtensions).toBeUndefined();
+    expect(xuguRoot.children?.some((node) => node.type === "xugu-user-admin")).toBe(false);
+    expect(mysqlRoot.children?.some((node) => node.type === "user-admin")).toBe(false);
   }, 15000);
 
   it("clears connection loading after disconnect even when metadata apply is skipped", async () => {
@@ -3082,13 +3273,15 @@ describe("connectionStore metadata loading", () => {
     resolveOldTables([{ name: "stale_users", table_type: "TABLE", comment: null }]);
     await staleLoad;
 
-    expect(reconnectedDb.children?.some((child) => child.label === "stale_users")).toBe(false);
+    expect(tableTreeLabels(reconnectedDb.children)).not.toContain("stale_users");
     expect(reconnectedDb.isLoading).toBe(true);
-    expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(false);
+    const pendingTables = reconnectedDb.children!.find((node) => node.type === "group-tables")!;
+    expect(pendingTables).toBeDefined();
+    expect(store.isTreeNodeChildrenLoaded(pendingTables.id)).toBe(false);
 
     resolveNewTables([{ name: "fresh_users", table_type: "TABLE", comment: null }]);
     await freshLoad;
-    expect(reconnectedDb.children?.some((child) => child.label === "fresh_users")).toBe(true);
+    expect(tableTreeLabels(reconnectedDb.children)).toEqual(["fresh_users"]);
     expect(reconnectedDb.isLoading).toBe(false);
   });
 
@@ -3156,7 +3349,7 @@ describe("connectionStore metadata loading", () => {
     resolveTables([{ name: "users", table_type: "TABLE", comment: null }]);
     await loadPromise;
 
-    expect(dbNode.children?.some((child) => child.label === "users")).toBe(true);
+    expect(tableTreeLabels(dbNode.children)).toEqual(["users"]);
     expect(dbNode.isLoading).toBe(false);
   });
 
@@ -3305,9 +3498,11 @@ describe("connectionStore metadata loading", () => {
     resolveTables([{ name: "stale_users", table_type: "TABLE", comment: null }]);
     await staleLoad;
 
-    expect(dbNode.children?.some((child) => child.label === "stale_users")).toBe(false);
+    expect(tableTreeLabels(dbNode.children)).not.toContain("stale_users");
     expect(dbNode.isLoading).toBe(false);
-    expect(store.isTreeNodeChildrenLoaded(test1Id)).toBe(false);
+    const discardedTables = dbNode.children!.find((node) => node.type === "group-tables")!;
+    expect(discardedTables).toBeDefined();
+    expect(store.isTreeNodeChildrenLoaded(discardedTables.id)).toBe(false);
   });
 
   it("does not re-expand a node collapsed while its load is still in flight", async () => {
@@ -3368,7 +3563,7 @@ describe("connectionStore metadata loading", () => {
     const loadPromise = store.loadTables(connection.id, "test1");
     await vi.waitFor(() => expect(listTables).toHaveBeenCalledTimes(1));
     expect(dbNode.isLoading).toBe(true);
-    expect(dbNode.isExpanded).toBe(false);
+    expect(dbNode.isExpanded).toBe(true);
 
     // Simulate the user collapsing the node while the metadata load is still in flight.
     dbNode.isExpanded = false;
@@ -4775,6 +4970,7 @@ describe("connectionStore metadata loading", () => {
       checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       listSchemas,
+      listSchemaInfos: async () => (await listSchemas()).map((name) => ({ name, comment: null })),
       loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),
       saveConnections: vi.fn().mockResolvedValue(undefined),
@@ -5213,10 +5409,10 @@ describe("connectionStore metadata loading", () => {
     expect(defaultDatabase().isExpanded).toBe(true);
     expect(schemaLabels()).toEqual(["APP_USER", "APP_USER_ARCHIVE", "SYS"]);
 
-    await store.setVisibleSchemas(connection.id, "", ["APP_USER"]);
+    await store.setVisibleSchemas(connection.id, "", ["APP_USER"], { names: ["APP_USER", "APP_USER_ARCHIVE", "SYS"], systemNames: new Set() });
 
     // The saved filter must show without a manual refresh of the connection.
-    expect(store.getConfig(connection.id)?.visible_schemas).toEqual({ "": ["APP_USER"] });
+    expect(store.getConfig(connection.id)?.schema_visibility?.databases[""]).toEqual({ APP_USER_ARCHIVE: false, SYS: false });
     expect(schemaLabels()).toEqual(["APP_USER"]);
   });
 });

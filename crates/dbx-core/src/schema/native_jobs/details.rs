@@ -57,6 +57,19 @@ pub(super) fn file_watcher_reference_present(row: &NativeJobRow) -> bool {
 pub async fn read_native_job_details_with<Q, F>(
     dialect: NativeJobCatalogDialect,
     target: &NativeJobRef,
+    query: Q,
+) -> Result<NativeJobDetails, &'static str>
+where
+    Q: FnMut(NativeJobCatalogQuery) -> F,
+    F: Future<Output = Result<Value, NativeJobCatalogFailure>>,
+{
+    read_native_job_details_in_page_with(dialect, target, None, query).await
+}
+
+pub async fn read_native_job_details_in_page_with<Q, F>(
+    dialect: NativeJobCatalogDialect,
+    target: &NativeJobRef,
+    page: Option<&dbx_types::native_jobs::NativeJobPageScope>,
     mut query: Q,
 ) -> Result<NativeJobDetails, &'static str>
 where
@@ -64,6 +77,19 @@ where
     F: Future<Output = Result<Value, NativeJobCatalogFailure>>,
 {
     target.validate()?;
+    if let Some(page) = page {
+        page.validate()?;
+        let matches = match target {
+            NativeJobRef::Scheduler { owner, .. } => {
+                page.kind == dbx_types::native_jobs::NativeJobKind::Scheduler && owner == &page.schema
+            }
+            NativeJobRef::Legacy { .. } => page.kind == dbx_types::native_jobs::NativeJobKind::Legacy,
+            NativeJobRef::DamengNative { .. } => false,
+        };
+        if !matches {
+            return Err("native_job_page_scope_mismatch");
+        }
+    }
     let before =
         read_native_job_catalog_part_with(dialect, target, NativeJobCatalogPart::Generation, &mut query).await?;
     let mut sources = BTreeMap::new();
@@ -77,6 +103,35 @@ where
         ("history", NativeJobCatalogPart::History),
     ] {
         let section = read_native_job_catalog_part_with(dialect, target, part, &mut query).await?;
+        if key == "definition" {
+            if let Some(page) = page {
+                if let Some(category) = page.scheduler_category {
+                    let matching = match &section.data {
+                        NativeJobMetadata::Available { value } => value
+                            .first()
+                            .and_then(|row| row.get("JOB_STYLE"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|style| category.styles().contains(&style)),
+                        _ => false,
+                    };
+                    if !matching {
+                        return Err("native_job_page_scope_mismatch");
+                    }
+                }
+                if matches!(target, NativeJobRef::Legacy { .. }) {
+                    let matching = match &section.data {
+                        NativeJobMetadata::Available { value } => {
+                            value.first().and_then(|row| row.get("SCHEMA_USER")).and_then(Value::as_str)
+                                == Some(page.schema.as_str())
+                        }
+                        _ => false,
+                    };
+                    if !matching {
+                        return Err("native_job_page_scope_mismatch");
+                    }
+                }
+            }
+        }
         sources.insert(
             key.into(),
             NativeJobCatalogSource { source: section.source.map(str::to_string), coverage: section.coverage },

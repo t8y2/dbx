@@ -2554,19 +2554,31 @@ fn linked_i32(row: &tiberius::Row, index: usize) -> Option<i32> {
 }
 
 pub async fn list_schemas(client: &mut SqlServerClient) -> Result<Vec<String>, String> {
-    let sql = sqlserver_list_schemas_sql();
+    list_schemas_with_system(client, false).await
+}
+
+pub async fn list_schemas_with_system(
+    client: &mut SqlServerClient,
+    show_system_schemas: bool,
+) -> Result<Vec<String>, String> {
+    let sql = sqlserver_list_schemas_sql(show_system_schemas);
     let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
     Ok(rows.iter().map(|row| row.get::<&str, _>(0).unwrap_or("").to_string()).collect())
 }
 
-fn sqlserver_list_schemas_sql() -> String {
-    let excluded_schemas =
-        sqlserver_hidden_schema_names().iter().map(|name| format!("'{name}'")).collect::<Vec<_>>().join(",");
+fn sqlserver_list_schemas_sql(show_system_schemas: bool) -> String {
+    let predicate = if show_system_schemas {
+        String::new()
+    } else {
+        let excluded_schemas =
+            sqlserver_hidden_schema_names().iter().map(|name| format!("'{name}'")).collect::<Vec<_>>().join(",");
+        format!("WHERE s.name NOT IN ({excluded_schemas}) ")
+    };
     format!(
         "SELECT s.name \
          FROM sys.schemas s \
-         WHERE s.name NOT IN ({excluded_schemas}) \
+         {predicate}\
          ORDER BY CASE WHEN s.name = 'dbo' THEN 0 ELSE 1 END, s.name"
     )
 }
@@ -3020,7 +3032,34 @@ fn sqlserver_hidden_schema_names() -> &'static [&'static str] {
 
 pub async fn list_objects(client: &mut SqlServerClient, schema: &str) -> Result<Vec<crate::types::ObjectInfo>, String> {
     let sql = sqlserver_list_objects_sql(schema);
-    let stream = client.query(&*sql, &[]).await.map_err(|e| e.to_string())?;
+    sqlserver_query_objects(client, schema, &sql).await
+}
+
+pub async fn list_objects_page(
+    client: &mut SqlServerClient,
+    schema: &str,
+    object_types: &[String],
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<crate::types::ObjectInfo>, String> {
+    if object_types.iter().any(|kind| {
+        !["TABLE", "VIEW", "PROCEDURE", "FUNCTION"].iter().any(|supported| kind.eq_ignore_ascii_case(supported))
+    }) {
+        return Err("Unsupported SQL Server object directory type".to_string());
+    }
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let sql = sqlserver_list_objects_page_sql(schema, object_types, limit, offset);
+    sqlserver_query_objects(client, schema, &sql).await
+}
+
+async fn sqlserver_query_objects(
+    client: &mut SqlServerClient,
+    schema: &str,
+    sql: &str,
+) -> Result<Vec<crate::types::ObjectInfo>, String> {
+    let stream = client.query(sql, &[]).await.map_err(|e| e.to_string())?;
     let rows = stream.into_first_result().await.map_err(|e| e.to_string())?;
     Ok(rows
         .iter()
@@ -3041,6 +3080,26 @@ pub async fn list_objects(client: &mut SqlServerClient, schema: &str) -> Result<
             xugu_type_members_expandable: None,
         })
         .collect())
+}
+
+fn sqlserver_list_objects_page_sql(schema: &str, object_types: &[String], limit: usize, offset: usize) -> String {
+    let sql = sqlserver_list_objects_sql(schema).replacen("SELECT o.name,", "SELECT o.object_id, o.name,", 1);
+    let source = sql.rsplit_once(" ORDER BY ").map_or(sql.as_str(), |(query, _)| query);
+    let types = ["TABLE", "VIEW", "PROCEDURE", "FUNCTION"]
+        .into_iter()
+        .filter(|kind| {
+            object_types.is_empty() || object_types.iter().any(|requested| requested.eq_ignore_ascii_case(kind))
+        })
+        .map(|kind| format!("'{kind}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let end = offset.saturating_add(limit);
+    format!(
+        "SELECT name, object_type, create_date, modify_date, object_comment \
+         FROM (SELECT directory.*, ROW_NUMBER() OVER (ORDER BY object_type, name, object_id) AS directory_row \
+               FROM ({source}) directory WHERE object_type IN ({types})) numbered \
+         WHERE directory_row > {offset} AND directory_row <= {end} ORDER BY directory_row"
+    )
 }
 
 fn sqlserver_list_objects_sql(schema: &str) -> String {
@@ -6188,6 +6247,33 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_directory_page_filters_types_before_numbering_and_preserves_bounds() {
+        let types = vec!["VIEW".to_string(), "FUNCTION".to_string()];
+        let sql = super::sqlserver_list_objects_page_sql("Sales'Ops", &types, 1000, 2000);
+
+        assert!(super::Parser::parse_sql(&super::MsSqlDialect {}, &sql).is_ok());
+        assert!(sql.contains("s.name = 'Sales''Ops'"));
+        assert!(sql.contains("ROW_NUMBER() OVER (ORDER BY object_type, name, object_id)"));
+        assert!(sql.contains("directory WHERE object_type IN ('VIEW', 'FUNCTION')"));
+        assert!(sql.ends_with("directory_row > 2000 AND directory_row <= 3000 ORDER BY directory_row"));
+        assert!(sql.contains(sqlserver_visible_object_predicate()));
+        assert!(sql.contains("OUTER APPLY"));
+        assert!(!sql.contains("OFFSET"));
+        assert!(!sql.contains("FETCH"));
+    }
+
+    #[test]
+    fn sqlserver_directory_page_empty_type_selection_keeps_all_supported_types() {
+        let sql = super::sqlserver_list_objects_page_sql("dbo", &[], 1000, 0);
+
+        assert!(sql.contains("object_type IN ('TABLE', 'VIEW', 'PROCEDURE', 'FUNCTION')"));
+        assert!(sql.ends_with("directory_row > 0 AND directory_row <= 1000 ORDER BY directory_row"));
+        let original = sqlserver_list_objects_sql("dbo");
+        assert!(!original.contains("ROW_NUMBER"));
+        assert!(!original.contains("directory_row"));
+    }
+
+    #[test]
     fn sqlserver_metadata_allows_cdc_system_shipped_objects() {
         let predicate = sqlserver_visible_object_predicate();
 
@@ -6198,13 +6284,23 @@ mod tests {
 
     #[test]
     fn sqlserver_list_schemas_includes_empty_user_schemas() {
-        let sql = sqlserver_list_schemas_sql();
+        let sql = sqlserver_list_schemas_sql(false);
 
         assert!(!sql.contains("sys.objects"));
         assert!(sql.contains("s.name NOT IN"));
         assert!(sql.contains("'db_owner'"));
         assert!(sql.contains("'db_datareader'"));
         assert!(sqlserver_hidden_schema_names().contains(&"sys"));
+    }
+
+    #[test]
+    fn sqlserver_complete_schema_candidates_do_not_exclude_system_or_empty_schemas() {
+        let sql = sqlserver_list_schemas_sql(true);
+
+        assert!(sql.contains("FROM sys.schemas s"));
+        assert!(!sql.contains("WHERE"));
+        assert!(!sql.contains("sys.objects"));
+        assert!(sql.contains("ORDER BY CASE WHEN s.name = 'dbo' THEN 0 ELSE 1 END, s.name"));
     }
 
     #[test]

@@ -9,7 +9,16 @@ import type { ConnectionConfig, IndexInfo, ObjectInfo } from "@/types/database";
 const mocks = vi.hoisted(() => ({ listObjects: vi.fn(), listTables: vi.fn(), listIndexes: vi.fn(), getColumns: vi.fn(), getTableDdl: vi.fn(), openTableStructure: vi.fn(), executeQuery: vi.fn(), executeBatch: vi.fn(), toolbarTier: 0 }));
 const ddlSettings = vi.hoisted(() => ({ separateDdlIndexes: false, includeDdlStorage: true, compactDdlSql: false, sidebarMenuLayout: "grouped" }));
 vi.mock("@/lib/backend/api", () => ({ ...mocks, listSchemas: vi.fn().mockResolvedValue([" Mixed "]), listObjectStatistics: vi.fn().mockResolvedValue([]), loadSchemaCache: vi.fn().mockResolvedValue(null), saveSchemaCache: vi.fn(), deleteSchemaCachePrefix: vi.fn() }));
-vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ getConfig: () => connection, ensureConnected: vi.fn().mockResolvedValue(undefined), tableNameFilterForScope: () => undefined, orderByPinnedTreeNodes: (rows: unknown[]) => rows }) }));
+vi.mock("@/stores/connectionStore", () => ({
+  useConnectionStore: () => ({
+    getConfig: () => connection,
+    completionCacheRevision: () => 0,
+    ensureConnected: vi.fn().mockResolvedValue(undefined),
+    readVisibleSchemaSelection: vi.fn().mockResolvedValue({ visibleNames: [" Mixed "] }),
+    tableNameFilterForScope: () => undefined,
+    orderByPinnedTreeNodes: (rows: unknown[]) => rows,
+  }),
+}));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ openTableStructure: mocks.openTableStructure }) }));
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
@@ -142,10 +151,12 @@ describe("schema index browsing and draft navigation", () => {
         return item!;
       });
       row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
-      const action = await vi.waitFor(() => {
+      await vi.waitFor(() => {
         expect(document.querySelector("[data-dbx-context-menu]")).not.toBeNull();
-        const item = document.querySelector<HTMLElement>('[data-menu-action="contextMenu.exportStructure"]');
-        expect([...document.querySelectorAll("[data-menu-action]")].map((item) => item.getAttribute("data-menu-action"))).toContain("contextMenu.exportStructure");
+      });
+      const action = await vi.waitFor(() => {
+        const item = [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].find((button) => button.textContent?.includes("contextMenu.exportStructure"));
+        expect(item).toBeDefined();
         return item!;
       });
       action.click();

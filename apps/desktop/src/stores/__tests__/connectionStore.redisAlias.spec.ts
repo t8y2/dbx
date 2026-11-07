@@ -140,7 +140,7 @@ describe("connectionStore Redis database aliases", () => {
 
     expect(store.getRedisDatabaseAlias("redis-1", 3)).toBe("orders");
     expect(store.connections[0]).toEqual(expect.objectContaining({ password: "one-time-secret", redis_database_aliases: { "3": "orders" } }));
-    expect(saveConnections).toHaveBeenLastCalledWith([]);
+    expect(saveConnections).not.toHaveBeenCalled();
   });
 
   it("preserves pinned state and order for redis databases with aliases after reconnecting", async () => {

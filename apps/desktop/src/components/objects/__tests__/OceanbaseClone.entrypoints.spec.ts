@@ -21,6 +21,8 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
   ...backend,
   closeClientConnectionSession: vi.fn().mockResolvedValue(true),
   listPlugins: vi.fn().mockResolvedValue([]),
+  listInstalledAgents: vi.fn().mockResolvedValue([]),
+  listInstalledAgentsLocal: vi.fn().mockResolvedValue([]),
   saveSchemaCache: vi.fn().mockResolvedValue(undefined),
   loadSchemaCache: vi.fn().mockResolvedValue(null),
   deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
@@ -89,6 +91,10 @@ async function mountEntry(surface: "sidebar" | "objects") {
   const pinia = createPinia();
   setActivePinia(pinia);
   const store = useConnectionStore();
+  vi.spyOn(store, "readVisibleSchemaSelection").mockImplementation(async (id, database) => {
+    const names = await api.listSchemas(id, database);
+    return { names, infos: [], systemNames: new Set<string>(), visibleNames: names, oracleMaintainedSchemas: undefined };
+  });
   store.connections = [{ ...connection }];
   store.connectedIds.add(connection.id);
   vi.spyOn(store, "ensureConnected").mockResolvedValue(undefined);

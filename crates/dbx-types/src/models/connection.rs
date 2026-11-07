@@ -152,6 +152,12 @@ pub enum ProductionBadgeScope {
     Table,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SchemaVisibility {
+    pub migrate_legacy: bool,
+    pub databases: HashMap<String, HashMap<String, bool>>,
+}
+
 #[derive(Clone, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     pub id: String,
@@ -180,18 +186,22 @@ pub struct ConnectionConfig {
     pub visible_database_patterns: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_visibility: Option<SchemaVisibility>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub show_system_schemas: bool,
     /// Frontend navigation preference: exhaust the paginated Tables group when opened.
     #[serde(default, skip_serializing_if = "is_false")]
     pub sidebar_auto_load_all_tables: bool,
-    /// Sidebar preference. Absent means shown; only an explicit opt-out is stored.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Legacy sidebar inputs, omitted from effective writes.
+    #[serde(default, skip_serializing)]
     pub show_database_links: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub show_native_jobs: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub show_user_admin: Option<bool>,
+    #[serde(default, skip_serializing)]
+    pub show_extensions: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     /// SQL statements executed right after the connection is established
@@ -769,6 +779,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
     #[serde(default)]
+    pub schema_visibility: Option<SchemaVisibility>,
+    #[serde(default)]
     pub show_system_schemas: bool,
     #[serde(default)]
     pub sidebar_auto_load_all_tables: bool,
@@ -778,6 +790,8 @@ struct ConnectionConfigData {
     pub show_native_jobs: Option<bool>,
     #[serde(default)]
     pub show_user_admin: Option<bool>,
+    #[serde(default)]
+    pub show_extensions: Option<bool>,
     #[serde(default)]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     #[serde(default)]
@@ -900,11 +914,13 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             visible_databases: data.visible_databases,
             visible_database_patterns: data.visible_database_patterns,
             visible_schemas: data.visible_schemas,
+            schema_visibility: data.schema_visibility,
             show_system_schemas: data.show_system_schemas,
             sidebar_auto_load_all_tables: data.sidebar_auto_load_all_tables,
             show_database_links: data.show_database_links,
             show_native_jobs: data.show_native_jobs,
             show_user_admin: data.show_user_admin,
+            show_extensions: data.show_extensions,
             attached_databases: data.attached_databases,
             init_script: data.init_script,
             color: data.color,
@@ -3424,7 +3440,7 @@ mod tests {
     }
 
     #[test]
-    fn show_database_links_opt_out_round_trips() {
+    fn extension_visibility_is_read_compatible_but_never_serialized() {
         let mut value = serde_json::json!({
             "id": "id",
             "name": "Oracle",
@@ -3436,28 +3452,71 @@ mod tests {
             "database": "FREEPDB1"
         });
         let legacy: ConnectionConfig = serde_json::from_value(value.clone()).unwrap();
-        assert!(serde_json::to_value(legacy).unwrap().get("show_database_links").is_none());
+        assert!(serde_json::to_value(legacy).unwrap().get("show_extensions").is_none());
 
-        value["show_database_links"] = serde_json::json!(false);
-        let hidden: ConnectionConfig = serde_json::from_value(value).unwrap();
-        assert_eq!(serde_json::to_value(hidden).unwrap()["show_database_links"], serde_json::json!(false));
+        for visible in [false, true] {
+            value["show_extensions"] = serde_json::json!(visible);
+            let legacy: ConnectionConfig = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(legacy.show_extensions, Some(visible));
+            assert!(serde_json::to_value(legacy).unwrap().get("show_extensions").is_none());
+        }
     }
 
     #[test]
-    fn sidebar_visibility_preferences_round_trip() {
+    fn extension_visibility_and_legacy_keys_are_omitted_on_serialization() {
+        let value = serde_json::json!({
+            "id": "sidebar", "name": "Sidebar", "db_type": "oracle", "host": "localhost",
+            "port": 1521, "username": "test", "password": "secret",
+            "show_database_links": false, "show_native_jobs": false, "show_user_admin": false,
+            "show_extensions": false,
+            "external_config": {"show_user_admin": false, "show_extensions": true, "custom": "preserved"}
+        });
+        let config: ConnectionConfig = serde_json::from_value(value).unwrap();
+        let serialized = serde_json::to_value(config).unwrap();
+        for field in ["show_extensions", "show_database_links", "show_native_jobs", "show_user_admin"] {
+            assert!(serialized.get(field).is_none(), "legacy key {field} was serialized");
+        }
+        assert_eq!(serialized["external_config"]["show_user_admin"], false);
+        assert_eq!(serialized["external_config"]["show_extensions"], true);
+        assert_eq!(serialized["external_config"]["custom"], "preserved");
+        assert_eq!(serialized["password"], "secret");
+    }
+
+    #[test]
+    fn sidebar_visibility_preferences_are_input_only() {
         let base = serde_json::json!({
             "id": "sidebar", "name": "Sidebar", "db_type": "oracle", "host": "localhost",
             "port": 1521, "username": "test", "password": ""
         });
-        for field in ["show_database_links", "show_native_jobs", "show_user_admin"] {
+        for field in ["show_extensions", "show_database_links", "show_native_jobs", "show_user_admin"] {
             let legacy: ConnectionConfig = serde_json::from_value(base.clone()).unwrap();
             assert!(serde_json::to_value(legacy).unwrap().get(field).is_none());
             for visible in [true, false] {
                 let mut value = base.clone();
                 value[field] = serde_json::json!(visible);
                 let config: ConnectionConfig = serde_json::from_value(value).unwrap();
-                assert_eq!(serde_json::to_value(config).unwrap()[field], serde_json::json!(visible));
+                assert!(serde_json::to_value(config).unwrap().get(field).is_none());
             }
+        }
+    }
+
+    #[test]
+    fn schema_visibility_round_trips_legacy_and_initialized_databases() {
+        let base = serde_json::json!({
+            "id": "schema", "name": "Schema", "db_type": "oracle", "host": "localhost",
+            "port": 1521, "username": "test", "password": ""
+        });
+        let legacy: ConnectionConfig = serde_json::from_value(base.clone()).unwrap();
+        assert!(legacy.schema_visibility.is_none());
+        assert!(serde_json::to_value(legacy).unwrap().get("schema_visibility").is_none());
+        for migrate_legacy in [true, false] {
+            let mut input = base.clone();
+            input["schema_visibility"] = serde_json::json!({
+                "migrate_legacy": migrate_legacy,
+                "databases": {"empty": {}, "ORCL": {"APP": true, "SYS": false}}
+            });
+            let config: ConnectionConfig = serde_json::from_value(input.clone()).unwrap();
+            assert_eq!(serde_json::to_value(config).unwrap()["schema_visibility"], input["schema_visibility"]);
         }
     }
 
@@ -3483,10 +3542,12 @@ mod tests {
             visible_databases: None,
             visible_database_patterns: None,
             visible_schemas: None,
+            schema_visibility: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
             show_native_jobs: None,
+            show_extensions: None,
             show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,

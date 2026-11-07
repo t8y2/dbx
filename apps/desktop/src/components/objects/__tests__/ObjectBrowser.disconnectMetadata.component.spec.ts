@@ -48,6 +48,10 @@ it("retires an actual ObjectBrowser page when the real store disconnects the sam
   const pinia = createPinia();
   setActivePinia(pinia);
   const store = useConnectionStore();
+  vi.spyOn(store, "readVisibleSchemaSelection").mockImplementation(async () => {
+    const names = await api.listSchemas();
+    return { names, infos: [], systemNames: new Set<string>(), visibleNames: names, oracleMaintainedSchemas: undefined };
+  });
   const settings = useSettingsStore();
   settings.editorSettings.disconnectTabHandlingMode = "keep-tabs-clear-results";
   const connection = { id: "ob-real-generation", name: "OB", db_type: "oceanbase-oracle", database: "APP", transport_layers: [] } as unknown as ConnectionConfig;
@@ -81,6 +85,10 @@ it("cancels a pending object search when the real store disconnects", async () =
   const pinia = createPinia();
   setActivePinia(pinia);
   const store = useConnectionStore();
+  vi.spyOn(store, "readVisibleSchemaSelection").mockImplementation(async () => {
+    const names = await api.listSchemas();
+    return { names, infos: [], systemNames: new Set<string>(), visibleNames: names, oracleMaintainedSchemas: undefined };
+  });
   useSettingsStore().editorSettings.disconnectTabHandlingMode = "keep-tabs-clear-results";
   const connection = { id: "ob-pending-search", name: "OB", db_type: "oceanbase-oracle", database: "APP", transport_layers: [] } as unknown as ConnectionConfig;
   store.connections = [connection];

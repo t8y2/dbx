@@ -65,6 +65,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  navigationPreferences: { refreshFailed: "설정은 저장되었지만 탐색 새로 고침에 실패했습니다: {message}", connectionUnavailable: "연결이 더 이상 존재하지 않습니다. 다시 여세요." },
   oracleTrigger: {
     errorPositionUnavailable: "소스를 열었습니다. 오류 위치를 확인할 수 없으므로 표시된 행과 열을 확인하세요.",
     reconcileStructure: "적용된 변경 사항 대조",
@@ -3762,6 +3763,7 @@ export default withEnglishFallback({
     unknown: "예상하지 못한 백엔드 오류가 발생했습니다.",
   },
   common: {
+    all: "전체",
     fileNotFound: "파일이 존재하지 않습니다: {path}",
     loading: "불러오는 중...",
     stopping: "중지하는 중...",
@@ -4617,6 +4619,10 @@ export default withEnglishFallback({
     noDatabasesFound: "데이터베이스를 찾을 수 없습니다",
   },
   contextMenu: {
+    viewObjects: "객체 보기",
+    refreshObjects: "객체 새로 고침",
+    confirmDeleteConnectionConfig: "저장된 연결 설정 “{name}”을(를) 삭제하시겠습니까?",
+    confirmDeleteSelectedConnectionConfigs: "선택한 저장된 연결 설정 {count}개를 삭제하시겠습니까?",
     splitTab: "분할",
     batchCloseTabs: "여러 탭 닫기",
     copyTabName: "탭 이름 복사",
@@ -4626,12 +4632,12 @@ export default withEnglishFallback({
     closeConnection: "연결 닫기",
     closeSelectedConnections: "선택한 연결 {count}개 닫기",
     closeDatabaseConnection: "데이터베이스 연결 닫기",
-    deleteConnection: "연결 삭제",
-    deleteSelectedConnections: "선택한 연결 {count}개 삭제",
+    deleteConnection: "연결 삭제…",
+    deleteSelectedConnections: "선택한 연결 {count}개 삭제…",
     confirmDeleteTitle: "연결 삭제",
     confirmDeleteMessage: '"{name}"을(를) 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.',
     confirmDeleteSelectedMessage: "선택한 연결 {count}개를 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
-    editConnection: "연결 편집",
+    editConnection: "연결 편집…",
     revealDatabaseFile: "파일 관리자에서 보기",
     selectVisibleDatabases: "표시할 데이터베이스 선택",
     configureVisibleObjects: "표시 객체 필터",
@@ -5091,6 +5097,8 @@ export default withEnglishFallback({
     loadFailed: "데이터베이스를 불러오는 데 실패했습니다: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "사용자 스키마",
+    systemGroup: "시스템 스키마",
     title: "스키마 필터",
     detailLabel: "표시할 스키마",
     detailActionLabel: '"{connection}"의 표시할 스키마 구성',
@@ -5107,6 +5115,9 @@ export default withEnglishFallback({
     loadFailed: "스키마를 불러오는 데 실패했습니다: {message}",
   },
   databaseLinks: {
+    foreignPrivateReadOnly: "다른 사용자의 비공개 링크는 보기만 가능합니다.",
+    privateSchemaUnavailable: "다른 사용자의 스키마에 비공개 링크를 만들 수 없습니다. 로그인한 사용자의 스키마를 사용하세요.",
+    permissionUnknown: "삭제 권한이 확인되지 않았습니다. 실행 시 데이터베이스가 확인합니다. 새로 고침하여 다시 확인하세요.",
     remoteTenant: "원격 테넌트",
     remoteProtocol: "원격 데이터베이스 프로토콜",
     remoteCluster: "원격 클러스터(선택 사항)",
@@ -5132,6 +5143,18 @@ export default withEnglishFallback({
     manage: "Manage database links",
   },
   tree: {
+    navigationStatus: { denied: "권한 없음", error: "불러오기 실패", unknown: "확인 필요", unsupported: "지원 안 됨", truncated: "일부 결과" },
+    scheduler: "스케줄러",
+    publicObjects: "공용 객체",
+    tenantObjects: "테넌트 객체",
+    jobs: "작업",
+    jobCategories: {
+      regular: "예약 작업",
+      lightweight: "경량 작업",
+      inMemory: "메모리 작업",
+      legacy: "기존 작업",
+    },
+    openList: "목록 열기",
     nativeJobs: "네이티브 작업",
     databaseLinks: "Database Links",
     savedSql: "SQL 라이브러리",
@@ -5667,6 +5690,14 @@ export default withEnglishFallback({
     stepSkipped: "필요한 이전 단계가 실패하여 건너뜁니다.",
   },
   nativeJobs: {
+    contextChanged: "작업 컨텍스트가 변경되었거나 만료되었습니다. 목록을 새로 고친 후 다시 시도하세요.",
+    scopeRecoveryTitle: "작업 탭 복원",
+    scopeRecoveryHint: "이전 탭을 복원하려면 스키마 확인이 필요합니다. 객체 트리에서 다시 열 수 있으며 저장된 내용은 유지됩니다.",
+    retainedContent: "보관된 내용 보기",
+    scopeMismatch: "작업이 이 페이지의 스키마 또는 분류에 속하지 않습니다. 해당 분류에서 다시 여세요.",
+    scopeInvalid: "스키마 또는 분류가 올바르지 않습니다. 객체 트리에서 다시 여세요.",
+    legacySchemaCreationUnavailable: "이 방식으로는 다른 사용자의 스키마에 기존 작업을 만들 수 없습니다. 로그인한 사용자의 스키마를 사용하세요.",
+    scopeResolutionUnavailable: "스키마를 확인할 수 없습니다. 연결과 카탈로그 권한을 확인한 후 다시 시도하세요.",
     datePrecisionMicroseconds: "이 OceanBase 버전의 작업 날짜는 마이크로초 정밀도만 지원합니다. 소수 초의 7~9번째 자리를 0으로 바꾸고 다시 미리 보세요. 원래 입력은 보존되었습니다.",
     previousContext: "이전 컨텍스트의 작업 결과",
     detachedDraft: "원래 초안은 보존되었으며 현재 객체에 연결되어 있지 않습니다.",

@@ -14,7 +14,19 @@ vi.mock("@/lib/backend/api", () => ({
   listObjectStatistics: vi.fn().mockResolvedValue([]),
 }));
 vi.mock("@/stores/connectionStore", () => ({
-  useConnectionStore: () => ({ getConfig: () => connection, connectedIds: new Set([connection.id]), connectionStateRevision: () => 0, ensureConnected: vi.fn().mockResolvedValue(undefined), tableNameFilterForScope: () => undefined, orderByPinnedTreeNodes: (rows: unknown[]) => rows }),
+  useConnectionStore: () => ({
+    getConfig: () => connection,
+    completionCacheRevision: () => 0,
+    readVisibleSchemaSelection: async (...args: unknown[]) => {
+      const names = await mocks.listSchemas(...args);
+      return { names, infos: [], systemNames: new Set<string>(), visibleNames: names, oracleMaintainedSchemas: undefined };
+    },
+    connectedIds: new Set([connection.id]),
+    connectionStateRevision: () => 0,
+    ensureConnected: vi.fn().mockResolvedValue(undefined),
+    tableNameFilterForScope: () => undefined,
+    orderByPinnedTreeNodes: (rows: unknown[]) => rows,
+  }),
 }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({}) }));
 vi.mock("@/stores/settingsStore", () => ({

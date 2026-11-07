@@ -18,6 +18,8 @@ import type { CSSProperties } from "vue";
 import { hexToRgba } from "@/lib/common/color";
 import { useI18n } from "vue-i18n";
 import { provideTabUiState } from "@/lib/tabs/tabUiState";
+import { nativeJobAdminEngine } from "@/lib/database/nativeJobAdmin";
+import { translateBackendError } from "@/i18n/backend-errors";
 import { shouldPinResultRunOnClick } from "@/lib/tabs/resultRunPin";
 import {
   Check,
@@ -326,6 +328,19 @@ provideTabUiState(() => {
   const mode = tab.mode;
   return { snapshot: tab.uiState?.page?.[mode] ?? {}, update: (patch) => queryStore.updateTabPageUiState(tab.id, mode, patch, tab) };
 });
+watch(
+  () => [props.activeTab.id, props.activeTab.mode, props.activeConnection ? nativeJobAdminEngine(props.activeConnection) : undefined],
+  () => {
+    if (props.activeTab.mode === "database-jobs" && props.activeConnection && !props.activeTab.nativeJobPage) void queryStore.resolveNativeJobNavigation(props.activeTab.id);
+  },
+  { immediate: true },
+);
+const retainedNativeJobContent = computed(() => {
+  const tab = props.activeTab;
+  const state = tab.uiState?.page?.["database-jobs"];
+  if (!tab.sql && !tab.originalSql && !state) return "";
+  return JSON.stringify({ ...(tab.sql ? { sql: tab.sql } : {}), ...(tab.originalSql && tab.originalSql !== tab.sql ? { originalSql: tab.originalSql } : {}), ...(state ? { state } : {}) }, null, 2);
+});
 const canAccessEtcdAdmin = computed(() => connectionStore.getEtcdAccessCapabilities(props.activeTab.connectionId).admin);
 watch(
   () => [props.activeTab.connectionId, props.activeTab.mode] as const,
@@ -387,7 +402,7 @@ const columnInfoError = ref<string | undefined>(undefined);
 const dataGridRef = ref<DataGridHandle>();
 const queryEditorRef = ref<InstanceType<typeof QueryEditor>>();
 const elasticsearchJsonResponsePanelRef = ref<ElasticsearchJsonResponsePanelHandle>();
-const tableStructureEditorRef = ref<{ applyChanges: () => Promise<boolean>; focusSearch: () => boolean }>();
+const tableStructureEditorRef = ref<{ applyChanges: () => Promise<boolean>; focusSearch: () => boolean; saving: boolean }>();
 const standaloneResultToolbarRef = ref<HTMLElement | null>(null);
 const standaloneResultToolbarWidth = ref(0);
 const standaloneResultToolbarViewportWidth = ref(0);
@@ -2278,6 +2293,18 @@ defineExpose({
     </div>
     <!-- Query mode: editor + results -->
     <template v-if="activeTab.mode === 'query'">
+      <div v-if="activeTab.queryCreation" class="flex shrink-0 items-center gap-2 border-b px-3 py-2">
+        <select
+          class="h-8 min-w-0 max-w-full rounded border bg-background px-2 text-sm"
+          :aria-label="t('common.database') + ' / Schema'"
+          :value="activeTab.queryCreation.selected ?? ''"
+          :disabled="activeTab.isExecuting || activeTab.isExplaining"
+          @change="queryStore.selectObjectTemplateTarget(activeTab.id, Number(($event.target as HTMLSelectElement).value))"
+        >
+          <option value="" disabled>—</option>
+          <option v-for="(target, index) in activeTab.queryCreation.targets" :key="index" :value="index">{{ [target.catalog, target.database, target.schema].filter((part, index, parts) => part && (index === 0 || part !== parts[index - 1])).join(" · ") }}</option>
+        </select>
+      </div>
       <Splitpanes horizontal class="query-output-splitpanes flex-1 min-h-0 overflow-hidden" @resize="onResultsSplitResize" @resized="onResultsResized">
         <Pane v-if="!resultOnly" class="min-h-0" :size="editorPaneSize" :min-size="resultsPaneOpen ? 15 : 100">
           <div class="h-full flex flex-col relative">
@@ -2349,6 +2376,9 @@ defineExpose({
                 :database="activeTab.database"
                 :schema="activeTab.schema"
                 :client-session-id="activeTab.id"
+                :txn-session-id="activeTab.txnSessionId"
+                :auto-commit="activeTab.autoCommit"
+                :is-cancelling="activeTab.isCancelling"
                 :completion-context-version="activeTab.completionContextVersion"
                 :database-type="activeEffectiveDatabaseType"
                 :mongo-query-language="activeTab.mongoQueryLanguage"
@@ -3999,8 +4029,21 @@ defineExpose({
 
     <!-- Structure mode: table structure editor -->
     <template v-else-if="activeTab.mode === 'structure'">
-      <div class="flex-1 min-h-0">
+      <div class="flex flex-1 min-h-0 flex-col">
+        <div v-if="activeTab.structureCreationTargets && !activeTab.structureTableName" class="flex shrink-0 items-center gap-2 border-b px-3 py-2">
+          <select
+            class="h-8 min-w-0 max-w-full rounded border bg-background px-2 text-sm"
+            :aria-label="t('common.database') + ' / Schema'"
+            :value="activeTab.structureCreationTargetIndex ?? ''"
+            :disabled="tableStructureEditorRef?.saving"
+            @change="!tableStructureEditorRef?.saving && queryStore.selectTableCreationTarget(activeTab.id, Number(($event.target as HTMLSelectElement).value))"
+          >
+            <option value="" disabled>—</option>
+            <option v-for="(target, index) in activeTab.structureCreationTargets" :key="index" :value="index">{{ [target.catalog, target.database, target.schema].filter((part, index, parts) => part && (index === 0 || part !== parts[index - 1])).join(" · ") }}</option>
+          </select>
+        </div>
         <TableStructureEditor
+          v-if="!activeTab.structureCreationTargets || activeTab.structureCreationTargetIndex !== undefined"
           ref="tableStructureEditorRef"
           :key="`${activeTab.id}-${activeTab.structureTableName || 'new'}`"
           :connection-id="activeTab.connectionId"
@@ -4084,7 +4127,30 @@ defineExpose({
       <DamengJobAdmin :key="activeTab.id" :connection="activeConnection" :initial-selection="activeTab.nativeJobAdmin" />
     </template>
     <template v-else-if="activeTab.mode === 'database-jobs' && activeConnection">
-      <DatabaseJobAdmin :key="activeTab.id" :connection="activeConnection" :initial-selection="activeTab.nativeJobAdmin" />
+      <DatabaseJobAdmin
+        v-if="activeTab.nativeJobPage || activeTab.nativeJobCreationTargets"
+        :key="activeTab.id"
+        :connection="activeConnection"
+        :creation-targets="activeTab.nativeJobCreationTargets"
+        :initial-selection="activeTab.nativeJobAdmin"
+        :page-scope="activeTab.nativeJobPage"
+        :database="activeTab.database"
+        :workspace="queryStore.nativeJobWorkspaceForTab(activeTab.id)"
+        :create-request="activeTab.nativeJobCreateRequest"
+        @update:selection="activeTab.nativeJobAdmin = $event"
+        @create-request-consumed="activeTab.nativeJobCreateRequest = undefined"
+      />
+      <div v-else class="flex h-full min-h-0 flex-col items-start gap-3 overflow-auto p-6">
+        <h2 class="text-base font-semibold">{{ t("nativeJobs.scopeRecoveryTitle") }}</h2>
+        <p class="max-w-2xl text-sm text-muted-foreground">{{ t("nativeJobs.scopeRecoveryHint") }}</p>
+        <p v-if="activeTab.nativeJobScopeResolution?.status === 'loading'" role="status" class="text-sm text-muted-foreground">{{ t("common.loading") }}</p>
+        <p v-if="activeTab.nativeJobScopeResolution?.error" role="alert" class="max-w-2xl whitespace-pre-wrap break-words text-sm text-destructive">{{ translateBackendError(t, activeTab.nativeJobScopeResolution.error) }}</p>
+        <Button v-if="activeTab.nativeJobScopeResolution?.retryable" variant="outline" :disabled="activeTab.nativeJobScopeResolution?.status === 'loading'" @click="queryStore.resolveNativeJobNavigation(activeTab.id)">{{ t("common.retry") }}</Button>
+        <details v-if="retainedNativeJobContent" class="w-full max-w-3xl">
+          <summary class="cursor-pointer text-sm">{{ t("nativeJobs.retainedContent") }}</summary>
+          <pre class="mt-3 max-h-[50vh] overflow-auto rounded border p-3 text-sm whitespace-pre-wrap break-words">{{ retainedNativeJobContent }}</pre>
+        </details>
+      </div>
     </template>
 
     <template v-else-if="activeTab.mode === 'dameng-users' && activeConnection">

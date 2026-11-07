@@ -82,6 +82,12 @@ const taggedAiCliErrorKeys: Record<string, string> = {
 };
 
 const exactMessageKeys: Record<string, string> = {
+  native_job_context_changed: "nativeJobs.contextChanged",
+  native_job_context_expired: "nativeJobs.contextChanged",
+  native_job_page_scope_invalid: "nativeJobs.scopeInvalid",
+  native_job_page_scope_mismatch: "nativeJobs.scopeMismatch",
+  native_job_legacy_schema_creation_unavailable: "nativeJobs.legacySchemaCreationUnavailable",
+  native_job_scope_resolution_unavailable: "nativeJobs.scopeResolutionUnavailable",
   MYSQL_DATA_CHARSET_READ_ONLY: "connection.mysqlDataCharsetReadOnly",
   MYSQL_DATA_CHARSET_EXPORT_UNSUPPORTED: "connection.mysqlDataCharsetExportHint",
   MYSQL_DATA_CHARSET_TRANSFER_UNSUPPORTED: "connection.mysqlDataCharsetExportHint",

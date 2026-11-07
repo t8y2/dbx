@@ -14,6 +14,16 @@ import {
 } from "@/lib/sidebar/treeNodeClick";
 
 describe("treeNodeClick", () => {
+  it("keeps extension groups and management leaves aligned with activation preferences", () => {
+    expect(treeNodeRowAction("connection-extensions", true, "single")).toBe("toggle");
+    expect(treeNodeRowAction("connection-extensions", true, "double")).toBe("none");
+    expect(treeNodeRowDoubleClickAction("connection-extensions", false, "double", true)).toBe("toggle");
+    for (const type of ["process-list", "server-dashboard"] as const) {
+      expect(treeNodeRowAction(type, false, "single")).toBe("toggle");
+      expect(treeNodeRowAction(type, false, "double")).toBe("none");
+      expect(treeNodeRowDoubleClickAction(type, false, "double", false)).toBe("toggle");
+    }
+  });
   it("copies the raw Schema index name rather than its decorated tree label", () => {
     expect(copyNameForTreeNode({ id: "index", type: "index", objectScope: "schema", objectName: ' Ix (a)" ', label: ' Ix (a)"  (TABLE)', connectionId: "ob", database: "service" })).toBe(' Ix (a)" ');
   });

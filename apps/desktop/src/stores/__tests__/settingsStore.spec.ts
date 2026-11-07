@@ -67,11 +67,11 @@ describe("normalizeEditorSettings", () => {
     }
   });
 
-  it("retains only an explicit legacy sidebar value without creating a global default", () => {
+  it("ignores legacy sidebar visibility without creating a global default", () => {
     expect(DEFAULT_EDITOR_SETTINGS).not.toHaveProperty("sidebarShowUserAdmin");
     expect(normalizeEditorSettings({})).not.toHaveProperty("sidebarShowUserAdmin");
     for (const visible of [false, true]) {
-      expect(normalizeEditorSettings({ sidebarShowUserAdmin: visible }).sidebarShowUserAdmin).toBe(visible);
+      expect(normalizeEditorSettings({ sidebarShowUserAdmin: visible })).not.toHaveProperty("sidebarShowUserAdmin");
     }
     expect(normalizeEditorSettings({ sidebarShowUserAdmin: "false" as any })).not.toHaveProperty("sidebarShowUserAdmin");
   });
@@ -1855,7 +1855,7 @@ describe("settingsStore persisted settings initialization", () => {
     expect(restartedStore.editorSettings.dataGridSelectionSummaryMetric).toBe("average");
   });
 
-  it.each(["persisted", "legacy"])("preserves a %s global opt-out through unrelated saves until connection migration", async (source) => {
+  it.each(["persisted", "legacy"])("drops the obsolete %s global opt-out without migrating connection preferences", async (source) => {
     const old = { sidebarShowUserAdmin: false, theme: "xcode-dark" };
     const data = new Map(source === "legacy" ? [["dbx-editor-settings", JSON.stringify(old)]] : []);
     vi.stubGlobal("localStorage", {
@@ -1870,11 +1870,12 @@ describe("settingsStore persisted settings initialization", () => {
       const { useSettingsStore } = await import("@/stores/settingsStore");
       const store = useSettingsStore();
       await store.initEditorSettings();
-      expect(store.editorSettings.sidebarShowUserAdmin).toBe(false);
-      expect(saveEditorSettings).toHaveBeenCalledWith(expect.objectContaining({ sidebarShowUserAdmin: false }));
+      expect(store.editorSettings).not.toHaveProperty("sidebarShowUserAdmin");
+      expect(saveEditorSettings.mock.calls.every(([settings]) => !("sidebarShowUserAdmin" in settings))).toBe(true);
       store.updateEditorSettings({ fontSize: 16 });
       await store.persistEditorSettings();
-      expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarShowUserAdmin: false, fontSize: 16 }));
+      expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ fontSize: 16 }));
+      expect(saveEditorSettings.mock.calls.at(-1)![0]).not.toHaveProperty("sidebarShowUserAdmin");
       if (source === "legacy") expect(data.has("dbx-editor-settings")).toBe(false);
     } finally {
       vi.unstubAllGlobals();

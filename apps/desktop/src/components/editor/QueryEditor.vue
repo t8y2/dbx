@@ -2809,7 +2809,7 @@ watch(
 
 prefetchCompletionTablesIfEnabled();
 
-watch([() => props.clientSessionId, () => props.completionContextVersion], () => {
+watch([() => props.clientSessionId, () => props.txnSessionId, () => props.autoCommit, () => props.completionContextVersion], () => {
   completion.invalidateRequests();
   refreshCompletionCache();
   setSemanticDiagnostics([]);

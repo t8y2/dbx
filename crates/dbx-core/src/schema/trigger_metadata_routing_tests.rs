@@ -82,8 +82,11 @@ fn calls(dir: &tempfile::TempDir) -> Vec<serde_json::Value> {
 #[tokio::test]
 async fn core_routes_exact_reads_to_the_existing_jdbc_methods_and_does_not_page_twice() {
     let (dir, state) = jdbc_fixture().await;
-    let options =
-        MetadataReadOptions { identity_mode: Some(MetadataIdentityMode::Exact), catalog: Some(" Catalog ".into()) };
+    let options = MetadataReadOptions {
+        identity_mode: Some(MetadataIdentityMode::Exact),
+        catalog: Some(" Catalog ".into()),
+        ..Default::default()
+    };
     let objects = super::list_objects_core_with_options(
         &state,
         "jdbc-trigger",
@@ -139,7 +142,8 @@ async fn core_routes_exact_reads_to_the_existing_jdbc_methods_and_does_not_page_
 async fn old_plugin_keeps_default_empty_trigger_contract_but_exact_request_reports_missing_method() {
     let (dir, state) = jdbc_fixture().await;
     assert!(super::list_triggers_core(&state, "jdbc-trigger", "demo", "missing-method", "T").await.unwrap().is_empty());
-    let options = MetadataReadOptions { identity_mode: Some(MetadataIdentityMode::Exact), catalog: None };
+    let options =
+        MetadataReadOptions { identity_mode: Some(MetadataIdentityMode::Exact), catalog: None, ..Default::default() };
     let error = super::list_triggers_core_with_options(&state, "jdbc-trigger", "demo", "missing-method", "T", &options)
         .await
         .unwrap_err();

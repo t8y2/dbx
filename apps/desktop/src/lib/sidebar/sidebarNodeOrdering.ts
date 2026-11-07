@@ -54,12 +54,14 @@ function isBottomConnectionUtilityNode(child: TreeNode): boolean {
 
 function connectionChildSections(children: readonly TreeNode[]) {
   const savedSqlNodes = children.filter((child) => child.type === "saved-sql-root");
+  const extensionNodes = children.filter((child) => child.type === "connection-extensions");
+  const sharedObjectNodes = children.filter((child) => child.type === "oracle-shared-objects");
   const bottomUtilityNodes = children.filter(isBottomConnectionUtilityNode);
   const utilityOrder = ["oracle-db-links", "database-job-admin", "user-admin", "xugu-user-admin"];
   const utilityRank = (child: TreeNode) => (utilityOrder.includes(child.type) ? utilityOrder.indexOf(child.type) : utilityOrder.length);
   bottomUtilityNodes.sort((left, right) => utilityRank(left) - utilityRank(right));
-  const regularChildren = children.filter((child) => child.type !== "saved-sql-root" && !isBottomConnectionUtilityNode(child));
-  return { savedSqlNodes, bottomUtilityNodes, regularChildren };
+  const regularChildren = children.filter((child) => child.type !== "saved-sql-root" && child.type !== "connection-extensions" && child.type !== "oracle-shared-objects" && !isBottomConnectionUtilityNode(child));
+  return { savedSqlNodes, extensionNodes, sharedObjectNodes, bottomUtilityNodes, regularChildren };
 }
 
 export function orderSidebarConnectionUtilitiesForDisplay(nodes: TreeNode[]): TreeNode[] {
@@ -67,9 +69,12 @@ export function orderSidebarConnectionUtilitiesForDisplay(nodes: TreeNode[]): Tr
     if (!node.children) return node;
     let children = node.children;
     if (node.type === "connection-group") children = orderSidebarConnectionUtilitiesForDisplay(children);
-    else if (node.type === "connection") {
-      const { savedSqlNodes, regularChildren, bottomUtilityNodes } = connectionChildSections(children);
-      const next = [...savedSqlNodes, ...regularChildren, ...bottomUtilityNodes];
+    else if (node.type === "database") {
+      const next = [...children.filter((child) => child.type === "oracle-shared-objects"), ...children.filter((child) => child.type !== "oracle-shared-objects")];
+      if (!next.every((child, index) => child === children[index])) children = next;
+    } else if (node.type === "connection") {
+      const { savedSqlNodes, extensionNodes, sharedObjectNodes, regularChildren, bottomUtilityNodes } = connectionChildSections(children);
+      const next = [...savedSqlNodes, ...extensionNodes, ...sharedObjectNodes, ...orderSidebarConnectionUtilitiesForDisplay(regularChildren), ...bottomUtilityNodes];
       if (!next.every((child, index) => child === children[index])) children = next;
     }
     return children === node.children ? node : { ...node, children };
@@ -95,8 +100,8 @@ function orderSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">, child
   }
 
   if (parent.type === "connection") {
-    const { savedSqlNodes, bottomUtilityNodes, regularChildren } = connectionChildSections(normalized);
-    const withConnectionUtilityOrder = (children: TreeNode[]) => [...savedSqlNodes, ...children, ...bottomUtilityNodes];
+    const { savedSqlNodes, extensionNodes, sharedObjectNodes, bottomUtilityNodes, regularChildren } = connectionChildSections(normalized);
+    const withConnectionUtilityOrder = (children: TreeNode[]) => [...savedSqlNodes, ...extensionNodes, ...sharedObjectNodes, ...children, ...bottomUtilityNodes];
 
     if (
       databaseType === "mongodb" ||
@@ -142,9 +147,10 @@ function orderSidebarTreeChildrenForParent(parent: Pick<TreeNode, "type">, child
       return [...objectGroups, ...schemas, ...rest];
     }
 
-    if (normalized.every((child) => child.type === "schema")) {
-      return sortByLabel(normalized);
-    }
+    const shared = normalized.filter((child) => child.type === "oracle-shared-objects");
+    const rest = normalized.filter((child) => child.type !== "oracle-shared-objects");
+    if (rest.every((child) => child.type === "schema")) return [...shared, ...sortByLabel(rest)];
+    if (shared.length) return [...shared, ...rest];
   }
 
   return normalized;

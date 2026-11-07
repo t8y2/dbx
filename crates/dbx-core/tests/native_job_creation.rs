@@ -245,6 +245,38 @@ async fn preview_has_an_explicit_scope_but_no_invented_out_id_or_database_side_e
 }
 
 #[tokio::test]
+async fn scoped_cross_schema_creation_preserves_target_and_original_engine_guard() {
+    for engine in ["oracle", "oceanbase-oracle"] {
+        let (_dir, state, scope) = setup_engine(engine).await;
+        let mut definition = definition();
+        definition.schema = "OtherOwner".into();
+        let page = NativeJobPageScope {
+            schema: definition.schema.clone(),
+            kind: NativeJobKind::Legacy,
+            scheduler_category: None,
+        };
+        let request = NativeJobRequest::Create {
+            scope: scope.clone(),
+            definition: NativeJobCreateDefinition::Legacy(definition),
+        };
+        let wrong_page =
+            NativeJobPageScope { schema: "Owner".into(), kind: NativeJobKind::Legacy, scheduler_category: None };
+        assert_eq!(
+            native_job_prepare_in_page_core(&state, request.clone(), Some(&wrong_page)).await.err().as_deref(),
+            Some("native_job_page_scope_mismatch")
+        );
+        let plan = native_job_prepare_in_page_core(&state, request, Some(&page)).await;
+        if engine == "oracle" {
+            assert_eq!(plan.err().as_deref(), Some("native_job_legacy_schema_creation_unavailable"));
+        } else {
+            let plan = plan.unwrap();
+            assert_eq!(plan.scope, scope);
+            assert!(plan.steps[0].sql.contains("CURRENT_SCHEMA = \"OtherOwner\""));
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_real_out_id_is_recorded_before_commit_and_duplicate_apply_never_submits_again() {
     let (_dir, state, scope) = setup().await;
     let plan = preview(&state, &scope, definition()).await.unwrap();

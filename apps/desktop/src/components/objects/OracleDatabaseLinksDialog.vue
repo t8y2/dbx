@@ -4,12 +4,12 @@ import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
-import { alterOracleDatabaseLinkSql, createOracleDatabaseLinkSql, createOceanBaseDatabaseLinkSql, dropOracleDatabaseLinkSql, redactOracleDatabaseLinkError, testOracleDatabaseLinkSql, type OracleDatabaseLink } from "@/lib/database/oracleDatabaseLinks";
+import { alterOracleDatabaseLinkSql, createOracleDatabaseLinkSql, createOceanBaseDatabaseLinkSql, dropOracleDatabaseLinkSql, redactOracleDatabaseLinkError, testOracleDatabaseLinkSql, type OracleDatabaseLink, type OracleDatabaseLinkScope } from "@/lib/database/oracleDatabaseLinks";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-const props = defineProps<{ open: boolean; connectionId: string; database: string; name?: string; owner?: string }>();
+const props = defineProps<{ open: boolean; connectionId: string; database: string; name?: string; owner?: string; scope?: OracleDatabaseLinkScope; createScopes?: OracleDatabaseLinkScope[]; intent?: "list" | "create" }>();
 const emit = defineEmits<{ "update:open": [boolean]; changed: [] }>();
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -30,17 +30,37 @@ const username = ref("");
 const password = ref("");
 const host = ref("");
 const publicLink = ref(false);
+const createTarget = ref("");
+const creationScope = computed(() => (props.createScopes ? props.createScopes.find((scope) => JSON.stringify(scope) === createTarget.value) : props.scope));
+watch(
+  () => (creationScope.value ? JSON.stringify(creationScope.value) : undefined),
+  () => {
+    ++revision;
+    publicLink.value = creationScope.value?.kind === "public";
+    error.value = "";
+  },
+  { flush: "sync" },
+);
 const filtered = computed(() => links.value.filter((link) => `${link.name} ${link.owner} ${link.username} ${link.host}`.toLowerCase().includes(search.value.toLowerCase())));
-const selectedIsShadowed = computed(() => !oceanbase.value && selected.value?.owner === "PUBLIC" && links.value.some((link) => link.owner !== "PUBLIC" && link.name.toUpperCase() === selected.value?.name.toUpperCase()));
+const selectedIsShadowed = computed(() => !oceanbase.value && selected.value?.owner === "PUBLIC" && (selected.value.shadowedBySessionPrivate === true || links.value.some((link) => link.owner !== "PUBLIC" && link.name.toUpperCase() === selected.value?.name.toUpperCase())));
+function privateLinkReadOnly(link: OracleDatabaseLink): boolean {
+  return !oceanbase.value && link.owner !== "PUBLIC" && link.owner !== sessionUser.value;
+}
+const selectedIsReadOnly = computed(() => !!selected.value && privateLinkReadOnly(selected.value));
 let revision = 0;
+let saveGeneration = 0;
+let pendingCreate = false;
 onBeforeUnmount(() => {
   ++revision;
 });
 watch(
-  () => [props.open, props.connectionId, props.database, props.name, props.owner],
+  () => [props.open, props.connectionId, props.database, props.name, props.owner, props.scope?.kind, props.scope?.kind === "schema" ? props.scope.schema : undefined, props.intent],
   () => {
     ++revision;
+    ++saveGeneration;
+    createTarget.value = "";
     mode.value = "";
+    pendingCreate = props.intent === "create";
     password.value = "";
     selected.value = undefined;
     links.value = [];
@@ -60,7 +80,7 @@ async function reload() {
   busy.value = true;
   error.value = "";
   try {
-    const result = await store.listOracleDatabaseLinks(connectionId, database);
+    const result = props.createScopes ? [] : await (props.scope ? store.listOracleDatabaseLinks(connectionId, database, props.scope) : store.listOracleDatabaseLinks(connectionId, database));
     if (requested !== revision) return;
     const identity = await api.executeQuery(connectionId, database, "SELECT SYS_CONTEXT('USERENV', 'SESSION_USER') FROM DUAL", undefined, undefined, { maxRows: 1, timeoutSecs: 15 });
     if (requested !== revision) return;
@@ -70,11 +90,22 @@ async function reload() {
   } catch (e) {
     if (requested === revision) error.value = String(e);
   } finally {
-    if (requested === revision) busy.value = false;
+    if (requested === revision) {
+      busy.value = false;
+      if (pendingCreate && !error.value && sessionUser.value) {
+        pendingCreate = false;
+        begin("create");
+      }
+    }
   }
 }
 function begin(next: "create" | "alter" | "drop") {
   if (busy.value || !sessionUser.value || !props.open || (next === "alter" && oceanbase.value)) return;
+  if (next === "create" && creationScope.value?.kind === "schema" && creationScope.value.schema !== sessionUser.value) {
+    error.value = t("databaseLinks.privateSchemaUnavailable");
+    return;
+  }
+  if (next !== "create" && (!selected.value || privateLinkReadOnly(selected.value) || (next === "drop" && selected.value.canDrop === false))) return;
   mode.value = next;
   password.value = "";
   error.value = "";
@@ -83,18 +114,20 @@ function begin(next: "create" | "alter" | "drop") {
     linkName.value = "";
     username.value = "";
     host.value = "";
-    publicLink.value = false;
+    publicLink.value = creationScope.value?.kind === "public";
     tenant.value = "";
     protocol.value = "OB";
     cluster.value = "";
   }
 }
-async function execute(sql: string) {
+async function execute(sql: string, target?: OracleDatabaseLink) {
   if (!sessionUser.value) throw new Error("Unable to determine the Oracle session user");
   const connectionId = props.connectionId,
     database = props.database,
     schema = sessionUser.value,
-    requested = revision;
+    requested = revision,
+    owner = target?.owner,
+    name = target?.name;
   return executeWithProductionSqlGuard({
     connection: store.getConfig(connectionId),
     database,
@@ -102,14 +135,22 @@ async function execute(sql: string) {
     source: t("tree.databaseLinks"),
     execute: () => {
       if (requested !== revision || !props.open) throw new Error("Database link target changed");
+      if (target && (selected.value?.owner !== owner || selected.value?.name !== name || privateLinkReadOnly(target))) throw new Error("Database link target changed");
       return api.executeQuery(connectionId, database, sql, schema, undefined, { maxRows: 1, timeoutSecs: 15 });
     },
   });
 }
 async function save() {
   if (busy.value || !props.open || !sessionUser.value) return;
+  if (mode.value === "create" && props.createScopes && !creationScope.value) return;
+  if (mode.value === "create" && creationScope.value?.kind === "schema" && creationScope.value.schema !== sessionUser.value) {
+    error.value = t("databaseLinks.privateSchemaUnavailable");
+    return;
+  }
+  if (mode.value !== "create" && (!selected.value || privateLinkReadOnly(selected.value) || (mode.value === "drop" && selected.value.canDrop === false) || (mode.value === "alter" && oceanbase.value))) return;
   const requested = revision,
-    secret = password.value;
+    secret = password.value,
+    saving = ++saveGeneration;
   busy.value = true;
   error.value = "";
   try {
@@ -124,7 +165,7 @@ async function save() {
             ? dropOracleDatabaseLinkSql(selected.value, oceanbase.value ? "oceanbase-oracle" : "oracle")
             : "";
     if (!sql) return;
-    const result = await execute(sql);
+    const result = await execute(sql, mode.value === "create" ? undefined : selected.value);
     if (requested !== revision || result === undefined) return;
     mode.value = "";
     password.value = "";
@@ -134,17 +175,17 @@ async function save() {
   } catch (e) {
     if (requested === revision) error.value = redactOracleDatabaseLinkError(e, secret);
   } finally {
-    if (requested === revision) busy.value = false;
+    if (saving === saveGeneration) busy.value = false;
   }
 }
 async function test() {
-  if (!selected.value || busy.value || selectedIsShadowed.value || !props.open) return;
+  if (!selected.value || busy.value || selectedIsShadowed.value || selectedIsReadOnly.value || !props.open) return;
   const requested = revision;
   busy.value = true;
   error.value = "";
   message.value = "";
   try {
-    const result = await execute(testOracleDatabaseLinkSql(selected.value, oceanbase.value ? "oceanbase-oracle" : "oracle"));
+    const result = await execute(testOracleDatabaseLinkSql(selected.value, oceanbase.value ? "oceanbase-oracle" : "oracle"), selected.value);
     if (requested !== revision || result === undefined) return;
     message.value = t("databaseLinks.testSuccess");
   } catch (e) {
@@ -161,12 +202,12 @@ async function test() {
       <DialogHeader
         ><DialogTitle>{{ t("tree.databaseLinks") }}</DialogTitle></DialogHeader
       >
-      <div class="flex gap-2">
+      <div v-if="!createScopes" class="flex gap-2">
         <Input v-model="search" :placeholder="t('databaseLinks.search')" :aria-label="t('databaseLinks.search')" />
         <Button variant="outline" :disabled="busy" @click="reload">{{ t("common.refresh") }}</Button>
         <Button :disabled="busy" @click="begin('create')">{{ t("databaseLinks.create") }}</Button>
       </div>
-      <div class="max-h-64 overflow-auto border rounded-md">
+      <div v-if="!createScopes" class="max-h-64 overflow-auto border rounded-md">
         <table class="w-full text-sm text-left">
           <thead class="sticky top-0 bg-muted">
             <tr>
@@ -197,21 +238,29 @@ async function test() {
             </tr>
           </tbody>
         </table>
-        <p v-if="!busy && !filtered.length" class="p-4 text-sm text-muted-foreground">{{ t("databaseLinks.empty") }}</p>
+        <p v-if="!busy && !error && !filtered.length" class="p-4 text-sm text-muted-foreground">{{ t("databaseLinks.empty") }}</p>
       </div>
       <template v-if="selected && !mode">
         <p class="text-sm break-all">{{ selected.name }} · {{ selected.owner }} · {{ selected.created }}</p>
         <p v-if="selectedIsShadowed" class="text-sm text-muted-foreground">{{ t("databaseLinks.shadowed") }}</p>
-        <p v-if="oceanbase && selected.canDrop === false" class="text-sm text-muted-foreground">{{ t("databaseLinks.oceanbaseSharedReadOnly") }}</p>
+        <p v-if="selectedIsReadOnly" class="text-sm text-muted-foreground">{{ t("databaseLinks.foreignPrivateReadOnly") }}</p>
+        <p v-if="oceanbase && selected.permissionUnknown" class="text-sm text-muted-foreground">{{ t("databaseLinks.permissionUnknown") }}</p>
         <p v-if="oceanbase" class="text-sm text-muted-foreground">{{ t("databaseLinks.oceanbaseRecreateHint") }}</p>
         <div class="flex gap-2">
-          <Button variant="outline" :disabled="busy || selectedIsShadowed" @click="test">{{ t("databaseLinks.test") }}</Button
-          ><Button v-if="!oceanbase" variant="outline" :disabled="busy || !selected.username" @click="begin('alter')">{{ t("databaseLinks.alter") }}</Button
-          ><Button variant="destructive" :disabled="busy || selected.canDrop === false" @click="begin('drop')">{{ t("common.delete") }}</Button>
+          <Button variant="outline" :disabled="busy || selectedIsShadowed || selectedIsReadOnly" @click="test">{{ t("databaseLinks.test") }}</Button
+          ><Button v-if="!oceanbase" variant="outline" :disabled="busy || !selected.username || selectedIsReadOnly" @click="begin('alter')">{{ t("databaseLinks.alter") }}</Button
+          ><Button variant="destructive" :disabled="busy || selected.canDrop === false || selectedIsReadOnly" @click="begin('drop')">{{ t("common.delete") }}</Button>
         </div>
       </template>
       <form v-if="mode" class="space-y-3 border-t pt-3" @submit.prevent="save">
         <template v-if="mode === 'create'">
+          <label v-if="createScopes" class="block text-sm">
+            {{ t("databaseLinks.owner") }}
+            <select v-model="createTarget" class="h-9 w-full rounded-md border bg-background px-2" :aria-label="t('databaseLinks.owner')" :disabled="busy" required>
+              <option value="" disabled>—</option>
+              <option v-for="target in createScopes" :key="JSON.stringify(target)" :value="JSON.stringify(target)">{{ target.kind === "schema" ? target.schema : "PUBLIC" }}</option>
+            </select>
+          </label>
           <label class="block text-sm">{{ t("databaseLinks.name") }}<Input v-model="linkName" required autocomplete="off" /></label>
           <label class="block text-sm">{{ t("databaseLinks.username") }}<Input v-model="username" required autocomplete="off" /></label>
           <label class="block text-sm">{{ t("databaseLinks.host") }}<Input v-model="host" required :placeholder="oceanbase ? 'host:2881 or host:1521/service' : '//host:1521/service'" autocomplete="off" /></label>
@@ -226,7 +275,7 @@ async function test() {
             <label v-if="protocol === 'OB'" class="block text-sm">{{ t("databaseLinks.remoteTenant") }}<Input v-model="tenant" required autocomplete="off" /></label>
             <label v-if="protocol === 'OB'" class="block text-sm">{{ t("databaseLinks.remoteCluster") }}<Input v-model="cluster" autocomplete="off" /></label>
           </template>
-          <label class="flex items-center gap-2 text-sm"><input v-model="publicLink" type="checkbox" />{{ t(oceanbase ? "databaseLinks.oceanbasePublic" : "databaseLinks.public") }}</label>
+          <label v-if="!scope && !createScopes" class="flex items-center gap-2 text-sm"><input v-model="publicLink" type="checkbox" />{{ t(oceanbase ? "databaseLinks.oceanbasePublic" : "databaseLinks.public") }}</label>
         </template>
         <p v-if="mode === 'alter'" class="text-sm">{{ t("databaseLinks.alterHint", { name: selected?.name }) }}</p>
         <label v-if="mode !== 'drop'" class="block text-sm">{{ t("databaseLinks.password") }}<Input v-model="password" type="password" required autocomplete="new-password" /></label>
@@ -241,7 +290,7 @@ async function test() {
               password = '';
             "
             >{{ t("common.cancel") }}</Button
-          ><Button type="submit" :disabled="busy" :variant="mode === 'drop' ? 'destructive' : 'default'">{{ t(mode === "drop" ? "common.delete" : "common.save") }}</Button>
+          ><Button type="submit" :disabled="busy || (mode === 'create' && !!createScopes && !creationScope)" :variant="mode === 'drop' ? 'destructive' : 'default'">{{ t(mode === "drop" ? "common.delete" : "common.save") }}</Button>
         </div>
       </form>
       <p v-if="busy" role="status" class="text-sm text-muted-foreground">{{ t("common.loading") }}</p>

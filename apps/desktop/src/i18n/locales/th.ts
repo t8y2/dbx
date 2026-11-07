@@ -50,6 +50,7 @@ const damengDump = {
 };
 
 export default withEnglishFallback({
+  navigationPreferences: { refreshFailed: "บันทึกการตั้งค่าแล้ว แต่รีเฟรชการนำทางไม่สำเร็จ: {message}", connectionUnavailable: "ไม่มีการเชื่อมต่อนี้แล้ว โปรดเปิดอีกครั้ง" },
   oracleTrigger: {
     errorPositionUnavailable: "เปิดซอร์สแล้ว แต่ไม่สามารถยืนยันตำแหน่งข้อผิดพลาดได้ โปรดตรวจสอบบรรทัดและคอลัมน์ที่แสดง",
     reconcileStructure: "ตรวจสอบการเปลี่ยนแปลงที่ใช้แล้ว",
@@ -4088,6 +4089,7 @@ export default withEnglishFallback({
     loadFailed: "โหลด DBX ไม่ได้ โปรดลองอีกครั้ง",
   },
   common: {
+    all: "ทั้งหมด",
     fileNotFound: "ไม่มีไฟล์: {path}",
     loading: "กำลังโหลด...",
     stopping: "กำลังหยุด...",
@@ -4938,6 +4940,10 @@ export default withEnglishFallback({
     magpieConfigDirectoryFailed: "ไม่สามารถระบุตำแหน่งไดเรกทอรีกำหนดค่าของ Magpie ได้",
   },
   contextMenu: {
+    viewObjects: "ดูออบเจ็กต์",
+    refreshObjects: "รีเฟรชออบเจ็กต์",
+    confirmDeleteConnectionConfig: "ลบการตั้งค่าการเชื่อมต่อที่บันทึกไว้ “{name}” หรือไม่?",
+    confirmDeleteSelectedConnectionConfigs: "ลบการตั้งค่าการเชื่อมต่อที่บันทึกไว้และเลือกไว้ {count} รายการหรือไม่?",
     splitTab: "แยก",
     batchCloseTabs: "ปิดหลายแท็บ",
     copyTabName: "คัดลอกชื่อแท็บ",
@@ -4945,12 +4951,12 @@ export default withEnglishFallback({
     closeConnection: "ปิดการเชื่อมต่อ",
     closeSelectedConnections: "ปิดการเชื่อมต่อที่เลือก {count} รายการ",
     closeDatabaseConnection: "ปิดการเชื่อมต่อฐานข้อมูล",
-    deleteConnection: "ลบการเชื่อมต่อ",
-    deleteSelectedConnections: "ลบการเชื่อมต่อที่เลือก {count} รายการ",
+    deleteConnection: "ลบการเชื่อมต่อ…",
+    deleteSelectedConnections: "ลบการเชื่อมต่อที่เลือก {count} รายการ…",
     confirmDeleteTitle: "ลบการเชื่อมต่อ",
     confirmDeleteMessage: "คุณแน่ใจหรือไม่ว่าต้องการลบ “{name}” การดำเนินการนี้ย้อนกลับไม่ได้",
     confirmDeleteSelectedMessage: "คุณแน่ใจหรือไม่ว่าต้องการลบการเชื่อมต่อที่เลือก {count} รายการ การดำเนินการนี้ย้อนกลับไม่ได้",
-    editConnection: "แก้ไขการเชื่อมต่อ",
+    editConnection: "แก้ไขการเชื่อมต่อ…",
     revealDatabaseFile: "แสดงใน File Manager",
     selectVisibleDatabases: "เลือกฐานข้อมูลที่มองเห็นได้",
     configureVisibleObjects: "ตัวกรอง Object ที่มองเห็นได้",
@@ -5450,6 +5456,8 @@ export default withEnglishFallback({
     loadFailed: "โหลดฐานข้อมูลไม่สำเร็จ: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "Schema ผู้ใช้",
+    systemGroup: "Schema ระบบ",
     title: "ตัวกรอง Schema",
     detailLabel: "Schema ที่มองเห็นได้",
     detailActionLabel: "กำหนดค่า Schema ที่มองเห็นได้สำหรับ “{connection}”",
@@ -5466,6 +5474,9 @@ export default withEnglishFallback({
     loadFailed: "โหลด Schema ไม่สำเร็จ: {message}",
   },
   databaseLinks: {
+    foreignPrivateReadOnly: "ลิงก์ส่วนตัวของผู้ใช้อื่นเปิดดูได้อย่างเดียว",
+    privateSchemaUnavailable: "สร้างลิงก์ส่วนตัวในสคีมาของผู้ใช้อื่นไม่ได้ โปรดใช้สคีมาของผู้ใช้ที่เข้าสู่ระบบ",
+    permissionUnknown: "ยังไม่ยืนยันสิทธิ์ลบ ฐานข้อมูลจะตรวจสอบเมื่อดำเนินการ รีเฟรชเพื่อตรวจสอบอีกครั้ง",
     remoteTenant: "Tenant ระยะไกล",
     remoteProtocol: "Protocol ฐานข้อมูลระยะไกล",
     remoteCluster: "Cluster ระยะไกล (ไม่บังคับ)",
@@ -5491,6 +5502,18 @@ export default withEnglishFallback({
     manage: "จัดการลิงก์ฐานข้อมูล",
   },
   tree: {
+    navigationStatus: { denied: "ไม่มีสิทธิ์", error: "โหลดไม่สำเร็จ", unknown: "ยังไม่ยืนยัน", unsupported: "ไม่รองรับ", truncated: "ผลลัพธ์บางส่วน" },
+    scheduler: "ตัวจัดกำหนดการ",
+    publicObjects: "ออบเจ็กต์สาธารณะ",
+    tenantObjects: "ออบเจ็กต์ของเทนแนนต์",
+    jobs: "งาน",
+    jobCategories: {
+      regular: "งานตามกำหนดเวลา",
+      lightweight: "งานแบบน้ำหนักเบา",
+      inMemory: "งานในหน่วยความจำ",
+      legacy: "งานแบบดั้งเดิม",
+    },
+    openList: "เปิดรายการ",
     nativeJobs: "งานเนทีฟ",
     savedSql: "ไลบรารี SQL",
     queries: "Queries",
@@ -6397,6 +6420,14 @@ export default withEnglishFallback({
     operationFailedWithMessage: "Operation ล้มเหลว: {message}",
   },
   nativeJobs: {
+    contextChanged: "บริบทของงานเปลี่ยนแปลงหรือหมดอายุแล้ว โปรดรีเฟรชรายการแล้วลองอีกครั้ง",
+    scopeRecoveryTitle: "กู้คืนแท็บงาน",
+    scopeRecoveryHint: "แท็บเดิมนี้ต้องยืนยันสคีมา เปิดอีกครั้งจากต้นไม้ออบเจ็กต์ได้ โดยยังเก็บเนื้อหาที่บันทึกไว้",
+    retainedContent: "ดูเนื้อหาที่เก็บไว้",
+    scopeMismatch: "งานไม่อยู่ในสคีมาหรือหมวดหมู่ของหน้านี้ โปรดเปิดจากหมวดหมู่ที่ถูกต้อง",
+    scopeInvalid: "สคีมาหรือหมวดหมู่ไม่ถูกต้อง โปรดเปิดอีกครั้งจากต้นไม้ออบเจ็กต์",
+    legacySchemaCreationUnavailable: "วิธีนี้สร้างงานแบบเดิมในสคีมาของผู้ใช้อื่นไม่ได้ โปรดใช้สคีมาของผู้ใช้ที่เข้าสู่ระบบ",
+    scopeResolutionUnavailable: "ยืนยันสคีมาไม่ได้ โปรดตรวจสอบการเชื่อมต่อและสิทธิ์แค็ตตาล็อกแล้วลองใหม่",
     datePrecisionMicroseconds: "วันที่ของงานใน OceanBase รุ่นนี้รองรับความละเอียดระดับไมโครวินาทีเท่านั้น โปรดเปลี่ยนหลักที่ 7–9 ของวินาทีเศษให้เป็น 0 แล้วดูตัวอย่างอีกครั้ง โดยเก็บข้อมูลที่ป้อนเดิมไว้แล้ว",
     previousContext: "ผลการดำเนินการจากบริบทก่อนหน้า",
     detachedDraft: "เก็บฉบับร่างเดิมไว้แล้ว และไม่ได้ผูกกับออบเจ็กต์ปัจจุบัน",

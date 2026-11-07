@@ -1,6 +1,7 @@
 import { computed, effectScope, nextTick, reactive, ref, type Ref } from "vue";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { useSidebarSearchIndexes } from "@/composables/useSidebarSearchIndexes";
+import { sidebarNavigationSettings } from "@/lib/sidebar/sidebarNavigationPreferences";
 import { useSidebarRemoteSearch } from "@/composables/useSidebarRemoteSearch";
 import { connectionShouldDiscoverJdbcSchemas, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
@@ -28,6 +29,10 @@ function fixture(display: "grouped" | "simple" = "grouped") {
   const settingsStore = reactive({ editorSettings: { sidebarGlobalSearchLocal: false, sidebarObjectDisplay: display, sidebarSearchOpenedDatabasesOnly: true } });
   const queryStore = reactive({ openDatabaseKeys: new Set<string>() });
   const store = reactive({
+    relationalNavigationSelections: {},
+    projectRelationalNavigationTree: (nodes: readonly TreeNode[]) => nodes,
+    relationalNavigationAllowsScope: () => true,
+    relationalNavigationSearchChildren: (node: TreeNode) => node.children ?? [],
     activeConnectionId: "conn",
     connectedIds: new Set(["conn"]),
     treeNodes: [{ id: "conn", label: "north", type: "connection", connectionId: "conn", isExpanded: true, children: databases }] as TreeNode[],
@@ -48,6 +53,7 @@ function fixture(display: "grouped" | "simple" = "grouped") {
     deferredSearchQuery: searchQuery,
     regexMode: ref(false),
     settingsStore,
+    sidebarNavigationSettings,
     queryStore,
     store,
     selectedSearchScopes: ref([]),

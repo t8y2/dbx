@@ -15,7 +15,7 @@ beforeEach(() => {
 
 afterEach(() => vi.unstubAllGlobals());
 
-async function createHarness(mode: "simple" | "grouped" = "simple", disk = new Map<string, string>()) {
+async function createHarness(mode: "simple" | "grouped" = "simple", disk = new Map<string, string>(), savedConnection?: ConnectionConfig) {
   const listSchemaInfos = vi.fn(async (_id: string, _database: string) => [
     { name: "PUBLIC", comment: null },
     { name: "Sales Area", comment: null },
@@ -23,6 +23,7 @@ async function createHarness(mode: "simple" | "grouped" = "simple", disk = new M
   const listTables = vi.fn(async (_id: string, database: string, schema: string) => [{ name: "SHARED_TABLE", table_type: "TABLE", schema, comment: database }]);
   const getColumns = vi.fn().mockResolvedValue([{ name: "ID", data_type: "NUMBER", is_nullable: false }]);
   const loadSchemaCache = vi.fn(async (key: string) => disk.get(key) ?? null);
+  const saveConnections = vi.fn(async (_configs: ConnectionConfig[]) => undefined);
   vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
   vi.doMock("@/lib/backend/api", () => ({
     checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
@@ -38,19 +39,19 @@ async function createHarness(mode: "simple" | "grouped" = "simple", disk = new M
     saveSchemaCache: vi.fn(async (key: string, value: string) => {
       disk.set(key, value);
     }),
-    saveConnections: vi.fn().mockResolvedValue(undefined),
+    saveConnections,
     saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
   }));
   const { useConnectionStore } = await import("@/stores/connectionStore");
   const { useSettingsStore } = await import("@/stores/settingsStore");
   useSettingsStore().editorSettings.sidebarObjectDisplay = mode;
   const store = useConnectionStore();
-  const connection = { id: "snowflake-test", name: "Snowflake", db_type: "snowflake", database: "DEFAULT_DB", host: "fixture.invalid", port: 443, username: "", password: "" } as ConnectionConfig;
+  const connection = savedConnection ?? ({ id: "snowflake-test", name: "Snowflake", db_type: "snowflake", database: "DEFAULT_DB", host: "fixture.invalid", port: 443, username: "", password: "" } as ConnectionConfig);
   const databases: TreeNode[] = ["DEFAULT_DB", "OTHER_DB"].map((database) => ({ id: `${connection.id}:${database}`, label: database, type: "database", connectionId: connection.id, database, children: [] }));
   store.connections = [connection];
   store.connectedIds.add(connection.id);
   store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: databases }];
-  return { store, connection, databases, listSchemaInfos, listTables, getColumns, loadSchemaCache, disk };
+  return { store, connection, databases, listSchemaInfos, listTables, getColumns, loadSchemaCache, disk, saveConnections };
 }
 
 describe("Snowflake sidebar namespace metadata", () => {
@@ -58,7 +59,7 @@ describe("Snowflake sidebar namespace metadata", () => {
     const { store, connection, databases, listSchemaInfos, listTables, getColumns } = await createHarness(mode);
     for (const database of databases) {
       await store.loadTreeNodeChildren(database);
-      expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, database.database);
+      expect(listSchemaInfos).toHaveBeenCalledWith(connection.id, database.database, true);
       const schemas = database.children!.filter((node) => node.type === "schema");
       expect(schemas.map((node) => node.schema)).toEqual(["PUBLIC", "Sales Area"]);
       for (const schema of schemas) {
@@ -97,7 +98,9 @@ describe("Snowflake sidebar namespace metadata", () => {
     expect(first.disk.size).toBeGreaterThan(0);
     vi.resetModules();
     setActivePinia(createPinia());
-    const restored = await createHarness("simple", first.disk);
+    const savedConnection = JSON.parse(JSON.stringify(first.saveConnections.mock.calls.at(-1)![0][0]));
+    expect(savedConnection.schema_visibility.databases.OTHER_DB).toEqual({});
+    const restored = await createHarness("simple", first.disk, savedConnection);
     let finishRefresh!: (tables: Awaited<ReturnType<typeof restored.listTables>>) => void;
     restored.listTables.mockReturnValue(
       new Promise((resolve) => {

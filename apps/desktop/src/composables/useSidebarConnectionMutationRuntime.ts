@@ -101,7 +101,7 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
 
   function connectionDeleteConfirmMessage(): string {
     const targets = connectionDeleteTargets();
-    return targets.length > 1 ? t("contextMenu.confirmDeleteSelectedMessage", { count: targets.length }) : t("contextMenu.confirmDeleteMessage", { name: targets[0]?.label || sidebarFormTarget.value?.label || activeNode.value.label });
+    return targets.length > 1 ? t("contextMenu.confirmDeleteSelectedConnectionConfigs", { count: targets.length }) : t("contextMenu.confirmDeleteConnectionConfig", { name: targets[0]?.label || sidebarFormTarget.value?.label || activeNode.value.label });
   }
 
   function deleteConnection() {

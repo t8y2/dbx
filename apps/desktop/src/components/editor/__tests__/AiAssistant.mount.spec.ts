@@ -196,6 +196,8 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
     // the panel would hit the HTTP backend inside happy-dom and the request
     // would never leave, which is exactly the moment under test.
     listSchemas: () => Promise.resolve(aiAssistantMountApi.schemaNames),
+    listSchemaInfos: () => Promise.resolve(aiAssistantMountApi.schemaNames.map((name) => ({ name, comment: null }))),
+    saveConnections: () => Promise.resolve(),
     listDatabases: () => Promise.resolve(aiAssistantMountApi.databaseNames.map((name) => ({ name }))),
     // `loadDatabaseOptions`/`loadSchemaOptions` call `ensureConnected`, which
     // probes health for an already-flagged connection; without this stub the

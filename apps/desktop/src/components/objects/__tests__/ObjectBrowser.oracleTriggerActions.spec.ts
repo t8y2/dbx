@@ -104,6 +104,10 @@ async function mountTriggerBrowser(filter: "all" | "triggers" = "triggers", conn
   const pinia = createPinia();
   setActivePinia(pinia);
   const connections = useConnectionStore();
+  vi.spyOn(connections, "readVisibleSchemaSelection").mockImplementation(async (id, database) => {
+    const names = await rpc.listSchemas(id, database);
+    return { names, infos: [], systemNames: new Set<string>(), visibleNames: names, oracleMaintainedSchemas: undefined };
+  });
   connections.connections = [connection];
   connections.connectedIds.add(connection.id);
   const host = document.createElement("div");

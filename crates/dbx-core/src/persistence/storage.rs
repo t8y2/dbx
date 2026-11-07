@@ -8064,49 +8064,10 @@ impl Storage {
         .await
     }
 
-    pub async fn migrate_sidebar_user_admin_visibility(&self, legacy_show_user_admin: bool) -> Result<(), String> {
-        self.with_conn(move |conn| {
-            let tx =
-                conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
-            let migrated: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM app_state WHERE key = 'sidebar_user_admin_visibility_migration_v1')",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(|error| error.to_string())?;
-            if migrated {
-                return Ok(());
-            }
-            if !legacy_show_user_admin {
-                let rows = {
-                    let mut stmt =
-                        tx.prepare("SELECT id, config_json FROM connections").map_err(|error| error.to_string())?;
-                    let rows = stmt
-                        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
-                        .map_err(|error| error.to_string())?;
-                    rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
-                };
-                for (id, json) in rows {
-                    let Ok(serde_json::Value::Object(mut config)) = serde_json::from_str(&json) else {
-                        continue;
-                    };
-                    config.insert("show_user_admin".into(), serde_json::Value::Bool(false));
-                    tx.execute(
-                        "UPDATE connections SET config_json = ?1 WHERE id = ?2",
-                        params![serde_json::to_string(&config).map_err(|error| error.to_string())?, id],
-                    )
-                    .map_err(|error| error.to_string())?;
-                }
-            }
-            tx.execute(
-                "INSERT INTO app_state (key, value_json) VALUES ('sidebar_user_admin_visibility_migration_v1', 'true')",
-                [],
-            )
-            .map_err(|error| error.to_string())?;
-            tx.commit().map_err(|error| error.to_string())
-        })
-        .await
+    pub async fn migrate_sidebar_user_admin_visibility(&self, _legacy_show_user_admin: bool) -> Result<(), String> {
+        // Older clients still pass this preference when loading connections.
+        // The unified extensions setting supersedes it without rewriting stored rows.
+        Ok(())
     }
 
     pub async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
@@ -10560,7 +10521,10 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
             let originals = vec![
-                ("missing", r#"{"show_database_links":false,"show_native_jobs":true,"future":{"value":42}}"#),
+                (
+                    "missing",
+                    r#"{"show_database_links":false,"show_native_jobs":true,"show_extensions":false,"future":{"value":42,"show_extensions":true}}"#,
+                ),
                 ("shown", r#"{"show_user_admin":true,"host":"unchanged"}"#),
                 ("hidden", r#"{"show_user_admin":false}"#),
                 ("broken", "not-json"),
@@ -10599,19 +10563,13 @@ mod tests {
             assert_eq!(rows.len(), originals.len());
             assert_eq!(secret, "unchanged-ciphertext");
             for (id, original) in originals {
-                if legacy_visible || id == "broken" || id == "array" {
-                    assert_eq!(rows[id], original);
-                } else {
-                    let mut expected: serde_json::Value = serde_json::from_str(original).unwrap();
-                    expected["show_user_admin"] = serde_json::Value::Bool(false);
-                    assert_eq!(serde_json::from_str::<serde_json::Value>(&rows[id]).unwrap(), expected);
-                }
+                assert_eq!(rows[id], original);
             }
         }
     }
 
     #[tokio::test]
-    async fn sidebar_user_admin_migration_keeps_later_choices_and_new_connections_after_reopen() {
+    async fn sidebar_user_admin_migration_never_reintroduces_retired_flags_after_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("storage.db");
         let storage = crate::persistence::test_storage::open(&path).await.unwrap();
@@ -10622,22 +10580,22 @@ mod tests {
         .unwrap();
         storage.save_connections(&[config.clone()]).await.unwrap();
         storage.migrate_sidebar_user_admin_visibility(false).await.unwrap();
-        assert_eq!(storage.load_connections().await.unwrap()[0].show_user_admin, Some(false));
-        config.show_user_admin = Some(true);
+        assert_eq!(storage.load_connections().await.unwrap()[0].show_extensions, None);
+        config.show_extensions = Some(false);
         let mut added = config.clone();
         added.id = "new".into();
-        added.show_user_admin = None;
+        added.show_extensions = None;
         storage.save_connections(&[config, added]).await.unwrap();
         drop(storage);
         let reopened = crate::persistence::test_storage::open(&path).await.unwrap();
         reopened.migrate_sidebar_user_admin_visibility(false).await.unwrap();
         let configs = reopened.load_connections().await.unwrap();
-        assert_eq!(configs.iter().find(|c| c.id == "existing").unwrap().show_user_admin, Some(true));
-        assert_eq!(configs.iter().find(|c| c.id == "new").unwrap().show_user_admin, None);
+        assert_eq!(configs.iter().find(|c| c.id == "existing").unwrap().show_extensions, None);
+        assert_eq!(configs.iter().find(|c| c.id == "new").unwrap().show_extensions, None);
     }
 
     #[tokio::test]
-    async fn sidebar_user_admin_migration_rolls_back_updates_and_marker_before_retry() {
+    async fn sidebar_user_admin_migration_does_not_write_even_when_writes_would_fail() {
         for failure in [
             "CREATE TRIGGER reject_migration BEFORE UPDATE ON connections WHEN OLD.id = 'b' BEGIN SELECT RAISE(ABORT, 'injected update failure'); END;",
             "CREATE TRIGGER reject_migration BEFORE INSERT ON app_state WHEN NEW.key = 'sidebar_user_admin_visibility_migration_v1' BEGIN SELECT RAISE(ABORT, 'injected marker failure'); END;",
@@ -10648,7 +10606,7 @@ mod tests {
                 conn.execute_batch("INSERT INTO connections (id, config_json) VALUES ('a', '{}'), ('b', '{}');").map_err(|e| e.to_string())?;
                 conn.execute_batch(failure).map_err(|e| e.to_string())
             }).await.unwrap();
-            assert!(storage.migrate_sidebar_user_admin_visibility(false).await.is_err());
+            storage.migrate_sidebar_user_admin_visibility(false).await.unwrap();
             storage.with_conn(|conn| {
                 let unchanged: i64 = conn.query_row("SELECT COUNT(*) FROM connections WHERE config_json = '{}'", [], |row| row.get(0)).map_err(|e| e.to_string())?;
                 let marked: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM app_state WHERE key = 'sidebar_user_admin_visibility_migration_v1')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
@@ -10659,7 +10617,7 @@ mod tests {
             storage.migrate_sidebar_user_admin_visibility(false).await.unwrap();
             storage.with_conn(|conn| {
                 let changed: i64 = conn.query_row("SELECT COUNT(*) FROM connections WHERE json_extract(config_json, '$.show_user_admin') = 0", [], |row| row.get(0)).map_err(|e| e.to_string())?;
-                assert_eq!(changed, 2);
+                assert_eq!(changed, 0);
                 Ok(())
             }).await.unwrap();
         }
@@ -12906,10 +12864,12 @@ mod tests {
             visible_databases: None,
             visible_database_patterns: None,
             visible_schemas: None,
+            schema_visibility: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
             show_native_jobs: None,
+            show_extensions: None,
             show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
@@ -12990,10 +12950,12 @@ mod tests {
             visible_databases: None,
             visible_database_patterns: None,
             visible_schemas: None,
+            schema_visibility: None,
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
             show_native_jobs: None,
+            show_extensions: None,
             show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,

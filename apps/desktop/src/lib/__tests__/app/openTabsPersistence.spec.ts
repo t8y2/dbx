@@ -21,6 +21,33 @@ function roundTrip(tabs: QueryTab[]) {
 }
 
 describe("openTabsPersistence originalSql round-trip", () => {
+  it("preserves stable Job page scope and exact selection independently across schemas", () => {
+    const tabs = ["A", "B"].map((schema) => queryTab({ id: schema, mode: "database-jobs", nativeJobPage: { schema, kind: "scheduler" }, nativeJobAdmin: { kind: "scheduler", owner: schema, name: "SAME" } }));
+    const restored = roundTrip(tabs);
+    expect(restored.map((tab) => tab.nativeJobPage)).toEqual([
+      { schema: "A", kind: "scheduler" },
+      { schema: "B", kind: "scheduler" },
+    ]);
+    expect(restored.map((tab) => tab.nativeJobAdmin)).toEqual(tabs.map((tab) => tab.nativeJobAdmin));
+    expect(restored.map((tab) => tab.database)).toEqual(["db", "db"]);
+  });
+  it("keeps session Job inputs and one-shot creation requests out of persistent navigation", () => {
+    const tab = queryTab({
+      mode: "database-jobs",
+      nativeJobPage: { schema: "A", kind: "scheduler" },
+      nativeJobCreateRequest: 1,
+      nativeJobWorkspace: { snapshot: { pageIdentity: "session-page", retained: [], create: { open: true, name: "PRIVATE_SESSION_INPUT", kind: "scheduler", scheduler: { argumentContext: "runtime-context" }, legacy: {}, dameng: {} } } },
+    });
+    const [saved] = serializeOpenTabs([tab]);
+    expect(saved).not.toHaveProperty("nativeJobWorkspace");
+    expect(saved).not.toHaveProperty("nativeJobCreateRequest");
+    expect(JSON.stringify(saved)).not.toContain("PRIVATE_SESSION_INPUT");
+    expect(JSON.stringify(saved)).not.toContain("runtime-context");
+    const [restored] = restoreOpenTabsPayload({ tabs: [{ ...saved, nativeJobWorkspace: tab.nativeJobWorkspace, nativeJobCreateRequest: 99 }], activeTabId: tab.id }).tabs;
+    expect(restored.nativeJobWorkspace).toBeUndefined();
+    expect(restored.nativeJobCreateRequest).toBeUndefined();
+    expect(restored.nativeJobPage).toEqual({ schema: "A", kind: "scheduler" });
+  });
   it("preserves retained result source connections independently of the editor connection", () => {
     const base = { title: "Result", sequence: 1, sql: "SELECT 1", createdAt: 1 };
     const [restored] = roundTrip([

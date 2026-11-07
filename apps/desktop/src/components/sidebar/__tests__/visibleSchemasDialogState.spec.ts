@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addVisibleSchemas, initialVisibleSchemaSelection, resolveVisibleSchemaSaveAction, selectVisibleSchemas } from "../visibleSchemasDialogState";
+import { addVisibleSchemas, initialVisibleSchemaSelection, selectVisibleSchemas } from "../visibleSchemasDialogState";
 
 describe("visibleSchemasDialogState", () => {
   const schemaNames = ["public", "sales", "audit"];
@@ -16,34 +16,12 @@ describe("visibleSchemasDialogState", () => {
     expect([...filtered]).toEqual(["sales", "audit"]);
   });
 
-  it("keeps an explicitly empty normal-mode filter empty", () => {
+  it("distinguishes an absent selection from an explicit empty selection", () => {
     expect([...initialVisibleSchemaSelection(schemaNames, undefined)]).toEqual(schemaNames);
     expect([...initialVisibleSchemaSelection(schemaNames, [])]).toEqual([]);
   });
 
-  it("keeps draft-mode empty or absent selections as all selected", () => {
-    expect([...initialVisibleSchemaSelection(schemaNames, undefined, true)]).toEqual(schemaNames);
-    expect([...initialVisibleSchemaSelection(schemaNames, [], true)]).toEqual(schemaNames);
-  });
-
-  it("normalizes configured schemas against the available list", () => {
-    expect([...initialVisibleSchemaSelection(schemaNames, ["missing", "audit", "audit"])]).toEqual(["audit"]);
-  });
-
-  it("skips persistence when an unchanged filter is saved", () => {
-    expect(resolveVisibleSchemaSaveAction(new Set(["audit", "public"]), schemaNames, ["public", "audit"])).toEqual({ type: "none" });
-  });
-
-  it("stores changed partial selections in stable schema order", () => {
-    expect(resolveVisibleSchemaSaveAction(new Set(["audit", "public"]), schemaNames, ["sales"])).toEqual({
-      type: "set",
-      schemaNames: ["public", "audit"],
-    });
-  });
-
-  it("represents a full selection as show-all and avoids redundant tree refreshes", () => {
-    const selected = new Set(schemaNames);
-    expect(resolveVisibleSchemaSaveAction(selected, schemaNames, undefined)).toEqual({ type: "none" });
-    expect(resolveVisibleSchemaSaveAction(selected, schemaNames, ["public"])).toEqual({ type: "clear" });
+  it("retains configured names temporarily absent from the candidate list", () => {
+    expect([...initialVisibleSchemaSelection(schemaNames, ["missing", "audit", "audit"])]).toEqual(["missing", "audit"]);
   });
 });

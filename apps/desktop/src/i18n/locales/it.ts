@@ -65,6 +65,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  navigationPreferences: { refreshFailed: "Impostazioni salvate, ma aggiornamento della navigazione non riuscito: {message}", connectionUnavailable: "La connessione non esiste più. Riaprila." },
   oracleTrigger: {
     errorPositionUnavailable: "Sorgente aperto. Impossibile verificare la posizione dell'errore; controllare la riga e la colonna indicate.",
     reconcileStructure: "Riconcilia le modifiche applicate",
@@ -3810,6 +3811,7 @@ export default withEnglishFallback({
     unknown: "Si è verificato un errore backend imprevisto.",
   },
   common: {
+    all: "Tutti",
     fileNotFound: "Il file non esiste: {path}",
     loading: "Caricamento...",
     stopping: "Interruzione...",
@@ -4672,6 +4674,10 @@ export default withEnglishFallback({
     editCancel: "Annulla",
   },
   contextMenu: {
+    viewObjects: "Visualizza oggetti",
+    refreshObjects: "Aggiorna oggetti",
+    confirmDeleteConnectionConfig: "Eliminare la configurazione di connessione salvata «{name}»?",
+    confirmDeleteSelectedConnectionConfigs: "Eliminare le {count} configurazioni di connessione salvate selezionate?",
     splitTab: "Dividi",
     batchCloseTabs: "Chiudi più schede",
     copyTabName: "Copia nome scheda",
@@ -4681,12 +4687,12 @@ export default withEnglishFallback({
     closeConnection: "Chiudi Connessione",
     closeSelectedConnections: "Chiudi {count} connessioni selezionate",
     closeDatabaseConnection: "Chiudi Connessione Database",
-    deleteConnection: "Elimina Connessione",
-    deleteSelectedConnections: "Elimina {count} connessioni selezionate",
+    deleteConnection: "Elimina Connessione…",
+    deleteSelectedConnections: "Elimina {count} connessioni selezionate…",
     confirmDeleteTitle: "Elimina Connessione",
     confirmDeleteMessage: 'Sei sicuro di voler eliminare "{name}"? Questa azione non può essere annullata.',
     confirmDeleteSelectedMessage: "Eliminare le {count} connessioni selezionate? Questa azione non può essere annullata.",
-    editConnection: "Modifica Connessione",
+    editConnection: "Modifica Connessione…",
     revealDatabaseFile: "Mostra nel file manager",
     selectVisibleDatabases: "Seleziona Database Visibili",
     configureVisibleObjects: "Filtro Oggetti Visibili",
@@ -5158,6 +5164,8 @@ export default withEnglishFallback({
     loadFailed: "Impossibile caricare i database: {message}",
   },
   visibleSchemas: {
+    ordinaryGroup: "Schemi utente",
+    systemGroup: "Schemi di sistema",
     title: "Filtro Schema",
     detailLabel: "Schema visibili",
     detailActionLabel: 'Configura gli schema visibili per "{connection}"',
@@ -5174,6 +5182,9 @@ export default withEnglishFallback({
     loadFailed: "Impossibile caricare gli schema: {message}",
   },
   databaseLinks: {
+    foreignPrivateReadOnly: "Il collegamento privato di un altro utente è di sola lettura.",
+    privateSchemaUnavailable: "Non è possibile creare un collegamento privato nello schema di un altro utente. Usa lo schema dell’utente connesso.",
+    permissionUnknown: "Il permesso di eliminazione non è confermato; verrà verificato dal database durante l’esecuzione. Aggiorna per ricontrollare.",
     remoteTenant: "Tenant remoto",
     remoteProtocol: "Protocollo del database remoto",
     remoteCluster: "Cluster remoto (facoltativo)",
@@ -5199,6 +5210,18 @@ export default withEnglishFallback({
     manage: "Manage database links",
   },
   tree: {
+    navigationStatus: { denied: "Nessun permesso", error: "Caricamento fallito", unknown: "Da verificare", unsupported: "Non supportato", truncated: "Risultati parziali" },
+    scheduler: "Pianificatore",
+    publicObjects: "Oggetti pubblici",
+    tenantObjects: "Oggetti del tenant",
+    jobs: "Processi",
+    jobCategories: {
+      regular: "Processi pianificati",
+      lightweight: "Processi leggeri",
+      inMemory: "Processi in memoria",
+      legacy: "Processi tradizionali",
+    },
+    openList: "Apri elenco",
     nativeJobs: "Job nativi",
     databaseLinks: "Database Links",
     savedSql: "Libreria SQL",
@@ -5375,6 +5398,14 @@ export default withEnglishFallback({
     stepSkipped: "Ignorato perché un passaggio precedente richiesto non è riuscito.",
   },
   nativeJobs: {
+    contextChanged: "Il contesto del processo è cambiato o è scaduto. Aggiorna l’elenco e riprova.",
+    scopeRecoveryTitle: "Ripristina scheda processo",
+    scopeRecoveryHint: "Questa vecchia scheda richiede uno schema verificato. Riaprila dall’albero degli oggetti; il contenuto salvato è conservato.",
+    retainedContent: "Visualizza contenuto conservato",
+    scopeMismatch: "Il processo non appartiene allo schema o alla categoria di questa pagina. Riaprilo dalla sua categoria.",
+    scopeInvalid: "Schema o categoria non validi. Riapri la pagina dall’albero degli oggetti.",
+    legacySchemaCreationUnavailable: "Questo metodo non crea processi legacy nello schema di un altro utente. Usa lo schema dell’utente connesso.",
+    scopeResolutionUnavailable: "Impossibile verificare lo schema. Controlla la connessione e i permessi del catalogo e riprova.",
     datePrecisionMicroseconds: "Le date dei job in questa versione di OceanBase supportano solo la precisione al microsecondo. Imposta a 0 le cifre 7–9 dei secondi frazionari e genera di nuovo l'anteprima; l'input originale è stato conservato.",
     previousContext: "Risultato dell'operazione del contesto precedente",
     detachedDraft: "La bozza originale è stata conservata e non è associata all'oggetto corrente.",

@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@/components/ui/input";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
+import { translateBackendError } from "@/i18n/backend-errors";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
@@ -41,10 +42,14 @@ import {
   nativeJobAdminEngine,
   nativeJobAdminSupported,
   nativeJobAdminSelection,
+  nativeJobSelectionMatchesPage,
+  nativeJobPageLabelKey,
   nativeJobAdminSelectionKey,
   newNativeJobDefinitionDraft,
   type NativeJobAdminSelection,
   type NativeJobDefinitionDraft,
+  type NativeJobRetainedDraft,
+  type NativeJobWorkspaceState,
 } from "@/lib/database/nativeJobAdmin";
 import { DAMENG_JOB_ENVIRONMENT_SQL, damengInitJobSystemSql, isDamengJobAlreadyInitializedError, isDamengJobEnvironmentMissingError, parseDamengJobEnvironmentReady } from "@/lib/database/damengJobAdmin";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
@@ -52,14 +57,25 @@ import { useTabUiState } from "@/lib/tabs/tabUiState";
 const props = defineProps<{
   connection: ConnectionConfig;
   initialSelection?: NativeJobAdminSelection;
+  pageScope?: { schema: string; kind: "scheduler" | "legacy"; schedulerCategory?: "regular" | "lightweight" | "in-memory" };
+  creationTargets?: { database: string; schema: string; kind: "scheduler" | "legacy"; schedulerCategory?: "regular" | "lightweight" | "in-memory" }[];
+  database?: string;
+  createRequest?: number;
+  workspace?: NativeJobWorkspaceState;
 }>();
+const emit = defineEmits<{ "create-request-consumed": []; "update:selection": [NativeJobAdminSelection | undefined] }>();
+const createTarget = ref(props.workspace?.creationTarget ?? "");
+const chosenCreationTarget = computed(() => props.creationTargets?.find((target) => JSON.stringify(target) === createTarget.value));
+const pageScope = computed(() => props.pageScope ?? (chosenCreationTarget.value ? { schema: chosenCreationTarget.value.schema, kind: chosenCreationTarget.value.kind, schedulerCategory: chosenCreationTarget.value.schedulerCategory } : undefined));
 
 type DetailTab = "definition" | "arguments" | "steps" | "schedules" | "running" | "histories";
-interface RetainedJobDraft {
-  dameng: NativeJobDamengEditDraft;
-  definition: NativeJobDefinitionDraft;
-  anchor?: { engine: NativeJobContext["engine"]; sessionUser: string; actualDatabase: string | null; details: NativeJobDetails };
-}
+type RetainedJobDraft = NativeJobRetainedDraft;
+const workspace = props.workspace;
+const pageIdentity = JSON.stringify(props.creationTargets ? ["create", props.connection.id] : [props.connection.id, props.database ?? "", pageScope.value?.schema ?? null, pageScope.value?.kind ?? null, ...(pageScope.value?.schedulerCategory ? [pageScope.value.schedulerCategory] : [])]);
+const restoredWorkspace = workspace?.snapshot?.pageIdentity === pageIdentity ? workspace.snapshot : undefined;
+let pendingWorkspaceDrafts = [...(restoredWorkspace?.retained ?? [])];
+let pendingWorkspaceEditing = restoredWorkspace?.editing;
+let restoreCreateOpen = restoredWorkspace?.create.open === true;
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -78,10 +94,10 @@ const editDialogOpen = ref(false);
 const editDraft = ref<NativeJobDamengEditDraft>({});
 const definitionEditDraft = ref({}) as Ref<NativeJobDefinitionDraft>;
 const selectedIdentity = shallowRef<NativeJobAdminSelection | undefined>(props.initialSelection ?? restoredUiState.selectedJob);
-const kind = ref<NativeJobKind>(selectedIdentity.value?.kind ?? restoredUiState.kind ?? (isDameng.value ? "dameng-native" : "scheduler"));
-const ownerFilter = ref(restoredUiState.ownerFilter ?? "");
+const kind = ref<NativeJobKind>(pageScope.value?.kind ?? props.creationTargets?.[0]?.kind ?? selectedIdentity.value?.kind ?? restoredUiState.kind ?? (isDameng.value ? "dameng-native" : "scheduler"));
+const ownerFilter = ref(pageScope.value?.schema ?? restoredUiState.ownerFilter ?? "");
 const retainedDrafts = new Map<string, RetainedJobDraft>();
-const detachedDraft = shallowRef<RetainedJobDraft>();
+const detachedDraft = shallowRef<RetainedJobDraft | undefined>(restoredWorkspace?.detached);
 const viewingDetachedDraft = ref(false);
 const refreshingContext = ref(false);
 let contextRefreshGeneration = 0;
@@ -106,7 +122,7 @@ const loadError = ref("");
 const detailError = ref("");
 const detailTab = ref<DetailTab>(["definition", "arguments", "steps", "schedules", "running", "histories"].includes(restoredUiState.detailTab ?? "") ? restoredUiState.detailTab! : isDameng.value ? "steps" : "definition");
 
-const createDialogOpen = ref(false);
+const createDialogOpen = ref(!!props.creationTargets);
 const previewDialogOpen = ref(false);
 const pendingSql = ref("");
 const pendingAfterApply = ref<(() => Promise<void>) | undefined>();
@@ -116,12 +132,12 @@ const pendingNative = ref(false);
 const pendingNativeSlot = ref<"main" | "stop">("main");
 const pendingConfirmation = shallowRef<{ slot: "main" | "stop"; planId: string; operationId: string }>();
 
-const createName = ref("JOB_TEST");
-const createOwner = ref("");
-const createKind = ref<NativeJobKind>(kind.value);
+const createName = ref(restoredWorkspace?.create.name ?? "JOB_TEST");
+const createOwner = ref(pageScope.value?.schema ?? "");
+const createKind = ref<NativeJobKind>(pageScope.value?.kind ?? restoredWorkspace?.create.kind ?? kind.value);
 // Keep the recursive JSON contract stable instead of expanding Vue's deep-unwrapped type.
-const schedulerCreateDraft = ref(newNativeJobDefinitionDraft("scheduler")) as Ref<NativeJobDefinitionDraft>;
-const legacyCreateDraft = ref(newNativeJobDefinitionDraft("legacy")) as Ref<NativeJobDefinitionDraft>;
+const schedulerCreateDraft = ref(restoredWorkspace?.create.scheduler ?? newNativeJobDefinitionDraft("scheduler")) as Ref<NativeJobDefinitionDraft>;
+const legacyCreateDraft = ref(restoredWorkspace?.create.legacy ?? newNativeJobDefinitionDraft("legacy")) as Ref<NativeJobDefinitionDraft>;
 const definitionCreateDraft = computed({
   get: () => (createKind.value === "legacy" ? legacyCreateDraft.value : schedulerCreateDraft.value),
   set: (value: NativeJobDefinitionDraft) => {
@@ -129,17 +145,19 @@ const definitionCreateDraft = computed({
     else schedulerCreateDraft.value = value;
   },
 });
-const createDraft = ref<NativeJobDamengEditDraft>({
-  attributes: { ENABLE: { kind: "set", value: true } },
-  steps: [{ kind: "add", name: "STEP1", attributes: { TYPE: { kind: "set", value: 0 }, COMMAND_INPUT: { kind: "set", value: "SELECT 1;" } } }],
-  schedules: [{ kind: "add", name: "SCHEDULE1", attributes: { TYPE: { kind: "set", value: 1 } } }],
-});
+const createDraft = ref<NativeJobDamengEditDraft>(
+  restoredWorkspace?.create.dameng ?? {
+    attributes: { ENABLE: { kind: "set", value: true } },
+    steps: [{ kind: "add", name: "STEP1", attributes: { TYPE: { kind: "set", value: 0 }, COMMAND_INPUT: { kind: "set", value: "SELECT 1;" } } }],
+    schedules: [{ kind: "add", name: "SCHEDULE1", attributes: { TYPE: { kind: "set", value: 1 } } }],
+  },
+);
 const creationPending = ref(false);
 
 trackUiState(() => ({ selectedJobName: selectedJobName.value, selectedJob: selectedIdentity.value, kind: kind.value, ownerFilter: ownerFilter.value, search: search.value, detailTab: detailTab.value, listOffset: listOffset.value }));
 
 const supported = computed(() => nativeJobAdminSupported(props.connection));
-const executionDatabase = computed(() => "");
+const executionDatabase = computed(() => chosenCreationTarget.value?.database ?? props.database ?? "");
 const engine = computed(() => context.value?.engine ?? nativeJobAdminEngine(props.connection) ?? "oracle");
 const kinds = computed(() => nativeJobAdminKinds(engine.value));
 const connectionIdentity = computed(() => connectionConfigFingerprint(props.connection));
@@ -166,6 +184,9 @@ const detailMetadata = computed<NativeJobMetadata<NativeJobRow[]> | undefined>((
 const detailRows = computed(() => (detailMetadata.value?.status === "available" || detailMetadata.value?.status === "truncated" ? detailMetadata.value.value : []));
 const metadataWarning = computed(() => (detailMetadata.value && !["available", "empty"].includes(detailMetadata.value.status) ? t("nativeJobs.partitionUnavailable", { status: detailMetadata.value.status }) : ""));
 const native = useNativeJobExecution({
+  retainedState: workspace ? (workspace.mainExecution ??= {}) : undefined,
+  captureInput: () => (creationPending.value ? { name: createName.value, kind: createKind.value, definition: definitionCreateDraft.value, dameng: createDraft.value } : undefined),
+  pageScope: () => pageScope.value,
   connection: () => props.connection,
   database: () => executionDatabase.value,
   scope: () => context.value?.scope,
@@ -230,6 +251,14 @@ const native = useNativeJobExecution({
     if (creating && status.target && selection === selectionChanges) kind.value = status.target.kind;
     await loadJobs();
     if (refresh !== contextRefreshGeneration || disposed) return;
+    if (pageScope.value && ["verified", "partial", "unknown"].includes(status.outcome)) {
+      try {
+        await connectionStore.refreshNativeJobTree(props.connection.id, executionDatabase.value, pageScope.value);
+      } catch (error) {
+        if (refresh === contextRefreshGeneration && !disposed) toast(translateBackendError(t, error), 5000);
+      }
+      if (refresh !== contextRefreshGeneration || disposed) return;
+    }
     if (creating && selection === selectionChanges && status.target && status.target.scope.contextId === context.value?.scope.contextId) {
       const previous = selectedTargetKey.value;
       if (!jobs.value.some((job) => nativeJobRefKey(job.ref) === nativeJobRefKey(status.target!))) {
@@ -251,6 +280,8 @@ const native = useNativeJobExecution({
   },
 });
 const stopping = useNativeJobExecution({
+  retainedState: workspace ? (workspace.stopExecution ??= {}) : undefined,
+  pageScope: () => pageScope.value,
   connection: () => props.connection,
   database: () => executionDatabase.value,
   scope: () => context.value?.scope,
@@ -264,7 +295,7 @@ const previewExecution = computed(() => (pendingNativeSlot.value === "stop" ? st
 const nativePreview = computed(() => previewExecution.value.preview.value);
 const nativeError = computed(() => {
   const error = previewExecution.value.error.value;
-  return error?.includes("native_job_timestamp_precision_microseconds") ? t("nativeJobs.datePrecisionMicroseconds") : error;
+  return error?.includes("native_job_timestamp_precision_microseconds") ? t("nativeJobs.datePrecisionMicroseconds") : error ? translateBackendError(t, error) : error;
 });
 const legacyRunRestoresScheduling = computed(() => engine.value === "oceanbase-oracle" && nativePreview.value?.target?.kind === "legacy" && nativePreview.value.steps.some((step) => step.id === "run"));
 const nativeResult = computed(() => native.execution.value ?? native.previousExecution.value);
@@ -285,7 +316,7 @@ watch(
     if (!confirmation) return;
     const owner = confirmation.slot === "stop" ? stopping : native;
     const execution = owner.execution.value;
-    if (execution?.prepared.plan.planId === confirmation.planId && execution.status.operationId === confirmation.operationId) previewDialogOpen.value = false;
+    if (execution?.status.operationId === confirmation.operationId) previewDialogOpen.value = false;
   },
   { flush: "sync" },
 );
@@ -306,7 +337,7 @@ function extraSummary(target: NativeJobRef): NativeJobSummary {
 
 function draftAnchor(value = details.value): RetainedJobDraft["anchor"] {
   const current = context.value;
-  return current && value && value.snapshot.ref.scope.contextId === current.scope.contextId ? { engine: current.engine, sessionUser: current.sessionUser, actualDatabase: current.actualDatabase, details: value } : undefined;
+  return current && value && value.snapshot.ref.scope.contextId === current.scope.contextId ? { connectionIdentity: connectionIdentity.value, engine: current.engine, sessionUser: current.sessionUser, actualDatabase: current.actualDatabase, details: value } : undefined;
 }
 
 function currentDraft(key = selectedTargetKey.value): RetainedJobDraft {
@@ -321,6 +352,7 @@ function draftBelongsToCurrentObject(draft: RetainedJobDraft): boolean {
     !old ||
     !current ||
     !value ||
+    old.connectionIdentity !== connectionIdentity.value ||
     old.engine !== current.engine ||
     old.sessionUser !== current.sessionUser ||
     old.actualDatabase !== current.actualDatabase ||
@@ -424,6 +456,7 @@ async function ensureConnection() {
 
 async function loadJobs(refreshDetails = true) {
   if (disposed || !supported.value) return;
+  if (props.creationTargets && !chosenCreationTarget.value) return;
   const request = ++jobsRequest;
   const identity = connectionIdentity.value;
   loadingJobs.value = true;
@@ -446,9 +479,27 @@ async function loadJobs(refreshDetails = true) {
     const currentContext = context.value ?? (await api.nativeJobOpenContext(props.connection.id, executionDatabase.value));
     if (disposed || request !== jobsRequest || identity !== connectionIdentity.value) return;
     context.value = currentContext;
+    if (props.creationTargets) {
+      createOwner.value = chosenCreationTarget.value!.schema;
+      createKind.value = chosenCreationTarget.value!.kind;
+      return;
+    }
+    if (restoreCreateOpen) {
+      restoreCreateOpen = false;
+      createDialogOpen.value = true;
+    }
     if (!kinds.value.includes(kind.value)) kind.value = kinds.value[0]!;
-    if (!createOwner.value) createOwner.value = currentContext.sessionUser;
-    const result = await api.nativeJobList({ scope: currentContext.scope, kind: kind.value, ...(ownerFilter.value ? { schema: ownerFilter.value } : {}), filter: search.value.trim(), offset: listOffset.value, limit: pageSize });
+    if (!createOwner.value) createOwner.value = pageScope.value?.schema ?? currentContext.sessionUser;
+    const listSchema = pageScope.value?.schema ?? ownerFilter.value;
+    const result = await api.nativeJobList({
+      scope: currentContext.scope,
+      kind: pageScope.value?.kind ?? kind.value,
+      ...(pageScope.value?.schedulerCategory ? { schedulerCategory: pageScope.value.schedulerCategory } : {}),
+      ...(listSchema ? { schema: listSchema } : {}),
+      filter: search.value.trim(),
+      offset: listOffset.value,
+      limit: pageSize,
+    });
     if (disposed || request !== jobsRequest || identity !== connectionIdentity.value) return;
     if (result.jobs.status !== "available" && result.jobs.status !== "empty" && result.jobs.status !== "truncated") throw new Error(t("nativeJobs.partitionUnavailable", { status: result.jobs.status }));
     const previous = selectedTargetKey.value;
@@ -475,7 +526,7 @@ async function loadJobs(refreshDetails = true) {
       jobEnvironmentReady.value = false;
       loadError.value = "";
     } else {
-      loadError.value = message;
+      loadError.value = translateBackendError(t, error);
     }
     jobs.value = [];
     details.value = undefined;
@@ -495,10 +546,11 @@ async function loadDetails() {
   loadingDetails.value = true;
   detailError.value = "";
   try {
-    const result = await api.nativeJobRead(target);
+    const result = await (pageScope.value ? api.nativeJobRead(target, pageScope.value) : api.nativeJobRead(target));
     if (disposed || request !== detailsRequest || nativeJobRefKey(target) !== selectedTargetKey.value) return;
     if (nativeJobRefKey(result.snapshot.ref) !== nativeJobRefKey(target)) throw new Error("native_job_identity_mismatch");
     details.value = result;
+    restoreWorkspaceDraft(target);
     if (!retainedDrafts.get(selectedTargetKey.value)?.anchor) retainedDrafts.set(selectedTargetKey.value, currentDraft());
     if (selectedExtra.value && nativeJobRefKey(selectedExtra.value.ref) === nativeJobRefKey(target) && result.snapshot.definition.status === "available") {
       const row = result.snapshot.definition.value;
@@ -515,11 +567,31 @@ async function loadDetails() {
     }
   } catch (error: any) {
     if (disposed || request !== detailsRequest) return;
-    detailError.value = error?.message || String(error);
+    const pending = [...pendingWorkspaceDrafts].reverse().find((entry) => nativeJobAdminSelectionKey(entry.selection) === nativeJobAdminSelectionKey(target));
+    if (pending) detachedDraft.value = pending.draft;
+    detailError.value = translateBackendError(t, error);
     details.value = undefined;
   } finally {
     if (request === detailsRequest) loadingDetails.value = false;
   }
+}
+
+function restoreWorkspaceDraft(target: NativeJobRef) {
+  const candidates = [...pendingWorkspaceDrafts].reverse().filter((entry) => nativeJobAdminSelectionKey(entry.selection) === nativeJobAdminSelectionKey(target));
+  const restored = candidates.find((entry) => draftBelongsToCurrentObject(entry.draft));
+  if (!restored) {
+    if (candidates[0]) detachedDraft.value = candidates[0].draft;
+    return;
+  }
+  editDraft.value = restored.draft.dameng;
+  definitionEditDraft.value = restored.draft.definition;
+  retainedDrafts.set(selectedTargetKey.value, { ...restored.draft, anchor: draftAnchor() });
+  pendingWorkspaceDrafts = pendingWorkspaceDrafts.filter((entry) => entry !== restored);
+  if (pendingWorkspaceEditing && nativeJobAdminSelectionKey(pendingWorkspaceEditing) === nativeJobAdminSelectionKey(target)) {
+    pendingWorkspaceEditing = undefined;
+    editDialogOpen.value = true;
+  }
+  saveWorkspace();
 }
 
 function selectJob(job: NativeJobSummary) {
@@ -540,10 +612,32 @@ function changeKind() {
   void loadJobs();
 }
 
+function initializeCreateJobStyle() {
+  const category = pageScope.value?.schedulerCategory;
+  if (category && !schedulerCreateDraft.value.attributes?.JOB_STYLE) {
+    schedulerCreateDraft.value.attributes ??= {};
+    schedulerCreateDraft.value.attributes.JOB_STYLE = { kind: "set", value: category === "regular" ? "REGULAR" : category === "lightweight" ? "LIGHTWEIGHT" : "IN_MEMORY_RUNTIME" };
+  }
+}
+
 function openCreate() {
-  createKind.value = kind.value;
+  createKind.value = pageScope.value?.kind ?? kind.value;
+  initializeCreateJobStyle();
   createDialogOpen.value = true;
 }
+
+let consumedCreateRequest: number | undefined;
+watch(
+  [() => props.createRequest, context, nativeBusy],
+  ([request]) => {
+    if (!request) consumedCreateRequest = undefined;
+    if (!request || request === consumedCreateRequest || !context.value || nativeBusy.value || !jobEnvironmentReady.value) return;
+    consumedCreateRequest = request;
+    openCreate();
+    emit("create-request-consumed");
+  },
+  { immediate: true },
+);
 
 function previewSql(sql: string, options: { danger?: boolean; afterApply?: () => Promise<void>; useTransaction?: boolean } = {}) {
   pendingNative.value = false;
@@ -641,8 +735,30 @@ async function previewNative(change: NativeJobMutation, danger = false) {
   }
 }
 
-function correctDraft() {
-  const status = nativeResult.value?.status;
+async function correctDraft() {
+  const result = nativeResult.value;
+  const status = result?.status;
+  if (result?.callbacksRevoked && result.input) {
+    const input = result.input;
+    if (!status?.target || !status.steps.some((step) => step.id === "create" && step.state === "applied")) {
+      // Keep later creation inputs intact; the dispatched input remains available to copy.
+      detachedDraft.value = { definition: input.definition, dameng: input.dameng, creation: input };
+      viewingDetachedDraft.value = true;
+      editDialogOpen.value = true;
+      return;
+    }
+    const requested = status.operationId;
+    const previous = selectedTargetKey.value;
+    selectedExtra.value = extraSummary(status.target);
+    selectedIdentity.value = nativeJobAdminSelection(status.target);
+    selectedJobName.value = status.target.kind === "legacy" ? status.target.jobId : status.target.name;
+    if (previous === nativeJobRefKey(status.target)) await loadDetails();
+    else await selectedRead;
+    if (!details.value || disposed || nativeResult.value?.status.operationId !== requested || nativeJobRefKey(details.value.snapshot.ref) !== nativeJobRefKey(status.target)) return;
+    if (status.target.kind === "dameng-native") {
+      if (!Object.keys(editDraft.value).length) editDraft.value = rebaseNativeJobDamengCreation(details.value, input.dameng, status);
+    } else if (!Object.keys(definitionEditDraft.value).length) definitionEditDraft.value = rebaseNativeJobDefinitionCreation(details.value, input.definition, status);
+  }
   if (
     !creationPending.value &&
     status?.target?.kind === "scheduler" &&
@@ -701,6 +817,11 @@ watch(
   { flush: "sync" },
 );
 watch(connectionIdentity, () => {
+  if (workspace) {
+    const saved = currentDraft();
+    pendingWorkspaceDrafts = captureWorkspaceDrafts();
+    if (Object.keys(saved.dameng).length || Object.keys(saved.definition).length) detachedDraft.value = saved;
+  }
   contextRefreshGeneration++;
   refreshingContext.value = false;
   native.invalidateContext();
@@ -715,12 +836,12 @@ watch(connectionIdentity, () => {
   selectedExtra.value = undefined;
   selectedIdentity.value = undefined;
   selectedJobName.value = "";
-  createOwner.value = "";
+  createOwner.value = pageScope.value?.schema ?? "";
   listOffset.value = 0;
   editDraft.value = {};
   definitionEditDraft.value = {};
   retainedDrafts.clear();
-  detachedDraft.value = undefined;
+  if (!workspace) detachedDraft.value = undefined;
   viewingDetachedDraft.value = false;
   renameSource = undefined;
   editDialogOpen.value = false;
@@ -753,12 +874,43 @@ watch(
   () => props.initialSelection,
   (selection) => {
     if (!selection) return;
-    kind.value = selection.kind;
+    if (selectedIdentity.value && nativeJobAdminSelectionKey(selection) === nativeJobAdminSelectionKey(selectedIdentity.value)) return;
+    if (!nativeJobSelectionMatchesPage(selection, pageScope.value)) {
+      detailError.value = translateBackendError(t, "native_job_page_scope_mismatch");
+      return;
+    }
+    kind.value = pageScope.value?.kind ?? selection.kind;
     selectedIdentity.value = selection;
     selectedExtra.value = undefined;
     listOffset.value = 0;
     void loadJobs();
   },
+);
+watch(
+  () => (selectedIdentity.value ? nativeJobAdminSelectionKey(selectedIdentity.value) : ""),
+  () => {
+    emit("update:selection", selectedIdentity.value ? nativeJobAdminSelection(selectedIdentity.value) : undefined);
+  },
+  { flush: "sync" },
+);
+watch(
+  createTarget,
+  () => {
+    if (workspace) workspace.creationTarget = createTarget.value;
+    contextRefreshGeneration++;
+    jobsRequest++;
+    detailsRequest++;
+    native.invalidatePreview();
+    stopping.invalidatePreview();
+    pendingConfirmation.value = undefined;
+    previewDialogOpen.value = false;
+    context.value = undefined;
+    createOwner.value = chosenCreationTarget.value?.schema ?? "";
+    if (chosenCreationTarget.value) createKind.value = chosenCreationTarget.value.kind;
+    initializeCreateJobStyle();
+    void loadJobs();
+  },
+  { flush: "sync" },
 );
 onMounted(() => void loadJobs());
 watch([search, ownerFilter], () => {
@@ -770,7 +922,33 @@ watch([search, ownerFilter], () => {
     void loadJobs();
   }, 200);
 });
+function captureWorkspaceDrafts() {
+  if (selectedTargetKey.value) retainedDrafts.set(selectedTargetKey.value, currentDraft());
+  const retained = [...pendingWorkspaceDrafts];
+  for (const draft of retainedDrafts.values()) {
+    if (!Object.keys(draft.dameng).length && !Object.keys(draft.definition).length) continue;
+    const selection = draft.anchor ? nativeJobAdminSelection(draft.anchor.details.snapshot.ref) : selectedIdentity.value;
+    if (selection) retained.push({ selection, draft });
+  }
+  return retained;
+}
+
+function saveWorkspace() {
+  if (workspace) {
+    const retained = captureWorkspaceDrafts();
+    workspace.snapshot = {
+      pageIdentity,
+      retained,
+      detached: detachedDraft.value,
+      editing: editDialogOpen.value && !viewingDetachedDraft.value ? selectedIdentity.value : undefined,
+      create: { open: createDialogOpen.value, name: createName.value, kind: createKind.value, scheduler: schedulerCreateDraft.value, legacy: legacyCreateDraft.value, dameng: createDraft.value },
+    };
+  }
+}
+if (workspace) watch([editDraft, definitionEditDraft, createDraft, schedulerCreateDraft, legacyCreateDraft, createName, createKind, createDialogOpen, editDialogOpen, detachedDraft, selectedIdentity], saveWorkspace, { deep: true, flush: "sync" });
+
 onScopeDispose(() => {
+  saveWorkspace();
   disposed = true;
   contextRefreshGeneration++;
   jobsRequest++;
@@ -784,7 +962,7 @@ onScopeDispose(() => {
     <div class="flex h-12 shrink-0 items-center gap-2 border-b px-3">
       <CalendarClock class="h-4 w-4 text-primary" />
       <div class="min-w-0 flex-1">
-        <div class="truncate text-sm font-semibold">{{ t(isDameng ? "damengJobAdmin.title" : "nativeJobs.title") }}</div>
+        <div class="truncate text-sm font-semibold">{{ t(pageScope ? nativeJobPageLabelKey(pageScope) : isDameng ? "damengJobAdmin.title" : "nativeJobs.title") }}</div>
         <div class="truncate text-[11px] text-muted-foreground">{{ connection.name }}</div>
       </div>
       <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="loadingJobs || refreshingContext || applying" @click="refreshContext">
@@ -806,13 +984,14 @@ onScopeDispose(() => {
       {{ t("nativeJobs.unsupported") }}
     </div>
 
-    <div v-else class="grid min-h-0 flex-1 grid-cols-[300px_minmax(0,1fr)]">
+    <div v-else-if="!creationTargets" class="grid min-h-0 flex-1 grid-cols-[300px_minmax(0,1fr)]">
       <aside class="flex min-h-0 flex-col border-r">
         <div class="grid gap-2 border-b p-2">
-          <select v-model="kind" :disabled="refreshingContext" :aria-label="t('nativeJobs.kind')" class="h-9 rounded border bg-background px-2 text-sm" @change="changeKind">
+          <div v-if="pageScope" class="text-sm font-medium">{{ pageScope.schema }} · {{ t(nativeJobPageLabelKey(pageScope)) }}</div>
+          <select v-else v-model="kind" :disabled="refreshingContext" :aria-label="t('nativeJobs.kind')" class="h-9 rounded border bg-background px-2 text-sm" @change="changeKind">
             <option v-for="value in kinds" :key="value" :value="value">{{ t(`nativeJobs.kinds.${value}`) }}</option>
           </select>
-          <Input v-if="!isDameng" v-model="ownerFilter" :disabled="refreshingContext" class="h-8 text-xs" :aria-label="t('nativeJobs.ownerFilter')" :placeholder="t('nativeJobs.ownerFilter')" />
+          <Input v-if="!isDameng && !pageScope" v-model="ownerFilter" :disabled="refreshingContext" class="h-8 text-xs" :aria-label="t('nativeJobs.ownerFilter')" :placeholder="t('nativeJobs.ownerFilter')" />
           <Input v-model="search" :disabled="refreshingContext" class="h-8 text-xs" :placeholder="t('damengJobAdmin.searchJob')" />
         </div>
         <div v-if="loadError" class="m-2 rounded border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive">
@@ -836,7 +1015,7 @@ onScopeDispose(() => {
               <span class="min-w-0 flex-1 truncate font-medium">{{ job.name }}</span>
               <Badge :variant="job.enabled ? 'default' : 'secondary'" class="h-5 px-1.5 text-[10px]">{{ job.enabled === null ? t("nativeJobs.unknown") : job.enabled ? t("damengJobAdmin.enabled") : t("damengJobAdmin.disabled") }}</Badge>
             </div>
-            <div class="mt-1 truncate text-[11px] text-muted-foreground">{{ job.owner || "-" }} · {{ job.state || t("nativeJobs.unknown") }}</div>
+            <div v-if="job.owner || job.schemaUser || job.state" class="mt-1 truncate text-[11px] text-muted-foreground">{{ [job.ref.kind === "legacy" ? job.schemaUser || job.owner : job.owner, job.state].filter(Boolean).join(" · ") }}</div>
           </button>
           <div v-if="!loadingJobs && !loadError && jobEnvironmentReady && filteredJobs.length === 0" class="p-6 text-center text-xs text-muted-foreground">
             {{ t(search.trim() ? "nativeJobs.noMatches" : "nativeJobs.emptyJobs") }}
@@ -941,7 +1120,7 @@ onScopeDispose(() => {
               v-if="execution === native && !previousContextResult && nativeResult.status.state === 'finished' && (nativeResult.status.outcome === 'partial' || nativeResult.status.outcome === 'unknown')"
               size="sm"
               variant="outline"
-              :disabled="refreshingContext || (!creationPending && !details)"
+              :disabled="refreshingContext || (!creationPending && !details && !nativeResult.input)"
               @click="correctDraft"
               >{{ t("nativeJobs.correctDraft") }}</Button
             >
@@ -1054,14 +1233,16 @@ onScopeDispose(() => {
         <DialogHeader
           ><DialogTitle
             >{{ viewingDetachedDraft ? t("nativeJobs.viewRetainedDraft") : t("nativeJobs.editJob") }} ·
-            {{ viewingDetachedDraft ? (detachedDraft?.anchor?.details.snapshot.ref.kind === "legacy" ? detachedDraft.anchor.details.snapshot.ref.jobId : detachedDraft?.anchor?.details.snapshot.ref.name) : selectedJob?.name }}</DialogTitle
+            {{ viewingDetachedDraft ? (detachedDraft?.creation?.name ?? (detachedDraft?.anchor?.details.snapshot.ref.kind === "legacy" ? detachedDraft.anchor.details.snapshot.ref.jobId : detachedDraft?.anchor?.details.snapshot.ref.name)) : selectedJob?.name }}</DialogTitle
           ></DialogHeader
         >
         <div v-if="viewingDetachedDraft && detachedDraft?.anchor" class="min-h-0 overflow-auto p-1">
           <NativeJobDamengEditor v-if="detachedDraft.anchor.details.snapshot.ref.kind === 'dameng-native'" :model-value="detachedDraft.dameng" :details="detachedDraft.anchor.details" disabled />
           <NativeJobDefinitionEditor v-else :model-value="detachedDraft.definition" :engine="detachedDraft.anchor.engine" :kind="detachedDraft.anchor.details.snapshot.ref.kind" :details="detachedDraft.anchor.details" disabled />
         </div>
-        <pre v-else-if="viewingDetachedDraft && detachedDraft" class="max-h-[60vh] overflow-auto whitespace-pre-wrap text-sm">{{ JSON.stringify({ attributes: detachedDraft.definition.attributes, arguments: detachedDraft.definition.arguments, dameng: detachedDraft.dameng }, null, 2) }}</pre>
+        <pre v-else-if="viewingDetachedDraft && detachedDraft" class="max-h-[60vh] overflow-auto whitespace-pre-wrap text-sm">{{
+          JSON.stringify(detachedDraft.creation ?? { attributes: detachedDraft.definition.attributes, arguments: detachedDraft.definition.arguments, dameng: detachedDraft.dameng }, null, 2)
+        }}</pre>
         <div v-else-if="details" class="min-h-0 overflow-auto p-1">
           <NativeJobDamengEditor v-if="selectedTarget?.kind === 'dameng-native'" v-model="editDraft" :details="details" :disabled="nativeBusy" />
           <NativeJobDefinitionEditor v-else-if="selectedTarget" v-model="definitionEditDraft" :engine="engine" :kind="selectedTarget.kind" :details="details" :scope="context?.scope" :disabled="nativeBusy" />
@@ -1080,13 +1261,21 @@ onScopeDispose(() => {
           <DialogTitle>{{ t("damengJobAdmin.newJob") }}{{ createKind === "legacy" ? "" : ` · ${createName}` }}</DialogTitle>
         </DialogHeader>
         <div class="grid min-h-0 gap-4 overflow-auto p-1 text-sm">
-          <label class="grid gap-1.5"
+          <label v-if="creationTargets" class="grid gap-1.5">
+            <span>{{ t("nativeJobs.owner") }}</span>
+            <select v-model="createTarget" :aria-label="t('nativeJobs.owner')" class="h-9 rounded border bg-background px-2" :disabled="nativeBusy">
+              <option value="" disabled>—</option>
+              <option v-for="target in creationTargets" :key="JSON.stringify(target)" :value="JSON.stringify(target)">{{ target.schema }}</option>
+            </select>
+          </label>
+          <label v-if="!pageScope && !creationTargets" class="grid gap-1.5"
             ><span>{{ t("nativeJobs.kind") }}</span
             ><select v-model="createKind" :aria-label="t('nativeJobs.createKind')" class="h-9 rounded border bg-background px-2" :disabled="nativeBusy">
               <option v-for="value in kinds" :key="value" :value="value">{{ t(`nativeJobs.kinds.${value}`) }}</option>
             </select></label
           >
-          <label v-if="createKind !== 'dameng-native'" class="grid gap-1.5"
+          <div v-if="pageScope" class="text-sm font-medium">{{ pageScope.schema }} · {{ t(nativeJobPageLabelKey(pageScope)) }}</div>
+          <label v-if="createKind !== 'dameng-native' && !pageScope && !creationTargets" class="grid gap-1.5"
             ><span>{{ createKind === "legacy" ? "SCHEMA_USER" : t("nativeJobs.owner") }}</span
             ><Input v-model="createOwner" :aria-label="createKind === 'legacy' ? 'SCHEMA_USER' : t('nativeJobs.owner')" class="h-9"
           /></label>

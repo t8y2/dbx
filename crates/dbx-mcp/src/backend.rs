@@ -5548,8 +5548,12 @@ mod nacos_external_config_tests {
         assert_eq!(parsed.context_path, "/my-nacos");
         // serverAddr still comes from the connection fields.
         assert_eq!(parsed.server_addr, "http://127.0.0.1:8848");
-        // Empty username keeps the no-auth config.
-        assert_eq!(parsed.auth, NacosAuthConfig::None);
+        // Credentials still flow from the connection fields when the user's
+        // external_config does not carry an auth block.
+        assert_eq!(
+            parsed.auth,
+            NacosAuthConfig::UsernamePassword { username: "nacos".to_string(), password: "secret".to_string() }
+        );
     }
 
     #[test]

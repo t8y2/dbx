@@ -15,6 +15,8 @@ import { connectionUsesConnectionRootSchemaMode } from "@/lib/database/jdbcDiale
 import { objectBrowserTargetForNamespaceRow } from "@/lib/database/objectBrowserTarget";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "@/components/sidebar/SidebarTreeItemDialogs.vue";
+import TableStructurePeekDialog from "@/components/editor/TableStructurePeekDialog.vue";
+import { useTableStructurePeek } from "@/composables/useTableStructurePeek";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -76,6 +78,7 @@ const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
 const { presentMenu, SidebarMenuPreferencesDialog, sidebarMenuPreferencesOpen, sidebarMenuPreferences } = useSidebarMenuPresentation();
+const { target: tableStructureTarget, columns: tableStructureColumns, loading: tableStructureLoading, error: tableStructureError, open: openTableStructurePeek, close: closeTableStructurePeek } = useTableStructurePeek();
 const searchInput = ref<InstanceType<typeof Input>>();
 const search = ref(restoredUiState.search ?? "");
 const rows = ref<DatabaseRow[]>([]);
@@ -264,6 +267,11 @@ function removeUnsupportedDatabaseItems(items: ContextMenuItem[]): ContextMenuIt
 
 function openDatabaseFromSidebar(node: TreeNode) {
   if (node.database) openDatabase(node.database);
+}
+
+function openSidebarTableStructure(node: TreeNode) {
+  if (!node.connectionId) return;
+  void openTableStructurePeek(node);
 }
 
 function columnLabel(key: DatabaseBrowserColumnKey): string {
@@ -842,7 +850,26 @@ defineExpose({ focusSearch, refresh });
       </div>
     </div>
     <SidebarMenuPreferencesDialog v-if="sidebarMenuPreferences" v-model:open="sidebarMenuPreferencesOpen" :scope="sidebarMenuPreferences.scope" :items="sidebarMenuPreferences.items" />
-    <SidebarTreeRuntimeHost ref="sidebarRuntimeHost" :node="sidebarRuntimeNode" :depth="0" @open-danger-dialog="openSidebarDangerDialog" @open-data="openDatabaseFromSidebar" @open-ddl="openDatabaseFromSidebar" @open-dialog-controller="sidebarDialogController = $event" />
+    <SidebarTreeRuntimeHost
+      ref="sidebarRuntimeHost"
+      :node="sidebarRuntimeNode"
+      :depth="0"
+      @open-danger-dialog="openSidebarDangerDialog"
+      @open-data="openDatabaseFromSidebar"
+      @open-ddl="openDatabaseFromSidebar"
+      @peek-structure="openSidebarTableStructure"
+      @open-dialog-controller="sidebarDialogController = $event"
+    />
     <SidebarTreeItemDialogs v-if="sidebarDialogController" :controller="sidebarDialogController" @closed="sidebarDialogController = null" />
+    <TableStructurePeekDialog
+      v-if="tableStructureTarget"
+      :table-name="tableStructureTarget.objectName || tableStructureTarget.label"
+      :schema="tableStructureTarget.schema"
+      :columns="tableStructureColumns"
+      :loading="tableStructureLoading"
+      :error="tableStructureError"
+      :insert-enabled="false"
+      @close="closeTableStructurePeek"
+    />
   </section>
 </template>

@@ -77,7 +77,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import { DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
@@ -176,6 +176,7 @@ import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
 import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut, eventTargetUsesNativeClipboard } from "@/lib/common/clipboard";
 import { encodeSpreadsheetTsvCell } from "@/lib/common/spreadsheetTsv";
+import { formatRowsAsSpreadsheetTsv } from "@/lib/common/tableClipboard";
 import {
   defaultPasteTableMode,
   pasteTableModeCopiesData,
@@ -213,6 +214,7 @@ import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
+import { COLUMN_NAME_COPY_SEPARATOR_VALUES } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
 import { foreignKeyChecksPreview, foreignKeyChecksTargetResults, isForeignKeyChecksOverride, runForeignKeyChecksBatch, supportsForeignKeyChecksOption, type ForeignKeyChecksMode } from "@/lib/table/foreignKeyChecks";
@@ -366,6 +368,7 @@ const sortKey = ref<ObjectBrowserSortKey>("name");
 const sortDirection = ref<ObjectBrowserSortDirection>("asc");
 const loadingSchemas = ref(false);
 const loadingObjects = ref(false);
+const copyingObjectRows = ref(false);
 const loadingMoreObjects = ref(false);
 const hasMoreObjects = ref(false);
 let objectPageOffset = 0;
@@ -485,6 +488,7 @@ const supportsSchemaIndexes = computed(() => supportsSchemaIndexManagement(effec
 const exactIndexList = computed(() => supportsSchemaIndexes.value && objectFilter.value === "indexes");
 const usesServerObjectPaging = computed(() => props.connection.db_type === "oceanbase-oracle" || exactIndexList.value || (objectFilter.value === "triggers" && supportsExactTriggerDiscovery.value));
 const objectPageSize = computed(() => Math.max(1, Math.min(10_000, Math.floor(settingsStore.desktopSettings?.sidebar_table_page_size || 500))));
+const OBJECT_COPY_PAGE_SIZE = 1_000;
 const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && props.connection.driver_profile?.toLowerCase() === "gaussdb-m");
 
 function setOracleInvalidObjectsOpen(open: boolean) {
@@ -4392,12 +4396,21 @@ async function confirmDuplicateStructureImpl() {
   }
 }
 
-function objectBrowserTableNamesCopyText(rows: readonly ObjectBrowserRow[]): string {
+function objectBrowserTableNamesCopyText(rows: readonly ObjectBrowserRow[], useDisplayName = false): string {
+  if (useDisplayName && settingsStore.editorSettings.sidebarCopyTableNameIncludeSchema && rows.some((row) => row.signature)) {
+    const separator = COLUMN_NAME_COPY_SEPARATOR_VALUES[settingsStore.editorSettings.sidebarCopyTableNameSeparator] ?? ",";
+    return rows
+      .map((row) => {
+        const qualifiedName = objectBrowserTableNamesCopyText([row]);
+        return row.signature ? `${qualifiedName}(${row.signature})` : qualifiedName;
+      })
+      .join(separator);
+  }
   const targets = rows.map(
     (row) =>
       ({
         id: row.name,
-        label: row.name,
+        label: useDisplayName ? row.displayName : row.name,
         type: "table",
         connectionId: props.connection.id,
         database: props.database,
@@ -4412,6 +4425,139 @@ function objectBrowserTableNamesCopyText(rows: readonly ObjectBrowserRow[]): str
     driverProfile: props.connection.driver_profile,
     identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
   });
+}
+
+function objectBrowserTableCopyColumns() {
+  return objectBrowserColumns.value
+    .filter((key) => key !== "select")
+    .map((key) => {
+      const definition = objectColumnDefinitions.value.find((column) => column.key === key);
+      return {
+        label: definition?.label ?? key,
+        value: (row: ObjectBrowserRow) => {
+          if (key === "name") return row.displayName;
+          if (key === "type") return typeLabel(row);
+          if (key === "estimatedRows") return formatObjectBrowserCount(row.estimatedRows);
+          if (key === "totalBytes") return formatObjectBrowserBytes(row.totalBytes);
+          if (key === "characterSet") return row.characterSet ?? "";
+          if (key === "collation") return row.collation ?? "";
+          if (key === "created_at") return formatObjectBrowserTimestamp(row.created_at);
+          if (key === "updated_at") return formatObjectBrowserTimestamp(row.updated_at);
+          return row.comment ?? "";
+        },
+      };
+    });
+}
+
+async function copyCurrentObjectNames() {
+  const rows = currentObjectRowsForCopy();
+  if (rows.length === 0) return;
+  try {
+    await copyToClipboard(objectBrowserTableNamesCopyText(rows, true));
+    toast(t("objects.copyNamesSuccess", { count: rows.length }), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function copyPrimaryObjectNames() {
+  if (selectedTableCount.value > 0 && supportsBatchTableActions.value && !hasSelectedSchemaIndexes.value) {
+    await copySelectedTablesToClipboard();
+    return;
+  }
+  await copyCurrentObjectNames();
+}
+
+async function copyObjectRowsAsTable(rows: readonly ObjectBrowserRow[]) {
+  if (rows.length === 0) return;
+  try {
+    await copyToClipboard(formatRowsAsSpreadsheetTsv(rows, objectBrowserTableCopyColumns()));
+    toast(t("objects.copyTableDataSuccess", { count: rows.length }), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+function currentObjectRowsForCopy(): readonly ObjectBrowserRow[] {
+  return filteredRows.value;
+}
+
+function allLoadedObjectRowsForCopy(): readonly ObjectBrowserRow[] {
+  return sortObjectBrowserRowsWithPins(objectSearchSummary.value.matchingRows.filter(rowMatchesObjectFilter));
+}
+
+async function fetchAllObjectRowsForCopy(): Promise<ObjectBrowserRow[]> {
+  if (!usesServerObjectPaging.value) return [...allLoadedObjectRowsForCopy()];
+  const copyConnection = { ...props.connection };
+  const copyConnectionId = copyConnection.id;
+  const copyDatabase = props.database;
+  const copyCatalog = props.catalog;
+  const copySelectedSchema = selectedSchema.value;
+  const copySchemaProp = props.schema;
+  const copyObjectFilter = objectFilter.value;
+  const copySearch = search.value.trim();
+  const copyExactIndexList = exactIndexList.value;
+  const copyNeedsSchema = needsSchema.value;
+  const copySupportsSchemaIndexes = supportsSchemaIndexes.value;
+  const copyEffectiveDatabaseType = effectiveDatabaseType.value;
+  const copyNameFilters = Object.fromEntries(Object.entries(objectNameFilters.value).map(([key, filter]) => [key, filter ? { includePatterns: [...filter.includePatterns], excludePatterns: [...filter.excludePatterns] } : undefined])) as typeof objectNameFilters.value;
+  const schema = copyExactIndexList ? (copySelectedSchema ?? copySchemaProp ?? objectListSchemaForConnection(copyConnection, copySelectedSchema) ?? copyDatabase) : copyNeedsSchema ? objectListSchemaForConnection(copyConnection, copySelectedSchema) : copyDatabase;
+  const objectTypes: Partial<Record<ObjectFilter, (SidebarObjectKind | "EVENT")[]>> = {
+    tables: ["TABLE"],
+    views: ["VIEW"],
+    materializedViews: ["MATERIALIZED_VIEW"],
+    procedures: ["PROCEDURE"],
+    functions: ["FUNCTION"],
+    triggers: ["TRIGGER"],
+    events: ["EVENT"],
+    sequences: ["SEQUENCE"],
+    indexes: ["INDEX"],
+    packages: ["PACKAGE", "PACKAGE_BODY"],
+    types: ["TYPE", "TYPE_BODY"],
+  };
+  const queryTypes = copySupportsSchemaIndexes && copyObjectFilter === "all" ? sidebarObjectKindsForDatabase(copyEffectiveDatabaseType).filter((type) => type !== "INDEX") : undefined;
+  const requestedTypes = queryTypes ?? objectTypes[copyObjectFilter];
+  const filter = copySearch || undefined;
+  const readOptions = oracleTriggerObjectReadOptions(copyConnection, requestedTypes, copyCatalog);
+  const exactIdentity = copyExactIndexList;
+  const rowSchema = connectionObjectTreeNodeSchema(copyConnection, copyDatabase, copySelectedSchema);
+  const objects: ObjectInfo[] = [];
+  for (let offset = 0; ; offset += OBJECT_COPY_PAGE_SIZE) {
+    const page = exactIdentity
+      ? await api.listObjects(copyConnectionId, copyDatabase, schema, objectTypes[copyObjectFilter], filter, OBJECT_COPY_PAGE_SIZE, offset, copyCatalog, undefined, undefined, true)
+      : readOptions
+        ? await api.listObjects(copyConnectionId, copyDatabase, schema, requestedTypes, filter, OBJECT_COPY_PAGE_SIZE, offset, copyCatalog, undefined, undefined, readOptions)
+        : await api.listObjects(copyConnectionId, copyDatabase, schema, requestedTypes, filter, OBJECT_COPY_PAGE_SIZE, offset, copyCatalog);
+    objects.push(...page);
+    if (page.length < OBJECT_COPY_PAGE_SIZE) break;
+  }
+  const rows = buildObjectBrowserRows({
+    objects: objects.filter((object) => !copySupportsSchemaIndexes || copyObjectFilter !== "all" || object.object_type !== "INDEX"),
+    database: copyDatabase,
+    fallbackSchema: schema,
+    rowSchema,
+  });
+  return rows.filter((row) => matchesTableNameFilter(row.name, copyNameFilters[row.type]));
+}
+
+async function copyCurrentObjectRowsAsTable() {
+  await copyObjectRowsAsTable(currentObjectRowsForCopy());
+}
+
+async function copyAllObjectRowsAsTable() {
+  if (copyingObjectRows.value) return;
+  copyingObjectRows.value = true;
+  try {
+    await copyObjectRowsAsTable(await fetchAllObjectRowsForCopy());
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    copyingObjectRows.value = false;
+  }
+}
+
+async function copySelectedObjectRowsAsTable() {
+  await copyObjectRowsAsTable(selectedTableRows.value);
 }
 
 async function copySelectedTablesToClipboard() {
@@ -6372,6 +6518,41 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <Clipboard class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.pasteTableSelected") }}
       </Button>
+      <div class="flex h-7 shrink-0 items-center">
+        <Button variant="ghost" size="sm" class="h-7 rounded-r-none px-2 text-xs" :disabled="selectedTableCount > 0 ? hasSelectedSchemaIndexes : filteredRows.length === 0" @click="copyPrimaryObjectNames">
+          <Copy class="mr-1.5 h-3.5 w-3.5" />
+          {{ selectedTableCount > 0 && supportsBatchTableActions && !hasSelectedSchemaIndexes ? t("objects.copyTableSelected") : t("objects.copyNames") }}
+        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger as-child>
+            <Button variant="ghost" size="icon" class="h-7 w-6 rounded-l-none border-l border-border/60" :aria-label="t('objects.copyOptions')" :title="t('objects.copyOptions')" data-object-copy-menu>
+              <ChevronDown class="h-3.5 w-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" class="w-56">
+            <DropdownMenuItem :disabled="filteredRows.length === 0" @select="copyCurrentObjectNames">
+              <Copy class="h-3.5 w-3.5" />
+              {{ t("objects.copyNames") }}
+            </DropdownMenuItem>
+            <DropdownMenuItem v-if="supportsBatchTableActions" :disabled="selectedTableCount === 0 || hasSelectedSchemaIndexes" @select="copySelectedTablesToClipboard">
+              <Copy class="h-3.5 w-3.5" />
+              {{ t("objects.copySelectedNames") }}
+            </DropdownMenuItem>
+            <DropdownMenuItem v-if="supportsBatchTableActions" :disabled="selectedTableCount === 0" @select="copySelectedObjectRowsAsTable">
+              <Clipboard class="h-3.5 w-3.5" />
+              {{ t("objects.copySelectedAsTable") }}
+            </DropdownMenuItem>
+            <DropdownMenuItem :disabled="filteredRows.length === 0" @select="copyCurrentObjectRowsAsTable">
+              <Clipboard class="h-3.5 w-3.5" />
+              {{ t("objects.copyCurrentPageAsTable") }}
+            </DropdownMenuItem>
+            <DropdownMenuItem :disabled="copyingObjectRows || loadingObjects || filteredRows.length === 0" @select="copyAllObjectRowsAsTable">
+              <Clipboard class="h-3.5 w-3.5" />
+              {{ t("objects.copyAllAsTable") }}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
       <ToolbarOverflowMenu v-if="showToolbarOverflow" :label="t('toolbar.moreActions')" button-class="h-7 w-7">
         <DropdownMenuSub v-if="!usesServerObjectPaging">
           <DropdownMenuSubTrigger>
@@ -6435,10 +6616,6 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <Button v-if="supportsBatchTableActions && !hasSelectedSchemaIndexes" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openBatchDatabaseExport">
         <Upload class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.exportSelected") }}
-      </Button>
-      <Button v-if="supportsBatchTableActions && !hasSelectedSchemaIndexes" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="copySelectedTablesToClipboard">
-        <Clipboard class="mr-1.5 h-3.5 w-3.5" />
-        {{ t("objects.copyTableSelected") }}
       </Button>
       <Button v-if="supportsBatchTableActions && supportsTruncateTable && hasSelectedTablesOnly" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchTruncateTables">
         <Scissors class="mr-1.5 h-3.5 w-3.5" />

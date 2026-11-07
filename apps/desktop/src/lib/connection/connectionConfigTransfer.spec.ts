@@ -175,6 +175,59 @@ describe("connectionConfigTransfer", () => {
     expect(imported.layout?.order[0]).toEqual({ type: "connection", id: "new-1" });
   });
 
+  describe("import deduplication identity", () => {
+    const sequentialIds = () => {
+      let n = 0;
+      return () => `new-${++n}`;
+    };
+    const ssh = (host: string, user = "root") => ({ transport_layers: [{ type: "ssh" as const, id: `layer-${host}-${user}`, host, port: 22, user }] });
+    const variants: [string, Partial<ConnectionConfig>][] = [
+      ["account", { username: "reporting" }],
+      ["database", { database: "analytics" }],
+      ["database type", { db_type: "postgres", driver_profile: "postgres" }],
+      ["tunnel host", ssh("bastion-2")],
+      ["tunnel user", ssh("bastion-1", "deploy")],
+    ];
+
+    it.each(variants)("imports a connection that differs from an existing one only by %s", (_label, extras) => {
+      const existing = conn("existing", "Shared", { database: "app", ...ssh("bastion-1") });
+      const incoming = conn("incoming", "Shared", { database: "app", ...ssh("bastion-1"), ...extras });
+      const imported = prepareConnectionConfigImport({ connections: [incoming] }, [existing], [], sequentialIds());
+      expect(imported.connections.map((connection) => connection.id)).toEqual(["new-1"]);
+      expect(imported.createdIds).toEqual(new Map([["incoming", "new-1"]]));
+    });
+
+    it.each(variants)("keeps two selected rows that differ only by %s within one import", (_label, extras) => {
+      const first = conn("first", "Shared", { database: "app", ...ssh("bastion-1") });
+      const second = conn("second", "Shared", { database: "app", ...ssh("bastion-1"), ...extras });
+      const imported = prepareConnectionConfigImport({ connections: [first, second] }, [], [], sequentialIds());
+      expect(imported.connections.map((connection) => connection.id)).toEqual(["new-1", "new-2"]);
+      expect(imported.createdIds).toEqual(
+        new Map([
+          ["first", "new-1"],
+          ["second", "new-2"],
+        ]),
+      );
+    });
+
+    it("still deduplicates an identical connection, ignoring secrets, against existing and selected rows", () => {
+      const existing = conn("existing", "Shared", { database: "app", password: "old" });
+      const imported = prepareConnectionConfigImport(
+        {
+          connections: [conn("again", "Shared", { database: "app", password: "new" }), conn("fresh", "Fresh"), conn("fresh-copy", "Fresh", { password: "other" })],
+          layout: { groups: [], order: [{ type: "connection", id: "again" }] },
+        },
+        [existing],
+        [],
+        sequentialIds(),
+      );
+      expect(imported.connections.map((connection) => connection.id)).toEqual(["new-1"]);
+      // Skipped rows are not reported as created, but layout references still resolve.
+      expect(imported.createdIds).toEqual(new Map([["fresh", "new-1"]]));
+      expect(imported.layout?.order[0]).toEqual({ type: "connection", id: "existing" });
+    });
+  });
+
   it("selects a preview subset without mutating the original preview", () => {
     const preview = {
       connections: [conn("a", "A"), conn("b", "B"), conn("c", "C")],

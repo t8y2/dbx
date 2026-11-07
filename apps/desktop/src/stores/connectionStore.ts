@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { cancelSchemaDiffTasksForConnection } from "@/lib/schema/schemaDiffCancellation";
 import type { SqlFilePreview } from "@/lib/backend/api";
+import type { DataGripImportPayload } from "@/lib/imports/datagripImport";
 import { uuid } from "@/lib/common/utils";
 import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
 import { ref, computed, watch, markRaw, reactive } from "vue";
@@ -11504,7 +11505,8 @@ export const useConnectionStore = defineStore("connection", () => {
       const { readFile } = await import("@tauri-apps/plugin-fs");
       const { decodeImportFileText } = await import("@/lib/common/decodeText");
       const path = await open({
-        filters: source === "another-redis" ? [{ name: "Another Redis Desktop Manager", extensions: ["ano"] }] : source === "navicat" ? [{ name: "Navicat Connection Export", extensions: ["ncx", "xml"] }] : [{ name: source === "rdm" ? "RedisDesktopManager JSON" : "DBX JSON", extensions: ["json"] }],
+        filters:
+          source === "another-redis" ? [{ name: "Another Redis Desktop Manager", extensions: ["ano"] }] : source === "navicat" ? [{ name: "Navicat Connections", extensions: ["ncx", "xml", "json"] }] : [{ name: source === "rdm" ? "RedisDesktopManager JSON" : "DBX JSON", extensions: ["json"] }],
         multiple: false,
       });
       if (!path) return null;
@@ -11516,7 +11518,7 @@ export const useConnectionStore = defineStore("connection", () => {
       content = await new Promise<string>((resolve, reject) => {
         const input = document.createElement("input");
         input.type = "file";
-        input.accept = source === "another-redis" ? ".ano" : source === "navicat" ? ".ncx,.xml" : ".json";
+        input.accept = source === "another-redis" ? ".ano" : source === "navicat" ? ".ncx,.xml,.json" : ".json";
         input.onchange = () => {
           const file = input.files?.[0];
           if (!file) {
@@ -11533,6 +11535,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
 
     if (source === "rdm") return { content: JSON.stringify({ format: "rdm-import", content }), encrypted: false };
+    if (source === "navicat") return { content: JSON.stringify({ format: "navicat-import", content }), encrypted: false };
     if (source === "another-redis") return { content: JSON.stringify({ format: "another-redis-import", content }), encrypted: false };
     if (content.trimStart().startsWith("<")) {
       return { content, encrypted: false };
@@ -11551,6 +11554,11 @@ export const useConnectionStore = defineStore("connection", () => {
 
     if (!passphrase) {
       const payload: unknown = JSON.parse(content);
+      if (payload && typeof payload === "object" && "format" in payload && payload.format === "navicat-import") {
+        if (!("content" in payload) || typeof payload.content !== "string") throw new Error("Navicat: invalid import payload.");
+        const { parseNavicatConnections } = await import("@/lib/imports/navicatImport");
+        return { connections: await parseNavicatConnections(payload.content) };
+      }
       if (payload && typeof payload === "object" && "format" in payload && payload.format === "another-redis-import") {
         if (!("content" in payload) || typeof payload.content !== "string") throw new Error("Another Redis Desktop Manager: invalid import payload.");
         const { parseAnotherRedisImport } = await import("@/lib/imports/anotherRedisImport");
@@ -11587,7 +11595,7 @@ export const useConnectionStore = defineStore("connection", () => {
     return parseConnectionConfigObject(JSON.parse(json));
   }
 
-  async function applyConnectionsImport(preview: ConnectionConfigBundle, selectedConnectionIds?: Iterable<string>): Promise<{ count: number; layout?: SidebarLayout }> {
+  async function applyConnectionsImport(preview: ConnectionConfigBundle, selectedConnectionIds?: Iterable<string>): Promise<{ count: number; layout?: SidebarLayout; createdIds: Map<string, string> }> {
     const selected = selectConnectionConfigBundle(preview, selectedConnectionIds);
     const importedTunnelProfileStore = useTunnelProfileStore();
     await importedTunnelProfileStore.init();
@@ -11601,7 +11609,7 @@ export const useConnectionStore = defineStore("connection", () => {
       await importedTunnelProfileStore.saveProfiles([...importedTunnelProfileStore.profiles, ...imported.tunnelProfiles]);
     }
     for (const connection of imported.connections) await addConnection(normalizeConnection(connection));
-    return { count: imported.connections.length, layout: imported.layout };
+    return { count: imported.connections.length, layout: imported.layout, createdIds: imported.createdIds };
   }
 
   async function importConnectionsFromFile(content: string, passphrase: string | null, selectedConnectionIds?: Iterable<string>): Promise<{ count: number; layout?: SidebarLayout }> {
@@ -11609,16 +11617,23 @@ export const useConnectionStore = defineStore("connection", () => {
     return applyConnectionsImport(preview, selectedConnectionIds);
   }
 
-  /** Read macOS Keychain passwords for DataGrip connections and update them. */
-  async function applyDataGripKeychainPasswords(): Promise<number> {
-    const payload = pendingDataGripPayload;
-    pendingDataGripPayload = null;
+  /**
+   * Read macOS Keychain passwords for DataGrip connections and update them.
+   * With a scope, each target pairs a DataGrip source row with the connection
+   * created from it: only those rows' Keychain entries are read, and each
+   * password is written only to its own target connection.
+   */
+  async function applyDataGripKeychainPasswords(scope?: { payload: DataGripImportPayload; targets: { source: ConnectionConfig; connectionId: string }[] }): Promise<number> {
+    const payload = scope ? scope.payload : pendingDataGripPayload;
+    if (!scope) pendingDataGripPayload = null;
     if (!payload) return 0;
+    if (scope && !scope.targets.length) return 0;
 
     try {
-      const { getDataGripUuidMap, datagripKeychainService } = await import("@/lib/imports/datagripImport");
+      const { getDataGripUuidMap, datagripKeychainService, dataGripKeychainKey } = await import("@/lib/imports/datagripImport");
       // dedupKey → DataGrip UUID
       const uuidMap = getDataGripUuidMap(payload);
+      if (scope) return await fillDataGripKeychainTargets(scope.targets, uuidMap, datagripKeychainService, dataGripKeychainKey);
       if (uuidMap.size === 0) return 0;
 
       // Build service names for batch Keychain read
@@ -11642,8 +11657,7 @@ export const useConnectionStore = defineStore("connection", () => {
       // Update connections that have passwords (match by name/host/port)
       let filled = 0;
       const updated = connections.value.map((conn) => {
-        const dedupKey = [conn.name, conn.host, conn.port, conn.database || ""].join("\u0000");
-        const service = dedupKeyToService.get(dedupKey);
+        const service = dedupKeyToService.get(dataGripKeychainKey(conn));
         if (!service) return conn;
         const password = passwordByService.get(service);
         if (password) {
@@ -11662,6 +11676,33 @@ export const useConnectionStore = defineStore("connection", () => {
       console.warn("[DataGrip Import] Keychain read failed:", e);
       return 0;
     }
+  }
+
+  async function fillDataGripKeychainTargets(targets: { source: ConnectionConfig; connectionId: string }[], uuidMap: Map<string, string>, keychainService: (dgUuid: string) => string, keychainKey: (connection: ConnectionConfig) => string): Promise<number> {
+    // Target connection ID → Keychain service of the DataGrip row it was created from.
+    const serviceByConnectionId = new Map<string, string>();
+    for (const { source, connectionId } of targets) {
+      const dgUuid = uuidMap.get(keychainKey(source));
+      if (dgUuid) serviceByConnectionId.set(connectionId, keychainService(dgUuid));
+    }
+    if (serviceByConnectionId.size === 0) return 0;
+
+    const results: [string, string][] = await api.readKeychainPasswords([...new Set(serviceByConnectionId.values())]);
+    const passwordByService = new Map(results.filter(([, password]) => password));
+
+    let filled = 0;
+    const updated = connections.value.map((conn) => {
+      const service = serviceByConnectionId.get(conn.id);
+      const password = service ? passwordByService.get(service) : undefined;
+      if (!password) return conn;
+      filled++;
+      return { ...conn, password };
+    });
+    if (filled > 0) {
+      connections.value = updated;
+      await persistConnections();
+    }
+    return filled;
   }
 
   function applySidebarLayout(layout: SidebarLayout) {

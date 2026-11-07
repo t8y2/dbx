@@ -2751,6 +2751,7 @@ pub fn run() {
             commands::global_search::global_search,
             commands::external_db::pending_open_db_files,
             commands::keychain::read_keychain_password,
+            commands::connection_discovery::discover_connection_sources,
             commands::keychain::read_keychain_passwords,
             commands::deep_link::pending_open_connection_links,
             commands::deep_link::pending_open_ai_config_links,

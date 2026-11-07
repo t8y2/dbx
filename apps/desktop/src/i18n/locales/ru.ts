@@ -1,3 +1,4 @@
+import { installedImportRu as installedImport } from "./installedImportMessages";
 import { tableColumnPasteRu as tableColumnPaste } from "./tableColumnPaste";
 import { sidebarMenuRu as sidebarMenu } from "./sidebarMenuMessages";
 import { oceanbaseCloneDialogRu as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
@@ -8,6 +9,7 @@ import { meilisearchManagementRu } from "./meilisearchManagement";
 
 // Russian locale. Entries omitted here fall back to English at runtime.
 export default withEnglishFallback({
+  installedImport,
   oracleTrigger: {
     errorPositionUnavailable: "Исходный код открыт. Не удалось проверить позицию ошибки; проверьте указанные строку и столбец.",
     reconcileStructure: "Сверить применённые изменения",

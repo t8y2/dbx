@@ -1500,6 +1500,7 @@ async fn serve() -> Result<(), String> {
         .route("/changelog/releases/{tag}", get(routes::update::fetch_changelog_release))
         // Layout
         .route("/layout/sidebar", post(routes::layout::save_sidebar_layout).get(routes::layout::load_sidebar_layout))
+        .route("/layout/sidebar/raw", get(routes::layout::load_sidebar_layout_raw))
         .route(
             "/layout/table-vgroups",
             post(routes::layout::save_table_vgroups).get(routes::layout::load_table_vgroups),

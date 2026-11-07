@@ -100,8 +100,25 @@ const STARROCKS_PRESETS: Record<Exclude<AuthorizationPreset, "custom">, string[]
   readWrite: ["SELECT", "INSERT", "UPDATE", "DELETE", "ALTER", "DROP", "EXPORT"],
 };
 
+// Doris spells privileges with the legacy `*_PRIV` suffix; MySQL's `SELECT` /
+// `SHOW VIEW` names are rejected with "Unknown privilege type" (#14428).
+// INSERT maps to LOAD_PRIV and UPDATE/DELETE map to ALTER_PRIV, which is how
+// Doris documents row-change access.
+const DORIS_PRESETS: Record<Exclude<AuthorizationPreset, "custom">, string[]> = {
+  readOnly: ["SELECT_PRIV", "SHOW_VIEW_PRIV"],
+  dml: ["SELECT_PRIV", "LOAD_PRIV", "ALTER_PRIV"],
+  ddl: ["CREATE_PRIV", "DROP_PRIV", "ALTER_PRIV"],
+  readWrite: ["SELECT_PRIV", "LOAD_PRIV", "ALTER_PRIV", "CREATE_PRIV", "DROP_PRIV", "SHOW_VIEW_PRIV"],
+};
+
+function presetPrivilegesFor(provider: DatabaseUserAdminProvider) {
+  if (provider.authorizationModel === "starrocks") return STARROCKS_PRESETS;
+  if (provider.authorizationModel === "doris") return DORIS_PRESETS;
+  return provider.dialect === "mysql" ? MYSQL_PRESETS : POSTGRES_PRESETS;
+}
+
 export function authorizationPresetPrivileges(provider: DatabaseUserAdminProvider, preset: AuthorizationPreset, custom: string[] = [], targetScope: AuthorizationTargetScope = "database"): string[] {
-  const presetPrivileges = provider.authorizationModel === "starrocks" ? STARROCKS_PRESETS : provider.dialect === "mysql" ? MYSQL_PRESETS : POSTGRES_PRESETS;
+  const presetPrivileges = presetPrivilegesFor(provider);
   const privileges = preset === "custom" ? uniquePrivileges(custom) : [...presetPrivileges[preset]];
   if (provider.authorizationModel === "starrocks" && privileges.includes("ALL")) return ["ALL"];
   if (targetScope !== "table") return privileges;

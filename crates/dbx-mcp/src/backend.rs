@@ -3195,6 +3195,7 @@ pub fn new_connection_config(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Nacos connections need a dialect-specific `external_config` to be reachable:
 /// Nacos 2.x only serves its API under the `/nacos` context, and the desktop
 /// dialog defaults new connections to `implementation=nacos`, `versionMode=v2`,

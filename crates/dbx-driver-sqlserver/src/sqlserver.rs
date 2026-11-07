@@ -5148,6 +5148,90 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_host_with_url_instance_appends_instance_from_url_params() {
+        use std::borrow::Cow;
+
+        let host = "db.example.com";
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=SQLEXPRESS")),
+            Ok(Cow::Owned(r"db.example.com\SQLEXPRESS".to_string()))
+        );
+        // Semicolon-separated and case-insensitive keys, percent-encoded value.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 1433, false, Some(";InstanceName=SQL%45XPR%45SS")),
+            Ok(Cow::Owned(r"db.example.com\SQLEXPRESS".to_string()))
+        );
+        // Braced values keep whitespace and separators literally.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName={SQL EXPR}")),
+            Ok(Cow::Owned(r"db.example.com\SQL EXPR".to_string()))
+        );
+        // Duplicate keys: the last occurrence wins.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=OLD;instanceName=NEW")),
+            Ok(Cow::Owned(r"db.example.com\NEW".to_string()))
+        );
+        // No instanceName property leaves the host untouched.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("encrypt=true;applicationName=dbx")),
+            Ok(Cow::Borrowed(host))
+        );
+        // Empty instanceName is treated as absent.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=")),
+            Ok(Cow::Borrowed(host))
+        );
+        // Explicit port, non-default port, inline instance, or missing params all skip URL lookup.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 1433, true, Some("instanceName=SQLEXPRESS")),
+            Ok(Cow::Borrowed(host))
+        );
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 40030, false, Some("instanceName=SQLEXPRESS")),
+            Ok(Cow::Borrowed(host))
+        );
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(
+                r"db.example.com\INLINE",
+                0,
+                false,
+                Some("instanceName=SQLEXPRESS")
+            ),
+            Ok(Cow::Borrowed(r"db.example.com\INLINE"))
+        );
+        assert_eq!(super::sqlserver_host_with_url_instance(host, 0, false, None), Ok(Cow::Borrowed(host)));
+    }
+
+    #[test]
+    fn sqlserver_host_with_url_instance_validates_parsed_names() {
+        let host = "db.example.com";
+        // Host-embedded ports keep the host as-is instead of using the URL instance.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance("db.example.com,1433", 0, false, Some("instanceName=SQLEXPRESS")),
+            Ok(Cow::Borrowed("db.example.com,1433"))
+        );
+        // Names carrying host/port separators are rejected.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some(r"instanceName=BAD\NAME")),
+            Err("Invalid SQL Server instanceName URL parameter".to_string())
+        );
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=BAD:NAME")),
+            Err("Invalid SQL Server instanceName URL parameter".to_string())
+        );
+        // Control characters are rejected.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=BAD\u{0007}NAME")),
+            Err("Invalid SQL Server instanceName URL parameter".to_string())
+        );
+        // Undecodable percent sequences are rejected.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=%FF%FE")),
+            Err("Invalid SQL Server instanceName URL parameter".to_string())
+        );
+    }
+
+    #[test]
     fn sqlserver_connect_uses_named_instance_resolution() {
         let source = include_str!("sqlserver.rs");
         let try_connect = source.split("\nasync fn try_connect(").nth(1).unwrap();

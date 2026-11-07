@@ -1,0 +1,68 @@
+diff --git a/dist/index.js b/dist/index.js
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -160,3 +160,5 @@
+     backslashEscapes: false,
++    nestedBlockComments: true,
+     hashComments: false,
++    clickHouseHashComments: false,
+     spaceAfterDashes: false,
+@@ -205,3 +207,3 @@
+         }
+-        else if (next == 35 /* Ch.Hash */ && d.hashComments ||
++        else if (next == 35 /* Ch.Hash */ && (d.hashComments || d.clickHouseHashComments && (input.next == 32 || input.next == 33)) ||
+             next == 47 /* Ch.Slash */ && input.next == 47 /* Ch.Slash */ && d.slashComments) {
+@@ -228,3 +230,3 @@
+                 }
+-                else if (cur == 47 /* Ch.Slash */ && input.next == 42 /* Ch.Star */) {
++                else if (d.nestedBlockComments && cur == 47 /* Ch.Slash */ && input.next == 42 /* Ch.Star */) {
+                     depth++;
+diff --git a/dist/index.cjs b/dist/index.cjs
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -162,3 +162,5 @@
+     backslashEscapes: false,
++    nestedBlockComments: true,
+     hashComments: false,
++    clickHouseHashComments: false,
+     spaceAfterDashes: false,
+@@ -207,3 +209,3 @@
+         }
+-        else if (next == 35 /* Ch.Hash */ && d.hashComments ||
++        else if (next == 35 /* Ch.Hash */ && (d.hashComments || d.clickHouseHashComments && (input.next == 32 || input.next == 33)) ||
+             next == 47 /* Ch.Slash */ && input.next == 47 /* Ch.Slash */ && d.slashComments) {
+@@ -230,3 +232,3 @@
+                 }
+-                else if (cur == 47 /* Ch.Slash */ && input.next == 42 /* Ch.Star */) {
++                else if (d.nestedBlockComments && cur == 47 /* Ch.Slash */ && input.next == 42 /* Ch.Star */) {
+                     depth++;
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -26,2 +26,6 @@
+     /**
++    Whether block comments may nest. Defaults to true.
++    */
++    nestedBlockComments?: boolean;
++    /**
+     Controls whether # creates a line comment.
+@@ -29,2 +33,4 @@
+     hashComments?: boolean;
++    /** Recognize ClickHouse # space and #! line comments. */
++    clickHouseHashComments?: boolean;
+     /**
+diff --git a/dist/index.d.cts b/dist/index.d.cts
+--- a/dist/index.d.cts
++++ b/dist/index.d.cts
+@@ -26,2 +26,6 @@
+     /**
++    Whether block comments may nest. Defaults to true.
++    */
++    nestedBlockComments?: boolean;
++    /**
+     Controls whether # creates a line comment.
+@@ -29,2 +33,4 @@
+     hashComments?: boolean;
++    /** Recognize ClickHouse # space and #! line comments. */
++    clickHouseHashComments?: boolean;
+     /**

@@ -10,3 +10,6 @@ allowBuilds:
   esbuild: true
   keytar: true
   vue-demi: false
+
+patchedDependencies:
+  "@codemirror/lang-sql@6.10.0": patches/codemirror-lang-sql-6.10.0.patch

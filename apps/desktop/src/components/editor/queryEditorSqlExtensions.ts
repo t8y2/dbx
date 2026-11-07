@@ -14,9 +14,10 @@ import { compareSqlCompletions } from "@/lib/editor/sqlCompletionPresentation";
 import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
 import { createSqlAliasHighlights } from "@/lib/editor/codemirrorSqlAliasHighlights";
 import { elasticsearchLanguage } from "@/lib/elasticsearch/elasticsearchLanguage";
-import { createDbxCodeMirrorSqlDialect, supportsQueryEditorSqlLanguage } from "@/lib/editor/codemirrorSqlDialect";
+import { createDbxCodeMirrorSqlDialect, sqlRegionDialectSpec, supportsQueryEditorSqlLanguage } from "@/lib/editor/codemirrorSqlDialect";
 import { createLargeDocumentSqlLanguage } from "@/lib/editor/codemirrorLargeDocumentSqlLanguage";
 import { createSqlWindowTreeParser } from "@/lib/editor/codemirrorSqlWindowTree";
+import { sqlRegionDialect } from "@/lib/editor/sqlRegionFoldRanges";
 import { graphQueryLanguage, isGraphQueryDatabase } from "@/lib/graph/graphQueryLanguage";
 import { getGraphFunctionSignatureHelp } from "@/lib/graph/graphSignatureHelp";
 import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorSqlSemanticHighlight";
@@ -368,18 +369,19 @@ export function configureQueryEditorSqlExtensions(options: QueryEditorSqlExtensi
   });
 
   codeMirrorRuntime.buildSqlLanguageExtension = () => {
+    const syntaxDialect = options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect;
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, syntaxDialect, props.databaseType, sqlDriverProfile.value);
     const commentDatabaseType = queryEditorStatementDatabaseType(props.databaseType, props.mongoQueryLanguage);
     return [
+      sqlRegionDialect.of(sqlRegionDialectSpec(dialect, syntaxDialect, props.databaseType)),
       props.databaseType === "elasticsearch" || props.databaseType === "easysearch"
-        ? elasticsearchLanguage(createDbxCodeMirrorSqlDialect(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value).language.parser, () => !boundedAnalysisEnabled())
+        ? elasticsearchLanguage(dialect.language.parser, () => !boundedAnalysisEnabled())
         : isGraphQueryDatabase(props.databaseType)
           ? graphQueryLanguage(props.databaseType)
           : supportsQueryEditorSqlLanguage(props.databaseType)
             ? syntaxParsingEnabled()
-              ? langSql.sql({
-                  dialect: createDbxCodeMirrorSqlDialect(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType, sqlDriverProfile.value, sqlStatementParameterOptions()),
-                })
-              : createLargeDocumentSqlLanguage(langSql, options.sqlSyntaxDialect?.() ?? props.syntaxDialect ?? props.dialect, props.databaseType, sqlStatementParameterOptions())
+              ? langSql.sql({ dialect: createDbxCodeMirrorSqlDialect(langSql, syntaxDialect, props.databaseType, sqlDriverProfile.value, sqlStatementParameterOptions()) })
+              : createLargeDocumentSqlLanguage(langSql, syntaxDialect, props.databaseType, sqlStatementParameterOptions())
             : [],
       // Non-SQL editors (MongoDB shell) keep the SQL grammar for highlighting, so override the
       // comment marker that toggleLineComment reads from language data.

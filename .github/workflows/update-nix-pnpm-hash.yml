@@ -9,6 +9,7 @@ on:
       - 'packages/**/package.json'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
+      - 'patches/**'
       - 'flake.nix'
       - 'flake.lock'
   workflow_dispatch:

@@ -31,9 +31,13 @@ function jobLines(source: string, jobId: string): string[] {
   return block;
 }
 
-/** The job-level `if:` lines of a job block. A job-level condition is a single line. */
+/**
+ * The job-level `if:` lines of a job block. A job-level condition is a single
+ * line indented 4 spaces; a step-level condition is nested deeper, so matching
+ * on the indentation keeps the two apart instead of counting both.
+ */
 function jobGuardLines(source: string, jobId: string): string[] {
-  return jobLines(source, jobId).filter((line) => line.trim().startsWith("if:"));
+  return jobLines(source, jobId).filter((line) => /^ {4}if:/.test(line));
 }
 
 /**
@@ -72,6 +76,17 @@ describe("fork-aware workflow contract", () => {
     expect(guard).toContain("github.event_name != 'workflow_run'");
     expect(guard).toContain("github.event.workflow_run.conclusion == 'success'");
     expect(guard).toContain("&&");
+  });
+
+  it("does not mistake a step-level condition for a job-level guard", () => {
+    // A step-level `if:` is nested deeper than the job-level one, so adding one
+    // must not change the number of guards the job is considered to have.
+    const workflow = readWorkflow("dockerhub-description.yml");
+    expect(jobGuardLines(workflow, "update"), "the job has one guard").toHaveLength(1);
+
+    const withStepCondition = workflow.replace("      - uses: actions/checkout@v7", "      - uses: actions/checkout@v7\n        if: github.ref == 'refs/heads/main'");
+    expect(withStepCondition, "the step condition was inserted").not.toBe(workflow);
+    expect(jobGuardLines(withStepCondition, "update"), "the job still has one guard").toHaveLength(1);
   });
 
   it("preserves the triggers, permissions, and destinations of the guarded workflows", () => {

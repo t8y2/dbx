@@ -1936,14 +1936,27 @@ fn sql_server_count_sql(statement: &str) -> Option<String> {
     }
     let dialect = MsSqlDialect {};
     let mut statements = Parser::parse_sql(&dialect, statement).ok()?;
-    let (derived_table_projection_safe, ast_has_order_by) = {
+    let (derived_table_projection_safe, explicit_projection_width, ast_has_order_by, ast_has_offset_or_fetch) = {
         let [Statement::Query(query)] = statements.as_slice() else {
             return None;
         };
         let SetExpr::Select(select) = query.body.as_ref() else {
             return None;
         };
-        (sql_server_derived_table_select_projection_safe(select), query.order_by.is_some())
+        let explicit_projection_width = (select.into.is_none()
+            && query.for_clause.is_none()
+            && select
+                .projection
+                .iter()
+                .all(|item| matches!(item, SelectItem::UnnamedExpr(_) | SelectItem::ExprWithAlias { .. })))
+        .then_some(select.projection.len());
+        (
+            sql_server_derived_table_select_projection_safe(select),
+            explicit_projection_width,
+            query.order_by.is_some(),
+            matches!(&query.limit_clause, Some(LimitClause::LimitOffset { offset: Some(_), .. }))
+                || query.fetch.is_some(),
+        )
     };
     // 词法扫描在 `#` 临时表、反斜杠字符串后会漏掉结尾 ORDER BY（见
     // sql_server_ast_has_order_by）。定位不到就不能原样塞进派生表：SQL Server
@@ -1954,10 +1967,29 @@ fn sql_server_count_sql(statement: &str) -> Option<String> {
     let hidden_order_by = ast_has_order_by
         && find_top_level_trailing_order_by(statement).is_none()
         && !has_top_level_select_top(statement)
-        && !sql_server_ast_has_offset_or_fetch(statement);
-    if derived_table_projection_safe && !hidden_order_by {
+        && !ast_has_offset_or_fetch;
+    if (derived_table_projection_safe || explicit_projection_width.is_some()) && !hidden_order_by {
         let alias = quote_table_identifier(Some(DatabaseType::SqlServer), "dbx_count");
-        let wrapped_sql = sql_server_statement_for_derived_table(statement);
+        // SQL Server requires every derived-table output to have a unique name.
+        // An explicit column alias list lets COUNT wrap unnamed subqueries or
+        // duplicate labels without changing the projection's row cardinality.
+        // Wildcards have unknown width and retain the guarded rewrite below.
+        let alias = if derived_table_projection_safe {
+            alias
+        } else {
+            let columns = (0..explicit_projection_width?)
+                .map(|index| quote_table_identifier(Some(DatabaseType::SqlServer), &fallback_alias(index)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{alias}({columns})")
+        };
+        let wrapped_sql = if ast_has_offset_or_fetch {
+            // OFFSET/FETCH changes which rows are counted, so its ORDER BY
+            // must stay inside the derived table even without a TOP clause.
+            statement.to_string()
+        } else {
+            sql_server_statement_for_derived_table(statement)
+        };
         return Some(derived_table_sql("SELECT COUNT(*) AS dbx_total_rows FROM", &wrapped_sql, &format!("{alias};")));
     }
 
@@ -4319,15 +4351,15 @@ mod tests {
     #[test]
     fn sqlserver_unsafe_top_projections_use_rowcount_for_later_pages() {
         let queries = [
-            "SELECT TOP 100 AAA, * FROM BBB",
-            "SELECT TOP 100 AAA, bbb AS aaa FROM BBB",
-            "SELECT TOP 100 a.id, b.id FROM AAA a JOIN BBB b ON a.id = b.id",
-            "SELECT TOP 100 a.*, b.* FROM AAA a JOIN BBB b ON a.id = b.id",
-            "SELECT TOP 100 a.*, * FROM AAA a",
-            "SELECT TOP 100 AAA + 1 FROM BBB",
+            ("SELECT TOP 100 AAA, * FROM BBB", false),
+            ("SELECT TOP 100 AAA, bbb AS aaa FROM BBB", true),
+            ("SELECT TOP 100 a.id, b.id FROM AAA a JOIN BBB b ON a.id = b.id", true),
+            ("SELECT TOP 100 a.*, b.* FROM AAA a JOIN BBB b ON a.id = b.id", false),
+            ("SELECT TOP 100 a.*, * FROM AAA a", false),
+            ("SELECT TOP 100 AAA + 1 FROM BBB", true),
         ];
 
-        for sql in queries {
+        for (sql, countable) in queries {
             let first_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
                 sql: sql.to_string(),
                 query_base_sql: sql.to_string(),
@@ -4339,7 +4371,7 @@ mod tests {
             });
             assert_eq!(first_page.sql_to_execute, sql);
             assert!(first_page.page_sql.is_none());
-            assert!(first_page.count_sql.is_none());
+            assert_eq!(first_page.count_sql.is_some(), countable);
 
             let later_page = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
                 sql: sql.to_string(),
@@ -4353,9 +4385,103 @@ mod tests {
             assert!(later_page.sql_to_execute.starts_with("EXEC sys.sp_executesql N'SET ROWCOUNT 200; "));
             assert_eq!(sqlserver_result_offset(&later_page.sql_to_execute), 100);
             assert_eq!(later_page.page_sql, Some(later_page.sql_to_execute.clone()));
-            assert!(later_page.count_sql.is_none());
+            assert_eq!(later_page.count_sql.is_some(), countable);
             assert_eq!(later_page.page_limit, Some(100));
             assert_eq!(later_page.page_offset, Some(100));
+        }
+    }
+
+    #[test]
+    fn sqlserver_unnamed_scalar_subquery_keeps_count_and_later_pages() {
+        let sql = "SELECT a.town, a.[postal code], a.province, a.port, \
+            (SELECT TOP 1 b.id FROM regions b WHERE b.port_name = a.port AND b.name_en = a.province) \
+            FROM (SELECT DISTINCT town, [postal code], province, port FROM region_data \
+            WHERE port IN ('BARCELONA', 'VALENCIA')) a WHERE a.port IN ('BARCELONA', 'VALENCIA')";
+
+        for offset in [0, 200, 7000] {
+            let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                sql: sql.to_string(),
+                query_base_sql: sql.to_string(),
+                database_type: Some(DatabaseType::SqlServer),
+                pagination: QueryPagination { limit: 200, offset, session_id: None },
+                use_agent_cursor: false,
+                first_page_uses_actual_sql: false,
+                execution_hint: None,
+            });
+
+            let count = plan.count_sql.expect("an unnamed scalar subquery must remain countable");
+            assert!(count.contains(sql), "the scalar subquery and filters must be preserved: {count}");
+            assert!(count.ends_with("[dbx_count]([column_1], [column_2], [column_3], [column_4], [column_5]);"));
+            assert!(Parser::parse_sql(&MsSqlDialect {}, &count).is_ok());
+            assert_eq!(plan.exact_query_row_bound, None, "the inner TOP 1 must not bound the outer result");
+            assert_eq!(plan.page_limit, Some(200));
+            assert_eq!(plan.page_offset, Some(offset));
+            assert!(!plan.sql_to_execute.contains("[column_"), "internal count aliases must not rename result columns");
+            if offset == 0 {
+                assert!(plan.sql_to_execute.starts_with("SELECT TOP (200) a.town"));
+            } else {
+                assert_eq!(sqlserver_result_offset(&plan.sql_to_execute), offset);
+                assert!(plan
+                    .sql_to_execute
+                    .starts_with(&format!("EXEC sys.sp_executesql N'SET ROWCOUNT {};", offset + 200)));
+            }
+        }
+    }
+
+    #[test]
+    fn sqlserver_count_supplies_names_for_explicit_unnamed_or_duplicate_columns() {
+        for (sql, aliases) in [
+            ("SELECT id + 1 FROM towns", "[column_1]"),
+            ("SELECT (SELECT TOP 1 id FROM regions) FROM towns", "[column_1]"),
+            ("SELECT t.id, t.id FROM towns t", "[column_1], [column_2]"),
+            ("SELECT id AS column_2, id + 1 FROM towns", "[column_1], [column_2]"),
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::SqlServer),
+            });
+            assert_eq!(
+                result.sql.as_deref(),
+                Some(format!("SELECT COUNT(*) AS dbx_total_rows FROM ({sql}) [dbx_count]({aliases});").as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn sqlserver_count_keeps_unnamed_projection_cardinality_modifiers() {
+        for sql in [
+            "SELECT DISTINCT id + 1 FROM towns",
+            "SELECT TOP (7000) id + 1 FROM towns ORDER BY id",
+            "SELECT TOP (10) WITH TIES id + 1 FROM towns ORDER BY id",
+            "SELECT province, COUNT(*) FROM towns GROUP BY province HAVING COUNT(*) > 1",
+            "SELECT MAX(id) FROM towns WHERE 1 = 0",
+            "SELECT id + 1 FROM towns ORDER BY id OFFSET 10 ROWS FETCH NEXT 20 ROWS ONLY",
+            "SELECT 1",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::SqlServer),
+            });
+            let count = result.sql.expect("explicit unnamed projections must remain countable");
+            assert!(count.contains(sql), "must count the original result, including its row-count modifiers: {count}");
+            assert!(Parser::parse_sql(&MsSqlDialect {}, &count).is_ok(), "invalid SQL Server count: {count}");
+        }
+    }
+
+    #[test]
+    fn sqlserver_unnamed_count_does_not_guess_wildcard_width_or_wrap_output_clauses() {
+        for sql in [
+            "SELECT t.*, (SELECT TOP 1 id FROM regions) FROM towns t",
+            "SELECT id + 1, * FROM towns",
+            "SELECT id + 1 INTO new_towns FROM towns",
+            "SELECT id + 1 FROM #towns FOR JSON PATH",
+            "SELECT id + 1 FROM #towns FOR XML PATH",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::SqlServer),
+            });
+            assert!(!result.ok, "must not generate an unsafe count for {sql}");
         }
     }
 

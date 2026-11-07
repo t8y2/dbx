@@ -66,6 +66,8 @@ pub struct WebState {
     pub ssh_prompts: Arc<crate::ssh_prompt::SshPromptHub>,
     pub migration_ready: Arc<AtomicBool>,
     pub web_mcp: Arc<crate::web_mcp::WebMcpRuntime>,
+    /// `DBX_WEB_AUDIT_LOG`: `None` unless the operator enabled the audit log.
+    pub audit: Option<Arc<crate::audit::AuditLog>>,
 }
 
 impl WebState {
@@ -101,6 +103,7 @@ impl WebState {
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
             migration_ready: Arc::new(AtomicBool::new(true)),
             web_mcp: Arc::new(crate::web_mcp::WebMcpRuntime::disabled()),
+            audit: None,
         }
     }
 }

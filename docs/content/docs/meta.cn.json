@@ -44,6 +44,7 @@
     "web-api",
     "---安全与配置---",
     "production-safety",
+    "web-audit-log",
     "data-security-migration",
     "connection-import",
     "config-export",

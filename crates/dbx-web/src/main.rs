@@ -1,3 +1,4 @@
+mod audit;
 mod auth;
 mod captcha;
 mod credentials;
@@ -604,6 +605,13 @@ async fn serve() -> Result<(), String> {
 
     let demo_mode = demo::demo_mode_from_env();
 
+    let audit_config = audit::AuditConfig::from_env().map_err(|error| format!("Failed to start DBX Web: {error}"))?;
+    let audit_path = audit_config.as_ref().map(|config| config.path.display().to_string());
+    let audit_log = audit_config
+        .map(audit::AuditLog::open)
+        .transpose()
+        .map_err(|error| format!("Failed to start DBX Web: {error}"))?;
+
     let migration_ready = storage_migration_ready(&app_state).await;
     let web_mcp = Arc::new(if migration_ready {
         WebMcpRuntime::load(&app_state.storage, !password_disabled && password_hash.is_some())
@@ -637,6 +645,7 @@ async fn serve() -> Result<(), String> {
         ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
         migration_ready: Arc::new(AtomicBool::new(migration_ready)),
         web_mcp,
+        audit: audit_log,
     });
 
     ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
@@ -1598,6 +1607,9 @@ async fn serve() -> Result<(), String> {
     let api = add_mq_routes(api)
         .layer(middleware::from_fn_with_state(web_state.clone(), migration_gate))
         .layer(middleware::from_fn_with_state(web_state.clone(), demo::demo_mode_gate))
+        // Inside auth on purpose: only authenticated requests and the auth
+        // bootstrap routes reach the audit log, never anonymous noise.
+        .layer(middleware::from_fn_with_state(web_state.clone(), audit::api_audit_middleware))
         .layer(middleware::from_fn_with_state(web_state.clone(), auth::auth_middleware))
         .with_state(web_state.clone());
 
@@ -1612,7 +1624,8 @@ async fn serve() -> Result<(), String> {
     app = app.merge(
         mcp_router
             .layer(middleware::from_fn_with_state(web_state.clone(), web_mcp_demo_gate))
-            .layer(middleware::from_fn_with_state(web_state.clone(), migration_gate)),
+            .layer(middleware::from_fn_with_state(web_state.clone(), migration_gate))
+            .layer(middleware::from_fn_with_state(web_state.clone(), audit::mcp_audit_middleware)),
     );
     tracing::info!("DBX Web MCP endpoint is available at /mcp when enabled");
 
@@ -1669,6 +1682,9 @@ async fn serve() -> Result<(), String> {
     if demo_mode {
         tracing::info!("Demo mode is enabled: connection/plugin/AI mutations are blocked");
     }
+    if let Some(path) = &audit_path {
+        tracing::info!("Audit log is enabled: {path}");
+    }
 
     let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind address");
     let shutdown_state = web_state.app.clone();
@@ -1718,9 +1734,12 @@ async fn serve() -> Result<(), String> {
     });
 
     let shutdown_wait = server_shutdown.clone();
-    let serve_future = axum::serve(listener, app).with_graceful_shutdown(async move {
-        shutdown_wait.cancelled().await;
-    });
+    let shutdown_audit = web_state.audit.clone();
+    // Connect info gives the audit log the client address of each request.
+    let serve_future = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(async move {
+            shutdown_wait.cancelled().await;
+        });
 
     // If graceful shutdown of HTTP connections takes longer than 5 seconds, abort to ensure prompt termination on Ctrl+C.
     // Non-zero exit codes keep systemd's Restart=on-failure meaningful: a serve error or an
@@ -1745,6 +1764,9 @@ async fn serve() -> Result<(), String> {
         exit_code = 1;
     }
     shutdown_state.shutdown(std::time::Duration::from_secs(3)).await;
+    if let Some(audit) = shutdown_audit {
+        audit.flush().await;
+    }
     std::process::exit(exit_code);
 }
 

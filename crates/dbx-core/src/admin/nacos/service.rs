@@ -615,6 +615,7 @@ mod tests {
             version_mode: Some(NacosVersionMode::Auto),
             api_plane: None,
             context_path: "/nacos".to_string(),
+            context_path_implied: false,
             managed_namespaces: Vec::new(),
             rnacos_console_addr: String::new(),
             rnacos_history_enabled: Some(false),

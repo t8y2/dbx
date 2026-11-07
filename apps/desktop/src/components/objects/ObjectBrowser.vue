@@ -4426,6 +4426,8 @@ function objectBrowserTableCopyColumns() {
           if (key === "type") return typeLabel(row);
           if (key === "estimatedRows") return formatObjectBrowserCount(row.estimatedRows);
           if (key === "totalBytes") return formatObjectBrowserBytes(row.totalBytes);
+          if (key === "characterSet") return row.characterSet ?? "";
+          if (key === "collation") return row.collation ?? "";
           if (key === "created_at") return formatObjectBrowserTimestamp(row.created_at);
           if (key === "updated_at") return formatObjectBrowserTimestamp(row.updated_at);
           return row.comment ?? "";

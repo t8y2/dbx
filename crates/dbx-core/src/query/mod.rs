@@ -6561,20 +6561,45 @@ fn postgres_transaction_begin_sql(consistent_snapshot: bool) -> &'static str {
     }
 }
 
-fn mysql_transaction_begin_sql_candidates(consistent_snapshot: bool) -> &'static [&'static str] {
-    if consistent_snapshot {
+fn mysql_transaction_begin_sql_candidates(
+    consistent_snapshot: bool,
+    catalog_dialect: Option<db::mysql::MySqlCatalogDialect>,
+) -> &'static [&'static str] {
+    if !consistent_snapshot {
+        return &["START TRANSACTION"];
+    }
+    // Doris parses BEGIN with its own ANTLR grammar. `WITH CONSISTENT SNAPSHOT`
+    // is accepted, but neither the `, READ ONLY` clause nor a standalone
+    // `READ ONLY` / `READ WRITE` is, so the plain MySQL forms always fail with
+    // ER_UNKNOWN_ERROR 1105 (`mismatched input ',' ...`, `mismatched input
+    // 'READ' ...`). Verified against Doris 4.0.7
+    // (`doris-4.0.7-rc02-35854e7e92a`, server version 5.7.99). Doris opens
+    // repeatable-read transactions by default, so the short form still gives a
+    // database export the consistent snapshot it needs; `START TRANSACTION` is
+    // kept only as a last-resort fallback.
+    if matches!(catalog_dialect, Some(db::mysql::MySqlCatalogDialect::Doris)) {
+        &["START TRANSACTION WITH CONSISTENT SNAPSHOT", "START TRANSACTION"]
+    } else {
         &[
             "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
             "START TRANSACTION WITH CONSISTENT SNAPSHOT",
             "START TRANSACTION",
         ]
-    } else {
-        &["START TRANSACTION"]
     }
 }
 
-fn mysql_transaction_isolation_sql(consistent_snapshot: bool) -> Option<&'static str> {
-    consistent_snapshot.then_some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+fn mysql_transaction_isolation_sql(
+    consistent_snapshot: bool,
+    catalog_dialect: Option<db::mysql::MySqlCatalogDialect>,
+) -> Option<&'static str> {
+    // Doris rejects `SET TRANSACTION ISOLATION LEVEL ...` with the same parser
+    // error class and silently no-ops `SET TRANSACTION READ ONLY`, while its
+    // transactions already start at REPEATABLE-READ, so the pre-BEGIN statement
+    // is both useless and fatal there.
+    if !consistent_snapshot || matches!(catalog_dialect, Some(db::mysql::MySqlCatalogDialect::Doris)) {
+        return None;
+    }
+    Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
 }
 
 fn mysql_error_is_syntax_error(error: &mysql_async::Error) -> bool {
@@ -6585,9 +6610,24 @@ fn mysql_error_is_syntax_error(error: &mysql_async::Error) -> bool {
         // diagnostic instead of MySQL's ER_PARSE_ERROR (1064).  Only treat
         // diagnostics that clearly identify a syntax/parser failure as
         // retryable; generic 1105 errors may indicate a real server failure.
+        //
+        // Two Doris grammar flavours are in the wild, so match both:
+        //   - older/rewritten: `Syntax error in line 1: ... ^ Encountered: X Expected: Y`
+        //   - Doris 4.x (raw ANTLR): `mismatched input ',' expecting {<EOF>, ';'}(line 1, pos 42)`
         mysql_async::Error::Server(server_error) if server_error.code == 1105 => {
             let message = server_error.message.to_ascii_lowercase();
-            message.contains("syntax error") && (message.contains("encountered:") || message.contains("expected"))
+            let classic_parser_diagnostic =
+                message.contains("syntax error") && (message.contains("encountered:") || message.contains("expected"));
+            let antlr_parser_diagnostic = message.contains("mismatched input")
+                || message.contains("extraneous input")
+                || message.contains("no viable alternative")
+                || message.contains("token recognition error");
+            // `errCode = 2` is Doris' internal ANALYSIS_ERROR code; the parser
+            // diagnostics above are the discriminator, this is a secondary guard
+            // so an unrelated 1105 failure carrying the same marker stays fatal.
+            let doris_analysis_error = message.contains("errcode = 2");
+            classic_parser_diagnostic
+                || (antlr_parser_diagnostic && (doris_analysis_error || message.contains("expecting")))
         }
         // PolarDB-X exposes parser failures such as PXC-4500 / ERR_PARSER
         // through the generic MySQL protocol ERR_HANDLE_DATA code (3009).
@@ -6718,11 +6758,11 @@ async fn begin_transaction_session(
         TxnPoolHandle::Mysql(mysql_pool) => {
             let mut conn = mysql_pool.get_conn().await.map_err(|e| format!("Failed to get MySQL connection: {e}"))?;
             db::mysql::apply_catalog_database_context(&mut conn, mysql_catalog_dialect, catalog, database).await?;
-            if let Some(isolation_sql) = mysql_transaction_isolation_sql(consistent_snapshot) {
+            if let Some(isolation_sql) = mysql_transaction_isolation_sql(consistent_snapshot, mysql_catalog_dialect) {
                 conn.query_drop(isolation_sql).await.map_err(|e| format!("SET TRANSACTION failed: {e}"))?;
             }
             let mut syntax_errors = Vec::new();
-            for begin_sql in mysql_transaction_begin_sql_candidates(consistent_snapshot) {
+            for begin_sql in mysql_transaction_begin_sql_candidates(consistent_snapshot, mysql_catalog_dialect) {
                 match conn.query_drop(*begin_sql).await {
                     Ok(()) => {
                         syntax_errors.clear();
@@ -14772,17 +14812,37 @@ for line in sys.stdin:
     #[test]
     fn database_backup_transactions_request_consistent_snapshots() {
         assert_eq!(postgres_transaction_begin_sql(true), "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
-        assert_eq!(mysql_transaction_isolation_sql(true), Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"));
         assert_eq!(
-            mysql_transaction_begin_sql_candidates(true),
+            mysql_transaction_isolation_sql(true, None),
+            Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        );
+        assert_eq!(
+            mysql_transaction_begin_sql_candidates(true, None),
             [
                 "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
                 "START TRANSACTION WITH CONSISTENT SNAPSHOT",
                 "START TRANSACTION",
             ]
         );
-        assert_eq!(mysql_transaction_isolation_sql(false), None);
-        assert_eq!(mysql_transaction_begin_sql_candidates(false), ["START TRANSACTION"]);
+        assert_eq!(mysql_transaction_isolation_sql(false, None), None);
+        assert_eq!(mysql_transaction_begin_sql_candidates(false, None), ["START TRANSACTION"]);
+    }
+
+    /// Doris 4.x rejects `WITH CONSISTENT SNAPSHOT, READ ONLY` and a standalone
+    /// `READ ONLY` clause with ER_UNKNOWN_ERROR 1105, and it no-ops
+    /// `SET TRANSACTION READ ONLY`, so a Doris backup must never send the
+    /// MySQL-only statements first (they used to abort every database export
+    /// with `START TRANSACTION failed: ... mismatched input ','`).
+    #[test]
+    fn doris_backup_transactions_use_doris_compatible_begin() {
+        let doris = Some(db::mysql::MySqlCatalogDialect::Doris);
+        assert_eq!(
+            mysql_transaction_begin_sql_candidates(true, doris),
+            ["START TRANSACTION WITH CONSISTENT SNAPSHOT", "START TRANSACTION"]
+        );
+        assert_eq!(mysql_transaction_isolation_sql(true, doris), None);
+        // Manual (non-snapshot) transactions are unaffected.
+        assert_eq!(mysql_transaction_begin_sql_candidates(false, doris), ["START TRANSACTION"]);
     }
 
     #[test]
@@ -14817,6 +14877,38 @@ for line in sys.stdin:
 
         assert!(mysql_error_is_syntax_error(&doris_syntax_error));
         assert!(!mysql_error_is_syntax_error(&generic_unknown_error));
+    }
+
+    /// Real Doris 4.0.7 payload captured from `START TRANSACTION WITH
+    /// CONSISTENT SNAPSHOT, READ ONLY`: raw ANTLR diagnostics wrapped in the
+    /// `errCode = 2` ANALYSIS_ERROR envelope, with no "syntax error" wording,
+    /// which the older heuristic never matched.
+    #[test]
+    fn mysql_backup_transaction_falls_back_for_doris4_antlr_parser_errors() {
+        let server_error = |message: &str| {
+            mysql_async::Error::Server(mysql_async::ServerError {
+                code: 1105,
+                message: message.to_string(),
+                state: "HY000".to_string(),
+            })
+        };
+        let doris4_comma =
+            server_error("errCode = 2, detailMessage = \nmismatched input ',' expecting {<EOF>, ';'}(line 1, pos 42)");
+        let doris4_read = server_error(
+            "errCode = 2, detailMessage = \nmismatched input 'READ' expecting {<EOF>, ';'}(line 1, pos 18)",
+        );
+        let doris_extraneous = server_error(
+            "errCode = 2, detailMessage = \nextraneous input 'WORK' expecting {<EOF>, ';'}(line 1, pos 6)",
+        );
+        // Real server failures must stay fatal instead of being retried.
+        let unknown_database = server_error("errCode = 2, detailMessage = Unknown database 'missing_db'");
+        let missing_table = server_error("errCode = 2, detailMessage = Table does not exist");
+
+        assert!(mysql_error_is_syntax_error(&doris4_comma));
+        assert!(mysql_error_is_syntax_error(&doris4_read));
+        assert!(mysql_error_is_syntax_error(&doris_extraneous));
+        assert!(!mysql_error_is_syntax_error(&unknown_database));
+        assert!(!mysql_error_is_syntax_error(&missing_table));
     }
 
     #[test]

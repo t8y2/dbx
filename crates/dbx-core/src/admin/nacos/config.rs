@@ -185,7 +185,12 @@ impl NacosAdminConfig {
                 server_addr: format!("{scheme}://{}:{}", cfg.host.trim(), cfg.port),
                 display_server_addr: String::new(),
                 namespace: cfg.database.clone().unwrap_or_default(),
-                context_path: String::new(),
+                // Connections created without the dialog (e.g. MCP
+                // `dbx_add_connection`) carry no Nacos profile. Use the same
+                // `/nacos` default the dialog stores: stock Nacos 2.x serves its
+                // API only there, and r-nacos login paths still resolve to the
+                // server root under this context (#14527).
+                context_path: "/nacos".to_string(),
                 managed_namespaces: Vec::new(),
                 rnacos_console_addr: String::new(),
                 rnacos_history_enabled: None,
@@ -458,6 +463,83 @@ mod tests {
         assert_eq!(parsed.namespace, "public");
     }
 
+    #[tokio::test]
+    async fn connection_without_profile_reaches_nacos_2_api_under_default_context() {
+        use crate::admin::nacos::{http::NacosOpenApiAdmin, port::NacosAdmin};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Nacos 2.x serves its API only under `/nacos`; the root answers with
+        // Tomcat's HTML 404 page (#14527).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut targets = Vec::new();
+            while let Ok(Ok((mut socket, _))) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept()).await
+            {
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    request.extend_from_slice(&buffer[..read]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                        let length = head
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if body.len() >= length {
+                            break;
+                        }
+                    }
+                    if read == 0 {
+                        break;
+                    }
+                }
+                let target = String::from_utf8_lossy(&request).split_whitespace().nth(1).unwrap().to_string();
+                let path = target.split('?').next().unwrap().to_string();
+                let (status, content_type, body) = match path.as_str() {
+                    "/nacos/v1/auth/users/login" => {
+                        ("200 OK", "application/json", r#"{"accessToken":"token","tokenTtl":18000}"#)
+                    }
+                    "/nacos/v1/console/namespaces" => (
+                        "200 OK",
+                        "application/json",
+                        r#"{"code":200,"data":[{"namespace":"","namespaceShowName":"public"}]}"#,
+                    ),
+                    _ => ("404 Not Found", "text/html", "<html><body>HTTP Status 404 - Not Found</body></html>"),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                let done = path == "/nacos/v1/console/namespaces";
+                targets.push(path);
+                if done {
+                    break;
+                }
+            }
+            targets
+        });
+
+        let mut cfg = connection_with_external(serde_json::json!({}));
+        cfg.external_config = None;
+        cfg.port = address.port();
+        cfg.username = "nacos".to_string();
+        cfg.password = "pw".to_string();
+        let admin = NacosOpenApiAdmin::new(NacosAdminConfig::from_connection(&cfg).unwrap()).unwrap();
+
+        let namespaces = admin.list_namespaces().await;
+        let targets = server.await.unwrap();
+        assert!(namespaces.is_ok(), "{namespaces:?}; requests: {targets:?}");
+        assert_eq!(targets.first().map(String::as_str), Some("/nacos/v1/auth/users/login"), "{targets:?}");
+    }
+
     #[test]
     fn parses_rnacos_console_address() {
         let cfg = connection_with_external(serde_json::json!({
@@ -599,7 +681,8 @@ mod tests {
         cfg.password = "pw".to_string();
         let parsed = NacosAdminConfig::from_connection(&cfg).unwrap();
         assert_eq!(parsed.server_addr, "http://127.0.0.1:8848");
-        assert_eq!(parsed.context_path, "");
+        // Same default the connection dialog stores (#14527).
+        assert_eq!(parsed.context_path, "/nacos");
         assert!(matches!(parsed.auth, NacosAuthConfig::UsernamePassword { .. }));
     }
 

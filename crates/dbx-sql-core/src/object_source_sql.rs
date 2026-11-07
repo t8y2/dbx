@@ -624,6 +624,13 @@ fn build_executable_object_source_statements_with_mysql_validation_name(
         ));
     }
 
+    // MySQL has no CREATE OR REPLACE TRIGGER, so saving an edited trigger has to drop the
+    // existing one first. SHOW CREATE TRIGGER always carries DEFINER=...; replaying that
+    // CREATE verbatim on an existing trigger fails with ERROR 1359 (Trigger already exists).
+    if is_mysql_like(input.database_type) && input.object_type == ObjectSourceKind::Trigger {
+        return Ok(executable_mysql_trigger_statements(&input, source));
+    }
+
     let create_statement = ensure_semicolon(source);
     let cleanup = build_routine_rename_cleanup(&input, source);
     Ok(if let Some(cleanup) = cleanup { vec![create_statement, cleanup] } else { vec![create_statement] })
@@ -1083,6 +1090,11 @@ pub fn build_editable_object_source(input: EditableObjectSourceSqlInput) -> Stri
     if is_mysql_like(input.database_type)
         && matches!(input.object_type, ObjectSourceKind::Function | ObjectSourceKind::Procedure)
     {
+        return ensure_semicolon(source.trim());
+    }
+    if is_mysql_like(input.database_type) && input.object_type == ObjectSourceKind::Trigger {
+        // The editable form must stay editable source: save adds its own
+        // `DROP TRIGGER IF EXISTS` ahead of the CREATE body.
         return ensure_semicolon(source.trim());
     }
     if input.database_type == DatabaseType::Mysql && input.object_type == ObjectSourceKind::View {
@@ -1733,6 +1745,32 @@ fn executable_mysql_routine_statements(
 
 fn mysql_drop_routine_if_exists(object_type: ObjectSourceKind, schema: Option<&str>, name: &str) -> String {
     format!("DROP {} IF EXISTS {};", object_type_keyword(&object_type), mysql_qualified_name(schema, name))
+}
+
+fn executable_mysql_trigger_statements(input: &EditableObjectSourceSqlInput, source: &str) -> Vec<String> {
+    if !mysql_source_starts_with_create_trigger(source) {
+        // Not a replayable CREATE TRIGGER (bare body, comment only, ...): send it as written
+        // like every other object kind, instead of inventing a DROP.
+        return vec![ensure_semicolon(source)];
+    }
+    let trigger_name = mysql_trigger_declaration_name(source).unwrap_or_else(|| input.name.clone());
+    vec![
+        format!("DROP TRIGGER IF EXISTS {};", mysql_qualified_name(input.schema.as_deref(), &trigger_name)),
+        ensure_semicolon(source),
+    ]
+}
+
+fn mysql_source_starts_with_create_trigger(source: &str) -> bool {
+    Regex::new(r"(?is)^\s*CREATE\s+(?:DEFINER\s*=.+?\s+)?TRIGGER\b").unwrap().is_match(source)
+}
+
+fn mysql_trigger_declaration_name(source: &str) -> Option<String> {
+    let re = Regex::new(
+        r"(?is)^\s*CREATE\s+(?:DEFINER\s*=\s*(?:(?:`(?:``|[^`])+`|'(?:''|[^'])+'|[^\s]+)\s*@\s*(?:`(?:``|[^`])+`|'(?:''|[^'])+'|[^\s]+)|CURRENT_USER(?:\(\))?)\s+)?TRIGGER\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:`(?:``|[^`])+`|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:`(?:``|[^`])+`|[A-Za-z_][\w$]*))?)",
+    )
+    .unwrap();
+    let captures = re.captures(source)?;
+    split_mysql_qualified_routine_name(captures.get(1)?.as_str()).last().cloned()
 }
 
 fn mysql_source_starts_with_create_routine(source: &str) -> bool {
@@ -2773,6 +2811,64 @@ mod tests {
         statements.push(drop_informix_view_if_exists(target_name));
         statements.push(create_informix_view(target_name, create_tail));
         statements
+    }
+
+    fn mysql_trigger_input(source: &str) -> EditableObjectSourceSqlInput {
+        EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Mysql,
+            object_type: ObjectSourceKind::Trigger,
+            schema: Some("app".to_string()),
+            name: "t_bi".to_string(),
+            source: source.to_string(),
+        }
+    }
+
+    #[test]
+    fn mysql_trigger_save_drops_trigger_before_replaying_create() {
+        // MySQL has no CREATE OR REPLACE TRIGGER; replaying the DEFINER-prefixed
+        // CREATE on an existing trigger fails with ERROR 1359.
+        let statements = build_executable_object_source_statements(mysql_trigger_input(
+            "CREATE DEFINER=`root`@`%` TRIGGER `t_bi` BEFORE INSERT ON `t` FOR EACH ROW SET NEW.a = 1",
+        ))
+        .unwrap();
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0], "DROP TRIGGER IF EXISTS `app`.`t_bi`;");
+        assert_eq!(
+            statements[1],
+            "CREATE DEFINER=`root`@`%` TRIGGER `t_bi` BEFORE INSERT ON `t` FOR EACH ROW SET NEW.a = 1;"
+        );
+    }
+
+    #[test]
+    fn mysql_trigger_editable_source_stays_the_create_statement() {
+        let editable = build_editable_object_source(mysql_trigger_input(
+            "CREATE DEFINER=`root`@`%` TRIGGER `t_bi` BEFORE INSERT ON `t` FOR EACH ROW BEGIN SET NEW.a = 1; END",
+        ));
+
+        assert!(editable.trim_start().starts_with("CREATE DEFINER=`root`@`%` TRIGGER"));
+        assert!(!editable.contains("DROP TRIGGER"));
+        assert!(editable.trim_end().ends_with(';'));
+    }
+
+    #[test]
+    fn mysql_trigger_save_drops_the_qualified_name_the_source_declares() {
+        let statements = build_executable_object_source_statements(mysql_trigger_input(
+            "CREATE TRIGGER `other_db`.`t_bi` BEFORE INSERT ON `t` FOR EACH ROW SET NEW.a = 1;",
+        ))
+        .unwrap();
+
+        assert_eq!(statements[0], "DROP TRIGGER IF EXISTS `app`.`t_bi`;");
+        assert!(statements[1].ends_with(';'));
+        assert!(!statements[1].ends_with(";;"));
+    }
+
+    #[test]
+    fn mysql_trigger_save_without_a_create_declaration_is_sent_as_written() {
+        let statements =
+            build_executable_object_source_statements(mysql_trigger_input("SET NEW.a = 1")).unwrap();
+
+        assert_eq!(statements, vec!["SET NEW.a = 1;".to_string()]);
     }
 
     #[test]

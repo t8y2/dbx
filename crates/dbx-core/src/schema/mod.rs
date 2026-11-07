@@ -5527,13 +5527,20 @@ for line in sys.stdin:
         let oracle = test_connection_config(DatabaseType::Oracle);
         let postgres = test_connection_config(DatabaseType::Postgres);
 
-        for object_type in
-            [db::ObjectSourceKind::Sequence, db::ObjectSourceKind::Package, db::ObjectSourceKind::PackageBody]
-        {
+        // Triggers belong here too: the Oracle agent returns a body-only definition
+        // ("TRIGGER HR.T BEFORE INSERT ON ...") that cannot be replayed, while
+        // DBMS_METADATA.GET_DDL returns the full CREATE OR REPLACE TRIGGER.
+        for object_type in [
+            db::ObjectSourceKind::Sequence,
+            db::ObjectSourceKind::Package,
+            db::ObjectSourceKind::PackageBody,
+            db::ObjectSourceKind::Trigger,
+        ] {
             assert!(super::uses_oracle_metadata_object_source(Some(&oracle), &object_type));
         }
         assert!(!super::uses_oracle_metadata_object_source(Some(&postgres), &db::ObjectSourceKind::Sequence,));
         assert!(!super::uses_oracle_metadata_object_source(Some(&oracle), &db::ObjectSourceKind::View,));
+        assert!(!super::uses_oracle_metadata_object_source(Some(&postgres), &db::ObjectSourceKind::Trigger));
     }
 
     #[test]
@@ -11665,7 +11672,14 @@ fn uses_oracle_metadata_object_source(config: Option<&ConnectionConfig>, object_
     config.is_some_and(|config| config.db_type == DatabaseType::Oracle)
         && matches!(
             object_type,
-            db::ObjectSourceKind::Sequence | db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody
+            db::ObjectSourceKind::Sequence
+                | db::ObjectSourceKind::Package
+                | db::ObjectSourceKind::PackageBody
+                // The Oracle agent's getObjectSource answers a TRIGGER with the trigger body only
+                // ("TRIGGER HR.T BEFORE INSERT ON ... BEGIN ... END;"), which is not replayable.
+                // DBMS_METADATA.GET_DDL returns the full CREATE OR REPLACE statement, matching
+                // what routines/views already get.
+                | db::ObjectSourceKind::Trigger
         )
 }
 

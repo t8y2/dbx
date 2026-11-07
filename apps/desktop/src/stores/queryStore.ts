@@ -339,8 +339,14 @@ interface OpenPendingObjectSourceTabOptions {
 /**
  * 拿到源码也没有可编辑形态的对象类型：只填内容，不挂 objectSource。
  * （`App.vue` 的 Ctrl+click 路径有一份少了 `JOB` 的旧副本，是既有不一致。）
+ *
+ * TRIGGER 不在此列：MySQL（SHOW CREATE TRIGGER）、Oracle（DBMS_METADATA）、SQL Server
+ * （sys.sql_modules）返回的都是可重放的 CREATE 全文，`build_executable_object_source_statements`
+ * 对 TRIGGER 走通用分支（规范化分号后原样执行）。放进这个集合会让源码 tab 变成一份
+ * “普通查询”：Ctrl+S 没有保存目标，直接掉进 SQL 库，而不是写回数据库。
+ * 真正不能编辑的触发器源码由后端的 `editable: false` 标记（PostgreSQL 系），这里不重复判断。
  */
-const OBJECT_SOURCE_READ_ONLY_TYPES: readonly ObjectSourceKind[] = ["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY", "JOB"];
+const OBJECT_SOURCE_READ_ONLY_TYPES: readonly ObjectSourceKind[] = ["SEQUENCE", "TYPE", "TYPE_BODY", "JOB"];
 
 /**
  * 「查看」与「编辑」拿到的文本本就不同的对象类型：OceanBase Oracle 的序列在查看态

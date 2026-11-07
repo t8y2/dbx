@@ -39,7 +39,7 @@ const CONNECTION_ID = "ora-1";
 const DATABASE = "ORCL";
 const SCHEMA = "APP";
 
-const pendingOptions = (request: { name: string; objectType: "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY"; signature?: string }) => ({
+const pendingOptions = (request: { name: string; objectType: "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TRIGGER"; signature?: string }) => ({
   connectionId: CONNECTION_ID,
   database: DATABASE,
   title: `Source - ${request.name}`,
@@ -432,6 +432,27 @@ describe("queryStore pending object source tab", () => {
     expect(store.tabs[0]?.id).toBe(existingId);
     expect(store.tabs[0]?.sql).toBe("CREATE OR REPLACE FUNCTION app.foo RETURN NUMBER IS BEGIN RETURN 1; END;");
     expect(store.tabs[0]?.sourceLoad).toBeUndefined();
+  });
+
+  it("keeps MySQL triggers editable so Ctrl+S writes back to the database", async () => {
+    // 触发器曾被误放进只读集合：源码 tab 只带内容、不带 objectSource，
+    // Ctrl+S 因此没有保存目标，直接落进 SQL 库（见 sqlTabSaveTarget）。
+    // MySQL 没有 Oracle 的 exact-baseline 读取路径，源码就是 SHOW CREATE TRIGGER 原文。
+    mocks.getObjectSource.mockResolvedValue(objectSource("CREATE DEFINER=`root`@`%` TRIGGER `t_bi` BEFORE INSERT ON `t` FOR EACH ROW SET NEW.a = 1"));
+    mocks.connectionStore.dbType = "mysql";
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    store.openObjectSourceTabPending(pendingOptions({ name: "t_bi", objectType: "TRIGGER" }));
+    await settle();
+    mocks.connectionStore.dbType = "oracle";
+
+    expect(store.tabs).toHaveLength(1);
+    const tab = store.tabs[0]!;
+    expect(tab.objectSource).toMatchObject({ schema: SCHEMA, name: "t_bi", objectType: "TRIGGER" });
+    expect(tab.sql).toContain("CREATE DEFINER");
+    expect(tab.sourceView).toBe(true);
+    expect(tab.sourceLoad).toBeUndefined();
   });
 
   it("honors backend editability: read-only sources load as a plain source tab", async () => {

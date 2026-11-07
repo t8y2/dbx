@@ -16,6 +16,18 @@ fn transfer_identifier_policy_preserves_legacy_output() {
 }
 
 #[test]
+fn tdengine_transfer_identifiers_use_backticks() {
+    // #14540: TDengine treats double quotes as string literals, so every
+    // export/transfer identifier must take the backtick family instead of the
+    // ANSI default arm.
+    assert_eq!(quote_transfer_identifier("device_desc", &DatabaseType::Tdengine), "`device_desc`");
+    assert_eq!(
+        qualified_transfer_table("device_desc", "demo_db", &DatabaseType::Tdengine, None),
+        "`demo_db`.`device_desc`"
+    );
+}
+
+#[test]
 fn backtick_family_predicate_matches_quoting() {
     // `uses_backtick_identifier_quoting` is the single source of truth the "Standard
     // SQL" export dialect consults to decide when to deviate from ANSI double

@@ -2410,10 +2410,11 @@ impl AppState {
             .with_database_info(database_info_from_protocol_value(&response)));
         }
 
+        // A static tunnel has already chosen the TCP port, even if it is 1433.
         db::sqlserver::connect_with_port_explicit(
             host,
             port,
-            config.sqlserver_port_explicit(),
+            config.sqlserver_port_explicit() || config.has_effective_transport_layers(),
             &config.username,
             &config.password,
             config.database.as_deref(),
@@ -2454,7 +2455,7 @@ impl AppState {
         let client = db::sqlserver::connect_with_port_explicit(
             host,
             port,
-            config.sqlserver_port_explicit(),
+            config.sqlserver_port_explicit() || config.has_effective_transport_layers(),
             &config.username,
             &config.password,
             config.database.as_deref(),

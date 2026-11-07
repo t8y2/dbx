@@ -3316,6 +3316,29 @@ export const useQueryStore = defineStore("query", () => {
     return { connectionId: context.connectionId, database: context.database, schema: context.schema || context.database, catalog: context.catalog, name: source.name, objectType: source.objectType, section };
   }
 
+  /**
+   * 只读源码 tab（MySQL 触发器、序列等）加载完成后不挂 objectSource，
+   * findMatchingObjectSourceTab 永远匹配不到，只能靠 objectDetails 判重
+   * （issue #14517：否则每次双击触发器都新开一个 tab）。
+   * 查看态 SEQUENCE 展示 CREATE、编辑态才是 ALTER，编辑请求不能复用只读查看 tab。
+   */
+  function findLoadedReadOnlySourceTab(options: OpenPendingObjectSourceTabOptions): QueryTab | undefined {
+    if (options.request.objectType === "SEQUENCE" && options.initialEditing !== false) return undefined;
+    return tabs.value.find(
+      (tab) =>
+        tab.mode === "query" &&
+        !!tab.sourceView &&
+        !tab.objectSource &&
+        !tab.sourceLoad &&
+        tab.connectionId === options.connectionId &&
+        tab.database === options.database &&
+        (tab.schema || "") === (options.schema || "") &&
+        (tab.catalog || "") === (options.catalog || "") &&
+        tab.objectDetails?.name === options.request.name &&
+        tab.objectDetails.objectType === options.request.objectType,
+    );
+  }
+
   function findPendingObjectSourceTab(options: OpenPendingObjectSourceTabOptions): QueryTab | undefined {
     return tabs.value.find(
       (tab) =>
@@ -3369,6 +3392,19 @@ export const useQueryStore = defineStore("query", () => {
       // 再次点击同一对象 = 再试一次，不新开 tab、不重复占用一个 tab 位
       if (existing.sourceLoad?.error) retryObjectSourceTab(existing.id);
       return existing.id;
+    }
+
+    const readOnlyLoaded = findLoadedReadOnlySourceTab(options);
+    if (readOnlyLoaded) {
+      readOnlyLoaded.objectDetails = sourceDetails(options, options.request, options.initialSection);
+      switchTab(readOnlyLoaded.id);
+      useConnectionStore().activeConnectionId = options.connectionId;
+      // 复用即刷新；有未保存修改时只切换，不覆盖用户内容
+      if (!isTabDirty(readOnlyLoaded)) {
+        readOnlyLoaded.sourceLoad = { startedAt: Date.now(), initialEditing: options.initialEditing, request: { ...options.request } };
+        void loadObjectSourceIntoTab(readOnlyLoaded.id);
+      }
+      return readOnlyLoaded.id;
     }
 
     const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, "", options.catalog, { forceNew: true, sourceView: true, schemaQualifiesSql: true });

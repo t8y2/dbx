@@ -462,6 +462,9 @@ pub fn quote_transfer_identifier(name: &str, database_type: &DatabaseType) -> St
         | DatabaseType::Argo
         | DatabaseType::Transwarp
         | DatabaseType::Spark
+        // TDengine treats double quotes as string literals; its identifiers take
+        // backticks, so export/transfer SQL must not fall into the ANSI arm (#14540).
+        | DatabaseType::Tdengine
         | DatabaseType::Questdb => format!("`{}`", name.replace('`', "``")),
         DatabaseType::SqlServer => format!("[{}]", name.replace(']', "]]")),
         _ => format!("\"{}\"", name.replace('\"', "\"\"")),

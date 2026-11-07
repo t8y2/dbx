@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { usesLightweightMysqlBrowser } from "@/lib/database/mysqlBrowserLoading";
+import { mysqlTableCharsetFromCollation } from "@/lib/table/mysqlTableCollation";
 import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { uuid } from "@/lib/common/utils";
 import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
@@ -267,7 +268,7 @@ import { createLocateTabMenuItem } from "@/lib/tabs/tabMenu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type ObjectFilter = ObjectBrowserFilter;
-type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
+type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -514,6 +515,7 @@ const supportsBatchTableActions = computed(() => !isVictoriaMetrics.value && !is
 const showTableStatistics = computed(() => !usesServerObjectPaging.value && effectiveDatabaseType.value !== "nebula" && (objectFilter.value === "all" || objectFilter.value === "tables"));
 const showObjectRowStats = computed(() => showTableStatistics.value);
 const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showTableStatistics.value);
+const showMysqlTableCharsetColumns = computed(() => effectiveDatabaseType.value === "mysql" && showTableStatistics.value);
 const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
 
 function toggleTableDdlWordWrap() {
@@ -671,6 +673,8 @@ const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
   type: 110,
   estimatedRows: 110,
   totalBytes: 100,
+  characterSet: 120,
+  collation: 220,
   created_at: 150,
   updated_at: 150,
   comment: 260,
@@ -680,6 +684,12 @@ const objectColumnVisibilityStorageKey = computed(() => `dbx-object-browser-colu
 const objectColumnDefinitions = computed(() => [
   { key: "name" as const, label: t("objects.name") },
   { key: "type" as const, label: t("objects.type") },
+  ...(showMysqlTableCharsetColumns.value
+    ? [
+        { key: "characterSet" as const, label: t("structureEditor.characterSet") },
+        { key: "collation" as const, label: t("structureEditor.collation") },
+      ]
+    : []),
   ...(showObjectRowStats.value ? [{ key: "estimatedRows" as const, label: objectRowsLabel.value }] : []),
   ...(showObjectSizeStats.value ? [{ key: "totalBytes" as const, label: t("objects.size") }] : []),
   ...(hasCreatedAt.value ? [{ key: "created_at" as const, label: t("objects.createdAt") }] : []),
@@ -1195,6 +1205,7 @@ function toggleSort(key: ObjectBrowserSortKey) {
 
 const sortKeyOptions = computed<ObjectBrowserSortKey[]>(() => {
   const options: ObjectBrowserSortKey[] = ["name", "type"];
+  if (showMysqlTableCharsetColumns.value) options.push("characterSet", "collation");
   if (showObjectRowStats.value) options.push("estimatedRows");
   if (showObjectSizeStats.value) options.push("totalBytes");
   if (hasCreatedAt.value) options.push("created_at");
@@ -1213,6 +1224,8 @@ watch(sortKeyOptions, (options) => {
 function sortKeyLabel(key: ObjectBrowserSortKey): string {
   if (key === "name") return t("objects.name");
   if (key === "type") return t("objects.type");
+  if (key === "characterSet") return t("structureEditor.characterSet");
+  if (key === "collation") return t("structureEditor.collation");
   if (key === "estimatedRows") return objectRowsLabel.value;
   if (key === "totalBytes") return t("objects.size");
   if (key === "created_at") return t("objects.createdAt");
@@ -5356,15 +5369,13 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     // Explicit refresh and metadata invalidation still bypass this branch.
     applyObjectBrowserRows(cached.rows);
     finishOnce();
-    // 行数/大小是随对象列表一起缓存的，直接返回缓存会让这两列一直停在上一次统计
-    // （#10461）。对象列表本身仍按上面的约定不动，只把统计信息在后台补一次。
-    if (cached.stale && !detailsPassEnabled.value) void revalidateCachedObjectStatistics(request, cacheWriteToken);
-    // 轻量枚举过的缓存只有名字，注释/时间戳/统计都要回读：陈旧缓存先让统计回源再补
-    // 详情，避免两条重读同时打库；新鲜缓存直接补详情。
+    // 统计信息随对象列表缓存，过期时只在后台刷新统计，保留对象列表本身。
+    // MySQL 的旧缓存可能尚未合并表排序规则，即使仍新鲜也要补读一次。
+    const missingMysqlCollation = showMysqlTableCharsetColumns.value && rows.value.some((row) => row.type === "TABLE" && row.collation === undefined);
+    const statistics = cached.stale || missingMysqlCollation ? revalidateCachedObjectStatistics(request, cacheWriteToken) : undefined;
+    // 缺失的注释/时间戳在统计读完后补齐，避免两条重读同时打库。
     if (detailsPassEnabled.value && !rows.value.some((row) => row.comment?.trim() || row.created_at?.trim() || row.updated_at?.trim())) {
-      const start = detailsPassStarter(request, cacheWriteToken, undefined);
-      if (cached.stale) void revalidateCachedObjectStatistics(request, cacheWriteToken).then(start);
-      else start();
+      detailsPassStarter(request, cacheWriteToken, statistics)();
     }
     return;
   } else {
@@ -5389,8 +5400,8 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows);
     // Row/size statistics come from a separate aggregate read; the MySQL split only
     // skips them on the enumeration, not for the whole view.
-    if (!detailsPassEnabled.value) void loadObjectStatistics(request, cacheWriteToken, cachedAt);
-    else detailsPassStarter(request, cacheWriteToken, cachedAt)();
+    const statistics = loadObjectStatistics(request, cacheWriteToken, cachedAt);
+    if (detailsPassEnabled.value) detailsPassStarter(request, cacheWriteToken, statistics)();
   } catch (e: any) {
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     // Keep visible rows on a background revalidate failure — surface a lightweight
@@ -5545,9 +5556,8 @@ interface ObjectBrowserDetailsPass {
  * row list is still being applied, and deferring one task keeps the list's own
  * render ahead of the second read.
  */
-function detailsPassStarter(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined): () => void {
+function detailsPassStarter(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, waitFor?: Promise<unknown>): () => void {
   const epoch = request.epoch;
-  const waitFor = cachedAt !== undefined ? Promise.resolve(cachedAt) : undefined;
   return () => {
     // The pass is decorative and must never surface as a load failure: defer it and
     // keep any throw inside the pass.
@@ -5587,7 +5597,6 @@ function startObjectBrowserDetails(pass: ObjectBrowserDetailsPass): Promise<unkn
       if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
       applyObjectBrowserDetails(details);
       cacheObjectBrowserRows(pass.cacheWriteToken, rows.value);
-      void loadObjectStatistics(request, pass.cacheWriteToken, undefined);
     } catch (e) {
       // Details are decorative: keep the names already rendered and stay quiet.
       console.debug("[ObjectBrowser] object details unavailable", e);
@@ -5656,6 +5665,7 @@ function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string
       ...row,
       estimatedRows: normalizeStatisticNumber(stat.estimated_rows),
       totalBytes: normalizeStatisticNumber(stat.total_bytes),
+      ...(effectiveDatabaseType.value === "mysql" ? { characterSet: mysqlTableCharsetFromCollation(stat.collation) || null, collation: stat.collation?.trim() || null } : {}),
     };
   });
   cacheObjectBrowserRows(cacheWriteToken, rows.value, { cachedAt });
@@ -6506,6 +6516,36 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                   <GripVertical class="h-3 w-3" />
                 </div>
               </div>
+              <div v-if="showMysqlTableCharsetColumns && isObjectColumnVisible('characterSet')" class="relative flex min-w-0 items-center">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('characterSet')">
+                  <span class="truncate">{{ t("structureEditor.characterSet") }}</span>
+                  <component :is="sortIconFor('characterSet')" v-if="sortIconFor('characterSet')" class="h-3 w-3 shrink-0" />
+                </button>
+                <div
+                  v-if="!isLastVisibleObjectColumn('characterSet')"
+                  data-object-column-resize="characterSet"
+                  class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                  @mousedown="onObjectColumnResizeStart('characterSet', $event)"
+                  @dblclick="resetObjectColumnWidth('characterSet', 120, $event)"
+                >
+                  <GripVertical class="h-3 w-3" />
+                </div>
+              </div>
+              <div v-if="showMysqlTableCharsetColumns && isObjectColumnVisible('collation')" class="relative flex min-w-0 items-center">
+                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('collation')">
+                  <span class="truncate">{{ t("structureEditor.collation") }}</span>
+                  <component :is="sortIconFor('collation')" v-if="sortIconFor('collation')" class="h-3 w-3 shrink-0" />
+                </button>
+                <div
+                  v-if="!isLastVisibleObjectColumn('collation')"
+                  data-object-column-resize="collation"
+                  class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                  @mousedown="onObjectColumnResizeStart('collation', $event)"
+                  @dblclick="resetObjectColumnWidth('collation', 220, $event)"
+                >
+                  <GripVertical class="h-3 w-3" />
+                </div>
+              </div>
               <div v-if="showObjectRowStats && isObjectColumnVisible('estimatedRows')" class="relative flex min-w-0 items-center">
                 <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
                   <span class="truncate">{{ objectRowsLabel }}</span>
@@ -6641,6 +6681,12 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     <span v-if="item.valid != null" class="shrink-0 rounded border px-1 py-px text-[10px] font-medium" :class="item.valid ? 'border-emerald-500/30 text-emerald-600' : 'border-destructive/30 text-destructive'">
                       {{ t(item.valid ? "objects.validStatus" : "objects.invalidStatus") }}
                     </span>
+                  </div>
+                  <div v-if="showMysqlTableCharsetColumns && isObjectColumnVisible('characterSet')" class="truncate text-xs text-muted-foreground" :title="item.characterSet || ''">
+                    {{ item.characterSet || "" }}
+                  </div>
+                  <div v-if="showMysqlTableCharsetColumns && isObjectColumnVisible('collation')" class="truncate text-xs text-muted-foreground" :title="item.collation || ''">
+                    {{ item.collation || "" }}
                   </div>
                   <div v-if="showObjectRowStats && isObjectColumnVisible('estimatedRows')" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
                     {{ formatObjectBrowserCount(item.estimatedRows) }}

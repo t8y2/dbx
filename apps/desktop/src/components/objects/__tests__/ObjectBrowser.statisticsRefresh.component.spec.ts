@@ -59,6 +59,7 @@ vi.mock("@/components/ui/searchable-select", () => ({ SearchableSelect: { render
 vi.mock("@/components/ui/ToolbarOverflowMenu.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/ui/CustomContextMenu.vue", () => ({
   default: defineComponent({
+    inheritAttrs: false,
     setup(_, { slots }) {
       return () => slots.default?.({ onContextMenu: () => undefined, isOpen: false });
     },
@@ -113,10 +114,10 @@ afterEach(() => {
   invalidateObjectBrowserRowsCache({});
 });
 
-async function mountBrowser(schema = ref("public")) {
+async function mountBrowser(schema = ref("public"), selectedObjectFilter?: "all") {
   const host = document.createElement("div");
   document.body.append(host);
-  const app = createApp({ setup: () => () => h(ObjectBrowser, { connection, database: "pgdemo", schema: schema.value }) });
+  const app = createApp({ setup: () => () => h(ObjectBrowser, { connection, database: "pgdemo", schema: schema.value, selectedObjectFilter }) });
   mountedApps.push({ app, host });
   app.mount(host);
   return host;
@@ -247,5 +248,103 @@ describe("MySQL lightweight enumeration", () => {
     } finally {
       connection.db_type = originalType;
     }
+  });
+});
+
+describe("MySQL table charset and collation columns", () => {
+  beforeEach(() => {
+    connection.db_type = "mysql";
+    localStorage.clear();
+    mocks.listSchemas.mockResolvedValue(["pgdemo"]);
+    mocks.listObjects.mockResolvedValue([
+      { name: "a_utf8", object_type: "TABLE", schema: "pgdemo", comment: "UTF-8 table" },
+      { name: "z_latin", object_type: "TABLE", schema: "pgdemo", comment: "Latin table" },
+      { name: "v_orders", object_type: "VIEW", schema: "pgdemo" },
+    ]);
+    mocks.listObjectStatistics.mockResolvedValue([
+      { name: "a_utf8", schema: "pgdemo", collation: "utf8mb4_0900_ai_ci" },
+      { name: "z_latin", schema: "pgdemo", collation: "latin1_swedish_ci" },
+      { name: "v_orders", schema: "pgdemo", collation: "utf8mb4_bin" },
+    ]);
+  });
+
+  afterEach(() => {
+    connection.db_type = "postgres";
+    localStorage.clear();
+  });
+
+  function displayedNames(host: HTMLElement) {
+    return Array.from(host.querySelectorAll(".object-browser-scroller .grid")).map((row) => /a_utf8|z_latin|v_orders/.exec(row.textContent ?? "")?.[0]);
+  }
+
+  it("shows each table's charset and collation using the shared statistics read", async () => {
+    const host = await mountBrowser(ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
+    expect(host.textContent).toContain("structureEditor.characterSet");
+    expect(host.textContent).toContain("structureEditor.collation");
+    expect(host.textContent).toContain("latin1_swedish_ci");
+    expect(getCachedObjectBrowserRows(mysqlScope)).toEqual(expect.arrayContaining([expect.objectContaining({ name: "a_utf8", characterSet: "utf8mb4", collation: "utf8mb4_0900_ai_ci" }), expect.objectContaining({ name: "z_latin", characterSet: "latin1", collation: "latin1_swedish_ci" })]));
+    expect(getCachedObjectBrowserRows(mysqlScope)?.find((row) => row.name === "v_orders")).not.toHaveProperty("collation");
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+    expect(host.querySelector('[data-object-column-resize="characterSet"]')).not.toBeNull();
+    expect(host.querySelector('[data-object-column-resize="collation"]')).not.toBeNull();
+  });
+
+  it("sorts tables by charset in both directions while keeping missing values last", async () => {
+    const host = await mountBrowser(ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain("latin1_swedish_ci"));
+    const sort = Array.from(host.querySelectorAll("button")).find((button) => button.textContent?.trim() === "structureEditor.characterSet")!;
+    expect(sort).toBeDefined();
+    sort.click();
+    await vi.waitFor(() => expect(displayedNames(host)).toEqual(["z_latin", "a_utf8", "v_orders"]));
+    sort.click();
+    await vi.waitFor(() => expect(displayedNames(host)).toEqual(["a_utf8", "z_latin", "v_orders"]));
+  });
+
+  it("persists hidden charset columns and restores them with cached metadata", async () => {
+    const host = await mountBrowser(ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
+    host.querySelector<HTMLButtonElement>('[aria-label="objects.configureColumns"]')!.click();
+    let toggle: HTMLButtonElement | undefined;
+    await vi.waitFor(() => {
+      toggle = Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.trim() === "structureEditor.characterSet" && button.querySelector("span.border"));
+      expect(toggle).toBeDefined();
+    });
+    toggle!.click();
+    await vi.waitFor(() => expect(host.querySelector('[data-object-column-resize="characterSet"]')).toBeNull());
+    expect(JSON.parse(localStorage.getItem(`dbx-object-browser-columns:v1:${connection.id}:pgdemo:`) ?? "{}")).toMatchObject({ characterSet: false });
+    const mounted = mountedApps.pop()!;
+    mounted.app.unmount();
+    mounted.host.remove();
+
+    const restored = await mountBrowser(ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(restored.textContent).toContain("utf8mb4_0900_ai_ci"));
+    expect(restored.querySelector('[data-object-column-resize="characterSet"]')).toBeNull();
+    expect(restored.querySelector('[data-object-column-resize="collation"]')).not.toBeNull();
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([0, 31_000])("backfills missing metadata in a cached scaffold with comments (age %s ms)", async (ageMs) => {
+    cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(mysqlScope), [{ id: "table:a_utf8", name: "a_utf8", displayName: "a_utf8", schema: "pgdemo", type: "TABLE", comment: "UTF-8 table" }], { cachedAt: Date.now() - ageMs });
+    const host = await mountBrowser(ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
+    expect(mocks.listObjects).not.toHaveBeenCalled();
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes stale collation metadata even when table comments are cached", async () => {
+    cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(mysqlScope), [{ id: "table:a_utf8", name: "a_utf8", displayName: "a_utf8", schema: "pgdemo", type: "TABLE", comment: "UTF-8 table", characterSet: "latin1", collation: "latin1_bin" }], { cachedAt: Date.now() - 31_000 });
+    const host = await mountBrowser(ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
+    expect(host.textContent).not.toContain("latin1_bin");
+    expect(mocks.listObjects).not.toHaveBeenCalled();
+  });
+
+  it("keeps the extra columns out of other database browsers", async () => {
+    connection.db_type = "postgres";
+    const host = await mountBrowser();
+    await vi.waitFor(() => expect(host.textContent).toContain("a_utf8"));
+    expect(host.textContent).not.toContain("structureEditor.characterSet");
+    expect(host.textContent).not.toContain("structureEditor.collation");
   });
 });

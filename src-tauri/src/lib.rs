@@ -10,6 +10,7 @@ mod macos_escape_guard;
 mod migration_gate;
 mod models;
 mod plugin_ui_protocol;
+mod promoted_build;
 #[cfg(any(target_os = "windows", test))]
 mod startup_messages;
 #[cfg(any(target_os = "windows", test))]
@@ -317,9 +318,16 @@ fn native_window_decorations_override(target_os: &str) -> Option<bool> {
 fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
     let pkg_info = app_handle.package_info();
     let app_name = pkg_info.name.clone();
+    let build_version = pkg_info.version.to_string();
+    // A promoted stable build keeps its beta version inside the binary; the
+    // renderer reports the promotion so the panel can show the stable version
+    // like Settings → About and the copied support info do.
+    let promoted = app_handle.try_state::<promoted_build::PromotedBuildState>().and_then(|state| state.get());
+    let (version, short_version) = promoted_build::about_version_pair(&build_version, promoted.as_deref());
     let about_metadata = AboutMetadata {
         name: Some(app_name.clone()),
-        version: Some(pkg_info.version.to_string()),
+        version: Some(version),
+        short_version,
         copyright: Some(commands::support_info::format_support_info_for_native_about()),
         icon: Some(ABOUT_APP_ICON),
         ..Default::default()
@@ -2007,7 +2015,9 @@ pub fn run() {
         if event.id() == APP_MENU_QUIT_ID {
             request_app_close(app, "quit");
         } else if event.id() == APP_MENU_COPY_SUPPORT_INFO_ID {
-            if let Err(err) = app.clipboard().write_text(commands::support_info::format_support_info_for_clipboard()) {
+            let promoted = app.try_state::<promoted_build::PromotedBuildState>().and_then(|state| state.get());
+            let text = commands::support_info::format_support_info_for_clipboard(promoted.as_deref());
+            if let Err(err) = app.clipboard().write_text(text) {
                 log::warn!("Failed to copy support info from app menu: {err}");
             }
         } else if event.id() == APP_MENU_CLOSE_TAB_ID {
@@ -2021,6 +2031,9 @@ pub fn run() {
         .manage(commands::plugin_media::PluginMediaState::new())
         .manage(commands::plugin_storage::PluginUiStorageState::new())
         .manage(AppLocaleState::new())
+        // Managed on the builder, not in setup: `build_app_menu` runs before
+        // setup and reads it to render the About panel.
+        .manage(promoted_build::PromotedBuildState::new())
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {
                 if let Some(state) = webview.app_handle().try_state::<CloseBehaviorState>() {
@@ -2099,6 +2112,13 @@ pub fn run() {
             let migration_gate = Arc::new(migration_gate::MigrationGate::new(migration_ready));
             app.manage(migration_gate.clone());
             let desktop_settings = tauri::async_runtime::block_on(storage.load_desktop_settings()).unwrap_or_default();
+            // The app menu — and with it the About panel metadata — is built
+            // before storage exists, so hand the stored marker over now.
+            #[cfg(target_os = "macos")]
+            {
+                let stored_promotion = tauri::async_runtime::block_on(storage.load_promoted_build()).unwrap_or(None);
+                promoted_build::apply_stored_promotion(app.handle(), stored_promotion);
+            }
             #[cfg(target_os = "linux")]
             {
                 // Transparency must be chosen before creating the native window. Read the saved
@@ -2413,6 +2433,7 @@ pub fn run() {
             commands::app_settings::load_app_appearance_settings,
             commands::app_settings::update_app_appearance_settings,
             commands::app_settings::set_app_locale,
+            commands::app_settings::set_promoted_build,
             commands::app_settings::complete_app_close,
             commands::app_settings::mark_frontend_ready,
             commands::app_settings::request_app_close_from_window_controls,

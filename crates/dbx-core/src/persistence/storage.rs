@@ -66,6 +66,10 @@ const APP_STATE_EDITOR_SETTINGS_KEY: &str = "editor_settings";
 const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
 const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
 const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
+/// Beta build version the app was told is the promoted stable release. Kept in
+/// app_state (not renderer localStorage) because the native About panel is
+/// built before the webview could report it again on a cold start.
+const APP_STATE_PROMOTED_BUILD_KEY: &str = "promoted_build";
 const APP_APPEARANCE_SETTINGS_KEY: &str = "app_appearance";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 /// Policy v2 (`dbx_core::mcp_access::McpAccessPolicy`). Written next to the
@@ -6169,6 +6173,22 @@ impl Storage {
     /// Load open tabs from an isolated state key.
     pub async fn load_open_tabs_state_with_key(&self, key: &str) -> Result<Option<serde_json::Value>, String> {
         self.load_app_state_value(key).await
+    }
+
+    /// Store the promoted-build marker. Only the native About panel reads it,
+    /// and only for the build recorded here — a stale marker from another build
+    /// is ignored by its reader rather than rewritten during startup.
+    pub async fn save_promoted_build(&self, build_version: &str) -> Result<(), String> {
+        let value = serde_json::Value::String(build_version.trim().to_string());
+        self.save_app_state_value(APP_STATE_PROMOTED_BUILD_KEY, &value).await
+    }
+
+    pub async fn load_promoted_build(&self) -> Result<Option<String>, String> {
+        Ok(self
+            .load_app_state_value(APP_STATE_PROMOTED_BUILD_KEY)
+            .await?
+            .and_then(|value| value.as_str().map(str::trim).map(ToOwned::to_owned))
+            .filter(|value| !value.is_empty()))
     }
 
     pub async fn save_saved_sql_editor_positions(&self, positions: &serde_json::Value) -> Result<(), String> {
@@ -15160,6 +15180,21 @@ mod tests {
             DesktopSettings { icon_theme: DesktopIconTheme::Black, ..DesktopSettings::default() }
         );
         assert_eq!(storage.load_app_settings_json().await.unwrap().get("open_tabs"), None);
+    }
+
+    #[tokio::test]
+    async fn promoted_build_marker_roundtrips_in_local_app_state() {
+        let path = temp_db_path("promoted-build");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        assert_eq!(storage.load_promoted_build().await.unwrap(), None);
+
+        storage.save_promoted_build(" 0.6.67-beta.20261105.1 ").await.unwrap();
+        assert_eq!(storage.load_promoted_build().await.unwrap().as_deref(), Some("0.6.67-beta.20261105.1"));
+
+        // Overwriting replaces the marker instead of accumulating values.
+        storage.save_promoted_build("0.6.68-beta.20261106.1").await.unwrap();
+        assert_eq!(storage.load_promoted_build().await.unwrap().as_deref(), Some("0.6.68-beta.20261106.1"));
     }
 
     #[tokio::test]

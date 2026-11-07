@@ -110,7 +110,7 @@ pub struct ImportSqlBatch {
     pub row_count: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TableImportGenerator {
     Uuid,
@@ -122,10 +122,18 @@ pub enum TableImportGenerator {
     CurrentDate,
     #[serde(rename = "sequence", alias = "autoIncrement", alias = "auto_increment")]
     Sequence,
+    /// 用户手填的固定常量，线路编码为 `fixed:<value>`（issue #14503）。
+    Fixed(String),
 }
 
 impl TableImportGenerator {
     pub fn parse(raw: &str) -> Option<Self> {
+        // 固定值必须原样保留（大小写、空格、连字符），先于下面的归一化处理
+        if let Some(prefix) = raw.get(..6) {
+            if prefix.eq_ignore_ascii_case("fixed:") {
+                return Some(Self::Fixed(raw[6..].to_string()));
+            }
+        }
         let trimmed = raw.trim().to_ascii_lowercase().replace('-', "_");
         match trimmed.as_str() {
             "uuid" | "uuid_v4" => Some(Self::Uuid),
@@ -146,6 +154,7 @@ impl TableImportGenerator {
             }
             Self::CurrentDate => serde_json::Value::String(chrono::Local::now().format("%Y-%m-%d").to_string()),
             Self::Sequence => serde_json::json!(sequence),
+            Self::Fixed(value) => serde_json::Value::String(value.clone()),
         }
     }
 }
@@ -5167,6 +5176,17 @@ fn import_value_rows_sql(
                     TableImportGenerator::Sequence => {
                         values.push_str(&row_sequence.to_string());
                     }
+                    TableImportGenerator::Fixed(value) => {
+                        let owned = serde_json::Value::String(value.clone());
+                        let normalized = normalize_import_value_cow(
+                            &owned,
+                            data_type,
+                            db_type,
+                            kingbase_oracle_mode,
+                            date_time_format,
+                        );
+                        values.push_str(&escape_value_typed(normalized.as_ref(), db_type, data_type));
+                    }
                 },
             }
         }
@@ -5801,6 +5821,13 @@ fn build_import_create_table_plan_with_identifier_quote(
                         Some(TableImportGenerator::CurrentTimestamp) => ImportInferredType::Timestamp,
                         Some(TableImportGenerator::CurrentDate) => ImportInferredType::Date,
                         Some(TableImportGenerator::Sequence) => ImportInferredType::Integer,
+                        Some(TableImportGenerator::Fixed(value)) => {
+                            if value.trim().parse::<i64>().is_ok() {
+                                ImportInferredType::Integer
+                            } else {
+                                ImportInferredType::Text
+                            }
+                        }
                         None => ImportInferredType::Text,
                     },
                 };
@@ -16052,6 +16079,104 @@ mod tests {
         assert_eq!(TableImportGenerator::parse("sequence"), Some(TableImportGenerator::Sequence));
         assert_eq!(TableImportGenerator::parse("auto_increment"), Some(TableImportGenerator::Sequence));
         assert_eq!(TableImportGenerator::parse("unknown_gen"), None);
+    }
+
+    #[test]
+    fn table_import_fixed_generator_preserves_value_verbatim() {
+        // 固定值不做大小写/连字符归一化，冒号后的内容原样保留（issue #14503）
+        assert_eq!(
+            TableImportGenerator::parse("fixed:Hello-World"),
+            Some(TableImportGenerator::Fixed("Hello-World".to_string()))
+        );
+        assert_eq!(TableImportGenerator::parse("fixed:a:b:c"), Some(TableImportGenerator::Fixed("a:b:c".to_string())));
+        assert_eq!(TableImportGenerator::parse("fixed: x "), Some(TableImportGenerator::Fixed(" x ".to_string())));
+        assert_eq!(TableImportGenerator::parse("fixed:"), Some(TableImportGenerator::Fixed(String::new())));
+        assert_eq!(TableImportGenerator::parse("FIXED:x"), Some(TableImportGenerator::Fixed("x".to_string())));
+        assert_eq!(TableImportGenerator::parse("fixed"), None);
+        assert_eq!(TableImportGenerator::Fixed("42".to_string()).generate_value(7), serde_json::json!("42"));
+    }
+
+    #[test]
+    fn import_fixed_generator_writes_escaped_constant_for_every_row() {
+        let columns = vec!["name".to_string()];
+        let mappings = vec![
+            TableImportColumnMapping {
+                source_column: "name".to_string(),
+                target_column: "name".to_string(),
+                target_data_type: None,
+                generator: None,
+            },
+            TableImportColumnMapping {
+                source_column: "".to_string(),
+                target_column: "tag".to_string(),
+                target_data_type: None,
+                generator: Some("fixed:O'Brien-x".to_string()),
+            },
+            TableImportColumnMapping {
+                source_column: "".to_string(),
+                target_column: "num".to_string(),
+                target_data_type: None,
+                generator: Some("fixed:42".to_string()),
+            },
+        ];
+        let plan = compile_import_plan(&columns, &mappings, &[("num".to_string(), "integer".to_string())]).unwrap();
+        let rows = vec![vec![serde_json::json!("Alice")], vec![serde_json::json!("Bob")]];
+        let batches = build_import_insert_batches_with_plan(
+            &rows,
+            &plan,
+            "users",
+            "public",
+            &DatabaseType::Postgres,
+            false,
+            TableImportConflictPolicy::Error,
+            &[],
+            None,
+            None,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].row_count, 2);
+        let sql = &batches[0].sql;
+        assert_eq!(sql.matches("'O''Brien-x'").count(), 2, "sql: {sql}");
+        // 与源数据单元格同一套字面量规则：文本形式的数字按字符串字面量写入，由数据库隐式转换
+        assert_eq!(sql.matches("'42'").count(), 2, "sql: {sql}");
+    }
+
+    #[test]
+    fn import_create_table_plan_infers_types_for_fixed_generator() {
+        let data = ParsedImportFile {
+            columns: vec!["username".to_string()],
+            rows: vec![vec![serde_json::json!("alice")]],
+            total_rows: 1,
+            effective_encoding: None,
+        };
+        let mappings = vec![
+            TableImportColumnMapping {
+                source_column: "".to_string(),
+                target_column: "num".to_string(),
+                target_data_type: None,
+                generator: Some("fixed:42".to_string()),
+            },
+            TableImportColumnMapping {
+                source_column: "".to_string(),
+                target_column: "tag".to_string(),
+                target_data_type: None,
+                generator: Some("fixed:batch-A".to_string()),
+            },
+        ];
+        let plan = build_import_create_table_plan(&data, &mappings, "accounts", "", &DatabaseType::Mysql).unwrap();
+        assert_eq!(
+            plan.columns,
+            vec![
+                ImportCreateTableColumn {
+                    name: "num".to_string(),
+                    data_type: integer_data_type(&DatabaseType::Mysql).to_string()
+                },
+                ImportCreateTableColumn { name: "tag".to_string(), data_type: "TEXT".to_string() },
+            ]
+        );
     }
 
     #[test]

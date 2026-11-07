@@ -3,7 +3,7 @@ import type { TableImportJsonShape, TableImportParseOptions, TableImportSourceFo
 
 export const IMPORT_SKIP_TARGET = "";
 
-export type TableImportGeneratorKey = "uuid" | "uuid_simple" | "current_timestamp" | "current_date" | "sequence";
+export type TableImportGeneratorKey = "uuid" | "uuid_simple" | "current_timestamp" | "current_date" | "sequence" | "fixed";
 
 export interface TableImportGeneratorOption {
   value: TableImportGeneratorKey;
@@ -16,7 +16,23 @@ export const TABLE_IMPORT_GENERATOR_OPTIONS: ReadonlyArray<TableImportGeneratorO
   { value: "current_timestamp", labelKey: "tableImport.generatorCurrentTimestamp" },
   { value: "current_date", labelKey: "tableImport.generatorCurrentDate" },
   { value: "sequence", labelKey: "tableImport.generatorSequence" },
+  { value: "fixed", labelKey: "tableImport.generatorFixed" },
 ];
+
+/** 固定值生成器在线路上编码为 `fixed:<value>`，后端 TableImportGenerator::parse 按同一前缀解码。 */
+export const FIXED_GENERATOR_PREFIX = "fixed:";
+
+export function isFixedValueGenerator(generator: string | null | undefined): boolean {
+  return !!generator && generator.startsWith(FIXED_GENERATOR_PREFIX);
+}
+
+export function fixedValueFromGenerator(generator: string): string {
+  return generator.slice(FIXED_GENERATOR_PREFIX.length);
+}
+
+export function toFixedValueGenerator(value: string): string {
+  return `${FIXED_GENERATOR_PREFIX}${value}`;
+}
 
 export interface ImportColumnMappingLike {
   sourceColumn: string;
@@ -78,6 +94,7 @@ export function resolveTableImportElapsed(liveElapsedMs: number, backendElapsedM
 }
 
 export function previewValueForGenerator(generator: string, sequence = 1): string {
+  if (isFixedValueGenerator(generator)) return fixedValueFromGenerator(generator);
   const normalized = generator.toLowerCase().replace(/[-_]/g, "");
   switch (normalized) {
     case "uuid":
@@ -368,6 +385,10 @@ export function suggestImportTargetDataTypes(columns: string[], rows: unknown[][
 }
 
 export function suggestDataTypeForGenerator(generator: string, databaseType?: DatabaseType): string {
+  if (isFixedValueGenerator(generator)) {
+    const value = fixedValueFromGenerator(generator).trim();
+    return importDataTypeForDatabase(/^-?\d+$/.test(value) ? "integer" : "text", databaseType);
+  }
   const normalized = generator.toLowerCase().replace(/[-_]/g, "");
   switch (normalized) {
     case "uuid":

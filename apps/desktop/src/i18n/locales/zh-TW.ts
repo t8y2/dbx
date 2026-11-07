@@ -6970,6 +6970,8 @@ export default withEnglishFallback({
     generatorCurrentTimestamp: "目前時間 (DATETIME/TIMESTAMP)",
     generatorCurrentDate: "目前日期 (DATE)",
     generatorSequence: "自動遞增序號 (1, 2, 3...)",
+    generatorFixed: "固定值",
+    fixedValuePlaceholder: "輸入固定值",
     addGeneratedColumn: "新增產生欄位",
     removeGeneratedColumn: "刪除產生欄位",
     generatedColumns: "自動產生欄位",

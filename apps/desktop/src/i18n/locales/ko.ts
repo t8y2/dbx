@@ -7878,6 +7878,8 @@ export default withEnglishFallback({
     generatorCurrentTimestamp: "현재 시간 (DATETIME/TIMESTAMP)",
     generatorCurrentDate: "현재 날짜 (DATE)",
     generatorSequence: "자동 증가 순번 (1, 2, 3...)",
+    generatorFixed: "고정 값",
+    fixedValuePlaceholder: "고정 값 입력",
     addGeneratedColumn: "생성 열 추가",
     removeGeneratedColumn: "생성 열 삭제",
     generatedColumns: "자동 생성 열",

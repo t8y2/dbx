@@ -9320,6 +9320,8 @@ export default withEnglishFallback({
     generatorCurrentTimestamp: "Текущее время (DATETIME/TIMESTAMP)",
     generatorCurrentDate: "Текущая дата (DATE)",
     generatorSequence: "Автоинкрементный номер (1, 2, 3...)",
+    generatorFixed: "Фиксированное значение",
+    fixedValuePlaceholder: "Введите фиксированное значение",
     addGeneratedColumn: "Добавить генерируемый столбец",
     removeGeneratedColumn: "Удалить генерируемый столбец",
     generatedColumns: "Автоматически генерируемые столбцы",

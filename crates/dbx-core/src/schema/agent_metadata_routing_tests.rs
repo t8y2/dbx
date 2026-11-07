@@ -18,6 +18,11 @@ struct AgentFixture {
 
 impl AgentFixture {
     async fn new(db_type: DatabaseType) -> Self {
+        let profile = (db_type == DatabaseType::SqlServer).then_some("sqlserver-legacy");
+        Self::with_profile(db_type, profile).await
+    }
+
+    async fn with_profile(db_type: DatabaseType, profile: Option<&str>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let storage = crate::persistence::test_storage::open(&directory.path().join("storage.db")).await.unwrap();
         let state = Arc::new(AppState::new_with_plugin_and_agent_dir_and_app_version(
@@ -26,7 +31,6 @@ impl AgentFixture {
             directory.path().join("agents"),
             "test",
         ));
-        let profile = (db_type == DatabaseType::SqlServer).then_some("sqlserver-legacy");
         let driver_key = crate::database_capabilities::agent_key(&db_type, profile).unwrap();
         let executable = state.agent_manager.driver_native_path(driver_key);
         std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
@@ -145,6 +149,31 @@ async fn oracle_public_object_entry_applies_index_filter_and_offset_once() {
 }
 
 #[tokio::test]
+async fn oracle_exact_object_listing_loads_table_comments() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+    let types = vec!["TABLE".to_string()];
+    let options = MetadataReadOptions { identity_mode: Some(MetadataIdentityMode::Exact), catalog: None };
+    let objects = list_objects_core_with_options(
+        &fixture.state,
+        "conn",
+        "configured",
+        "HR",
+        None,
+        None,
+        None,
+        Some(&types),
+        None,
+        &options,
+    )
+    .await
+    .unwrap();
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].name, "ORDERS");
+    assert_eq!(objects[0].comment.as_deref(), Some("Customer orders table"));
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn oracle_exact_object_list_fills_table_and_view_comments_for_that_exact_owner() {
     let fixture = AgentFixture::new(DatabaseType::Oracle).await;
     let object =
@@ -222,6 +251,110 @@ async fn oracle_exact_object_list_survives_a_failed_comment_lookup() {
     assert_eq!(objects.len(), 1);
     assert_eq!(objects[0].comment, None);
     assert_eq!(fixture.requests("execute_query").len(), 1);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn oracle_default_agent_filtered_second_page_applies_paging_after_comments() {
+    let fixture = AgentFixture::new(DatabaseType::Oracle).await;
+    std::fs::write(fixture.control_path("paged-tables"), "").unwrap();
+    let types = vec!["TABLE".to_string()];
+    let options = MetadataReadOptions { identity_mode: Some(MetadataIdentityMode::Exact), catalog: None };
+    let objects = list_objects_core_with_options(
+        &fixture.state,
+        "conn",
+        "configured",
+        "HR",
+        Some("ORD"),
+        Some(20),
+        Some(20),
+        Some(&types),
+        None,
+        &options,
+    )
+    .await
+    .unwrap();
+    assert_eq!(objects.len(), 20);
+    assert_eq!(objects[0].name, "ORD_20");
+    assert_eq!(objects[0].comment.as_deref(), Some("Customer orders 20"));
+    assert_eq!(objects[19].name, "ORD_39");
+    assert_eq!(objects[19].comment.as_deref(), Some("Customer orders 39"));
+
+    let calls = fixture.requests("list_objects");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["params"].get("filter"), None);
+    assert_eq!(calls[0]["params"].get("offset"), None);
+    assert_eq!(calls[0]["params"].get("limit"), None);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn oracle_legacy_filtered_second_page_preserves_paging_and_does_not_page_twice() {
+    let fixture = AgentFixture::with_profile(DatabaseType::Oracle, Some("oracle-legacy")).await;
+    std::fs::write(fixture.control_path("paged-tables"), "").unwrap();
+    let types = vec!["TABLE".to_string()];
+    let options = MetadataReadOptions { identity_mode: Some(MetadataIdentityMode::Exact), catalog: None };
+    let objects = list_objects_core_with_options(
+        &fixture.state,
+        "conn",
+        "configured",
+        "HR",
+        Some("ORD"),
+        Some(20),
+        Some(20),
+        Some(&types),
+        None,
+        &options,
+    )
+    .await
+    .unwrap();
+    assert_eq!(objects.len(), 20);
+    assert_eq!(objects[0].name, "ORD_20");
+    assert_eq!(objects[0].comment.as_deref(), Some("Customer orders 20"));
+    assert_eq!(objects[19].name, "ORD_39");
+    assert_eq!(objects[19].comment.as_deref(), Some("Customer orders 39"));
+
+    let queries = fixture.requests("execute_query");
+    assert!(!queries.is_empty());
+    let sql = queries[0]["params"]["sql"].as_str().unwrap();
+    assert!(sql.contains("ROWNUM <= 40"), "{sql}");
+    assert!(sql.contains("DBX_RN > 20"), "{sql}");
+    assert!(fixture.requests("list_objects").is_empty());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn oracle_10g_filtered_second_page_preserves_paging_and_does_not_page_twice() {
+    let fixture = AgentFixture::with_profile(DatabaseType::Oracle, Some("oracle-10g")).await;
+    std::fs::write(fixture.control_path("paged-tables"), "").unwrap();
+    let types = vec!["TABLE".to_string()];
+    let options = MetadataReadOptions { identity_mode: Some(MetadataIdentityMode::Exact), catalog: None };
+    let objects = list_objects_core_with_options(
+        &fixture.state,
+        "conn",
+        "configured",
+        "HR",
+        Some("ORD"),
+        Some(20),
+        Some(20),
+        Some(&types),
+        None,
+        &options,
+    )
+    .await
+    .unwrap();
+    assert_eq!(objects.len(), 20);
+    assert_eq!(objects[0].name, "ORD_20");
+    assert_eq!(objects[0].comment.as_deref(), Some("Customer orders 20"));
+    assert_eq!(objects[19].name, "ORD_39");
+    assert_eq!(objects[19].comment.as_deref(), Some("Customer orders 39"));
+
+    let queries = fixture.requests("execute_query");
+    assert!(!queries.is_empty());
+    let sql = queries[0]["params"]["sql"].as_str().unwrap();
+    assert!(sql.contains("ROWNUM <= 40"), "{sql}");
+    assert!(sql.contains("DBX_RN > 20"), "{sql}");
+    assert!(fixture.requests("list_objects").is_empty());
     fixture.shutdown().await;
 }
 

@@ -81,4 +81,12 @@ describe("dataGridColumnNameCopy", () => {
     store.set("dbx-copy-column-names-separator", "bogus");
     expect(loadColumnNameCopySeparator()).toBe("tab");
   });
+
+  it("formats a comma list of single-quoted literals for IN (...) lists (#14495)", () => {
+    expect(formatColumnNamesForCopy(["id", "user_name"], { separator: "comma", quote: true, quoteStyle: "single" })).toBe("'id','user_name'");
+    // Escapes a quote instead of producing broken SQL, and needs no identifier-quote support.
+    expect(formatColumnNamesForCopy(["o'brien"], { separator: "comma", quote: true, quoteStyle: "single", databaseType: "jdbc" })).toBe("'o''brien'");
+    // The default style is still the database identifier quote.
+    expect(formatColumnNamesForCopy(["type"], { separator: "comma", quote: true, databaseType: "mysql" })).toBe("`type`");
+  });
 });

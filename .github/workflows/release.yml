@@ -1193,7 +1193,6 @@ jobs:
           set -euo pipefail
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
           versioned="s3://${R2_BUCKET_NAME}/releases/beta/${{ inputs.release_tag || github.ref_name }}/"
-          latest_dir="s3://${R2_BUCKET_NAME}/releases/beta/latest/"
           if aws s3api head-object --bucket "$R2_BUCKET_NAME" --key "releases/beta/${{ inputs.release_tag || github.ref_name }}/latest.json" --endpoint-url "$endpoint" >/dev/null 2>&1; then
             aws s3 cp "${versioned}latest.json" "$RUNNER_TEMP/existing-beta-manifest.json" --endpoint-url "$endpoint"
             # sync-changelog fills in `notes` after publishing; ignore it on reruns.
@@ -1226,13 +1225,34 @@ jobs:
           # is still missing instead of re-uploading the full ~1.6 GiB.
           retry aws s3 sync "$RUNNER_TEMP/manifest/" "$versioned" \
             --endpoint-url "$endpoint" --cache-control "no-cache" --size-only
-          # Mirror the versioned prefix into releases/beta/latest/ server-side. The
-          # old client-side sync re-uploaded the same assets a second time, which
-          # doubled the multipart failure surface; the size-only sync after the
-          # copy only prunes entries this beta no longer ships.
-          retry aws s3 cp "$versioned" "$latest_dir" --recursive --endpoint-url "$endpoint"
-          retry aws s3 sync "$versioned" "$latest_dir" \
-            --endpoint-url "$endpoint" --delete --size-only
+          # Mirror the versioned prefix into releases/beta/latest/ so the
+          # portable fallback URLs stay current. Copy object by object: the
+          # high-level `aws s3 cp/sync` between two prefixes calls
+          # GetObjectTagging to replicate tags, and R2 answers NotImplemented,
+          # which made every mirror run fail on the large installers.
+          tag_prefix="releases/beta/${{ inputs.release_tag || github.ref_name }}/"
+          mirror_prefix="releases/beta/latest/"
+          mapfile -t asset_keys < <(
+            aws s3api list-objects-v2 --bucket "$R2_BUCKET_NAME" --prefix "$tag_prefix" \
+              --endpoint-url "$endpoint" --output json | jq -r '.Contents[]?.Key'
+          )
+          for key in "${asset_keys[@]}"; do
+            relative="${key#"$tag_prefix"}"
+            retry aws s3api copy-object --bucket "$R2_BUCKET_NAME" \
+              --copy-source "${R2_BUCKET_NAME}/${key}" --key "${mirror_prefix}${relative}" \
+              --endpoint-url "$endpoint" >/dev/null
+          done
+          # Drop mirror entries that this beta no longer ships.
+          mapfile -t mirror_keys < <(
+            aws s3api list-objects-v2 --bucket "$R2_BUCKET_NAME" --prefix "$mirror_prefix" \
+              --endpoint-url "$endpoint" --output json | jq -r '.Contents[]?.Key'
+          )
+          for key in "${mirror_keys[@]}"; do
+            if ! printf '%s\n' "${asset_keys[@]}" | grep -Fxq "${tag_prefix}${key#"$mirror_prefix"}"; then
+              retry aws s3api delete-object --bucket "$R2_BUCKET_NAME" --key "$key" \
+                --endpoint-url "$endpoint" >/dev/null
+            fi
+          done
           retry aws s3 cp "$RUNNER_TEMP/manifest/latest.json" "s3://${R2_BUCKET_NAME}/releases/beta/latest.json" \
             --endpoint-url "$endpoint" --cache-control "no-cache"
 

@@ -10011,6 +10011,10 @@ export default withEnglishFallback({
     totalFiles: "ไฟล์ {count} ไฟล์",
     executeSuccess: "เรียกใช้ไฟล์ SQL สำเร็จแล้ว",
     completedWithErrors: "การเรียกใช้เสร็จสิ้น: สำเร็จ {succeeded}, ล้มเหลว {failed}",
+    backgroundStarted: "ไฟล์ SQL ได้เริ่มดำเนินการในพื้นหลังแล้ว คุณสามารถดูความคืบหน้าได้ในงานพื้นหลัง",
+    viewDetails: "ดูรายละเอียด",
+    backgroundCompleted: "ไฟล์ SQL “{name}” ดำเนินการเสร็จสิ้น",
+    backgroundFailed: "ไฟล์ SQL “{name}” ดำเนินการไม่สำเร็จ",
   },
   sqlFileTree: {
     searchIncompleteHelp: "เหตุผลที่ผลการค้นหาครั้งนี้ไม่ครบถ้วน:",

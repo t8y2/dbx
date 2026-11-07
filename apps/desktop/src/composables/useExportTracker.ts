@@ -26,6 +26,25 @@ export interface SqlFileFailure {
   truncated?: boolean;
 }
 
+export interface SqlFilePerFileResult {
+  fileName: string;
+  statementIndex: number;
+  successCount: number;
+  failureCount: number;
+  affectedRows: number;
+}
+
+export interface AddSqlFileTaskOptions {
+  onOpen?: () => void;
+  targetConnectionId?: string;
+  targetDatabase?: string;
+  targetSchema?: string;
+  previews?: api.SqlFilePreview[];
+  txnSessionId?: string;
+  isExecuting?: boolean;
+  manualTransaction?: boolean;
+}
+
 export interface SqlFileFailureContext {
   fileIndex?: number;
   fileName?: string;
@@ -89,6 +108,13 @@ export interface ExportTask {
   oracleRoutineDeployment?: OracleRoutineDeployment;
   sqlFileFailures?: SqlFileFailure[];
   sqlFileFailuresOmitted?: number;
+  sqlFilePerFileResults?: SqlFilePerFileResult[];
+  sqlFilePreviews?: api.SqlFilePreview[];
+  sqlFileTxnSessionId?: string;
+  sqlFileIsExecuting?: boolean;
+  sqlFileManualTransaction?: boolean;
+  sqlFileCommitUncertain?: boolean;
+  sqlFileResolvingTransaction?: boolean;
   multiDbSourceTabId?: string;
   multiDbTotal?: number;
   multiDbCompleted?: number;
@@ -620,7 +646,8 @@ export function useExportTracker() {
     if (task.status === "Done" || task.status === "Error") finishExportTask(task);
   }
 
-  function addSqlFileTask(executionId: string, fileName: string, filePath: string): ExportTask {
+  function addSqlFileTask(executionId: string, fileName: string, filePath: string, onOpenOrOptions?: (() => void) | AddSqlFileTaskOptions): ExportTask {
+    const options = typeof onOpenOrOptions === "function" ? { onOpen: onOpenOrOptions } : onOpenOrOptions;
     sqlFileFailureStates.delete(executionId);
     const task = reactive<ExportTask>({
       exportId: executionId,
@@ -640,6 +667,14 @@ export function useExportTracker() {
       statementSummary: "",
       sqlFileFailures: [],
       sqlFileFailuresOmitted: 0,
+      targetConnectionId: options?.targetConnectionId,
+      targetDatabase: options?.targetDatabase,
+      targetSchema: options?.targetSchema,
+      sqlFilePreviews: options?.previews ? [...options.previews] : undefined,
+      sqlFileTxnSessionId: options?.txnSessionId,
+      sqlFileIsExecuting: options?.isExecuting,
+      sqlFileManualTransaction: options?.manualTransaction,
+      onOpen: options?.onOpen,
     });
     taskMap.set(executionId, task);
     return task;
@@ -926,6 +961,9 @@ export function useExportTracker() {
     task.statementSummary = progress.statementSummary;
     task.rowsExported = progress.successCount + progress.failureCount;
     task.totalRows = null;
+    if (progress.status === "done" || progress.status === "error" || progress.status === "cancelled") {
+      task.sqlFileIsExecuting = false;
+    }
   }
 
   function updateDataTransferTask(transferId: string, progress: api.TransferProgress) {

@@ -224,6 +224,42 @@ function sshConnection(note?: string): ConnectionConfig {
   };
 }
 
+function genericPlugin(): InstalledPlugin {
+  return {
+    manifest: {
+      id: "io.dbx.kafka",
+      name: "Kafka",
+      drivers: [],
+      contributions: [
+        {
+          type: "connection-provider",
+          id: "io.dbx.kafka.connection",
+          database_type: "kafka",
+          fields: [
+            { key: "host", label: "Broker", type: "text", binding: "host", default: "kafka.example.com" },
+            { key: "port", label: "Port", type: "number", binding: "port", default: 9092 },
+          ],
+        },
+      ],
+    },
+    compatibility: { compatible: true, errors: [], warnings: [] },
+  };
+}
+
+function genericConnection(note?: string): ConnectionConfig {
+  return {
+    id: "kafka-1",
+    name: "Kafka cluster",
+    db_type: "plugin",
+    plugin_id: "io.dbx.kafka",
+    plugin_connection_provider: "io.dbx.kafka.connection",
+    plugin_connection_type: "kafka",
+    host: "kafka.example.com",
+    port: 9092,
+    note,
+  };
+}
+
 function noteEditor(): HTMLTextAreaElement {
   const editors = document.querySelectorAll<HTMLTextAreaElement>(`textarea[placeholder="${i18n.global.t("connection.notePlaceholder")}"]`);
   expect(editors).toHaveLength(1);
@@ -304,6 +340,32 @@ describe("ConnectionDialog plugin connection notes", () => {
       plugin_connection_provider: "io.dbx.ssh.connection",
       host: "ssh.example.com",
     });
+  });
+
+  it("saves and restores notes for a non-SSH plugin connection", async () => {
+    backend.listPlugins.mockResolvedValue([genericPlugin()]);
+    const config = genericConnection("Original Kafka note");
+    await mountDialog(config);
+
+    expect(noteEditor().value).toBe("Original Kafka note");
+    await changeNote("Updated Kafka note");
+    saveButton().click();
+
+    await vi.waitFor(() => expect(store.updateConnection).toHaveBeenCalledOnce());
+    const saved = store.updateConnection.mock.calls[0]![0] as ConnectionConfig;
+    expect(saved).toMatchObject({
+      note: "Updated Kafka note",
+      db_type: "plugin",
+      plugin_id: "io.dbx.kafka",
+      plugin_connection_provider: "io.dbx.kafka.connection",
+      plugin_connection_type: "kafka",
+      host: "kafka.example.com",
+      port: 9092,
+    });
+
+    await settle();
+    await mountDialog(saved);
+    expect(noteEditor().value).toBe("Updated Kafka note");
   });
 
   it("discards note edits when the dialog is dismissed", async () => {

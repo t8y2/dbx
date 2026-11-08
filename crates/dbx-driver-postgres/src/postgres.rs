@@ -1560,7 +1560,7 @@ fn pg_error_to_string(err: impl Into<PgError>) -> String {
     let Some(db_error) = err.as_db_error() else {
         return error_with_sources_to_string(&err);
     };
-    let mut message = pg_db_error_to_string(db_error);
+    let mut message = db_error.to_string();
     // Carry the server-reported cursor position across the `db` layer's
     // `Result<_, String>` boundary; `query.rs` resolves it against the executed
     // statement and strips the suffix before the message reaches any client.

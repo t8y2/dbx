@@ -2509,6 +2509,8 @@ export default withEnglishFallback({
     collapseTabBar: "탭 표시줄 접기",
     expandTabBar: "탭 표시줄 펼치기",
     switcherTitle: "탭 전환",
+    recentClosedTitle: "최근 닫은 탭",
+    recentClosedSearch: "제목, 연결, 데이터베이스 또는 SQL 미리보기 검색",
     switcherHint: "계속 눌러 이동하고 놓으면 전환",
     noMatchingTabs: "일치하는 탭이 없습니다",
     editGroupTitle: "그룹 편집: {name}",

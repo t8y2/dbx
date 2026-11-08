@@ -2567,6 +2567,8 @@ export default withEnglishFallback({
     pluginTabs: "外掛",
     expandTabBar: "展開分頁列",
     switcherTitle: "切換分頁",
+    recentClosedTitle: "最近關閉的分頁",
+    recentClosedSearch: "搜尋標題、連線、資料庫或 SQL 預覽",
     switcherHint: "繼續按選擇，放開修飾鍵切換",
     noMatchingTabs: "找不到符合的分頁",
     editGroupTitle: "編輯群組：{name}",

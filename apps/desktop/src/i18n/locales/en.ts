@@ -2892,6 +2892,8 @@ export default {
     pluginTabs: "Plugins",
     expandTabBar: "Expand tab bar",
     switcherTitle: "Switch Tab",
+    recentClosedTitle: "Recently Closed Tabs",
+    recentClosedSearch: "Search title, connection, database or SQL preview",
     switcherHint: "keep pressing to move, release to switch",
     noMatchingTabs: "No matching tabs",
     editGroupTitle: "Edit group: {name}",

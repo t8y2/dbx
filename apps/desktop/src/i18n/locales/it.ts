@@ -2585,6 +2585,8 @@ export default withEnglishFallback({
     collapseTabBar: "Comprimi barra delle schede",
     expandTabBar: "Espandi barra delle schede",
     switcherTitle: "Cambia scheda",
+    recentClosedTitle: "Schede chiuse di recente",
+    recentClosedSearch: "Cerca titolo, connessione, database o anteprima SQL",
     switcherHint: "continua a premere per spostarti, rilascia per cambiare",
     noMatchingTabs: "Nessuna scheda corrispondente",
     editGroupTitle: "Modifica gruppo: {name}",

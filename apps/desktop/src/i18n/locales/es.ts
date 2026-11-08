@@ -2686,6 +2686,8 @@ export default withEnglishFallback({
     collapseTabBar: "Contraer barra de pestañas",
     expandTabBar: "Expandir barra de pestañas",
     switcherTitle: "Cambiar de pestaña",
+    recentClosedTitle: "Pestañas cerradas recientemente",
+    recentClosedSearch: "Buscar título, conexión, base de datos o vista previa SQL",
     switcherHint: "sigue pulsando para moverte, suelta para cambiar",
     noMatchingTabs: "No se encontraron pestañas",
     editGroupTitle: "Editar grupo: {name}",

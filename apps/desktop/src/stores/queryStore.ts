@@ -5691,6 +5691,15 @@ export const useQueryStore = defineStore("query", () => {
     if (newTab.mode === "data") void refreshDataTab(newId);
   }
 
+  function reopenClosedTabEntry(entry: ClosedTabHistoryEntry): string | null {
+    assertUpdateAllowsInteraction();
+    const index = closedTabsHistory.value.indexOf(entry);
+    if (index < 0) return null;
+    closedTabsHistory.value.splice(index, 1);
+    closedTabsHistory.value.push(entry);
+    return reopenClosedTab();
+  }
+
   function reopenClosedTab(): string | null {
     assertUpdateAllowsInteraction();
     const entry = closedTabsHistory.value.pop();
@@ -11960,6 +11969,7 @@ export const useQueryStore = defineStore("query", () => {
     duplicateTab,
     closedTabsHistory,
     canReopenClosedTab,
+    reopenClosedTabEntry,
     reopenClosedTab,
     clearClosedTabsHistory,
     closeConnectionTabs,

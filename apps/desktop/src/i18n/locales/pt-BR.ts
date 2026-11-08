@@ -2585,6 +2585,8 @@ export default withEnglishFallback({
     collapseTabBar: "Recolher barra de abas",
     expandTabBar: "Expandir barra de abas",
     switcherTitle: "Alternar aba",
+    recentClosedTitle: "Abas fechadas recentemente",
+    recentClosedSearch: "Buscar título, conexão, banco de dados ou prévia SQL",
     switcherHint: "continue pressionando para mover, solte para alternar",
     noMatchingTabs: "Nenhuma aba correspondente",
     editGroupTitle: "Editar grupo: {name}",

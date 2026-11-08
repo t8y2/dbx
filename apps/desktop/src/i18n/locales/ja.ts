@@ -2602,6 +2602,8 @@ export default withEnglishFallback({
     collapseTabBar: "タブバーを折りたたむ",
     expandTabBar: "タブバーを展開",
     switcherTitle: "タブを切り替え",
+    recentClosedTitle: "最近閉じたタブ",
+    recentClosedSearch: "タイトル、接続、データベース、SQL プレビューを検索",
     switcherHint: "押し続けて移動、離して切り替え",
     noMatchingTabs: "一致するタブがありません",
     editGroupTitle: "グループを編集: {name}",

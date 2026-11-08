@@ -5449,6 +5449,7 @@ onUnmounted(() => {
           :active-ai-run-count="activeAiRunCount"
           :awaiting-ai-run-count="awaitingAiRunCount"
           :show-history="showHistory"
+          :has-closed-tabs="queryStore.canReopenClosedTab"
           :show-sql-library="showSqlLibraryPanel"
           :sql-library-save-feedback-id="sqlLibrarySaveFeedbackId"
           :show-sql-file-panel="showSqlFilePanel"

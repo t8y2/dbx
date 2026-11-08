@@ -519,6 +519,7 @@ export default withEnglishFallback({
     previewQuery: "Podgląd zapytania",
     hidePreviewSql: "Ukryj podgląd SQL",
     saveSql: "Zapisz w bibliotece SQL",
+    saveRoutineToDatabase: "Zapisz w bazie danych",
     saveSqlFile: "Zapisz do oryginalnego pliku",
     openSql: "Otwórz plik SQL",
     exPasteSqlInCondition: "ExPaste: wklej jako warunek IN",

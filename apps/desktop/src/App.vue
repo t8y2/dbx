@@ -112,6 +112,7 @@ import { buildEditableObjectSource } from "@/lib/table/objectSourceEditor";
 import { isOracleFamilyTypeSource } from "@/lib/database/databaseObjectCapabilities";
 import { oracleTypeManagementRequest } from "@/lib/table/oracleTypeManagementRequest";
 import { saveObjectSourceTab } from "@/lib/table/objectSourceTabSave";
+import { saveRoutineDefinitionToDatabase } from "@/lib/table/routineDefinitionSave";
 import { loadEditableObjectSourceForEditor } from "@/lib/table/objectSourceLoad";
 import { schemaAfterConnectionSwitch } from "@/lib/schema/connectionSchemaInitialization";
 import { canReuseTabForHistoryRestore, resolveHistorySqlRestoreTarget } from "@/lib/history/historyRestoreTarget";
@@ -1221,6 +1222,23 @@ function requestActiveEditorExecuteAll(_source?: "pointer" | "keyboard", tabId?:
   void tryExecute(tab?.sql ?? undefined, targetTabId ? { tabId: targetTabId } : undefined);
 }
 
+const pendingRoutineSaves = new Set<string>();
+async function saveRoutineToDatabase(tabId: string) {
+  const tab = queryStore.tabs.find((item) => item.id === tabId);
+  const connection = tab && connectionStore.getConfig(tab.connectionId);
+  if (!tab || !connection || pendingRoutineSaves.has(tabId)) return;
+  const sql = contentAreaRef.value?.captureQueryEditorExecutionSnapshot?.(tabId)?.fullSql ?? tab.sql;
+  pendingRoutineSaves.add(tabId);
+  try {
+    const result = await saveRoutineDefinitionToDatabase(tab, sql, { connection, tabs: queryStore.tabs, execute: tryExecute, isCurrent: () => queryStore.tabs.includes(tab) && connectionStore.getConfig(tab.connectionId) === connection });
+    if (result?.status === "started" && result.ok) toast(t("objects.sourceSaved"), 2000);
+  } catch (error: unknown) {
+    toast(t("objects.sourceSaveFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  } finally {
+    pendingRoutineSaves.delete(tabId);
+  }
+}
+
 function requestActiveEditorExecuteInNewResultTab(source?: "pointer" | "keyboard", tabId?: string) {
   const snapshot = pendingToolbarExecutionSnapshot.value;
   pendingToolbarExecutionSnapshot.value = undefined;
@@ -1289,6 +1307,7 @@ provide(EDITOR_TOOLBAR_ACTIONS, {
   compressSql: compressActiveSql,
   toggleSqlKeywordCase,
   saveSql: (tabId: string) => void openSaveSqlDialog(tabId),
+  saveRoutineToDatabase: (tabId: string) => void saveRoutineToDatabase(tabId),
   saveAllTabs: (tabIds?: string[]) => void handleSaveAllTabs(tabIds),
   openSqlFile,
   importResultArchive,

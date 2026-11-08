@@ -302,6 +302,7 @@ export default withEnglishFallback({
     previewQuery: "Sorğu önbaxışı",
     hidePreviewSql: "SQL önbaxışını gizlət",
     saveSql: "SQL kitabxanasında yadda saxla",
+    saveRoutineToDatabase: "Verilənlər bazasında saxla",
     saveSqlFile: "İlkin faylda yadda saxla",
     openSql: "SQL faylını aç",
     exPasteSqlInCondition: "ExPaste: IN şərti kimi yerləşdir",

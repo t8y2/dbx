@@ -1010,6 +1010,7 @@ export default withEnglishFallback({
     previewQuery: "แสดงตัวอย่าง Query",
     hidePreviewSql: "ซ่อนตัวอย่าง SQL",
     saveSql: "บันทึกไปยังไลบรารี SQL",
+    saveRoutineToDatabase: "บันทึกลงฐานข้อมูล",
     saveSqlFile: "บันทึกไปยังไฟล์ต้นฉบับ",
     openSql: "เปิดไฟล์ SQL",
     exPasteSqlInCondition: "ExPaste: วางเป็นเงื่อนไข IN",

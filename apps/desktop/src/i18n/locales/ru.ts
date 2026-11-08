@@ -910,6 +910,7 @@ export default withEnglishFallback({
     previewQuery: "Предпросмотр запроса",
     hidePreviewSql: "Скрыть предпросмотр SQL",
     saveSql: "Сохранить в библиотеку SQL",
+    saveRoutineToDatabase: "Сохранить в базу данных",
     saveSqlFile: "Сохранить в исходный файл",
     openSql: "Открыть файл SQL",
     exPasteSqlInCondition: "ExPaste: вставить как условие IN",

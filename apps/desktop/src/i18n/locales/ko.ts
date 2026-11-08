@@ -956,6 +956,7 @@ export default withEnglishFallback({
     mongoSqlMode: "SQL",
     copyMongoShell: "생성된 셸 복사",
     mongoShellCopied: "Mongo 셸 명령이 복사되었습니다",
+    saveRoutineToDatabase: "데이터베이스에 저장",
     saveSqlFile: "원본 파일에 저장",
     pluginCenter: "플러그인 센터",
     executeAllSql: "모든 SQL 실행",

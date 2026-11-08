@@ -1,5 +1,8 @@
 use crate::text_encoding::{Client as EncodingClient, PgError, Row, RowStream, TextEncoding, ValueRow};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use dbx_sql_dialect::sql_dialect::{
+    is_postgres_reserved_identifier, is_simple_lower_identifier, quote_gaussdb_jdbc_identifier,
+};
 use deadpool_postgres::{ManagerConfig, Pool, PoolError, RecyclingMethod, Runtime};
 use futures::{SinkExt, StreamExt};
 use openssl::ssl::{SslConnector, SslFiletype, SslMethod, SslVerifyMode};
@@ -8346,21 +8349,43 @@ pub async fn list_schema_infos_with_system(pool: &Pool, show_system_schemas: boo
 /// schema-qualified (quoted only when the identifier requires it) so the
 /// generated `CREATE TABLE` / `ALTER TABLE ... TYPE` still resolves outside
 /// the search path instead of failing with `type "..." does not exist`
-/// (#14525 review).
+/// (#14525 review). Lowercase reserved words (a type literally named `order`)
+/// must keep their quotes — the bare branch is reserved-word aware (#14536
+/// review follow-up).
 pub async fn list_data_types(pool: &Pool) -> Result<Vec<String>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let client = &EncodingClient::new(&client);
     let rows = postgres_query_cached(client, list_data_types_sql(), &[]).await.map_err(|e| e.to_string())?;
 
-    Ok(rows.iter().map(|row| pg_row_try_string(row, 0)).filter(|name| !name.is_empty()).collect())
+    let mut names = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let schema_name = pg_row_try_string(row, 0);
+        let type_name = pg_row_try_string(row, 1);
+        if type_name.is_empty() {
+            continue;
+        }
+        let visible = pg_row_try_bool(row, 2).unwrap_or(false);
+        let bare = visible && is_simple_lower_identifier(&type_name) && !is_postgres_reserved_identifier(&type_name);
+        let rendered = if bare {
+            type_name
+        } else {
+            format!(
+                "{}.{}",
+                quote_gaussdb_jdbc_identifier(&schema_name, "\""),
+                quote_gaussdb_jdbc_identifier(&type_name, "\"")
+            )
+        };
+        if !rendered.is_empty() && !names.contains(&rendered) {
+            names.push(rendered);
+        }
+    }
+    Ok(names)
 }
 
 fn list_data_types_sql() -> &'static str {
-    "SELECT DISTINCT CASE \
-       WHEN t.typname ~ '^[a-z_][a-z0-9_$]*$' AND n.nspname = ANY (current_schemas(true)) \
-         THEN t.typname \
-       ELSE format('%I.%I', n.nspname, t.typname) \
-     END AS type_name \
+    "SELECT n.nspname AS schema_name, \
+       t.typname AS type_name, \
+       (n.nspname = ANY (current_schemas(true))) AS visible \
      FROM pg_catalog.pg_type t \
      JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
      LEFT JOIN pg_catalog.pg_class c ON c.oid = t.typrelid \
@@ -8372,7 +8397,7 @@ fn list_data_types_sql() -> &'static str {
        AND n.nspname <> 'information_schema' \
        AND n.nspname NOT LIKE 'pg_toast%' \
        AND n.nspname NOT LIKE 'pg_temp%' \
-     ORDER BY type_name"
+     ORDER BY n.nspname, t.typname"
 }
 
 // Sibling of `postgres_columns_for_relations_sql`/`_compat_sql` above (~line
@@ -13538,16 +13563,33 @@ mod tests {
     #[test]
     fn list_data_types_sql_targets_user_defined_types() {
         let sql = list_data_types_sql();
-        assert!(sql.contains("DISTINCT"), "{sql}");
-        // Types visible through search_path stay bare; everything else comes back
-        // schema-qualified so generated DDL resolves outside the search path.
-        assert!(sql.contains("n.nspname = ANY (current_schemas(true))"), "{sql}");
-        assert!(sql.contains("format('%I.%I', n.nspname, t.typname)"), "{sql}");
+        // Visibility is decided per row in Rust (bare for search_path-visible
+        // simple names, schema-qualified otherwise) so reserved words keep their
+        // quotes.
+        assert!(sql.contains("(n.nspname = ANY (current_schemas(true))) AS visible"), "{sql}");
+        assert!(sql.contains("t.typname AS type_name"), "{sql}");
         assert!(sql.contains("t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm')"), "{sql}");
         assert!(sql.contains("t.typisdefined"), "{sql}");
         assert!(sql.contains("t.typelem = 0"), "{sql}");
         assert!(sql.contains("n.nspname <> 'pg_catalog'"), "{sql}");
         assert!(sql.contains("n.nspname <> 'information_schema'"), "{sql}");
+    }
+
+    #[test]
+    fn list_data_types_rendering_keeps_reserved_words_quoted() {
+        // #14536 review follow-up: a type literally named `order` must not be
+        // emitted bare even though it is a simple lowercase identifier.
+        assert!(!is_simple_lower_identifier("with space"));
+        let bare_visible = is_simple_lower_identifier("order") && !is_postgres_reserved_identifier("order");
+        assert!(!bare_visible, "reserved words must stay quoted");
+        assert_eq!(
+            format!(
+                "{}.{}",
+                quote_gaussdb_jdbc_identifier("public", "\""),
+                quote_gaussdb_jdbc_identifier("order", "\"")
+            ),
+            "public.\"order\""
+        );
     }
 
     #[tokio::test]
@@ -13569,12 +13611,16 @@ mod tests {
             execute_query(&pool, &format!("CREATE TYPE {schema_ident}.mood AS ENUM ('sad', 'ok')")).await?;
             // Mixed-case identifiers need the %I quoting.
             execute_query(&pool, &format!("CREATE TYPE {schema_ident}.\"Mood\" AS ENUM ('sad', 'ok')")).await?;
+            // A lowercase reserved word must come back quoted — bare `order`
+            // would break generated DDL (#14536 review follow-up).
+            execute_query(&pool, "CREATE TYPE public.\"order\" AS ENUM ('asc', 'desc')").await?;
             let qualified_mood = format!("{schema}.mood");
 
             // The returned names must be directly usable in DDL: create a column
             // from the qualified name, then ALTER it to the same-name public type.
             let probe = format!("{schema_ident}.usage_probe");
-            execute_query(&pool, &format!("CREATE TABLE {probe} (id bigint, m {qualified_mood})")).await?;
+            execute_query(&pool, &format!("CREATE TABLE {probe} (id bigint, m {qualified_mood}, r public.\"order\")"))
+                .await?;
             execute_query(
                 &pool,
                 &format!("ALTER TABLE {probe} ALTER COLUMN m TYPE public.mood USING m::text::public.mood"),
@@ -13589,6 +13635,7 @@ mod tests {
         let cleanup = execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await;
         cleanup.expect("drop schema");
         execute_query(&pool, "DROP TYPE IF EXISTS public.mood").await.expect("drop public.mood");
+        execute_query(&pool, "DROP TYPE IF EXISTS public.\"order\"").await.expect("drop public.order");
         let types = exercise.expect("list data types");
 
         assert!(types.iter().any(|name| name == "hstore"), "search_path extension type stays bare: {types:?}");
@@ -13597,6 +13644,11 @@ mod tests {
         assert!(types.iter().any(|name| name == &qualified_mood), "off-search_path enum must be qualified: {types:?}");
         let qualified_mixed = format!("{schema}.\"Mood\"");
         assert!(types.iter().any(|name| name == &qualified_mixed), "mixed-case type must keep quoting: {types:?}");
+        assert!(
+            types.iter().any(|name| name == "public.\"order\""),
+            "reserved-word type must stay schema-qualified and quoted: {types:?}"
+        );
+        assert!(!types.iter().any(|name| name == "order"), "bare reserved word must not be listed: {types:?}");
     }
 
     #[tokio::test]

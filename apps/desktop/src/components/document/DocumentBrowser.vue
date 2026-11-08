@@ -106,6 +106,7 @@ import {
   type MongoDocumentQueryKind,
 } from "@/lib/mongo/mongoCompletion";
 import { mongoDocumentsToQueryResult } from "@/lib/mongo/mongoShellCommand";
+import { handleMongoQueryInputBrackets } from "@/lib/mongo/mongoQueryInputBrackets";
 import type { GridNewRowMeta } from "@/lib/dataGrid/gridNewRowPlacement";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { documentDataGridColumnLayoutScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
@@ -1127,6 +1128,7 @@ const documentQueryCompletionActiveDescendant = computed(() => (documentQueryCom
 // Guards the field lookup: a keystroke that lands while a previous refresh is
 // still awaiting fields must win, and a dismiss must cancel both.
 let documentQueryCompletionRequestId = 0;
+let documentQueryCompletionSelectionVersion = 0;
 
 function documentQueryCompletionKind(target: DocumentQueryCompletionTarget): MongoDocumentQueryKind {
   return target === "filter" ? "filter" : "sortKeys";
@@ -1190,18 +1192,27 @@ async function refreshDocumentQueryCompletions(target: DocumentQueryCompletionTa
   }
 
   const requestId = ++documentQueryCompletionRequestId;
+  const selectionVersion = documentQueryCompletionSelectionVersion;
+  let displayedLocalItems = false;
+  const publishItems = (fields: MongoCompletionField[]) => {
+    const selectedLabel = displayedLocalItems && selectionVersion !== documentQueryCompletionSelectionVersion ? documentQueryCompletionItems.value[documentQueryCompletionIndex.value]?.label : undefined;
+    const items = buildMongoCompletionItemsFromContext(context, { fields }).slice(0, DOCUMENT_QUERY_COMPLETION_MENU_LIMIT);
+    if (items.length === 0) return false;
+    documentQueryCompletionTarget.value = target;
+    documentQueryCompletionItems.value = items;
+    documentQueryCompletionIndex.value = Math.max(
+      0,
+      items.findIndex((item) => item.label === selectedLabel),
+    );
+    updateDocumentQueryCompletionPosition(target);
+    return true;
+  };
+  // A partially typed field can use the loaded page immediately. Sampling may
+  // take seconds on a remote collection and only needs to enrich these items.
+  if (context.prefix && mongoCompletionNeedsFields(context.mode)) displayedLocalItems = publishItems(documentQueryCompletionLocalFields.value);
   const fields = mongoCompletionNeedsFields(context.mode) ? await documentQueryCompletionFields() : [];
   if (requestId !== documentQueryCompletionRequestId) return;
-
-  const items = buildMongoCompletionItemsFromContext(context, { fields }).slice(0, DOCUMENT_QUERY_COMPLETION_MENU_LIMIT);
-  if (items.length === 0) {
-    dismissDocumentQueryCompletions();
-    return;
-  }
-  documentQueryCompletionTarget.value = target;
-  documentQueryCompletionItems.value = items;
-  documentQueryCompletionIndex.value = 0;
-  updateDocumentQueryCompletionPosition(target);
+  if (!publishItems(fields)) dismissDocumentQueryCompletions();
 }
 
 /**
@@ -1239,6 +1250,7 @@ watch(documentQueryCompletionOpen, (open) => {
 
 function selectDocumentQueryCompletion(index: number) {
   if (index < 0 || index >= documentQueryCompletionItems.value.length) return;
+  documentQueryCompletionSelectionVersion++;
   documentQueryCompletionIndex.value = index;
   void nextTick(() => {
     const listbox = document.getElementById(documentQueryCompletionListboxId);
@@ -1382,6 +1394,10 @@ function onDocumentQueryKeydown(event: KeyboardEvent, target: DocumentQueryCompl
   if (event.isComposing) return;
 
   if (documentQueryCompletionEnabled.value) {
+    if (handleMongoQueryInputBrackets(event, settingsStore.editorSettings.autoCloseBrackets)) {
+      void nextTick(() => refreshDocumentQueryCompletions(target));
+      return;
+    }
     if ((event.ctrlKey || event.metaKey) && event.code === "Space") {
       event.preventDefault();
       void refreshDocumentQueryCompletions(target, { force: true });

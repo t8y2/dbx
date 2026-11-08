@@ -454,6 +454,7 @@ export default withEnglishFallback({
     previewQuery: "Pratinjau kueri",
     hidePreviewSql: "Sembunyikan Pratinjau SQL",
     saveSql: "Simpan ke SQL Library",
+    saveRoutineToDatabase: "Simpan ke database",
     saveSqlFile: "Simpan ke File Asli",
     openSql: "Buka file SQL",
     exPasteSqlInCondition: "ExPaste: tempel sebagai kondisi IN",

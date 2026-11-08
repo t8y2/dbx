@@ -930,6 +930,7 @@ export default withEnglishFallback({
     previewQuery: "Visualizar consulta",
     hidePreviewSql: "Ocultar Visualização SQL",
     saveSql: "Salvar na Biblioteca SQL",
+    saveRoutineToDatabase: "Salvar no banco de dados",
     saveSqlFile: "Salvar no arquivo original",
     openSql: "Abrir arquivo SQL",
     exPasteSqlInCondition: "ExPaste: colar como condição IN",

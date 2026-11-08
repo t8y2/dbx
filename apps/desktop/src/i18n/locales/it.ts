@@ -929,6 +929,7 @@ export default withEnglishFallback({
     previewQuery: "Anteprima query",
     hidePreviewSql: "Nascondi anteprima SQL",
     saveSql: "Salva nella Libreria SQL",
+    saveRoutineToDatabase: "Salva nel database",
     saveSqlFile: "Salva nel file originale",
     openSql: "Apri file SQL",
     exPasteSqlInCondition: "ExPaste: incolla come condizione IN",

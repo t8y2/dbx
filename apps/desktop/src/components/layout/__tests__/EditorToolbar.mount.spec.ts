@@ -118,6 +118,53 @@ describe("EditorToolbar mount contract", () => {
     });
   });
 
+  it.each([
+    ["mysql", "CREATE PROCEDURE p() BEGIN SELECT 1; END;"],
+    ["postgres", "CREATE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN NULL; END $$;"],
+    ["sqlserver", "CREATE PROCEDURE dbo.p AS SELECT 1;"],
+    ["oracle", "CREATE PROCEDURE p AS BEGIN NULL; END;"],
+    ["firebird", "CREATE OR ALTER PROCEDURE P AS BEGIN END;"],
+  ])("offers a separate database save action for %s routines", async (dbType, sql) => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "conn", db_type: dbType, color: "" } as never];
+    const tab = reactive({ id: "tab-1", title: "SQL", connectionId: "conn-1", database: "db", sql, mode: "query", isExecuting: false, isCancelling: false, isExplaining: false });
+    const saveRoutine = vi.fn(),
+      saveSql = vi.fn();
+    const host = createHost();
+    const app = createApp(EditorToolbar, {
+      activeTab: tab,
+      activeConnection: store.getConfig("conn-1"),
+      hasExecutableSql: true,
+      executableSqlMayContainDml: false,
+      explainMode: "explain",
+      blockDangerousRedisCommands: false,
+      sqlKeywordCase: "preserve",
+      databaseRequiredSignal: 0,
+      autoCommit: true,
+      onSaveRoutineToDatabase: saveRoutine,
+      onSaveSql: saveSql,
+    });
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    await nextTick();
+
+    const button = host.querySelector<HTMLButtonElement>('[aria-label="toolbar.saveRoutineToDatabase"]')!;
+    expect(button).not.toBeNull();
+    button.click();
+    expect(saveRoutine).toHaveBeenCalledExactlyOnceWith("tab-1");
+    expect(saveSql).not.toHaveBeenCalled();
+    tab.isExecuting = true;
+    await nextTick();
+    expect(button.disabled).toBe(true);
+    tab.isExecuting = false;
+    tab.sql = "SELECT 1;";
+    await nextTick();
+    expect(host.querySelector('[aria-label="toolbar.saveRoutineToDatabase"]')).toBeNull();
+    app.unmount();
+    host.remove();
+  });
+
   it("emits toolbarExecute instead of execute when the run button is clicked", async () => {
     const connectionStore = useConnectionStore();
     connectionStore.connections = [

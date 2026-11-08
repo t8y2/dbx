@@ -85,6 +85,8 @@ export function useDataGridColumnFormatter(options: DataGridColumnFormatterOptio
   const formatterJsonPath = ref("$.user.name");
   const formatterMaskPrefix = ref(4);
   const formatterMaskSuffix = ref(4);
+  const formatterNumberGrouping = ref(false);
+  const formatterNumberDecimalPlaces = ref<number | string>("");
   const formatterCustomId = ref(CUSTOM_FORMATTER_NEW);
   const formatterCustomCapturedDeleteVersion = ref<number>();
   const formatterCustomName = ref("");
@@ -189,6 +191,9 @@ export function useDataGridColumnFormatter(options: DataGridColumnFormatterOptio
   }
 
   function currentFormatterDraft(): ColumnFormatterConfig {
+    if (formatterKind.value === "number") {
+      return { kind: "number", useGrouping: formatterNumberGrouping.value, decimalPlaces: formatterNumberDecimalPlaces.value === "" ? undefined : Number(formatterNumberDecimalPlaces.value) };
+    }
     if (formatterKind.value === "json-path") return { kind: "json-path", path: formatterJsonPath.value.trim() || "$" };
     if (formatterKind.value === "mask") {
       return { kind: "mask", prefix: Math.max(0, Math.floor(Number(formatterMaskPrefix.value) || 0)), suffix: Math.max(0, Math.floor(Number(formatterMaskSuffix.value) || 0)) };
@@ -236,6 +241,8 @@ export function useDataGridColumnFormatter(options: DataGridColumnFormatterOptio
     formatterForeignKeyFilterEndValue.value = "";
     const draft = formatter ?? { kind: "datetime", unit: "auto" as const, pattern: "YYYY-MM-DD HH:mm:ss" as const, timezone: dayjs.tz.guess() };
     formatterKind.value = draft.kind === "custom-ref" ? "custom-template" : draft.kind === "iotdb-timestamp" ? "datetime" : draft.kind;
+    formatterNumberGrouping.value = draft.kind === "number" ? draft.useGrouping : false;
+    formatterNumberDecimalPlaces.value = draft.kind === "number" ? (draft.decimalPlaces ?? "") : "";
     if (draft.kind === "datetime") {
       formatterDateUnit.value = draft.unit;
       formatterDatetimePattern.value = draft.pattern;
@@ -544,6 +551,8 @@ export function useDataGridColumnFormatter(options: DataGridColumnFormatterOptio
     formatterJsonPath,
     formatterMaskPrefix,
     formatterMaskSuffix,
+    formatterNumberGrouping,
+    formatterNumberDecimalPlaces,
     formatterCustomId,
     formatterCustomName,
     formatterCustomTemplate,

@@ -1879,23 +1879,37 @@ jobs:
           R2_ENDPOINT: "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
           R2_BUCKET: "s3://${{ secrets.R2_BUCKET_NAME }}"
         run: |
+          set -euo pipefail
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              echo "::warning::R2 upload attempt ${attempt}/3 failed: $*"
+              sleep $((attempt * 15))
+            done
+            return 1
+          }
           # Always upload the current registry.
-          aws s3 cp release/agent-registry.json \
+          retry aws s3 cp release/agent-registry.json \
             "$R2_BUCKET/agents/agent-registry.json" \
             --endpoint-url "$R2_ENDPOINT"
           echo "Uploaded agent-registry.json"
 
-          # Upload all single-driver packages concurrently.
-          aws s3 cp release/ "$R2_BUCKET/agents/drivers/" \
-            --recursive \
+          # Upload all single-driver packages concurrently. Package names carry
+          # the driver version, so the size check makes a retry resume after a
+          # transient R2 failure instead of re-uploading every driver again.
+          retry aws s3 sync release/ "$R2_BUCKET/agents/drivers/" \
             --exclude "*" \
             --include "dbx-agent-*.tar.zst" \
             --include "dbx-agent-*.tar.zst.delta" \
+            --size-only \
             --endpoint-url "$R2_ENDPOINT"
           echo "Uploaded single-driver packages"
 
           # Upload JRE packages concurrently, always overwriting the stable names.
-          aws s3 cp release/ "$R2_BUCKET/agents/jre/" \
+          retry aws s3 cp release/ "$R2_BUCKET/agents/jre/" \
             --recursive \
             --exclude "*" \
             --include "dbx-jre-*.tar.zst" \

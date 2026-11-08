@@ -2142,6 +2142,11 @@ function foldAll(): boolean {
   return queryEditorRef.value?.foldAll?.() ?? false;
 }
 
+function toggleLineComment(): boolean {
+  if (!sourceSectionActive.value) return false;
+  return queryEditorRef.value?.toggleLineComment?.() ?? false;
+}
+
 function unfoldAll(): boolean {
   return queryEditorRef.value?.unfoldAll?.() ?? false;
 }
@@ -2301,6 +2306,7 @@ defineExpose({
   focusErrorPosition,
   locateActiveResultError,
   foldAll,
+  toggleLineComment,
   unfoldAll,
 });
 </script>

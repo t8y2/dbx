@@ -461,19 +461,34 @@ jobs:
         run: |
           set -euo pipefail
           endpoint="https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
-          manifest_key="releases/stable/${{ steps.version.outputs.tag }}/latest.json"
+          bucket="s3://${{ secrets.R2_BUCKET_NAME }}"
+          tag="${{ steps.version.outputs.tag }}"
+          manifest_key="releases/stable/${tag}/latest.json"
           if aws s3api head-object --bucket "${{ secrets.R2_BUCKET_NAME }}" --key "$manifest_key" --endpoint-url "$endpoint" >/dev/null 2>&1; then
-            aws s3 cp "s3://${{ secrets.R2_BUCKET_NAME }}/${manifest_key}" "$RUNNER_TEMP/existing-stable-manifest.json" --endpoint-url "$endpoint"
+            aws s3 cp "${bucket}/${manifest_key}" "$RUNNER_TEMP/existing-stable-manifest.json" --endpoint-url "$endpoint"
             # sync-changelog fills in `notes` after a successful publish, so a
             # rerun must not treat that field as a content change.
             if ! cmp -s <(jq -S 'del(.notes)' assets/latest.json) <(jq -S 'del(.notes)' "$RUNNER_TEMP/existing-stable-manifest.json"); then
-              echo "::error::Immutable stable manifest already exists for ${{ steps.version.outputs.tag }} with different contents."
+              echo "::error::Immutable stable manifest already exists for ${tag} with different contents."
               exit 1
             fi
             echo "Stable manifest already exists with identical contents; continuing idempotently."
           fi
-          aws s3 sync ./assets "s3://${{ secrets.R2_BUCKET_NAME }}/releases/stable/${{ steps.version.outputs.tag }}/" \
-            --endpoint-url "$endpoint"
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              echo "::warning::R2 upload attempt ${attempt}/3 failed: $*"
+              sleep $((attempt * 15))
+            done
+            return 1
+          }
+          # The versioned directory is immutable for this tag, so compare sizes:
+          # a rerun resumes instead of re-uploading the whole release.
+          retry aws s3 sync ./assets "${bucket}/releases/stable/${tag}/" \
+            --endpoint-url "$endpoint" --size-only
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}

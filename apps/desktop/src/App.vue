@@ -332,7 +332,30 @@ connectionStore.setBeforeConnectHandler(async (config) => {
     await connectionStore.updateConnection(config);
   }
 });
-const { toast } = useToast();
+const { toast, dismissToast } = useToast();
+// 「正在连接」用独立的 loading toast：连接一结束（成功/失败/被并发尝试取消）就立刻移除，
+// 不再依赖 30 秒的单槽 toast 被下一条消息覆盖。兜底 30 秒，避免异常路径一直挂着。
+const connectingToastIds = new Map<string, number>();
+const CONNECTING_TOAST_TIMEOUT_MS = 30000;
+
+function showConnectingToast(name: string) {
+  dismissConnectingToast(name);
+  const id = toast(t("connection.connecting", { name }), { persistent: true, loading: true });
+  if (id === undefined) return;
+  connectingToastIds.set(name, id);
+  window.setTimeout(() => {
+    if (connectingToastIds.get(name) !== id) return;
+    dismissToast(id);
+    connectingToastIds.delete(name);
+  }, CONNECTING_TOAST_TIMEOUT_MS);
+}
+
+function dismissConnectingToast(name: string) {
+  const id = connectingToastIds.get(name);
+  if (id === undefined) return;
+  dismissToast(id);
+  connectingToastIds.delete(name);
+}
 const { isDark, themeMode, applyTheme, setThemeMode, writeRootToken } = useTheme();
 const { activeCount: activeBackgroundTaskCount, tasks: backgroundTasks, cancelTask: cancelBackgroundTask } = useExportTracker();
 const tableCopyTasks = useTableCopyTaskStore();
@@ -3122,7 +3145,8 @@ async function openDbFilePath(path: string) {
       username: "",
       password: "",
     };
-    await connectionStore.addConnection(config);
+    // 打开数据库文件后立即连接是既有行为，避免 store 的自动连接再连一次。
+    await connectionStore.addConnection(config, undefined, { autoConnect: false });
     await connectionStore.connect(config);
     toast(t("welcome.fileOpened", { name }));
   } catch (e: any) {
@@ -5915,8 +5939,9 @@ onUnmounted(() => {
           @update:show-sql-parameter-dialog="showSqlParameterDialog = $event"
           @danger-confirm="onDangerConfirm"
           @sql-parameters-confirm="onSqlParametersConfirm"
-          @connect-started="(name: string) => toast(t('connection.connecting', { name }), 30000)"
+          @connect-started="showConnectingToast"
           @connect-succeeded="(name: string) => toast(t('connection.connectSuccess', { name }), 2000)"
+          @connect-settled="dismissConnectingToast"
           @connect-failed="
             (msg: string) =>
               toast(

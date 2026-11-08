@@ -68,6 +68,7 @@ const emit = defineEmits<{
   sqlParametersConfirm: [sql: string];
   connectStarted: [name: string];
   connectSucceeded: [name: string];
+  connectSettled: [name: string];
   connectFailed: [message: string];
   openDriverStore: [focus?: DriverStoreFocus];
   openTunnelProfileSettings: [];
@@ -180,6 +181,7 @@ watch(
     @update:open="emit('update:showConnectionDialog', $event)"
     @connect-started="emit('connectStarted', $event)"
     @connect-succeeded="emit('connectSucceeded', $event)"
+    @connect-settled="emit('connectSettled', $event)"
     @connect-failed="emit('connectFailed', $event)"
     @open-driver-store="emit('openDriverStore', $event)"
     @open-tunnel-profile-settings="emit('openTunnelProfileSettings')"

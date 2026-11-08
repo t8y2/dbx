@@ -895,6 +895,19 @@ const DEEP_LINK_CONNECTION_CONFIRM_MODES = ["always", "create", "update", "all"]
 export type DeepLinkConnectionConfirmMode = (typeof DEEP_LINK_CONNECTION_CONFIRM_MODES)[number];
 
 /**
+ * 新建连接保存后是否立即发起连接。
+ *
+ * - `off`：关闭，保存后由用户自行在侧栏里连接
+ * - `deepLink`：仅对通过连接深链（`dbx://connection/new`，含在弹窗里粘贴的连接链接）
+ *   新建的连接自动连接。堡垒机下发的一次性凭据通常有时效，需要在时限内连上
+ * - `all`：所有新建连接保存后都自动连接（历史默认行为）
+ *
+ * 只作用于「新建」：编辑已有连接不在此列；JDBC 连接需要单独准备驱动，仍由用户手动连接。
+ */
+const AUTO_CONNECT_AFTER_CREATE_MODES = ["off", "deepLink", "all"] as const;
+export type AutoConnectAfterCreateMode = (typeof AUTO_CONNECT_AFTER_CREATE_MODES)[number];
+
+/**
  * 标签页标题重名时，用哪种后缀区分。
  *
  * - `ordinal`：对象名 + 序号（`users 1`、`users 2`），历史默认行为
@@ -1238,6 +1251,8 @@ export interface EditorSettings {
    * 哪些情况跳过确认直接保存。见 {@link DeepLinkConnectionConfirmMode}。
    */
   deepLinkConnectionConfirmMode: DeepLinkConnectionConfirmMode;
+  /** 新建连接保存后是否立即发起连接。见 {@link AutoConnectAfterCreateMode}。 */
+  autoConnectAfterCreateMode: AutoConnectAfterCreateMode;
   dataTabReuseMode: DataTabReuseMode;
   openDataTabsNextToActive: boolean;
   openTablesInDetachedWindow: boolean;
@@ -1616,6 +1631,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   rememberConnectionDatabaseOnDelete: true,
   rememberedConnectionDatabases: {},
   deepLinkConnectionConfirmMode: "always",
+  // 老行为是「保存并连接」：新建连接保存后一律自动连接，升级后保持不变。
+  autoConnectAfterCreateMode: "all",
   dataTabReuseMode: DEFAULT_DATA_TAB_REUSE_MODE,
   openDataTabsNextToActive: false,
   openTablesInDetachedWindow: false,
@@ -1913,6 +1930,11 @@ function normalizeDeepLinkConnectionConfirmMode(value: unknown, legacyAutoCreate
   if (value === "update-only") return "update";
   if (legacyAutoCreate === true) return "create";
   return DEFAULT_EDITOR_SETTINGS.deepLinkConnectionConfirmMode;
+}
+
+/** 新建连接后自动连接模式：只接受白名单取值，老配置文件缺字段时保持「全部自动连接」。 */
+function normalizeAutoConnectAfterCreateMode(value: unknown): AutoConnectAfterCreateMode {
+  return AUTO_CONNECT_AFTER_CREATE_MODES.includes(value as AutoConnectAfterCreateMode) ? (value as AutoConnectAfterCreateMode) : DEFAULT_EDITOR_SETTINGS.autoConnectAfterCreateMode;
 }
 
 /** 重名标签页后缀策略：只接受白名单取值，其余一律回落默认（历史行为 = 序号）。 */
@@ -2382,6 +2404,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
       // 上一版布尔开关，已从类型里移除，只在这里读一次做迁移。
       (settings as { deepLinkConnectionAutoCreate?: unknown }).deepLinkConnectionAutoCreate,
     ),
+    autoConnectAfterCreateMode: normalizeAutoConnectAfterCreateMode(settings.autoConnectAfterCreateMode),
     duplicateTabTitleMode: normalizeDuplicateTabTitleMode(settings.duplicateTabTitleMode),
     dataTabReuseMode: normalizeDataTabReuseMode(
       settings.dataTabReuseMode,
@@ -3336,6 +3359,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.rememberConnectionDatabaseOnDelete !== undefined) editorSettings.value.rememberConnectionDatabaseOnDelete = partial.rememberConnectionDatabaseOnDelete === true;
     if (partial.rememberedConnectionDatabases !== undefined) editorSettings.value.rememberedConnectionDatabases = normalizeRememberedConnectionDatabases(partial.rememberedConnectionDatabases);
     if (partial.deepLinkConnectionConfirmMode !== undefined) editorSettings.value.deepLinkConnectionConfirmMode = normalizeDeepLinkConnectionConfirmMode(partial.deepLinkConnectionConfirmMode);
+    if (partial.autoConnectAfterCreateMode !== undefined) editorSettings.value.autoConnectAfterCreateMode = normalizeAutoConnectAfterCreateMode(partial.autoConnectAfterCreateMode);
     if (partial.duplicateTabTitleMode !== undefined) editorSettings.value.duplicateTabTitleMode = normalizeDuplicateTabTitleMode(partial.duplicateTabTitleMode);
     if (partial.dataTabReuseMode !== undefined) editorSettings.value.dataTabReuseMode = normalizeDataTabReuseMode(partial.dataTabReuseMode);
     if (partial.openDataTabsNextToActive !== undefined) editorSettings.value.openDataTabsNextToActive = partial.openDataTabsNextToActive === true;

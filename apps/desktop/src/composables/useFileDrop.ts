@@ -113,7 +113,8 @@ export function useFileDrop() {
             password: "",
           };
           try {
-            await connectionStore.addConnection(config);
+            // 拖放文件后显式连接一次，跳过 store 的自动连接以免重复。
+            await connectionStore.addConnection(config, undefined, { autoConnect: false });
             await connectionStore.connect(config);
             toast(t("welcome.fileOpened", { name }));
           } catch (e: any) {

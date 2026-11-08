@@ -507,11 +507,13 @@ describe("sidebar connection duplication", () => {
     await duplicateConnection();
 
     expect(store.addConnection).toHaveBeenCalledTimes(1);
-    const [copy, groupId] = store.addConnection.mock.calls[0];
+    const [copy, groupId, options] = store.addConnection.mock.calls[0];
     expect(copy).toMatchObject({ name: "Tunnelled (Copy)", host: "db.internal", transport_layers: [{ type: "ssh", id: "bastion", host: "bastion.example.com" }] });
     expect(copy.id).not.toBe("conn-1");
     expect(copy.transport_layers[0]).not.toHaveProperty("local_port");
     expect(groupId).toBe("group-1");
+    // 复制连接绕过弹窗，必须显式让 store 按设置自动连接。
+    expect(options).toEqual({ autoConnect: true });
     expect(source.transport_layers?.[0]).toMatchObject({ local_port: 4059 });
   });
 });

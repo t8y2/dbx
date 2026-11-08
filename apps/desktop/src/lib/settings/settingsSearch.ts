@@ -442,6 +442,14 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     keywordKeys: ["settings.deepLinkConnectionConfirmModeAlways", "settings.deepLinkConnectionConfirmModeCreate", "settings.deepLinkConnectionConfirmModeUpdate", "settings.deepLinkConnectionConfirmModeAll"],
   },
   {
+    id: "navigation-auto-connect-after-create-mode",
+    category: "navigation",
+    titleKey: "settings.autoConnectAfterCreateMode",
+    descriptionKey: "settings.autoConnectAfterCreateModeDescription",
+    targetId: "navigation",
+    keywordKeys: ["settings.autoConnectAfterCreateModeOff", "settings.autoConnectAfterCreateModeDeepLink", "settings.autoConnectAfterCreateModeAll"],
+  },
+  {
     id: "navigation-duplicate-tab-title-mode",
     category: "navigation",
     titleKey: "settings.duplicateTabTitleMode",

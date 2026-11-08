@@ -155,7 +155,8 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
       const config = connectionStore.getConfig(target.connectionId);
       if (!config) continue;
       const newConfig = { ...withoutSshLocalPorts(config), id: uuid(), name: `${config.name} (Copy)` };
-      await connectionStore.addConnection(newConfig, connectionStore.groupIdForConnection(target.connectionId));
+      // 复制连接绕过了弹窗的 save()，由 store 按「新建连接后自动连接」设置决定是否立即连接。
+      await connectionStore.addConnection(newConfig, connectionStore.groupIdForConnection(target.connectionId), { autoConnect: true });
       duplicatedCount += 1;
     }
     if (!duplicatedCount) return;

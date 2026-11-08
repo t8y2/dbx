@@ -988,8 +988,10 @@ const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridR
 const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridSearchMode);
 const dataGridRowNumberMode = computed(() => settingsStore.editorSettings.dataGridRowNumberMode);
 const splitDataGridToolbar = computed(() => settingsStore.editorSettings.dataGridToolbarLayout === "split");
-const compactDataGridToolbar = computed(() => dataGridTopbarOverflowCompact.value || (!splitDataGridToolbar.value && isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)));
-const responsiveDataGridToolbarActionCount = computed(() => (splitDataGridToolbar.value ? 0 : dataGridToolbarActionCollapseCount(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)));
+// The fixed breakpoint reserves space for WHERE/ORDER BY inputs. Query results
+// have no such inputs: keep their labels until the row actually overflows.
+const compactDataGridToolbar = computed(() => dataGridTopbarOverflowCompact.value || (!isResultsContext.value && !splitDataGridToolbar.value && isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)));
+const responsiveDataGridToolbarActionCount = computed(() => (splitDataGridToolbar.value || isResultsContext.value ? 0 : dataGridToolbarActionCollapseCount(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)));
 const compactDataGridToolbarActionCount = computed(() => Math.max(responsiveDataGridToolbarActionCount.value, dataGridTopbarOverflowActionCount.value));
 const compactDataGridToolbarLeading = computed(() => (splitDataGridToolbar.value ? compactDataGridToolbarActionCount.value > 0 : compactDataGridToolbar.value));
 const compactDataGridToolbarActions = computed(() => settingsStore.editorSettings.dataGridHideToolbarLabels || compactDataGridToolbarLeading.value);

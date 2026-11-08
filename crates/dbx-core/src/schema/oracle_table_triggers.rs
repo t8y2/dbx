@@ -1,6 +1,6 @@
 use super::*;
 use dbx_sql::object_source_sql::{
-    oracle_trigger_ddl_sources, oracle_trigger_enabled, oracle_trigger_metadata_matches,
+    oracle_trigger_ddl_sources_with_table_owner, oracle_trigger_enabled, oracle_trigger_metadata_matches,
     oracle_trigger_source_with_create,
 };
 
@@ -117,7 +117,7 @@ pub(super) async fn enrich(
                 continue;
             }
         };
-        let definitions = match oracle_trigger_ddl_sources(&full, schema) {
+        let definitions = match oracle_trigger_ddl_sources_with_table_owner(&full, trigger_owner, schema) {
             Ok(definitions) => definitions,
             Err(_) => {
                 log::warn!("Trigger metadata remains incomplete for {schema}.{}: invalid declaration", trigger.name);
@@ -125,7 +125,7 @@ pub(super) async fn enrich(
             }
         };
         if definitions.len() != 1
-            || definitions[0].owner != schema
+            || definitions[0].owner != trigger_owner
             || definitions[0].name != trigger.name
             || definitions[0].table_owner != schema
             || definitions[0].table != table

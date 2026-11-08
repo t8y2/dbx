@@ -26,6 +26,7 @@ const bindings = computed(() => ({ ...surfaceProps.value, ...contentEmits }));
 const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
 
 defineExpose<QueryResultSurfaceHandle>({
+  copyActiveResult: (isValid?: () => boolean) => contentAreaRef.value?.copyActiveResult(isValid) ?? false,
   focusResultGrid: () => contentAreaRef.value?.focusResultGrid() ?? false,
   cancelResultGridFocus: () => contentAreaRef.value?.cancelResultGridFocus(),
   focusSearch: (target: Element | null = null) => contentAreaRef.value?.focusSearch(target) ?? false,

@@ -15,24 +15,42 @@ function sortConnectionSiblingsForDisplay(nodes: readonly TreeNode[], mode: Excl
     })
     .map(({ node }) => node);
 
+  const sortedGroups = nodes
+    .map((node, index) => ({ node, index }))
+    .filter(({ node }) => node.type === "connection-group")
+    .sort((left, right) => {
+      const compared = connectionNameCollator.compare(left.node.label, right.node.label);
+      const directional = mode === "asc" ? compared : -compared;
+      return directional || left.index - right.index;
+    })
+    .map(({ node }) => {
+      if (!node.children) return node;
+      const children = sortConnectionSiblingsForDisplay(node.children, mode);
+      return children === node.children ? node : { ...node, children };
+    });
+
   let nextConnectionIndex = 0;
+  let nextGroupIndex = 0;
   const displayNodes = nodes.map((node) => {
     if (node.type === "connection") {
       return sortedConnections[nextConnectionIndex++]!;
     }
 
-    if (node.type !== "connection-group" || !node.children) return node;
-    const children = sortConnectionSiblingsForDisplay(node.children, mode);
-    return children === node.children ? node : { ...node, children };
+    if (node.type === "connection-group") {
+      return sortedGroups[nextGroupIndex++]!;
+    }
+
+    return node;
   });
 
   return displayNodes.every((node, index) => node === nodes[index]) ? (nodes as TreeNode[]) : displayNodes;
 }
 
 /**
- * Produces a display-only ordering of saved connections. Group positions and
- * the persisted manual layout remain untouched, so switching back to manual
- * order restores drag-and-drop placement without a data migration.
+ * Produces a display-only ordering of saved connections. In asc/desc modes
+ * both connections and groups are ordered by name; the persisted manual
+ * layout remains untouched, so switching back to manual order restores
+ * drag-and-drop placement without a data migration.
  */
 export function sortConnectionListForDisplay(nodes: readonly TreeNode[], mode: ConnectionListSortMode): TreeNode[] {
   if (mode === "manual") return nodes as TreeNode[];

@@ -42,12 +42,12 @@ on:
         type: string
       sdk-ref:
         description: DBX tag or commit used only when installing the plugin CLI from source
-        default: plugin-sdk-v1
+        default: plugin-cli-v0.1.10
         required: false
         type: string
       plugin-cli-version:
         description: Published @dbx-app/plugin-cli version used to package the plugin
-        default: "0.1.2"
+        default: "0.1.10"
         required: false
         type: string
       install-plugin-cli:
@@ -77,7 +77,7 @@ jobs:
       matrix: ${{ fromJSON(inputs.build-matrix) }}
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve Node dependency cache
         id: node-cache
@@ -117,13 +117,13 @@ jobs:
           package_json_file: ${{ inputs.working-directory }}/package.json
           run_install: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node-version }}
           cache: ${{ steps.node-cache.outputs.cache }}
           cache-dependency-path: ${{ steps.node-cache.outputs.dependency-path }}
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         if: inputs.go-version != ''
         with:
           go-version: ${{ inputs.go-version }}
@@ -137,7 +137,7 @@ jobs:
 
       - name: Checkout DBX plugin SDK
         if: inputs.install-plugin-cli && inputs.install-plugin-cli-from-source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: t8y2/dbx
           ref: ${{ inputs.sdk-ref }}

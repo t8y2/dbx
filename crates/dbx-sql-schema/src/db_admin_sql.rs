@@ -15,6 +15,7 @@ pub enum DatabaseObjectType {
     Procedure,
     Function,
     Event,
+    Trigger,
     Type,
     TypeBody,
 }
@@ -1034,6 +1035,9 @@ pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
 }
 
 pub fn supports_object_rename(database_type: Option<DatabaseType>, object_type: DatabaseObjectType) -> bool {
+    if object_type == DatabaseObjectType::Trigger {
+        return false;
+    }
     let Some(database_type) = database_type else {
         return false;
     };
@@ -1326,12 +1330,10 @@ fn qualified_name_with_quote(
 }
 
 fn qualified_duplicate_target_name(database_type: Option<DatabaseType>, schema: Option<&str>, name: &str) -> String {
-    // Both duplicate-target normalizations emit the spelling a freshly created clone resolves
-    // to: Oracle's clone DDL creates plain identifiers unquoted (uppercase fold), and Dameng's
-    // clone keeps the same fold convention through its profile.  Every other type stays exact.
+    // Oracle's clone DDL creates plain identifiers unquoted (uppercase fold). Other types,
+    // including Dameng's quoted structured CREATE TABLE, preserve the requested spelling.
     let target = match database_type {
         Some(DatabaseType::Oracle) => crate::table_structure_sql::oracle_new_object_reference(name),
-        Some(DatabaseType::Dameng) => profile_for(DatabaseType::Dameng).quote_ident(name),
         _ => return qualified_name(database_type, schema, name),
     };
     if schema.is_some_and(|schema| !schema.is_empty()) {
@@ -1365,6 +1367,7 @@ fn object_type_keyword(object_type: DatabaseObjectType) -> &'static str {
         DatabaseObjectType::Procedure => "PROCEDURE",
         DatabaseObjectType::Function => "FUNCTION",
         DatabaseObjectType::Event => "EVENT",
+        DatabaseObjectType::Trigger => "TRIGGER",
         DatabaseObjectType::Type => "TYPE",
         DatabaseObjectType::TypeBody => "TYPE BODY",
     }
@@ -2293,6 +2296,27 @@ mod tests {
     }
 
     #[test]
+    fn trigger_drop_transport_preserves_exact_identity_without_enabling_rename() {
+        for database_type in ["oracle", "oceanbase-oracle", "dameng"] {
+            let options: DropObjectSqlOptions = serde_json::from_value(serde_json::json!({
+                "databaseType": database_type,
+                "objectType": "TRIGGER",
+                "schema": " Owner ",
+                "name": " Tr\"igger ",
+                "signature": "must_not_be_appended"
+            }))
+            .unwrap();
+            let object_type = options.object_type;
+            assert_eq!(build_drop_object_sql(options), "DROP TRIGGER \" Owner \".\" Tr\"\"igger \";");
+            for rename_database in
+                [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng, DatabaseType::SqlServer]
+            {
+                assert!(!supports_object_rename(Some(rename_database), object_type));
+            }
+        }
+    }
+
+    #[test]
     fn kingbase_drop_object_sql_preserves_routine_signature() {
         for (object_type, keyword) in
             [(DatabaseObjectType::Procedure, "PROCEDURE"), (DatabaseObjectType::Function, "FUNCTION")]
@@ -3078,15 +3102,16 @@ mod tests {
         });
         assert_eq!(
             dameng_sql,
-            "CREATE TABLE \"APP\".USERS_COPY AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON TABLE \"APP\".USERS_COPY IS '测试''克隆';\nCOMMENT ON COLUMN \"APP\".USERS_COPY.\"DISPLAY\"\"NAME\" IS '  Owner''s; display name';\nCOMMENT ON COLUMN \"APP\".USERS_COPY.\"STATUS\" IS 'active  ';"
+            "CREATE TABLE \"APP\".\"users_copy\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON TABLE \"APP\".\"users_copy\" IS '测试''克隆';\nCOMMENT ON COLUMN \"APP\".\"users_copy\".\"DISPLAY\"\"NAME\" IS '  Owner''s; display name';\nCOMMENT ON COLUMN \"APP\".\"users_copy\".\"STATUS\" IS 'active  ';"
         );
         assert_eq!(
             crate::sql::split_sql_statements_for_database(&dameng_sql, DatabaseType::Dameng),
             vec![
-                "CREATE TABLE \"APP\".USERS_COPY AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0".to_string(),
-                "COMMENT ON TABLE \"APP\".USERS_COPY IS '测试''克隆'".to_string(),
-                "COMMENT ON COLUMN \"APP\".USERS_COPY.\"DISPLAY\"\"NAME\" IS '  Owner''s; display name'".to_string(),
-                "COMMENT ON COLUMN \"APP\".USERS_COPY.\"STATUS\" IS 'active  '".to_string(),
+                "CREATE TABLE \"APP\".\"users_copy\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0".to_string(),
+                "COMMENT ON TABLE \"APP\".\"users_copy\" IS '测试''克隆'".to_string(),
+                "COMMENT ON COLUMN \"APP\".\"users_copy\".\"DISPLAY\"\"NAME\" IS '  Owner''s; display name'"
+                    .to_string(),
+                "COMMENT ON COLUMN \"APP\".\"users_copy\".\"STATUS\" IS 'active  '".to_string(),
             ]
         );
         // Control chars / backslashes must not switch Dameng to Postgres E'...' literals.
@@ -3103,7 +3128,7 @@ mod tests {
         });
         assert_eq!(
             dameng_escape_sql,
-            "CREATE TABLE \"APP\".USERS_COPY AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON TABLE \"APP\".USERS_COPY IS 'line1\\path\nline2';"
+            "CREATE TABLE \"APP\".\"users_copy\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0;\nCOMMENT ON TABLE \"APP\".\"users_copy\" IS 'line1\\path\nline2';"
         );
         assert!(!dameng_escape_sql.contains("E'"));
         assert_eq!(
@@ -3285,7 +3310,7 @@ mod tests {
                 normalize_new_target_name: true,
                 identifier_quote: None,
             }),
-            "INSERT INTO \"APP\".USERS_COPY SELECT * FROM \"APP\".\"users\";"
+            "INSERT INTO \"APP\".\"users_copy\" SELECT * FROM \"APP\".\"users\";"
         );
         assert_eq!(
             build_copy_table_data_sql(CopyTableDataSqlOptions {

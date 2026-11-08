@@ -1,5 +1,6 @@
 import { onScopeDispose, ref, shallowRef, watch, type Ref, type WatchSource } from "vue";
-import type { SidebarRemoteSearchResult } from "@/lib/sidebar/sidebarRemoteSearch";
+import { removeVerifiedSidebarTriggerSearchResult, type SidebarRemoteSearchResult } from "@/lib/sidebar/sidebarRemoteSearch";
+import type { TreeNode } from "@/types/database";
 
 export function useSidebarRemoteSearch(options: {
   query: Ref<string>;
@@ -86,5 +87,10 @@ export function useSidebarRemoteSearch(options: {
   );
 
   onScopeDispose(reset);
-  return { results, isLoading };
+  const removeVerifiedTriggerNode = (node: TreeNode) => {
+    abortPending();
+    results.value = removeVerifiedSidebarTriggerSearchResult(results.value, node);
+    schedule();
+  };
+  return { results, isLoading, removeVerifiedTriggerNode };
 }

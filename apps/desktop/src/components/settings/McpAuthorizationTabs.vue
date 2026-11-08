@@ -28,7 +28,10 @@ const currentSection = defineModel<SectionId>({ default: "overrides" });
          footer Apply button), not sequential steps, so every one is a directly reachable tab. Hidden
          panels stay mounted (unmount-on-hide=false) so the pickers keep their search/expand state across tab switches. -->
     <Tabs v-model="currentSection" :unmount-on-hide="false" class="gap-4">
-      <TabsList variant="line" class="h-9 w-full justify-start gap-1 overflow-x-auto border-b border-border/60 bg-transparent p-0" :aria-label="t('settings.mcpAuthTitle')">
+      <!-- overflow-x-auto turns overflow-y into auto as well, and the line variant draws the active
+           underline 5px below each trigger. pb-[5px] keeps that underline inside the list and
+           overflow-y-hidden stops it from adding a vertical scrollbar. -->
+      <TabsList variant="line" class="h-9 w-full justify-start gap-1 overflow-x-auto overflow-y-hidden border-b border-border/60 bg-transparent px-0 pt-0 pb-[5px] group-data-horizontal/tabs:h-9" :aria-label="t('settings.mcpAuthTitle')">
         <TabsTrigger v-for="section in sections" :key="section.id" :value="section.id" class="flex-none px-3">{{ section.title }}</TabsTrigger>
       </TabsList>
       <TabsContent v-for="section in sections" :key="section.id" :value="section.id" :data-settings-search-id="`mcp-${section.id}`" class="m-0">

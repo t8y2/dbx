@@ -334,6 +334,7 @@ impl RoutineCatalog for LiveCatalog<'_> {
             &identity.kind,
             None,
             None,
+            &dbx_types::oracle_trigger::MetadataReadOptions::default(),
             true,
             agent_metadata_timeout(Some(self.config)),
         )

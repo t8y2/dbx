@@ -16,6 +16,18 @@ fn transfer_identifier_policy_preserves_legacy_output() {
 }
 
 #[test]
+fn tdengine_transfer_identifiers_use_backticks() {
+    // #14540: TDengine treats double quotes as string literals, so every
+    // export/transfer identifier must take the backtick family instead of the
+    // ANSI default arm.
+    assert_eq!(quote_transfer_identifier("device_desc", &DatabaseType::Tdengine), "`device_desc`");
+    assert_eq!(
+        qualified_transfer_table("device_desc", "demo_db", &DatabaseType::Tdengine, None),
+        "`demo_db`.`device_desc`"
+    );
+}
+
+#[test]
 fn backtick_family_predicate_matches_quoting() {
     // `uses_backtick_identifier_quoting` is the single source of truth the "Standard
     // SQL" export dialect consults to decide when to deviate from ANSI double
@@ -246,7 +258,7 @@ fn maps_table_pagination_strategy_by_database_type() {
     assert_eq!(table_pagination_strategy(Some(DatabaseType::OceanbaseOracle)), TablePaginationStrategy::Rownum);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Questdb)), TablePaginationStrategy::QuestDbLimit);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Oracle)), TablePaginationStrategy::Rownum);
-    assert_eq!(table_pagination_strategy(Some(DatabaseType::Oscar)), TablePaginationStrategy::Rownum);
+    assert_eq!(table_pagination_strategy(Some(DatabaseType::Oscar)), TablePaginationStrategy::LimitOffset);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Cassandra)), TablePaginationStrategy::AgentMaxRows);
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Cassandra), PaginationContext::BoundedRead),
@@ -276,6 +288,38 @@ fn maps_table_pagination_strategy_by_database_type() {
     // Both Spanner dialects support `LIMIT n OFFSET m`; pin the fallback.
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Spanner)), TablePaginationStrategy::LimitOffset);
     assert_eq!(table_pagination_strategy(None), TablePaginationStrategy::LimitOffset);
+}
+
+#[test]
+fn oscar_table_data_pages_use_one_limit_pagination_form_without_rownum() {
+    let options = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Oscar),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "USERS".to_string(),
+        table_type: Some("TABLE".to_string()),
+        primary_keys: vec!["ID".to_string()],
+        columns: vec!["ID".to_string(), "NAME".to_string()],
+        order_by: Some("\"ID\" ASC".to_string()),
+        limit: Some(100),
+        offset: Some(0),
+        ..Default::default()
+    };
+
+    // OSCAR rejects a statement that combines ROWNUM with a LIMIT. The JDBC
+    // agent always caps table-data statements with setMaxRows(), so table
+    // previews must not also wrap the statement in ROWNUM: a later page's
+    // ROWNUM bound (offset + limit) exceeds the driver cap and the server
+    // reports "rownum and limit cannot be mixed" (#13515).
+    let first_page = build_table_data_select_sql(options.clone());
+    assert_eq!(first_page, "SELECT \"ID\", \"NAME\" FROM \"SYSDBA\".\"USERS\" ORDER BY \"ID\" ASC LIMIT 100;");
+    assert!(!first_page.to_ascii_uppercase().contains("ROWNUM"), "{first_page}");
+
+    let second_page = build_table_data_select_sql(TableDataSelectSqlOptions { offset: Some(100), ..options });
+    assert_eq!(
+        second_page,
+        "SELECT \"ID\", \"NAME\" FROM \"SYSDBA\".\"USERS\" ORDER BY \"ID\" ASC LIMIT 100 OFFSET 100;"
+    );
+    assert!(!second_page.to_ascii_uppercase().contains("ROWNUM"), "{second_page}");
 }
 
 #[test]
@@ -577,6 +621,32 @@ fn jdbc_table_data_qualifies_schema_without_forcing_identifier_quotes() {
             ..Default::default()
         }),
         "SELECT * FROM STUDENT;"
+    );
+}
+
+#[test]
+fn opengauss_table_data_uses_compatibility_identifier_quote() {
+    // openGauss keeps the PostgreSQL catalog but switches identifier quoting with
+    // the database compatibility mode: B/MySQL databases reject the double quotes
+    // that A/PG databases require (#13596).
+    let base = TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::OpenGauss),
+        schema: Some("dbx-demo".to_string()),
+        table_name: "order".to_string(),
+        limit: Some(25),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            identifier_quote: Some("`".to_string()),
+            ..base.clone()
+        }),
+        "SELECT * FROM `dbx-demo`.`order` LIMIT 25;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions { identifier_quote: Some("\"".to_string()), ..base }),
+        "SELECT * FROM \"dbx-demo\".\"order\" LIMIT 25;"
     );
 }
 

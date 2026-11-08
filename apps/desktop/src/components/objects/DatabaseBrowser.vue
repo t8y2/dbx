@@ -1,21 +1,25 @@
 <script setup lang="ts">
+import { usesLightweightMysqlBrowser } from "@/lib/database/mysqlBrowserLoading";
 import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
-import { ArrowDown, ArrowUp, Check, Copy, Database, GripVertical, Grid3X3, LayoutGrid, List, Loader2, RefreshCw, Search, Settings2, TerminalSquare, X } from "@lucide/vue";
+import { ArrowDown, ArrowUp, Check, ChevronDown, Copy, Database, GripVertical, Grid3X3, LayoutGrid, List, Loader2, RefreshCw, Search, Settings2, TerminalSquare, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
-import { DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { openSidebarDangerDialog } from "@/lib/sidebar/sidebarDangerDialog";
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
+import { connectionUsesConnectionRootSchemaMode } from "@/lib/database/jdbcDialect";
 import { objectBrowserTargetForNamespaceRow } from "@/lib/database/objectBrowserTarget";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import SidebarTreeItemDialogs from "@/components/sidebar/SidebarTreeItemDialogs.vue";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
+import { useToast } from "@/composables/useToast";
+import { translateBackendError } from "@/i18n/backend-errors";
 import * as api from "@/lib/backend/api";
-import { filterDatabaseNamesForConnection } from "@/lib/database/visibleDatabases";
+import { filterDatabaseNamesForConnection, filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
 import { formatObjectBrowserBytes, formatObjectBrowserTimestamp } from "@/lib/table/objectBrowserRows";
 import { requestObjectBrowserSearchFocus } from "@/lib/tabs/objectBrowserSearchFocus";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
@@ -25,6 +29,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSidebarMenuPresentation } from "@/composables/useSidebarMenuPresentation";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { formatRowsAsSpreadsheetTsv } from "@/lib/common/tableClipboard";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type DatabaseRow = {
@@ -76,6 +81,7 @@ const search = ref(restoredUiState.search ?? "");
 const rows = ref<DatabaseRow[]>([]);
 const loading = ref(false);
 const error = ref("");
+const { toast } = useToast();
 const sortKey = ref<DatabaseBrowserSortKey>(DATABASE_BROWSER_COLUMN_KEYS.includes(restoredUiState.sortKey as DatabaseBrowserColumnKey) ? restoredUiState.sortKey! : "name");
 const sortDirection = ref<SortDirection>(restoredUiState.sortDirection === "desc" ? "desc" : "asc");
 const columnWidths = ref<Record<DatabaseBrowserColumnKey, number>>(
@@ -181,14 +187,41 @@ function openDatabase(database: string) {
   void nextTick(() => requestObjectBrowserSearchFocus(tabId));
 }
 
+const pendingCapacity = new Set<string>();
+async function loadDatabaseCapacity(name: string) {
+  const generation = refreshGeneration;
+  const connectionId = props.connection.id;
+  const key = JSON.stringify([connectionId, generation, name]);
+  if (pendingCapacity.has(key)) return;
+  pendingCapacity.add(key);
+  try {
+    const sizes = await api.listDatabaseStorage(connectionId, [name]);
+    if (generation !== refreshGeneration || connectionId !== props.connection.id) return;
+    const size = sizes.find((item) => item.name === name);
+    if (size) rows.value = rows.value.map((row) => (row.name === name ? { ...row, sizeBytes: size.size_bytes ?? null } : row));
+  } catch (cause) {
+    if (generation === refreshGeneration && connectionId === props.connection.id) toast(translateBackendError(t, cause), 5000);
+  } finally {
+    pendingCapacity.delete(key);
+  }
+}
+
 function databaseContextMenuItems(row: DatabaseRow): ContextMenuItem[] {
   const target = objectBrowserTargetForNamespaceRow(props.connection, row.name);
   const node: TreeNode = { id: `${props.connection.id}:${row.name}`, label: row.name, type: "database", connectionId: props.connection.id, database: target.database, schema: target.schema };
+  const capacityItem: ContextMenuItem = {
+    label: t("objects.loadCapacity"),
+    icon: Database,
+    action: () => {
+      void loadDatabaseCapacity(row.name);
+    },
+  };
   const runtimeItems = sidebarRuntimeHost.value?.buildContextMenu(node);
-  if (runtimeItems?.length) return presentMenu(removeUnsupportedDatabaseItems(runtimeItems), "database");
+  if (runtimeItems?.length) return presentMenu([...removeUnsupportedDatabaseItems(runtimeItems), ...(usesLightweightMysqlBrowser(props.connection) ? [capacityItem] : [])], "database");
   const isDefault = props.connection.database === row.name;
   return presentMenu(
     [
+      ...(usesLightweightMysqlBrowser(props.connection) ? [capacityItem] : []),
       { sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: () => openDatabase(row.name), icon: Database },
       {
         sidebarActionId: "contextMenu.viewDdl",
@@ -196,11 +229,11 @@ function databaseContextMenuItems(row: DatabaseRow): ContextMenuItem[] {
         action: () => {
           const dbType = props.connection.db_type;
           const sql = dbType === "mysql" ? `SHOW CREATE DATABASE \`${row.name.replaceAll("`", "``")}\`;` : `-- ${row.name}\n-- Database DDL is not available for this driver.`;
-          queryStore.createTab(props.connection.id, row.name, `${row.name} - ${t("contextMenu.viewDdl")}`, "query", undefined, sql, undefined, { forceNew: true });
+          queryStore.createTab(props.connection.id, target.database, `${row.name} - ${t("contextMenu.viewDdl")}`, "query", target.schema, sql, undefined, { forceNew: true });
         },
         icon: Copy,
       },
-      { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => queryStore.createTab(props.connection.id, row.name, `${row.name} - ${t("contextMenu.newQuery")}`, "query", undefined, undefined, undefined, { forceNew: true }), icon: TerminalSquare },
+      { sidebarActionId: "contextMenu.newQuery", label: t("contextMenu.newQuery"), action: () => queryStore.createTab(props.connection.id, target.database, `${row.name} - ${t("contextMenu.newQuery")}`, "query", target.schema, undefined, undefined, { forceNew: true }), icon: TerminalSquare },
       { sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: () => copyToClipboard(row.name), icon: Copy },
       { label: "", separator: true },
       {
@@ -251,6 +284,33 @@ function displayValue(row: DatabaseRow, key: DatabaseBrowserColumnKey): string {
   if (key === "defaultCharset") return row.defaultCharset || "";
   if (key === "defaultCollation") return row.defaultCollation || "";
   return row.comment || "";
+}
+
+function databaseBrowserCopyColumns() {
+  return visibleColumns.value.map((key) => ({
+    label: columnLabel(key),
+    value: (row: DatabaseRow) => displayValue(row, key),
+  }));
+}
+
+async function copyDatabaseNames() {
+  if (visibleRows.value.length === 0) return;
+  try {
+    await copyToClipboard(visibleRows.value.map((row) => row.name).join("\n"));
+    toast(t("objects.copyNamesSuccess", { count: visibleRows.value.length }), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function copyDatabasesAsTable() {
+  if (visibleRows.value.length === 0) return;
+  try {
+    await copyToClipboard(formatRowsAsSpreadsheetTsv(visibleRows.value, databaseBrowserCopyColumns()));
+    toast(t("objects.copyTableDataSuccess", { count: visibleRows.value.length }), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
 }
 
 function compareRows(left: DatabaseRow, right: DatabaseRow, key: DatabaseBrowserSortKey, direction: SortDirection): number {
@@ -403,7 +463,46 @@ async function refresh(): Promise<boolean> {
   loading.value = true;
   error.value = "";
   try {
+    if (connectionUsesConnectionRootSchemaMode(props.connection)) {
+      const database = props.connection.database || "";
+      let schemas: Array<{ name: string; comment?: string | null }> = [];
+      try {
+        schemas = await api.listSchemaInfos(props.connection.id, database);
+      } catch {
+        const names = await api.listSchemas(props.connection.id, database, true).catch(() => []);
+        schemas = names.map((name) => ({ name, comment: null }));
+      }
+      if (generation !== refreshGeneration) return true;
+      if (schemas.length === 0) {
+        const databases = await api.listDatabases(props.connection.id).catch(() => []);
+        if (generation !== refreshGeneration) return true;
+        schemas = databases.map((database) => ({ name: database.name, comment: database.comment ?? null }));
+      }
+      const visibleNames = new Set(
+        filterSchemaNamesForConnection(
+          schemas.map((schema) => schema.name),
+          props.connection,
+          database,
+        ),
+      );
+      rows.value = schemas
+        .filter((schema) => schema.name.trim() && visibleNames.has(schema.name))
+        .map((schema) => ({
+          name: schema.name,
+          sizeBytes: null,
+          createdAt: null,
+          updatedAt: null,
+          comment: schema.comment ?? null,
+          defaultCharset: null,
+          defaultCollation: null,
+        }));
+      loading.value = false;
+      restoreScrollPosition();
+      return true;
+    }
+
     const databases = await api.listDatabases(props.connection.id);
+    if (generation !== refreshGeneration) return true;
     const visibleNames = new Set(
       filterDatabaseNamesForConnection(
         databases.map((database) => database.name),
@@ -425,8 +524,8 @@ async function refresh(): Promise<boolean> {
     restoreScrollPosition();
 
     // Name enumeration is cheap and should render immediately. Enrich the
-    // rows separately because MySQL metadata calculates sizes by aggregating
-    // information_schema.TABLES, which can be expensive for large servers.
+    // rows separately. MySQL capacity is requested explicitly; this read only
+    // supplies its inexpensive schema attributes.
     try {
       const metadata = await api.listDatabaseMetadata(props.connection.id);
       if (generation !== refreshGeneration) return true;
@@ -436,7 +535,7 @@ async function refresh(): Promise<boolean> {
         return database
           ? {
               ...row,
-              sizeBytes: database.size_bytes ?? null,
+              sizeBytes: usesLightweightMysqlBrowser(props.connection) ? row.sizeBytes : (database.size_bytes ?? null),
               createdAt: database.created_at ?? null,
               updatedAt: database.updated_at ?? null,
               comment: database.comment ?? null,
@@ -517,6 +616,7 @@ onActivated(() => {
 });
 
 onBeforeUnmount(() => {
+  refreshGeneration++;
   stopColumnResize?.();
   if (restoreScrollFrame) window.cancelAnimationFrame(restoreScrollFrame);
 });
@@ -572,6 +672,25 @@ defineExpose({ focusSearch, refresh });
         >
           <option v-for="width in OBJECT_BROWSER_COMPACT_WIDTHS" :key="width" :value="width" class="bg-background text-foreground">{{ width }}px</option>
         </select>
+      </div>
+      <div class="flex h-7 shrink-0 items-center">
+        <Button variant="ghost" size="sm" class="h-7 rounded-r-none px-2 text-xs" :disabled="visibleRows.length === 0" @click="copyDatabaseNames">
+          <Copy class="mr-1.5 h-3.5 w-3.5" />
+          {{ t("objects.copyNames") }}
+        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger as-child>
+            <Button variant="ghost" size="icon" class="h-7 w-6 rounded-l-none border-l border-border/60" :aria-label="t('objects.copyOptions')" :title="t('objects.copyOptions')" data-database-copy-menu>
+              <ChevronDown class="h-3.5 w-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" class="w-56">
+            <DropdownMenuItem :disabled="visibleRows.length === 0" @select="copyDatabasesAsTable">
+              <Copy class="h-3.5 w-3.5" />
+              {{ t("objects.copyCurrentPageAsTable") }}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('contextMenu.refreshTab')" :disabled="loading" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loading }" />

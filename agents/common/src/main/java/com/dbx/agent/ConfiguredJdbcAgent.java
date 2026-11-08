@@ -153,8 +153,13 @@ public abstract class ConfiguredJdbcAgent extends AbstractJdbcAgent {
 
         return DdlBuilder.buildTableDdl(
             schema, table, getColumns(schema, table), indexes, foreignKeys,
-            Collections.emptyList(), false, includeColumnCommentsInTableDdl(), tableComment
+            Collections.emptyList(), false, includeColumnCommentsInTableDdl(), tableComment,
+            defaultBeforeNotNullInTableDdl()
         );
+    }
+
+    protected boolean defaultBeforeNotNullInTableDdl() {
+        return false;
     }
 
     protected boolean includeColumnCommentsInTableDdl() {

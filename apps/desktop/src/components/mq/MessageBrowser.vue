@@ -38,11 +38,13 @@ const incomplete = ref(false);
 const partition = ref<string | number>("");
 const offset = ref<string | number>("");
 const count = ref(20);
+const decodePayload = ref(false);
 const advancedExpanded = ref(false);
 const messageSearchQuery = ref("");
 type KafkaPeekStartPosition = NonNullable<PeekMessagesOptions["startPosition"]>;
 const kafkaStartPosition = ref<KafkaPeekStartPosition>("latest");
 const kafkaStartTimestamp = ref("");
+const kafkaEndTimestamp = ref("");
 const kafkaMessageDisplayOrder = ref<KafkaMessageDisplayOrder>("newest");
 let messageRequestVersion = 0;
 
@@ -102,6 +104,15 @@ async function loadMessages() {
         const parsedTime = Date.parse(String(kafkaStartTimestamp.value));
         if (!Number.isFinite(parsedTime)) throw new Error(t("mqMessages.timestampRequired"));
         options.timestamp = parsedTime;
+        const endTimestampText = String(kafkaEndTimestamp.value).trim();
+        if (endTimestampText !== "") {
+          const parsedEndTime = Date.parse(endTimestampText);
+          if (!Number.isFinite(parsedEndTime)) throw new Error(t("mqMessages.endTimestampInvalid"));
+          if (parsedEndTime < parsedTime) throw new Error(t("mqMessages.endTimestampBeforeStart"));
+          options.endTimestamp = parsedEndTime;
+        }
+        // 时间窗口下「时间顺序」即读取方向：最新优先让 agent 从截止时间一侧倒序回扫。
+        options.sortOrder = kafkaMessageDisplayOrder.value;
       }
     } else {
       if (partitionText !== "") {
@@ -143,9 +154,8 @@ function invalidateMessageRequest() {
 }
 
 function messagePayload(message: PeekedMessage): string {
-  // Raw-struct thrift sniffing is opt-in per MQ kind: only RabbitMQ's payload
-  // contract is thrift, so Kafka/RocketMQ keep the base64/text fallback.
-  return formatMqMessagePayload(message, { allowRawStructSniff: props.mqSystemKind === "rabbitmq" });
+  const enabled = decodePayload.value;
+  return formatMqMessagePayload(message, { decode: enabled, allowRawStructSniff: enabled });
 }
 
 async function copyMessagePayload(message: PeekedMessage) {
@@ -154,6 +164,10 @@ async function copyMessagePayload(message: PeekedMessage) {
 
 async function copyMessageHeaders(message: PeekedMessage) {
   await copyMessageText(JSON.stringify(message.headers, null, 2));
+}
+
+async function copyMessageProperties(message: PeekedMessage) {
+  await copyMessageText(JSON.stringify(message.properties, null, 2));
 }
 
 async function copyMessageText(text: string) {
@@ -209,6 +223,9 @@ watch(kafkaStartPosition, () => {
       <template v-else-if="kafkaStartPosition === 'earliest'">
         {{ t("mqMessages.kafkaEarliestHint") }}
       </template>
+      <template v-else-if="kafkaStartPosition === 'timestamp'">
+        {{ t("mqMessages.kafkaTimestampHint") }}
+      </template>
       <template v-else>
         {{ t("mqMessages.kafkaOffsetHint") }}
       </template>
@@ -222,6 +239,10 @@ watch(kafkaStartPosition, () => {
       <label>
         <span>{{ t("mqMessages.count") }}</span>
         <input v-model.number="count" data-testid="peek-count" type="number" min="1" max="100" :disabled="loading" />
+      </label>
+      <label class="peek-checkbox-control">
+        <input v-model="decodePayload" data-testid="rabbitmq-decode-payload" type="checkbox" />
+        <span>{{ t("mqMessages.decodePayload") }}</span>
       </label>
       <label v-if="isKafka && !isMonitoring">
         <span>{{ t("mqMessages.startPosition") }}</span>
@@ -240,6 +261,10 @@ watch(kafkaStartPosition, () => {
       <label v-if="isKafka && isKafkaTimestampMode && !isMonitoring">
         <span>{{ t("mqMessages.startTimestamp") }}</span>
         <input v-model="kafkaStartTimestamp" data-testid="kafka-peek-start-timestamp" type="datetime-local" step="1" :disabled="loading" />
+      </label>
+      <label v-if="isKafka && isKafkaTimestampMode && !isMonitoring">
+        <span>{{ t("mqMessages.endTimestamp") }}</span>
+        <input v-model="kafkaEndTimestamp" data-testid="kafka-peek-end-timestamp" type="datetime-local" step="1" :disabled="loading" />
       </label>
       <label v-if="isKafka">
         <span>{{ t("mqMessages.timeOrder") }}</span>
@@ -321,6 +346,18 @@ watch(kafkaStartPosition, () => {
           </div>
           <div class="message-headers-values">
             <span v-for="(value, key) in message.headers" :key="key">{{ key }}: {{ value }}</span>
+          </div>
+        </div>
+        <div v-if="mqSystemKind === 'rabbitmq' && Object.keys(message.properties || {}).length" class="message-headers" data-testid="message-properties">
+          <div class="message-headers-heading">
+            <span>{{ t("mqMessages.messageProperties") }}</span>
+            <Button type="button" variant="outline" size="sm" class="message-copy-action h-7 gap-1.5 px-2 text-xs" :aria-label="`${t('grid.copy')} ${t('mqMessages.messageProperties')}`" data-testid="copy-message-properties" @click="copyMessageProperties(message)">
+              <Copy :size="14" aria-hidden="true" />
+              {{ t("grid.copy") }}
+            </Button>
+          </div>
+          <div class="message-headers-values">
+            <span v-for="(value, key) in message.properties" :key="key">{{ key }}: {{ value }}</span>
           </div>
         </div>
       </article>
@@ -406,7 +443,7 @@ watch(kafkaStartPosition, () => {
   font-weight: 500;
 }
 
-.peek-controls input,
+.peek-controls input:not([type="checkbox"]),
 .peek-controls :deep(.message-browser-start-position) {
   height: 32px;
   width: 100%;
@@ -419,7 +456,16 @@ watch(kafkaStartPosition, () => {
   font-size: 13px;
 }
 
-.peek-controls input:focus,
+.peek-controls label.peek-checkbox-control {
+  flex-direction: row;
+  align-items: center;
+  align-self: end;
+  height: 32px;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.peek-controls input:not([type="checkbox"]):focus,
 .peek-controls :deep(.message-browser-start-position:focus-visible) {
   outline: none;
   border-color: var(--color-primary);

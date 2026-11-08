@@ -215,6 +215,10 @@ export interface TableDiff {
   ddl?: string;
   targetDdl?: string;
   sourceTableComment?: string | null;
+  tableCharset?: {
+    source: { characterSet?: string | null; collation?: string | null };
+    target: { characterSet?: string | null; collation?: string | null };
+  };
   targetTableComment?: string | null;
   syncSql?: string;
 }
@@ -375,6 +379,7 @@ export interface SchemaSyncSqlPlan {
 
 export interface GenerateSchemaSyncPlanOptions {
   databaseType: DatabaseType;
+  compareCharset?: boolean;
   targetSchema?: string;
   cascadeDelete?: boolean;
   sourceDialect?: string;
@@ -397,16 +402,22 @@ export interface GenerateSchemaSyncPlanOptions {
 
 const MYSQL_LIKE_SCHEMA_DIFF_TARGET_TYPES = new Set<DatabaseType>(["mysql", "doris", "starrocks", "goldendb", "sundb", "databend", "gbase"]);
 
-export function schemaDiffDeployTargetSchema(databaseType: DatabaseType | undefined, targetDatabase: string, targetSchema?: string): string | undefined {
-  const schema = targetSchema?.trim();
-  if (schema) return schema;
+/** Resolve the schema that qualifies an object: an explicit schema wins; engines without a
+ * separate schema namespace use the selected database as the schema. */
+export function schemaDiffEffectiveSchema(databaseType: DatabaseType | undefined, database: string, schema?: string): string | undefined {
+  const trimmedSchema = schema?.trim();
+  if (trimmedSchema) return trimmedSchema;
 
-  const database = targetDatabase.trim();
-  if (databaseType && MYSQL_LIKE_SCHEMA_DIFF_TARGET_TYPES.has(databaseType) && database) {
-    return database;
+  const trimmedDatabase = database.trim();
+  if (databaseType && MYSQL_LIKE_SCHEMA_DIFF_TARGET_TYPES.has(databaseType) && trimmedDatabase) {
+    return trimmedDatabase;
   }
 
   return undefined;
+}
+
+export function schemaDiffDeployTargetSchema(databaseType: DatabaseType | undefined, targetDatabase: string, targetSchema?: string): string | undefined {
+  return schemaDiffEffectiveSchema(databaseType, targetDatabase, targetSchema);
 }
 
 // Unified object type for UI display
@@ -742,7 +753,7 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
               parentId: tableId,
               parentName: diff.name,
             })),
-            ...(diff.sourceTableComment !== diff.targetTableComment
+            ...(diff.sourceTableComment !== diff.targetTableComment || diff.tableCharset
               ? [
                   {
                     id: tableOptionObjectId(diff.name),
@@ -750,7 +761,15 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
                     objectKind: "tableOption" as DiffObjectKind,
                     name: "tableOption",
                     selected: true,
-                    changes: [`comment: ${diff.targetTableComment ?? ""} -> ${diff.sourceTableComment ?? ""}`],
+                    changes: [
+                      ...(diff.sourceTableComment !== diff.targetTableComment ? [`comment: ${diff.targetTableComment ?? ""} -> ${diff.sourceTableComment ?? ""}`] : []),
+                      ...(diff.tableCharset?.source.characterSet && diff.tableCharset?.target.characterSet && diff.tableCharset.source.characterSet.toLowerCase() !== diff.tableCharset.target.characterSet.toLowerCase()
+                        ? [`character set: ${diff.tableCharset.target.characterSet} → ${diff.tableCharset.source.characterSet}`]
+                        : []),
+                      ...(diff.tableCharset?.source.collation && diff.tableCharset?.target.collation && diff.tableCharset.source.collation.toLowerCase() !== diff.tableCharset.target.collation.toLowerCase()
+                        ? [`collation: ${diff.tableCharset.target.collation} → ${diff.tableCharset.source.collation}`]
+                        : []),
+                    ],
                     parentId: tableId,
                     parentName: diff.name,
                   },
@@ -903,6 +922,7 @@ export function selectSchemaDiffInput(result: SchemaDiffPreparation, objects: Sc
         triggers,
         sourceTableComment: includeTableOptions ? diff.sourceTableComment : undefined,
         targetTableComment: includeTableOptions ? diff.targetTableComment : undefined,
+        tableCharset: includeTableOptions ? diff.tableCharset : undefined,
         syncSql: undefined,
       },
     ];

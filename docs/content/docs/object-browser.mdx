@@ -98,6 +98,21 @@ Metadata sections identify incomplete, unavailable, or unsupported dictionary re
 
 For OceanBase Oracle mode over generic JDBC, use an explicit `jdbc:oceanbase:oracle://` URL so type listing, details, and source use the same dialect. A plain `jdbc:oceanbase://` URL does not identify Oracle mode.
 
+## Inspect and Edit Oracle-Family Triggers
+
+Exact trigger actions for Oracle, OceanBase Oracle, and DM8 depend on the actual driver and version. Older agents, unidentified dialects, or plugins without the metadata contract do not gain write access automatically. Native Oracle and DM8 live-database compatibility still needs validation; OceanBase evidence does not establish it.
+
+1. Select **Triggers**, search by name, and load more as needed. A single click opens the source side panel. To use a bound source tab, open the trigger from the object tree with the source-tab setting.
+2. Check the trigger owner and actual owning table/view or non-table scope. Enabled/disabled and valid/invalid are independent states. Failed or denied reads are shown separately.
+3. Edit the complete definition and save. Review the fixed target, execution schema, and actual SQL before confirming. A body-only, truncated, or unverified baseline cannot replace the object. Keep a manually completed candidate, repair permissions, explicitly reload authority, and preview again.
+4. Inspect the readback. An accepted statement does not prove that the trigger is valid. Read compilation errors in the same details or open invalid-object diagnostics, then return to source to repair them. Cursor navigation is offered only when the error location can be mapped to the current source accurately.
+
+Source, dependencies, and dependents share the existing details panel. Dependency and owning-object navigation use the actual owner and type; non-table triggers have no table navigation. Switching detail sections retains drafts and undo history. Closing or changing objects lets you cancel discarding a draft. Trigger-source refresh and retry retain the latest input rather than overwriting it.
+
+Enable, disable, and compile use native operations, not drop/recreate. Oracle/OceanBase replacement preserves a known disabled state. DM state restoration may require separate steps, and a failed compile never automatically re-enables the trigger.
+
+<Callout type="warn">DDL may commit one statement at a time. After an unknown or partial result, use **Verify without writing** or refresh to inspect actual state. DBX never automatically replays attempted writes. Keep the failed draft and generate a new preview for only the remaining changes after verification. Reload and compare when the object or definition has changed.</Callout>
+
 ## Object Tree vs. Object Browser
 
 | Object tree | Object browser |

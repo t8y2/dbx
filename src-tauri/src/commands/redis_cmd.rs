@@ -4,8 +4,8 @@ use tauri::State;
 use crate::commands::connection::{ensure_connection_writable, AppState};
 use dbx_core::db::redis_driver::{
     classify_command, parse_command_argv, RedisBlob, RedisCollectionPage, RedisCommandResult, RedisCommandSafety,
-    RedisDatabaseInfo, RedisKeysExpiryResult, RedisScanResult, RedisStreamConsumer, RedisStreamGroup, RedisStreamPage,
-    RedisStreamPendingPage, RedisValue,
+    RedisDatabaseInfo, RedisKeyMetadata, RedisKeysExpiryResult, RedisScanResult, RedisStreamConsumer, RedisStreamGroup,
+    RedisStreamPage, RedisStreamPendingPage, RedisValue,
 };
 
 #[tauri::command]
@@ -50,6 +50,18 @@ pub async fn redis_scan_keys_batch(
         include_types.unwrap_or(true),
     )
     .await
+}
+
+/// Reads TYPE and TTL for an explicit list of keys so the key browser can
+/// fill the badges of rows it already listed without rescanning the keyspace.
+#[tauri::command]
+pub async fn redis_key_metadata_batch(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    db: u32,
+    key_raws: Vec<String>,
+) -> Result<Vec<RedisKeyMetadata>, String> {
+    dbx_core::redis_ops::redis_key_metadata_batch_in_db_core(&state, &connection_id, db, &key_raws).await
 }
 
 #[tauri::command]

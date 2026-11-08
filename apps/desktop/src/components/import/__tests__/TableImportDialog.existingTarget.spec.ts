@@ -537,7 +537,7 @@ describe("TableImportDialog existing targets", () => {
         index_type: "UNIQUE KEY",
       },
     ]);
-    mocks.previewTableImportFile.mockResolvedValueOnce({
+    mocks.previewTableImportFile.mockResolvedValue({
       fileName: "multi.xlsx",
       filePath: "/tmp/multi.xlsx",
       fileType: "excel",
@@ -551,6 +551,8 @@ describe("TableImportDialog existing targets", () => {
     i18n.global.locale.value = "en";
     await mountDialog({ connectionId: "doris-1", database: "analytics" });
     await selectWorkbook();
+    await vi.waitFor(() => expect(mocks.previewTableImportFile.mock.calls.at(-1)?.[1]).toMatchObject({ parseOptions: { sheetName: "Data" } }));
+    await flushAsyncUpdates();
     buttonContaining("Existing table")?.click();
     await flushAsyncUpdates();
     await selectExistingTarget("existing_target");
@@ -598,6 +600,8 @@ describe("TableImportDialog existing targets", () => {
     i18n.global.locale.value = "en";
     await mountDialog({ connectionId: "doris-1", database: "analytics" });
     await selectWorkbook();
+    await vi.waitFor(() => expect(mocks.previewTableImportFile.mock.calls.at(-1)?.[1]).toMatchObject({ parseOptions: { sheetName: "Data" } }));
+    await flushAsyncUpdates();
     buttonContaining("Existing table")?.click();
     await flushAsyncUpdates();
     await selectExistingTarget("existing_target");
@@ -872,5 +876,62 @@ describe("TableImportDialog existing targets", () => {
     expect(getHeaderSpans()[1].classList.contains("line-through")).toBe(false);
     expect(getRowCells(1)[0].classList.contains("line-through")).toBe(false);
     expect(getRowCells(1)[1].classList.contains("line-through")).toBe(false);
+  });
+
+  it("allows adding generated column and auto-generating required unmapped columns", async () => {
+    i18n.global.locale.value = "en";
+    mocks.getColumns.mockResolvedValueOnce([
+      { name: "id", data_type: "INTEGER", is_nullable: false, is_primary_key: true },
+      { name: "name", data_type: "TEXT", is_nullable: true, is_primary_key: false },
+    ]);
+    mocks.previewTableImportFile.mockResolvedValueOnce({
+      fileName: "users_no_id.csv",
+      filePath: "/tmp/users_no_id.csv",
+      fileType: "csv",
+      sizeBytes: 20,
+      columns: ["name"],
+      rows: [["Alice"]],
+      totalRows: 1,
+      sourceFingerprint: "users_no_id",
+    });
+
+    await mountDialog({ prefillTable: "existing_target" });
+    await selectWorkbook("users_no_id.csv");
+    await vi.waitFor(() => expect(buttonContaining("Next")?.disabled).toBe(false));
+
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+
+    // In mapping step: "id" is a required unmapped column.
+    // The required unmapped warning and "Auto-generate Required Columns" button should be visible.
+    const autoGenBtn = document.body.querySelector<HTMLButtonElement>('button[data-action="auto-generate-required"]');
+    expect(autoGenBtn).toBeTruthy();
+
+    // Click auto-generate
+    autoGenBtn?.click();
+    await flushAsyncUpdates();
+
+    // Warning should disappear
+    expect(document.body.querySelector('button[data-action="auto-generate-required"]')).toBeNull();
+
+    // Next button should be enabled
+    expect(buttonContaining("Next")?.disabled).toBe(false);
+
+    // Click Next to review
+    buttonContaining("Next")?.click();
+    await flushAsyncUpdates();
+
+    // Click Start Import
+    const startBtn = buttonContaining("Start Import");
+    expect(startBtn?.disabled).toBe(false);
+    startBtn?.click();
+    await flushAsyncUpdates();
+
+    expect(mocks.importTableFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mappings: [expect.objectContaining({ sourceColumn: "name", targetColumn: "name" }), expect.objectContaining({ sourceColumn: "", targetColumn: "id", generator: expect.any(String) })],
+      }),
+      expect.any(Function),
+    );
   });
 });

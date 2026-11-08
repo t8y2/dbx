@@ -13,6 +13,7 @@ export interface StatementRange {
 }
 
 export interface QueryEditorSurfaceHandle {
+  focusSqlEditor(): boolean;
   focusSearch(target?: Element | null): boolean;
   focusWhere(): boolean;
   openGoToColumn(): boolean;
@@ -50,6 +51,9 @@ export interface QueryEditorSurfaceHandle {
 }
 
 export interface QueryResultSurfaceHandle {
+  copyActiveResult(isValid?: () => boolean): boolean;
+  focusResultGrid(): boolean;
+  cancelResultGridFocus(): void;
   focusSearch(target?: Element | null): boolean;
   refreshData(target?: Element | null): boolean;
   toggleResultsPane(): boolean;
@@ -62,14 +66,13 @@ export interface QueryResultSurfaceHandle {
 export interface ContentAreaSurfaceProps {
   activeTab: QueryTab;
   activeConnection?: ConnectionConfig;
-  executableSql: string;
+  /** Whether the editor has anything to execute. Deliberately not the SQL text itself: the text changes on every keystroke and would re-render every layer it is threaded through. */
+  hasExecutableSql: boolean;
   activeOutputView: TabOutputView;
   formatSqlRequest: { id: number; tabId: string } | null;
   compressSqlRequest: { id: number; tabId: string } | null;
   /** Toolbar `a`/`A`: re-case keywords in the acting tab's editor (issue #11828). */
   keywordCaseRequest: { id: number; tabId: string; mode: "upper" | "lower" } | null;
-  selectedSql: string;
-  cursorPos: number;
   blockDangerousRedisCommands: boolean;
   zenMode?: boolean;
 }
@@ -85,6 +88,7 @@ export interface ContentAreaSurfaceEmits {
   closeTab: [tabId: string];
   "locate-tab": [tab: QueryTab];
   "locate-sql-file": [tab: QueryTab];
+  "locate-sql-library-file": [tab: QueryTab];
   "update:activeOutputView": [tabId: string, value: TabOutputView];
   fixWithAi: [tabId: string, errorMessage: string];
   sendSelectionToAi: [tabId: string, sql: string];

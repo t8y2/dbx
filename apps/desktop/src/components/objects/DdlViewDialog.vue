@@ -297,6 +297,7 @@ async function loadDdl(force = false) {
     queryTimeoutSecs: connectionStore.getConfig(props.connectionId)?.query_timeout_secs,
     database: props.database,
     schema: props.schema || props.database,
+    explicitOwner: props.schema || undefined,
     tableName: props.tableName,
     objectType: props.objectType,
     catalog: props.catalog,
@@ -485,6 +486,7 @@ function createDdlViewerTab(ddl: string, pending: boolean) {
   if (tab) {
     tab.ddlViewer = {
       schema: props.schema || props.database,
+      explicitOwner: props.schema || undefined,
       tableName: props.tableName,
       objectType: props.objectType,
       formatDialect: ddlFormatDialectFor({ formatDialect: props.formatDialect, databaseType: props.databaseType, highlightDialect: props.dialect }),

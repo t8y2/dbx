@@ -322,6 +322,66 @@ afterEach(() => {
   root = undefined;
 });
 
+describe("SqlFileExecutionDialog includes", () => {
+  it("shows included source paths in live statement progress and retained failure details", async () => {
+    await mountReadyDialog();
+    const gate = deferred();
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "running", { statementIndex: 1, statementSummary: "[shared/seed.sql] INSERT INTO missing VALUES(1)" }));
+      await gate.promise;
+      mocks.progressHandler?.(progress(request.executionId, "statementFailed", { statementIndex: 1, failureCount: 1, statementSummary: "[shared/seed.sql] INSERT INTO missing VALUES(1)", error: "[shared/seed.sql] no such table: missing" }));
+      mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 1, failureCount: 1 }));
+    });
+    findButton("sqlFile.execute").click();
+    try {
+      await vi.waitFor(() => expect(root!.textContent).toContain("[shared/seed.sql] INSERT INTO missing"));
+    } finally {
+      gate.resolve();
+    }
+    await vi.waitFor(() => expect(root!.textContent).toContain("[shared/seed.sql] no such table: missing"));
+    expect(mocks.trackerTask.sqlFileFailures[0].statementSummary).toContain("[shared/seed.sql]");
+  });
+
+  it("keeps includes opt-in and submits the checked option with the entry paths", async () => {
+    await mountReadyDialog();
+    const label = Array.from(root!.querySelectorAll("label")).find((item) => item.textContent?.includes("sqlFile.resolveIncludes"))!;
+    const input = label.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(input.checked).toBe(false);
+    expect(input.disabled).toBe(false);
+    input.click();
+    await nextTick();
+    expect(root!.textContent).toContain("sqlFile.resolveIncludesHint");
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalledWith(expect.objectContaining({ resolveIncludes: true }), ["/tmp/first.sql", "/tmp/second.sql"]));
+    expect(input.disabled).toBe(true);
+  });
+
+  it("does not offer server-local includes for prepared Web uploads", async () => {
+    mocks.desktop = false;
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true, prefillPreview: { fileName: "main.sql", filePath: "/server/tmp/main.sql", sizeBytes: 9, preview: "SELECT 1;", canExecuteWithoutSelectedDatabase: true } });
+    app.mount(root);
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+    expect(root.textContent).not.toContain("sqlFile.resolveIncludes");
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalledWith(expect.objectContaining({ resolveIncludes: false }), ["/server/tmp/main.sql"]));
+  });
+
+  it("disables includes for compressed SQL files", async () => {
+    mocks.openFileDialog.mockResolvedValue(["/tmp/backup.sql.gz"]);
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true });
+    app.mount(root);
+    await vi.waitFor(() => expect(mocks.fetchSqlFileTargetOptions).toHaveBeenCalled());
+    findButton("sqlFile.browse").click();
+    await vi.waitFor(() => expect(mocks.previewSqlFile).toHaveBeenCalled());
+    const label = Array.from(root.querySelectorAll("label")).find((item) => item.textContent?.includes("sqlFile.resolveIncludes"))!;
+    expect(label.querySelector<HTMLInputElement>("input")!.disabled).toBe(true);
+  });
+});
+
 describe("SqlFileExecutionDialog retries", () => {
   async function mountRestoredPreview() {
     mocks.desktop = false;
@@ -1169,7 +1229,8 @@ describe("SqlFileExecutionDialog target preservation (#4844)", () => {
 });
 
 describe("SqlFileExecutionDialog completion prompt and close (#12608)", () => {
-  it("toasts success and closes dialog upon successful completion", async () => {
+  // The close-on-success default keeps the dialog open so results stay visible (#14078).
+  it("toasts success and keeps the dialog open upon successful completion by default", async () => {
     const onOpenChange = vi.fn();
     await mountReadyDialog(onOpenChange);
 
@@ -1180,7 +1241,7 @@ describe("SqlFileExecutionDialog completion prompt and close (#12608)", () => {
     findButton("sqlFile.execute").click();
 
     await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("sqlFile.executeSuccess", 3000));
-    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(onOpenChange).not.toHaveBeenCalled();
   });
 
   it("toasts warning and keeps dialog open when execution has statement failures", async () => {
@@ -1197,8 +1258,9 @@ describe("SqlFileExecutionDialog completion prompt and close (#12608)", () => {
     expect(onOpenChange).not.toHaveBeenCalled();
   });
 
-  it("toasts success and closes dialog upon manual transaction commit", async () => {
+  it("toasts success and closes dialog upon manual transaction commit when closeOnSuccess is on", async () => {
     const onOpenChange = vi.fn();
+    localStorage.setItem("dbx-sql-file-close-on-success", "true");
     await mountReadyDialog(onOpenChange);
     const label = Array.from(root!.querySelectorAll("label")).find((item) => item.textContent?.includes("toolbar.manualTransaction"));
     label!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
@@ -1227,12 +1289,27 @@ describe("SqlFileExecutionDialog closeOnSuccess option (#12891)", () => {
     toggleButton.click();
     await nextTick();
 
-    expect(localStorage.getItem("dbx-sql-file-close-on-success")).toBe("false");
+    expect(localStorage.getItem("dbx-sql-file-close-on-success")).toBe("true");
 
     toggleButton.click();
     await nextTick();
 
-    expect(localStorage.getItem("dbx-sql-file-close-on-success")).toBe("true");
+    expect(localStorage.getItem("dbx-sql-file-close-on-success")).toBe("false");
+  });
+
+  it("closes dialog upon successful completion when closeOnSuccess is on", async () => {
+    const onOpenChange = vi.fn();
+    localStorage.setItem("dbx-sql-file-close-on-success", "true");
+    await mountReadyDialog(onOpenChange);
+
+    mocks.executeSqlFiles.mockImplementationOnce(async (request) => {
+      mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 1, successCount: 1, failureCount: 0 }));
+    });
+
+    findButton("sqlFile.execute").click();
+
+    await vi.waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("sqlFile.executeSuccess", 3000));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
   it("keeps dialog open after successful execution when closeOnSuccess is false", async () => {

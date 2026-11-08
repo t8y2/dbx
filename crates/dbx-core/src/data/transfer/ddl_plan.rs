@@ -35,6 +35,18 @@ pub(super) async fn prepare_table_ddl(
     table_comment: Option<&str>,
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
 ) -> Result<PreparedTableDdl, String> {
+    if mysql_xugu::is_pair(source_db_type, target_db_type) {
+        let ddl = crate::schema::get_table_transfer_ddl_core(
+            state,
+            &request.source_connection_id,
+            &request.source_database,
+            &request.source_schema,
+            table,
+        )
+        .await
+        .map_err(|error| format!("Cannot read complete MySQL DDL for '{table}': {error}"))?;
+        return mysql_xugu::prepare(&ddl, columns, &request.target_schema, target_table);
+    }
     let source_columns = if request.has_package_selection() {
         Some(serde_json::to_value(columns).map_err(|error| error.to_string())?)
     } else {
@@ -253,13 +265,14 @@ pub(super) async fn prepare_table_ddl(
             )
         }
     } else {
-        generate_create_table_ddl_with_column_quoting(
+        generate_create_table_ddl_with_source_profile(
             columns,
             target_table,
             &request.source_schema,
             &request.target_schema,
             target_db_type,
             source_db_type,
+            source_driver_profile.as_deref(),
             table_comment,
             request.target_catalog.as_deref(),
             request.quote_target_column_names,

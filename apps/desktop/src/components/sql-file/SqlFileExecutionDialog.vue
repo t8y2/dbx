@@ -77,6 +77,7 @@ const isDesktopRuntime = isTauriRuntime();
 const fileInput = ref<HTMLInputElement | null>(null);
 const previews = ref<SqlFilePreview[]>([]);
 const encoding = ref<SqlFileEncoding>("auto");
+const resolveIncludes = ref(false);
 const previewError = ref("");
 let previewGeneration = 0;
 let selectedSources: Array<string | File> = [];
@@ -345,6 +346,10 @@ onBeforeUnmount(() => {
 });
 
 const restoreSelectedTables = ref(false);
+const canResolveIncludes = computed(() => isDesktopRuntime && !restoreSelectedTables.value && previews.value.length > 0 && previews.value.every((item) => !item.packageFilePaths && item.fileName.toLowerCase().endsWith(".sql")));
+watch(canResolveIncludes, (allowed) => {
+  if (!allowed) resolveIncludes.value = false;
+});
 const backupTables = ref<SqlFileTable[]>([]);
 const selectedTableKeys = ref(new Set<string>());
 const tableSearch = ref("");
@@ -569,6 +574,7 @@ function resetState() {
   const initialTarget = resolveInitialTarget();
   previews.value = [];
   encoding.value = "auto";
+  resolveIncludes.value = false;
   selectingFile.value = false;
   loadingPreview.value = false;
   applyTarget(initialTarget);
@@ -903,6 +909,7 @@ async function startExecution() {
           ...(target.schema ? { schema: target.schema } : {}),
           filePath: executionPaths[0]!,
           encoding: encoding.value,
+          resolveIncludes: canResolveIncludes.value && resolveIncludes.value,
           continueOnError: continueOnError.value,
           ...(txnSessionId.value ? { txnSessionId: txnSessionId.value } : {}),
           ...(restoreSelectedTables.value ? { selectedTables: selectedTables.value.map((table) => ({ ...table })) } : {}),
@@ -1212,6 +1219,11 @@ watch(
             {{ t("toolbar.manualTransaction") }}
           </label>
           <p v-if="manualTransaction" class="text-xs text-muted-foreground">{{ t("sqlFile.manualTransactionHint") }}</p>
+          <label v-if="isDesktopRuntime" class="flex items-center gap-2 text-xs">
+            <input v-model="resolveIncludes" type="checkbox" :disabled="executionLocked || !canResolveIncludes" />
+            {{ t("sqlFile.resolveIncludes") }}
+          </label>
+          <p v-if="resolveIncludes" class="text-xs text-muted-foreground">{{ t("sqlFile.resolveIncludesHint") }}</p>
           <button type="button" class="flex items-center gap-2 text-xs text-left" :disabled="executionLocked || manualTransaction" @click="continueOnError = !continueOnError">
             <CheckSquare v-if="continueOnError" class="w-3.5 h-3.5 text-primary shrink-0" />
             <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />

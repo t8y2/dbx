@@ -527,6 +527,7 @@ for line in sys.stdin:
             None,
             None,
             Some("exact-test"),
+            &MetadataReadOptions::default(),
         )
         .await
         .unwrap();
@@ -550,6 +551,7 @@ for line in sys.stdin:
             Some(&types),
             None,
             Some("exact-test"),
+            &MetadataReadOptions::default(),
         )
         .await
         .unwrap();
@@ -583,6 +585,7 @@ for line in sys.stdin:
                 Some(&["INDEX".into()]),
                 None,
                 Some("exact-test"),
+                &MetadataReadOptions::default(),
             )
             .await;
             if mode == "legacy-empty" {
@@ -608,6 +611,7 @@ for line in sys.stdin:
             Some(&["INDEX".into()]),
             None,
             Some("exact-test"),
+            &MetadataReadOptions::default(),
         )
         .await
         .unwrap();

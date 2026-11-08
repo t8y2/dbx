@@ -86,6 +86,19 @@ fn exact_backup_scope_preserves_literal_names_and_rejects_empty_or_foreign_scope
     assert!(config.validate().is_err());
 }
 
+#[test]
+fn scheduled_backup_system_databases_filter_templates_for_postgres_and_opengauss() {
+    assert!(super::engine::system_database("template0", true));
+    assert!(super::engine::system_database("template1", true));
+    assert!(super::engine::system_database("TEMPLATE0", true));
+    assert!(!super::engine::system_database("my_db", true));
+    assert!(super::engine::system_database("information_schema", false));
+    assert!(super::engine::system_database("mysql", false));
+    assert!(super::engine::system_database("performance_schema", false));
+    assert!(super::engine::system_database("sys", false));
+    assert!(!super::engine::system_database("my_db", false));
+}
+
 #[tokio::test]
 async fn schedule_survives_reopen_and_rejects_stale_edit() {
     let dir = tempfile::tempdir().unwrap();

@@ -4,6 +4,8 @@ import { CaseSensitive, ChevronDown, ChevronRight, ChevronUp, Search, X } from "
 import { useI18n } from "vue-i18n";
 import { vNamingStyleSupport } from "@/directives/vNamingStyleSupport";
 import type { DataGridReplaceScope } from "@/lib/dataGrid/dataGridReplace";
+import { isReplaceAllShortcut } from "@/lib/editor/replaceAllShortcut";
+import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 
 const { t } = useI18n();
 
@@ -52,6 +54,37 @@ function keepSearchInputFocused(event: MouseEvent) {
   event.preventDefault();
 }
 
+/** Same gates as the Replace All button, mirrored for its keyboard accelerator. */
+function canReplaceAll(): boolean {
+  return !!props.replaceAvailable && !props.replaceBusy && !!props.replaceMatchCount;
+}
+
+function onSearchInputKeydown(event: KeyboardEvent) {
+  if (isReplaceAllShortcut(event)) {
+    // Handled here: the forwarded keydown would run Enter = navigate-next in
+    // the grid host. A closed replace row must not fire with hidden (possibly
+    // stale) replacement text — swallow the combo either way.
+    event.preventDefault();
+    if (replaceOpen.value && canReplaceAll()) emit("replaceAll");
+    return;
+  }
+  emit("keydown", event);
+}
+
+function onReplacementKeydown(event: KeyboardEvent) {
+  if (isReplaceAllShortcut(event)) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (canReplaceAll()) emit("replaceAll");
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    event.stopPropagation();
+    if (props.replaceAvailable && !props.replaceBusy && props.canReplaceCurrent) emit("replaceCurrent");
+  }
+}
+
 defineExpose({
   focus: (select = false) => {
     searchInput.value?.focus();
@@ -62,7 +95,7 @@ defineExpose({
 
 <template>
   <Transition enter-active-class="transition-opacity duration-150" leave-active-class="transition-opacity duration-100" enter-from-class="opacity-0" leave-to-class="opacity-0">
-    <div v-if="props.open" data-grid-search-bar class="absolute top-1 right-2 z-20 max-w-[calc(100%-1rem)] px-2 py-1 bg-background border rounded-md shadow-md" @keydown.esc.stop.prevent="emit('close')">
+    <div v-if="props.open" data-grid-search-bar class="absolute top-1 right-2 z-20 max-w-[calc(100%-1rem)] px-2 py-1 bg-background focus-within:bg-background-solid border rounded-md shadow-md" @keydown.esc.stop.prevent="emit('close')">
       <div class="flex items-center gap-1 min-w-0">
         <button
           v-if="props.replaceAvailable !== undefined"
@@ -90,7 +123,7 @@ defineExpose({
           spellcheck="false"
           class="w-48 h-5 min-w-0 flex-1 text-xs bg-transparent outline-none placeholder:text-muted-foreground"
           :placeholder="t('grid.search')"
-          @keydown="emit('keydown', $event)"
+          @keydown="onSearchInputKeydown"
         />
         <button
           v-if="replaceOpen"
@@ -156,20 +189,29 @@ defineExpose({
           class="h-6 min-w-0 w-48 flex-1 text-xs bg-transparent outline-none border rounded px-1.5"
           :placeholder="t('grid.replaceText')"
           :aria-label="t('grid.replaceText')"
-          @keydown.enter.stop.prevent="props.replaceAvailable && !props.replaceBusy && props.canReplaceCurrent && emit('replaceCurrent')"
+          @keydown="onReplacementKeydown"
         />
         <button data-grid-replace-current type="button" class="h-6 border rounded px-2 text-xs disabled:opacity-40" :disabled="!props.replaceAvailable || props.replaceBusy || !props.canReplaceCurrent" :title="t('grid.replaceCurrentCell')" @click="emit('replaceCurrent')">
           {{ t("editor.search.replace") }}
         </button>
-        <button data-grid-replace-all type="button" class="h-6 border rounded px-2 text-xs disabled:opacity-40" :disabled="!props.replaceAvailable || props.replaceBusy || !props.replaceMatchCount" @click="emit('replaceAll')">{{ t("editor.search.replaceAll") }}</button>
+        <button
+          data-grid-replace-all
+          type="button"
+          class="h-6 border rounded px-2 text-xs disabled:opacity-40"
+          :disabled="!props.replaceAvailable || props.replaceBusy || !props.replaceMatchCount"
+          :title="`${t('editor.search.replaceAll')} (${formatShortcutDisplay('Mod+Alt+Enter')})`"
+          @click="emit('replaceAll')"
+        >
+          {{ t("editor.search.replaceAll") }}
+        </button>
       </div>
       <div v-if="replaceOpen" class="flex flex-wrap items-center gap-1 mt-1 text-xs">
-        <select v-model="replaceScope" data-grid-replace-scope class="min-w-0 h-6 max-w-full rounded border bg-background px-1" :aria-label="t('grid.replaceScope')">
+        <select v-model="replaceScope" data-grid-replace-scope class="min-w-0 h-6 max-w-full rounded border bg-background focus:bg-background-solid px-1" :aria-label="t('grid.replaceScope')">
           <option value="loaded">{{ t("grid.replaceLoadedResults") }}</option>
           <option value="column">{{ t("grid.replaceCurrentColumn") }}</option>
           <option value="selection">{{ t("grid.replaceSelectedCells") }}</option>
         </select>
-        <select v-if="replaceScope === 'column'" v-model.number="replaceColumn" data-grid-replace-column class="h-6 min-w-0 flex-1 max-w-48 rounded border bg-background px-1" :aria-label="t('grid.replaceCurrentColumn')">
+        <select v-if="replaceScope === 'column'" v-model.number="replaceColumn" data-grid-replace-column class="h-6 min-w-0 flex-1 max-w-48 rounded border bg-background focus:bg-background-solid px-1" :aria-label="t('grid.replaceCurrentColumn')">
           <option :value="-1" disabled>{{ t("grid.replaceChooseColumn") }}</option>
           <option v-for="(column, index) in props.columns" :key="index" :value="index">{{ column }}</option>
         </select>

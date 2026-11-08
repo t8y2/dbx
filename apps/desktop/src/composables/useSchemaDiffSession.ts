@@ -7,6 +7,7 @@ import { filterSchemaDiffTables } from "@/lib/schema/schemaDiffTableFilter";
 import { compileSchemaDiffTableFilter } from "@/lib/schema/schemaDiffTableFilter";
 import { filterSchemaDiffFunctions, schemaDiffRoutineKeyFromFunction } from "@/lib/schema/schemaDiffRoutine";
 import { loadSchemaDetails } from "@/lib/schema/schemaDiffMetadataLoad";
+import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
 import { registerSchemaDiffTask } from "@/lib/schema/schemaDiffCancellation";
 import type { SchemaDiffTableIdentity, SchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
 import { getSchemaDiffNextProgressStep, isSchemaDiffPostgresLike, shouldLoadSchemaDiffExtraObjectPhase, shouldLoadSchemaDiffRoutines, type SchemaDiffProgressPhase } from "@/lib/schema/schemaDiffProgress";
@@ -203,6 +204,17 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
       const [sourceTableList, targetTableList] = await settleRequests([dependencies.tableListLoader.load(sourceTableIdentity, { refresh: true }), dependencies.tableListLoader.load(targetTableIdentity, { refresh: true })]);
       signal.throwIfAborted();
       ({ sourceTables, targetTables } = filterSchemaDiffTables(sourceTableList, targetTableList, tableFilter, sessionOptions, sessionOptions.selectedTables));
+
+      // Column/index/foreign-key reads are served from the persisted object
+      // metadata cache, which has no TTL on the backend. A compare must see the
+      // live structure on both sides, otherwise changes made outside DBX are
+      // hidden behind a stale snapshot. Best effort: a failed deletion only
+      // means the compare falls back to whatever the cache returns. Users can
+      // opt out via `refreshMetadata` to reuse the cache for faster compares.
+      if (sessionOptions.refreshMetadata) {
+        await Promise.all([invalidateObjectMetadataCache({ connectionId: input.sourceConnectionId, database: input.sourceDatabase }), invalidateObjectMetadataCache({ connectionId: input.targetConnectionId, database: input.targetDatabase })]);
+        signal.throwIfAborted();
+      }
 
       publishProgress(session, { phase: "loading-source-details", current: 0, total: sourceTables.length });
       sourceDetails = await loadSchemaDetails(

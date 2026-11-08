@@ -84,7 +84,7 @@ vi.mock("@/stores/settingsStore", async () => {
   };
   return { ...actual, useSettingsStore: () => settingsMock.store };
 });
-vi.mock("@/lib/dataGrid/geometryPreview", () => ({ isHexGeometry: () => false, renderWktOnCanvas: mocks.renderWkt }));
+vi.mock("@/lib/dataGrid/geometryPreview", () => ({ isHexGeometry: () => false, looksLikeWkt: () => false, parseWktGeometry: () => null, renderWktOnCanvas: mocks.renderWkt }));
 vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: mocks.copyToClipboard }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/composables/useDataGridCellDetail", async () => {
@@ -200,7 +200,10 @@ describe("DataGridSearchBar", () => {
 });
 
 describe("DataGridPagination", () => {
-  it("shows average beside the existing selection summary values", () => {
+  beforeEach(() => {
+    settingsMock.store.editorSettings.dataGridSelectionSummaryMetric = "sum";
+  });
+  it("defaults the compact footer to sum and keeps other metrics in the popover", () => {
     const mounted = mountComponent(DataGridPagination, {
       selectionSummary: { cellCount: 4, rowCount: 2 },
       selectionSummarySumText: "10",
@@ -218,13 +221,51 @@ describe("DataGridPagination", () => {
     });
 
     const summaryText = hostText(mounted.root);
-    expect(summaryText).toContain("grid.selectionSum");
-    expect(summaryText).toContain("grid.selectionAverage");
-    expect(summaryText).toContain("grid.selectionCells");
-    expect(summaryText).toContain("grid.rows");
+    expect(summaryText).toContain("grid.selectionStatisticsSum");
+    expect(summaryText).toContain("grid.selectionStatisticsAverage");
+    expect(summaryText).toContain("grid.selectionStatisticsCells");
+    expect(summaryText).toContain("grid.selectionStatisticsRows");
   });
 
-  it("shows min, max, count and distinct beside sum and average when numbers are selected (#13286)", () => {
+  it("saves the chosen footer metric and shares it with newly mounted grids", async () => {
+    const props = {
+      selectionSummary: { cellCount: 4, rowCount: 2 },
+      selectionSummarySumText: "10",
+      selectionSummaryAverageText: "2.5",
+      selectionSummaryMinText: "1",
+      selectionSummaryMaxText: "4",
+      loadAllRowsActive: false,
+      loadAllRowsEnabled: true,
+      canLoadAllRows: true,
+      defaultPageSize: 100,
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      pageSize: 100,
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: false,
+      canJumpLastPage: false,
+    };
+    const mounted = mountComponent(DataGridPagination, props);
+    const trigger = findOne(mounted.root, (node) => node.props["data-selection-summary-trigger"] === "");
+    expect(hostText(trigger)).toBe("grid.selectionStatisticsSum: 10");
+
+    const displaySelect = findOne(mounted.root, (node) => node.props["data-selection-summary-display-control"] === "");
+    mocks.updateSettings.mockImplementationOnce((partial) => Object.assign(settingsMock.store.editorSettings, partial));
+    displaySelect.props["onUpdate:modelValue"]("average");
+    await nextTick();
+    expect(mocks.updateSettings).toHaveBeenCalledWith({ dataGridSelectionSummaryMetric: "average" });
+    expect(displaySelect.props["model-value"]).toBe("average");
+    expect(hostText(trigger)).toBe("grid.selectionStatisticsAverage: 2.5");
+
+    const secondGrid = mountComponent(DataGridPagination, props);
+    const secondTrigger = findOne(secondGrid.root, (node) => node.props["data-selection-summary-trigger"] === "");
+    expect(hostText(secondTrigger)).toBe("grid.selectionStatisticsAverage: 2.5");
+  });
+
+  it("shows all metrics as labeled rows inside the statistics popover (#13286)", () => {
     const mounted = mountComponent(DataGridPagination, {
       selectionSummary: { cellCount: 4, rowCount: 2 },
       selectionSummarySumText: "10",
@@ -246,10 +287,10 @@ describe("DataGridPagination", () => {
     });
 
     const summaryText = hostText(mounted.root);
-    expect(summaryText).toContain("grid.selectionMin");
-    expect(summaryText).toContain("grid.selectionMax");
-    expect(summaryText).toContain("grid.selectionCount");
-    expect(summaryText).toContain("grid.selectionDistinct");
+    expect(summaryText).toContain("grid.selectionStatisticsMin");
+    expect(summaryText).toContain("grid.selectionStatisticsMax");
+    expect(summaryText).toContain("grid.selectionStatisticsCount");
+    expect(summaryText).toContain("grid.selectionStatisticsDistinct");
   });
 
   it("keeps the loading icon mounted with a constant footprint and only animates while loading", async () => {
@@ -447,7 +488,7 @@ describe("DataGridPagination", () => {
       canExport: true,
     });
 
-    const findExportMenu = () => findAll(mounted.root, (node) => node.props["data-stub"] === "LightDropdown" && node.props["aria-label"] === "grid.export");
+    const findExportMenu = () => findAll(mounted.root, (node) => node.props["aria-label"] === "grid.export");
     expect(findExportMenu()).toHaveLength(1);
 
     await mounted.setProps({ canExport: false });
@@ -474,16 +515,20 @@ describe("DataGridPagination", () => {
       canJumpLastPage: false,
     });
 
-    const exportMenus = findAll(mounted.root, (node) => node.props["data-stub"] === "LightDropdown" && node.props["aria-label"] === "grid.export");
+    const exportMenus = findAll(mounted.root, (node) => node.props["aria-label"] === "grid.export");
     expect(exportMenus).toHaveLength(1);
   });
 
-  it("copies each aggregate value on click, and only the values", () => {
+  it("keeps metric selection separate from full-width copy rows", () => {
     const copySelectionSummary = vi.fn();
     const mounted = mountComponent(DataGridPagination, {
       selectionSummary: { cellCount: 4, rowCount: 2 },
       selectionSummarySumText: "10",
       selectionSummaryAverageText: "2.5",
+      selectionSummaryMinText: "1",
+      selectionSummaryMaxText: "4",
+      selectionSummaryCount: 4,
+      selectionSummaryDistinctCount: 3,
       loading: false,
       infiniteScrollEnabled: false,
       infiniteScrollAllLoaded: false,
@@ -503,15 +548,64 @@ describe("DataGridPagination", () => {
     // the complete button interaction model on a clickable text span.
     expect(sum.type).toBe("button");
     expect(average.type).toBe("button");
-    expect(sum.props.title).toBe("grid.copyValue");
+    expect(sum.props.title).toBe("grid.copyValue: grid.selectionStatisticsSum: 10");
     expect(hostText(sum)).toContain("grid.copyValue");
 
-    dispatch(sum, "click");
-    expect(copySelectionSummary).toHaveBeenCalledWith("10");
+    const expectedValues = { sum: "10", average: "2.5", min: "1", max: "4", count: "4", distinct: "3", cells: "4", rows: "2" };
+    for (const [key, value] of Object.entries(expectedValues)) {
+      const row = findOne(mounted.root, (node) => node.props["data-selection-summary-copy"] === key);
+      expect(row.type).toBe("button");
+      dispatch(row, "click");
+      expect(copySelectionSummary).toHaveBeenLastCalledWith(value);
+    }
+    expect(copySelectionSummary).toHaveBeenCalledTimes(8);
+    expect(findAll(mounted.root, (node) => node.props.type === "radio")).toHaveLength(0);
+    const displaySelect = findOne(mounted.root, (node) => node.props["data-selection-summary-display-control"] === "");
+    expect(findAll(mounted.root, (node) => node.type === "select")).toHaveLength(0);
+    displaySelect.props["onUpdate:modelValue"]("sum");
+    expect(copySelectionSummary).toHaveBeenCalledTimes(8);
+  });
 
-    dispatch(average, "click");
-    expect(copySelectionSummary).toHaveBeenLastCalledWith("2.5");
-    expect(copySelectionSummary).toHaveBeenCalledTimes(2);
+  it("caps the chosen aggregate width and keeps full values readable in the popover (#13468)", () => {
+    const longValue = "2026102710000008194";
+    const mounted = mountComponent(DataGridPagination, {
+      selectionSummary: { cellCount: 1, rowCount: 1 },
+      selectionSummarySumText: longValue,
+      selectionSummaryAverageText: longValue,
+      selectionSummaryMinText: longValue,
+      selectionSummaryMaxText: longValue,
+      selectionSummaryCount: 1,
+      selectionSummaryDistinctCount: 1,
+      loading: false,
+      infiniteScrollEnabled: false,
+      infiniteScrollAllLoaded: false,
+      canLoadAllRows: true,
+      pageSize: 100,
+      customPageSizeInput: "",
+      pageSizeMenuItems: [],
+      exportMenuItems: [],
+      currentPage: 1,
+      canGoNextPage: true,
+      canJumpLastPage: true,
+    });
+
+    const trigger = findOne(mounted.root, (node) => node.props["data-selection-summary-trigger"] === "");
+    expect(hostText(trigger)).toBe(`grid.selectionStatisticsSum: ${longValue}`);
+    expect(hostText(trigger)).not.toContain("grid.selectionStatisticsAverage");
+    expect(trigger.props.title).toContain(longValue);
+    expect(trigger.props["aria-label"]).toBe("grid.selectionStatistics");
+
+    const details = findOne(mounted.root, (node) => node.props["data-selection-summary-details"] === "");
+    expect(details.props.side).toBe("top");
+    expect(findAll(details, (node) => node.type === "dt")).toHaveLength(8);
+    expect(findAll(details, (node) => node.type === "dd")).toHaveLength(8);
+    const aggregates = ["sum", "average", "min", "max"].map((key) => findOne(details, (node) => node.props[`data-selection-summary-${key}`] === ""));
+    for (const aggregate of aggregates) {
+      expect(hostText(aggregate)).toContain(longValue);
+    }
+
+    const loadAll = findOne(mounted.root, (node) => node.props["aria-label"] === "grid.loadAllAndGoToLastRow");
+    expect(loadAll.props.disabled).toBe(false);
   });
 
   it("keeps the aggregate values non-copyable while the selection drag is pending", () => {
@@ -538,6 +632,10 @@ describe("DataGridPagination", () => {
     // Pending aggregate placeholders retain their layout but expose no copy action.
     expect(sum.props.title).toBeUndefined();
     expect(sum.props.disabled).toBe(true);
+    const count = findOne(mounted.root, (node) => node.props["data-selection-summary-value"] === "count");
+    const distinct = findOne(mounted.root, (node) => node.props["data-selection-summary-value"] === "distinct");
+    expect(hostText(count)).toBe("…");
+    expect(hostText(distinct)).toBe("…");
 
     dispatch(sum, "click");
     expect(copySelectionSummary).not.toHaveBeenCalled();
@@ -2140,6 +2238,57 @@ describe("cell detail surfaces", () => {
       openImagePreview: vi.fn(),
       canCopySqlCondition: () => true,
       databaseType: "oracle",
+    });
+
+    expect(hostText(dialog.root)).toContain("Hello");
+    expect(hostText(panel.root)).toContain("Hello");
+    dispatch(
+      findOne(dialog.root, (node) => node.props.title === "grid.copyValue"),
+      "click",
+    );
+    expect(copyText).toHaveBeenCalledWith("Hello");
+  });
+
+  it("presents printable PostgreSQL BYTEA bytes as text and copies the presented value (#11987)", async () => {
+    const copyText = vi.fn();
+    const byteaDetail = detail({
+      type: "BYTEA",
+      value: "0x48656c6c6f",
+      rawValue: "0x48656c6c6f",
+      rawValuePreview: "0x48656c6c6f",
+      displayValue: "Hello",
+      displayValuePreview: "Hello",
+      formattedJson: "",
+    });
+    const dialog = mountComponent(DataGridCellDetailDialog, {
+      open: true,
+      detail: byteaDetail,
+      typeColorClass: () => "",
+      openImagePreview: vi.fn(),
+      copyText,
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => true,
+      importBinaryValue: vi.fn(),
+      databaseType: "postgres",
+    });
+    const panel = mountComponent(DataGridCellDetailPanel, {
+      detail: byteaDetail,
+      panelIsBottom: true,
+      metadataCollapsed: false,
+      valueFillsHeight: false,
+      editing: false,
+      sideJsonView: false,
+      showCompactJson: false,
+      canCompactJson: false,
+      typeColorClass: () => "",
+      canDownloadBinaryValue: () => true,
+      downloadBinaryValue: vi.fn(),
+      canImportBinaryValue: () => true,
+      importBinaryValue: vi.fn(),
+      openImagePreview: vi.fn(),
+      canCopySqlCondition: () => true,
+      databaseType: "postgres",
     });
 
     expect(hostText(dialog.root)).toContain("Hello");

@@ -43,10 +43,12 @@ pub fn allowed_command(command: &str) -> bool {
             | "confirm_exit"
             | "complete_app_close"
             | "reveal_path_in_file_manager"
+            | "open_path_with_default_app"
             | "get_platform"
             | "load_app_appearance_settings"
             | "update_app_appearance_settings"
             | "set_app_locale"
+            | "set_promoted_build"
     )
 }
 /// Wrap the actual invoke dispatcher so direct IPC calls cannot bypass the startup UI.
@@ -80,6 +82,10 @@ mod tests {
         }
         assert!(allowed_command("migration_start"));
         assert!(allowed_command("reveal_path_in_file_manager"));
+        assert!(allowed_command("open_path_with_default_app"));
+        // Display-only native-menu feeds: they must work while the wizard is up.
+        assert!(allowed_command("set_app_locale"));
+        assert!(allowed_command("set_promoted_build"));
     }
     #[test]
     fn invoke_dispatch_rejects_business_commands_until_ready() {

@@ -13,6 +13,27 @@ import static org.junit.jupiter.api.Assertions.*;
 final class DeferredLobValuesTest {
     public interface InternalStatement { void setInternal(); }
     @Test
+    void deferredTextByteSizeIsUnknownWithoutReadingTheWholeValue() throws Exception {
+        for (String value : new String[]{"a".repeat(300), "中".repeat(300), "🙂".repeat(300)}) {
+            var registry = new DeferredLobValues(CallableStatement::execute, () -> false);
+            var connection = connection();
+            var preview = registry.capture(connection, new SerialClob(value.toCharArray()), false);
+            assertNotNull(preview.ref());
+            assertEquals(0, preview.originalBytes());
+            var result = new StringBuilder();
+            long offset = 0;
+            while (true) {
+                var chunk = registry.fetch(connection, preview.ref(), offset, 113);
+                result.append(chunk.data());
+                offset = chunk.next_offset();
+                if (chunk.eof()) break;
+            }
+            assertEquals(value, result.toString());
+            registry.clear();
+        }
+    }
+
+    @Test
     void nullAndEmptyValuesStayInline() throws Exception {
         var registry = new DeferredLobValues(CallableStatement::execute, () -> false);
         var connection = connection();

@@ -457,7 +457,7 @@
       "defaultPort": 8000,
       "supportLevel": "operate",
       "capabilities": {
-        "queryExecution": false,
+        "queryExecution": true,
         "metadataBrowse": true,
         "objectBrowser": false,
         "objectSource": false,
@@ -1469,7 +1469,7 @@
         "diagram": true,
         "tableDataEdit": true,
         "tableStructureEdit": true,
-        "tableImport": false,
+        "tableImport": true,
         "dataTransfer": false,
         "sqlFileExecution": true,
         "databaseCreate": false,

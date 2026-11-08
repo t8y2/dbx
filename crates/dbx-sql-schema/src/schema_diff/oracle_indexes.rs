@@ -462,6 +462,100 @@ mod tests {
     }
 
     #[test]
+    fn modified_trigger_manual_preview_is_not_reported_complete() {
+        let source: TriggerInfo =
+            serde_json::from_value(json!({"name":"TR","event":"DELETE","timing":"BEFORE EACH ROW","enabled":false}))
+                .unwrap();
+        let target: TriggerInfo =
+            serde_json::from_value(json!({"name":"TR","event":"INSERT","timing":"BEFORE EACH ROW","enabled":true}))
+                .unwrap();
+        for (source, target) in
+            [(vec![source.clone()], vec![target.clone()]), (vec![source], vec![]), (vec![], vec![target])]
+        {
+            let triggers = diff_triggers(&source, &target);
+            assert_eq!(triggers.len(), 1);
+            let diffs: Vec<TableDiff> =
+                serde_json::from_value(json!([{"type":"modified","name":"T","triggers":triggers}])).unwrap();
+            for db_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+                let result = generate_schema_sync_sql_plan_with_oracle_ddl(
+                    &diffs,
+                    &[],
+                    &[],
+                    &[],
+                    &[],
+                    db_type,
+                    Some("APP"),
+                    false,
+                    Some(DialectKind::Oracle),
+                    &[],
+                    true,
+                    false,
+                    Some(&OracleSchemaSyncDdlSources::default()),
+                );
+                assert_eq!(result.forward_completeness, RollbackCompleteness::Incomplete);
+                assert_eq!(result.rollback_completeness, RollbackCompleteness::Incomplete);
+                assert!(result.generation_issues.iter().any(|issue| issue.kind == "trigger" && issue.name == "TR"));
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_raw_triggers_without_enriched_source_never_silently_enable() {
+        for db_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            for rollback in [false, true] {
+                for captured_state in ["", " ALTER TRIGGER APP.TR DISABLE;"] {
+                    let kind = if rollback { "removed" } else { "added" };
+                    let side = if rollback { "target" } else { "source" };
+                    let mut trigger = json!({"type":kind,"name":"TR"});
+                    trigger[side] = json!({"name":"TR","event":"INSERT","timing":"BEFORE EACH ROW","enabled":false});
+                    let diffs: Vec<TableDiff> =
+                        serde_json::from_value(json!([{"type":kind,"name":"T","triggers":[trigger]}])).unwrap();
+                    let original = captured("T", &format!("CREATE TABLE APP.T(ID NUMBER); CREATE TRIGGER APP.TR BEFORE INSERT ON APP.T FOR EACH ROW BEGIN NULL; END;{captured_state}"));
+                    let sources = if rollback {
+                        OracleSchemaSyncDdlSources { rollback: vec![original], ..Default::default() }
+                    } else {
+                        OracleSchemaSyncDdlSources { forward: vec![original], ..Default::default() }
+                    };
+                    let result = generate_schema_sync_sql_plan_with_oracle_ddl(
+                        &diffs,
+                        &[],
+                        &[],
+                        &[],
+                        &[],
+                        db_type,
+                        Some("APP"),
+                        false,
+                        Some(DialectKind::Oracle),
+                        &[],
+                        rollback,
+                        false,
+                        Some(&sources),
+                    );
+                    let (sql, completeness) = if rollback {
+                        (result.rollback_sync_sql.as_deref().unwrap(), &result.rollback_completeness)
+                    } else {
+                        (result.sync_sql.as_str(), &result.forward_completeness)
+                    };
+                    if captured_state.is_empty() {
+                        assert_eq!(
+                            *completeness,
+                            RollbackCompleteness::Incomplete,
+                            "{db_type:?} rollback={rollback}: {sql}"
+                        );
+                        assert!(result
+                            .generation_issues
+                            .iter()
+                            .any(|issue| issue.reason.contains("firing state changed")));
+                    } else {
+                        assert_eq!(*completeness, RollbackCompleteness::Complete, "{:?}", result.generation_issues);
+                        assert!(sql.contains("ALTER TRIGGER APP.TR DISABLE;"), "{sql}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn raw_trigger_default_does_not_supply_an_unknown_snapshot_firing_state() {
         let diffs = serde_json::from_value::<Vec<TableDiff>>(json!([{"type":"added","name":"T","triggers":[
             {"type":"added","name":"TR","source":{"name":"TR","event":"INSERT","timing":"BEFORE EACH ROW"}}

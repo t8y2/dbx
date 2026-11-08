@@ -1,4 +1,5 @@
 import { PLUGIN_AI_TASKS } from "./pluginAiCompletion";
+import { permittedPluginUrl } from "./pluginOpenUrl";
 import type { PluginAiProvider, PluginAiModel, PluginAiGenerateRequest, PluginAiStreamRequest, PluginAiStreamChunkEvent, PluginAiTask } from "./pluginAiCompletion";
 import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginUiContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
@@ -90,6 +91,10 @@ export interface PluginBridgeTheme {
 }
 
 export interface PluginWorkbenchContext {
+  /** Explicit New Query; restore this workspace's state or start with blank input. */
+  newQuery?: boolean;
+  /** Source workspace on the same connection; plugins may inherit its location. */
+  sourceWorkbenchId?: string;
   connectionId?: string;
   database?: string;
   schema?: string;
@@ -161,6 +166,8 @@ export const MAX_PLUGIN_STORAGE_VALUE_BYTES = 256 * 1024;
 export const MAX_PLUGIN_STORAGE_KEY_CHARS = 256;
 
 export interface PluginHostBridgeApi {
+  /** Must display trusted host consent for every request; never launch directly. */
+  openUrl?(url: string): Promise<{ opened: boolean }>;
   invoke<T = unknown>(pluginId: string, method: string, params?: unknown, timeoutMs?: number): Promise<T>;
   notify(pluginId: string, method: string, params?: unknown): Promise<void>;
   sendBinary(pluginId: string, channel: string, dataBase64: string): Promise<void>;
@@ -505,6 +512,7 @@ export class PluginHostBridge {
       // Additive capability advertisement: an older host omits `planApi`, and a
       // plugin must treat the absence as "unsupported" rather than probing.
       capabilities: {
+        openUrl: !!this.api.openUrl,
         downloadFile: !!this.api.downloadFile,
         planApi: !!this.api.getPlanCapabilities && !!this.api.explainPlan,
         [PLUGIN_SCHEMA_METADATA_CAPABILITY]: !!this.api.getTableMetadata,
@@ -646,6 +654,12 @@ export class PluginHostBridge {
   }
 
   private async dispatch(method: string, params: unknown, binary?: ArrayBuffer): Promise<unknown> {
+    if (method === "host.openUrl") {
+      const input = requireRecord(params, "open URL params");
+      const url = permittedPluginUrl(input.url, this.plugin.manifest.permissions);
+      if (!this.api.openUrl) throw new Error("Host URL opening is unavailable");
+      return this.api.openUrl(url);
+    }
     if (method === "host.downloadFile") {
       if (!this.api.downloadFile) throw new Error("Streaming file downloads require the desktop host");
       const input = requireRecord(params, "download params");
@@ -1453,6 +1467,7 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         return request('backend.sendBinary', { channel }, { transfer: bytes });
       },
       readAsset: (path) => request('ui.readAsset', { path }),
+      openUrl: (url) => request('host.openUrl', { url }),
       readAssetUrl: async (path) => {
         const asset = await request('ui.readAsset', { path });
         return URL.createObjectURL(new Blob([decode(asset.dataBase64)], { type: asset.contentType }));
@@ -1645,13 +1660,21 @@ export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
         });
       }
     });
+    // The close-tab shortcut listens in the BUBBLE phase and yields to events a
+    // plugin input already consumed. A capture-phase listener runs before the
+    // focused control, so a terminal (xterm) handling Ctrl+W as "delete word"
+    // had the tab closed underneath it: the host posted closeTab before the
+    // terminal ever saw the key. Bubbling lets the focused control run first;
+    // xterm calls preventDefault()+stopPropagation() for the keys it sends, and
+    // any other consumer only needs preventDefault() to keep the tab open.
     addEventListener('keydown', (event) => {
+      if (event.defaultPrevented) return;
       const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
       if (key !== 'w' || (!event.metaKey && !event.ctrlKey) || event.altKey || event.shiftKey || event.isComposing) return;
       event.preventDefault();
       event.stopPropagation();
       parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'shortcut', shortcut: 'closeTab' }, '*');
-    }, true);
+    });
     parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'ready', features: ['workbench.close'] }, '*');
   })();`;
 }

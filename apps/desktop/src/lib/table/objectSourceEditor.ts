@@ -14,12 +14,10 @@ export type BuildEditableObjectSourceSqlInput = {
 };
 
 export type ValidateOracleExecutableObjectSourceInput = {
-  databaseType: Extract<DatabaseType, "oracle" | "oceanbase-oracle">;
-  objectType: Extract<ObjectSourceKind, "PROCEDURE" | "FUNCTION" | "PACKAGE" | "PACKAGE_BODY">;
   schema?: string | null;
   name: string;
   source: string;
-};
+} & ({ databaseType: Extract<DatabaseType, "oracle" | "oceanbase-oracle">; objectType: Extract<ObjectSourceKind, "PROCEDURE" | "FUNCTION" | "PACKAGE" | "PACKAGE_BODY" | "TRIGGER"> } | { databaseType: "dameng"; objectType: "TRIGGER" });
 
 export type FingerprintOracleRoutineObjectSourceInput = {
   databaseType: Extract<DatabaseType, "oracle" | "oceanbase-oracle">;

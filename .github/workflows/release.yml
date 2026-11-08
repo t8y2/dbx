@@ -4,11 +4,18 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag containing the draft release to build"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
   CNB_REPOSITORY: "dbxio.com/dbx"
   CNB_USERNAME: "cnb"
   CNB_REGISTRY: "docker.cnb.cool"
@@ -24,11 +31,11 @@ jobs:
         shell: bash
         run: |
           for attempt in $(seq 1 30); do
-            RELEASE_JSON="$(gh release view "${GITHUB_REF_NAME}" \
+            RELEASE_JSON="$(gh release view "${RELEASE_TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
               --json tagName,isDraft,body 2>/dev/null || true)"
             if [ -n "$RELEASE_JSON" ] \
-              && [ "$(jq -r '.tagName' <<<"$RELEASE_JSON")" = "${GITHUB_REF_NAME}" ] \
+              && [ "$(jq -r '.tagName' <<<"$RELEASE_JSON")" = "${RELEASE_TAG}" ] \
               && [ "$(jq -r '.isDraft' <<<"$RELEASE_JSON")" = true ] \
               && [ -n "$(jq -r '.body' <<<"$RELEASE_JSON")" ]; then
               echo "Agent-created draft release is ready."
@@ -36,14 +43,16 @@ jobs:
             fi
             sleep 2
           done
-          echo "Agent-created draft release was not ready for ${GITHUB_REF_NAME}." >&2
+          echo "Agent-created draft release was not ready for ${RELEASE_TAG}." >&2
           exit 1
 
   nix-packaging:
     runs-on: ubuntu-22.04
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
@@ -59,8 +68,9 @@ jobs:
       new_version: ${{ steps.bump.outputs.new_version }}
       prev_tag: ${{ steps.prev-tag.outputs.prev_tag }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.release_tag || github.ref }}
           fetch-depth: 0
           token: ${{ secrets.MCP_RELEASE_TOKEN }}
 
@@ -150,10 +160,15 @@ jobs:
       # Keep releases working until the shared S3 secrets are configured.
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Set release version
+        run: node .github/scripts/set-release-version.mjs "${RELEASE_TAG}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -169,9 +184,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
@@ -254,10 +269,22 @@ jobs:
       - name: Install system dependencies (Linux)
         if: startsWith(matrix.platform, 'ubuntu')
         run: |
-          sudo apt-get update
           # Bundle GTK input-method modules from the same Jammy ABI baseline
           # instead of loading potentially incompatible modules from the host.
-          sudo apt-get install -y fcitx5-frontend-gtk3 ibus-gtk3 libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev xdg-utils
+          sudo python3 .github/scripts/ci-install-system-deps.py --group release
+          # The ARM hosted runner has 16 GB RAM and no swap; the serialized
+          # release build plus the final lld link of the dbx binary still
+          # exhausts memory and the runner loses communication with the
+          # server. Back it with a swapfile so the link peak pages to disk
+          # instead of starving the runner agent.
+          if [ "${{ matrix.platform }}" = "ubuntu-22.04-arm" ]; then
+            df -h /
+            sudo fallocate -l 14G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=14336
+            sudo chmod 600 /mnt/swapfile
+            sudo mkswap /mnt/swapfile
+            sudo swapon /mnt/swapfile
+            free -h
+          fi
 
       - name: Prepare Wayland-capable AppImage bundler
         if: startsWith(matrix.platform, 'ubuntu')
@@ -282,12 +309,19 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Standard ARM runners have 16 GB RAM; parallel rustc of the heavy
+          # workspace crates (dbx-core, dbx-mcp) plus linking peaks past what
+          # the pool now tolerates and the runner is killed with a shutdown
+          # signal. Serialize codegen on the ARM leg and link with lld, which
+          # holds far less memory than the default bfd linker.
+          CARGO_BUILD_JOBS: ${{ (matrix.platform == 'ubuntu-22.04-arm' && '1') || 'default' }}
+          RUSTFLAGS: ${{ (matrix.platform == 'ubuntu-22.04-arm' && '-C link-arg=-fuse-ld=lld') || '' }}
           APPLE_SIGNING_IDENTITY: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_SIGNING_IDENTITY || '' }}
           APPLE_ID: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_ID || '' }}
           APPLE_PASSWORD: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_TEAM_ID || '' }}
         with:
-          tagName: ${{ github.ref_name }}
+          tagName: ${{ inputs.release_tag || github.ref_name }}
           releaseDraft: true
           # Empty on x64 legs: tauri-action then keeps the default Tauri CLI names.
           assetNamePattern: ${{ matrix.asset_pattern }}
@@ -318,6 +352,8 @@ jobs:
     runs-on: windows-2022
     env:
       CARGO_INCREMENTAL: "0"
+      # Environment flags override target rustflags; retain the 8 MiB stack.
+      RUSTFLAGS: -C link-arg=/STACK:8388608
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
       VSIGN_CERT_HASH: ${{ vars.VSIGN_CERT_HASH }}
@@ -325,10 +361,16 @@ jobs:
       VSIGN_SERVER: ${{ vars.VSIGN_SERVER }}
       VSIGN_TOOL_SHA256: ${{ vars.VSIGN_TOOL_SHA256 }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Set release version
+        shell: pwsh
+        run: node .github/scripts/set-release-version.mjs "${env:RELEASE_TAG}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -344,9 +386,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
 
       - name: Configure S3 sccache
         if: env.SCCACHE_GHA_ENABLED != 'true'
@@ -426,6 +468,10 @@ jobs:
           VSIGN_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
         run: ./.github/scripts/setup-vsign.ps1
 
+      - name: Prepare MSI version
+        shell: pwsh
+        run: node .github/scripts/prepare-msi-config.mjs "${env:RELEASE_TAG}" src-tauri/tauri.msi-version.conf.json
+
       - name: Build and sign Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -433,11 +479,16 @@ jobs:
           SSIGNCODE_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
           VSIGN_KEY_PIN: ${{ secrets.VSIGN_KEY_PIN }}
         with:
-          tagName: ${{ github.ref_name }}
+          tagName: ${{ inputs.release_tag || github.ref_name }}
           releaseDraft: true
           # No assetNamePattern: the default Tauri CLI names already produce
           # DBX_[version]_x64/arm64-setup.exe and keep the _en-US.msi names.
-          args: --target ${{ matrix.target }} --config src-tauri/tauri.vsign.conf.json
+          # tauri.msi-version.conf.json is generated above and is empty for stable tags.
+          args: --target ${{ matrix.target }} --config src-tauri/tauri.vsign.conf.json --config src-tauri/tauri.msi-version.conf.json
+
+      - name: Verify Windows executable stack reserve
+        shell: pwsh
+        run: ./.github/scripts/assert-windows-stack-reserve.ps1 -BinaryPath "target/${{ matrix.target }}/release/dbx.exe"
 
       - name: Verify Windows bundles
         shell: pwsh
@@ -467,7 +518,8 @@ jobs:
           SSIGNCODE_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
           VSIGN_KEY_PIN: ${{ secrets.VSIGN_KEY_PIN }}
         run: |
-          $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          $tagVersion = "${env:RELEASE_TAG}".TrimStart("v")
+          $version = $tagVersion -replace '-beta\..*$', ''
           $arch = "${{ matrix.arch }}"
           $bundleDir = "target/${{ matrix.target }}/release/bundle/nsis"
           $offlineName = "DBX_${version}_${arch}-offline-setup.exe"
@@ -492,7 +544,7 @@ jobs:
 
           ./.github/scripts/assert-authenticode.ps1 -Path $installer.FullName
           Copy-Item $installer.FullName $offlineName -Force
-          gh release upload "${env:GITHUB_REF_NAME}" $offlineName --repo "${env:GITHUB_REPOSITORY}" --clobber
+          gh release upload "${env:RELEASE_TAG}" $offlineName --repo "${env:GITHUB_REPOSITORY}" --clobber
 
       - name: Upload Windows portable ZIP
         timeout-minutes: 20
@@ -502,7 +554,8 @@ jobs:
           SSIGNCODE_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
           VSIGN_KEY_PIN: ${{ secrets.VSIGN_KEY_PIN }}
         run: |
-          $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          $tagVersion = "${env:RELEASE_TAG}".TrimStart("v")
+          $version = $tagVersion -replace '-beta\..*$', ''
           $arch = "${{ matrix.arch }}"
           $portableRoot = "portable"
           $portableDir = Join-Path $portableRoot "DBX_${version}_${arch}"
@@ -514,8 +567,8 @@ jobs:
           if (!(Test-Path $exePath)) {
             throw "Missing Windows executable: $exePath"
           }
-          if (!$appVersion -or $appVersion -ne $version) {
-            throw "Release tag version $version does not match the built DBX package version $appVersion"
+          if (!$appVersion -or ($appVersion -ne $version -and $appVersion -ne $tagVersion)) {
+            throw "Release tag version $tagVersion or base version $version does not match the built DBX package version $appVersion"
           }
 
           ./.github/scripts/vsign-sign.ps1 -FilePath $exePath
@@ -551,7 +604,7 @@ jobs:
             throw "Missing portable update signature: $signatureName"
           }
 
-          gh release upload "${env:GITHUB_REF_NAME}" $zipName $signatureName --repo "${env:GITHUB_REPOSITORY}" --clobber
+          gh release upload "${env:RELEASE_TAG}" $zipName $signatureName --repo "${env:GITHUB_REPOSITORY}" --clobber
 
       - name: Show sccache stats
         if: always()
@@ -579,20 +632,26 @@ jobs:
     # The vendored loader is a tracked Cargo input, so Rust compile caching is safe.
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
-      SCCACHE_GHA_VERSION: win7-webview2-1.0.902.49-v1
-      SCCACHE_IDLE_TIMEOUT: "0"
+      # An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so the
+      # 8 MiB main-thread stack must be repeated here: without it the legacy PE
+      # keeps the 1 MiB linker default and deep connect/serde call stacks abort
+      # with 0xC00000FD ("DBX 已停止工作"). Guarded by assert-win7-pe-compat.ps1.
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
       VSIGN_CERT_HASH: ${{ vars.VSIGN_CERT_HASH }}
       VSIGN_OPERATOR_SHA1: ${{ vars.VSIGN_OPERATOR_SHA1 }}
       VSIGN_SERVER: ${{ vars.VSIGN_SERVER }}
       VSIGN_TOOL_SHA256: ${{ vars.VSIGN_TOOL_SHA256 }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Set release version
+        shell: pwsh
+        run: node .github/scripts/set-release-version.mjs "${env:RELEASE_TAG}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -605,33 +664,8 @@ jobs:
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-07-22
+          toolchain: nightly-2026-10-25
           components: rust-src
-
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: "v0.16.0"
-
-      - name: Configure S3 sccache
-        if: env.SCCACHE_GHA_ENABLED != 'true'
-        shell: bash
-        env:
-          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
-          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
-          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
-          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
-          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
-          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
-        run: |
-          {
-            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
-            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
-            echo "SCCACHE_REGION=${CACHE_REGION}"
-            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
-            echo "SCCACHE_S3_USE_SSL=true"
-            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
-            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
-          } >> "$GITHUB_ENV"
 
       - name: Prepare Win7-compatible WebView2 loader
         shell: pwsh
@@ -685,15 +719,16 @@ jobs:
           SSIGNCODE_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
           VSIGN_KEY_PIN: ${{ secrets.VSIGN_KEY_PIN }}
         run: |
-          $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          $tagVersion = "${env:RELEASE_TAG}".TrimStart("v")
+          $version = $tagVersion -replace '-beta\..*$', ''
           $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
           $offlineName = "DBX_${version}_x64-win7-server2012r2-offline-setup.exe"
           $checksumName = "${offlineName}.sha256"
           $cargoMetadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
           $appVersion = ($cargoMetadata.packages | Where-Object { $_.name -eq "dbx" } | Select-Object -First 1).version
 
-          if (!$appVersion -or $appVersion -ne $version) {
-            Write-Error "Release tag version $version does not match the built DBX package version $appVersion"
+          if (!$appVersion -or ($appVersion -ne $version -and $appVersion -ne $tagVersion)) {
+            Write-Error "Release tag version $tagVersion or base version $version does not match the built DBX package version $appVersion"
             exit 1
           }
 
@@ -715,13 +750,8 @@ jobs:
           Copy-Item $installer.FullName $offlineName -Force
           $hash = (Get-FileHash -LiteralPath $offlineName -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $offlineName" | Set-Content -LiteralPath $checksumName -Encoding ascii
-          gh release upload "${env:GITHUB_REF_NAME}" $offlineName $checksumName `
+          gh release upload "${env:RELEASE_TAG}" $offlineName $checksumName `
             --repo "${env:GITHUB_REPOSITORY}" --clobber
-
-      - name: Show sccache stats
-        if: always()
-        continue-on-error: true
-        run: ${SCCACHE_PATH} --show-stats
 
       - name: Remove temporary VSign files
         if: always()
@@ -747,12 +777,22 @@ jobs:
             arch: x86_64
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      # An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so the
+      # 8 MiB main-thread stack must be repeated here: without it the legacy PE
+      # keeps the 1 MiB linker default and deep connect/serde call stacks abort
+      # with 0xC00000FD ("DBX 已停止工作"). Guarded by assert-win7-pe-compat.ps1.
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Set release version
+        shell: pwsh
+        run: node .github/scripts/set-release-version.mjs "${env:RELEASE_TAG}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -768,7 +808,7 @@ jobs:
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-07-22
+          toolchain: nightly-2026-10-25
           components: rust-src
 
       - name: Install NASM
@@ -793,7 +833,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          $tagVersion = "${env:RELEASE_TAG}".TrimStart("v")
+          $version = $tagVersion -replace '-beta\..*$', ''
           $arch = "${{ matrix.arch }}"
           $portableRoot = "portable"
           $portableDir = Join-Path $portableRoot "DBX_${version}_${arch}"
@@ -817,7 +858,7 @@ jobs:
           $zip_sha256 = (Get-FileHash -LiteralPath $zipName -Algorithm SHA256).Hash.ToLowerInvariant()
           Set-Content -Path $zipSha256 -Value $zip_sha256 -Encoding utf8NoBOM
 
-          gh release upload "${env:GITHUB_REF_NAME}" $zipName $zipSha256 --repo "${env:GITHUB_REPOSITORY}" --clobber
+          gh release upload "${env:RELEASE_TAG}" $zipName $zipSha256 --repo "${env:GITHUB_REPOSITORY}" --clobber
 
   static-browser:
     # Fully static musl builds of the browser (dbx-web) variant. No glibc
@@ -844,10 +885,15 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Set release version
+        run: node .github/scripts/set-release-version.mjs "${RELEASE_TAG}"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -866,9 +912,9 @@ jobs:
         run: pip3 install cargo-zigbuild
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          version: "v0.10.0"
+          version: "v0.16.0"
 
       # Plain CC/CXX only wrap HOST C compilations (build scripts): for the
       # musl targets cargo-zigbuild sets CC_<target> to zig cc, which takes
@@ -946,10 +992,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          TAG_VERSION="${RELEASE_TAG#v}"
+          VERSION="${TAG_VERSION%%-beta.*}"
           PACKAGE_VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dbx-web") | .version')"
-          if [ "$PACKAGE_VERSION" != "$VERSION" ]; then
-            echo "Release tag version $VERSION does not match dbx-web package version $PACKAGE_VERSION" >&2
+          if [ "$PACKAGE_VERSION" != "$VERSION" ] && [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
+            echo "Release tag version $TAG_VERSION or base version $VERSION does not match dbx-web package version $PACKAGE_VERSION" >&2
             exit 1
           fi
           SOURCE="dist-web-static/dbx-linux-${{ matrix.arch }}-browser-static.tar.gz"
@@ -957,7 +1004,7 @@ jobs:
           CHECKSUM="${ASSET}.sha256"
           cp "$SOURCE" "$ASSET"
           sha256sum "$ASSET" | tee "$CHECKSUM"
-          gh release upload "${GITHUB_REF_NAME}" "$ASSET" "$CHECKSUM" \
+          gh release upload "${RELEASE_TAG}" "$ASSET" "$CHECKSUM" \
             --repo "${GITHUB_REPOSITORY}" --clobber
 
       - name: Show sccache stats
@@ -975,7 +1022,7 @@ jobs:
         shell: bash
         run: |
           mapfile -t SIG_ASSETS < <(
-            gh release view "${GITHUB_REF_NAME}" \
+            gh release view "${RELEASE_TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
               --json assets \
               --jq '.assets[].name | select(endswith(".sig") and (endswith("-portable.zip.sig") | not))'
@@ -988,7 +1035,7 @@ jobs:
 
           for ASSET in "${SIG_ASSETS[@]}"; do
             echo "Deleting release asset: ${ASSET}"
-            gh release delete-asset "${GITHUB_REF_NAME}" "${ASSET}" \
+            gh release delete-asset "${RELEASE_TAG}" "${ASSET}" \
               --repo "${GITHUB_REPOSITORY}" \
               --yes
           done
@@ -997,12 +1044,13 @@ jobs:
     needs: [cleanup-release-signatures, bump-jdbc-plugin-version]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.release_tag || github.ref }}
           fetch-depth: 0
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -1026,7 +1074,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${GITHUB_REF_NAME}" \
+          gh release upload "${RELEASE_TAG}" \
             "plugins/jdbc/dist/dbx-jdbc-plugin-${{ steps.jdbc-plugin.outputs.version }}.zip" \
             "plugins/jdbc/dist/dbx-jdbc-plugin-latest.zip" \
             --repo "${GITHUB_REPOSITORY}" \
@@ -1038,7 +1086,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/latest-json"
-          gh release download "${GITHUB_REF_NAME}" \
+          gh release download "${RELEASE_TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --pattern latest.json \
             --dir "$RUNNER_TEMP/latest-json"
@@ -1047,7 +1095,7 @@ jobs:
             "${{ steps.jdbc-plugin.outputs.version }}" \
             "1" \
             "https://github.com/t8y2/dbx/releases/latest/download/dbx-jdbc-plugin-latest.zip"
-          gh release upload "${GITHUB_REF_NAME}" \
+          gh release upload "${RELEASE_TAG}" \
             "$RUNNER_TEMP/latest-json/latest.json" \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber
@@ -1058,23 +1106,181 @@ jobs:
     # upload their release assets independently of publication.
     needs: [cleanup-release-signatures, docker-manifest, fnos-package, jdbc-plugin, static-browser]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
     steps:
       - name: Publish draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit ${{ github.ref_name }} --repo ${{ github.repository }} --draft=false --prerelease
+        run: |
+          set -euo pipefail
+          # Every release stays a prerelease until publish-packages.yml promotes it,
+          # so GitHub's latest release never runs ahead of R2, Homebrew and Scoop.
+          gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --draft=false --prerelease
+
+      - name: Promote stable release through Publish Packages
+        if: ${{ !contains(env.RELEASE_TAG, '-beta.') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Beta releases wait for an approved promotion; plain version tags are
+          # published automatically, with no manual workflow run.
+          gh workflow run publish-packages.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref "${RELEASE_TAG}" \
+            -f tag="${RELEASE_TAG}" \
+            -f notify=true
+
+  publish-beta-manifest:
+    name: Publish beta update manifest
+    needs: publish
+    if: startsWith(inputs.release_tag || github.ref_name, 'v') && contains(inputs.release_tag || github.ref_name, '-beta.')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Download updater manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download "${{ inputs.release_tag || github.ref_name }}" --repo "${{ github.repository }}" --dir "$RUNNER_TEMP/manifest" --clobber
+
+      - name: Read release timestamp
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release view "${{ inputs.release_tag || github.ref_name }}" --repo "${{ github.repository }}" --json publishedAt --jq '"published_at=" + .publishedAt' >> "$GITHUB_OUTPUT"
+
+      - name: Validate beta manifest completeness
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/manifest/latest.json"
+          test -s "$manifest"
+          test -n "$(jq -r '.version // empty' "$manifest")"
+          for platform in darwin-aarch64 darwin-x86_64 windows-x86_64 windows-aarch64 linux-x86_64 linux-aarch64; do
+            jq -e --arg platform "$platform" '.platforms[$platform] | type == "object" and (.url | type == "string" and length > 0) and (.signature | type == "string" and length > 0)' "$manifest" >/dev/null
+          done
+
+      - name: Prepare beta manifest
+        run: node .github/scripts/prepare-channel-manifest.mjs "$RUNNER_TEMP/manifest/latest.json" "$RUNNER_TEMP/manifest/latest.json" beta "${{ inputs.release_tag || github.ref_name }}" false "${{ steps.release.outputs.published_at }}"
+
+      - name: Rewrite beta asset URLs to the beta R2 directory
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.release_tag || github.ref_name }}"
+          manifest="$RUNNER_TEMP/manifest/latest.json"
+          jq --arg tag "$TAG" '
+            (.platforms[]?.url?) |= (
+              sub("\\?.*$"; "")
+              | if startswith("https://github.com/t8y2/dbx/releases/download/" + $tag + "/")
+                then sub("https://github\\.com/t8y2/dbx/releases/download/" + $tag + "/"; "https://dl.dbxio.com/releases/beta/" + $tag + "/")
+                else .
+                end
+              + "?v=" + $tag
+            )
+          ' "$manifest" > "$manifest.tmp"
+          mv "$manifest.tmp" "$manifest"
+
+      - name: Publish beta manifest to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          versioned="s3://${R2_BUCKET_NAME}/releases/beta/${{ inputs.release_tag || github.ref_name }}/"
+          if aws s3api head-object --bucket "$R2_BUCKET_NAME" --key "releases/beta/${{ inputs.release_tag || github.ref_name }}/latest.json" --endpoint-url "$endpoint" >/dev/null 2>&1; then
+            aws s3 cp "${versioned}latest.json" "$RUNNER_TEMP/existing-beta-manifest.json" --endpoint-url "$endpoint"
+            # sync-changelog fills in `notes` after publishing; ignore it on reruns.
+            if ! cmp -s <(jq -S 'del(.notes)' "$RUNNER_TEMP/manifest/latest.json") <(jq -S 'del(.notes)' "$RUNNER_TEMP/existing-beta-manifest.json"); then
+              echo "::error::Immutable beta manifest already exists for ${{ inputs.release_tag || github.ref_name }} with different contents."
+              exit 1
+            fi
+            echo "Beta manifest already exists with identical contents; continuing idempotently."
+          else
+            aws s3 cp "$RUNNER_TEMP/manifest/latest.json" "${versioned}latest.json" --endpoint-url "$endpoint" --cache-control "no-cache"
+          fi
+          # R2 intermittently rejects CompleteMultipartUpload (InvalidPart) on the
+          # hundreds-of-megabytes installers. Retry every transfer, and let the
+          # retry resume from what is already in R2 instead of restarting it.
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              echo "::warning::R2 publish attempt ${attempt}/3 failed: $*"
+              sleep $((attempt * 15))
+            done
+            return 1
+          }
+          # gh release download fetched the signed installers and portable
+          # archives as well as latest.json. Keep those immutable assets beside
+          # the versioned beta manifest so the manifest's R2 URLs are usable.
+          # Assets are immutable for a tag, so --size-only retries only copy what
+          # is still missing instead of re-uploading the full ~1.6 GiB.
+          retry aws s3 sync "$RUNNER_TEMP/manifest/" "$versioned" \
+            --endpoint-url "$endpoint" --cache-control "no-cache" --size-only
+          # Mirror the versioned prefix into releases/beta/latest/ so the
+          # portable fallback URLs stay current. Copy object by object: the
+          # high-level `aws s3 cp/sync` between two prefixes calls
+          # GetObjectTagging to replicate tags, and R2 answers NotImplemented,
+          # which made every mirror run fail on the large installers.
+          tag_prefix="releases/beta/${{ inputs.release_tag || github.ref_name }}/"
+          mirror_prefix="releases/beta/latest/"
+          mapfile -t asset_keys < <(
+            aws s3api list-objects-v2 --bucket "$R2_BUCKET_NAME" --prefix "$tag_prefix" \
+              --endpoint-url "$endpoint" --output json | jq -r '.Contents[]?.Key'
+          )
+          for key in "${asset_keys[@]}"; do
+            relative="${key#"$tag_prefix"}"
+            retry aws s3api copy-object --bucket "$R2_BUCKET_NAME" \
+              --copy-source "${R2_BUCKET_NAME}/${key}" --key "${mirror_prefix}${relative}" \
+              --endpoint-url "$endpoint" >/dev/null
+          done
+          # Drop mirror entries that this beta no longer ships.
+          mapfile -t mirror_keys < <(
+            aws s3api list-objects-v2 --bucket "$R2_BUCKET_NAME" --prefix "$mirror_prefix" \
+              --endpoint-url "$endpoint" --output json | jq -r '.Contents[]?.Key'
+          )
+          for key in "${mirror_keys[@]}"; do
+            if ! printf '%s\n' "${asset_keys[@]}" | grep -Fxq "${tag_prefix}${key#"$mirror_prefix"}"; then
+              retry aws s3api delete-object --bucket "$R2_BUCKET_NAME" --key "$key" \
+                --endpoint-url "$endpoint" >/dev/null
+            fi
+          done
+          retry aws s3 cp "$RUNNER_TEMP/manifest/latest.json" "s3://${R2_BUCKET_NAME}/releases/beta/latest.json" \
+            --endpoint-url "$endpoint" --cache-control "no-cache"
+
+      - name: Keep latest five beta releases in R2
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: bash .github/scripts/prune-r2-releases.sh beta "${{ inputs.release_tag || github.ref_name }}"
 
   sync-release-to-cnb:
     name: Sync release to CNB
+    # Beta and stable tags both mirror here. Promotion later re-syncs the plain
+    # version tag through publish-packages.yml with --make-latest.
     needs: publish
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Download GitHub release assets
         env:
-          TAG_NAME: ${{ github.ref_name }}
+          TAG_NAME: ${{ inputs.release_tag || github.ref_name }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -1102,11 +1308,19 @@ jobs:
         continue-on-error: true
         env:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
-          CURRENT_TAG: ${{ github.ref_name }}
+          CURRENT_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
+          set -euo pipefail
+          # Beta and stable releases are retained independently so daily betas
+          # never evict stable releases from CNB.
+          if [[ "$CURRENT_TAG" == *-beta.* ]]; then
+            tag_pattern='^v[0-9]+[.][0-9]+[.][0-9]+-beta[.][0-9]{8}[.][0-9]+$'
+          else
+            tag_pattern='^(?!.*-beta[.])v[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z.-]+)?$'
+          fi
           node .github/scripts/cleanup-cnb-releases.mjs \
             --current-tag "$CURRENT_TAG" \
-            --tag-pattern '^v[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z.-]+)?$' \
+            --tag-pattern "$tag_pattern" \
             --retain 5 \
             --apply
 
@@ -1117,7 +1331,9 @@ jobs:
       matrix:
         platform: [linux/amd64, linux/arm64]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -1222,18 +1438,24 @@ jobs:
 
       - name: Extract version from tag
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Create manifest list and push
         run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          dockerhub_tags=("-t" "${{ secrets.DOCKERHUB_USERNAME }}/dbx:${VERSION}")
+          cnb_tags=("-t" "${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:${VERSION}")
+          if [[ "${VERSION}" != *-beta.* ]]; then
+            dockerhub_tags+=("-t" "${{ secrets.DOCKERHUB_USERNAME }}/dbx:latest")
+            cnb_tags+=("-t" "${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:latest")
+          fi
+
           docker buildx imagetools create \
-            -t ${{ secrets.DOCKERHUB_USERNAME }}/dbx:${{ steps.version.outputs.version }} \
-            -t ${{ secrets.DOCKERHUB_USERNAME }}/dbx:latest \
+            "${dockerhub_tags[@]}" \
             $(cd /tmp/digests/dockerhub && printf '${{ secrets.DOCKERHUB_USERNAME }}/dbx@sha256:%s ' *)
 
           docker buildx imagetools create \
-            -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:${{ steps.version.outputs.version }} \
-            -t ${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}:latest \
+            "${cnb_tags[@]}" \
             $(cd /tmp/digests/cnb && printf '${{ env.CNB_REGISTRY }}/${{ env.CNB_REPOSITORY }}@sha256:%s ' *)
 
   fnos-package:
@@ -1241,11 +1463,13 @@ jobs:
     needs: [release-ready, docker-manifest]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Build versioned fnOS package
         env:
-          DBX_FNOS_VERSION: ${{ github.ref_name }}
+          DBX_FNOS_VERSION: ${{ inputs.release_tag || github.ref_name }}
         run: |
           DBX_FNOS_VERSION="${DBX_FNOS_VERSION#v}" ./deploy/fnos/build.sh
 
@@ -1253,6 +1477,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${GITHUB_REF_NAME}" dist/fnos/* \
+          gh release upload "${RELEASE_TAG}" dist/fnos/* \
             --repo "${GITHUB_REPOSITORY}" \
             --clobber

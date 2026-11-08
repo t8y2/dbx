@@ -21,14 +21,18 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
     loadHistoryRetentionLimit: async () => 5000,
     loadMcpHistoryRetentionLimit: async () => 5000,
     loadMcpGlobalPolicy: async () => null,
+    loadWebMcpHttpStatus: async () => ({ enabled: false, allowedHosts: [], allowedOrigins: [] }),
     loadDesktopSettings: async () => null,
+    saveDesktopSettings: async () => undefined,
     loadAiConfigs: async () => [],
     loadAiConfig: async () => null,
     loadAiProviderConfigs: async () => ({}),
     loadAiChatSelection: async () => null,
     webdavSyncSecretsStatus: async () => ({}),
-    snippetSavedTokenStatus: async () => ({}),
+    snippetTokenStatus: async () => ({ hasSavedToken: false }),
+    snippetPassphraseStatus: async () => ({ hasSavedPassphrase: false }),
     snippetSyncSettings: async () => ({}),
+    listPlugins: async () => [],
   };
 });
 
@@ -121,5 +125,40 @@ describe("Ctrl+S on the settings page (exposed apply entrypoint)", () => {
 
     expect(backend.saves).not.toHaveBeenCalled();
     expect(open.value).toBe(true);
+  });
+});
+
+describe.each([
+  { key: "showConnectionGroupPath" as const, toggleId: "editor-show-connection-group-path", defaultValue: false },
+  { key: "batchColumnSelectionIncludeComments" as const, toggleId: "editor-batch-column-selection-include-comments", defaultValue: true },
+])("$key setting", ({ key, toggleId, defaultValue }) => {
+  it("applies both toggle values and reloads them when old settings have no field", async () => {
+    backend.saved = {};
+    const { store } = await mountPage();
+    const toggle = host.querySelector<HTMLButtonElement>(`#${toggleId}`)!;
+    const apply = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === i18n.global.t("settings.apply"))!;
+
+    expect(store.editorSettings[key]).toBe(defaultValue);
+    expect(toggle.getAttribute("aria-checked")).toBe(String(defaultValue));
+    expect(apply.disabled).toBe(true);
+
+    for (const enabled of [!defaultValue, defaultValue]) {
+      backend.saves.mockClear();
+      toggle.click();
+      await settle();
+      expect(toggle.getAttribute("aria-checked")).toBe(String(enabled));
+      expect(apply.disabled).toBe(false);
+      expect(store.editorSettings[key]).toBe(!enabled);
+
+      apply.click();
+      await settle();
+      expect(store.editorSettings[key]).toBe(enabled);
+      expect(backend.saves).toHaveBeenCalledWith(expect.objectContaining({ [key]: enabled }));
+      expect(apply.disabled).toBe(true);
+
+      const reloadedStore = useSettingsStore(createPinia());
+      await reloadedStore.initEditorSettings();
+      expect(reloadedStore.editorSettings[key]).toBe(enabled);
+    }
   });
 });

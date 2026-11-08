@@ -1,5 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { buildSelectedTablesPayload, isDatabaseExportTableSelectionValid } from "@/lib/export/databaseExportSelection";
+import type { DatabaseExportSelectedObject } from "@/lib/backend/api";
+import { buildSelectedTablesPayload, databaseExportSelectedObjectsRequest, isDatabaseExportTableSelectionValid, splitDatabaseExportObjectSelection } from "@/lib/export/databaseExportSelection";
+
+const picked = (objectType: string, name: string, signature?: string): DatabaseExportSelectedObject => ({ objectType, name, ...(signature === undefined ? {} : { signature }) });
+
+describe("splitDatabaseExportObjectSelection (#13940)", () => {
+  const allTables = ["orders", "T_CUSTOMER", "V_CUSTOMER"];
+
+  it.each([
+    ["keeps listed tables and views in list order", [picked("VIEW", "V_CUSTOMER"), picked("TABLE", "orders")], { tables: ["orders", "V_CUSTOMER"], others: [] }],
+    ["keeps a routine named like a table out of the table list", [picked("FUNCTION", "orders", "integer")], { tables: [], others: [picked("FUNCTION", "orders", "integer")] }],
+    ["keeps objects the list cannot show", [picked("TABLE", "orders"), picked("SEQUENCE", "SEQ_ORDER"), picked("VIEW", "V_UNLISTED")], { tables: ["orders"], others: [picked("SEQUENCE", "SEQ_ORDER"), picked("VIEW", "V_UNLISTED")] }],
+  ])("%s", (_name, objects, expected) => {
+    expect(splitDatabaseExportObjectSelection(objects, allTables)).toEqual(expected);
+  });
+});
+
+describe("databaseExportSelectedObjectsRequest (#13940)", () => {
+  const viewNames = new Set(["V_CUSTOMER"]);
+
+  it.each([
+    ["sends the checked tables and views with their types", ["orders", "V_CUSTOMER"], [], [picked("TABLE", "orders"), picked("VIEW", "V_CUSTOMER")]],
+    ["keeps a routine named like a table typed as a routine", [], [picked("FUNCTION", "orders", "integer")], [picked("FUNCTION", "orders", "integer")]],
+    ["sends an empty list once every table is unchecked", [], [], []],
+  ])("%s", (_name, selectedTables, others, expected) => {
+    expect(databaseExportSelectedObjectsRequest(selectedTables, viewNames, others)).toEqual(expected);
+  });
+});
 
 describe("buildSelectedTablesPayload", () => {
   it("returns undefined when all tables are selected without extra objects", () => {

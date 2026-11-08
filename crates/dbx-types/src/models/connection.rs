@@ -185,9 +185,13 @@ pub struct ConnectionConfig {
     /// Frontend navigation preference: exhaust the paginated Tables group when opened.
     #[serde(default, skip_serializing_if = "is_false")]
     pub sidebar_auto_load_all_tables: bool,
-    /// Oracle sidebar preference. Absent means shown; only an explicit opt-out is stored.
+    /// Sidebar preference. Absent means shown; only an explicit opt-out is stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_database_links: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_native_jobs: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_user_admin: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     /// SQL statements executed right after the connection is established
@@ -694,6 +698,7 @@ include!(concat!(env!("OUT_DIR"), "/database_type.rs"));
 #[serde(rename_all = "kebab-case")]
 pub enum JdbcDialectHint {
     OceanbaseOracle,
+    Oracle,
 }
 
 /// Connection data returned to a client, with response-only metadata flattened into the JSON.
@@ -723,9 +728,16 @@ pub fn jdbc_dialect_hint(config: &ConnectionConfig) -> Option<JdbcDialectHint> {
         return None;
     }
     let url = config.connection_string.as_deref()?.trim();
-    url.get(.."jdbc:oceanbase:oracle://".len())
-        .filter(|prefix| prefix.eq_ignore_ascii_case("jdbc:oceanbase:oracle://"))
-        .map(|_| JdbcDialectHint::OceanbaseOracle)
+    if url
+        .get(.."jdbc:oceanbase:oracle://".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("jdbc:oceanbase:oracle://"))
+    {
+        return Some(JdbcDialectHint::OceanbaseOracle);
+    }
+    if url.get(.."jdbc:oracle:".len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case("jdbc:oracle:")) {
+        return Some(JdbcDialectHint::Oracle);
+    }
+    None
 }
 
 #[derive(Deserialize)]
@@ -762,6 +774,10 @@ struct ConnectionConfigData {
     pub sidebar_auto_load_all_tables: bool,
     #[serde(default)]
     pub show_database_links: Option<bool>,
+    #[serde(default)]
+    pub show_native_jobs: Option<bool>,
+    #[serde(default)]
+    pub show_user_admin: Option<bool>,
     #[serde(default)]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     #[serde(default)]
@@ -887,6 +903,8 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             show_system_schemas: data.show_system_schemas,
             sidebar_auto_load_all_tables: data.sidebar_auto_load_all_tables,
             show_database_links: data.show_database_links,
+            show_native_jobs: data.show_native_jobs,
+            show_user_admin: data.show_user_admin,
             attached_databases: data.attached_databases,
             init_script: data.init_script,
             color: data.color,
@@ -1950,6 +1968,31 @@ fn sqlserver_url_param_parts(params: Option<&str>) -> Vec<(Option<char>, &str)> 
 
     parts.push((separator, &source[start..]));
     parts
+}
+
+pub fn sqlserver_url_instance_name(params: Option<&str>) -> Result<Option<String>, String> {
+    let property = sqlserver_url_param_parts(params)
+        .into_iter()
+        .rev()
+        .filter_map(|(_, part)| part.split_once('='))
+        .find(|(key, _)| percent_decode_str(key.trim()).decode_utf8_lossy().eq_ignore_ascii_case("instanceName"));
+    let Some((_, value)) = property else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    let name = if let Some(quoted) = value.strip_prefix('{').and_then(|value| value.strip_suffix('}')) {
+        quoted.to_owned()
+    } else {
+        percent_decode_str(value)
+            .decode_utf8()
+            .map_err(|_| "Invalid SQL Server instanceName URL parameter")?
+            .into_owned()
+    };
+    // A name must not be interpreted as part of the host or port.
+    if name.contains(['\\', ',', ':', '{', '}']) || name.chars().any(char::is_control) {
+        return Err("Invalid SQL Server instanceName URL parameter".to_owned());
+    }
+    Ok((!name.is_empty()).then_some(name))
 }
 
 fn sqlserver_legacy_compatibility_part(part: &str) -> bool {
@@ -3227,7 +3270,7 @@ mod tests {
     };
 
     #[test]
-    fn connection_response_derives_only_oceanbase_oracle_from_explicit_jdbc_url() {
+    fn connection_response_derives_approved_hints_from_explicit_jdbc_url() {
         let mut config = mysql_config("root", "", None);
         config.db_type = DatabaseType::Jdbc;
         config.connection_string = Some(" JDBC:OCEANBASE:ORACLE://host/service ".into());
@@ -3238,6 +3281,12 @@ mod tests {
         assert_eq!(response.config, config);
 
         config.connection_string = Some("jdbc:oracle:thin:@host/service".into());
+        let oracle_response = ConnectionResponse::from_config(config.clone());
+        let oracle_value = serde_json::to_value(&oracle_response).unwrap();
+        assert_eq!(oracle_value["jdbc_dialect"], "oracle");
+        assert_eq!(oracle_value["db_type"], "jdbc");
+
+        config.connection_string = Some("jdbc:mysql://host:3306/service".into());
         assert!(serde_json::to_value(ConnectionResponse::from_config(config.clone()))
             .unwrap()
             .get("jdbc_dialect")
@@ -3419,6 +3468,24 @@ mod tests {
         assert_eq!(serde_json::to_value(hidden).unwrap()["show_database_links"], serde_json::json!(false));
     }
 
+    #[test]
+    fn sidebar_visibility_preferences_round_trip() {
+        let base = serde_json::json!({
+            "id": "sidebar", "name": "Sidebar", "db_type": "oracle", "host": "localhost",
+            "port": 1521, "username": "test", "password": ""
+        });
+        for field in ["show_database_links", "show_native_jobs", "show_user_admin"] {
+            let legacy: ConnectionConfig = serde_json::from_value(base.clone()).unwrap();
+            assert!(serde_json::to_value(legacy).unwrap().get(field).is_none());
+            for visible in [true, false] {
+                let mut value = base.clone();
+                value[field] = serde_json::json!(visible);
+                let config: ConnectionConfig = serde_json::from_value(value).unwrap();
+                assert_eq!(serde_json::to_value(config).unwrap()[field], serde_json::json!(visible));
+            }
+        }
+    }
+
     fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
             oracle_oci_nls_lang: None,
@@ -3444,6 +3511,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,

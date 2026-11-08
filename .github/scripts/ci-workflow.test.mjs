@@ -179,6 +179,24 @@ test("every old Agent stage has an independent owner and Java packaging remains 
   for (const name of ["agent-rust", "agent-go", "agent-integration", "agent-java"]) assert.doesNotMatch(job(name), /continue-on-error: true/);
 });
 
+test("Neo4j Windows x64 release and CI use the Windows-compatible build", () => {
+  const release = readFileSync(new URL("../workflows/agents-release.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  const neo4j = job("build-neo4j-native", release);
+  const modernBuild = neo4j.slice(neo4j.indexOf("- name: Cross-compile"), neo4j.indexOf("- name: Setup Windows-compatible Go"));
+  assert.match(modernBuild, /\["windows-aarch64"\]="windows\/arm64"/);
+  assert.doesNotMatch(modernBuild, /\["windows-x64"\]/, "a modern build must not overwrite the Windows 7-compatible artifact");
+  assert.match(neo4j, /go-version: "1\.20\.14"/);
+  assert.ok(neo4j.includes('build-windows-legacy.sh "$GITHUB_WORKSPACE/release-native/dbx-agent-neo4j-windows-x64.exe"'));
+  assert.ok(neo4j.includes("name: neo4j-native"));
+
+  const ci = job("agent-go");
+  const compatibilitySteps = ci.slice(ci.indexOf("- name: Setup Neo4j Windows-compatible Go"));
+  assert.equal((compatibilitySteps.match(/if: matrix\.driver == 'neo4j-go'/g) ?? []).length, 2);
+  assert.match(compatibilitySteps, /go-version: "1\.20\.14"/);
+  assert.ok(compatibilitySteps.includes("go.windows-legacy.sum"));
+  assert.ok(compatibilitySteps.includes('build-windows-legacy.sh "$RUNNER_TEMP/dbx-agent-neo4j-windows-x64.exe"'));
+});
+
 test("shared Rust caches publish only complete builds outside the old cache namespace", () => {
   for (const name of ["packages", "rust-fmt-clippy", "rust-test", "agent-rust", "agent-integration"]) {
     const content = job(name);
@@ -370,7 +388,7 @@ test("Rust test jobs install pinned nextest and retain separate doctests", () =>
   const pluginRelease = readFileSync(new URL("../workflows/plugin-cli-release.yml", import.meta.url), "utf8");
   const consumers = [job("packages"), job("rust-test"), job("agent-rust"), job("agent-integration"), job("test", pluginDevHost), job("prepare", pluginRelease)];
   for (const content of consumers) {
-    assert.ok(content.includes("uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b"));
+    assert.ok(content.includes("uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91"));
     assert.ok(content.includes("tool: cargo-nextest@0.9.137"));
     assert.doesNotMatch(content, /cargo test (?!.*--doc)/);
     const testCommand = content.indexOf("cargo nextest run") >= 0 ? "cargo nextest run" : content.includes("pnpm test:packages") ? "pnpm test:packages" : content.includes("ci-rust.mjs test") ? "ci-rust.mjs test" : "ci-agent-integration.sh";
@@ -495,4 +513,21 @@ test("path filtering and the planner use the exact test merge first parent", () 
     assert.ok(changes.includes(`steps.plan.outputs.${flag}`));
   }
   assert.doesNotMatch(changes, /steps\.filter\.outputs\.windows_win7_bundle|github\.event\.pull_request\.base\.sha|WIN7_CURRENT/);
+});
+
+test("legacy Windows builds keep the 8 MiB main-thread stack", () => {
+  const release = readFileSync(new URL("../workflows/release.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  const sqlServerUserTest = readFileSync(new URL("../workflows/sqlserver2000-windows-user-test.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  const stackFlag = /RUSTFLAGS:.*link-arg=\/STACK:8388608/;
+  // An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so every job
+  // that links a Windows PE has to repeat the /STACK link argument; otherwise
+  // the 1 MiB linker default returns and deep DB call stacks abort with
+  // 0xC00000FD ("DBX 已停止工作").
+  for (const name of ["windows-standard-check", "windows-win7-bundle", "duckdb-windows-driver"]) {
+    assert.match(job(name), stackFlag, `${name} must keep the 8 MiB main-thread stack in RUSTFLAGS`);
+  }
+  for (const name of ["build-windows-7-offline", "build-windows-7-static-browser"]) {
+    assert.match(job(name, release), stackFlag, `release job ${name} must keep the 8 MiB main-thread stack in RUSTFLAGS`);
+  }
+  assert.match(job("build-windows-7-x64", sqlServerUserTest), stackFlag, "the SQL Server 2000 Win7 test build must keep the 8 MiB main-thread stack");
 });

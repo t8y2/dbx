@@ -929,6 +929,9 @@ pub(super) fn build_select_columns(
     // can carry dozens of tags and fields — a full column list turns the
     // generated SQL into a wall of names, while InfluxQL supports `*`
     // natively and users can narrow the projection by editing the SQL.
+    // OSCAR table previews keep their explicit projection: switching the
+    // pagination form from ROWNUM to LIMIT/OFFSET must not also widen a
+    // generated page to every column (#13515).
     if !matches!(
         database_type,
         Some(
@@ -937,6 +940,7 @@ pub(super) fn build_select_columns(
                 | DatabaseType::Impala
                 | DatabaseType::Argo
                 | DatabaseType::Transwarp
+                | DatabaseType::Oscar
         )
     ) {
         return "*".to_string();

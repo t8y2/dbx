@@ -30,7 +30,7 @@ afterEach(() => {
   document.body.innerHTML = "";
   window.localStorage.clear();
 });
-async function mountViewer(type: "oracle" | "oceanbase-oracle" = "oracle", separateIndexes = false) {
+async function mountViewer(type: "oracle" | "oceanbase-oracle" = "oracle", separateIndexes = false, schema = "Owner", explicitOwner?: string) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const connection = { id: "oracle-viewer", name: "Oracle", db_type: type, host: "localhost", port: 1, username: "test", password: "" } as ConnectionConfig;
@@ -40,7 +40,7 @@ async function mountViewer(type: "oracle" | "oceanbase-oracle" = "oracle", separ
   settings.editorSettings.separateDdlIndexes = separateIndexes;
   const id = store.createTab(connection.id, "service", "DDL", "query", "Owner", "", undefined, { forceNew: true, sourceView: true });
   const tab = store.tabs.find((tab) => tab.id === id)!;
-  tab.ddlViewer = { schema: "Owner", tableName: "First", formatDialect: "plsql" };
+  tab.ddlViewer = { schema, explicitOwner, tableName: "First", formatDialect: "plsql" };
   const activeTab = shallowRef(tab);
   const container = document.createElement("div");
   document.body.append(container);
@@ -58,6 +58,15 @@ function toggle(container: HTMLElement, option: string) {
   expect(button!.disabled).toBe(false);
   button!.click();
 }
+
+it.each(["oracle", "oceanbase-oracle"] as const)("preserves %s explicit service-name owner on initial load and refresh", async (type) => {
+  const { tab, store } = await mountViewer(type, true, "service", "service");
+  await vi.waitFor(() => expect(tab.ddlLoad).toBeUndefined());
+  expect(mocks.load.mock.calls[0][0]).toMatchObject({ schema: "service", explicitOwner: "service", separateIndexes: true });
+  tab.ddlLoad = { startedAt: Date.now() };
+  await store.loadDdlViewerTab(tab.id, true);
+  expect(mocks.load.mock.lastCall?.[0]).toMatchObject({ schema: "service", explicitOwner: "service", separateIndexes: true });
+});
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: Error) => void;

@@ -36,8 +36,10 @@ import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { supportsTransaction } from "@/lib/database/databaseFeatureSupport";
 import { formatError, isManualTransactionSessionExpired } from "@/lib/backend/errorUtils";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { promptExportSavePath } from "@/lib/export/exportPath";
 import TableMultiSelect from "@/components/diff/TableMultiSelect.vue";
-import { ArrowLeftRight, CheckSquare, ChevronDown, ChevronRight, Copy, GitCompareArrows, Loader2, Play, RotateCcw, Square } from "@lucide/vue";
+import { ArrowLeftRight, CheckSquare, ChevronDown, ChevronRight, Copy, Download, GitCompareArrows, Loader2, Play, RotateCcw, Square } from "@lucide/vue";
 
 const PREVIEW_LIMIT_OPTIONS = [50, 100, 200, 500];
 const SYNC_EXECUTE_BATCH_SIZE = 500;
@@ -92,6 +94,7 @@ const syncPlan = shallowRef<DataCompareSyncPlan>(emptyDataCompareSyncPlan());
 const sqlPreview = computed(() => createBoundedTextPreview(syncPlan.value.syncSql, { maxCharacters: SQL_PREVIEW_MAX_CHARACTERS, maxLines: SQL_PREVIEW_MAX_LINES }));
 const sqlPreviewText = computed(() => (sqlPreview.value.truncated ? `${sqlPreview.value.head}\n…\n${sqlPreview.value.tail}` : sqlPreview.value.head));
 const comparing = ref(false);
+const exportingDiffs = ref(false);
 const planningSync = ref(false);
 const compareProgressCurrent = ref(0);
 const compareProgressTotal = ref(0);
@@ -837,6 +840,70 @@ function toggleShowAll(table: DataCompareTableResult, kind: DiffKind) {
   table.showAll[kind] = !table.showAll[kind];
 }
 
+/** 是否存在可导出的差异：至少一张表比对成功且带有 added/removed/modified 行。 */
+const canExportDiffs = computed(() => batchResults.value.some((item) => item.status === "different" && item.columns.length > 0 && (item.diff.added.length > 0 || item.diff.removed.length > 0 || item.diff.modified.length > 0)));
+
+/**
+ * 按列名取差异行的单元格值：added/removed 行的整行值分散在 `values` 与
+ * `keyValues` 两个 Record 里（键列不进 values），取不到时回退键值，最后兜底
+ * null，保证导出行与列头逐列对齐。
+ */
+function compareRowCellValue(values: Record<string, DataCompareCellValue>, keyValues: Record<string, DataCompareCellValue>, column: string): DataCompareCellValue {
+  const value = values[column] ?? keyValues[column];
+  return value === undefined ? null : value;
+}
+
+/** modified 行导出源库整行；变更明细单独汇总在行尾的「变更明细」列。 */
+function compareModifiedRowCellValue(row: DataCompareModifiedRow, column: string): DataCompareCellValue {
+  const value = row.sourceValues[column] ?? row.keyValues[column];
+  return value === undefined ? null : value;
+}
+
+/** 变更明细文案：`列名: 源值 => 目标值`，多字段用分号连接，便于离线核对。 */
+function changedFieldsSummary(row: DataCompareModifiedRow): string {
+  return row.changes.map((change) => `${change.column}: ${String(change.source ?? "")} => ${String(change.target ?? "")}`).join("; ");
+}
+
+/**
+ * 把当前比对出的全部差异导出为 XLSX：每张有差异的表一个 worksheet，行首
+ * 「差异类型」列区分新增/缺失/修改（文案随界面语言）；modified 行导出源库
+ * 整行。注意导出的仍是预算内已比对的行，被截断舍弃的范围不会因此补全。
+ * sheet 名交由写入端清洗去重（Tauri/Rust 与 Web 构建路径都有该逻辑）。
+ */
+async function exportDiffResultsXlsx() {
+  const tables = batchResults.value.filter((item) => item.status === "different" && item.columns.length > 0 && (item.diff.added.length > 0 || item.diff.removed.length > 0 || item.diff.modified.length > 0));
+  if (tables.length === 0) return;
+
+  const kindColumn = t("dataCompare.exportDiffKind");
+  const changedColumn = t("dataCompare.exportChangedFields");
+  const worksheets = tables.map((item) => ({
+    sheetName: item.sourceTable,
+    columns: [kindColumn, ...item.columns, changedColumn],
+    rows: [
+      ...item.diff.added.map((row) => [t("diff.added"), ...item.columns.map((column) => compareRowCellValue(row.values, row.keyValues, column)), ""]),
+      ...item.diff.removed.map((row) => [t("diff.removed"), ...item.columns.map((column) => compareRowCellValue(row.values, row.keyValues, column)), ""]),
+      ...item.diff.modified.map((row) => [t("diff.modified"), ...item.columns.map((column) => compareModifiedRowCellValue(row, column)), changedFieldsSummary(row)]),
+    ],
+    autoFilter: false,
+  }));
+
+  exportingDiffs.value = true;
+  try {
+    let outputPath = `data-compare-diffs-${new Date().toISOString().slice(0, 10)}.xlsx`;
+    if (isTauriRuntime()) {
+      const path = await promptExportSavePath({ defaultFileName: outputPath, filters: [{ name: "Excel", extensions: ["xlsx"] }] });
+      if (!path) return;
+      outputPath = path;
+    }
+    await api.exportQueryResultsXlsx(outputPath, worksheets, false, undefined);
+    toast(t("dataCompare.exportDiffSuccess", { path: outputPath }), 5000);
+  } catch (error: any) {
+    toast(formatError(error), 5000);
+  } finally {
+    exportingDiffs.value = false;
+  }
+}
+
 function setDiffSelection(kind: DiffKind, selected: boolean) {
   if (executionLocked.value) return;
   batchResults.value.forEach((table) => {
@@ -1505,8 +1572,16 @@ onBeforeUnmount(() => {
 
           <div v-if="hasResults" class="space-y-3">
             <div class="rounded-lg border p-3 text-sm space-y-2">
-              <div>{{ summary }}</div>
-              <div class="text-xs text-muted-foreground">{{ selectedSummary }}</div>
+              <div class="flex flex-wrap items-start justify-between gap-2">
+                <div class="min-w-0 space-y-2">
+                  <div>{{ summary }}</div>
+                  <div class="text-xs text-muted-foreground">{{ selectedSummary }}</div>
+                </div>
+                <Button v-if="canExportDiffs" size="sm" variant="outline" class="h-7 shrink-0 text-xs" :disabled="exportingDiffs" @click="exportDiffResultsXlsx">
+                  <Download class="h-3.5 w-3.5" />
+                  {{ t("dataCompare.exportDiff") }}
+                </Button>
+              </div>
             </div>
 
             <div v-if="truncatedResults.length" class="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700 space-y-1 dark:text-amber-400">

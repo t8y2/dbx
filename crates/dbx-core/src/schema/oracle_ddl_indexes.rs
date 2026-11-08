@@ -662,7 +662,11 @@ pub async fn separate_table_ddl_indexes_core(
     schema: &str,
     table: &str,
     source: &str,
+    explicit_owner: Option<&str>,
 ) -> Result<String, String> {
+    if explicit_owner.is_some_and(|owner| owner.is_empty() || owner != schema) {
+        return Err("Explicit table owner must match the selected schema".into());
+    }
     let config = connection_config(state, connection_id).await.ok_or("connection not found")?;
     let separate_supporting_indexes = config.db_type != DatabaseType::OceanbaseOracle
         && crate::models::connection::jdbc_dialect_hint(&config)
@@ -674,7 +678,7 @@ pub async fn separate_table_ddl_indexes_core(
         schema,
         table,
         source,
-        false,
+        explicit_owner.is_some(),
         separate_supporting_indexes,
     )
     .await?;
@@ -717,7 +721,7 @@ async fn capture_table_ddl_indexes(
         return Err("Table DDL does not match the selected table name".into());
     }
     let owner = match source_metadata.owner.as_deref() {
-        Some(owner) if owner == schema || schema.is_empty() || schema == database => owner,
+        Some(owner) if owner == schema || (!explicit_schema && (schema.is_empty() || schema == database)) => owner,
         Some(_) => return Err("Table DDL does not match the selected table owner".into()),
         None if !schema.is_empty() && (explicit_schema || schema != database) => schema,
         None => return Err("Unqualified table DDL requires an explicit Oracle schema, not a service name".into()),
@@ -1041,7 +1045,8 @@ for line in sys.stdin:
     #[tokio::test]
     async fn native_post_table_primary_key_reaches_view_and_removed_rollback_entry_points() {
         let (_directory, state) = fixture("native-post").await;
-        let output = separate_table_ddl_indexes_core(&state, "conn", "demo", OWNER, "T", POST_SOURCE).await.unwrap();
+        let output =
+            separate_table_ddl_indexes_core(&state, "conn", "demo", OWNER, "T", POST_SOURCE, None).await.unwrap();
         assert_eq!(output.matches("CREATE INDEX").count(), 1);
         assert_eq!(output.matches("PRIMARY KEY").count(), 1);
         assert!(!output.contains("CREATE UNIQUE INDEX"));
@@ -1056,7 +1061,7 @@ for line in sys.stdin:
         assert!(captured.rollback[0].issues.is_empty(), "{:?}", captured.rollback[0].issues);
         assert_eq!(captured.rollback[0].supporting_indexes.len(), 1);
         let conflict = POST_SOURCE.replace("USING INDEX \" O'w \".\" I'x \"", "USING INDEX \" O'w \".OTHER");
-        assert!(separate_table_ddl_indexes_core(&state, "conn", "demo", OWNER, "T", &conflict)
+        assert!(separate_table_ddl_indexes_core(&state, "conn", "demo", OWNER, "T", &conflict, None)
             .await
             .unwrap_err()
             .contains("binding disagree"));
@@ -1126,7 +1131,7 @@ for line in sys.stdin:
     async fn oceanbase_view_export_keeps_inline_support_and_supplements_only_the_ordinary_index() {
         let (directory, state) = fixture("ob-ordinary").await;
         state.configs.write().await.get_mut("conn").unwrap().db_type = DatabaseType::OceanbaseOracle;
-        let result = separate_table_ddl_indexes_core(&state, "conn", "demo", OWNER, "T", SOURCE).await.unwrap();
+        let result = separate_table_ddl_indexes_core(&state, "conn", "demo", OWNER, "T", SOURCE, None).await.unwrap();
         assert!(result.contains("PRIMARY KEY (\"ID\") USING INDEX ENABLE"));
         assert_eq!(result.matches("CREATE INDEX").count(), 1);
         assert!(result.contains("\"ORD\""));
@@ -1271,6 +1276,44 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn explicit_display_owner_can_equal_service_and_rejects_conflicting_ddl() {
+        for db_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            let (directory, state) = fixture("ordinary").await;
+            state.configs.write().await.get_mut("conn").unwrap().db_type = db_type;
+            let ddl = "CREATE TABLE T(ID NUMBER);";
+            assert!(separate_table_ddl_indexes_core(&state, "conn", OWNER, OWNER, "T", ddl, None)
+                .await
+                .unwrap_err()
+                .contains("explicit Oracle schema"));
+            let result =
+                separate_table_ddl_indexes_core(&state, "conn", OWNER, OWNER, "T", ddl, Some(OWNER)).await.unwrap();
+            assert!(result.contains("DESC) INVISIBLE"), "{result}");
+            let calls = std::fs::read_to_string(directory.path().join("calls")).unwrap();
+            assert!(calls.contains("TABLE_OWNER = ' O''w '"));
+            for owner in ["", "OTHER"] {
+                assert!(separate_table_ddl_indexes_core(&state, "conn", OWNER, OWNER, "T", ddl, Some(owner))
+                    .await
+                    .unwrap_err()
+                    .contains("must match"));
+            }
+            assert!(separate_table_ddl_indexes_core(
+                &state,
+                "conn",
+                OWNER,
+                OWNER,
+                "T",
+                "CREATE TABLE OTHER.T(ID NUMBER);",
+                Some(OWNER),
+            )
+            .await
+            .unwrap_err()
+            .contains("selected table owner"));
+            assert_eq!(calls, std::fs::read_to_string(directory.path().join("calls")).unwrap());
+            state.shutdown(Duration::from_secs(1)).await;
+        }
+    }
+
+    #[tokio::test]
     async fn comparison_explicit_schema_can_equal_service_without_using_the_legacy_fallback() {
         let (_directory, state) = fixture("ordinary").await;
         let endpoint =
@@ -1281,7 +1324,7 @@ for line in sys.stdin:
         assert!(captured.issues.is_empty(), "{:?}", captured.issues);
         assert_eq!(captured.owner, OWNER);
         assert!(captured.table_ddl.unwrap().contains("CREATE TABLE T"));
-        assert!(separate_table_ddl_indexes_core(&state, "conn", OWNER, OWNER, "T", ddl)
+        assert!(separate_table_ddl_indexes_core(&state, "conn", OWNER, OWNER, "T", ddl, None)
             .await
             .unwrap_err()
             .contains("explicit Oracle schema"));
@@ -1332,7 +1375,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn independent_indexes_core_preserves_full_definitions_and_exact_dictionary_identity() {
         let (directory, state) = fixture("valid").await;
-        let result = separate_table_ddl_indexes_core(&state, "conn", "demo", OWNER, "T", SOURCE).await.unwrap();
+        let result = separate_table_ddl_indexes_core(&state, "conn", "demo", OWNER, "T", SOURCE, None).await.unwrap();
         assert!(result.contains(&"完整定义 ".repeat(4000)));
         assert!(result.contains("(\"ID\" DESC) INVISIBLE"));
         assert!(result.contains("USING INDEX \" O'w \".\" I'x \""));
@@ -1368,7 +1411,8 @@ for line in sys.stdin:
             "inventory-deferred",
         ] {
             let (_directory, state) = fixture(mode).await;
-            let error = separate_table_ddl_indexes_core(&state, "conn", "demo", OWNER, "T", SOURCE).await.unwrap_err();
+            let error =
+                separate_table_ddl_indexes_core(&state, "conn", "demo", OWNER, "T", SOURCE, None).await.unwrap_err();
             let expected = match mode {
                 "dictionary-deferred"
                 | "ddl-deferred"
@@ -1400,7 +1444,8 @@ for line in sys.stdin:
             ("iot", SOURCE.trim_end_matches(';').to_string() + " ORGANIZATION INDEX;"),
         ] {
             let (directory, state) = fixture(mode).await;
-            let result = separate_table_ddl_indexes_core(&state, "conn", "demo", "demo", "T", &source).await.unwrap();
+            let result =
+                separate_table_ddl_indexes_core(&state, "conn", "demo", "demo", "T", &source, None).await.unwrap();
             assert_eq!(result, source);
             let requests = std::fs::read_to_string(directory.path().join("calls")).unwrap();
             assert!(!requests.contains("GET_DDL"), "{mode}: {requests}");
@@ -1416,7 +1461,8 @@ for line in sys.stdin:
             if existing {
                 source.push_str("\nCREATE INDEX \" O'w \".\" I'x \" ON \" O'w \".\"T\" (\"ID\" DESC) INVISIBLE;");
             }
-            let result = separate_table_ddl_indexes_core(&state, "conn", "demo", OWNER, "T", &source).await.unwrap();
+            let result =
+                separate_table_ddl_indexes_core(&state, "conn", "demo", OWNER, "T", &source, None).await.unwrap();
             assert_eq!(result.matches(" INDEX ").count(), 1);
             assert!(result.contains("DESC) INVISIBLE"));
             assert!(!result.contains("ALTER TABLE"));

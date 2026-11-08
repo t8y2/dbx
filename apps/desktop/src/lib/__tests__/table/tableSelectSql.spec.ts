@@ -312,6 +312,19 @@ describe("quoteTableIdentifier", () => {
     expect(quoteTableIdentifierIfNeeded("postgres", "Order")).toBe('"Order"');
     expect(quoteTableIdentifierIfNeeded("mysql", "dbx_test")).toBe("dbx_test");
     expect(quoteTableIdentifierIfNeeded("mysql", "order")).toBe("`order`");
+    expect(quoteTableIdentifierIfNeeded("clickhouse", "dbx_test")).toBe("dbx_test");
+    expect(quoteTableIdentifierIfNeeded("clickhouse", "Order_Test")).toBe("Order_Test");
+    expect(quoteTableIdentifierIfNeeded("clickhouse", "order")).toBe("`order`");
+    expect(quoteTableIdentifierIfNeeded("clickhouse", "prewhere")).toBe("`prewhere`");
+    expect(quoteTableIdentifierIfNeeded("clickhouse", "姓名")).toBe("`姓名`");
+    expect(quoteTableIdentifierIfNeeded("clickhouse", "时间")).toBe("`时间`");
+    expect(quoteTableIdentifierIfNeeded("clickhouse", "col$1")).toBe("`col$1`");
+  });
+
+  it("does not wrap an already quoted PostgreSQL identifier again (#14194)", () => {
+    expect(quoteTableIdentifier("postgres", '"neptune"')).toBe('"neptune"');
+    expect(quoteTableIdentifier("postgres", "neptune")).toBe('"neptune"');
+    expect(quoteTableDataIdentifier("postgres", '"neptune"', '"')).toBe('"neptune"');
   });
 
   it("uses a JDBC driver's reported quote for required identifiers", () => {

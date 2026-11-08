@@ -135,7 +135,7 @@ describe("useSidebarTreeExportRuntime", () => {
       activeNode.value = secondNode;
       settingsStore.editorSettings.separateDdlIndexes = true;
       await vi.waitFor(() => expect(apiMock.getTableDdl).toHaveBeenCalledTimes(2));
-      expect(apiMock.getTableDdl.mock.calls[1]).toEqual(["conn-1", "db", "app", "A", undefined, undefined, true, undefined, true]);
+      expect(apiMock.getTableDdl.mock.calls[1]).toEqual(["conn-1", "db", "app", "A", undefined, undefined, true, undefined, true, "app"]);
       await vi.waitFor(() => expect(isLoadingStructurePreview.value).toBe(false));
       expect(structurePreviewSql.value).toContain("CREATE INDEX ix");
       expect(structurePreviewDefaultFileName.value).toBe("A.sql");
@@ -534,6 +534,7 @@ describe("useSidebarTreeExportRuntime", () => {
     activeNode.value = { id: "table-2", type: "table", label: "orders", connectionId: "conn-2", database: "db-b", schema: "sales", children: [] } as TreeNode;
     settingsStore.editorSettings.exportBatchSize = 16;
     settingsStore.editorSettings.exportRowLimit = 10;
+    settingsStore.editorSettings.dataGridExtractorOptions = { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, sql: { ...DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS.sql, primaryKeyMode: "exclude-all" } };
     metadata.resolve([column("name")]);
 
     await exportPromise;
@@ -549,6 +550,7 @@ describe("useSidebarTreeExportRuntime", () => {
         columns: ["name"],
         batchSize: 128,
         rowLimit: 500,
+        primaryKeyMode: "include",
       }),
       expect.any(Function),
     );
@@ -735,6 +737,22 @@ describe("useSidebarTreeExportRuntime", () => {
     settingsStore.editorSettings.generateSqlIncludeDatabaseName = true;
     await runtime.exportData("sql");
     expect(apiMock.startTableExport).toHaveBeenLastCalledWith(expect.objectContaining({ format: "sql", omitDatabaseQualifier: false }), expect.any(Function));
+  });
+
+  it("rejects compatibility SQL export before creating output or connecting", async () => {
+    const activeNode = shallowRef({ id: "table-1", type: "table", label: "events", connectionId: "conn-1", database: "warehouse", schema: "warehouse", children: [] } as TreeNode);
+    const connectionStore = {
+      ensureConnected: vi.fn(),
+      getConfig: () => ({ db_type: "mysql", url_params: "dataCharset=GBK" }),
+      connectionIdentifierQuote: () => "`",
+      treeNodes: [],
+      selectedTreeNodeIds: [],
+    };
+    const runtime = useSidebarTreeExportRuntime({ activeNode, connectionStore: connectionStore as never, settingsStore: exportSettings() as never, acceptedSelectionIds: () => null });
+    await runtime.exportData("sql");
+    expect(connectionStore.ensureConnected).not.toHaveBeenCalled();
+    expect(apiMock.startTableExport).not.toHaveBeenCalled();
+    expect(toastMock).toHaveBeenCalledWith("connection.mysqlDataCharsetExportHint", 5000);
   });
 
   it.each([

@@ -43,6 +43,7 @@ import {
 import OracleDatabaseLinksDialog from "@/components/objects/OracleDatabaseLinksDialog.vue";
 const showDatabaseLinks = ref(false);
 import { useConnectionStore } from "@/stores/connectionStore";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
@@ -89,7 +90,8 @@ import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { isTableVGroupGroupableRowType, selectedTableVGroupMoveTargets, tableVGroupIdFromNodeId } from "@/lib/table/tableVGroup";
 import { findTreeNodeById } from "@/lib/sql/newQueryContext";
 import { resolveTableVGroupDropTarget, setTableVGroupDropTargetNodeId, tableVGroupDropTargetNodeId } from "@/lib/sidebar/sidebarTableVGroupDrag";
-import { isExecuteSqlShortcut, isFocusSearchShortcut } from "@/lib/editor/keyboardShortcuts";
+import { connectionEndpointUserLabel } from "@/lib/connection/connectionPresentation";
+import { isCancelSearchShortcut, isExecuteSqlShortcut, isFocusSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { connectionDetailRows, type ConnectionDetailRow } from "@/lib/connection/connectionDetailRows";
 import { hexToRgba } from "@/lib/common/color";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
@@ -264,6 +266,15 @@ function currentDriverProfile(): string | undefined {
   return activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId)?.driver_profile : undefined;
 }
 
+function externalTableKind(node: TreeNode): string | undefined {
+  if (node.type !== "table") return;
+  const kind = node.tableType
+    ?.trim()
+    .toUpperCase()
+    .replace(/[\s_]+/g, " ");
+  return kind === "FOREIGN TABLE" || kind === "EXTERNAL TABLE" ? kind : undefined;
+}
+
 function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
   switch (node.type) {
     case "connection":
@@ -293,6 +304,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: FolderOpen, colorClass: "text-amber-500" };
     }
     case "table":
+      if (externalTableKind(node)) return { icon: Link2, colorClass: "text-cyan-500" };
       return { icon: Table, colorClass: "text-green-500" };
     case "view":
       return { icon: Eye, colorClass: "text-purple-500" };
@@ -338,6 +350,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
     case "dameng-roles":
       return { icon: ShieldCheck, colorClass: "text-primary" };
     case "dameng-job-admin":
+    case "database-job-admin":
       return { icon: CalendarClock, colorClass: "text-primary" };
     case "saved-sql-root":
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-blue-500" };
@@ -434,6 +447,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
     case "group-jobs":
       return { icon: Clock, colorClass: "text-orange-400" };
     case "group-packages":
+      return { icon: Package, colorClass: "text-cyan-500" };
+    case "group-package-bodies":
       return { icon: Package, colorClass: "text-cyan-500" };
     case "group-types":
       return { icon: Braces, colorClass: "text-violet-500" };
@@ -572,9 +587,11 @@ const detailTooltip = computed(() => {
   }
   const column = node.type === "column" ? (node.meta as ColumnInfo | undefined) : undefined;
   const comment = column && "comment" in column ? column.comment : node.comment;
-  if ((!comment && !column) || !isSidebarCommentSupportedType(node.type)) return null;
+  const tableKind = externalTableKind(node);
+  if ((!comment && !column && !tableKind) || !isSidebarCommentSupportedType(node.type)) return null;
   const rows: ConnectionDetailRow[] = [
     { label: t("connection.name"), value: visibleLabel(node) },
+    ...(tableKind ? [{ label: t("postgresForeignTable.tableKind"), value: tableKind }] : []),
     ...(column ? [{ label: t("structureEditor.nullable"), value: t(column.is_nullable ? "structureEditor.nullable" : "structureEditor.notNull") }] : []),
     { label: t("structureEditor.comment"), value: cleanTooltipValue(comment), multiline: true },
   ].filter((row) => row.value);
@@ -807,6 +824,11 @@ const trailingComment = computed(() => {
   return sidebarTreeNodeComment(activeNode.value, settingsStore.editorSettings.sidebarShowConnectionNotes);
 });
 
+const connectionEndpointText = computed(() => {
+  if (activeNode.value.type !== "connection" || !settingsStore.editorSettings.sidebarShowConnectionEndpoints) return null;
+  return connectionEndpointUserLabel(activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined) || null;
+});
+
 function isRightAlignedComment(): boolean {
   return settingsStore.editorSettings.sidebarObjectInfoMode === "comment-right" && !!trailingComment.value;
 }
@@ -824,7 +846,7 @@ function measureTrailingCommentLayout() {
     trailingCommentMaxWidth.value = 0;
     return;
   }
-  trailingCommentMaxWidth.value = settingsStore.editorSettings.sidebarAllowHorizontalScroll ? sidebarRightCommentMaxWidthPx : trailingCommentAvailableWidth(container.clientWidth, leading.scrollWidth);
+  trailingCommentMaxWidth.value = usesFullWidthLabel.value ? sidebarRightCommentMaxWidthPx : trailingCommentAvailableWidth(container.clientWidth, leading.scrollWidth);
 }
 
 function scheduleTrailingCommentMeasure() {
@@ -869,7 +891,7 @@ function formattedObjectStorage(): string {
 const alignedCommentLabelWidth = computed(() => (settingsStore.editorSettings.sidebarObjectInfoMode === "comment-aligned" && activeNode.value.type !== "connection" ? props.commentLabelWidth : undefined));
 
 function alignedCommentLeadingStyle(): { width: string } | { maxWidth: string } | undefined {
-  if (!settingsStore.editorSettings.sidebarAllowHorizontalScroll && settingsStore.editorSettings.sidebarObjectInfoMode === "comment-and-size" && trailingComment.value) {
+  if (!usesFullWidthLabel.value && settingsStore.editorSettings.sidebarObjectInfoMode === "comment-and-size" && trailingComment.value) {
     // Reserve the inline comment's margin so a long name cannot push into the size column.
     return { maxWidth: "max(0px, calc(100% - 1rem))" };
   }
@@ -885,6 +907,7 @@ const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(activeNode.valu
 
 const isCompactSidebar = computed(() => settingsStore.editorSettings.sidebarDensity === "compact");
 
+const isConnectionRow = computed(() => activeNode.value.type === "connection" || activeNode.value.type === "connection-group");
 const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0 tree-row-viewport"));
 
 const labelWidthClass = computed(() => {
@@ -912,7 +935,7 @@ const isConnecting = computed(() => activeNode.value.type === "connection" && !!
 // database colors entirely; the trailing green dot still marks active ones.
 const connectionIconInactiveClass = computed(() => (activeNode.value.type === "connection" && activeNode.value.connectionId && !connectionStore.connectedIds.has(activeNode.value.connectionId) ? "saturate-50 opacity-70" : ""));
 
-const isConnectionReadonly = computed(() => activeNode.value.type === "connection" && !!activeNode.value.connectionId && (connectionStore.getConfig(activeNode.value.connectionId)?.read_only ?? false));
+const isConnectionReadonly = computed(() => activeNode.value.type === "connection" && !!activeNode.value.connectionId && (mysqlDataCharsetEnabled(connectionStore.getConfig(activeNode.value.connectionId)) || (connectionStore.getConfig(activeNode.value.connectionId)?.read_only ?? false)));
 
 const databaseOpenVisual = computed(() => {
   const databaseOpen = isSidebarDatabaseOpenForVisual(activeNode.value, connectionStore.isTreeNodeChildrenLoaded, queryStore.openDatabaseKeys);
@@ -960,7 +983,7 @@ const rowStyle = computed(() => {
   const backgroundColor = hexToRgba(color, isActiveConnectionScope.value ? 0.14 : 0.08);
   return {
     paddingLeft: paddingLeft.value,
-    paddingRight: props.isStickyContext && !showProductionBadge.value ? "72px" : showProductionRowMarker.value ? "8px" : trailingComment.value ? "12px" : undefined,
+    paddingRight: props.isStickyContext && !showProductionBadge.value ? "72px" : showProductionRowMarker.value || (activeNode.value.type === "connection" && showProductionBadge.value) ? "8px" : trailingComment.value ? "12px" : undefined,
     "--tree-connection-row-bg": backgroundColor,
     "--tree-connection-row-hover-bg": hexToRgba(color, isActiveConnectionScope.value ? 0.2 : 0.16),
     "--tree-connection-active-bg": hexToRgba(color, 0.18),
@@ -972,7 +995,6 @@ const tableSearchStyle = computed(() => {
   const color = connectionColor.value;
   const rowBackgroundColor = color ? hexToRgba(color, isActiveConnectionScope.value ? 0.14 : 0.08) : "transparent";
   return {
-    paddingLeft: paddingLeft.value,
     "--tree-table-search-row-bg": rowBackgroundColor,
     "--tree-table-search-input-bg": color ? hexToRgba(color, isActiveConnectionScope.value ? 0.05 : 0.03) : "color-mix(in srgb, var(--background) 56%, transparent)",
     "--tree-table-search-border": color ? hexToRgba(color, isActiveConnectionScope.value ? 0.12 : 0.08) : "color-mix(in srgb, var(--border) 36%, transparent)",
@@ -1012,6 +1034,16 @@ function onTableSearchControlKeydown(event: KeyboardEvent) {
     const input = control?.querySelector<HTMLInputElement>("[data-sidebar-table-search-parent-id]");
     input?.focus();
     input?.select();
+    event.stopPropagation();
+    return;
+  }
+  if (isCancelSearchShortcut(event)) {
+    if (tableSearchValue.value) {
+      event.preventDefault();
+      clearTableSearchQuery();
+    }
+    event.stopPropagation();
+    return;
   }
   // Let the app-level shortcut handler open the database default query while
   // the table-search input remains focused. Other tree-local key handling
@@ -1553,8 +1585,9 @@ function onKeydown(event: KeyboardEvent) {
 </script>
 
 <template>
-  <div v-if="node.type === 'table-search-control'" data-sidebar-table-search-control class="tree-table-search-control pr-2" :class="isCompactSidebar ? 'h-6 py-0' : 'h-7 py-0.5'" :style="tableSearchStyle" @click.stop @dblclick.stop @mousedown.stop @keydown="onTableSearchControlKeydown">
-    <div class="tree-table-search-control__content flex w-full min-w-0 items-center gap-1.5">
+  <div v-if="node.type === 'table-search-control'" data-sidebar-table-search-control class="tree-table-search-control" :class="isCompactSidebar ? 'h-6 py-0' : 'h-7 py-0.5'" :style="tableSearchStyle" @click.stop @dblclick.stop @mousedown.stop @keydown="onTableSearchControlKeydown">
+    <!-- Keep indentation inside the viewport-sized content so trailing controls fit. -->
+    <div class="tree-table-search-control__content flex w-full min-w-0 items-center gap-1.5 pr-2" :style="{ paddingLeft }">
       <div class="relative min-w-0 flex-1">
         <Search class="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
         <Input
@@ -1654,7 +1687,17 @@ function onKeydown(event: KeyboardEvent) {
         >
           <div
             ref="trailingCommentLeadingRef"
-            :class="trailingComment ? (usesFullWidthLabel ? 'flex min-w-0 shrink-0 items-center gap-2' : 'flex max-w-full min-w-0 shrink-0 items-center gap-2') : formattedObjectStorage() ? 'flex min-w-0 flex-1 items-center gap-2' : 'contents'"
+            :class="
+              trailingComment
+                ? usesFullWidthLabel
+                  ? 'flex min-w-0 shrink-0 items-center gap-2'
+                  : isConnectionRow
+                    ? 'flex max-w-full min-w-0 shrink items-center gap-2'
+                    : 'flex max-w-full min-w-0 shrink-0 items-center gap-2'
+                : formattedObjectStorage()
+                  ? 'flex min-w-0 flex-1 items-center gap-2'
+                  : 'contents'
+            "
             :style="alignedCommentLeadingStyle()"
           >
             <input
@@ -1673,7 +1716,7 @@ function onKeydown(event: KeyboardEvent) {
               :class="[
                 labelWidthClass,
                 {
-                  'flex-1': node.type === 'connection' && !trailingComment,
+                  'flex-1': isConnectionRow && !trailingComment && !connectionEndpointText,
                   'tree-connection-label': node.type === 'connection' || node.type === 'connection-group',
                   'tree-object-label': node.type !== 'connection' && node.type !== 'connection-group',
                   'font-semibold': isLoginUserNode(),
@@ -1681,6 +1724,7 @@ function onKeydown(event: KeyboardEvent) {
               ]"
               >{{ visibleLabel(node) }}</span
             >
+            <span v-if="connectionEndpointText && !isRenamingConnection" class="sidebar-connection-endpoint flex-1 min-w-0 truncate" :class="{ 'shrink-0 whitespace-nowrap': usesFullWidthLabel }" :title="connectionEndpointText">{{ connectionEndpointText }}</span>
             <span
               v-if="node.type === 'column' && node.meta"
               class="shrink-0 rounded px-1 text-[10px] leading-4"
@@ -1709,7 +1753,7 @@ function onKeydown(event: KeyboardEvent) {
               <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
             </button>
             <Pin v-else-if="isPinned" class="h-3 w-3 shrink-0 fill-current text-primary" aria-hidden="true" />
-            <ProductionContextBadge v-if="showProductionBadge && !showProductionRowMarker" compact />
+            <ProductionContextBadge v-if="showProductionBadge && !showProductionRowMarker && node.type !== 'connection'" compact />
             <span
               v-if="
                 (node.type === 'group-tables' ||
@@ -1733,6 +1777,7 @@ function onKeydown(event: KeyboardEvent) {
                   node.type === 'group-synonyms' ||
                   node.type === 'group-jobs' ||
                   node.type === 'group-packages' ||
+                  node.type === 'group-package-bodies' ||
                   node.type === 'group-types' ||
                   node.type === 'group-partitions' ||
                   node.type === 'type-attributes' ||
@@ -1761,6 +1806,7 @@ function onKeydown(event: KeyboardEvent) {
         </div>
         <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
+        <ProductionContextBadge v-if="showProductionBadge && !showProductionRowMarker && node.type === 'connection'" class="ml-auto shrink-0" compact />
         <ReadOnlySessionControl v-if="isConnectionReadonly && activeNode.connectionId" :connection-id="activeNode.connectionId" show-label />
         <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
         <span v-if="formattedObjectStorage()" class="ml-auto shrink-0 text-right text-xs tabular-nums text-muted-foreground">{{ formattedObjectStorage() }}</span>
@@ -1849,10 +1895,20 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 .sidebar-object-comment--windows {
-  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  /* Inherit the interface font; only adjust readability on Windows. */
   font-size: 1em;
   font-weight: 500;
   opacity: 1;
+}
+
+.sidebar-connection-endpoint {
+  color: var(--muted-foreground);
+  /* Matches the connection detail tooltip (text-xs ≈ 12px at the default sidebar font size) and scales with the sidebar font size setting. */
+  font-size: 0.85em;
+  line-height: 1.25;
+  opacity: 0.7;
+  /* Two name-sized characters of gap; this element's own font is 0.85em, so scale the 2em back to the row font. */
+  margin-left: calc(2em / 0.85);
 }
 
 .tree-connection-label {

@@ -32,6 +32,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import javax.net.ssl.TrustManagerFactory;
@@ -187,8 +188,21 @@ class KafkaAgentTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
-    void consumerGroupQueriesKeepCommittedTopicsWhenDescriptionsTimeOut(boolean snapshot) throws Exception {
+    void consumerGroupQueriesKeepCommittedTopicsWhenManyDescriptionsTimeOut(boolean snapshot) throws Exception {
         TopicPartition partition = new TopicPartition("orders", 0);
+        List<ConsumerGroupListing> listings = new ArrayList<>();
+        Map<String, KafkaFuture<ConsumerGroupDescription>> descriptions = new LinkedHashMap<>();
+        for (int index = 0; index < 197; index++) {
+            String groupId = index == 0 ? "orders-service" : String.format("slow-group-%03d", index);
+            listings.add(new ConsumerGroupListing(groupId, false));
+            descriptions.put(groupId, index == 0
+                ? KafkaFuture.completedFuture(new ConsumerGroupDescription(
+                    groupId, false, List.of(), "", ConsumerGroupState.EMPTY, Node.noNode()
+                ))
+                : new KafkaFutureImpl<>());
+        }
+        AtomicInteger descriptionRequests = new AtomicInteger();
+        AtomicInteger offsetRequests = new AtomicInteger();
         ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
         try {
             Admin admin = (Admin) Proxy.newProxyInstance(Admin.class.getClassLoader(), new Class<?>[] {Admin.class},
@@ -197,18 +211,16 @@ class KafkaAgentTest {
                         case "listConsumerGroups" -> {
                             var constructor = ListConsumerGroupsResult.class.getDeclaredConstructor(KafkaFuture.class);
                             constructor.setAccessible(true);
-                            yield constructor.newInstance(KafkaFuture.completedFuture(List.of(
-                                new ConsumerGroupListing("orders-service", false),
-                                new ConsumerGroupListing("slow-group", false)
-                            )));
+                            yield constructor.newInstance(KafkaFuture.completedFuture(listings));
                         }
-                        case "describeConsumerGroups" -> new DescribeConsumerGroupsResult(Map.of(
-                            "orders-service", KafkaFuture.completedFuture(new ConsumerGroupDescription(
-                                "orders-service", false, List.of(), "", ConsumerGroupState.EMPTY, Node.noNode()
-                            )),
-                            "slow-group", new KafkaFutureImpl<>()
-                        ));
+                        case "describeConsumerGroups" -> {
+                            descriptionRequests.incrementAndGet();
+                            assertEquals(197, ((java.util.Collection<?>) args[0]).size());
+                            yield new DescribeConsumerGroupsResult(descriptions);
+                        }
                         case "listConsumerGroupOffsets" -> {
+                            offsetRequests.incrementAndGet();
+                            assertEquals(197, ((Map<?, ?>) args[0]).size());
                             // Model an offsets response that needs a small amount of network time.
                             // If descriptions consumed the deadline before this request was sent,
                             // the broker cannot return even these independently available offsets.
@@ -223,10 +235,11 @@ class KafkaAgentTest {
                             }, Math.min(50, timeout), TimeUnit.MILLISECONDS);
                             var constructor = ListConsumerGroupOffsetsResult.class.getDeclaredConstructor(Map.class);
                             constructor.setAccessible(true);
-                            yield constructor.newInstance(Map.of(
-                                CoordinatorKey.byGroupId("orders-service"), offsets,
-                                CoordinatorKey.byGroupId("slow-group"), offsets
-                            ));
+                            Map<CoordinatorKey, KafkaFuture<Map<TopicPartition, OffsetAndMetadata>>> groupOffsets = new LinkedHashMap<>();
+                            for (ConsumerGroupListing listing : listings) {
+                                groupOffsets.put(CoordinatorKey.byGroupId(listing.groupId()), offsets);
+                            }
+                            yield constructor.newInstance(groupOffsets);
                         }
                         case "listOffsets" -> new ListOffsetsResult(Map.of(
                             partition, KafkaFuture.completedFuture(new ListOffsetsResult.ListOffsetsResultInfo(5, -1, Optional.empty()))
@@ -237,23 +250,28 @@ class KafkaAgentTest {
             JsonObject params = new JsonObject();
             params.addProperty("timeout_ms", 300);
             params.addProperty("topic", "orders");
+            long start = System.nanoTime();
             Object result = snapshot
                 ? KafkaAgent.getConsumerGroupSnapshot(params, admin)
                 : KafkaAgent.listConsumerGroups(params, admin);
+            long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            assertTrue(elapsed < 1_500, "waited " + elapsed + "ms; 197 groups must share one 300ms deadline");
+            assertEquals(1, descriptionRequests.get());
+            assertEquals(1, offsetRequests.get());
             var groups = new Gson().toJsonTree(result).getAsJsonObject().getAsJsonArray("groups");
-            assertEquals(2, groups.size());
+            assertEquals(197, groups.size());
             for (var row : groups) {
                 JsonObject group = row.getAsJsonObject();
                 if (snapshot) {
                     assertEquals(1, group.getAsJsonArray("topics").size(), "committed topic survives description timeout");
                     assertEquals("orders", group.getAsJsonArray("topics").get(0).getAsString());
                     assertEquals(3, group.getAsJsonArray("partitions").get(0).getAsJsonObject().get("currentOffset").getAsInt());
-                    if (group.get("groupId").getAsString().equals("slow-group")) {
+                    if (!group.get("groupId").getAsString().equals("orders-service")) {
                         assertTrue(group.get("error").getAsString().contains("Consumer group details unavailable"));
                         assertFalse(group.has("memberCount"));
                     }
                 } else {
-                    assertEquals(!group.get("groupId").getAsString().equals("slow-group"), group.get("membersAvailable").getAsBoolean());
+                    assertEquals(group.get("groupId").getAsString().equals("orders-service"), group.get("membersAvailable").getAsBoolean());
                     assertEquals(1, group.getAsJsonArray("committedOffsets").size(), "committed offsets survive description timeout");
                     assertEquals("orders", group.getAsJsonArray("committedOffsets").get(0).getAsJsonObject().get("topic").getAsString());
                     assertEquals(3, group.getAsJsonArray("committedOffsets").get(0).getAsJsonObject().get("offset").getAsInt());
@@ -261,6 +279,96 @@ class KafkaAgentTest {
             }
         } finally {
             executor.shutdownNow();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void consumerGroupQueriesShardBothLookupsAcrossIndependentAdmins(boolean snapshot) throws Exception {
+        TopicPartition partition = new TopicPartition("orders", 0);
+        List<ConsumerGroupListing> listings = new ArrayList<>();
+        for (int index = 0; index < 197; index++) {
+            listings.add(new ConsumerGroupListing(String.format("group-%03d", index), false));
+        }
+        Map<String, Integer> offsetOwners = new HashMap<>();
+        Map<String, Integer> descriptionOwners = new HashMap<>();
+        Map<String, KafkaFutureImpl<Map<TopicPartition, OffsetAndMetadata>>> pendingOffsets = new HashMap<>();
+        List<Admin> admins = new ArrayList<>();
+        for (int index = 0; index < 12; index++) {
+            int owner = index;
+            admins.add((Admin) Proxy.newProxyInstance(Admin.class.getClassLoader(), new Class<?>[] {Admin.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "listConsumerGroups" -> {
+                        assertEquals(0, owner);
+                        var constructor = ListConsumerGroupsResult.class.getDeclaredConstructor(KafkaFuture.class);
+                        constructor.setAccessible(true);
+                        yield constructor.newInstance(KafkaFuture.completedFuture(listings));
+                    }
+                    case "listConsumerGroupOffsets" -> {
+                        Map<?, ?> specs = (Map<?, ?>) args[0];
+                        assertTrue(specs.size() <= 17, "197 groups must be split across 12 clients");
+                        Map<CoordinatorKey, KafkaFuture<Map<TopicPartition, OffsetAndMetadata>>> offsets = new HashMap<>();
+                        for (Object key : specs.keySet()) {
+                            String groupId = (String) key;
+                            assertNull(offsetOwners.put(groupId, owner), "offsets requested twice for " + groupId);
+                            KafkaFutureImpl<Map<TopicPartition, OffsetAndMetadata>> future = new KafkaFutureImpl<>();
+                            pendingOffsets.put(groupId, future);
+                            offsets.put(CoordinatorKey.byGroupId(groupId), future);
+                        }
+                        var constructor = ListConsumerGroupOffsetsResult.class.getDeclaredConstructor(Map.class);
+                        constructor.setAccessible(true);
+                        yield constructor.newInstance(offsets);
+                    }
+                    case "describeConsumerGroups" -> {
+                        java.util.Collection<?> ids = (java.util.Collection<?>) args[0];
+                        assertTrue(ids.size() <= 17, "descriptions must use the same shards as offsets");
+                        Map<String, KafkaFuture<ConsumerGroupDescription>> descriptions = new HashMap<>();
+                        for (Object key : ids) {
+                            String groupId = (String) key;
+                            assertNull(descriptionOwners.put(groupId, owner), "description requested twice for " + groupId);
+                            descriptions.put(groupId, KafkaFuture.completedFuture(new ConsumerGroupDescription(
+                                groupId, false, List.of(), "", ConsumerGroupState.EMPTY, Node.noNode()
+                            )));
+                        }
+                        // None of the offset futures completes until every shard was sent.
+                        // Waiting on one client before dispatching the others loses its rows.
+                        if (offsetOwners.size() == 197 && descriptionOwners.size() == 197) {
+                            pendingOffsets.values().forEach(future -> future.complete(Map.of(partition, new OffsetAndMetadata(3))));
+                        }
+                        yield new DescribeConsumerGroupsResult(descriptions);
+                    }
+                    case "listOffsets" -> new ListOffsetsResult(Map.of(
+                        partition, KafkaFuture.completedFuture(new ListOffsetsResult.ListOffsetsResultInfo(5, -1, Optional.empty()))
+                    ));
+                    default -> throw new UnsupportedOperationException(method.getName());
+                }));
+        }
+        JsonObject params = new JsonObject();
+        params.addProperty("timeout_ms", 300);
+        params.addProperty("topic", "orders");
+        java.util.function.IntFunction<List<Admin>> provider = count -> {
+            assertEquals(197, count);
+            return admins;
+        };
+        Object result = snapshot
+            ? KafkaAgent.getConsumerGroupSnapshot(params, admins.get(0), provider)
+            : KafkaAgent.listConsumerGroups(params, admins.get(0), provider);
+        assertEquals(197, offsetOwners.size());
+        assertEquals(offsetOwners, descriptionOwners);
+        assertEquals(12, new java.util.HashSet<>(offsetOwners.values()).size());
+        var groups = new Gson().toJsonTree(result).getAsJsonObject().getAsJsonArray("groups");
+        assertEquals(197, groups.size());
+        for (var row : groups) {
+            JsonObject group = row.getAsJsonObject();
+            if (snapshot) {
+                assertEquals(2, group.get("totalLag").getAsInt());
+                assertTrue(group.get("lagAvailable").getAsBoolean());
+                assertFalse(group.has("error"));
+            } else {
+                assertTrue(group.get("membersAvailable").getAsBoolean());
+                assertEquals(1, group.getAsJsonArray("committedOffsets").size());
+                assertEquals(1, group.getAsJsonArray("endOffsets").size());
+            }
         }
     }
 
@@ -950,21 +1058,21 @@ class KafkaAgentTest {
     @Test
     void offsetStartPositionAllowsAllPartitionsButRequiresANonNegativeOffset() {
         assertDoesNotThrow(() ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, null, 0L, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, null, 0L, null, null, null));
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, 0, null, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, 0, null, null, null, null));
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, -1, 0L, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, -1, 0L, null, null, null));
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, 0, -1L, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, 0, -1L, null, null, null));
     }
 
     @Test
     void nonOffsetStartPositionsRejectAnOffset() {
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.LATEST, true, 0, 7L, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.LATEST, true, 0, 7L, null, null, null));
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, true, 0, 7L, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, true, 0, 7L, null, null, null));
     }
 
     @Test
@@ -977,14 +1085,14 @@ class KafkaAgentTest {
     @Test
     void everyStartPositionRejectsNegativePartitions() {
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.LATEST, true, -1, null, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.LATEST, true, -1, null, null, null, null));
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, true, -1, null, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, true, -1, null, null, null, null));
     }
 
     @Test
     void legacyOffsetWithoutStartPositionKeepsTheExistingReadBehavior() {
-        KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, false, null, 7L, null);
+        KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, false, null, 7L, null, null, null);
         assertEquals(7L, KafkaAgent.requestedPeekOffset(
             KafkaAgent.PeekStartPosition.EARLIEST, 7L, true, 0L, 10L
         ));
@@ -1296,6 +1404,116 @@ class KafkaAgentTest {
     }
 
     @Test
+    void collectPeekedMessagesNewestFirstWalksBackwardBatchByBatch() {
+        TopicPartition tp = new TopicPartition("events", 0);
+        // 模拟稀疏日志窗口 [0, 1200)：每个 500 条宽的批次里只有少量真实记录，
+        // 首批从 700 读起，消费尽后回退到 200，再回退到窗口左端 0 后停止。
+        Map<Long, List<Long>> offsetsByBatchStart = new LinkedHashMap<>();
+        offsetsByBatchStart.put(700L, List.of(709L, 809L, 909L));
+        offsetsByBatchStart.put(200L, List.of(209L, 309L));
+        offsetsByBatchStart.put(0L, List.of(9L, 109L));
+        Map<Long, Long> batchEndByBatchStart = Map.of(700L, 1200L, 200L, 700L, 0L, 200L);
+
+        AtomicLong position = new AtomicLong(700L);
+        List<Long> seekTargets = new ArrayList<>();
+        AtomicInteger polls = new AtomicInteger();
+        KafkaAgent.PeekRecordPoller poller = timeout -> {
+            polls.incrementAndGet();
+            long batchStart = position.get();
+            List<ConsumerRecord<String, byte[]>> records = new ArrayList<>();
+            for (long offset : offsetsByBatchStart.getOrDefault(batchStart, List.of())) {
+                records.add(new ConsumerRecord<>(
+                    "events", 0, offset, "k", "v".getBytes(StandardCharsets.UTF_8)
+                ));
+            }
+            position.set(batchEndByBatchStart.getOrDefault(batchStart, batchStart));
+            return records.isEmpty()
+                ? ConsumerRecords.empty()
+                : new ConsumerRecords<>(Map.of(tp, records));
+        };
+
+        List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessagesNewestFirst(
+            poller,
+            partition -> position.get(),
+            (partition, offset) -> {
+                seekTargets.add(offset);
+                position.set(offset);
+            },
+            record -> true,
+            List.of(tp),
+            Map.of(tp, 0L),
+            Map.of(tp, 1200L),
+            8,
+            1_000,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        assertEquals(List.of(200L, 0L), seekTargets);
+        assertEquals(3, polls.get());
+        assertEquals(
+            List.of(709L, 809L, 909L, 209L, 309L, 9L, 109L),
+            messages.stream().map(message -> message.get("offset")).toList()
+        );
+    }
+
+    @Test
+    void collectPeekedMessagesNewestFirstStopsOnceEveryQuotaIsSatisfied() {
+        TopicPartition tp = new TopicPartition("events", 0);
+        AtomicLong position = new AtomicLong(700L);
+        AtomicInteger polls = new AtomicInteger();
+        List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessagesNewestFirst(
+            timeout -> {
+                polls.incrementAndGet();
+                position.set(1200L);
+                return new ConsumerRecords<>(Map.of(tp, List.of(
+                    new ConsumerRecord<>("events", 0, 709L, "k", "v".getBytes(StandardCharsets.UTF_8)),
+                    new ConsumerRecord<>("events", 0, 800L, "k", "v".getBytes(StandardCharsets.UTF_8))
+                )));
+            },
+            partition -> position.get(),
+            (partition, offset) -> {
+                throw new AssertionError("quota was met before any backward seek");
+            },
+            record -> true,
+            List.of(tp),
+            Map.of(tp, 0L),
+            Map.of(tp, 1200L),
+            2,
+            1_000,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        assertEquals(1, polls.get());
+        assertEquals(List.of(709L, 800L), messages.stream()
+            .map(message -> message.get("offset")).toList());
+    }
+
+    @Test
+    void collectPeekedMessagesNewestFirstStopsAtTheScanLimit() {
+        TopicPartition tp = new TopicPartition("events", 0);
+        ConsumerRecord<String, byte[]> record =
+            new ConsumerRecord<>("events", 0, 900L, "k", "v".getBytes(StandardCharsets.UTF_8));
+
+        List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessagesNewestFirst(
+            timeout -> new ConsumerRecords<>(Map.of(tp, List.of(record, record, record))),
+            partition -> 0L,
+            (partition, offset) -> { },
+            ignored -> true,
+            List.of(tp),
+            Map.of(tp, 0L),
+            Map.of(tp, 1200L),
+            100,
+            2,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        assertEquals(2, messages.size());
+    }
+
+    @Test
     void collectPeekedMessagesDoesNotPollWhenAlreadyCaughtUp() {
         TopicPartition tp = new TopicPartition("events", 0);
         AtomicInteger polls = new AtomicInteger();
@@ -1573,6 +1791,64 @@ class KafkaAgentTest {
     }
 
     @Test
+    void pemTlsPathsConfigurePemTruststoreAndInlineClientKeystore(@TempDir Path tempDir) throws Exception {
+        Path caCert = tempDir.resolve("ca-chain.pem");
+        Path clientCert = tempDir.resolve("client.crt");
+        Path clientKey = tempDir.resolve("client.key");
+        Files.writeString(caCert, "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n");
+        Files.writeString(clientCert, "-----BEGIN CERTIFICATE-----\nCLIENT\n-----END CERTIFICATE-----\n");
+        Files.writeString(clientKey, "-----BEGIN PRIVATE KEY-----\nKEY\n-----END PRIVATE KEY-----\n");
+
+        Properties props = new Properties();
+        KafkaAgent.applyConnectionProperties(JsonParser.parseString(("""
+            {
+              "security_protocol": "SASL_SSL",
+              "tls_skip_verify": false,
+              "tls": {
+                "ca_cert_path": "%s",
+                "client_cert_path": "%s",
+                "client_key_path": "%s"
+              }
+            }
+            """).formatted(caCert, clientCert, clientKey)).getAsJsonObject(), props);
+
+        assertEquals("PEM", props.getProperty("ssl.truststore.type"));
+        assertEquals(caCert.toString(), props.getProperty("ssl.truststore.location"));
+        assertEquals("PEM", props.getProperty("ssl.keystore.type"));
+        assertEquals(Files.readString(clientCert), props.getProperty("ssl.keystore.certificate.chain"));
+        assertEquals(Files.readString(clientKey), props.getProperty("ssl.keystore.key"));
+        // PEM store 无密码，不应出现密码属性。
+        assertNull(props.getProperty("ssl.truststore.password"));
+        assertNull(props.getProperty("ssl.keystore.password"));
+    }
+
+    @Test
+    void pemTlsClientCertWithoutKeyFailsFast() {
+        Properties props = new Properties();
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+            () -> KafkaAgent.applyConnectionProperties(JsonParser.parseString("""
+                {
+                  "security_protocol": "SSL",
+                  "tls": { "client_cert_path": "/certs/client.crt" }
+                }
+                """).getAsJsonObject(), props));
+        assertTrue(error.getMessage().contains("client_key_path"));
+    }
+
+    @Test
+    void pemTlsUnreadableFileReportsPath() {
+        Properties props = new Properties();
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+            () -> KafkaAgent.applyConnectionProperties(JsonParser.parseString("""
+                {
+                  "security_protocol": "SSL",
+                  "tls": { "ca_cert_path": "/no/such/ca-chain.pem" }
+                }
+                """).getAsJsonObject(), props));
+        assertTrue(error.getMessage().contains("/no/such/ca-chain.pem"));
+    }
+
+    @Test
     void appliesAllowedKerberosSystemPropertiesFromConnectionProperties() {
         Map<String, String> previous = KafkaAgent.applyKerberosSystemProperties(JsonParser.parseString("""
             {
@@ -1681,13 +1957,60 @@ class KafkaAgentTest {
             KafkaAgent.peekStartPosition(JsonParser.parseString("{\"startPosition\":\"timestamp\"}").getAsJsonObject())
         );
         assertDoesNotThrow(() -> KafkaAgent.validatePeekRequest(
-            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null, 1_700_000_000_000L));
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null, 1_700_000_000_000L, null, null));
         assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
-            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null, null));
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null, null, null, null));
         assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
-            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null, -1L));
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null, -1L, null, null));
         assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
-            KafkaAgent.PeekStartPosition.EARLIEST, true, null, null, 1_700_000_000_000L));
+            KafkaAgent.PeekStartPosition.EARLIEST, true, null, null, 1_700_000_000_000L, null, null));
+    }
+
+    @Test
+    void peekAcceptsAnEndTimestampOnlyInsideATimestampWindow() {
+        assertDoesNotThrow(() -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
+            1_700_000_000_000L, 1_700_000_060_000L, null));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
+            1_700_000_000_000L, 1_699_999_999_999L, null));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
+            1_700_000_000_000L, -1L, null));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.LATEST, true, null, null, null, 1_700_000_060_000L, null));
+    }
+
+    @Test
+    void peekAcceptsASortOrderOnlyInsideATimestampWindow() {
+        assertDoesNotThrow(() -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
+            1_700_000_000_000L, 1_700_000_060_000L, "newest"));
+        assertDoesNotThrow(() -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
+            1_700_000_000_000L, null, "oldest"));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
+            1_700_000_000_000L, 1_700_000_060_000L, "banana"));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.EARLIEST, true, null, null, null, null, "newest"));
+    }
+
+    @Test
+    void boundedPeekEndOffsetsClampToTheEndTimestamp() {
+        TopicPartition bounded = new TopicPartition("t", 0);
+        TopicPartition unbounded = new TopicPartition("t", 1);
+        Map<TopicPartition, Long> logEndOffsets = new LinkedHashMap<>();
+        logEndOffsets.put(bounded, 100L);
+        logEndOffsets.put(unbounded, 50L);
+        Map<TopicPartition, Long> timestampEndOffsets = new LinkedHashMap<>();
+        timestampEndOffsets.put(bounded, 40L);
+
+        Map<TopicPartition, Long> resolved =
+            KafkaAgent.boundedPeekEndOffsets(logEndOffsets, timestampEndOffsets);
+
+        assertEquals(40L, resolved.get(bounded));
+        assertEquals(50L, resolved.get(unbounded));
     }
 
     @Test

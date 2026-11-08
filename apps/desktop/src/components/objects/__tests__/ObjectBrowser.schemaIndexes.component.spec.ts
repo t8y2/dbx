@@ -9,7 +9,7 @@ import type { ConnectionConfig, IndexInfo, ObjectInfo } from "@/types/database";
 const mocks = vi.hoisted(() => ({ listObjects: vi.fn(), listTables: vi.fn(), listIndexes: vi.fn(), getColumns: vi.fn(), getTableDdl: vi.fn(), openTableStructure: vi.fn(), executeQuery: vi.fn(), executeBatch: vi.fn(), toolbarTier: 0 }));
 const ddlSettings = vi.hoisted(() => ({ separateDdlIndexes: false, includeDdlStorage: true, compactDdlSql: false, sidebarMenuLayout: "grouped" }));
 vi.mock("@/lib/backend/api", () => ({ ...mocks, listSchemas: vi.fn().mockResolvedValue([" Mixed "]), listObjectStatistics: vi.fn().mockResolvedValue([]), loadSchemaCache: vi.fn().mockResolvedValue(null), saveSchemaCache: vi.fn(), deleteSchemaCachePrefix: vi.fn() }));
-vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ getConfig: () => connection, ensureConnected: vi.fn().mockResolvedValue(undefined), orderByPinnedTreeNodes: (rows: unknown[]) => rows }) }));
+vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ getConfig: () => connection, ensureConnected: vi.fn().mockResolvedValue(undefined), tableNameFilterForScope: () => undefined, orderByPinnedTreeNodes: (rows: unknown[]) => rows }) }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ openTableStructure: mocks.openTableStructure }) }));
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
@@ -150,7 +150,7 @@ describe("schema index browsing and draft navigation", () => {
       });
       action.click();
       await vi.waitFor(() => expect(mocks.getTableDdl).toHaveBeenCalledOnce());
-      expect(mocks.getTableDdl.mock.calls[0]).toEqual([connection.id, "service", "Mixed", "EXPORT_TARGET", objectType === "VIEW" ? "VIEW" : undefined, undefined, true, ...(objectType === "TABLE" ? [undefined, true] : [])]);
+      expect(mocks.getTableDdl.mock.calls[0]).toEqual([connection.id, "service", "Mixed", "EXPORT_TARGET", objectType === "VIEW" ? "VIEW" : undefined, undefined, true, ...(objectType === "TABLE" ? [undefined, true, "Mixed"] : [])]);
     } finally {
       createUrl.mockRestore();
       revokeUrl.mockRestore();
@@ -177,7 +177,7 @@ describe("schema index browsing and draft navigation", () => {
     option.click();
     await vi.waitFor(() => expect(mocks.getTableDdl).toHaveBeenCalledTimes(2));
     expect(mocks.getTableDdl.mock.calls[1].slice(0, 6)).toEqual(mocks.getTableDdl.mock.calls[0].slice(0, 6));
-    expect(mocks.getTableDdl.mock.calls[1].slice(7)).toEqual([true, true]);
+    expect(mocks.getTableDdl.mock.calls[1].slice(7)).toEqual([true, true, " Other Owner "]);
     await vi.waitFor(() => expect(host.textContent).toContain("CREATE INDEX detached"));
   });
 
@@ -241,7 +241,8 @@ describe("schema index browsing and draft navigation", () => {
     expect(host.querySelector('[title="ORDINARY"]')).not.toBeNull();
     expect(host.querySelector('[title="LEGACY_WRONG"]')).toBeNull();
     expect(host.querySelector('[title=" Ix(a) "]')).toBeNull();
-    expect(mocks.listObjects.mock.calls.every((call) => !call[10] && !call[3]?.includes("INDEX"))).toBe(true);
+    expect(mocks.listObjects.mock.calls.every((call) => call[10] !== true && !call[3]?.includes("INDEX"))).toBe(true);
+    expect(mocks.listObjects.mock.calls[0][10]).toEqual({ identityMode: "exact" });
   });
 
   it("loads indexes only after choosing the dedicated bounded exact filter", async () => {

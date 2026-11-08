@@ -8,7 +8,6 @@ publish = false
 [dependencies]
 dbx-driver-support = { path = "../dbx-driver-support" }
 dbx-sql-core = { path = "../dbx-sql-core" }
-dbx-sql-dialect = { path = "../dbx-sql-dialect", default-features = false }
 dbx-types = { path = "../dbx-types", default-features = false }
 chrono = { version = "0.4", features = ["serde"] }
 bytes = "1"

@@ -1,8 +1,5 @@
 use crate::text_encoding::{Client as EncodingClient, PgError, Row, RowStream, TextEncoding, ValueRow};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use dbx_sql_dialect::sql_dialect::{
-    is_postgres_reserved_identifier, is_simple_lower_identifier, quote_gaussdb_jdbc_identifier,
-};
 use deadpool_postgres::{ManagerConfig, Pool, PoolError, RecyclingMethod, Runtime};
 use futures::{SinkExt, StreamExt};
 use openssl::ssl::{SslConnector, SslFiletype, SslMethod, SslVerifyMode};
@@ -8338,48 +8335,34 @@ pub async fn list_schema_infos_with_system(pool: &Pool, show_system_schemas: boo
         .collect())
 }
 
-/// Distinct user-defined type names for the structure editor's type dropdown.
-/// Same predicate as the object browser's TYPE branch (base/composite/domain/
+/// A user-defined type reference for the structure editor's type dropdown:
+/// same predicate as the object browser's TYPE branch (base/composite/domain/
 /// enum/range/multirange types outside the system schemas), so types provided
-/// by installed extensions — `vector`, `hstore`, `ltree`, … — become
-/// selectable in the create/edit column type picker (#14525).
-///
-/// Types visible through `search_path` are returned bare so they stay
-/// interchangeable with the static list; everything else comes back
-/// schema-qualified (quoted only when the identifier requires it) so the
-/// generated `CREATE TABLE` / `ALTER TABLE ... TYPE` still resolves outside
-/// the search path instead of failing with `type "..." does not exist`
-/// (#14525 review). Lowercase reserved words (a type literally named `order`)
-/// must keep their quotes — the bare branch is reserved-word aware (#14536
-/// review follow-up).
-pub async fn list_data_types(pool: &Pool) -> Result<Vec<String>, String> {
+/// by installed extensions — `vector`, `hstore`, `ltree`, … — reach the
+/// picker (#14525). `visible` reports whether the owning schema is in the
+/// session's `search_path`; the caller decides between the bare name and a
+/// schema-qualified one.
+#[derive(Debug)]
+pub struct PostgresUserTypeName {
+    pub schema: String,
+    pub name: String,
+    pub visible: bool,
+}
+
+pub async fn list_data_types(pool: &Pool) -> Result<Vec<PostgresUserTypeName>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let client = &EncodingClient::new(&client);
     let rows = postgres_query_cached(client, list_data_types_sql(), &[]).await.map_err(|e| e.to_string())?;
 
-    let mut names = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let schema_name = pg_row_try_string(row, 0);
-        let type_name = pg_row_try_string(row, 1);
-        if type_name.is_empty() {
-            continue;
-        }
-        let visible = pg_row_try_bool(row, 2).unwrap_or(false);
-        let bare = visible && is_simple_lower_identifier(&type_name) && !is_postgres_reserved_identifier(&type_name);
-        let rendered = if bare {
-            type_name
-        } else {
-            format!(
-                "{}.{}",
-                quote_gaussdb_jdbc_identifier(&schema_name, "\""),
-                quote_gaussdb_jdbc_identifier(&type_name, "\"")
-            )
-        };
-        if !rendered.is_empty() && !names.contains(&rendered) {
-            names.push(rendered);
-        }
-    }
-    Ok(names)
+    Ok(rows
+        .iter()
+        .map(|row| PostgresUserTypeName {
+            schema: pg_row_try_string(row, 0),
+            name: pg_row_try_string(row, 1),
+            visible: pg_row_try_bool(row, 2).unwrap_or(false),
+        })
+        .filter(|entry| !entry.name.is_empty())
+        .collect())
 }
 
 fn list_data_types_sql() -> &'static str {
@@ -13575,23 +13558,6 @@ mod tests {
         assert!(sql.contains("n.nspname <> 'information_schema'"), "{sql}");
     }
 
-    #[test]
-    fn list_data_types_rendering_keeps_reserved_words_quoted() {
-        // #14536 review follow-up: a type literally named `order` must not be
-        // emitted bare even though it is a simple lowercase identifier.
-        assert!(!is_simple_lower_identifier("with space"));
-        let bare_visible = is_simple_lower_identifier("order") && !is_postgres_reserved_identifier("order");
-        assert!(!bare_visible, "reserved words must stay quoted");
-        assert_eq!(
-            format!(
-                "{}.{}",
-                quote_gaussdb_jdbc_identifier("public", "\""),
-                quote_gaussdb_jdbc_identifier("order", "\"")
-            ),
-            "public.\"order\""
-        );
-    }
-
     #[tokio::test]
     #[ignore = "requires DBX_TEST_POSTGRES_URL pointing at a writable PostgreSQL database"]
     async fn postgres_list_data_types_includes_extension_and_user_types() {
@@ -13638,17 +13604,24 @@ mod tests {
         execute_query(&pool, "DROP TYPE IF EXISTS public.\"order\"").await.expect("drop public.order");
         let types = exercise.expect("list data types");
 
-        assert!(types.iter().any(|name| name == "hstore"), "search_path extension type stays bare: {types:?}");
-        assert!(types.iter().any(|name| name == "mood"), "public enum stays bare: {types:?}");
-        let qualified_mood = format!("{schema}.mood");
-        assert!(types.iter().any(|name| name == &qualified_mood), "off-search_path enum must be qualified: {types:?}");
-        let qualified_mixed = format!("{schema}.\"Mood\"");
-        assert!(types.iter().any(|name| name == &qualified_mixed), "mixed-case type must keep quoting: {types:?}");
-        assert!(
-            types.iter().any(|name| name == "public.\"order\""),
-            "reserved-word type must stay schema-qualified and quoted: {types:?}"
-        );
-        assert!(!types.iter().any(|name| name == "order"), "bare reserved word must not be listed: {types:?}");
+        // Raw rows drive the caller-side rendering: visible rows keep the bare
+        // name, off-search_path ones carry the schema, and reserved words stay
+        // distinct entries.
+        let find = |schema_name: &str, type_name: &str| {
+            types
+                .iter()
+                .find(|entry| entry.schema == schema_name && entry.name == type_name)
+                .unwrap_or_else(|| panic!("missing {schema_name}.{type_name} in {types:?}"))
+        };
+        let hstore = find("public", "hstore");
+        assert!(hstore.visible, "public is on the search path: {types:?}");
+        let mood = find("public", "mood");
+        assert!(mood.visible, "{types:?}");
+        let custom_mood = find(&schema, "mood");
+        assert!(!custom_mood.visible, "off-search_path schema must be flagged: {types:?}");
+        assert!(find(&schema, "Mood").name == "Mood", "mixed-case name must not be folded: {types:?}");
+        let order = find("public", "order");
+        assert!(order.visible, "{types:?}");
     }
 
     #[tokio::test]

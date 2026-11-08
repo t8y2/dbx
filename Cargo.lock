@@ -2432,7 +2432,6 @@ dependencies = [
  "chrono",
  "dbx-driver-support",
  "dbx-sql-core",
- "dbx-sql-dialect",
  "dbx-types",
  "deadpool-postgres",
  "encoding_rs",

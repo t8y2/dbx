@@ -1209,6 +1209,8 @@ export default withEnglishFallback({
     searchScopeSchema: "スキーマ",
     searchScopeTable: "テーブル",
     searchScopeView: "ビュー",
+    searchIndexesInCurrentConnection: "この接続のインデックスを検索...",
+    clearIndexSearch: "インデックス検索をクリア",
     searchTablesInCurrentScope: "このデータベースのテーブルを検索...",
     searchViewsInCurrentScope: "このデータベースのビューを検索...",
     searchMaterializedViewsInCurrentScope: "このデータベースのマテリアライズドビューを検索...",

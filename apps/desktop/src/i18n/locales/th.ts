@@ -1289,6 +1289,8 @@ export default withEnglishFallback({
     searchScopeSchema: "Schema",
     searchScopeTable: "ตาราง",
     searchScopeView: "View",
+    searchIndexesInCurrentConnection: "ค้นหาดัชนีในการเชื่อมต่อนี้...",
+    clearIndexSearch: "ล้างการค้นหาดัชนี",
     searchTablesInCurrentScope: "ค้นหาตารางในฐานข้อมูลนี้...",
     searchViewsInCurrentScope: "ค้นหามุมมองในฐานข้อมูลนี้...",
     searchMaterializedViewsInCurrentScope: "ค้นหามุมมองที่ถูกทำให้เป็นรูปธรรมในฐานข้อมูลนี้...",

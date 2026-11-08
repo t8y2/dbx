@@ -1215,6 +1215,8 @@ export default withEnglishFallback({
     searchScopeSchema: "스키마",
     searchScopeTable: "테이블",
     searchScopeView: "뷰",
+    searchIndexesInCurrentConnection: "이 연결의 인덱스 검색...",
+    clearIndexSearch: "인덱스 검색 지우기",
     searchTablesInCurrentScope: "이 데이터베이스에서 테이블 검색...",
     searchViewsInCurrentScope: "이 데이터베이스에서 뷰 검색...",
     searchMaterializedViewsInCurrentScope: "이 데이터베이스에서 구체화된 뷰 검색...",

@@ -1189,6 +1189,8 @@ export default withEnglishFallback({
     searchScopeSchema: "Схема",
     searchScopeTable: "Таблица",
     searchScopeView: "Представление",
+    searchIndexesInCurrentConnection: "Поиск индексов в этом подключении...",
+    clearIndexSearch: "Очистить поиск индексов",
     searchTablesInCurrentScope: "Поиск таблиц в этой базе данных...",
     searchViewsInCurrentScope: "Поиск представлений в этой базе данных...",
     searchMaterializedViewsInCurrentScope: "Поиск материализованных представлений в этой базе данных...",

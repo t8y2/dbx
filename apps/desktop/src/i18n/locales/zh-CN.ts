@@ -1359,6 +1359,8 @@ export default withEnglishFallback({
     searchScopeSchema: "Schema",
     searchScopeTable: "表",
     searchScopeView: "视图",
+    searchIndexesInCurrentConnection: "搜索此连接的索引...",
+    clearIndexSearch: "清除索引搜索",
     searchTablesInCurrentScope: "搜索当前库的表...",
     searchViewsInCurrentScope: "搜索当前库的视图...",
     searchMaterializedViewsInCurrentScope: "搜索当前库的物化视图...",

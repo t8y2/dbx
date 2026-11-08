@@ -251,6 +251,7 @@ type DataGridHandle = DataGridColumnLayoutHandle & {
   focusSearch: (target?: Element | null) => boolean;
   focusWhere: () => boolean;
   focusGrid: () => boolean;
+  copyActiveResult: (isValid?: () => boolean) => Promise<boolean>;
   openGoToColumn: () => boolean;
   openCellDetailSearch: () => boolean;
   nullColumnsHidden: boolean;
@@ -1192,6 +1193,51 @@ function toggleResultsPane(): boolean {
 function focusSqlEditor(): boolean {
   return props.activeTab.mode === "query" && !props.resultOnly && (queryEditorRef.value?.focusEditor?.() ?? false);
 }
+
+const pendingGridCopy = shallowRef<{ isValid: () => boolean; started: boolean }>();
+let gridCopyRequest = 0;
+function copyActiveResult(isWorkspaceValid: () => boolean = () => true): boolean {
+  if (props.editorOnly || !hasFocusableQueryResult(props.activeTab) || activeElasticsearchJsonResponse.value || redisResultViewMode.value !== "grid" || !isWorkspaceValid()) return false;
+  const request = ++gridCopyRequest;
+  const tabId = props.activeTab.id;
+  const result = props.activeTab.result;
+  const generation = props.activeTab.resultViewGeneration;
+  const isValid = () => request === gridCopyRequest && isWorkspaceValid() && props.activeTab.id === tabId && props.activeTab.result === result && props.activeTab.resultViewGeneration === generation && props.activeOutputView === "result";
+  pendingGridCopy.value = { isValid, started: false };
+  if (!props.resultOnly) resultsPaneOpen.value = true;
+  showElasticsearchRawJson.value = false;
+  selectOutputView(tabId, "result");
+  return true;
+}
+
+watch(
+  [pendingGridCopy, dataGridRef, () => props.activeTab.id, () => props.activeTab.result, () => props.activeTab.resultViewGeneration, () => props.activeOutputView],
+  () => {
+    const request = pendingGridCopy.value;
+    if (!request) return;
+    if (!request.isValid()) {
+      ++gridCopyRequest;
+      pendingGridCopy.value = undefined;
+      return;
+    }
+    const grid = dataGridRef.value;
+    if (!grid || request.started) return;
+    request.started = true;
+    void grid
+      .copyActiveResult(request.isValid)
+      .catch((error: unknown) => {
+        if (request.isValid()) toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+      })
+      .finally(() => {
+        if (pendingGridCopy.value === request) pendingGridCopy.value = undefined;
+      });
+  },
+  { flush: "post" },
+);
+onUnmounted(() => {
+  ++gridCopyRequest;
+  pendingGridCopy.value = undefined;
+});
 
 const pendingGridFocus = shallowRef<{ tabId: string; result: QueryResult; source: Element | null }>();
 function cancelResultGridFocus() {
@@ -2225,6 +2271,7 @@ function locateExecutionSummaryError(item: ExecutionSummaryItem) {
 }
 
 defineExpose({
+  copyActiveResult,
   focusSqlEditor,
   focusResultGrid,
   cancelResultGridFocus,

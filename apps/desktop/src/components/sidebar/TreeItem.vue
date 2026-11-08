@@ -926,6 +926,7 @@ const tableSearchParentId = computed(() => activeNode.value.tableSearchParentId 
 
 const tableSearchValue = computed(() => {
   const parentId = tableSearchParentId.value;
+  if (activeNode.value.indexSearchOnly) return sidebarTreeContext?.getIndexSearchQuery?.(parentId) ?? "";
   return parentId ? connectionStore.sidebarTableSearchQueries[parentId] || "" : "";
 });
 
@@ -1005,6 +1006,10 @@ function updateTableSearchQuery(value: string | number) {
   const parentId = tableSearchParentId.value;
   if (!parentId) return;
   const query = String(value);
+  if (activeNode.value.indexSearchOnly) {
+    sidebarTreeContext?.setIndexSearchQuery?.(parentId, query);
+    return;
+  }
   if (sidebarTreeContext?.setTableSearchQuery) {
     sidebarTreeContext.setTableSearchQuery(parentId, query, settingsStore.editorSettings.sidebarTableSearchLocal);
     return;
@@ -1603,14 +1608,20 @@ function onKeydown(event: KeyboardEvent) {
           :data-sidebar-table-search-parent-id="tableSearchParentId"
           @update:model-value="updateTableSearchQuery"
         />
-        <button v-if="tableSearchValue" type="button" class="absolute right-1.5 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('sidebar.clearTableSearch')" @click.stop="clearTableSearchQuery">
+        <button
+          v-if="tableSearchValue"
+          type="button"
+          class="absolute right-1.5 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+          :aria-label="t(node.indexSearchOnly ? 'sidebar.clearIndexSearch' : 'sidebar.clearTableSearch')"
+          @click.stop="clearTableSearchQuery"
+        >
           <X class="h-3 w-3" />
         </button>
       </div>
-      <LightTooltip :text="t('sidebar.localTableSearchTooltip')" side="top" :delay="300">
+      <LightTooltip v-if="!node.indexSearchOnly" :text="t('sidebar.localTableSearchTooltip')" side="top" :delay="300">
         <Switch size="sm" :model-value="settingsStore.editorSettings.sidebarTableSearchLocal" :aria-label="t('sidebar.localTableSearch')" @update:model-value="updateTableSearchLocal(Boolean($event))" />
       </LightTooltip>
-      <LightTooltip v-if="settingsStore.editorSettings.sidebarTableSearchLocal" :text="t('sidebar.refreshLocalTableSearchIndex')" side="top" :delay="300">
+      <LightTooltip v-if="!node.indexSearchOnly && settingsStore.editorSettings.sidebarTableSearchLocal" :text="t('sidebar.refreshLocalTableSearchIndex')" side="top" :delay="300">
         <button type="button" class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('sidebar.refreshLocalTableSearchIndex')" @click.stop="refreshTableSearchIndex">
           <RefreshCw class="h-3 w-3" />
         </button>

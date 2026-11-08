@@ -1423,6 +1423,8 @@ export default {
     searchScopeSchema: "Schema",
     searchScopeTable: "Table",
     searchScopeView: "View",
+    searchIndexesInCurrentConnection: "Search indexes in this connection...",
+    clearIndexSearch: "Clear index search",
     searchTablesInCurrentScope: "Search tables in this database...",
     searchViewsInCurrentScope: "Search views in this database...",
     searchMaterializedViewsInCurrentScope: "Search materialized views in this database...",

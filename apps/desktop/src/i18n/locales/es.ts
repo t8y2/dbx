@@ -1220,6 +1220,8 @@ export default withEnglishFallback({
     searchScopeSchema: "Schema",
     searchScopeTable: "Tabla",
     searchScopeView: "Vista",
+    searchIndexesInCurrentConnection: "Buscar índices en esta conexión...",
+    clearIndexSearch: "Borrar búsqueda de índices",
     searchTablesInCurrentScope: "Buscar tablas en esta base de datos...",
     searchViewsInCurrentScope: "Buscar vistas en esta base de datos...",
     searchMaterializedViewsInCurrentScope: "Buscar vistas materializadas en esta base de datos...",

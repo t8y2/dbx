@@ -1194,6 +1194,8 @@ export default withEnglishFallback({
     searchScopeSchema: "Schema",
     searchScopeTable: "資料表",
     searchScopeView: "檢視",
+    searchIndexesInCurrentConnection: "搜尋此連線的索引...",
+    clearIndexSearch: "清除索引搜尋",
     searchTablesInCurrentScope: "搜尋目前資料庫的資料表...",
     searchViewsInCurrentScope: "搜尋目前資料庫的檢視表...",
     searchMaterializedViewsInCurrentScope: "搜尋目前資料庫的具體化檢視表...",

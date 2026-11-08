@@ -9414,6 +9414,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabase: "Fijar base de datos predeterminada arriba",
     sidebarPinDefaultDatabaseDescription: "Cuando está habilitado, la base de datos predeterminada se muestra en la parte superior de la lista. Cuando está deshabilitado, se ordena alfabéticamente.",
     sidebarBrowseObjectsOnDatabaseActivation: "Explorar objetos al activar una base de datos",
+    sidebarTableClickNavigation: "Enfocar tablas con un clic y abrir pestañas nuevas con doble clic",
+    sidebarTableClickNavigationDescription: "Un clic activa una pestaña abierta de la misma tabla. Un doble clic siempre abre otra pestaña de datos. Solo se aplica a las tablas de la barra lateral.",
     sidebarBrowseObjectsOnDatabaseActivationDescription: 'Si está activado, al activar un nodo de base de datos o esquema con el modo seleccionado de uno o dos clics también se abre la pestaña "Explorar objetos".',
     openTabsRestoreMode: "Restaurar pestañas al iniciar",
     openTabsRestoreModeDescription: "Elige cómo DBX restaura las pestañas que estaban abiertas la última vez.",

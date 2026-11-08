@@ -1835,6 +1835,11 @@ function onDoubleClick(event: MouseEvent) {
     void newQuery({ reuseQueryTabByScope: true });
   }
   if (dataTabOpenModeFromTreeClick(activeNode.value.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab) === "new-tab") return;
+  if (activeNode.value.type === "table" && settingsStore.editorSettings.sidebarTableClickNavigation) {
+    beginNavigationRequest();
+    openDataInNewTabImmediately();
+    return;
+  }
   if (activeNode.value.type === "event") {
     beginNavigationRequest();
     void openObjectBrowser(false, true);
@@ -9116,8 +9121,17 @@ function buildContextMenu(node: TreeNode): ContextMenuItem[] {
   return items;
 }
 
-function handleRowClick(node: TreeNode, clickDetail: number) {
+function handleRowClick(node: TreeNode, clickDetail: number, tableClickNavigation = false) {
   activateRuntimeNode(node);
+  // Only pointer clicks opt into this policy; search Enter keeps its existing action.
+  if (tableClickNavigation && node.type === "table" && settingsStore.editorSettings.sidebarTableClickNavigation) {
+    const existing = findExistingSameTableDataTab();
+    if (existing) {
+      beginNavigationRequest();
+      queryStore.switchTab(existing.id);
+    }
+    return;
+  }
   runRowClickAction(clickDetail);
 }
 

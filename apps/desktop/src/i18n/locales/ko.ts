@@ -9314,6 +9314,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabase: "기본 데이터베이스 상단 고정",
     sidebarPinDefaultDatabaseDescription: "활성화하면 기본 데이터베이스가 데이터베이스 목록 상단에 고정 표시됩니다. 비활성화하면 알파벳순으로 정렬됩니다.",
     sidebarBrowseObjectsOnDatabaseActivation: "데이터베이스 노드 활성화 시 객체 탐색",
+    sidebarTableClickNavigation: "클릭으로 테이블 탭 전환, 두 번 클릭으로 새 탭 열기",
+    sidebarTableClickNavigationDescription: "클릭하면 같은 테이블의 열린 탭으로 전환합니다. 두 번 클릭하면 항상 새 데이터 탭을 엽니다. 사이드바의 테이블에만 적용됩니다.",
     sidebarBrowseObjectsOnDatabaseActivationDescription: '활성화하면 선택한 한 번 클릭 또는 두 번 클릭 방식으로 데이터베이스나 스키마 노드를 활성화할 때 사이드바를 펼치면서 "객체 탐색" 탭을 엽니다.',
     openTabsRestoreMode: "실행 시 탭 복원",
     openTabsRestoreModeDescription: "DBX가 지난번에 열려 있던 탭을 복원하는 방법을 선택하세요.",

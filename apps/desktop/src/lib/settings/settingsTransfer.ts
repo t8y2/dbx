@@ -199,6 +199,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "tabDoubleClickAction",
     "tabGroupRows",
     "sidebarActivation",
+    "sidebarColumnDoubleClickAction",
     "sidebarObjectDisplay",
     "routineSourceOpenMode",
     "sidebarTableSearchEnabled",

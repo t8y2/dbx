@@ -1208,6 +1208,7 @@ export interface EditorSettings {
   shortcuts: ShortcutSettings;
   sqlFormatter: SqlFormatterSettings;
   sidebarActivation: SidebarActivation;
+  sidebarColumnDoubleClickAction: "structure" | "query";
   sidebarMenuLayout: SidebarMenuLayout;
   sidebarMenuPinnedActions: SidebarMenuPinnedActions;
   sidebarMenuHiddenPrimaryActions: SidebarMenuPinnedActions;
@@ -1592,6 +1593,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   shortcuts: normalizeShortcutSettings(),
   sqlFormatter: normalizeSqlFormatterSettings(DEFAULT_SQL_FORMATTER_SETTINGS),
   sidebarActivation: "single",
+  sidebarColumnDoubleClickAction: "structure",
   sidebarMenuLayout: "grouped",
   sidebarMenuPinnedActions: {},
   sidebarMenuHiddenPrimaryActions: {},
@@ -2331,6 +2333,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     shortcuts: normalizeShortcutSettings(settings.shortcuts),
     sqlFormatter: normalizeSqlFormatterSettings(settings.sqlFormatter),
     sidebarActivation: settings.sidebarActivation === "single" || settings.sidebarActivation === "double" ? settings.sidebarActivation : DEFAULT_EDITOR_SETTINGS.sidebarActivation,
+    sidebarColumnDoubleClickAction: settings.sidebarColumnDoubleClickAction === "query" ? "query" : "structure",
     sidebarMenuLayout: settings.sidebarMenuLayout === "full" ? "full" : "grouped",
     sidebarMenuPinnedActions: normalizeSidebarMenuPinnedActions(settings.sidebarMenuPinnedActions),
     sidebarMenuHiddenPrimaryActions: normalizeSidebarMenuPinnedActions(settings.sidebarMenuHiddenPrimaryActions),
@@ -3313,6 +3316,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.shortcuts !== undefined) editorSettings.value.shortcuts = normalizeShortcutSettings(partial.shortcuts);
     if (partial.sqlFormatter !== undefined) editorSettings.value.sqlFormatter = normalizeSqlFormatterSettings(partial.sqlFormatter);
     if (partial.sidebarActivation !== undefined) editorSettings.value.sidebarActivation = partial.sidebarActivation;
+    if (partial.sidebarColumnDoubleClickAction !== undefined) editorSettings.value.sidebarColumnDoubleClickAction = partial.sidebarColumnDoubleClickAction === "query" ? "query" : "structure";
     if (partial.sidebarMenuLayout !== undefined) editorSettings.value.sidebarMenuLayout = partial.sidebarMenuLayout === "full" ? "full" : "grouped";
     if (partial.sidebarMenuPinnedActions !== undefined) editorSettings.value.sidebarMenuPinnedActions = normalizeSidebarMenuPinnedActions(partial.sidebarMenuPinnedActions);
     if (partial.sidebarMenuHiddenPrimaryActions !== undefined) editorSettings.value.sidebarMenuHiddenPrimaryActions = normalizeSidebarMenuPinnedActions(partial.sidebarMenuHiddenPrimaryActions);

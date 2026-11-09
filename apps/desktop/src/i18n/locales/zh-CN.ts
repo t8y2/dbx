@@ -9936,6 +9936,13 @@ export default withEnglishFallback({
     noTables: "没有可用表",
   },
   dataCompare: {
+    advancedOptions: "高级选项",
+    sourceFilter: "源端过滤条件（WHERE）",
+    targetFilter: "目标端过滤条件（WHERE）",
+    filtersActive: "已设置过滤条件",
+    filterHint: "仅填写 WHERE 后的条件，不含 WHERE、分号或注释；留空表示不过滤。请使用各自数据库的 SQL 语法。",
+    batchFilterHint: "多表比较时，每端的条件会应用于该端所有选中的表，请确认这些表都包含所用字段。",
+    filteredResultsHint: "当前结果仅覆盖过滤后的数据，不代表整表一致。执行同步前，请确认两端过滤的是相同业务范围。",
     configSelect: "选择或保存配置",
     configNew: "保存为新配置",
     configRename: "重命名配置",

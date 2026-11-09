@@ -9970,6 +9970,13 @@ export default {
     noTables: "No tables available",
   },
   dataCompare: {
+    advancedOptions: "Advanced options",
+    sourceFilter: "Source filter (WHERE)",
+    targetFilter: "Target filter (WHERE)",
+    filtersActive: "Filters configured",
+    filterHint: "Enter only the condition after WHERE, without WHERE, semicolons or comments. Leave blank for no filtering. Use each database's SQL syntax.",
+    batchFilterHint: "For multi-table comparisons, each filter applies to every selected table on its side. Make sure all tables contain the referenced columns.",
+    filteredResultsHint: "Results cover only the filtered data, not the entire tables. Before synchronizing, make sure both filters select the same business scope.",
     configSelect: "Select or save a config",
     configNew: "Save as new config",
     configRename: "Rename config",

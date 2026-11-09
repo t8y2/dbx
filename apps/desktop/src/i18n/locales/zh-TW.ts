@@ -7679,6 +7679,13 @@ export default withEnglishFallback({
     noTables: "沒有可用的資料表",
   },
   dataCompare: {
+    advancedOptions: "進階選項",
+    sourceFilter: "來源端篩選條件（WHERE）",
+    targetFilter: "目標端篩選條件（WHERE）",
+    filtersActive: "已設定篩選條件",
+    filterHint: "僅填寫 WHERE 後的條件，不含 WHERE、分號或註解；留空表示不篩選。請使用各自資料庫的 SQL 語法。",
+    batchFilterHint: "比較多個資料表時，每端的條件會套用至該端所有選取的資料表，請確認這些資料表都包含所用欄位。",
+    filteredResultsHint: "目前結果僅涵蓋篩選後的資料，不代表整張資料表一致。執行同步前，請確認兩端篩選的是相同業務範圍。",
     configSelect: "選擇或儲存設定",
     configNew: "另存為新設定",
     configRename: "重新命名設定",

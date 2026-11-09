@@ -8557,6 +8557,13 @@ export default withEnglishFallback({
     noTables: "Nessuna tabella disponibile",
   },
   dataCompare: {
+    advancedOptions: "Opzioni avanzate",
+    sourceFilter: "Filtro origine (WHERE)",
+    targetFilter: "Filtro destinazione (WHERE)",
+    filtersActive: "Filtri configurati",
+    filterHint: "Inserisci solo la condizione dopo WHERE, senza WHERE, punti e virgola o commenti. Lascia vuoto per non filtrare. Usa la sintassi SQL di ciascun database.",
+    batchFilterHint: "Nel confronto di più tabelle, ogni filtro si applica a tutte le tabelle selezionate sul proprio lato. Verifica che tutte contengano le colonne indicate.",
+    filteredResultsHint: "I risultati coprono solo i dati filtrati, non le intere tabelle. Prima di sincronizzare, verifica che entrambi i filtri selezionino lo stesso ambito di dati aziendali.",
     configSelect: "Seleziona o salva una configurazione",
     configNew: "Salva come nuova configurazione",
     configRename: "Rinomina configurazione",

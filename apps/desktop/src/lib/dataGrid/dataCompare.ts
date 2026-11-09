@@ -46,6 +46,7 @@ export interface DataComparePreparationOptions {
   sourceRows: DataCompareCellValue[][];
   targetRows: DataCompareCellValue[][];
   databaseType?: DatabaseType;
+  targetFilter?: string;
 }
 
 export interface DataComparePreparation {
@@ -59,10 +60,13 @@ export interface DataCompareFromTablesOptions {
   sourceDatabase: string;
   sourceSchema: string;
   sourceTable: string;
+  /** SQL predicate only, without the WHERE keyword. */
+  sourceFilter?: string;
   targetConnectionId: string;
   targetDatabase: string;
   targetSchema: string;
   targetTable: string;
+  targetFilter?: string;
   columns: string[];
   keyColumns: string[];
   /** Source-side column names aligned positionally with `columns`; needed when the two databases store identifier case differently (e.g. SQL Server vs Oracle). */
@@ -78,6 +82,7 @@ export interface DataCompareMissingTargetOptions {
   sourceDatabase: string;
   sourceSchema: string;
   sourceTable: string;
+  sourceFilter?: string;
   targetConnectionId: string;
   targetDatabase: string;
   targetSchema: string;
@@ -108,6 +113,7 @@ export interface DataCompareSyncPlanTableOptions {
   columnInfo?: ColumnInfo[];
   diff: DataCompareResult;
   databaseType?: DatabaseType;
+  targetFilter?: string;
   preSyncStatements?: string[];
   syncEligible: boolean;
 }

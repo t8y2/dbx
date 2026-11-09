@@ -5,7 +5,7 @@ import { uuid } from "@/lib/common/utils";
  * Persisted "Compare Data" task configuration.
  *
  * Only the user's selection is stored (endpoints + the tables to compare +
- * per-table match columns). Derived data such as the available database /
+ * per-table match columns and SQL filters). Derived data such as the available database /
  * schema / table lists, compare results and sync plans are intentionally not
  * persisted: they are re-loaded from the live connection when a config is
  * applied, so a stale config can never resurrect a deleted table.
@@ -23,6 +23,8 @@ export interface DataCompareConfig {
   targetDatabase: string;
   targetSchema: string;
   targetTable: string;
+  sourceFilter?: string;
+  targetFilter?: string;
   /** Preview row limit, stored alongside the selection so re-running reproduces the same view. */
   detailPreviewLimit: string;
   /** Explicit match columns per source table; absent entry means "use the primary key". */
@@ -38,6 +40,8 @@ export interface DataCompareConfigSnapshot {
   targetDatabase: string;
   targetSchema: string;
   targetTable: string;
+  sourceFilter?: string;
+  targetFilter?: string;
   detailPreviewLimit: string;
   keyColumnsByTable: Record<string, string[]>;
 }
@@ -85,6 +89,8 @@ function sanitizeConfig(raw: unknown): DataCompareConfig | undefined {
     targetDatabase: typeof item.targetDatabase === "string" ? item.targetDatabase : "",
     targetSchema: typeof item.targetSchema === "string" ? item.targetSchema : "",
     targetTable: typeof item.targetTable === "string" ? item.targetTable : "",
+    sourceFilter: typeof item.sourceFilter === "string" ? item.sourceFilter : "",
+    targetFilter: typeof item.targetFilter === "string" ? item.targetFilter : "",
     detailPreviewLimit: typeof item.detailPreviewLimit === "string" ? item.detailPreviewLimit : "",
     keyColumnsByTable: sanitizeKeyColumns(item.keyColumnsByTable),
   };

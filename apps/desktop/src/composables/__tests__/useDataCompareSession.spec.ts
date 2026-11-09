@@ -137,6 +137,55 @@ test("infers the primary key of every table when no match columns are configured
   );
 });
 
+test("passes independent SQL filters to every table in a batch and preserves the session snapshot", async () => {
+  const input = baseConfig({ selectedSourceTables: ["users", "orders"], sourceFilter: "tenant_id = 1", targetFilter: "tenant_id = 2" });
+  const session = await runSession(input, [
+    { sourceTable: "users", targetTable: "users" },
+    { sourceTable: "orders", targetTable: "orders" },
+  ]);
+
+  assert.equal(session.status, "completed");
+  assert.equal(apiMock.prepareDataCompareFromTables.mock.calls.length, 2);
+  for (const [options] of apiMock.prepareDataCompareFromTables.mock.calls) {
+    assert.equal(options.sourceFilter, "tenant_id = 1");
+    assert.equal(options.targetFilter, "tenant_id = 2");
+  }
+  input.sourceFilter = "tenant_id = 3";
+  assert.equal(session.config.sourceFilter, "tenant_id = 1");
+});
+
+test.each([
+  ["  id > 5  ", " \n ", "id > 5", undefined],
+  ["", "active = 1", undefined, "active = 1"],
+])("omits blank predicates and trims each side independently", async (sourceFilter, targetFilter, expectedSource, expectedTarget) => {
+  await runSession(baseConfig({ selectedSourceTables: ["users"], targetTable: "users", sourceFilter, targetFilter }), [{ sourceTable: "users", targetTable: "users" }]);
+  const options = apiMock.prepareDataCompareFromTables.mock.calls[0]?.[0];
+  assert.equal(options.sourceFilter, expectedSource);
+  assert.equal(options.targetFilter, expectedTarget);
+});
+
+test("keeps the source SQL filter when the target table is missing", async () => {
+  apiMock.prepareDataCompareMissingTarget.mockResolvedValue(preparationFor("users"));
+  const session = await runSession(baseConfig({ selectedSourceTables: ["users"], targetTable: "users", targetTables: [], sourceFilter: "user_id > 10", targetFilter: "user_id > 20" }), [{ sourceTable: "users", targetTable: "users" }]);
+  assert.equal(session.batchResults[0]?.status, "different");
+  const options = apiMock.prepareDataCompareMissingTarget.mock.calls[0]?.[0];
+  assert.equal(options.sourceFilter, "user_id > 10");
+  assert.equal(options.targetFilter, undefined);
+  assert.equal(apiMock.buildDataCompareSyncPlan.mock.calls[0]?.[0].tables[0]?.targetFilter, undefined);
+});
+
+test("keeps the original target filter on every rebuilt synchronization plan", async () => {
+  const input = baseConfig({ selectedSourceTables: ["users"], targetTable: "users", sourceFilter: "tenant_id = 1", targetFilter: " tenant_id = 2 " });
+  const session = await runSession(input, [{ sourceTable: "users", targetTable: "users" }]);
+  assert.equal(apiMock.buildDataCompareSyncPlan.mock.calls[0]?.[0].tables[0]?.targetFilter, "tenant_id = 2");
+  input.targetFilter = "tenant_id = 3";
+  session.config.targetFilter = "tenant_id = 4";
+  const table = session.batchResults[0]!;
+  setCompareSelection(table.selection.added, false);
+  toggleCompareSelection(table.selection.added, 0);
+  assert.equal(buildDataCompareSyncPlanTables(session.batchResults, "public")[0]?.targetFilter, "tenant_id = 2");
+});
+
 test("gives one table its own match columns without changing the other tables", async () => {
   const session = await runSession(baseConfig({ selectedSourceTables: ["users", "orders", "payments"], keyColumnsByTable: { payments: ["tenant_id", "payment_no"] } }), [
     { sourceTable: "users", targetTable: "users" },

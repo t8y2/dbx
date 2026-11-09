@@ -8575,6 +8575,13 @@ export default withEnglishFallback({
     noTables: "利用可能なテーブルがありません",
   },
   dataCompare: {
+    advancedOptions: "詳細オプション",
+    sourceFilter: "ソースのフィルター条件（WHERE）",
+    targetFilter: "ターゲットのフィルター条件（WHERE）",
+    filtersActive: "フィルター設定済み",
+    filterHint: "WHERE の後の条件のみ入力してください。WHERE、セミコロン、コメントは含めないでください。空欄の場合は絞り込みません。各データベースの SQL 構文を使用してください。",
+    batchFilterHint: "複数テーブルの比較では、各条件はその側で選択されたすべてのテーブルに適用されます。参照する列がすべてのテーブルに存在することを確認してください。",
+    filteredResultsHint: "結果は絞り込み後のデータのみを対象とし、テーブル全体の一致を示すものではありません。同期前に、両方の条件が同じ業務範囲を選択していることを確認してください。",
     configSelect: "設定を選択または保存",
     configNew: "新しい設定として保存",
     configRename: "設定の名前を変更",

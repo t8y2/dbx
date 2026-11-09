@@ -8672,6 +8672,13 @@ export default withEnglishFallback({
     },
   },
   dataCompare: {
+    advancedOptions: "고급 옵션",
+    sourceFilter: "원본 필터 조건 (WHERE)",
+    targetFilter: "대상 필터 조건 (WHERE)",
+    filtersActive: "필터 설정됨",
+    filterHint: "WHERE 뒤의 조건만 입력하세요. WHERE, 세미콜론, 주석은 포함하지 마세요. 비워 두면 필터링하지 않습니다. 각 데이터베이스의 SQL 구문을 사용하세요.",
+    batchFilterHint: "여러 테이블을 비교할 때 각 필터는 해당 쪽의 선택된 모든 테이블에 적용됩니다. 모든 테이블에 참조하는 열이 있는지 확인하세요.",
+    filteredResultsHint: "결과는 필터링된 데이터만 포함하며 전체 테이블의 일치를 의미하지 않습니다. 동기화 전에 두 필터가 동일한 업무 범위를 선택하는지 확인하세요.",
     configSelect: "구성 선택 또는 저장",
     configNew: "새 구성으로 저장",
     configRename: "구성 이름 변경",

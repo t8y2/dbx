@@ -197,6 +197,7 @@ pub struct BuildRenameDatabaseSqlRequest {
     pub old_name: String,
     pub new_name: String,
     pub terminate_connections: bool,
+    pub identifier_quote: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1275,6 +1276,7 @@ pub async fn build_rename_database_sql(
         &req.old_name,
         &req.new_name,
         req.terminate_connections,
+        req.identifier_quote.as_deref(),
     )
     .map(Json)
     .map_err(AppError::from)

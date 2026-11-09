@@ -247,6 +247,7 @@ async function loadSource(nextEditing = props.initialEditing && canEdit.value, r
       schema,
       name: target.name,
       source: result.source,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(target.connectionId),
     });
     if (serial !== loadSerial) return;
     resolvedObjectType.value = resolvedType;
@@ -356,6 +357,7 @@ async function saveSource() {
       schema,
       name,
       source: draft.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId),
     });
     if (serial !== loadSerial) return;
     save = await prepareObjectSourceSave(connectionId, database, databaseType, statements, schema, { objectType, name });

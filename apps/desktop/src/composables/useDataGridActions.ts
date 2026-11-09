@@ -855,6 +855,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         column,
         direction,
         tieBreakerColumnIndexes: primaryKeyTieBreakerIndexes(tab.querySourceColumns?.length === sortColumns.resultColumns.length ? tab.querySourceColumns : sortColumns.resultColumns, tab.tableMeta?.primaryKeys),
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(executionTarget?.connectionId ?? tab.connectionId),
       });
       if (!built.ok || !built.sql) {
         toast(t("grid.sortUnsupported"), 5000);

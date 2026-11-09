@@ -393,6 +393,7 @@ pub fn build_type_evolution_sql(owner: &str, name: &str, before: &str, after: &s
             schema: Some(owner.into()),
             name: name.into(),
             source: source.into(),
+            identifier_quote: None,
         })?;
         evolution_shape(owner, &sql)
     };

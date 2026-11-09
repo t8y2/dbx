@@ -2116,7 +2116,7 @@ export async function buildRenameObjectSql(options: BuildRenameObjectSqlOptions)
   return post("/api/query/build-rename-object-sql", { options });
 }
 
-export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean }): Promise<string> {
+export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean; identifierQuote?: string }): Promise<string> {
   return post("/api/query/build-rename-database-sql", options);
 }
 

@@ -11,6 +11,10 @@ export type BuildEditableObjectSourceSqlInput = {
   schema?: string | null;
   name: string;
   source: string;
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
+   * table-data SQL options. */
+  identifierQuote?: string;
 };
 
 export type ValidateOracleExecutableObjectSourceInput = {

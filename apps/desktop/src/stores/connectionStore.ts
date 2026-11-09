@@ -126,6 +126,7 @@ import { oracleDatabaseLinksFromResult, oracleDatabaseLinksSql, supportsOracleDa
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, schemaNodeHasLoadableName, shouldShowDorisCatalogTree, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
+import { invalidateSchemaOptionsCache } from "@/lib/database/schemaOptionsCache";
 import {
   connectionDatabaseMetadataSchema,
   connectionObjectTreeNodeSchema,
@@ -7014,6 +7015,13 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadSchemas(connectionId: string, database: string, options?: LoadTreeOptions) {
+    if (options?.force) {
+      // A forced reload is the app's "the schema set changed" signal (create/drop, or an
+      // explicit refresh). Completion and the editor's schema picker hold their own
+      // copies, so both have to go with it (#14582).
+      invalidateCompletionCache(connectionId, database);
+      invalidateSchemaOptionsCache(connectionId, database);
+    }
     const configForScope = getConfig(connectionId);
     return runTreeMetadataLoad(
       {
@@ -9031,6 +9039,12 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function refreshDatabaseTreeNode(connectionId: string, database: string, catalog?: string) {
+    // Refreshing a database means its schema set may have changed outside the app
+    // (CREATE SCHEMA in another client, or the app's own create/drop). Drop the
+    // schema picker and completion lists too, or the editor keeps offering the set
+    // it cached on mount (#14582).
+    invalidateCompletionCache(connectionId, database);
+    invalidateSchemaOptionsCache(connectionId, database);
     const node = findDatabaseTreeNode(treeNodes.value, connectionId, database, catalog);
     if (node) {
       await refreshTreeNode(node);

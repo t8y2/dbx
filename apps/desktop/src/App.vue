@@ -1724,18 +1724,21 @@ async function settleUpdateBlockers() {
   // Reaching here means the user confirmed the preparation block, which states
   // that running queries are cancelled and open transactions are rolled back.
   // Settle them in the order the guard checks them, then let preparation run.
-  for (const task of [...backgroundTasks.value]) {
+  // Everything below is collected synchronously before the first await, so no
+  // copy of the reactive arrays is needed.
+  for (const task of backgroundTasks.value) {
     if (task.status === "Running" || task.status === "Writing" || (task.kind === "table-copy" && task.canCancel)) {
       void cancelBackgroundTask(task.exportId);
     }
   }
   const cancels: Promise<unknown>[] = [];
-  for (const tab of [...queryStore.tabs]) {
+  const rollbacks: Promise<unknown>[] = [];
+  for (const tab of queryStore.tabs) {
     if (tab.isExecuting) cancels.push(queryStore.cancelTabExecution(tab.id).catch(() => undefined));
     if (tab.explainExecutionId) cancels.push(queryStore.cancelTabExplain(tab.id).catch(() => undefined));
+    if (tab.txnSessionId) rollbacks.push(queryStore.rollbackTransaction(tab.id).catch(() => undefined));
   }
   await Promise.allSettled(cancels);
-  const rollbacks = [...queryStore.tabs].filter((tab) => tab.txnSessionId).map((tab) => queryStore.rollbackTransaction(tab.id).catch(() => undefined));
   await Promise.allSettled(rollbacks);
 }
 

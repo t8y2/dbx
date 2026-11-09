@@ -364,21 +364,26 @@ describe("UpdateDialog prepared package without a remote update (#13562)", () =>
 });
 
 describe("UpdateDialog download progress", () => {
-  it("keeps the downloading button at a fixed width as progress changes", async () => {
+  it("shows a progress bar at a fixed width as progress changes", async () => {
     const { state } = await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: 9 });
 
-    expect(buttonWithText("Downloading 9%")?.classList.contains("w-52")).toBe(true);
+    const filler = document.body.querySelector<HTMLElement>("[data-download-progress-fill]");
+    expect(filler?.style.width).toBe("9%");
+    expect(filler?.closest(".w-52")).not.toBeNull();
 
     state.downloadProgress = 100;
     await flushDialog();
 
-    expect(buttonWithText("Downloading 100%")?.classList.contains("w-52")).toBe(true);
+    expect(document.body.querySelector<HTMLElement>("[data-download-progress-fill]")?.style.width).toBe("100%");
   });
 
-  it("falls back to 0% while the download size is unknown", async () => {
+  it("falls back to an indeterminate bar while the download size is unknown", async () => {
     await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: null });
 
-    expect(buttonWithText("Downloading 0%")).toBeDefined();
+    // A 0% bar looks stuck; the unknown-total case gets motion instead.
+    expect(document.body.querySelector("[data-download-progress-fill]")).toBeNull();
+    expect(document.body.querySelector("[data-download-progress-indeterminate]")).not.toBeNull();
+    expect(document.body.textContent).not.toContain("Downloading 0%");
   });
 });
 

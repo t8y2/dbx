@@ -928,3 +928,35 @@ describe("UpdateDialog aggregate update center", () => {
     expect(restoreIgnoredVersion).toHaveBeenCalledOnce();
   });
 });
+
+describe("UpdateDialog blocked preparation confirmation", () => {
+  it("names the block and offers the destructive confirmation", async () => {
+    const confirmBlocked = vi.fn();
+    const dismissBlocked = vi.fn();
+    await mountDialog(0, {}, undefined, {
+      blockedUpdateMessage: "2 tasks are running",
+      "onConfirm-blocked-install": confirmBlocked,
+      "onDismiss-blocked-install": dismissBlocked,
+    });
+
+    const panel = document.body.querySelector("[data-update-blocked-confirm]");
+    expect(panel).not.toBeNull();
+    expect(panel?.textContent).toContain("2 tasks are running");
+    // The consequence of confirming must be stated, not implied.
+    expect(panel?.textContent).toContain("rolls back open transactions");
+
+    buttonWithText("Close all and continue")?.click();
+    await flushDialog();
+    expect(confirmBlocked).toHaveBeenCalledOnce();
+
+    buttonWithText("Cancel")?.click();
+    await flushDialog();
+    expect(dismissBlocked).toHaveBeenCalledOnce();
+  });
+
+  it("renders no confirmation while nothing is blocked", async () => {
+    await mountDialog(0);
+
+    expect(document.body.querySelector("[data-update-blocked-confirm]")).toBeNull();
+  });
+});

@@ -55,6 +55,8 @@ const props = withDefaults(
     componentUpdatesUpdating?: boolean;
     updatingComponent?: ComponentUpdateCategory | null;
     isUpdatingAll?: boolean;
+    /** Localized reason the last install attempt was held back; empty when none. */
+    blockedUpdateMessage?: string;
   }>(),
   {
     driverUpdates: () => [],
@@ -69,6 +71,7 @@ const props = withDefaults(
     componentUpdatesUpdating: false,
     updatingComponent: null,
     isUpdatingAll: false,
+    blockedUpdateMessage: "",
     updateDownloadedVersion: "",
     ignoredReleaseVersion: "",
   },
@@ -86,6 +89,8 @@ const emit = defineEmits<{
   "change-download-source": [source: UpdateDownloadSource];
   "install-component-updates": [category: ComponentUpdateCategory];
   "update-all": [];
+  "confirm-blocked-install": [];
+  "dismiss-blocked-install": [];
 }>();
 
 const { t, locale } = useI18n();
@@ -572,6 +577,23 @@ watch(
               </div>
             </div>
           </template>
+        </div>
+
+        <!-- A held-back install is a decision, not an error: name the cause and let
+             the user authorise cancelling queries / rolling back transactions. -->
+        <div v-if="blockedUpdateMessage" data-update-blocked-confirm role="alertdialog" class="border-t border-amber-500/40 bg-amber-500/10 px-[22px] py-3 text-xs text-amber-800 dark:text-amber-200">
+          <div class="flex items-start gap-2">
+            <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
+            <div class="min-w-0 flex-1 space-y-1">
+              <p class="font-medium">{{ t("updates.blockedRetryTitle") }}</p>
+              <p class="text-amber-700 dark:text-amber-300">{{ blockedUpdateMessage }}</p>
+              <p class="text-amber-700 dark:text-amber-300">{{ t("updates.blockedRetryConsequence") }}</p>
+              <div class="flex flex-wrap items-center gap-2 pt-1">
+                <Button size="sm" class="h-8" :disabled="isInstallingUpdate" @click="emit('confirm-blocked-install')">{{ t("updates.blockedRetryAccept") }}</Button>
+                <Button size="sm" variant="ghost" class="h-8" @click="emit('dismiss-blocked-install')">{{ t("common.cancel") }}</Button>
+              </div>
+            </div>
+          </div>
         </div>
 
         <DialogFooter v-if="selectedTab === 'app'" data-update-footer class="mx-0 mb-0 min-w-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">

@@ -368,10 +368,16 @@ const {
   cancelDownload,
   installDownloadedUpdate,
   restartApp,
+  blockedPreparation,
+  confirmBlockedInstall,
+  dismissBlockedInstall,
 } = useAppUpdater({
   getActiveTaskCount: () => trackedUpdateTaskCount.value,
-  prepareForUpdate: async () => {
+  prepareForUpdate: async (prepareOptions: { force?: boolean } = {}) => {
     if (!updatePreparation) throw new Error(t("updates.preparationNotReady"));
+    // Only the confirmation raised by the preparation block sets `force`; every
+    // other path still reports the block and lets the user act on it.
+    if (prepareOptions.force) await settleUpdateBlockers();
     return prepareUpdateWithDraftRecovery(() => updatePreparation!.prepare());
   },
 });
@@ -1714,6 +1720,25 @@ async function consumePendingComponentUpdatesAfterRestart() {
   reportComponentUpdateResult(await runPendingComponentUpdatePlan(pending, componentUpdates));
 }
 
+async function settleUpdateBlockers() {
+  // Reaching here means the user confirmed the preparation block, which states
+  // that running queries are cancelled and open transactions are rolled back.
+  // Settle them in the order the guard checks them, then let preparation run.
+  for (const task of [...backgroundTasks.value]) {
+    if (task.status === "Running" || task.status === "Writing" || (task.kind === "table-copy" && task.canCancel)) {
+      void cancelBackgroundTask(task.exportId);
+    }
+  }
+  const cancels: Promise<unknown>[] = [];
+  for (const tab of [...queryStore.tabs]) {
+    if (tab.isExecuting) cancels.push(queryStore.cancelTabExecution(tab.id).catch(() => undefined));
+    if (tab.explainExecutionId) cancels.push(queryStore.cancelTabExplain(tab.id).catch(() => undefined));
+  }
+  await Promise.allSettled(cancels);
+  const rollbacks = [...queryStore.tabs].filter((tab) => tab.txnSessionId).map((tab) => queryStore.rollbackTransaction(tab.id).catch(() => undefined));
+  await Promise.allSettled(rollbacks);
+}
+
 async function installDownloadedUpdateWithComponentUpdates() {
   await rememberComponentUpdatesForRestartedApp();
   await installDownloadedUpdate();
@@ -1722,6 +1747,11 @@ async function installDownloadedUpdateWithComponentUpdates() {
 async function restartAppWithComponentUpdates() {
   await rememberComponentUpdatesForRestartedApp();
   await restartApp();
+}
+
+async function confirmBlockedInstallWithComponentUpdates() {
+  await rememberComponentUpdatesForRestartedApp();
+  await confirmBlockedInstall();
 }
 
 function installComponentUpdates(category: ComponentUpdateCategory) {
@@ -6011,6 +6041,9 @@ onUnmounted(() => {
           @cancel-download="cancelDownload"
           @install-downloaded="installDownloadedUpdateWithComponentUpdates"
           @restart="restartAppWithComponentUpdates"
+          :blocked-update-message="blockedPreparation?.message ?? ''"
+          @confirm-blocked-install="confirmBlockedInstallWithComponentUpdates"
+          @dismiss-blocked-install="dismissBlockedInstall"
           :ignored-release-version="ignoredReleaseVersion"
           @ignore-version="ignoreCurrentVersion"
           @restore-ignored-version="restoreIgnoredVersion"

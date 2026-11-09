@@ -2,6 +2,7 @@
 import { createApp, defineComponent, h, reactive, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
+import { UpdatePreparationError } from "@/lib/app/updatePreparation";
 import { effectiveUpdateInfo, isNewerRemoteVersion, isPreparedUpdateObsolete, resolveReleaseTagUrl, resolveUpdateReleaseUrl, useAppUpdater } from "@/composables/useAppUpdater";
 const mocks = vi.hoisted(() => ({
   checkForUpdates: vi.fn(),
@@ -325,6 +326,58 @@ describe("silent update lifecycle", () => {
     expect(updater.updateDownloaded.value).toBe(true);
     await updater.installDownloadedUpdate();
     expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+  });
+  it("offers a confirmation for running work and retries the install with force", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const prepare = vi
+      .fn()
+      .mockRejectedValueOnce(new UpdatePreparationError("2 tasks running", "tasks"))
+      .mockResolvedValueOnce(() => {});
+    const updater = mount({ prepareForUpdate: prepare });
+    await updater.checkUpdates({ silent: true });
+
+    await updater.installDownloadedUpdate();
+
+    // A settleable block is a question, not a failure: no error banner, no install.
+    expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+    expect(updater.updateCheckFailed.value).toBe(false);
+    expect(updater.blockedPreparation.value?.message).toContain("2 tasks running");
+
+    await updater.confirmBlockedInstall();
+
+    expect(prepare).toHaveBeenLastCalledWith({ force: true });
+    expect(mocks.installDownloadedUpdate).toHaveBeenCalledWith("cached", "1.1.0");
+    expect(updater.blockedPreparation.value).toBeNull();
+  });
+  it("dismissing the confirmation installs nothing", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const updater = mount({
+      prepareForUpdate: async () => {
+        throw new UpdatePreparationError("1 transaction open", "tasks");
+      },
+    });
+    await updater.checkUpdates({ silent: true });
+    await updater.installDownloadedUpdate();
+
+    expect(updater.blockedPreparation.value?.code).toBe("tasks");
+    updater.dismissBlockedInstall();
+
+    expect(updater.blockedPreparation.value).toBeNull();
+    expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+  });
+  it("keeps non-settleable blocks as errors instead of offering a confirmation", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const updater = mount({
+      prepareForUpdate: async () => {
+        throw new UpdatePreparationError("close the DDL dialog", "config");
+      },
+    });
+    await updater.checkUpdates({ silent: true });
+    await updater.installDownloadedUpdate();
+
+    expect(updater.blockedPreparation.value).toBeNull();
+    expect(updater.updateCheckFailed.value).toBe(true);
+    expect(updater.updateCheckMessage.value).toContain("close the DDL dialog");
   });
   it("retries only restart after relaunch fails", async () => {
     mocks.relaunchApp.mockRejectedValueOnce(new Error("restart failed"));

@@ -3040,8 +3040,16 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   // CTE bodies are their own scope: resolve them first so the outer query's
   // referenced tables are read from a statement with those bodies blanked out.
   const cteDefs = scanCteDefinitions(fullStatement, options.databaseType);
-  let referencedTables = extractReferencedTables(maskResolvedCteBodies(fullStatement, cursorInStatement, cteDefs), options.databaseType);
-  for (const cte of cteDefs) {
+  // Inside a CTE body only that body's own sources and the CTEs declared before it
+  // are in scope; the CTE being defined (unless the body references it, as a
+  // recursive CTE does) and the outer query would otherwise count as extra row
+  // sources and force every column suggestion to be qualified (#14109).
+  const enclosingCteIndex = cteDefs.findIndex((cte) => cursorInStatement > cte.bodyStart && cursorInStatement <= cte.bodyEnd);
+  const enclosingCte = enclosingCteIndex >= 0 ? cteDefs[enclosingCteIndex] : undefined;
+  const scopedStatement = enclosingCte ? keepOnlyCteBody(fullStatement, enclosingCte) : maskResolvedCteBodies(fullStatement, cursorInStatement, cteDefs);
+  let referencedTables = extractReferencedTables(scopedStatement, options.databaseType);
+  const visibleCteDefs = enclosingCte ? cteDefs.slice(0, enclosingCteIndex).concat(referencedTables.some((rt) => rt.name.toLowerCase() === enclosingCte.name.toLowerCase()) ? [enclosingCte] : []) : cteDefs;
+  for (const cte of visibleCteDefs) {
     const matching = referencedTables.filter((rt) => rt.name.toLowerCase() === cte.name.toLowerCase());
     if (matching.length === 0) {
       referencedTables.push({ name: cte.name, columns: cte.columns, kind: "cte" });
@@ -3056,7 +3064,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   }
 
   // Merge subquery alias references
-  const subqueryRefs = extractSubqueryReferences(fullStatement, cteDefs, options.databaseType);
+  const subqueryRefs = extractSubqueryReferences(enclosingCte ? scopedStatement : fullStatement, cteDefs, options.databaseType);
   for (const sq of subqueryRefs) {
     if (!referencedTables.some((rt) => rt.name.toLowerCase() === sq.name.toLowerCase() && rt.alias === sq.alias)) {
       referencedTables.push(sq);
@@ -4690,6 +4698,14 @@ function maskResolvedCteBodies(statement: string, cursorOffset: number, ctes: re
     masked = `${masked.slice(0, cte.bodyStart + 1)}${" ".repeat(bodyLength)}${masked.slice(cte.bodyEnd)}`;
   }
   return masked;
+}
+
+/**
+ * Blanks everything outside one CTE body, keeping offsets, so completion inside
+ * that body reads only the body's own row sources (#14109).
+ */
+function keepOnlyCteBody(statement: string, cte: ScannedCteDefinition): string {
+  return `${" ".repeat(cte.bodyStart + 1)}${statement.slice(cte.bodyStart + 1, cte.bodyEnd)}${" ".repeat(Math.max(0, statement.length - cte.bodyEnd))}`;
 }
 
 function extractSubqueryReferences(sql: string, knownCtes?: readonly ScannedCteDefinition[], databaseType?: DatabaseType): SqlCompletionReferencedTable[] {

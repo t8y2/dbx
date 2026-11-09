@@ -1,22 +1,24 @@
 // @vitest-environment happy-dom
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { writeSnippetRemoteContentHash } from "./snippetAutoUploadConfig";
 
 const invoke = vi.hoisted(() => vi.fn().mockResolvedValue({ snippetId: "shared" }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke, Channel: class {} }));
 import { snippetSyncUpload } from "../backend/tauri";
 
-describe("manual snippet upload version guard", () => {
-  beforeEach(() => {
-    const entries = new Map<string, string>();
-    vi.stubGlobal("localStorage", {
-      getItem: (key: string) => entries.get(key) ?? null,
-      setItem: (key: string, value: string) => entries.set(key, value),
-      removeItem: (key: string) => entries.delete(key),
-    });
-    invoke.mockClear();
+beforeEach(() => {
+  const entries = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => entries.get(key) ?? null,
+    setItem: (key: string, value: string) => entries.set(key, value),
+    removeItem: (key: string) => entries.delete(key),
   });
+  invoke.mockClear();
+});
 
+afterEach(() => vi.unstubAllGlobals());
+
+describe("manual snippet upload version guard", () => {
   it("sends the last synchronized version rather than accepting the current remote version", async () => {
     writeSnippetRemoteContentHash("gitee", undefined, "shared", "a".repeat(64));
     await snippetSyncUpload({ provider: "gitee", snippetId: "shared" }, {}, "password", true, "secrets");

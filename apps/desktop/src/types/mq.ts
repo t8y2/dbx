@@ -375,6 +375,8 @@ export interface PeekMessagesOptions {
   endTimestamp?: number;
   /** 仅 timestamp 窗口模式生效：newest 让 agent 从截止时间一侧倒序回扫读取。 */
   sortOrder?: string;
+  /** Kafka only. 主题内搜索关键字：按 key/正文匹配，扫描整个主题而非已加载消息。 */
+  searchQuery?: string;
   partition?: number;
   offset?: number;
 }

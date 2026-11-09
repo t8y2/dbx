@@ -3670,6 +3670,10 @@ export default withEnglishFallback({
     copyCurrentPageSql: "Copia SQL della pagina corrente",
     copyActualExecutionSql: "Copia SQL effettivamente eseguito",
     pageProbeDescription: "Questa pagina mostra al massimo {count} righe; viene letta al massimo 1 riga aggiuntiva per determinare se esiste una pagina successiva.",
+    queryPendingChangesTitle: "Il set di risultati contiene modifiche non confermate",
+    queryPendingChangesMessage: "Eseguendo la query verranno perse le modifiche non confermate nel set di risultati corrente. Puoi annullare per confermare prima le modifiche, oppure ignorare le modifiche ed eseguire la query.",
+    queryDiscardAndExecute: "Ignora modifiche ed esegui",
+    queryWhileSaving: "Salvataggio delle modifiche al set di risultati in corso. Attendi il completamento del salvataggio prima di eseguire la query.",
   },
   exportProgress: {
     recoveryTitle: "Eliminare l'esportazione di cui non è stata confermata la fine?",

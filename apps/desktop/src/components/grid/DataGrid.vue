@@ -4764,6 +4764,7 @@ const editor = useDataGridEditor({
   onManualTransactionMutation: () => props.onManualTransactionMutation?.(),
   onSaveConflict: (message) => toast(message, 5000),
   onAdoptedSaveCompleted: () => toast(t("grid.saveCompleted"), 3000),
+  hasPendingEditorDraft: () => hasPendingDataEditorDraft.value,
   sql: computed(() => props.sql),
   searchText,
   whereFilterInput,

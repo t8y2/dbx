@@ -3622,6 +3622,10 @@ export default withEnglishFallback({
     copyCurrentPageSql: "현재 페이지 SQL 복사",
     copyActualExecutionSql: "실제 실행 SQL 복사",
     pageProbeDescription: "이 페이지에는 최대 {count}행이 표시되며, 다음 페이지가 있는지 판단하기 위해 최대 1행을 추가로 읽습니다.",
+    queryPendingChangesTitle: "결과 집합에 커밋되지 않은 변경 사항이 있습니다",
+    queryPendingChangesMessage: "쿼리를 실행하면 현재 결과 집합에 있는 커밋되지 않은 변경 사항이 버려집니다. 취소하고 먼저 변경 사항을 커밋하거나, 변경 사항을 버리고 쿼리를 실행할 수 있습니다.",
+    queryDiscardAndExecute: "변경 사항을 버리고 실행",
+    queryWhileSaving: "결과 집합 변경 사항을 저장하는 중입니다. 저장이 완료된 후 쿼리를 실행하세요.",
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",

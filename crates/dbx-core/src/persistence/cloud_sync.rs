@@ -795,8 +795,8 @@ pub struct SnippetSyncSummary {
     pub bytes: usize,
     pub exported_at: Option<String>,
     pub app_version: Option<String>,
-    /// SHA-256 of the encrypted remote file content. Used by the opt-in
-    /// automatic uploader to stop when another device has changed the snippet.
+    /// SHA-256 of the encrypted remote file content. Used by manual and
+    /// automatic uploaders to detect changes from another device.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_content_hash: Option<String>,
     #[serde(default)]
@@ -2055,7 +2055,7 @@ impl SnippetSyncClient {
         snippet_passphrase: Option<&str>,
         secrets_passphrase: Option<&str>,
     ) -> Result<SnippetSyncSummary, String> {
-        self.put_snapshot_with_expected_remote_hash(snapshot, snippet_passphrase, secrets_passphrase, None).await
+        self.put_snapshot_guarded(snapshot, snippet_passphrase, secrets_passphrase, None, false).await
     }
 
     pub async fn put_snapshot_with_expected_remote_hash(
@@ -2065,18 +2065,30 @@ impl SnippetSyncClient {
         secrets_passphrase: Option<&str>,
         expected_remote_content_hash: Option<&str>,
     ) -> Result<SnippetSyncSummary, String> {
+        self.put_snapshot_guarded(snapshot, snippet_passphrase, secrets_passphrase, expected_remote_content_hash, true)
+            .await
+    }
+
+    /// Manual uploads also require the version last successfully uploaded or
+    /// restored on this device. Inspecting a remote snapshot is not a baseline.
+    pub async fn put_snapshot_guarded(
+        &self,
+        snapshot: &SyncSnapshot,
+        snippet_passphrase: Option<&str>,
+        secrets_passphrase: Option<&str>,
+        expected_remote_content_hash: Option<&str>,
+        automatic: bool,
+    ) -> Result<SnippetSyncSummary, String> {
         self.require_token()?;
         let passphrase = required_snippet_passphrase(snippet_passphrase)?;
         let existing_id = normalized_snippet_id(self.config.snippet_id.as_deref());
         if expected_remote_content_hash.is_some() && existing_id.is_none() {
-            return Err(
-                "Automatic snippet upload needs a snippet ID and a previous successful manual upload.".to_string()
-            );
+            return Err("Snippet upload needs a snippet ID and a previous successful upload or download.".to_string());
         }
         if let Some(expected_hash) = expected_remote_content_hash {
             if expected_hash.len() != 64 || !expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 return Err(
-                    "Automatic snippet upload has an invalid saved remote version. Upload manually to reset it."
+                    "Snippet upload has an invalid saved remote version. Download and review the latest snippet before uploading."
                         .to_string(),
                 );
             }
@@ -2086,10 +2098,10 @@ impl SnippetSyncClient {
             if expected_remote_content_hash
                 .is_some_and(|expected_hash| !content_hash(&existing_content).eq_ignore_ascii_case(expected_hash))
             {
-                return Err("The remote snippet changed since the last successful upload. Automatic upload was paused to avoid overwriting newer changes. Download and review the latest snippet, then upload manually before re-enabling automatic upload.".to_string());
+                return Err("The remote snippet changed since this device last synchronized. Upload was stopped to avoid overwriting newer changes. Back up any local changes, then download and review the latest snippet before uploading again.".to_string());
             }
             if !is_encrypted_snippet_snapshot(&existing_content) {
-                if expected_remote_content_hash.is_some() && is_legacy_dbx_snapshot(&existing_content) {
+                if automatic && expected_remote_content_hash.is_some() && is_legacy_dbx_snapshot(&existing_content) {
                     return Err("Automatic upload is paused because the remote snippet uses a legacy unencrypted snapshot. Migrate it manually before enabling automatic uploads.".to_string());
                 }
                 // Never delete an arbitrary snippet merely because it is not an
@@ -2115,12 +2127,15 @@ impl SnippetSyncClient {
                 if self.config.replace_legacy_snippet {
                     return Err("The selected snippet is already encrypted; use the normal upload action.".to_string());
                 }
+                if expected_remote_content_hash.is_none() {
+                    return Err("This device has no saved version of this snippet. Upload was stopped to avoid overwriting remote changes. Back up any local changes, then download and review the latest snippet before uploading.".to_string());
+                }
                 // Refuse a PATCH unless the supplied snippet encryption
                 // password decrypts the currently stored envelope. Otherwise
                 // an accidental password change would silently lock out the
                 // user's other devices.
                 let existing_snapshot = parse_snippet_snapshot(&existing_content, Some(passphrase))?;
-                if expected_remote_content_hash.is_some() {
+                if automatic && expected_remote_content_hash.is_some() {
                     if existing_snapshot.encrypted_secrets.is_some() {
                         return Err("Automatic upload is paused because this snippet includes encrypted credentials. Use manual upload to keep the credentials protected.".to_string());
                     }
@@ -4518,8 +4533,80 @@ mod tests {
             base,
         );
 
-        client.put_snapshot(&snapshot, Some("correct-password"), None).await.unwrap();
+        let hash = super::content_hash(&serde_json::to_string(&encrypted).unwrap());
+        client.put_snapshot_guarded(&snapshot, Some("correct-password"), None, Some(&hash), false).await.unwrap();
         assert_eq!(server.await.unwrap(), vec!["GET /gists/existing-id HTTP/1.1", "PATCH /gists/existing-id HTTP/1.1"]);
+    }
+
+    #[tokio::test]
+    async fn manual_snippet_upload_rejects_missing_stale_and_invalid_versions_without_writing() {
+        let storage = crate::persistence::test_storage::open(&temp_db_path("snippet-manual-conflict")).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
+        let encrypted = encrypt_snippet_snapshot(&snapshot, "password").unwrap();
+        let content = serde_json::to_string(&encrypted).unwrap();
+        for provider in [SnippetProvider::GitHub, SnippetProvider::Gitee] {
+            for (expected, error) in [
+                (None, "no saved version"),
+                (Some("0".repeat(64)), "remote snippet changed"),
+                (Some("invalid".to_string()), "invalid saved remote version"),
+            ] {
+                let responses =
+                    if error.starts_with("invalid") { vec![] } else { vec![github_snippet_response(&content)] };
+                let (base, server) = spawn_snippet_server(responses).await;
+                let client = SnippetSyncClient::with_api_base(
+                    SnippetSyncConfig {
+                        provider,
+                        instance_url: None,
+                        token: Some("test-token".to_string()),
+                        snippet_id: Some("existing-id".to_string()),
+                        replace_legacy_snippet: false,
+                    },
+                    base,
+                );
+                let result =
+                    client.put_snapshot_guarded(&snapshot, Some("password"), None, expected.as_deref(), false).await;
+                assert!(result.unwrap_err().contains(error));
+                let requests = server.await.unwrap();
+                assert!(requests.iter().all(|request| request.starts_with("GET ")));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_snippet_upload_with_matching_version_allows_encrypted_credentials() {
+        let storage = crate::persistence::test_storage::open(&temp_db_path("snippet-manual-secrets")).await.unwrap();
+        storage.save_connections(&[postgres_connection("pg", "secret")]).await.unwrap();
+        let snapshot = build_sync_snapshot(&storage, "test-version", None, Some("secrets-password")).await.unwrap();
+        assert!(snapshot.encrypted_secrets.is_some());
+        let encrypted = encrypt_snippet_snapshot(&snapshot, "password").unwrap();
+        let content = serde_json::to_string(&encrypted).unwrap();
+        for provider in [SnippetProvider::GitHub, SnippetProvider::Gitee] {
+            let (base, server) = spawn_snippet_server(vec![
+                github_snippet_response(&content),
+                serde_json::json!({"id": "existing-id"}).to_string(),
+            ])
+            .await;
+            let client = SnippetSyncClient::with_api_base(
+                SnippetSyncConfig {
+                    provider,
+                    instance_url: None,
+                    token: Some("test-token".to_string()),
+                    snippet_id: Some("existing-id".to_string()),
+                    replace_legacy_snippet: false,
+                },
+                base,
+            );
+            let hash = super::content_hash(&content);
+            let result = client
+                .put_snapshot_guarded(&snapshot, Some("password"), Some("secrets-password"), Some(&hash), false)
+                .await
+                .unwrap();
+            assert!(result.remote_content_hash.is_some());
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests[0].starts_with("GET /gists/existing-id"));
+            assert!(requests[1].starts_with("PATCH /gists/existing-id"));
+        }
     }
 
     #[tokio::test]
@@ -4931,7 +5018,7 @@ mod tests {
         let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "password").unwrap()).unwrap();
         let (base, server) = spawn_gitlab_server(vec![
             serde_json::json!({"files": [{"path": "dbx-sync.json"}]}).to_string(),
-            encrypted,
+            encrypted.clone(),
             serde_json::json!({"id": 42}).to_string(),
         ])
         .await;
@@ -4945,7 +5032,10 @@ mod tests {
             },
             base,
         );
-        client.put_snapshot(&snapshot, Some("password"), None).await.unwrap();
+        client
+            .put_snapshot_guarded(&snapshot, Some("password"), None, Some(&super::content_hash(&encrypted)), false)
+            .await
+            .unwrap();
         let requests = server.await.unwrap();
         assert_eq!(requests.len(), 3);
         assert!(requests[2].starts_with("PUT /api/v4/snippets/42 HTTP/1.1"));

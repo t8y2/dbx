@@ -62,7 +62,7 @@ export function useSnippetAutoUpload() {
           return;
         }
 
-        const summary = await snippetSyncUpload(account, settingsStore.editorSettings, undefined, false, undefined, readSnippetAutoUploadSelection(config.provider, config.instanceUrl), remoteContentHash);
+        const summary = await snippetSyncUpload(account, settingsStore.editorSettings, undefined, false, undefined, readSnippetAutoUploadSelection(config.provider, config.instanceUrl), remoteContentHash, true);
         if (!summary.remoteContentHash) {
           stopAutoUpload(config.provider, config.instanceUrl, config.intervalMinutes);
           appendDebugLog("error", "[DBX][snippet:auto-upload:paused]", "The provider did not return a remote content hash.");
@@ -80,7 +80,7 @@ export function useSnippetAutoUpload() {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("remote snippet changed since the last successful upload")) {
+      if (message.includes("remote snippet changed since this device last synchronized")) {
         stopAutoUpload(config.provider, config.instanceUrl, config.intervalMinutes);
       }
       if (message.includes("encrypted credentials")) {

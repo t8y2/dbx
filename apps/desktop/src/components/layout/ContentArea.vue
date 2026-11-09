@@ -2001,14 +2001,16 @@ function dispatchBeforeResultTabSwitch() {
 }
 
 /**
- * 点击结果标签：切换显示的同时切换固定状态（issue #9975、#13306）。
+ * 点击结果标签：切换显示的同时固定该结果（issue #9975、#13306、#14599）。
  * 未固定的结果会被下一次普通查询复用/覆盖，点击后固定即可保留下来；
- * 点击已固定的结果则直接取消固定，无需再打开右键菜单。
+ * 再次点击当前已固定的结果会取消固定，无需再打开右键菜单；
+ * 从其他结果标签切换过来时只切换显示，不会取消已有的固定。
  */
 async function selectResultRunFromTab(runId: string) {
+  const wasActive = runId === props.activeTab.activeResultRunId;
   if (!(await selectResultRun(runId))) return;
   const run = resultRuns.value.find((item) => item.id === runId);
-  if (shouldPinResultRunOnClick(run, settingsStore.editorSettings.pinResultTabOnClick)) toggleResultRunPinned(runId);
+  if (shouldPinResultRunOnClick(run, settingsStore.editorSettings.pinResultTabOnClick, wasActive)) toggleResultRunPinned(runId);
 }
 
 async function focusResultRunByIndex(index: number) {

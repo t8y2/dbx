@@ -478,6 +478,29 @@ export function normalizeBasePath(value: string): string {
   return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
 }
 
+/**
+ * Reads the base path out of a free-form `external_config` blob.
+ *
+ * `external_config` is arbitrary JSON (it can arrive through an imported
+ * connection file), so the value may be missing, empty, or not a string at
+ * all. The lookup mirrors the Rust side (`dbx-drivers` `external_string` +
+ * `normalize_base_path`) so the form shows exactly what the driver requests:
+ *
+ * - the first present key wins (`basePath` before `base_path`)
+ * - a value that is not a string means "no prefix"
+ * - an empty string means "no prefix" and does not fall through to the alias
+ */
+export function externalBasePath(config: unknown): string {
+  if (!config || typeof config !== "object") return "";
+  const record = config as Record<string, unknown>;
+  for (const key of ["basePath", "base_path"]) {
+    if (!(key in record)) continue;
+    const value = record[key];
+    return typeof value === "string" ? normalizeBasePath(value) : "";
+  }
+  return "";
+}
+
 export function connectionProfileForScheme(scheme: string, preferredProfile?: string): ConnectionProfile | undefined {
   const normalizedScheme = scheme.trim().toLowerCase();
   const normalizedPreferredProfile = preferredProfile?.trim().toLowerCase();

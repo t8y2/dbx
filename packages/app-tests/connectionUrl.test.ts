@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "../../apps/desktop/src/lib/connection/connectionUrl.ts";
+import { applyParsedConnectionUrl, externalBasePath, normalizeMongoConnectionString, parseConnectionUrl } from "../../apps/desktop/src/lib/connection/connectionUrl.ts";
 import { connectionUrlPlaceholder } from "../../apps/desktop/src/lib/connection/connectionPresentation.ts";
 import { h2FileJdbcUrlWithPath } from "../../apps/desktop/src/lib/database/h2Connection.ts";
 
@@ -962,4 +962,26 @@ test("drops the InfluxDB base path when the pasted URL has no path", () => {
 test("shows InfluxDB connection URL placeholders without a database segment", () => {
   assert.equal(connectionUrlPlaceholder("influxdb"), "influxdb://user:password@host:port");
   assert.equal(connectionUrlPlaceholder("influxdb3"), "influxdb3://token@host:8181");
+});
+
+test("reads the InfluxDB base path from either external config spelling", () => {
+  assert.equal(externalBasePath({ basePath: "/influxdb" }), "/influxdb");
+  assert.equal(externalBasePath({ base_path: "/influxdb" }), "/influxdb");
+  assert.equal(externalBasePath({ basePath: "influxdb/" }), "/influxdb");
+  assert.equal(externalBasePath({ version: "2", org: "dbx" }), "");
+});
+
+test("treats a non-string InfluxDB base path as no prefix instead of throwing", () => {
+  assert.equal(externalBasePath({ basePath: 123 }), "");
+  assert.equal(externalBasePath({ basePath: { path: "/influxdb" } }), "");
+  assert.equal(externalBasePath({ basePath: null }), "");
+  assert.equal(externalBasePath(undefined), "");
+  assert.equal(externalBasePath("not a config"), "");
+});
+
+test("does not fall back to the base path alias when the first key is empty", () => {
+  // The Rust side reads the first present key and stops there, so the form
+  // must not show a prefix the driver would ignore.
+  assert.equal(externalBasePath({ basePath: "", base_path: "/influxdb" }), "");
+  assert.equal(externalBasePath({ basePath: 123, base_path: "/influxdb" }), "");
 });

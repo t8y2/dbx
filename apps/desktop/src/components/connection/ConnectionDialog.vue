@@ -81,7 +81,7 @@ import {
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isWindows } from "@/lib/backend/platform";
-import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, normalizeBasePath, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
+import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, externalBasePath, normalizeBasePath, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
 import { hasGbase8cConnectionDatabase } from "@/lib/connection/gbase8cDatabase";
 import { type GbaseProfile, gbaseProfileFromConfig, isGbaseProfile } from "@/lib/connection/gbaseProfiles";
 import { loadVisibleDatabasesPickerNames } from "@/lib/connection/visibleDatabasesPickerLoad";
@@ -1743,8 +1743,8 @@ const victoriaMetricsLookback = ref("1h");
 function resetInfluxDbFields(config?: Partial<InfluxDbExternalConfig>, versionHint?: InfluxDbVersion) {
   const version = versionHint ?? (config?.version === "2" ? "2" : config?.version === "3" ? "3" : "1");
   influxDbVersion.value = version;
-  influxDbOrg.value = config?.org?.trim() || "";
-  influxDbBasePath.value = normalizeBasePath(config?.basePath || "");
+  influxDbOrg.value = typeof config?.org === "string" ? config.org.trim() : "";
+  influxDbBasePath.value = externalBasePath(config);
 }
 
 function hydrateInfluxDbFields(value: unknown, versionHint?: InfluxDbVersion) {
@@ -1755,8 +1755,9 @@ function hydrateInfluxDbFields(value: unknown, versionHint?: InfluxDbVersion) {
   // The driver accepts both spellings, so the form has to read both as well:
   // `buildInfluxDbExternalConfig` rebuilds the whole external config from the
   // form, and a stored `base_path` would otherwise be dropped on save.
-  const config = value as Partial<InfluxDbExternalConfig> & { base_path?: string };
-  resetInfluxDbFields({ ...config, basePath: config.basePath || config.base_path }, versionHint);
+  // `externalBasePath` resolves both keys with the same precedence as the
+  // driver, so the form cannot show a prefix the driver would ignore.
+  resetInfluxDbFields(value as Partial<InfluxDbExternalConfig>, versionHint);
 }
 
 function resetHiveKerberosFields(config?: Pick<ConnectionConfig, "url_params" | "agent_java_options">) {

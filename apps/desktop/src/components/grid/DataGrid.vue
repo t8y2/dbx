@@ -1595,6 +1595,8 @@ const structuredFilterHydrationReady = ref(true);
 let structuredFilterHydrationRequestId = 0;
 const draftStructuredWhereInput = ref("");
 const filterEditorView = computed(() => settingsStore.editorSettings.dataGridFilterEditorView);
+const dataGridOrderByVisible = computed(() => settingsStore.editorSettings.dataGridOrderByVisible);
+const dataGridWhereRatio = computed(() => settingsStore.editorSettings.dataGridWhereRatio);
 const isPersistentFilterView = computed(() => filterEditorView.value === "conditions" || filterEditorView.value === "text");
 // Keep the persisted preference as the initial state for persistent views, but
 // do not use it as a lock: the toolbar toggle must always be able to close them.
@@ -2420,6 +2422,52 @@ async function clearStructuredSortRules() {
 }
 
 watch(filterEditorView, () => sortBuilder.setOpen(false));
+watch(
+  dataGridOrderByVisible,
+  async (visible, previousVisible) => {
+    if (!visible) {
+      // On initial mount, wait for the prop-backed sort state watcher below to
+      // hydrate the owning tab's sort before clearing any persisted ORDER BY.
+      if (previousVisible === undefined) {
+        await nextTick();
+        if (dataGridOrderByVisible.value) return;
+      }
+
+      sortBuilder.setOpen(false);
+      const hadManualOrder = !!orderByInput.value.trim();
+      const hadStructuredOrder = !!appliedStructuredOrderByInput.value.trim();
+      const activeSortColumn = sortCol.value;
+      const activeSortColumnIndex = sortColIndex.value ?? 0;
+      const activeSortMode = localSortMode.value;
+      const hadColumnSort = !!activeSortColumn;
+      const hadDatabaseColumnSort = hadColumnSort && activeSortMode === "database";
+
+      sortBuilder.clear();
+      orderByInput.value = "";
+      emit("update:orderByInput", "");
+      emit("update:structuredOrderByInput", "");
+      clearSort();
+
+      if (hadColumnSort && activeSortColumn) {
+        // Keep the owning tab's sort state in sync too. For database sorts this
+        // event also reloads without ORDER BY; for local sorts it restores the
+        // original row order and clears the persisted column indicator.
+        emit("sort", activeSortColumn, activeSortColumnIndex, null, currentWhereInput(), activeSortMode, hadDatabaseColumnSort ? "" : undefined);
+      }
+
+      // Clearing a database column sort above already requests the replacement
+      // query with an explicit empty ORDER BY, so avoid issuing it a second time.
+      if ((hadManualOrder || hadStructuredOrder) && !hadDatabaseColumnSort) {
+        if (props.onExecuteSql) {
+          await applyOrderBySearch(undefined, "");
+        } else {
+          emit("reload", props.sql, searchText.value, currentWhereInput(), undefined, pageSize.value, (currentPage.value - 1) * pageSize.value);
+        }
+      }
+    }
+  },
+  { immediate: true },
+);
 
 const rowStatusFilter = ref<RowStatusFilter>("all");
 
@@ -4059,6 +4107,9 @@ function currentWhereInput(): string | undefined {
 
 function effectiveOrderBy(): string | undefined {
   const columnOrderBy = localSortMode.value === "database" && sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined;
+  if (!dataGridOrderByVisible.value) {
+    return columnOrderBy;
+  }
   const manualOrderBy = orderByInput.value.trim() || columnOrderBy;
   return combineDataGridOrderByInputs(manualOrderBy, appliedStructuredOrderByInput.value);
 }
@@ -15478,6 +15529,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   v-model:filter-builder-open="filterBuilderOpen"
                   :sort-builder-open="sortBuilderOpen"
                   :filter-editor-view="filterEditorView"
+                  :show-order-by="dataGridOrderByVisible"
+                  :where-pane-ratio="dataGridWhereRatio"
                   :columns="props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns"
                   :comment-by-column="columnCommentMap"
                   :condition-columns="conditionColumns"
@@ -15714,7 +15767,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @custom-mode-order="openFilterModeOrderDialog"
         />
         <DataGridSortWorkbench
-          v-if="canUseWhereSearch && filterEditorView === 'conditions' && sortBuilderOpen"
+          v-if="canUseWhereSearch && dataGridOrderByVisible && filterEditorView === 'conditions' && sortBuilderOpen"
           :sql-preview="sortSqlPreview"
           :rules="structuredSortRules"
           :columns="filterBuilderColumnOptions"
@@ -15732,7 +15785,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @apply="applyStructuredSortRules"
         />
         <DataGridTextSortWorkbench
-          v-if="canUseWhereSearch && filterEditorView === 'text' && sortBuilderOpen"
+          v-if="canUseWhereSearch && dataGridOrderByVisible && filterEditorView === 'text' && sortBuilderOpen"
           :height="settingsStore.editorSettings.dataGridTextFilterPanelHeight"
           :sql-preview="sortSqlPreview"
           :rules="structuredSortRules"

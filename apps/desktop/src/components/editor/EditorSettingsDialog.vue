@@ -892,6 +892,8 @@ const editDataGridQuickEntry = ref(settingsStore.editorSettings.dataGridQuickEnt
 const editDataGridFilterEditorView = ref<DataGridFilterEditorView>(settingsStore.editorSettings.dataGridFilterEditorView);
 const editDataGridToolbarLayout = ref<DataGridToolbarLayout>(settingsStore.editorSettings.dataGridToolbarLayout);
 const editDataGridKeepFilterEditorExpanded = ref(settingsStore.editorSettings.dataGridKeepFilterEditorExpanded);
+const editDataGridOrderByVisible = ref(settingsStore.editorSettings.dataGridOrderByVisible);
+const editDataGridWhereRatio = ref(settingsStore.editorSettings.dataGridWhereRatio);
 const dataGridFilterViewPreviewExpanded = ref(true);
 const editDataGridTextFilterPanelHeight = ref(settingsStore.editorSettings.dataGridTextFilterPanelHeight);
 const editDefaultAutoKeepResults = ref(settingsStore.editorSettings.defaultAutoKeepResults);
@@ -1402,6 +1404,8 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     dataGridFilterEditorView: editDataGridFilterEditorView.value,
     dataGridToolbarLayout: editDataGridToolbarLayout.value,
     dataGridKeepFilterEditorExpanded: editDataGridKeepFilterEditorExpanded.value,
+    dataGridOrderByVisible: editDataGridOrderByVisible.value,
+    dataGridWhereRatio: editDataGridWhereRatio.value,
     dataGridTextFilterPanelHeight: editDataGridTextFilterPanelHeight.value,
     defaultAutoKeepResults: editDefaultAutoKeepResults.value,
     pinResultTabOnClick: editPinResultTabOnClick.value,
@@ -2118,6 +2122,8 @@ function syncEditorSettingsDraftFromStore() {
   editDataGridFilterEditorView.value = settingsStore.editorSettings.dataGridFilterEditorView;
   editDataGridToolbarLayout.value = settingsStore.editorSettings.dataGridToolbarLayout;
   editDataGridKeepFilterEditorExpanded.value = settingsStore.editorSettings.dataGridKeepFilterEditorExpanded;
+  editDataGridOrderByVisible.value = settingsStore.editorSettings.dataGridOrderByVisible;
+  editDataGridWhereRatio.value = settingsStore.editorSettings.dataGridWhereRatio;
   editDataGridTextFilterPanelHeight.value = settingsStore.editorSettings.dataGridTextFilterPanelHeight;
   editDefaultAutoKeepResults.value = settingsStore.editorSettings.defaultAutoKeepResults;
   editPinResultTabOnClick.value = settingsStore.editorSettings.pinResultTabOnClick;
@@ -2304,6 +2310,8 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   dataGridFilterEditorView: editDataGridFilterEditorView,
   dataGridToolbarLayout: editDataGridToolbarLayout,
   dataGridKeepFilterEditorExpanded: editDataGridKeepFilterEditorExpanded,
+  dataGridOrderByVisible: editDataGridOrderByVisible,
+  dataGridWhereRatio: editDataGridWhereRatio,
   dataGridTextFilterPanelHeight: editDataGridTextFilterPanelHeight,
   defaultAutoKeepResults: editDefaultAutoKeepResults,
   pinResultTabOnClick: editPinResultTabOnClick,
@@ -3007,6 +3015,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDataGridFilterEditorView.value = DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
     editDataGridToolbarLayout.value = DEFAULT_EDITOR_SETTINGS.dataGridToolbarLayout;
     editDataGridKeepFilterEditorExpanded.value = DEFAULT_EDITOR_SETTINGS.dataGridKeepFilterEditorExpanded;
+    editDataGridOrderByVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridOrderByVisible;
+    editDataGridWhereRatio.value = DEFAULT_EDITOR_SETTINGS.dataGridWhereRatio;
     editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
     editDefaultAutoKeepResults.value = DEFAULT_EDITOR_SETTINGS.defaultAutoKeepResults;
     editPinResultTabOnClick.value = DEFAULT_EDITOR_SETTINGS.pinResultTabOnClick;
@@ -3152,6 +3162,8 @@ function resetAllDefaults() {
   editDataGridFilterEditorView.value = DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
   editDataGridToolbarLayout.value = DEFAULT_EDITOR_SETTINGS.dataGridToolbarLayout;
   editDataGridKeepFilterEditorExpanded.value = DEFAULT_EDITOR_SETTINGS.dataGridKeepFilterEditorExpanded;
+  editDataGridOrderByVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridOrderByVisible;
+  editDataGridWhereRatio.value = DEFAULT_EDITOR_SETTINGS.dataGridWhereRatio;
   editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
   editDefaultAutoKeepResults.value = DEFAULT_EDITOR_SETTINGS.defaultAutoKeepResults;
   editPinResultTabOnClick.value = DEFAULT_EDITOR_SETTINGS.pinResultTabOnClick;
@@ -10467,6 +10479,41 @@ onUnmounted(() => {
                     </div>
                     <Switch id="data-grid-keep-filter-editor-expanded" v-model="editDataGridKeepFilterEditorExpanded" />
                   </div>
+                  <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-background px-3 py-2">
+                    <div class="space-y-1">
+                      <Label for="data-grid-order-by-visible">{{ t("settings.dataGridOrderByVisible") }}</Label>
+                      <p class="text-xs text-muted-foreground">{{ t("settings.dataGridOrderByVisibleDescription") }}</p>
+                    </div>
+                    <Switch id="data-grid-order-by-visible" v-model="editDataGridOrderByVisible" />
+                  </div>
+                  <div v-if="editDataGridOrderByVisible" class="settings-item space-y-2 rounded-md border bg-background px-3 py-2">
+                    <div class="flex items-center justify-between">
+                      <div class="space-y-1">
+                        <Label for="data-grid-where-ratio">{{ t("settings.dataGridWhereRatio") }}</Label>
+                        <p class="text-xs text-muted-foreground">{{ t("settings.dataGridWhereRatioDescription") }}</p>
+                      </div>
+                      <span class="text-xs text-muted-foreground tabular-nums shrink-0 font-medium"> WHERE {{ Math.round(editDataGridWhereRatio * 100) }}% : ORDER BY {{ Math.round((1 - editDataGridWhereRatio) * 100) }}% </span>
+                    </div>
+                    <input id="data-grid-where-ratio" type="range" min="20" max="85" step="1" :value="Math.round(editDataGridWhereRatio * 100)" @input="editDataGridWhereRatio = Number(($event.target as HTMLInputElement).value) / 100" class="w-full accent-primary cursor-pointer" />
+                    <div class="relative flex items-center justify-between text-xs text-muted-foreground select-none pt-0.5">
+                      <div class="absolute inset-x-0 top-1/2 -translate-y-1/2 border-b border-dashed border-muted-foreground/25 pointer-events-none" />
+                      <button type="button" class="relative z-10 bg-background pr-1.5 hover:text-primary hover:underline cursor-pointer transition-colors" :class="Math.round(editDataGridWhereRatio * 100) === 20 ? 'text-primary font-medium' : ''" @click="editDataGridWhereRatio = 0.2">
+                        20% : 80%
+                      </button>
+                      <button
+                        type="button"
+                        class="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 z-10 bg-background px-1.5 hover:text-primary hover:underline cursor-pointer transition-colors whitespace-nowrap"
+                        style="left: 46.15%"
+                        :class="Math.round(editDataGridWhereRatio * 100) === 50 ? 'text-primary font-medium' : ''"
+                        @click="editDataGridWhereRatio = 0.5"
+                      >
+                        50% : 50%
+                      </button>
+                      <button type="button" class="relative z-10 bg-background pl-1.5 hover:text-primary hover:underline cursor-pointer transition-colors" :class="Math.round(editDataGridWhereRatio * 100) === 85 ? 'text-primary font-medium' : ''" @click="editDataGridWhereRatio = 0.85">
+                        85% : 15%
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
                 <div v-if="dataGridFilterViewPreviewExpanded" class="pointer-events-none select-none overflow-hidden border-t bg-background" data-data-grid-filter-view-preview>
@@ -10476,11 +10523,11 @@ onUnmounted(() => {
                         <Filter class="h-3 w-3" />
                       </span>
                     </div>
-                    <div class="flex min-w-0 flex-1 items-center gap-1.5 border-r px-2">
+                    <div class="flex min-w-0 items-center gap-1.5 px-2" :class="editDataGridOrderByVisible ? 'border-r' : 'flex-1'" :style="editDataGridOrderByVisible ? { flex: `0 0 ${editDataGridWhereRatio * 100}%` } : undefined">
                       <span class="shrink-0 text-muted-foreground">WHERE</span>
                       <code class="truncate text-foreground">status = 'ACTIVE'</code>
                     </div>
-                    <div class="flex min-w-0 flex-1 items-center gap-1.5 px-2">
+                    <div v-if="editDataGridOrderByVisible" class="flex min-w-0 flex-1 items-center gap-1.5 px-2">
                       <span class="shrink-0 text-muted-foreground">ORDER BY</span>
                       <code class="truncate text-foreground">id</code>
                     </div>

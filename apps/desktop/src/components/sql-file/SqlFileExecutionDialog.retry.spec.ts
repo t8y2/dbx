@@ -1497,4 +1497,19 @@ describe("SqlFileExecutionDialog schema target", () => {
 
     expect(schemaSection()).toBeNull();
   });
+
+  it("calls the single picker a schema picker for connection-root schema engines (#14584)", async () => {
+    mocks.connections = [{ id: "ora-1", name: "Oracle", db_type: "oracle", driver_profile: "oracle", database: "ORCL" }];
+    mocks.queryStore.tabs = [{ id: "ora-tab", connectionId: "ora-1", database: "ORCL" }];
+    mocks.queryStore.activeTabId = "ora-tab";
+    mocks.fetchSqlFileTargetOptions.mockResolvedValue(["HR", "SCOTT"]);
+
+    await mountReadyDialog();
+
+    const labels = [...root!.querySelectorAll("label")].map((element) => element.textContent?.trim());
+    expect(labels).toContain("sqlFile.schema");
+    expect(labels).not.toContain("sqlFile.database");
+    // The picker already lists schemas, so no second one is added.
+    expect(schemaSection()).toBeNull();
+  });
 });

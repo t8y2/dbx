@@ -581,6 +581,13 @@ const schemaPickerApplies = computed(() => {
   return isSchemaAware(connection.db_type);
 });
 
+/**
+ * Oracle, Dameng and OceanBase-Oracle expose schemas directly under the connection,
+ * so their single picker *is* the schema picker. Naming it "Database" made the dialog
+ * look like it could not target a schema at all (#14584).
+ */
+const namespacePickerListsSchemas = computed(() => namespaceOptionsAreSchemas(store.getConfig(connectionId.value)));
+
 let schemaLoadToken = 0;
 // "connection\0database" whose schema list is already on screen, so re-emitting the
 // same namespace does not clear a schema the user just picked.
@@ -1238,17 +1245,17 @@ watch(
             </div>
 
             <div class="space-y-1.5">
-              <Label class="text-xs">{{ t("sqlFile.database") }}</Label>
+              <Label class="text-xs">{{ t(namespacePickerListsSchemas ? "sqlFile.schema" : "sqlFile.database") }}</Label>
               <Select v-if="databaseOptions.length" v-model="targetNamespace" :disabled="executionLocked || loadingDatabases">
                 <SelectTrigger class="h-8 text-xs">
-                  <SelectValue :placeholder="t('sqlFile.selectDatabase')" />
+                  <SelectValue :placeholder="t(namespacePickerListsSchemas ? 'sqlFile.schemaPlaceholder' : 'sqlFile.selectDatabase')" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem v-for="db in databaseOptions" :key="db" :value="db">{{ db }}</SelectItem>
                 </SelectContent>
               </Select>
               <div v-else class="relative">
-                <Input v-model="targetNamespace" class="h-8 text-xs" :disabled="executionLocked || loadingDatabases" :placeholder="t('sqlFile.databasePlaceholder')" />
+                <Input v-model="targetNamespace" class="h-8 text-xs" :disabled="executionLocked || loadingDatabases" :placeholder="t(namespacePickerListsSchemas ? 'sqlFile.schemaPlaceholder' : 'sqlFile.databasePlaceholder')" />
                 <Loader2 v-if="loadingDatabases" class="absolute right-2 top-2 w-3.5 h-3.5 animate-spin text-muted-foreground" />
               </div>
             </div>

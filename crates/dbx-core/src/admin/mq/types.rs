@@ -893,6 +893,10 @@ pub struct PeekMessagesOptions {
     /// where `newest` makes the agent read backward from the end timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort_order: Option<String>,
+    /// 主题内搜索关键字（Kafka）。非空时 agent 只返回 key 或正文包含该串的消息，
+    /// 并从起始位置向前扫描，结果受扫描预算和请求超时约束。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_query: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

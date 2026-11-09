@@ -1191,10 +1191,12 @@ class KafkaAgentTest {
     }
 
     @Test
-    void topicSearchScanBudgetGrowsWithResultCountButStaysBounded() {
-        assertEquals(1_000, KafkaAgent.searchPeekScanLimit(10));
-        assertEquals(10_000, KafkaAgent.searchPeekScanLimit(1_000));
-        assertEquals(1_000_000, KafkaAgent.searchPeekScanLimit(100_000));
+    void topicSearchTruncationReasonsDistinguishStopCauses() {
+        assertEquals("resultLimit", KafkaAgent.searchTruncatedReason(5, 5, true, false));
+        assertEquals("resultLimit", KafkaAgent.searchTruncatedReason(5, 5, true, true));
+        assertEquals("scanBudget", KafkaAgent.searchTruncatedReason(3, 5, true, true));
+        assertEquals("timeBudget", KafkaAgent.searchTruncatedReason(3, 5, true, false));
+        assertNull(KafkaAgent.searchTruncatedReason(3, 5, false, false));
     }
 
     @Test
@@ -1230,7 +1232,7 @@ class KafkaAgentTest {
     }
 
     @Test
-    void limitSearchPeekedMessagesKeepsTheNewestMatches() {
+    void limitSearchPeekedMessagesKeepsTheNewestMatchesInDescendingOrder() {
         List<Map<String, Object>> messages = new ArrayList<>();
         for (int i = 0; i < 5; i++) {
             Map<String, Object> message = new HashMap<>();
@@ -1242,7 +1244,20 @@ class KafkaAgentTest {
 
         List<Map<String, Object>> limited = KafkaAgent.limitSearchPeekedMessages(messages, 2);
 
-        assertEquals(List.of(3L, 4L), limited.stream().map(message -> (Long) message.get("offset")).toList());
+        assertEquals(List.of(4L, 3L), limited.stream().map(message -> (Long) message.get("offset")).toList());
+    }
+
+    @Test
+    void searchResultsExposeTruncatedFlagAndReason() {
+        Map<String, Object> truncated =
+            KafkaAgent.peekMessagesResult(List.of(), false, "resultLimit");
+        Map<String, Object> complete = KafkaAgent.peekMessagesResult(List.of(), false);
+
+        assertEquals(true, truncated.get("truncated"));
+        assertEquals("resultLimit", truncated.get("truncatedReason"));
+        assertEquals(false, complete.get("truncated"));
+        assertNull(complete.get("truncatedReason"));
+        assertEquals(false, complete.get("incomplete"));
     }
 
     @Test
@@ -2030,16 +2045,22 @@ class KafkaAgentTest {
     }
 
     @Test
-    void peekAcceptsAnEndTimestampOnlyInsideATimestampWindow() {
+    void peekAcceptsAnEndTimestampWithTimestampOrEarliestStart() {
         assertDoesNotThrow(() -> KafkaAgent.validatePeekRequest(
             KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
             1_700_000_000_000L, 1_700_000_060_000L, null));
+        // 只填结束时间：earliest 起点 + endTimestamp 也合法。
+        assertDoesNotThrow(() -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.EARLIEST, true, null, null,
+            null, 1_700_000_060_000L, null));
         assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
             KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
             1_700_000_000_000L, 1_699_999_999_999L, null));
         assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
             KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
             1_700_000_000_000L, -1L, null));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.EARLIEST, true, null, null, null, -1L, null));
         assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
             KafkaAgent.PeekStartPosition.LATEST, true, null, null, null, 1_700_000_060_000L, null));
     }

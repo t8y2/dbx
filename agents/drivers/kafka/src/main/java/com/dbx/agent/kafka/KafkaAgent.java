@@ -51,10 +51,13 @@ public final class KafkaAgent {
     private static final int GROUPS_PER_QUERY_ADMIN = 16;
     private static final int MAX_PEEK_MESSAGE_COUNT = 100;
     private static final int MAX_PEEK_SCAN_RECORDS = 1_000;
-    // 主题内搜索按 key/正文过滤，结果条数上限比普通浏览更高，但仍受扫描预算约束。
+    // 主题内搜索按 key/正文过滤，结果条数上限比普通浏览更高。
     private static final int MAX_SEARCH_MESSAGE_COUNT = 100_000;
-    private static final int SEARCH_SCAN_RECORDS_PER_RESULT = 10;
+    // 全主题搜索的扫描硬上限：与返回条数无关，避免无界扫描拖垮请求。
     private static final int MAX_SEARCH_SCAN_RECORDS = 1_000_000;
+    private static final String TRUNCATED_REASON_SCAN_BUDGET = "scanBudget";
+    private static final String TRUNCATED_REASON_TIME_BUDGET = "timeBudget";
+    private static final String TRUNCATED_REASON_RESULT_LIMIT = "resultLimit";
     // 最新优先回扫时每批向窗口左侧推进的记录数，凑满配额或扫到窗口起点即停。
     private static final int REVERSE_PEEK_BATCH_RECORDS = 500;
     private static final int DEFAULT_SESSION_TIMEOUT_MS = 30_000;
@@ -1723,13 +1726,8 @@ public final class KafkaAgent {
         );
         // 时间窗口 + 最新优先时，读取方向改为从截止时间一侧倒序回扫。
         boolean newestFirst = startPosition == PeekStartPosition.TIMESTAMP && "newest".equals(sortOrder);
-        // 主题内搜索必须覆盖全部保留期数据：忽略“最近 N 条”窗口，也不做倒序回扫。
-        if (searching) {
-            if (startPosition == PeekStartPosition.LATEST) {
-                startPosition = PeekStartPosition.EARLIEST;
-            }
-            newestFirst = false;
-        }
+        // 主题内搜索恒为倒序回扫：从窗口右端向左推进，结果天然接近时间倒序。
+        boolean reverseScan = searching || newestFirst;
         boolean legacyOffsetRequest = !explicitStartPosition && offset != null;
 
         JsonObject conn = activeConnection;
@@ -1798,16 +1796,32 @@ public final class KafkaAgent {
                 return peekMessagesResult(Collections.emptyList(), false);
             }
 
-            int messagesPerPartition = startPosition == PeekStartPosition.LATEST
-                ? latestPeekMessagesPerPartition(count, readablePartitions.size())
-                : peekMessagesPerPartition(count, readablePartitions.size());
+            int messagesPerPartition = searching
+                // 搜索配额是全局的：每个分区最多贡献 count 条，最终整体裁到 count 条。
+                ? count
+                : startPosition == PeekStartPosition.LATEST
+                    ? latestPeekMessagesPerPartition(count, readablePartitions.size())
+                    : peekMessagesPerPartition(count, readablePartitions.size());
             int scanLimit = searching
-                ? searchPeekScanLimit(count)
+                ? MAX_SEARCH_SCAN_RECORDS
                 : peekScanLimit(count, readablePartitions.size(), startPosition);
             boolean latestBudgetLimited = startPosition == PeekStartPosition.LATEST
                 && latestPeekBudgetLimited(count, readablePartitions.size());
-            Map<TopicPartition, Long> snapshotEndOffsets = new LinkedHashMap<>();
-            if (startPosition == PeekStartPosition.LATEST) {
+
+            // 回扫窗口以用户选定的起点为左边界、快照末尾为右边界；初始 seek 落到右端一批。
+            Map<TopicPartition, Long> reverseWindowStarts = new LinkedHashMap<>();
+            Map<TopicPartition, Long> reverseWindowEnds = new LinkedHashMap<>();
+            if (reverseScan) {
+                for (TopicPartition tp : readablePartitions) {
+                    long floor = seekOffsets.get(tp);
+                    long windowEnd = boundedEndOffsets.getOrDefault(tp, floor);
+                    reverseWindowStarts.put(tp, floor);
+                    reverseWindowEnds.put(tp, windowEnd);
+                    seekOffsets.put(tp, Math.max(floor, windowEnd - REVERSE_PEEK_BATCH_RECORDS));
+                }
+            }
+            // 普通「最近 N 条」浏览仍需把起点挪到窗口右侧。
+            if (!searching && startPosition == PeekStartPosition.LATEST) {
                 for (TopicPartition tp : readablePartitions) {
                     long beginningOffset = beginningOffsets.getOrDefault(tp, 0L);
                     long endOffset = boundedEndOffsets.getOrDefault(tp, beginningOffset);
@@ -1816,21 +1830,9 @@ public final class KafkaAgent {
                     ));
                 }
             }
+            Map<TopicPartition, Long> snapshotEndOffsets = new LinkedHashMap<>();
             for (TopicPartition tp : readablePartitions) {
                 snapshotEndOffsets.put(tp, boundedEndOffsets.getOrDefault(tp, 0L));
-            }
-
-            // 最新优先回扫：初始 seek 挪到窗口右侧靠前的一批，收集阶段按批向左回退。
-            Map<TopicPartition, Long> reverseWindowStarts = new LinkedHashMap<>();
-            Map<TopicPartition, Long> reverseWindowEnds = new LinkedHashMap<>();
-            if (newestFirst) {
-                for (TopicPartition tp : readablePartitions) {
-                    long floor = seekOffsets.get(tp);
-                    long windowEnd = boundedEndOffsets.getOrDefault(tp, floor);
-                    reverseWindowStarts.put(tp, floor);
-                    reverseWindowEnds.put(tp, windowEnd);
-                    seekOffsets.put(tp, Math.max(floor, windowEnd - REVERSE_PEEK_BATCH_RECORDS));
-                }
             }
 
             consumer.assign(readablePartitions);
@@ -1844,21 +1846,11 @@ public final class KafkaAgent {
                 && recordIsWithinEndTimestamp(record, endTimestamp)
                 && (!searching || recordMatchesSearch(record, searchQuery));
             PeekCollectionState collection;
-            if (startPosition == PeekStartPosition.LATEST) {
-                collection = collectLatestPeekedMessages(
-                    consumer,
-                    readablePartitions,
-                    beginningOffsets,
-                    seekOffsets,
-                    snapshotEndOffsets,
-                    messagesPerPartition,
-                    scanLimit,
-                    deadlineNs,
-                    pollTimeout
+            if (reverseScan) {
+                // 搜索的全局配额：取够 count 条命中即停，不再按分区均分。
+                collection = new PeekCollectionState(
+                    readablePartitions, messagesPerPartition, searching ? count : 0
                 );
-                collection.incomplete = collection.incomplete || latestBudgetLimited;
-            } else if (newestFirst) {
-                collection = new PeekCollectionState(readablePartitions, messagesPerPartition);
                 collection.incomplete = !collectPeekedMessagesNewestFirst(
                     timeout -> consumer.poll(timeout),
                     consumer::position,
@@ -1872,6 +1864,19 @@ public final class KafkaAgent {
                     deadlineNs,
                     pollTimeout
                 );
+            } else if (startPosition == PeekStartPosition.LATEST) {
+                collection = collectLatestPeekedMessages(
+                    consumer,
+                    readablePartitions,
+                    beginningOffsets,
+                    seekOffsets,
+                    snapshotEndOffsets,
+                    messagesPerPartition,
+                    scanLimit,
+                    deadlineNs,
+                    pollTimeout
+                );
+                collection.incomplete = collection.incomplete || latestBudgetLimited;
             } else {
                 PeekCollectionCompletionChecker snapshotComplete = state -> allPeekPartitionsComplete(
                     readablePartitions,
@@ -1895,14 +1900,33 @@ public final class KafkaAgent {
                 : sortAndLimitPeekedMessages(
                     collection.messages, count, newestFirst ? PeekStartPosition.LATEST : startPosition
                 );
-            return peekMessagesResult(messages, collection.incomplete);
+            // 搜索不再复用 incomplete；改用 truncated + truncatedReason 区分停因。
+            String truncatedReason = searching
+                ? searchTruncatedReason(
+                    collection.messages.size(),
+                    count,
+                    collection.incomplete,
+                    collection.scanBudgetReached
+                )
+                : null;
+            return peekMessagesResult(messages, searching ? false : collection.incomplete, truncatedReason);
         }
     }
 
     static Map<String, Object> peekMessagesResult(List<Map<String, Object>> messages, boolean incomplete) {
+        return peekMessagesResult(messages, incomplete, null);
+    }
+
+    static Map<String, Object> peekMessagesResult(
+        List<Map<String, Object>> messages,
+        boolean incomplete,
+        String truncatedReason
+    ) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("messages", messages);
         result.put("incomplete", incomplete);
+        result.put("truncated", truncatedReason != null);
+        result.put("truncatedReason", truncatedReason);
         return result;
     }
 
@@ -1934,10 +1958,25 @@ public final class KafkaAgent {
         return trimmed.isEmpty() ? null : trimmed.toLowerCase(Locale.ROOT);
     }
 
-    /** 结果条数越多允许扫描的记录越多，但始终不超过硬上限。 */
-    static int searchPeekScanLimit(int count) {
-        long budget = Math.max(MAX_PEEK_SCAN_RECORDS, (long) count * SEARCH_SCAN_RECORDS_PER_RESULT);
-        return (int) Math.min(MAX_SEARCH_SCAN_RECORDS, budget);
+    /**
+     * 搜索结果的截断原因。命中数达到用户上限时优先报 resultLimit；
+     * 否则按收集阶段先耗尽的预算区分扫描上限和请求超时。
+     */
+    static String searchTruncatedReason(
+        int collected,
+        int count,
+        boolean incomplete,
+        boolean scanBudgetReached
+    ) {
+        if (!incomplete) {
+            return null;
+        }
+        if (collected >= count) {
+            return TRUNCATED_REASON_RESULT_LIMIT;
+        }
+        return scanBudgetReached
+            ? TRUNCATED_REASON_SCAN_BUDGET
+            : TRUNCATED_REASON_TIME_BUDGET;
     }
 
     /** key 或正文包含匹配串即命中（大小写不敏感）。 */
@@ -1966,16 +2005,16 @@ public final class KafkaAgent {
         }
     }
 
-    /** 顺序扫描时最后命中的记录最新，超过上限时保留较新的结果。 */
+    /** 搜索恒为反向扫描，最终按时间倒序保留最新的 count 条命中。 */
     static List<Map<String, Object>> limitSearchPeekedMessages(
         List<Map<String, Object>> messages,
         int count
     ) {
-        sortPeekedMessages(messages, PeekStartPosition.EARLIEST);
+        sortPeekedMessages(messages, PeekStartPosition.LATEST);
         if (messages.size() <= count) {
             return messages;
         }
-        return new ArrayList<>(messages.subList(messages.size() - count, messages.size()));
+        return new ArrayList<>(messages.subList(0, count));
     }
 
     static int peekRequestTimeoutMs(JsonObject conn, Properties props) {
@@ -2055,8 +2094,8 @@ public final class KafkaAgent {
         Duration pollTimeout
     ) {
         while (System.nanoTime() < deadlineNs) {
-            if (completionChecker.isComplete(collection)) {
-                return true;
+            if (completionChecker.isComplete(collection) || collection.globalQuotaSatisfied()) {
+                return collection.globalQuotaSatisfied() ? false : true;
             }
             long remainingNs = deadlineNs - System.nanoTime();
             if (remainingNs <= 0) {
@@ -2071,6 +2110,7 @@ public final class KafkaAgent {
             }
             for (ConsumerRecord<String, byte[]> record : records) {
                 if (collection.scannedRecords >= maxScanRecords) {
+                    collection.scanBudgetReached = true;
                     return false;
                 }
                 collection.scannedRecords++;
@@ -2081,9 +2121,14 @@ public final class KafkaAgent {
                 }
                 collection.messages.add(peekedMessageFromRecord(record));
                 collection.remainingByPartition.put(partition, remaining - 1);
+                if (collection.globalQuotaSatisfied()) {
+                    return false;
+                }
             }
         }
-        return completionChecker.isComplete(collection);
+        boolean complete = completionChecker.isComplete(collection);
+        collection.timeBudgetReached = !complete;
+        return complete;
     }
 
     /**
@@ -2144,6 +2189,10 @@ public final class KafkaAgent {
             batchEnds.put(partition, windowEnd);
         }
         while (System.nanoTime() < deadlineNs) {
+            if (collection.globalQuotaSatisfied()) {
+                // 全局配额命中即视为未扫完：窗口里可能还有更多命中。
+                return false;
+            }
             if (allReversePeekPartitionsExhausted(
                 partitions, collection, windowStartOffsets, batchStarts, batchEnds, positionReader
             )) {
@@ -2159,6 +2208,7 @@ public final class KafkaAgent {
             ConsumerRecords<String, byte[]> records = poller.poll(timeout);
             for (ConsumerRecord<String, byte[]> record : records) {
                 if (collection.scannedRecords >= maxScanRecords) {
+                    collection.scanBudgetReached = true;
                     return false;
                 }
                 collection.scannedRecords++;
@@ -2169,6 +2219,9 @@ public final class KafkaAgent {
                 }
                 collection.messages.add(peekedMessageFromRecord(record));
                 collection.remainingByPartition.put(partition, remaining - 1);
+                if (collection.globalQuotaSatisfied()) {
+                    return false;
+                }
             }
             // Seek backward only after the current batch is fully consumed; seeking earlier
             // would drop buffered records that poll has not returned yet.
@@ -2187,9 +2240,11 @@ public final class KafkaAgent {
                 seeker.seek(partition, previousStart);
             }
         }
-        return allReversePeekPartitionsExhausted(
+        boolean exhausted = allReversePeekPartitionsExhausted(
             partitions, collection, windowStartOffsets, batchStarts, batchEnds, positionReader
         );
+        collection.timeBudgetReached = !exhausted;
+        return exhausted;
     }
 
     /**
@@ -2459,17 +2514,30 @@ public final class KafkaAgent {
     private static final class PeekCollectionState {
         private final List<Map<String, Object>> messages = new ArrayList<>();
         private final Map<TopicPartition, Integer> remainingByPartition = new HashMap<>();
+        /** 大于 0 时表示所有分区共享的命中上限（主题内搜索使用）。 */
+        private final int globalLimit;
         private int scannedRecords;
         private boolean incomplete;
+        private boolean scanBudgetReached;
+        private boolean timeBudgetReached;
 
         private PeekCollectionState(List<TopicPartition> partitions, int messagesPerPartition) {
+            this(partitions, messagesPerPartition, 0);
+        }
+
+        private PeekCollectionState(List<TopicPartition> partitions, int messagesPerPartition, int globalLimit) {
             for (TopicPartition partition : partitions) {
                 remainingByPartition.put(partition, messagesPerPartition);
             }
+            this.globalLimit = globalLimit;
         }
 
         private boolean allPartitionQuotasSatisfied() {
             return remainingByPartition.values().stream().allMatch(remaining -> remaining <= 0);
+        }
+
+        private boolean globalQuotaSatisfied() {
+            return globalLimit > 0 && messages.size() >= globalLimit;
         }
     }
 
@@ -2587,8 +2655,24 @@ public final class KafkaAgent {
         if (startPosition != PeekStartPosition.TIMESTAMP && timestamp != null) {
             throw new IllegalArgumentException("timestamp is only supported when startPosition is timestamp");
         }
-        if (startPosition != PeekStartPosition.TIMESTAMP && endTimestamp != null) {
-            throw new IllegalArgumentException("endTimestamp is only supported when startPosition is timestamp");
+        if (endTimestamp != null) {
+            // 结束时间可与「最早」组合（只填结束时间），但不能与 latest/offset 混用。
+            if (startPosition != PeekStartPosition.TIMESTAMP
+                && startPosition != PeekStartPosition.EARLIEST) {
+                throw new IllegalArgumentException(
+                    "endTimestamp is only supported when startPosition is timestamp or earliest"
+                );
+            }
+            if (endTimestamp < 0) {
+                throw new IllegalArgumentException(
+                    "endTimestamp must be a non-negative epoch millisecond value"
+                );
+            }
+            if (startPosition == PeekStartPosition.TIMESTAMP
+                && timestamp != null
+                && endTimestamp < timestamp) {
+                throw new IllegalArgumentException("endTimestamp must not be earlier than timestamp");
+            }
         }
         if (startPosition == PeekStartPosition.TIMESTAMP) {
             if (timestamp == null) {
@@ -2596,16 +2680,6 @@ public final class KafkaAgent {
             }
             if (timestamp < 0) {
                 throw new IllegalArgumentException("timestamp must be a non-negative epoch millisecond value");
-            }
-            if (endTimestamp != null) {
-                if (endTimestamp < 0) {
-                    throw new IllegalArgumentException(
-                        "endTimestamp must be a non-negative epoch millisecond value"
-                    );
-                }
-                if (endTimestamp < timestamp) {
-                    throw new IllegalArgumentException("endTimestamp must not be earlier than timestamp");
-                }
             }
         }
         if (partition != null && partition < 0) {

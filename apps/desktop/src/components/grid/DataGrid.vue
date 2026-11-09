@@ -5871,6 +5871,7 @@ async function requestDropColumns() {
           schema: target.schema || undefined,
           tableName: target.tableName,
           name,
+          identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
         }),
       ),
     );

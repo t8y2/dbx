@@ -189,6 +189,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
       tableName: node.label,
       full,
       analyze,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
     };
   }
 

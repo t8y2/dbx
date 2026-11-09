@@ -495,6 +495,7 @@ impl<C: RoutineCatalog> Resolver<'_, C> {
             schema: Some(identity.owner.clone()),
             name: identity.name.clone(),
             source: source.object.source.clone(),
+            identifier_quote: None,
         });
         if !contract.complete {
             return Err(format!(

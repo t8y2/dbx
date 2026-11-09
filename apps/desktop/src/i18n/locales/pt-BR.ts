@@ -3668,6 +3668,10 @@ export default withEnglishFallback({
     copyCurrentPageSql: "Copiar SQL da página atual",
     copyActualExecutionSql: "Copiar SQL de execução real",
     pageProbeDescription: "Esta página exibe no máximo {count} linhas, com leitura adicional de no máximo 1 linha para determinar se há uma próxima página.",
+    queryPendingChangesTitle: "O conjunto de resultados tem alterações não confirmadas",
+    queryPendingChangesMessage: "Executar a consulta descartará as alterações não confirmadas no conjunto de resultados atual. Você pode cancelar e confirmar as alterações primeiro, ou descartar as alterações e executar a consulta.",
+    queryDiscardAndExecute: "Descartar alterações e executar",
+    queryWhileSaving: "As alterações do conjunto de resultados estão sendo salvas. Aguarde a conclusão do salvamento antes de executar a consulta.",
   },
   exportProgress: {
     recoveryTitle: "Excluir a exportação cuja conclusão não foi confirmada?",

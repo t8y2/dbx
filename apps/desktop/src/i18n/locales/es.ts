@@ -3797,6 +3797,10 @@ export default withEnglishFallback({
     copyCurrentPageSql: "Copiar SQL de la página actual",
     copyActualExecutionSql: "Copiar SQL realmente ejecutado",
     pageProbeDescription: "Esta página muestra como máximo {count} filas; se lee como máximo 1 fila adicional para determinar si hay una página siguiente.",
+    queryPendingChangesTitle: "El conjunto de resultados tiene cambios sin confirmar",
+    queryPendingChangesMessage: "Ejecutar la consulta descartará los cambios sin confirmar del conjunto de resultados actual. Puede cancelar y confirmar los cambios primero, o descartar los cambios y ejecutar la consulta.",
+    queryDiscardAndExecute: "Descartar cambios y ejecutar",
+    queryWhileSaving: "Se están guardando los cambios del conjunto de resultados. Espere a que termine el guardado antes de ejecutar la consulta.",
   },
   exportProgress: {
     recoveryTitle: "¿Eliminar la exportación cuyo final no se ha confirmado?",

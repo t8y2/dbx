@@ -235,7 +235,7 @@ import { detectAndFormatElasticsearchRequests } from "@/lib/elasticsearch/elasti
 import { detectDatabaseFileType } from "@/lib/database/databaseFileDetection";
 import { ensureJdbcxRuntimeDrivers } from "@/lib/database/jdbcxBuiltinDriver";
 import { ensureRegisteredJdbcProductRuntimeDrivers } from "@/lib/database/jdbcProductProfiles";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -397,7 +397,7 @@ function updateBlockingConfigState(): UpdateBlockingConfigState {
     ddlDialog: showQueryEditorDdlDialog.value,
     objectSourceDialog: showQueryEditorObjectSourceDialog.value,
     sqlParameterDialog: showSqlParameterDialog.value,
-    dangerDialog: showDangerDialog.value,
+    dangerDialog: showDangerDialog.value || showResultChangesDialog.value,
     multiDbExecuteDialog: showMultiDbExecuteDialog.value,
     transferDialog: dialogs.showTransferDialog.value,
     sqlFileDialog: dialogs.showSqlFileDialog.value,
@@ -1162,6 +1162,8 @@ function promptActiveConnectionSelection(tabId?: string) {
 
 const {
   dangerSql,
+  showResultChangesDialog,
+  onResultChangesConfirm,
   showDangerDialog,
   suppressDangerConfirm,
   tryExecute,
@@ -5912,6 +5914,26 @@ onUnmounted(() => {
           </div>
           <PluginShortcutBar v-if="!isDetachedWindowContext && !isZenMode && settingsStore.editorSettings.pluginShortcuts.enabled && settingsStore.editorSettings.pluginShortcuts.position.startsWith('right-')" :position="settingsStore.editorSettings.pluginShortcuts.position" />
         </div>
+
+        <Dialog
+          :open="showResultChangesDialog"
+          @update:open="
+            (open) => {
+              if (!open) onResultChangesConfirm(false);
+            }
+          "
+        >
+          <DialogContent class="sm:max-w-[420px]">
+            <DialogHeader>
+              <DialogTitle>{{ t("grid.queryPendingChangesTitle") }}</DialogTitle>
+              <DialogDescription>{{ t("grid.queryPendingChangesMessage") }}</DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" @click="onResultChangesConfirm(false)">{{ t("common.cancel") }}</Button>
+              <Button variant="destructive" @click="onResultChangesConfirm(true)">{{ t("grid.queryDiscardAndExecute") }}</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         <AppDialogs
           :show-connection-dialog="showConnectionDialog"

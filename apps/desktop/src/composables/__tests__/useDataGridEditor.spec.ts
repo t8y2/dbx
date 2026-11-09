@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
-import { computed, nextTick, ref, type Ref } from "vue";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { clearDataGridPendingSnapshot, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor, type CustomSaveHandler } from "@/composables/useDataGridEditor";
+import { computed, createApp, nextTick, ref, type Ref } from "vue";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { clearDataGridPendingSnapshot, dataGridPendingChangesState, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor, type CustomSaveHandler } from "@/composables/useDataGridEditor";
 import { clearDataGridClipboardCopy, parseDataGridClipboard, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
 import { buildMongoUpdateDocument, MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridInputValue, mongoDocumentGridValue } from "@/lib/mongo/mongoDocumentValues";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
@@ -142,6 +142,72 @@ function createEditorWithResult(
 function createEditor(...args: Parameters<typeof createEditorWithResult>) {
   return createEditorWithResult(...args).editor;
 }
+
+describe("pending result changes before execution", () => {
+  const key = "query-pending-guard-0-initial";
+  let app: ReturnType<typeof createApp> | undefined;
+  let host: HTMLElement | undefined;
+
+  afterEach(() => {
+    app?.unmount();
+    app = undefined;
+    host?.remove();
+    clearDataGridPendingSnapshot(key);
+  });
+
+  function mountEditor() {
+    let editor!: ReturnType<typeof useDataGridEditor>;
+    host = document.createElement("div");
+    document.body.append(host);
+    app = createApp({
+      setup() {
+        editor = createEditor(undefined, true, key, undefined, [["AA", null, "BB"]]);
+        editor.discardChanges();
+        return () => null;
+      },
+    });
+    app.mount(host);
+    return editor;
+  }
+
+  it("detects live updates, inserts, deletes, drafts, and in-flight saves", () => {
+    const editor = mountEditor();
+    const state = () => dataGridPendingChangesState(key, "query-pending-guard");
+    expect(state()).toBeUndefined();
+    editor.applyCellValue(0, 2, "CC");
+    expect(state()).toBe("pending");
+    editor.discardChanges();
+    editor.newRows.value = [["AA", null, "new"]];
+    expect(state()).toBe("pending");
+    editor.discardChanges();
+    editor.deletedRows.value = new Set([0]);
+    expect(state()).toBe("pending");
+    editor.discardChanges();
+    editor.quickEntryDraftRow.value = ["draft", null, null];
+    expect(state()).toBe("pending");
+    editor.isSaving.value = true;
+    expect(state()).toBe("saving");
+    editor.isSaving.value = false;
+  });
+
+  it("protects cached edits after the result grid is hidden or unmounted", () => {
+    const editor = mountEditor();
+    editor.dirtyRows.value.set(0, new Map([[2, "CC"]]));
+    app!.unmount();
+    app = undefined;
+    expect(dataGridPendingChangesState(key, "query-pending-guard")).toBe("pending");
+    expect(dataGridPendingChangesState(`${key}-other-result`, "query-pending-guard")).toBeUndefined();
+    clearDataGridPendingSnapshot(key);
+    expect(dataGridPendingChangesState(key, "query-pending-guard")).toBeUndefined();
+  });
+
+  it("does not treat a clean grid's cached view state as unsaved changes", () => {
+    mountEditor();
+    app!.unmount();
+    app = undefined;
+    expect(dataGridPendingChangesState(key, "query-pending-guard")).toBeUndefined();
+  });
+});
 
 describe("useDataGridEditor searched replacements", () => {
   beforeEach(() => {

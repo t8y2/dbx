@@ -8681,6 +8681,7 @@ mod tests {
                     ..Default::default()
                 }],
                 incomplete: true,
+                ..Default::default()
             })
         }
 

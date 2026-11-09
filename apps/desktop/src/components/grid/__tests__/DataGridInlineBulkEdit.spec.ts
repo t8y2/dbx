@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { bulkEditInputToSqlValue, dataGridInlineBulkEditValue } from "@/lib/dataGrid/dataGridInlineBulkEdit";
+import { bulkEditInputToSqlValue, dataGridDirectCellEditValue, dataGridInlineBulkEditValue } from "@/lib/dataGrid/dataGridInlineBulkEdit";
+
+describe("DataGrid direct cell editing", () => {
+  it.each(["1", "删", "🙂", " "])("starts from the printable %j key", (key) => {
+    expect(dataGridDirectCellEditValue({ key })).toBe(key);
+  });
+
+  it.each(["1", "2", "A", " "])("accepts printable ASCII key %j with macOS keyCode 229 outside composition", (key) => {
+    expect(dataGridDirectCellEditValue({ key, keyCode: 229, isComposing: false })).toBe(key);
+  });
+
+  it.each([{ key: "v", ctrlKey: true }, { key: "1", altKey: true }, { key: "删", isComposing: true }, { key: "删", keyCode: 229 }, { key: "Process" }, { key: "Enter" }, { key: "F2" }])("ignores shortcut, composition, and control keys: %j", (event) => {
+    expect(dataGridDirectCellEditValue(event)).toBeUndefined();
+  });
+});
 
 describe("DataGrid inline bulk editing", () => {
   it.each([

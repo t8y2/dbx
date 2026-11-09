@@ -3619,8 +3619,8 @@ mod tests {
         gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config,
         is_mysql_external_driver_config, is_oracle_external_driver_config, is_retryable_metadata_error,
         is_sqlserver_external_driver_config, metadata_error_action, metadata_name_or_comment_matches,
-        mysql_auto_increment_from_query_result, mysql_auto_increment_metadata_sql, mysql_database_list_timeout,
-        mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
+        mysql_auto_increment_from_query_result, mysql_auto_increment_metadata_sql, mysql_browser_lightweight_budget,
+        mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
         mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
         mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
         oracle_columns_sql, oracle_columns_sql_for_resolved_owner, oracle_completion_synonyms_sql,
@@ -3914,6 +3914,25 @@ mod tests {
         config.connect_timeout_secs = 500;
         assert_eq!(mysql_database_list_timeout(Some(&config)), Duration::from_secs(300));
         assert_eq!(mysql_database_list_timeout(None), db::connection_timeout());
+    }
+
+    #[test]
+    fn mysql_browser_lightweight_budget_honors_configured_query_timeout() {
+        // Unconfigured ("no limit", 0) keeps the snappy 5s default from #14139.
+        let mut config = test_connection_config(DatabaseType::Mysql);
+        config.query_timeout_secs = 0;
+        assert_eq!(mysql_browser_lightweight_budget(Some(&config)), Duration::from_secs(5));
+        assert_eq!(mysql_browser_lightweight_budget(None), Duration::from_secs(5));
+
+        // A configured query timeout extends the browse budget instead of a
+        // hardcoded 5s cancelling slow metadata reads (#14487).
+        config.query_timeout_secs = 300;
+        assert_eq!(mysql_browser_lightweight_budget(Some(&config)), Duration::from_secs(300));
+        config.query_timeout_secs = 60;
+        assert_eq!(mysql_browser_lightweight_budget(Some(&config)), Duration::from_secs(60));
+        // The 5s floor still applies below it.
+        config.query_timeout_secs = 2;
+        assert_eq!(mysql_browser_lightweight_budget(Some(&config)), Duration::from_secs(5));
     }
 
     #[tokio::test]
@@ -7944,6 +7963,15 @@ fn mysql_browser_explicit_budget(config: &ConnectionConfig) -> Duration {
     }
 }
 
+/// Browser budget for the lightweight MySQL enumeration. Unconfigured connections
+/// ("no limit", `0`) keep the snappy 5s default from #14139; a configured query
+/// timeout extends the budget so slow metadata reads are not cancelled before the
+/// user's own timeout elapses (#14487).
+fn mysql_browser_lightweight_budget(config: Option<&ConnectionConfig>) -> Duration {
+    let timeout_secs = config.map_or(0, |config| config.effective_query_timeout_secs());
+    Duration::from_secs(5.max(timeout_secs))
+}
+
 fn is_native_mysql_browser_config(config: &ConnectionConfig) -> bool {
     config.db_type == DatabaseType::Mysql
         && config
@@ -7979,7 +8007,7 @@ pub async fn list_objects_core_with_loading_options(
             Some(PoolKind::Mysql(_, MysqlMode::Normal | MysqlMode::Bare))
         ) {
             let budget = if lightweight {
-                Duration::from_secs(5)
+                mysql_browser_lightweight_budget(config.as_ref())
             } else {
                 mysql_browser_explicit_budget(config.as_ref().expect("native mysql config verified above"))
             };

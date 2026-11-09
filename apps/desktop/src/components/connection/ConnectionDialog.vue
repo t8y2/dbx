@@ -1752,7 +1752,11 @@ function hydrateInfluxDbFields(value: unknown, versionHint?: InfluxDbVersion) {
     resetInfluxDbFields(undefined, versionHint);
     return;
   }
-  resetInfluxDbFields(value as Partial<InfluxDbExternalConfig>, versionHint);
+  // The driver accepts both spellings, so the form has to read both as well:
+  // `buildInfluxDbExternalConfig` rebuilds the whole external config from the
+  // form, and a stored `base_path` would otherwise be dropped on save.
+  const config = value as Partial<InfluxDbExternalConfig> & { base_path?: string };
+  resetInfluxDbFields({ ...config, basePath: config.basePath || config.base_path }, versionHint);
 }
 
 function resetHiveKerberosFields(config?: Pick<ConnectionConfig, "url_params" | "agent_java_options">) {
@@ -9215,7 +9219,7 @@ function openExternalUrl(url: string) {
                     <div class="grid grid-cols-4 items-start gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.influxdbApiPath") }}</Label>
                       <div class="col-span-3 space-y-1.5">
-                        <Input v-model="influxDbBasePath" placeholder="/" />
+                        <Input v-model="influxDbBasePath" placeholder="/influxdb" />
                         <p class="text-xs leading-5 text-muted-foreground">{{ t("connection.influxdbApiPathHint") }}</p>
                       </div>
                     </div>

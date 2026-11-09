@@ -221,10 +221,14 @@ pub async fn test_connection(client: &Influxdb3Client, timeout: Duration) -> Res
     .await
 }
 
+/// Admin endpoint that enumerates databases on Core. `?format=json` is
+/// required — omitting it returns 400.
+fn databases_url(client: &Influxdb3Client) -> String {
+    format!("{}{}/api/v3/configure/database?format=json", client.base_url, client.base_path)
+}
+
 pub async fn list_databases(client: &Influxdb3Client) -> Result<Vec<DatabaseInfo>, String> {
-    // The admin endpoint is the canonical way to enumerate databases on
-    // Core. `?format=json` is required — omitting it returns 400.
-    let url = format!("{}{}/api/v3/configure/database?format=json", client.base_url, client.base_path);
+    let url = databases_url(client);
     let resp =
         auth(client, client.http.get(&url)).send().await.map_err(|e| format!("InfluxDB 3 request failed: {e}"))?;
     if !resp.status().is_success() {
@@ -496,6 +500,7 @@ mod tests {
         let c = Influxdb3Client::new_for_config("http://localhost:8181/", &config, Duration::from_secs(1)).unwrap();
         assert_eq!(c.base_path, "/influxdb");
         assert_eq!(query_url(&c), "http://localhost:8181/influxdb/api/v3/query_sql");
+        assert_eq!(databases_url(&c), "http://localhost:8181/influxdb/api/v3/configure/database?format=json");
     }
 
     #[test]

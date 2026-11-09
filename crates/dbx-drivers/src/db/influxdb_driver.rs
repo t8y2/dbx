@@ -1217,6 +1217,35 @@ mod tests {
     }
 
     #[test]
+    fn v2_config_applies_base_path_prefix() {
+        let config: ConnectionConfig = serde_json::from_value(json!({
+            "id": "influx-v2",
+            "name": "InfluxDB 2",
+            "db_type": "influxdb",
+            "host": "127.0.0.1",
+            "port": 8086,
+            "username": "",
+            "password": "token-value",
+            "database": "metrics",
+            "external_config": {
+                "version": "2",
+                "org": "DBX Org",
+                "basePath": "/influxdb"
+            }
+        }))
+        .unwrap();
+
+        let client = InfluxdbClient::new_for_config("http://localhost:8086", &config, Duration::from_secs(1)).unwrap();
+
+        assert_eq!(client.base_path, "/influxdb");
+        assert_eq!(
+            build_v2_buckets_url(&client, 0).unwrap(),
+            "http://localhost:8086/influxdb/api/v2/buckets?org=DBX%20Org&limit=100&offset=0"
+        );
+        assert_eq!(build_v2_query_url(&client).unwrap(), "http://localhost:8086/influxdb/api/v2/query?org=DBX%20Org");
+    }
+
+    #[test]
     fn v2_config_accepts_organization_alias() {
         let config: ConnectionConfig = serde_json::from_value(json!({
             "id": "influx-v2",

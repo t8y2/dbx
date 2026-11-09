@@ -834,8 +834,10 @@ pub struct PeekedMessage {
     pub payload_text: Option<String>,
 }
 
-/// A message browse response. `incomplete` is set when the adapter could only
-/// return a partial snapshot before its configured deadline or scan limit.
+/// A message browse response. `incomplete` is set when a regular browse could
+/// only return a partial snapshot before its configured deadline or scan limit.
+/// `truncated`/`truncated_reason` describe topic-search results that stopped
+/// early: `scanBudget`, `timeBudget`, or `resultLimit`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeekMessagesResult {
@@ -843,12 +845,21 @@ pub struct PeekMessagesResult {
     pub messages: Vec<PeekedMessage>,
     #[serde(default)]
     pub incomplete: bool,
+    /// 普通浏览不受影响；只有主题搜索提前停止时才会序列化该字段。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated_reason: Option<String>,
 }
 
 impl PeekMessagesResult {
     pub fn complete(messages: Vec<PeekedMessage>) -> Self {
-        Self { messages, incomplete: false }
+        Self { messages, ..Default::default() }
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// Kafka's explicit starting position for a non-committing message peek.
@@ -869,7 +880,9 @@ pub enum PeekStartPosition {
 /// is supplied, Kafka reads forward from that offset in every topic partition.
 /// `start_position: Timestamp` requires a non-negative epoch-millisecond
 /// `timestamp` and reads from the first record at or after it. An optional
-/// `end_timestamp` bounds that read to records at or before the given time.
+/// `end_timestamp` bounds that read to records at or before the given time and
+/// may also be combined with `start_position: Earliest` to read only older
+/// records.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeekMessagesOptions {
@@ -885,16 +898,17 @@ pub struct PeekMessagesOptions {
     /// the agent resolves the first offset at or after this time per partition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<i64>,
-    /// Epoch milliseconds; optional inclusive upper bound for
-    /// `start_position: Timestamp`. Records after this time are not returned.
+    /// Epoch milliseconds; optional inclusive upper bound. Supported with
+    /// `start_position: Timestamp` and `start_position: Earliest`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_timestamp: Option<i64>,
     /// `newest` or `oldest`; only honored with `start_position: Timestamp`,
     /// where `newest` makes the agent read backward from the end timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort_order: Option<String>,
-    /// 主题内搜索关键字（Kafka）。非空时 agent 只返回 key 或正文包含该串的消息，
-    /// 并从起始位置向前扫描，结果受扫描预算和请求超时约束。
+    /// 主题内搜索关键字（Kafka）。非空时 agent 只返回 key 或正文包含该串的消息。
+    /// 搜索恒从窗口右端向左回扫，并按时间倒序返回；可用 `start_position`/
+    /// `timestamp`/`end_timestamp` 收窄时间范围，三者都省略即全主题查找。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_query: Option<String>,
 }

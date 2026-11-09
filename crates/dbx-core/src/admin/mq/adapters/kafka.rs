@@ -758,12 +758,14 @@ fn peek_messages_params(
 }
 
 fn peek_messages_result_from_agent(result: &serde_json::Value) -> PeekMessagesResult {
-    let (messages, incomplete) = if let Some(messages) = result.as_array() {
-        (messages.clone(), false)
+    let (messages, incomplete, truncated, truncated_reason) = if let Some(messages) = result.as_array() {
+        (messages.clone(), false, false, None)
     } else {
         (
             result.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
             result.get("incomplete").and_then(|v| v.as_bool()).unwrap_or(false),
+            result.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false),
+            result.get("truncatedReason").and_then(|v| v.as_str()).map(String::from),
         )
     };
     let messages = messages
@@ -793,7 +795,7 @@ fn peek_messages_result_from_agent(result: &serde_json::Value) -> PeekMessagesRe
             }
         })
         .collect();
-    PeekMessagesResult { messages, incomplete }
+    PeekMessagesResult { messages, incomplete, truncated, truncated_reason }
 }
 
 fn reset_cursor_params(topic: &TopicRef, sub: &str, pos: ResetPosition) -> Result<serde_json::Value, String> {
@@ -1105,9 +1107,39 @@ mod tests {
         }));
 
         assert!(result.incomplete);
+        assert!(!result.truncated);
         assert_eq!(result.messages.len(), 1);
         assert_eq!(result.messages[0].properties.get("partition").map(String::as_str), Some("2"));
         assert_eq!(result.messages[0].message_id.as_deref(), Some("17"));
+    }
+
+    #[test]
+    fn peek_result_preserves_the_topic_search_truncation_reason() {
+        let result = peek_messages_result_from_agent(&serde_json::json!({
+            "messages": [],
+            "incomplete": false,
+            "truncated": true,
+            "truncatedReason": "resultLimit",
+        }));
+
+        assert!(result.truncated);
+        assert_eq!(result.truncated_reason.as_deref(), Some("resultLimit"));
+        assert!(!result.incomplete);
+    }
+
+    #[test]
+    fn peek_message_params_allow_end_timestamp_with_earliest_start() {
+        let cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        let options = PeekMessagesOptions {
+            start_position: Some(PeekStartPosition::Earliest),
+            end_timestamp: Some(1_700_000_060_000),
+            ..Default::default()
+        };
+
+        let params = peek_messages_params(&cfg, &topic_ref(), 5_000, options);
+
+        assert_eq!(params.get("startPosition").and_then(|value| value.as_str()), Some("earliest"));
+        assert_eq!(params.get("endTimestamp").and_then(|value| value.as_i64()), Some(1_700_000_060_000));
     }
 
     #[test]

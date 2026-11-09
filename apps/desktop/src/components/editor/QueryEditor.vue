@@ -106,7 +106,7 @@ import { createQueryEditorEscapeHandler } from "@/lib/editor/queryEditorEscape";
 import { buildQueryEditorLineNumbersExtension, createQueryEditorLineNumberAlignmentExtension } from "@/lib/editor/queryEditorLineNumbers";
 import { createQueryEditorBookmarks, type QueryEditorBookmarks } from "@/lib/editor/codemirrorBookmarks";
 import { keepGuttersAttachedDuringSync } from "@/lib/editor/codemirrorGutterSync";
-import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
+import { searchKeymapWithoutConfigurableBindings } from "@/lib/editor/codemirrorSearchKeymap";
 import { defaultKeymapForGlobalShortcuts } from "@/lib/editor/codemirrorDefaultKeymap";
 import { createQueryEditorFoldShortcutBindings, foldKeymapWithoutAllBindings } from "@/lib/editor/queryEditorFoldKeymap";
 import { createShowWhitespaceExtension } from "@/lib/editor/codemirrorShowWhitespace";
@@ -1595,7 +1595,6 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.sqlIntentionActions, handleSqlIntentionActions),
         ...createQueryEditorCompletionShortcutBindings(shortcuts.triggerCompletion, triggerSqlCompletion),
         ...createQueryEditorSearchKeymap({
-          openSearch,
           openReplace,
           isReadOnly: () => !!props.readOnly,
         }),
@@ -2324,7 +2323,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
         // Vim must be mounted before DBX/default keymaps so normal-mode keys are handled first.
         initializedRuntime.vimModeComp.of(vimModeExtension(initialSettings.vimModeEnabled)),
         initializedRuntime.defaultKeymapComp.of(defaultKeymapExtension()),
-        keymap.of([...searchKeymapWithoutModD(searchKeymap), ...historyKeymap, ...foldKeymapWithoutAllBindings(foldKeymap, initializedRuntime.codeMirrorFoldAll, initializedRuntime.codeMirrorUnfoldAll), ...completionKeymap]),
+        keymap.of([...searchKeymapWithoutConfigurableBindings(searchKeymap), ...historyKeymap, ...foldKeymapWithoutAllBindings(foldKeymap, initializedRuntime.codeMirrorFoldAll, initializedRuntime.codeMirrorUnfoldAll), ...completionKeymap]),
         Prec.highest(keymap.of([{ key: "Space", run: handleSpace }])),
         initializedRuntime.sqlLanguageComp.of(sqlExtensions.buildSqlLanguageExtension()),
         initializedRuntime.sqlSemanticHighlightComp.of(sqlExtensions.buildSqlSemanticHighlightExtension()),

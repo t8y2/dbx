@@ -3545,6 +3545,21 @@ mod tests {
                     assert!(read > 0, "request ended before headers were complete");
                     request.extend_from_slice(&chunk[..read]);
                 }
+                // Consume the upload body before closing the socket, including
+                // larger encrypted-credential snapshots, to avoid TCP resets.
+                let header_end = request.windows(4).position(|window| window == b"\r\n\r\n").unwrap() + 4;
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+                    .unwrap_or(0);
+                while request.len() < header_end + content_length {
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    assert!(read > 0, "request ended before body was complete");
+                    request.extend_from_slice(&chunk[..read]);
+                }
                 let request = String::from_utf8(request).unwrap();
                 methods.push(request.lines().next().unwrap().to_string());
                 let response = format!(

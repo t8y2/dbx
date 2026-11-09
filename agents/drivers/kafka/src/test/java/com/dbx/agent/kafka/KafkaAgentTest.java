@@ -1183,6 +1183,69 @@ class KafkaAgentTest {
     }
 
     @Test
+    void topicSearchCountAllowsLargerResultSets() {
+        assertEquals(1, KafkaAgent.validatedSearchCount(1));
+        assertEquals(100_000, KafkaAgent.validatedSearchCount(100_000));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatedSearchCount(0));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatedSearchCount(100_001));
+    }
+
+    @Test
+    void topicSearchScanBudgetGrowsWithResultCountButStaysBounded() {
+        assertEquals(1_000, KafkaAgent.searchPeekScanLimit(10));
+        assertEquals(10_000, KafkaAgent.searchPeekScanLimit(1_000));
+        assertEquals(1_000_000, KafkaAgent.searchPeekScanLimit(100_000));
+    }
+
+    @Test
+    void topicSearchMatchesKeyOrUtf8ValueCaseInsensitively() {
+        ConsumerRecord<String, byte[]> keyMatch =
+            new ConsumerRecord<>("events", 0, 1, "Order-42", "{}".getBytes(StandardCharsets.UTF_8));
+        ConsumerRecord<String, byte[]> valueMatch = new ConsumerRecord<>(
+            "events", 0, 2, "k", "{\"kind\":\"PAYMENT_FAILED\"}".getBytes(StandardCharsets.UTF_8)
+        );
+
+        assertTrue(KafkaAgent.recordMatchesSearch(keyMatch, "order-42"));
+        assertTrue(KafkaAgent.recordMatchesSearch(valueMatch, "payment_failed"));
+        assertFalse(KafkaAgent.recordMatchesSearch(valueMatch, "payment_success"));
+    }
+
+    @Test
+    void topicSearchSkipsBinaryPayloads() {
+        ConsumerRecord<String, byte[]> binaryRecord =
+            new ConsumerRecord<>("events", 0, 1, "k", new byte[] { (byte) 0xFF, (byte) 0xFE, 0x00 });
+
+        assertFalse(KafkaAgent.recordMatchesSearch(binaryRecord, "f"));
+    }
+
+    @Test
+    void normalizedSearchQueryTrimsAndLowercases() {
+        JsonObject params = JsonParser.parseString("{\"searchQuery\":\"  Order-42  \"}").getAsJsonObject();
+        JsonObject blank = new JsonObject();
+        blank.addProperty("searchQuery", "   ");
+
+        assertEquals("order-42", KafkaAgent.normalizedSearchQuery(params));
+        assertNull(KafkaAgent.normalizedSearchQuery(blank));
+        assertNull(KafkaAgent.normalizedSearchQuery(new JsonObject()));
+    }
+
+    @Test
+    void limitSearchPeekedMessagesKeepsTheNewestMatches() {
+        List<Map<String, Object>> messages = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            Map<String, Object> message = new HashMap<>();
+            message.put("timestamp", 1_000L + i);
+            message.put("partition", 0);
+            message.put("offset", (long) i);
+            messages.add(message);
+        }
+
+        List<Map<String, Object>> limited = KafkaAgent.limitSearchPeekedMessages(messages, 2);
+
+        assertEquals(List.of(3L, 4L), limited.stream().map(message -> (Long) message.get("offset")).toList());
+    }
+
+    @Test
     void peekUsesTheConfiguredConsumerRequestTimeout() {
         Properties properties = new Properties();
         properties.put("request.timeout.ms", "1500");

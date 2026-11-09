@@ -750,6 +750,10 @@ fn peek_messages_params(
     if let Some(sort_order) = options.sort_order.as_deref() {
         params["sortOrder"] = serde_json::json!(sort_order);
     }
+    // 空白关键字等同未开启搜索，交给 agent 走普通浏览路径。
+    if let Some(search_query) = options.search_query.as_deref().filter(|query| !query.trim().is_empty()) {
+        params["searchQuery"] = serde_json::json!(search_query);
+    }
     params
 }
 
@@ -999,6 +1003,7 @@ mod tests {
                 timestamp: None,
                 end_timestamp: None,
                 sort_order: None,
+                search_query: None,
             },
         );
 
@@ -1024,6 +1029,7 @@ mod tests {
                 timestamp: Some(1_700_000_000_000),
                 end_timestamp: Some(1_700_000_060_000),
                 sort_order: Some("newest".to_string()),
+                search_query: None,
             },
         );
 
@@ -1063,6 +1069,28 @@ mod tests {
         assert!(params.get("startPosition").is_none());
         assert!(params.get("partition").is_none());
         assert!(params.get("offset").is_none());
+        assert!(params.get("searchQuery").is_none());
+    }
+
+    #[test]
+    fn peek_message_params_forward_topic_search_query() {
+        let cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        let options = PeekMessagesOptions { search_query: Some("Payment-Failed".to_string()), ..Default::default() };
+
+        let params = peek_messages_params(&cfg, &topic_ref(), 5_000, options);
+
+        assert_eq!(params.get("searchQuery").and_then(|value| value.as_str()), Some("Payment-Failed"));
+        assert_eq!(params.get("count").and_then(serde_json::Value::as_u64), Some(5_000));
+    }
+
+    #[test]
+    fn peek_message_params_skip_blank_topic_search_query() {
+        let cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        let options = PeekMessagesOptions { search_query: Some("   ".to_string()), ..Default::default() };
+
+        let params = peek_messages_params(&cfg, &topic_ref(), 20, options);
+
+        assert!(params.get("searchQuery").is_none());
     }
 
     #[test]
@@ -1111,6 +1139,7 @@ mod tests {
                 timestamp: None,
                 end_timestamp: None,
                 sort_order: None,
+                search_query: None,
             },
         );
 

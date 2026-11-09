@@ -25,6 +25,9 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.net.URI;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -48,6 +51,10 @@ public final class KafkaAgent {
     private static final int GROUPS_PER_QUERY_ADMIN = 16;
     private static final int MAX_PEEK_MESSAGE_COUNT = 100;
     private static final int MAX_PEEK_SCAN_RECORDS = 1_000;
+    // 主题内搜索按 key/正文过滤，结果条数上限比普通浏览更高，但仍受扫描预算约束。
+    private static final int MAX_SEARCH_MESSAGE_COUNT = 100_000;
+    private static final int SEARCH_SCAN_RECORDS_PER_RESULT = 10;
+    private static final int MAX_SEARCH_SCAN_RECORDS = 1_000_000;
     // 最新优先回扫时每批向窗口左侧推进的记录数，凑满配额或扫到窗口起点即停。
     private static final int REVERSE_PEEK_BATCH_RECORDS = 500;
     private static final int DEFAULT_SESSION_TIMEOUT_MS = 30_000;
@@ -1700,7 +1707,12 @@ public final class KafkaAgent {
         String topic = stringOrEmpty(params, "topic");
         Integer partition = integerOrNull(params, "partition");
         Long offset = longOrNull(params, "offset");
-        int count = validatedPeekCount(intOrDefault(params, "count", 10));
+        // searchQuery 为空表示普通浏览；非空时按 key/正文做子串匹配，并放宽结果条数上限。
+        String searchQuery = normalizedSearchQuery(params);
+        boolean searching = searchQuery != null;
+        int count = searching
+            ? validatedSearchCount(intOrDefault(params, "count", 10))
+            : validatedPeekCount(intOrDefault(params, "count", 10));
         PeekStartPosition startPosition = peekStartPosition(params);
         boolean explicitStartPosition = stringOrNull(params, "startPosition") != null;
         Long startTimestamp = longOrNull(params, "timestamp");
@@ -1711,6 +1723,13 @@ public final class KafkaAgent {
         );
         // 时间窗口 + 最新优先时，读取方向改为从截止时间一侧倒序回扫。
         boolean newestFirst = startPosition == PeekStartPosition.TIMESTAMP && "newest".equals(sortOrder);
+        // 主题内搜索必须覆盖全部保留期数据：忽略“最近 N 条”窗口，也不做倒序回扫。
+        if (searching) {
+            if (startPosition == PeekStartPosition.LATEST) {
+                startPosition = PeekStartPosition.EARLIEST;
+            }
+            newestFirst = false;
+        }
         boolean legacyOffsetRequest = !explicitStartPosition && offset != null;
 
         JsonObject conn = activeConnection;
@@ -1782,7 +1801,9 @@ public final class KafkaAgent {
             int messagesPerPartition = startPosition == PeekStartPosition.LATEST
                 ? latestPeekMessagesPerPartition(count, readablePartitions.size())
                 : peekMessagesPerPartition(count, readablePartitions.size());
-            int scanLimit = peekScanLimit(count, readablePartitions.size(), startPosition);
+            int scanLimit = searching
+                ? searchPeekScanLimit(count)
+                : peekScanLimit(count, readablePartitions.size(), startPosition);
             boolean latestBudgetLimited = startPosition == PeekStartPosition.LATEST
                 && latestPeekBudgetLimited(count, readablePartitions.size());
             Map<TopicPartition, Long> snapshotEndOffsets = new LinkedHashMap<>();
@@ -1820,7 +1841,8 @@ public final class KafkaAgent {
             long deadlineNs = System.nanoTime() + requestTimeout.toNanos();
             Duration pollTimeout = Duration.ofMillis(Math.min(500L, requestTimeout.toMillis()));
             PeekRecordFilter windowFilter = record -> recordIsBeforeEndOffset(record, snapshotEndOffsets)
-                && recordIsWithinEndTimestamp(record, endTimestamp);
+                && recordIsWithinEndTimestamp(record, endTimestamp)
+                && (!searching || recordMatchesSearch(record, searchQuery));
             PeekCollectionState collection;
             if (startPosition == PeekStartPosition.LATEST) {
                 collection = collectLatestPeekedMessages(
@@ -1868,9 +1890,11 @@ public final class KafkaAgent {
                     pollTimeout
                 );
             }
-            List<Map<String, Object>> messages = sortAndLimitPeekedMessages(
-                collection.messages, count, newestFirst ? PeekStartPosition.LATEST : startPosition
-            );
+            List<Map<String, Object>> messages = searching
+                ? limitSearchPeekedMessages(collection.messages, count)
+                : sortAndLimitPeekedMessages(
+                    collection.messages, count, newestFirst ? PeekStartPosition.LATEST : startPosition
+                );
             return peekMessagesResult(messages, collection.incomplete);
         }
     }
@@ -1889,6 +1913,69 @@ public final class KafkaAgent {
             );
         }
         return count;
+    }
+
+    static int validatedSearchCount(int count) {
+        if (count < 1 || count > MAX_SEARCH_MESSAGE_COUNT) {
+            throw new IllegalArgumentException(
+                "Kafka search result count must be between 1 and " + MAX_SEARCH_MESSAGE_COUNT
+            );
+        }
+        return count;
+    }
+
+    /** 空或全空白的 searchQuery 视为未开启搜索，返回已转小写的匹配串。 */
+    static String normalizedSearchQuery(JsonObject params) {
+        String raw = stringOrNull(params, "searchQuery");
+        if (raw == null) {
+            return null;
+        }
+        String trimmed = raw.trim();
+        return trimmed.isEmpty() ? null : trimmed.toLowerCase(Locale.ROOT);
+    }
+
+    /** 结果条数越多允许扫描的记录越多，但始终不超过硬上限。 */
+    static int searchPeekScanLimit(int count) {
+        long budget = Math.max(MAX_PEEK_SCAN_RECORDS, (long) count * SEARCH_SCAN_RECORDS_PER_RESULT);
+        return (int) Math.min(MAX_SEARCH_SCAN_RECORDS, budget);
+    }
+
+    /** key 或正文包含匹配串即命中（大小写不敏感）。 */
+    static boolean recordMatchesSearch(ConsumerRecord<String, byte[]> record, String lowerQuery) {
+        if (record.key() != null && record.key().toLowerCase(Locale.ROOT).contains(lowerQuery)) {
+            return true;
+        }
+        String text = recordValueText(record);
+        return text != null && text.toLowerCase(Locale.ROOT).contains(lowerQuery);
+    }
+
+    /** 只有能完整解码为 UTF-8 的正文才参与匹配，二进制内容直接跳过。 */
+    private static String recordValueText(ConsumerRecord<String, byte[]> record) {
+        byte[] value = record.value();
+        if (value == null || value.length == 0) {
+            return null;
+        }
+        try {
+            return StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(value))
+                .toString();
+        } catch (CharacterCodingException ignored) {
+            return null;
+        }
+    }
+
+    /** 顺序扫描时最后命中的记录最新，超过上限时保留较新的结果。 */
+    static List<Map<String, Object>> limitSearchPeekedMessages(
+        List<Map<String, Object>> messages,
+        int count
+    ) {
+        sortPeekedMessages(messages, PeekStartPosition.EARLIEST);
+        if (messages.size() <= count) {
+            return messages;
+        }
+        return new ArrayList<>(messages.subList(messages.size() - count, messages.size()));
     }
 
     static int peekRequestTimeoutMs(JsonObject conn, Properties props) {

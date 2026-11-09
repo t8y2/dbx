@@ -8298,6 +8298,7 @@ export default withEnglishFallback({
     createFailed: "SQL 파일을 생성하지 못했습니다: {message}",
     renameFile: "이름 바꾸기",
     renameFileDescription: ".sql 확장자가 자동으로 추가됩니다.",
+    moveFailed: "SQL 파일 이동 실패: {message}",
     fileRenamed: "SQL 파일 이름을 변경했습니다",
     renameFailed: "SQL 파일 이름을 변경하지 못했습니다: {message}",
     deleteFile: "파일 삭제",

@@ -7123,6 +7123,7 @@ export default withEnglishFallback({
     createFailed: "SQL faylını yaratmaq mümkün olmadı: {message}",
     renameFile: "Adını dəyiş",
     renameFileDescription: ".sql uzantısı avtomatik əlavə edilir.",
+    moveFailed: "SQL faylını köçürmək mümkün olmadı: {message}",
     fileRenamed: "SQL faylının adı dəyişdirildi",
     renameFailed: "SQL faylının adını dəyişmək mümkün olmadı: {message}",
     deleteFile: "Faylı sil",

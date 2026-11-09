@@ -664,6 +664,155 @@ pub async fn delete_sql_file_in_folder(root_path: String, file_path: String) -> 
     .map_err(|error| format!("Failed to delete SQL file: {error}"))?
 }
 
+fn rename_file_without_replacing(source: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+        // Omit MOVEFILE_REPLACE_EXISTING: the OS rejects a concurrently created
+        // destination. Cross-volume copies use the checked fallback below.
+        if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), 0) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let mut path = tempfile::TempPath::try_from_path(source)?;
+        // The source belongs to the user; a failed move must never delete it.
+        path.disable_cleanup(true);
+        path.persist_noclobber(target).map_err(|error| error.error)
+    }
+}
+
+fn move_managed_sql_file(
+    root_path: &str,
+    file_path: &str,
+    target_root_path: &str,
+    directory_path: &str,
+) -> Result<String, String> {
+    let file = managed_file(root_path, file_path)?;
+    if !std::fs::symlink_metadata(&file).map_err(|e| e.to_string())?.file_type().is_file() {
+        return Err("Only files can be managed here".to_string());
+    }
+    let directory = managed_directory(target_root_path, directory_path)?;
+    let name = Path::new(file_path).file_name().ok_or("Failed to resolve SQL file name")?;
+    let target = directory.join(name);
+    let display_path = Path::new(directory_path).join(name).to_string_lossy().into_owned();
+    if file == target {
+        return Ok(display_path);
+    }
+    match std::fs::symlink_metadata(&target) {
+        Ok(_) => return Err("A SQL file with this name already exists".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("Failed to inspect SQL file target: {e}")),
+    }
+    if let Err(error) = rename_file_without_replacing(&file, &target) {
+        if error.kind() != std::io::ErrorKind::CrossesDevices {
+            return Err(format!("Failed to move SQL file: {error}"));
+        }
+        let temporary =
+            tempfile::NamedTempFile::new_in(&directory).map_err(|e| format!("Failed to move SQL file: {e}"))?;
+        std::fs::copy(&file, temporary.path()).map_err(|e| format!("Failed to move SQL file: {e}"))?;
+        temporary.persist_noclobber(&target).map_err(|e| format!("Failed to move SQL file: {}", e.error))?;
+        if let Err(error) = std::fs::remove_file(&file) {
+            let _ = std::fs::remove_file(&target);
+            return Err(format!("Failed to move SQL file: {error}"));
+        }
+    }
+    Ok(display_path)
+}
+
+#[tauri::command]
+pub async fn move_sql_file_in_folder(
+    root_path: String,
+    file_path: String,
+    target_root_path: String,
+    directory_path: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        move_managed_sql_file(&root_path, &file_path, &target_root_path, &directory_path)
+    })
+    .await
+    .map_err(|e| format!("Failed to move SQL file: {e}"))?
+}
+
+struct SqlFileWatcher {
+    _watcher: std::sync::Mutex<notify::RecommendedWatcher>,
+}
+impl tauri::Resource for SqlFileWatcher {}
+
+fn create_sql_file_watcher(
+    folder_path: &str,
+    recursive: bool,
+    on_change: impl Fn() + Send + 'static,
+) -> Result<notify::RecommendedWatcher, String> {
+    use notify::Watcher;
+    let folder = canonical_directory(Path::new(folder_path), "SQL root folder")?;
+    let root = folder.clone();
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if let Ok(event) = event {
+            if !event.kind.is_access()
+                && (event.need_rescan()
+                    || event.paths.is_empty()
+                    || event.paths.iter().any(|path| {
+                        path.strip_prefix(&root).is_ok_and(|path| {
+                            !path.components().any(|part| is_pruned_dir(&part.as_os_str().to_string_lossy()))
+                        })
+                    }))
+            {
+                on_change();
+            }
+        }
+    })
+    .map_err(|e| format!("Failed to watch SQL folder: {e}"))?;
+    fn watch_directory(
+        watcher: &mut notify::RecommendedWatcher,
+        folder: &Path,
+        recursive: bool,
+        depth: usize,
+    ) -> Result<(), String> {
+        watcher
+            .watch(folder, notify::RecursiveMode::NonRecursive)
+            .map_err(|e| format!("Failed to watch SQL folder: {e}"))?;
+        if recursive && depth < MAX_SCAN_DEPTH {
+            for entry in std::fs::read_dir(folder).map_err(|e| e.to_string())?.flatten() {
+                if entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && !is_pruned_dir(&entry.file_name().to_string_lossy())
+                {
+                    let _ = watch_directory(watcher, &entry.path(), true, depth + 1);
+                }
+            }
+        }
+        Ok(())
+    }
+    // Match the browser's depth/exclusion rules instead of watching build caches
+    // and dependency directories recursively. The UI rebinds when directories change.
+    watch_directory(&mut watcher, &folder, recursive, 0)?;
+    Ok(watcher)
+}
+
+#[tauri::command]
+pub async fn watch_sql_file_folder(
+    webview: tauri::Webview,
+    folder_path: String,
+    recursive: bool,
+    on_change: tauri::ipc::Channel<()>,
+) -> Result<tauri::ResourceId, String> {
+    use tauri::Manager;
+    let watcher = tauri::async_runtime::spawn_blocking(move || {
+        create_sql_file_watcher(&folder_path, recursive, move || {
+            let _ = on_change.send(());
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let resource_id = webview.resources_table().add(SqlFileWatcher { _watcher: std::sync::Mutex::new(watcher) });
+    Ok(resource_id)
+}
+
 #[tauri::command]
 pub async fn create_sql_folder_in_folder(
     root_path: String,
@@ -738,6 +887,123 @@ pub async fn delete_sql_folder_in_folder(root_path: String, folder_path: String)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moves_files_between_opened_folders_without_changing_contents() {
+        let base = tempfile::tempdir().unwrap();
+        let source_root = base.path().join("source");
+        let target_root = base.path().join("target");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::create_dir_all(&target_root).unwrap();
+        let source = source_root.join("example.sql");
+        std::fs::write(&source, b"SELECT 'unchanged';\r\n").unwrap();
+        let moved = move_managed_sql_file(
+            source_root.to_str().unwrap(),
+            source.to_str().unwrap(),
+            target_root.to_str().unwrap(),
+            target_root.to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(Path::new(&moved), target_root.join("example.sql"));
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(moved).unwrap(), b"SELECT 'unchanged';\r\n");
+    }
+
+    #[test]
+    fn moving_a_file_never_overwrites_an_existing_destination() {
+        let base = tempfile::tempdir().unwrap();
+        let target = base.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let source = base.path().join("example.sql");
+        std::fs::write(&source, "source").unwrap();
+        std::fs::write(target.join("example.sql"), "destination").unwrap();
+        assert!(move_managed_sql_file(
+            base.path().to_str().unwrap(),
+            source.to_str().unwrap(),
+            base.path().to_str().unwrap(),
+            target.to_str().unwrap()
+        )
+        .is_err());
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "source");
+        assert_eq!(std::fs::read_to_string(target.join("example.sql")).unwrap(), "destination");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn moves_between_workspace_and_system_temporary_folders() {
+        // These roots can live on different drives on Windows (for example D: and C:).
+        let source_root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let target_root = tempfile::tempdir().unwrap();
+        let source = source_root.path().join("example.sql");
+        let content = b"\xef\xbb\xbfSELECT 1;\r\n";
+        std::fs::write(&source, content).unwrap();
+        let moved = move_managed_sql_file(
+            source_root.path().to_str().unwrap(),
+            source.to_str().unwrap(),
+            target_root.path().to_str().unwrap(),
+            target_root.path().to_str().unwrap(),
+        )
+        .unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(moved).unwrap(), content);
+    }
+
+    #[test]
+    fn moving_a_file_rejects_source_and_destination_outside_their_roots() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("opened");
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("example.sql");
+        std::fs::write(&source, "source").unwrap();
+        let outside = base.path().join("outside.sql");
+        std::fs::write(&outside, "outside").unwrap();
+        assert!(move_managed_sql_file(
+            root.to_str().unwrap(),
+            outside.to_str().unwrap(),
+            root.to_str().unwrap(),
+            root.to_str().unwrap()
+        )
+        .is_err());
+        assert!(move_managed_sql_file(
+            root.to_str().unwrap(),
+            source.to_str().unwrap(),
+            root.to_str().unwrap(),
+            base.path().to_str().unwrap()
+        )
+        .is_err());
+        assert!(source.exists());
+        assert!(outside.exists());
+    }
+
+    #[test]
+    fn native_sql_folder_watcher_reports_file_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _watcher = create_sql_file_watcher(root.path().to_str().unwrap(), true, move || {
+            let _ = tx.send(());
+        })
+        .unwrap();
+        std::fs::write(nested.join("example.sql"), "SELECT 1;").unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn sql_folder_watcher_does_not_watch_excluded_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let excluded = root.path().join("node_modules");
+        std::fs::create_dir(&excluded).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _watcher = create_sql_file_watcher(root.path().to_str().unwrap(), true, move || {
+            let _ = tx.send(());
+        })
+        .unwrap();
+        std::fs::write(excluded.join("ignored.sql"), "SELECT 1;").unwrap();
+        assert!(rx.recv_timeout(std::time::Duration::from_millis(150)).is_err());
+        std::fs::write(root.path().join("visible.sql"), "SELECT 2;").unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    }
 
     #[cfg(unix)]
     #[tokio::test]

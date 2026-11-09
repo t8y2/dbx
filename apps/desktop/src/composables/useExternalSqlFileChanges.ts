@@ -8,6 +8,8 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { externalSqlEditorMaxBytes } from "@/lib/sql/sqlFileOpen";
 import type { ExternalSqlFileSnapshot } from "@/lib/backend/tauri";
 import type { QueryTab } from "@/types/database";
+import { useSqlFileWatch } from "@/composables/useSqlFileWatch";
+import { sqlFileParentPath } from "@/lib/sqlFile/sqlFileOrder";
 
 export type ExternalSqlFilePromptDecision = "load" | "keep" | "overwrite" | "recreate" | "saveAs" | "close" | "cancel";
 
@@ -73,6 +75,9 @@ export function useExternalSqlFileChanges(options: UseExternalSqlFileChangesOpti
   let checksSuspended = 0;
   let disposed = false;
   let unlistenWindowFocus: (() => void) | undefined;
+  let activeCheckRunning = false;
+  let recheckActive = false;
+  const isCurrentFile = (tab: QueryTab, path: string) => !disposed && tab.externalSqlPath === path && queryStore.tabs.some((candidate) => candidate.id === tab.id && candidate.externalSqlPath === path);
 
   const promptOpen = computed(() => pendingPrompt.value !== null);
 
@@ -102,21 +107,24 @@ export function useExternalSqlFileChanges(options: UseExternalSqlFileChangesOpti
   async function detectChange(tab: QueryTab, forceContentCheck = false): Promise<DetectedExternalSqlFileChange | null> {
     if (!tab.externalSqlPath || !isTauriRuntime() || checkingTabIds.has(tab.id)) return null;
     checkingTabIds.add(tab.id);
+    const path = tab.externalSqlPath;
     try {
-      const status = await inspectStableFile(tab.externalSqlPath);
+      const status = await inspectStableFile(path);
+      if (!isCurrentFile(tab, path)) return null;
       if (status.kind === "missing") {
         if (!forceContentCheck && tab.externalSqlFileMissing) return null;
         return {
           kind: "deleted",
           tabId: tab.id,
-          path: tab.externalSqlPath,
+          path,
           dirty: queryStore.isTabDirty(tab),
         };
       }
 
       if (!forceContentCheck && !tab.externalSqlFileMissing && externalSqlFileMetadataMatches(tab.externalSqlFileVersion, status)) return null;
 
-      const snapshot = await readStableSnapshot(tab.externalSqlPath, tab.externalSqlEncoding);
+      const snapshot = await readStableSnapshot(path, tab.externalSqlEncoding);
+      if (!isCurrentFile(tab, path)) return null;
       if (externalSqlFileContentMatchesBaseline(tab, snapshot) || (!tab.externalSqlFileVersion && tab.sql === snapshot.content)) {
         queryStore.updateExternalSqlFileVersion(tab.id, snapshot.version);
         return null;
@@ -126,7 +134,7 @@ export function useExternalSqlFileChanges(options: UseExternalSqlFileChangesOpti
       return {
         kind: "modified",
         tabId: tab.id,
-        path: tab.externalSqlPath,
+        path,
         dirty: queryStore.isTabDirty(tab),
         snapshot,
       };
@@ -152,8 +160,10 @@ export function useExternalSqlFileChanges(options: UseExternalSqlFileChangesOpti
 
   async function loadLatest(tab: QueryTab) {
     if (!tab.externalSqlPath) return false;
+    const path = tab.externalSqlPath;
     try {
-      const snapshot = await readStableSnapshot(tab.externalSqlPath, tab.externalSqlEncoding);
+      const snapshot = await readStableSnapshot(path, tab.externalSqlEncoding);
+      if (!isCurrentFile(tab, path)) return false;
       queryStore.applyExternalSqlFileSnapshot(tab.id, snapshot.content, snapshot.version);
       return true;
     } catch (error: any) {
@@ -175,13 +185,22 @@ export function useExternalSqlFileChanges(options: UseExternalSqlFileChangesOpti
   }
 
   async function checkActiveFile() {
-    if (checksSuspended || pendingPrompt.value) return;
+    if (checksSuspended || pendingPrompt.value || activeCheckRunning) {
+      recheckActive = true;
+      return;
+    }
     const tab = options.activeTab.value;
     if (!tab?.externalSqlPath) return;
+    activeCheckRunning = true;
     try {
       const change = await detectChange(tab);
-      if (!change || !queryStore.tabs.some((candidate) => candidate.id === tab.id)) return;
+      if (!change || !isCurrentFile(tab, change.path) || options.activeTab.value?.id !== tab.id) return;
+      if (change.kind === "modified" && !queryStore.isTabDirty(tab)) {
+        queryStore.applyExternalSqlFileSnapshot(tab.id, change.snapshot.content, change.snapshot.version);
+        return;
+      }
       const decision = await requestDecision(change, "reload");
+      if (!isCurrentFile(tab, change.path)) return;
       if (change.kind === "modified") {
         if (decision === "load") await loadLatest(tab);
         else if (decision === "keep") queryStore.ignoreExternalSqlFileVersion(tab.id, change.snapshot.version);
@@ -190,6 +209,12 @@ export function useExternalSqlFileChanges(options: UseExternalSqlFileChangesOpti
       }
     } catch (error: any) {
       options.reportError(t("externalSqlFile.checkFailed", { message: error?.message || String(error) }));
+    } finally {
+      activeCheckRunning = false;
+      if (recheckActive && !disposed && !checksSuspended && !pendingPrompt.value) {
+        recheckActive = false;
+        queueMicrotask(() => void checkActiveFile());
+      }
     }
   }
 
@@ -229,12 +254,17 @@ export function useExternalSqlFileChanges(options: UseExternalSqlFileChangesOpti
   }
 
   watch(
-    () => options.activeTab.value?.id,
+    () => [options.activeTab.value?.id, options.activeTab.value?.externalSqlPath],
     () => {
       if (!disposed) void checkActiveFile();
     },
-    { flush: "post" },
+    { flush: "post", immediate: true },
   );
+
+  useSqlFileWatch(() => {
+    const path = options.activeTab.value?.externalSqlPath;
+    return path ? [{ path: sqlFileParentPath(path), recursive: false }] : [];
+  }, checkActiveFile);
 
   if (isTauriRuntime()) {
     void import("@tauri-apps/api/window")

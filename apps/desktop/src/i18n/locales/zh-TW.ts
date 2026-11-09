@@ -11535,6 +11535,7 @@ export default withEnglishFallback({
     createFailed: "新增 SQL 檔案失敗: {message}",
     renameFile: "重新命名",
     renameFileDescription: "將自動加入 .sql 副檔名。",
+    moveFailed: "移動 SQL 檔案失敗：{message}",
     fileRenamed: "SQL 檔案已重新命名",
     renameFailed: "重新命名 SQL 檔案失敗: {message}",
     deleteFile: "刪除檔案",

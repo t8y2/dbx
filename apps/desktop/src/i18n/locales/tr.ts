@@ -7003,6 +7003,7 @@ export default withEnglishFallback({
     createFailed: "SQL dosyası oluşturulamadı: {message}",
     renameFile: "Yeniden Adlandır",
     renameFileDescription: ".sql uzantısı otomatik olarak eklenir.",
+    moveFailed: "SQL dosyası taşınamadı: {message}",
     fileRenamed: "SQL dosyası yeniden adlandırıldı",
     renameFailed: "SQL dosyası yeniden adlandırılamadı: {message}",
     deleteFile: "Dosyayı sil",

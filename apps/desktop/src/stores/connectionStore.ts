@@ -4668,6 +4668,11 @@ export const useConnectionStore = defineStore("connection", () => {
     bumpCompletionCacheRevision(connectionId, database);
     invalidateMetadataCaches({ connectionId, database });
     if (database == null) delete completionDatabasesCache.value[connectionId];
+    // The editor's schema picker caches the same names the completion schema list
+    // does, so the two must drop together: every caller of this function is a
+    // metadata freshness boundary (disconnect, edit, visible-database change,
+    // refresh), and leaving the picker holding the old set is exactly #14582.
+    invalidateSchemaOptionsCache(connectionId, database);
     const cachePrefix = database == null ? `${connectionId}:` : `${connectionId}:${database}:`;
     const exactCacheKey = database == null ? null : `${connectionId}:${database}`;
     for (const key of Object.keys(completionTablesCache.value)) {
@@ -6217,6 +6222,14 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadDatabases(connectionId: string, options?: LoadTreeOptions) {
+    if (options?.force) {
+      // Single-database engines keep their schemas under the connection root, so
+      // creating or dropping one lands here instead of loadSchemas. A forced
+      // database reload is therefore also a "schema set changed" signal and must
+      // drop the same caches (#14582); invalidateCompletionCache drops the
+      // schema picker cache with them.
+      invalidateCompletionCache(connectionId);
+    }
     const configForScope = getConfig(connectionId);
     const searchFilter = activeTreeLoadSearchFilter(options);
     if (!options?.force && !options?.connectedOnly && !searchFilter) {
@@ -7020,7 +7033,6 @@ export const useConnectionStore = defineStore("connection", () => {
       // explicit refresh). Completion and the editor's schema picker hold their own
       // copies, so both have to go with it (#14582).
       invalidateCompletionCache(connectionId, database);
-      invalidateSchemaOptionsCache(connectionId, database);
     }
     const configForScope = getConfig(connectionId);
     return runTreeMetadataLoad(
@@ -7120,6 +7132,13 @@ export const useConnectionStore = defineStore("connection", () => {
     const nodeId = `${connectionId}:${database}`;
     const node = findNode(treeNodes.value, nodeId);
     if (!node) return;
+    if (options?.force) {
+      // SQL Server schema sets load through this loader instead of loadSchemas;
+      // a forced reload must drop the picker and completion caches the same way
+      // so the editor cannot keep offering a stale schema list (#14582);
+      // invalidateCompletionCache drops the schema picker cache with them.
+      invalidateCompletionCache(connectionId, database);
+    }
     let load = beginTreeNodeLoad(node);
     try {
       await ensureConnected(connectionId);
@@ -9042,9 +9061,9 @@ export const useConnectionStore = defineStore("connection", () => {
     // Refreshing a database means its schema set may have changed outside the app
     // (CREATE SCHEMA in another client, or the app's own create/drop). Drop the
     // schema picker and completion lists too, or the editor keeps offering the set
-    // it cached on mount (#14582).
+    // it cached on mount (#14582). invalidateCompletionCache drops the schema
+    // picker cache with them, so one call covers both.
     invalidateCompletionCache(connectionId, database);
-    invalidateSchemaOptionsCache(connectionId, database);
     const node = findDatabaseTreeNode(treeNodes.value, connectionId, database, catalog);
     if (node) {
       await refreshTreeNode(node);

@@ -483,4 +483,12 @@ describe("InfluxDB connection URL copy", () => {
 
     expect(parseConnectionUrl(copied, "influxdb").basePath).toBe("/influxdb");
   });
+
+  it("does not fall back to the base path alias when the first key is null", () => {
+    // The driver stops at the first present key, so the copied URL must not
+    // advertise a prefix the driver would not request.
+    const connection = config({ db_type: "influxdb", host: "influx.example.com", port: 8086, username: "", password: "token", database: "metrics", external_config: { basePath: null, base_path: "/influxdb" } });
+
+    expect(buildConnectionUrlCopy(connection, "url")).toBe("http://influx.example.com:8086");
+  });
 });

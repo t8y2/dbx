@@ -4,7 +4,7 @@ import { GAUSSDB_M_JDBC_DRIVER_PROFILE } from "@/lib/database/jdbcDialect";
 import { effectiveRedisDatabaseIndex } from "@/lib/redis/redisDatabaseIndex";
 import { isSecretConnectionProperty, normalizeJdbcProperties, quoteJdbcProperty } from "@/lib/connection/jdbcProperties";
 import { redactConnectionStringSecrets } from "@/lib/connection/connectionStringRedaction";
-import { normalizeBasePath } from "@/lib/connection/connectionUrl";
+import { externalBasePath } from "@/lib/connection/connectionUrl";
 
 /**
  * Builds copy-ready connection strings (standard URL / JDBC URL / libpq DSN /
@@ -173,11 +173,9 @@ function effectiveUsername(config: ConnectionUrlCopyConfig): string {
  */
 function influxBasePath(config: ConnectionUrlCopyConfig): string | null {
   if (config.db_type !== "influxdb" && config.db_type !== "influxdb3") return null;
-  const external = config.external_config;
-  if (!external || typeof external !== "object") return "";
-  const record = external as Record<string, unknown>;
-  const raw = record.basePath ?? record.base_path;
-  return normalizeBasePath(typeof raw === "string" ? raw : "");
+  // Same lookup as the driver and the connection form, so the copied URL
+  // never advertises a prefix that the driver would not request.
+  return externalBasePath(config.external_config);
 }
 
 function queryHasParam(params: string, keys: string[]): boolean {

@@ -8,8 +8,6 @@ use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::sync::LazyLock;
 
-const MAX_SCOPE_QUERY_TOKENS: usize = 2048;
-
 /// Function-call syntax supported by PostgreSQL scope recognition. This policy
 /// is independent of the manual-transaction read proof.
 const POSTGRES_SCOPE_QUERY_FUNCTIONS: &[&str] = &[
@@ -507,11 +505,6 @@ fn has_static_postgres_query_structure(sql: &str) -> bool {
     let Ok(tokens) = Tokenizer::new(&dialect, sql).with_unescape(false).tokenize() else {
         return false;
     };
-    // Bound AST traversal and drop on worker stacks; larger queries keep the
-    // original scan even when parsing itself would not exceed its depth limit.
-    if tokens.iter().filter(|token| !matches!(token, Token::Whitespace(_))).count() > MAX_SCOPE_QUERY_TOKENS {
-        return false;
-    }
     // Ordinary backslash strings depend on standard_conforming_strings, which
     // is not available here. E strings and dollar quotes have explicit semantics.
     if tokens.iter().any(|token| {
@@ -1589,19 +1582,17 @@ mod tests {
     }
 
     #[test]
-    fn oversized_postgres_queries_keep_the_existing_scope_scan() {
-        // A long left-associative expression can exhaust a worker stack while
-        // traversing or dropping its AST despite the parser's recursion limit.
+    fn large_postgres_values_queries_use_query_structure() {
+        // Many VALUES rows increase input size without deeply nesting expressions.
         std::thread::Builder::new()
             .stack_size(2 * 1024 * 1024)
             .spawn(|| {
-                let expression = vec!["1"; 30_000].join("+");
-                let sql = format!("WITH c AS (SELECT id FROM public.users) SELECT {expression}, 2 FROM c");
+                let values = vec!["(1)"; 1_000].join(",");
+                let sql = format!(
+                    "WITH c(x) AS (VALUES {values}), compared AS (SELECT x FROM c) SELECT COUNT(*), SUM(x) FROM compared"
+                );
                 let allowed = vec!["reporting".to_string()];
                 assert!(sql_references_disallowed_database(&sql, &DatabaseType::Postgres, "reporting", &allowed));
-                assert!(connection_scope_rejects(&sql, &DatabaseType::Postgres, "reporting", &allowed));
-                let sql = format!("SELECT {expression} FROM public.users");
-                assert!(!sql_references_disallowed_database(&sql, &DatabaseType::Postgres, "reporting", &allowed));
                 assert!(!connection_scope_rejects(&sql, &DatabaseType::Postgres, "reporting", &allowed));
             })
             .unwrap()

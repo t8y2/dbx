@@ -10672,6 +10672,16 @@ export default {
     deepLinkConnectionConfirmModeUpdateDescription: "Links carrying an id update the saved connection immediately; new connections still wait for confirmation.",
     deepLinkConnectionConfirmModeAll: "All connection links",
     deepLinkConnectionConfirmModeAllDescription: "Both new and updated connections are saved without confirmation. If the prefilled parameters fail validation, the dialog stays open so you can finish it manually.",
+    autoConnectAfterCreateMode: "Auto-connect after creating a connection",
+    autoConnectAfterCreateModeDescription:
+      "Choose whether a newly created connection is connected right after it is saved. While auto-connect is on, connection links (including links with an id that refresh credentials) skip the confirmation dialog and connect immediately, so short-lived bastion credentials can be used in time. Editing a connection manually is not affected.",
+    autoConnectAfterCreateModeOff: "Off",
+    autoConnectAfterCreateModeOffDescription: "Only save the connection; connect it manually from the sidebar afterwards.",
+    autoConnectAfterCreateModeDeepLink: "Deep links only",
+    autoConnectAfterCreateModeDeepLinkDescription:
+      "Only connections created or updated from a dbx://connection/new link (including one pasted into the connection dialog) are connected automatically. The confirmation dialog is skipped, because bastion credentials often expire before a manual confirmation.",
+    autoConnectAfterCreateModeAll: "All new connections",
+    autoConnectAfterCreateModeAllDescription: "Every new connection is connected immediately after saving (the historical default). Deep links skip the confirmation dialog as well. JDBC connections still need to be connected manually.",
     duplicateTabTitleMode: "Duplicate tab titles",
     duplicateTabTitleModeDescription: "Choose how tabs with the same name are told apart. Applies only when two or more tabs would show the same title.",
     duplicateTabTitleModeOrdinal: "Object name + number",

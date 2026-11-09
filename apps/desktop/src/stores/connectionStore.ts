@@ -5,6 +5,7 @@ import { uuid } from "@/lib/common/utils";
 import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
 import { ref, computed, watch, markRaw, reactive } from "vue";
 import { DEFAULT_QUERY_TIMEOUT_SECS, normalizeManualTransactionTimeoutSecs } from "@/lib/connection/timeoutLimits";
+import { shouldAutoConnectAfterCreate } from "@/lib/connection/connectionAutoConnect";
 import { gaussdbConnectionMode } from "@/lib/database/jdbcDialect";
 import { exactOracleTriggerMetadata, exactOracleTriggerNodeMetadata, oracleTriggerIdentityKey, oracleTriggerReadOptions, oracleTriggerObjectReadOptions } from "@/lib/database/oracleTriggerIdentity";
 import { nativeJobAdminEngine } from "@/lib/database/nativeJobAdmin";
@@ -4576,7 +4577,28 @@ export const useConnectionStore = defineStore("connection", () => {
     return true;
   }
 
-  async function addConnection(config: ConnectionConfig, targetGroupId?: string | null) {
+  /** 只有明确传 `autoConnect: true` 的创建路径才参与自动连接（侧栏复制、单条粘贴）。 */
+  type AddConnectionOptions = { autoConnect?: boolean; fromDeepLink?: boolean };
+
+  /**
+   * 「新建连接后自动连接」覆盖绕过连接弹窗的创建路径。弹窗保存、打开文件、拖放文件、
+   * 批量导入都自带连接逻辑或不应批量连接，因此默认完全不参与。
+   */
+  function autoConnectNewConnection(config: ConnectionConfig, options: AddConnectionOptions): void {
+    if (options.autoConnect !== true) return;
+    if (config.db_type === "jdbc") return;
+    const mode = settingsStore.editorSettings.autoConnectAfterCreateMode;
+    // 老配置或测试里的部分 mock 缺这个字段时不改变历史行为。
+    if (mode !== "off" && mode !== "deepLink" && mode !== "all") return;
+    if (!shouldAutoConnectAfterCreate(mode, { isNew: true, fromDeepLink: options.fromDeepLink ?? false })) return;
+    void connect(config).catch((error: any) => {
+      const message = String(error?.message || error);
+      if (message.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
+      useToast().toast(i18n.global.t("connection.connectFailed", { message }), 5000);
+    });
+  }
+
+  async function addConnection(config: ConnectionConfig, targetGroupId?: string | null, options: AddConnectionOptions = {}) {
     const normalized = normalizeConnection(config);
     if (normalized.save_password === false) normalized.password = "";
     const isNewConnection = !connections.value.some((c) => c.id === normalized.id);
@@ -4611,6 +4633,7 @@ export const useConnectionStore = defineStore("connection", () => {
       if (queryStore.rebindDetachedTabs(normalized.name, normalized.id, normalized.database) > 0) {
         await queryStore.flushPendingPersist().catch(() => undefined);
       }
+      autoConnectNewConnection(normalized, options);
     }
   }
 
@@ -4645,6 +4668,8 @@ export const useConnectionStore = defineStore("connection", () => {
           name: `${entry.config.name} (Copy)`,
         },
         targetGroupId === undefined ? entry.sourceGroupId : targetGroupId,
+        // 批量粘贴不自动连接，单条粘贴与「复制连接」保持一致。
+        { autoConnect: clipboard.connections.length === 1 },
       );
       pastedCount += 1;
     }
@@ -11600,7 +11625,8 @@ export const useConnectionStore = defineStore("connection", () => {
     if (imported.tunnelProfiles?.length) {
       await importedTunnelProfileStore.saveProfiles([...importedTunnelProfileStore.profiles, ...imported.tunnelProfiles]);
     }
-    for (const connection of imported.connections) await addConnection(normalizeConnection(connection));
+    // 批量导入不自动连接，避免一次导入就并发连上一批数据库。
+    for (const connection of imported.connections) await addConnection(normalizeConnection(connection), undefined, { autoConnect: false });
     return { count: imported.connections.length, layout: imported.layout };
   }
 

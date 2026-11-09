@@ -111,6 +111,7 @@ import {
   type ConnectionDeepLinkDraft,
   type ConnectionDeepLinkUpdate,
 } from "@/lib/connection/connectionDeepLink";
+import { shouldAutoConnectAfterCreate, shouldAutoSubmitConnectionDeepLink } from "@/lib/connection/connectionAutoConnect";
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connection/connectionPresentation";
 import { MYSQL_DATA_CHARSETS, mysqlDataCharset, setMysqlDataCharset, mysqlDataCharsetValidation, supportsMysqlDataCharset } from "@/lib/connection/mysqlDataCharset";
 import { parseGaussdbHosts, serializeGaussdbHosts, type GaussdbHostEntry } from "@/lib/connection/gaussdbHosts";
@@ -359,6 +360,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   connectStarted: [name: string];
   connectSucceeded: [name: string];
+  connectSettled: [name: string];
   connectFailed: [message: string];
   openDriverStore: [focus?: DriverStoreFocus];
   openTunnelProfileSettings: [];
@@ -3253,6 +3255,12 @@ let appliedConnectionUpdate: ConnectionDeepLinkUpdate | null = null;
  */
 const submittedAutoCreatePrefillKey = ref<string | null>(null);
 
+/**
+ * 当前这次「新建」是否由连接深链发起（外部唤起，或在连接弹窗里粘贴 `dbx://connection/new`）。
+ * 连接配置本身不带来源标记，只在弹窗生命周期里记录，供「新建连接后自动连接」判定使用。
+ */
+const createdFromDeepLink = ref(false);
+
 function finishApplyingConnectionUpdate() {
   void nextTick(() => {
     applyingConnectionUpdate = false;
@@ -4836,8 +4844,11 @@ function applyConnectionUrlToForm(input: string): boolean {
       appliedConnectionUrlInput.value = input.trim();
       return true;
     }
-    const draft = parseConnectionDeepLink(input) ?? parseServiceConnectionUrl(input);
+    const deepLinkDraft = parseConnectionDeepLink(input);
+    const draft = deepLinkDraft ?? parseServiceConnectionUrl(input);
     if (draft) {
+      // 在弹窗里粘贴 `dbx://connection/new` 与从外部打开深链一样，都是深链创建。
+      if (deepLinkDraft) createdFromDeepLink.value = true;
       applyConnectionDraftToForm({ ...draft, oneTime: undefined });
       if (form.value.db_type === "meilisearch") {
         syncMeilisearchHostInput(form.value);
@@ -6480,6 +6491,7 @@ function openJdbcDriverManagerFromError() {
 
 function resetForm(options: { preservePickerState?: boolean } = {}) {
   editingId.value = null;
+  createdFromDeepLink.value = false;
   selectedConnectionGroupId.value = initialConnectionGroupId();
   form.value = defaultForm();
   redisKeyTemplatesText.value = "";
@@ -6547,11 +6559,17 @@ function prefillDraftKey(draft: ConnectionDeepLinkDraft) {
  * 打开对应形态后，新建（`create`）与带 `id` 的更新（`update`）链接也走同一条路径：
  * 弹窗完成预填后立刻保存，用户不需要再点确认。
  *
+ * 另外，「新建连接后自动连接」覆盖深链（`deepLink` / `all`）时也直接提交：
+ * 堡垒机下发的凭据有时效，等用户确认再保存往往已经过期（表现为 `ERROR 1043 bad handshake`）。
+ * `off` 仍按 `deepLinkConnectionConfirmMode` 决定是否弹窗。
+ *
  * 仍然复用弹窗自己的 `save()`，因此驱动安装、URL 解析、校验等逻辑与手动保存完全一致；
  * 一旦校验失败，`save()` 返回 false 且弹窗保持打开，用户可以继续手动补全。
  */
 function submitPrefillIfAutoConfirmed(draft: ConnectionDeepLinkDraft) {
-  if (!shouldAutoConfirmConnectionPrefill(draft, settingsStore.editorSettings.deepLinkConnectionConfirmMode)) return;
+  const confirmedByLinkSetting = shouldAutoConfirmConnectionPrefill(draft, settingsStore.editorSettings.deepLinkConnectionConfirmMode);
+  const confirmedByAutoConnect = shouldAutoSubmitConnectionDeepLink(settingsStore.editorSettings.autoConnectAfterCreateMode);
+  if (!confirmedByLinkSetting && !confirmedByAutoConnect) return;
   const key = prefillDraftKey(draft);
   if (submittedAutoCreatePrefillKey.value === key) return;
   submittedAutoCreatePrefillKey.value = key;
@@ -6560,7 +6578,9 @@ function submitPrefillIfAutoConfirmed(draft: ConnectionDeepLinkDraft) {
 
 /** 带 `id` 的更新链接：预填完成后按设置决定是否直接保存。 */
 function submitUpdateIfAutoConfirmed(update: ConnectionDeepLinkUpdate) {
-  if (!shouldAutoConfirmConnectionDeepLink("update", settingsStore.editorSettings.deepLinkConnectionConfirmMode)) return;
+  const confirmedByLinkSetting = shouldAutoConfirmConnectionDeepLink("update", settingsStore.editorSettings.deepLinkConnectionConfirmMode);
+  const confirmedByAutoConnect = shouldAutoSubmitConnectionDeepLink(settingsStore.editorSettings.autoConnectAfterCreateMode);
+  if (!confirmedByLinkSetting && !confirmedByAutoConnect) return;
   const key = `update:${update.connectionId}:${JSON.stringify(update.patch)}`;
   if (submittedAutoCreatePrefillKey.value === key) return;
   submittedAutoCreatePrefillKey.value = key;
@@ -6634,6 +6654,7 @@ function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
 
 function applyConnectionPrefill(draft: ConnectionDeepLinkDraft) {
   resetForm();
+  createdFromDeepLink.value = true;
   applyConnectionDraftToForm(draft);
   submitPrefillIfAutoConfirmed(draft);
 }
@@ -7021,6 +7042,29 @@ async function persistConnectionNoteVisibilityDraft() {
   await persistConnectionNoteVisibilityDraftState(connectionNoteVisibilityDraft, settingsStore.editorSettings.sidebarShowConnectionNotes, (value) => settingsStore.updateEditorSettingsAndPersist({ sidebarShowConnectionNotes: value }));
 }
 
+/**
+ * 本次弹窗是否由连接深链驱动。
+ *
+ * `createdFromDeepLink` 会被 `resetForm()` 清空（弹窗关闭时就会触发），所以保存判定还要
+ * 直接看 props：外部唤起的新建链接是 `prefillConfig`，带 `id` 的更新链接是
+ * `updatePrefill`（或粘贴到 URL 输入框的 `appliedConnectionUpdate`）。
+ */
+const isDeepLinkSave = computed(() => createdFromDeepLink.value || !!props.prefillConfig || !!props.updatePrefill || !!appliedConnectionUpdate);
+
+/**
+ * 当前表单这次保存是否要自动连接。
+ *
+ * - 深链保存（新建，或带 `id` 刷新凭据的更新链接）：`all` / `deepLink` 都在保存后
+ *   立刻连接，`off` 不连。更新链接虽属「编辑」，但它是深链刷新凭据，必须在时限内重连。
+ * - 普通新建：`all` 连、`deepLink` 不连。
+ * - 普通编辑已有连接：永远不自动连接。
+ */
+const autoConnectAfterSave = computed(() => {
+  const mode = settingsStore.editorSettings.autoConnectAfterCreateMode;
+  if (isDeepLinkSave.value) return shouldAutoConnectAfterCreate(mode, { isNew: true, fromDeepLink: true });
+  return shouldAutoConnectAfterCreate(mode, { isNew: !editingId.value, fromDeepLink: false });
+});
+
 function startSavedConnection(config: ConnectionConfig) {
   emit("connectStarted", config.name);
   void store
@@ -7034,6 +7078,10 @@ function startSavedConnection(config: ConnectionConfig) {
       // Keep failed one-time connections available for retry and error inspection.
       // They are still removed by connectionStore.disconnect after a successful session.
       emit("connectFailed", appendConnectionErrorHints(config, mongodbAuthFailureHint(message), t));
+    })
+    // 无论成功 / 失败 / 被并发尝试取消，都要立刻收起「正在连接」提示。
+    .finally(() => {
+      emit("connectSettled", config.name);
     });
 }
 
@@ -7054,7 +7102,9 @@ async function save(options: SaveConnectionOptions = {}): Promise<boolean> {
     return false;
   }
   const wasEditing = !!editingId.value;
-  const connectAfterSave = options.connectAfterSave ?? (!wasEditing && !isJdbcConnection.value);
+  // 插件的 save / save-and-connect action 显式传值时优先；否则按「新建连接后自动连接」设置。
+  // JDBC 需要单独准备驱动，仍沿用历史行为不自动连接。
+  const connectAfterSave = options.connectAfterSave ?? (autoConnectAfterSave.value && !isJdbcConnection.value);
   const closeOnSuccess = options.closeOnSuccess ?? true;
   const databaseInfoForSave = visibleTestDatabaseInfo.value ?? visibleSavedDatabaseInfo.value;
   isSaving.value = true;
@@ -7079,12 +7129,16 @@ async function save(options: SaveConnectionOptions = {}): Promise<boolean> {
       await ensureRequiredGaussdbMJdbcRuntime(config);
       await persistGlobalTimeoutDrafts();
       await persistGlobalRedisValuePreviewLimit();
-      await store.addConnection(config, selectedConnectionGroupId.value);
+      // 弹窗自己用 startSavedConnection 发连接生命周期事件，这里不要让 store 重复连接。
+      await store.addConnection(config, selectedConnectionGroupId.value, { autoConnect: false });
       savedConfig = config;
       connectionSaved = true;
       await persistConnectionNoteVisibilityDraft();
       draftTestConnectionId.value = uuid();
     }
+    // 深链凭据有时效：保存成功后立刻发起连接，不等弹窗关闭 / nextTick，
+    // 也不受关闭时 resetForm 清空深链标记的影响（connectAfterSave 已在保存前算好）。
+    if (connectAfterSave && savedConfig.db_type !== "jdbc") startSavedConnection(savedConfig);
     if (closeOnSuccess) {
       if (wasEditing) store.stopEditing();
       open.value = false;
@@ -7093,7 +7147,6 @@ async function save(options: SaveConnectionOptions = {}): Promise<boolean> {
       editingId.value = savedConfig.id;
       store.startEditing(savedConfig.id);
     }
-    if (connectAfterSave && savedConfig.db_type !== "jdbc") startSavedConnection(savedConfig);
     return true;
   } catch (e: any) {
     const cause = mongodbAuthFailureHint(String(e?.message || e));
@@ -11442,7 +11495,7 @@ function openExternalUrl(url: string) {
               {{ isTesting ? t("connection.testing") : t("connection.test") }}
             </Button>
             <Button class="shrink-0" @click="save()" :disabled="isSaving || isTestingSshTunnel || !hasRequiredConnectionTarget">
-              {{ isSaving ? t("common.loading") : editingId || isJdbcConnection ? t("connection.save") : t("connection.saveAndConnect") }}
+              {{ isSaving ? t("common.loading") : editingId || isJdbcConnection || !autoConnectAfterSave ? t("connection.save") : t("connection.saveAndConnect") }}
             </Button>
           </template>
         </DialogFooter>

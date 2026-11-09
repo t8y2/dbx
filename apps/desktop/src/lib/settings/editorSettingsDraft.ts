@@ -132,6 +132,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "deleteConnectionTabHandlingMode",
   "rememberConnectionDatabaseOnDelete",
   "deepLinkConnectionConfirmMode",
+  "autoConnectAfterCreateMode",
   "duplicateTabTitleMode",
   "dataTabReuseMode",
   "openDataTabsNextToActive",

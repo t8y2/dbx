@@ -30,7 +30,15 @@ const { store, settings, backend, actualStoreHolder } = vi.hoisted(() => ({
   },
   actualStoreHolder: { value: null as unknown },
   settings: {
-    editorSettings: { sidebarShowConnectionNotes: false, globalConnectTimeoutSecs: 10, globalQueryTimeoutSecs: 0, connectTimeoutInheritConnectionIds: [], queryTimeoutInheritConnectionIds: [], deepLinkConnectionConfirmMode: "always" as "always" | "create" | "update" | "all" },
+    editorSettings: {
+      sidebarShowConnectionNotes: false,
+      globalConnectTimeoutSecs: 10,
+      globalQueryTimeoutSecs: 0,
+      connectTimeoutInheritConnectionIds: [],
+      queryTimeoutInheritConnectionIds: [],
+      deepLinkConnectionConfirmMode: "always" as "always" | "create" | "update" | "all",
+      autoConnectAfterCreateMode: "all" as "off" | "deepLink" | "all",
+    },
     rememberedDatabaseForConnection: vi.fn(() => ""),
     initEditorSettings: vi.fn().mockResolvedValue(undefined),
     persistEditorSettings: vi.fn(),
@@ -239,10 +247,12 @@ beforeEach(() => {
   visibleTab.value = "connection";
   i18n.global.locale.value = "en";
   settings.editorSettings.deepLinkConnectionConfirmMode = "always";
+  settings.editorSettings.autoConnectAfterCreateMode = "all";
   for (const fn of Object.values(backend)) fn.mockResolvedValue([]);
   backend.listenAgentInstallProgress.mockResolvedValue(() => {});
   store.updateConnection.mockResolvedValue(undefined);
   store.addConnection.mockResolvedValue(undefined);
+  store.connect.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -297,6 +307,12 @@ describe.each([
 });
 
 describe("ConnectionDialog deep-link edit confirmation", () => {
+  // 这组用例验证「通过链接打开连接时的确认方式」自身的行为，关掉自动连接，
+  // 避免深链免确认/自动连接把弹窗提前提交掉。自动连接的行为在下面的 describe 里单独覆盖。
+  beforeEach(() => {
+    settings.editorSettings.autoConnectAfterCreateMode = "off";
+  });
+
   it.each([false, true])("prefills Kafka brokers and only saves on confirmation (SASL: %s)", async (sasl) => {
     store.connect.mockResolvedValue(undefined);
     backend.listInstalledAgentsLocal.mockResolvedValue([{ db_type: "kafka", installed: true }]);
@@ -314,7 +330,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     expect(store.addConnection).not.toHaveBeenCalled();
     expect(store.connect).not.toHaveBeenCalled();
     expect(backend.testConnectionWithInfo).not.toHaveBeenCalled();
-    const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === i18n.global.t("connection.saveAndConnect"));
+    const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === i18n.global.t("connection.save"));
     expect(save).toBeTruthy();
     save!.click();
     await settle();
@@ -335,6 +351,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
         }),
       }),
       null,
+      { autoConnect: false },
     );
   });
 
@@ -368,11 +385,11 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
     const mode = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === i18n.global.t("connection.oceanbaseOracleMode"));
     mode!.click();
     await settle();
-    const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === i18n.global.t("connection.saveAndConnect"));
+    const save = [...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === i18n.global.t("connection.save"));
     expect(save).toBeTruthy();
     save!.click();
     await settle();
-    expect(store.addConnection).toHaveBeenCalledWith(expect.objectContaining({ db_type: "oceanbase-oracle", driver_profile: "oceanbase-oracle", port: 2881 }), null);
+    expect(store.addConnection).toHaveBeenCalledWith(expect.objectContaining({ db_type: "oceanbase-oracle", driver_profile: "oceanbase-oracle", port: 2881 }), null, { autoConnect: false });
   });
 
   it.each([false, true])("follows each OceanBase profile default in both directions (Oracle source: %s)", async (oracle) => {
@@ -855,6 +872,7 @@ describe("ConnectionDialog deep-link edit confirmation", () => {
         port: 0,
       }),
       null,
+      { autoConnect: false },
     );
   });
 
@@ -1094,5 +1112,165 @@ describe("JDBC connection parameter entry and driver metadata", () => {
         jdbc_driver_paths: ["/new/postgresql.jar", "/new/helper.jar"],
       }),
     );
+  });
+});
+
+describe("ConnectionDialog auto-connect after create", () => {
+  const deepLinkUrl = "dbx://connection/new?type=mysql&host=bastion.example.test&name=Bastion";
+
+  async function mountWithConnectEvents(url?: string) {
+    const events = { connectStarted: vi.fn(), connectSucceeded: vi.fn(), connectSettled: vi.fn() };
+    const props = reactive({ open: true, prefillConfig: url ? parseConnectionDeepLink(url) : null });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const app = createApp(
+      defineComponent({
+        setup: () => () =>
+          h(ConnectionDialog, {
+            ...props,
+            onConnectStarted: events.connectStarted,
+            onConnectSucceeded: events.connectSucceeded,
+            onConnectSettled: events.connectSettled,
+            "onUpdate:open": (value: boolean) => {
+              props.open = value;
+            },
+          }),
+      }),
+    );
+    app.use(i18n);
+    mountedApps.push(app);
+    app.mount(container);
+    await settle();
+    return events;
+  }
+
+  function saveButton(label: string) {
+    return [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === label);
+  }
+
+  async function mountManualConfigDialog() {
+    await mountNewDialog();
+    const next = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === i18n.global.t("connection.next"));
+    expect(next).toBeTruthy();
+    next!.click();
+    await settle();
+  }
+
+  async function clickSave(label: string) {
+    const button = saveButton(label);
+    expect(button).toBeTruthy();
+    button!.click();
+    await vi.waitFor(() => expect(store.addConnection).toHaveBeenCalledOnce());
+    await settle();
+  }
+
+  const saveLabel = () => i18n.global.t("connection.save");
+  const saveAndConnectLabel = () => i18n.global.t("connection.saveAndConnect");
+
+  it.each(["off", "deepLink"] as const)("does not auto-connect a manually created connection in %s mode", async (mode) => {
+    settings.editorSettings.autoConnectAfterCreateMode = mode;
+    store.connect.mockResolvedValue(undefined);
+    await mountManualConfigDialog();
+    expect(saveButton(saveLabel())).toBeTruthy();
+    await clickSave(saveLabel());
+    expect(store.connect).not.toHaveBeenCalled();
+  });
+
+  it("keeps connecting every new connection in all mode", async () => {
+    settings.editorSettings.autoConnectAfterCreateMode = "all";
+    store.connect.mockResolvedValue(undefined);
+    await mountManualConfigDialog();
+    await clickSave(saveAndConnectLabel());
+    await vi.waitFor(() => expect(store.connect).toHaveBeenCalledOnce());
+  });
+
+  it("skips confirmation and connects a create deep link in deepLink mode", async () => {
+    settings.editorSettings.autoConnectAfterCreateMode = "deepLink";
+    settings.editorSettings.deepLinkConnectionConfirmMode = "always";
+    await mountNewDialog(deepLinkUrl);
+    // 免确认 + 保存后立即连接，不用等用户点确认按钮（堡垒机凭据有时效）。
+    await vi.waitFor(() => expect(store.addConnection).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(store.connect).toHaveBeenCalledOnce());
+  });
+
+  it("skips confirmation and connects a create deep link in all mode", async () => {
+    settings.editorSettings.autoConnectAfterCreateMode = "all";
+    settings.editorSettings.deepLinkConnectionConfirmMode = "always";
+    await mountNewDialog(deepLinkUrl);
+    await vi.waitFor(() => expect(store.addConnection).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(store.connect).toHaveBeenCalledOnce());
+  });
+
+  it("connects an id update link in all mode even when the confirm setting only allows updates", async () => {
+    // 用户实际组合：确认方式「仅带 id 的更新链接」+ 自动连接「全部」。
+    settings.editorSettings.autoConnectAfterCreateMode = "all";
+    settings.editorSettings.deepLinkConnectionConfirmMode = "update";
+    await mountDialog(savedConnection(), "dbx://connection/new?id=saved-production&host=new.example.test");
+    await settle();
+    expect(store.updateConnection).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(store.connect).toHaveBeenCalledOnce());
+  });
+
+  it("connects an id update deep link that refreshes bastion credentials in deepLink mode", async () => {
+    settings.editorSettings.autoConnectAfterCreateMode = "deepLink";
+    settings.editorSettings.deepLinkConnectionConfirmMode = "always";
+    await mountDialog(savedConnection(), "dbx://connection/new?id=saved-production&host=new.example.test");
+    await settle();
+    expect(store.updateConnection).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(store.connect).toHaveBeenCalledOnce());
+  });
+
+  it("never auto-connects in off mode, not even for deep links", async () => {
+    settings.editorSettings.autoConnectAfterCreateMode = "off";
+    await mountNewDialog(deepLinkUrl);
+    // 关闭时仍停在确认弹窗，不自动提交也不自动连接。
+    expect(store.addConnection).not.toHaveBeenCalled();
+    expect(saveButton(saveLabel())).toBeTruthy();
+    await clickSave(saveLabel());
+    expect(store.connect).not.toHaveBeenCalled();
+  });
+
+  it("connects a one-time bastion deep link immediately without waiting for confirmation", async () => {
+    settings.editorSettings.autoConnectAfterCreateMode = "deepLink";
+    settings.editorSettings.deepLinkConnectionConfirmMode = "always";
+    store.connect.mockResolvedValue(undefined);
+    await mountNewDialog(`${deepLinkUrl}&one_time=true`);
+    await vi.waitFor(() => expect(store.addConnection).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(store.connect).toHaveBeenCalledOnce());
+  });
+
+  it("settles the connecting toast after a successful connection", async () => {
+    settings.editorSettings.autoConnectAfterCreateMode = "all";
+    const events = await mountWithConnectEvents(deepLinkUrl);
+    await vi.waitFor(() => expect(events.connectStarted).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(events.connectSucceeded).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(events.connectSettled).toHaveBeenCalledOnce());
+  });
+
+  it("settles the connecting toast even when a concurrent attempt cancels this one", async () => {
+    settings.editorSettings.autoConnectAfterCreateMode = "all";
+    // vi.mock 里把 CONNECTION_ATTEMPT_CANCELLED_MESSAGE 固定成 "cancelled"。
+    store.connect.mockRejectedValue(new Error("cancelled"));
+    const events = await mountWithConnectEvents(deepLinkUrl);
+    await vi.waitFor(() => expect(events.connectSettled).toHaveBeenCalledOnce());
+    expect(events.connectSucceeded).not.toHaveBeenCalled();
+  });
+
+  it("treats a connection link pasted into the dialog as a deep-link creation", async () => {
+    settings.editorSettings.autoConnectAfterCreateMode = "deepLink";
+    store.connect.mockResolvedValue(undefined);
+    await mountManualConfigDialog();
+    const parseButton = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.getAttribute("aria-label") === i18n.global.t("connection.parseConnectionUrl"));
+    expect(parseButton).toBeTruthy();
+    const urlInput = parseButton!.closest("div")?.querySelector("input");
+    expect(urlInput).toBeTruthy();
+    urlInput!.value = deepLinkUrl;
+    urlInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    parseButton!.click();
+    await settle();
+    expect(saveButton(saveAndConnectLabel())).toBeTruthy();
+    await clickSave(saveAndConnectLabel());
+    await vi.waitFor(() => expect(store.connect).toHaveBeenCalledOnce());
   });
 });

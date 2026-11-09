@@ -705,6 +705,17 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ deepLinkConnectionConfirmMode: "sometimes" } as any).deepLinkConnectionConfirmMode).toBe("always");
   });
 
+  it("keeps auto-connecting new connections by default and limits the opt-out modes", () => {
+    // 老配置文件没有这个字段时保持「保存并连接」的历史行为。
+    expect(normalizeEditorSettings({}).autoConnectAfterCreateMode).toBe("all");
+    expect(DEFAULT_EDITOR_SETTINGS.autoConnectAfterCreateMode).toBe("all");
+    for (const mode of ["off", "deepLink", "all"] as const) {
+      expect(normalizeEditorSettings({ autoConnectAfterCreateMode: mode }).autoConnectAfterCreateMode).toBe(mode);
+    }
+    expect(normalizeEditorSettings({ autoConnectAfterCreateMode: "sometimes" } as any).autoConnectAfterCreateMode).toBe("all");
+    expect(normalizeEditorSettings({ autoConnectAfterCreateMode: false } as any).autoConnectAfterCreateMode).toBe("all");
+  });
+
   it("keeps duplicate tab titles on ordinal by default and accepts the connection-name mode", () => {
     // 老配置文件没有这个字段时保持历史行为（序号），升级不该改变已有标签栏。
     expect(normalizeEditorSettings({}).duplicateTabTitleMode).toBe("ordinal");

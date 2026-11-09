@@ -95,6 +95,7 @@ import {
   type DisconnectTabHandlingMode,
   type DeleteConnectionTabHandlingMode,
   type DeepLinkConnectionConfirmMode,
+  type AutoConnectAfterCreateMode,
   type DuplicateTabTitleMode,
   type DataTabReuseMode,
   type DataGridFilterEditorView,
@@ -1033,6 +1034,7 @@ const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(settingsSto
 const editDeleteConnectionTabHandlingMode = ref<DeleteConnectionTabHandlingMode>(settingsStore.editorSettings.deleteConnectionTabHandlingMode);
 const editRememberConnectionDatabaseOnDelete = ref(settingsStore.editorSettings.rememberConnectionDatabaseOnDelete);
 const editDeepLinkConnectionConfirmMode = ref<DeepLinkConnectionConfirmMode>(settingsStore.editorSettings.deepLinkConnectionConfirmMode);
+const editAutoConnectAfterCreateMode = ref<AutoConnectAfterCreateMode>(settingsStore.editorSettings.autoConnectAfterCreateMode);
 const editDuplicateTabTitleMode = ref<DuplicateTabTitleMode>(settingsStore.editorSettings.duplicateTabTitleMode);
 // 「记住的连接名 → 数据库」是累积数据而非偏好设置，不进弹窗草稿；这里直接读写 store，
 // 让清除操作立即生效，不受弹窗的保存/取消影响。
@@ -1157,6 +1159,18 @@ const deepLinkConnectionConfirmModeDescriptionKey = computed(() => {
   }
 
   return "deepLinkConnectionConfirmModeAlwaysDescription";
+});
+const autoConnectAfterCreateModeDescriptionKey = computed(() => {
+  switch (editAutoConnectAfterCreateMode.value) {
+    case "off":
+      return "autoConnectAfterCreateModeOffDescription";
+    case "deepLink":
+      return "autoConnectAfterCreateModeDeepLinkDescription";
+    case "all":
+      return "autoConnectAfterCreateModeAllDescription";
+  }
+
+  return "autoConnectAfterCreateModeAllDescription";
 });
 const duplicateTabTitleModeDescriptionKey = computed(() => (editDuplicateTabTitleMode.value === "connection" ? "duplicateTabTitleModeConnectionDescription" : "duplicateTabTitleModeOrdinalDescription"));
 const normalizedEditTableColumnTemplateFields = computed(() => tableColumnTemplateRowsToSettings(editTableColumnTemplateRows.value));
@@ -1446,6 +1460,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     deleteConnectionTabHandlingMode: editDeleteConnectionTabHandlingMode.value,
     rememberConnectionDatabaseOnDelete: editRememberConnectionDatabaseOnDelete.value,
     deepLinkConnectionConfirmMode: editDeepLinkConnectionConfirmMode.value,
+    autoConnectAfterCreateMode: editAutoConnectAfterCreateMode.value,
     duplicateTabTitleMode: editDuplicateTabTitleMode.value,
     dataTabReuseMode: editDataTabReuseMode.value,
     openDataTabsNextToActive: editOpenDataTabsNextToActive.value,
@@ -2163,6 +2178,7 @@ function syncEditorSettingsDraftFromStore() {
   editDeleteConnectionTabHandlingMode.value = settingsStore.editorSettings.deleteConnectionTabHandlingMode;
   editRememberConnectionDatabaseOnDelete.value = settingsStore.editorSettings.rememberConnectionDatabaseOnDelete;
   editDeepLinkConnectionConfirmMode.value = settingsStore.editorSettings.deepLinkConnectionConfirmMode;
+  editAutoConnectAfterCreateMode.value = settingsStore.editorSettings.autoConnectAfterCreateMode;
   editDuplicateTabTitleMode.value = settingsStore.editorSettings.duplicateTabTitleMode;
   editDataTabReuseMode.value = settingsStore.editorSettings.dataTabReuseMode;
   editOpenDataTabsNextToActive.value = settingsStore.editorSettings.openDataTabsNextToActive;
@@ -2346,6 +2362,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   deleteConnectionTabHandlingMode: editDeleteConnectionTabHandlingMode,
   rememberConnectionDatabaseOnDelete: editRememberConnectionDatabaseOnDelete,
   deepLinkConnectionConfirmMode: editDeepLinkConnectionConfirmMode,
+  autoConnectAfterCreateMode: editAutoConnectAfterCreateMode,
   duplicateTabTitleMode: editDuplicateTabTitleMode,
   dataTabReuseMode: editDataTabReuseMode,
   openDataTabsNextToActive: editOpenDataTabsNextToActive,
@@ -2962,6 +2979,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDeleteConnectionTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.deleteConnectionTabHandlingMode;
     editRememberConnectionDatabaseOnDelete.value = DEFAULT_EDITOR_SETTINGS.rememberConnectionDatabaseOnDelete;
     editDeepLinkConnectionConfirmMode.value = DEFAULT_EDITOR_SETTINGS.deepLinkConnectionConfirmMode;
+    editAutoConnectAfterCreateMode.value = DEFAULT_EDITOR_SETTINGS.autoConnectAfterCreateMode;
     editDuplicateTabTitleMode.value = DEFAULT_EDITOR_SETTINGS.duplicateTabTitleMode;
     editDataTabReuseMode.value = DEFAULT_EDITOR_SETTINGS.dataTabReuseMode;
     editOpenDataTabsNextToActive.value = DEFAULT_EDITOR_SETTINGS.openDataTabsNextToActive;
@@ -10099,6 +10117,27 @@ onUnmounted(() => {
                 </Select>
                 <p class="text-xs text-muted-foreground">
                   {{ t(`settings.${deepLinkConnectionConfirmModeDescriptionKey}`) }}
+                </p>
+              </div>
+              <div class="settings-item space-y-2 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="auto-connect-after-create-mode">{{ t("settings.autoConnectAfterCreateMode") }}</Label>
+                  <HelpTooltip :label="t('settings.autoConnectAfterCreateMode')">
+                    {{ t("settings.autoConnectAfterCreateModeDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Select :model-value="editAutoConnectAfterCreateMode" @update:model-value="(value) => (editAutoConnectAfterCreateMode = value as AutoConnectAfterCreateMode)">
+                  <SelectTrigger id="auto-connect-after-create-mode" class="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="off">{{ t("settings.autoConnectAfterCreateModeOff") }}</SelectItem>
+                    <SelectItem value="deepLink">{{ t("settings.autoConnectAfterCreateModeDeepLink") }}</SelectItem>
+                    <SelectItem value="all">{{ t("settings.autoConnectAfterCreateModeAll") }}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p class="text-xs text-muted-foreground">
+                  {{ t(`settings.${autoConnectAfterCreateModeDescriptionKey}`) }}
                 </p>
               </div>
               <div class="settings-item space-y-2 rounded-md border bg-muted/20 px-3 py-2">

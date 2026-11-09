@@ -1439,6 +1439,8 @@ export default withEnglishFallback({
     oracleTnsAdminRequired: "Oracle TNS モードでは tnsnames.ora を含む TNS_ADMIN ディレクトリが必要です。",
     oracleTnsTransportUnsupported: "Oracle TNS 接続は SSH、プロキシ、HTTP トンネルと併用できません。トランスポート層を削除するか、サービス名/SID モードを使用してください。",
     version: "バージョン",
+    influxdbApiPath: "APIパス",
+    influxdbApiPathHint: "Nginx などのリバースプロキシで InfluxDB をサブパス（例: /influxdb）として公開する場合に入力します。サーバーに直接接続する場合は空欄のままで構いません。末尾のスラッシュは無視されます。",
     victoriametricsApiPath: "APIパス",
     victoriametricsApiPathHint: "単一ノード構成では /prometheus、クラスター構成では /select/tenantID/prometheus を使用します。",
     victoriametricsLookback: "メタデータ参照範囲",

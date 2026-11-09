@@ -4,6 +4,7 @@ import { GAUSSDB_M_JDBC_DRIVER_PROFILE } from "@/lib/database/jdbcDialect";
 import { effectiveRedisDatabaseIndex } from "@/lib/redis/redisDatabaseIndex";
 import { isSecretConnectionProperty, normalizeJdbcProperties, quoteJdbcProperty } from "@/lib/connection/jdbcProperties";
 import { redactConnectionStringSecrets } from "@/lib/connection/connectionStringRedaction";
+import { normalizeBasePath } from "@/lib/connection/connectionUrl";
 
 /**
  * Builds copy-ready connection strings (standard URL / JDBC URL / libpq DSN /
@@ -165,6 +166,20 @@ function effectiveUsername(config: ConnectionUrlCopyConfig): string {
   return config.username?.trim() ?? "";
 }
 
+/**
+ * InfluxDB passes databases and buckets as query parameters, so its URL path
+ * is free for the reverse-proxy sub path the deployment is served under.
+ * Returns `null` for every other database type.
+ */
+function influxBasePath(config: ConnectionUrlCopyConfig): string | null {
+  if (config.db_type !== "influxdb" && config.db_type !== "influxdb3") return null;
+  const external = config.external_config;
+  if (!external || typeof external !== "object") return "";
+  const record = external as Record<string, unknown>;
+  const raw = record.basePath ?? record.base_path;
+  return normalizeBasePath(typeof raw === "string" ? raw : "");
+}
+
 function queryHasParam(params: string, keys: string[]): boolean {
   if (!params) return false;
   const wanted = new Set(keys.map((key) => key.toLowerCase()));
@@ -302,7 +317,8 @@ function buildStandardUrl(config: ConnectionUrlCopyConfig, options: ConnectionUr
   const userInfo = usesApiKey ? "" : buildUserInfo(config, options.includePassword, encode, scheme === "oceanbase" ? encodeOceanBaseUrlUsername : encode);
   const hostPart = formatHostForUrl(host);
   const portPart = shouldAppendPort(config) ? `:${config.port}` : "";
-  const path = database ? `/${encodeURIComponent(database)}` : "";
+  const influxPath = influxBasePath(config);
+  const path = influxPath !== null ? influxPath : database ? `/${encodeURIComponent(database)}` : "";
   const query = standardUrlQuery(config, scheme);
   return `${scheme}://${userInfo}${hostPart}${portPart}${path}${query ? `?${query}` : ""}`;
 }

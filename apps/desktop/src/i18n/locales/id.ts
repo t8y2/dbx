@@ -964,6 +964,8 @@ export default withEnglishFallback({
     elasticsearchIndexGroupingPatternPlaceholder: "nonaktif secara default; masukkan regex untuk mengaktifkan",
     elasticsearchIndexGroupingPatternHint: "Nonaktif secara default (skema penamaan berbeda-beda). Masukkan ekspresi reguler untuk mengaktifkan: indeks rolling atau deret waktu yang cocok akan digabungkan menjadi satu pola wildcard yang dapat dikueri, menyembunyikan detail per hari.",
     version: "Versi",
+    influxdbApiPath: "Jalur API",
+    influxdbApiPathHint: "Isi ketika reverse proxy seperti Nginx menyajikan InfluxDB pada sub-path, misalnya /influxdb. Biarkan kosong untuk mengakses server di root. Tanda garis miring di akhir diabaikan.",
     victoriametricsApiPath: "Jalur API",
     victoriametricsApiPathHint: "Gunakan /prometheus untuk deployment single-node, atau /select/tenantID/prometheus untuk klaster.",
     victoriametricsLookback: "Lookback Metadata",

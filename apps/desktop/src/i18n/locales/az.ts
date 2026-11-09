@@ -769,6 +769,8 @@ export default withEnglishFallback({
     elasticsearchIndexGroupingPatternPlaceholder: "standart olaraq deaktivdir; aktiv etmək üçün müntəzəm ifadə daxil edin",
     elasticsearchIndexGroupingPatternHint: "Standart olaraq deaktivdir (adlandırma sxemləri fərqlənir). Aktiv etmək üçün müntəzəm ifadə daxil edin: uyğun gələn dövri və ya zaman sırası indeksləri gündəlik təfərrüatları gizlətməklə sorğulana bilən bir ümumiləşdirici şablonda birləşdirilir.",
     version: "Versiya",
+    influxdbApiPath: "API yolu",
+    influxdbApiPathHint: "Nginx kimi tərs proksi InfluxDB-ni alt yolda (məsələn /influxdb) təqdim edirsə, doldurun. Serverə kökdən daxil olmaq üçün boş buraxın. Sondakı kəsilmə nəzərə alınmır.",
     victoriametricsApiPath: "API yolu",
     victoriametricsApiPathHint: "Tək qovşaqlı quraşdırmalar üçün /prometheus, klasterlər üçün isə /select/tenantID/prometheus yolundan istifadə edin.",
     victoriametricsLookback: "Metaverilənlər üçün geriyə baxış müddəti",

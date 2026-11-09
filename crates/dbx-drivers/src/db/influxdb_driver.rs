@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::time::{Duration, Instant};
 
+use super::external_config::{external_string, normalize_base_path};
 use super::with_connection_timeout;
 use crate::models::connection::ConnectionConfig;
 use crate::sql::starts_with_executable_sql_keyword;
@@ -19,6 +20,10 @@ enum InfluxdbApiVersion {
 pub struct InfluxdbClient {
     http: HttpClient,
     base_url: String,
+    /// Optional path prefix for deployments behind a reverse proxy that
+    /// serves InfluxDB under a sub path (`/influxdb/`). Empty means the
+    /// server is reached at the root of `base_url`.
+    base_path: String,
     username: Option<String>,
     password: Option<String>,
     url_params: Option<String>,
@@ -39,6 +44,7 @@ impl InfluxdbClient {
         Self {
             http,
             base_url: url.trim_end_matches('/').to_string(),
+            base_path: String::new(),
             username,
             password,
             url_params,
@@ -60,6 +66,7 @@ impl InfluxdbClient {
         Ok(Self {
             http,
             base_url: url.trim_end_matches('/').to_string(),
+            base_path: String::new(),
             username,
             password,
             url_params,
@@ -72,6 +79,9 @@ impl InfluxdbClient {
     pub fn new_for_config(url: &str, config: &ConnectionConfig, timeout: Duration) -> Result<Self, String> {
         let version = influxdb_api_version(config.external_config.as_ref());
         let org = influxdb_org(config.external_config.as_ref());
+        let base_path = external_string(config, &["basePath", "base_path"])
+            .map(|value| normalize_base_path(&value))
+            .unwrap_or_default();
         // InfluxDB 2.x authenticates with a token and scopes requests by org/bucket.
         let (username, password) = match version {
             InfluxdbApiVersion::V1 => (
@@ -86,6 +96,7 @@ impl InfluxdbClient {
         Ok(Self {
             http,
             base_url: url.trim_end_matches('/').to_string(),
+            base_path,
             username,
             password,
             url_params: config.url_params.clone(),
@@ -156,6 +167,7 @@ impl Clone for InfluxdbClient {
         Self {
             http: self.http.clone(),
             base_url: self.base_url.clone(),
+            base_path: self.base_path.clone(),
             username: self.username.clone(),
             password: self.password.clone(),
             url_params: self.url_params.clone(),
@@ -239,7 +251,7 @@ fn build_query_url(client: &InfluxdbClient, database: Option<&str>, sql: &str) -
     }
     let encoded_sql = utf8_percent_encode(sql, NON_ALPHANUMERIC);
     params.push(format!("q={encoded_sql}"));
-    format!("{}/query?{}", client.base_url, params.join("&").as_str())
+    format!("{}{}/query?{}", client.base_url, client.base_path, params.join("&").as_str())
 }
 
 fn encode_url_param(value: &str) -> String {
@@ -252,12 +264,17 @@ fn quote_influx_identifier(value: &str) -> String {
 
 fn build_v2_buckets_url(client: &InfluxdbClient, offset: usize) -> Result<String, String> {
     let org = client.org.as_deref().ok_or_else(|| "InfluxDB 2.x organization is required".to_string())?;
-    Ok(format!("{}/api/v2/buckets?org={}&limit=100&offset={offset}", client.base_url, encode_url_param(org)))
+    Ok(format!(
+        "{}{}/api/v2/buckets?org={}&limit=100&offset={offset}",
+        client.base_url,
+        client.base_path,
+        encode_url_param(org)
+    ))
 }
 
 fn build_v2_query_url(client: &InfluxdbClient) -> Result<String, String> {
     let org = client.org.as_deref().ok_or_else(|| "InfluxDB 2.x organization is required".to_string())?;
-    Ok(format!("{}/api/v2/query?org={}", client.base_url, encode_url_param(org)))
+    Ok(format!("{}{}/api/v2/query?org={}", client.base_url, client.base_path, encode_url_param(org)))
 }
 
 fn build_request(client: &InfluxdbClient, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -940,6 +957,7 @@ mod tests {
         InfluxdbClient {
             http: reqwest::Client::new(),
             base_url: "http://localhost:8086".to_string(),
+            base_path: String::new(),
             username: None,
             password: None,
             url_params: None,
@@ -1137,6 +1155,60 @@ mod tests {
         assert_eq!(client.username, None);
         assert_eq!(client.password.as_deref(), Some("token-value"));
         assert_eq!(client.org.as_deref(), Some("DBX Org"));
+        assert_eq!(
+            build_v2_buckets_url(&client, 0).unwrap(),
+            "http://localhost:8086/api/v2/buckets?org=DBX%20Org&limit=100&offset=0"
+        );
+        assert_eq!(build_v2_query_url(&client).unwrap(), "http://localhost:8086/api/v2/query?org=DBX%20Org");
+    }
+
+    #[test]
+    fn config_applies_base_path_prefix() {
+        let config: ConnectionConfig = serde_json::from_value(json!({
+            "id": "influx-v1",
+            "name": "InfluxDB 1",
+            "db_type": "influxdb",
+            "host": "127.0.0.1",
+            "port": 8086,
+            "username": "user",
+            "password": "pass",
+            "database": "metrics",
+            "external_config": {
+                "version": "1",
+                "basePath": "/influxdb/"
+            }
+        }))
+        .unwrap();
+
+        let client = InfluxdbClient::new_for_config("http://localhost:8086", &config, Duration::from_secs(1)).unwrap();
+
+        assert_eq!(client.base_path, "/influxdb");
+        assert!(build_query_url(&client, Some("metrics"), "SELECT * FROM cpu")
+            .starts_with("http://localhost:8086/influxdb/query?db=metrics&q="));
+    }
+
+    #[test]
+    fn config_without_base_path_keeps_root_urls() {
+        let config: ConnectionConfig = serde_json::from_value(json!({
+            "id": "influx-v2",
+            "name": "InfluxDB 2",
+            "db_type": "influxdb",
+            "host": "127.0.0.1",
+            "port": 8086,
+            "username": "",
+            "password": "token-value",
+            "database": "metrics",
+            "external_config": {
+                "version": "2",
+                "org": "DBX Org",
+                "basePath": "/"
+            }
+        }))
+        .unwrap();
+
+        let client = InfluxdbClient::new_for_config("http://localhost:8086", &config, Duration::from_secs(1)).unwrap();
+
+        assert_eq!(client.base_path, "");
         assert_eq!(
             build_v2_buckets_url(&client, 0).unwrap(),
             "http://localhost:8086/api/v2/buckets?org=DBX%20Org&limit=100&offset=0"

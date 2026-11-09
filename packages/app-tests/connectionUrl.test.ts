@@ -904,3 +904,62 @@ test("parses MongoDB URL with simple authSource only", () => {
 test("rejects unsupported URL schemes", () => {
   assert.throws(() => parseConnectionUrl("ftp://example.com"), /Unsupported connection URL scheme/);
 });
+
+test("parses InfluxDB URLs and reads the path as the reverse proxy base path", () => {
+  const parsed = parseConnectionUrl("influxdb://user:password@influx.example.com:8086/influxdb");
+
+  assert.equal(parsed.dbType, "influxdb");
+  assert.equal(parsed.driverProfile, "influxdb");
+  assert.equal(parsed.host, "influx.example.com");
+  assert.equal(parsed.port, 8086);
+  assert.equal(parsed.username, "user");
+  assert.equal(parsed.password, "password");
+  assert.equal(parsed.database, undefined);
+  assert.equal(parsed.basePath, "/influxdb");
+});
+
+test("defaults the InfluxDB port and keeps an empty base path at the server root", () => {
+  const parsed = parseConnectionUrl("influxdb://user:password@influx.example.com");
+
+  assert.equal(parsed.port, 8086);
+  assert.equal(parsed.basePath, "");
+});
+
+test("parses InfluxDB 3 URLs with their own default port", () => {
+  const parsed = parseConnectionUrl("influxdb3://token@influx.example.com:8181/influxdb");
+
+  assert.equal(parsed.dbType, "influxdb3");
+  // InfluxDB 3 is a version of the InfluxDB card, so it shares its profile.
+  assert.equal(parsed.driverProfile, "influxdb");
+  assert.equal(parsed.port, 8181);
+  assert.equal(parsed.username, "");
+  assert.equal(parsed.password, "token");
+  assert.equal(parsed.basePath, "/influxdb");
+});
+
+test("parses HTTP URLs for the InfluxDB profile", () => {
+  const parsed = parseConnectionUrl("http://influx.example.com:8086/influxdb", "influxdb");
+
+  assert.equal(parsed.dbType, "influxdb");
+  assert.equal(parsed.ssl, false);
+  assert.equal(parsed.basePath, "/influxdb");
+});
+
+test("applies the InfluxDB base path to the external config and keeps the version", () => {
+  const parsed = parseConnectionUrl("influxdb://user:password@influx.example.com:8086/influxdb");
+  const applied = applyParsedConnectionUrl({ name: "influx", db_type: "influxdb", external_config: { version: "2", org: "dbx" } } as any, parsed);
+
+  assert.deepEqual(applied.external_config, { version: "2", org: "dbx", basePath: "/influxdb" });
+});
+
+test("drops the InfluxDB base path when the pasted URL has no path", () => {
+  const parsed = parseConnectionUrl("influxdb://user:password@influx.example.com:8086");
+  const applied = applyParsedConnectionUrl({ name: "influx", db_type: "influxdb", external_config: { version: "1", basePath: "/stale" } } as any, parsed);
+
+  assert.deepEqual(applied.external_config, { version: "1" });
+});
+
+test("shows InfluxDB connection URL placeholders without a database segment", () => {
+  assert.equal(connectionUrlPlaceholder("influxdb"), "influxdb://user:password@host:port");
+  assert.equal(connectionUrlPlaceholder("influxdb3"), "influxdb3://token@host:8181");
+});

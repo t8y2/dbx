@@ -7256,9 +7256,39 @@ export const useQueryStore = defineStore("query", () => {
     largeValuePreview: boolean;
   }
 
+  /**
+   * Pending "retry the original SQL once" state for query-mode executions whose
+   * hidden PostgreSQL locator projection was rejected by the server (#12647).
+   * Keyed by executionId: only the still-current execution may consume it.
+   */
+  const pendingQueryLocatorRetries = new Map<string, { connectionId: string; originalSql: string; publicationOptions?: Parameters<typeof executeTabSql>[2] }>();
+
+  /**
+   * Registers the original SQL behind a locator-bearing query rewrite so the
+   * result-publication path can replay it once if the engine rejects the
+   * rewrite (#12647). Keyed by executionId; consumed or dropped when that
+   * execution finishes.
+   */
+  function registerEditableQueryLocatorRetry(tab: QueryTab, originalSql: string) {
+    if (!tab.executionId) return;
+    pendingQueryLocatorRetries.set(tab.executionId, { connectionId: tab.connectionId!, originalSql });
+  }
+
+  /**
+   * Re-runs the untouched user SQL after the engine rejected its locator-bearing
+   * rewrite. Deferred to the next tick so the failed rewrite's error result is
+   * published (and observed) before the retry replaces it; the retry runs as an
+   * ordinary query execution, so its own publication path stays untouched.
+   */
+  function scheduleQueryLocatorRetry(tab: QueryTab, originalSql: string, options: Parameters<typeof executeTabSql>[2]) {
+    setTimeout(() => {
+      if (tabs.value.includes(tab) || findExecutionTab(tab.id) === tab) void executeTabSql(tab.id, originalSql, { ...options, resultBaseSql: originalSql }).catch(() => undefined);
+    }, 0);
+  }
+
   function oracleCompletionTableType(tab: QueryTab, metadataDbType: string, database: string, schema: string, tableName: string, catalog?: string): string | undefined {
     if (metadataDbType !== "oracle" && metadataDbType !== "oceanbase-oracle" && metadataDbType !== "postgres") return undefined;
-    const resolvedSchema = schema.trim() || (metadataDbType === "postgres" ? "public" : "");
+    const resolvedSchema = schema.trim() || tab.schema?.trim() || (metadataDbType === "postgres" ? "public" : "");
     if (!resolvedSchema) return undefined;
     const normalizeIdentifier = (value: string | undefined) => value?.trim().toLowerCase() ?? "";
     const targetName = normalizeIdentifier(tableName);
@@ -7273,7 +7303,12 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function canUseQueryKeylessRowPredicate(databaseType: DatabaseType, loaded: LoadedEditableSource): boolean {
-    if (isViewTableType(loaded.tableMeta.tableType)) return false;
+    // The hidden locator path is view-safe by construction: `resolveOracleRowIdSafety`
+    // only stamps BASE TABLE, and PostgreSQL's own check below requires the known
+    // type. Unknown/empty types keep main's keyless whole-row fallback (with its
+    // warning banner) for auto-updatable views it cannot distinguish (#14596 review).
+    if (isViewTableType(loaded.tableMeta.tableType) && (databaseType !== "postgres" || loaded.tableMeta.tableType?.trim().toUpperCase() === "VIEW")) return false;
+    if (databaseType === "postgres" && loaded.tableMeta.tableType?.trim() && loaded.tableMeta.tableType?.trim().toUpperCase() !== "BASE TABLE") return false;
     if (loaded.tableMeta.columns.some((column) => column.resolved_table) && loaded.tableMeta.tableType?.trim().toUpperCase() !== "TABLE") return false;
     if (!canUseKeylessRowPredicate(databaseType, loaded.tableMeta.primaryKeys)) return false;
     if (databaseType === "oceanbase-oracle" && loaded.tableMeta.tableType?.trim().toUpperCase() !== "TABLE") return false;
@@ -7533,6 +7568,11 @@ export const useQueryStore = defineStore("query", () => {
     const normalizeIdentifier = (value: string | undefined) => value?.trim().toLowerCase() ?? "";
     const targetName = normalizeIdentifier(loaded.tableMeta.tableName);
     const resolvedSchema = loaded.tableMeta.schema?.trim() || tab.schema?.trim() || connectionStore.getConfig(tab.connectionId!)?.default_schema?.trim() || (databaseType === "postgres" ? "public" : "");
+    // PostgreSQL resolves unqualified names through the session search_path, not
+    // always `public`: the tab's schema and the connection's default schema come
+    // first, and `public` only remains the last-resort assumption when neither is
+    // known. `tableoid` still pins the physical relation, so a wrong guess here
+    // can only cost the fast path, never write correctness.
     if (!resolvedSchema) return false;
     const targetSchema = normalizeIdentifier(resolvedSchema);
     const targetCatalog = loaded.tableMeta.catalog?.trim() ? normalizeIdentifier(loaded.tableMeta.catalog) : undefined;
@@ -7725,7 +7765,17 @@ export const useQueryStore = defineStore("query", () => {
       if (syntheticRowId && !(await resolveOracleRowIdSafety(tab, loaded, databaseType))) return unchanged;
       const effectivePrimaryKeys = postgresCtidRowId ? [DBX_ROWID_COLUMN] : primaryKeys;
       const declaredPrimaryKeys = syntheticRowId ? [] : primaryKeys;
-      return buildHiddenPrimaryKeyPreparation(tab, sql, databaseType, loaded, effectivePrimaryKeys, declaredPrimaryKeys, traceId, elapsed);
+      const preparation = buildHiddenPrimaryKeyPreparation(tab, sql, databaseType, loaded, effectivePrimaryKeys, declaredPrimaryKeys, traceId, elapsed);
+      if (postgresCtidRowId && preparation.hiddenPrimaryKeys.length > 0) {
+        // PostgreSQL-compatible engines without system-column support (Hologres rejects
+        // `tableoid`, #12647) fail every locator-bearing rewrite at the server. Query-mode
+        // results have no reload entry point like the data-tab flows, so register the
+        // original SQL now: when this execution lands as an error result, the publication
+        // path replays it once and marks the connection, and the next execution skips the
+        // locator up front (rowIdLocatorUnsupported above).
+        registerEditableQueryLocatorRetry(tab, sql);
+      }
+      return preparation;
     } catch (error) {
       // Metadata enrichment is optional. Query execution must retain its prior
       // behavior when metadata is unavailable or the SQL cannot be rewritten.
@@ -9785,6 +9835,19 @@ export const useQueryStore = defineStore("query", () => {
       } else if (hiddenPrimaryKeys.length > 0) {
         queryMetadataSql = queryBaseSql;
       }
+      // Query-mode locator rejection (#12647): a PostgreSQL-compatible engine that
+      // refuses system columns fails the whole rewritten SELECT. Remember the
+      // connection and replay the original SQL once so the user still gets rows —
+      // same degradation contract as the data-tab flows (`shouldRetryWithoutRowIdLocator`).
+      if (hiddenPrimaryKeys.length > 0 && tab.mode === "query" && results.length === 1 && isQueryExecutionErrorResult(results[0]) && findExecutionTab(id) === tab && tab.executionId === executionId) {
+        const pendingLocatorRetry = pendingQueryLocatorRetries.get(executionId);
+        if (pendingLocatorRetry && pendingLocatorRetry.connectionId === executionConnectionId && queryBaseSql.trim() === pendingLocatorRetry.originalSql.trim()) {
+          pendingQueryLocatorRetries.delete(executionId);
+          markRowIdLocatorUnsupported(executionConnectionId);
+          queryExecutionLog("info", "query-locator-retry:original-sql", { traceId, elapsed: elapsed() });
+          scheduleQueryLocatorRetry(tab, pendingLocatorRetry.originalSql, options);
+        }
+      }
       queryExecutionLog("info", "execute-multi:done", {
         traceId,
         resultCount: results.length,
@@ -10189,6 +10252,7 @@ export const useQueryStore = defineStore("query", () => {
         } else {
           pendingResultRunRestores.delete(executionId);
         }
+        pendingQueryLocatorRetries.delete(executionId);
         current.isExecuting = false;
         current.isCancelling = false;
         current.queryExecutionStartedAt = undefined;
@@ -10198,6 +10262,7 @@ export const useQueryStore = defineStore("query", () => {
         queryExecutionLog("info", "finish", { traceId, elapsed: elapsed() });
       } else {
         pendingResultRunRestores.delete(executionId);
+        pendingQueryLocatorRetries.delete(executionId);
         if (current) clearLiveBatchSqlExecution(current, executionId);
         queryExecutionLog("warn", "finish-stale", {
           traceId,

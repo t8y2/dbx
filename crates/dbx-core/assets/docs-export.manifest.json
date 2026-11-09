@@ -48,6 +48,6 @@
     "@vue/runtime-core": "3.5.44",
     "@vue/runtime-dom": "3.5.44",
     "@vue/shared": "3.5.44",
-    "marked": "18.1.1"
+    "marked": "18.1.3"
   }
 }

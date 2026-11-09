@@ -1175,6 +1175,9 @@ export default withEnglishFallback({
     source: "업데이트 소스",
     sourceOfficial: "공식 소스",
     sourceCnb: "CNB",
+    blockedRetryTitle: "재시작 전에 이 작업을 종료해야 합니다",
+    blockedRetryConsequence: "확인하면 실행 중인 쿼리가 취소되고, 백그라운드 작업이 종료되며, 커밋되지 않은 트랜잭션이 롤백됩니다. 트랜잭션에서 아직 커밋되지 않은 변경 사항은 손실됩니다.",
+    blockedRetryAccept: "모두 닫고 계속",
   },
   pluginDock: {
     close: "터미널 닫기",

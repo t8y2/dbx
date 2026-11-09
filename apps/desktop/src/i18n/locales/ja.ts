@@ -1169,6 +1169,9 @@ export default withEnglishFallback({
     source: "更新ソース",
     sourceOfficial: "公式ソース",
     sourceCnb: "CNB",
+    blockedRetryTitle: "再起動する前にこれらの操作を終了する必要があります",
+    blockedRetryConsequence: "確認すると、実行中のクエリがキャンセルされ、バックグラウンドタスクが終了され、未コミットのトランザクションがロールバックされます。トランザクション内の未コミットの変更は失われます。",
+    blockedRetryAccept: "すべて閉じて続行",
   },
   pluginDock: {
     close: "ターミナルを閉じる",

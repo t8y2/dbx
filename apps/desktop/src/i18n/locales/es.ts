@@ -1180,6 +1180,9 @@ export default withEnglishFallback({
     source: "Fuente de actualizaciones",
     sourceOfficial: "Fuente oficial",
     sourceCnb: "CNB",
+    blockedRetryTitle: "Hay que finalizar estas operaciones antes de reiniciar",
+    blockedRetryConsequence: "Tras la confirmación, se cancelarán las consultas en ejecución, se terminarán las tareas en segundo plano y se revertirán las transacciones no confirmadas; los cambios no confirmados de las transacciones se perderán.",
+    blockedRetryAccept: "Cerrar todo y continuar",
   },
   pluginDock: {
     close: "Cerrar terminal",

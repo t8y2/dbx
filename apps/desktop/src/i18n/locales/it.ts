@@ -1168,6 +1168,9 @@ export default withEnglishFallback({
     source: "Sorgente di aggiornamento",
     sourceOfficial: "Sorgente ufficiale",
     sourceCnb: "CNB",
+    blockedRetryTitle: "È necessario terminare queste operazioni prima del riavvio",
+    blockedRetryConsequence: "Dopo la conferma, le query in esecuzione verranno annullate, le attività in background terminate e verrà eseguito il rollback delle transazioni non confermate; le modifiche non ancora confermate nelle transazioni andranno perse.",
+    blockedRetryAccept: "Chiudi tutto e continua",
   },
   pluginDock: {
     close: "Chiudi terminale",

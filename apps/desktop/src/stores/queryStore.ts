@@ -3451,6 +3451,7 @@ export const useQueryStore = defineStore("query", () => {
         name: objectSource.name,
         objectType: objectSource.objectType,
         databaseType,
+        sqlFormatter: settingsStore.editorSettings.sqlFormatter,
         signature: objectSource.signature,
       });
       // 期间 tab 可能被关闭、被复用或已被编辑：身份没变且用户没改过内容时才回填
@@ -3586,6 +3587,7 @@ export const useQueryStore = defineStore("query", () => {
         name: request.name,
         objectType: request.objectType,
         databaseType,
+        sqlFormatter: settingsStore.editorSettings.sqlFormatter,
         signature: request.signature,
         metadataReadOptions: triggerOptions,
       });

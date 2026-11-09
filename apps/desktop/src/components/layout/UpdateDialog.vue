@@ -609,7 +609,7 @@ watch(
               </SelectContent>
             </Select>
           </div>
-          <template v-if="appUpdateActionsVisible">
+          <template v-if="appUpdateActionsVisible && !blockedUpdateMessage">
             <div v-if="updateInfo?.update_available" class="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
               <Button v-if="canIgnoreVersion" variant="ghost" class="shrink-0" :disabled="isIgnoringUpdate" @click="emit('ignore-version')">
                 <Loader2 v-if="isIgnoringUpdate" class="h-4 w-4 animate-spin" />

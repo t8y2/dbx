@@ -3820,8 +3820,8 @@ function preferredKeywordsForCompletion(
   if (selectListColumnContext && hasSelectListExpression(beforeCursor, databaseType)) keywords.push("FROM");
   if (isAfterJoinModifierContext(beforeCursor, databaseType)) keywords.push("JOIN");
   if (!exclusiveTableSuggestions && isAfterSelectBodyExpression(beforeToken, databaseType)) {
-    keywords.push("LIMIT");
     if (databaseType === "mysql" && /\sforce$/i.test(beforeToken)) keywords.push("INDEX");
+    keywords.push("LIMIT");
   }
   if (isAfterConditionExpression(beforeToken, databaseType)) keywords.push("AND", "OR");
   if (updateInfo?.afterTarget) keywords.push("SET");

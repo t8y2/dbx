@@ -508,6 +508,29 @@ describe("MessageBrowser", () => {
     expect(browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]')?.value).toBe("");
   });
 
+  it("searches the whole topic with the entered keyword and result cap", async () => {
+    const browser = await mountBrowser();
+    const filter = browser.querySelector<HTMLInputElement>('[data-testid="kafka-message-filter-input"]');
+    const maxResults = browser.querySelector<HTMLInputElement>('[data-testid="kafka-topic-search-max"]');
+    const searchButton = browser.querySelector<HTMLButtonElement>('[data-testid="kafka-topic-search"]');
+    if (!filter || !maxResults || !searchButton) throw new Error("Kafka topic search controls not found");
+
+    // 未输入关键字时搜索按钮保持禁用，避免下发无意义的全主题扫描
+    expect(searchButton.disabled).toBe(true);
+
+    await setInputValue(filter, "Payment-Failed");
+    await setInputValue(maxResults, "5000");
+    await flushUi();
+    expect(searchButton.disabled).toBe(false);
+    searchButton.click();
+    await flushUi();
+
+    expect(backend.mqPeekMessages).toHaveBeenLastCalledWith("mq-1", expect.objectContaining({ topic: "events" }), "__dbx_kafka_viewer__", 5000, {
+      startPosition: "latest",
+      searchQuery: "payment-failed",
+    });
+  });
+
   it("does not expose the loaded-message filter for non-Kafka browsers", async () => {
     const browser = await mountBrowser("rabbitmq");
 

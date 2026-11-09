@@ -41,6 +41,10 @@ const count = ref(20);
 const decodePayload = ref(false);
 const advancedExpanded = ref(false);
 const messageSearchQuery = ref("");
+// 主题内搜索只在用户显式点击时触发，普通「加载消息」的条数上限与行为保持不变。
+const searchMaxResults = ref(1000);
+const activeSearchQuery = ref("");
+const MAX_TOPIC_SEARCH_RESULTS = 100000;
 type KafkaPeekStartPosition = NonNullable<PeekMessagesOptions["startPosition"]>;
 const kafkaStartPosition = ref<KafkaPeekStartPosition>("latest");
 const kafkaStartTimestamp = ref("");
@@ -72,21 +76,38 @@ function peekGroupName(): string {
 }
 
 async function loadMessages() {
+  const resultLimit = Math.max(1, Math.min(100, Math.trunc(Number(count.value) || 20)));
+  count.value = resultLimit;
+  await fetchMessages({ resultLimit });
+}
+
+/** 主题内搜索：关键字下发给 agent 扫描整个主题，而不只是过滤已加载的消息。 */
+async function searchTopic() {
+  const query = normalizedMessageSearchQuery.value;
+  if (!isKafka.value || !query || loading.value) return;
+  const resultLimit = Math.min(MAX_TOPIC_SEARCH_RESULTS, Math.max(1, Math.trunc(Number(searchMaxResults.value) || 1000)));
+  searchMaxResults.value = resultLimit;
+  await fetchMessages({ resultLimit, searchQuery: query });
+}
+
+async function fetchMessages({ resultLimit, searchQuery }: { resultLimit: number; searchQuery?: string }) {
   const topic = props.topic;
   if (!topic || loading.value) return;
   const requestVersion = ++messageRequestVersion;
   loading.value = true;
   error.value = undefined;
   incomplete.value = false;
+  activeSearchQuery.value = searchQuery ?? "";
   try {
-    const resultLimit = Math.max(1, Math.min(100, Math.trunc(Number(count.value) || 20)));
-    count.value = resultLimit;
     const options: PeekMessagesOptions = {};
     const partitionText = String(partition.value).trim();
     const offsetText = String(offset.value).trim();
 
     if (isKafka.value) {
       options.startPosition = kafkaStartPosition.value;
+      if (searchQuery) {
+        options.searchQuery = searchQuery;
+      }
       if (partitionText !== "") {
         const parsedPartition = parseNonNegativeSafeInteger(partitionText);
         if (parsedPartition == null) throw new Error(t("mqMessages.partitionMustBeNonNegativeInt"));
@@ -151,6 +172,7 @@ function invalidateMessageRequest() {
   error.value = undefined;
   messages.value = [];
   incomplete.value = false;
+  activeSearchQuery.value = "";
 }
 
 function messagePayload(message: PeekedMessage): string {
@@ -232,7 +254,7 @@ watch(kafkaStartPosition, () => {
     </p>
     <p v-else class="peek-default-hint">{{ t("mqMessages.peekDefaultHint") }}</p>
     <p v-if="incomplete" class="peek-incomplete" role="status" data-testid="peek-incomplete">
-      {{ t("mqMessages.peekIncomplete") }}
+      {{ activeSearchQuery ? t("mqMessages.searchIncomplete") : t("mqMessages.peekIncomplete") }}
     </p>
 
     <div class="peek-controls">
@@ -306,9 +328,17 @@ watch(kafkaStartPosition, () => {
       </div>
     </template>
 
-    <div v-if="isKafka && messages.length" class="message-filter-row" data-testid="kafka-message-filter">
+    <!-- 表单外观下搜索入口始终可见；监控面板保持「有消息才显示」的原布局。 -->
+    <div v-if="isKafka && (messages.length || !isMonitoring)" class="message-filter-row" data-testid="kafka-message-filter">
       <MqSearchInput v-model="messageSearchQuery" :placeholder="t('mqMessages.filterLoadedPlaceholder')" :aria-label="t('mqMessages.filterLoadedPlaceholder')" :disabled="loading" data-testid="kafka-message-filter-input" />
-      <span class="mq-result-count" data-testid="kafka-message-filter-count" aria-live="polite">
+      <label class="topic-search-max-results">
+        <span>{{ t("mqMessages.searchMaxResults") }}</span>
+        <input v-model.number="searchMaxResults" data-testid="kafka-topic-search-max" type="number" min="1" :max="MAX_TOPIC_SEARCH_RESULTS" :disabled="loading" />
+      </label>
+      <Button type="button" variant="outline" size="sm" class="message-topic-search h-7 px-2 text-xs" :disabled="loading || !normalizedMessageSearchQuery" :title="t('mqMessages.searchInTopicHint')" data-testid="kafka-topic-search" @click="searchTopic">
+        {{ t("mqMessages.searchInTopic") }}
+      </Button>
+      <span v-if="messages.length" class="mq-result-count" data-testid="kafka-message-filter-count" aria-live="polite">
         {{ t("mqMessages.filterLoadedCount", { matched: filteredMessages.length, loaded: messages.length }) }}
       </span>
     </div>
@@ -486,6 +516,23 @@ watch(kafkaStartPosition, () => {
 .message-filter-row :deep(.mq-search-input) {
   width: min(420px, 100%);
   flex: 1;
+}
+
+.topic-search-max-results {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.topic-search-max-results input {
+  width: 88px;
+}
+
+.message-topic-search {
+  flex-shrink: 0;
 }
 
 .collapse-toggle {

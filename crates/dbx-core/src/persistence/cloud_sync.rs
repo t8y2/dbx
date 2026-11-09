@@ -4508,7 +4508,10 @@ mod tests {
             base,
         );
 
-        assert!(client.put_snapshot(&snapshot, Some("wrong-password"), None).await.is_err());
+        let hash = super::content_hash(&serde_json::to_string(&encrypted).unwrap());
+        let error =
+            client.put_snapshot_guarded(&snapshot, Some("wrong-password"), None, Some(&hash), false).await.unwrap_err();
+        assert!(!error.contains("saved version"));
         assert_eq!(server.await.unwrap(), vec!["GET /gists/existing-id HTTP/1.1"]);
     }
 
@@ -5048,6 +5051,7 @@ mod tests {
         let storage = crate::persistence::test_storage::open(&temp_db_path("gitlab-wrong-password")).await.unwrap();
         let snapshot = build_sync_snapshot(&storage, "test-version", None, None).await.unwrap();
         let encrypted = serde_json::to_string(&encrypt_snippet_snapshot(&snapshot, "correct").unwrap()).unwrap();
+        let hash = super::content_hash(&encrypted);
         let (base, server) =
             spawn_gitlab_server(vec![serde_json::json!({"files": [{"path": "dbx-sync.json"}]}).to_string(), encrypted])
                 .await;
@@ -5061,7 +5065,8 @@ mod tests {
             },
             base,
         );
-        assert!(client.put_snapshot(&snapshot, Some("wrong"), None).await.is_err());
+        let error = client.put_snapshot_guarded(&snapshot, Some("wrong"), None, Some(&hash), false).await.unwrap_err();
+        assert!(!error.contains("saved version"));
         assert_eq!(server.await.unwrap().len(), 2);
     }
 

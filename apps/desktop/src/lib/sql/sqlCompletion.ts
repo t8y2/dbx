@@ -3754,7 +3754,8 @@ function detectInsertColumnListContext(beforeCursor: string): { table: string; d
   const cleaned = beforeCursor.replace(/'[^']*'/g, "''");
   const identifier = '(?:"[^"]+"|`[^`]+`|\\[[^\\]]+\\]|[A-Za-z_][\\w$]*)';
   const qualifiedIdentifier = `${identifier}(?:\\.${identifier}){0,2}`;
-  const match = new RegExp(`\\binsert\\s+into\\s+(${qualifiedIdentifier})\\s*\\([^)]*$`, "i").exec(cleaned);
+  // MySQL's `INSERT IGNORE INTO` targets a table the same way as `INSERT INTO`.
+  const match = new RegExp(`\\binsert\\s+(?:ignore\\s+)?into\\s+(${qualifiedIdentifier})\\s*\\([^)]*$`, "i").exec(cleaned);
   if (!match) return null;
   const fullTable = match[1];
   if (!fullTable) return null;

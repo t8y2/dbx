@@ -707,12 +707,7 @@ const objectColumnDefinitions = computed(() => {
   return [...availableObjectColumnDefinitions.value].sort((left, right) => (ranks.get(left.key) ?? Number.MAX_SAFE_INTEGER) - (ranks.get(right.key) ?? Number.MAX_SAFE_INTEGER));
 });
 
-function moveObjectColumn(key: ObjectBrowserColumnKey, direction: -1 | 1): void {
-  const order: ObjectBrowserColumnKey[] = objectColumnDefinitions.value.map((column) => column.key);
-  const index = order.indexOf(key);
-  const target = index + direction;
-  if (index < 0 || target < 0 || target >= order.length) return;
-  [order[index], order[target]] = [order[target]!, order[index]!];
+function saveObjectColumnOrder(order: ObjectBrowserColumnKey[]): void {
   objectColumnOrder.value = [...order, ...objectColumnOrder.value.filter((column) => !order.includes(column))];
   try {
     localStorage.setItem(objectColumnOrderStorageKey.value, JSON.stringify(objectColumnOrder.value));
@@ -721,6 +716,71 @@ function moveObjectColumn(key: ObjectBrowserColumnKey, direction: -1 | 1): void 
   }
   nextTick(() => syncObjectListHeaderScroll());
 }
+
+function moveObjectColumn(key: ObjectBrowserColumnKey, direction: -1 | 1): void {
+  const order: ObjectBrowserColumnKey[] = objectColumnDefinitions.value.map((column) => column.key);
+  const index = order.indexOf(key);
+  const target = index + direction;
+  if (index < 0 || target < 0 || target >= order.length) return;
+  [order[index], order[target]] = [order[target]!, order[index]!];
+  saveObjectColumnOrder(order);
+}
+
+const objectColumnConfigOpen = ref(false);
+const objectColumnListRef = ref<HTMLElement>();
+const objectColumnDrag = ref<{ key: ObjectBrowserColumnKey; pointerId: number; startX: number; startY: number; active: boolean; handle: HTMLElement }>();
+const objectColumnDropTarget = ref<{ key: ObjectBrowserColumnKey; after: boolean }>();
+
+function cancelObjectColumnDrag(): void {
+  const drag = objectColumnDrag.value;
+  objectColumnDrag.value = undefined;
+  objectColumnDropTarget.value = undefined;
+  if (drag?.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId);
+}
+
+function startObjectColumnDrag(event: PointerEvent, key: ObjectBrowserColumnKey): void {
+  if (event.button !== 0 || !event.isPrimary) return;
+  cancelObjectColumnDrag();
+  const handle = event.currentTarget as HTMLElement;
+  handle.focus({ preventScroll: true });
+  handle.setPointerCapture(event.pointerId);
+  objectColumnDrag.value = { key, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, active: false, handle };
+}
+
+function updateObjectColumnDrag(event: PointerEvent): void {
+  const drag = objectColumnDrag.value;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 5) return;
+  drag.active = true;
+  const row = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-object-column-key]");
+  const key = objectColumnDefinitions.value.find((column) => column.key === row?.dataset.objectColumnKey)?.key;
+  if (!row || !key || key === drag.key || !objectColumnListRef.value?.contains(row)) {
+    objectColumnDropTarget.value = undefined;
+    return;
+  }
+  const rect = row.getBoundingClientRect();
+  objectColumnDropTarget.value = { key, after: event.clientY >= rect.top + rect.height / 2 };
+}
+
+function finishObjectColumnDrag(event: PointerEvent): void {
+  const drag = objectColumnDrag.value;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  updateObjectColumnDrag(event);
+  const target = objectColumnDropTarget.value;
+  if (drag.active && target) {
+    const order: ObjectBrowserColumnKey[] = objectColumnDefinitions.value.map((column) => column.key).filter((key) => key !== drag.key);
+    const index = order.indexOf(target.key);
+    if (index >= 0) {
+      order.splice(index + (target.after ? 1 : 0), 0, drag.key);
+      saveObjectColumnOrder(order);
+    }
+  }
+  cancelObjectColumnDrag();
+}
+
+watch([objectColumnOrderStorageKey, objectColumnConfigOpen], cancelObjectColumnDrag);
+onBeforeUnmount(cancelObjectColumnDrag);
+onDeactivated(cancelObjectColumnDrag);
 
 function loadObjectColumnOrder(): void {
   try {
@@ -6837,7 +6897,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </template>
             </div>
-            <Popover>
+            <Popover v-model:open="objectColumnConfigOpen">
               <PopoverTrigger as-child>
                 <button type="button" class="absolute right-1 top-1/2 z-10 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('objects.configureColumns')" :aria-label="t('objects.configureColumns')">
                   <Settings2 class="h-3.5 w-3.5" />
@@ -6845,24 +6905,32 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               </PopoverTrigger>
               <PopoverContent align="end" class="w-64 p-1">
                 <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ t("objects.configureColumns") }}</div>
-                <div v-for="(column, index) in objectColumnDefinitions" :key="column.key" class="flex items-center gap-1">
-                  <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :disabled="column.key === 'name'" @click="toggleObjectColumnVisibility(column.key)">
-                    <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border" :class="isObjectColumnVisible(column.key) ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background text-transparent'"><Check class="h-3 w-3 stroke-[3]" /></span>
-                    <span class="truncate">{{ column.label }}</span>
-                  </button>
-                  <button type="button" class="rounded p-1 hover:bg-accent disabled:opacity-40" :disabled="index === 0" :title="t('objects.columnMoveUp', { column: column.label })" :aria-label="t('objects.columnMoveUp', { column: column.label })" @click="moveObjectColumn(column.key, -1)">
-                    <ArrowUp class="h-3 w-3" />
-                  </button>
-                  <button
-                    type="button"
-                    class="rounded p-1 hover:bg-accent disabled:opacity-40"
-                    :disabled="index === objectColumnDefinitions.length - 1"
-                    :title="t('objects.columnMoveDown', { column: column.label })"
-                    :aria-label="t('objects.columnMoveDown', { column: column.label })"
-                    @click="moveObjectColumn(column.key, 1)"
-                  >
-                    <ArrowDown class="h-3 w-3" />
-                  </button>
+                <div ref="objectColumnListRef">
+                  <div v-for="column in objectColumnDefinitions" :key="column.key" :data-object-column-key="column.key" class="relative flex select-none items-center gap-1" :class="{ 'opacity-40': objectColumnDrag?.active && objectColumnDrag.key === column.key }">
+                    <span v-if="objectColumnDropTarget?.key === column.key" class="pointer-events-none absolute inset-x-0 z-10 h-0.5 bg-primary" :class="objectColumnDropTarget.after ? 'bottom-0' : 'top-0'" />
+                    <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :disabled="column.key === 'name'" @click="toggleObjectColumnVisibility(column.key)">
+                      <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border" :class="isObjectColumnVisible(column.key) ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background text-transparent'"><Check class="h-3 w-3 stroke-[3]" /></span>
+                      <span class="truncate">{{ column.label }}</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="flex h-7 w-7 shrink-0 touch-none items-center justify-center rounded text-muted-foreground hover:bg-accent"
+                      :class="objectColumnDrag?.active ? 'cursor-grabbing' : 'cursor-grab'"
+                      :title="t('objects.columnReorder', { column: column.label })"
+                      :aria-label="t('objects.columnReorder', { column: column.label })"
+                      @pointerdown.stop.prevent="startObjectColumnDrag($event, column.key)"
+                      @pointermove.stop="updateObjectColumnDrag"
+                      @pointerup.stop.prevent="finishObjectColumnDrag"
+                      @pointercancel="cancelObjectColumnDrag"
+                      @lostpointercapture="cancelObjectColumnDrag"
+                      @keydown.esc="cancelObjectColumnDrag"
+                      @keydown.up.stop.prevent="moveObjectColumn(column.key, -1)"
+                      @keydown.down.stop.prevent="moveObjectColumn(column.key, 1)"
+                      @click.stop
+                    >
+                      <GripVertical class="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 </div>
               </PopoverContent>
             </Popover>

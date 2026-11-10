@@ -2948,6 +2948,8 @@ export default withEnglishFallback({
     copyRow: "Копировать всю строку (объект JSON)",
     copyColumnJson: "Копировать столбец (JSON)",
     copyColumnNames: "Копировать имена столбцов",
+    copyColumnNamesComma: "Копировать имена столбцов (через запятую)",
+    copyColumnNamesQuotedComma: "Копировать имена столбцов (в кавычках, через запятую)",
     copyColumnNamesSelected: "Копировать имена выбранных столбцов ({count})",
     copyColumnNamesTitle: "Копировать имена столбцов ({count})",
     copyColumnNamesSeparator: "Разделитель столбцов",

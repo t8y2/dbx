@@ -2862,6 +2862,8 @@ export default withEnglishFallback({
     copyRow: "전체 행 복사(JSON 객체)",
     copyColumnJson: "컬럼 복사 (JSON)",
     copyColumnNames: "컬럼 이름 복사",
+    copyColumnNamesComma: "열 이름 복사(쉼표 구분)",
+    copyColumnNamesQuotedComma: "열 이름 복사(작은따옴표 + 쉼표)",
     copyColumnNamesSelected: "선택한 컬럼 이름 복사 ({count})",
     copyColumnNamesTitle: "컬럼 이름 복사 ({count})",
     copyColumnNamesSeparator: "컬럼 구분자",

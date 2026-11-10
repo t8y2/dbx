@@ -2748,6 +2748,8 @@ export default withEnglishFallback({
     copyRow: "Copia intera riga (oggetto JSON)",
     copyColumnJson: "Copia Colonna (JSON)",
     copyColumnNames: "Copia Nomi Colonne",
+    copyColumnNamesComma: "Copia nomi colonne (separati da virgola)",
+    copyColumnNamesQuotedComma: "Copia nomi colonne (tra apici singoli, virgola)",
     copyColumnNamesSelected: "Copia Nomi Colonne Selezionate ({count})",
     copyColumnNamesTitle: "Copia Nomi Colonne ({count})",
     copyColumnNamesSeparator: "Separatore di colonne",

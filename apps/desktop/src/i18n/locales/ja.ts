@@ -2754,6 +2754,8 @@ export default withEnglishFallback({
     copyRow: "行全体をコピー（JSON オブジェクト）",
     copyColumnJson: "列をコピー (JSON)",
     copyColumnNames: "すべての列名をコピー",
+    copyColumnNamesComma: "列名をコピー（カンマ区切り）",
+    copyColumnNamesQuotedComma: "列名をコピー（単一引用符 + カンマ）",
     copyColumnNamesSelected: "選択した列名をコピー（{count} 列）",
     copyColumnNamesTitle: "列名をコピー（{count} 列）",
     copyColumnNamesSeparator: "列区切り文字",

@@ -2725,6 +2725,8 @@ export default withEnglishFallback({
     copyRow: "複製整筆（JSON 物件）",
     copyColumnJson: "複製欄 (JSON)",
     copyColumnNames: "複製全部欄名",
+    copyColumnNamesComma: "複製欄名（逗號分隔）",
+    copyColumnNamesQuotedComma: "複製欄名（單引號 + 逗號）",
     copyColumnNamesSelected: "複製選取欄名（{count} 欄）",
     copyColumnNamesTitle: "複製欄名（{count} 欄）",
     copyColumnNamesSeparator: "欄分隔符",

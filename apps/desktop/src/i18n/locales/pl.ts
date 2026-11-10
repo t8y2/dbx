@@ -2393,6 +2393,8 @@ export default withEnglishFallback({
     copyRow: "Kopiuj cały wiersz (obiekt JSON)",
     copyColumnJson: "Kopiuj kolumnę (JSON)",
     copyColumnNames: "Kopiuj nazwy kolumn",
+    copyColumnNamesComma: "Kopiuj nazwy kolumn (oddzielone przecinkami)",
+    copyColumnNamesQuotedComma: "Kopiuj nazwy kolumn (w apostrofach, przecinkami)",
     copyColumnNamesSelected: "Kopiuj nazwy zaznaczonych kolumn ({count})",
     copyColumnNamesTitle: "Kopiuj nazwy kolumn ({count})",
     copyColumnNamesSeparator: "Separator kolumn",

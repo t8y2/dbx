@@ -2324,6 +2324,8 @@ export default withEnglishFallback({
     copyRow: "Salin Seluruh Baris (Objek JSON)",
     copyColumnJson: "Salin Kolom (JSON)",
     copyColumnNames: "Salin Nama Kolom",
+    copyColumnNamesComma: "Salin nama kolom (dipisah koma)",
+    copyColumnNamesQuotedComma: "Salin nama kolom (kutip tunggal + koma)",
     copyColumnNamesSelected: "Salin Nama Kolom Terpilih ({count})",
     copyColumnNamesTitle: "Salin Nama Kolom ({count})",
     copyColumnNamesSeparator: "Pemisah Kolom",

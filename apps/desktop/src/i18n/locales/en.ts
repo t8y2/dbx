@@ -3250,6 +3250,8 @@ export default {
     copyRow: "Copy Entire Row (JSON Object)",
     copyColumnJson: "Copy Column (JSON)",
     copyColumnNames: "Copy Column Names",
+    copyColumnNamesComma: "Copy column names (comma separated)",
+    copyColumnNamesQuotedComma: "Copy column names (single-quoted, comma separated)",
     copyColumnNamesSelected: "Copy Selected Column Names ({count})",
     copyColumnNamesTitle: "Copy Column Names ({count})",
     copyColumnNamesSeparator: "Column Separator",

@@ -2032,6 +2032,8 @@ export default withEnglishFallback({
     copyRow: "Bütün sətri kopyala (JSON obyekti)",
     copyColumnJson: "Sütunu kopyala (JSON)",
     copyColumnNames: "Sütun adlarını kopyala",
+    copyColumnNamesComma: "Sütun adlarını kopyala (vergüllə)",
+    copyColumnNamesQuotedComma: "Sütun adlarını kopyala (tək dırnaqla, vergüllə)",
     copyColumnNamesSelected: "Seçilmiş sütun adlarını kopyala ({count})",
     copyColumnNamesTitle: "Sütun adlarını kopyala ({count})",
     copyColumnNamesSeparator: "Sütun ayırıcısı",

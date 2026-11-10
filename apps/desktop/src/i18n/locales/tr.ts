@@ -2030,6 +2030,8 @@ export default withEnglishFallback({
     copyRow: "Tüm Satırı Kopyala (JSON Nesnesi)",
     copyColumnJson: "Sütunu Kopyala (JSON)",
     copyColumnNames: "Sütun Adlarını Kopyala",
+    copyColumnNamesComma: "Sütun adlarını kopyala (virgülle)",
+    copyColumnNamesQuotedComma: "Sütun adlarını kopyala (tek tırnaklı, virgülle)",
     copyColumnNamesSelected: "Seçili Sütun Adlarını Kopyala ({count})",
     copyColumnNamesTitle: "Sütun Adlarını Kopyala ({count})",
     copyColumnNamesSeparator: "Sütun Ayırıcısı",

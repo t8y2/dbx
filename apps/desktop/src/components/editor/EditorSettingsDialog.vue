@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import ToolbarSettingsList from "@/components/editor/ToolbarSettingsList.vue";
+import { TOOLBAR_ITEM_GROUPS, toolbarGroupOrder, replaceToolbarItemOrder, type ToolbarItemGroup, type ToolbarItemKey } from "@/lib/settings/toolbarCustomization";
 import { SIDEBAR_HOVER_DELAY_MIN, SIDEBAR_HOVER_DELAY_MAX, normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import { cleanupMcpHistoryRetention, loadMcpHistoryRetentionLimit, saveMcpHistoryRetentionLimit } from "@/lib/backend/api";
 import { HISTORY_RETENTION_LIMITS, useHistoryRetentionSetting } from "@/composables/useHistoryRetentionSetting";
@@ -395,19 +397,7 @@ import {
   normalizeAiConversationFontFamilyInput,
   normalizeAiConversationFontSize,
 } from "@/lib/ai/aiTypography";
-import {
-  SETTINGS_SEARCH_DEFINITIONS,
-  TOOLBAR_VISIBILITY_ITEMS,
-  createShortcutSettingsSearchDefinitions,
-  resolveSettingsCategory,
-  resolveSettingsSearchEntries,
-  searchSettings,
-  toolbarVisibilityItemLabel,
-  visibleToolbarVisibilityItems,
-  type SettingsCategory,
-  type SettingsSearchEntry,
-  type ToolbarVisibilityItem,
-} from "@/lib/settings/settingsSearch";
+import { SETTINGS_SEARCH_DEFINITIONS, TOOLBAR_VISIBILITY_ITEMS, createShortcutSettingsSearchDefinitions, resolveSettingsCategory, resolveSettingsSearchEntries, searchSettings, visibleToolbarVisibilityItems, type SettingsCategory, type SettingsSearchEntry } from "@/lib/settings/settingsSearch";
 import { findSettingsSearchHighlightTarget } from "@/lib/settings/settingsSearchHighlight";
 import { LOCALE_OPTIONS } from "@/lib/app/localeOptions";
 import LocaleFlag from "@/components/icons/LocaleFlag.vue";
@@ -1106,11 +1096,14 @@ const editQueryExportKeysetOptimizationEnabled = ref(settingsStore.editorSetting
 const editUpdateDownloadSource = ref<UpdateDownloadSource>(settingsStore.editorSettings.updateDownloadSource);
 const editUpdateChannel = ref<UpdateChannel>(settingsStore.editorSettings.updateChannel);
 const editToolbarItems = ref({ ...settingsStore.editorSettings.toolbarItems });
+const editToolbarItemOrder = ref([...settingsStore.editorSettings.toolbarItemOrder]);
+const toolbarGroups = Object.keys(TOOLBAR_ITEM_GROUPS) as ToolbarItemGroup[];
+function toolbarGroupItems(group: ToolbarItemGroup) {
+  const keys = new Set<ToolbarItemKey>(TOOLBAR_ITEM_GROUPS[group]);
+  return toolbarVisibilityItems.value.filter((item) => keys.has(item.key));
+}
 // Desktop-only toolbar buttons (always-on-top) can never render in the Web build, so their switches stay out of the Web settings dialog.
 const toolbarVisibilityItems = computed(() => visibleToolbarVisibilityItems(TOOLBAR_VISIBILITY_ITEMS, isWeb));
-function getToolbarVisibilityItemLabel(item: ToolbarVisibilityItem): string {
-  return toolbarVisibilityItemLabel(item, t);
-}
 const systemFonts = ref<string[]>([]);
 const systemFontsLoading = ref(false);
 const systemFontsLoaded = ref(false);
@@ -1496,6 +1489,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     updateDownloadSource: editUpdateDownloadSource.value,
     updateChannel: editUpdateChannel.value,
     toolbarItems: { ...editToolbarItems.value },
+    toolbarItemOrder: [...editToolbarItemOrder.value],
     snippets: editSnippets.value,
     snippetTriggerKey: editSnippetTriggerKey.value,
     sqlShortcuts: editSqlShortcuts.value,
@@ -2212,6 +2206,7 @@ function syncEditorSettingsDraftFromStore() {
   editUpdateDownloadSource.value = settingsStore.editorSettings.updateDownloadSource;
   editUpdateChannel.value = settingsStore.editorSettings.updateChannel;
   editToolbarItems.value = { ...settingsStore.editorSettings.toolbarItems };
+  editToolbarItemOrder.value = [...settingsStore.editorSettings.toolbarItemOrder];
   editSnippets.value = settingsStore.editorSettings.snippets.map(editableSnippet);
   editSnippetTriggerKey.value = settingsStore.editorSettings.snippetTriggerKey;
   editSqlShortcuts.value = mergeDefaultSqlShortcuts(settingsStore.editorSettings.sqlShortcuts.map(editableSqlShortcut));
@@ -2396,6 +2391,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   updateDownloadSource: editUpdateDownloadSource,
   updateChannel: editUpdateChannel,
   toolbarItems: editToolbarItems,
+  toolbarItemOrder: editToolbarItemOrder,
   snippets: editSnippets,
   snippetTriggerKey: editSnippetTriggerKey,
   sqlShortcuts: editSqlShortcuts,
@@ -2427,6 +2423,7 @@ function applyEditorSettingsKeysToRefs(draft: EditorSettingsDraft, keys: readonl
     excludedCompletionItems: (value) => (value as string[]).join("\n"),
     redisKeyTemplates: (value) => normalizeRedisKeyTemplates(value as string[]).join("\n"),
     toolbarItems: (value) => ({ ...(value as EditorSettings["toolbarItems"]) }),
+    toolbarItemOrder: (value) => [...(value as EditorSettings["toolbarItemOrder"])],
     snippets: (value) => (value as SqlSnippet[]).map(editableSnippet),
     sqlShortcuts: (value) => mergeDefaultSqlShortcuts((value as SqlShortcutAction[]).map(editableSqlShortcut)),
     sqlVariableSyntaxOverrides: (value) => normalizeSqlVariableSyntaxOverrides(value as EditorSettings["sqlVariableSyntaxOverrides"]),
@@ -2920,6 +2917,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
     sqlFormatterConfigValid.value = true;
   } else if (tab === "appearance") {
+    editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
+    editToolbarItemOrder.value = [...DEFAULT_EDITOR_SETTINGS.toolbarItemOrder];
     editTableFontFamily.value = DEFAULT_EDITOR_SETTINGS.tableFontFamily;
     editUiFontFamily.value = DEFAULT_EDITOR_SETTINGS.uiFontFamily;
     editUiScale.value = DEFAULT_EDITOR_SETTINGS.uiScale;
@@ -2985,7 +2984,6 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarHiddenTablePrefixes.value = DEFAULT_EDITOR_SETTINGS.sidebarHiddenTablePrefixes.join("\n");
     editSidebarCopyTableNameSeparator.value = DEFAULT_EDITOR_SETTINGS.sidebarCopyTableNameSeparator;
     editSidebarCopyTableNameIncludeSchema.value = DEFAULT_EDITOR_SETTINGS.sidebarCopyTableNameIncludeSchema;
-    editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
   } else if (tab === "data") {
     historyRetention.reset();
     mcpHistoryRetention.reset();
@@ -3245,6 +3243,7 @@ function resetAllDefaults() {
   editUpdateDownloadSource.value = DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
   editUpdateChannel.value = DEFAULT_EDITOR_SETTINGS.updateChannel;
   editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
+  editToolbarItemOrder.value = [...DEFAULT_EDITOR_SETTINGS.toolbarItemOrder];
   editSnippets.value = DEFAULT_SQL_SNIPPETS.map((s) => ({ ...s }));
   editSnippetTriggerKey.value = DEFAULT_EDITOR_SETTINGS.snippetTriggerKey;
   editSqlShortcuts.value = DEFAULT_SQL_SHORTCUTS.map(editableSqlShortcut);
@@ -9711,10 +9710,18 @@ onUnmounted(() => {
                   </div>
                   <Switch id="exclusive-right-sidebar-panels" v-model="editToolbarItems.exclusiveRightSidebarPanels" />
                 </div>
-                <div class="grid grid-cols-3 gap-2 mt-2">
-                  <div v-for="item in toolbarVisibilityItems" :key="item.key" class="flex items-center gap-2">
-                    <Switch :id="`toolbar-${item.key}`" :model-value="(editToolbarItems as any)[item.key]" @update:model-value="(v: boolean) => ((editToolbarItems as any)[item.key] = v)" />
-                    <Label :for="`toolbar-${item.key}`" class="text-sm cursor-pointer">{{ getToolbarVisibilityItemLabel(item) }}</Label>
+                <p class="mt-2 text-xs text-muted-foreground">{{ t("settings.toolbarOrderHint") }}</p>
+                <div class="mt-2 grid gap-3 sm:grid-cols-2">
+                  <div v-for="group in toolbarGroups" :key="group" class="min-w-0 space-y-1.5">
+                    <h4 class="text-xs font-medium">{{ t(`settings.toolbarGroup_${group}`) }}</h4>
+                    <ToolbarSettingsList
+                      :group="group"
+                      :items="toolbarGroupItems(group)"
+                      :order="toolbarGroupOrder(editToolbarItemOrder, group)"
+                      :visibility="editToolbarItems"
+                      @toggle="(key: ToolbarItemKey, visible: boolean) => (editToolbarItems[key] = visible)"
+                      @reorder="(keys: ToolbarItemKey[]) => (editToolbarItemOrder = replaceToolbarItemOrder(editToolbarItemOrder, keys))"
+                    />
                   </div>
                 </div>
               </div>

@@ -10228,6 +10228,13 @@ export default withEnglishFallback({
     exportDiffSuccess: "Различия экспортированы: {path}",
   },
   settings: {
+    toolbarGroup_primary: "Основные действия",
+    toolbarGroup_menu: "Меню «Ещё»",
+    toolbarGroup_right: "Правая панель",
+    toolbarGroup_controls: "Системные действия",
+    toolbarOrderHint: "Перетащите или используйте ↑/↓ для сортировки внутри группы. Скрытые основные и системные действия доступны в меню «Ещё».",
+    toolbarReorderItem: "Перетащите или используйте ↑/↓ для сортировки {item}",
+    toolbarExportProgress: "Ход выполнения задач",
     historyRetentionLimit: "Хранение истории запросов",
     mcpHistoryRetentionLimit: "Хранение истории MCP",
     mcpHistoryRetentionDescription: "Отдельно управляет количеством истории вызовов MCP, не затрагивая историю SQL.",

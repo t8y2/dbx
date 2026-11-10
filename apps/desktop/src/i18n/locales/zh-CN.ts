@@ -10031,6 +10031,13 @@ export default withEnglishFallback({
     exportDiffSuccess: "差异导出成功：{path}",
   },
   settings: {
+    toolbarGroup_primary: "主操作栏",
+    toolbarGroup_menu: "更多菜单",
+    toolbarGroup_right: "右侧工具栏",
+    toolbarGroup_controls: "系统入口",
+    toolbarOrderHint: "拖拽或用 ↑/↓ 调整同一区域的顺序。隐藏的主操作和系统入口仍可从“更多”访问。",
+    toolbarReorderItem: "拖拽或用 ↑/↓ 调整{item}的顺序",
+    toolbarExportProgress: "任务进度",
     historyRetentionLimit: "查询历史保留条数",
     mcpHistoryRetentionLimit: "MCP 历史保留条数",
     mcpHistoryRetentionDescription: "独立控制 MCP 调用历史的保留数量，不影响 SQL 查询历史。",

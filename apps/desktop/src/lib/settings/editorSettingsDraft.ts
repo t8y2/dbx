@@ -182,6 +182,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "updateDownloadSource",
   "updateChannel",
   "toolbarItems",
+  "toolbarItemOrder",
   "snippets",
   "sqlShortcuts",
   "sqlVariableSubstitutionEnabled",

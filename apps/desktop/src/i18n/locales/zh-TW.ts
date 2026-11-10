@@ -7774,6 +7774,13 @@ export default withEnglishFallback({
     exportDiffSuccess: "差異匯出成功：{path}",
   },
   settings: {
+    toolbarGroup_primary: "主要操作列",
+    toolbarGroup_menu: "更多選單",
+    toolbarGroup_right: "右側工具列",
+    toolbarGroup_controls: "系統入口",
+    toolbarOrderHint: "拖曳或用 ↑/↓ 調整同一區域的順序。隱藏的主要操作和系統入口仍可從「更多」存取。",
+    toolbarReorderItem: "拖曳或用 ↑/↓ 調整{item}的順序",
+    toolbarExportProgress: "工作進度",
     historyRetentionLimit: "查詢歷史保留筆數",
     mcpHistoryRetentionLimit: "MCP 歷史保留筆數",
     mcpHistoryRetentionDescription: "獨立控制 MCP 呼叫歷史的保留數量，不影響 SQL 查詢歷史。",

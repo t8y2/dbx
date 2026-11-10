@@ -8649,6 +8649,13 @@ export default withEnglishFallback({
     exportDiffSuccess: "Diferenças exportadas: {path}",
   },
   settings: {
+    toolbarGroup_primary: "Ações principais",
+    toolbarGroup_menu: "Menu Mais",
+    toolbarGroup_right: "Barra direita",
+    toolbarGroup_controls: "Ações do sistema",
+    toolbarOrderHint: "Arraste ou use ↑/↓ para ordenar cada grupo. As ações principais e do sistema ocultas continuam disponíveis em Mais.",
+    toolbarReorderItem: "Arraste ou use ↑/↓ para reordenar {item}",
+    toolbarExportProgress: "Progresso das tarefas",
     historyRetentionLimit: "Limite do histórico de consultas",
     mcpHistoryRetentionLimit: "Retenção do histórico MCP",
     mcpHistoryRetentionDescription: "Controla separadamente a quantidade do histórico de chamadas MCP do histórico SQL.",

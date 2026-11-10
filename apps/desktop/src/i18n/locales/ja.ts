@@ -8670,6 +8670,13 @@ export default withEnglishFallback({
     exportDiffSuccess: "差分のエクスポートが完了しました：{path}",
   },
   settings: {
+    toolbarGroup_primary: "主要操作",
+    toolbarGroup_menu: "その他メニュー",
+    toolbarGroup_right: "右側ツールバー",
+    toolbarGroup_controls: "システム操作",
+    toolbarOrderHint: "各グループ内でドラッグまたは ↑/↓ キーで並べ替えます。非表示の主要操作とシステム操作は「その他」から利用できます。",
+    toolbarReorderItem: "ドラッグまたは ↑/↓ キーで {item} を並べ替え",
+    toolbarExportProgress: "タスクの進行状況",
     historyRetentionLimit: "クエリ履歴の保持件数",
     mcpHistoryRetentionLimit: "MCP 履歴の保持数",
     mcpHistoryRetentionDescription: "SQL 履歴とは別に MCP 呼び出し履歴の保持数を管理します。",

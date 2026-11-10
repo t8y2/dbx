@@ -1,3 +1,4 @@
+import { DEFAULT_TOOLBAR_ITEM_ORDER, normalizeToolbarItemOrder, type ToolbarItemKey } from "@/lib/settings/toolbarCustomization";
 import { SIDEBAR_HOVER_DELAY_DEFAULT, normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import { DEFAULT_OBJECT_BROWSER_COMPACT_WIDTH, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { normalizeModelTemplates, type ModelTemplate } from "@/lib/model/modelTemplates";
@@ -1302,6 +1303,7 @@ export interface EditorSettings {
   /** Plugin ids the user granted `script-src 'unsafe-eval'` in the workbench sandbox. */
   pluginGraphicsEngineIds: string[];
   toolbarItems: ToolbarItems;
+  toolbarItemOrder: ToolbarItemKey[];
   objectBrowserShowCheckbox: boolean;
   objectBrowserViewMode: "list" | "grid" | "compact";
   objectBrowserCompactWidth: ObjectBrowserCompactWidth;
@@ -1326,6 +1328,15 @@ export interface EditorSettings {
 }
 
 export interface ToolbarItems {
+  newConnection: boolean;
+  newQuery: boolean;
+  openSql: boolean;
+  databaseBackups: boolean;
+  mcpSettings: boolean;
+  exportProgress: boolean;
+  settings: boolean;
+  logout: boolean;
+
   immediateSync: boolean;
   dataTransfer: boolean;
   driverManager: boolean;
@@ -1348,6 +1359,15 @@ export interface ToolbarItems {
 }
 
 export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
+  newConnection: true,
+  newQuery: true,
+  openSql: true,
+  databaseBackups: true,
+  mcpSettings: true,
+  exportProgress: true,
+  settings: true,
+  logout: true,
+
   immediateSync: false,
   dataTransfer: true,
   driverManager: true,
@@ -1672,6 +1692,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   pluginShortcuts: normalizePluginShortcutSettings(undefined),
   pluginGraphicsEngineIds: [],
   toolbarItems: { ...DEFAULT_TOOLBAR_ITEMS },
+  toolbarItemOrder: [...DEFAULT_TOOLBAR_ITEM_ORDER],
   objectBrowserShowCheckbox: false,
   objectBrowserViewMode: "list",
   objectBrowserCompactWidth: DEFAULT_OBJECT_BROWSER_COMPACT_WIDTH,
@@ -2054,6 +2075,14 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
   const defaults = DEFAULT_TOOLBAR_ITEMS;
   if (!items || typeof items !== "object") return { ...defaults };
   return {
+    newConnection: items.newConnection ?? defaults.newConnection,
+    newQuery: items.newQuery ?? defaults.newQuery,
+    openSql: items.openSql ?? defaults.openSql,
+    databaseBackups: items.databaseBackups ?? defaults.databaseBackups,
+    mcpSettings: items.mcpSettings ?? defaults.mcpSettings,
+    exportProgress: items.exportProgress ?? defaults.exportProgress,
+    settings: items.settings ?? defaults.settings,
+    logout: items.logout ?? defaults.logout,
     immediateSync: items.immediateSync ?? defaults.immediateSync,
     dataTransfer: items.dataTransfer ?? defaults.dataTransfer,
     driverManager: items.driverManager ?? defaults.driverManager,
@@ -2467,6 +2496,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     pluginShortcuts: normalizePluginShortcutSettings(settings.pluginShortcuts),
     pluginGraphicsEngineIds: normalizePluginGraphicsEngineIds(settings.pluginGraphicsEngineIds),
     toolbarItems: normalizeToolbarItems(settings.toolbarItems),
+    toolbarItemOrder: normalizeToolbarItemOrder(settings.toolbarItemOrder),
     objectBrowserShowCheckbox: typeof settings.objectBrowserShowCheckbox === "boolean" ? settings.objectBrowserShowCheckbox : DEFAULT_EDITOR_SETTINGS.objectBrowserShowCheckbox,
     objectBrowserCompactWidth: normalizeObjectBrowserCompactWidth(settings.objectBrowserCompactWidth),
     objectBrowserViewMode: settings.objectBrowserViewMode === "grid" || settings.objectBrowserViewMode === "compact" ? settings.objectBrowserViewMode : DEFAULT_EDITOR_SETTINGS.objectBrowserViewMode,
@@ -3405,6 +3435,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.pluginShortcuts !== undefined) editorSettings.value.pluginShortcuts = normalizePluginShortcutSettings(partial.pluginShortcuts);
     if (partial.pluginGraphicsEngineIds !== undefined) editorSettings.value.pluginGraphicsEngineIds = normalizePluginGraphicsEngineIds(partial.pluginGraphicsEngineIds);
     if (partial.toolbarItems !== undefined) editorSettings.value.toolbarItems = normalizeToolbarItems(partial.toolbarItems);
+    if (partial.toolbarItemOrder !== undefined) editorSettings.value.toolbarItemOrder = normalizeToolbarItemOrder(partial.toolbarItemOrder);
     if (partial.objectBrowserShowCheckbox !== undefined) editorSettings.value.objectBrowserShowCheckbox = partial.objectBrowserShowCheckbox === true;
     if (partial.objectBrowserCompactWidth !== undefined) editorSettings.value.objectBrowserCompactWidth = normalizeObjectBrowserCompactWidth(partial.objectBrowserCompactWidth);
     if (partial.objectBrowserViewMode !== undefined) editorSettings.value.objectBrowserViewMode = partial.objectBrowserViewMode === "grid" || partial.objectBrowserViewMode === "compact" ? partial.objectBrowserViewMode : "list";

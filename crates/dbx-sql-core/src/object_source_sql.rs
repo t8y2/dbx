@@ -182,7 +182,12 @@ pub fn build_routine_rename_object_source_statements(
     let renamed_source = if is_mysql_like(input.database_type) {
         replace_mysql_routine_declaration_name(source, &input.new_name)
     } else {
-        replace_sql_routine_declaration_name(source, input.schema.as_deref(), &input.new_name, input.identifier_quote.as_deref())
+        replace_sql_routine_declaration_name(
+            source,
+            input.schema.as_deref(),
+            &input.new_name,
+            input.identifier_quote.as_deref(),
+        )
     };
     let Some(renamed_source) = renamed_source else {
         return Err(format!("Cannot rewrite the {:?} name in the object source.", input.object_type));
@@ -3725,8 +3730,9 @@ mod tests {
             schema: Some("public".to_string()),
             name: "refresh_cache".to_string(),
             new_name: "refresh_cache v2".to_string(),
-            source: "CREATE FUNCTION public.refresh_cache() RETURNS integer AS $$ BEGIN RETURN 1; END; $$ LANGUAGE plpgsql"
-                .to_string(),
+            source:
+                "CREATE FUNCTION public.refresh_cache() RETURNS integer AS $$ BEGIN RETURN 1; END; $$ LANGUAGE plpgsql"
+                    .to_string(),
             identifier_quote: backtick.clone(),
         })
         .unwrap();

@@ -336,13 +336,11 @@ pub fn build_create_database_sql(options: CreateDatabaseSqlOptions) -> Result<St
     match options.target.unwrap_or(DatabaseCreationTarget::Database) {
         DatabaseCreationTarget::Database => build_create_database_statement(&options),
         // Schema creation is exposed through the same frontend dialog contract when the tree target is a database node.
-        DatabaseCreationTarget::Schema => {
-            build_create_schema_sql(SchemaNameSqlOptions {
-                database_type: options.database_type,
-                name: options.name,
-                identifier_quote: options.identifier_quote,
-            })
-        }
+        DatabaseCreationTarget::Schema => build_create_schema_sql(SchemaNameSqlOptions {
+            database_type: options.database_type,
+            name: options.name,
+            identifier_quote: options.identifier_quote,
+        }),
         DatabaseCreationTarget::Catalog => Err("Creating catalogs is not supported yet.".to_string()),
         DatabaseCreationTarget::Namespace => Err("Creating namespaces is not supported yet.".to_string()),
     }
@@ -374,7 +372,8 @@ fn build_create_database_statement(options: &CreateDatabaseSqlOptions) -> Result
         // honors by running the statement on a sysmaster session pinned to that DB_LOCALE.
         return Ok(format!("-- DBX_DB_LOCALE={locale}\nCREATE DATABASE {name};"));
     }
-    let name = quote_rename_identifier_with_quote(options.database_type, &options.name, options.identifier_quote.as_deref());
+    let name =
+        quote_rename_identifier_with_quote(options.database_type, &options.name, options.identifier_quote.as_deref());
     let charset = clean_sql_option(options.charset.as_deref());
     let collation = clean_sql_option(options.collation.as_deref());
     if !supports_create_database_charset(options.database_type, options.driver_profile.as_deref()) || charset.is_empty()
@@ -798,11 +797,8 @@ fn supports_truncate_table_cascade(database_type: Option<DatabaseType>) -> bool 
 }
 
 pub fn build_drop_database_sql(options: DatabaseNameSqlOptions) -> String {
-    let name = quote_rename_identifier_with_quote(
-        options.database_type,
-        &options.name,
-        options.identifier_quote.as_deref(),
-    );
+    let name =
+        quote_rename_identifier_with_quote(options.database_type, &options.name, options.identifier_quote.as_deref());
     if options.database_type == Some(DatabaseType::Transwarp) {
         return format!("DROP DATABASE IF EXISTS {name};");
     }
@@ -822,14 +818,12 @@ pub fn build_update_database_properties_sql(options: DatabasePropertyEditSqlOpti
             }
             build_database_charset_sql(&options)
         }
-        DatabasePropertyTarget::Schema => {
-            build_schema_comment_sql(
-                options.database_type,
-                &options.name,
-                options.comment.as_deref(),
-                options.identifier_quote.as_deref(),
-            )
-        }
+        DatabasePropertyTarget::Schema => build_schema_comment_sql(
+            options.database_type,
+            &options.name,
+            options.comment.as_deref(),
+            options.identifier_quote.as_deref(),
+        ),
     }
 }
 
@@ -847,11 +841,7 @@ fn build_database_charset_sql(options: &DatabasePropertyEditSqlOptions) -> Resul
     }
     let mut sql = format!(
         "ALTER DATABASE {}",
-        quote_rename_identifier_with_quote(
-            options.database_type,
-            &options.name,
-            options.identifier_quote.as_deref(),
-        )
+        quote_rename_identifier_with_quote(options.database_type, &options.name, options.identifier_quote.as_deref(),)
     );
     if !charset.is_empty() {
         sql.push_str(&format!(" DEFAULT CHARACTER SET {charset}"));
@@ -906,11 +896,8 @@ pub fn build_create_schema_sql(options: SchemaNameSqlOptions) -> Result<String, 
 }
 
 pub fn build_drop_schema_sql(options: SchemaNameSqlOptions) -> String {
-    let schema = quote_rename_identifier_with_quote(
-        options.database_type,
-        &options.name,
-        options.identifier_quote.as_deref(),
-    );
+    let schema =
+        quote_rename_identifier_with_quote(options.database_type, &options.name, options.identifier_quote.as_deref());
     if options.database_type == Some(DatabaseType::OceanbaseOracle) {
         // OceanBase Oracle mode models schemas as users, so dropping one drops the user.
         format!("DROP USER {schema} CASCADE;")
@@ -1228,11 +1215,7 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
                 &options.old_name,
                 options.identifier_quote.as_deref(),
             ),
-            quote_rename_identifier_with_quote(
-                database_type,
-                &options.new_name,
-                options.identifier_quote.as_deref(),
-            )
+            quote_rename_identifier_with_quote(database_type, &options.new_name, options.identifier_quote.as_deref(),)
         ));
     }
 

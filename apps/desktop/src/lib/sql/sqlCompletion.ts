@@ -5943,6 +5943,7 @@ function isInTableListContext(beforeToken: string, databaseType: DatabaseType | 
   if (lastTableIntro < 0) return false;
 
   const lastBoundary = Math.max(
+    lastTopLevelKeywordIndex(cleaned, "values"),
     lastTopLevelKeywordIndex(cleaned, "where"),
     lastTopLevelKeywordIndex(cleaned, "set"),
     lastTopLevelKeywordIndex(cleaned, "group"),

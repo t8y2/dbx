@@ -4948,13 +4948,13 @@ fn data_grid_like_escape_supported(database_type: Option<DatabaseType>) -> bool 
 /// The value matches literally, so `%`, `_` and the escape character itself are
 /// escaped before the wildcard template is applied (#14365 review): typing `a_`
 /// must not match `abc`. Only the wrapper wildcards stay unescaped.
-fn data_grid_like_pattern(value: &Value, template: DataGridLikeTemplate, database_type: Option<DatabaseType>) -> String {
+fn data_grid_like_pattern(
+    value: &Value,
+    template: DataGridLikeTemplate,
+    database_type: Option<DatabaseType>,
+) -> String {
     let raw = value_to_filter_text(value);
-    let body = if data_grid_like_escape_supported(database_type) {
-        escape_data_grid_like_literal(&raw)
-    } else {
-        raw
-    };
+    let body = if data_grid_like_escape_supported(database_type) { escape_data_grid_like_literal(&raw) } else { raw };
     match template {
         DataGridLikeTemplate::Contains => format!("%{body}%"),
         DataGridLikeTemplate::StartsWith => format!("{body}%"),

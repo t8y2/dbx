@@ -98,6 +98,19 @@ fn oceanbase_mysql_setup_queries(config: &ConnectionConfig) -> Vec<String> {
 
 fn mysql_pool_setup_queries(config: &ConnectionConfig, url: &str) -> Vec<String> {
     let mut queries = oceanbase_mysql_setup_queries(config);
+    let native_mysql = config.db_type == DatabaseType::Mysql
+        && config.driver_profile.as_deref().is_none_or(|profile| {
+            let profile = profile.trim();
+            profile.is_empty() || profile.eq_ignore_ascii_case("mysql") || profile.eq_ignore_ascii_case("mariadb")
+        });
+    if native_mysql {
+        // A server with global autocommit=0 otherwise makes ordinary writes
+        // disappear when the auto-commit execution path cleans up the session.
+        // Pool setup also runs after COM_RESET_CONNECTION, before any user SQL.
+        if let Some(query) = db::mysql::default_autocommit_setup_query(url) {
+            queries.push(query.to_string());
+        }
+    }
     if let Some(dialect) = db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()) {
         if let Some(query) = db::mysql::catalog_setup_query_for_url(dialect, url) {
             queries.push(query);
@@ -9913,6 +9926,37 @@ mod tests {
             mysql_pool_setup_queries(&config, "mysql://root:secret@localhost:9030/bi?catalog=paimon%5Fcatalog"),
             vec!["SWITCH `paimon_catalog`"]
         );
+    }
+
+    #[test]
+    fn native_mysql_pool_setup_initializes_autocommit() {
+        let mut config = mysql_config(Some("dbx"));
+        for profile in [None, Some(""), Some("mysql"), Some("MariaDB")] {
+            config.driver_profile = profile.map(str::to_string);
+            assert_eq!(
+                mysql_pool_setup_queries(&config, "mysql://root:secret@localhost/dbx"),
+                vec!["SET SESSION autocommit = 1"]
+            );
+            assert!(mysql_pool_setup_queries(
+                &config,
+                "mysql://root:secret@localhost/dbx?sessionVariables=autocommit%3D0"
+            )
+            .is_empty());
+        }
+    }
+
+    #[test]
+    fn mysql_compatible_profiles_keep_their_transaction_setup() {
+        let mut config = mysql_config(Some("dbx"));
+        for profile in ["doris", "selectdb", "starrocks", "manticoresearch", "oceanbase", "tidb", "dolt"] {
+            config.driver_profile = Some(profile.to_string());
+            assert!(
+                mysql_pool_setup_queries(&config, "mysql://root:secret@localhost/dbx")
+                    .iter()
+                    .all(|query| !query.contains("autocommit")),
+                "{profile}"
+            );
+        }
     }
 
     #[test]

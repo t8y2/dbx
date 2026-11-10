@@ -3195,6 +3195,7 @@ export default withEnglishFallback({
     sortCurrentPageAscending: "현재 페이지 오름차순 정렬",
     sortCurrentPageDescending: "현재 페이지 내림차순 정렬",
     sortDatabaseAscending: "데이터베이스 오름차순 정렬",
+    quickSortHint: "클릭하여 오름차순 또는 내림차순 전환; 오른쪽 클릭으로 정렬 옵션 선택",
     sortDatabaseDescending: "데이터베이스 내림차순 정렬",
     clearSort: "정렬 지우기",
     sortBuilderTitle: "정렬",

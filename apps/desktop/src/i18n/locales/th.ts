@@ -3462,6 +3462,7 @@ export default withEnglishFallback({
     sortCurrentPageAscending: "เรียงหน้าปัจจุบันจากน้อยไปมาก",
     sortCurrentPageDescending: "เรียงหน้าปัจจุบันจากมากไปน้อย",
     sortDatabaseAscending: "เรียงฐานข้อมูลจากน้อยไปมาก",
+    quickSortHint: "คลิกเพื่อสลับเรียงจากน้อยไปมากหรือมากไปน้อย; คลิกขวาเพื่อเลือกวิธีเรียง",
     sortDatabaseDescending: "เรียงฐานข้อมูลจากมากไปน้อย",
     clearSort: "ล้างการเรียง",
     sortBuilderTitle: "เรียง",

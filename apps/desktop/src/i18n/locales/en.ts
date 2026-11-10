@@ -3619,6 +3619,7 @@ export default {
     sortCurrentPageAscending: "Sort Current Page Ascending",
     sortCurrentPageDescending: "Sort Current Page Descending",
     sortDatabaseAscending: "Sort Database Ascending",
+    quickSortHint: "Click to toggle ascending or descending; right-click for sort options",
     sortDatabaseDescending: "Sort Database Descending",
     clearSort: "Clear Sort",
     sortBuilderTitle: "Sort",

@@ -3550,6 +3550,7 @@ export default withEnglishFallback({
     sortCurrentPageAscending: "当前页升序排序",
     sortCurrentPageDescending: "当前页降序排序",
     sortDatabaseAscending: "数据库升序排序",
+    quickSortHint: "点击切换升序或降序；右键选择排序方式",
     sortDatabaseDescending: "数据库降序排序",
     clearSort: "清除排序",
     sortBuilderTitle: "排序",

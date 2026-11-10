@@ -129,7 +129,8 @@ describe("QueryEditor search keymap precedence", () => {
       });
 
       const handled = runScopeHandlers(view, new KeyboardEvent("keydown", { key: "f", ...modifierEvent }), "editor");
-      expect(handled).toBe(false);
+      // Falling through means lower-priority handlers now own the key.
+      expect(handled).toBe(true);
       expect(openSearch).not.toHaveBeenCalled();
       expect(lowerPrioritySearch).toHaveBeenCalledOnce();
       view.destroy();

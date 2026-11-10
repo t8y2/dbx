@@ -5444,6 +5444,8 @@ export default withEnglishFallback({
     viewCompact: "緊湊九宮格檢視",
     compactCardWidth: "緊湊卡片最小寬度",
     configureColumns: "設定顯示欄",
+    columnMoveUp: "上移{column}欄",
+    columnMoveDown: "下移{column}欄",
     copyNames: "複製名稱",
     copySelectedNames: "複製所選名稱",
     copyOptions: "複製選項",

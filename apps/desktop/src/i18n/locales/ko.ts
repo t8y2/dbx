@@ -6194,6 +6194,8 @@ export default withEnglishFallback({
     viewCompact: "컴팩트 3x3 그리드 뷰",
     compactCardWidth: "컴팩트 카드 최소 너비",
     configureColumns: "표시 열 구성",
+    columnMoveUp: "{column} 열 위로 이동",
+    columnMoveDown: "{column} 열 아래로 이동",
     copyNames: "이름 복사",
     copySelectedNames: "선택한 이름 복사",
     copyOptions: "복사 옵션",

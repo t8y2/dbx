@@ -5975,6 +5975,8 @@ export default withEnglishFallback({
     viewCompact: "コンパクトグリッドビュー",
     compactCardWidth: "コンパクトカードの最小幅",
     configureColumns: "表示列を設定",
+    columnMoveUp: "{column} 列を上へ移動",
+    columnMoveDown: "{column} 列を下へ移動",
     copyNames: "名前をコピー",
     copySelectedNames: "選択した名前をコピー",
     copyOptions: "コピーオプション",

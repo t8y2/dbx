@@ -16,6 +16,8 @@ const appBuildScript = readFileSync(resolve(process.cwd(), "src-tauri/build.rs")
 const wryWebView2Source = readFileSync(resolve(process.cwd(), "vendor/wry/src/webview2/mod.rs"), "utf8");
 const ciWorkflow = readFileSync(resolve(process.cwd(), ".github/workflows/ci.yml"), "utf8");
 const releaseWorkflow = readFileSync(resolve(process.cwd(), ".github/workflows/release.yml"), "utf8");
+const fixedRuntimeConfig = JSON.parse(readFileSync(resolve(process.cwd(), "src-tauri/tauri.webview2-win7-fixed.conf.json"), "utf8"));
+const clientConfig = JSON.parse(readFileSync(resolve(process.cwd(), "src-tauri/tauri.conf.json"), "utf8"));
 
 describe("Windows offline installer template", () => {
   it("routes supported legacy Windows users from generic installers to the fixed-runtime package", () => {
@@ -30,6 +32,11 @@ describe("Windows offline installer template", () => {
     expect(template).toContain("${OrIf} ${IsWin2012R2}");
     expect(template).toContain('MessageBox MB_ICONSTOP|MB_YESNO|MB_DEFBUTTON1 "$(dbxWin7InstallerRequired)" IDYES dbx_open_win7_installer');
     expect(template).toContain('${GetParent} "$EXEPATH" $0');
+    // The fixed-runtime build says which systems it targets in the installer
+    // title; productName must stay path-safe ("/" is rejected by Tauri).
+    expect(template).toContain('!define DBX_WINDOW_TITLE "${PRODUCTNAME} - Windows 7 / Server 2008 R2"');
+    expect(clientConfig.productName).toBe("DBX");
+    expect(fixedRuntimeConfig.productName).toBeUndefined();
     expect(template).toContain("DBX_${VERSION}_x64-win7-server2008r2-offline-setup.exe?from=${VERSION}");
     expect(template).not.toContain("win7-server2012r2-offline-setup.exe");
     expect(template).toContain("SetErrorLevel 1633");

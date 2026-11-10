@@ -61,18 +61,6 @@ ${StrLoc}
 !define WEBVIEW2INSTALLERPATH "{{webview2_installer_path}}"
 !define MINIMUMWEBVIEW2VERSION "{{minimum_webview2_version}}"
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCTNAME}"
-; Display name for the fixed-runtime build (Windows 7 / Server 2008 R2), so the
-; installer title, install dir, shortcuts and the uninstall entry all say which
-; systems the package is for. Evergreen installers keep the plain product name.
-!if "${INSTALLWEBVIEW2MODE}" != ""
-  !define DBX_APP_DISPLAYNAME "${PRODUCTNAME}"
-!else if "${ARCH}" == "x64"
-  !define DBX_APP_DISPLAYNAME "${PRODUCTNAME} (Windows 7 / Server 2008 R2 build)"
-!endif
-!ifndef DBX_APP_DISPLAYNAME
-  !define DBX_APP_DISPLAYNAME "${PRODUCTNAME}"
-!endif
-
 !define MANUKEY "Software\${MANUFACTURER}"
 !define MANUPRODUCTKEY "${MANUKEY}\${PRODUCTNAME}"
 !define UNINSTALLERSIGNCOMMAND "{{uninstaller_sign_cmd}}"
@@ -116,7 +104,20 @@ Var DbxDirectoryProbeError
 Var DbxFailedFile
 Var DbxWriteFailureAction
 
-Name "${DBX_APP_DISPLAYNAME}"
+; The fixed-runtime build advertises the legacy systems it targets. Registry
+; keys, install dir and shortcuts keep using ${PRODUCTNAME}, which stays stable
+; across packages (Tauri rejects "/" in productName, so the bundle-wide name
+; cannot carry "Windows 7 / Server 2008 R2").
+!if "${INSTALLWEBVIEW2MODE}" != ""
+  !define DBX_WINDOW_TITLE "${PRODUCTNAME}"
+!else if "${ARCH}" == "x64"
+  !define DBX_WINDOW_TITLE "${PRODUCTNAME} - Windows 7 / Server 2008 R2"
+!endif
+!ifndef DBX_WINDOW_TITLE
+  !define DBX_WINDOW_TITLE "${PRODUCTNAME}"
+!endif
+
+Name "${DBX_WINDOW_TITLE}"
 BrandingText "${COPYRIGHT}"
 OutFile "${OUTFILE}"
 
@@ -820,17 +821,17 @@ Function .onInit
     !if "${INSTALLMODE}" == "perMachine"
       ${If} ${RunningX64}
         !if "${ARCH}" == "x64"
-          StrCpy $INSTDIR "$PROGRAMFILES64\${DBX_APP_DISPLAYNAME}"
+          StrCpy $INSTDIR "$PROGRAMFILES64\${PRODUCTNAME}"
         !else if "${ARCH}" == "arm64"
-          StrCpy $INSTDIR "$PROGRAMFILES64\${DBX_APP_DISPLAYNAME}"
+          StrCpy $INSTDIR "$PROGRAMFILES64\${PRODUCTNAME}"
         !else
-          StrCpy $INSTDIR "$PROGRAMFILES\${DBX_APP_DISPLAYNAME}"
+          StrCpy $INSTDIR "$PROGRAMFILES\${PRODUCTNAME}"
         !endif
       ${Else}
-        StrCpy $INSTDIR "$PROGRAMFILES\${DBX_APP_DISPLAYNAME}"
+        StrCpy $INSTDIR "$PROGRAMFILES\${PRODUCTNAME}"
       ${EndIf}
     !else if "${INSTALLMODE}" == "currentUser"
-      StrCpy $INSTDIR "$LOCALAPPDATA\${DBX_APP_DISPLAYNAME}"
+      StrCpy $INSTDIR "$LOCALAPPDATA\${PRODUCTNAME}"
     !endif
 
     Call RestorePreviousInstallLocation
@@ -1038,7 +1039,7 @@ Section Install
   WriteRegStr SHCTX "${UNINSTKEY}" "MainBinaryName" "${MAINBINARYNAME}.exe"
 
   ; Registry information for add/remove programs
-  WriteRegStr SHCTX "${UNINSTKEY}" "DisplayName" "${DBX_APP_DISPLAYNAME}"
+  WriteRegStr SHCTX "${UNINSTKEY}" "DisplayName" "${PRODUCTNAME}"
   WriteRegStr SHCTX "${UNINSTKEY}" "DisplayIcon" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\""
   WriteRegStr SHCTX "${UNINSTKEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr SHCTX "${UNINSTKEY}" "Publisher" "${MANUFACTURER}"

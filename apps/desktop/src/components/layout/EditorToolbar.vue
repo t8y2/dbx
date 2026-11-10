@@ -33,6 +33,7 @@ import {
   RefreshCw,
   UserRound,
   Copy,
+  MessageSquareText,
 } from "@lucide/vue";
 import { supportsInsertValueHints } from "@/lib/sql/insertValueHints";
 import { Button } from "@/components/ui/button";
@@ -118,6 +119,7 @@ const emit = defineEmits<{
   formatSql: [];
   compressSql: [];
   foldAll: [];
+  toggleLineComment: [];
   unfoldAll: [];
   toggleSqlKeywordCase: [];
   saveSql: [tabId: string];
@@ -355,6 +357,7 @@ const saveTooltip = computed(() => {
 });
 const explainPlanTooltip = computed(() => formatShortcutTooltip(t("toolbar.explainPlan"), settingsStore.editorSettings.shortcuts.explainSql));
 const formatSqlTooltip = computed(() => formatShortcutTooltip(t("toolbar.formatSql"), settingsStore.editorSettings.shortcuts.formatSql));
+const lineCommentTooltip = computed(() => formatShortcutTooltip(t("settings.shortcutToggleLineComment"), settingsStore.editorSettings.shortcuts.toggleLineComment));
 const exPasteSqlInConditionTooltip = computed(() => formatShortcutTooltip(t("toolbar.exPasteSqlInCondition"), settingsStore.editorSettings.shortcuts.exPasteSqlInCondition));
 const isObjectSourceTab = computed(() => !!props.activeTab.objectSource || !!props.activeTab.sourceLoad);
 const objectSourceRefreshing = computed(() => !!props.activeTab.sourceLoad && !props.activeTab.sourceLoad.error);
@@ -734,6 +737,22 @@ defineExpose({
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ explainAnalyzeTooltip }}</TooltipContent>
+      </Tooltip>
+      <Tooltip v-if="canFormatSql">
+        <TooltipTrigger as-child>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground"
+            :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText"
+            :aria-label="t('settings.shortcutToggleLineComment')"
+            @mousedown.prevent
+            @click="emit('toggleLineComment')"
+          >
+            <MessageSquareText class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ lineCommentTooltip }}</TooltipContent>
       </Tooltip>
       <Tooltip v-if="showFormatButton">
         <TooltipTrigger as-child>

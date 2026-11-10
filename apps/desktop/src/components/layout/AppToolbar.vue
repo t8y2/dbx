@@ -626,13 +626,6 @@ const toolbarStyle = computed(() => {
       </TooltipTrigger>
       <TooltipContent>{{ sidebarExpandTooltip }}</TooltipContent>
     </Tooltip>
-    <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-connection')">
-      <span class="inline-flex items-center gap-1">
-        <DatabaseZap class="h-3.5 w-3.5" />
-        <span ref="newConnectionLabelEl" :class="toolbarTextLabelClass">{{ t("toolbar.newConnection") }}</span>
-      </span>
-    </Button>
-
     <Tooltip v-if="canNewQuery">
       <TooltipTrigger as-child>
         <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-query')">
@@ -642,6 +635,13 @@ const toolbarStyle = computed(() => {
       </TooltipTrigger>
       <TooltipContent>{{ newQueryTooltip }}</TooltipContent>
     </Tooltip>
+
+    <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-connection')">
+      <span class="inline-flex items-center gap-1">
+        <DatabaseZap class="h-3.5 w-3.5" />
+        <span ref="newConnectionLabelEl" :class="toolbarTextLabelClass">{{ t("toolbar.newConnection") }}</span>
+      </span>
+    </Button>
 
     <template v-if="!toolbarCollapsed">
       <Button v-if="toolbarItems.dataTransfer" variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('open-transfer')" :disabled="!hasConnections">

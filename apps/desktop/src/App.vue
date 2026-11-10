@@ -127,8 +127,8 @@ import { defaultSavedQueryFileName, externalSqlFileOpenErrorMessage, externalSql
 import type { ConnectionConfig, DatabaseType, ObjectBrowserFilter, ObjectSourceKind, QueryTab, TableInfoTab, TabOutputView, TreeNode } from "@/types/database";
 import { OPEN_PLUGIN_SETTINGS, type PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { parsePluginInstallDeepLink } from "@/lib/plugins/pluginInstallDeepLink";
-import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
-import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate, type ConnectionDeepLinkDraft, type ConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
+import { createFrontendPluginRegistry, pluginConnectionProviderDefaultPort } from "@/lib/plugins/frontendPlugin";
+import { parseConnectionDeepLink, parseConnectionDeepLinkUpdate, type ConnectionDeepLinkDraft, type ConnectionDeepLinkPluginProvider, type ConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLink";
 import { resolveConnectionDeepLinkUpdate } from "@/lib/connection/connectionDeepLinkUpdate";
 import { parseAiConfigDeepLink, type AiConfigDeepLinkDraft } from "@/lib/ai/aiConfigDeepLink";
 import { activeDesktopAiRuns, blockingDesktopAiRunsForQuit } from "@/lib/ai/desktopAiRunRegistry";
@@ -3163,6 +3163,27 @@ async function openPendingDbFiles() {
   }
 }
 
+/**
+ * 深链里 `type=` 可寻址的插件连接提供者（例如 SSH 插件注册的 `ssh`）。
+ *
+ * 插件在运行时注册，深链解析器又必须是纯函数，所以由这里把已安装提供者投影成
+ * 只读描述表传进去；插件加载失败只是让 `type=` 退回内置数据库类型，不影响打开弹窗。
+ */
+async function deepLinkPluginConnectionProviders(): Promise<ConnectionDeepLinkPluginProvider[]> {
+  try {
+    const registry = createFrontendPluginRegistry(await api.listPlugins(), appLocale.value);
+    return registry.listConnectionProviders().map((entry) => ({
+      pluginId: entry.plugin.manifest.id,
+      providerId: entry.contribution.id,
+      label: entry.contribution.label,
+      databaseType: entry.contribution.database_type,
+      defaultPort: pluginConnectionProviderDefaultPort(entry.contribution),
+    }));
+  } catch {
+    return [];
+  }
+}
+
 async function openConnectionDeepLink(url: string) {
   await connectionStore.initFromDisk();
   try {
@@ -3178,7 +3199,7 @@ async function openConnectionDeepLink(url: string) {
       showConnectionDialog.value = true;
       return;
     }
-    const draft = parseConnectionDeepLink(url);
+    const draft = parseConnectionDeepLink(url, { pluginProviders: await deepLinkPluginConnectionProviders() });
     if (!draft) return;
     // Do not let another external URL replace an unconfirmed update draft.
     if (connectionDialogUpdate.value && showConnectionDialog.value) throw new Error("Close the current connection dialog before opening another connection link.");

@@ -3221,6 +3221,51 @@ function applyRequestedPluginProvider(target: PluginCenterFocus | null | undefin
   return true;
 }
 
+/**
+ * 深链指向插件连接（`type=ssh` 这类由插件注册的 `database_type`）时，选中该提供者并把
+ * 链接上的通用字段（名称/主机/端口/用户/口令）落到插件表单。
+ *
+ * 插件字段的 `binding` 与内置连接的通用字段一一对应，所以这里复用一个等价的
+ * `ConnectionConfig` 交给 {@link pluginConnectionFormValues} 做绑定，而不是再实现一遍。
+ */
+function applyPluginConnectionPrefill(draft: ConnectionDeepLinkDraft): boolean {
+  const target = draft.pluginProvider;
+  if (!target) return false;
+  const entry = pluginProviderEntry(target.pluginId, target.providerId);
+  if (!entry) return false;
+  if (!applyPluginProvider(pluginConnectionProviderOptionValue(target.pluginId, target.providerId))) return false;
+
+  selectedDbCategory.value = "plugins";
+  const seed = {
+    id: editingId.value || "",
+    name: draft.name?.trim() || entry.contribution.label,
+    db_type: "plugin",
+    driver_profile: "plugin",
+    driver_label: entry.contribution.label,
+    host: draft.host ?? "",
+    port: draft.port ?? 0,
+    username: draft.username ?? "",
+    password: draft.password ?? "",
+    database: draft.database,
+  } as ConnectionConfig;
+  pluginFormValues.value = pluginConnectionFormValues(entry.contribution, seed);
+
+  form.value.name = seed.name;
+  if (draft.host) form.value.host = draft.host;
+  if (draft.port) form.value.port = draft.port;
+  if (draft.username !== undefined) form.value.username = draft.username;
+  if (draft.password !== undefined) form.value.password = draft.password;
+  if (!draft.name?.trim()) {
+    const nameField = entry.contribution.fields.find((field) => field.binding === "name");
+    const defaultName = nameField ? pluginFormValues.value[nameField.key] : undefined;
+    if (typeof defaultName === "string" && defaultName.trim()) form.value.name = defaultName.trim();
+  }
+  dialogStep.value = "config";
+  configTab.value = "connection";
+  resetTestState();
+  return true;
+}
+
 function switchOceanbaseMode(mode: "mysql" | "oracle") {
   const port = form.value.port;
   const sourceProfile = oceanbaseSubMode.value === "mysql" ? "oceanbase" : "oceanbase-oracle";
@@ -6537,6 +6582,7 @@ function prefillDraftKey(draft: ConnectionDeepLinkDraft) {
     draft.useMongoUrl,
     draft.serviceConfig,
     draft.mqConfig,
+    draft.pluginProvider,
   ]);
 }
 
@@ -6590,7 +6636,8 @@ function applyConnectionDraftToConfig(config: Omit<ConnectionConfig, "id">, draf
   return next;
 }
 
-function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
+function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft): boolean {
+  if (draft.pluginProvider) return applyPluginConnectionPrefill(draft);
   applyProfile(draft.driverProfile);
   form.value = applyConnectionDraftToConfig(form.value, draft);
   if (draft.serviceConfig?.kind === "consul") {
@@ -6630,10 +6677,36 @@ function applyConnectionDraftToForm(draft: ConnectionDeepLinkDraft) {
   dialogStep.value = "config";
   configTab.value = "connection";
   resetTestState();
+  return true;
+}
+
+/**
+ * 插件深链的预填必须等 `listPlugins` 返回，否则选中提供者时插件表还是空的。
+ *
+ * `notifyFailure` 只在「插件表已经就绪」的调用点为真：此时仍然找不到提供者说明插件
+ * 没装或被禁用，需要告诉用户，而不是静默留一个空表单。
+ */
+function applyDeferredPluginConnectionPrefill(notifyFailure = true): boolean {
+  const draft = props.prefillConfig;
+  if (!open.value || !draft?.pluginProvider) return false;
+  if (!applyConnectionDraftToForm(draft)) {
+    if (notifyFailure) toast(t("connection.pluginProviderUnavailable"), 5000);
+    return false;
+  }
+  submitPrefillIfAutoConfirmed(draft);
+  return true;
 }
 
 function applyConnectionPrefill(draft: ConnectionDeepLinkDraft) {
   resetForm();
+  if (draft.pluginProvider) {
+    // 插件表在这里可能还没加载完（首次打开时 `installedPlugins` 为空），
+    // 因此先等插件就绪再落表单，避免预填成一条没有 provider 的连接。
+    if (!applyDeferredPluginConnectionPrefill(false)) {
+      void loadInstalledPlugins().then(() => applyDeferredPluginConnectionPrefill());
+    }
+    return;
+  }
   applyConnectionDraftToForm(draft);
   submitPrefillIfAutoConfirmed(draft);
 }
@@ -6664,6 +6737,8 @@ watch(
           selectedDbCategory.value = "plugins";
           pluginFormValues.value = pluginConnectionFormValues(entry.contribution, props.editConfig);
         }
+      } else if (props.prefillConfig?.pluginProvider) {
+        applyDeferredPluginConnectionPrefill(false);
       } else if (!props.prefillConfig) {
         applyRequestedPluginProvider(props.pluginProvider);
       }
@@ -6682,6 +6757,8 @@ watch(
           selectedDbCategory.value = "plugins";
           pluginFormValues.value = pluginConnectionFormValues(entry.contribution, props.editConfig);
         }
+      } else if (props.prefillConfig?.pluginProvider) {
+        applyDeferredPluginConnectionPrefill(false);
       } else if (!props.prefillConfig) {
         applyRequestedPluginProvider(props.pluginProvider);
       }

@@ -620,6 +620,9 @@ async function fetchDdl(force = false, options?: { preserveDraft?: boolean }) {
   }
 }
 const errorMessage = ref("");
+// A failed column read stays unloaded. Keep its error separate from preview
+// errors so automatic tab loading waits for an explicit metadata refresh.
+const columnsMetadataReadError = ref("");
 const secondaryMetadataErrors = ref<Partial<Record<ObjectMetadataFacet, string>>>({});
 // Keep the index write gate independent of display errors, which unrelated
 // facet loads and silent refreshes may clear or suppress.
@@ -3891,6 +3894,7 @@ function clearDraft() {
 }
 
 function resetState() {
+  columnsMetadataReadError.value = "";
   triggerStructurePlan.value = undefined;
   triggerStructureRecovery.value = undefined;
   invalidateDraftHydration();
@@ -4257,6 +4261,7 @@ async function loadStructure(
   const oracleIndexContext = !isCreateMode.value && (databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle");
   const needsOracleIndexBaseline = oracleIndexContext && scope.indexes;
   const effectiveScope = withRequiredPostgresPrimaryKeyMetadata(needsOracleIndexBaseline || (props.exactIdentity && scope.indexes) ? { ...scope, columns: true, indexes: true } : scope);
+  if (effectiveScope.columns) columnsMetadataReadError.value = "";
   if (oracleIndexContext && (scope.columns || scope.indexes)) invalidateOracleIndexReady();
   let loadEpoch = oracleIndexEpoch.value;
   const requestId = ++structureLoadRequestId;
@@ -4297,10 +4302,15 @@ async function loadStructure(
         : Promise.resolve({ known: true, status: { isPartitionedParent: false, isPartition: false, isForeign: false } });
     const columnsLoad = effectiveScope.columns ? loadObjectMetadataFacet(metadataRequest, "columns", () => getStructureColumns(metadataRequest), { force: forceMetadata }) : undefined;
     const columnsPromise = columnsLoad
-      ? columnsLoad.then((result) => {
-          columnsServedFromCache = result.cacheStatus !== "remote";
-          return result.value;
-        })
+      ? columnsLoad
+          .then((result) => {
+            columnsServedFromCache = result.cacheStatus !== "remote";
+            return result.value;
+          })
+          .catch((error) => {
+            if (oracleIndexLoadIsCurrent(requestId, loadTargetIdentity, loadConnectionRevision, loadConfigFingerprint)) columnsMetadataReadError.value = error instanceof Error ? error.message || String(error) : String(error);
+            throw error;
+          })
       : Promise.resolve(undefined);
     const indexesPromise = effectiveScope.indexes
       ? tableMetadataCapabilities.value.indexes
@@ -4596,7 +4606,15 @@ async function revalidateCachedStructureMetadata(loadRequestId: number, scope: {
     const [columnsResult, commentResult] = await Promise.allSettled([columnsPromise, commentPromise] as const);
     // A newer load or revalidation supersedes this one.
     if (!isCurrent()) return;
-    if (columnsResult.status === "rejected") console.warn("[DBX][structure-editor:columns-metadata-revalidation-failed]", columnsResult.reason);
+    if (columnsResult.status === "rejected") {
+      console.warn("[DBX][structure-editor:columns-metadata-revalidation-failed]", columnsResult.reason);
+      if (columns.value.length === 0) {
+        const error = columnsResult.reason;
+        columnsMetadataReadError.value = error instanceof Error ? error.message || String(error) : String(error);
+        errorMessage.value = columnsMetadataReadError.value;
+        loadedMetadataFacets.delete("columns");
+      }
+    }
     if (commentResult.status === "rejected") console.warn("[DBX][structure-editor:comment-metadata-revalidation-failed]", commentResult.reason);
 
     let applied = false;
@@ -7862,8 +7880,11 @@ onMounted(() => {
   if (props.draft?.initialized) {
     // A clean persisted editor snapshot is not a live schema cache. After an
     // MCP DDL, restoring its loaded-facet flags would otherwise bypass the
-    // invalidated backend cache entirely. Legacy/dirty drafts remain intact.
-    const revalidateRestoredColumns = props.draft.dirty === false && !isCreateMode.value && loadedMetadataFacets.has("columns") && !(databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl);
+    // invalidated backend cache entirely. Empty legacy snapshots can also
+    // wrongly claim that columns were loaded; recheck those when no edits need
+    // preserving. Other legacy/dirty drafts remain intact.
+    const emptyLegacyColumns = props.draft.dirty === undefined && columns.value.length === 0 && !hasPendingStructureChanges() && !ddlDirty.value;
+    const revalidateRestoredColumns = (props.draft.dirty === false || emptyLegacyColumns) && !isCreateMode.value && loadedMetadataFacets.has("columns") && !(databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl);
     const restoredIdentity = draftTargetIdentity();
     void hydrateRestoredDraftFromDatabase().then((completed) => {
       if (completed) return initializeRestoredDraftMetadata(restoredIdentity, revalidateRestoredColumns);
@@ -8238,6 +8259,10 @@ async function loadActiveTableStructureMetadataIfNeeded() {
   }
   if (loading.value || secondaryMetadataLoading.value) return;
   const scope = withRequiredPostgresPrimaryKeyMetadata(unloadedTableStructureRefreshScope(activeTab.value, loadedMetadataFacets));
+  if (scope.columns && columnsMetadataReadError.value) {
+    errorMessage.value = columnsMetadataReadError.value;
+    return;
+  }
   // A rejected facet is still unloaded, but retrying it whenever loading
   // clears would loop indefinitely. The toolbar performs an explicit retry.
   if (indexMetadataReadError.value) scope.indexes = false;

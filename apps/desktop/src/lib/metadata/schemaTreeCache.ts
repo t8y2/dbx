@@ -4,19 +4,14 @@ export interface TableSearchIndexEntry {
   name: string;
   tableType: string;
   comment?: string | null;
-  /**
-   * Schema that owns this object. `TableInfo.parent_schema` is the partitioned
-   * parent table's schema, so it cannot stand in for it (#14316 review).
-   */
+  /** Schema that owns this object; `parent_schema` belongs to the partitioned parent. */
   schema?: string;
+  parentSchema?: string | null;
+  parentName?: string | null;
 }
 
 export interface TableSearchIndex {
-  /**
-   * Bumped when the entry shape changes in a way older caches cannot satisfy.
-   * Version 2 adds `schema`; version 1 indexes are discarded and rebuilt so a
-   * stale cache never answers `schema.table` searches from unattributed names.
-   */
+  /** Version 2 preserves owning schema and partition parent metadata. */
   version: 2;
   complete: true;
   indexedAt: string;
@@ -91,7 +86,14 @@ function decodeTableSearchIndex(value: unknown): TableSearchIndex | undefined {
   const index = value as Partial<TableSearchIndex>;
   if (index.version !== 2 || index.complete !== true || typeof index.indexedAt !== "string" || !Array.isArray(index.entries)) return undefined;
   const entries = index.entries.filter(
-    (entry): entry is TableSearchIndexEntry => !!entry && typeof entry.name === "string" && typeof entry.tableType === "string" && (entry.comment === undefined || entry.comment === null || typeof entry.comment === "string") && (entry.schema === undefined || typeof entry.schema === "string"),
+    (entry): entry is TableSearchIndexEntry =>
+      !!entry &&
+      typeof entry.name === "string" &&
+      typeof entry.tableType === "string" &&
+      (entry.comment === undefined || entry.comment === null || typeof entry.comment === "string") &&
+      (entry.schema === undefined || typeof entry.schema === "string") &&
+      (entry.parentSchema === undefined || entry.parentSchema === null || typeof entry.parentSchema === "string") &&
+      (entry.parentName === undefined || entry.parentName === null || typeof entry.parentName === "string"),
   );
   return entries.length === index.entries.length ? { version: 2, complete: true, indexedAt: index.indexedAt, entries } : undefined;
 }

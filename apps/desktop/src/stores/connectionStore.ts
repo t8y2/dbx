@@ -4080,6 +4080,8 @@ export const useConnectionStore = defineStore("connection", () => {
             table_type: entry.tableType,
             ...(entry.comment !== undefined ? { comment: entry.comment } : {}),
             ...(entry.schema !== undefined ? { schema: entry.schema } : {}),
+            ...(entry.parentSchema !== undefined ? { parent_schema: entry.parentSchema } : {}),
+            ...(entry.parentName !== undefined ? { parent_name: entry.parentName } : {}),
           }))
         : null;
       const indexedAt = index ? Date.parse(index.indexedAt) : Number.NaN;
@@ -4222,7 +4224,7 @@ export const useConnectionStore = defineStore("connection", () => {
         if (page.length < pageSize) break;
       }
     }
-    const deduped = [...new Map(entries.map((entry) => [`${entry.schema ?? ""}\0${entry.table_type}\0${entry.name}`, entry])).values()];
+    const deduped = [...new Map(entries.map((entry) => [`${entry.schema ?? ""}\0${entry.table_type}\0${entry.name}\0${entry.parent_schema ?? ""}\0${entry.parent_name ?? ""}`, entry])).values()];
     const tableSearchIndex = {
       version: 2 as const,
       complete: true as const,
@@ -4232,6 +4234,8 @@ export const useConnectionStore = defineStore("connection", () => {
         tableType: entry.table_type,
         ...(entry.comment !== undefined ? { comment: entry.comment } : {}),
         ...(entry.schema ? { schema: entry.schema } : {}),
+        ...(entry.parent_schema !== undefined ? { parentSchema: entry.parent_schema } : {}),
+        ...(entry.parent_name !== undefined ? { parentName: entry.parent_name } : {}),
       })),
     };
     if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return [];

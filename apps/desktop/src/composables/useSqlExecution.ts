@@ -1,11 +1,13 @@
 import { shouldReportOracleCompilationErrors } from "@/lib/query/oracleCompilationErrors";
-import { ref, watch, type Ref, type ComputedRef } from "vue";
+import { getCurrentScope, onScopeDispose, ref, watch, type Ref, type ComputedRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
+import { dataGridPendingChangesState } from "@/composables/useDataGridEditor";
+import { resultGridInstanceKey } from "@/lib/tabs/tabPresentation";
 import { isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { supportsConnectionScopedQueryExecution } from "@/lib/database/databaseFeatureSupport";
 import { supportsTransaction } from "@/lib/database/databaseFeatureSupport";
@@ -195,6 +197,17 @@ export function useSqlExecution(deps: {
   const dangerSql = ref("");
   const pendingDangerSql = ref("");
   const showDangerDialog = ref(false);
+  const showResultChangesDialog = ref(false);
+  let resolveResultChanges: ((confirmed: boolean) => void) | undefined;
+
+  function onResultChangesConfirm(confirmed: boolean) {
+    const resolve = resolveResultChanges;
+    resolveResultChanges = undefined;
+    showResultChangesDialog.value = false;
+    resolve?.(confirmed);
+  }
+  if (getCurrentScope()) onScopeDispose(() => onResultChangesConfirm(false));
+
   const suppressDangerConfirm = ref(false);
   const explainMode = ref<"explain" | "autotrace">("explain");
   const showSqlParameterDialog = ref(false);
@@ -518,6 +531,38 @@ export function useSqlExecution(deps: {
       deps.onMissingDatabase?.(executionTabId);
       cancelEditorViewportRequest(options.editorViewportRequestId);
       return notStarted("missing-database", executionTabId);
+    }
+    if (options.openInNewResultTab !== true) {
+      const gridKey = resultGridInstanceKey(tab);
+      const previousResult = tab.result;
+      const gridKeys = Array.from({ length: Math.max(tab.results?.length ?? 0, 1) }, (_, activeResultIndex) => resultGridInstanceKey({ ...tab, activeResultIndex }));
+      const pendingState = () => {
+        const states = gridKeys.map((key) => dataGridPendingChangesState(key, tab.id, tab.resultViewGeneration));
+        return states.includes("saving") ? "saving" : states.includes("pending") ? "pending" : undefined;
+      };
+      if (showResultChangesDialog.value) {
+        cancelEditorViewportRequest(options.editorViewportRequestId);
+        return notStarted("busy", executionTabId);
+      }
+      if (pendingState() === "saving") {
+        toast(t("grid.queryWhileSaving"), 5000);
+        cancelEditorViewportRequest(options.editorViewportRequestId);
+        return notStarted("busy", executionTabId);
+      }
+      if (pendingState() === "pending") {
+        const confirmed = await new Promise<boolean>((resolve) => {
+          resolveResultChanges = resolve;
+          showResultChangesDialog.value = true;
+        });
+        if (!confirmed || resolveExecutionTab(executionTabId) !== tab || resultGridInstanceKey(tab) !== gridKey || tab.result !== previousResult) {
+          cancelEditorViewportRequest(options.editorViewportRequestId);
+          return notStarted("cancelled", executionTabId);
+        }
+        if (tab.isExecuting || pendingState() === "saving") {
+          cancelEditorViewportRequest(options.editorViewportRequestId);
+          return notStarted("busy", executionTabId);
+        }
+      }
     }
     const statementCount = splitSqlStatementRanges(
       sql,
@@ -1129,6 +1174,8 @@ export function useSqlExecution(deps: {
 
   return {
     dangerSql,
+    showResultChangesDialog,
+    onResultChangesConfirm,
     pendingDangerSql,
     showDangerDialog,
     suppressDangerConfirm,

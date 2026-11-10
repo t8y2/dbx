@@ -6561,20 +6561,45 @@ fn postgres_transaction_begin_sql(consistent_snapshot: bool) -> &'static str {
     }
 }
 
-fn mysql_transaction_begin_sql_candidates(consistent_snapshot: bool) -> &'static [&'static str] {
-    if consistent_snapshot {
+fn mysql_transaction_begin_sql_candidates(
+    consistent_snapshot: bool,
+    catalog_dialect: Option<db::mysql::MySqlCatalogDialect>,
+) -> &'static [&'static str] {
+    if !consistent_snapshot {
+        return &["START TRANSACTION"];
+    }
+    // Doris parses BEGIN with its own ANTLR grammar. `WITH CONSISTENT SNAPSHOT`
+    // is accepted, but neither the `, READ ONLY` clause nor a standalone
+    // `READ ONLY` / `READ WRITE` is, so the plain MySQL forms always fail with
+    // ER_UNKNOWN_ERROR 1105 (`mismatched input ',' ...`, `mismatched input
+    // 'READ' ...`). Verified against Doris 4.0.7
+    // (`doris-4.0.7-rc02-35854e7e92a`, server version 5.7.99). Doris opens
+    // repeatable-read transactions by default, so the short form still gives a
+    // database export the consistent snapshot it needs; `START TRANSACTION` is
+    // kept only as a last-resort fallback.
+    if matches!(catalog_dialect, Some(db::mysql::MySqlCatalogDialect::Doris)) {
+        &["START TRANSACTION WITH CONSISTENT SNAPSHOT", "START TRANSACTION"]
+    } else {
         &[
             "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
             "START TRANSACTION WITH CONSISTENT SNAPSHOT",
             "START TRANSACTION",
         ]
-    } else {
-        &["START TRANSACTION"]
     }
 }
 
-fn mysql_transaction_isolation_sql(consistent_snapshot: bool) -> Option<&'static str> {
-    consistent_snapshot.then_some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+fn mysql_transaction_isolation_sql(
+    consistent_snapshot: bool,
+    catalog_dialect: Option<db::mysql::MySqlCatalogDialect>,
+) -> Option<&'static str> {
+    // Doris rejects `SET TRANSACTION ISOLATION LEVEL ...` with the same parser
+    // error class and silently no-ops `SET TRANSACTION READ ONLY`, while its
+    // transactions already start at REPEATABLE-READ, so the pre-BEGIN statement
+    // is both useless and fatal there.
+    if !consistent_snapshot || matches!(catalog_dialect, Some(db::mysql::MySqlCatalogDialect::Doris)) {
+        return None;
+    }
+    Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
 }
 
 fn mysql_error_is_syntax_error(error: &mysql_async::Error) -> bool {
@@ -6585,9 +6610,24 @@ fn mysql_error_is_syntax_error(error: &mysql_async::Error) -> bool {
         // diagnostic instead of MySQL's ER_PARSE_ERROR (1064).  Only treat
         // diagnostics that clearly identify a syntax/parser failure as
         // retryable; generic 1105 errors may indicate a real server failure.
+        //
+        // Two Doris grammar flavours are in the wild, so match both:
+        //   - older/rewritten: `Syntax error in line 1: ... ^ Encountered: X Expected: Y`
+        //   - Doris 4.x (raw ANTLR): `mismatched input ',' expecting {<EOF>, ';'}(line 1, pos 42)`
         mysql_async::Error::Server(server_error) if server_error.code == 1105 => {
             let message = server_error.message.to_ascii_lowercase();
-            message.contains("syntax error") && (message.contains("encountered:") || message.contains("expected"))
+            let classic_parser_diagnostic =
+                message.contains("syntax error") && (message.contains("encountered:") || message.contains("expected"));
+            let antlr_parser_diagnostic = message.contains("mismatched input")
+                || message.contains("extraneous input")
+                || message.contains("no viable alternative")
+                || message.contains("token recognition error");
+            // `errCode = 2` is Doris' internal ANALYSIS_ERROR code; the parser
+            // diagnostics above are the discriminator, this is a secondary guard
+            // so an unrelated 1105 failure carrying the same marker stays fatal.
+            let doris_analysis_error = message.contains("errcode = 2");
+            classic_parser_diagnostic
+                || (antlr_parser_diagnostic && (doris_analysis_error || message.contains("expecting")))
         }
         // PolarDB-X exposes parser failures such as PXC-4500 / ERR_PARSER
         // through the generic MySQL protocol ERR_HANDLE_DATA code (3009).
@@ -6602,8 +6642,10 @@ fn mysql_error_is_syntax_error(error: &mysql_async::Error) -> bool {
 /// Compute per-execution-statement proven-read-only markers for the sticky
 /// manual-transaction UX (#7122 Oracle, #9018 MySQL/PostgreSQL, ... GaussDB).
 /// The user-facing classification SQL is split with the same dialect-aware
-/// splitter as the execution SQL and paired by count/position; any mismatch is
-/// fail-closed (no markers). Oracle/OceanBase-Oracle reach the same AST proof as
+/// splitter as the execution SQL — including the connection's compatibility
+/// mode, which is what a Kingbase or openGauss connection is actually split
+/// with — and paired by count/position; any mismatch is fail-closed (no
+/// markers). Oracle/OceanBase-Oracle reach the same AST proof as
 /// the PostgreSQL family through `is_oracle_proven_read_only_statement`, which
 /// keeps the Oracle-specific lexical guard rails (see `sql_risk`); MySQL and the
 /// PostgreSQL family use the strict `sql_risk` proof directly; every other
@@ -6612,6 +6654,7 @@ fn classify_manual_transaction_statements(
     database_type: Option<DatabaseType>,
     execution_statement_count: usize,
     classification_sql: Option<&str>,
+    compatibility_mode: Option<&str>,
 ) -> Vec<bool> {
     let Some(database_type) = database_type.filter(|database_type| {
         matches!(
@@ -6622,6 +6665,7 @@ fn classify_manual_transaction_statements(
                 | DatabaseType::Postgres
                 | DatabaseType::Gaussdb
                 | DatabaseType::OpenGauss
+                | DatabaseType::Kingbase
         )
     }) else {
         return Vec::new();
@@ -6629,7 +6673,11 @@ fn classify_manual_transaction_statements(
     let Some(classification_sql) = classification_sql else {
         return Vec::new();
     };
-    let user_statements = crate::sql::split_sql_statements_for_database(classification_sql, database_type);
+    let user_statements = crate::sql::split_sql_statements_for_database_with_compatibility(
+        classification_sql,
+        database_type,
+        compatibility_mode,
+    );
     let paired = user_statements.len() == execution_statement_count && !user_statements.is_empty();
     if !paired {
         return Vec::new();
@@ -6637,7 +6685,11 @@ fn classify_manual_transaction_statements(
     user_statements
         .iter()
         .map(|statement| match database_type {
-            DatabaseType::Mysql | DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::OpenGauss => {
+            DatabaseType::Mysql
+            | DatabaseType::Postgres
+            | DatabaseType::Gaussdb
+            | DatabaseType::OpenGauss
+            | DatabaseType::Kingbase => {
                 crate::sql_risk::prove_read_only_for_database(statement, database_type)
                     == crate::sql_risk::ReadProof::ProvenReadOnly
             }
@@ -6706,11 +6758,11 @@ async fn begin_transaction_session(
         TxnPoolHandle::Mysql(mysql_pool) => {
             let mut conn = mysql_pool.get_conn().await.map_err(|e| format!("Failed to get MySQL connection: {e}"))?;
             db::mysql::apply_catalog_database_context(&mut conn, mysql_catalog_dialect, catalog, database).await?;
-            if let Some(isolation_sql) = mysql_transaction_isolation_sql(consistent_snapshot) {
+            if let Some(isolation_sql) = mysql_transaction_isolation_sql(consistent_snapshot, mysql_catalog_dialect) {
                 conn.query_drop(isolation_sql).await.map_err(|e| format!("SET TRANSACTION failed: {e}"))?;
             }
             let mut syntax_errors = Vec::new();
-            for begin_sql in mysql_transaction_begin_sql_candidates(consistent_snapshot) {
+            for begin_sql in mysql_transaction_begin_sql_candidates(consistent_snapshot, mysql_catalog_dialect) {
                 match conn.query_drop(*begin_sql).await {
                     Ok(()) => {
                         syntax_errors.clear();
@@ -6900,6 +6952,43 @@ pub async fn keep_manual_transaction_alive(
     Ok(ManualTransactionKeepAlive { task, sessions: keep_alive_sessions, txn_session_id })
 }
 
+/// Clears a manual transaction session's `busy` flag when the execution that
+/// claimed it goes away without reaching its own cleanup: the command future was
+/// dropped (frontend cancelled the invoke, the window reloaded) or a driver
+/// panicked. Without it the session stays busy forever and every later run fails
+/// with "Transaction session is already executing" until a new window is opened
+/// (#14184). Normal paths already clear the flag themselves; the guard is a
+/// best-effort `try_write` fallback for exactly the exits nobody owns.
+struct ManualTransactionBusyGuard<'a> {
+    state: &'a AppState,
+    txn_session_id: &'a str,
+}
+
+impl<'a> ManualTransactionBusyGuard<'a> {
+    fn new(state: &'a AppState, txn_session_id: &'a str) -> Self {
+        Self { state, txn_session_id }
+    }
+}
+
+impl Drop for ManualTransactionBusyGuard<'_> {
+    fn drop(&mut self) {
+        // A dropped future cannot await, so retry the non-blocking lock briefly
+        // instead of leaving the session wedged when a poller happens to hold it.
+        for _ in 0..100 {
+            if let Ok(mut sessions) = self.state.transaction_sessions.try_write() {
+                if let Some(session) = sessions.get_mut(self.txn_session_id) {
+                    if session.busy {
+                        session.busy = false;
+                        session.last_activity = std::time::Instant::now();
+                    }
+                }
+                return;
+            }
+            std::thread::yield_now();
+        }
+    }
+}
+
 /// Execute SQL within an existing manual transaction session.
 pub async fn execute_in_manual_transaction(
     state: &AppState,
@@ -7009,6 +7098,7 @@ pub async fn execute_in_manual_transaction_with_options(
                     | DatabaseType::Postgres
                     | DatabaseType::Gaussdb
                     | DatabaseType::OpenGauss
+                    | DatabaseType::Kingbase
             )
         ) {
             result = result.with_manual_transaction_no_statement();
@@ -7052,8 +7142,12 @@ pub async fn execute_in_manual_transaction_with_options(
         }
     }
 
-    let classification: Vec<bool> =
-        classify_manual_transaction_statements(db_type, statements.len(), options.classification_sql.as_deref());
+    let classification: Vec<bool> = classify_manual_transaction_statements(
+        db_type,
+        statements.len(),
+        options.classification_sql.as_deref(),
+        compatibility_mode.as_deref(),
+    );
 
     let connection = {
         let mut sessions = state.transaction_sessions.write().await;
@@ -7080,6 +7174,12 @@ pub async fn execute_in_manual_transaction_with_options(
         release_manual_txn_session_pool(state, &session.connection_id, &mut conn).await;
         return Err(MANUAL_TRANSACTION_IDLE_ROLLBACK_ERROR.to_string());
     }
+    // If this future is dropped mid-execution — the frontend cancels the invoke,
+    // the window reloads, or a driver panics — the code below never runs and the
+    // session would stay busy forever ("Transaction session is already
+    // executing" until a new window). The guard clears the flag on every exit
+    // path, including cancellation and unwinding (#14184).
+    let _busy_guard = ManualTransactionBusyGuard::new(state, txn_session_id);
 
     let connection = {
         let sessions = state.transaction_sessions.read().await;
@@ -7298,6 +7398,9 @@ where
         let _ = rollback_manual_txn_connection(&mut conn).await;
         return Err(MANUAL_TRANSACTION_IDLE_ROLLBACK_ERROR.to_string());
     }
+    // Same busy-stuck protection as the batch executor: if this streaming
+    // future is dropped mid-run the guard clears the flag (#14184).
+    let _busy_guard = ManualTransactionBusyGuard::new(state, txn_session_id);
 
     let (connection, pool_key, connection_id, mysql_data_charset) = {
         let sessions = state.transaction_sessions.read().await;
@@ -13079,92 +13182,154 @@ done
     #[test]
     fn manual_transaction_classification_pairs_statements_and_fails_closed() {
         // MySQL/PostgreSQL route through the strict sql_risk proof.
-        assert_eq!(classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, Some("SELECT 1")), vec![true]);
         assert_eq!(
-            classify_manual_transaction_statements(Some(DatabaseType::Postgres), 1, Some("SELECT * FROM users")),
+            classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, Some("SELECT 1"), None),
+            vec![true]
+        );
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::Postgres), 1, Some("SELECT * FROM users"), None),
             vec![true]
         );
         // GaussDB/openGauss share the PostgreSQL-family proof.
         assert_eq!(
-            classify_manual_transaction_statements(Some(DatabaseType::Gaussdb), 1, Some("SELECT * FROM users")),
+            classify_manual_transaction_statements(Some(DatabaseType::Gaussdb), 1, Some("SELECT * FROM users"), None),
             vec![true]
         );
         assert_eq!(
-            classify_manual_transaction_statements(Some(DatabaseType::OpenGauss), 1, Some("UPDATE users SET x = 1")),
+            classify_manual_transaction_statements(
+                Some(DatabaseType::OpenGauss),
+                1,
+                Some("UPDATE users SET x = 1"),
+                None
+            ),
+            vec![false]
+        );
+        // Kingbase shares the PostgreSQL-family proof.
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::Kingbase), 1, Some("SELECT * FROM users"), None),
+            vec![true]
+        );
+        assert_eq!(
+            classify_manual_transaction_statements(
+                Some(DatabaseType::Kingbase),
+                1,
+                Some("UPDATE users SET x = 1"),
+                None
+            ),
             vec![false]
         );
         // Mixed script: every statement is classified individually.
         assert_eq!(
-            classify_manual_transaction_statements(Some(DatabaseType::Mysql), 2, Some("SELECT 1; DELETE FROM t")),
+            classify_manual_transaction_statements(Some(DatabaseType::Mysql), 2, Some("SELECT 1; DELETE FROM t"), None),
             vec![true, false]
         );
         // Session-state writes fail the proof (SELECT ... INTO @var).
         assert_eq!(
-            classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, Some("SELECT 1 INTO @x")),
+            classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, Some("SELECT 1 INTO @x"), None),
             vec![false]
         );
         // Count mismatch, missing classification SQL, non-participating dialects
         // and unknown connections are all fail-closed (no markers).
-        assert!(classify_manual_transaction_statements(Some(DatabaseType::Mysql), 3, Some("SELECT 1")).is_empty());
-        assert!(classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, None).is_empty());
-        assert!(classify_manual_transaction_statements(Some(DatabaseType::Doris), 1, Some("SELECT 1")).is_empty());
-        assert!(classify_manual_transaction_statements(None, 1, Some("SELECT 1")).is_empty());
+        assert!(classify_manual_transaction_statements(Some(DatabaseType::Mysql), 3, Some("SELECT 1"), None).is_empty());
+        assert!(classify_manual_transaction_statements(Some(DatabaseType::Mysql), 1, None, None).is_empty());
+        assert!(classify_manual_transaction_statements(Some(DatabaseType::Doris), 1, Some("SELECT 1"), None).is_empty());
+        assert!(classify_manual_transaction_statements(None, 1, Some("SELECT 1"), None).is_empty());
         // Oracle/OceanBase-Oracle share the AST proof and keep the pairing
         // behavior; built-in functions are now provable (#11788) while the
         // Oracle guard rails (dblink, sequence pseudocolumns, set operators)
         // still fail the proof.
         assert_eq!(
-            classify_manual_transaction_statements(Some(DatabaseType::Oracle), 1, Some("SELECT * FROM EMP")),
+            classify_manual_transaction_statements(Some(DatabaseType::Oracle), 1, Some("SELECT * FROM EMP"), None),
             vec![true]
         );
         assert_eq!(
-            classify_manual_transaction_statements(Some(DatabaseType::Oracle), 1, Some("SELECT LENGTH(1) FROM dual")),
+            classify_manual_transaction_statements(
+                Some(DatabaseType::Oracle),
+                1,
+                Some("SELECT LENGTH(1) FROM dual"),
+                None
+            ),
             vec![true]
         );
         assert_eq!(
             classify_manual_transaction_statements(
                 Some(DatabaseType::OceanbaseOracle),
                 2,
-                Some("SELECT COUNT(*) FROM EMP; SELECT * FROM EMP@LINK")
+                Some("SELECT COUNT(*) FROM EMP; SELECT * FROM EMP@LINK"),
+                None
             ),
             vec![true, false]
         );
         assert_eq!(
-            classify_manual_transaction_statements(Some(DatabaseType::OceanbaseOracle), 1, Some("DELETE FROM EMP")),
+            classify_manual_transaction_statements(
+                Some(DatabaseType::OceanbaseOracle),
+                1,
+                Some("DELETE FROM EMP"),
+                None
+            ),
             vec![false]
         );
     }
 
-    /// Spawns a fake Python agent and registers a manual transaction session in
-    /// the app state so `execute_in_manual_transaction_with_options` can run
-    /// end to end without a live database.
-    async fn manual_transaction_test_state(db_type: DatabaseType) -> (AppState, String, std::path::PathBuf) {
-        use std::io::Write;
+    /// A Kingbase connection reports the compatibility mode its server runs in,
+    /// and the execution side splits the script with that mode's profile. The
+    /// classification has to use the same profile: otherwise the two statement
+    /// counts differ, the pairing fails closed and the read-only proof is
+    /// dropped even though nothing about the script was risky.
+    #[test]
+    fn manual_transaction_classification_uses_the_connection_compatibility_mode() {
+        // A MySQL-mode Kingbase connection keeps the routine body whole, so the
+        // execution side runs it as a single statement.
+        let sql = "CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END;";
+        for mode in [Some("mysql"), Some("pg"), None] {
+            let execution_statements =
+                crate::sql::split_sql_statements_for_database_with_compatibility(sql, DatabaseType::Kingbase, mode);
+            let classification = classify_manual_transaction_statements(
+                Some(DatabaseType::Kingbase),
+                execution_statements.len(),
+                Some(sql),
+                mode,
+            );
+            assert_eq!(
+                classification.len(),
+                execution_statements.len(),
+                "the classification must pair with the executed statements in mode {mode:?}"
+            );
+        }
+        // The MySQL profile keeps the routine body whole, so it is one write.
+        assert_eq!(
+            classify_manual_transaction_statements(Some(DatabaseType::Kingbase), 1, Some(sql), Some("mysql")),
+            vec![false]
+        );
+    }
 
-        let mut script = tempfile::NamedTempFile::new().unwrap();
-        write!(
-            script,
-            r#"import json
+    /// Fake JSON-RPC agent used by the manual-transaction tests. Requests are
+    /// answered from their own thread so a deliberately stalled statement cannot
+    /// block later requests; `HANG_MANUAL_TXN` in the SQL stalls only that reply.
+    const MANUAL_TRANSACTION_FAKE_AGENT_SCRIPT: &str = r#"import json
 import sys
+import threading
+import time
 
-print(json.dumps({{"ready": True}}), flush=True)
-cursor_ids = {{"cursor-1"}}
-for line in sys.stdin:
-    request = json.loads(line)
+print(json.dumps({"ready": True}), flush=True)
+print_lock = threading.Lock()
+cursor_ids = {"cursor-1"}
+
+def respond(request):
     method = request.get("method")
     if method == "close_query_session":
-        cursor_id = request.get("params", {{}}).get("sessionId")
+        cursor_id = request.get("params", {}).get("sessionId")
         closed = cursor_id in cursor_ids
         cursor_ids.discard(cursor_id)
-        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": closed}}), flush=True)
-        continue
+        result = closed
+        with print_lock:
+            print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+        return
     if method == "execute_query_page":
-        # First cursor page: two rows and an open result session on this
-        # transaction connection.
-        params = request.get("params", {{}})
+        params = request.get("params", {})
         page_size = int(params.get("pageSize") or 1)
         rows = [["page-row-" + str(index)] for index in range(1, min(page_size, 2) + 1)]
-        result = {{
+        result = {
             "columns": ["val"],
             "column_types": [],
             "column_sortables": [],
@@ -13174,12 +13339,9 @@ for line in sys.stdin:
             "truncated": False,
             "session_id": "cursor-1",
             "has_more": True
-        }}
-        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": result}}), flush=True)
-        continue
-    if method == "fetch_query_page":
-        # Continuation page of the same cursor: one last row.
-        result = {{
+        }
+    elif method == "fetch_query_page":
+        result = {
             "columns": ["val"],
             "column_types": [],
             "column_sortables": [],
@@ -13189,42 +13351,72 @@ for line in sys.stdin:
             "truncated": False,
             "session_id": "cursor-1",
             "has_more": False
-        }}
-        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": result}}), flush=True)
-        continue
-    if method == "execute_query":
-        params = request.get("params", {{}})
+        }
+    elif method == "execute_query":
+        params = request.get("params", {})
         sql = params.get("sql", "")
         if "REQUIRE_APP_SCHEMA" in sql and params.get("schema") != "APP":
-            print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -32000, "message": "schema was not forwarded"}}}}), flush=True)
-            continue
+            with print_lock:
+                print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32000, "message": "schema was not forwarded"}}), flush=True)
+            return
         if "RAISE_FILE_ERROR" in sql:
-            print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -32000, "message": "file statement rejected"}}}}), flush=True)
-            continue
-        row = [sql]
+            with print_lock:
+                print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32000, "message": "file statement rejected"}}), flush=True)
+            return
+        if "HANG_MANUAL_TXN" in sql:
+            time.sleep(3.0)
+        result = {
+            "columns": ["stmt"],
+            "column_types": [],
+            "column_sortables": [],
+            "rows": [[sql]],
+            "affected_rows": 0,
+            "execution_time_ms": 1,
+            "truncated": False,
+            "session_id": None,
+            "has_more": False
+        }
     else:
         # commit_manual_transaction / rollback_manual_transaction / disconnect
-        row = []
-    result = {{
-        "columns": ["stmt"],
-        "column_types": [],
-        "column_sortables": [],
-        "rows": [row],
-        "affected_rows": 0,
-        "execution_time_ms": 1,
-        "truncated": False,
-        "session_id": None,
-        "has_more": False
-    }}
-    print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": result}}), flush=True)
-"#
-        )
-        .unwrap();
-        script.flush().unwrap();
+        result = {
+            "columns": ["stmt"],
+            "column_types": [],
+            "column_sortables": [],
+            "rows": [[]],
+            "affected_rows": 0,
+            "execution_time_ms": 1,
+            "truncated": False,
+            "session_id": None,
+            "has_more": False
+        }
+    with print_lock:
+        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+
+for line in sys.stdin:
+    request = json.loads(line)
+    threading.Thread(target=respond, args=(request,), daemon=True).start()
+"#;
+
+    /// Spawns a fake Python agent and registers a manual transaction session in
+    /// the app state so `execute_in_manual_transaction_with_options` can run
+    /// end to end without a live database.
+    async fn manual_transaction_test_state(db_type: DatabaseType) -> (AppState, String, std::path::PathBuf) {
+        manual_transaction_state_with_agent_script(db_type, MANUAL_TRANSACTION_FAKE_AGENT_SCRIPT).await
+    }
+
+    async fn manual_transaction_state_with_agent_script(
+        db_type: DatabaseType,
+        script: &str,
+    ) -> (AppState, String, std::path::PathBuf) {
+        use std::io::Write;
+
+        let mut script_file = tempfile::NamedTempFile::new().unwrap();
+        write!(script_file, "{script}").unwrap();
+        script_file.flush().unwrap();
 
         let python = if cfg!(windows) { "python" } else { "python3" };
         let client = AgentDriverClient::spawn(
-            AgentLaunchSpec::new(python).with_args([script.path().to_string_lossy().to_string()]),
+            AgentLaunchSpec::new(python).with_args([script_file.path().to_string_lossy().to_string()]),
         )
         .await
         .unwrap();
@@ -13711,6 +13903,109 @@ for line in sys.stdin:
         assert!(serde_json::to_value(&unproven[0]).unwrap().get("manual_transaction_proven_read_only").is_none());
 
         assert!(rollback_manual_transaction(&state, &txn_session_id).await.is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// #14184: dropping the command future mid-execution — the frontend cancels
+    /// the invoke or the window reloads — must not wedge the session. The fake
+    /// agent stalls one statement, the executing task is aborted to simulate the
+    /// dropped future, and the very next statement must run instead of failing
+    /// with "Transaction session is already executing" forever.
+    #[tokio::test]
+    async fn manual_transaction_busy_flag_clears_when_the_execution_future_is_dropped() {
+        let (state, txn_session_id, dir) = manual_transaction_test_state(DatabaseType::Oracle).await;
+        let state = std::sync::Arc::new(state);
+        let hang_state = state.clone();
+        let hang_session = txn_session_id.clone();
+        let hung = tokio::spawn(async move {
+            execute_in_manual_transaction_with_options(
+                &hang_state,
+                &hang_session,
+                "SELECT HANG_MANUAL_TXN FROM dual",
+                "ORCL",
+                None,
+                ManualTransactionExecutionOptions::default(),
+            )
+            .await
+        });
+
+        // The running execution owns the session: a concurrent run is rejected.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let busy = state
+                .transaction_sessions
+                .read()
+                .await
+                .get(&txn_session_id)
+                .map(|session| session.busy)
+                .unwrap_or(false);
+            if busy {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "execution never claimed the session");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let concurrent = execute_in_manual_transaction_with_options(
+            &state,
+            &txn_session_id,
+            "SELECT 1 FROM dual",
+            "ORCL",
+            None,
+            ManualTransactionExecutionOptions::default(),
+        )
+        .await;
+        assert_eq!(concurrent.unwrap_err(), "Transaction session is already executing");
+
+        // Dropping the executing future (the failure mode behind #14184) used to
+        // leave busy set forever; the guard must release the session instead.
+        hung.abort();
+        let _ = hung.await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let busy = state
+                .transaction_sessions
+                .read()
+                .await
+                .get(&txn_session_id)
+                .map(|session| session.busy)
+                .unwrap_or(false);
+            if !busy {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "busy flag stayed set after the execution future was dropped"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // The next attempt must not be rejected as "already executing" again.
+        // Depending on the driver, the aborted RPC may have invalidated the
+        // underlying agent client; in that case the error tears the session down
+        // and the frontend's rolled-back-session recovery opens a fresh one.
+        let retry = execute_in_manual_transaction_with_options(
+            &state,
+            &txn_session_id,
+            "SELECT 1 FROM dual",
+            "ORCL",
+            None,
+            ManualTransactionExecutionOptions::default(),
+        )
+        .await;
+        if let Err(error) = &retry {
+            assert!(
+                !error.contains("Transaction session is already executing"),
+                "session stayed busy after the execution future was dropped: {error}"
+            );
+        }
+        let session_still_present = state.transaction_sessions.read().await.contains_key(&txn_session_id);
+        assert!(
+            retry.is_ok() || !session_still_present,
+            "a failed retry must discard the session so the frontend can reopen it"
+        );
+        if session_still_present {
+            assert!(rollback_manual_transaction(&state, &txn_session_id).await.is_ok());
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -14517,17 +14812,37 @@ for line in sys.stdin:
     #[test]
     fn database_backup_transactions_request_consistent_snapshots() {
         assert_eq!(postgres_transaction_begin_sql(true), "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
-        assert_eq!(mysql_transaction_isolation_sql(true), Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"));
         assert_eq!(
-            mysql_transaction_begin_sql_candidates(true),
+            mysql_transaction_isolation_sql(true, None),
+            Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        );
+        assert_eq!(
+            mysql_transaction_begin_sql_candidates(true, None),
             [
                 "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",
                 "START TRANSACTION WITH CONSISTENT SNAPSHOT",
                 "START TRANSACTION",
             ]
         );
-        assert_eq!(mysql_transaction_isolation_sql(false), None);
-        assert_eq!(mysql_transaction_begin_sql_candidates(false), ["START TRANSACTION"]);
+        assert_eq!(mysql_transaction_isolation_sql(false, None), None);
+        assert_eq!(mysql_transaction_begin_sql_candidates(false, None), ["START TRANSACTION"]);
+    }
+
+    /// Doris 4.x rejects `WITH CONSISTENT SNAPSHOT, READ ONLY` and a standalone
+    /// `READ ONLY` clause with ER_UNKNOWN_ERROR 1105, and it no-ops
+    /// `SET TRANSACTION READ ONLY`, so a Doris backup must never send the
+    /// MySQL-only statements first (they used to abort every database export
+    /// with `START TRANSACTION failed: ... mismatched input ','`).
+    #[test]
+    fn doris_backup_transactions_use_doris_compatible_begin() {
+        let doris = Some(db::mysql::MySqlCatalogDialect::Doris);
+        assert_eq!(
+            mysql_transaction_begin_sql_candidates(true, doris),
+            ["START TRANSACTION WITH CONSISTENT SNAPSHOT", "START TRANSACTION"]
+        );
+        assert_eq!(mysql_transaction_isolation_sql(true, doris), None);
+        // Manual (non-snapshot) transactions are unaffected.
+        assert_eq!(mysql_transaction_begin_sql_candidates(false, doris), ["START TRANSACTION"]);
     }
 
     #[test]
@@ -14562,6 +14877,38 @@ for line in sys.stdin:
 
         assert!(mysql_error_is_syntax_error(&doris_syntax_error));
         assert!(!mysql_error_is_syntax_error(&generic_unknown_error));
+    }
+
+    /// Real Doris 4.0.7 payload captured from `START TRANSACTION WITH
+    /// CONSISTENT SNAPSHOT, READ ONLY`: raw ANTLR diagnostics wrapped in the
+    /// `errCode = 2` ANALYSIS_ERROR envelope, with no "syntax error" wording,
+    /// which the older heuristic never matched.
+    #[test]
+    fn mysql_backup_transaction_falls_back_for_doris4_antlr_parser_errors() {
+        let server_error = |message: &str| {
+            mysql_async::Error::Server(mysql_async::ServerError {
+                code: 1105,
+                message: message.to_string(),
+                state: "HY000".to_string(),
+            })
+        };
+        let doris4_comma =
+            server_error("errCode = 2, detailMessage = \nmismatched input ',' expecting {<EOF>, ';'}(line 1, pos 42)");
+        let doris4_read = server_error(
+            "errCode = 2, detailMessage = \nmismatched input 'READ' expecting {<EOF>, ';'}(line 1, pos 18)",
+        );
+        let doris_extraneous = server_error(
+            "errCode = 2, detailMessage = \nextraneous input 'WORK' expecting {<EOF>, ';'}(line 1, pos 6)",
+        );
+        // Real server failures must stay fatal instead of being retried.
+        let unknown_database = server_error("errCode = 2, detailMessage = Unknown database 'missing_db'");
+        let missing_table = server_error("errCode = 2, detailMessage = Table does not exist");
+
+        assert!(mysql_error_is_syntax_error(&doris4_comma));
+        assert!(mysql_error_is_syntax_error(&doris4_read));
+        assert!(mysql_error_is_syntax_error(&doris_extraneous));
+        assert!(!mysql_error_is_syntax_error(&unknown_database));
+        assert!(!mysql_error_is_syntax_error(&missing_table));
     }
 
     #[test]

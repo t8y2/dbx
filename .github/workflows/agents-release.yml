@@ -775,7 +775,6 @@ jobs:
             ["linux-aarch64"]="linux/arm64"
             ["linux-x64"]="linux/amd64"
             ["windows-aarch64"]="windows/arm64"
-            ["windows-x64"]="windows/amd64"
           )
           for platform in "${!TARGETS[@]}"; do
             IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
@@ -787,6 +786,14 @@ jobs:
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
           done
           ls -lh ../../../release-native
+      - name: Setup Windows-compatible Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.20.14"
+          cache-dependency-path: agents/drivers/neo4j-go/go.windows-legacy.sum
+      - name: Build Windows-compatible Neo4j agent
+        shell: bash
+        run: bash agents/drivers/neo4j-go/build-windows-legacy.sh "$GITHUB_WORKSPACE/release-native/dbx-agent-neo4j-windows-x64.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: neo4j-native
@@ -1872,23 +1879,37 @@ jobs:
           R2_ENDPOINT: "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
           R2_BUCKET: "s3://${{ secrets.R2_BUCKET_NAME }}"
         run: |
+          set -euo pipefail
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              echo "::warning::R2 upload attempt ${attempt}/3 failed: $*"
+              sleep $((attempt * 15))
+            done
+            return 1
+          }
           # Always upload the current registry.
-          aws s3 cp release/agent-registry.json \
+          retry aws s3 cp release/agent-registry.json \
             "$R2_BUCKET/agents/agent-registry.json" \
             --endpoint-url "$R2_ENDPOINT"
           echo "Uploaded agent-registry.json"
 
-          # Upload all single-driver packages concurrently.
-          aws s3 cp release/ "$R2_BUCKET/agents/drivers/" \
-            --recursive \
+          # Upload all single-driver packages concurrently. Package names carry
+          # the driver version, so the size check makes a retry resume after a
+          # transient R2 failure instead of re-uploading every driver again.
+          retry aws s3 sync release/ "$R2_BUCKET/agents/drivers/" \
             --exclude "*" \
             --include "dbx-agent-*.tar.zst" \
             --include "dbx-agent-*.tar.zst.delta" \
+            --size-only \
             --endpoint-url "$R2_ENDPOINT"
           echo "Uploaded single-driver packages"
 
           # Upload JRE packages concurrently, always overwriting the stable names.
-          aws s3 cp release/ "$R2_BUCKET/agents/jre/" \
+          retry aws s3 cp release/ "$R2_BUCKET/agents/jre/" \
             --recursive \
             --exclude "*" \
             --include "dbx-jre-*.tar.zst" \

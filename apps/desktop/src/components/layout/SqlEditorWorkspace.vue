@@ -60,6 +60,7 @@ const editorGroupBindings = computed(() => ({ ...surfaceProps.value, ...contentE
 const resultSurfaceBindings = computed(() => ({ ...surfaceProps.value, ...contentEmits, activeTab: activeQueryTab.value! }));
 
 defineExpose({
+  copyActiveResult,
   focusResultGrid,
   focusSqlEditor,
   focusSearch: (target: Element | null = null) => {
@@ -184,6 +185,25 @@ function toggleSharedResultsPane(): boolean {
   showResultPane.value = !showResultPane.value;
   return true;
 }
+
+let copyRequest = 0;
+function copyActiveResult(): boolean {
+  const tab = activeQueryTab.value;
+  if (props.contentSuppressed || !tab || !hasFocusableQueryResult(tab) || isObjectDependencySection(tab)) return false;
+  const request = ++copyRequest;
+  const result = tab.result;
+  const generation = tab.resultViewGeneration;
+  const isValid = () => request === copyRequest && !props.contentSuppressed && activeQueryTab.value?.id === tab.id && activeQueryTab.value.result === result && activeQueryTab.value.resultViewGeneration === generation;
+  // A collapsed pane is unmounted. Restore it without focusing the grid or
+  // synthesizing a selection in either the editor or the result table.
+  showResultPane.value = true;
+  void nextTick(() => {
+    if (isValid()) resultSurfaceRef.value?.copyActiveResult(isValid);
+  });
+  return true;
+}
+watch([() => activeQueryTab.value?.id, () => activeQueryTab.value?.result, () => activeQueryTab.value?.resultViewGeneration, () => props.contentSuppressed], () => ++copyRequest, { flush: "sync" });
+onBeforeUnmount(() => ++copyRequest);
 
 let focusRequest = 0;
 function focusResultGrid(): boolean {

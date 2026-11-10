@@ -142,7 +142,17 @@ function Install-DbxMcp {
             try { $actual = 'sha512-' + [Convert]::ToBase64String($hasher.ComputeHash($stream)) }
             finally { $stream.Dispose(); $hasher.Dispose() }
             if ($actual -cne $integrity) { throw "Integrity verification failed for $registry; refusing to install." }
-            & tar.exe -xzf $archive -C $workDir 'package/bin/dbx-mcp.exe' 2>$null
+            # GNU tar (Git for Windows / MSYS2) parses an absolute archive path such as
+            # C:\...\archive.tgz as a remote "host:file" operand and fails with
+            # "tar (child): Cannot connect to C: resolve failed". Extract through a
+            # relative archive name from inside the work directory so both GNU tar and
+            # the bsdtar shipped with Windows treat it as a local file.
+            Push-Location $workDir
+            try {
+                & tar.exe -xzf 'archive.tgz' -C '.' 'package/bin/dbx-mcp.exe' 2>$null
+            } finally {
+                Pop-Location
+            }
             if ($LASTEXITCODE -ne 0) { throw 'Binary missing from npm archive.' }
             [IO.File]::Move((Join-Path $workDir 'package\bin\dbx-mcp.exe'), $stagedBinary)
             $downloaded = $true

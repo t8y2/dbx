@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use sqlparser::ast::{
     Expr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, JoinConstraint, JoinOperator,
-    ObjectName, ObjectNamePart, OrderByKind, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
+    ObjectName, ObjectNamePart, OrderByKind, Query, Select, SelectItem, SetExpr, Statement, TableAlias, TableFactor,
     TableWithJoins,
 };
 use sqlparser::dialect::{
@@ -48,6 +48,10 @@ pub struct SqlReferenceAnalysis {
     /// SELECT projection columns that are neither aggregated nor listed in GROUP BY.
     #[serde(default)]
     pub group_by_violations: Vec<SqlGroupByViolation>,
+    /// Two-part qualifiers (`alias.column`) that name no table or alias visible
+    /// in the reference scope.
+    #[serde(default)]
+    pub unknown_qualifiers: Vec<SqlUnknownQualifier>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,10 +83,30 @@ pub struct SqlGroupByViolation {
     pub qualifier: Option<String>,
 }
 
+/// A two-part column qualifier that matches neither a table nor an alias
+/// visible in the statement, e.g. `b.id` when only `a` and `qb` are declared.
+/// The span covers the qualifier token itself (quotes included when the
+/// identifier is quoted), not the whole reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlUnknownQualifier {
+    pub qualifier: String,
+    pub span: SqlTextSpan,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SqlReferenceScope {
     pub id: usize,
     pub parent_id: Option<usize>,
+}
+
+/// A two-part qualified column reference (`alias.column`) captured for the
+/// unknown-qualifier check. Only the qualifier is kept: the column name and
+/// its own span are already recorded as a column reference.
+#[derive(Clone)]
+struct QualifiedColumnRef {
+    qualifier: String,
+    span: SqlTextSpan,
+    scope_id: usize,
 }
 
 /// 1-based line and column range in SQL text.
@@ -158,6 +182,18 @@ struct Analyzer {
     is_sqlserver: bool,
     is_spark: bool,
     group_by_violations: Vec<SqlGroupByViolation>,
+    /// Two-part column references, kept for the unknown-qualifier check.
+    qualified_columns: Vec<QualifiedColumnRef>,
+    /// Relation names of the current scope that are not physical tables: CTE
+    /// names and their aliases, derived-table aliases, the alias of a
+    /// parenthesized join. A qualifier may name any of them, so the
+    /// unknown-qualifier check resolves against them too.
+    relation_names: Vec<(usize, String)>,
+    /// Scopes holding a relation the analyzer cannot even name (table
+    /// functions, `UNNEST`, `PIVOT`, ...). A qualifier that does not resolve
+    /// there would be a guess, so the unknown-qualifier check skips those
+    /// scopes.
+    non_plain_scopes: HashSet<usize>,
     projection_items: Vec<ProjectionItemAcc>,
     current_projection_item: Option<ProjectionItemAcc>,
     aggregate_depth: usize,
@@ -167,29 +203,31 @@ struct Analyzer {
 
 pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlReferenceAnalysis, String> {
     let normalized_dialect = normalize_dialect(dialect);
-    if normalized_dialect == "duckdb" && starts_with_duckdb_parser_gap_sql(sql) {
+    if normalized_dialect.id == "duckdb" && starts_with_duckdb_parser_gap_sql(sql) {
         return Ok(SqlReferenceAnalysis {
             tables: vec![],
             columns: vec![],
             scopes: vec![],
             group_by_violations: vec![],
+            unknown_qualifiers: vec![],
         });
     }
-    if normalized_dialect == "postgres" && starts_with_postgres_parser_gap_sql(sql) {
+    if normalized_dialect.id == "postgres" && starts_with_postgres_parser_gap_sql(sql) {
         return Ok(SqlReferenceAnalysis {
             tables: vec![],
             columns: vec![],
             scopes: vec![],
             group_by_violations: vec![],
+            unknown_qualifiers: vec![],
         });
     }
-    let parser_sql = if normalized_dialect == "clickhouse" {
+    let parser_sql = if normalized_dialect.id == "clickhouse" {
         normalize_clickhouse_join_order_for_parser(sql)
     } else {
         sql.to_string()
     };
 
-    let parsed_statements = match normalized_dialect.as_str() {
+    let parsed_statements = match normalized_dialect.id {
         "postgres" => Parser::parse_sql(&PostgreSqlDialect {}, &parser_sql),
         "mysql" => parse_mysql(&parser_sql),
         "sqlite" => Parser::parse_sql(&SQLiteDialect {}, &parser_sql),
@@ -201,19 +239,20 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
     };
     let statements = match parsed_statements {
         Ok(statements) => {
-            if normalized_dialect == "postgres" && postgres_create_procedure_is_missing_body(&parser_sql) {
+            if normalized_dialect.id == "postgres" && postgres_create_procedure_is_missing_body(&parser_sql) {
                 return Err("Expected: procedure body after AS, found: EOF".to_string());
             }
             statements
         }
         Err(error)
-            if normalized_dialect == "postgres" && is_postgres_create_procedure_parser_gap(&parser_sql, &error) =>
+            if normalized_dialect.id == "postgres" && is_postgres_create_procedure_parser_gap(&parser_sql, &error) =>
         {
             return Ok(SqlReferenceAnalysis {
                 tables: vec![],
                 columns: vec![],
                 scopes: vec![],
                 group_by_violations: vec![],
+                unknown_qualifiers: vec![],
             });
         }
         Err(error) => match oracle_admin_ddl_gap_statements(dialect, &parser_sql) {
@@ -223,26 +262,31 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
     };
 
     let mut analyzer = Analyzer {
-        is_sqlserver: normalized_dialect == "sqlserver",
-        is_spark: normalized_dialect == "spark",
+        is_sqlserver: normalized_dialect.id == "sqlserver",
+        is_spark: normalized_dialect.id == "spark",
         ..Analyzer::default()
     };
     for statement in statements {
         analyzer.visit_statement(&statement);
     }
 
+    // Oracle-family dialects may resolve a qualifier as a schema name, so the
+    // check only runs where the FROM scope is authoritative.
+    let unknown_qualifiers =
+        if normalized_dialect.scopes_qualifiers { analyzer.unknown_qualifiers() } else { Vec::new() };
     let mut analysis = SqlReferenceAnalysis {
         tables: analyzer.tables,
         columns: analyzer.columns,
         scopes: analyzer.scopes,
         group_by_violations: analyzer.group_by_violations,
+        unknown_qualifiers,
     };
     // Engines that do not enforce strict GROUP BY semantics (MySQL, SQLite,
     // DuckDB, ClickHouse, Spark) accept ungrouped projection columns — MySQL
     // enforces ONLY_FULL_GROUP_BY by default since 5.7 but the frontend has no
     // access to the connection's sql_mode, so skipping is the conservative
     // choice — flagging them there would be noise.
-    if matches!(normalized_dialect.as_str(), "mysql" | "sqlite" | "duckdb" | "clickhouse" | "spark") {
+    if matches!(normalized_dialect.id, "mysql" | "sqlite" | "duckdb" | "clickhouse" | "spark") {
         analysis.group_by_violations.clear();
     }
     Ok(analysis)
@@ -1381,18 +1425,51 @@ fn normalize_clickhouse_join_order_for_parser(sql: &str) -> String {
         .into_owned()
 }
 
-fn normalize_dialect(dialect: Option<&str>) -> String {
+/// A dialect the analyzer knows by name, plus whether its FROM scope is
+/// authoritative for a two-part qualifier (`alias.column`).
+///
+/// Oracle-family dialects resolve a qualifier as a schema name
+/// (`SELECT emp.no FROM dual`), so the qualifier is legitimately absent from
+/// the scope there and the unknown-alias check must not run. Every dialect the
+/// analyzer only knows generically is treated the same way — it may well be an
+/// Oracle-compatible engine.
+///
+/// Both properties live together on purpose: adding a dialect to
+/// `normalize_dialect` forces a decision here instead of silently leaving the
+/// check off for it.
+struct NormalizedDialect {
+    id: &'static str,
+    scopes_qualifiers: bool,
+}
+
+impl NormalizedDialect {
+    /// The FROM scope owns the qualifier: `alias.column` has to resolve to a
+    /// table or an alias of the statement's scope.
+    const fn scoped(id: &'static str) -> Self {
+        Self { id, scopes_qualifiers: true }
+    }
+
+    /// The qualifier may name something outside the scope (a schema), so the
+    /// unknown-alias check does not apply.
+    const fn opaque(id: &'static str) -> Self {
+        Self { id, scopes_qualifiers: false }
+    }
+}
+
+fn normalize_dialect(dialect: Option<&str>) -> NormalizedDialect {
     match dialect.unwrap_or("generic").to_ascii_lowercase().as_str() {
         "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "highgo" | "uxdb" | "questdb" => {
-            "postgres".to_string()
+            NormalizedDialect::scoped("postgres")
         }
-        "mysql" | "mariadb" | "doris" | "starrocks" | "manticoresearch" | "oceanbase" => "mysql".to_string(),
-        "sqlite" => "sqlite".to_string(),
-        "sqlserver" | "mssql" => "sqlserver".to_string(),
-        "clickhouse" => "clickhouse".to_string(),
-        "duckdb" => "duckdb".to_string(),
-        "spark" | "sparksql" => "spark".to_string(),
-        _ => "generic".to_string(),
+        "mysql" | "mariadb" | "doris" | "starrocks" | "manticoresearch" | "oceanbase" => {
+            NormalizedDialect::scoped("mysql")
+        }
+        "sqlite" => NormalizedDialect::scoped("sqlite"),
+        "sqlserver" | "mssql" => NormalizedDialect::scoped("sqlserver"),
+        "clickhouse" => NormalizedDialect::scoped("clickhouse"),
+        "duckdb" => NormalizedDialect::scoped("duckdb"),
+        "spark" | "sparksql" => NormalizedDialect::scoped("spark"),
+        _ => NormalizedDialect::opaque("generic"),
     }
 }
 
@@ -1714,29 +1791,66 @@ impl Analyzer {
             TableFactor::Table { name, alias, args, .. } => {
                 // Qualified names remain physical objects even when their final component matches a visible CTE.
                 if args.is_none() && !self.is_visible_cte(name) {
-                    if let Some(table) = table_reference_from_name(
+                    match table_reference_from_name(
                         name,
                         alias.as_ref().map(|a| a.name.value.clone()),
                         self.current_scope_id(),
                     ) {
-                        self.tables.push(table);
+                        Some(table) => self.tables.push(table),
+                        // Not a plain object name, so it cannot become a table
+                        // reference. Its alias is still a name a qualifier may
+                        // use; without one the scope stays unexplained.
+                        None => {
+                            if !self.record_alias(alias.as_ref()) {
+                                self.mark_scope_non_plain();
+                            }
+                        }
                     }
+                } else if args.is_none() {
+                    // A CTE reference. `is_visible_cte` only accepts a
+                    // single-part identifier, so the CTE name is always
+                    // readable here; the alias, when present, is the other
+                    // name a qualifier may use.
+                    match object_name_last_ident(name) {
+                        Some(ident) => {
+                            self.record_relation_name(ident);
+                        }
+                        None => self.mark_scope_non_plain(),
+                    }
+                    self.record_alias(alias.as_ref());
+                } else {
+                    // A table-valued function. Its relation name is engine
+                    // specific, so the scope stays unexplained for now.
+                    self.mark_scope_non_plain();
                 }
             }
-            TableFactor::Derived { subquery, .. } => self.visit_child_query(subquery),
-            TableFactor::NestedJoin { table_with_joins, .. } => self.visit_table_with_joins(table_with_joins),
-            TableFactor::TableFunction { expr, .. } => self.visit_expr(expr),
+            TableFactor::Derived { subquery, alias, .. } => {
+                self.record_alias(alias.as_ref());
+                self.visit_child_query(subquery);
+            }
+            TableFactor::NestedJoin { table_with_joins, alias, .. } => {
+                // The parenthesized join may carry its own alias; the aliases
+                // inside it are recorded by the recursion below.
+                self.record_alias(alias.as_ref());
+                self.visit_table_with_joins(table_with_joins);
+            }
+            TableFactor::TableFunction { expr, .. } => {
+                self.mark_scope_non_plain();
+                self.visit_expr(expr);
+            }
             TableFactor::Function { args, .. } => {
+                self.mark_scope_non_plain();
                 for arg in args {
                     self.visit_function_arg(arg);
                 }
             }
             TableFactor::UNNEST { array_exprs, .. } => {
+                self.mark_scope_non_plain();
                 for expr in array_exprs {
                     self.visit_expr(expr);
                 }
             }
-            _ => {}
+            _ => self.mark_scope_non_plain(),
         }
     }
 
@@ -1748,6 +1862,11 @@ impl Analyzer {
                     let column = idents.last().expect("checked length");
                     let qualifier = idents.get(idents.len() - 2).map(|ident| ident.value.clone());
                     self.push_column(qualifier, column);
+                    // Only a two-part reference can name a table alias; longer
+                    // chains are qualified object names (`db.schema.table.col`).
+                    if idents.len() == 2 {
+                        self.record_qualified_column(&idents[0]);
+                    }
                 }
             }
             Expr::CompoundFieldAccess { root, .. } | Expr::JsonAccess { value: root, .. } => self.visit_expr(root),
@@ -1921,6 +2040,100 @@ impl Analyzer {
                 aggregated: self.aggregate_depth > 0 || self.window_depth > 0,
             });
         }
+    }
+
+    /// Remember a two-part qualifier so the unknown-qualifier check can tell
+    /// `b.id` (no such alias) from `a.id` (alias `a`).
+    fn record_qualified_column(&mut self, qualifier: &Ident) {
+        let Some(scope_id) = self.current_scope_id() else {
+            return;
+        };
+        self.qualified_columns.push(QualifiedColumnRef {
+            qualifier: qualifier.value.clone(),
+            span: qualifier.span.into(),
+            scope_id,
+        });
+    }
+
+    /// Remember a relation name of the current scope that is not a physical
+    /// table, so the unknown-qualifier check can resolve it. Returns whether a
+    /// name was recorded.
+    fn record_relation_name(&mut self, ident: &Ident) -> bool {
+        let Some(scope_id) = self.current_scope_id() else {
+            return false;
+        };
+        self.relation_names.push((scope_id, ident.value.to_ascii_lowercase()));
+        true
+    }
+
+    /// Record the alias of a non-physical relation. Returns whether the factor
+    /// carried one.
+    fn record_alias(&mut self, alias: Option<&TableAlias>) -> bool {
+        match alias {
+            Some(alias) => self.record_relation_name(&alias.name),
+            None => false,
+        }
+    }
+
+    /// Mark the current scope as holding a relation whose name the analyzer
+    /// cannot model, so the unknown-qualifier check skips it.
+    fn mark_scope_non_plain(&mut self) {
+        if let Some(scope_id) = self.current_scope_id() {
+            self.non_plain_scopes.insert(scope_id);
+        }
+    }
+
+    /// Two-part qualifiers that name neither a table nor an alias visible in
+    /// the reference scope.
+    ///
+    /// A qualifier resolves against the relations of its own scope and of every
+    /// enclosing scope, so a correlated subquery can still refer to an outer
+    /// alias. Relations cover physical tables, CTE names and their aliases,
+    /// derived-table aliases and the alias of a parenthesized join. Scopes
+    /// holding a relation the analyzer cannot even name (table functions,
+    /// `UNNEST`, `PIVOT`, ...) are skipped: an unresolved qualifier would be a
+    /// guess there.
+    fn unknown_qualifiers(&self) -> Vec<SqlUnknownQualifier> {
+        let mut scope_parents: HashMap<usize, Option<usize>> = HashMap::new();
+        for scope in &self.scopes {
+            scope_parents.insert(scope.id, scope.parent_id);
+        }
+        let mut names_by_scope: HashMap<usize, HashSet<String>> = HashMap::new();
+        for table in &self.tables {
+            let names = names_by_scope.entry(table.scope_id).or_default();
+            names.insert(table.name.to_ascii_lowercase());
+            if let Some(alias) = &table.alias {
+                names.insert(alias.to_ascii_lowercase());
+            }
+        }
+        for (scope_id, name) in &self.relation_names {
+            names_by_scope.entry(*scope_id).or_default().insert(name.clone());
+        }
+
+        let mut unknown = Vec::new();
+        for column in &self.qualified_columns {
+            let mut scope_id = Some(column.scope_id);
+            let mut visible_names: HashSet<String> = HashSet::new();
+            let mut resolvable = true;
+            while let Some(id) = scope_id {
+                if self.non_plain_scopes.contains(&id) {
+                    resolvable = false;
+                    break;
+                }
+                if let Some(names) = names_by_scope.get(&id) {
+                    visible_names.extend(names.iter().cloned());
+                }
+                scope_id = scope_parents.get(&id).copied().flatten();
+            }
+            if !resolvable {
+                continue;
+            }
+            if visible_names.contains(&column.qualifier.to_ascii_lowercase()) {
+                continue;
+            }
+            unknown.push(SqlUnknownQualifier { qualifier: column.qualifier.clone(), span: column.span });
+        }
+        unknown
     }
 }
 
@@ -2305,5 +2518,194 @@ mod mysql_table_comment_tests {
         assert_eq!(analysis.tables[0].span.start_line, 2);
         assert_eq!(analysis.columns[0].name, "id");
         assert_eq!(analysis.columns[0].span.start_line, 2);
+    }
+}
+
+#[cfg(test)]
+mod table_reference_qualifier_tests {
+    use super::*;
+
+    fn table<'a>(analysis: &'a SqlReferenceAnalysis, name: &str) -> &'a SqlTableReference {
+        analysis
+            .tables
+            .iter()
+            .find(|table| table.name.eq_ignore_ascii_case(name))
+            .unwrap_or_else(|| panic!("{name} must be reported as a table reference"))
+    }
+
+    #[test]
+    fn sqlserver_three_part_name_keeps_the_database_qualifier() {
+        // #13947 / #13959: dropping `mk_passport_api` made the editor look the table
+        // up in the current database and flag a valid cross-database query as unknown.
+        let analysis = analyze_sql_references(
+            "select top 10 * from mk_passport_api.dbo.orders order by id desc",
+            Some("sqlserver"),
+        )
+        .unwrap();
+        let orders = table(&analysis, "orders");
+
+        assert_eq!(orders.database.as_deref(), Some("mk_passport_api"));
+        assert_eq!(orders.schema.as_deref(), Some("dbo"));
+    }
+
+    #[test]
+    fn two_part_name_has_no_database_qualifier() {
+        // MySQL reads `db.table` as database.table, so the middle qualifier stays in
+        // the schema slot and nothing may be lifted into `database`.
+        let analysis = analyze_sql_references("select * from shop.orders", Some("mysql")).unwrap();
+        let orders = table(&analysis, "orders");
+
+        assert_eq!(orders.database, None);
+        assert_eq!(orders.schema.as_deref(), Some("shop"));
+    }
+}
+
+#[cfg(test)]
+mod unknown_qualifier_tests {
+    use super::*;
+
+    fn qualifiers(sql: &str, dialect: Option<&str>) -> Vec<String> {
+        let analysis = analyze_sql_references(sql, dialect).expect("query should analyze");
+        analysis.unknown_qualifiers.into_iter().map(|unknown| unknown.qualifier).collect()
+    }
+
+    fn span_text<'a>(sql: &'a str, span: &SqlTextSpan) -> &'a str {
+        let line = sql.lines().nth(span.start_line - 1).expect("line in range");
+        &line[span.start_column - 1..span.end_column]
+    }
+
+    #[test]
+    fn reports_a_qualifier_that_names_no_table_or_alias() {
+        let sql = "SELECT a.id, a.v, b.id FROM t_tx_demo a JOIN t_tx_demo qb on a.id = b.id";
+        let analysis = analyze_sql_references(sql, Some("mysql")).expect("query should analyze");
+
+        // The projection and the join condition both reference the missing alias.
+        assert_eq!(analysis.unknown_qualifiers.len(), 2);
+        assert!(analysis.unknown_qualifiers.iter().all(|unknown| unknown.qualifier == "b"));
+        // The span covers the qualifier, not the whole `b.id` reference.
+        for unknown in &analysis.unknown_qualifiers {
+            assert_eq!(span_text(sql, &unknown.span), "b");
+        }
+    }
+
+    #[test]
+    fn accepts_declared_aliases_and_table_names() {
+        assert!(qualifiers("SELECT a.id FROM t a", Some("mysql")).is_empty());
+        assert!(qualifiers("SELECT t.id FROM t", Some("mysql")).is_empty());
+        assert!(qualifiers("SELECT a.id FROM t a JOIN u b ON a.id = b.id", Some("mysql")).is_empty());
+        // Aliases are compared case-insensitively.
+        assert!(qualifiers("SELECT A.id FROM t a", Some("mysql")).is_empty());
+    }
+
+    #[test]
+    fn ignores_qualified_object_names() {
+        // Three or more parts are qualified object names, never table aliases.
+        assert!(qualifiers("SELECT db.t.id FROM t", Some("mysql")).is_empty());
+        assert!(qualifiers("SELECT db.s.t.c FROM db.s.t", Some("mysql")).is_empty());
+    }
+
+    #[test]
+    fn accepts_derived_table_and_cte_aliases() {
+        // The alias of a derived table is a relation name of the scope.
+        assert!(qualifiers("SELECT x.id FROM (SELECT id FROM t) x", Some("mysql")).is_empty());
+        // The same holds for a CTE: both the CTE name and the alias of its
+        // reference resolve.
+        assert!(qualifiers("WITH demo AS (SELECT id FROM t) SELECT demo.id FROM demo", Some("mysql")).is_empty());
+        assert!(qualifiers("WITH c AS (SELECT id FROM t) SELECT ro.id FROM c ro", Some("mysql")).is_empty());
+        assert!(qualifiers("WITH demo AS (SELECT id, v FROM t) SELECT d.id FROM demo d", Some("mysql")).is_empty());
+    }
+
+    #[test]
+    fn reports_a_qualifier_that_names_no_cte_or_derived_alias() {
+        assert_eq!(
+            qualifiers("WITH demo AS (SELECT id FROM t) SELECT zz.id FROM demo d", Some("mysql")),
+            vec!["zz".to_string()]
+        );
+        assert_eq!(qualifiers("SELECT zz.id FROM (SELECT id FROM t) AS x", Some("mysql")), vec!["zz".to_string()]);
+    }
+
+    #[test]
+    fn reports_a_qualifier_inside_a_cte_body() {
+        // The body is its own scope, so an alias that no relation declares
+        // there is reported even though it sits inside a WITH clause.
+        assert_eq!(
+            qualifiers("WITH c AS (SELECT zz.y FROM t) SELECT c.id FROM c", Some("mysql")),
+            vec!["zz".to_string()]
+        );
+    }
+
+    #[test]
+    fn reports_a_qualifier_that_names_no_parenthesized_join_alias() {
+        // The alias of the parenthesized join and the aliases inside it all
+        // resolve; anything else in that scope is an error. Keeping the inner
+        // aliases resolvable next to the join alias is the same conservative
+        // choice the physical-table path makes (`FROM t x` accepts both `t` and
+        // `x`), so a dialect that hides them once the join is aliased is
+        // under-reported rather than mis-reported.
+        let legit = "SELECT ab.id, a.id, b.id FROM (t1 a JOIN t2 b ON a.id = b.id) ab";
+        assert!(qualifiers(legit, Some("postgres")).is_empty());
+        assert_eq!(
+            qualifiers("SELECT zz.id FROM (t1 a JOIN t2 b ON a.id = b.id) ab", Some("postgres")),
+            vec!["zz".to_string()]
+        );
+    }
+
+    #[test]
+    fn does_not_resolve_a_derived_table_source_in_the_outer_scope() {
+        // `t` belongs to the derived table's own scope, so the outer query
+        // cannot qualify a column with it.
+        assert_eq!(qualifiers("SELECT t.id FROM (SELECT * FROM t) x", Some("mysql")), vec!["t".to_string()]);
+    }
+
+    #[test]
+    fn skips_scopes_with_relations_it_cannot_name() {
+        // Table-valued functions, UNNEST and PIVOT expose names the analyzer
+        // does not model, so the scope stays unexplained instead of guessed.
+        assert!(qualifiers("SELECT zz.id FROM generate_series(1, 10) g", Some("postgres")).is_empty());
+        assert!(qualifiers("SELECT zz.id FROM UNNEST([1, 2]) AS numbers", Some("duckdb")).is_empty());
+        assert!(qualifiers("SELECT zz.id FROM t PIVOT(sum(v) FOR k IN ('a')) p", Some("duckdb")).is_empty());
+        // MSSQL's `FROM t (NOLOCK)` parses as a table with arguments, so it
+        // shares the table-function branch.
+        assert!(qualifiers("SELECT zz.id FROM t (NOLOCK)", Some("sqlserver")).is_empty());
+    }
+
+    #[test]
+    fn accepts_an_outer_alias_in_a_correlated_subquery() {
+        assert!(qualifiers(
+            "SELECT aa.id FROM t aa WHERE EXISTS (SELECT 1 FROM u u2 WHERE u2.id = aa.id)",
+            Some("mysql")
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn reports_a_qualifier_without_any_from_clause() {
+        let sql = "SELECT b.id";
+        let analysis = analyze_sql_references(sql, Some("mysql")).expect("query should analyze");
+
+        assert_eq!(analysis.unknown_qualifiers.len(), 1);
+        assert_eq!(analysis.unknown_qualifiers[0].qualifier, "b");
+        assert_eq!(span_text(sql, &analysis.unknown_qualifiers[0].span), "b");
+    }
+
+    #[test]
+    fn skips_dialects_where_a_qualifier_may_name_a_schema() {
+        // `SELECT emp.no FROM dual` resolves `emp` as a schema in Oracle, so the
+        // qualifier is legitimately absent from the FROM scope.
+        for dialect in ["oracle", "dameng", "snowflake", "generic"] {
+            assert!(qualifiers("SELECT emp.no FROM dual", Some(dialect)).is_empty(), "{dialect}");
+        }
+        assert!(qualifiers("SELECT emp.no FROM dual", None).is_empty());
+        // The same shape is invalid where the FROM scope is authoritative.
+        assert_eq!(qualifiers("SELECT emp.no FROM dual", Some("mysql")), vec!["emp".to_string()]);
+    }
+
+    #[test]
+    fn reports_unknown_qualifiers_for_every_scoped_dialect() {
+        // Every dialect whose FROM scope is authoritative has to run the check.
+        // Narrowing that list would otherwise keep this suite green.
+        for dialect in ["mysql", "postgres", "sqlite", "sqlserver", "clickhouse", "duckdb", "spark"] {
+            assert_eq!(qualifiers("SELECT b.id FROM t a", Some(dialect)), vec!["b".to_string()], "{dialect}");
+        }
     }
 }

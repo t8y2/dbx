@@ -13,10 +13,7 @@ import (
 	"strings"
 	"time"
 
-	neo4j "github.com/neo4j/neo4j-go-driver/v6/neo4j"
-	neo4jauth "github.com/neo4j/neo4j-go-driver/v6/neo4j/auth"
-	"github.com/neo4j/neo4j-go-driver/v6/neo4j/config"
-	neo4jdb "github.com/neo4j/neo4j-go-driver/v6/neo4j/db"
+	neo4j "github.com/t8y2/dbx/agents/drivers/neo4j-go/internal/neo4jcompat"
 )
 
 const (
@@ -81,7 +78,7 @@ func openDriver(params connectParams) (neo4j.Driver, error) {
 	if params.Username != "" || params.Password != "" {
 		authToken = neo4j.BasicAuth(params.Username, params.Password, "")
 	}
-	configurers := []func(*config.Config){func(driverConfig *config.Config) {
+	configurers := []func(*neo4j.Config){func(driverConfig *neo4j.Config) {
 		driverConfig.ReadBufferSize = optimizedReadBuffer
 		driverConfig.MaxConnectionPoolSize = defaultConnectionLimit
 		driverConfig.ConnectionAcquisitionTimeout = 30 * time.Second
@@ -99,7 +96,7 @@ func openDriver(params connectParams) (neo4j.Driver, error) {
 	return neo4j.NewDriver(uri, authToken, configurers...)
 }
 
-func neo4jTLSConfigurer(params connectParams) (func(*config.Config), error) {
+func neo4jTLSConfigurer(params connectParams) (func(*neo4j.Config), error) {
 	var tlsConfig *tls.Config
 	if params.CACertPath != "" {
 		certificate, err := os.ReadFile(params.CACertPath)
@@ -115,12 +112,12 @@ func neo4jTLSConfigurer(params connectParams) (func(*config.Config), error) {
 		}
 		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
 	}
-	var clientCertificateProvider neo4jauth.ClientCertificateProvider
+	var clientCertificateProvider neo4j.ClientCertificateProvider
 	if params.ClientCertPath != "" || params.ClientKeyPath != "" {
 		if params.ClientCertPath == "" || params.ClientKeyPath == "" {
 			return nil, errors.New("both client certificate and client key are required")
 		}
-		provider, err := neo4jauth.NewStaticClientCertificateProvider(neo4jauth.ClientCertificate{
+		provider, err := neo4j.NewStaticClientCertificateProvider(neo4j.ClientCertificate{
 			CertFile: params.ClientCertPath,
 			KeyFile:  params.ClientKeyPath,
 		})
@@ -132,7 +129,7 @@ func neo4jTLSConfigurer(params connectParams) (func(*config.Config), error) {
 	if tlsConfig == nil && clientCertificateProvider == nil {
 		return nil, nil
 	}
-	return func(driverConfig *config.Config) {
+	return func(driverConfig *neo4j.Config) {
 		if tlsConfig != nil {
 			driverConfig.TlsConfig = tlsConfig
 		}
@@ -250,7 +247,7 @@ func isRoutingUnsupported(err error) bool {
 	if err == nil {
 		return false
 	}
-	var featureErr *neo4jdb.FeatureNotSupportedError
+	var featureErr *neo4j.FeatureNotSupportedError
 	if errors.As(err, &featureErr) && strings.EqualFold(featureErr.Feature, "routing") {
 		return true
 	}

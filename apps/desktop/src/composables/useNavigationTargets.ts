@@ -7,6 +7,7 @@ import { buildTableSelectSql, requiresEagerTableMetadataForDataOpen } from "@/li
 import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { editableRowIdentifierColumns, physicalTablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
+import { rowIdLocatorUnsupported } from "@/lib/table/tableRowIdSupport";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
 import { beginDataTabNavigation, endDataTabNavigation, isCurrentDataTabNavigation } from "@/lib/tabs/dataTabNavigationGeneration";
@@ -217,6 +218,7 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
     }
     const eagerColumns = eagerMetadata?.metadata.columns ?? [];
     const eagerPrimaryKeys = eagerMetadata?.metadata.primaryKeys ?? [];
+    const eagerIncludeRowId = Boolean(eagerMetadata) && shouldIncludeSyntheticRowId(effectiveDbType, eagerPrimaryKeys, targetTableType) && !rowIdLocatorUnsupported(target.connectionId);
     const defaultSort = resolveTableDefaultSort(settingsStore.editorSettings, effectiveDbType, physicalTablePrimaryKeys(eagerColumns, eagerMetadata?.metadata.indexes, effectiveDbType), identifierQuote);
     const sql = await buildTableSelectSql({
       databaseType: effectiveDbType,
@@ -231,6 +233,7 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
       tableType: targetTableType,
       columns: eagerColumns.map((column) => column.name),
       primaryKeys: eagerPrimaryKeys,
+      includeRowId: eagerIncludeRowId,
       orderBy: defaultSort.orderBy,
       ...tableDataLargeValuePreviewOptions(effectiveDbType, eagerColumns, eagerPrimaryKeys, pageLimit, config.db_type === "jdbc"),
       whereInput: target.whereInput,
@@ -307,7 +310,7 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
       // 异步窗口内 tab 可能已被复用为其他目标：旧请求的元数据不得落地、
       // 不得解除新目标的 pending
       if (!isCurrentTarget() || !isCurrentGeneration()) return;
-      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, targetTableType);
+      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, targetTableType) && !rowIdLocatorUnsupported(target.connectionId);
       queryStore.setTableMeta(tabId, {
         schema: tableSchema,
         catalog: target.catalog,
@@ -317,7 +320,7 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
         columns,
         primaryKeys,
       });
-      if (!fellBackToLimitZero && !firstQueryFailed && (useRowId || config.db_type === "tdengine")) {
+      if (!fellBackToLimitZero && !firstQueryFailed && ((useRowId && !eagerIncludeRowId) || config.db_type === "tdengine")) {
         const newSql = await buildTableSelectSql({
           databaseType: effectiveDbType,
           driverProfile: config.driver_profile,

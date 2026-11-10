@@ -280,6 +280,43 @@ describe("DataGrid transpose sorting", () => {
     expect(rowInfoCell?.style.width).toBe(`${autoFittedWidth}px`);
   });
 
+  it("keeps the transpose header fixed and resizes record columns from it", async () => {
+    const { host } = mountGrid();
+    await settle();
+    await openTranspose(host);
+
+    const transposeHeader = host.querySelector<HTMLElement>("[data-grid-transpose-header]");
+    expect(transposeHeader).not.toBeNull();
+    expect(transposeHeader!.closest(".transpose-grid-scroller")).toBeNull();
+    expect(host.querySelector('[data-grid-transpose-cell][data-grid-transpose-record-index="0"] [data-grid-transpose-record-resize-handle]')).toBeNull();
+
+    const initialHeader = host.querySelector<HTMLElement>('[data-grid-transpose-record-header][data-grid-transpose-record-index="0"]');
+    const resizeHandle = initialHeader?.querySelector<HTMLElement>("[data-grid-transpose-record-resize-handle]");
+    const initialWidth = parseInt(initialHeader?.style.width ?? "0", 10);
+    expect(initialWidth).toBeGreaterThan(0);
+    expect(resizeHandle).not.toBeNull();
+    expect(host.querySelectorAll('[data-grid-transpose-cell][data-grid-transpose-record-index="0"]')).toHaveLength(2);
+
+    resizeHandle!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: 200 }));
+    document.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, cancelable: true, clientX: 280 }));
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+    await settle();
+
+    const resizedHeader = host.querySelector<HTMLElement>('[data-grid-transpose-record-header][data-grid-transpose-record-index="0"]');
+    const resizedWidth = parseInt(resizedHeader?.style.width ?? "0", 10);
+    const resizedCells = [...host.querySelectorAll<HTMLElement>('[data-grid-transpose-cell][data-grid-transpose-record-index="0"]')];
+    expect(resizedWidth).toBeGreaterThan(initialWidth);
+    expect(resizedCells.map((cell) => cell.style.width)).toEqual([`${resizedWidth}px`, `${resizedWidth}px`]);
+
+    host.querySelector<HTMLElement>('[data-grid-transpose-record-header][data-grid-transpose-record-index="0"] [data-grid-transpose-record-resize-handle]')!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+    await settle();
+
+    const autoFittedHeader = host.querySelector<HTMLElement>('[data-grid-transpose-record-header][data-grid-transpose-record-index="0"]');
+    const autoFittedWidth = autoFittedHeader?.style.width;
+    expect(autoFittedWidth).not.toBe(`${resizedWidth}px`);
+    expect([...host.querySelectorAll<HTMLElement>('[data-grid-transpose-cell][data-grid-transpose-record-index="0"]')].map((cell) => cell.style.width)).toEqual([autoFittedWidth, autoFittedWidth]);
+  });
+
   it("displays column comments and types in transpose view by default and allows toolbar toggling", async () => {
     const { host, settingsStore } = mountGrid();
     await settle();

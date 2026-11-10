@@ -84,3 +84,48 @@ test("pruneOldReleases is a dry run unless apply is enabled", async () => {
   });
   assert.deepEqual(deleted, ["64"]);
 });
+
+// Keep these in sync with the "Keep latest five app releases in CNB" step in release.yml.
+const betaPattern = "^v[0-9]+[.][0-9]+[.][0-9]+-beta[.][0-9]{8}[.][0-9]+$";
+const stablePattern = "^(?!.*-beta[.])v[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z.-]+)?$";
+
+const mixedReleases = [
+  ...appReleases,
+  release("b6", "v0.5.70-beta.20260730.1", "2026-07-30T05:35:19Z"),
+  release("b5", "v0.5.70-beta.20260731.1", "2026-07-31T05:35:19Z"),
+  release("b4", "v0.5.70-beta.20260801.1", "2026-08-01T05:35:19Z"),
+  release("b3", "v0.5.70-beta.20260802.1", "2026-08-02T05:35:19Z"),
+  release("b2", "v0.5.70-beta.20260803.1", "2026-08-03T05:35:19Z"),
+  release("b1", "v0.5.70-beta.20260804.1", "2026-08-04T05:35:19Z"),
+];
+
+test("beta retention never evicts stable releases", () => {
+  const plan = planReleaseRetention(mixedReleases, { currentTag: "v0.5.70-beta.20260804.1", tagPattern: betaPattern, retain: 5 });
+
+  assert.equal(plan.skipped, "");
+  assert.deepEqual(
+    plan.remove.map((item) => item.tag),
+    ["v0.5.70-beta.20260730.1"],
+  );
+});
+
+test("stable retention ignores beta releases", () => {
+  const plan = planReleaseRetention(mixedReleases, { currentTag: "v0.5.69", tagPattern: stablePattern, retain: 5 });
+
+  assert.equal(plan.skipped, "");
+  assert.deepEqual(
+    plan.keep.map((item) => item.tag),
+    ["v0.5.69", "v0.5.68", "v0.5.67", "v0.5.66", "v0.5.65"],
+  );
+  assert.deepEqual(
+    plan.remove.map((item) => item.tag),
+    ["v0.5.64"],
+  );
+});
+
+test("stable retention skips when the current tag is a beta", () => {
+  const plan = planReleaseRetention(mixedReleases, { currentTag: "v0.5.70-beta.20260804.1", tagPattern: stablePattern, retain: 5 });
+
+  assert.match(plan.skipped, /outside the retention family/);
+  assert.deepEqual(plan.remove, []);
+});

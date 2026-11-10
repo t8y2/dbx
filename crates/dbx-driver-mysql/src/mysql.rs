@@ -1720,6 +1720,7 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
     let mut retry_url = url.to_string();
     let mut retry_ca_cert_path = ca_cert_path;
     let mut tls_error = None;
+    let eof_mode = MySqlEofMode::default_for_setup_mode(setup_mode);
     let mut result = connect_pool_attempt(
         url,
         ca_cert_path,
@@ -1729,7 +1730,7 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
         setup_database,
         extra_setup_queries,
         setup_mode,
-        MySqlEofMode::Deprecate,
+        eof_mode,
     )
     .await;
 
@@ -1748,13 +1749,15 @@ async fn connect_with_ca_cert_pool_limit_idle_setup_database_with_mode(
                 setup_database,
                 extra_setup_queries,
                 setup_mode,
-                MySqlEofMode::Deprecate,
+                eof_mode,
             )
             .await;
         }
     }
 
-    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error)) {
+    if eof_mode == MySqlEofMode::Deprecate
+        && result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error))
+    {
         log::info!("MySQL proxy returned legacy EOF packets; retrying with CLIENT_DEPRECATE_EOF disabled");
         result = connect_pool_attempt(
             &retry_url,
@@ -1898,6 +1901,17 @@ enum MySqlTcpKeepaliveMode {
 impl MySqlEofMode {
     fn deprecate_eof(self) -> bool {
         self == Self::Deprecate
+    }
+
+    fn default_for_setup_mode(setup_mode: MySqlSetupMode) -> Self {
+        match setup_mode {
+            // Doris and other MySQL-compatible servers append an empty info
+            // field to the login OK packet when CLIENT_DEPRECATE_EOF is set.
+            // Keep the legacy protocol for this compatibility path so the
+            // handshake does not depend on mysql_async accepting that quirk.
+            MySqlSetupMode::Compatible => Self::Legacy,
+            MySqlSetupMode::Standard | MySqlSetupMode::LiteralFloor => Self::Deprecate,
+        }
     }
 }
 
@@ -3366,6 +3380,7 @@ pub async fn connect_bare_with_pool_limit_and_setup_database(
     extra_setup_queries: &[String],
 ) -> Result<MySqlPool, String> {
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
+    let eof_mode = MySqlEofMode::default_for_setup_mode(MySqlSetupMode::Compatible);
     let result = connect_pool_attempt(
         url,
         None,
@@ -3375,10 +3390,12 @@ pub async fn connect_bare_with_pool_limit_and_setup_database(
         setup_database,
         extra_setup_queries,
         MySqlSetupMode::Compatible,
-        MySqlEofMode::Deprecate,
+        eof_mode,
     )
     .await;
-    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error)) {
+    if eof_mode == MySqlEofMode::Deprecate
+        && result.as_ref().err().is_some_and(|error| mysql_error_should_retry_with_legacy_eof(error))
+    {
         log::info!(
             "MySQL proxy returned legacy EOF packets; retrying bare connection with CLIENT_DEPRECATE_EOF disabled"
         );
@@ -4639,7 +4656,7 @@ fn list_tables_objects_sql(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> String {
-    list_tables_objects_sql_with_loading(database, object_types, limit, offset, false)
+    list_tables_objects_sql_with_loading(database, object_types, limit, offset, false, false)
 }
 
 fn list_tables_objects_sql_with_loading(
@@ -4648,11 +4665,14 @@ fn list_tables_objects_sql_with_loading(
     limit: Option<usize>,
     offset: Option<usize>,
     lightweight: bool,
+    comment_in_lightweight: bool,
 ) -> String {
-    let details = if lightweight {
-        "NULL AS object_comment, NULL AS created_at, NULL AS updated_at"
-    } else {
-        "TABLE_COMMENT AS object_comment, CREATE_TIME AS created_at, UPDATE_TIME AS updated_at"
+    let details = match (lightweight, comment_in_lightweight) {
+        // MySQL 8+ resolves TABLE_COMMENT from the data dictionary, so the light
+        // browser load keeps comments while still skipping the heavy stat columns (#14382).
+        (true, true) => "TABLE_COMMENT AS object_comment, NULL AS created_at, NULL AS updated_at",
+        (true, false) => "NULL AS object_comment, NULL AS created_at, NULL AS updated_at",
+        (false, _) => "TABLE_COMMENT AS object_comment, CREATE_TIME AS created_at, UPDATE_TIME AS updated_at",
     };
     let wants_tables = requested_object_type(object_types, "TABLE");
     let wants_views = requested_object_type(object_types, "VIEW");
@@ -4957,6 +4977,7 @@ pub async fn list_objects(
 }
 
 /// Explicit browser mode; existing metadata consumers retain the full legacy API.
+#[allow(clippy::too_many_arguments)]
 pub async fn list_objects_for_browser(
     pool: &MySqlPool,
     database: &str,
@@ -4964,13 +4985,21 @@ pub async fn list_objects_for_browser(
     limit: Option<usize>,
     offset: Option<usize>,
     lightweight: bool,
+    comment_in_lightweight: bool,
     budget: Duration,
 ) -> Result<PagedObjectList, String> {
     let paging_applied = limit.is_some() && object_query_supports_paging(object_types);
     let (query_limit, query_offset) = if paging_applied { (limit, offset) } else { (None, None) };
     let mut objects = Vec::new();
     if wants_table_objects(object_types) {
-        let sql = list_tables_objects_sql_with_loading(database, object_types, query_limit, query_offset, lightweight);
+        let sql = list_tables_objects_sql_with_loading(
+            database,
+            object_types,
+            query_limit,
+            query_offset,
+            lightweight,
+            comment_in_lightweight,
+        );
         match browser_metadata_rows_with_budget(pool, &sql, false, budget).await {
             Ok(rows) if !rows.is_empty() => objects.extend(rows.iter().map(|row| row_to_object(row, database))),
             Err(error) if error.contains("timed out") => return Err(error),
@@ -9215,7 +9244,7 @@ mod tests {
     #[test]
     fn mysql_browser_queries_separate_names_from_details_and_capacity() {
         let types = vec!["VIEW".to_string()];
-        let light = list_tables_objects_sql_with_loading("app's", Some(&types), Some(7), Some(14), true);
+        let light = list_tables_objects_sql_with_loading("app's", Some(&types), Some(7), Some(14), true, false);
         for heavy in ["TABLE_COMMENT", "CREATE_TIME", "UPDATE_TIME", "DATA_LENGTH", "INDEX_LENGTH"] {
             assert!(!light.contains(heavy), "unexpected heavy field: {heavy}");
         }
@@ -9233,6 +9262,17 @@ mod tests {
         assert!(!capacity.contains("JOIN"));
     }
 
+    #[test]
+    fn mysql_browser_lightweight_keeps_dictionary_comments_on_mysql8() {
+        let types = vec!["TABLE".to_string(), "VIEW".to_string()];
+        let light = list_tables_objects_sql_with_loading("app's", Some(&types), Some(7), Some(14), true, true);
+        assert!(light.contains("TABLE_COMMENT AS object_comment"), "comment stays in the light list: {light}");
+        assert!(light.contains("NULL AS created_at, NULL AS updated_at"), "stat columns stay lazy: {light}");
+        for heavy in ["CREATE_TIME", "UPDATE_TIME", "DATA_LENGTH", "INDEX_LENGTH"] {
+            assert!(!light.contains(heavy), "unexpected heavy field: {heavy}");
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires isolated fixture via DBX_LIVE_MYSQL_METADATA_URL"]
     async fn live_mysql_browser_metadata_loading_and_cancellation() {
@@ -9244,7 +9284,7 @@ mod tests {
         let types = vec!["TABLE".to_string(), "VIEW".to_string()];
         let start = Instant::now();
         let light =
-            list_objects_for_browser(&pool, &database, Some(&types), None, None, true, BROWSER_METADATA_TIMEOUT)
+            list_objects_for_browser(&pool, &database, Some(&types), None, None, true, false, BROWSER_METADATA_TIMEOUT)
                 .await
                 .unwrap();
         eprintln!("light objects={} elapsed_ms={}", light.objects.len(), start.elapsed().as_millis());
@@ -9254,20 +9294,49 @@ mod tests {
             .iter()
             .all(|object| object.comment.is_none() && object.created_at.is_none() && object.updated_at.is_none()));
         let start = Instant::now();
-        let full =
-            list_objects_for_browser(&pool, &database, Some(&types), None, None, false, BROWSER_METADATA_TIMEOUT)
-                .await
-                .unwrap();
+        let full = list_objects_for_browser(
+            &pool,
+            &database,
+            Some(&types),
+            None,
+            None,
+            false,
+            false,
+            BROWSER_METADATA_TIMEOUT,
+        )
+        .await
+        .unwrap();
         eprintln!("full objects={} elapsed_ms={}", full.objects.len(), start.elapsed().as_millis());
         assert_eq!(
             light.objects.iter().map(|object| (&object.name, &object.object_type)).collect::<Vec<_>>(),
             full.objects.iter().map(|object| (&object.name, &object.object_type)).collect::<Vec<_>>()
         );
         assert!(full.objects.iter().any(|object| object.created_at.is_some()));
-        let page =
-            list_objects_for_browser(&pool, &database, Some(&types), Some(7), Some(14), true, BROWSER_METADATA_TIMEOUT)
+        let light_with_comment =
+            list_objects_for_browser(&pool, &database, Some(&types), None, None, true, true, BROWSER_METADATA_TIMEOUT)
                 .await
                 .unwrap();
+        assert_eq!(
+            light_with_comment.objects.iter().map(|object| &object.name).collect::<Vec<_>>(),
+            light.objects.iter().map(|object| &object.name).collect::<Vec<_>>()
+        );
+        assert!(light_with_comment.objects.iter().all(|object| object.created_at.is_none()));
+        assert_eq!(
+            light_with_comment.objects.iter().map(|object| &object.comment).collect::<Vec<_>>(),
+            full.objects.iter().map(|object| &object.comment).collect::<Vec<_>>()
+        );
+        let page = list_objects_for_browser(
+            &pool,
+            &database,
+            Some(&types),
+            Some(7),
+            Some(14),
+            true,
+            false,
+            BROWSER_METADATA_TIMEOUT,
+        )
+        .await
+        .unwrap();
         assert!(page.paging_applied);
         assert_eq!(
             page.objects.iter().map(|object| &object.name).collect::<Vec<_>>(),
@@ -10655,6 +10724,8 @@ mod tests {
         AccessDenied,
         LegacyEof,
         Accept,
+        DorisAccept,
+        CachingSha2Accept,
     }
 
     async fn mysql_tls_test_packet(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
@@ -10699,7 +10770,11 @@ mod tests {
                     | Caps::CLIENT_DEPRECATE_EOF,
                 33,
                 StatusFlags::SERVER_STATUS_AUTOCOMMIT,
-                Some(&b"mysql_native_password"[..]),
+                Some(if matches!(reply, MysqlTlsTestReply::CachingSha2Accept) {
+                    &b"caching_sha2_password"[..]
+                } else {
+                    &b"mysql_native_password"[..]
+                }),
             );
             let mut payload = Vec::new();
             greeting.serialize(&mut payload);
@@ -10734,9 +10809,16 @@ mod tests {
                     assert!(capabilities.contains(Caps::CLIENT_DEPRECATE_EOF));
                     mysql_tls_test_write(&mut socket, 3, &[0, 0, 0, 2, 0, 0, 0]).await;
                 }
-                MysqlTlsTestReply::Accept => {
+                MysqlTlsTestReply::Accept | MysqlTlsTestReply::DorisAccept | MysqlTlsTestReply::CachingSha2Accept => {
                     assert!(!capabilities.contains(Caps::CLIENT_SSL));
-                    mysql_tls_test_write(&mut socket, 2, &[0, 0, 0, 2, 0, 0, 0]).await;
+                    let ok_packet = if matches!(reply, MysqlTlsTestReply::DorisAccept)
+                        && capabilities.contains(Caps::CLIENT_DEPRECATE_EOF)
+                    {
+                        &[0, 0, 0, 2, 0, 0, 0, 0][..]
+                    } else {
+                        &[0, 0, 0, 2, 0, 0, 0][..]
+                    };
+                    mysql_tls_test_write(&mut socket, 2, ok_packet).await;
                     loop {
                         let command = mysql_tls_test_packet(&mut socket).await;
                         if command[0] == 1 {
@@ -10762,6 +10844,45 @@ mod tests {
         let url = format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode={mode}&max_allowed_packet=65536&wait_timeout=60&sessionVariables=group_concat_max_len%3D1024");
         let result = connect_with_ca_cert_and_pool_limit(&url, None, Duration::from_secs(2), 1).await;
         (result, servers)
+    }
+
+    async fn mysql_bare_test_connect(
+        reply: MysqlTlsTestReply,
+    ) -> (Result<MySqlPool, String>, tokio::task::JoinSet<Vec<mysql_async::consts::CapabilityFlags>>) {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut servers = tokio::task::JoinSet::new();
+        servers.spawn(mysql_tls_test_server(listener, vec![reply]));
+        let url =
+            format!("mysql://test:secret@127.0.0.1:{port}/?ssl-mode=disabled&max_allowed_packet=65536&wait_timeout=60");
+        let result = connect_bare_with_pool_limit_and_setup(&url, Duration::from_secs(2), 1, &[]).await;
+        (result, servers)
+    }
+
+    #[tokio::test]
+    async fn mysql_caching_sha2_immediate_ok_returns_a_working_pool() {
+        // Router may return OK directly after the caching_sha2 handshake response.
+        let (result, mut servers) =
+            mysql_tls_test_connect(vec![MysqlTlsTestReply::CachingSha2Accept], "disabled").await;
+        let pool = result.unwrap();
+        verify_pool_connection(&pool, Duration::from_secs(2)).await.unwrap();
+        pool.get_conn().await.unwrap().query_drop("DO 1").await.unwrap();
+        pool.disconnect().await.unwrap();
+        let attempts = servers.join_next().await.unwrap().unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert!(!attempts[0].contains(mysql_async::consts::CapabilityFlags::CLIENT_SSL));
+        assert!(attempts[0].contains(mysql_async::consts::CapabilityFlags::CLIENT_DEPRECATE_EOF));
+    }
+
+    #[tokio::test]
+    async fn mysql_bare_compatible_connection_uses_legacy_eof_for_doris_login_ok() {
+        let (result, mut servers) = mysql_bare_test_connect(MysqlTlsTestReply::DorisAccept).await;
+        let pool = result.unwrap();
+        pool.disconnect().await.unwrap();
+        let attempts = servers.join_next().await.unwrap().unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert!(!attempts[0].contains(mysql_async::consts::CapabilityFlags::CLIENT_DEPRECATE_EOF));
     }
 
     #[tokio::test]

@@ -44,6 +44,7 @@ const messageSearchQuery = ref("");
 type KafkaPeekStartPosition = NonNullable<PeekMessagesOptions["startPosition"]>;
 const kafkaStartPosition = ref<KafkaPeekStartPosition>("latest");
 const kafkaStartTimestamp = ref("");
+const kafkaEndTimestamp = ref("");
 const kafkaMessageDisplayOrder = ref<KafkaMessageDisplayOrder>("newest");
 let messageRequestVersion = 0;
 
@@ -103,6 +104,15 @@ async function loadMessages() {
         const parsedTime = Date.parse(String(kafkaStartTimestamp.value));
         if (!Number.isFinite(parsedTime)) throw new Error(t("mqMessages.timestampRequired"));
         options.timestamp = parsedTime;
+        const endTimestampText = String(kafkaEndTimestamp.value).trim();
+        if (endTimestampText !== "") {
+          const parsedEndTime = Date.parse(endTimestampText);
+          if (!Number.isFinite(parsedEndTime)) throw new Error(t("mqMessages.endTimestampInvalid"));
+          if (parsedEndTime < parsedTime) throw new Error(t("mqMessages.endTimestampBeforeStart"));
+          options.endTimestamp = parsedEndTime;
+        }
+        // 时间窗口下「时间顺序」即读取方向：最新优先让 agent 从截止时间一侧倒序回扫。
+        options.sortOrder = kafkaMessageDisplayOrder.value;
       }
     } else {
       if (partitionText !== "") {
@@ -213,6 +223,9 @@ watch(kafkaStartPosition, () => {
       <template v-else-if="kafkaStartPosition === 'earliest'">
         {{ t("mqMessages.kafkaEarliestHint") }}
       </template>
+      <template v-else-if="kafkaStartPosition === 'timestamp'">
+        {{ t("mqMessages.kafkaTimestampHint") }}
+      </template>
       <template v-else>
         {{ t("mqMessages.kafkaOffsetHint") }}
       </template>
@@ -248,6 +261,10 @@ watch(kafkaStartPosition, () => {
       <label v-if="isKafka && isKafkaTimestampMode && !isMonitoring">
         <span>{{ t("mqMessages.startTimestamp") }}</span>
         <input v-model="kafkaStartTimestamp" data-testid="kafka-peek-start-timestamp" type="datetime-local" step="1" :disabled="loading" />
+      </label>
+      <label v-if="isKafka && isKafkaTimestampMode && !isMonitoring">
+        <span>{{ t("mqMessages.endTimestamp") }}</span>
+        <input v-model="kafkaEndTimestamp" data-testid="kafka-peek-end-timestamp" type="datetime-local" step="1" :disabled="loading" />
       </label>
       <label v-if="isKafka">
         <span>{{ t("mqMessages.timeOrder") }}</span>

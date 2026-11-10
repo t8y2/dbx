@@ -17,12 +17,13 @@ pub use oracle_trigger::{
 mod oracle_routines;
 pub use oracle_indexes::{
     extract_oracle_table_triggers, oracle_index_ddl_sources, oracle_table_created_index_identities,
-    oracle_trigger_ddl_sources, oracle_trigger_definitions_match, oracle_trigger_enabled,
-    oracle_trigger_metadata_matches, oracle_trigger_source_with_create, order_oracle_trigger_sources,
-    parse_oracle_table_ddl, rebase_oracle_table_ddl, rebase_oracle_trigger_ddl, separate_oracle_supporting_indexes,
-    separate_oracle_supporting_indexes_with_retained, split_oracle_table_ddl, split_oracle_table_ddl_with_retained,
-    OracleDdlNameMapping, OracleIndexDdlSource, OracleSupportingIndexDdl, OracleSupportingIndexIdentity,
-    OracleTableConstraintSource, OracleTableDdlParts, OracleTableDdlSource, OracleTriggerDdlSource,
+    oracle_trigger_ddl_sources, oracle_trigger_ddl_sources_with_table_owner, oracle_trigger_definitions_match,
+    oracle_trigger_enabled, oracle_trigger_metadata_matches, oracle_trigger_source_with_create,
+    order_oracle_trigger_sources, parse_oracle_table_ddl, rebase_oracle_table_ddl, rebase_oracle_trigger_ddl,
+    separate_oracle_supporting_indexes, separate_oracle_supporting_indexes_with_retained, split_oracle_table_ddl,
+    split_oracle_table_ddl_with_retained, OracleDdlNameMapping, OracleIndexDdlSource, OracleSupportingIndexDdl,
+    OracleSupportingIndexIdentity, OracleTableConstraintSource, OracleTableDdlParts, OracleTableDdlSource,
+    OracleTriggerDdlSource,
 };
 pub use oracle_routines::{
     analyze_oracle_package_body_draft, analyze_oracle_routine_draft, compact_oracle_ddl,
@@ -607,10 +608,22 @@ fn build_executable_object_source_statements_with_mysql_validation_name(
         return Ok(vec![executable_oracle_routine_ddl(source)]);
     }
 
+    if (is_oracle_like(input.database_type) || input.database_type == DatabaseType::OceanbaseOracle)
+        && input.object_type == ObjectSourceKind::Trigger
+    {
+        // Dictionary sources carry the bare `TRIGGER ...` definition without a CREATE
+        // header, which is not executable on its own (ORA-00900); rebuild the header.
+        return Ok(vec![executable_oracle_trigger_ddl(source)]);
+    }
+
     if matches!(input.database_type, DatabaseType::Informix | DatabaseType::Gbase8s)
         && input.object_type == ObjectSourceKind::View
     {
         return Ok(executable_informix_view_statements(input.schema.as_deref(), &input.name, source));
+    }
+
+    if is_mysql_like(input.database_type) && input.object_type == ObjectSourceKind::Trigger {
+        return Ok(executable_mysql_trigger_statements(&input, source));
     }
 
     if is_mysql_like(input.database_type)
@@ -1085,6 +1098,16 @@ pub fn build_editable_object_source(input: EditableObjectSourceSqlInput) -> Stri
     {
         return ensure_semicolon(source.trim());
     }
+    if is_mysql_like(input.database_type) && input.object_type == ObjectSourceKind::Trigger {
+        // The editable text stays the CREATE statement; the executable form adds
+        // the DROP via build_executable_object_source_statements.
+        return ensure_semicolon(source.trim());
+    }
+    if (is_oracle_like(input.database_type) || input.database_type == DatabaseType::OceanbaseOracle)
+        && input.object_type == ObjectSourceKind::Trigger
+    {
+        return ensure_semicolon(source.trim());
+    }
     if input.database_type == DatabaseType::Mysql && input.object_type == ObjectSourceKind::View {
         // Existing view DDL opens as ALTER, while save must preserve CREATE for new views and TiDB.
         return executable_mysql_view_ddl(&source);
@@ -1174,6 +1197,19 @@ pub fn build_export_object_source_sql(
         )
     {
         return mysql_delimited_routine_source(source);
+    }
+    // T-SQL only accepts these as the first statement of a batch and a module runs to the
+    // end of its batch, so a `;` cannot separate them from the rest of an exported script.
+    if database_type == DatabaseType::SqlServer
+        && matches!(
+            object_type,
+            ObjectSourceKind::View
+                | ObjectSourceKind::Procedure
+                | ObjectSourceKind::Function
+                | ObjectSourceKind::Trigger
+        )
+    {
+        return format!("GO\n{source}\nGO");
     }
     ensure_semicolon(source)
 }
@@ -1548,6 +1584,17 @@ fn executable_oracle_routine_ddl(source: &str) -> String {
     ensure_semicolon(trimmed)
 }
 
+/// Oracle-family trigger sources come back as the bare `TRIGGER ...` definition
+/// (no CREATE header), which fails with ORA-00900 when replayed; rebuild the
+/// header. A user-provided full `CREATE [DEFINER = ...] TRIGGER` passes through.
+fn executable_oracle_trigger_ddl(source: &str) -> String {
+    let trimmed = strip_standalone_trailing_slash(source);
+    if Regex::new(r"(?i)^TRIGGER\b").unwrap().is_match(trimmed) {
+        return ensure_semicolon(&format!("CREATE OR REPLACE {trimmed}"));
+    }
+    ensure_semicolon(trimmed)
+}
+
 /// View DDL shown in Edit Structure. MySQL returns `CREATE VIEW`, which the
 /// structure editor used to present like a table script. Rewrite that to
 /// `CREATE OR REPLACE VIEW` and keep the view name unqualified.
@@ -1720,6 +1767,46 @@ fn executable_mysql_routine_statements(
 
 fn mysql_drop_routine_if_exists(object_type: ObjectSourceKind, schema: Option<&str>, name: &str) -> String {
     format!("DROP {} IF EXISTS {};", object_type_keyword(&object_type), mysql_qualified_name(schema, name))
+}
+
+fn mysql_drop_trigger_if_exists(schema: Option<&str>, name: &str) -> String {
+    format!("DROP TRIGGER IF EXISTS {};", mysql_qualified_name(schema, name))
+}
+
+fn mysql_source_starts_with_create_trigger(source: &str) -> bool {
+    Regex::new(r"(?is)^\s*CREATE\s+(?:DEFINER\s*=.+?\s+)?TRIGGER\b").unwrap().is_match(source)
+}
+
+/// The trigger name being (re)created, taken from the declaration so a rename in
+/// the source drops the right object; unquoted and unqualified.
+fn mysql_trigger_declaration_name(source: &str) -> Option<String> {
+    let captures = Regex::new(r"(?is)^\s*CREATE\s+(?:DEFINER\s*=.+?\s+)?TRIGGER\s+((?:`[^`]+`|[A-Za-z0-9_$]+)(?:\s*\.\s*(?:`[^`]+`|[A-Za-z0-9_$]+))?)")
+        .unwrap()
+        .captures(source)?;
+    let reference = captures.get(1)?.as_str();
+    let name = reference.rsplit('.').next()?.trim().trim_matches('`');
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// MySQL has no `CREATE OR REPLACE TRIGGER`: replaying the dictionary source fails
+/// with ER_TRG_ALREADY_EXISTS (1359), so a save drops the trigger before creating it.
+fn executable_mysql_trigger_statements(input: &EditableObjectSourceSqlInput, source: &str) -> Vec<String> {
+    if !mysql_source_starts_with_create_trigger(source) {
+        return vec![ensure_semicolon(source)];
+    }
+    let declared = mysql_trigger_declaration_name(source);
+    let create_name = declared.as_deref().unwrap_or(input.name.as_str());
+    let mut statements = Vec::with_capacity(3);
+    if !create_name.eq_ignore_ascii_case(input.name.trim()) {
+        statements.push(mysql_drop_trigger_if_exists(input.schema.as_deref(), input.name.trim()));
+    }
+    statements.push(mysql_drop_trigger_if_exists(input.schema.as_deref(), create_name));
+    statements.push(ensure_semicolon(source));
+    statements
 }
 
 fn mysql_source_starts_with_create_routine(source: &str) -> bool {
@@ -3828,6 +3915,108 @@ mod tests {
     }
 
     #[test]
+    fn mysql_trigger_source_save_drops_before_create() {
+        let source = "CREATE DEFINER=`root`@`%` TRIGGER `trg_orders` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.updated_at = NOW()";
+        let statements = build_executable_object_source_statements(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Mysql,
+            object_type: ObjectSourceKind::Trigger,
+            schema: Some("shop".to_string()),
+            name: "trg_orders".to_string(),
+            source: source.to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "DROP TRIGGER IF EXISTS `shop`.`trg_orders`;".to_string(),
+                "CREATE DEFINER=`root`@`%` TRIGGER `trg_orders` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.updated_at = NOW();".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_trigger_rename_drops_the_old_trigger_too() {
+        let statements = build_executable_object_source_statements(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Mysql,
+            object_type: ObjectSourceKind::Trigger,
+            schema: Some("shop".to_string()),
+            name: "trg_orders".to_string(),
+            source: "CREATE TRIGGER `trg_orders_v2` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.updated_at = NOW()"
+                .to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "DROP TRIGGER IF EXISTS `shop`.`trg_orders`;".to_string(),
+                "DROP TRIGGER IF EXISTS `shop`.`trg_orders_v2`;".to_string(),
+                "CREATE TRIGGER `trg_orders_v2` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.updated_at = NOW();"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_trigger_source_save_rebuilds_the_create_header() {
+        let statements = build_executable_object_source_statements(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::Trigger,
+            schema: Some("HR".to_string()),
+            name: "TRG_EMP".to_string(),
+            source: "TRIGGER HR.TRG_EMP BEFORE INSERT ON HR.EMP FOR EACH ROW BEGIN :new.id := 1; END".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec!["CREATE OR REPLACE TRIGGER HR.TRG_EMP BEFORE INSERT ON HR.EMP FOR EACH ROW BEGIN :new.id := 1; END;"
+                .to_string()]
+        );
+    }
+
+    #[test]
+    fn oracle_trigger_source_with_full_create_passes_through() {
+        let source = "CREATE OR REPLACE TRIGGER HR.TRG_EMP BEFORE INSERT ON HR.EMP FOR EACH ROW BEGIN NULL; END";
+        let statements = build_executable_object_source_statements(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::Trigger,
+            schema: Some("HR".to_string()),
+            name: "TRG_EMP".to_string(),
+            source: source.to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(statements, vec![format!("{source};")]);
+    }
+
+    #[test]
+    fn trigger_source_opened_for_editing_keeps_the_raw_statement() {
+        let mysql = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Mysql,
+            object_type: ObjectSourceKind::Trigger,
+            schema: Some("shop".to_string()),
+            name: "trg_orders".to_string(),
+            source: "CREATE TRIGGER `trg_orders` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.updated_at = NOW()"
+                .to_string(),
+        });
+        assert_eq!(
+            mysql,
+            "CREATE TRIGGER `trg_orders` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.updated_at = NOW();"
+        );
+
+        let oracle = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::Trigger,
+            schema: Some("HR".to_string()),
+            name: "TRG_EMP".to_string(),
+            source: "TRIGGER HR.TRG_EMP BEFORE INSERT ON HR.EMP FOR EACH ROW BEGIN NULL; END".to_string(),
+        });
+        assert_eq!(oracle, "TRIGGER HR.TRG_EMP BEFORE INSERT ON HR.EMP FOR EACH ROW BEGIN NULL; END;");
+    }
+
+    #[test]
     fn mysql_view_source_opened_for_editing_uses_alter_view() {
         let source = "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `new_view` AS select `base_plugins`.`id` AS `id` from `base_plugins`";
         let expected = "ALTER ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `new_view` AS select `base_plugins`.`id` AS `id` from `base_plugins`;";
@@ -4053,6 +4242,48 @@ mod tests {
         );
 
         assert_eq!(sql, "CREATE VIEW `active_users` AS SELECT `id` FROM `users`;");
+    }
+
+    #[test]
+    fn sqlserver_exported_modules_run_as_their_own_batches() {
+        let before = "CREATE TABLE dbo.orders (id INT);\nINSERT INTO dbo.orders (id) VALUES (1);";
+        let after = "CREATE TABLE dbo.audit_log (id INT);";
+        let cases = [
+            ("view", ObjectSourceKind::View, "CREATE VIEW dbo.v_orders AS\nSELECT id FROM dbo.orders"),
+            (
+                "procedure",
+                ObjectSourceKind::Procedure,
+                "CREATE PROCEDURE dbo.recalc AS\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND",
+            ),
+            (
+                "function",
+                ObjectSourceKind::Function,
+                "CREATE FUNCTION dbo.total() RETURNS INT AS\nBEGIN\n  RETURN 1;\nEND;",
+            ),
+            (
+                "trigger",
+                ObjectSourceKind::Trigger,
+                "CREATE TRIGGER dbo.tr_orders ON dbo.orders AFTER INSERT AS\nBEGIN\n  SELECT 1;\nEND",
+            ),
+        ];
+
+        for (name, object_type, source) in cases {
+            let exported = build_export_object_source_sql(DatabaseType::SqlServer, object_type, source);
+            let script = format!("{before}\n\n{exported}\n\n{exported}\n\n{after}\n");
+
+            assert_eq!(crate::sql::split_sql_batches(&script), vec![before, source, source, after], "{name}");
+        }
+    }
+
+    #[test]
+    fn sqlserver_sequence_export_keeps_regular_statement_terminator() {
+        let sql = build_export_object_source_sql(
+            DatabaseType::SqlServer,
+            ObjectSourceKind::Sequence,
+            "CREATE SEQUENCE dbo.order_seq AS INT",
+        );
+
+        assert_eq!(sql, "CREATE SEQUENCE dbo.order_seq AS INT;");
     }
 
     #[test]

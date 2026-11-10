@@ -266,11 +266,11 @@ describe("usesProvenReadOnlyStickyTransactionState", () => {
     expect(usesProvenReadOnlyStickyTransactionState("postgres")).toBe(true);
     expect(usesProvenReadOnlyStickyTransactionState("gaussdb")).toBe(true);
     expect(usesProvenReadOnlyStickyTransactionState("opengauss")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("kingbase")).toBe(true);
   });
 
   it("keeps databases without manual-transaction support on the legacy toolbar", () => {
     expect(usesProvenReadOnlyStickyTransactionState("doris")).toBe(false);
-    expect(usesProvenReadOnlyStickyTransactionState("kingbase")).toBe(false);
     expect(usesProvenReadOnlyStickyTransactionState("jdbc")).toBe(false);
     expect(usesProvenReadOnlyStickyTransactionState("redis")).toBe(false);
     expect(usesProvenReadOnlyStickyTransactionState(undefined)).toBe(false);
@@ -279,7 +279,7 @@ describe("usesProvenReadOnlyStickyTransactionState", () => {
   it("only enables sticky state where manual mode is reachable", () => {
     // The sticky UX gates commit/rollback in manual mode; a member without
     // transaction support could never reach it. Guards against drift.
-    for (const dbType of ["oracle", "oceanbase-oracle", "mysql", "postgres", "gaussdb", "opengauss"]) {
+    for (const dbType of ["oracle", "oceanbase-oracle", "mysql", "postgres", "gaussdb", "opengauss", "kingbase"]) {
       expect(supportsTransaction(dbType)).toBe(true);
     }
   });

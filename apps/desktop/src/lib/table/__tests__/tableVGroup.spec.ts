@@ -376,6 +376,27 @@ describe("resolveTableVGroupScopeFromNode", () => {
     expect(resolveTableVGroupScopeFromNode([databaseNode], indexesGroup)).toEqual({});
     expect(resolveTableVGroupScopeFromNode([databaseNode], tableTriggersGroup)).toEqual({});
   });
+
+  it("resolves a search-projected table row absent from the live tree to its container scope (#14228)", () => {
+    // 搜索投影行：首页之外的表不在 live 树里（无同 id 节点），但身份字段齐全，
+    // 顶层成员行按容器 scope + label 即可唯一收敛。表行自带的 tableName 是
+    // buildTableTreeNodes 的身份冗余字段，不代表结构子行。
+    const projectedHidden: TreeNode = { id: "conn-1:main:t_hidden", label: "t_hidden", type: "table", connectionId: "conn-1", database: "main", schema: "main", tableName: "t_hidden" };
+    expect(resolveTableVGroupScopeFromNode([databaseNode], projectedHidden)).toEqual(resolveTableVGroupScopeFromNode([databaseNode], databaseNode));
+  });
+
+  it("resolves a projected db-level trigger row the live tree does not hold", () => {
+    const database: TreeNode = { id: "db:conn-1:db1", label: "db1", type: "database", connectionId: "conn-1", database: "db1" };
+    const dbTriggers: TreeNode = { id: "gt:1", label: "Triggers", type: "group-triggers", connectionId: "conn-1", database: "db1", children: [{ id: "dbtrig:1", label: "tg_a", type: "trigger", connectionId: "conn-1", database: "db1" }] };
+    const tree: TreeNode[] = [{ ...database, children: [dbTriggers] }];
+    // 现实中带 parentage 的库级触发器行（parentName/tableName，tableTree.ts）仍走严格
+    // id 路径、投影时解析失败（既有局限）；本用例只覆盖无 parentage 字段的裸行。
+    const projected: TreeNode = { id: "dbtrig:projected", label: "tg_b", type: "trigger", connectionId: "conn-1", database: "db1" };
+    expect(tableVGroupScopeKey(resolveTableVGroupScopeFromNode(tree, projected))).toBe("conn-1\u0000\u0000\u0000db1\u0000\u0000triggers");
+    // 分区/子表行携带 partitionParentName，属结构子行，即使投影也不放宽。
+    const projectedPartition: TreeNode = { id: "p:projected", label: "t_order_p1", type: "table", connectionId: "conn-1", database: "db1", partitionParentName: "t_order" };
+    expect(resolveTableVGroupScopeFromNode(tree, projectedPartition)).toEqual({});
+  });
 });
 
 describe("table tree helpers", () => {

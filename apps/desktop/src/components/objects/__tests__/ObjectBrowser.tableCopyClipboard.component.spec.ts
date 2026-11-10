@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn(),
   copyToClipboard: vi.fn(),
   toast: vi.fn(),
+  tableNameFilterForScope: vi.fn(),
   store: { treeClipboard: null as unknown },
 }));
 
@@ -32,7 +33,7 @@ vi.mock("@/stores/connectionStore", () => ({
     },
     ensureConnected: mocks.ensureConnected,
     getConfig: () => connection,
-    tableNameFilterForScope: () => undefined,
+    tableNameFilterForScope: (...args: unknown[]) => mocks.tableNameFilterForScope(...args),
     orderByPinnedTreeNodes: (rows: unknown[]) => rows,
   }),
 }));
@@ -100,6 +101,7 @@ beforeEach(() => {
   mocks.getColumns.mockResolvedValue([]);
   mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.copyToClipboard.mockResolvedValue(undefined);
+  mocks.tableNameFilterForScope.mockReturnValue(undefined);
   invalidateObjectBrowserRowsCache({});
 });
 
@@ -119,6 +121,14 @@ async function mountBrowser() {
   app.mount(host);
   await vi.waitFor(() => expect(host.textContent).toContain("users"));
   return host;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((yes) => {
+    resolve = yes;
+  });
+  return { promise, resolve };
 }
 
 function rowFor(host: HTMLElement, name: string): HTMLElement {
@@ -273,6 +283,152 @@ describe("ObjectBrowser table copy", () => {
     expect(filterShortcut.defaultPrevented).toBe(false);
   });
 
+  it("shows the list copy menu without requiring a selection", async () => {
+    const host = await mountBrowser();
+    const trigger = host.querySelector<HTMLButtonElement>("[data-object-copy-menu]");
+    expect(trigger).toBeDefined();
+    trigger!.click();
+    await nextTick();
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((entry) => entry.textContent?.includes("objects.copyCurrentPageAsTable"));
+    expect(item).toBeDefined();
+    item!.click();
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenLastCalledWith(expect.stringContaining("audit\tobjects.table")));
+  });
+
+  it("preserves routine signatures when copying the current object names", async () => {
+    connection.id = "mysql-copy-routines";
+    mocks.listObjects.mockResolvedValue([
+      { name: "find_user", object_type: "FUNCTION", signature: "id integer" },
+      { name: "find_user", object_type: "FUNCTION", signature: "name text" },
+      { name: "users", object_type: "TABLE" },
+    ]);
+    const host = await mountBrowser();
+    const allFilter = [...host.querySelectorAll<HTMLButtonElement>("[data-object-filter-chips] button")].find((button) => button.textContent?.includes("objects.all"));
+    allFilter?.click();
+    await nextTick();
+    const copyButton = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("objects.copyNames"));
+    expect(copyButton).toBeDefined();
+    copyButton!.click();
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenLastCalledWith(expect.stringContaining("find_user(id integer)")));
+    expect(mocks.copyToClipboard).toHaveBeenLastCalledWith(expect.stringContaining("find_user(name text)"));
+  });
+
+  it("uses one unified copy button for selected names", async () => {
+    const host = await mountBrowser();
+    rowFor(host, "orders").dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
+    await nextTick();
+
+    const selectedCopyButtons = [...host.querySelectorAll<HTMLButtonElement>("button")].filter((button) => button.textContent?.includes("objects.copyTableSelected"));
+    expect(selectedCopyButtons).toHaveLength(1);
+    selectedCopyButtons[0].click();
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith("orders"));
+    expect(host.textContent).not.toContain("objects.copySelectedNames");
+  });
+
+  it("keeps the primary selected copy enabled when search hides the selected row", async () => {
+    const host = await mountBrowser();
+    rowFor(host, "orders").dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
+    await nextTick();
+
+    const searchInput = host.querySelector<HTMLInputElement>("[data-object-search-input]")!;
+    searchInput.value = "missing";
+    searchInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(host.querySelectorAll(".grid.h-\\[34px\\]")).toHaveLength(0));
+
+    const primaryCopy = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("objects.copyTableSelected"));
+    expect(primaryCopy).toBeDefined();
+    expect(primaryCopy!.disabled).toBe(false);
+    primaryCopy!.click();
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith("orders"));
+  });
+
+  it("copies the visible object metadata as a spreadsheet table from the copy menu", async () => {
+    mocks.listObjects.mockResolvedValue([
+      { name: "orders", object_type: "TABLE", comment: "sales" },
+      { name: "users", object_type: "TABLE", comment: "accounts" },
+    ]);
+    const host = await mountBrowser();
+    rowFor(host, "orders").dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
+    rowFor(host, "users").dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
+    await nextTick();
+    const trigger = host.querySelector<HTMLButtonElement>("[data-object-copy-menu]");
+    expect(trigger).toBeDefined();
+    trigger!.click();
+    await nextTick();
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((entry) => entry.textContent?.includes("objects.copySelectedAsTable"));
+    expect(item).toBeDefined();
+    item!.click();
+    // MySQL 连接现在包含 charset/collation 列（空值，与对象列表列定义一致）
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenLastCalledWith("objects.name\tobjects.type\tstructureEditor.characterSet\tstructureEditor.collation\tobjects.rows\tobjects.size\tobjects.comment\norders\tobjects.table\t\t\t\t\tsales\nusers\tobjects.table\t\t\t\t\taccounts"));
+  });
+
+  it("loads all server-paged filtered objects in batches before copying", async () => {
+    connection.id = "oceanbase-copy-all";
+    connection.db_type = "oceanbase-oracle";
+    mocks.tableNameFilterForScope.mockReturnValue({ includePatterns: [], excludePatterns: ["audit%"] });
+    mocks.listObjects.mockImplementation((_id: string, _database: string, _schema: string | undefined, _types: unknown, _filter: string | undefined, limit: number | undefined, offset: number | undefined) => {
+      if (limit === 1000 && offset === 1000) return Promise.resolve([{ name: "audit", object_type: "TABLE", comment: "archive" }]);
+      if (limit === 1000 && offset === 0) {
+        return Promise.resolve([{ name: "orders", object_type: "TABLE", comment: "sales" }, { name: "users", object_type: "TABLE", comment: "accounts" }, ...Array.from({ length: 998 }, (_, index) => ({ name: `table_${index}`, object_type: "TABLE" }))]);
+      }
+      return Promise.resolve([
+        { name: "orders", object_type: "TABLE", comment: "sales" },
+        { name: "users", object_type: "TABLE", comment: "accounts" },
+      ]);
+    });
+    const host = await mountBrowser();
+    rowFor(host, "orders").dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
+    await nextTick();
+    host.querySelector<HTMLButtonElement>("[data-object-copy-menu]")!.click();
+    await nextTick();
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((entry) => entry.textContent?.includes("objects.copyAllAsTable"));
+    expect(item).toBeDefined();
+    item!.click();
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenLastCalledWith(expect.not.stringContaining("audit")));
+    expect(mocks.listObjects.mock.calls.some((call) => call[5] === 1000 && call[6] === 1000)).toBe(true);
+  });
+
+  it("keeps all copy-all pages on the start-time search and object filter", async () => {
+    connection.id = "oceanbase-copy-snapshot";
+    connection.db_type = "oceanbase-oracle";
+    const secondPage = deferred<unknown[]>();
+    const thirdPage = deferred<unknown[]>();
+    mocks.listObjects.mockImplementation((_id: string, _database: string, _schema: string | undefined, types: unknown, filter: string | undefined, limit: number | undefined, offset: number | undefined) => {
+      if (limit === 1000 && offset === 0) return Promise.resolve([{ name: "orders", object_type: "TABLE" }, ...Array.from({ length: 999 }, (_, index) => ({ name: `table_${index}`, object_type: "TABLE" }))]);
+      if (limit === 1000 && offset === 1000) return secondPage.promise;
+      if (limit === 1000 && offset === 2000) {
+        expect(types).toEqual(["TABLE"]);
+        expect(filter).toBeUndefined();
+        return thirdPage.promise;
+      }
+      return Promise.resolve([
+        { name: "orders", object_type: "TABLE" },
+        { name: "users", object_type: "TABLE" },
+      ]);
+    });
+    const host = await mountBrowser();
+    host.querySelector<HTMLButtonElement>("[data-object-copy-menu]")!.click();
+    await nextTick();
+    const copyAll = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((entry) => entry.textContent?.includes("objects.copyAllAsTable"));
+    expect(copyAll).toBeDefined();
+    copyAll!.click();
+    await vi.waitFor(() => expect(mocks.listObjects.mock.calls.some((call) => call[5] === 1000 && call[6] === 1000)).toBe(true));
+
+    host.querySelector<HTMLButtonElement>("[data-object-copy-menu]")!.click();
+    await nextTick();
+    const duplicate = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((entry) => entry.textContent?.includes("objects.copyAllAsTable"));
+    expect(duplicate?.getAttribute("aria-disabled")).toBe("true");
+    duplicate?.click();
+
+    const searchInput = host.querySelector<HTMLInputElement>("[data-object-search-input]")!;
+    searchInput.value = "changed";
+    searchInput.dispatchEvent(new Event("input", { bubbles: true }));
+    secondPage.resolve([{ name: "users", object_type: "TABLE" }, ...Array.from({ length: 999 }, (_, index) => ({ name: `page2_${index}`, object_type: "TABLE" }))]);
+    await vi.waitFor(() => expect(mocks.listObjects.mock.calls.some((call) => call[5] === 1000 && call[6] === 2000)).toBe(true));
+    thirdPage.resolve([]);
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith(expect.stringContaining("orders")));
+  });
+
   it("writes the selected table names to the system clipboard on Ctrl+C", async () => {
     const host = await mountBrowser();
     rowFor(host, "orders").dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
@@ -307,8 +463,12 @@ describe("ObjectBrowser table copy", () => {
     expect(host.textContent).not.toContain("objects.exportSelected");
     expect(host.textContent).not.toContain("objects.dropSelected");
     expect(host.querySelector('[title="objects.toggleCheckbox"]')).toBeNull();
+    expect(host.querySelector<HTMLButtonElement>("[data-object-copy-menu]")).not.toBeNull();
+    const copyButton = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("objects.copyNames"));
+    expect(copyButton).toBeDefined();
+    copyButton!.click();
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith("audit\norders\nusers"));
     host.querySelector<HTMLElement>("[data-object-browser-root]")!.dispatchEvent(new KeyboardEvent("keydown", { key: "c", ctrlKey: true, bubbles: true }));
-    expect(mocks.copyToClipboard).not.toHaveBeenCalled();
     expect(mocks.store.treeClipboard).toBeNull();
   });
 });

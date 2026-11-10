@@ -65,14 +65,17 @@ jobs:
             echo "Source version $base_version matches stable; publishing a daily beta build from the current source."
           fi
 
+          # Latest published (non-draft) beta; drives both the no-change skip and
+          # the monotonicity check on the tag this run is about to create.
+          latest_beta_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft \
+            --jq '.[] | select(.isDraft == false) | .tagName' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]{8}\.[0-9]+$' | sort -V | tail -n 1 || true)"
+
           # Skip days without new commits: nothing changed since the last
           # published beta (or the stable release) was built from this source.
           # Automation commits marked [skip ci] (version sync, plugin version
           # bumps) do not count as changes.
           if [[ "$FORCE_BUILD" != "true" && -z "$REQUESTED_BASE_VERSION" ]]; then
-            latest_beta_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft \
-              --jq '.[] | select(.isDraft == false) | .tagName' \
-              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]{8}\.[0-9]+$' | sort -V | tail -n 1 || true)"
             for built_tag in "$latest_beta_tag" "$stable_tag"; do
               [[ -n "$built_tag" ]] || continue
               comparison="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${built_tag}...${GITHUB_SHA}" \
@@ -86,15 +89,30 @@ jobs:
           fi
 
           date_suffix="$(date -u +%Y%m%d)"
-          sequence=1
-          while :; do
-            tag="v${base_version}-beta.${date_suffix}.${sequence}"
-            if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-              && ! gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" >/dev/null 2>&1; then
-              break
+          # Continue from the highest sequence already used today instead of
+          # taking the lowest free slot. A withdrawn beta leaves its number
+          # behind, and handing that lower number to a newer build makes the
+          # updater rank the new beta below the installed one, so nobody is
+          # ever offered it.
+          highest_sequence="$( {
+              gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName --jq '.[].tagName' || true
+              gh api "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v${base_version}-beta.${date_suffix}." \
+                --jq '.[].ref' 2>/dev/null | sed 's#^refs/tags/##' || true
+            } \
+            | grep -E "^v${base_version//./\\.}-beta\\.${date_suffix}\\.[0-9]+$" \
+            | sed -E 's/^.*\.//' | sort -n | tail -n 1 || true)"
+          sequence=$(( ${highest_sequence:-0} + 1 ))
+          tag="v${base_version}-beta.${date_suffix}.${sequence}"
+
+          # Never publish a beta that ranks at or below what beta users already
+          # run; the update check is a SemVer comparison, not a publish order.
+          if [[ -n "$latest_beta_tag" ]]; then
+            newest="$(printf '%s\n%s\n' "$latest_beta_tag" "$tag" | sort -V | tail -n 1)"
+            if [[ "$newest" != "$tag" ]]; then
+              echo "::error::Computed beta tag ${tag} does not rank above the published beta ${latest_beta_tag}; refusing to publish a lower version."
+              exit 1
             fi
-            sequence=$((sequence + 1))
-          done
+          fi
 
           if [[ -z "$RELEASE_WORKFLOW_TOKEN" ]]; then
             echo "::error::MCP_RELEASE_TOKEN is required to dispatch the release workflow because GITHUB_TOKEN-created events do not trigger another workflow."

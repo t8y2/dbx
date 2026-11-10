@@ -4226,7 +4226,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     const deduped = [...new Map(entries.map((entry) => [`${entry.schema ?? ""}\0${entry.table_type}\0${entry.name}\0${entry.parent_schema ?? ""}\0${entry.parent_name ?? ""}`, entry])).values()];
     const tableSearchIndex = {
-      version: 2 as const,
+      version: 3 as const,
       complete: true as const,
       indexedAt: new Date().toISOString(),
       entries: deduped.map((entry) => ({

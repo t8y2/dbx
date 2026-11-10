@@ -1081,11 +1081,15 @@ fn qualify_cross_family_view_target(sql: &str, target_family: &TransferObjectFam
 /// Collapses `CREATE [ALGORITHM=..] [DEFINER=..] [SQL SECURITY ..] VIEW`,
 /// `CREATE OR REPLACE [FORCE] [NONEDITIONABLE] VIEW` and plain `CREATE VIEW`
 /// into a bare `CREATE VIEW` prefix usable on every target family.
+/// Leading SQL comments are kept in the output: Dameng replays creation
+/// scripts verbatim (comments included), so the scan must look past them.
 fn strip_sql_view_prefix(sql: &str) -> String {
-    if let Some(pos) = sql.find(" VIEW ") {
-        let head = &sql[..pos];
+    let start = crate::object_source_sql::leading_sql_statement_start(sql);
+    let executable = &sql[start..];
+    if let Some(pos) = executable.find(" VIEW ") {
+        let head = &executable[..pos];
         if head.trim_start().starts_with("CREATE") {
-            return format!("CREATE VIEW{}", &sql[pos + 5..]);
+            return format!("{}CREATE VIEW{}", &sql[..start], &executable[pos + 5..]);
         }
     }
     sql.to_string()
@@ -16849,6 +16853,47 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             );
             assert!(my2.starts_with("CREATE VIEW `tgt`.`V` ("), "{my2}");
             assert!(my2.contains("`tgt`.`T`"));
+        }
+
+        #[test]
+        fn strip_sql_view_prefix_skips_leading_comments() {
+            assert_eq!(
+                strip_sql_view_prefix(
+                    "-- 2. 再创建物资出库明细视图\nCREATE OR REPLACE FORCE VIEW \"S\".\"V\" AS SELECT 1"
+                ),
+                "-- 2. 再创建物资出库明细视图\nCREATE VIEW \"S\".\"V\" AS SELECT 1",
+            );
+            assert_eq!(
+                strip_sql_view_prefix("/* banner */\nCREATE ALGORITHM=MERGE VIEW v AS SELECT 1"),
+                "/* banner */\nCREATE VIEW v AS SELECT 1",
+            );
+            // a " VIEW " token inside the leading comment must not confuse the scan
+            assert_eq!(
+                strip_sql_view_prefix("-- see VIEW docs first\nCREATE OR REPLACE VIEW v AS SELECT 1"),
+                "-- see VIEW docs first\nCREATE VIEW v AS SELECT 1",
+            );
+            // non-CREATE statements stay untouched
+            assert_eq!(strip_sql_view_prefix("-- c\nALTER VIEW v AS SELECT 1"), "-- c\nALTER VIEW v AS SELECT 1");
+        }
+
+        #[test]
+        fn cross_family_view_ddl_with_leading_comment_collapses_prefix() {
+            // Dameng GET_DDL replays the creation script with its leading
+            // comment; the VIEW prefix must still collapse and the comment
+            // must survive into the converted DDL.
+            let dm_view =
+                "-- 2. 再创建物资出库明细视图\nCREATE OR REPLACE VIEW \"S\".\"V\" AS SELECT \"ID\" FROM \"S\".\"T\"";
+            let ss = convert_cross_family_object_ddl(
+                &TransferObjectFamily::Oracle,
+                &TransferObjectFamily::SqlServer,
+                &TransferObjectKind::View,
+                "S",
+                "dbo",
+                dm_view,
+            );
+            assert!(ss.starts_with("-- 2. 再创建物资出库明细视图"), "{ss}");
+            assert!(ss.contains("CREATE VIEW [dbo].[V] AS"), "{ss}");
+            assert!(!ss.contains("OR REPLACE"), "{ss}");
         }
 
         #[test]

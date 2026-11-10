@@ -9586,6 +9586,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlways: "常に",
     tableCompletionSchemaQualificationAlwaysDescription: "メタデータにスキーマがある場合は常に挿入します。",
     autoAliasTables: "テーブル別名を自動追加",
+    qualifyColumnCompletions: "列補完にテーブル接頭辞を追加",
+    qualifyColumnCompletionsDescription: "無効にすると、複数テーブルのクエリで曖昧でない列は列名のみ挿入します。同名の列と手入力の接頭辞は保持します。",
     autoAliasTablesDescription: "FROM または JOIN でテーブル補完を選択すると、order_items AS oi のような生成済み別名を挿入します。",
     batchColumnSelectionIncludeComments: "選択した列の挿入時にコメントを含める",
     batchColumnSelectionIncludeCommentsDescription: "補完リストから SELECT の列を一括挿入するときに、データベースの列コメントを含めます。",

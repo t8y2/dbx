@@ -202,6 +202,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
     keywordKeys: ["settings.tableCompletionSchemaQualificationNever", "settings.tableCompletionSchemaQualificationCollision", "settings.tableCompletionSchemaQualificationAlways"],
   },
   { id: "editor-auto-alias", category: "editor", titleKey: "settings.autoAliasTables", descriptionKey: "settings.autoAliasTablesDescription", targetId: "editor" },
+  { id: "editor-qualify-columns", category: "editor", titleKey: "settings.qualifyColumnCompletions", descriptionKey: "settings.qualifyColumnCompletionsDescription", targetId: "editor" },
   { id: "editor-batch-column-comments", category: "editor", titleKey: "settings.batchColumnSelectionIncludeComments", descriptionKey: "settings.batchColumnSelectionIncludeCommentsDescription", targetId: "editor" },
   { id: "editor-unsaved-close", category: "editor", titleKey: "settings.confirmUnsavedSqlClose", descriptionKey: "settings.confirmUnsavedSqlCloseDescription", targetId: "editor" },
   {

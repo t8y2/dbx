@@ -35,6 +35,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "showInsertValueHints",
   "showConnectionGroupPath",
   "autoAliasTables",
+  "qualifyColumnCompletions",
   "batchColumnSelectionIncludeComments",
   "tableCompletionSchemaQualification",
   "insertSpaceAfterCompletion",

@@ -11222,6 +11222,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlways: "Всегда",
     tableCompletionSchemaQualificationAlwaysDescription: "Добавлять схему всегда, когда она доступна в метаданных.",
     autoAliasTables: "Автоматически добавлять псевдонимы таблиц",
+    qualifyColumnCompletions: "Добавлять префиксы таблиц при дополнении столбцов",
+    qualifyColumnCompletionsDescription: "Если отключено, для однозначных столбцов в запросах к нескольким таблицам вставляется только имя. Неоднозначные имена и введённые префиксы сохраняются.",
     autoAliasTablesDescription: "При выборе автодополнения таблицы в FROM или JOIN вставлять сгенерированный псевдоним, например order_items AS oi.",
     batchColumnSelectionIncludeComments: "Добавлять комментарии при вставке выбранных столбцов",
     batchColumnSelectionIncludeCommentsDescription: "Включать комментарии столбцов базы данных при массовой вставке столбцов SELECT из списка автодополнения.",

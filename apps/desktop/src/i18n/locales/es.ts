@@ -9846,6 +9846,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlways: "Siempre",
     tableCompletionSchemaQualificationAlwaysDescription: "Incluye el esquema siempre que esté disponible en los metadatos.",
     autoAliasTables: "Agregar alias de tabla automáticamente",
+    qualifyColumnCompletions: "Añadir prefijos de tabla al completar columnas",
+    qualifyColumnCompletionsDescription: "Al desactivarlo, las columnas sin ambigüedad en consultas de varias tablas insertan solo su nombre. Los nombres ambiguos y los prefijos escritos se conservan.",
     autoAliasTablesDescription: "Al seleccionar una tabla en FROM o JOIN, inserta un alias generado como order_items AS oi.",
     batchColumnSelectionIncludeComments: "Incluir comentarios al insertar columnas seleccionadas",
     batchColumnSelectionIncludeCommentsDescription: "Incluye los comentarios de las columnas de la base de datos al insertar varias columnas SELECT desde la lista de autocompletado.",

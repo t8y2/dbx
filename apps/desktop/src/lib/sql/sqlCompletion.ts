@@ -2003,6 +2003,7 @@ export interface SqlCompletionProviderInput {
   functionCase?: SqlKeywordCase;
   identifierCase?: SqlKeywordCase;
   autoAliasTables?: boolean;
+  qualifyColumnCompletions?: boolean;
   tableCompletionSchemaQualification?: SqlTableCompletionSchemaQualification;
   quoteIdentifiers?: boolean;
   functionCompletionIncludeParams?: boolean;
@@ -2029,6 +2030,7 @@ export function buildSqlCompletionItems(
     functionCase?: SqlKeywordCase;
     identifierCase?: SqlKeywordCase;
     autoAliasTables?: boolean;
+    qualifyColumnCompletions?: boolean;
     tableCompletionSchemaQualification?: SqlTableCompletionSchemaQualification;
     quoteIdentifiers?: boolean;
     functionCompletionIncludeParams?: boolean;
@@ -2186,7 +2188,7 @@ class SqlCompletionProvider {
     }
 
     if (!context.exclusiveTableSuggestions && context.suggestColumns) {
-      this.items.push(...buildColumnItems(context, this.columnsByTable, this.dialect, this.databaseType, this.input.quoteIdentifiers, this.matchMode));
+      this.items.push(...buildColumnItems(context, this.columnsByTable, this.dialect, this.databaseType, this.input.quoteIdentifiers, this.matchMode, this.input.qualifyColumnCompletions));
       this.items.push(...buildSelectAllColumnItems(context, this.columnsByTable, this.t, this.dialect, this.databaseType, this.matchMode));
       this.items.push(...buildInsertAllColumnItems(context, this.columnsByTable, this.t, this.dialect, this.input.keywordCase, this.matchMode));
       if ((this.input.sequenceCompletionEnabled ?? true) && (isOracleLikeDatabase(this.databaseType) || isSequenceCompletionDatabase(this.databaseType)) && context.qualifier && !completionQualifierIsReferencedTable(context)) {
@@ -6063,7 +6065,7 @@ function columnsForInsertTarget(context: SqlCompletionContext, columnsByTable: M
   });
 }
 
-function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, dialect?: SqlCompletionApplyDialect, databaseType?: DatabaseType, quoteIdentifiers?: boolean, matchMode: SqlCompletionMatchMode = "fuzzy"): SqlCompletionItem[] {
+function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, dialect?: SqlCompletionApplyDialect, databaseType?: DatabaseType, quoteIdentifiers?: boolean, matchMode: SqlCompletionMatchMode = "fuzzy", qualifyColumns = true): SqlCompletionItem[] {
   // Build a bounded candidate pool before doing duplicate detection, ranking,
   // and completion object materialization. Canonical column arrays remain the
   // source of truth; the per-array prefix index is only a derived accelerator.
@@ -6091,9 +6093,8 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
     nameCount.set(nameKey, (nameCount.get(nameKey) || 0) + 1);
   }
 
-  // Multi-source queries always insert a qualified column. Duplicate names remain
-  // separate choices so the user can select the intended row source.
-  const qualifyAllColumns = !context.qualifier && !context.insertTable && context.referencedTables.length > 1;
+  // Keep ambiguous names qualified even when optional table prefixes are disabled.
+  const qualifyAllColumns = qualifyColumns && !context.qualifier && !context.insertTable && context.referencedTables.length > 1;
   const seen = new Set<string>();
   const uniqueColumns: Array<SqlCompletionColumn & { key: string; displayLabel: string }> = [];
   for (const c of relevantCols) {

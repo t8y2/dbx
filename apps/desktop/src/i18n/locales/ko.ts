@@ -9762,6 +9762,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlways: "항상",
     tableCompletionSchemaQualificationAlwaysDescription: "메타데이터에 스키마가 있으면 항상 삽입합니다.",
     autoAliasTables: "자동으로 테이블 별칭 추가",
+    qualifyColumnCompletions: "열 자동 완성에 테이블 접두사 추가",
+    qualifyColumnCompletionsDescription: "끄면 여러 테이블 쿼리에서 모호하지 않은 열은 열 이름만 삽입합니다. 중복 이름과 직접 입력한 접두사는 유지됩니다.",
     autoAliasTablesDescription: "FROM이나 JOIN에서 테이블 완성을 선택할 때 order_items AS oi 같은 생성된 별칭을 삽입합니다.",
     batchColumnSelectionIncludeComments: "선택한 열을 삽입할 때 주석 포함",
     batchColumnSelectionIncludeCommentsDescription: "자동 완성 목록에서 SELECT 열을 일괄 삽입할 때 데이터베이스 열 주석을 포함합니다.",

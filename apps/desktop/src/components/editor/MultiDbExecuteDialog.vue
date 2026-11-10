@@ -465,9 +465,9 @@ function databaseTargets(connectionId: string, catalog: string | undefined, data
   const connection = targetSelection.connection(connectionId);
   if (!connection) return [];
   const base = databaseTarget(connectionId, catalog, database);
-  if (!targetSupportsSchema(connection)) return [base];
-  const schemas = targetSelection.schemaNamesForTarget(base);
-  return schemas.length > 0 ? schemas.map((schema) => databaseTarget(connectionId, catalog, database, schema)) : [base];
+  const schemas = targetSupportsSchema(connection) ? targetSelection.schemaNamesForTarget(base) : [];
+  if (schemas.length > 0) return schemas.filter((schema) => schemaVisible(connection, catalog, database, schema)).map((schema) => databaseTarget(connectionId, catalog, database, schema));
+  return queryMatches(connectionLabel(connection), catalog, database) ? [base] : [];
 }
 
 function catalogTargets(connectionId: string, catalog: MultiDbTargetCatalogOption): MultiDbExecutionTarget[] {
@@ -476,12 +476,12 @@ function catalogTargets(connectionId: string, catalog: MultiDbTargetCatalogOptio
 }
 
 function connectionTargets(connection: ConnectionConfig): MultiDbExecutionTarget[] {
-  if (targetUsesConnectionOnlyScope(connection)) return [{ connectionId: connection.id, database: "" }];
+  if (targetUsesConnectionOnlyScope(connection)) return queryMatches(connectionLabel(connection), connection.id) ? [{ connectionId: connection.id, database: "" }] : [];
   if (targetSupportsCatalog(connection)) {
     return targetSelection.catalogsForConnection(connection.id).flatMap((catalog) => catalogTargets(connection.id, catalog));
   }
   const databases = targetSelection.databaseNamesForConnection(connection.id);
-  if (databases.length === 0 && targetAllowsEmptyDatabase(connection)) return [{ connectionId: connection.id, database: "" }];
+  if (databases.length === 0 && targetAllowsEmptyDatabase(connection)) return queryMatches(connectionLabel(connection), connection.id) ? [{ connectionId: connection.id, database: "" }] : [];
   return databases.flatMap((database) => databaseTargets(connection.id, undefined, database));
 }
 
@@ -1175,12 +1175,12 @@ watch(
               </div>
             </div>
 
-            <div class="min-h-0 overflow-hidden rounded-md border bg-background">
-              <div class="flex items-center justify-between border-b px-3 py-2">
+            <div class="flex min-h-0 flex-col overflow-hidden rounded-md border bg-background">
+              <div class="flex shrink-0 items-center justify-between border-b px-3 py-2">
                 <div class="text-xs font-medium">{{ t("multiDbExecute.selectedTargets") }}</div>
                 <Badge variant="secondary">{{ selectedTargets.length }}</Badge>
               </div>
-              <ScrollArea class="h-full max-h-[calc(88vh-300px)]">
+              <ScrollArea class="min-h-0 flex-1">
                 <div v-if="selectedTargets.length === 0" class="p-5 text-center text-sm text-muted-foreground">{{ t("multiDbExecute.noTargets") }}</div>
                 <div v-else class="space-y-1 p-2">
                   <div v-for="target in selectedTargets" :key="targetKey(target)" class="flex min-w-0 items-start gap-2 rounded-md border px-2 py-1.5">

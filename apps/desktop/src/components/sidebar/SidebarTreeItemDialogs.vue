@@ -122,6 +122,12 @@ const {
   editDatabaseCollation,
   canEditDatabaseComment,
   editDatabaseCommentText,
+  canEditDatabaseOwner,
+  editDatabaseOwner,
+  ownerRoleOptions,
+  ownerRolesLoading,
+  ownerRolesLoadError,
+  canEditSchemaComment,
   editDatabasePropertiesPreviewSql,
   confirmEditDatabaseProperties,
   showCreateNacosNamespaceDialog,
@@ -179,6 +185,8 @@ const {
   showCompileErrorDialog,
   compileErrorTitle,
   compileErrorMessage,
+  canEditSchemaOwner,
+  schemaOwner,
   schemaCommentText,
   schemaCommentLoading,
   schemaCommentPreviewSql,
@@ -819,6 +827,24 @@ watch(
             @keydown.ctrl.enter.prevent="confirmEditDatabaseProperties"
           ></textarea>
         </div>
+        <div v-if="canEditDatabaseOwner" class="grid gap-1.5">
+          <label class="text-xs font-medium text-muted-foreground">{{ t("contextMenu.databaseOwner") }}</label>
+          <SearchableSelect
+            v-model="editDatabaseOwner"
+            :options="ownerRoleOptions"
+            :placeholder="t('contextMenu.databaseOwnerPlaceholder')"
+            :search-placeholder="t('contextMenu.databaseOwnerSearchPlaceholder')"
+            :empty-text="t('contextMenu.databaseOwnerEmpty')"
+            :loading-text="t('common.loading')"
+            :loading="ownerRolesLoading"
+            :allow-custom="true"
+            :trim-custom="false"
+            :disabled="editDatabasePropertiesLoading"
+            trigger-class="h-9 w-full max-w-none justify-between border bg-background px-3 text-sm shadow-xs hover:bg-accent"
+            content-class="w-[var(--reka-popover-trigger-width)]"
+          />
+          <p v-if="ownerRolesLoadError" class="text-[11px] text-destructive">{{ t("contextMenu.databaseOwnerLoadFailed", { message: ownerRolesLoadError }) }}</p>
+        </div>
         <pre v-if="editDatabasePropertiesPreviewSql" class="max-h-32 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap" v-html="highlight(editDatabasePropertiesPreviewSql)"></pre>
       </div>
       <DialogFooter>
@@ -918,10 +944,11 @@ watch(
   <Dialog v-model:open="showEditSchemaCommentDialog">
     <DialogContent class="sm:max-w-[520px]">
       <DialogHeader>
-        <DialogTitle>{{ t("contextMenu.editSchemaCommentTitle", { name: node.label }) }}</DialogTitle>
+        <DialogTitle>{{ t("contextMenu.editSchemaPropertiesTitle", { name: node.label }) }}</DialogTitle>
       </DialogHeader>
       <div class="grid gap-3">
         <textarea
+          v-if="canEditSchemaComment"
           v-model="schemaCommentText"
           class="min-h-28 w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm outline-none transition-colors focus:border-ring focus:ring-1 focus:ring-ring/40"
           :placeholder="t('contextMenu.schemaCommentPlaceholder')"
@@ -929,6 +956,24 @@ watch(
           @keydown.meta.enter.prevent="confirmEditSchemaComment"
           @keydown.ctrl.enter.prevent="confirmEditSchemaComment"
         ></textarea>
+        <div v-if="canEditSchemaOwner" class="grid gap-1.5">
+          <label class="text-xs font-medium text-muted-foreground">{{ t("contextMenu.databaseOwner") }}</label>
+          <SearchableSelect
+            v-model="schemaOwner"
+            :options="ownerRoleOptions"
+            :placeholder="t('contextMenu.databaseOwnerPlaceholder')"
+            :search-placeholder="t('contextMenu.databaseOwnerSearchPlaceholder')"
+            :empty-text="t('contextMenu.databaseOwnerEmpty')"
+            :loading-text="t('common.loading')"
+            :loading="ownerRolesLoading"
+            :allow-custom="true"
+            :trim-custom="false"
+            :disabled="schemaCommentLoading"
+            trigger-class="h-9 w-full max-w-none justify-between border bg-background px-3 text-sm shadow-xs hover:bg-accent"
+            content-class="w-[var(--reka-popover-trigger-width)]"
+          />
+          <p v-if="ownerRolesLoadError" class="text-[11px] text-destructive">{{ t("contextMenu.databaseOwnerLoadFailed", { message: ownerRolesLoadError }) }}</p>
+        </div>
         <pre v-if="schemaCommentPreviewSql" class="max-h-32 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap" v-html="highlight(schemaCommentPreviewSql)"></pre>
       </div>
       <DialogFooter>

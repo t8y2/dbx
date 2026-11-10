@@ -372,6 +372,17 @@ export function usersFromPostgresRolesResult(result: QueryResult): DatabaseUserI
 }
 
 export function postgresShowGrantsSql(user: DatabaseUserIdentity): string {
+  return postgresShowGrantsSqlWith(user, postgresObjectGrantLines());
+}
+
+// PostgreSQL-compatible servers do not all expose aclexplode/pg_default_acl, so
+// the shared provider keeps the original query; only PostgreSQL adds the
+// sequence/function/default-privilege lines.
+function postgresBasicShowGrantsSql(user: DatabaseUserIdentity): string {
+  return postgresShowGrantsSqlWith(user, "");
+}
+
+function postgresShowGrantsSqlWith(user: DatabaseUserIdentity, objectGrantLines: string): string {
   const role = quoteSqlString(user.user);
   const bypassRls = postgresRoleBypassRlsSql("r");
   return `
@@ -432,9 +443,56 @@ FROM (
     string_agg(privilege_type || CASE WHEN is_grantable = 'YES' THEN ' WITH GRANT OPTION' ELSE '' END, ', ' ORDER BY privilege_type)
   FROM information_schema.role_table_grants
   WHERE grantee = ${role}
-  GROUP BY table_schema, table_name
+  GROUP BY table_schema, table_name${objectGrantLines}
 ) grants
 ORDER BY sort, line;`.trim();
+}
+
+function postgresObjectGrantLines(): string {
+  return `
+  UNION ALL
+  SELECT 60, 'Sequence: ' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || ' = ' ||
+    string_agg(a.privilege_type || CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END, ', ' ORDER BY a.privilege_type)
+  FROM target t
+  CROSS JOIN pg_catalog.pg_class c
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  CROSS JOIN LATERAL pg_catalog.aclexplode(c.relacl) a
+  WHERE c.relkind = 'S'
+    AND a.grantee = t.oid
+    AND n.nspname NOT LIKE 'pg~_%' ESCAPE '~'
+    AND n.nspname <> 'information_schema'
+  GROUP BY n.nspname, c.relname
+  UNION ALL
+  SELECT 70, 'Function: ' || quote_ident(n.nspname) || '.' || quote_ident(p.proname) || '(' ||
+    pg_catalog.pg_get_function_identity_arguments(p.oid) || ') = ' ||
+    string_agg(a.privilege_type || CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END, ', ' ORDER BY a.privilege_type)
+  FROM target t
+  CROSS JOIN pg_catalog.pg_proc p
+  JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+  CROSS JOIN LATERAL pg_catalog.aclexplode(p.proacl) a
+  WHERE a.grantee = t.oid
+    AND n.nspname NOT LIKE 'pg~_%' ESCAPE '~'
+    AND n.nspname <> 'information_schema'
+  GROUP BY n.nspname, p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid)
+  UNION ALL
+  SELECT 80, 'Default privileges: ' ||
+    CASE d.defaclobjtype
+      WHEN 'r' THEN 'tables'
+      WHEN 'S' THEN 'sequences'
+      WHEN 'f' THEN 'functions'
+      WHEN 'T' THEN 'types'
+      WHEN 'n' THEN 'schemas'
+      ELSE 'objects'
+    END ||
+    CASE WHEN d.defaclnamespace = 0 THEN ' (all schemas)' ELSE ' in ' || quote_ident(n.nspname) END || ' = ' ||
+    string_agg(a.privilege_type || CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END, ', ' ORDER BY a.privilege_type)
+  FROM target t
+  CROSS JOIN pg_catalog.pg_default_acl d
+  LEFT JOIN pg_catalog.pg_namespace n ON n.oid = d.defaclnamespace
+  CROSS JOIN LATERAL pg_catalog.aclexplode(d.defaclacl) a
+  WHERE a.grantee = t.oid
+  GROUP BY d.defaclobjtype, d.defaclnamespace, n.nspname
+`.trimEnd();
 }
 
 export function postgresTableGrantsSql(user: DatabaseUserIdentity): string {
@@ -461,7 +519,7 @@ export function postgresTableGrantsResult(result: QueryResult, context: TableGra
     const schema = String(row[schemaIndex] ?? "").trim();
     const table = String(row[tableIndex] ?? "").trim();
     const privilege = normalizePrivilegeName(String(row[privilegeIndex] ?? ""));
-    if (!isPostgresAuthorizationSchema(schema) || !table || !privilege) return [];
+    if (!isPostgresGrantSchema(schema) || !table || !privilege) return [];
     return [
       {
         database,
@@ -834,9 +892,9 @@ function postgresDefaultPrivilege(scope: PrivilegeScope | undefined): string {
   return "SELECT";
 }
 
-function isPostgresAuthorizationSchema(schema: string): boolean {
-  const normalized = schema.toLowerCase();
-  return !!schema && normalized !== "information_schema" && normalized !== "sys_catalog" && !normalized.startsWith("pg_");
+export function isPostgresGrantSchema(schema: string): boolean {
+  const normalized = schema.trim().toLowerCase();
+  return !!normalized && normalized !== "information_schema" && normalized !== "sys_catalog" && !normalized.startsWith("pg_");
 }
 
 function postgresPrivilegesForScope(scope: PrivilegeScope): readonly string[] {
@@ -904,6 +962,7 @@ const postgresCompatibleUserAdminProvider: DatabaseUserAdminProvider = {
   ...postgresUserAdminProvider,
   authorizationModel: undefined,
   supportsTableGrantsOnCreate: undefined,
+  showGrantsSql: postgresBasicShowGrantsSql,
   tableGrantsSql: undefined,
   parseTableGrants: undefined,
 };

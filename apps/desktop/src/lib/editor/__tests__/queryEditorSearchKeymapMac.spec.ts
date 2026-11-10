@@ -123,14 +123,17 @@ describe("QueryEditor search keymap on macOS", () => {
     view.destroy();
   });
 
-  it("still opens search with ⌘F", async () => {
+  it("no longer consumes ⌘F — Find is exclusively the configurable binding (#14623)", async () => {
     const { view, openSearch } = await createMacSearchHarness();
 
     const event = keyEvent({ key: "f", code: "KeyF", keyCode: 70, metaKey: true });
     view.contentDOM.dispatchEvent(event);
 
-    expect(openSearch).toHaveBeenCalledOnce();
-    expect(event.defaultPrevented).toBe(true);
+    // The hard-coded Mod-f binding was removed (#14623): ⌘F must reach the
+    // configurable Find binding / global handlers instead of being swallowed
+    // here. This harness mounts only the fallback keymap, so nothing handles it.
+    expect(openSearch).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
     view.destroy();
   });
 

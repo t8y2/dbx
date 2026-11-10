@@ -28,11 +28,6 @@ export function replaceFallbackKey(platform = globalThis.navigator?.platform || 
 export function createQueryEditorSearchKeymap(options: QueryEditorSearchKeymapOptions, platform = globalThis.navigator?.platform || ""): KeyBinding[] {
   return [
     {
-      key: "Mod-f",
-      preventDefault: true,
-      run: options.openSearch,
-    },
-    {
       key: replaceFallbackKey(platform),
       preventDefault: true,
       // Consume the shortcut in previews without exposing mutation controls.

@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 // pi-lens-ignore: typescript:2307
 import { createQueryEditorExecutionShortcutBindings } from "@/lib/editor/queryEditorExecutionShortcut";
 // pi-lens-ignore: typescript:2307
-import { createQueryEditorReplaceShortcutBindings, createQueryEditorReplaceShortcutHandler, createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
+import { createQueryEditorReplaceShortcutBindings, createQueryEditorReplaceShortcutHandler, createQueryEditorSearchKeymap, replaceFallbackKey } from "@/lib/editor/queryEditorSearchKeymap";
 
 // CodeMirror resolves `Mod` from the *host's* `navigator.platform` once at
 // module load, so a synthetic key event cannot influence it. Spelling the
@@ -98,7 +98,27 @@ describe("QueryEditor search keymap precedence", () => {
       view.destroy();
     });
 
-    it(`${name}: keeps the search fallback above lower-priority CodeMirror bindings`, () => {
+    it(`${name}: keeps the replace fallback above lower-priority CodeMirror bindings`, () => {
+      const openReplace = vi.fn(() => true);
+      const lowerPrioritySearch = vi.fn(() => true);
+      const fallback = replaceFallbackKey();
+      const view = new EditorView({
+        parent: document.createElement("div"),
+        state: EditorState.create({
+          extensions: [keymap.of([{ key: fallback, run: lowerPrioritySearch }]), Prec.high(keymap.of(withModifier(createQueryEditorSearchKeymap({ openSearch: () => true, openReplace, isReadOnly: () => false }), modifier)))],
+        }),
+      });
+
+      const fallbackEvent = fallback.includes("Alt") ? { key: "f", altKey: true, metaKey: true } : { key: "h", ...(modifier === "Meta" ? { metaKey: true } : { ctrlKey: true }) };
+      expect(runScopeHandlers(view, new KeyboardEvent("keydown", fallbackEvent), "editor")).toBe(true);
+      expect(openReplace).toHaveBeenCalledOnce();
+      expect(lowerPrioritySearch).not.toHaveBeenCalled();
+      view.destroy();
+    });
+
+    it(`${name}: lets a cleared Find shortcut fall through instead of opening the editor search panel (#14623)`, () => {
+      // The hard-coded Mod-f binding is gone: with the configurable Find
+      // shortcut cleared, the key must reach lower-priority handlers.
       const openSearch = vi.fn(() => true);
       const lowerPrioritySearch = vi.fn(() => true);
       const view = new EditorView({
@@ -108,9 +128,9 @@ describe("QueryEditor search keymap precedence", () => {
         }),
       });
 
-      expect(runScopeHandlers(view, new KeyboardEvent("keydown", { key: "f", ...modifierEvent }), "editor")).toBe(true);
-      expect(openSearch).toHaveBeenCalledOnce();
-      expect(lowerPrioritySearch).not.toHaveBeenCalled();
+      const handled = runScopeHandlers(view, new KeyboardEvent("keydown", { key: "f", ...modifierEvent }), "editor");
+      expect(openSearch).not.toHaveBeenCalled();
+      expect(lowerPrioritySearch).toHaveBeenCalledOnce();
       view.destroy();
     });
   }

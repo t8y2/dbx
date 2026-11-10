@@ -132,7 +132,16 @@ public final class DamengAgent extends AbstractJdbcAgent {
             String value = resultSet.getString(index);
             return resultSet.wasNull() ? null : value;
         }
+        if (sqlType == Types.FLOAT) {
+            return readFloatColumn(resultSet, index);
+        }
         return super.resultValue(resultSet, index, sqlType);
+    }
+
+    // DM FLOAT is double precision (the driver reports precision 53); getFloat would round it to 7 digits.
+    private static Double readFloatColumn(ResultSet resultSet, int index) throws SQLException {
+        double value = resultSet.getDouble(index);
+        return resultSet.wasNull() ? null : value;
     }
     private volatile boolean legacyJdbcMetadata;
     private volatile boolean dbmsOutputInitializationSupported = true;
@@ -2969,7 +2978,8 @@ public final class DamengAgent extends AbstractJdbcAgent {
             Object value = switch (sqlType) {
                 case Types.BIGINT -> rs.getLong(index);
                 case Types.INTEGER, Types.SMALLINT, Types.TINYINT -> rs.getInt(index);
-                case Types.FLOAT, Types.REAL -> rs.getFloat(index);
+                case Types.FLOAT -> readFloatColumn(rs, index);
+                case Types.REAL -> rs.getFloat(index);
                 case Types.DOUBLE -> rs.getDouble(index);
                 case Types.DECIMAL, Types.NUMERIC -> rs.getBigDecimal(index);
                 case Types.BOOLEAN -> rs.getBoolean(index);

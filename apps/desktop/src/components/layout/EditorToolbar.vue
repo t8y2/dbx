@@ -33,6 +33,7 @@ import {
   RefreshCw,
   UserRound,
   Copy,
+  MessageSquareText,
 } from "@lucide/vue";
 import { supportsInsertValueHints } from "@/lib/sql/insertValueHints";
 import { Button } from "@/components/ui/button";
@@ -61,6 +62,7 @@ import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { formatShortcutDisplay, formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
 import { resolveNextEditorToolbarTier, type EditorToolbarTier } from "@/lib/tabs/editorToolbarLayout";
 import { canSaveSqlTab } from "@/lib/tabs/sqlTabSaveTarget";
+import { canSaveRoutineToDatabase } from "@/lib/table/routineDefinitionSave";
 import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useToast } from "@/composables/useToast";
@@ -117,9 +119,11 @@ const emit = defineEmits<{
   formatSql: [];
   compressSql: [];
   foldAll: [];
+  toggleLineComment: [];
   unfoldAll: [];
   toggleSqlKeywordCase: [];
   saveSql: [tabId: string];
+  saveRoutineToDatabase: [tabId: string];
   "change-encoding": [value: NonNullable<QueryTab["externalSqlEncoding"]>];
   openSql: [];
   importResultArchive: [];
@@ -353,6 +357,7 @@ const saveTooltip = computed(() => {
 });
 const explainPlanTooltip = computed(() => formatShortcutTooltip(t("toolbar.explainPlan"), settingsStore.editorSettings.shortcuts.explainSql));
 const formatSqlTooltip = computed(() => formatShortcutTooltip(t("toolbar.formatSql"), settingsStore.editorSettings.shortcuts.formatSql));
+const lineCommentTooltip = computed(() => formatShortcutTooltip(t("settings.shortcutToggleLineComment"), settingsStore.editorSettings.shortcuts.toggleLineComment));
 const exPasteSqlInConditionTooltip = computed(() => formatShortcutTooltip(t("toolbar.exPasteSqlInCondition"), settingsStore.editorSettings.shortcuts.exPasteSqlInCondition));
 const isObjectSourceTab = computed(() => !!props.activeTab.objectSource || !!props.activeTab.sourceLoad);
 const objectSourceRefreshing = computed(() => !!props.activeTab.sourceLoad && !props.activeTab.sourceLoad.error);
@@ -380,6 +385,8 @@ const explainAnalyzeTooltip = computed(() => {
   return t("toolbar.autotrace");
 });
 const canSaveSql = computed(() => canSaveSqlTab(props.activeTab));
+const showSaveRoutineToDatabase = computed(() => canSaveRoutineToDatabase(props.activeTab, props.activeConnection));
+watch(showSaveRoutineToDatabase, () => void nextTick(scheduleToolbarMeasurement));
 const keywordCaseIsLower = computed(() => props.sqlKeywordCase === "lower");
 const keywordCaseToggleTooltip = computed(() => (keywordCaseIsLower.value ? t("toolbar.keywordCaseUpper") : t("toolbar.keywordCaseLower")));
 const wordWrapEnabled = computed(() => props.activeTab.forceWordWrap === true || settingsStore.editorSettings.wordWrap);
@@ -731,6 +738,22 @@ defineExpose({
         </TooltipTrigger>
         <TooltipContent>{{ explainAnalyzeTooltip }}</TooltipContent>
       </Tooltip>
+      <Tooltip v-if="canFormatSql">
+        <TooltipTrigger as-child>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6 text-muted-foreground hover:bg-muted hover:text-foreground"
+            :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText"
+            :aria-label="t('settings.shortcutToggleLineComment')"
+            @mousedown.prevent
+            @click="emit('toggleLineComment')"
+          >
+            <MessageSquareText class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ lineCommentTooltip }}</TooltipContent>
+      </Tooltip>
       <Tooltip v-if="showFormatButton">
         <TooltipTrigger as-child>
           <Button variant="ghost" size="icon" class="h-6 w-6 text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-200" :disabled="activeTab.isExecuting || activeTab.isExplaining || !hasSqlText" @click="emit('formatSql')">
@@ -842,6 +865,18 @@ defineExpose({
         </TooltipTrigger>
         <TooltipContent>{{ t("toolbar.blockDangerousRedisCommands") }}</TooltipContent>
       </Tooltip>
+      <Button
+        v-if="showSaveRoutineToDatabase"
+        variant="ghost"
+        size="sm"
+        class="h-6 shrink-0 gap-1 px-2 text-xs text-blue-600 hover:bg-blue-500/10 hover:text-blue-700 dark:text-blue-300 dark:hover:text-blue-200"
+        :disabled="activeTab.isExecuting || activeTab.isCancelling || activeTab.isExplaining"
+        :aria-label="t('toolbar.saveRoutineToDatabase')"
+        @click="emit('saveRoutineToDatabase', props.activeTab.id)"
+      >
+        <Save class="h-3.5 w-3.5" />
+        {{ t("toolbar.saveRoutineToDatabase") }}
+      </Button>
       <Tooltip>
         <TooltipTrigger as-child>
           <Button variant="ghost" size="icon" class="h-6 w-6 text-blue-600 hover:bg-blue-500/10 hover:text-blue-700 dark:text-blue-300 dark:hover:text-blue-200" :disabled="!canSaveSql" @click="emit('saveSql', props.activeTab.id)">

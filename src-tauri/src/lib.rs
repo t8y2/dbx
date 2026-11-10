@@ -1217,6 +1217,9 @@ fn run_shutdown_on_dedicated_thread(shutdown: impl FnOnce() + Send + 'static) ->
 }
 
 pub(crate) fn cleanup_before_updater_forced_exit(app_handle: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    window_state_guard::save_current_main_window_geometry(app_handle);
+
     let shutdown_app = app_handle.clone();
     if let Err(error) = run_shutdown_on_dedicated_thread(move || {
         tauri::async_runtime::block_on(shutdown_runtime_resources(&shutdown_app));

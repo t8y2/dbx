@@ -17,12 +17,13 @@ pub use oracle_trigger::{
 mod oracle_routines;
 pub use oracle_indexes::{
     extract_oracle_table_triggers, oracle_index_ddl_sources, oracle_table_created_index_identities,
-    oracle_trigger_ddl_sources, oracle_trigger_definitions_match, oracle_trigger_enabled,
-    oracle_trigger_metadata_matches, oracle_trigger_source_with_create, order_oracle_trigger_sources,
-    parse_oracle_table_ddl, rebase_oracle_table_ddl, rebase_oracle_trigger_ddl, separate_oracle_supporting_indexes,
-    separate_oracle_supporting_indexes_with_retained, split_oracle_table_ddl, split_oracle_table_ddl_with_retained,
-    OracleDdlNameMapping, OracleIndexDdlSource, OracleSupportingIndexDdl, OracleSupportingIndexIdentity,
-    OracleTableConstraintSource, OracleTableDdlParts, OracleTableDdlSource, OracleTriggerDdlSource,
+    oracle_trigger_ddl_sources, oracle_trigger_ddl_sources_with_table_owner, oracle_trigger_definitions_match,
+    oracle_trigger_enabled, oracle_trigger_metadata_matches, oracle_trigger_source_with_create,
+    order_oracle_trigger_sources, parse_oracle_table_ddl, rebase_oracle_table_ddl, rebase_oracle_trigger_ddl,
+    separate_oracle_supporting_indexes, separate_oracle_supporting_indexes_with_retained, split_oracle_table_ddl,
+    split_oracle_table_ddl_with_retained, OracleDdlNameMapping, OracleIndexDdlSource, OracleSupportingIndexDdl,
+    OracleSupportingIndexIdentity, OracleTableConstraintSource, OracleTableDdlParts, OracleTableDdlSource,
+    OracleTriggerDdlSource,
 };
 pub use oracle_routines::{
     analyze_oracle_package_body_draft, analyze_oracle_routine_draft, compact_oracle_ddl,

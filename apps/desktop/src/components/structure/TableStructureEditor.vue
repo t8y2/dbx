@@ -8864,6 +8864,8 @@ watch(
                             :option-tooltip="dataTypeTooltip"
                             :display-name="gaussdbMDataTypeDisplayName"
                             :trigger-class="[structureControlClass, 'w-full']"
+                            :content-style="structureDensityStyle"
+                            item-class="text-[length:var(--structure-font-size)]"
                             @update:model-value="(v: string) => updateColumnDataType(column, v)"
                           >
                             <template #option-label="{ option, label }">
@@ -8963,16 +8965,16 @@ watch(
                         </td>
                         <td v-if="columnEditorControls.defaultValue" :class="[structureCellClass, 'structure-column-default-value', structureDefaultValueToneClass(column.defaultValue, column.dataType), structureColumnSelectionClass('defaultValue')]" :title="column.defaultValue || undefined">
                           <div class="flex min-w-0 items-center gap-1">
-                            <Input v-model="column.defaultValue" :class="[structureMonoControlClass, 'flex-1']" :disabled="isColumnDefaultDisabled(column)" />
+                            <Input v-model="column.defaultValue" :class="[structureControlClass, 'flex-1']" :disabled="isColumnDefaultDisabled(column)" />
                             <DropdownMenu>
                               <DropdownMenuTrigger as-child>
                                 <Button variant="ghost" size="icon" :class="[structureIconButtonClass, 'shrink-0']" :disabled="isColumnDefaultDisabled(column)" :aria-label="t('structureEditor.defaultValuePresets')" :title="t('structureEditor.defaultValuePresets')">
                                   <ChevronDown :class="structureIconClass" />
                                 </Button>
                               </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end" class="max-h-56 w-max min-w-36 max-w-[calc(100vw-1rem)] overflow-y-auto">
+                              <DropdownMenuContent align="end" class="max-h-56 w-max min-w-36 max-w-[calc(100vw-1rem)] overflow-y-auto" :style="structureDensityStyle">
                                 <DropdownMenuItem v-for="preset in columnDefaultValuePresets(column)" :key="preset.value" @click="column.defaultValue = preset.value">
-                                  <code :class="['structure-data-type-option block truncate font-mono text-[length:var(--structure-font-size)]', structureDefaultValueToneClass(preset.value, preset.dataType)]">{{ preset.label }}</code>
+                                  <code :class="['structure-data-type-option block truncate [font-family:inherit] text-[length:var(--structure-font-size)]', structureDefaultValueToneClass(preset.value, preset.dataType)]">{{ preset.label }}</code>
                                 </DropdownMenuItem>
                               </DropdownMenuContent>
                             </DropdownMenu>
@@ -10710,7 +10712,6 @@ watch(
 
 .structure-data-type-option {
   color: var(--structure-type-color);
-  font-weight: 500;
 }
 
 .structure-data-type-numeric,
@@ -10807,7 +10808,6 @@ watch(
 .structure-column-data-type :deep(.structure-grid-control),
 .structure-column-default-value :deep(.structure-grid-control) {
   color: var(--structure-type-color);
-  font-weight: 500;
 }
 
 /* --primary is rgb/oklch; use color-mix like DataGrid, not channel-based hsl wrappers. */

@@ -8,7 +8,20 @@ use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::sync::LazyLock;
 
-const MAX_SCOPE_QUERY_TOKENS: usize = 2048;
+/// Upper bound on the tokens the PostgreSQL scope proof will hand to the parser.
+///
+/// The bound exists because the parser and the AST visitor recurse, and this runs on
+/// MCP worker stacks. It is deliberately below the measured crash point for an
+/// unoptimised 2 MiB stack (roughly 28.5k tokens on a long additive expression,
+/// #14586), and pathological nesting is refused separately by
+/// `MAX_SCOPE_QUERY_NESTING_DEPTH` before anything is parsed.
+const MAX_SCOPE_QUERY_TOKENS: usize = 16_384;
+
+/// Deepest bracket nesting the scope proof attempts. Bracket depth is what a
+/// recursive-descent parser turns into stack frames, so bounding it keeps a
+/// long-but-flat query provable while still refusing adversarial input whose token
+/// count alone stays under the cap.
+const MAX_SCOPE_QUERY_NESTING_DEPTH: usize = 128;
 
 /// Function-call syntax supported by PostgreSQL scope recognition. This policy
 /// is independent of the manual-transaction read proof.
@@ -512,6 +525,9 @@ fn has_static_postgres_query_structure(sql: &str) -> bool {
     if tokens.iter().filter(|token| !matches!(token, Token::Whitespace(_))).count() > MAX_SCOPE_QUERY_TOKENS {
         return false;
     }
+    if bracket_nesting_exceeds(&tokens, MAX_SCOPE_QUERY_NESTING_DEPTH) {
+        return false;
+    }
     // Ordinary backslash strings depend on standard_conforming_strings, which
     // is not available here. E strings and dollar quotes have explicit semantics.
     if tokens.iter().any(|token| {
@@ -523,6 +539,27 @@ fn has_static_postgres_query_structure(sql: &str) -> bool {
         return false;
     };
     !statements.is_empty() && matches!(statements.visit(&mut StaticPostgresQuery), ControlFlow::Continue(()))
+}
+
+/// Whether bracket nesting goes deeper than `limit`.
+///
+/// Only `(` counts: it is the only token that makes the parser and the visitor
+/// recurse without bound. Brackets and braces appear in fixed-shape syntax.
+fn bracket_nesting_exceeds(tokens: &[Token], limit: usize) -> bool {
+    let mut depth = 0usize;
+    for token in tokens {
+        match token {
+            Token::LParen => {
+                depth += 1;
+                if depth > limit {
+                    return true;
+                }
+            }
+            Token::RParen => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Matches supported scope-call syntax, without resolving runtime function identity.
@@ -1443,6 +1480,60 @@ mod tests {
                 "query block boundaries must not be treated as FROM targets: {sql}"
             );
         }
+    }
+
+    #[test]
+    fn long_read_only_postgres_queries_keep_the_static_scope_proof() {
+        // #14586: the token bound only exists to keep the parser off a blown stack, so
+        // it must sit far above ordinary long reports. A read-only CTE with thousands
+        // of tokens used to fall back to the comma-FROM scan and be denied as
+        // DATABASE_OUT_OF_SCOPE even though every reference was inside the allowlist.
+        let allowed = vec!["reporting".to_string()];
+        let mut sql = String::from("WITH c AS (SELECT id FROM reporting.users) SELECT c.id");
+        for _ in 0..1200 {
+            sql.push_str(" + 1");
+        }
+        sql.push_str(" AS total FROM c");
+        assert!(
+            sql.split_whitespace().count() > 2048,
+            "the regression needs more tokens than the old bound: {}",
+            sql.split_whitespace().count()
+        );
+        assert!(
+            !connection_scope_rejects(&sql, &DatabaseType::Postgres, "reporting", &allowed),
+            "a long read-only query must keep the static scope proof"
+        );
+    }
+
+    #[test]
+    fn deep_bracket_nesting_is_refused_before_parsing() {
+        // The token bound alone cannot bound recursion: a short query can nest far
+        // deeper than a long flat one, so depth is refused separately.
+        let nested = |depth: usize| format!("SELECT {}1{}", "(".repeat(depth), ")".repeat(depth));
+        let tokenize = |sql: &str| {
+            sqlparser::tokenizer::Tokenizer::new(&sqlparser::dialect::PostgreSqlDialect {}, sql)
+                .with_unescape(false)
+                .tokenize()
+                .expect("valid tokens")
+        };
+        let limit = super::MAX_SCOPE_QUERY_NESTING_DEPTH;
+        assert!(!super::bracket_nesting_exceeds(&tokenize(&nested(limit)), limit));
+        assert!(super::bracket_nesting_exceeds(&tokenize(&nested(limit + 2)), limit));
+        // A long, flat query adds tokens but no depth.
+        assert!(!super::bracket_nesting_exceeds(&tokenize(&format!("SELECT {}1", "1 + ".repeat(3000))), limit));
+
+        // And the refusal is fail-closed: the query loses the static proof and the
+        // comma-FROM scan sees the disallowed database again.
+        let allowed = vec!["reporting".to_string()];
+        let deep = format!(
+            "WITH c AS (SELECT id FROM reporting.users) SELECT {}c.id{} FROM c, production.secrets s",
+            "(".repeat(limit + 2),
+            ")".repeat(limit + 2)
+        );
+        assert!(
+            connection_scope_rejects(&deep, &DatabaseType::Postgres, "reporting", &allowed),
+            "a pathologically nested query must not be relaxed"
+        );
     }
 
     #[test]

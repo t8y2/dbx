@@ -88,6 +88,7 @@ interface UseDataGridExtractorOptions {
   contextCell: ComputedRef<{ rowId: number; rowIndex: number; col: number } | null> | Ref<{ rowId: number; rowIndex: number; col: number } | null>;
   contextSelectionIsSynthetic: ComputedRef<boolean> | Ref<boolean>;
   copyText: (text: string, gridCopy?: { rows: readonly (readonly unknown[])[]; header?: readonly unknown[] }, richHtml?: string) => Promise<boolean>;
+  onCopied?: (result: DataGridExtractResult) => void;
   displayValue?: (value: CellValue, columnIndex: number) => string;
   editValue?: (value: CellValue, columnIndex: number) => string;
   hasColumnFormatter?: (columnIndex: number) => boolean;
@@ -576,6 +577,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       if (isSessionValid && !isSessionValid()) return false;
       const copied = await options.copyText(result.text, gridCopy, extractor === "html" ? result.text : undefined);
       if (!copied) return false;
+      options.onCopied?.(result);
       showWarnings(result.warnings, result.omittedColumns);
       const partialLoadInfo = options.partialLoadInfo?.value;
       if (partialLoadInfo && isPartiallyLoadedCopy(partialLoadInfo)) {

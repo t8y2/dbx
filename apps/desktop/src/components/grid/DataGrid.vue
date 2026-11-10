@@ -377,7 +377,7 @@ import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy,
 import { parseInsertStatementPaste, parseInsertStatementPasteInBatches } from "@/lib/dataGrid/dataGridInsertPaste";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
 import { DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS, DATA_GRID_COPY_EXTRACTOR_IDS, DATA_GRID_DEFAULT_COPY_PREFERENCES, extractorUnavailableForDatabase, type DataGridCopyExtractorId, type DataGridCopyPreference, type DataGridPrimaryKeyMode } from "@/lib/dataGrid/dataGridCopyExtractor";
-import { columnNamesForCopy } from "@/lib/dataGrid/dataGridColumnNameCopy";
+import { columnNamesForCopy, formatColumnNamesForCopy, type ColumnNameCopyQuoteStyle, type ColumnNameCopySeparator } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { DATA_GRID_ROW_NUM_WIDTH, dataGridRowNumberColumnWidth, resolveDataGridMaxRowNumber, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 import { createDataGridColumnStructureSignature } from "@/lib/dataGrid/dataGridColumnWidthState";
 import { useDataGridColumnLayout, useDataGridColumnLayoutState, type ColumnHeaderReferenceDragController } from "@/composables/useDataGridColumnLayout";
@@ -4764,6 +4764,7 @@ const editor = useDataGridEditor({
   onManualTransactionMutation: () => props.onManualTransactionMutation?.(),
   onSaveConflict: (message) => toast(message, 5000),
   onAdoptedSaveCompleted: () => toast(t("grid.saveCompleted"), 3000),
+  hasPendingEditorDraft: () => hasPendingDataEditorDraft.value,
   sql: computed(() => props.sql),
   searchText,
   whereFilterInput,
@@ -6127,6 +6128,8 @@ const {
   formatterJsonPath,
   formatterMaskPrefix,
   formatterMaskSuffix,
+  formatterNumberGrouping,
+  formatterNumberDecimalPlaces,
   formatterCustomId,
   formatterCustomName,
   formatterCustomTemplate,
@@ -9534,6 +9537,13 @@ function pauseCanvasGridWork() {
   gridRef.value?.setAttribute("data-grid-active", "false");
   if (gridSurfaceBusy.value) finishDataGridNativeSelectionBlock(dataGridNativeSelectionBlockOwner);
   canvasRuntime.pause();
+  // KeepAlive retains the canvas elements; release their bitmaps while hidden.
+  for (const canvas of [canvasRef.value, canvasBackRef.value]) {
+    if (!canvas) continue;
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+  lastPresentedCanvasBackingKey = null;
   stopCanvasResizeTracking();
   gridScrollbarsRuntime.pause();
   disconnectCellEditResizeObserver();
@@ -9774,6 +9784,7 @@ const {
   copyRowCount,
   canCopyRow,
   copyAll,
+  copyAllWithPreference,
   copyWithExtractor,
   copyWithPreference,
   previewWithPreference,
@@ -9948,6 +9959,12 @@ function sqlInsertModeLabel(mode: DataGridPrimaryKeyMode): string {
 
 const selectedCopyPreference = computed(() => settingsStore.editorSettings.dataGridCopyExtractor);
 const defaultCopyPreferenceLabel = computed(() => copyPreferenceLabel(selectedCopyPreference.value));
+
+function copyActiveResult(isSessionValid?: () => boolean): Promise<boolean> {
+  const result = props.result;
+  const connectionId = props.connectionId;
+  return copyAllWithPreference(selectedCopyPreference.value, () => !gridSurfaceBusy.value && props.result === result && props.connectionId === connectionId && (isSessionValid?.() ?? true));
+}
 const extractorConfigOpen = ref(false);
 const advancedCopyOpen = ref(false);
 let advancedCopySession = 0;
@@ -13029,6 +13046,14 @@ function openCopyAllColumnNamesDialog() {
   openCopyColumnNamesDialog(columnNamesForCopy({ allColumnNames: props.result.columns, displayableIndexes: displayableColumnIndexes.value, visibleColumnNames: visibleColumns.value, scope: "all" }));
 }
 
+// One-click variants of the "copy column names" dialog's two most-used formats, so
+// building a field list or an IN (...) literal does not need the dialog each time (#14495).
+function copyAllColumnNamesAs(separator: ColumnNameCopySeparator, quoteStyle?: ColumnNameCopyQuoteStyle) {
+  const names = columnNamesForCopy({ allColumnNames: props.result.columns, displayableIndexes: displayableColumnIndexes.value, visibleColumnNames: visibleColumns.value, scope: "all" });
+  if (names.length === 0) return;
+  void copyText(formatColumnNamesForCopy(names, { separator, quote: !!quoteStyle, quoteStyle, databaseType: resolvedDatabaseType.value }));
+}
+
 function copyHeaderColumnOrSelected() {
   if (selectedColumnNamesForCopy.value.length > 1) {
     openCopyColumnNamesDialog(selectedColumnNamesForCopy.value);
@@ -14638,6 +14663,7 @@ function focusGrid(): boolean {
 
 defineExpose({
   focusGrid,
+  copyActiveResult,
   exportMenuItems,
   exportWarning,
   selectExportMenuItem,
@@ -14930,6 +14956,14 @@ function copySubmenu(): ContextMenuItem {
   items.push({
     label: t("grid.copyColumnNames"),
     action: openCopyAllColumnNamesDialog,
+  });
+  items.push({
+    label: t("grid.copyColumnNamesComma"),
+    action: () => copyAllColumnNamesAs("comma"),
+  });
+  items.push({
+    label: t("grid.copyColumnNamesQuotedComma"),
+    action: () => copyAllColumnNamesAs("comma", "single"),
   });
   return { label: t("grid.copy"), icon: Copy, children: items };
 }
@@ -16312,6 +16346,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                                     <SelectItem value="datetime">{{ t("grid.formatterDatetime") }}</SelectItem>
                                     <SelectItem value="json-path">{{ t("grid.formatterJsonPath") }}</SelectItem>
                                     <SelectItem value="mask">{{ t("grid.formatterMask") }}</SelectItem>
+                                    <SelectItem value="number">{{ t("grid.formatterNumber") }}</SelectItem>
                                     <SelectItem value="foreign-key-display">{{ t("grid.formatterForeignKeyDisplay") }}</SelectItem>
                                     <SelectItem value="custom-template">{{ t("grid.formatterCustomTemplate") }}</SelectItem>
                                   </SelectContent>
@@ -16369,6 +16404,18 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                                     @update:model-value="(value: any) => (formatterDateTimezone = value)"
                                   />
                                 </div>
+                              </div>
+
+                              <div v-else-if="formatterKind === 'number'" class="space-y-3">
+                                <label class="flex items-center justify-between gap-3 text-xs font-medium">
+                                  <span>{{ t("grid.formatterNumberGrouping") }}</span>
+                                  <Switch v-model="formatterNumberGrouping" size="sm" />
+                                </label>
+                                <label class="block space-y-1.5">
+                                  <span class="text-xs font-medium text-muted-foreground">{{ t("grid.formatterNumberDecimalPlaces") }}</span>
+                                  <input v-model.number="formatterNumberDecimalPlaces" type="number" min="0" max="20" step="1" :placeholder="t('grid.formatterNumberAutomatic')" class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus:border-primary" />
+                                </label>
+                                <div class="text-[11px] leading-4 text-muted-foreground">{{ t("grid.formatterNumberHint") }}</div>
                               </div>
 
                               <div v-else-if="formatterKind === 'json-path'" class="space-y-1.5">

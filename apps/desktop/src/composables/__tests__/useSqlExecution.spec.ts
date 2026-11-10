@@ -1,6 +1,6 @@
 import { computed, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isDangerousSql, requiresConnectionSelection, requiresDatabaseSelection, snapshotResultForMerge, supportsSqlTemplateParameters, useSqlExecution } from "../useSqlExecution";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useHistoryStore } from "@/stores/historyStore";
@@ -15,6 +15,8 @@ import { normalizeSqlVariableSyntaxOverrides, updateSqlVariableSyntaxToggle } fr
 import type { SqlExecutionSnapshot } from "@/lib/sql/sqlExecutionTarget";
 import { useReadOnlyUnlockStore } from "@/stores/readOnlyUnlockStore";
 import * as api from "@/lib/backend/api";
+import * as gridEditor from "@/composables/useDataGridEditor";
+import { resultGridInstanceKey } from "@/lib/tabs/tabPresentation";
 
 const { toast } = vi.hoisted(() => ({ toast: vi.fn() }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast }) }));
@@ -73,6 +75,117 @@ function queryTab(database = ""): QueryTab {
     isExplaining: false,
   };
 }
+
+describe("unsaved result changes before query execution", () => {
+  beforeEach(() => {
+    installLocalStorage();
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  function setup(state: "pending" | "saving" | undefined = "pending") {
+    const tab = ref<QueryTab>({ ...queryTab("app"), sql: "SELECT * FROM ts", result: { columns: ["name"], rows: [["BB"]], affected_rows: 0, execution_time_ms: 0 } });
+    const activeTab = ref(tab.value);
+    const config = connection("mysql");
+    const store = useQueryStore();
+    store.tabs.push(tab.value);
+    vi.spyOn(useConnectionStore(), "getConfig").mockReturnValue(config);
+    vi.spyOn(useHistoryStore(), "add").mockResolvedValue(undefined);
+    const execute = vi.spyOn(store, "executeCurrentSql").mockResolvedValue(undefined);
+    const pendingState = vi.spyOn(gridEditor, "dataGridPendingChangesState").mockReturnValue(state);
+    const cancelled = vi.fn();
+    const output = ref<"result" | "summary">("result");
+    const execution = useSqlExecution({ activeTab: computed(() => activeTab.value), activeConnection: computed(() => config), executableSql: computed(() => tab.value.sql), activeOutputView: output, onExecutionCancelled: cancelled });
+    return { tab, activeTab, store, execute, pendingState, execution, cancelled, output };
+  }
+
+  it("cancels without executing, changing the result, or switching the output view", async () => {
+    const { tab, execute, execution, cancelled, output, pendingState } = setup();
+    const previousResult = tab.value.result;
+    const running = execution.doExecute("SELECT * FROM ts", undefined, { editorViewportRequestId: 7 });
+    await vi.waitFor(() => expect(execution.showResultChangesDialog.value).toBe(true));
+    expect(execute).not.toHaveBeenCalled();
+    execution.onResultChangesConfirm(false);
+    expect(await running).toEqual({ status: "not-started", reason: "cancelled", tabId: "tab-1" });
+    expect(tab.value.result).toBe(previousResult);
+    expect(output.value).toBe("result");
+    expect(cancelled).toHaveBeenCalledWith(7);
+    expect(pendingState).toHaveBeenCalledWith(resultGridInstanceKey(tab.value), "tab-1", undefined);
+  });
+
+  it("executes once only after discard is confirmed", async () => {
+    const { execute, execution } = setup();
+    const running = execution.tryExecute();
+    await vi.waitFor(() => expect(execution.showResultChangesDialog.value).toBe(true));
+    expect(execute).not.toHaveBeenCalled();
+    execution.onResultChangesConfirm(true);
+    await running;
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execution.showResultChangesDialog.value).toBe(false);
+  });
+
+  it("keeps execution attached to its originating tab after focus changes", async () => {
+    const { activeTab, store, execute, execution } = setup();
+    const running = execution.tryExecute();
+    await vi.waitFor(() => expect(execution.showResultChangesDialog.value).toBe(true));
+    const otherTab = { ...queryTab("other"), id: "tab-2" };
+    store.tabs.push(otherTab);
+    activeTab.value = otherTab;
+    execution.onResultChangesConfirm(true);
+    await running;
+    expect(execute).toHaveBeenCalledWith("SELECT * FROM ts", expect.objectContaining({ tabId: "tab-1" }));
+  });
+
+  it("refuses to replace a result while its save is running", async () => {
+    const { execute, execution } = setup("saving");
+    expect(await execution.tryExecute()).toEqual({ status: "not-started", reason: "busy", tabId: "tab-1" });
+    expect(execute).not.toHaveBeenCalled();
+    expect(execution.showResultChangesDialog.value).toBe(false);
+  });
+
+  it("does not bypass a save that starts while the discard dialog is open", async () => {
+    const { execute, pendingState, execution } = setup();
+    const running = execution.tryExecute();
+    await vi.waitFor(() => expect(execution.showResultChangesDialog.value).toBe(true));
+    pendingState.mockReturnValue("saving");
+    execution.onResultChangesConfirm(true);
+    expect(await running).toEqual({ status: "not-started", reason: "busy", tabId: "tab-1" });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("does not execute a stale request after the result was replaced", async () => {
+    const { tab, execute, execution } = setup();
+    const running = execution.tryExecute();
+    await vi.waitFor(() => expect(execution.showResultChangesDialog.value).toBe(true));
+    tab.value.resultGridRevision = "replacement";
+    execution.onResultChangesConfirm(true);
+    expect(await running).toEqual({ status: "not-started", reason: "cancelled", tabId: "tab-1" });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("protects edits cached in another result set of the same execution", async () => {
+    const { tab, execute, pendingState, execution } = setup();
+    tab.value.results = [tab.value.result!, { columns: ["name"], rows: [["other"]], affected_rows: 0, execution_time_ms: 0 }];
+    const editedKey = resultGridInstanceKey(tab.value);
+    tab.value.activeResultIndex = 1;
+    tab.value.result = tab.value.results[1];
+    pendingState.mockImplementation((key) => (key === editedKey ? "pending" : undefined));
+    const running = execution.tryExecute();
+    await vi.waitFor(() => expect(execution.showResultChangesDialog.value).toBe(true));
+    execution.onResultChangesConfirm(false);
+    expect(await running).toMatchObject({ status: "not-started", reason: "cancelled" });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it.each(["clean", "new-result"] as const)("does not prompt for %s execution", async (mode) => {
+    const { execute, execution, pendingState } = setup();
+    if (mode === "clean") pendingState.mockReturnValue(undefined);
+    await (mode === "new-result" ? execution.tryExecuteInNewResultTab() : execution.tryExecute());
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execution.showResultChangesDialog.value).toBe(false);
+  });
+});
 
 describe("compatibility write denial outcomes", () => {
   beforeEach(() => {

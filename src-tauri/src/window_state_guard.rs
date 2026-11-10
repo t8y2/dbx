@@ -246,6 +246,11 @@ pub(crate) fn remember_main_window_geometry<R: Runtime>(app: &AppHandle<R>) {
         }
         *last = Some(now);
     }
+    save_current_main_window_geometry(app);
+}
+
+/// Flush the current frame before an exit that bypasses the normal close handler.
+pub(crate) fn save_current_main_window_geometry<R: Runtime>(app: &AppHandle<R>) {
     if let Some(geometry) = current_main_window_geometry(app) {
         persist_logical_geometry(app, &geometry);
         let _ = app.save_window_state(persisted_main_window_state_flags());

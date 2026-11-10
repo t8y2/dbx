@@ -25,6 +25,7 @@ import {
   localTableSearchParentTypes,
 } from "@/lib/sidebar/sidebarSearchTree";
 import { createSidebarLabelMatcher } from "@/lib/sidebar/sidebarSearch";
+import { filterConnectionIndexes, insertConnectionIndexSearchControls } from "@/lib/sidebar/sidebarIndexSearch";
 import { firstSidebarSearchMatchDataNode, hasActiveSidebarSearch } from "@/lib/sidebar/sidebarSearchEnter";
 import { collectSidebarRegexIndexScopes } from "@/lib/sidebar/sidebarRegexSearchIndex";
 import { collectSidebarGlobalSearchIndexes, sidebarIndexedObjectGroupTypes } from "@/lib/sidebar/sidebarGlobalSearchIndex";
@@ -127,6 +128,8 @@ const store = useConnectionStore();
 const queryStore = useQueryStore();
 const savedSqlStore = useSavedSqlStore();
 const settingsStore = useSettingsStore();
+const connectionIndexSearchQueries = ref<Record<string, string>>({});
+const indexSearchConnectionIds = computed(() => new Set(store.connections.filter((connection) => connection.db_type === "elasticsearch" || connection.db_type === "easysearch").map((connection) => connection.id)));
 const { toast } = useToast();
 const searchQuery = ref("");
 const deferredSearchQuery = ref("");
@@ -774,6 +777,7 @@ const filteredNodes = computed(() => {
     nodes = filterSidebarTreeToConnectedConnections(nodes, store.connectedIds);
   }
 
+  if (!isTreeSearchFiltering.value) nodes = filterConnectionIndexes(nodes, indexSearchConnectionIds.value, connectionIndexSearchQueries.value);
   nodes = filterLocallySearchedTables(nodes, { enabled: settingsStore.editorSettings.sidebarTableSearchLocal, queries: store.sidebarTableSearchQueries, indexedResults: localTableSearchResults.value });
   nodes = filterGloballyIndexedTables(nodes);
   nodes = mergeSidebarRemoteSearchResults(nodes, remoteSearchResults.value);
@@ -805,13 +809,14 @@ const projectedConnectionIds = computed<ReadonlySet<string> | null>(() => {
   return connectionIds;
 });
 
-const flatNodes = computed<FlatTreeNode[]>(() =>
-  insertSidebarTableSearchControls(flattenTree(filteredNodes.value), {
+const flatNodes = computed<FlatTreeNode[]>(() => {
+  const nodes = insertSidebarTableSearchControls(flattenTree(filteredNodes.value), {
     enabled: settingsStore.editorSettings.sidebarTableSearchEnabled && !isTreeSearchFiltering.value,
     sidebarObjectDisplay: settingsStore.editorSettings.sidebarObjectDisplay,
     activeQueries: store.sidebarTableSearchQueries,
-  }),
-);
+  });
+  return isTreeSearchFiltering.value ? nodes : insertConnectionIndexSearchControls(nodes, indexSearchConnectionIds.value);
+});
 
 // Debug instrumentation for the "expanded tree leaves the scroll shell stuck
 // (e.g. Dameng connection expanded and the viewport froze near half height)"
@@ -1583,6 +1588,14 @@ function onSidebarHorizontalScrollbarThumbPointerDown(event: PointerEvent) {
 const pasteHandlerRegistry = createSidebarPasteHandlerRegistry();
 
 provide(sidebarTreeContextKey, {
+  getIndexSearchQuery: (parentNodeId) => connectionIndexSearchQueries.value[parentNodeId] ?? "",
+  setIndexSearchQuery: (parentNodeId, query) => {
+    const focusRestore = captureTableSearchFocus(parentNodeId);
+    latestTableSearchInteractionParentId = parentNodeId;
+    latestTableSearchInteractionId = focusRestore.interactionId;
+    connectionIndexSearchQueries.value = { ...connectionIndexSearchQueries.value, [parentNodeId]: query };
+    restoreTableSearchInput(focusRestore);
+  },
   getVisibleNodes: () => selectableVisibleNodes.value,
   getVisibleNodeIndex: (id: string) => selectableVisibleNodeIndexById.value.get(id) ?? -1,
   getVisibleFlatNodes: () => flatNodes.value.filter((item) => !isSidebarTableSearchControlNode(item.node)),

@@ -133,7 +133,7 @@ export default async function SponsorsPage({ params }: { params: Promise<{ lang:
     },
     {
       name: "HuaLongAI",
-      href: "https://api.hualong.online/register?promo=DBX%26HUALONG",
+      href: "https://dbx.hualong.online/",
       logo: "/sponsors/hualong-tight.png",
       logoClass: "w-full object-contain",
       description: t.hualongSponsorDesc,

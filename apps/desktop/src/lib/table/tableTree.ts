@@ -13,7 +13,7 @@ export function buildTableTreeNodes({ nodeId, connectionId, database, schema, ta
     const name = normalizeDatabaseObjectName(table.name);
     if (!name) return [];
     const objectType = normalizeObjectType(table.table_type);
-    const childSchema = schema;
+    const childSchema = table.schema ?? schema;
     return [
       makeTableTreeEntry({
         nodeId,

@@ -5923,6 +5923,8 @@ export default withEnglishFallback({
     viewCompact: "Vista compatta a griglia",
     compactCardWidth: "Larghezza minima scheda compatta",
     configureColumns: "Configura colonne visualizzate",
+    columnMoveUp: "Sposta la colonna {column} in alto",
+    columnMoveDown: "Sposta la colonna {column} in basso",
     copyNames: "Copia nomi",
     copySelectedNames: "Copia nomi selezionati",
     copyOptions: "Copia opzioni",

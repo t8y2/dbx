@@ -6678,6 +6678,8 @@ export default withEnglishFallback({
     viewCompact: "Компактный вид сетки",
     compactCardWidth: "Минимальная ширина компактной карточки",
     configureColumns: "Настроить отображаемые столбцы",
+    columnMoveUp: "Переместить столбец {column} вверх",
+    columnMoveDown: "Переместить столбец {column} вниз",
     copyNames: "Копировать имена",
     copySelectedNames: "Копировать имена выбранных",
     copyOptions: "Копировать параметры",

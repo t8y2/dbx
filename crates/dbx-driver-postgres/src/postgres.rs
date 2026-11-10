@@ -8665,6 +8665,49 @@ pub async fn get_columns_compat_first(pool: &Pool, schema: &str, table: &str) ->
     get_columns_with_tiers(pool, schema, table, false).await
 }
 
+/// Resolves the stored spelling of a relation when the requested name only
+/// matches case-insensitively.
+///
+/// PostgreSQL-compatible engines do not all fold unquoted identifiers the same
+/// way: TDSQL-PG / OpenTenBase fold them to upper case while stock PostgreSQL
+/// folds to lower. DBX resolves a query's table reference through the stock rule,
+/// so on an upper-folding engine the catalog lookup misses, the grid falls back to
+/// the result set's own columns, and the generated UPDATE quotes the lower-case
+/// guess (`"etl"."t_df_batch"`) and fails with 42P01 (#14330). The frontend always
+/// prefers `resolved_schema` / `resolved_table` when a driver reports them, so
+/// finding the real spelling here is enough to fix the write path.
+///
+/// Only an unambiguous match is returned: `"Foo"` and `foo` may coexist, and this
+/// must never silently retarget a write.
+fn postgres_relation_case_insensitive_sql() -> &'static str {
+    "SELECT n.nspname, c.relname \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE c.relkind IN ('r','p','f','v','m') \
+       AND lower(c.relname) = lower($2) \
+       AND (CASE WHEN coalesce(length($1::text), 0) = 0 THEN pg_catalog.pg_table_is_visible(c.oid) \
+                 ELSE lower(n.nspname) = lower($1) END) \
+       AND 1 = (SELECT count(*) FROM pg_catalog.pg_class c2 \
+                JOIN pg_catalog.pg_namespace n2 ON n2.oid = c2.relnamespace \
+                WHERE n2.nspname = n.nspname AND lower(c2.relname) = lower(c.relname) \
+                  AND c2.relkind IN ('r','p','f','v','m')) \
+     LIMIT 1"
+}
+
+async fn resolve_relation_case_insensitive(
+    client: &deadpool_postgres::Client,
+    schema: &str,
+    table: &str,
+) -> Result<Option<(String, String)>, PgError> {
+    let client = &EncodingClient::new(client);
+    let rows = postgres_query_cached(client, postgres_relation_case_insensitive_sql(), &[&schema, &table]).await?;
+    Ok(rows.first().and_then(|row| {
+        let schema = row.try_get::<_, Option<String>>(0).ok().flatten()?;
+        let table = row.try_get::<_, Option<String>>(1).ok().flatten()?;
+        Some((schema, table))
+    }))
+}
+
 async fn get_columns_with_tiers(
     pool: &Pool,
     schema: &str,
@@ -8687,7 +8730,7 @@ async fn get_columns_with_tiers(
         }
     };
     let tiers = column_metadata_tiers(modern_tier_supported);
-    query_with_column_metadata_fallback(
+    let columns = query_with_column_metadata_fallback(
         &tiers,
         |sql| get_columns_with_sql(&client, sql, schema, table),
         total_started,
@@ -8695,7 +8738,34 @@ async fn get_columns_with_tiers(
         |error: &PgError| error.as_db_error().map(|db_error| db_error.code().code().to_string()),
         log_get_columns_tier_diagnostic,
     )
-    .await
+    .await;
+    // A tier that matched nothing means the requested spelling is not addressable
+    // on this engine. Retry once with the stored spelling and report it back so the
+    // caller writes to the real relation instead of the folded guess (#14330).
+    if columns.as_ref().is_ok_and(|columns| !columns.is_empty()) {
+        return columns;
+    }
+    let Ok(Some((resolved_schema, resolved_table))) = resolve_relation_case_insensitive(&client, schema, table).await
+    else {
+        return columns;
+    };
+    if resolved_schema == schema && resolved_table == table {
+        return columns;
+    }
+    let mut resolved = query_with_column_metadata_fallback(
+        &tiers,
+        |sql| get_columns_with_sql(&client, sql, &resolved_schema, &resolved_table),
+        total_started,
+        pg_error_to_string,
+        |error: &PgError| error.as_db_error().map(|db_error| db_error.code().code().to_string()),
+        log_get_columns_tier_diagnostic,
+    )
+    .await?;
+    for column in &mut resolved {
+        column.resolved_schema = Some(resolved_schema.clone());
+        column.resolved_table = Some(resolved_table.clone());
+    }
+    Ok(resolved)
 }
 
 pub fn pg_quote_literal(value: &str) -> String {
@@ -13256,6 +13326,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_columns_report_the_stored_spelling_of_an_upper_case_relation() {
+        // TDSQL-PG / OpenTenBase fold unquoted names to upper case while DBX
+        // resolves a query's table reference through the stock lower-case rule, so
+        // the grid used to write `"etl"."t_df_batch"` and fail with 42P01 (#14330).
+        // The lookup must recover the stored spelling and report it, because the
+        // frontend then targets it for every generated UPDATE/DELETE.
+        let Some(container) = start_docker_postgres().await else {
+            return;
+        };
+        let pool = connect(&container.url(), Duration::from_secs(5)).await.expect("connect postgres");
+        execute_query(&pool, "CREATE SCHEMA \"ETL\"").await.expect("create schema");
+        execute_query(
+            &pool,
+            "CREATE TABLE \"ETL\".\"T_DF_BATCH\" (\"BATCH_ID\" text PRIMARY KEY, \"BATCH_NAME\" text)",
+        )
+        .await
+        .expect("create upper-case table");
+
+        let columns = get_columns(&pool, "etl", "t_df_batch").await.expect("read columns through the folded name");
+
+        assert_eq!(columns.len(), 2, "{columns:?}");
+        assert_eq!(columns[0].name, "BATCH_ID");
+        assert!(columns[0].is_primary_key);
+        assert_eq!(columns[0].resolved_schema.as_deref(), Some("ETL"));
+        assert_eq!(columns[0].resolved_table.as_deref(), Some("T_DF_BATCH"));
+    }
+
+    #[tokio::test]
     async fn postgres_dml_returning_preserves_result_rows() {
         let Some(container) = start_docker_postgres().await else {
             return;
@@ -15106,6 +15204,20 @@ mod tests {
         assert!(!POSTGRES_COLUMNS_SQL.contains("information_schema.columns"));
         assert!(POSTGRES_COLUMNS_SQL.contains("pg_enum"));
         assert!(POSTGRES_COLUMNS_SQL.contains("AS enum_values"));
+    }
+
+    #[test]
+    fn postgres_relation_case_insensitive_lookup_only_returns_an_unambiguous_match() {
+        // Upper-folding engines (TDSQL-PG / OpenTenBase) store `T_DF_BATCH` while a
+        // stock-PostgreSQL folding turns the query's reference into `t_df_batch`
+        // (#14330). The recovery lookup must never pick between `Foo` and `foo`.
+        let sql = postgres_relation_case_insensitive_sql();
+
+        assert!(sql.contains("lower(c.relname) = lower($2)"), "{sql}");
+        assert!(sql.contains("AND 1 = (SELECT count(*)"), "{sql}");
+        assert!(sql.contains("n2.nspname = n.nspname"), "{sql}");
+        assert!(sql.contains("pg_table_is_visible(c.oid)"), "{sql}");
+        assert!(sql.contains("c.relkind IN ('r','p','f','v','m')"), "{sql}");
     }
 
     #[test]

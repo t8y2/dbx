@@ -860,6 +860,27 @@ async fn list_schema_infos_once(
     Ok(schemas.into_iter().map(|name| db::SchemaInfo { name, comment: None }).collect())
 }
 
+/// Renders one `list_data_types` row for the structure editor's dropdown:
+/// search_path-visible simple lowercase names stay bare so they remain
+/// interchangeable with the static list; everything else — off-search_path
+/// schemas, mixed case, lowercase reserved words like a type literally named
+/// `order` — comes back schema-qualified with the quoting the identifier
+/// requires, so generated `CREATE TABLE` / `ALTER TABLE ... TYPE` resolves
+/// (#14525 review follow-up).
+fn render_postgres_type_name(schema: &str, name: &str, visible: bool) -> String {
+    if visible
+        && crate::sql_dialect::is_simple_lower_identifier(name)
+        && !crate::sql_dialect::is_postgres_reserved_identifier(name)
+    {
+        return name.to_string();
+    }
+    format!(
+        "{}.{}",
+        crate::sql_dialect::quote_gaussdb_jdbc_identifier(schema, "\""),
+        crate::sql_dialect::quote_gaussdb_jdbc_identifier(name, "\"")
+    )
+}
+
 pub async fn list_data_types_core(
     state: &AppState,
     connection_id: &str,
@@ -889,7 +910,14 @@ pub async fn list_data_types_core(
                 .map(deduplicate_data_type_names);
         }
         if let Some(PoolKind::Postgres(pool)) = pool_handle.as_ref() {
-            return db::postgres::list_data_types(pool).await.map(deduplicate_data_type_names);
+            let entries = db::postgres::list_data_types(pool).await?;
+            return Ok(entries
+                .into_iter()
+                .map(|entry| render_postgres_type_name(&entry.schema, &entry.name, entry.visible))
+                .filter(|name| !name.is_empty())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .collect());
         }
         Ok(Vec::new())
     })
@@ -5857,6 +5885,20 @@ for line in sys.stdin:
         });
         assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::ShowFullTables);
         assert!(super::is_mycat_config(&config));
+    }
+
+    #[test]
+    fn render_postgres_type_name_keeps_reserved_words_quoted() {
+        // #14536 review follow-up: a type literally named `order` must not be
+        // emitted bare even though it is a simple lowercase identifier.
+        assert_eq!(super::render_postgres_type_name("public", "hstore", true), "hstore");
+        assert_eq!(super::render_postgres_type_name("public", "mood", true), "mood");
+        // %I/quote semantics: simple lowercase names stay unquoted — schema
+        // qualification alone already bypasses the search path.
+        assert_eq!(super::render_postgres_type_name("dbx_custom", "mood", false), "dbx_custom.mood");
+        assert_eq!(super::render_postgres_type_name("dbx_custom", "Mood", false), "dbx_custom.\"Mood\"");
+        assert_eq!(super::render_postgres_type_name("public", "order", true), "public.\"order\"");
+        assert!(!crate::sql_dialect::is_simple_lower_identifier("with space"));
     }
 
     #[test]

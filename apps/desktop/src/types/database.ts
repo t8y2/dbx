@@ -1093,6 +1093,11 @@ export interface TableInfo {
   /** Optional validity populated by status-aware object loaders. */
   valid?: boolean | null;
   comment?: string | null;
+  /**
+   * Schema that owns this object. The backend list does not return it (it is the
+   * schema that was queried), so the sidebar table index fills it in.
+   */
+  schema?: string | null;
   parent_schema?: string | null;
   parent_name?: string | null;
 }

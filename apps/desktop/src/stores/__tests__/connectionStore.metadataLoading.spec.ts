@@ -1155,7 +1155,7 @@ describe("connectionStore metadata loading", () => {
       tableListCalls += 1;
       if (tableListCalls === 2) releaseTableLists();
       await bothTableListsStarted;
-      return limit === 2 ? ([{ name: "indexed_table", table_type: "TABLE", comment: null }] satisfies TableInfo[]) : ([{ name: "fresh_table", table_type: "TABLE", comment: null }] satisfies TableInfo[]);
+      return limit === 2 ? ([{ name: "indexed_table", table_type: "TABLE", comment: null, parent_schema: "public", parent_name: "parent_table" }] satisfies TableInfo[]) : ([{ name: "fresh_table", table_type: "TABLE", comment: null }] satisfies TableInfo[]);
     });
     const loadSchemaCache = vi.fn(async (key: string) => {
       const payload = cachedPayloads.get(key) ?? null;
@@ -1234,9 +1234,11 @@ describe("connectionStore metadata loading", () => {
     const treeCache = decodeSchemaTreeCache<TreeNode[]>(cachedPayloads.get(treeCacheKey));
     const indexCache = decodeSchemaTreeCache<TreeNode[]>(cachedPayloads.get(indexCacheKey));
     expect(treeCache?.children.map((node) => node.label)).toEqual(["fresh_table"]);
-    // The local table index preserves comments for regex search matching.
-    expect(indexCache?.tableSearchIndex?.entries).toEqual([{ name: "indexed_table", tableType: "TABLE", comment: null }]);
-    await expect(store.loadSidebarTableSearchIndex(tablesGroup.id)).resolves.toEqual([{ name: "indexed_table", table_type: "TABLE", comment: null }]);
+    // The local table index preserves comments, owning schema, and partition
+    // parent metadata across persistence.
+    expect(indexCache?.tableSearchIndex?.version).toBe(3);
+    expect(indexCache?.tableSearchIndex?.entries).toEqual([{ name: "indexed_table", tableType: "TABLE", comment: null, schema: "public", parentSchema: "public", parentName: "parent_table" }]);
+    await expect(store.loadSidebarTableSearchIndex(tablesGroup.id)).resolves.toEqual([{ name: "indexed_table", table_type: "TABLE", comment: null, schema: "public", parent_schema: "public", parent_name: "parent_table" }]);
     // The refreshed index is served from the in-memory cache; refreshing
     // additionally registers the scope by reading the sidebar index manifest.
     expect(loadSchemaCache).toHaveBeenLastCalledWith("dbx:sidebar-table-search-index-manifest-v1");

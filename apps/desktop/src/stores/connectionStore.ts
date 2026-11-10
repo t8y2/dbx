@@ -258,6 +258,8 @@ const SIDEBAR_DATABASE_STORAGE_CACHE_TTL_MS = 30_000;
 const SIDEBAR_DATABASE_STORAGE_CACHE_MAX_ENTRIES = 32;
 const SIDEBAR_TABLE_STORAGE_CACHE_MAX_ENTRIES = 64;
 const SIDEBAR_TABLE_SEARCH_INDEX_CACHE_MAX_ENTRIES = 32;
+/** Above this many schemas an unattributed index beats hundreds of round trips. */
+const SIDEBAR_TABLE_SEARCH_INDEX_MAX_SCHEMA_SCOPES = 200;
 export const COMPLETION_METADATA_CONCURRENCY = 2;
 const MONGO_LEGACY_DRIVER_PROFILE = "mongodb-legacy";
 const MONGO_LEGACY_DRIVER_LABEL = "MongoDB (Legacy)";
@@ -4072,7 +4074,16 @@ export const useConnectionStore = defineStore("connection", () => {
     const read = (async () => {
       const decoded = decodeSchemaTreeCache<TreeNode[]>(await api.loadSchemaCache<unknown>(cacheKey).catch(() => null));
       const index = decoded?.tableSearchIndex;
-      const entries = index ? index.entries.map((entry) => ({ name: entry.name, table_type: entry.tableType, ...(entry.comment !== undefined ? { comment: entry.comment } : {}) })) : null;
+      const entries = index
+        ? index.entries.map((entry) => ({
+            name: entry.name,
+            table_type: entry.tableType,
+            ...(entry.comment !== undefined ? { comment: entry.comment } : {}),
+            ...(entry.schema !== undefined ? { schema: entry.schema } : {}),
+            ...(entry.parentSchema !== undefined ? { parent_schema: entry.parentSchema } : {}),
+            ...(entry.parentName !== undefined ? { parent_name: entry.parentName } : {}),
+          }))
+        : null;
       const indexedAt = index ? Date.parse(index.indexedAt) : Number.NaN;
       const value = { entries, stale: decoded?.isStale ?? false, staleAt: Number.isFinite(indexedAt) ? indexedAt + SCHEMA_TREE_CACHE_TTL_MS : Date.now() };
       if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return { entries: null, stale: false, staleAt: Date.now() };
@@ -4141,6 +4152,34 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  /**
+   * Schemas a table-search index has to walk so every entry can be attributed.
+   *
+   * A schema-scoped node knows its schema. A schema-less node can only attribute
+   * rows for schemas it has already listed, so it uses its loaded schema children
+   * (no extra round trip) and otherwise falls back to the database name, where a
+   * schema and a database are the same thing (MySQL/SQLite). `parent_schema` is
+   * never an option: drivers use it for the partitioned parent table (#14316).
+   */
+  function sidebarTableSearchIndexSchemas(parent: TreeNode): string[] {
+    const scopeSchema = parent.schema?.trim();
+    if (scopeSchema) return [scopeSchema];
+    const loadedSchemas = [
+      ...new Set(
+        (parent.children ?? [])
+          .filter((child) => child.type === "schema" || child.type === "linked-server-schema")
+          .map((child) => child.schema?.trim())
+          .filter((schema): schema is string => !!schema),
+      ),
+    ];
+    // Hundreds of schemas would turn one index build into hundreds of round
+    // trips; stay unattributed there and let the live tree answer instead.
+    if (loadedSchemas.length > 0 && loadedSchemas.length <= SIDEBAR_TABLE_SEARCH_INDEX_MAX_SCHEMA_SCOPES) return loadedSchemas;
+    // No loaded schema to attribute with: fall back to the database name, which is
+    // the schema on drivers where the two are the same thing.
+    return parent.database ? [parent.database] : [];
+  }
+
   async function buildSidebarTableSearchIndex(parentNodeId: string, identity?: SidebarRegexScopeIdentity): Promise<TableInfo[] | null> {
     const parent = identity ? findSidebarTreeNodeByIdentity(parentNodeId, identity) : findNode(treeNodes.value, parentNodeId);
     if (!parent?.connectionId || !hasTreeNodeDatabaseContext(parent)) return [];
@@ -4156,7 +4195,6 @@ export const useConnectionStore = defineStore("connection", () => {
     const scopeGeneration = sidebarTableSearchIndexScopeGeneration(cacheKey);
     await ensureConnected(connectionId);
     const config = getConfig(connectionId);
-    const querySchema = connectionObjectTreeQuerySchema(config, parent.database, parent.schema);
     const objectTypes = sidebarIndexedObjectGroupTypes.has(parent.type) ? (objectTypesForGroupNode(parent.type) ?? undefined) : undefined;
     const pageSize = sidebarObjectGroupPageSize();
     // 搜索索引必须与连接的表过滤器保持一致：用户右键设置的过滤条件在正常加载路径
@@ -4173,17 +4211,32 @@ export const useConnectionStore = defineStore("connection", () => {
       }),
     );
     const entries: TableInfo[] = [];
-    for (let offset = 0; ; offset += pageSize) {
-      if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return [];
-      const page = await listTablesWithOptionalTableNameFilter(connectionId, parent.database, querySchema, undefined, pageSize, offset, objectTypes, parent.catalog, tableNameFilter);
-      entries.push(...page);
-      if (page.length < pageSize) break;
+    // A table row does not say which schema owns it (the backend answers for the
+    // schema that was queried), so attribute every row while we still know it.
+    // `parent_schema` cannot stand in: drivers use it for the partitioned parent.
+    const indexSchemas = sidebarTableSearchIndexSchemas(parent);
+    for (const entrySchema of indexSchemas) {
+      const querySchema = connectionObjectTreeQuerySchema(config, parent.database, entrySchema || undefined);
+      for (let offset = 0; ; offset += pageSize) {
+        if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return [];
+        const page = await listTablesWithOptionalTableNameFilter(connectionId, parent.database, querySchema, undefined, pageSize, offset, objectTypes, parent.catalog, tableNameFilter);
+        entries.push(...page.map((row) => (entrySchema ? { ...row, schema: entrySchema } : row)));
+        if (page.length < pageSize) break;
+      }
     }
-    const deduped = [...new Map(entries.map((entry) => [`${entry.table_type}\0${entry.name}`, entry])).values()];
+    const deduped = [...new Map(entries.map((entry) => [`${entry.schema ?? ""}\0${entry.table_type}\0${entry.name}\0${entry.parent_schema ?? ""}\0${entry.parent_name ?? ""}`, entry])).values()];
     const tableSearchIndex = {
+      version: 3 as const,
       complete: true as const,
       indexedAt: new Date().toISOString(),
-      entries: deduped.map((entry) => ({ name: entry.name, tableType: entry.table_type, ...(entry.comment !== undefined ? { comment: entry.comment } : {}) })),
+      entries: deduped.map((entry) => ({
+        name: entry.name,
+        tableType: entry.table_type,
+        ...(entry.comment !== undefined ? { comment: entry.comment } : {}),
+        ...(entry.schema ? { schema: entry.schema } : {}),
+        ...(entry.parent_schema !== undefined ? { parentSchema: entry.parent_schema } : {}),
+        ...(entry.parent_name !== undefined ? { parentName: entry.parent_name } : {}),
+      })),
     };
     if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return [];
     let indexIsCurrent = false;

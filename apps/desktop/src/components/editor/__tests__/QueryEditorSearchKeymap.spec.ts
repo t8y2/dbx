@@ -104,10 +104,7 @@ describe("QueryEditor search keymap precedence", () => {
       const view = new EditorView({
         parent: document.createElement("div"),
         state: EditorState.create({
-          extensions: [
-            keymap.of(withModifier(searchKeymapWithoutConfigurableBindings(searchKeymap), modifier)),
-            Prec.high(keymap.of(withModifier(createQueryEditorSearchKeymap({ openReplace: () => true, isReadOnly: () => false }), modifier))),
-          ],
+          extensions: [keymap.of(withModifier(searchKeymapWithoutConfigurableBindings(searchKeymap), modifier)), Prec.high(keymap.of(withModifier(createQueryEditorSearchKeymap({ openReplace: () => true, isReadOnly: () => false }), modifier)))],
         }),
       });
 

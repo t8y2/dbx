@@ -174,6 +174,18 @@ API keys use the existing encrypted password storage and follow **Save password*
 
 For CLI/MCP configurations, set `external_config.authType` to `"apiKey"` and put the encoded key in `password`; do not put the key in URL parameters or `external_config`.
 
+### SQL Server Certificate Verification
+
+By default the native SQL Server driver encrypts when the server supports it, accepts any server certificate, and falls back to the legacy encryption modes when the encrypted handshake fails. Add `trustServerCertificate=false` to the URL parameters to verify the server certificate instead:
+
+| Parameter | Meaning |
+| --- | --- |
+| `trustServerCertificate=false` | Require TLS and verify the certificate chain and host name. The connection fails instead of falling back. |
+| `sslrootcert=<path>` | CA certificate file (`.pem`, `.crt` or `.der`, one certificate) on the machine running DBX. Without it, the system trust store is used. |
+| `hostNameInCertificate=<name>` | Name to check in the certificate when it differs from the connection host, for example when connecting by IP address or through a tunnel. Not supported for named instances resolved through SQL Server Browser. |
+
+`trustServerCertificate=false` cannot be combined with `encrypt=false` or `sqlserverEncryption=disabled`. Paths containing `;` or `&` can be brace-quoted (`sslrootcert={C:\certs\a;b.pem}`) or percent-encoded.
+
 ## Local Test Environments
 
 The repository includes pinned Docker Compose labs for ClickHouse, MariaDB, MongoDB, MySQL, PostgreSQL, and Redis. Use [Database Test Lab](/en/docs/database-lab) for connection, driver, and regression testing.

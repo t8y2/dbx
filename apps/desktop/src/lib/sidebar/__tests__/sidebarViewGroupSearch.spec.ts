@@ -74,6 +74,22 @@ describe("sidebar search for view groups (#12901)", () => {
     expect(nodes[0]?.children?.find((node) => node.type === "group-partitions")?.children?.map((node) => node.label)).toEqual(["orders_2025"]);
   });
 
+  it("restores partition hierarchy for database-level indexed results", () => {
+    const nodes = buildSidebarIndexedTableNodes({
+      parentNodeId: "conn:db",
+      nodeType: "database",
+      connectionId: "conn",
+      database: "app",
+      entries: [
+        { name: "orders", table_type: "BASE TABLE", schema: "public" },
+        { name: "orders_2025", table_type: "BASE TABLE", schema: "public", parent_schema: "public", parent_name: "orders" },
+      ],
+    });
+
+    expect(nodes.map((node) => node.label)).toEqual(["orders"]);
+    expect(nodes[0]?.children?.find((node) => node.type === "group-partitions")?.children?.map((node) => node.label)).toEqual(["orders_2025"]);
+  });
+
   it("registers the view group types as local search parents", () => {
     expect(localTableSearchParentTypes.has("group-views")).toBe(true);
     expect(localTableSearchParentTypes.has("group-materialized-views")).toBe(true);

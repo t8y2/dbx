@@ -2355,6 +2355,7 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 		return nil, err
 	}
 	s.closeRows(rows)
+	s.enrichObjectComments(result, schema, useSessionUser)
 	if constraints.Exact {
 		s.enrichExactTriggerObjects(result, schema)
 	}

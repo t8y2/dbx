@@ -166,6 +166,12 @@ function firstQueryExecutionError(tab: Pick<QueryTab, "result" | "results">) {
   return results.find((result) => isQueryExecutionErrorResult(result));
 }
 
+function resultExecutionTimeMs(tab: Pick<QueryTab, "result" | "results">, fallbackMs: number): number {
+  const results = tab.results?.length ? tab.results : tab.result ? [tab.result] : [];
+  if (!results.length || results.some((result) => !Number.isFinite(result.execution_time_ms) || result.execution_time_ms < 0)) return fallbackMs;
+  return results.reduce((total, result) => total + result.execution_time_ms, 0);
+}
+
 export function useSqlExecution(deps: {
   activeTab: ComputedRef<QueryTab | undefined>;
   activeConnection: ComputedRef<ConnectionConfig | undefined>;
@@ -641,7 +647,7 @@ export function useSqlExecution(deps: {
       connection_name: connName,
       database: currentTab.database,
       sql,
-      execution_time_ms: elapsed,
+      execution_time_ms: resultExecutionTimeMs(currentTab, elapsed),
       success,
       error: failure ? (failure.error ? translateBackendError(t, failure.error, failure.rows?.[0]?.[0]) : String(failure.rows?.[0]?.[0] ?? "")) : undefined,
       activity_kind: classifySqlActivityKind(sql),
@@ -925,7 +931,7 @@ export function useSqlExecution(deps: {
       const mergeResult = snapshotResultForMerge(latest.result);
       const resultStatus = success ? (input.manualTransaction ? "pending_commit" : "success") : "failed";
       recordedRunId = captureWorkerResult(resultStatus, errorMessage);
-      const executionDuration = elapsedMs();
+      const executionDuration = resultExecutionTimeMs(latest, elapsedMs());
       const recordOutcome = async () => {
         await historyStore.add({
           connection_id: executionTab.connectionId,

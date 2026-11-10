@@ -1,4 +1,5 @@
 {
+  "productName": "DBX (Windows 7 / Server 2008 R2)",
   "bundle": {
     "createUpdaterArtifacts": false,
     "windows": {

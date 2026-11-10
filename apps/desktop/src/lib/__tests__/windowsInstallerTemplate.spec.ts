@@ -26,18 +26,21 @@ describe("Windows offline installer template", () => {
     expect(template).toContain('!if "${INSTALLWEBVIEW2MODE}" != ""');
     expect(template).not.toContain('!if "${INSTALLWEBVIEW2MODE}" != "fixedRuntime"');
     expect(template).toContain("${If} ${IsWin7}");
+    expect(template).toContain("${OrIf} ${IsWin2008R2}");
     expect(template).toContain("${OrIf} ${IsWin2012R2}");
     expect(template).toContain('MessageBox MB_ICONSTOP|MB_YESNO|MB_DEFBUTTON1 "$(dbxWin7InstallerRequired)" IDYES dbx_open_win7_installer');
-    expect(template).toContain("https://dl.dbxio.com/releases/v${VERSION}/DBX_${VERSION}_x64-win7-server2012r2-offline-setup.exe?v=${VERSION}");
+    expect(template).toContain('${GetParent} "$EXEPATH" $0');
+    expect(template).toContain("DBX_${VERSION}_x64-win7-server2008r2-offline-setup.exe?from=${VERSION}");
+    expect(template).not.toContain("win7-server2012r2-offline-setup.exe");
     expect(template).toContain("SetErrorLevel 1633");
     expect(template).toContain("${OrIf} $PassiveMode = 1");
   });
 
   it("localizes the Windows 7 package guidance in every installer language", () => {
     expect(template.match(/LangString dbxWin7InstallerRequired/g)).toHaveLength(3);
-    expect(template).toContain("This installer does not support Windows 7 or Windows Server 2012 R2.");
-    expect(template).toContain("此安装包不支持 Windows 7 或 Windows Server 2012 R2。");
-    expect(template).toContain("此安裝套件不支援 Windows 7 或 Windows Server 2012 R2。");
+    expect(template).toContain("This installer does not support Windows 7 or Windows Server 2008 R2.");
+    expect(template).toContain("此安装包不支持 Windows 7 或 Windows Server 2008 R2。");
+    expect(template).toContain("此安裝套件不支援 Windows 7 或 Windows Server 2008 R2。");
   });
 
   it.each([

@@ -61,6 +61,18 @@ ${StrLoc}
 !define WEBVIEW2INSTALLERPATH "{{webview2_installer_path}}"
 !define MINIMUMWEBVIEW2VERSION "{{minimum_webview2_version}}"
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCTNAME}"
+; Display name for the fixed-runtime build (Windows 7 / Server 2008 R2), so the
+; installer title, install dir, shortcuts and the uninstall entry all say which
+; systems the package is for. Evergreen installers keep the plain product name.
+!if "${INSTALLWEBVIEW2MODE}" != ""
+  !define DBX_APP_DISPLAYNAME "${PRODUCTNAME}"
+!else if "${ARCH}" == "x64"
+  !define DBX_APP_DISPLAYNAME "${PRODUCTNAME} (Windows 7 / Server 2008 R2 build)"
+!endif
+!ifndef DBX_APP_DISPLAYNAME
+  !define DBX_APP_DISPLAYNAME "${PRODUCTNAME}"
+!endif
+
 !define MANUKEY "Software\${MANUFACTURER}"
 !define MANUPRODUCTKEY "${MANUKEY}\${PRODUCTNAME}"
 !define UNINSTALLERSIGNCOMMAND "{{uninstaller_sign_cmd}}"
@@ -104,7 +116,7 @@ Var DbxDirectoryProbeError
 Var DbxFailedFile
 Var DbxWriteFailureAction
 
-Name "${PRODUCTNAME}"
+Name "${DBX_APP_DISPLAYNAME}"
 BrandingText "${COPYRIGHT}"
 OutFile "${OUTFILE}"
 
@@ -529,9 +541,9 @@ LangString dbxFileWriteError ${LANG_TRADCHINESE} "$DbxFailedFile$\r$\n$\r$\n$(db
 LangString dbxManualInstallFallback ${LANG_ENGLISH} "Yes: open the installer folder and exit. No: retry. Cancel: stop installation."
 LangString dbxManualInstallFallback ${LANG_SIMPCHINESE} "“是”：打开安装包目录并退出；“否”：重试；“取消”：停止安装。"
 LangString dbxManualInstallFallback ${LANG_TRADCHINESE} "「是」：開啟安裝套件目錄並結束；「否」：重試；「取消」：停止安裝。"
-LangString dbxWin7InstallerRequired ${LANG_ENGLISH} "This installer does not support Windows 7 or Windows Server 2012 R2.$\r$\n$\r$\nPlease use the dedicated Windows 7 / Server 2012 R2 package instead.$\r$\n$\r$\nOpen the download now?"
-LangString dbxWin7InstallerRequired ${LANG_SIMPCHINESE} "此安装包不支持 Windows 7 或 Windows Server 2012 R2。$\r$\n$\r$\n请改用 Windows 7 / Server 2012 R2 专用包。$\r$\n$\r$\n是否立即打开下载地址？"
-LangString dbxWin7InstallerRequired ${LANG_TRADCHINESE} "此安裝套件不支援 Windows 7 或 Windows Server 2012 R2。$\r$\n$\r$\n請改用 Windows 7 / Server 2012 R2 專用套件。$\r$\n$\r$\n是否立即開啟下載網址？"
+LangString dbxWin7InstallerRequired ${LANG_ENGLISH} "This installer does not support Windows 7 or Windows Server 2008 R2.$\r$\n$\r$\nPlease use the dedicated Windows 7 / Server 2008 R2 package instead.$\r$\n$\r$\nOpen the download now?"
+LangString dbxWin7InstallerRequired ${LANG_SIMPCHINESE} "此安装包不支持 Windows 7 或 Windows Server 2008 R2。$\r$\n$\r$\n请改用 Windows 7 / Server 2008 R2 专用包。$\r$\n$\r$\n是否立即打开下载地址？"
+LangString dbxWin7InstallerRequired ${LANG_TRADCHINESE} "此安裝套件不支援 Windows 7 或 Windows Server 2008 R2。$\r$\n$\r$\n請改用 Windows 7 / Server 2008 R2 專用套件。$\r$\n$\r$\n是否立即開啟下載網址？"
 FileErrorText "$(dbxFileWriteErrorNoIgnore)" "$(dbxFileWriteErrorNoIgnore)"
 
 LangString dbxElevationFailed ${LANG_ENGLISH} "Administrator permission is required to install DBX in this folder. Permission was denied or the elevated installer could not be started."
@@ -778,6 +790,7 @@ Function .onInit
   ; install an Evergreen WebView2 runtime to the fixed WebView2 109 bundle.
   !if "${INSTALLWEBVIEW2MODE}" != ""
     ${If} ${IsWin7}
+    ${OrIf} ${IsWin2008R2}
     ${OrIf} ${IsWin2012R2}
       ${If} ${Silent}
       ${OrIf} $PassiveMode = 1
@@ -790,7 +803,11 @@ Function .onInit
       Quit
 
       dbx_open_win7_installer:
-        ExecShell "open" "https://dl.dbxio.com/releases/v${VERSION}/DBX_${VERSION}_x64-win7-server2012r2-offline-setup.exe?v=${VERSION}"
+        ; Derive the releases root from the installer path so installers served
+        ; from mirrors or the GitHub release page download from the same host.
+        ${GetParent} "$EXEPATH" $0
+        ${GetParent} "$0" $0
+        ExecShell "open" "$0/v${VERSION}/DBX_${VERSION}_x64-win7-server2008r2-offline-setup.exe?from=${VERSION}"
         SetErrorLevel 1633
         Quit
     ${EndIf}
@@ -803,17 +820,17 @@ Function .onInit
     !if "${INSTALLMODE}" == "perMachine"
       ${If} ${RunningX64}
         !if "${ARCH}" == "x64"
-          StrCpy $INSTDIR "$PROGRAMFILES64\${PRODUCTNAME}"
+          StrCpy $INSTDIR "$PROGRAMFILES64\${DBX_APP_DISPLAYNAME}"
         !else if "${ARCH}" == "arm64"
-          StrCpy $INSTDIR "$PROGRAMFILES64\${PRODUCTNAME}"
+          StrCpy $INSTDIR "$PROGRAMFILES64\${DBX_APP_DISPLAYNAME}"
         !else
-          StrCpy $INSTDIR "$PROGRAMFILES\${PRODUCTNAME}"
+          StrCpy $INSTDIR "$PROGRAMFILES\${DBX_APP_DISPLAYNAME}"
         !endif
       ${Else}
-        StrCpy $INSTDIR "$PROGRAMFILES\${PRODUCTNAME}"
+        StrCpy $INSTDIR "$PROGRAMFILES\${DBX_APP_DISPLAYNAME}"
       ${EndIf}
     !else if "${INSTALLMODE}" == "currentUser"
-      StrCpy $INSTDIR "$LOCALAPPDATA\${PRODUCTNAME}"
+      StrCpy $INSTDIR "$LOCALAPPDATA\${DBX_APP_DISPLAYNAME}"
     !endif
 
     Call RestorePreviousInstallLocation
@@ -1021,7 +1038,7 @@ Section Install
   WriteRegStr SHCTX "${UNINSTKEY}" "MainBinaryName" "${MAINBINARYNAME}.exe"
 
   ; Registry information for add/remove programs
-  WriteRegStr SHCTX "${UNINSTKEY}" "DisplayName" "${PRODUCTNAME}"
+  WriteRegStr SHCTX "${UNINSTKEY}" "DisplayName" "${DBX_APP_DISPLAYNAME}"
   WriteRegStr SHCTX "${UNINSTKEY}" "DisplayIcon" "$\"$INSTDIR\${MAINBINARYNAME}.exe$\""
   WriteRegStr SHCTX "${UNINSTKEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr SHCTX "${UNINSTKEY}" "Publisher" "${MANUFACTURER}"

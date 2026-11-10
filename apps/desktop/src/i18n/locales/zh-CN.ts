@@ -7054,6 +7054,7 @@ export default withEnglishFallback({
     viewCompact: "紧凑九宫格视图",
     compactCardWidth: "紧凑卡片最小宽度",
     configureColumns: "配置显示列",
+    columnReorder: "拖拽排序，或按 ↑/↓ 移动{column}列",
     sortAsc: "升序",
     sortDesc: "降序",
     sortBy: "排序方式",

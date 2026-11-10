@@ -5921,6 +5921,7 @@ export default withEnglishFallback({
     viewCompact: "Visualização compacta em grade",
     compactCardWidth: "Largura mínima do cartão compacto",
     configureColumns: "Configurar colunas de exibição",
+    columnReorder: "Arraste para reordenar {column} ou use as setas para cima/baixo",
     copyNames: "Copiar nomes",
     copySelectedNames: "Copiar nomes selecionados",
     copyOptions: "Copiar opções",

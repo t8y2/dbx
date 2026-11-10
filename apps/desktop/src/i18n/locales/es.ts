@@ -6103,6 +6103,7 @@ export default withEnglishFallback({
     viewCompact: "Vista de cuadrícula compacta",
     compactCardWidth: "Ancho mínimo de tarjeta compacta",
     configureColumns: "Configurar columnas de visualización",
+    columnReorder: "Arrastra para ordenar {column} o usa las flechas arriba/abajo",
     copyNames: "Copiar nombres",
     copySelectedNames: "Copiar nombres seleccionados",
     copyOptions: "Opciones de copia",

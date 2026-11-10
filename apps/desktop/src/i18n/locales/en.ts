@@ -7081,6 +7081,7 @@ export default {
     viewCompact: "Compact grid view",
     compactCardWidth: "Compact card minimum width",
     configureColumns: "Configure columns",
+    columnReorder: "Drag to reorder {column}, or use the Up/Down arrow keys",
     sortAsc: "Ascending",
     sortDesc: "Descending",
     sortBy: "Sort by",

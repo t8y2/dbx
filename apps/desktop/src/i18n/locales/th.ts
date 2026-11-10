@@ -6943,6 +6943,7 @@ export default withEnglishFallback({
     viewCompact: "มุมมองกริดแบบกะทัดรัด",
     compactCardWidth: "ความกว้างขั้นต่ำของการ์ดแบบกะทัดรัด",
     configureColumns: "กำหนดค่าคอลัมน์ที่แสดง",
+    columnReorder: "ลากเพื่อเรียงลำดับ {column} หรือใช้ปุ่มลูกศรขึ้น/ลง",
     copyNames: "คัดลอกชื่อ",
     copySelectedNames: "คัดลอกชื่อที่เลือก",
     copyOptions: "คัดลอกตัวเลือก",

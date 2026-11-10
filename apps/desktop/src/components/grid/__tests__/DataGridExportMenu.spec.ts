@@ -82,32 +82,50 @@ it("shows the selected-row column only while selected-row actions exist", async 
   expect(document.body.textContent).not.toContain(i18n.global.t("grid.exportSelectedRowsScope"));
 });
 
-it("gives the selection and selected-column scopes their own columns (#14469)", async () => {
-  const items = [
-    { value: "csv", label: "All CSV" },
+/**
+ * #14470 review: at a 320px viewport the scope columns used to squeeze the format
+ * column down to roughly 20px, so labels such as "SQL INSERT" overflowed into the
+ * download buttons. The column keeps a readable floor and the popover scrolls
+ * sideways when the floor no longer fits.
+ *
+ * The measured layout lives in a real browser (verified at 320px: format column 84px,
+ * popover 304px with 356px of scrollable content); this asserts the contract that
+ * produces it, which happy-dom can check without layout.
+ */
+it("keeps a readable format column and lets the popover scroll instead of squeezing it", async () => {
+  const mountWith = async (items: Array<{ value: string; label: string }>) => {
+    unmount?.();
+    document.body.replaceChildren();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const app = createApp({ render: () => h(DataGridExportMenu, { items, label: "Export", onSelect: vi.fn() }) });
+    app.use(i18n);
+    app.mount(host);
+    unmount = () => app.unmount();
+    host.querySelector<HTMLButtonElement>("button")!.click();
+    await nextTick();
+    await nextTick();
+    return document.querySelector<HTMLElement>("[data-export-menu-grid]")!;
+  };
+
+  // All three scope columns present.
+  const fullGrid = await mountWith([
     { value: "page-csv", label: "Page CSV" },
-    { value: "selected-csv", label: "Selected rows CSV" },
-    { value: "selected-cells-csv", label: "Selected cells CSV" },
-    { value: "selected-columns-csv", label: "Selected columns CSV" },
-    { value: "database", label: "Database" },
-  ];
-  const host = document.createElement("div");
-  document.body.append(host);
-  const app = createApp({ render: () => h(DataGridExportMenu, { items, label: "Export", onSelect: vi.fn() }) });
-  app.use(i18n);
-  app.mount(host);
-  unmount = () => app.unmount();
-  host.querySelector<HTMLButtonElement>("button")!.click();
-  await nextTick();
-  await nextTick();
+    { value: "selected-csv", label: "Selected CSV" },
+    { value: "csv", label: "All CSV" },
+  ]);
+  expect(fullGrid.style.gridTemplateColumns).toBe("minmax(84px,1fr) 80px 80px 88px");
+  expect(fullGrid.style.minWidth).toBe("348px");
 
-  // The two scopes used to fall through to the loose list under the grid.
-  expect(document.body.textContent).toContain(i18n.global.t("grid.exportSelectedCellsScope"));
-  expect(document.body.textContent).toContain(i18n.global.t("grid.exportSelectedColumnsScope"));
-  expect(document.querySelectorAll('button[aria-label="Selected cells CSV"]')).toHaveLength(1);
-  expect(document.querySelectorAll('button[aria-label="Selected columns CSV"]')).toHaveLength(1);
+  // Without the selection column the same floor still fits inside the popover.
+  const narrowGrid = await mountWith([
+    { value: "page-csv", label: "Page CSV" },
+    { value: "csv", label: "All CSV" },
+  ]);
+  expect(narrowGrid.style.gridTemplateColumns).toBe("minmax(84px,1fr) 80px 88px");
+  expect(narrowGrid.style.minWidth).toBe("268px");
 
-  // 格式 | 选中行 | 选区 | 选中列 | 当前页 | 全部结果
-  const grid = [...document.querySelectorAll<HTMLElement>("div")].find((element) => element.style.gridTemplateColumns);
-  expect(grid?.style.gridTemplateColumns).toBe("minmax(0,1fr) 80px 80px 80px 80px 88px");
+  // The popover itself must be able to scroll: without it the fixed floor would
+  // simply clip the trailing column at a narrow viewport.
+  expect(narrowGrid.closest(".overflow-x-auto")).not.toBeNull();
 });

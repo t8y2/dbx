@@ -284,7 +284,8 @@ function connectionNodeWithTableGroups(...databases: string[]): { root: TreeNode
 
 function indexEnvelope(entries: Array<{ name: string; tableType: string; schema?: string }>, cachedAt = Date.now()) {
   return encodeSchemaTreeCache<TreeNode[]>([], cachedAt, {
-    version: 2,
+    // Version 3 includes both the owning schema and partition parent metadata.
+    version: 3,
     complete: true,
     indexedAt: new Date(cachedAt).toISOString(),
     entries,

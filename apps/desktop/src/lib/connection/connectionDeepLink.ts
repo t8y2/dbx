@@ -358,10 +358,7 @@ function normalizePluginToken(value: string): string {
  * `database_type` 排在最后，是因为一个插件可能注册多个提供者，而类型名（如 `ssh`）
  * 只保证插件与宿主之间唯一。
  */
-export function connectionDeepLinkPluginProviderForType(
-  type: string,
-  providers: readonly ConnectionDeepLinkPluginProvider[] | undefined,
-): ConnectionDeepLinkPluginProvider | undefined {
+export function connectionDeepLinkPluginProviderForType(type: string, providers: readonly ConnectionDeepLinkPluginProvider[] | undefined): ConnectionDeepLinkPluginProvider | undefined {
   if (!providers?.length) return undefined;
   const key = normalizePluginToken(type);
   if (!key) return undefined;
@@ -372,11 +369,7 @@ export function connectionDeepLinkPluginProviderForType(
     const providerId = key.slice(separator + 1);
     return providers.find((entry) => normalizePluginToken(entry.pluginId) === pluginId && normalizePluginToken(entry.providerId) === providerId);
   }
-  return (
-    providers.find((entry) => normalizePluginToken(entry.providerId) === key) ??
-    providers.find((entry) => normalizePluginToken(entry.pluginId) === key) ??
-    providers.find((entry) => entry.databaseType !== undefined && normalizePluginToken(entry.databaseType) === key)
-  );
+  return providers.find((entry) => normalizePluginToken(entry.providerId) === key) ?? providers.find((entry) => normalizePluginToken(entry.pluginId) === key) ?? providers.find((entry) => entry.databaseType !== undefined && normalizePluginToken(entry.databaseType) === key);
 }
 
 export function parseConnectionDeepLink(value: string, options: ConnectionDeepLinkOptions = {}): ConnectionDeepLinkDraft | null {

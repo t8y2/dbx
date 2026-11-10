@@ -68,9 +68,7 @@ describe("plugin connection deep links", () => {
   });
 
   it("refuses a DSN for plugin connections instead of silently dropping it", () => {
-    expect(() => parseConnectionDeepLink("dbx://connection/new?type=ssh&url=ssh%3A%2F%2Froot%4010.0.0.9%3A22", { pluginProviders: [SSH_PLUGIN] })).toThrow(
-      /does not accept a database URL/,
-    );
+    expect(() => parseConnectionDeepLink("dbx://connection/new?type=ssh&url=ssh%3A%2F%2Froot%4010.0.0.9%3A22", { pluginProviders: [SSH_PLUGIN] })).toThrow(/does not accept a database URL/);
   });
 
   it("keeps service and one-time semantics intact for plugin drafts", () => {

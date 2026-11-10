@@ -85,18 +85,33 @@ describe("sidebar search for view groups (#12901)", () => {
     expect(plain[0]?.children?.map((node) => node.label)).toEqual(["users"]);
   });
 
-  it("matches a schema-qualified query against indexed entries by their parent schema (#14316)", () => {
+  it("matches a schema-qualified query against indexed entries by their own schema (#14316)", () => {
     const databaseNode: TreeNode = { id: "conn:db", label: "app", type: "database", connectionId: "conn", database: "app", isExpanded: true, children: [] };
     const filtered = filterLocallySearchedTables([databaseNode], {
       enabled: true,
       queries: { "conn:db": "public.users" },
       indexedResults: {
         "conn:db": [
-          { name: "users", table_type: "TABLE", parent_schema: "public" },
-          { name: "users", table_type: "TABLE", parent_schema: "audit" },
+          { name: "users", table_type: "TABLE", schema: "public" },
+          { name: "users", table_type: "TABLE", schema: "audit" },
         ],
       },
     });
     expect(filtered[0]?.children?.map((node) => node.label)).toEqual(["users"]);
+  });
+
+  it("never reads a partitioned parent's schema as the object's schema (#14316 review)", () => {
+    // Drivers put the partitioned parent table's schema in `parent_schema`, so an
+    // entry that only has one must not satisfy a `public.users` query: that is how
+    // ordinary tables went missing and partition children matched the wrong schema.
+    const databaseNode: TreeNode = { id: "conn:db", label: "app", type: "database", connectionId: "conn", database: "app", isExpanded: true, children: [] };
+    const filtered = filterLocallySearchedTables([databaseNode], {
+      enabled: true,
+      queries: { "conn:db": "public.users" },
+      indexedResults: {
+        "conn:db": [{ name: "users", table_type: "TABLE", parent_schema: "public" }],
+      },
+    });
+    expect(filtered[0]?.children).toEqual([]);
   });
 });

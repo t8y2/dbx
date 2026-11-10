@@ -4,9 +4,20 @@ export interface TableSearchIndexEntry {
   name: string;
   tableType: string;
   comment?: string | null;
+  /**
+   * Schema that owns this object. `TableInfo.parent_schema` is the partitioned
+   * parent table's schema, so it cannot stand in for it (#14316 review).
+   */
+  schema?: string;
 }
 
 export interface TableSearchIndex {
+  /**
+   * Bumped when the entry shape changes in a way older caches cannot satisfy.
+   * Version 2 adds `schema`; version 1 indexes are discarded and rebuilt so a
+   * stale cache never answers `schema.table` searches from unattributed names.
+   */
+  version: 2;
   complete: true;
   indexedAt: string;
   entries: TableSearchIndexEntry[];
@@ -78,9 +89,11 @@ export function encodeSchemaTreeCache<T>(children: T, nowMs = Date.now(), tableS
 function decodeTableSearchIndex(value: unknown): TableSearchIndex | undefined {
   if (!value || typeof value !== "object") return undefined;
   const index = value as Partial<TableSearchIndex>;
-  if (index.complete !== true || typeof index.indexedAt !== "string" || !Array.isArray(index.entries)) return undefined;
-  const entries = index.entries.filter((entry): entry is TableSearchIndexEntry => !!entry && typeof entry.name === "string" && typeof entry.tableType === "string" && (entry.comment === undefined || entry.comment === null || typeof entry.comment === "string"));
-  return entries.length === index.entries.length ? { complete: true, indexedAt: index.indexedAt, entries } : undefined;
+  if (index.version !== 2 || index.complete !== true || typeof index.indexedAt !== "string" || !Array.isArray(index.entries)) return undefined;
+  const entries = index.entries.filter(
+    (entry): entry is TableSearchIndexEntry => !!entry && typeof entry.name === "string" && typeof entry.tableType === "string" && (entry.comment === undefined || entry.comment === null || typeof entry.comment === "string") && (entry.schema === undefined || typeof entry.schema === "string"),
+  );
+  return entries.length === index.entries.length ? { version: 2, complete: true, indexedAt: index.indexedAt, entries } : undefined;
 }
 
 export function decodeSchemaTreeCache<T>(payload: unknown, nowMs = Date.now(), ttlMs = SCHEMA_TREE_CACHE_TTL_MS): DecodedSchemaTreeCache<T> | null {

@@ -1234,9 +1234,11 @@ describe("connectionStore metadata loading", () => {
     const treeCache = decodeSchemaTreeCache<TreeNode[]>(cachedPayloads.get(treeCacheKey));
     const indexCache = decodeSchemaTreeCache<TreeNode[]>(cachedPayloads.get(indexCacheKey));
     expect(treeCache?.children.map((node) => node.label)).toEqual(["fresh_table"]);
-    // The local table index preserves comments for regex search matching.
-    expect(indexCache?.tableSearchIndex?.entries).toEqual([{ name: "indexed_table", tableType: "TABLE", comment: null }]);
-    await expect(store.loadSidebarTableSearchIndex(tablesGroup.id)).resolves.toEqual([{ name: "indexed_table", table_type: "TABLE", comment: null }]);
+    // The local table index preserves comments for regex search matching and the
+    // owning schema so a cached index still answers `schema.table` queries.
+    expect(indexCache?.tableSearchIndex?.version).toBe(2);
+    expect(indexCache?.tableSearchIndex?.entries).toEqual([{ name: "indexed_table", tableType: "TABLE", comment: null, schema: "public" }]);
+    await expect(store.loadSidebarTableSearchIndex(tablesGroup.id)).resolves.toEqual([{ name: "indexed_table", table_type: "TABLE", comment: null, schema: "public" }]);
     // The refreshed index is served from the in-memory cache; refreshing
     // additionally registers the scope by reading the sidebar index manifest.
     expect(loadSchemaCache).toHaveBeenLastCalledWith("dbx:sidebar-table-search-index-manifest-v1");

@@ -119,6 +119,8 @@ function filterLocallySearchedTableNodes(nodes: TreeNode[], options: LocalTableS
     const indexed = options.indexedResults[node.id];
     // A "schema.table" query names the scope it wants, so only that schema's objects
     // match; a plain query keeps the historical name/comment matching (#14316).
+    // The schema comes from the entry's own attribution, never from `parent_schema`
+    // (that field is the partitioned parent's schema).
     const qualified = splitQualifiedLocalTableQuery(query);
     const nameQuery = qualified?.name ?? query;
     const scopeMatches = (schema: string | null | undefined) => {
@@ -146,7 +148,7 @@ function filterLocallySearchedTableNodes(nodes: TreeNode[], options: LocalTableS
                 database: node.database || "",
                 schema: node.schema,
                 catalog: node.catalog,
-                entries: indexed.filter((entry) => entryMatches(entry.name, entry.comment, entry.parent_schema)),
+                entries: indexed.filter((entry) => entryMatches(entry.name, entry.comment, entry.schema)),
               }),
               flatChildren,
             )

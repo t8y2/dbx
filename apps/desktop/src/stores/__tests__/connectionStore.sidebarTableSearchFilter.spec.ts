@@ -101,6 +101,32 @@ describe("sidebar table search index respects the per-connection table filter", 
     expect(call[8]).toBeUndefined();
   }, 20_000);
 
+  it("attributes every indexed row to the schema that was queried (#14316 review)", async () => {
+    const { store, listTables } = await setup();
+    // A database node that already lists its schemas is indexed one schema at a
+    // time: the backend returns no owning schema, so the query scope is the only
+    // source of truth, and `parent_schema` means the partitioned parent table.
+    const database = store.treeNodes[0].children![0];
+    database.children = ["public", "audit"].map((schema) => ({
+      id: `conn-a:app:${schema}`,
+      label: schema,
+      type: "schema" as const,
+      connectionId: "conn-a",
+      database: "app",
+      schema,
+      isExpanded: true,
+      children: [],
+    }));
+    listTables.mockImplementation(async (...args: unknown[]) => (args[2] === "public" ? [{ name: "users", table_type: "BASE TABLE" }] : [{ name: "users", table_type: "BASE TABLE", parent_schema: "public", parent_name: "users" }]));
+
+    const entries = await store.refreshSidebarTableSearchIndex(database.id);
+
+    expect((entries ?? []).map((entry) => [entry.schema, entry.name])).toEqual([
+      ["public", "users"],
+      ["audit", "users"],
+    ]);
+  }, 20_000);
+
   it("drops the stale index when the table filter changes and rebuilds with the filter", async () => {
     const { store, listTables } = await setup();
     const group = tablesGroupNode(store);

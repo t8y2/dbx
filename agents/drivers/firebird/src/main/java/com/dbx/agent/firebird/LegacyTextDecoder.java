@@ -6,9 +6,22 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.util.Properties;
+import org.firebirdsql.encodings.EncodingDefinition;
+import org.firebirdsql.encodings.EncodingFactory;
 
-/** Explicit, read-only recovery of legacy text stored as Latin-1 byte containers. */
+/** Explicit compatibility with legacy text stored as Latin-1 byte containers. */
 final class LegacyTextDecoder {
+    static void configureWrites(Properties properties, Charset charset) {
+        EncodingDefinition encoding = EncodingFactory.getPlatformDefault().getEncodingDefinition(
+            properties.getProperty("encoding"), properties.getProperty("charSet"));
+        if (encoding != null && "ISO8859_1".equalsIgnoreCase(encoding.getFirebirdEncodingName())) {
+            // Keep the server's byte-container charset while encoding SQL text in the actual data charset.
+            properties.setProperty("encoding", "ISO8859_1");
+            properties.setProperty("charSet", charset.name());
+        }
+    }
+
     static Charset charsetFromUrl(String url) {
         int query = url.indexOf('?');
         String charset = null;

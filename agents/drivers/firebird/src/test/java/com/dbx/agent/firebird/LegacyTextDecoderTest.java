@@ -2,6 +2,11 @@ package com.dbx.agent.firebird;
 
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Properties;
+import org.firebirdsql.encodings.EncodingDefinition;
+import org.firebirdsql.encodings.EncodingFactory;
+import org.firebirdsql.jdbc.FBDriver;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -31,6 +36,37 @@ class LegacyTextDecoderTest {
             Charset charset = Charset.forName(name);
             String latin1 = new String("中文".getBytes(charset), StandardCharsets.ISO_8859_1);
             assertEquals("中文", LegacyTextDecoder.decode(latin1, charset));
+        }
+    }
+
+    @Test
+    void encodesSqlInTheDataCharsetWhileKeepingTheServerLatin1Charset() throws Exception {
+        for (String charset : List.of("GBK", "GB18030", "Big5")) {
+            for (String params : List.of("charSet=ISO8859_1", "local_encoding=ISO-8859-1",
+                "encoding=ISO8859_1", "lc_ctype=ISO8859_1&charset=ISO8859_1")) {
+                Properties properties = new Properties();
+                properties.putAll(FBDriver.normalizeProperties("jdbc:firebirdsql:x?" + params, null));
+                LegacyTextDecoder.configureWrites(properties, Charset.forName(charset));
+                EncodingDefinition encoding = EncodingFactory.getPlatformDefault().getEncodingDefinition(
+                    properties.getProperty("encoding"), properties.getProperty("charSet"));
+                assertEquals("ISO8859_1", encoding.getFirebirdEncodingName());
+                assertArrayEquals("中文".getBytes(Charset.forName(charset)),
+                    encoding.getEncoding().encodeToCharset("中文"));
+                String stored = new String(encoding.getEncoding().encodeToCharset("中文"), StandardCharsets.ISO_8859_1);
+                assertEquals("中文", LegacyTextDecoder.decode(stored, Charset.forName(charset)));
+            }
+        }
+    }
+
+    @Test
+    void leavesOtherConnectionCharsetsUnchanged() throws Exception {
+        for (String params : List.of("", "charSet=UTF8", "charSet=GBK", "encoding=NONE&charSet=ISO8859_1")) {
+            Properties properties = new Properties();
+            properties.putAll(FBDriver.normalizeProperties("jdbc:firebirdsql:x?" + params, null));
+            Properties original = new Properties();
+            original.putAll(properties);
+            LegacyTextDecoder.configureWrites(properties, GBK);
+            assertEquals(original, properties);
         }
     }
 

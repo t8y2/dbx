@@ -1560,6 +1560,7 @@ function onClick(event: MouseEvent) {
 }
 
 function onDoubleClick(event: MouseEvent) {
+  if (props.node.type === "table" && settingsStore.editorSettings.sidebarTableClickNavigation && (event.shiftKey || event.ctrlKey || event.metaKey)) return;
   if (props.node.type === "oracle-db-link" || props.node.type === "oracle-db-links") {
     showDatabaseLinks.value = true;
     return;

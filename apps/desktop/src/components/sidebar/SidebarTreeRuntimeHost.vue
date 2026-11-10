@@ -192,7 +192,8 @@ import { requestOracleTypeManagement } from "@/lib/table/oracleTypeManagementReq
 import { qualifiedNameForSidebarNode } from "@/lib/sidebar/sidebarTableNameCopy";
 import { schemaIndexIsSameOwner, schemaIndexNodeIdentity } from "@/lib/table/schemaIndexNavigation";
 import { mongoCollectionTableTypeFromNode, mongoCreateDatabasePreview, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
-import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
+import { dataTabOpenModeFromTreeClick, isSameHBaseTable, isSameTable, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
+import { supersedeSidebarDataNavigation } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isEditSidebarTableStructureShortcut, isModRShortcut, isPasteSidebarSelectionShortcut, isRefreshDataShortcut } from "@/lib/editor/keyboardShortcuts";
 import { handleSidebarTreeDeleteShortcut } from "@/lib/sidebar/sidebarTreeDeleteShortcut";
 import { sidebarNodeSupportsStructureEdit } from "@/lib/sidebar/sidebarTreeStructureShortcut";
@@ -9125,11 +9126,19 @@ function handleRowClick(node: TreeNode, clickDetail: number, tableClickNavigatio
   activateRuntimeNode(node);
   // Only pointer clicks opt into this policy; search Enter keeps its existing action.
   if (tableClickNavigation && node.type === "table" && settingsStore.editorSettings.sidebarTableClickNavigation) {
-    const existing = findExistingSameTableDataTab();
-    if (existing) {
-      beginNavigationRequest();
-      queryStore.switchTab(existing.id);
-    }
+    if (!hasNodeDatabaseContext(node)) return;
+    const config = connectionStore.getConfig(node.connectionId);
+    const target = {
+      connectionId: node.connectionId,
+      database: node.database,
+      catalog: node.catalog,
+      schema: connectionObjectTreeNodeSchema(config, node.database, node.schema),
+      tableName: node.label,
+    };
+    const existing = queryStore.tabs.find((tab) => (config?.db_type === "hbase" ? isSameHBaseTable(tab, target) : isSameTable(tab, target)));
+    supersedeSidebarDataNavigation(node.id);
+    beginNavigationRequest();
+    if (existing) queryStore.switchTab(existing.id);
     return;
   }
   runRowClickAction(clickDetail);

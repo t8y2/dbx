@@ -1131,7 +1131,9 @@ pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
     } else {
         ensure_semicolon(source)
     };
-    if Regex::new(r"(?i)^(?:CREATE|ALTER)\s+").unwrap().is_match(source) {
+    // 达梦的 DBMS_METADATA.GET_DDL 回放建视图的原始脚本，前面可能带 `--` 注释，
+    // 必须跳过前导注释再判断，否则会在完整 CREATE 外再包一层（重复包装）。
+    if source_starts_with_create_or_alter(source) {
         return terminated_source;
     }
 
@@ -1452,7 +1454,10 @@ fn source_starts_with_create_or_alter(source: &str) -> bool {
     Regex::new(r"(?i)^(?:CREATE|ALTER)\s+").unwrap().is_match(executable)
 }
 
-fn source_starts_with_create(source: &str) -> bool {
+/// Whether the source already carries its own `CREATE` statement, skipping any
+/// leading SQL comments (Dameng replays creation scripts verbatim, comments
+/// included, so a plain `starts_with("CREATE")` misclassifies them).
+pub fn source_starts_with_create(source: &str) -> bool {
     let executable = &source[leading_sql_statement_start(source)..];
     Regex::new(r"(?i)^CREATE\s+").unwrap().is_match(executable)
 }
@@ -1481,7 +1486,10 @@ fn executable_postgres_view_ddl(source: &str) -> Option<String> {
     None
 }
 
-fn leading_sql_statement_start(source: &str) -> usize {
+/// Byte offset of the first executable token, skipping leading whitespace and
+/// `--` / `/* */` comments. Dameng replays creation scripts verbatim (comments
+/// included), so DDL detection must look past them.
+pub fn leading_sql_statement_start(source: &str) -> usize {
     let mut index = 0;
     loop {
         index = skip_sql_whitespace(source, index);
@@ -4242,6 +4250,50 @@ mod tests {
         );
 
         assert_eq!(sql, "CREATE VIEW `active_users` AS SELECT `id` FROM `users`;");
+    }
+
+    #[test]
+    fn dameng_view_ddl_with_leading_comment_and_create_is_not_double_wrapped() {
+        // 达梦 DBMS_METADATA.GET_DDL 回放建视图的原始脚本，前面可能带 `--` 注释；
+        // 跳过注释后已经是完整 CREATE，就不能再包一层 CREATE VIEW（重复包装）。
+        let source =
+            "-- 2. 再创建物资出库明细视图\nCREATE OR REPLACE VIEW \"MISTEST\".\"MR_MATERIAL_IO_DETAIL_V\" AS\nSELECT 1 FROM DUAL";
+        let ddl = build_view_ddl_sql(BuildViewDdlInput {
+            database_type: Some(DatabaseType::Dameng),
+            schema: Some("MISTEST".to_string()),
+            name: "MR_MATERIAL_IO_DETAIL_V".to_string(),
+            source: source.to_string(),
+            identifier_quote: None,
+        });
+
+        assert_eq!(ddl, format!("{source};"));
+    }
+
+    #[test]
+    fn view_ddl_with_leading_block_comment_and_create_is_not_double_wrapped() {
+        let source = "/* export banner */\nCREATE OR REPLACE VIEW \"public\".\"v\" AS\nSELECT 1";
+        let ddl = build_view_ddl_sql(BuildViewDdlInput {
+            database_type: Some(DatabaseType::Postgres),
+            schema: Some("public".to_string()),
+            name: "v".to_string(),
+            source: source.to_string(),
+            identifier_quote: None,
+        });
+
+        assert_eq!(ddl, format!("{source};"));
+    }
+
+    #[test]
+    fn view_ddl_still_wraps_comment_prefixed_bare_body_exactly_once() {
+        let ddl = build_view_ddl_sql(BuildViewDdlInput {
+            database_type: Some(DatabaseType::Dameng),
+            schema: Some("MISTEST".to_string()),
+            name: "V".to_string(),
+            source: "-- 归还统计\nSELECT 1 FROM DUAL".to_string(),
+            identifier_quote: None,
+        });
+
+        assert_eq!(ddl, "CREATE VIEW \"MISTEST\".\"V\" AS\n-- 归还统计\nSELECT 1 FROM DUAL;");
     }
 
     #[test]

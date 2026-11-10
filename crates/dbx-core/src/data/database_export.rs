@@ -6456,7 +6456,7 @@ fn build_database_export_object_source_sql_unwrapped(
 ) -> String {
     let wrapped_source;
     let source = if matches!(object_type, ObjectSourceKind::View | ObjectSourceKind::MaterializedView)
-        && !source.trim().to_ascii_uppercase().starts_with("CREATE")
+        && !crate::object_source_sql::source_starts_with_create(source)
     {
         wrapped_source = crate::object_source_sql::build_view_ddl_sql(crate::object_source_sql::BuildViewDdlInput {
             database_type: Some(database_type),
@@ -7298,6 +7298,21 @@ mod tests {
             false,
         );
         assert_eq!(ddl, "CREATE VIEW \"v_users\" AS SELECT id FROM public.users;");
+    }
+
+    #[test]
+    fn dameng_view_definition_with_leading_comment_and_create_is_not_double_wrapped() {
+        // 达梦 GET_DDL 回放的建视图脚本以 `--` 注释开头，导出时不能再包一层 CREATE VIEW。
+        let view_def = "-- 2. 再创建物资出库明细视图\nCREATE OR REPLACE VIEW \"MISTEST\".\"V\" AS\nSELECT 1 FROM DUAL;";
+        let ddl = build_database_export_object_source_sql(
+            DatabaseType::Dameng,
+            &ObjectSourceKind::View,
+            "V",
+            view_def,
+            "MISTEST",
+            false,
+        );
+        assert_eq!(ddl, view_def);
     }
 
     #[test]

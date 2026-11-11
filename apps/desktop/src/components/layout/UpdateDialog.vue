@@ -339,7 +339,7 @@ watch(
   <Dialog :open="open" @update:open="handleOpenChange">
     <DialogContent
       class="sm:max-w-[700px]"
-      :class="'flex max-h-[min(720px,calc(var(--dbx-viewport-height)-48px))] flex-col gap-0 overflow-hidden p-0'"
+      :class="'flex h-[min(720px,calc(var(--dbx-viewport-height)-48px))] flex-col gap-0 overflow-hidden p-0'"
       :show-close-button="!isCloseBlocked"
       @open-auto-focus="handleOpenAutoFocus"
       @interact-outside="

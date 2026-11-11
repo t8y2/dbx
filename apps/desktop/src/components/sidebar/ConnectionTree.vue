@@ -19,6 +19,7 @@ import {
   filterSidebarTreeToConnectedConnections,
   findNodePathByIdentity,
   mergeSidebarRegexIndexScopes,
+  overlayProjectedTableGroupChildren,
   resolveSidebarFilterGuards,
   type SidebarRegexIndexScope,
   type SidebarRegexScopeIdentity,
@@ -765,6 +766,9 @@ watch(
       delete nextResults[scope.parentNodeId];
       localTableSearchDebouncer.cancel(scope.parentNodeId);
       pendingInvalidatedTableSearchScopes.set(invalidatedTableSearchScopeKey(scope), scope);
+      // Projected table groups were built from the invalidated index snapshot;
+      // drop them so the next expansion reloads fresh metadata (#14748).
+      store.clearProjectedTableGroupChildrenForConnection(scope.connectionId);
     }
     localTableSearchResults.value = nextResults;
     refreshPendingInvalidatedTableSearchScopes();
@@ -781,6 +785,10 @@ const filteredNodes = computed(() => {
   nodes = filterLocallySearchedTables(nodes, { enabled: settingsStore.editorSettings.sidebarTableSearchLocal, queries: store.sidebarTableSearchQueries, indexedResults: localTableSearchResults.value });
   nodes = filterGloballyIndexedTables(nodes);
   nodes = mergeSidebarRemoteSearchResults(nodes, remoteSearchResults.value);
+  // Table rows reached only through a search projection keep their loaded
+  // metadata groups in the store's side map; attach them here so expanding a
+  // projected row shows 字段/索引 groups like a live row would (#14748).
+  nodes = overlayProjectedTableGroupChildren(nodes, store.projectedTableGroupChildren, store.projectedTableGroupCollapsedIds);
 
   const q = deferredSearchQuery.value;
   nodes = filterSidebarTree(nodes, q, searchCollapsedIds.value, searchableNodeTypes.value, {

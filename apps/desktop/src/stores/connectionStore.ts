@@ -33,6 +33,7 @@ import type {
   TableNameFilter,
   TableInfo,
   TreeNode,
+  TreeNodeType,
   TriggerInfo,
   VectorCollectionMeta,
 } from "@/types/database";
@@ -622,6 +623,51 @@ export const useConnectionStore = defineStore("connection", () => {
   let sidebarTableSearchIndexManifest: TableSearchIndexManifestEntry[] | null = null;
   let sidebarTableSearchIndexManifestInFlight: Promise<TableSearchIndexManifestEntry[]> | null = null;
   let sidebarTableSearchIndexManifestWriteQueue: Promise<void> = Promise.resolve();
+  // Search projections (local table search, global index merge, remote merge)
+  // render table rows that were never loaded into the live tree. Loading the
+  // metadata groups of such a row stores the built children here, keyed by the
+  // row id, so the render pipeline can overlay them onto the freshly
+  // re-projected row (#14748). Collapsed projected rows are tracked separately
+  // because every re-projection creates a new row object whose expansion flag
+  // would otherwise reset to the builder default.
+  const projectedTableGroupChildren = ref(new Map<string, TreeNode[]>());
+  const projectedTableGroupCollapsedIds = ref(new Set<string>());
+
+  function findProjectedTableGroupNode(nodeId: string): TreeNode | null {
+    for (const children of projectedTableGroupChildren.value.values()) {
+      const found = findNode(children, nodeId);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  /** Live tree first; search-projected groups serve as the fallback (#14748). */
+  function findTreeNodeOrProjected(nodeId: string): TreeNode | null {
+    return findNode(treeNodes.value, nodeId) ?? findProjectedTableGroupNode(nodeId);
+  }
+
+  function clearProjectedTableGroupChildrenForConnection(connectionId: string) {
+    if (projectedTableGroupChildren.value.size === 0) return;
+    // Deleting the visited entry during Map/Set iteration is safe — we only
+    // ever remove, never add.
+    for (const id of projectedTableGroupChildren.value.keys()) {
+      if (id === connectionId || id.startsWith(`${connectionId}:`)) projectedTableGroupChildren.value.delete(id);
+    }
+    for (const id of projectedTableGroupCollapsedIds.value) {
+      if (id === connectionId || id.startsWith(`${connectionId}:`)) projectedTableGroupCollapsedIds.value.delete(id);
+    }
+  }
+
+  /** Collapse/expand a search-projected table row; live rows manage their own flag. */
+  function setProjectedTableGroupExpanded(nodeId: string, expanded: boolean) {
+    if (!projectedTableGroupChildren.value.has(nodeId)) return;
+    // The same table id can exist in the live tree (loaded normally) and as a
+    // projection; only the projection reads this flag, so never touch it from a
+    // live-row toggle.
+    if (findNode(treeNodes.value, nodeId)) return;
+    if (expanded) projectedTableGroupCollapsedIds.value.delete(nodeId);
+    else projectedTableGroupCollapsedIds.value.add(nodeId);
+  }
   const sidebarTableNameFilters = ref<Record<string, TableNameFilter>>(loadSidebarTableNameFilters());
   const sidebarTableNameFilterRevisions = new Map<string, number>();
   const completionTableIndex = new Map<string, { touched: number; tables: SqlCompletionTable[] }>();
@@ -1691,6 +1737,7 @@ export const useConnectionStore = defineStore("connection", () => {
     clearConnectionIdentifierQuote(connectionId);
     clearConnectionNodeLoading(connectionId);
     clearConnectionHealthCheck(connectionId);
+    clearProjectedTableGroupChildrenForConnection(connectionId);
     if (activeConnectionId.value === connectionId) activeConnectionId.value = null;
     recordConnectionError(connectionId, error);
     // 被动断链同样是元数据生命周期边界：查询/健康检查发现连接已失效后，
@@ -4439,15 +4486,12 @@ export const useConnectionStore = defineStore("connection", () => {
     return load.reclaim(treeNodeInSidebarTree(node) ?? node);
   }
 
-  function treeNodeLoadTarget(load: TreeNodeLoadHandle): TreeNode | null {
-    return load.targetNode(
-      (nodeId) => findNode(treeNodes.value, nodeId),
-      (connectionId) => connectedIds.value.has(connectionId),
-    ) as TreeNode | null;
+  function treeNodeLoadTarget(load: TreeNodeLoadHandle, findLive: (nodeId: string) => TreeNode | null = findTreeNodeOrProjected): TreeNode | null {
+    return load.targetNode(findLive, (connectionId) => connectedIds.value.has(connectionId)) as TreeNode | null;
   }
 
-  function finishTreeNodeLoad(load: TreeNodeLoadHandle) {
-    load.finish((nodeId) => findNode(treeNodes.value, nodeId));
+  function finishTreeNodeLoad(load: TreeNodeLoadHandle, findLive: (nodeId: string) => TreeNode | null = findTreeNodeOrProjected) {
+    load.finish(findLive);
   }
 
   /** Apply to a related node only while this load handle is still current. */
@@ -8415,40 +8459,68 @@ export const useConnectionStore = defineStore("connection", () => {
     return normalizeSidebarObjectKind(type);
   }
 
-  async function loadTableGroups(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string) {
-    const parentId = nodeId ?? (schema ? `${connectionId}:${database}:${schema}:${table}` : `${connectionId}:${database}:${table}`);
-    const node = findNode(treeNodes.value, parentId);
-    if (!node) return;
-    let load = beginTreeNodeLoad(node);
+  async function buildTableGroupChildren(parentId: string, connectionId: string, database: string, table: string, schema: string | undefined, catalog: string | undefined, node: TreeNode): Promise<TreeNode[]> {
+    const children: TreeNode[] = [
+      ...tablePartitionGroups(node),
+      {
+        id: `${parentId}:__columns`,
+        label: "tree.columns",
+        type: "group-columns",
+        connectionId,
+        database,
+        schema,
+        catalog,
+        tableName: table,
+        isExpanded: false,
+        children: [],
+      },
+    ];
 
-    try {
-      const children: TreeNode[] = [
-        ...tablePartitionGroups(node),
-        {
-          id: `${parentId}:__columns`,
-          label: "tree.columns",
-          type: "group-columns",
+    const config = getConfig(connectionId);
+    const effectiveDbType = effectiveDatabaseTypeForConnection(config);
+    const metadataCapabilities = getTableMetadataCapabilities(effectiveDbType);
+    const isXugu = effectiveDbType === "xugu";
+    const supportsXuguChildMetadata = isXugu && node.type === "table" && (await supportsXuguTableChildMetadata());
+    if (supportsXuguChildMetadata) {
+      children.push({
+        id: `${parentId}:__constraints`,
+        label: "tree.constraints",
+        type: "group-constraints",
+        connectionId,
+        database,
+        schema,
+        catalog,
+        tableName: table,
+        isExpanded: false,
+        children: [],
+      });
+    }
+    const isMongoView = node.type === "mongo-collection" && mongoCollectionKindFromNode(node) === "view";
+    if ((node.type === "table" || node.type === "mongo-collection") && !isMongoView && !parseSqlServerLinkedSchema(schema)) {
+      if (metadataCapabilities.indexes && !isXugu) {
+        children.push({
+          id: `${parentId}:__indexes`,
+          label: "tree.indexes",
+          type: "group-indexes",
           connectionId,
           database,
           schema,
           catalog,
           tableName: table,
+          // Keep the Mongo collection kind available to index actions so
+          // views do not offer unsupported index creation or deletion.
+          meta: node.type === "mongo-collection" ? node.meta : undefined,
           isExpanded: false,
           children: [],
-        },
-      ];
-
-      const config = getConfig(connectionId);
-      const effectiveDbType = effectiveDatabaseTypeForConnection(config);
-      const metadataCapabilities = getTableMetadataCapabilities(effectiveDbType);
-      const isXugu = effectiveDbType === "xugu";
-      const supportsXuguChildMetadata = isXugu && node.type === "table" && (await supportsXuguTableChildMetadata());
-      load = reclaimTreeNodeLoad(load, node);
-      if (supportsXuguChildMetadata) {
+        });
+      }
+    }
+    if (node.type === "table" && !parseSqlServerLinkedSchema(schema)) {
+      if (metadataCapabilities.foreignKeys) {
         children.push({
-          id: `${parentId}:__constraints`,
-          label: "tree.constraints",
-          type: "group-constraints",
+          id: `${parentId}:__fkeys`,
+          label: "tree.foreignKeys",
+          type: "group-fkeys",
           connectionId,
           database,
           schema,
@@ -8458,9 +8530,22 @@ export const useConnectionStore = defineStore("connection", () => {
           children: [],
         });
       }
-      const isMongoView = node.type === "mongo-collection" && mongoCollectionKindFromNode(node) === "view";
-      if ((node.type === "table" || node.type === "mongo-collection") && !isMongoView && !parseSqlServerLinkedSchema(schema)) {
-        if (metadataCapabilities.indexes && !isXugu) {
+      if (metadataCapabilities.triggers) {
+        children.push({
+          id: `${parentId}:__triggers`,
+          label: "tree.triggers",
+          type: "group-triggers",
+          connectionId,
+          database,
+          schema,
+          catalog,
+          tableName: table,
+          isExpanded: false,
+          children: [],
+        });
+      }
+      if (isXugu) {
+        if (metadataCapabilities.indexes) {
           children.push({
             id: `${parentId}:__indexes`,
             label: "tree.indexes",
@@ -8470,20 +8555,17 @@ export const useConnectionStore = defineStore("connection", () => {
             schema,
             catalog,
             tableName: table,
-            // Keep the Mongo collection kind available to index actions so
-            // views do not offer unsupported index creation or deletion.
-            meta: node.type === "mongo-collection" ? node.meta : undefined,
             isExpanded: false,
             children: [],
           });
         }
       }
-      if (node.type === "table" && !parseSqlServerLinkedSchema(schema)) {
-        if (metadataCapabilities.foreignKeys) {
-          children.push({
-            id: `${parentId}:__fkeys`,
-            label: "tree.foreignKeys",
-            type: "group-fkeys",
+      if (supportsXuguChildMetadata || effectiveDbType === "oceanbase-oracle") {
+        children.push(
+          {
+            id: `${parentId}:__table-partitions`,
+            label: "tree.partitions",
+            type: "group-table-partitions",
             connectionId,
             database,
             schema,
@@ -8491,13 +8573,11 @@ export const useConnectionStore = defineStore("connection", () => {
             tableName: table,
             isExpanded: false,
             children: [],
-          });
-        }
-        if (metadataCapabilities.triggers) {
-          children.push({
-            id: `${parentId}:__triggers`,
-            label: "tree.triggers",
-            type: "group-triggers",
+          },
+          {
+            id: `${parentId}:__table-subpartitions`,
+            label: "tree.subpartitions",
+            type: "group-table-subpartitions",
             connectionId,
             database,
             schema,
@@ -8505,54 +8585,39 @@ export const useConnectionStore = defineStore("connection", () => {
             tableName: table,
             isExpanded: false,
             children: [],
-          });
-        }
-        if (isXugu) {
-          if (metadataCapabilities.indexes) {
-            children.push({
-              id: `${parentId}:__indexes`,
-              label: "tree.indexes",
-              type: "group-indexes",
-              connectionId,
-              database,
-              schema,
-              catalog,
-              tableName: table,
-              isExpanded: false,
-              children: [],
-            });
-          }
-        }
-        if (supportsXuguChildMetadata || effectiveDbType === "oceanbase-oracle") {
-          children.push(
-            {
-              id: `${parentId}:__table-partitions`,
-              label: "tree.partitions",
-              type: "group-table-partitions",
-              connectionId,
-              database,
-              schema,
-              catalog,
-              tableName: table,
-              isExpanded: false,
-              children: [],
-            },
-            {
-              id: `${parentId}:__table-subpartitions`,
-              label: "tree.subpartitions",
-              type: "group-table-subpartitions",
-              connectionId,
-              database,
-              schema,
-              catalog,
-              tableName: table,
-              isExpanded: false,
-              children: [],
-            },
-          );
-        }
+          },
+        );
       }
+    }
 
+    return children;
+  }
+
+  async function loadTableGroups(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string, nodeType?: TreeNodeType) {
+    const parentId = nodeId ?? (schema ? `${connectionId}:${database}:${schema}:${table}` : `${connectionId}:${database}:${table}`);
+    const liveNode = findNode(treeNodes.value, parentId);
+    if (!liveNode) {
+      // Search projections (local table search, global index merge, remote
+      // merge) render table rows that were never loaded into the live tree, so
+      // there is no live node to attach the groups to. Cache them in the side
+      // map the render pipeline overlays onto the projected row (#14748);
+      // re-expansion reuses the cache so already-loaded columns survive.
+      const stored = projectedTableGroupChildren.value.get(parentId);
+      if (stored) {
+        projectedTableGroupCollapsedIds.value.delete(parentId);
+        return;
+      }
+      const node: TreeNode = { id: parentId, label: table, type: nodeType ?? "table", connectionId, database, schema, catalog, isExpanded: true, children: [] };
+      projectedTableGroupChildren.value.set(parentId, await buildTableGroupChildren(parentId, connectionId, database, table, schema, catalog, node));
+      projectedTableGroupCollapsedIds.value.delete(parentId);
+      return;
+    }
+    const node = liveNode;
+    let load = beginTreeNodeLoad(node);
+
+    try {
+      const children = await buildTableGroupChildren(parentId, connectionId, database, table, schema, catalog, node);
+      load = reclaimTreeNodeLoad(load, node);
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
       setChildren(targetNode, children);
@@ -8564,7 +8629,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function loadColumns(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string, options?: { preserveExpansion?: boolean }) {
     const parentId = nodeId ?? (schema ? `${connectionId}:${database}:${schema}:${table}:__columns` : `${connectionId}:${database}:${table}:__columns`);
-    const node = findNode(treeNodes.value, parentId);
+    const node = findNode(treeNodes.value, parentId) ?? findProjectedTableGroupNode(parentId);
     if (!node) return;
 
     const load = beginTreeNodeLoad(node);
@@ -8629,7 +8694,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function loadIndexes(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string) {
     const parentId = nodeId ?? (schema ? `${connectionId}:${database}:${schema}:${table}:__indexes` : `${connectionId}:${database}:${table}:__indexes`);
-    const node = findNode(treeNodes.value, parentId);
+    const node = findNode(treeNodes.value, parentId) ?? findProjectedTableGroupNode(parentId);
     if (!node) return;
 
     const load = beginTreeNodeLoad(node);
@@ -8673,7 +8738,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function loadForeignKeys(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string) {
     const parentId = nodeId ?? (schema ? `${connectionId}:${database}:${schema}:${table}:__fkeys` : `${connectionId}:${database}:${table}:__fkeys`);
-    const node = findNode(treeNodes.value, parentId);
+    const node = findNode(treeNodes.value, parentId) ?? findProjectedTableGroupNode(parentId);
     if (!node) return;
 
     const load = beginTreeNodeLoad(node);
@@ -8718,7 +8783,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function loadTriggers(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string) {
     const parentId = nodeId ?? (schema ? `${connectionId}:${database}:${schema}:${table}:__triggers` : `${connectionId}:${database}:${table}:__triggers`);
-    const node = findNode(treeNodes.value, parentId);
+    const node = findNode(treeNodes.value, parentId) ?? findProjectedTableGroupNode(parentId);
     if (!node) return;
 
     const load = beginTreeNodeLoad(node);
@@ -8773,7 +8838,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function loadConstraints(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string) {
     const parentId = nodeId ?? `${connectionId}:${database}:${schema || ""}:${table}:__constraints`;
-    const node = findNode(treeNodes.value, parentId);
+    const node = findNode(treeNodes.value, parentId) ?? findProjectedTableGroupNode(parentId);
     if (!node) return;
     const load = beginTreeNodeLoad(node);
     try {
@@ -8804,7 +8869,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function loadPartitions(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string) {
     const parentId = nodeId ?? `${connectionId}:${database}:${schema || ""}:${table}:__table-partitions`;
-    const node = findNode(treeNodes.value, parentId);
+    const node = findNode(treeNodes.value, parentId) ?? findProjectedTableGroupNode(parentId);
     if (!node) return;
     const load = beginTreeNodeLoad(node);
     try {
@@ -8835,7 +8900,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function loadSubpartitions(connectionId: string, database: string, table: string, schema?: string, nodeId?: string, catalog?: string) {
     const parentId = nodeId ?? `${connectionId}:${database}:${schema || ""}:${table}:__table-subpartitions`;
-    const node = findNode(treeNodes.value, parentId);
+    const node = findNode(treeNodes.value, parentId) ?? findProjectedTableGroupNode(parentId);
     if (!node) return;
     const load = beginTreeNodeLoad(node);
     try {
@@ -8912,7 +8977,7 @@ export const useConnectionStore = defineStore("connection", () => {
     } else if (node.type === "vector-database" && node.connectionId && node.database) {
       await loadVectorCollections(node.connectionId, node.database);
     } else if (node.type === "mongo-collection" && node.connectionId && node.database) {
-      await loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
+      await loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id, undefined, node.type);
     } else if (node.type === "mongo-gridfs") {
       node.isExpanded = true;
     } else if (node.type === "doris-catalog" && node.connectionId) {
@@ -8944,7 +9009,7 @@ export const useConnectionStore = defineStore("connection", () => {
     } else if (node.type === "linked-server-schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
       await loadTables(node.connectionId, node.database, node.schema, options);
     } else if ((node.type === "table" || node.type === "view" || node.type === "materialized_view") && node.connectionId && hasTreeNodeDatabaseContext(node)) {
-      await loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id, node.catalog);
+      await loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id, node.catalog, node.type);
     } else if (node.type === "type" && isXuguTypeMemberContainer(node, getConfig(node.connectionId || "")?.db_type)) {
       // Xugu object types expose attributes and methods through the scoped
       // completion endpoint. Do not route them through the generic custom-type
@@ -12023,6 +12088,10 @@ export const useConnectionStore = defineStore("connection", () => {
     loadConstraints,
     loadPartitions,
     loadSubpartitions,
+    projectedTableGroupChildren,
+    projectedTableGroupCollapsedIds,
+    setProjectedTableGroupExpanded,
+    clearProjectedTableGroupChildrenForConnection,
     listCompletionTables,
     listCompletionObjects,
     listCompletionColumns,

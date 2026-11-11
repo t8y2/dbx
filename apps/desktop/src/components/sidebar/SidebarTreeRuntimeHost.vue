@@ -1156,6 +1156,9 @@ async function toggle(requestId = beginNavigationRequest()) {
   if (node.isExpanded) {
     node.isExpanded = false;
     collapseSubtreeDescendants(node);
+    // A search-projected table row is rebuilt on every re-projection, so its
+    // collapsed flag lives in the store next to its cached groups (#14748).
+    connectionStore.setProjectedTableGroupExpanded(node.id, false);
     if (shouldReleaseCollapsedTreeNodeChildren()) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emitNodeToggled(node, wasExpanded, false);
     return;
@@ -1251,7 +1254,7 @@ async function toggle(requestId = beginNavigationRequest()) {
     } else if (node.type === "vector-database" && node.connectionId && node.database) {
       await connectionStore.loadVectorCollections(node.connectionId, node.database);
     } else if (node.type === "mongo-collection" && node.connectionId && node.database) {
-      await connectionStore.loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
+      await connectionStore.loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id, undefined, node.type);
     } else if (node.type === "elasticsearch-index" && node.connectionId) {
       await connectionStore.ensureConnected(node.connectionId);
       if (connectionStore.getConfig(node.connectionId)?.db_type === "meilisearch") {
@@ -1308,7 +1311,7 @@ async function toggle(requestId = beginNavigationRequest()) {
     } else if (node.type === "linked-server-schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
       await connectionStore.loadTables(node.connectionId, node.database, node.schema, treeLoadSearchOptions);
     } else if ((node.type === "table" || node.type === "view" || node.type === "materialized_view") && node.connectionId && hasTreeNodeDatabaseContext(node)) {
-      await connectionStore.loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id, node.catalog);
+      await connectionStore.loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id, node.catalog, node.type);
     } else if (node.type === "group-columns" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
       await connectionStore.loadColumns(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
     } else if (node.type === "group-indexes" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {

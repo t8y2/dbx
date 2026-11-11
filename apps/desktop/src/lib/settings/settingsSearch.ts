@@ -524,6 +524,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "data-datetime-export-format", category: "data", titleKey: "settings.globalDateTimeExportFormat", descriptionKey: "settings.globalDateTimeExportFormatDescription", targetId: "data" },
   { id: "data-datetime-import-format", category: "data", titleKey: "settings.globalDateTimeImportFormat", descriptionKey: "settings.globalDateTimeImportFormatDescription", targetId: "data" },
   { id: "data-export", category: "data", titleKey: "settings.exportSection", targetId: "data" },
+  { id: "data-export-xlsx-sheet-name", category: "data", titleKey: "settings.xlsxSheetName", descriptionKey: "settings.xlsxSheetNameDescription", targetId: "data" },
   { id: "data-export-preferred-path", category: "data", titleKey: "settings.preferredExportPath", descriptionKey: "settings.preferredExportPathDescription", targetId: "data-export-preferred-path" },
   {
     id: "data-export-file-name-source",

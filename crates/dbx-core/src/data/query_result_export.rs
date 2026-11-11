@@ -35,7 +35,8 @@ use crate::table_export::TableExportProgress;
 use crate::transfer::keyset_pagination_sql_with_identifier_quote;
 use crate::types::SpatialColumn;
 use crate::xlsx_export::{
-    finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_options, StreamingXlsxWriter, XlsxWorksheetData,
+    data_sheet_name, finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_options, StreamingXlsxWriter,
+    XlsxWorksheetData,
 };
 use mysql_async::prelude::Queryable;
 use serde_json::Value;
@@ -152,6 +153,10 @@ pub struct QueryResultExportRequest {
     /// comments on row 2, data from row 3) instead of overriding headers.
     #[serde(default)]
     pub header_comment_rows: bool,
+    /// XLSX only: fixed name for the data sheet. Empty or missing keeps
+    /// the default `Result`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_filter: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -385,7 +390,7 @@ fn start_query_result_xlsx_workbook<W: Write + Seek>(
         resolve_export_column_types(columns, column_types, request.export_column_types.as_deref());
     start_streaming_xlsx_workbook_with_options(
         writer,
-        Some("Result"),
+        Some(data_sheet_name(request.sheet_name.as_deref(), "Result")),
         columns,
         &effective_column_types,
         column_comments,
@@ -2555,6 +2560,31 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn query_result_export_request_carries_the_fixed_sheet_name_from_the_frontend() {
+        let request = |sheet_name: Option<&str>| {
+            let mut value = json!({
+                "exportId": "e1",
+                "connectionId": "c1",
+                "database": "db",
+                "sql": "select 1",
+                "querySql": "select 1",
+                "queryBaseSql": "select 1",
+                "databaseType": "sqlite",
+                "filePath": "out.xlsx",
+                "format": "xlsx",
+                "pageSize": 1000,
+            });
+            if let Some(name) = sheet_name {
+                value["sheetName"] = json!(name);
+            }
+            serde_json::from_value::<QueryResultExportRequest>(value).expect("deserialize query export request")
+        };
+
+        assert_eq!(request(Some("Report")).sheet_name.as_deref(), Some("Report"));
+        assert_eq!(request(None).sheet_name, None);
+    }
+
+    #[test]
     fn query_sql_export_primary_key_modes_distinguish_generated_and_manual_keys() {
         let keys = vec!["id".to_string(), "stat_date".to_string()];
         let columns = vec!["id".to_string(), "stat_date".to_string()];
@@ -2747,6 +2777,7 @@ mod tests {
             null_literal: String::new(),
             primary_key_mode: DataGridPrimaryKeyMode::Include,
             primary_keys: Vec::new(),
+            sheet_name: None,
         }
     }
 
@@ -2842,6 +2873,7 @@ mod tests {
             null_literal: String::new(),
             primary_key_mode: DataGridPrimaryKeyMode::ExcludeAll,
             primary_keys: vec!["id".to_string()],
+            sheet_name: None,
         };
 
         let mut writer = SqlInsertWriter::create(&request).expect("create sql insert writer");
@@ -3014,6 +3046,7 @@ mod tests {
             identifier_quote: None,
             primary_key_mode: DataGridPrimaryKeyMode::Include,
             primary_keys: Vec::new(),
+            sheet_name: None,
         }
     }
 

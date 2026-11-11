@@ -180,6 +180,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "queryExportKeysetOptimizationEnabled",
   "globalDateTimeDisplayFormat",
   "globalDateTimeExportFormat",
+  "xlsxSheetName",
   "globalDateTimeImportFormat",
   "updateDownloadSource",
   "updateChannel",

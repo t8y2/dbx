@@ -74,6 +74,14 @@ impl XlsxWorksheetData {
     }
 }
 
+/// The data sheet name an export should use: the user's fixed name when one is
+/// set (non-blank), otherwise the export's default (a table name or `Result`).
+/// The result still goes through the usual invalid-character and length
+/// normalisation when the workbook is written.
+pub fn data_sheet_name<'a>(fixed: Option<&'a str>, default: &'a str) -> &'a str {
+    fixed.map(str::trim).filter(|name| !name.is_empty()).unwrap_or(default)
+}
+
 fn normalize_sheet_name(input: Option<&str>) -> String {
     let base = input.unwrap_or("Sheet1");
     let name: String = base
@@ -1877,6 +1885,40 @@ mod tests {
         let sheet = read_zip_entry(&bytes, "xl/worksheets/sheet1.xml");
         assert!(sheet.contains("t=\"inlineStr\"") && sheet.contains("9223372036854775807"), "sheet={sheet}");
         assert!(!sheet.contains("><v>9223372036854775807</v>"), "sheet={sheet}");
+    }
+
+    #[test]
+    fn fixed_data_sheet_name_replaces_the_default_only_when_set() {
+        assert_eq!(super::data_sheet_name(Some("Report"), "secret_table"), "Report");
+        assert_eq!(super::data_sheet_name(Some("  Report  "), "secret_table"), "Report");
+        assert_eq!(super::data_sheet_name(None, "secret_table"), "secret_table");
+        assert_eq!(super::data_sheet_name(Some(""), "secret_table"), "secret_table");
+        assert_eq!(super::data_sheet_name(Some("   "), "secret_table"), "secret_table");
+    }
+
+    #[test]
+    fn streamed_workbook_uses_the_fixed_sheet_name_instead_of_the_table_name() {
+        let mut bytes = Cursor::new(Vec::new());
+        let columns = ["id".to_string()];
+        let mut writer = start_streaming_xlsx_workbook_with_options(
+            &mut bytes,
+            Some(super::data_sheet_name(Some("Report"), "secret_table")),
+            &columns,
+            &[],
+            &[],
+            &[],
+            None,
+            false,
+            true,
+            false,
+        )
+        .expect("start workbook");
+        writer.write_row(&[json!(1)]).expect("write row");
+        drop(writer.finish().expect("finish workbook"));
+
+        let workbook_xml = read_zip_entry(bytes.get_ref(), "xl/workbook.xml");
+        assert!(workbook_xml.contains("name=\"Report\""), "workbook_xml={workbook_xml}");
+        assert!(!workbook_xml.contains("secret_table"));
     }
 
     #[test]

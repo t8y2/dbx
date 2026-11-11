@@ -57,6 +57,7 @@ import { normalizeExcludedCompletionItems } from "@/lib/editor/excludedCompletio
 import { DEFAULT_SQL_TABLE_COMPLETION_SCHEMA_QUALIFICATION, normalizeSqlTableCompletionSchemaQualification, type SqlTableCompletionSchemaQualification } from "@/lib/sql/sqlCompletionSchemaQualification";
 import { DEFAULT_CSV_QUOTE_MODE, normalizeCsvQuoteMode, type CsvQuoteMode } from "@/lib/export/csvQuoteMode";
 import { DEFAULT_CSV_NULL_MODE, normalizeCsvNullMode, type CsvNullMode } from "@/lib/export/csvNullMode";
+import { normalizeXlsxSheetName } from "@/lib/export/xlsxSheetName";
 import { DEFAULT_QUERY_RESULT_EXPORT_FILE_NAME_SOURCE, normalizeQueryResultExportFileNameSource, type QueryResultExportFileNameSource } from "@/lib/export/saveTextFile";
 import { configureMetadataRuntimeCache, METADATA_CACHE_DEFAULT_MEMORY_MB, normalizeMetadataCacheMemoryMb } from "@/lib/metadata/metadataRuntimeCache";
 import type { AiApiStyle, AiAssistantMode, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiModelEffortPreference, AiProvider, AiReasoningLevel, AiTestConnectionResult } from "@/types/ai";
@@ -1275,6 +1276,7 @@ export interface EditorSettings {
   customColumnFormatters: Record<string, CustomColumnFormatterConfig>;
   globalDateTimeDisplayFormat: string;
   globalDateTimeExportFormat: string;
+  xlsxSheetName: string;
   globalDateTimeImportFormat: string;
   snippets: SqlSnippet[];
   sqlShortcuts: SqlShortcutAction[];
@@ -1651,6 +1653,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   customColumnFormatters: {},
   globalDateTimeDisplayFormat: "",
   globalDateTimeExportFormat: "",
+  xlsxSheetName: "",
   globalDateTimeImportFormat: "",
   snippets: DEFAULT_SQL_SNIPPETS,
   sqlShortcuts: DEFAULT_SQL_SHORTCUTS,
@@ -2445,6 +2448,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     customColumnFormatters: normalizeCustomColumnFormatters(settings.customColumnFormatters),
     globalDateTimeDisplayFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeDisplayFormat),
     globalDateTimeExportFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeExportFormat),
+    xlsxSheetName: normalizeXlsxSheetName(settings.xlsxSheetName),
     globalDateTimeImportFormat: normalizeGlobalDateTimePattern(settings.globalDateTimeImportFormat),
     snippets: normalizeSqlSnippets(settings.snippets, existing?.snippets),
     sqlShortcuts: normalizeSqlShortcuts(settings.sqlShortcuts, existing?.sqlShortcuts),
@@ -3388,6 +3392,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.customColumnFormatters !== undefined) editorSettings.value.customColumnFormatters = partial.customColumnFormatters;
     if (partial.globalDateTimeDisplayFormat !== undefined) editorSettings.value.globalDateTimeDisplayFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeDisplayFormat);
     if (partial.globalDateTimeExportFormat !== undefined) editorSettings.value.globalDateTimeExportFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeExportFormat);
+    if (partial.xlsxSheetName !== undefined) editorSettings.value.xlsxSheetName = normalizeXlsxSheetName(partial.xlsxSheetName);
     if (partial.globalDateTimeImportFormat !== undefined) editorSettings.value.globalDateTimeImportFormat = normalizeGlobalDateTimePattern(partial.globalDateTimeImportFormat);
     if (partial.snippets !== undefined) editorSettings.value.snippets = normalizeSqlSnippets(partial.snippets);
     if (partial.sqlShortcuts !== undefined) editorSettings.value.sqlShortcuts = normalizeSqlShortcuts(partial.sqlShortcuts);

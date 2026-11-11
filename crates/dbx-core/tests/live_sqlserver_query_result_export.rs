@@ -153,6 +153,7 @@ async fn live_sqlserver_xlsx_export_can_outlive_query_timeout_while_rows_keep_ar
         numeric_column_right_align: false,
         primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
+        sheet_name: None,
     };
     let rows_exported = AtomicU64::new(0);
     let done_seen = AtomicBool::new(false);

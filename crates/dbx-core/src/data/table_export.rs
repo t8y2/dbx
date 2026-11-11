@@ -36,7 +36,7 @@ use crate::transfer::{
     keyset_pagination_sql_with_identifier_quote, pagination_sql_with_filter_order_and_identifier_quote,
 };
 use crate::types::{is_opaque_aggregate_state_type, QueryResult};
-use crate::xlsx_export::{finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_options};
+use crate::xlsx_export::{data_sheet_name, finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_options};
 
 const DEFAULT_BATCH_SIZE: usize = 10_000;
 const SQL_INSERT_BATCH_SIZE: usize = 100;
@@ -107,6 +107,10 @@ pub struct TableExportRequest {
     /// comments on row 2, data from row 3) instead of overriding headers.
     #[serde(default)]
     pub header_comment_rows: bool,
+    /// XLSX only: fixed name for the data sheet. Empty or missing keeps the
+    /// table name as the sheet name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_filter: Option<bool>,
     /// SQL format only: when set, the export is packaged as a `.zip` archive
@@ -1307,7 +1311,7 @@ async fn try_export_native_table_stream(
                 std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
             let mut writer = start_streaming_xlsx_workbook_with_options(
                 BufWriter::new(xlsx_file),
-                Some(&request.table_name),
+                Some(data_sheet_name(request.sheet_name.as_deref(), &request.table_name)),
                 col_names,
                 &xlsx_column_types,
                 &column_comments,
@@ -2152,7 +2156,7 @@ async fn export_table_data_core_inner(
                 std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create XLSX file: {e}"))?;
             let mut writer = start_streaming_xlsx_workbook_with_options(
                 BufWriter::new(xlsx_file),
-                Some(&request.table_name),
+                Some(data_sheet_name(request.sheet_name.as_deref(), &request.table_name)),
                 &col_names,
                 &xlsx_column_types,
                 &column_comments,
@@ -2578,6 +2582,29 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn table_export_request_carries_the_fixed_sheet_name_from_the_frontend() {
+        let request = |sheet_name: Option<&str>| {
+            let mut value = json!({
+                "exportId": "e1",
+                "connectionId": "c1",
+                "database": "db",
+                "tableName": "secret_table",
+                "filePath": "out.xlsx",
+                "format": "xlsx",
+            });
+            if let Some(name) = sheet_name {
+                value["sheetName"] = json!(name);
+            }
+            serde_json::from_value::<TableExportRequest>(value).expect("deserialize table export request")
+        };
+
+        assert_eq!(request(Some("Report")).sheet_name.as_deref(), Some("Report"));
+        assert_eq!(request(None).sheet_name, None);
+        let serialized = serde_json::to_value(request(None)).expect("serialize request");
+        assert!(serialized.get("sheetName").is_none());
+    }
+
+    #[test]
     fn sql_export_primary_key_modes_keep_manual_keys_or_exclude_all_keys() {
         let primary_keys = vec!["id".to_string(), "stat_date".to_string()];
         let columns = vec!["id".to_string(), "stat_date".to_string()];
@@ -2878,6 +2905,7 @@ mod tests {
             header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
+            sheet_name: None,
         };
 
         ExternalDriverExportFixture { state, request, calls, output, dir }
@@ -3049,6 +3077,7 @@ mod tests {
             header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
+            sheet_name: None,
         };
 
         export_table_data_core(&state, &request, |_| {}).await.unwrap();
@@ -3223,6 +3252,7 @@ mod tests {
             header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
+            sheet_name: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, request.schema.as_deref());
         let columns = vec!["Time".to_string(), "root.test.device2.temperature".to_string()];
@@ -3292,6 +3322,7 @@ mod tests {
             header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
+            sheet_name: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, request.schema.as_deref());
         let columns = vec!["tImE".to_string(), "temperature".to_string()];
@@ -3337,6 +3368,7 @@ mod tests {
             header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
+            sheet_name: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, request.schema.as_deref());
         let error = table_export_query_columns(&request, &context, &["TIME".to_string()]).unwrap_err();
@@ -3377,6 +3409,7 @@ mod tests {
             header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
+            sheet_name: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, request.schema.as_deref());
         let columns = vec![
@@ -3425,6 +3458,7 @@ mod tests {
             header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
+            sheet_name: None,
         };
         let columns = vec!["Time".to_string(), "value".to_string()];
 
@@ -3485,6 +3519,7 @@ mod tests {
             header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
+            sheet_name: None,
         };
         let context = table_export_sql_context(DatabaseType::Oracle, request.schema.as_deref());
 
@@ -3539,6 +3574,7 @@ mod tests {
             header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
+            sheet_name: None,
         };
         let columns = vec!["id".to_string(), "payload".to_string()];
         let primary_keys = vec!["id".to_string()];
@@ -3621,6 +3657,7 @@ mod tests {
             header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
+            sheet_name: None,
         };
         let columns = vec!["id".to_string(), "DisplayName".to_string()];
         let primary_keys = vec!["id".to_string()];
@@ -3685,6 +3722,7 @@ mod tests {
             header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
+            sheet_name: None,
         };
         let columns = vec!["id".to_string(), "geom".to_string(), "name".to_string()];
         let column_types = vec![Some("int".to_string()), Some("geometry".to_string()), Some("varchar".to_string())];
@@ -3751,6 +3789,7 @@ mod tests {
             header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
+            sheet_name: None,
         };
         let context = table_export_sql_context(DatabaseType::Oracle, request.schema.as_deref());
         let sql = table_cursor_sql(&request, &context, &columns, &[], &primary_keys);
@@ -3809,6 +3848,7 @@ mod tests {
             header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: None,
+            sheet_name: None,
         };
 
         // Default / explicit false: keep the existing qualified target.
@@ -3856,6 +3896,7 @@ mod tests {
             header_comment_rows: false,
             split_max_mb: None,
             omit_database_qualifier: Some(true),
+            sheet_name: None,
         };
 
         let build = |request: &TableExportRequest| {

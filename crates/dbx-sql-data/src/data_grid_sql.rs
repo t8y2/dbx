@@ -4935,12 +4935,14 @@ enum DataGridLikeTemplate {
 /// filter keeps the same meaning as those patterns.
 const DATA_GRID_LIKE_ESCAPE_CHAR: char = '~';
 
-/// TDengine rejects `LIKE ... ESCAPE` outright (see
-/// `database_structure_search_sql`), so its patterns stay unescaped: declaring the
-/// escape character would be a syntax error, and escaping without the clause would
-/// look for literal `~` text. Every other SQL target accepts the clause.
+/// TDengine rejects `LIKE ... ESCAPE` outright, and ClickHouse only added the
+/// clause in 26.6 (upstream issue #99599) — see
+/// `database_structure_search_sql`, which already omits it for ClickHouse. Their
+/// patterns stay unescaped: declaring the escape character would be a syntax
+/// error, and escaping without the clause would look for literal `~` text.
+/// Every other SQL target accepts the clause.
 fn data_grid_like_escape_supported(database_type: Option<DatabaseType>) -> bool {
-    database_type != Some(DatabaseType::Tdengine)
+    !matches!(database_type, Some(DatabaseType::Tdengine | DatabaseType::ClickHouse))
 }
 
 /// Build the LIKE pattern for a user-typed filter value.
@@ -7530,13 +7532,14 @@ mod tests {
         );
     }
 
-    /// TDengine rejects `LIKE ... ESCAPE`, so that target keeps raw patterns instead
-    /// of emitting a clause it cannot parse.
+    /// TDengine rejects `LIKE ... ESCAPE`, and ClickHouse only added the clause in
+    /// 26.6, so those targets keep raw patterns instead of emitting a clause
+    /// older servers cannot parse.
     #[test]
-    fn omits_like_escape_clause_on_tdengine() {
-        let condition = |mode: DataGridContextFilterMode, value: &str| {
+    fn omits_like_escape_clause_on_unsupported_targets() {
+        let condition = |database_type: DatabaseType, mode: DataGridContextFilterMode, value: &str| {
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
-                database_type: Some(DatabaseType::Tdengine),
+                database_type: Some(database_type),
                 identifier_quote: None,
                 column_name: "file_name".to_string(),
                 mode,
@@ -7548,10 +7551,12 @@ mod tests {
             .unwrap_or_default()
         };
 
-        for mode in [DataGridContextFilterMode::BeginsWith, DataGridContextFilterMode::NotEndsWith] {
-            let sql = condition(mode, "a_");
-            assert!(!sql.contains("ESCAPE"), "TDengine has no ESCAPE clause: {sql}");
-            assert!(sql.contains("'a_%'") || sql.contains("'%a_'"), "{sql}");
+        for database_type in [DatabaseType::Tdengine, DatabaseType::ClickHouse] {
+            for mode in [DataGridContextFilterMode::BeginsWith, DataGridContextFilterMode::NotEndsWith] {
+                let sql = condition(database_type, mode, "a_");
+                assert!(!sql.contains("ESCAPE"), "{database_type:?} has no ESCAPE clause: {sql}");
+                assert!(sql.contains("'a_%'") || sql.contains("'%a_'"), "{sql}");
+            }
         }
     }
 

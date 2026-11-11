@@ -456,6 +456,9 @@ export function schemaDiffSessionObjects(result: SchemaDiffPreparation | null, d
   if (!result) return [];
   const objects = convertToSchemaDiffObjects(result.diffs, result.functionDiffs, result.sequenceDiffs, result.ruleDiffs, result.ownerDiffs, result.renameCandidates);
   for (const object of objects) {
+    // Keep target-only table drops out of the initial deployment plan.
+    if (object.objectKind === "table" && object.operationType === "delete") object.selected = false;
+
     const draft = deployment?.drafts.find((draft) => draft.objectId === object.id);
     if (draft?.sql?.trim() && draft.action !== "delete" && (object.operationType === "delete" || (object.operationType === "none" && draft.reviewedTargetDraft))) {
       object.operationType = draft.action === "replace" ? "modify" : "create";

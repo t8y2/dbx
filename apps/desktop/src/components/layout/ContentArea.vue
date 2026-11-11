@@ -808,6 +808,10 @@ const resultRunFallbackLabel = (sequence: number) => t(resultTabNamingMode.value
 const activeResultGridCacheKey = computed(() => resultGridCacheKey(props.activeTab));
 const activeResultGridColumnWidthCacheKey = computed(() => resultGridColumnWidthCacheKey(props.activeTab));
 const activeResultGridInstanceKey = computed(() => resultGridInstanceKey(props.activeTab));
+const activeResultColumnWidthKey = computed(() => {
+  const revision = props.activeTab.resultColumnWidthRevision;
+  return revision ? `${activeResultGridInstanceKey.value}:${revision}` : activeResultGridInstanceKey.value;
+});
 const hasNeo4jNodes = computed(() => activeEffectiveDatabaseType.value === "neo4j" && !!props.activeTab.result?.neo4j_node_cells?.length);
 const neo4jNodeTable = useNeo4jNodeTableResult(
   computed(() => props.activeTab.result),
@@ -3142,6 +3146,7 @@ defineExpose({
                 :key="activeResultGridInstanceKey"
                 :cache-key="activeResultGridCacheKey"
                 :column-width-cache-key="activeResultGridColumnWidthCacheKey"
+                :column-width-result-key="activeResultColumnWidthKey"
                 :pending-state-key="activeResultGridInstanceKey"
                 :tab-id="activeTab.id"
                 :view-generation="activeTab.resultViewGeneration"

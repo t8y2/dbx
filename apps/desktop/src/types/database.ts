@@ -2001,6 +2001,8 @@ export interface QueryResultRun {
    * disk eviction/restore. See `dataGridViewStateCache.ts`.
    */
   resultViewGeneration?: string;
+  /** Identifies the latest successful refresh for automatic column sizing. */
+  resultColumnWidthRevision?: string;
   result?: QueryResult;
   results?: QueryResult[];
   activeResultIndex?: number;
@@ -2676,6 +2678,7 @@ export interface QueryTab {
   resultGridRevision?: string;
   /** Logical-result identity for the tab-switch view snapshot cache; see QueryResultRun. */
   resultViewGeneration?: string;
+  resultColumnWidthRevision?: string;
   resultRuns?: QueryResultRun[];
   activeResultRunId?: string;
   /** Undefined inherits the default on open; false preserves an explicit per-tab opt-out. */

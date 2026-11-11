@@ -475,7 +475,8 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		result, err := s.fetchQueryPage(stringParam(params, "sessionId"), intParam(params, "pageSize"))
 		return result, false, err
 	case "close_query_session", "close_table_read_session":
-		return s.closeQuerySession(stringParam(params, "sessionId")), false, nil
+		closed, _ := s.closeQuerySession(stringParam(params, "sessionId"))
+		return closed, false, nil
 	case "execute_transaction":
 		result, err := s.executeTransaction(params)
 		return result, false, err
@@ -803,7 +804,13 @@ func (s *server) executeQuery(opts queryOptions) (result queryResult, resultErr 
 			return queryResult{}, err
 		}
 		defer func() {
-			_ = rows.Close()
+			// gokb surfaces errors raised after the first result set (e.g. a
+			// stored procedure that selects, then fails) only while draining
+			// the remaining protocol messages during Close, so the close error
+			// must replace an otherwise successful read.
+			if closeErr := rows.Close(); resultErr == nil && closeErr != nil {
+				resultErr = closeErr
+			}
 			result.Messages = messages.drain()
 			restore()
 			s.releaseConn(conn)
@@ -916,10 +923,13 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 		s.sessions[id] = session
 		result.SessionID = &id
 	} else {
-		_ = rows.Close()
+		closeErr := rows.Close()
 		restore()
 		s.releaseConn(conn)
 		s.endOperation(cancel)
+		if closeErr != nil {
+			return queryPageResult{}, closeErr
+		}
 	}
 	return result, nil
 }
@@ -940,17 +950,21 @@ func (s *server) fetchQueryPage(id string, pageSize int) (queryPageResult, error
 	if result.HasMore {
 		result.SessionID = &id
 	} else {
-		s.closeQuerySession(id)
+		if _, closeErr := s.closeQuerySession(id); closeErr != nil {
+			return queryPageResult{}, closeErr
+		}
 	}
 	return result, nil
 }
 
-func (s *server) closeQuerySession(id string) bool {
+func (s *server) closeQuerySession(id string) (bool, error) {
 	session := s.sessions[id]
 	if session == nil {
-		return false
+		return false, nil
 	}
-	_ = session.rows.Close()
+	// Close drains the remaining protocol messages; errors raised after the
+	// rows already delivered (procedure selects, then fails) surface here.
+	closeErr := session.rows.Close()
 	if session.restoreMessages != nil {
 		session.restoreMessages()
 	}
@@ -961,7 +975,7 @@ func (s *server) closeQuerySession(id string) bool {
 		s.endOperation(session.cancel)
 	}
 	delete(s.sessions, id)
-	return true
+	return true, closeErr
 }
 
 func (s *server) closeAllQuerySessions() {

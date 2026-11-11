@@ -5013,7 +5013,7 @@ func TestPagedQueryKeepsContextUntilSessionCloses(t *testing.T) {
 		t.Fatal("paged query context was canceled before session close")
 	default:
 	}
-	if !server.closeQuerySession(*result.SessionID) {
+	if closed, _ := server.closeQuerySession(*result.SessionID); !closed {
 		t.Fatal("query session was not closed")
 	}
 	assertContextCanceled(t, state.queryCtx)
@@ -5287,6 +5287,10 @@ type procTestRows struct {
 	currentRow int
 	closed     bool
 	closeCalls int
+	// closeErr models gokb semantics: Next() returns io.EOF at the next
+	// RowDescription, and errors raised later in the stream surface only
+	// from Close while draining the remaining protocol messages.
+	closeErr error
 }
 
 func (r *procTestRows) Columns() []string {
@@ -5303,7 +5307,7 @@ func (r *procTestRows) Close() error {
 	defer r.mu.Unlock()
 	r.closed = true
 	r.closeCalls++
-	return nil
+	return r.closeErr
 }
 
 func (r *procTestRows) Next(dest []driver.Value) error {
@@ -5590,7 +5594,7 @@ func TestExecuteProcedureCallsFetchRowsAndPaged(t *testing.T) {
 		t.Fatalf("expected earlyPage SessionID to be set")
 	}
 	earlySessionID := *earlyPage.SessionID
-	if !srv.closeQuerySession(earlySessionID) {
+	if closed, _ := srv.closeQuerySession(earlySessionID); !closed {
 		t.Fatalf("expected closeQuerySession to return true")
 	}
 	if !earlyRows.closed {
@@ -5818,5 +5822,44 @@ func TestExecuteProcedureMultipleEmptyResultSetsBeforeSELECT(t *testing.T) {
 	}
 	if len(page.Rows) != 1 || page.Rows[0][1] != "123.45" {
 		t.Fatalf("unexpected page rows: %v", page.Rows)
+	}
+}
+
+func TestExecuteProcedureSurfacesErrorAfterFirstResultSet(t *testing.T) {
+	// gokb reports a failure raised after the first result set only while
+	// draining the stream during Close; the agent must not report success
+	// for a procedure that selects rows and then fails.
+	newRows := func() *procTestRows {
+		return &procTestRows{
+			sets: []procTestResultSet{
+				{
+					columns:     []string{"report_id", "total"},
+					columnTypes: []string{"INT8", "NUMERIC"},
+					rows: [][]driver.Value{
+						{int64(1), "10.00"},
+					},
+				},
+			},
+			closeErr: errors.New("KINGBASE ERROR: raise_exception after first result set"),
+		}
+	}
+
+	state := &procTestDriverState{
+		queryFn: func(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+			return newRows(), nil
+		},
+	}
+	srv, _ := openProcTestServer(t, state)
+
+	if _, err := srv.executeQuery(queryOptions{SQL: "CALL proc_selects_then_raises()"}); err == nil {
+		t.Fatal("expected executeQuery to surface the drain error after the first result set, got nil")
+	} else if !strings.Contains(err.Error(), "raise_exception") {
+		t.Fatalf("expected drain error to propagate, got: %v", err)
+	}
+
+	if _, err := srv.executeQueryPage(queryOptions{SQL: "CALL proc_selects_then_raises()"}, 10); err == nil {
+		t.Fatal("expected executeQueryPage to surface the close error, got nil")
+	} else if !strings.Contains(err.Error(), "raise_exception") {
+		t.Fatalf("expected close error to propagate, got: %v", err)
 	}
 }

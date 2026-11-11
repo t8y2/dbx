@@ -9678,6 +9678,8 @@ export default withEnglishFallback({
     shortcutSaveSql: "Salvar SQL",
     shortcutAcceptCompletion: "Aceitar autocompletar",
     shortcutTriggerCompletion: "Acionar autocompletar",
+    shortcutPreviousCompletion: "Sugestão anterior do autocompletar",
+    shortcutNextCompletion: "Próxima sugestão do autocompletar",
     shortcutFormatSql: "Formatar SQL",
     shortcutExpandSelectStar: "Expandir * em colunas",
     shortcutToggleLineComment: "Alternar comentário de linha",

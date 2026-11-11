@@ -9327,6 +9327,8 @@ export default withEnglishFallback({
     shortcutSaveSql: "Simpan SQL",
     shortcutAcceptCompletion: "Terima pelengkapan",
     shortcutTriggerCompletion: "Picu pelengkapan",
+    shortcutPreviousCompletion: "Saran pelengkapan sebelumnya",
+    shortcutNextCompletion: "Saran pelengkapan berikutnya",
     shortcutFormatSql: "Format SQL",
     shortcutExpandSelectStar: "Perluas * menjadi kolom",
     shortcutToggleLineComment: "Aktifkan/nonaktifkan komentar baris",

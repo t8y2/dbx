@@ -8512,6 +8512,8 @@ export default withEnglishFallback({
     shortcutSaveSql: "SQL-i yadda saxla",
     shortcutAcceptCompletion: "Tamamlamanı qəbul et",
     shortcutTriggerCompletion: "Tamamlamanı başlat",
+    shortcutPreviousCompletion: "Əvvəlki tamamlama təklifi",
+    shortcutNextCompletion: "Növbəti tamamlama təklifi",
     shortcutFormatSql: "SQL-i formatla",
     shortcutExpandSelectStar: "* işarəsini sütunlarla əvəz et",
     shortcutToggleLineComment: "Sətir şərhini aç/bağla",

@@ -2398,7 +2398,7 @@ const codeMirrorLifecycle = useQueryEditorCodeMirror({
               // must keep working even while a completion list is open; yield
               // before completion navigation can consume and preventDefault it.
               if (matchesShortcut(event, shortcuts.quickOpen)) return false;
-              if (handleQueryEditorCompletionNavigation(currentView, event, initializedRuntime.codeMirrorMoveCompletionSelection)) return true;
+              if (handleQueryEditorCompletionNavigation(currentView, event, initializedRuntime.codeMirrorMoveCompletionSelection, shortcuts)) return true;
               if (matchesShortcut(event, shortcuts.selectLineEnds)) {
                 event.preventDefault();
                 return selectLineEnds(currentView);

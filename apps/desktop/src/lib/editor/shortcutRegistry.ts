@@ -16,6 +16,8 @@ export type ShortcutActionId =
   | "saveSql"
   | "acceptCompletion"
   | "triggerCompletion"
+  | "previousCompletion"
+  | "nextCompletion"
   | "indentMore"
   | "indentLess"
   | "insertLineBelow"
@@ -280,6 +282,18 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutTriggerCompletion",
     scope: "editor",
     defaultShortcut: "Alt+/",
+  },
+  {
+    id: "previousCompletion",
+    labelKey: "settings.shortcutPreviousCompletion",
+    scope: "editor",
+    defaultShortcut: "Ctrl+P",
+  },
+  {
+    id: "nextCompletion",
+    labelKey: "settings.shortcutNextCompletion",
+    scope: "editor",
+    defaultShortcut: "Ctrl+N",
   },
   {
     id: "indentMore",

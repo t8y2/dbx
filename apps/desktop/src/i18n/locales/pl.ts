@@ -9702,6 +9702,8 @@ export default withEnglishFallback({
     shortcutSaveSql: "Zapisz SQL",
     shortcutAcceptCompletion: "Zaakceptuj autouzupełnianie",
     shortcutTriggerCompletion: "Wywołaj autouzupełnianie",
+    shortcutPreviousCompletion: "Poprzednia sugestia autouzupełniania",
+    shortcutNextCompletion: "Następna sugestia autouzupełniania",
     shortcutFormatSql: "Formatuj SQL",
     shortcutExpandSelectStar: "Rozwiń * do listy kolumn",
     shortcutToggleLineComment: "Przełącz komentarz liniowy",

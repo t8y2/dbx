@@ -8325,6 +8325,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabase: "預設資料庫置頂",
     sidebarPinDefaultDatabaseDescription: "開啟後，預設資料庫在資料庫清單中置頂顯示；關閉後依字母正常排序。",
     sidebarBrowseObjectsOnDatabaseActivation: "啟用資料庫節點時瀏覽物件",
+    sidebarTableClickNavigation: "資料表節點單擊定位，雙擊另開",
+    sidebarTableClickNavigationDescription: "單擊切換到已開啟的同表分頁；雙擊一律建立新的資料分頁。僅影響側邊欄中的資料表。",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "開啟後，依照所選的單擊或雙擊啟用方式操作資料庫或結構描述節點時，會同時展開側邊欄並開啟「瀏覽物件」分頁。",
     openTabsRestoreMode: "啟動時還原分頁",
     openTabsRestoreModeDescription: "選擇 DBX 啟動時如何還原上次開啟的分頁。",

@@ -9208,6 +9208,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabase: "Fissa database predefinito in alto",
     sidebarPinDefaultDatabaseDescription: "Se abilitato, il database predefinito viene mostrato in cima all'elenco dei database. Se disabilitato, viene ordinato alfabeticamente.",
     sidebarBrowseObjectsOnDatabaseActivation: "Esplora oggetti all'attivazione di un database",
+    sidebarTableClickNavigation: "Attiva le tabelle con un clic e apri nuove schede con doppio clic",
+    sidebarTableClickNavigationDescription: "Un clic attiva una scheda aperta della stessa tabella. Un doppio clic apre sempre una nuova scheda dati. Si applica solo alle tabelle nella barra laterale.",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "Se abilitato, l'attivazione di un nodo database o schema con la modalità a clic singolo o doppio selezionata apre anche la scheda «Esplora oggetti».",
     openTabsRestoreMode: "Ripristina schede all'avvio",
     openTabsRestoreModeDescription: "Scegli come DBX ripristina le schede aperte l'ultima volta.",

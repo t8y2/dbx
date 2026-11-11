@@ -11174,6 +11174,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabase: "ปักหมุดฐานข้อมูลเริ่มต้นไว้ด้านบน",
     sidebarPinDefaultDatabaseDescription: "เมื่อเปิดใช้ ฐานข้อมูลเริ่มต้นจะแสดงด้านบนสุดของรายการฐานข้อมูล เมื่อปิดจะเรียงตามตัวอักษร",
     sidebarBrowseObjectsOnDatabaseActivation: "เรียกดูออบเจ็กต์เมื่อเปิดใช้ฐานข้อมูล",
+    sidebarTableClickNavigation: "คลิกเพื่อไปยังแท็บตาราง และดับเบิลคลิกเพื่อเปิดแท็บใหม่",
+    sidebarTableClickNavigationDescription: "คลิกเพื่อไปยังแท็บที่เปิดอยู่ของตารางเดียวกัน ดับเบิลคลิกจะเปิดแท็บข้อมูลใหม่เสมอ ใช้กับตารางในแถบด้านข้างเท่านั้น",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "เมื่อเปิดใช้ การเปิดโหนดฐานข้อมูลหรือ Schema ด้วยโหมดคลิกเดียวหรือดับเบิลคลิกที่เลือก จะเปิดแท็บ Browse Objects ด้วย",
     openTabsRestoreMode: "กู้คืนแท็บเมื่อเปิดแอป",
     openTabsRestoreModeDescription: "เลือกวิธีที่ DBX กู้คืนแท็บที่เปิดไว้ครั้งล่าสุด",

@@ -2389,6 +2389,7 @@ function openSidebarData(node: TreeNode, requireSelection: boolean, openMode: "d
   runSidebarDataOpenImmediately(
     {
       connectionKey: target.connectionId || target.id,
+      targetKey: target.id,
       // Explicit new-tab opens are intentional independent work; ordinary
       // navigation keeps latest-request-wins behavior.
       supersede: openMode !== "new-tab",

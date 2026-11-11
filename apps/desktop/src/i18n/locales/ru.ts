@@ -10785,6 +10785,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabase: "Закреплять базу данных по умолчанию вверху",
     sidebarPinDefaultDatabaseDescription: "Если включено, база данных по умолчанию отображается в начале списка. Если отключено, она сортируется по алфавиту.",
     sidebarBrowseObjectsOnDatabaseActivation: "Просматривать объекты при активации базы данных",
+    sidebarTableClickNavigation: "Переход к таблице по щелчку, новая вкладка по двойному щелчку",
+    sidebarTableClickNavigationDescription: "Щелчок активирует открытую вкладку той же таблицы. Двойной щелчок всегда открывает новую вкладку данных. Применяется только к таблицам на боковой панели.",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "Если включено, активация узла базы данных или схемы выбранным режимом (один или двойной клик) также открывает вкладку «Просмотр объектов».",
     openTabsRestoreMode: "Восстанавливать вкладки при запуске",
     openTabsRestoreModeDescription: "Выберите, как DBX восстанавливает вкладки, открытые в прошлый раз.",

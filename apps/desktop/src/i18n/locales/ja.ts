@@ -9206,6 +9206,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabase: "デフォルトデータベースを先頭に固定",
     sidebarPinDefaultDatabaseDescription: "有効にすると、デフォルトデータベースがデータベース一覧の先頭に固定されます。無効にすると、アルファベット順に並べ替えられます。",
     sidebarBrowseObjectsOnDatabaseActivation: "データベースノードのアクティブ化時にオブジェクトを参照",
+    sidebarTableClickNavigation: "クリックで表タブに切り替え、ダブルクリックで新規タブを開く",
+    sidebarTableClickNavigationDescription: "クリックすると同じ表の開いているタブに切り替えます。ダブルクリックすると常に新しいデータタブを開きます。サイドバーの表のみに適用されます。",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "有効にすると、選択したシングルクリックまたはダブルクリック方式でデータベースまたはスキーマノードをアクティブ化した際に、サイドバーを展開すると同時に「オブジェクトを参照」タブを開きます。",
     openTabsRestoreMode: "起動時にタブを復元",
     openTabsRestoreModeDescription: "DBX 起動時に前回開いていたタブをどのように復元するかを選択します。",

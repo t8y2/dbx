@@ -9205,6 +9205,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabase: "Fixar banco de dados padrão no topo",
     sidebarPinDefaultDatabaseDescription: "Quando ativado, o banco de dados padrão aparece no topo da lista de bancos de dados. Quando desativado, é ordenado em ordem alfabética.",
     sidebarBrowseObjectsOnDatabaseActivation: "Explorar objetos ao ativar um banco de dados",
+    sidebarTableClickNavigation: "Focar tabelas com um clique e abrir novas abas com clique duplo",
+    sidebarTableClickNavigationDescription: "Um clique ativa uma aba aberta da mesma tabela. Um clique duplo sempre abre uma nova aba de dados. Aplica-se apenas às tabelas da barra lateral.",
     sidebarBrowseObjectsOnDatabaseActivationDescription: 'Quando ativado, ativar um nó de banco de dados ou esquema com o modo selecionado de clique simples ou duplo também abre a aba "Explorar Objetos".',
     openTabsRestoreMode: "Restaurar abas ao iniciar",
     openTabsRestoreModeDescription: "Escolha como o DBX restaura as abas que estavam abertas na última vez.",

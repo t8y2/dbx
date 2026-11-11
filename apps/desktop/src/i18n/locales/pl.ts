@@ -2597,6 +2597,8 @@ export default withEnglishFallback({
     filterBuilderNotContains: "Nie zawiera",
     filterBuilderBeginsWith: "Zaczyna się od",
     filterBuilderEndsWith: "Kończy się na",
+    filterBuilderNotBeginsWith: "Nie zaczyna się od",
+    filterBuilderNotEndsWith: "Nie kończy się na",
     filterBuilderGreaterThan: "Większe niż",
     filterBuilderGreaterThanOrEqual: "Większe lub równe",
     filterBuilderLessThan: "Mniejsze niż",

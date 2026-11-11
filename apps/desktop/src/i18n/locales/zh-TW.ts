@@ -2919,6 +2919,8 @@ export default withEnglishFallback({
     filterBuilderNotContains: "不包含",
     filterBuilderBeginsWith: "以…開始",
     filterBuilderEndsWith: "以…結束",
+    filterBuilderNotBeginsWith: "不以…開始",
+    filterBuilderNotEndsWith: "不以…結束",
     filterBuilderGreaterThan: "大於",
     filterBuilderGreaterThanOrEqual: "大於等於",
     filterBuilderLessThan: "小於",

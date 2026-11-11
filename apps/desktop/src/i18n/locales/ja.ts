@@ -2953,6 +2953,8 @@ export default withEnglishFallback({
     filterBuilderNotContains: "含まない",
     filterBuilderBeginsWith: "で始まる",
     filterBuilderEndsWith: "で終わる",
+    filterBuilderNotBeginsWith: "…で始まらない",
+    filterBuilderNotEndsWith: "…で終わらない",
     filterBuilderGreaterThan: "より大きい",
     filterBuilderGreaterThanOrEqual: "以上",
     filterBuilderLessThan: "より小さい",

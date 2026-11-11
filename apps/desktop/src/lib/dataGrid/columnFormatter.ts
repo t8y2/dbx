@@ -302,6 +302,8 @@ const FOREIGN_KEY_DISPLAY_FILTER_MODES = new Set<DataGridContextFilterMode>([
   "not-like",
   "begins-with",
   "ends-with",
+  "not-begins-with",
+  "not-ends-with",
   "less-than",
   "less-than-or-equal",
   "greater-than",

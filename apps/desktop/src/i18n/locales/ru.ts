@@ -3163,6 +3163,8 @@ export default withEnglishFallback({
     filterBuilderNotContains: "Не содержит",
     filterBuilderBeginsWith: "Начинается с",
     filterBuilderEndsWith: "Заканчивается на",
+    filterBuilderNotBeginsWith: "Не начинается с",
+    filterBuilderNotEndsWith: "Не заканчивается на",
     filterBuilderGreaterThan: "Больше",
     filterBuilderGreaterThanOrEqual: "Больше или равно",
     filterBuilderLessThan: "Меньше",

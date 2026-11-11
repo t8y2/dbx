@@ -237,6 +237,8 @@ pub enum DataGridContextFilterMode {
     NotLike,
     BeginsWith,
     EndsWith,
+    NotBeginsWith,
+    NotEndsWith,
     LessThan,
     LessThanOrEqual,
     GreaterThan,
@@ -900,37 +902,41 @@ pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterCo
         DataGridContextFilterMode::IsNotBlank => Some(format!("({column} IS NOT NULL AND {column} <> '')")),
         DataGridContextFilterMode::Equals if value.is_null() => Some(format!("{column} IS NULL")),
         DataGridContextFilterMode::NotEquals if value.is_null() => Some(format!("{column} IS NOT NULL")),
-        DataGridContextFilterMode::Like => Some(format!(
-            "{like_column} LIKE {}",
-            format_grid_sql_literal(
-                &Value::String(format!("%{}%", value_to_filter_text(value))),
-                options.database_type,
-                None
-            )
+        DataGridContextFilterMode::Like => Some(data_grid_like_condition(
+            &like_column,
+            "LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::Contains, options.database_type),
+            options.database_type,
         )),
-        DataGridContextFilterMode::NotLike => Some(format!(
-            "{like_column} NOT LIKE {}",
-            format_grid_sql_literal(
-                &Value::String(format!("%{}%", value_to_filter_text(value))),
-                options.database_type,
-                None
-            )
+        DataGridContextFilterMode::NotLike => Some(data_grid_like_condition(
+            &like_column,
+            "NOT LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::Contains, options.database_type),
+            options.database_type,
         )),
-        DataGridContextFilterMode::BeginsWith => Some(format!(
-            "{like_column} LIKE {}",
-            format_grid_sql_literal(
-                &Value::String(format!("{}%", value_to_filter_text(value))),
-                options.database_type,
-                None
-            )
+        DataGridContextFilterMode::BeginsWith => Some(data_grid_like_condition(
+            &like_column,
+            "LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::StartsWith, options.database_type),
+            options.database_type,
         )),
-        DataGridContextFilterMode::EndsWith => Some(format!(
-            "{like_column} LIKE {}",
-            format_grid_sql_literal(
-                &Value::String(format!("%{}", value_to_filter_text(value))),
-                options.database_type,
-                None
-            )
+        DataGridContextFilterMode::EndsWith => Some(data_grid_like_condition(
+            &like_column,
+            "LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::EndsWith, options.database_type),
+            options.database_type,
+        )),
+        DataGridContextFilterMode::NotBeginsWith => Some(data_grid_like_condition(
+            &like_column,
+            "NOT LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::StartsWith, options.database_type),
+            options.database_type,
+        )),
+        DataGridContextFilterMode::NotEndsWith => Some(data_grid_like_condition(
+            &like_column,
+            "NOT LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::EndsWith, options.database_type),
+            options.database_type,
         )),
         DataGridContextFilterMode::LessThan => Some(format!(
             "{column} < {}",
@@ -4946,6 +4952,75 @@ fn value_to_filter_text(value: &Value) -> String {
     }
 }
 
+/// Wildcard shape a textual filter wraps around the user's value.
+#[derive(Clone, Copy)]
+enum DataGridLikeTemplate {
+    Contains,
+    StartsWith,
+    EndsWith,
+}
+
+/// Escape character used for literal LIKE patterns. `~` is what the metadata
+/// searches in this workspace already emit for `LIKE ... ESCAPE`, so a grid
+/// filter keeps the same meaning as those patterns.
+const DATA_GRID_LIKE_ESCAPE_CHAR: char = '~';
+
+/// TDengine rejects `LIKE ... ESCAPE` outright, and ClickHouse only added the
+/// clause in 26.6 (upstream issue #99599) — see
+/// `database_structure_search_sql`, which already omits it for ClickHouse. Their
+/// patterns stay unescaped: declaring the escape character would be a syntax
+/// error, and escaping without the clause would look for literal `~` text.
+/// Every other SQL target accepts the clause.
+fn data_grid_like_escape_supported(database_type: Option<DatabaseType>) -> bool {
+    !matches!(database_type, Some(DatabaseType::Tdengine | DatabaseType::ClickHouse))
+}
+
+/// Build the LIKE pattern for a user-typed filter value.
+///
+/// The value matches literally, so `%`, `_` and the escape character itself are
+/// escaped before the wildcard template is applied (#14365 review): typing `a_`
+/// must not match `abc`. Only the wrapper wildcards stay unescaped.
+fn data_grid_like_pattern(
+    value: &Value,
+    template: DataGridLikeTemplate,
+    database_type: Option<DatabaseType>,
+) -> String {
+    let raw = value_to_filter_text(value);
+    let body = if data_grid_like_escape_supported(database_type) { escape_data_grid_like_literal(&raw) } else { raw };
+    match template {
+        DataGridLikeTemplate::Contains => format!("%{body}%"),
+        DataGridLikeTemplate::StartsWith => format!("{body}%"),
+        DataGridLikeTemplate::EndsWith => format!("%{body}"),
+    }
+}
+
+fn escape_data_grid_like_literal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 8);
+    for ch in value.chars() {
+        if ch == DATA_GRID_LIKE_ESCAPE_CHAR || ch == '%' || ch == '_' {
+            escaped.push(DATA_GRID_LIKE_ESCAPE_CHAR);
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+/// Render `column LIKE|NOT LIKE <pattern>`, declaring the escape character where
+/// the dialect understands it.
+fn data_grid_like_condition(
+    like_column: &str,
+    operator: &str,
+    pattern: String,
+    database_type: Option<DatabaseType>,
+) -> String {
+    let literal = format_grid_sql_literal(&Value::String(pattern), database_type, None);
+    if data_grid_like_escape_supported(database_type) {
+        format!("{like_column} {operator} {literal} ESCAPE '{DATA_GRID_LIKE_ESCAPE_CHAR}'")
+    } else {
+        format!("{like_column} {operator} {literal}")
+    }
+}
+
 fn parse_typed_filter_value(
     text: &str,
     database_type: Option<DatabaseType>,
@@ -7310,7 +7385,7 @@ mod tests {
                 column_info: Some(column("status", "varchar", true, None)),
             })
             .as_deref(),
-            Some("\"status\" LIKE '%active%'")
+            Some("\"status\" LIKE '%active%' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
@@ -7324,7 +7399,7 @@ mod tests {
                 column_info: Some(column("update_date", "bigint", false, None)),
             })
             .as_deref(),
-            Some("\"update_date\"::text LIKE '%128%'")
+            Some("\"update_date\"::text LIKE '%128%' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
@@ -7338,7 +7413,7 @@ mod tests {
                 column_info: Some(column("created_at", "timestamp without time zone", false, None)),
             })
             .as_deref(),
-            Some("\"created_at\"::text NOT LIKE '%2026%'")
+            Some("\"created_at\"::text NOT LIKE '%2026%' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
@@ -7352,7 +7427,7 @@ mod tests {
                 column_info: Some(column("file_name", "varchar", false, None)),
             })
             .as_deref(),
-            Some("`file_name` LIKE 'FN%'")
+            Some("`file_name` LIKE 'FN%' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
@@ -7366,7 +7441,35 @@ mod tests {
                 column_info: Some(column("file_name", "varchar", false, None)),
             })
             .as_deref(),
-            Some("`file_name` LIKE '%.sql'")
+            Some("`file_name` LIKE '%.sql' ESCAPE '~'")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode: DataGridContextFilterMode::NotBeginsWith,
+                value: json!("tmp"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .as_deref(),
+            Some("`file_name` NOT LIKE 'tmp%' ESCAPE '~'")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode: DataGridContextFilterMode::NotEndsWith,
+                value: json!(".log"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .as_deref(),
+            Some("`file_name` NOT LIKE '%.log' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
@@ -7380,7 +7483,7 @@ mod tests {
                 column_info: Some(column("update_date", "bigint", false, None)),
             })
             .as_deref(),
-            Some("\"update_date\"::text LIKE '128%'")
+            Some("\"update_date\"::text LIKE '128%' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_column_value_filter_condition(DataGridColumnValueFilterConditionOptions {
@@ -7393,6 +7496,98 @@ mod tests {
             .as_deref(),
             Some("[active] = 0")
         );
+    }
+
+    /// #14365 review: a typed value has to match literally, so a LIKE metacharacter
+    /// inside it must not act as a wildcard. `not-begins-with` on `a_` used to emit
+    /// `NOT LIKE 'a_%'`, which wrongly excluded `abc` as well.
+    #[test]
+    fn escapes_like_metacharacters_in_context_filter_values() {
+        let condition = |mode: DataGridContextFilterMode, value: &str, database_type: DatabaseType| {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(database_type),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode,
+                value: json!(value),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+        };
+
+        // `_` is a single-character wildcard: it has to be escaped so `a_` only
+        // matches the literal text `a_`.
+        assert_eq!(
+            condition(DataGridContextFilterMode::NotBeginsWith, "a_", DatabaseType::Mysql).as_deref(),
+            Some("`file_name` NOT LIKE 'a~_%' ESCAPE '~'")
+        );
+        assert_eq!(
+            condition(DataGridContextFilterMode::NotEndsWith, "a_", DatabaseType::Mysql).as_deref(),
+            Some("`file_name` NOT LIKE '%a~_' ESCAPE '~'")
+        );
+        // `%` is a multi-character wildcard.
+        assert_eq!(
+            condition(DataGridContextFilterMode::BeginsWith, "50%", DatabaseType::Mysql).as_deref(),
+            Some("`file_name` LIKE '50~%%' ESCAPE '~'")
+        );
+        assert_eq!(
+            condition(DataGridContextFilterMode::EndsWith, "50%", DatabaseType::Postgres).as_deref(),
+            Some("\"file_name\" LIKE '%50~%' ESCAPE '~'")
+        );
+        // The pre-existing contains operators had the same hole, so they escape too.
+        assert_eq!(
+            condition(DataGridContextFilterMode::Like, "a_b", DatabaseType::Mysql).as_deref(),
+            Some("`file_name` LIKE '%a~_b%' ESCAPE '~'")
+        );
+        // The escape character itself is doubled, or `~_` would read as an escaped `_`.
+        assert_eq!(
+            condition(DataGridContextFilterMode::BeginsWith, "a~b", DatabaseType::Mysql).as_deref(),
+            Some("`file_name` LIKE 'a~~b%' ESCAPE '~'")
+        );
+        // The casted PostgreSQL reference keeps its prefix.
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                column_name: "update_date".to_string(),
+                mode: DataGridContextFilterMode::NotBeginsWith,
+                value: json!("12_8"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("update_date", "bigint", false, None)),
+            })
+            .as_deref(),
+            Some("\"update_date\"::text NOT LIKE '12~_8%' ESCAPE '~'")
+        );
+    }
+
+    /// TDengine rejects `LIKE ... ESCAPE`, and ClickHouse only added the clause in
+    /// 26.6, so those targets keep raw patterns instead of emitting a clause
+    /// older servers cannot parse.
+    #[test]
+    fn omits_like_escape_clause_on_unsupported_targets() {
+        let condition = |database_type: DatabaseType, mode: DataGridContextFilterMode, value: &str| {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(database_type),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode,
+                value: json!(value),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .unwrap_or_default()
+        };
+
+        for database_type in [DatabaseType::Tdengine, DatabaseType::ClickHouse] {
+            for mode in [DataGridContextFilterMode::BeginsWith, DataGridContextFilterMode::NotEndsWith] {
+                let sql = condition(database_type, mode, "a_");
+                assert!(!sql.contains("ESCAPE"), "{database_type:?} has no ESCAPE clause: {sql}");
+                assert!(sql.contains("'a_%'") || sql.contains("'%a_'"), "{sql}");
+            }
+        }
     }
 
     #[test]

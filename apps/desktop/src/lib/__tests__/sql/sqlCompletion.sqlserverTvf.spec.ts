@@ -50,6 +50,51 @@ describe("SQL Server table-valued function completion (#13131)", () => {
     expect(labels).toContain("GetCustomerName");
   });
 
+  it("inserts a call for zero-argument and signature-less table-valued functions", () => {
+    // A TVF is a relation source only in call form: even without a signature
+    // the insert is `TotalSales()`, never the bare name (t8y2/dbx#13394).
+    const item = itemsFor("SELECT * FROM TotalSal").find((entry) => entry.label === "TotalSales");
+    expect(item?.apply).toBe("TotalSales()");
+  });
+
+  it("keeps TVFs of other schemas out of a schema-qualified FROM", () => {
+    // dbo.DboRows and archive.ArchiveOnly live in different schemas with
+    // different signatures; `FROM dbo.` must offer and insert only the dbo
+    // one, with dbo's signature (t8y2/dbx#13394 review).
+    const scoped = [...objects, { name: "DboRows", schema: "dbo", type: "function" as const, dataType: "table", signature: "@top INT" }, { name: "ArchiveOnly", schema: "archive", type: "function" as const, dataType: "table", signature: "@from DATE" }];
+    const item = buildSqlCompletionItems("SELECT * FROM dbo.", 20, {
+      databaseType: "sqlserver",
+      tables: [{ name: "orders" }],
+      objects: scoped,
+      columnsByTable: new Map(),
+    }).find((entry) => entry.label === "DboRows");
+    expect(item).toBeDefined();
+    expect(item?.apply).toBe("DboRows(${1:@top INT})");
+    const labels = buildSqlCompletionItems("SELECT * FROM dbo.", 20, {
+      databaseType: "sqlserver",
+      tables: [{ name: "orders" }],
+      objects: scoped,
+      columnsByTable: new Map(),
+    }).map((entry) => entry.label);
+    expect(labels).not.toContain("ArchiveOnly");
+  });
+
+  it("inserts the dbo signature when the same TVF name exists in two schemas", () => {
+    // The schema scope above also keeps the signature lookup from crossing
+    // schemas when names collide (t8y2/dbx#13394 review).
+    const colliding = [
+      { name: "SplitCsv", schema: "dbo", type: "function" as const, dataType: "table", signature: "@csv NVARCHAR(MAX)" },
+      { name: "SplitCsv", schema: "archive", type: "function" as const, dataType: "table", signature: "@legacy INT" },
+    ];
+    const item = buildSqlCompletionItems("SELECT * FROM dbo.Split", 22, {
+      databaseType: "sqlserver",
+      tables: [{ name: "orders" }],
+      objects: colliding,
+      columnsByTable: new Map(),
+    }).find((entry) => entry.label === "SplitCsv");
+    expect(item?.apply).toBe("SplitCsv(${1:@csv NVARCHAR(MAX)})");
+  });
+
   it("does not offer sqlserver metadata objects to other engines", () => {
     const labels = buildSqlCompletionItems("SELECT * FROM ", 14, {
       databaseType: "mysql",

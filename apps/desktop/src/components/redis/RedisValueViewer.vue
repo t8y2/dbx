@@ -3215,7 +3215,10 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           <Badge v-if="stringValueDetectionLabel" variant="outline" class="shrink-0 text-xs text-muted-foreground" :title="t('redis.detectedBadgeTitle')" :aria-label="t('redis.detectedBadgeTitle')">{{ stringValueDetectionLabel }}</Badge>
           <FileArchive v-if="!isStringValueTruncated && stringGzipBadge && stringValueCodec === 'none'" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')" />
           <span class="flex-1" />
-          <label v-if="!stringPluginCodecView && (isTextRedisFormat(stringValueView) || activeStructuredStringDetail || isDecompressCodec(stringValueCodec))" class="flex items-center gap-1.5 text-muted-foreground">
+          <!-- Issue #14653: keep the toggle on one line. Without shrink-0 the label is the only
+               shrinkable item in this row and gets squeezed to min-content (one CJK glyph per
+               line), overflowing over the 视图 row; the codec strip already scrolls itself. -->
+          <label v-if="!stringPluginCodecView && (isTextRedisFormat(stringValueView) || activeStructuredStringDetail || isDecompressCodec(stringValueCodec))" class="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-muted-foreground">
             <WrapText class="h-3.5 w-3.5" />
             {{ t("redis.wordWrap") }}
             <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
@@ -3387,7 +3390,8 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': !redisJsonDecoded }" @click="setRedisJsonUnicodeMode('raw')">{{ t("redis.jsonViewRaw") }}</Button>
             <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': redisJsonDecoded }" @click="setRedisJsonUnicodeMode('decoded')">{{ t("redis.jsonViewDecoded") }}</Button>
           </div>
-          <label class="flex items-center gap-1.5 text-muted-foreground">
+          <!-- Issue #14653: same one-line contract as the codec row toggle. -->
+          <label class="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-muted-foreground">
             <WrapText class="h-3.5 w-3.5" />
             {{ t("redis.wordWrap") }}
             <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
@@ -4080,7 +4084,8 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': memberPluginCodecView }" :disabled="hasUnsavedRedisDraft" @click="memberPluginCodecView = true">{{ t("redis.pluginCodecLabel") }}</Button>
             </RedisHorizontalScrollbar>
             <span class="flex-1" />
-            <label v-if="!memberPluginCodecView && (isTextRedisFormat(memberValueView) || activeStructuredMemberDetail || isDecompressCodec(memberValueCodec))" class="flex items-center gap-1.5 text-muted-foreground">
+            <!-- Issue #14653: the member dialog narrows with the viewport, same one-line contract. -->
+            <label v-if="!memberPluginCodecView && (isTextRedisFormat(memberValueView) || activeStructuredMemberDetail || isDecompressCodec(memberValueCodec))" class="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-muted-foreground">
               <WrapText class="h-3.5 w-3.5" />
               {{ t("redis.wordWrap") }}
               <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />

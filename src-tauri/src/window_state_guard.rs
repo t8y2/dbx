@@ -311,7 +311,7 @@ fn current_main_window_geometry<R: Runtime>(app: &AppHandle<R>) -> Option<Window
 /// Writes the main window's entry into DBX's geometry file, keeping any other
 /// entries. The plugin never touches this file.
 fn persist_logical_geometry<R: Runtime>(app: &AppHandle<R>, geometry: &WindowGeometry) {
-    let Ok(dir) = app.path().app_config_dir() else {
+    let Some(dir) = geometry_dir(app) else {
         return;
     };
     let path = dir.join(GEOMETRY_FILENAME);
@@ -333,8 +333,17 @@ fn updated_geometry_file(existing: Option<&[u8]>, label: &str, geometry: &Window
 }
 
 fn load_main_window_geometry<R: Runtime>(app: &AppHandle<R>) -> Option<WindowGeometry> {
-    let path = app.path().app_config_dir().ok()?.join(GEOMETRY_FILENAME);
+    let path = geometry_dir(app)?.join(GEOMETRY_FILENAME);
     parse_geometry_file(&fs::read(path).ok()?, MAIN_WINDOW_LABEL)
+}
+
+fn geometry_dir<R: Runtime>(app: &AppHandle<R>) -> Option<std::path::PathBuf> {
+    if let Some(profile) = app.try_state::<crate::data_dir::DataDirResolution>() {
+        if profile.uses_custom_data_dir() {
+            return Some(profile.data_dir.clone());
+        }
+    }
+    app.path().app_config_dir().ok()
 }
 
 fn parse_geometry_file(bytes: &[u8], label: &str) -> Option<WindowGeometry> {

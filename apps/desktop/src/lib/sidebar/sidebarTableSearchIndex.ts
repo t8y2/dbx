@@ -24,6 +24,58 @@ import type { TableInfo } from "@/types/database";
 const inFlightSidebarTableSearchBuilds = new Map<string, Promise<TableInfo[] | null>>();
 
 /**
+ * One scope of a table-search index build: the schema name to query, and whether
+ * the rows it returns may be attributed to that schema.
+ *
+ * Attribution is not cosmetic. `buildTableTreeNodes` / `buildGroupedObjectTreeNodes`
+ * put the schema into a table node id, so stamping a schema the live tree does not
+ * carry makes the indexed node and the live node key differently. The sidebar then
+ * renders the same table twice, because merging is keyed by node id (#14736).
+ */
+export interface SidebarTableSearchIndexSchemaScope {
+  schema: string;
+  attributeSchema: boolean;
+}
+
+/**
+ * Scopes a table-search index build has to walk for one sidebar parent.
+ *
+ * The database-name fallback queries *as* that name (drivers where database and
+ * schema are the same thing need it as the query schema) but must not attribute
+ * rows to it: the live tree keeps `schema` empty for those connections and answers
+ * scope matching from `node.database` instead. Attributing there is exactly what
+ * produced duplicate rows.
+ */
+export function sidebarTableSearchIndexScopes(
+  parent: {
+    schema?: string | null;
+    database?: string | null;
+    children?: ReadonlyArray<{ type: string; schema?: string | null }>;
+  },
+  maxSchemas: number,
+): SidebarTableSearchIndexSchemaScope[] {
+  const scopeSchema = parent.schema?.trim();
+  if (scopeSchema) return [{ schema: scopeSchema, attributeSchema: true }];
+
+  const loadedSchemas = [
+    ...new Set(
+      (parent.children ?? [])
+        .filter((child) => child.type === "schema" || child.type === "linked-server-schema")
+        .map((child) => child.schema?.trim())
+        .filter((schema): schema is string => !!schema),
+    ),
+  ];
+  // Hundreds of schemas would turn one index build into hundreds of round trips;
+  // stay unattributed there and let the live tree answer instead.
+  if (loadedSchemas.length > 0 && loadedSchemas.length <= maxSchemas) {
+    return loadedSchemas.map((schema) => ({ schema, attributeSchema: true }));
+  }
+
+  const database = parent.database?.trim();
+  return database ? [{ schema: database, attributeSchema: false }] : [];
+}
+
+/**
  * Stop a later explicit refresh from reusing a build that started before the
  * underlying table list was refreshed. The old promise may still settle, but
  * callers can start a new build for the same scope immediately.

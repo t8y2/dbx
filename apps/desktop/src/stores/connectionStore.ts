@@ -143,7 +143,7 @@ import { buildSqlServerDatabaseTreeNodes } from "@/lib/database/sqlServerTree";
 import { collapseExpandedTreeNodes, collapseSubtreeDescendants } from "@/lib/sidebar/sidebarTreeCollapse";
 import { findNodePathByIdentity, nodeMatchesRegexScopeIdentity, type SidebarRegexScopeIdentity } from "@/lib/sidebar/sidebarSearchTree";
 import { sidebarIndexedObjectGroupTypes } from "@/lib/sidebar/sidebarGlobalSearchIndex";
-import { invalidateSidebarTableSearchBuild, loadOrBuildSidebarTableSearchIndex } from "@/lib/sidebar/sidebarTableSearchIndex";
+import { invalidateSidebarTableSearchBuild, loadOrBuildSidebarTableSearchIndex, sidebarTableSearchIndexScopes, type SidebarTableSearchIndexSchemaScope } from "@/lib/sidebar/sidebarTableSearchIndex";
 import { findDatabaseTreeNode } from "@/lib/sidebar/treeRefreshTarget";
 import { simpleModeEmptyShellNeedsConfirmedLoad, treeNodeLoadedChildrenContentPresent } from "@/lib/sidebar/treeLoadedChildrenMarker";
 import { shouldMarkDisconnected } from "@/lib/connection/connectionHealth";
@@ -4161,23 +4161,8 @@ export const useConnectionStore = defineStore("connection", () => {
    * schema and a database are the same thing (MySQL/SQLite). `parent_schema` is
    * never an option: drivers use it for the partitioned parent table (#14316).
    */
-  function sidebarTableSearchIndexSchemas(parent: TreeNode): string[] {
-    const scopeSchema = parent.schema?.trim();
-    if (scopeSchema) return [scopeSchema];
-    const loadedSchemas = [
-      ...new Set(
-        (parent.children ?? [])
-          .filter((child) => child.type === "schema" || child.type === "linked-server-schema")
-          .map((child) => child.schema?.trim())
-          .filter((schema): schema is string => !!schema),
-      ),
-    ];
-    // Hundreds of schemas would turn one index build into hundreds of round
-    // trips; stay unattributed there and let the live tree answer instead.
-    if (loadedSchemas.length > 0 && loadedSchemas.length <= SIDEBAR_TABLE_SEARCH_INDEX_MAX_SCHEMA_SCOPES) return loadedSchemas;
-    // No loaded schema to attribute with: fall back to the database name, which is
-    // the schema on drivers where the two are the same thing.
-    return parent.database ? [parent.database] : [];
+  function sidebarTableSearchIndexSchemas(parent: TreeNode): SidebarTableSearchIndexSchemaScope[] {
+    return sidebarTableSearchIndexScopes(parent, SIDEBAR_TABLE_SEARCH_INDEX_MAX_SCHEMA_SCOPES);
   }
 
   async function buildSidebarTableSearchIndex(parentNodeId: string, identity?: SidebarRegexScopeIdentity): Promise<TableInfo[] | null> {
@@ -4214,13 +4199,15 @@ export const useConnectionStore = defineStore("connection", () => {
     // A table row does not say which schema owns it (the backend answers for the
     // schema that was queried), so attribute every row while we still know it.
     // `parent_schema` cannot stand in: drivers use it for the partitioned parent.
-    const indexSchemas = sidebarTableSearchIndexSchemas(parent);
-    for (const entrySchema of indexSchemas) {
-      const querySchema = connectionObjectTreeQuerySchema(config, parent.database, entrySchema || undefined);
+    const indexScopes = sidebarTableSearchIndexSchemas(parent);
+    for (const indexScope of indexScopes) {
+      const querySchema = connectionObjectTreeQuerySchema(config, parent.database, indexScope.schema || undefined);
       for (let offset = 0; ; offset += pageSize) {
         if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return [];
         const page = await listTablesWithOptionalTableNameFilter(connectionId, parent.database, querySchema, undefined, pageSize, offset, objectTypes, parent.catalog, tableNameFilter);
-        entries.push(...page.map((row) => (entrySchema ? { ...row, schema: entrySchema } : row)));
+        // Only attribute a schema the live tree also carries, or the indexed node
+        // keys differently from the live one and the table renders twice (#14736).
+        entries.push(...page.map((row) => (indexScope.attributeSchema ? { ...row, schema: indexScope.schema } : row)));
         if (page.length < pageSize) break;
       }
     }

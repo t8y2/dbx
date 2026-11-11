@@ -1429,6 +1429,10 @@ fn build_neo4j_data_grid_column_distinct_values_sql(options: &DataGridColumnDist
     }
 }
 
+fn allows_before_insert_trigger_populated_not_null(database_type: Option<DatabaseType>) -> bool {
+    matches!(database_type, Some(DatabaseType::Mysql | DatabaseType::Firebird))
+}
+
 fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<String> {
     if let Some(error) = validate_oceanbase_blob_save(options) {
         return Some(error);
@@ -1500,9 +1504,9 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
         }
     }
 
-    // MySQL BEFORE INSERT triggers can populate omitted NOT NULL columns. New-row NULL values are
-    // omitted from the generated INSERT, so let MySQL apply triggers or report missing required fields.
-    if options.database_type != Some(DatabaseType::Mysql) {
+    // MySQL and Firebird BEFORE INSERT triggers can populate omitted NOT NULL columns. New-row NULL values are
+    // omitted from the generated INSERT, so let MySQL or Firebird apply triggers or report missing required fields.
+    if !allows_before_insert_trigger_populated_not_null(options.database_type) {
         for row in &options.new_rows {
             for column_index in 0..options.columns.len() {
                 let source_column = save_columns.get(column_index).and_then(|column| column.as_deref());
@@ -2012,6 +2016,9 @@ fn build_data_grid_save_statements(
             if options.database_type == Some(DatabaseType::Mysql) {
                 statements
                     .push(data_grid_statement(options.database_type, format!("INSERT INTO {table} () VALUES ()")));
+            } else if options.database_type == Some(DatabaseType::Firebird) {
+                statements
+                    .push(data_grid_statement(options.database_type, format!("INSERT INTO {table} DEFAULT VALUES")));
             }
             continue;
         }
@@ -2114,7 +2121,10 @@ fn build_data_grid_rollback_statements(
     for row in &options.new_rows {
         // Server-generated keys are unknown; never invent an undo predicate from
         // the unset draft values. Reuse the existing key-based rollback guard.
-        let where_clause = if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::StarRocks)) {
+        let where_clause = if matches!(
+            options.database_type,
+            Some(DatabaseType::Mysql | DatabaseType::StarRocks | DatabaseType::Firebird)
+        ) {
             build_mysql_insert_rollback_where(options, &save_columns, row, column_info)
         } else {
             let where_clause = build_save_row_where(
@@ -2503,7 +2513,7 @@ fn build_mysql_insert_rollback_where(
     }
 
     for primary_key in &options.table_meta.primary_keys {
-        let index = columns.iter().position(|column| column.as_deref() == Some(primary_key.as_str()))?;
+        let index = find_column_index(options.database_type, columns, primary_key)?;
         let value = row.get(index).unwrap_or(&Value::Null);
         let info = column_info_for(column_info, primary_key);
         if value.is_null()
@@ -13401,6 +13411,133 @@ mod tests {
         });
 
         assert_eq!(result.validation_error, Some(r#"Column "trigger_value" does not allow NULL."#.to_string()));
+        assert!(result.statements.is_empty());
+    }
+
+    #[test]
+    fn prepare_data_grid_save_allows_firebird_trigger_populated_primary_key_insert() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Firebird),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "REPORTS".to_string(),
+                primary_keys: vec!["REPORT_DID".to_string()],
+                columns: Some(vec![
+                    pk_column("REPORT_DID", "INTEGER", false, None),
+                    column("TITLE", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["REPORT_DID".to_string(), "TITLE".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, json!("Daily")]],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec![r#"INSERT INTO "REPORTS" ("TITLE") VALUES ('Daily');"#]);
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn prepare_data_grid_save_uses_firebird_default_values_for_trigger_only_rows() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Firebird),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "REPORTS".to_string(),
+                primary_keys: vec!["REPORT_DID".to_string()],
+                columns: Some(vec![
+                    pk_column("REPORT_DID", "INTEGER", false, None),
+                    column("TITLE", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["REPORT_DID".to_string(), "TITLE".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, Value::Null]],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec![r#"INSERT INTO "REPORTS" DEFAULT VALUES;"#]);
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn prepare_data_grid_save_uses_known_firebird_primary_key_for_trigger_rollback() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Firebird),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "REPORTS".to_string(),
+                primary_keys: vec!["REPORT_DID".to_string()],
+                columns: Some(vec![
+                    pk_column("REPORT_DID", "INTEGER", false, None),
+                    column("TRIGGER_VALUE", "VARCHAR(64)", false, None),
+                    column("PAYLOAD", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["REPORT_DID".to_string(), "TRIGGER_VALUE".to_string(), "PAYLOAD".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(7), Value::Null, json!("created")]],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![r#"INSERT INTO "REPORTS" ("REPORT_DID", "PAYLOAD") VALUES (7, 'created');"#]
+        );
+        assert_eq!(result.rollback_statements, vec![r#"DELETE FROM "REPORTS" WHERE "REPORT_DID" = 7;"#]);
+    }
+
+    #[test]
+    fn prepare_data_grid_save_still_rejects_firebird_null_update() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Firebird),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "REPORTS".to_string(),
+                primary_keys: vec!["REPORT_DID".to_string()],
+                columns: Some(vec![
+                    pk_column("REPORT_DID", "INTEGER", false, None),
+                    column("TRIGGER_VALUE", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["REPORT_DID".to_string(), "TRIGGER_VALUE".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("existing")]],
+            dirty_rows: vec![(0, vec![(1, Value::Null)])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, Some(r#"Column "TRIGGER_VALUE" does not allow NULL."#.to_string()));
         assert!(result.statements.is_empty());
     }
 

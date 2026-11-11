@@ -9,7 +9,7 @@ import { saveTextFile, sanitizeExportBaseName, compactLocalTimestamp } from "@/l
 import { notifyExportComplete } from "@/lib/export/exportReveal";
 import { dropsSchemaQualifier } from "@/lib/table/tableSelectSql";
 import * as api from "@/lib/backend/api";
-import { type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
+import { type CellSelectionClipboardMatrix, type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
 import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, type DataGridCopyExtractorId, type DataGridExtractRequest, type DataGridExtractorOptions, type DataGridPrimaryKeyMode } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { useToast } from "@/composables/useToast";
 import { useExportTracker } from "@/composables/useExportTracker";
@@ -156,6 +156,7 @@ export interface UseDataGridExportOptions {
   hasColumnSelection?: ComputedRef<boolean>;
   selectedCells: ComputedRef<SelectionData>;
   selectedCellMatrix: ComputedRef<CellSelectionMatrix | null>;
+  selectedCellClipboardMatrix?: ComputedRef<CellSelectionClipboardMatrix | null>;
   selectedRange: ComputedRef<CellSelectionRange | null>;
   contextCell: Ref<{ rowId: number; rowIndex: number; col: number } | null> | ComputedRef<{ rowId: number; rowIndex: number; col: number } | null>;
   contextSelectionIsSynthetic: Ref<boolean> | ComputedRef<boolean>;
@@ -300,6 +301,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     exportCanMinimize,
   } = options;
   const selectedCellMatrix = selectedCellMatrixOption;
+  const selectedCellClipboardMatrix = options.selectedCellClipboardMatrix ?? computed(() => null);
   const allColumns = allColumnsOption ?? columns;
   const allDisplayItems = allDisplayItemsOption ?? displayItems;
   const allSourceColumns = allSourceColumnsOption ?? sourceColumns;
@@ -1087,6 +1089,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     hasCellSelection,
     selectedCells,
     selectedCellMatrix,
+    selectedCellClipboardMatrix,
     hasRowSelection,
     hasColumnSelection,
     selectedRowIds,

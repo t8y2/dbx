@@ -1,5 +1,17 @@
 import { ref, computed, getCurrentScope, onScopeDispose, type ComputedRef, type Ref } from "vue";
-import { allCellsSelectionRange, extractColumnsSelection, extractSelection, isCellInSelection, normalizeSelectionRange, normalizeSelectedColumnIndexes, type CellPosition, type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
+import {
+  allCellsSelectionRange,
+  extractColumnsSelection,
+  extractSelection,
+  isCellInSelection,
+  normalizeSelectionRange,
+  normalizeSelectedColumnIndexes,
+  type CellPosition,
+  type CellSelectionClipboardMatrix,
+  type CellSelectionMatrix,
+  type CellSelectionRange,
+  type SelectionData,
+} from "@/lib/dataGrid/gridSelection";
 import type { DataGridRuntimeScope } from "@/lib/dataGrid/dataGridRuntime";
 
 type CellValue = string | number | boolean | null;
@@ -164,6 +176,32 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
       Array.from({ length: range.endRow - range.startRow + 1 }, (_, index) => range.startRow + index),
       Array.from({ length: range.endCol - range.startCol + 1 }, (_, index) => range.startCol + index),
     );
+  });
+
+  const selectedCellClipboardMatrix = computed<CellSelectionClipboardMatrix | null>(() => {
+    const matrix = selectedCellMatrix.value;
+    if (matrix) {
+      return {
+        ...matrix,
+        selectedMask: matrix.rows.map((row) => row.map(() => true)),
+      };
+    }
+
+    if (selectedCellKeys.value.size === 0) return null;
+    const positions = [...selectedCellKeys.value].map(parseCellKey).filter((position): position is CellPosition => !!position && position.rowIndex < displayItems.value.length && position.colIndex < columns.value.length && !displayItems.value[position.rowIndex]?.isDraft);
+    const rowIndexes = normalizeSelectedColumnIndexes(positions.map((position) => position.rowIndex));
+    const columnIndexes = normalizeSelectedColumnIndexes(positions.map((position) => position.colIndex));
+    if (rowIndexes.length === 0 || columnIndexes.length === 0) return null;
+
+    const selectedKeys = new Set(positions.map((position) => cellKey(position.rowIndex, position.colIndex)));
+    const selectedMask = rowIndexes.map((rowIndex) => columnIndexes.map((columnIndex) => selectedKeys.has(cellKey(rowIndex, columnIndex))));
+    return {
+      rowIndexes,
+      columnIndexes,
+      columns: columnIndexes.map((index) => columns.value[index]),
+      rows: rowIndexes.map((rowIndex, rowOffset) => columnIndexes.map((columnIndex, columnOffset) => (selectedMask[rowOffset]?.[columnOffset] ? (displayItems.value[rowIndex]?.data[columnIndex] ?? null) : ""))),
+      selectedMask,
+    };
   });
 
   // 选区计数/是否有选区不走 selectedCells 物化：框选拖拽时每帧都会读这些值
@@ -749,6 +787,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     selectedRange,
     selectedCells,
     selectedCellMatrix,
+    selectedCellClipboardMatrix,
     selectedCellCount,
     hasCellSelection,
     isSelectingAll,

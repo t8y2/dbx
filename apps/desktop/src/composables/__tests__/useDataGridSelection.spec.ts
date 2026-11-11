@@ -315,6 +315,36 @@ describe("useDataGridSelection", () => {
     }
   });
 
+  it.each(["ctrlKey", "metaKey"] as const)("builds a sparse clipboard matrix after adding B2:C2 to A1 with %s drag", (modifier) => {
+    const pointerDocument = installPointerDocument();
+    const selection = createSelection({ cellFromClientPoint: () => ({ rowIndex: 1, colIndex: 2 }) });
+
+    try {
+      selection.selectSingleCell(0, 0);
+      selection.handleDataCellMousedown(1, 1, 2, { button: 0, buttons: 1, clientX: 10, clientY: 10, [modifier]: true, preventDefault() {} } as unknown as MouseEvent);
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 30, clientY: 30 } as MouseEvent);
+
+      expect(selection.selectedCellKeys.value).toEqual(new Set(["0:0", "1:1", "1:2"]));
+      expect(selection.selectedCellMatrix.value).toBeNull();
+      expect(selection.selectedCellClipboardMatrix.value).toEqual({
+        rowIndexes: [0, 1],
+        columnIndexes: [0, 1, 2],
+        columns: ["id", "name", "email"],
+        rows: [
+          [1, "", ""],
+          ["", "name-2", "user-2@example.com"],
+        ],
+        selectedMask: [
+          [true, false, false],
+          [false, true, true],
+        ],
+      });
+    } finally {
+      selection.finishCellSelection();
+      pointerDocument.restore();
+    }
+  });
+
   it("removes a rectangular range when a Ctrl drag starts on a selected cell", () => {
     const pointerDocument = installPointerDocument();
     const selection = createSelection({ cellFromClientPoint: () => ({ rowIndex: 2, colIndex: 2 }) });

@@ -60,6 +60,39 @@ test("promotes a beta build manifest published under the stable tag", async () =
   assert.equal(manifest.is_promoted, true);
 });
 
+test("records the promoted beta build in the stable manifest", async () => {
+  const { input, output } = await fixture();
+  await writeFile(input, JSON.stringify({ version: "0.6.60-beta.20261028.1", platforms: {} }));
+  const result = await run([input, output, "stable", "v0.6.60", "true", "2026-10-28T00:00:00.000Z"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(await readFile(output, "utf8")).promoted_from, "0.6.60-beta.20261028.1");
+});
+
+test("keeps an already-promoted manifest byte-identical on a promotion rerun", async () => {
+  const { input, output } = await fixture();
+  const promoted = {
+    version: "0.6.60",
+    platforms: { "darwin-aarch64": {} },
+    channel: "stable",
+    release_tag: "v0.6.60",
+    is_promoted: true,
+    promoted_from: "0.6.60-beta.20261028.1",
+    published_at: "2026-10-28T00:00:00.000Z",
+  };
+  await writeFile(input, JSON.stringify(promoted));
+  const result = await run([input, output, "stable", "v0.6.60", "true", "2026-10-28T00:00:00.000Z"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(JSON.parse(await readFile(output, "utf8")), promoted);
+});
+
+test("omits promoted_from when the stable manifest is not a promoted beta build", async () => {
+  const { input, output } = await fixture();
+  await writeFile(input, JSON.stringify({ version: "0.6.60", platforms: {}, promoted_from: "0.6.60-beta.20261028.1" }));
+  const result = await run([input, output, "stable", "v0.6.60", "true", "2026-10-28T00:00:00.000Z"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal("promoted_from" in JSON.parse(await readFile(output, "utf8")), false);
+});
+
 test("rejects a beta build manifest from another release line under a stable tag", async () => {
   const { input, output } = await fixture();
   await writeFile(input, JSON.stringify({ version: "0.6.61-beta.20261028.1", platforms: {} }));

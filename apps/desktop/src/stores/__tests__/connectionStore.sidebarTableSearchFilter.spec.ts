@@ -15,6 +15,14 @@ function pgConnection(id: string): ConnectionConfig {
   return { id, name: id, db_type: "postgres", host: "127.0.0.1", port: 5432, username: "postgres", password: "", database: "app", read_only: false } as ConnectionConfig;
 }
 
+function mysqlConnection(id: string): ConnectionConfig {
+  return { id, name: id, db_type: "mysql", host: "127.0.0.1", port: 3306, username: "root", password: "", database: "app", read_only: false } as ConnectionConfig;
+}
+
+function sqliteConnection(id: string): ConnectionConfig {
+  return { id, name: id, db_type: "sqlite", host: "", port: 0, username: "", password: "", database: "app", read_only: false } as ConnectionConfig;
+}
+
 function databaseNode(connectionId: string, database: string): TreeNode {
   return {
     id: `${connectionId}:${database}`,
@@ -27,7 +35,7 @@ function databaseNode(connectionId: string, database: string): TreeNode {
   };
 }
 
-async function setup() {
+async function setup(connection: (id: string) => ConnectionConfig = pgConnection) {
   const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);
   const connectDb = vi.fn(async (config: ConnectionConfig) => config.id);
   const listTables = vi.fn().mockResolvedValue([
@@ -51,7 +59,7 @@ async function setup() {
 
   const { useConnectionStore } = await import("@/stores/connectionStore");
   const store = useConnectionStore();
-  store.connections = [pgConnection("conn-a")];
+  store.connections = [connection("conn-a")];
   store.treeNodes = [
     {
       id: "conn-a",
@@ -101,6 +109,32 @@ describe("sidebar table search index respects the per-connection table filter", 
     expect(call[8]).toBeUndefined();
   }, 20_000);
 
+  it("attributes every indexed row to the schema that was queried (#14316 review)", async () => {
+    const { store, listTables } = await setup();
+    // A database node that already lists its schemas is indexed one schema at a
+    // time: the backend returns no owning schema, so the query scope is the only
+    // source of truth, and `parent_schema` means the partitioned parent table.
+    const database = store.treeNodes[0].children![0];
+    database.children = ["public", "audit"].map((schema) => ({
+      id: `conn-a:app:${schema}`,
+      label: schema,
+      type: "schema" as const,
+      connectionId: "conn-a",
+      database: "app",
+      schema,
+      isExpanded: true,
+      children: [],
+    }));
+    listTables.mockImplementation(async (...args: unknown[]) => (args[2] === "public" ? [{ name: "users", table_type: "BASE TABLE" }] : [{ name: "users", table_type: "BASE TABLE", parent_schema: "public", parent_name: "users" }]));
+
+    const entries = await store.refreshSidebarTableSearchIndex(database.id);
+
+    expect((entries ?? []).map((entry) => [entry.schema, entry.name])).toEqual([
+      ["public", "users"],
+      ["audit", "users"],
+    ]);
+  }, 20_000);
+
   it("drops the stale index when the table filter changes and rebuilds with the filter", async () => {
     const { store, listTables } = await setup();
     const group = tablesGroupNode(store);
@@ -122,5 +156,31 @@ describe("sidebar table search index respects the per-connection table filter", 
     const call = listTables.mock.calls.at(-1)!;
     expect(call[8]).toEqual({ includePatterns: ["t_user%"], excludePatterns: [] });
     expect((rebuilt ?? []).map((entry) => entry.name)).toEqual(["t_order", "t_user"]);
+  }, 20_000);
+
+  it("keeps flat-engine (MySQL) index rows unattributed while still querying with the database", async () => {
+    const { store, listTables } = await setup(mysqlConnection);
+    const group = tablesGroupNode(store);
+
+    const entries = await store.refreshSidebarTableSearchIndex(group.id);
+
+    // A stamped schema would give index-built child ids a `${database}:` infix
+    // that the live group children (no node schema on flat engines) never have,
+    // so the global-search merge duplicated every matched table.
+    expect((entries ?? []).map((entry) => [entry.schema, entry.name])).toEqual([
+      [undefined, "t_order"],
+      [undefined, "t_user"],
+    ]);
+    // The database name remains the query schema: the index still sees every table.
+    expect(listTables.mock.calls.at(-1)![2]).toBe("app");
+  }, 20_000);
+
+  it("still attributes the database name where it is the node schema (SQLite)", async () => {
+    const { store } = await setup(sqliteConnection);
+    const group = tablesGroupNode(store);
+
+    const entries = await store.refreshSidebarTableSearchIndex(group.id);
+
+    expect((entries ?? []).map((entry) => entry.schema)).toEqual(["app", "app"]);
   }, 20_000);
 });

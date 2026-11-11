@@ -1250,6 +1250,7 @@ export type {
   MongoExportProgress,
   MongoExportSummary,
   DatabaseExportRequest,
+  DatabaseExportSelectedObject,
   ExportProgress,
   TableExportProgress,
   TableExportStatus,
@@ -1278,3 +1279,6 @@ export const mqttGetTopicTree = forward("mqttGetTopicTree");
 export const mqttGetMessages = forward("mqttGetMessages");
 export const mqttClearMessages = forward("mqttClearMessages");
 export const mqttDeleteMessage = forward("mqttDeleteMessage");
+
+export const migrationPrepareCredentialReset = forward("migrationPrepareCredentialReset");
+export const migrationResetCredentials = forward("migrationResetCredentials");

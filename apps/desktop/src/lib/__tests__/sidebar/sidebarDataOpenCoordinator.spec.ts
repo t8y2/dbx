@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cancelPendingSidebarDataOpen, runSidebarDataOpenImmediately } from "@/lib/sidebar/sidebarDataOpenCoordinator";
+import { cancelPendingSidebarDataOpen, runSidebarDataOpenImmediately, supersedeSidebarDataNavigation } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 
 function deferred() {
   let resolve!: () => void;
@@ -51,6 +51,73 @@ describe("sidebarDataOpenCoordinator", () => {
 
     expect(second).not.toHaveBeenCalled();
     expect(third).toHaveBeenCalledOnce();
+  });
+
+  it("cancels queued ordinary navigation for another target but preserves the same target and new-tab", async () => {
+    const blockedOther = deferred();
+    const blockedSame = deferred();
+    const blockedNewTab = deferred();
+    const queuedOtherTarget = vi.fn();
+    const queuedSameTarget = vi.fn();
+    const newTab = vi.fn();
+
+    runSidebarDataOpenImmediately({ connectionKey: "other-conn", supersede: false }, () => blockedOther.promise);
+    runSidebarDataOpenImmediately({ connectionKey: "other-conn", targetKey: "other" }, queuedOtherTarget);
+    runSidebarDataOpenImmediately({ connectionKey: "same-conn", supersede: false }, () => blockedSame.promise);
+    runSidebarDataOpenImmediately({ connectionKey: "same-conn", targetKey: "target" }, queuedSameTarget);
+    runSidebarDataOpenImmediately({ connectionKey: "new-tab-conn", supersede: false }, () => blockedNewTab.promise);
+    runSidebarDataOpenImmediately({ connectionKey: "new-tab-conn", supersede: false }, newTab);
+
+    supersedeSidebarDataNavigation("target");
+
+    expect(queuedOtherTarget).not.toHaveBeenCalled();
+    expect(queuedSameTarget).not.toHaveBeenCalled();
+    expect(newTab).not.toHaveBeenCalled();
+
+    blockedOther.resolve();
+    blockedSame.resolve();
+    blockedNewTab.resolve();
+    await vi.waitFor(() => expect(queuedSameTarget).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(newTab).toHaveBeenCalledOnce());
+    expect(queuedOtherTarget).not.toHaveBeenCalled();
+  });
+
+  it("cancels an active ordinary navigation for another target", async () => {
+    const active = deferred();
+    const activeCancel = vi.fn();
+    let activeRequest: { isCurrent: () => boolean; signal: AbortSignal } | undefined;
+
+    runSidebarDataOpenImmediately({ connectionKey: "conn", targetKey: "other" }, (request) => {
+      activeRequest = request;
+      request.registerCancel(activeCancel);
+      return active.promise;
+    });
+
+    supersedeSidebarDataNavigation("target");
+
+    expect(activeCancel).toHaveBeenCalledOnce();
+    expect(activeRequest?.signal.aborted).toBe(true);
+    active.resolve();
+  });
+
+  it("preserves active ordinary navigation for the clicked target", async () => {
+    const active = deferred();
+    const activeCancel = vi.fn();
+    let activeRequest: { isCurrent: () => boolean; signal: AbortSignal } | undefined;
+
+    runSidebarDataOpenImmediately({ connectionKey: "conn", targetKey: "target" }, (request) => {
+      activeRequest = request;
+      request.registerCancel(activeCancel);
+      return active.promise;
+    });
+
+    supersedeSidebarDataNavigation("target");
+
+    expect(activeCancel).not.toHaveBeenCalled();
+    expect(activeRequest?.signal.aborted).toBe(false);
+    expect(activeRequest?.isCurrent()).toBe(true);
+    active.resolve();
+    await vi.waitFor(() => expect(activeRequest?.isCurrent()).toBe(false));
   });
 
   it("bounds active work per connection", async () => {

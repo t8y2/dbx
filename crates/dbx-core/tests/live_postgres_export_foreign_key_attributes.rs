@@ -103,6 +103,7 @@ async fn live_postgres_export_preserves_foreign_key_actions_and_deferral() {
             schema: "public".to_string(),
             file_path: export_path.display().to_string(),
             selected_tables: Vec::new(),
+            selected_objects: None,
             excluded_tables: Vec::new(),
             include_structure: true,
             include_data: true,

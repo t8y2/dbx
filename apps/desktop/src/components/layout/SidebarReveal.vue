@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from "vue";
+import { SIDEBAR_HOVER_DELAY_DEFAULT, normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import { isPanelResizing } from "@/lib/app/panelResizeState";
 
-const props = defineProps<{ pinned: boolean; enabled: boolean; classicLayout: boolean }>();
+const props = withDefaults(defineProps<{ pinned: boolean; enabled: boolean; classicLayout: boolean; hoverEnabled?: boolean; hoverDelay?: number }>(), { hoverEnabled: true, hoverDelay: SIDEBAR_HOVER_DELAY_DEFAULT });
 const panel = ref<HTMLElement | null>(null);
 const revealed = ref(false);
 const visible = computed(() => props.enabled && (props.pinned || revealed.value));
@@ -51,13 +52,13 @@ function scheduleClose(delay = 300) {
 }
 
 function enterEdge(event: PointerEvent) {
-  if (event.pointerType === "touch" || event.buttons || !props.enabled || props.pinned) return;
+  if (event.pointerType === "touch" || event.buttons || !props.enabled || !props.hoverEnabled || props.pinned) return;
   inside = true;
   clearTimers();
   if (revealed.value) return;
   openTimer = setTimeout(() => {
     revealed.value = true;
-  }, 150);
+  }, normalizeSidebarHoverDelay(props.hoverDelay));
 }
 
 function enterPanel() {
@@ -80,7 +81,7 @@ function pointerUp() {
   scheduleClose();
 }
 
-watch(() => [props.pinned, props.enabled], dismiss, { flush: "sync" });
+watch(() => [props.pinned, props.enabled, props.hoverEnabled, props.hoverDelay], dismiss, { flush: "sync" });
 watch(isPanelResizing, (resizing) => {
   if (!resizing) scheduleClose();
 });
@@ -102,9 +103,17 @@ defineExpose({ dismiss });
 </script>
 
 <template>
-  <div v-if="enabled && !pinned" data-sidebar-reveal-edge aria-hidden="true" class="sidebar-reveal-edge" @pointerenter="enterEdge" @pointerleave="leave" />
+  <div v-if="enabled && hoverEnabled && !pinned" data-sidebar-reveal-edge aria-hidden="true" class="sidebar-reveal-edge" @pointerenter="enterEdge" @pointerleave="leave" />
   <Transition :name="pinned ? '' : 'sidebar-reveal'">
-    <div v-show="visible" ref="panel" data-sidebar-reveal-panel :data-sidebar-preview="!pinned && revealed ? '' : undefined" :class="pinned ? 'h-full shrink-0' : ['sidebar-reveal-overlay bg-background', { 'sidebar-reveal-inset': !classicLayout }]" @pointerenter="enterPanel" @pointerleave="leave">
+    <div
+      v-show="visible"
+      ref="panel"
+      data-sidebar-reveal-panel
+      :data-sidebar-preview="!pinned && revealed ? '' : undefined"
+      :class="pinned ? 'h-full shrink-0' : ['sidebar-reveal-overlay bg-background-solid', { 'sidebar-reveal-inset': !classicLayout }]"
+      @pointerenter="enterPanel"
+      @pointerleave="leave"
+    >
       <slot />
     </div>
   </Transition>

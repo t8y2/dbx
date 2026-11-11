@@ -10,9 +10,10 @@ use axum::Json;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use dbx_core::storage::{McpGlobalPolicy, McpGlobalPolicyState};
 use pbkdf2::pbkdf2_hmac;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
+use crate::captcha::CaptchaMode;
 use crate::error::AppError;
 use crate::state::WebState;
 use crate::web_mcp::{UpdateWebMcpRequest, WebMcpHttpStatus};
@@ -40,6 +41,41 @@ pub struct EncryptedConfigPayload {
 pub struct DecryptConfigRequest {
     pub payload: EncryptedConfigPayload,
     pub passphrase: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebLoginCaptchaState {
+    /// `always` | `auto` | `off`
+    pub mode: &'static str,
+    /// `DBX_WEB_CAPTCHA` is set, so the dialog must show the value read-only.
+    pub env_locked: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveWebLoginCaptchaRequest {
+    pub mode: String,
+}
+
+pub async fn load_web_login_captcha(State(state): State<Arc<WebState>>) -> Json<WebLoginCaptchaState> {
+    let mode = *state.captcha_mode.read().await;
+    Json(WebLoginCaptchaState { mode: mode.as_str(), env_locked: state.captcha_env_locked })
+}
+
+pub async fn save_web_login_captcha(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SaveWebLoginCaptchaRequest>,
+) -> Result<Json<WebLoginCaptchaState>, AppError> {
+    // A deployment that pins the policy with `DBX_WEB_CAPTCHA` must not be
+    // silently weakened from the UI.
+    if state.captcha_env_locked {
+        return Err(AppError::conflict("captcha_env_locked"));
+    }
+    let mode = CaptchaMode::from_user_input(&body.mode).ok_or_else(|| AppError::bad_request("captcha_mode_invalid"))?;
+    state.app.storage.save_web_login_captcha_mode(mode.as_str()).await.map_err(AppError::from)?;
+    *state.captcha_mode.write().await = mode;
+    Ok(Json(WebLoginCaptchaState { mode: mode.as_str(), env_locked: false }))
 }
 
 pub async fn load_pinned_tree_node_ids(State(state): State<Arc<WebState>>) -> Result<Json<Vec<String>>, AppError> {

@@ -20,6 +20,9 @@ import (
 
 const metadataTimeout = 15 * time.Second
 
+// connectionInfoSQL reads the session identity in one round trip.
+const connectionInfoSQL = "SELECT current_database(), current_user, version(), current_schema()"
+
 const (
 	kingbaseListDatabasesSQL         = "SELECT datname FROM sys_catalog.sys_database WHERE datallowconn AND LOWER(datname) NOT IN ('template0', 'template1') ORDER BY datname"
 	kingbaseListDatabasesPostgresSQL = "SELECT datname FROM pg_catalog.pg_database WHERE datallowconn AND LOWER(datname) NOT IN ('template0', 'template1') ORDER BY datname"
@@ -290,15 +293,25 @@ func (s *server) quoteDDLIdentifier(value string) string {
 }
 
 func (s *server) connectionInfo() (map[string]any, error) {
-	db, err := s.requireDB()
-	if err != nil {
-		return nil, err
-	}
 	var database, username, version string
 	var schema sql.NullString
-	err = db.QueryRow("SELECT current_database(), current_user, version(), current_schema()").Scan(&database, &username, &version, &schema)
-	if err != nil {
-		return nil, err
+	if s.manualConn != nil {
+		// The pool holds a single connection (SetMaxOpenConns(1)) and the open
+		// interactive transaction pinned it, so it is the only connection this
+		// session can use.
+		err := s.manualConn.QueryRowContext(context.Background(), connectionInfoSQL).Scan(&database, &username, &version, &schema)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		db, err := s.requireDB()
+		if err != nil {
+			return nil, err
+		}
+		err = db.QueryRow(connectionInfoSQL).Scan(&database, &username, &version, &schema)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return map[string]any{
 		"database": database, "username": username, "version": version, "schema": schema.String,
@@ -3175,22 +3188,39 @@ func (s *server) getExplainInfo(sqlText string) (string, error) {
 }
 
 func (s *server) metadataQuery(query string) (*sql.Rows, error) {
+	// These are bounded, internally generated statements. Calling Query without
+	// arguments keeps gokb on its single-round-trip simple-query path. The pool
+	// holds a single connection (SetMaxOpenConns(1)) and an open interactive
+	// transaction pinned it, so the query has to run on that connection instead
+	// of waiting for the pool.
+	if s.manualConn != nil {
+		return s.manualConn.QueryContext(context.Background(), query)
+	}
 	db, err := s.requireDB()
 	if err != nil {
 		return nil, err
 	}
-	// These are bounded, internally generated statements. Calling Query without
-	// arguments keeps gokb on its single-round-trip simple-query path.
 	return db.Query(query)
 }
 
 func (s *server) requireDBQueryRow(query string, destination ...any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), metadataTimeout)
+	defer cancel()
+	return s.requireDBQueryRowContext(ctx, query, destination...)
+}
+
+// requireDBQueryRowContext runs one row query on the caller's context, so a
+// fallback chain keeps the single deadline it started with. While an
+// interactive transaction is open the pinned connection is the only one the
+// session can use, so the query runs on it instead of waiting for the pool.
+func (s *server) requireDBQueryRowContext(ctx context.Context, query string, destination ...any) error {
+	if s.manualConn != nil {
+		return s.manualConn.QueryRowContext(ctx, query).Scan(destination...)
+	}
 	db, err := s.requireDB()
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), metadataTimeout)
-	defer cancel()
 	return db.QueryRowContext(ctx, query).Scan(destination...)
 }
 

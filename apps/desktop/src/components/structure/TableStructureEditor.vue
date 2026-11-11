@@ -621,6 +621,9 @@ async function fetchDdl(force = false, options?: { preserveDraft?: boolean }) {
 }
 const errorMessage = ref("");
 const secondaryMetadataErrors = ref<Partial<Record<ObjectMetadataFacet, string>>>({});
+// Keep the index write gate independent of display errors, which unrelated
+// facet loads and silent refreshes may clear or suppress.
+const indexMetadataReadError = ref("");
 const columns = ref<EditableStructureColumn[]>([]);
 const starrocksStatusBusy = ref(false);
 const starrocksStatusRevision = ref(0);
@@ -3012,6 +3015,7 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     createPartitioningColumns: cloneDraftValue(createPartitioningColumns.value),
     createPartitioningExpression: createPartitioningExpression.value,
     loadedMetadataFacets: [...loadedMetadataFacets],
+    indexMetadataReadError: indexMetadataReadError.value || undefined,
     scrollPositions: cloneDraftValue(structureScrollPositions),
     appliedInitialTabRequestId: lastAppliedInitialTabRequestId,
     appliedInitialTargetRequestId: lastAppliedInitialTargetRequestId,
@@ -3063,6 +3067,7 @@ function restoreDraft(draft: TableStructureEditorDraft) {
     oracleIndexRefreshGuard.value = { ...cloneDraftValue(draft.oracleIndexRecovery), afterRequestId: -1 };
     oracleIndexRefreshError.value = draft.oracleIndexRecovery.refreshError ?? "";
   }
+  indexMetadataReadError.value = draft.indexMetadataReadError || "";
   activeTab.value = draft.activeTab || "columns";
   // Restore the DDL baseline alongside the edit, otherwise the restored script
   // would read as dirty (or clean) against the wrong reference text.
@@ -3864,6 +3869,7 @@ const canApply = computed(
     (databaseType.value !== "starrocks" || !starrocksStatusBusy.value) &&
     !postSaveRefreshing.value &&
     !oracleIndexRefreshError.value &&
+    !schemaIndexWriteWarning() &&
     !secondaryMetadataLoading.value &&
     !mysqlTableEngineLoading.value &&
     !sqlPreviewLoading.value &&
@@ -3907,6 +3913,7 @@ function resetState() {
   oracleIndexRefreshGuard.value = undefined;
   lastAppliedInitialTargetRequestId = undefined;
   secondaryMetadataErrors.value = {};
+  indexMetadataReadError.value = "";
   isPartitionedParent.value = false;
   isTablePartition.value = false;
   isForeignTable.value = false;
@@ -4411,6 +4418,9 @@ async function loadStructure(
       }
 
       const nextIndexes = indexesResult.status === "fulfilled" ? indexesResult.value : undefined;
+      if (indexesResult.status === "rejected") {
+        indexMetadataReadError.value = indexesResult.reason?.message || String(indexesResult.reason);
+      }
       const nextForeignKeys = foreignKeysResult.status === "fulfilled" ? foreignKeysResult.value : undefined;
       const nextConstraints = constraintsResult.status === "fulfilled" ? constraintsResult.value : undefined;
       const nextTriggers = triggersResult.status === "fulfilled" ? triggersResult.value : undefined;
@@ -4423,6 +4433,7 @@ async function loadStructure(
           indexes.value = createIndexDrafts(nextIndexes);
         }
         loadedMetadataFacets.add("indexes");
+        indexMetadataReadError.value = "";
       }
       if (nextForeignKeys) {
         foreignKeys.value = createForeignKeyDrafts(nextForeignKeys, databaseType.value);
@@ -6219,6 +6230,7 @@ function schemaIndexDraftIsReadOnly(index: EditableStructureIndex): boolean {
 }
 
 function schemaIndexWriteWarning(): string | undefined {
+  if (!isCreateMode.value && !ddlDirty.value && indexMetadataReadError.value && indexes.value.some(indexChanged)) return indexMetadataReadError.value;
   const blocked = indexes.value.find((index) => schemaIndexDraftIsReadOnly(index) && indexChanged(index));
   if (!blocked) return undefined;
   return blocked.original?.owner == null ? t("schemaIndex.targetMissing", { name: blocked.original?.name }) : t("schemaIndex.crossOwnerReadOnly", { owner: blocked.original.owner, name: blocked.original.name });
@@ -8088,6 +8100,12 @@ watch([() => props.connectionId, () => props.database, () => props.schema, () =>
 
 watch(() => connection.value?.database_info?.productVersion, scheduleSqlPreviewRefresh);
 
+watch(indexMetadataReadError, () => {
+  if (schemaIndexWriteWarning()) clearSqlPreviewState();
+  scheduleSqlPreviewRefresh();
+  syncDraftToParent();
+});
+
 watch(
   [
     isCreateMode,
@@ -8220,6 +8238,9 @@ async function loadActiveTableStructureMetadataIfNeeded() {
   }
   if (loading.value || secondaryMetadataLoading.value) return;
   const scope = withRequiredPostgresPrimaryKeyMetadata(unloadedTableStructureRefreshScope(activeTab.value, loadedMetadataFacets));
+  // A rejected facet is still unloaded, but retrying it whenever loading
+  // clears would loop indefinitely. The toolbar performs an explicit retry.
+  if (indexMetadataReadError.value) scope.indexes = false;
   if (!hasTableStructureRefreshWork(scope)) return;
   await loadStructure(true, scope, true, { blockSecondaryMetadata: true, preserveDraft: true });
   applyInitialStructureTarget();
@@ -8708,12 +8729,12 @@ watch(
                     <colgroup>
                       <col v-for="(width, index) in visibleColWidths" :key="index" :style="{ width: width + 'px' }" />
                     </colgroup>
-                    <thead class="bg-background">
+                    <thead class="bg-background-solid">
                       <tr>
                         <th
                           v-for="(columnLabel, i) in colLabels"
                           :key="columnLabel.key"
-                          :class="[structureHeaderCellClass, 'bg-background select-none', { 'text-center': columnLabel.key === 'primaryKey' || columnLabel.key === 'nullable' }]"
+                          :class="[structureHeaderCellClass, 'bg-background-solid select-none', { 'text-center': columnLabel.key === 'primaryKey' || columnLabel.key === 'nullable' }]"
                           :data-column-selected="columnLabel.key === 'actions' ? undefined : selectedStructureColumnKeys.has(columnLabel.key)"
                           :style="{
                             width: visibleColWidths[i] + 'px',
@@ -8842,22 +8863,24 @@ watch(
                             :allow-custom="true"
                             :option-tooltip="dataTypeTooltip"
                             :display-name="gaussdbMDataTypeDisplayName"
-                            :trigger-class="[structureMonoControlClass, 'w-full']"
+                            :trigger-class="[structureControlClass, 'w-full']"
+                            :content-style="structureDensityStyle"
+                            item-class="text-[length:var(--structure-font-size)]"
                             @update:model-value="(v: string) => updateColumnDataType(column, v)"
                           >
                             <template #option-label="{ option, label }">
-                              <span :class="['structure-data-type-option block truncate font-mono', structureDataTypeToneClass(option)]">{{ label }}</span>
+                              <span :class="['structure-data-type-option block truncate', structureDataTypeToneClass(option)]">{{ label }}</span>
                             </template>
                             <template #custom-option-label="{ value }">
-                              <span :class="['structure-data-type-option block truncate font-mono', structureDataTypeToneClass(value)]">{{ value }}</span>
+                              <span :class="['structure-data-type-option block truncate', structureDataTypeToneClass(value)]">{{ value }}</span>
                             </template>
                           </SearchableSelect>
-                          <Input v-else :model-value="gaussdbMDataTypeDisplayName(dataTypeBaseInputValue(databaseType, column.dataType))" :class="[structureMonoControlClass, 'w-full']" disabled />
+                          <Input v-else :model-value="gaussdbMDataTypeDisplayName(dataTypeBaseInputValue(databaseType, column.dataType))" :class="[structureControlClass, 'w-full']" disabled />
                         </td>
                         <td v-if="columnEditorControls.length" :class="[structureCellClass, structureColumnSelectionClass('length')]" :title="structureColumnClipboardValue(column, 'length') || undefined">
                           <Popover v-if="isMysqlEnumDataType(databaseType, column.dataType)">
                             <PopoverTrigger as-child>
-                              <Button variant="outline" size="sm" :class="[structureMonoControlClass, 'w-full justify-between px-2']" :disabled="isColumnTypeDisabled(column)">
+                              <Button variant="outline" size="sm" :class="[structureControlClass, 'w-full justify-between px-2']" :disabled="isColumnTypeDisabled(column)">
                                 <span>{{ t("structureEditor.enumValueCount", { count: column.enumValues?.length ?? 0 }) }}</span>
                                 <ListChevronsUpDown :class="structureIconClass" />
                               </Button>
@@ -8872,7 +8895,7 @@ watch(
                               </div>
                               <div class="max-h-64 space-y-1.5 overflow-y-auto pr-1">
                                 <div v-for="(value, valueIndex) in column.enumValues" :key="valueIndex" class="flex items-center gap-1.5">
-                                  <Input :model-value="value" :class="structureMonoControlClass" :placeholder="t('structureEditor.enumValuePlaceholder')" @update:model-value="updateMysqlEnumValue(column, Number(valueIndex), $event)" />
+                                  <Input :model-value="value" :class="structureControlClass" :placeholder="t('structureEditor.enumValuePlaceholder')" @update:model-value="updateMysqlEnumValue(column, Number(valueIndex), $event)" />
                                   <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0" :disabled="(column.enumValues?.length ?? 0) <= 1" :title="t('structureEditor.removeEnumValue')" @click="removeMysqlEnumValue(column, Number(valueIndex))">
                                     <Trash2 class="h-3.5 w-3.5" />
                                   </Button>
@@ -8890,13 +8913,13 @@ watch(
                                 :placeholder="t('structureEditor.geometryTypePlaceholder')"
                                 :search-placeholder="t('structureEditor.geometryTypePlaceholder')"
                                 :empty-text="t('structureEditor.noMatchingType')"
-                                :trigger-class="[structureMonoControlClass, 'min-w-0 flex-1']"
+                                :trigger-class="[structureControlClass, 'min-w-0 flex-1']"
                                 :disabled="isColumnTypeDisabled(column)"
                                 @update:model-value="(v: string) => updatePostgresGeometryColumn(column, v, postgresGeometrySridValue(column.dataType))"
                               />
                               <Input
                                 :model-value="postgresGeometrySridValue(column.dataType)"
-                                :class="[structureMonoControlClass, 'w-20 shrink-0']"
+                                :class="[structureControlClass, 'w-20 shrink-0']"
                                 type="number"
                                 min="0"
                                 max="999999"
@@ -8911,14 +8934,9 @@ watch(
                             </p>
                           </div>
                           <div v-else class="flex min-w-0 items-center gap-1">
-                            <Input :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="[structureMonoControlClass, 'min-w-0 flex-1']" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
+                            <Input :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="[structureControlClass, 'min-w-0 flex-1']" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
                             <Select v-if="columnLengthUnitOptions(column).length" :model-value="dataTypeLengthUnitValue(databaseType, column.dataType) || '__default'" :disabled="isColumnLengthUnitDisabled(column)" @update:model-value="updateColumnDataTypeLengthUnit(column, $event)">
-                              <SelectTrigger
-                                :aria-label="t('structureEditor.lengthUnit')"
-                                :title="t('structureEditor.lengthUnit')"
-                                size="sm"
-                                class="structure-grid-control h-[var(--structure-control-height)] w-16 shrink-0 rounded-[6px] px-[var(--structure-control-px)] py-0 font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25"
-                              >
+                              <SelectTrigger :aria-label="t('structureEditor.lengthUnit')" :title="t('structureEditor.lengthUnit')" size="sm" :class="[structureControlClass, 'w-16 shrink-0']">
                                 <SelectValue :placeholder="t('structureEditor.unitPlaceholder')" />
                               </SelectTrigger>
                               <SelectContent>
@@ -8947,16 +8965,16 @@ watch(
                         </td>
                         <td v-if="columnEditorControls.defaultValue" :class="[structureCellClass, 'structure-column-default-value', structureDefaultValueToneClass(column.defaultValue, column.dataType), structureColumnSelectionClass('defaultValue')]" :title="column.defaultValue || undefined">
                           <div class="flex min-w-0 items-center gap-1">
-                            <Input v-model="column.defaultValue" :class="[structureMonoControlClass, 'flex-1']" :disabled="isColumnDefaultDisabled(column)" />
+                            <Input v-model="column.defaultValue" :class="[structureControlClass, 'flex-1']" :disabled="isColumnDefaultDisabled(column)" />
                             <DropdownMenu>
                               <DropdownMenuTrigger as-child>
                                 <Button variant="ghost" size="icon" :class="[structureIconButtonClass, 'shrink-0']" :disabled="isColumnDefaultDisabled(column)" :aria-label="t('structureEditor.defaultValuePresets')" :title="t('structureEditor.defaultValuePresets')">
                                   <ChevronDown :class="structureIconClass" />
                                 </Button>
                               </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end" class="max-h-56 w-max min-w-36 max-w-[calc(100vw-1rem)] overflow-y-auto">
+                              <DropdownMenuContent align="end" class="max-h-56 w-max min-w-36 max-w-[calc(100vw-1rem)] overflow-y-auto" :style="structureDensityStyle">
                                 <DropdownMenuItem v-for="preset in columnDefaultValuePresets(column)" :key="preset.value" @click="column.defaultValue = preset.value">
-                                  <code :class="['structure-data-type-option block truncate font-mono text-[length:var(--structure-font-size)]', structureDefaultValueToneClass(preset.value, preset.dataType)]">{{ preset.label }}</code>
+                                  <code :class="['structure-data-type-option block truncate [font-family:inherit] text-[length:var(--structure-font-size)]', structureDefaultValueToneClass(preset.value, preset.dataType)]">{{ preset.label }}</code>
                                 </DropdownMenuItem>
                               </DropdownMenuContent>
                             </DropdownMenu>
@@ -9256,11 +9274,11 @@ watch(
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}
             </div>
-            <div v-else-if="secondaryMetadataErrors.indexes" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {{ secondaryMetadataErrors.indexes }}
+            <div v-else-if="secondaryMetadataErrors.indexes || indexMetadataReadError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {{ secondaryMetadataErrors.indexes || indexMetadataReadError }}
             </div>
             <table v-else ref="indexesTableRef" class="structure-edit-grid border-separate border-spacing-0 text-[length:var(--structure-font-size)] leading-[var(--structure-line-height)]" :style="{ minWidth: indexColWidths.reduce((a, w) => a + w, 0) + 'px' }">
-              <thead class="sticky top-0 z-10 bg-background">
+              <thead class="sticky top-0 z-10 bg-background-solid">
                 <tr>
                   <th
                     v-for="(label, i) in indexColLabels"
@@ -10486,7 +10504,8 @@ watch(
   top: 0;
   z-index: 10;
   min-width: var(--structure-column-table-width);
-  background: var(--background);
+  /* Wallpaper mode makes --background translucent; sticky headers need an opaque surface (#14065). */
+  background: var(--background-solid, var(--background));
 }
 
 .structure-column-virtual-scroller :deep(.structure-column-virtual-list) {
@@ -10693,7 +10712,6 @@ watch(
 
 .structure-data-type-option {
   color: var(--structure-type-color);
-  font-weight: 500;
 }
 
 .structure-data-type-numeric,
@@ -10790,7 +10808,6 @@ watch(
 .structure-column-data-type :deep(.structure-grid-control),
 .structure-column-default-value :deep(.structure-grid-control) {
   color: var(--structure-type-color);
-  font-weight: 500;
 }
 
 /* --primary is rgb/oklch; use color-mix like DataGrid, not channel-based hsl wrappers. */

@@ -31,6 +31,16 @@ export interface SqlFileFailureContext {
   fileName?: string;
 }
 
+export interface DataTransferTaskOptions {
+  onStarted?: () => void;
+  onDone?: () => void | Promise<void>;
+  onOpen?: () => void;
+  openTask?: (taskId: string) => void;
+  onRemove?: () => void;
+  oracleRoutineDeployment?: OracleRoutineDeployment;
+  formatOverlapError?: (tables: string[]) => string;
+}
+
 export interface ExportTask {
   exportId: string;
   kind: BackgroundTaskKind;
@@ -46,6 +56,9 @@ export interface ExportTask {
    * 终态摘要，供进度对话框的「执行日志」区展示。按时间正序追加，超上限丢头部。
    */
   logLines?: BackgroundTaskLogLine[];
+  dataTransferRequest?: api.TransferRequest;
+  dataTransferLabel?: string;
+  dataTransferOptions?: DataTransferTaskOptions;
   databaseExportSource?: DatabaseExportSource;
   currentObject?: string;
   preparing?: boolean;
@@ -430,6 +443,10 @@ function finishExportTask(task: ExportTask) {
   }
 }
 
+export function canReexecuteDataTransferTask(task: ExportTask): boolean {
+  return task.kind === "data-transfer" && Boolean(task.dataTransferRequest) && (task.status === "Done" || task.status === "Error" || task.status === "Cancelled");
+}
+
 // Implementation lives in @/lib/format/duration (shared with the DataGrid
 // footer / history elapsed hints); the data-transfer name is kept for the
 // export/multi-db call sites.
@@ -747,22 +764,7 @@ export function useExportTracker() {
     if (task.status === "Done" || task.status === "Error" || task.status === "Cancelled") finishExportTask(task);
   }
 
-  function startDataTransferTask(
-    request: api.TransferRequest,
-    label: string,
-    options: {
-      onStarted?: () => void;
-      onDone?: () => void | Promise<void>;
-      onOpen?: () => void;
-      onRemove?: () => void;
-      oracleRoutineDeployment?: OracleRoutineDeployment;
-      formatOverlapError?: (tables: string[]) => string;
-    } = {},
-  ): ExportTask {
-    const existingTask = taskMap.get(request.transferId);
-    const task = existingTask ?? addDataTransferTask(request.transferId, label, request.tables.length);
-    task.onOpen = options.onOpen;
-    task.startedAt ??= Date.now();
+  function executeTransferRun(task: ExportTask, request: api.TransferRequest, options: DataTransferTaskOptions): ExportTask {
     task.targetConnectionId = request.targetConnectionId;
     task.targetCatalog = request.targetCatalog;
     task.targetDatabase = request.targetDatabase;
@@ -829,6 +831,23 @@ export function useExportTracker() {
     })();
 
     return task;
+  }
+
+  function startDataTransferTask(request: api.TransferRequest, label: string, options: DataTransferTaskOptions = {}): ExportTask {
+    const existingTask = taskMap.get(request.transferId);
+    const task = existingTask ?? addDataTransferTask(request.transferId, label, request.tables.length);
+    task.dataTransferRequest = {
+      ...JSON.parse(JSON.stringify(request)),
+      dropTargetConfirmed: false,
+    };
+    task.dataTransferLabel = label;
+    task.dataTransferOptions = {
+      ...options,
+      oracleRoutineDeployment: undefined,
+    };
+    task.onOpen = () => (options.openTask ? options.openTask(task.exportId) : options.onOpen?.());
+    task.startedAt ??= Date.now();
+    return executeTransferRun(task, request, options);
   }
 
   function updateTableExportTask(exportId: string, progress: api.TableExportProgress) {
@@ -1107,6 +1126,7 @@ export function useExportTracker() {
     addMultiDbExecutionTask,
     updateMultiDbExecutionTask,
     startDataTransferTask,
+    canReexecuteDataTransferTask,
     updateTableExportTask,
     updateDatabaseExportTask,
     markDatabaseExportTaskCancelling,

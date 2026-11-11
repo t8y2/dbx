@@ -1093,6 +1093,11 @@ export interface TableInfo {
   /** Optional validity populated by status-aware object loaders. */
   valid?: boolean | null;
   comment?: string | null;
+  /**
+   * Schema that owns this object. The backend list does not return it (it is the
+   * schema that was queried), so the sidebar table index fills it in.
+   */
+  schema?: string | null;
   parent_schema?: string | null;
   parent_name?: string | null;
 }
@@ -1595,6 +1600,7 @@ export interface TriggerInfo {
 
 /** Missing metadata means a provider has not established exact identity. */
 export interface MetadataReadOptions {
+  lightweight?: boolean;
   identityMode?: "exact";
   catalog?: string;
 }
@@ -1995,6 +2001,8 @@ export interface QueryResultRun {
    * disk eviction/restore. See `dataGridViewStateCache.ts`.
    */
   resultViewGeneration?: string;
+  /** Identifies the latest successful refresh for automatic column sizing. */
+  resultColumnWidthRevision?: string;
   result?: QueryResult;
   results?: QueryResult[];
   activeResultIndex?: number;
@@ -2095,6 +2103,16 @@ export interface SqlGroupByViolation {
   qualifier?: string | null;
 }
 
+/**
+ * A two-part column qualifier that names neither a table nor an alias visible
+ * in the statement, e.g. `b.id` when only `a` and `qb` are declared.
+ * The span covers the qualifier itself.
+ */
+export interface SqlUnknownQualifier {
+  qualifier: string;
+  span: SqlTextSpan;
+}
+
 export interface SqlReferenceScope {
   id: number;
   parent_id?: number | null;
@@ -2105,6 +2123,7 @@ export interface SqlReferenceAnalysis {
   columns: SqlColumnReference[];
   scopes?: SqlReferenceScope[];
   group_by_violations?: SqlGroupByViolation[];
+  unknown_qualifiers?: SqlUnknownQualifier[];
 }
 
 export type TreeNodeType =
@@ -2289,6 +2308,7 @@ export interface TreeNode {
   partitionParentName?: string;
   hiddenChildren?: TreeNode[];
   tableSearchParentId?: string;
+  indexSearchOnly?: boolean;
   savedSqlId?: string;
   savedSqlFolderId?: string;
   /** Set on synthetic table virtual-group container nodes. */
@@ -2440,6 +2460,8 @@ export interface TableStructureEditorDraft {
   createPartitioningColumns?: string[];
   createPartitioningExpression?: string;
   loadedMetadataFacets?: import("@/lib/metadata/objectMetadataCache").ObjectMetadataFacet[];
+  /** A failed index read must keep restored index edits blocked until an explicit reload succeeds. */
+  indexMetadataReadError?: string;
   scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
   /** Request id of the structureInitialTab the editor already applied; remounts must not replay a consumed initial tab over the restored draft. */
   appliedInitialTabRequestId?: number;
@@ -2656,6 +2678,7 @@ export interface QueryTab {
   resultGridRevision?: string;
   /** Logical-result identity for the tab-switch view snapshot cache; see QueryResultRun. */
   resultViewGeneration?: string;
+  resultColumnWidthRevision?: string;
   resultRuns?: QueryResultRun[];
   activeResultRunId?: string;
   /** Undefined inherits the default on open; false preserves an explicit per-tab opt-out. */

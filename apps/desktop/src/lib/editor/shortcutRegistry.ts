@@ -46,6 +46,7 @@ export type ShortcutActionId =
   | "lowercaseSelection"
   | "toggleCaseSelection"
   | "convertNamingStyle"
+  | "convertSelectionToDelimited"
   | "exPasteSqlInCondition"
   | "toggleFold"
   | "foldAll"
@@ -99,6 +100,7 @@ export type ShortcutActionId =
   | "toggleResultsPane"
   | "focusResultGrid"
   | "focusSqlEditor"
+  | "copyActiveResult"
   | "toggleTranspose"
   | "cancelSearch"
   | "toggleSidebar"
@@ -448,6 +450,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Shift+Alt+C",
   },
   {
+    id: "convertSelectionToDelimited",
+    labelKey: "settings.shortcutConvertSelectionToDelimited",
+    scope: "editor",
+    defaultShortcut: "Mod+Alt+,",
+  },
+  {
     id: "exPasteSqlInCondition",
     labelKey: "settings.shortcutExPasteSqlInCondition",
     scope: "editor",
@@ -766,6 +774,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
   {
     id: "focusSqlEditor",
     labelKey: "settings.shortcutFocusSqlEditor",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyActiveResult",
+    labelKey: "settings.shortcutCopyActiveResult",
     scope: "global",
     defaultShortcut: "",
   },

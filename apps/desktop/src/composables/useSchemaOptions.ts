@@ -1,8 +1,8 @@
-import { ref } from "vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { isSchemaAware as isSchemaAwareType, isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { sortSidebarNames } from "@/lib/database/databaseTree";
 import { filterSchemaNamesForConnection } from "@/lib/database/visibleDatabases";
+import { loadingSchemaOptionsByKey, schemaOptionsByKey } from "@/lib/database/schemaOptionsCache";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
 
@@ -22,8 +22,8 @@ export function schemaOptionsForConnection(schemaNames: string[], connection: Pi
 export function useSchemaOptions() {
   const connectionStore = useConnectionStore();
 
-  const schemaOptions = ref<Record<string, string[]>>({});
-  const loadingSchemaOptions = ref<Record<string, boolean>>({});
+  const schemaOptions = schemaOptionsByKey;
+  const loadingSchemaOptions = loadingSchemaOptionsByKey;
   const schemaRequests = new Map<string, Promise<void>>();
 
   function cacheKey(connectionId: string, database: string) {

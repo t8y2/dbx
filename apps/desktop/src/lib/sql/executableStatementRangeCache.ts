@@ -79,13 +79,16 @@ export function executableStatementRangeCacheForDoc(
   const byExecutableLineStart = new Map<number, SqlTextRange>();
   const sql = doc.toString();
   const ranges = parse(sql, databaseType, parameterOptions);
+  let currentLine = doc.lines > 0 ? doc.line(1) : null;
   for (const range of ranges) {
     byStart.set(range.from, range);
-    const line = doc.lineAt(range.from);
-    if (doc.sliceString(line.from, range.from).trim() === "") {
-      byExecutableLineStart.set(line.from, range);
+    if (!currentLine || currentLine.to < range.from || currentLine.from > range.from) {
+      currentLine = doc.lineAt(range.from);
     }
-    const executableStart = executableStartAfterLeadingDirective(sql, range, databaseType, parameterOptions);
+    if (doc.sliceString(currentLine.from, range.from).trim() === "") {
+      byExecutableLineStart.set(currentLine.from, range);
+    }
+    const executableStart = executableStartAfterLeadingComments(sql, range, databaseType, parameterOptions);
     if (executableStart !== null) {
       byExecutableLineStart.set(doc.lineAt(executableStart).from, range);
     }
@@ -93,11 +96,12 @@ export function executableStatementRangeCacheForDoc(
   return { doc, databaseType, parameterOptions, parameterSyntaxKey, byStart, byExecutableLineStart, ranges };
 }
 
-function executableStartAfterLeadingDirective(sql: string, range: SqlTextRange, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): number | null {
+function executableStartAfterLeadingComments(sql: string, range: SqlTextRange, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): number | null {
   databaseType = statementParsingDatabaseType(databaseType, parameterOptions);
   const text = range.sql;
   const hasExecutableDirective = text.startsWith("/*+") || text.startsWith("/*@") || text.startsWith("/*&") || (databaseType === "mysql" && text.startsWith("/*proxy*/"));
-  if (!hasExecutableDirective) return null;
+  const hasModuleComment = databaseType === "sqlserver" && (text.startsWith("--") || text.startsWith("/*"));
+  if (!hasExecutableDirective && !hasModuleComment) return null;
 
   let offset = 0;
   while (offset < text.length) {

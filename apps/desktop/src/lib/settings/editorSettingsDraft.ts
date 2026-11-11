@@ -1,9 +1,11 @@
+import { normalizeSidebarHoverDelay } from "@/lib/sidebar/sidebarHoverSettings";
 import type { EditorSettings } from "@/stores/settingsStore";
 import { normalizeBackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { normalizeExternalSqlEditorMaxMb } from "@/lib/sql/sqlFileOpen";
 import { normalizeCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { normalizeCompletionMatchMode } from "@/lib/sql/sqlCompletionMatchMode";
 import { normalizeExcludedCompletionItems } from "@/lib/editor/excludedCompletions";
 import { normalizeSqlTableCompletionSchemaQualification } from "@/lib/sql/sqlCompletionSchemaQualification";
 import { normalizeTableHoverLookupMode } from "@/lib/editor/hoverTableLookup";
@@ -124,12 +126,14 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "autoSelectActiveSidebarNode",
   "sidebarPinDefaultDatabase",
   "sidebarBrowseObjectsOnDatabaseActivation",
+  "sidebarTableClickNavigation",
   "openTabsRestoreMode",
   "autoReloadRestoredDataTabsOnOpen",
   "disconnectTabHandlingMode",
   "deleteConnectionTabHandlingMode",
   "rememberConnectionDatabaseOnDelete",
   "deepLinkConnectionConfirmMode",
+  "duplicateTabTitleMode",
   "dataTabReuseMode",
   "openDataTabsNextToActive",
   "openTablesInDetachedWindow",
@@ -150,6 +154,8 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "sidebarObjectInfoMode",
   "sidebarAllowHorizontalScroll",
   "sidebarShowConnectionEndpoints",
+  "sidebarHoverEnabled",
+  "sidebarHoverDelay",
   "sidebarShowTooltips",
   "sidebarIndent",
   "sidebarFontSize",
@@ -164,6 +170,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "damengClientBinDir",
   "autoOpenExportFolder",
   "applyColumnFormattersOnExport",
+  "csvWithoutBom",
   "csvQuoteMode",
   "csvNullMode",
   "queryResultExportFileNameSource",
@@ -184,6 +191,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "clickTableNavigationTarget",
   "objectBrowserAutoOpenDetailPanel",
   "completionTriggerMode",
+  "completionMatchMode",
   "excludedCompletionItems",
   "defaultTransactionMode",
   "keepExplicitTransactionInAutoCommit",
@@ -209,10 +217,12 @@ export function normalizeQueryResultMaxRowsDraft(value: unknown): number {
 }
 
 function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unknown {
+  if (key === "sidebarHoverDelay") return normalizeSidebarHoverDelay(value);
   if (key === "pageSize" || key === "tableOpenPageSize") return normalizeTableOpenPageSizeDraft(value);
   if (key === "queryResultMaxRows") return normalizeQueryResultMaxRowsDraft(value);
   if (key === "externalSqlEditorMaxMb") return normalizeExternalSqlEditorMaxMb(value);
   if (key === "completionTriggerMode") return normalizeCompletionTriggerMode(value);
+  if (key === "completionMatchMode") return normalizeCompletionMatchMode(value);
   if (key === "excludedCompletionItems") return normalizeExcludedCompletionItems(value);
   if (key === "tableCompletionSchemaQualification") return normalizeSqlTableCompletionSchemaQualification(value);
   if (key === "tableHoverLookupMode") return normalizeTableHoverLookupMode(value);

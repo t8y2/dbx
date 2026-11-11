@@ -34,7 +34,7 @@ use crate::sql_dialect::{
     uses_single_row_insert_statements, uses_synthetic_row_id, uses_xugu_row_id, TablePaginationStrategy,
 };
 use crate::value_literals::{format_ch_array_sql_literal, format_pg_array_sql_literal};
-use dbx_types::types::is_opaque_aggregate_state_type;
+use dbx_types::types::{is_opaque_aggregate_state_type, SpatialColumn};
 
 const DBX_ROWID_COLUMN: &str = "__DBX_ROWID";
 pub const DBX_NEO4J_ELEMENT_ID_COLUMN: &str = "__DBX_ELEMENT_ID";
@@ -160,6 +160,15 @@ pub struct DataGridCopyUpdateStatementOptions {
     /// callers that never strip the table metadata keep the historical shape.
     #[serde(default = "default_include_database_name")]
     pub include_database_name: bool,
+    /// Spatial column SRID metadata in the same column-index space as
+    /// `columns`, mirroring the copy-as-INSERT options so SQL Server
+    /// geometry/geography SET literals can carry per-column SRIDs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_columns: Option<Vec<SpatialColumn>>,
+    /// Per-cell SRID overrides (`rows`-major, `columns`-minor), mirroring the
+    /// copy-as-INSERT options. Falls back to `spatial_columns` per column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_values: Option<Vec<Vec<Option<u32>>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +195,10 @@ pub struct DataGridCopyInsertStatementOptions {
     pub include_database_name: bool,
     #[serde(default)]
     pub insert_mode: DataGridCopyInsertMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_columns: Option<Vec<SpatialColumn>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_values: Option<Vec<Vec<Option<u32>>>>,
 }
 
 fn default_include_database_name() -> bool {
@@ -224,6 +237,8 @@ pub enum DataGridContextFilterMode {
     NotLike,
     BeginsWith,
     EndsWith,
+    NotBeginsWith,
+    NotEndsWith,
     LessThan,
     LessThanOrEqual,
     GreaterThan,
@@ -546,21 +561,34 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
         options.include_database_name,
     );
     let mut statements = Vec::new();
-    for row in &options.rows {
+    let spatial_columns: std::collections::HashMap<usize, Option<u32>> =
+        options.spatial_columns.unwrap_or_default().into_iter().map(|col| (col.column_index, col.srid)).collect();
+    for (row_index, row) in options.rows.iter().enumerate() {
         if primary_key_indexes.iter().any(|index| row.get(*index).unwrap_or(&Value::Null).is_null()) {
             continue;
         }
         let sets = writable_indexes
             .iter()
             .map(|(column, index, info)| {
+                // Per-cell SRID with column-level fallback, mirroring the
+                // copy-as-INSERT value formatting.
+                let spatial_srid = options
+                    .spatial_values
+                    .as_ref()
+                    .and_then(|values| values.get(row_index))
+                    .and_then(|row| row.get(*index))
+                    .copied()
+                    .flatten()
+                    .or_else(|| spatial_columns.get(index).copied().flatten());
                 format!(
                     "{} = {}",
                     data_grid_identifier(options.database_type, column, options.identifier_quote.as_deref()),
-                    format_grid_assignment_sql_literal(
+                    format_grid_assignment_sql_literal_with_spatial(
                         row.get(*index).unwrap_or(&Value::Null),
                         options.database_type,
                         *info,
                         options.identifier_quote.as_deref(),
+                        spatial_srid,
                     )
                 )
             })
@@ -596,14 +624,14 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
     build_data_grid_copy_insert_statement_with_formatters(
         options,
         |reference| reference,
-        format_grid_copy_insert_sql_literal,
+        format_grid_copy_insert_sql_literal_with_spatial,
     )
 }
 
 pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
     options: DataGridCopyInsertStatementOptions,
     format_reference: impl Fn(String) -> String,
-    format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>) -> String,
+    format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>, Option<u32>) -> String,
 ) -> Option<String> {
     build_data_grid_copy_insert_statements_with_formatters(options, format_reference, format_literal)
         .map(|statements| statements.join("\n"))
@@ -612,8 +640,10 @@ pub(crate) fn build_data_grid_copy_insert_statement_with_formatters(
 pub(crate) fn build_data_grid_copy_insert_statements_with_formatters(
     options: DataGridCopyInsertStatementOptions,
     format_reference: impl Fn(String) -> String,
-    format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>) -> String,
+    format_literal: impl Fn(&Value, Option<DatabaseType>, Option<&DataGridColumnInfo>, Option<&str>, Option<u32>) -> String,
 ) -> Option<Vec<String>> {
+    let spatial_columns: std::collections::HashMap<usize, Option<u32>> =
+        options.spatial_columns.unwrap_or_default().into_iter().map(|col| (col.column_index, col.srid)).collect();
     let save_columns = effective_copy_columns(options.source_columns.as_deref(), &options.columns);
     let column_info = options.table_meta.as_ref().and_then(|meta| meta.columns.as_deref()).unwrap_or(&[]);
     let primary_keys = options.table_meta.as_ref().map(|meta| meta.primary_keys.as_slice()).unwrap_or_default();
@@ -623,8 +653,23 @@ pub(crate) fn build_data_grid_copy_insert_statements_with_formatters(
         .enumerate()
         .filter_map(|(index, column)| Some((column.as_deref()?, index)))
         .map(|(column, index)| {
-            let fallback_type =
-                options.column_types.as_deref().and_then(|types| types.get(index)).and_then(|value| value.as_deref());
+            let fallback_type = options
+                .column_types
+                .as_deref()
+                .and_then(|types| types.get(index))
+                .and_then(|value| value.as_deref())
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    if spatial_columns.contains_key(&index) {
+                        match options.database_type {
+                            Some(DatabaseType::Xugu) => Some("GEOMETRY"),
+                            Some(DatabaseType::SqlServer) => Some("geometry"),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                });
             (column, index, copy_column_info(options.database_type, column_info, column, fallback_type))
         })
         .filter(|(column, _, info)| {
@@ -740,17 +785,27 @@ pub(crate) fn build_data_grid_copy_insert_statements_with_formatters(
     let value_rows = options
         .rows
         .iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(row_index, row)| {
             format!(
                 "({})",
                 insert_columns
                     .iter()
                     .map(|(_, index, info)| {
+                        let spatial_srid = options
+                            .spatial_values
+                            .as_ref()
+                            .and_then(|values| values.get(row_index))
+                            .and_then(|row| row.get(*index))
+                            .copied()
+                            .flatten()
+                            .or_else(|| spatial_columns.get(index).copied().flatten());
                         format_literal(
                             row.get(*index).unwrap_or(&Value::Null),
                             options.database_type,
                             info.as_ref(),
                             options.identifier_quote.as_deref(),
+                            spatial_srid,
                         )
                     })
                     .collect::<Vec<_>>()
@@ -847,37 +902,41 @@ pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterCo
         DataGridContextFilterMode::IsNotBlank => Some(format!("({column} IS NOT NULL AND {column} <> '')")),
         DataGridContextFilterMode::Equals if value.is_null() => Some(format!("{column} IS NULL")),
         DataGridContextFilterMode::NotEquals if value.is_null() => Some(format!("{column} IS NOT NULL")),
-        DataGridContextFilterMode::Like => Some(format!(
-            "{like_column} LIKE {}",
-            format_grid_sql_literal(
-                &Value::String(format!("%{}%", value_to_filter_text(value))),
-                options.database_type,
-                None
-            )
+        DataGridContextFilterMode::Like => Some(data_grid_like_condition(
+            &like_column,
+            "LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::Contains, options.database_type),
+            options.database_type,
         )),
-        DataGridContextFilterMode::NotLike => Some(format!(
-            "{like_column} NOT LIKE {}",
-            format_grid_sql_literal(
-                &Value::String(format!("%{}%", value_to_filter_text(value))),
-                options.database_type,
-                None
-            )
+        DataGridContextFilterMode::NotLike => Some(data_grid_like_condition(
+            &like_column,
+            "NOT LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::Contains, options.database_type),
+            options.database_type,
         )),
-        DataGridContextFilterMode::BeginsWith => Some(format!(
-            "{like_column} LIKE {}",
-            format_grid_sql_literal(
-                &Value::String(format!("{}%", value_to_filter_text(value))),
-                options.database_type,
-                None
-            )
+        DataGridContextFilterMode::BeginsWith => Some(data_grid_like_condition(
+            &like_column,
+            "LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::StartsWith, options.database_type),
+            options.database_type,
         )),
-        DataGridContextFilterMode::EndsWith => Some(format!(
-            "{like_column} LIKE {}",
-            format_grid_sql_literal(
-                &Value::String(format!("%{}", value_to_filter_text(value))),
-                options.database_type,
-                None
-            )
+        DataGridContextFilterMode::EndsWith => Some(data_grid_like_condition(
+            &like_column,
+            "LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::EndsWith, options.database_type),
+            options.database_type,
+        )),
+        DataGridContextFilterMode::NotBeginsWith => Some(data_grid_like_condition(
+            &like_column,
+            "NOT LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::StartsWith, options.database_type),
+            options.database_type,
+        )),
+        DataGridContextFilterMode::NotEndsWith => Some(data_grid_like_condition(
+            &like_column,
+            "NOT LIKE",
+            data_grid_like_pattern(value, DataGridLikeTemplate::EndsWith, options.database_type),
+            options.database_type,
         )),
         DataGridContextFilterMode::LessThan => Some(format!(
             "{column} < {}",
@@ -1197,6 +1256,11 @@ pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinc
         TablePaginationStrategy::SqlServerTop if is_sqlserver_legacy_profile(options.driver_profile.as_deref()) => {
             format!("SELECT {select_list}{from_clause}")
         }
+        // Teradata takes `TOP n` after SELECT and rejects `LIMIT` (#14604). This
+        // statement never pages, so the limit is exact.
+        _ if options.database_type == Some(DatabaseType::Teradata) => {
+            format!("SELECT TOP {limit} {select_list}{from_clause}")
+        }
         TablePaginationStrategy::SqlServerTop => format!("SELECT TOP ({limit}) {select_list}{from_clause}"),
         TablePaginationStrategy::IrisTop => format!("SELECT TOP {limit} {select_list}{from_clause}"),
         TablePaginationStrategy::InformixFirst => format!("SELECT FIRST {limit} {select_list}{from_clause}"),
@@ -1376,6 +1440,10 @@ fn build_neo4j_data_grid_column_distinct_values_sql(options: &DataGridColumnDist
     }
 }
 
+fn allows_before_insert_trigger_populated_not_null(database_type: Option<DatabaseType>) -> bool {
+    matches!(database_type, Some(DatabaseType::Mysql | DatabaseType::Firebird))
+}
+
 fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<String> {
     if let Some(error) = validate_oceanbase_blob_save(options) {
         return Some(error);
@@ -1447,9 +1515,9 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
         }
     }
 
-    // MySQL BEFORE INSERT triggers can populate omitted NOT NULL columns. New-row NULL values are
-    // omitted from the generated INSERT, so let MySQL apply triggers or report missing required fields.
-    if options.database_type != Some(DatabaseType::Mysql) {
+    // MySQL and Firebird BEFORE INSERT triggers can populate omitted NOT NULL columns. New-row NULL values are
+    // omitted from the generated INSERT, so let MySQL or Firebird apply triggers or report missing required fields.
+    if !allows_before_insert_trigger_populated_not_null(options.database_type) {
         for row in &options.new_rows {
             for column_index in 0..options.columns.len() {
                 let source_column = save_columns.get(column_index).and_then(|column| column.as_deref());
@@ -1507,9 +1575,18 @@ fn validate_opaque_aggregate_state_write(options: &DataGridSaveStatementOptions)
     None
 }
 
+fn is_postgres_ctid_primary_keys(database_type: Option<DatabaseType>, primary_keys: &[String]) -> bool {
+    uses_postgres_ctid(database_type)
+        && (primary_keys.is_empty()
+            || (primary_keys.len() == 1 && primary_keys[0].eq_ignore_ascii_case(DBX_ROWID_COLUMN)))
+}
+
 fn validate_existing_row_primary_keys(options: &DataGridSaveStatementOptions) -> Option<String> {
     let primary_keys = &options.table_meta.primary_keys;
-    if primary_keys.is_empty() || (options.dirty_rows.is_empty() && options.deleted_rows.is_empty()) {
+    if primary_keys.is_empty()
+        || is_postgres_ctid_primary_keys(options.database_type, primary_keys)
+        || (options.dirty_rows.is_empty() && options.deleted_rows.is_empty())
+    {
         return None;
     }
 
@@ -1550,8 +1627,7 @@ fn validate_existing_row_primary_keys(options: &DataGridSaveStatementOptions) ->
 }
 
 fn validate_postgres_ctid_row_identifier(options: &DataGridSaveStatementOptions) -> Option<String> {
-    if !uses_postgres_ctid(options.database_type)
-        || !options.table_meta.primary_keys.is_empty()
+    if !is_postgres_ctid_primary_keys(options.database_type, &options.table_meta.primary_keys)
         || (options.dirty_rows.is_empty() && options.deleted_rows.is_empty())
     {
         return None;
@@ -1641,10 +1717,15 @@ fn validate_dameng_keyless_binary_lob_predicate(options: &DataGridSaveStatementO
 /// the `keyless_guards` this preparation emits, which count the matches of the
 /// exact predicate on the server.
 fn validate_keyless_row_predicate(options: &DataGridSaveStatementOptions) -> Option<String> {
+    let save_columns = effective_columns(options);
+    if is_postgres_ctid_primary_keys(options.database_type, &options.table_meta.primary_keys)
+        && find_column_index(options.database_type, &save_columns, DBX_ROWID_COLUMN).is_some()
+    {
+        return None;
+    }
     if !options.table_meta.primary_keys.is_empty() || !uses_keyless_row_predicate(options.database_type) {
         return None;
     }
-    let save_columns = effective_columns(options);
     let column_info = options.table_meta.columns.as_deref().unwrap_or(&[]);
     let touched_row_indexes =
         options.dirty_rows.iter().map(|(row_index, _)| *row_index).chain(options.deleted_rows.iter().copied());
@@ -1704,7 +1785,10 @@ fn validate_clickhouse_mutable_updates(options: &DataGridSaveStatementOptions) -
 
 fn validate_inserted_primary_keys(options: &DataGridSaveStatementOptions) -> Option<String> {
     let primary_keys = &options.table_meta.primary_keys;
-    if primary_keys.is_empty() || options.new_rows.is_empty() {
+    if primary_keys.is_empty()
+        || is_postgres_ctid_primary_keys(options.database_type, primary_keys)
+        || options.new_rows.is_empty()
+    {
         return None;
     }
 
@@ -1787,12 +1871,12 @@ fn build_data_grid_save_statements(
     let primary_key_set: Vec<String> =
         options.table_meta.primary_keys.iter().map(|primary_key| normalize_column_name(primary_key)).collect();
 
-    let guards_keyless_predicates = primary_key_set.is_empty() && uses_keyless_row_predicate(options.database_type);
     // With the hidden locator present every generated predicate addresses one
     // physical row, so its guard must match exactly one row rather than "at most one".
-    let postgres_ctid_locator = guards_keyless_predicates
-        && uses_postgres_ctid(options.database_type)
+    let postgres_ctid_locator = is_postgres_ctid_primary_keys(options.database_type, &options.table_meta.primary_keys)
         && find_column_index(options.database_type, &save_columns, DBX_ROWID_COLUMN).is_some();
+    let guards_keyless_predicates =
+        (primary_key_set.is_empty() && uses_keyless_row_predicate(options.database_type)) || postgres_ctid_locator;
     let mut guarded_predicates: Vec<GuardedPredicate> = Vec::new();
     let guard_predicate = |predicate: &str, guarded: &mut Vec<GuardedPredicate>| {
         if !guards_keyless_predicates || predicate.trim().is_empty() {
@@ -1943,6 +2027,9 @@ fn build_data_grid_save_statements(
             if options.database_type == Some(DatabaseType::Mysql) {
                 statements
                     .push(data_grid_statement(options.database_type, format!("INSERT INTO {table} () VALUES ()")));
+            } else if options.database_type == Some(DatabaseType::Firebird) {
+                statements
+                    .push(data_grid_statement(options.database_type, format!("INSERT INTO {table} DEFAULT VALUES")));
             }
             continue;
         }
@@ -2039,14 +2126,16 @@ fn build_data_grid_rollback_statements(
     );
     let table = data_grid_save_table_name(options, schema);
     let mut statements = Vec::new();
-    let postgres_ctid_identity = uses_postgres_ctid(options.database_type)
-        && options.table_meta.primary_keys.is_empty()
+    let postgres_ctid_identity = is_postgres_ctid_primary_keys(options.database_type, &options.table_meta.primary_keys)
         && find_column_index(options.database_type, &save_columns, DBX_ROWID_COLUMN).is_some();
 
     for row in &options.new_rows {
         // Server-generated keys are unknown; never invent an undo predicate from
         // the unset draft values. Reuse the existing key-based rollback guard.
-        let where_clause = if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::StarRocks)) {
+        let where_clause = if matches!(
+            options.database_type,
+            Some(DatabaseType::Mysql | DatabaseType::StarRocks | DatabaseType::Firebird)
+        ) {
             build_mysql_insert_rollback_where(options, &save_columns, row, column_info)
         } else {
             let where_clause = build_save_row_where(
@@ -2435,7 +2524,7 @@ fn build_mysql_insert_rollback_where(
     }
 
     for primary_key in &options.table_meta.primary_keys {
-        let index = columns.iter().position(|column| column.as_deref() == Some(primary_key.as_str()))?;
+        let index = find_column_index(options.database_type, columns, primary_key)?;
         let value = row.get(index).unwrap_or(&Value::Null);
         let info = column_info_for(column_info, primary_key);
         if value.is_null()
@@ -2655,11 +2744,22 @@ pub fn normalize_data_grid_save_error(database_type: Option<DatabaseType>, error
     error.to_string()
 }
 
+#[allow(dead_code)]
 pub(crate) fn format_grid_copy_insert_sql_literal(
     value: &Value,
     database_type: Option<DatabaseType>,
     column_info: Option<&DataGridColumnInfo>,
     identifier_quote: Option<&str>,
+) -> String {
+    format_grid_copy_insert_sql_literal_with_spatial(value, database_type, column_info, identifier_quote, None)
+}
+
+pub(crate) fn format_grid_copy_insert_sql_literal_with_spatial(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    identifier_quote: Option<&str>,
+    spatial_srid: Option<u32>,
 ) -> String {
     if is_oracle_temporal_literal_database(database_type) {
         if let Some(text) = value.as_str() {
@@ -2670,7 +2770,7 @@ pub(crate) fn format_grid_copy_insert_sql_literal(
             }
         }
     }
-    format_grid_assignment_sql_literal(value, database_type, column_info, identifier_quote)
+    format_grid_assignment_sql_literal_with_spatial(value, database_type, column_info, identifier_quote, spatial_srid)
 }
 
 fn format_grid_assignment_sql_literal(
@@ -2678,6 +2778,16 @@ fn format_grid_assignment_sql_literal(
     database_type: Option<DatabaseType>,
     column_info: Option<&DataGridColumnInfo>,
     identifier_quote: Option<&str>,
+) -> String {
+    format_grid_assignment_sql_literal_with_spatial(value, database_type, column_info, identifier_quote, None)
+}
+
+fn format_grid_assignment_sql_literal_with_spatial(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    identifier_quote: Option<&str>,
+    spatial_srid: Option<u32>,
 ) -> String {
     if is_oceanbase_blob_column(database_type, column_info) {
         if value.is_null() {
@@ -2700,14 +2810,15 @@ fn format_grid_assignment_sql_literal(
         }
     }
     if (value.is_array() || value.is_object()) && is_json_document_column(column_info) {
-        return format_grid_sql_literal_with_identifier_quote(
+        return format_grid_sql_literal_with_spatial(
             &Value::String(value.to_string()),
             database_type,
             column_info,
             identifier_quote,
+            spatial_srid,
         );
     }
-    format_grid_sql_literal_with_identifier_quote(value, database_type, column_info, identifier_quote)
+    format_grid_sql_literal_with_spatial(value, database_type, column_info, identifier_quote, spatial_srid)
 }
 
 fn format_oracle_lob_assignment_literal(text: &str, constructor: &str) -> String {
@@ -2778,6 +2889,16 @@ pub fn format_grid_sql_literal_with_identifier_quote(
     database_type: Option<DatabaseType>,
     column_info: Option<&DataGridColumnInfo>,
     identifier_quote: Option<&str>,
+) -> String {
+    format_grid_sql_literal_with_spatial(value, database_type, column_info, identifier_quote, None)
+}
+
+pub fn format_grid_sql_literal_with_spatial(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    identifier_quote: Option<&str>,
+    spatial_srid: Option<u32>,
 ) -> String {
     if value.is_null() {
         return "NULL".to_string();
@@ -2895,6 +3016,24 @@ pub fn format_grid_sql_literal_with_identifier_quote(
     {
         let escaped = text.replace('\\', "\\\\").replace('\'', "''");
         return format!("ST_GeomFromText('{}')", escaped);
+    }
+    // SQL Server spatial columns: wrap WKT text with geometry::STGeomFromText() or geography::STGeomFromText()
+    if database_type == Some(DatabaseType::SqlServer) {
+        if let Some(spatial_type) = column_info.and_then(|column| sqlserver_spatial_column_type(&column.data_type)) {
+            let trimmed = text.trim();
+            if trimmed.to_ascii_lowercase().starts_with("geometry::")
+                || trimmed.to_ascii_lowercase().starts_with("geography::")
+            {
+                return text;
+            }
+            let (wkt, marker_srid) = extract_sqlserver_spatial_wkt_and_srid(&text);
+            let srid = marker_srid
+                .or(spatial_srid)
+                .filter(|&srid| srid != 0 || spatial_type != "geography")
+                .unwrap_or(if spatial_type == "geography" { 4326 } else { 0 });
+            let escaped = wkt.replace('\'', "''");
+            return format!("{spatial_type}::STGeomFromText('{escaped}', {srid})");
+        }
     }
     if is_oracle_temporal_literal_database(database_type) {
         if let Some(literal) =
@@ -3454,6 +3593,35 @@ fn is_geometry_column_type(data_type: &str) -> bool {
     )
 }
 
+fn sqlserver_spatial_column_type(data_type: &str) -> Option<&'static str> {
+    let lower = data_type.trim().trim_matches(['[', ']']).to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ', '\t', '\n']).next().unwrap_or("").trim();
+    let base = base.split('.').next_back().unwrap_or(base).trim_matches(['[', ']']).trim();
+    if base == "geometry" {
+        Some("geometry")
+    } else if base == "geography" {
+        Some("geography")
+    } else {
+        None
+    }
+}
+
+fn extract_sqlserver_spatial_wkt_and_srid(text: &str) -> (&str, Option<u32>) {
+    let trimmed = text.trim();
+    if trimmed.len() > 5 && trimmed[..5].eq_ignore_ascii_case("srid=") {
+        if let Some((srid_part, wkt_part)) = trimmed[5..].split_once(';') {
+            if let Ok(srid) = srid_part.trim().parse::<u32>() {
+                if srid > 0 {
+                    return (wkt_part.trim(), Some(srid));
+                } else {
+                    return (wkt_part.trim(), None);
+                }
+            }
+        }
+    }
+    (trimmed, None)
+}
+
 fn manticore_typed_attribute_value(text: &str, column_info: Option<&DataGridColumnInfo>) -> Option<Value> {
     let data_type = column_info?.data_type.to_ascii_lowercase();
     if is_boolean_type(&data_type, None) && text.eq_ignore_ascii_case("true") {
@@ -3698,22 +3866,22 @@ fn build_primary_key_predicate(
     column_info: &[DataGridColumnInfo],
     identifier_quote: Option<&str>,
 ) -> MysqlKeyPredicate {
-    if primary_keys.is_empty() && uses_keyless_row_predicate(database_type) {
-        if uses_postgres_ctid(database_type) {
-            if let Some(row_id_index) = find_column_index(database_type, columns, DBX_ROWID_COLUMN) {
-                // `validate_postgres_ctid_row_identifier` already refused every
-                // touched row whose locator does not parse, so this fallback only
-                // keeps a malformed caller from generating an unguarded write.
-                return MysqlKeyPredicate {
-                    sql: build_postgres_ctid_predicate(row.get(row_id_index).unwrap_or(&Value::Null))
-                        .unwrap_or_else(|| "FALSE".to_string()),
-                    // A physical row locator is a single equality set, not a
-                    // mergeable plain column equality, and PostgreSQL never
-                    // batches grid writes anyway.
-                    plain: None,
-                };
-            }
+    if is_postgres_ctid_primary_keys(database_type, primary_keys) {
+        if let Some(row_id_index) = find_column_index(database_type, columns, DBX_ROWID_COLUMN) {
+            // `validate_postgres_ctid_row_identifier` already refused every
+            // touched row whose locator does not parse, so this fallback only
+            // keeps a malformed caller from generating an unguarded write.
+            return MysqlKeyPredicate {
+                sql: build_postgres_ctid_predicate(row.get(row_id_index).unwrap_or(&Value::Null))
+                    .unwrap_or_else(|| "FALSE".to_string()),
+                // A physical row locator is a single equality set, not a
+                // mergeable plain column equality, and PostgreSQL never
+                // batches grid writes anyway.
+                plain: None,
+            };
         }
+    }
+    if primary_keys.is_empty() && uses_keyless_row_predicate(database_type) {
         // A keyless row predicate matches every column value: never one plain
         // equality, and never batched (`supports_mysql_data_grid_batch`).
         return MysqlKeyPredicate {
@@ -4784,6 +4952,75 @@ fn value_to_filter_text(value: &Value) -> String {
     }
 }
 
+/// Wildcard shape a textual filter wraps around the user's value.
+#[derive(Clone, Copy)]
+enum DataGridLikeTemplate {
+    Contains,
+    StartsWith,
+    EndsWith,
+}
+
+/// Escape character used for literal LIKE patterns. `~` is what the metadata
+/// searches in this workspace already emit for `LIKE ... ESCAPE`, so a grid
+/// filter keeps the same meaning as those patterns.
+const DATA_GRID_LIKE_ESCAPE_CHAR: char = '~';
+
+/// TDengine rejects `LIKE ... ESCAPE` outright, and ClickHouse only added the
+/// clause in 26.6 (upstream issue #99599) — see
+/// `database_structure_search_sql`, which already omits it for ClickHouse. Their
+/// patterns stay unescaped: declaring the escape character would be a syntax
+/// error, and escaping without the clause would look for literal `~` text.
+/// Every other SQL target accepts the clause.
+fn data_grid_like_escape_supported(database_type: Option<DatabaseType>) -> bool {
+    !matches!(database_type, Some(DatabaseType::Tdengine | DatabaseType::ClickHouse))
+}
+
+/// Build the LIKE pattern for a user-typed filter value.
+///
+/// The value matches literally, so `%`, `_` and the escape character itself are
+/// escaped before the wildcard template is applied (#14365 review): typing `a_`
+/// must not match `abc`. Only the wrapper wildcards stay unescaped.
+fn data_grid_like_pattern(
+    value: &Value,
+    template: DataGridLikeTemplate,
+    database_type: Option<DatabaseType>,
+) -> String {
+    let raw = value_to_filter_text(value);
+    let body = if data_grid_like_escape_supported(database_type) { escape_data_grid_like_literal(&raw) } else { raw };
+    match template {
+        DataGridLikeTemplate::Contains => format!("%{body}%"),
+        DataGridLikeTemplate::StartsWith => format!("{body}%"),
+        DataGridLikeTemplate::EndsWith => format!("%{body}"),
+    }
+}
+
+fn escape_data_grid_like_literal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 8);
+    for ch in value.chars() {
+        if ch == DATA_GRID_LIKE_ESCAPE_CHAR || ch == '%' || ch == '_' {
+            escaped.push(DATA_GRID_LIKE_ESCAPE_CHAR);
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+/// Render `column LIKE|NOT LIKE <pattern>`, declaring the escape character where
+/// the dialect understands it.
+fn data_grid_like_condition(
+    like_column: &str,
+    operator: &str,
+    pattern: String,
+    database_type: Option<DatabaseType>,
+) -> String {
+    let literal = format_grid_sql_literal(&Value::String(pattern), database_type, None);
+    if data_grid_like_escape_supported(database_type) {
+        format!("{like_column} {operator} {literal} ESCAPE '{DATA_GRID_LIKE_ESCAPE_CHAR}'")
+    } else {
+        format!("{like_column} {operator} {literal}")
+    }
+}
+
 fn parse_typed_filter_value(
     text: &str,
     database_type: Option<DatabaseType>,
@@ -5833,6 +6070,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!("Ada"), json!("active")]],
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             statements,
@@ -5860,6 +6099,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!("blocked")]],
             include_database_name: true,
+            spatial_columns: None,
+            spatial_values: None,
         };
         assert_eq!(
             build_data_grid_copy_update_statements(options.clone()),
@@ -5893,6 +6134,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(42), json!("ready")]],
             include_database_name: true,
+            spatial_columns: None,
+            spatial_values: None,
         };
         assert_eq!(
             build_data_grid_copy_update_statements(options),
@@ -5946,6 +6189,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             statement.as_deref(),
@@ -5998,6 +6243,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(statement.as_deref(), Some("INSERT INTO \"public\".\"users\" (\"name\") VALUES ('Ada');"));
@@ -6045,6 +6292,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             statement.as_deref(),
@@ -6102,6 +6351,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(statement.as_deref(), Some("INSERT INTO `users` (`label`) VALUES ('Ada');"));
     }
@@ -6123,6 +6374,8 @@ mod tests {
             source_columns: Some(vec![Some("id".to_string()), Some("display_name".to_string())]),
             rows: vec![vec![json!(1), json!("Ada")]],
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(statements, vec!["UPDATE `users` SET `display_name` = 'Ada' WHERE `id` = 1;"]);
     }
@@ -6173,6 +6426,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             statement.as_deref(),
@@ -6218,6 +6473,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(statement.as_deref(), Some("INSERT INTO \"public\".\"countries\" (\"label\") VALUES ('Andorra');"));
     }
@@ -6250,6 +6507,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert!(statement.is_none());
@@ -6301,6 +6560,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -6330,6 +6591,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(statement.as_deref(), Some("INSERT INTO \"quoted_ids\" (\"id\") VALUES ('lowercase');"));
@@ -6363,6 +6626,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -6392,6 +6657,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(statement.as_deref(), Some("INSERT INTO `users` (`login_name`) VALUES ('ada');"));
     }
@@ -6410,6 +6677,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -6432,6 +6701,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES ('[1,2,3]');"));
@@ -6451,6 +6722,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES ('[]');"));
@@ -6470,6 +6743,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(statement.as_deref(), Some("INSERT INTO table_name (`data`) VALUES ('{\"a\":1}');"));
@@ -6496,6 +6771,8 @@ mod tests {
                 vec![json!(3), json!([])],
             ],
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -6525,6 +6802,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!(r#"[1,2]"#)], vec![json!(2), json!(true)], vec![json!(3), Value::Null]],
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             json_statements,
@@ -6550,6 +6829,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!([1, 2])]],
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(generic_statements, vec!["UPDATE `arrays` SET `payload` = '{1,2}' WHERE `id` = 1;"]);
 
@@ -6587,6 +6868,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -6616,6 +6899,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::RowByRow,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             statement.as_deref(),
@@ -6646,6 +6931,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -6680,6 +6967,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode,
+            spatial_columns: None,
+            spatial_values: None,
         }
     }
 
@@ -6785,6 +7074,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             insert.as_deref(),
@@ -6799,6 +7090,8 @@ mod tests {
             source_columns: None,
             rows,
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             updates,
@@ -6854,6 +7147,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -6892,6 +7187,8 @@ mod tests {
             include_computed_columns,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         };
 
         assert_eq!(
@@ -6958,6 +7255,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -7086,7 +7385,7 @@ mod tests {
                 column_info: Some(column("status", "varchar", true, None)),
             })
             .as_deref(),
-            Some("\"status\" LIKE '%active%'")
+            Some("\"status\" LIKE '%active%' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
@@ -7100,7 +7399,7 @@ mod tests {
                 column_info: Some(column("update_date", "bigint", false, None)),
             })
             .as_deref(),
-            Some("\"update_date\"::text LIKE '%128%'")
+            Some("\"update_date\"::text LIKE '%128%' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
@@ -7114,7 +7413,7 @@ mod tests {
                 column_info: Some(column("created_at", "timestamp without time zone", false, None)),
             })
             .as_deref(),
-            Some("\"created_at\"::text NOT LIKE '%2026%'")
+            Some("\"created_at\"::text NOT LIKE '%2026%' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
@@ -7128,7 +7427,7 @@ mod tests {
                 column_info: Some(column("file_name", "varchar", false, None)),
             })
             .as_deref(),
-            Some("`file_name` LIKE 'FN%'")
+            Some("`file_name` LIKE 'FN%' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
@@ -7142,7 +7441,35 @@ mod tests {
                 column_info: Some(column("file_name", "varchar", false, None)),
             })
             .as_deref(),
-            Some("`file_name` LIKE '%.sql'")
+            Some("`file_name` LIKE '%.sql' ESCAPE '~'")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode: DataGridContextFilterMode::NotBeginsWith,
+                value: json!("tmp"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .as_deref(),
+            Some("`file_name` NOT LIKE 'tmp%' ESCAPE '~'")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode: DataGridContextFilterMode::NotEndsWith,
+                value: json!(".log"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .as_deref(),
+            Some("`file_name` NOT LIKE '%.log' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
@@ -7156,7 +7483,7 @@ mod tests {
                 column_info: Some(column("update_date", "bigint", false, None)),
             })
             .as_deref(),
-            Some("\"update_date\"::text LIKE '128%'")
+            Some("\"update_date\"::text LIKE '128%' ESCAPE '~'")
         );
         assert_eq!(
             build_data_grid_column_value_filter_condition(DataGridColumnValueFilterConditionOptions {
@@ -7169,6 +7496,98 @@ mod tests {
             .as_deref(),
             Some("[active] = 0")
         );
+    }
+
+    /// #14365 review: a typed value has to match literally, so a LIKE metacharacter
+    /// inside it must not act as a wildcard. `not-begins-with` on `a_` used to emit
+    /// `NOT LIKE 'a_%'`, which wrongly excluded `abc` as well.
+    #[test]
+    fn escapes_like_metacharacters_in_context_filter_values() {
+        let condition = |mode: DataGridContextFilterMode, value: &str, database_type: DatabaseType| {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(database_type),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode,
+                value: json!(value),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+        };
+
+        // `_` is a single-character wildcard: it has to be escaped so `a_` only
+        // matches the literal text `a_`.
+        assert_eq!(
+            condition(DataGridContextFilterMode::NotBeginsWith, "a_", DatabaseType::Mysql).as_deref(),
+            Some("`file_name` NOT LIKE 'a~_%' ESCAPE '~'")
+        );
+        assert_eq!(
+            condition(DataGridContextFilterMode::NotEndsWith, "a_", DatabaseType::Mysql).as_deref(),
+            Some("`file_name` NOT LIKE '%a~_' ESCAPE '~'")
+        );
+        // `%` is a multi-character wildcard.
+        assert_eq!(
+            condition(DataGridContextFilterMode::BeginsWith, "50%", DatabaseType::Mysql).as_deref(),
+            Some("`file_name` LIKE '50~%%' ESCAPE '~'")
+        );
+        assert_eq!(
+            condition(DataGridContextFilterMode::EndsWith, "50%", DatabaseType::Postgres).as_deref(),
+            Some("\"file_name\" LIKE '%50~%' ESCAPE '~'")
+        );
+        // The pre-existing contains operators had the same hole, so they escape too.
+        assert_eq!(
+            condition(DataGridContextFilterMode::Like, "a_b", DatabaseType::Mysql).as_deref(),
+            Some("`file_name` LIKE '%a~_b%' ESCAPE '~'")
+        );
+        // The escape character itself is doubled, or `~_` would read as an escaped `_`.
+        assert_eq!(
+            condition(DataGridContextFilterMode::BeginsWith, "a~b", DatabaseType::Mysql).as_deref(),
+            Some("`file_name` LIKE 'a~~b%' ESCAPE '~'")
+        );
+        // The casted PostgreSQL reference keeps its prefix.
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Postgres),
+                identifier_quote: None,
+                column_name: "update_date".to_string(),
+                mode: DataGridContextFilterMode::NotBeginsWith,
+                value: json!("12_8"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("update_date", "bigint", false, None)),
+            })
+            .as_deref(),
+            Some("\"update_date\"::text NOT LIKE '12~_8%' ESCAPE '~'")
+        );
+    }
+
+    /// TDengine rejects `LIKE ... ESCAPE`, and ClickHouse only added the clause in
+    /// 26.6, so those targets keep raw patterns instead of emitting a clause
+    /// older servers cannot parse.
+    #[test]
+    fn omits_like_escape_clause_on_unsupported_targets() {
+        let condition = |database_type: DatabaseType, mode: DataGridContextFilterMode, value: &str| {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(database_type),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode,
+                value: json!(value),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .unwrap_or_default()
+        };
+
+        for database_type in [DatabaseType::Tdengine, DatabaseType::ClickHouse] {
+            for mode in [DataGridContextFilterMode::BeginsWith, DataGridContextFilterMode::NotEndsWith] {
+                let sql = condition(database_type, mode, "a_");
+                assert!(!sql.contains("ESCAPE"), "{database_type:?} has no ESCAPE clause: {sql}");
+                assert!(sql.contains("'a_%'") || sql.contains("'%a_'"), "{sql}");
+            }
+        }
     }
 
     #[test]
@@ -7885,6 +8304,31 @@ mod tests {
         );
     }
 
+    /// #14604: Teradata rejects `LIMIT`; the distinct-value statement caps with
+    /// `TOP n`. This query has no offset, so the limit is exact.
+    #[test]
+    fn teradata_distinct_values_use_top_instead_of_limit() {
+        let sql = build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+            database_type: Some(DatabaseType::Teradata),
+            driver_profile: None,
+            identifier_quote: None,
+            catalog: None,
+            database: None,
+            schema: Some("sales".to_string()),
+            table_name: "orders".to_string(),
+            column_name: "status".to_string(),
+            column_info: Some(column("status", "varchar", true, None)),
+            where_input: None,
+            search_value: None,
+            limit: Some(10),
+            include_counts: false,
+            exclude_nulls: false,
+        });
+
+        assert!(sql.starts_with("SELECT TOP 10 "), "{sql}");
+        assert!(!sql.to_uppercase().contains("LIMIT"), "{sql}");
+    }
+
     #[test]
     fn builds_grid_count_sql() {
         assert_eq!(
@@ -8406,6 +8850,8 @@ mod tests {
                         include_computed_columns: false,
                         include_database_name: false,
                         insert_mode: DataGridCopyInsertMode::RowByRow,
+                        spatial_columns: None,
+                        spatial_values: None,
                     })
                     .unwrap();
                     assert!(statement.contains(literal), "{database_type:?}: {statement}");
@@ -9482,6 +9928,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(
@@ -9508,6 +9956,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!("logout")]],
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(statements, vec!["UPDATE `audit-schema`.`events` SET `event_type` = 'logout' WHERE `id` = 1;"]);
@@ -10302,6 +10752,39 @@ mod tests {
         assert_eq!(result.validation_error.as_deref(), Some(POSTGRES_CTID_UNIDENTIFIABLE_ROW_ERROR));
         assert!(result.statements.is_empty());
         assert!(result.keyless_guards.is_empty());
+    }
+
+    #[test]
+    fn uses_postgres_ctid_from_hidden_query_locator_column() {
+        let mut options = postgres_ctid_options();
+        options.table_meta.primary_keys = vec![DBX_ROWID_COLUMN.to_string()];
+        options.columns = vec!["id".to_string(), "value".to_string(), "__DBX_PK_0".to_string()];
+        options.source_columns =
+            Some(vec![Some("id".to_string()), Some("value".to_string()), Some(DBX_ROWID_COLUMN.to_string())]);
+        options.rows = vec![
+            vec![json!(1), json!("same"), json!("16384:(0,1):742")],
+            vec![json!(1), json!("same"), json!("16384:(0,2):743")],
+        ];
+        options.dirty_rows = vec![(0, vec![(1, json!("updated"))])];
+        options.deleted_rows = vec![1];
+
+        let saved = prepare_data_grid_save(options);
+
+        assert_eq!(saved.validation_error, None);
+        assert_eq!(
+            saved.statements,
+            vec![
+                r#"UPDATE "public"."duplicate_rows" SET "value" = 'updated' WHERE tableoid = '16384'::oid AND ctid = '(0,1)'::tid AND xmin = '742'::xid;"#,
+                r#"DELETE FROM "public"."duplicate_rows" WHERE tableoid = '16384'::oid AND ctid = '(0,2)'::tid AND xmin = '743'::xid;"#,
+            ]
+        );
+        assert_eq!(saved.keyless_guards.len(), 2);
+        assert!(saved
+            .keyless_guards
+            .iter()
+            .all(|guard| guard.min_matched_rows == 1
+                && guard.min_message.as_deref() == Some(POSTGRES_CTID_STALE_ROW_ERROR)));
+        assert_guards_cover_statement_predicates(&saved);
     }
 
     #[test]
@@ -11354,6 +11837,227 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_spatial_columns_format_with_stgeomfromtext() {
+        let geom_col = column("shape", "geometry", true, None);
+        let geog_col = column("location", "geography", true, None);
+        assert_eq!(
+            format_grid_sql_literal(&json!("POINT (1 2)"), Some(DatabaseType::SqlServer), Some(&geom_col)),
+            "geometry::STGeomFromText('POINT (1 2)', 0)"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("POINT (1 2)"), Some(DatabaseType::SqlServer), Some(&geog_col)),
+            "geography::STGeomFromText('POINT (1 2)', 4326)"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("SRID=3857;POINT (1 2)"), Some(DatabaseType::SqlServer), Some(&geom_col)),
+            "geometry::STGeomFromText('POINT (1 2)', 3857)"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("geometry::STGeomFromText('POINT (1 2)', 0)"),
+                Some(DatabaseType::SqlServer),
+                Some(&geom_col)
+            ),
+            "geometry::STGeomFromText('POINT (1 2)', 0)"
+        );
+    }
+
+    #[test]
+    fn sqlserver_spatial_columns_format_with_spatial_srid() {
+        let geom_col = column("shape", "geometry", true, None);
+        let geog_col = column("location", "geography", true, None);
+        assert_eq!(
+            format_grid_sql_literal_with_spatial(
+                &json!("POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some(&geom_col),
+                None,
+                Some(3857)
+            ),
+            "geometry::STGeomFromText('POINT (1 2)', 3857)"
+        );
+        assert_eq!(
+            format_grid_sql_literal_with_spatial(
+                &json!("POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some(&geog_col),
+                None,
+                Some(4269)
+            ),
+            "geography::STGeomFromText('POINT (1 2)', 4269)"
+        );
+        // Geography ignores 0 and falls back to 4326
+        assert_eq!(
+            format_grid_sql_literal_with_spatial(
+                &json!("POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some(&geog_col),
+                None,
+                Some(0)
+            ),
+            "geography::STGeomFromText('POINT (1 2)', 4326)"
+        );
+    }
+
+    #[test]
+    fn sqlserver_spatial_copy_insert_with_real_driver_mixed_srid() {
+        let geom_col = column("geom", "geometry", true, None);
+        let geog_col = column("geog", "geography", true, None);
+        let options = DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: Some("test_db".to_string()),
+                schema: Some("dbo".to_string()),
+                table_name: "spatial_table".to_string(),
+                primary_keys: vec![],
+                columns: Some(vec![geom_col, geog_col]),
+            }),
+            columns: vec!["geom".to_string(), "geog".to_string()],
+            column_types: Some(vec![Some("geometry".to_string()), Some("geography".to_string())]),
+            source_columns: None,
+            // Real driver result shape: plain WKT in cells, per-cell SRIDs in spatial_values
+            rows: vec![
+                vec![json!("POINT (1 2)"), json!("POINT (10 20)")],
+                vec![json!("POINT (3 4)"), json!("POINT (30 40)")],
+                vec![json!("POINT (5 6)"), json!("POINT (50 60)")],
+            ],
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: Some(vec![
+                SpatialColumn { column_index: 0, srid: Some(0) },
+                SpatialColumn { column_index: 1, srid: Some(4326) },
+            ]),
+            spatial_values: Some(vec![
+                vec![Some(3857), Some(4326)],
+                vec![Some(2154), Some(4269)],
+                vec![None, None], // column fallback: 0 for geometry, 4326 for geography
+            ]),
+        };
+
+        let statement = build_data_grid_copy_insert_statement(options);
+        assert_eq!(
+            statement.as_deref(),
+            Some(
+                "INSERT INTO [test_db].[dbo].[spatial_table] ([geom], [geog]) VALUES\n(geometry::STGeomFromText('POINT (1 2)', 3857), geography::STGeomFromText('POINT (10 20)', 4326)),\n(geometry::STGeomFromText('POINT (3 4)', 2154), geography::STGeomFromText('POINT (30 40)', 4269)),\n(geometry::STGeomFromText('POINT (5 6)', 0), geography::STGeomFromText('POINT (50 60)', 4326));"
+            )
+        );
+    }
+
+    #[test]
+    fn sqlserver_spatial_copy_update_with_real_driver_mixed_srid() {
+        let geom_col = column("geom", "geometry", true, None);
+        let geog_col = column("geog", "geography", true, None);
+        let id_col = column("id", "int", false, None);
+        let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: Some("test_db".to_string()),
+                schema: Some("dbo".to_string()),
+                table_name: "spatial_table".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![id_col, geom_col, geog_col]),
+            },
+            columns: vec!["id".to_string(), "geom".to_string(), "geog".to_string()],
+            source_columns: None,
+            // Real driver result shape: plain WKT in cells, per-cell SRIDs in spatial_values
+            rows: vec![
+                vec![json!(1), json!("POINT (1 2)"), json!("POINT (10 20)")],
+                vec![json!(2), json!("POINT (3 4)"), json!("POINT (30 40)")],
+            ],
+            include_database_name: true,
+            spatial_columns: Some(vec![
+                SpatialColumn { column_index: 1, srid: Some(0) },
+                SpatialColumn { column_index: 2, srid: Some(4326) },
+            ]),
+            spatial_values: Some(vec![vec![None, Some(3857), Some(4326)], vec![None, Some(2154), Some(4269)]]),
+        });
+
+        assert_eq!(
+            statements,
+            vec![
+                "UPDATE [test_db].[dbo].[spatial_table] SET [geom] = geometry::STGeomFromText('POINT (1 2)', 3857), [geog] = geography::STGeomFromText('POINT (10 20)', 4326) WHERE [id] = 1;",
+                "UPDATE [test_db].[dbo].[spatial_table] SET [geom] = geometry::STGeomFromText('POINT (3 4)', 2154), [geog] = geography::STGeomFromText('POINT (30 40)', 4269) WHERE [id] = 2;",
+            ]
+        );
+        // The per-cell SRID 3857 must not silently regress to the geometry column default 0.
+        assert!(statements.first().is_some_and(|statement| statement.contains("STGeomFromText('POINT (1 2)', 3857)")));
+    }
+
+    #[test]
+    fn sqlserver_spatial_copy_update_falls_back_to_column_srid() {
+        let geom_col = column("geom", "geometry", true, None);
+        let id_col = column("id", "int", false, None);
+        let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: Some("test_db".to_string()),
+                schema: Some("dbo".to_string()),
+                table_name: "spatial_table".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![id_col, geom_col]),
+            },
+            columns: vec!["id".to_string(), "geom".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("POINT (5 6)")]],
+            include_database_name: true,
+            // No per-cell value: the column-level SRID 3857 must apply.
+            spatial_columns: Some(vec![SpatialColumn { column_index: 1, srid: Some(3857) }]),
+            spatial_values: Some(vec![vec![None, None]]),
+        });
+
+        assert_eq!(
+            statements,
+            vec!["UPDATE [test_db].[dbo].[spatial_table] SET [geom] = geometry::STGeomFromText('POINT (5 6)', 3857) WHERE [id] = 1;"]
+        );
+    }
+
+    #[test]
+    fn sqlserver_spatial_copy_insert_recovers_missing_type_and_cell_srid() {
+        let options = DataGridCopyInsertStatementOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            table_meta: Some(DataGridTableMeta {
+                catalog: None,
+                database: Some("test_db".to_string()),
+                schema: Some("dbo".to_string()),
+                table_name: "spatial_table".to_string(),
+                primary_keys: vec![],
+                columns: None,
+            }),
+            columns: vec!["geom".to_string(), "geog".to_string(), "untyped_geom".to_string()],
+            column_types: Some(vec![Some("geometry".to_string()), Some("geography".to_string()), None]),
+            source_columns: None,
+            rows: vec![vec![json!("POINT (1 2)"), json!("POINT (3 4)"), json!("POINT (5 6)")]],
+            primary_key_mode: DataGridPrimaryKeyMode::Include,
+            include_computed_columns: false,
+            include_database_name: true,
+            insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: Some(vec![
+                SpatialColumn { column_index: 0, srid: Some(0) },
+                SpatialColumn { column_index: 1, srid: Some(4326) },
+                SpatialColumn { column_index: 2, srid: Some(3857) },
+            ]),
+            spatial_values: Some(vec![vec![Some(0), Some(4326), Some(3857)]]),
+        };
+
+        let statement = build_data_grid_copy_insert_statement(options);
+        assert_eq!(
+            statement.as_deref(),
+            Some(
+                "INSERT INTO [test_db].[dbo].[spatial_table] ([geom], [geog], [untyped_geom]) VALUES (geometry::STGeomFromText('POINT (1 2)', 0), geography::STGeomFromText('POINT (3 4)', 4326), geometry::STGeomFromText('POINT (5 6)', 3857));"
+            )
+        );
+    }
+
+    #[test]
     fn sqlserver_literals_preserve_backslashes_before_line_breaks() {
         assert_eq!(
             format_grid_sql_literal(&json!("line1\\\nline2"), Some(DatabaseType::SqlServer), None),
@@ -12269,6 +12973,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!("Ada")]],
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
 
         assert_eq!(statements, vec!["ALTER TABLE `people` UPDATE `name` = 'Ada' WHERE `id` = 1;"]);
@@ -12293,6 +12999,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!(1), json!("paid")]],
             include_database_name: false,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             copy_updates,
@@ -12311,6 +13019,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         });
         assert_eq!(
             copy_insert.as_deref(),
@@ -12930,6 +13640,133 @@ mod tests {
     }
 
     #[test]
+    fn prepare_data_grid_save_allows_firebird_trigger_populated_primary_key_insert() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Firebird),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "REPORTS".to_string(),
+                primary_keys: vec!["REPORT_DID".to_string()],
+                columns: Some(vec![
+                    pk_column("REPORT_DID", "INTEGER", false, None),
+                    column("TITLE", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["REPORT_DID".to_string(), "TITLE".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, json!("Daily")]],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec![r#"INSERT INTO "REPORTS" ("TITLE") VALUES ('Daily');"#]);
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn prepare_data_grid_save_uses_firebird_default_values_for_trigger_only_rows() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Firebird),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "REPORTS".to_string(),
+                primary_keys: vec!["REPORT_DID".to_string()],
+                columns: Some(vec![
+                    pk_column("REPORT_DID", "INTEGER", false, None),
+                    column("TITLE", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["REPORT_DID".to_string(), "TITLE".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![Value::Null, Value::Null]],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec![r#"INSERT INTO "REPORTS" DEFAULT VALUES;"#]);
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn prepare_data_grid_save_uses_known_firebird_primary_key_for_trigger_rollback() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Firebird),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "REPORTS".to_string(),
+                primary_keys: vec!["REPORT_DID".to_string()],
+                columns: Some(vec![
+                    pk_column("REPORT_DID", "INTEGER", false, None),
+                    column("TRIGGER_VALUE", "VARCHAR(64)", false, None),
+                    column("PAYLOAD", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["REPORT_DID".to_string(), "TRIGGER_VALUE".to_string(), "PAYLOAD".to_string()],
+            source_columns: None,
+            rows: vec![],
+            dirty_rows: vec![],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(7), Value::Null, json!("created")]],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![r#"INSERT INTO "REPORTS" ("REPORT_DID", "PAYLOAD") VALUES (7, 'created');"#]
+        );
+        assert_eq!(result.rollback_statements, vec![r#"DELETE FROM "REPORTS" WHERE "REPORT_DID" = 7;"#]);
+    }
+
+    #[test]
+    fn prepare_data_grid_save_still_rejects_firebird_null_update() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Firebird),
+            identifier_quote: None,
+            server_version: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: None,
+                table_name: "REPORTS".to_string(),
+                primary_keys: vec!["REPORT_DID".to_string()],
+                columns: Some(vec![
+                    pk_column("REPORT_DID", "INTEGER", false, None),
+                    column("TRIGGER_VALUE", "VARCHAR(64)", false, None),
+                ]),
+            },
+            columns: vec!["REPORT_DID".to_string(), "TRIGGER_VALUE".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("existing")]],
+            dirty_rows: vec![(0, vec![(1, Value::Null)])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+            include_database_name: false,
+        });
+
+        assert_eq!(result.validation_error, Some(r#"Column "TRIGGER_VALUE" does not allow NULL."#.to_string()));
+        assert!(result.statements.is_empty());
+    }
+
+    #[test]
     fn prepare_data_grid_save_omits_empty_kingbase_sqlserver_identity_value() {
         let result = prepare_data_grid_save(DataGridSaveStatementOptions {
             database_type: Some(DatabaseType::Kingbase),
@@ -13030,6 +13867,8 @@ mod tests {
             include_computed_columns: false,
             include_database_name: true,
             insert_mode: DataGridCopyInsertMode::Merged,
+            spatial_columns: None,
+            spatial_values: None,
         })
         .is_none());
 
@@ -13043,6 +13882,8 @@ mod tests {
             source_columns: None,
             rows: vec![vec![json!("before"), json!("0x00ff")]],
             include_database_name: true,
+            spatial_columns: None,
+            spatial_values: None,
         })
         .is_empty());
     }

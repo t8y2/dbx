@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { appendSqlCompletionSpace } from "@/lib/editor/sqlCompletionInsertion";
+import { EditorSelection, EditorState } from "@codemirror/state";
+import { additionalSnippetApplyTargets, appendSqlCompletionSpace } from "@/lib/editor/sqlCompletionInsertion";
 
 describe("SQL completion insertion", () => {
   it("appends a space to ordinary completions by default", () => {
@@ -37,5 +38,60 @@ describe("SQL completion insertion", () => {
     expect(appendSqlCompletionSpace("SELECT", { enabled: false, itemType: "keyword" })).toBe("SELECT");
     expect(appendSqlCompletionSpace("CASE ${value}", { enabled: true, itemType: "snippet" })).toBe("CASE ${value}");
     expect(appendSqlCompletionSpace("count()", { enabled: true, itemType: "function" })).toBe("count()");
+  });
+});
+
+describe("multi-cursor snippet insertion", () => {
+  function stateWithCursors(lines: string[], prefixLength: number, mainIndex = 0) {
+    const doc = lines.join("\n");
+    const cursors: number[] = [];
+    let offset = 0;
+    for (const line of lines) {
+      cursors.push(offset + prefixLength);
+      offset += line.length + 1;
+    }
+    return EditorState.create({
+      doc,
+      selection: EditorSelection.create(
+        cursors.map((position) => EditorSelection.cursor(position)),
+        mainIndex,
+      ),
+      extensions: EditorState.allowMultipleSelections.of(true),
+    });
+  }
+
+  it("expands the snippet on every cursor that still carries the trigger prefix", () => {
+    const state = stateWithCursors(["sfhd_dwd.a", "sfhd_dwd.b", "sfhd_dwd.c"], 2);
+
+    expect(additionalSnippetApplyTargets(state, 0, 2)).toEqual([
+      { from: 22, to: 24 },
+      { from: 11, to: 13 },
+    ]);
+  });
+
+  it("returns nothing for a single cursor", () => {
+    const state = stateWithCursors(["sfhd_dwd.a"], 2);
+
+    expect(additionalSnippetApplyTargets(state, 0, 2)).toEqual([]);
+  });
+
+  it("skips cursors whose preceding text is not the typed prefix", () => {
+    const doc = "sfhd_dwd.a\nxxhd_dwd.b\nSFhd_dwd.c";
+    const state = EditorState.create({
+      doc,
+      selection: EditorSelection.create([EditorSelection.cursor(2), EditorSelection.cursor(doc.indexOf("xx") + 2), EditorSelection.cursor(doc.indexOf("SF") + 2)], 0),
+      extensions: EditorState.allowMultipleSelections.of(true),
+    });
+
+    expect(additionalSnippetApplyTargets(state, 0, 2)).toEqual([]);
+  });
+
+  it("orders targets backwards even when the main cursor is in the middle", () => {
+    const state = stateWithCursors(["sfhd_dwd.a", "sfhd_dwd.b", "sfhd_dwd.c"], 2, 1);
+
+    expect(additionalSnippetApplyTargets(state, state.selection.ranges[1].from - 2, state.selection.ranges[1].from)).toEqual([
+      { from: 22, to: 24 },
+      { from: 0, to: 2 },
+    ]);
   });
 });

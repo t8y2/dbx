@@ -10949,15 +10949,16 @@ export const useConnectionStore = defineStore("connection", () => {
       // A newer local edit may have landed during the conflict round-trip; merge
       // that edit too instead of persisting the stale candidate.
       if (candidateRevision !== sidebarLayoutRevision) {
+        // The newer edit is based on the same candidate we tried to write, so
+        // keep the original base and merge again against the fresh remote.
         candidate = sidebarLayout.value;
         candidateRevision = sidebarLayoutRevision;
-        expected = JSON.stringify(remoteLayout);
         continue;
       }
       const merged = mergeSidebarLayoutConflict(expectedLayout, candidate, remoteLayout, connectionIds);
       candidate = merged;
       candidateRevision = sidebarLayoutRevision;
-      expected = JSON.stringify(remoteLayout);
+      expected = remote ? JSON.stringify(remote) : null;
       if (JSON.stringify(merged) !== JSON.stringify(sidebarLayout.value)) {
         sidebarLayout.value = merged;
         sidebarLayoutRevision += 1;

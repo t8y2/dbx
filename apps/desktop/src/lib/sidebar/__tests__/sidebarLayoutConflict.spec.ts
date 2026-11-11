@@ -40,6 +40,22 @@ describe("mergeSidebarLayoutConflict", () => {
     expect(localGroup).toMatchObject({ children: [{ type: "connection", id: "b" }] });
   });
 
+  it("preserves a remote connection the local snapshot has not seen yet", () => {
+    const remote: SidebarLayout = {
+      groups: [{ id: "mcp", name: "MCP", collapsed: false }],
+      order: [
+        { type: "group", id: "mcp", children: [{ type: "connection", id: "new" }] },
+        { type: "connection", id: "a" },
+      ],
+    };
+    const merged = mergeSidebarLayoutConflict(ungrouped(), ungrouped(), remote, ["a"]);
+    expect(merged.order).toContainEqual({
+      type: "group",
+      id: "mcp",
+      children: [{ type: "connection", id: "new" }],
+    });
+  });
+
   it("does not reapply a local placement that did not change", () => {
     const remote: SidebarLayout = {
       groups: [{ id: "mcp", name: "MCP", collapsed: false }],

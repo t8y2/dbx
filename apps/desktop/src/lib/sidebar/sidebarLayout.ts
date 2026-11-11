@@ -234,8 +234,19 @@ export function mergeSidebarLayout(current: SidebarLayout, imported: SidebarLayo
  * concurrent MCP write is not reverted.
  */
 export function mergeSidebarLayoutConflict(base: SidebarLayout | null, local: SidebarLayout, remote: SidebarLayout, connectionIds: string[]): SidebarLayout {
-  const baseLayout = reconcileLayout(connectionIds, base);
-  const localLayout = reconcileLayout(connectionIds, local);
+  const mergedConnectionIds = new Set(connectionIds);
+  const collectConnectionIds = (entries: SidebarOrderEntry[]) => {
+    for (const entry of entries) {
+      if (entry.type === "connection") mergedConnectionIds.add(entry.id);
+      else collectConnectionIds(entryChildren(entry));
+    }
+  };
+  for (const layout of [base, local, remote]) {
+    if (layout) collectConnectionIds(layout.order);
+  }
+  const connectionIdsForMerge = [...mergedConnectionIds];
+  const baseLayout = reconcileLayout(connectionIdsForMerge, base);
+  const localLayout = reconcileLayout(connectionIdsForMerge, local);
   let merged: SidebarLayout = {
     groups: remote.groups.map((group) => ({ ...group })),
     order: cloneEntries(remote.order),
@@ -311,7 +322,7 @@ export function mergeSidebarLayoutConflict(base: SidebarLayout | null, local: Si
     remappedGroupIds.delete(group.id);
   }
 
-  for (const connectionId of connectionIds) {
+  for (const connectionId of connectionIdsForMerge) {
     const baseGroupId = findConnectionLocation(baseLayout, connectionId)?.groupId ?? null;
     const localGroupId = findConnectionLocation(localLayout, connectionId)?.groupId ?? null;
     if (localGroupId === baseGroupId) continue;
@@ -319,7 +330,7 @@ export function mergeSidebarLayoutConflict(base: SidebarLayout | null, local: Si
     merged = moveConnectionToGroup(merged, connectionId, targetGroupId);
   }
 
-  return reconcileLayout(connectionIds, merged);
+  return reconcileLayout(connectionIdsForMerge, merged);
 }
 
 export function connectionSidebarSearchAliases(config: Pick<ConnectionConfig, "host" | "username">): string[] {

@@ -887,7 +887,7 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 	if err != nil {
 		return queryPageResult{}, err
 	}
-	columns, err := rows.Columns()
+	columns, err := advanceToResultSetColumns(rows)
 	if err != nil {
 		_ = rows.Close()
 		restore()
@@ -895,7 +895,6 @@ func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageRes
 		s.endOperation(cancel)
 		return queryPageResult{}, err
 	}
-	columns = nonNilStrings(columns)
 	maxRows := opts.MaxRows
 	if maxRows <= 0 {
 		maxRows = defaultMaxRows
@@ -993,6 +992,9 @@ func readQuerySessionPage(session *querySession, pageSize int) (queryPageResult,
 	}
 	capacity := minInt(pageSize, session.remaining)
 	result := queryPageResult{Columns: session.columns, ColumnTypes: session.columnTypes, Rows: make([][]any, 0, capacity)}
+	if len(session.columns) == 0 {
+		return result, session.rows.Err()
+	}
 	for len(result.Rows) < pageSize && session.remaining > 0 {
 		if session.pending != nil {
 			result.Rows = append(result.Rows, session.pending)
@@ -1025,14 +1027,30 @@ func readQuerySessionPage(session *querySession, pageSize int) (queryPageResult,
 	return result, session.rows.Err()
 }
 
-func readRows(rows *sql.Rows, maxRows int) (queryResult, error) {
+func advanceToResultSetColumns(rows *sql.Rows) ([]string, error) {
 	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	for len(columns) == 0 && rows.NextResultSet() {
+		columns, err = rows.Columns()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return nonNilStrings(columns), nil
+}
+
+func readRows(rows *sql.Rows, maxRows int) (queryResult, error) {
+	columns, err := advanceToResultSetColumns(rows)
 	if err != nil {
 		return queryResult{}, err
 	}
-	columns = nonNilStrings(columns)
 	columnTypes := columnTypeNames(rows)
 	result := queryResult{Columns: columns, ColumnTypes: columnTypes, Rows: make([][]any, 0, minInt(maxRows, 1024))}
+	if len(columns) == 0 {
+		return result, rows.Err()
+	}
 	for rows.Next() {
 		if len(result.Rows) >= maxRows {
 			result.Truncated = true
@@ -1991,7 +2009,7 @@ func isQuerySQL(sqlText string) bool {
 		keyword = terminal
 		next = terminalEnd
 	}
-	if keyword == "select" || keyword == "show" || keyword == "explain" || keyword == "values" || keyword == "table" {
+	if keyword == "select" || keyword == "show" || keyword == "explain" || keyword == "values" || keyword == "table" || keyword == "call" || keyword == "exec" || keyword == "execute" {
 		return true
 	}
 	return isDMLKeyword(keyword) && hasTopLevelSQLKeyword(sqlText, next, "returning")

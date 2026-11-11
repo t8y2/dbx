@@ -55,6 +55,7 @@ export const databaseIconAssets: Readonly<Record<string, string>> = {
   impala: "impala",
   hbase: "hbase",
   phoenix: "phoenix",
+  "phoenix_5.0_hbase_2.0_compat": "phoenix",
   spark: "spark-logo.png",
   apache_kylin: "apache_kylin",
   apache_ignite: "apache_ignite",

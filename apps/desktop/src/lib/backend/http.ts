@@ -989,6 +989,20 @@ export async function installJdbcDriverFromMaven(coordinate: string, repositorie
   return post("/api/jdbc/drivers/maven", { coordinate, repositories });
 }
 
+export async function installJdbcCompatibilityRuntime(id: string): Promise<JdbcDriverInfo[]> {
+  return post("/api/jdbc/compatibility/install", { id });
+}
+
+export async function installJdbcCompatibilityRuntimeFromFile(id: string, pathOrFile: string | File): Promise<JdbcDriverInfo[]> {
+  if (!(pathOrFile instanceof File)) throw new Error("Web compatibility runtime installation requires an uploaded file");
+  const formData = new FormData();
+  formData.append("id", id);
+  formData.append("file", pathOrFile, pathOrFile.name);
+  const res = await fetch(apiUrl("/api/jdbc/compatibility/install-file"), { method: "POST", body: formData });
+  if (!res.ok) throw await backendResponseError(res);
+  return res.json();
+}
+
 export async function installPrestoSqlJdbcDriver(): Promise<JdbcDriverInfo[]> {
   return post("/api/jdbc/drivers/prestosql", {});
 }

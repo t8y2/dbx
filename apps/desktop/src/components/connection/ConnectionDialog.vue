@@ -245,11 +245,13 @@ import {
   createJdbcProductConnectionFieldsByMode,
   isJdbcProductDefaultDriverClass,
   isJdbcProductManagedMavenCoordinate,
-  isJdbcProductManagedMavenPath,
   jdbcProductConnectionDefaults,
+  jdbcProductConfiguredRuntime,
   jdbcProductManagedRuntimePaths,
   jdbcProductMode,
   jdbcProductRuntimeSelectionId,
+  jdbcProductRuntimeOptions,
+  selectJdbcProductRuntimePaths,
   rememberJdbcProductConnectionFields,
   type JdbcProductConnectionFieldsByMode,
 } from "@/lib/database/jdbcProductProfile";
@@ -1324,20 +1326,12 @@ const jdbcDriverSelectItems = computed<JdbcDriverSelectItem[]>(() => {
       paths: [driver.path],
       jdbcxRuntime: isJdbcxRuntimePath(driver.path),
     }));
-  const productPaths = productProfile && productMode ? jdbcProductManagedRuntimePaths(productProfile, jdbcMavenBundles.value, productMode.id) : [];
   const managedProductRuntime: JdbcDriverSelectItem[] =
-    productProfile && productMode && productPaths.length > 0
-      ? [
-          {
-            id: jdbcProductRuntimeSelectionId(productProfile, productMode.id),
-            label: t(productProfile.runtimeLabelKey, {
-              mode: t(productMode.labelKey),
-            }),
-            paths: productPaths,
-            jdbcxRuntime: false,
-            managedProductRuntime: true,
-          },
-        ]
+    productProfile && productMode
+      ? jdbcProductRuntimeOptions(productProfile, productMode.id).flatMap((runtime) => {
+          const paths = jdbcProductManagedRuntimePaths(productProfile, jdbcMavenBundles.value, productMode.id, runtime.id);
+          return paths.length > 0 ? [{ id: jdbcProductRuntimeSelectionId(productProfile, productMode.id, runtime.id), label: t(runtime.labelKey, { mode: t(productMode.labelKey) }), paths, jdbcxRuntime: false, managedProductRuntime: true }] : [];
+        })
       : [];
   return [...managedProductRuntime, ...localBundles, ...bundles, ...manual].sort((left, right) => left.label.localeCompare(right.label));
 });
@@ -4344,7 +4338,13 @@ const shouldShowAgentDriverInstallHint = computed(() => {
   if (form.value.db_type === "sqlite" && sqliteUsesSsh.value) return false;
   return showAgentDriverInstallHint(form.value.db_type, agentDrivers.value, form.value.driver_profile, { ssh: sqliteUsesSsh.value });
 });
-const agentDriverFocus = computed<DriverStoreFocus>(() => ({ target: "driver", driver: agentDriverInstallKey(form.value.db_type, form.value.driver_profile, { ssh: sqliteUsesSsh.value }) }));
+const agentDriverFocus = computed<DriverStoreFocus>(() => ({
+  target: "driver",
+  driver:
+    activeJdbcProductProfile.value && activeJdbcProductMode.value
+      ? jdbcProductConfiguredRuntime(activeJdbcProductProfile.value, activeJdbcProductMode.value.id, parsedJdbcDriverPaths()).managedDriverId
+      : agentDriverInstallKey(form.value.db_type, form.value.driver_profile, { ssh: sqliteUsesSsh.value }),
+}));
 const h2DriverMissing = computed(() => form.value.db_type === "h2" && isH2FileMode.value && agentDrivers.value.find((d) => d.db_type === "h2")?.installed !== true);
 const canChooseVisibleNacosNamespaces = computed(() => form.value.db_type === "nacos");
 const isNacosV3AdminPlane = computed(() => nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "admin");
@@ -7638,11 +7638,7 @@ function onJdbcDriverSelect(id: any) {
   if (!item) return;
   selectedJdbcDriverPath.value = id;
   if (item.managedProductRuntime && activeJdbcProductProfile.value) {
-    const existingPaths = jdbcDriverPathsInput.value
-      .split(/\r?\n/)
-      .map((path) => path.trim())
-      .filter((path) => path && !isJdbcProductManagedMavenPath(activeJdbcProductProfile.value!, path));
-    jdbcDriverPathsInput.value = Array.from(new Set([...existingPaths, ...item.paths])).join("\n");
+    jdbcDriverPathsInput.value = selectJdbcProductRuntimePaths(activeJdbcProductProfile.value, activeJdbcProductMode.value!.id, parsedJdbcDriverPaths(), item.paths).join("\n");
   } else if (isJdbcxConnection.value && item.jdbcxRuntime) {
     const installedJdbcxRuntimePaths = new Set(jdbcDriverSelectItems.value.filter((candidate) => candidate.jdbcxRuntime).flatMap((candidate) => candidate.paths));
     const existingPaths = jdbcDriverPathsInput.value
@@ -8054,6 +8050,10 @@ function openExternalUrl(url: string) {
                       <span />
                       <div class="col-span-3 space-y-1 text-xs text-muted-foreground">
                         <p>{{ t(activeJdbcProductMode.hintKey) }}</p>
+                        <p v-for="runtime in activeJdbcProductProfile.runtimes?.filter((runtime) => runtime.modeId === activeJdbcProductMode?.id)" :key="runtime.id">
+                          {{ t("connection.jdbcOptionalRuntime") }}
+                          <a class="underline cursor-pointer text-primary hover:text-primary/80" @click="emit('openDriverStore', { target: 'driver', driver: runtime.managedDriverId })">{{ t(runtime.labelKey) }}</a>
+                        </p>
                         <p>
                           {{ t(activeJdbcProductProfile.driverManagerHintPrefixKey) }}<a class="underline cursor-pointer text-primary hover:text-primary/80" @click="emit('openDriverStore', agentDriverFocus)">{{ t("toolbar.driverManager") }}</a
                           >{{ t(activeJdbcProductProfile.driverManagerHintSuffixKey) }}

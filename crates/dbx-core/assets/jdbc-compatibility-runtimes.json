@@ -1,0 +1,25 @@
+{
+  "format_version": 1,
+  "runtimes": [
+    {
+      "artifacts": [
+        {
+          "file_name": "phoenix-5.0.0-HBase-2.0-client.jar",
+          "sha256": "c093280f444d39b362373e51a644a335d3acfe824594f13305956ae78616a9ad",
+          "size": 346311818
+        },
+        {
+          "file_name": "zookeeper-3.4.10.jar",
+          "sha256": "caa38ce6b2f52c59c10b80f89abb544cc4279257805fc0c969010cbab1a11079",
+          "size": 871369
+        }
+      ],
+      "coordinate": "app.dbx.compat:phoenix-hbase-2.0:5.0.0-dbx.1",
+      "id": "phoenix-5.0-hbase-2.0-compat",
+      "sha256": "e97b80fe024e6ad608fc7197fcee70b63b87a66669c8b09cd231af0607a09283",
+      "size": 347278179,
+      "url": "https://github.com/t8y2/dbx/releases/download/jdbc-compat-phoenix-5.0.0-dbx.1/phoenix-5.0.0-hbase-2.0-dbx.1.zip",
+      "version": "5.0.0-dbx.1"
+    }
+  ]
+}

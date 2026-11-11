@@ -8,6 +8,9 @@ export const JDBC_PRODUCT_PROFILES = [PHOENIX_JDBC_PRODUCT_PROFILE] as const sat
 const jdbcProductProfileRegistry = createJdbcProductProfileRegistry(JDBC_PRODUCT_PROFILES);
 for (const profile of JDBC_PRODUCT_PROFILES) {
   validateJdbcProductManagedDriver(profile, managedJdbcDriverDefinition(profile.managedDriverId));
+  for (const runtime of profile.runtimes ?? []) {
+    validateJdbcProductManagedDriver(profile, managedJdbcDriverDefinition(runtime.managedDriverId), runtime);
+  }
 }
 
 export function jdbcProductProfileDefinition(id: string): JdbcProductProfileDefinition | undefined {

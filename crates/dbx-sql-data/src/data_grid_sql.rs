@@ -1250,6 +1250,11 @@ pub fn build_data_grid_column_distinct_values_sql(options: DataGridColumnDistinc
         TablePaginationStrategy::SqlServerTop if is_sqlserver_legacy_profile(options.driver_profile.as_deref()) => {
             format!("SELECT {select_list}{from_clause}")
         }
+        // Teradata takes `TOP n` after SELECT and rejects `LIMIT` (#14604). This
+        // statement never pages, so the limit is exact.
+        _ if options.database_type == Some(DatabaseType::Teradata) => {
+            format!("SELECT TOP {limit} {select_list}{from_clause}")
+        }
         TablePaginationStrategy::SqlServerTop => format!("SELECT TOP ({limit}) {select_list}{from_clause}"),
         TablePaginationStrategy::IrisTop => format!("SELECT TOP {limit} {select_list}{from_clause}"),
         TablePaginationStrategy::InformixFirst => format!("SELECT FIRST {limit} {select_list}{from_clause}"),
@@ -8102,6 +8107,31 @@ mod tests {
             }),
             "MATCH (n:`User`) WHERE n.active = true AND n.`status` IS NOT NULL RETURN n.`status` AS dbx_value, count(*) AS dbx_count ORDER BY dbx_count DESC, dbx_value LIMIT 10"
         );
+    }
+
+    /// #14604: Teradata rejects `LIMIT`; the distinct-value statement caps with
+    /// `TOP n`. This query has no offset, so the limit is exact.
+    #[test]
+    fn teradata_distinct_values_use_top_instead_of_limit() {
+        let sql = build_data_grid_column_distinct_values_sql(DataGridColumnDistinctValuesSqlOptions {
+            database_type: Some(DatabaseType::Teradata),
+            driver_profile: None,
+            identifier_quote: None,
+            catalog: None,
+            database: None,
+            schema: Some("sales".to_string()),
+            table_name: "orders".to_string(),
+            column_name: "status".to_string(),
+            column_info: Some(column("status", "varchar", true, None)),
+            where_input: None,
+            search_value: None,
+            limit: Some(10),
+            include_counts: false,
+            exclude_nulls: false,
+        });
+
+        assert!(sql.starts_with("SELECT TOP 10 "), "{sql}");
+        assert!(!sql.to_uppercase().contains("LIMIT"), "{sql}");
     }
 
     #[test]

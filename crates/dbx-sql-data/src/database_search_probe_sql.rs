@@ -77,6 +77,11 @@ fn probe_branch_sql(
     limit: usize,
 ) -> String {
     let limited_inner = match pagination_strategy(database_type, PaginationContext::BoundedRead) {
+        // Teradata spells the row cap as `TOP n` and rejects `LIMIT` (#14604). The
+        // probe never pages, so `TOP` expresses the limit exactly.
+        _ if database_type == Some(DatabaseType::Teradata) => {
+            format!("SELECT TOP {limit} 1 FROM {qualified_table} WHERE ({where_clause})")
+        }
         TablePaginationStrategy::SqlServerTop | TablePaginationStrategy::IrisTop => {
             format!("SELECT TOP {limit} 1 FROM {qualified_table} WHERE ({where_clause})")
         }
@@ -162,6 +167,19 @@ mod tests {
         assert_eq!(probe.sql.matches("UNION ALL").count(), 1);
         assert!(probe.sql.contains("'t0' AS table_label"));
         assert!(probe.sql.contains("'t1' AS table_label"));
+    }
+
+    /// #14604: Teradata rejects `LIMIT`; the bounded probe caps with `TOP n`.
+    #[test]
+    fn teradata_branch_uses_top_instead_of_limit() {
+        let probe = build_database_search_probe_sql(probe_options(
+            DatabaseType::Teradata,
+            vec![probe_table(Some("DLWEB"), "USERS", vec![col("NAME", "varchar", false)])],
+        ))
+        .unwrap();
+
+        assert!(probe.sql.contains("SELECT TOP 20 1 FROM"), "{}", probe.sql);
+        assert!(!probe.sql.to_uppercase().contains("LIMIT"), "{}", probe.sql);
     }
 
     #[test]

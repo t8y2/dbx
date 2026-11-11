@@ -3418,6 +3418,15 @@ export async function installJdbcDriverFromMaven(coordinate: string, repositorie
   });
 }
 
+export async function installJdbcCompatibilityRuntime(id: string): Promise<JdbcDriverInfo[]> {
+  return invoke("install_jdbc_compatibility_runtime", { id });
+}
+
+export async function installJdbcCompatibilityRuntimeFromFile(id: string, pathOrFile: string | File): Promise<JdbcDriverInfo[]> {
+  if (typeof pathOrFile !== "string") throw new Error("Desktop compatibility runtime installation requires a local file path");
+  return invoke("install_jdbc_compatibility_runtime_from_file", { id, filePath: pathOrFile });
+}
+
 export async function installPrestoSqlJdbcDriver(): Promise<JdbcDriverInfo[]> {
   return invoke("install_prestosql_jdbc_driver");
 }

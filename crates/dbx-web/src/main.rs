@@ -750,6 +750,12 @@ async fn serve() -> Result<(), String> {
         )
         .route("/jdbc/drivers/local", get(routes::jdbc::list_jdbc_local_bundles))
         .route("/jdbc/drivers/prestosql", post(routes::jdbc::install_prestosql_jdbc_driver))
+        .route("/jdbc/compatibility/install", post(routes::jdbc::install_jdbc_compatibility_runtime))
+        .route(
+            "/jdbc/compatibility/install-file",
+            post(routes::jdbc::install_jdbc_compatibility_runtime_file)
+                .layer(DefaultBodyLimit::max(dbx_core::jdbc::JDBC_COMPATIBILITY_MAX_PACKAGE_SIZE as usize + 64 * 1024)),
+        )
         .route("/jdbc/drivers/maven/{bundle_id}", delete(routes::jdbc::delete_jdbc_maven_bundle))
         .route("/jdbc/drivers/local/{bundle_id}", delete(routes::jdbc::delete_jdbc_local_bundle))
         .route("/jdbc/drivers/{name}", delete(routes::jdbc::delete_jdbc_driver))

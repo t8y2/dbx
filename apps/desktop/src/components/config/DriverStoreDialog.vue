@@ -34,7 +34,8 @@ import {
   updatePerDriverProgress,
   type DriverInstallProgress,
 } from "@/lib/connection/driverInstallProgressUi";
-import { installRegisteredManagedJdbcDriver, isManagedJdbcDriver, managedJdbcDriverRows, uninstallRegisteredManagedJdbcDriver } from "@/lib/database/managedJdbcDrivers";
+import { importManagedJdbcCompatibilityRuntime, managedJdbcPluginReady, ManagedJdbcPluginCapabilityError } from "@/lib/database/managedJdbcDriver";
+import { installRegisteredManagedJdbcDriver, isManagedJdbcDriver, managedJdbcDriverDefinition, managedJdbcDriverRows, uninstallRegisteredManagedJdbcDriver } from "@/lib/database/managedJdbcDrivers";
 import { driverStoreFocusElementKey, driverStoreFocusRowIsRenderable, shouldApplyDriverStoreFocus, type DriverStoreFocus, type DriverStoreTab } from "@/lib/connection/agentDriverInstallHint";
 import { isOfflineDriverPackage, webDriverImportAccept } from "@/lib/driverStore/driverImportSelection";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -51,6 +52,7 @@ const isWeb = !isTauriRuntime();
 // Backend errors arrive as plain strings, so translate them before they are
 // interpolated into an already-localized wrapper message.
 function backendError(e: unknown): string {
+  if (e instanceof ManagedJdbcPluginCapabilityError) return t("driverStore.compatibilityPluginRequired");
   const message = e instanceof Error ? e.message : ((e as { message?: string } | null)?.message ?? String(e));
   return translateBackendError(t, message);
 }
@@ -367,7 +369,17 @@ function isManagedJdbcBuiltinDriver(dbType: string): boolean {
   return isManagedJdbcDriver(dbType);
 }
 
-const builtinDriverRows = computed<AgentDriverInfo[]>(() => [...drivers.value, ...managedJdbcDriverRows(jdbcMavenBundles.value, jdbcPluginStatus.value)]);
+const builtinDriverRows = computed<AgentDriverInfo[]>(() => [
+  ...drivers.value,
+  ...managedJdbcDriverRows(jdbcMavenBundles.value, jdbcPluginStatus.value).map((row) => {
+    const labelKey = managedJdbcDriverDefinition(row.db_type)?.labelKey;
+    return labelKey ? { ...row, label: t(labelKey) } : row;
+  }),
+]);
+
+function compatibilityRuntimeId(dbType: string): string | undefined {
+  return managedJdbcDriverDefinition(dbType)?.bundles.find((bundle) => bundle.compatibilityRuntimeId)?.compatibilityRuntimeId;
+}
 
 function driverLabel(dbType: string): string {
   return builtinDriverRows.value.find((d) => d.db_type === dbType)?.label ?? dbType;
@@ -786,6 +798,35 @@ function toastOfflineImportResult(result: AgentOfflineImportResult) {
 async function importDriverFile(driver: AgentDriverInfo) {
   if (agentPackageBusy.value) return;
   const dbType = driver.db_type;
+  const compatibilityId = compatibilityRuntimeId(dbType);
+  if (compatibilityId) {
+    if (!managedJdbcPluginReady(managedJdbcDriverDefinition(dbType)!, jdbcPluginStatus.value)) {
+      toast(t("driverStore.compatibilityPluginRequired"));
+      return;
+    }
+    let selected: string | File | null = null;
+    if (isWeb) {
+      selected = await chooseWebFile(".zip");
+    } else {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const result = await open({ title: t("driverStore.importCompatibilityZip"), multiple: false, filters: [{ name: "ZIP", extensions: ["zip"] }] });
+      selected = typeof result === "string" ? result : null;
+    }
+    if (!selected) return;
+    importingDriver.value = dbType;
+    try {
+      jdbcDrivers.value = await importManagedJdbcCompatibilityRuntime(managedJdbcDriverDefinition(dbType)!, jdbcPluginStatus.value, selected, api);
+      jdbcMavenBundles.value = await api.listJdbcMavenBundles();
+      notifyComponentUpdatesChanged();
+      void loadDriverStoreUsage();
+      toast(t("driverStore.driverImportSuccess", { label: driverLabel(dbType) }));
+    } catch (error) {
+      toast(t("driverStore.driverImportFailed", { label: driverLabel(dbType), error: backendError(error) }));
+    } finally {
+      importingDriver.value = null;
+    }
+    return;
+  }
   if (isManagedJdbcBuiltinDriver(dbType)) {
     await importJdbcDrivers();
     return;
@@ -896,6 +937,7 @@ function agentRowProps(driver: AgentDriverInfo, options: { showCategoryBadge?: b
     progressPercent: getAgentProgressPercent(driver.db_type),
     progressText: getAgentProgressText(driver.db_type),
     managedJdbc: isManagedJdbcBuiltinDriver(driver.db_type),
+    compatibilityRuntime: Boolean(compatibilityRuntimeId(driver.db_type)),
     importing: importingDriver.value === driver.db_type,
     packageBusy: agentPackageBusy.value,
     preparingUpgradeAll: preparingUpgradeAll.value,

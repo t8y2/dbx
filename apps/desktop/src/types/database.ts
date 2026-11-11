@@ -1012,6 +1012,7 @@ export interface JdbcLocalBundleInfo {
 }
 
 export interface JdbcPluginStatus {
+  capabilities?: string[];
   installed: boolean;
   version?: string | null;
   protocol_version?: number | null;

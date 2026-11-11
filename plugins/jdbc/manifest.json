@@ -3,6 +3,13 @@
   "name": "DBX JDBC Plugin",
   "version": "0.1.52",
   "protocol_version": 1,
+  "capabilities": [
+    {
+      "id": "jdbc.external-classpath-isolation-v1",
+      "label": "External JDBC classpath isolation",
+      "kind": "runtime"
+    }
+  ],
   "description": "Adds optional JDBC driver support to DBX.",
   "executable": "bin/dbx-jdbc-plugin",
   "drivers": [

@@ -58,6 +58,7 @@ export const AGENT_DRIVER_CATEGORY_MAP: Readonly<Record<string, DriverCategoryKe
   "oracle-oci": "sql",
   oscar: "domestic",
   phoenix: "analytics",
+  "phoenix-5.0-hbase-2.0-compat": "analytics",
   prestosql: "analytics",
   rabbitmq: "mq",
   rocketmq: "mq",

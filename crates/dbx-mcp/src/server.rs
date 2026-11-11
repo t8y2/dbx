@@ -1182,10 +1182,17 @@ fn resolve_visible_group(
     layout: Option<&Value>,
     request: &GroupRequest,
 ) -> Result<SidebarGroup, SidebarGroupError> {
-    let group = request.resolve(layout)?;
+    let not_found = || SidebarGroupError::new(sidebar_groups::GROUP_NOT_FOUND, "the requested group was not found");
+    let group = request.resolve(layout).map_err(|error| {
+        if error.code == sidebar_groups::GROUP_NOT_FOUND || error.code == sidebar_groups::AMBIGUOUS_GROUP_NAME {
+            not_found()
+        } else {
+            error
+        }
+    })?;
     let visible_groups = sidebar_groups::visible_group_ids(summary, visible_connection_ids);
     if !visible_groups.contains(&group.id) {
-        return Err(SidebarGroupError::new(sidebar_groups::GROUP_NOT_FOUND, "the requested group was not found"));
+        return Err(not_found());
     }
     Ok(group)
 }

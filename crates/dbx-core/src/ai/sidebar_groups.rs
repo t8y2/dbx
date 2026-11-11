@@ -521,11 +521,21 @@ fn resolve_group_in_scope(
     selector: &GroupSelector,
     visible_group_ids: Option<&HashSet<String>>,
 ) -> Result<SidebarGroup, SidebarGroupError> {
-    let group = resolve_group(layout, selector)?;
+    let not_found = || SidebarGroupError::new(GROUP_NOT_FOUND, "the requested parent group was not found");
+    let group =
+        resolve_group(layout, selector).map_err(
+            |error| {
+                if error.code == GROUP_NOT_FOUND {
+                    not_found()
+                } else {
+                    error
+                }
+            },
+        )?;
     if group_in_scope(&group, visible_group_ids) {
         Ok(group)
     } else {
-        Err(SidebarGroupError::new(GROUP_NOT_FOUND, "the requested group was not found"))
+        Err(not_found())
     }
 }
 
@@ -546,11 +556,10 @@ pub fn create_group_under(
     let parent = match parent_id {
         None => None,
         Some(parent_id) => {
-            let parent = summary.groups.iter().find(|group| group.id == parent_id).cloned().ok_or_else(|| {
-                SidebarGroupError::new(GROUP_NOT_FOUND, format!("group id \"{parent_id}\" was not found"))
-            })?;
+            let not_found = || SidebarGroupError::new(GROUP_NOT_FOUND, "the requested parent group was not found");
+            let parent = summary.groups.iter().find(|group| group.id == parent_id).cloned().ok_or_else(&not_found)?;
             if !group_in_scope(&parent, visible_group_ids) {
-                return Err(SidebarGroupError::new(GROUP_NOT_FOUND, "the requested group was not found"));
+                return Err(not_found());
             }
             Some(parent)
         }

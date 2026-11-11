@@ -223,6 +223,73 @@ describe("QueryEditor completion-key ownership", () => {
     expect(view.state.selection.main.head).toBe(7);
   });
 
+  it("does not commit an unrelated fuzzy match on Space in SQL Server", () => {
+    // #14698: typing the JOIN keyword `on` opens the popup with fuzzy column
+    // matches; Space must stay a literal space instead of rewriting the word.
+    const { keys, view, runtime, status, accept } = createHarness({ modelValue: "inner join t on", databaseType: "sqlserver" });
+    view.dispatch({ selection: { anchor: 15 } });
+    status.mockReturnValue("active");
+    runtime.codeMirrorSelectedCompletion = () => null;
+    runtime.codeMirrorCurrentCompletions = () => [{ label: "tbml.FMEMONICCODE", apply: "FMEMONICCODE", type: "column" }];
+    runtime.codeMirrorSelectFirstCompletion = vi.fn(() => false);
+    accept.mockReturnValue(true);
+
+    expect(keys.handleSpace(view)).toBe(false);
+    expect(runtime.codeMirrorSelectFirstCompletion).not.toHaveBeenCalled();
+    expect(accept).not.toHaveBeenCalled();
+    expect(view.state.doc.toString()).toBe("inner join t on");
+  });
+
+  it("does not commit an unrelated selected fuzzy match on Space in SQL Server", () => {
+    const { keys, view, runtime, status, accept } = createHarness({ modelValue: "inner join t on", databaseType: "sqlserver" });
+    view.dispatch({ selection: { anchor: 15 } });
+    status.mockReturnValue("active");
+    runtime.codeMirrorSelectedCompletion = () => ({ label: "tbml.FMEMONICCODE", apply: "FMEMONICCODE", type: "column" });
+    accept.mockReturnValue(true);
+
+    expect(keys.acceptSqlServerCompletionOnSpace(view)).toBe(false);
+    expect(accept).not.toHaveBeenCalled();
+    expect(view.state.doc.toString()).toBe("inner join t on");
+  });
+
+  it("keeps confirming a keyword that continues the typed word on Space", () => {
+    const { keys, view, runtime, status, accept } = createHarness({ modelValue: "on", databaseType: "sqlserver" });
+    view.dispatch({ selection: { anchor: 2 } });
+    status.mockReturnValue("active");
+    runtime.codeMirrorSelectedCompletion = () => ({ label: "only", type: "keyword" });
+    accept.mockReturnValue(true);
+
+    expect(keys.acceptSqlServerCompletionOnSpace(view)).toBe(true);
+    expect(accept).toHaveBeenCalledOnce();
+  });
+
+  it("keeps confirming a qualified column continuation on Space in SQL Server", () => {
+    const { keys, view, runtime, status, accept } = createHarness({ modelValue: "select tbml.f", databaseType: "sqlserver" });
+    view.dispatch({ selection: { anchor: 13 } });
+    status.mockReturnValue("active");
+    runtime.codeMirrorSelectedCompletion = () => ({ label: "tbml.FMEMONICCODE", apply: "FMEMONICCODE", type: "column" });
+    accept.mockImplementation((currentView: EditorView) => {
+      currentView.dispatch({ changes: { from: 7, to: 13, insert: "FMEMONICCODE" }, selection: { anchor: 19 } });
+      return true;
+    });
+
+    expect(keys.acceptSqlServerCompletionOnSpace(view)).toBe(true);
+    expect(accept).toHaveBeenCalledOnce();
+    expect(view.state.doc.toString()).toBe("select FMEMONICCODE ");
+    expect(view.state.selection.main.head).toBe(20);
+  });
+
+  it("keeps confirming a completion right after a dot qualifier on Space", () => {
+    const { keys, view, runtime, status, accept } = createHarness({ modelValue: "select tbml.", databaseType: "sqlserver" });
+    view.dispatch({ selection: { anchor: 12 } });
+    status.mockReturnValue("active");
+    runtime.codeMirrorSelectedCompletion = () => ({ label: "tbml.FMEMONICCODE", apply: "FMEMONICCODE", type: "column" });
+    accept.mockReturnValue(true);
+
+    expect(keys.acceptSqlServerCompletionOnSpace(view)).toBe(true);
+    expect(accept).toHaveBeenCalledOnce();
+  });
+
   it("accepts snippet completion on Tab when snippetTriggerKey is tab or both", () => {
     const { keys, view, status, runtime, accept } = createHarness();
     status.mockReturnValue("active");

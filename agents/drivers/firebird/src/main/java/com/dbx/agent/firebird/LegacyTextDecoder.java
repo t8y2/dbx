@@ -37,16 +37,21 @@ final class LegacyTextDecoder {
     }
 
     static String jdbcUrl(String url) {
+        // Configured options travel through normalized properties so URL aliases cannot override them.
+        return charsetFromUrl(url) == null ? jdbcUrlWithoutDataCharset(url) : url.substring(0, url.indexOf('?'));
+    }
+
+    static String jdbcUrlWithoutDataCharset(String url) {
         int query = url.indexOf('?');
         if (query < 0) return url;
         java.util.List<String> parameters = new java.util.ArrayList<>();
-        boolean removed = false;
+        boolean hasDataCharset = false;
         for (String parameter : url.substring(query + 1).split("[&;]")) {
             String key = URLDecoder.decode(parameter.split("=", 2)[0], StandardCharsets.UTF_8);
-            if (key.equalsIgnoreCase("dataCharset")) removed = true;
+            if (key.equalsIgnoreCase("dataCharset")) hasDataCharset = true;
             else if (!parameter.isEmpty()) parameters.add(parameter);
         }
-        if (!removed) return url;
+        if (!hasDataCharset) return url;
         return url.substring(0, query) + (parameters.isEmpty() ? "" : "?" + String.join("&", parameters));
     }
 

@@ -12,7 +12,6 @@ import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 import java.nio.charset.Charset;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Types;
@@ -108,18 +107,21 @@ public final class FirebirdAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
-    protected Connection openConnection(ConnectParams params) throws Exception {
-        Charset charset = LegacyTextDecoder.charsetFromUrl(super.buildJdbcUrl(params));
+    protected Properties buildConnectionProperties(ConnectParams params) {
+        Properties properties = super.buildConnectionProperties(params);
+        String url = super.buildJdbcUrl(params);
+        Charset charset = LegacyTextDecoder.charsetFromUrl(url);
         if (charset == null) {
-            return super.openConnection(params);
+            return properties;
         }
-        String url = buildJdbcUrl(params);
-        Properties properties = new Properties();
-        properties.putAll(FBDriver.normalizeProperties(url, buildConnectionProperties(params)));
-        LegacyTextDecoder.configureWrites(properties, charset);
-        // Pass normalized properties separately so URL aliases cannot override the legacy encoding.
-        int query = url.indexOf('?');
-        return DriverManager.getConnection(query < 0 ? url : url.substring(0, query), properties);
+        return unchecked(() -> {
+            properties.putAll(FBDriver.normalizeProperties(
+                LegacyTextDecoder.jdbcUrlWithoutDataCharset(url),
+                properties
+            ));
+            LegacyTextDecoder.configureWrites(properties, charset);
+            return properties;
+        });
     }
 
     @Override

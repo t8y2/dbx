@@ -1146,7 +1146,6 @@ export class PluginHostBridge {
 }
 
 /**
-/**
  * Parse `host.network:<origin>` permission entries into CSP connect-src
  * origins. Must stay aligned with `parse_host_network_permission` and
  * `MAX_PLUGIN_NETWORK_ORIGINS` in crates/dbx-plugin-runtime/src/plugins/manifest.rs:

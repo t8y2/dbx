@@ -184,6 +184,7 @@ export function useQueryEditorCompletionKeys(options: QueryEditorCompletionKeysO
     const target = selected ?? getTargetCompletion(view);
     const completionType = target?.type;
     if (completionType !== "keyword" && completionType !== "table" && completionType !== "column") return false;
+    if (!target) return false;
     // Batch-selection rows own Space for checkbox toggling; this Prec.highest binding outranks their keymap.
     if (target?.dbxBatchColumnSelection || target?.dbxBatchColumnSelectionAction) return false;
     // Space confirms what the user is typing, not an unrelated fuzzy match the popup

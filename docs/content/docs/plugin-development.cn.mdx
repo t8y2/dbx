@@ -609,6 +609,21 @@ async function pasteFromClipboard() {
 }
 ```
 
+### 复制图片
+
+`window.dbxPlugin.copyImage({ contentType: "image/png" }, data)` 将 PNG 写入系统剪贴板，`data` 可为 `ArrayBuffer`、`Uint8Array` 或不含 data URL 前缀的 Base64 字符串；也可只传 `{ contentType: "image/png", dataBase64 }`。返回 `{ success: true }` 表示宿主写入成功，失败会 reject，不会把图片作为文本复制。`Uint8Array` 只发送其视图范围内的字节。
+
+先检查 `window.dbxPlugin.capabilities?.clipboardImageWrite`，旧宿主和 SDK Dev Host 不提供此能力。桌面端复用原生图片剪贴板；Web 端要求安全上下文、浏览器图片剪贴板 API 和浏览器授权，浏览器也可能要求用户激活，拒绝时应保留保存图片等降级方式。请在用户点击复制时调用，不要在后台自动覆盖剪贴板。与 `host.copy` 一样不新增 manifest 权限，也不授予剪贴板读取权限。底层请求方法为 `host.copyImage`，参数包含 `contentType` 和 `dataBase64`，或通过现有二进制字段传输字节。
+
+仅接受 PNG；编码内容最多 18 MiB（Base64 最多 24 MiB），图像最多 16,777,216 像素。宿主根据 PNG 头校验实际尺寸，不信任调用方的 `width` / `height`。建议大图片使用二进制传输，避免 Base64 开销。
+
+```js
+await window.dbxPlugin.ready;
+if (window.dbxPlugin.capabilities?.clipboardImageWrite) {
+  await window.dbxPlugin.copyImage({ contentType: "image/png" }, pngBytes);
+}
+```
+
 ### 文件传输与系统拖放
 
 桌面端宿主通过 `window.dbxPlugin.fileTransfer` 把本地文件流式接入插件沙箱。句柄只在用户明确同意后打开：原生打开/保存对话框（`pick` / `beginSave`），或从系统拖放到本插件工作台区域内的文件（`onDrop`）。传输按分块进行，多 GB 文件也不会整体载入内存。

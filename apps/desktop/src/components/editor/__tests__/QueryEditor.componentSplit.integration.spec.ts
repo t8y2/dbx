@@ -358,6 +358,34 @@ describe("QueryEditor component split integration", () => {
     expect(await editor.pasteClipboardAsSqlInCondition()).toBe(false);
   });
 
+  function pasteText(view: EditorView, text: string) {
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: { getData: (type: string) => (type === "text/plain" ? text : "") } });
+    view.contentDOM.dispatchEvent(event);
+  }
+
+  it.each(["", "SELECT 0;\n"])("runs the pasted statement immediately after a paste ending in blank lines (%j)", async (prefix) => {
+    const { editor, view, onExecute } = await mountEditor({ modelValue: prefix });
+    const sql = "SELECT 1;\nSELECT 2;";
+    view.dispatch({ selection: { anchor: prefix.length } });
+
+    pasteText(view, sql.replaceAll("\n", "\r\n") + "\r\n \r\n");
+    expect(view.state.doc.toString()).toBe(prefix + sql + "\n \n");
+    expect(editor.requestExecute({ bypassPicker: true })).toBe(true);
+    expect(onExecute).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ selectedSql: "SELECT 2", cursorPos: prefix.length + sql.length }));
+
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(prefix);
+  });
+
+  it("preserves the normal paste caret when inserting in the middle of a query", async () => {
+    const { view } = await mountEditor({ modelValue: "SELECT 2;" });
+    pasteText(view, "SELECT 1;\n");
+
+    expect(view.state.doc.toString()).toBe("SELECT 1;\nSELECT 2;");
+    expect(view.state.selection.main.head).toBe("SELECT 1;\n".length);
+  });
+
   it.each([false, true])("preserves the blank-line execution fallback setting (%s)", async (fallback) => {
     const { editor, view, props, settingsStore, onExecute } = await mountEditor({ modelValue: "SELECT 1;\n\nSELECT 2;" });
     settingsStore.editorSettings.executeAllOnBlankLine = fallback;

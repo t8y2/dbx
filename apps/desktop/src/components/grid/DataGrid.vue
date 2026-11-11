@@ -673,6 +673,7 @@ interface DataGridProps {
   tabId?: string;
   cacheKey?: string;
   columnWidthCacheKey?: string;
+  columnWidthResultKey?: string;
   pendingStateKey?: string;
   /**
    * Owner key for the tab-switch view snapshot. Defaults to `cacheKey`, which
@@ -2929,6 +2930,7 @@ const { initColumnWidths, growColumnWidthsToFitSamples, onResizeStart, autoFitCo
   compactColumnHeaderActions,
   columnIndexIndicators: visibleColumnIndexIndicators,
   cacheKey: columnWidthCacheKey,
+  resultKey: computed(() => props.columnWidthResultKey),
   columnStructureSignature,
   measureHeaderText: measureColumnHeaderText,
   headerMeasurementKey: columnHeaderMeasurementKey,

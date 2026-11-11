@@ -3142,6 +3142,7 @@ defineExpose({
                 :key="activeResultGridInstanceKey"
                 :cache-key="activeResultGridCacheKey"
                 :column-width-cache-key="activeResultGridColumnWidthCacheKey"
+                :column-width-result-key="activeResultGridInstanceKey"
                 :pending-state-key="activeResultGridInstanceKey"
                 :tab-id="activeTab.id"
                 :view-generation="activeTab.resultViewGeneration"

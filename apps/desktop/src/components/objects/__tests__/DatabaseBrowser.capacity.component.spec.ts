@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   listDatabaseMetadata: vi.fn(),
   listDatabaseStorage: vi.fn(),
   toast: vi.fn(),
+  copyToClipboard: vi.fn(),
   listSchemaInfos: vi.fn(),
   listSchemas: vi.fn(),
   openObjectBrowser: vi.fn(),
@@ -81,6 +82,7 @@ vi.mock("@/composables/useToolbarOverflow", () => ({
 }));
 
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
+vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: (...args: unknown[]) => mocks.copyToClipboard(...args) }));
 vi.mock("@/components/ui/CustomContextMenu.vue", () => ({
   default: defineComponent({
     props: ["items"],
@@ -138,6 +140,26 @@ describe("MySQL explicit database capacity", () => {
   function capacity() {
     (host.querySelector("[data-capacity]") as HTMLButtonElement).click();
   }
+
+  it("copies the filtered database names as separate clipboard lines", async () => {
+    await mount();
+    const copyButton = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("objects.copyNames"));
+    expect(copyButton).toBeDefined();
+    copyButton!.click();
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith("app\nother"));
+  });
+
+  it("offers one table copy option for the fully loaded database list", async () => {
+    await mount();
+    host.querySelector<HTMLButtonElement>("[data-database-copy-menu]")!.click();
+    await nextTick();
+
+    const tableCopyItems = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].filter((item) => item.textContent?.includes("objects.copyCurrentPageAsTable") || item.textContent?.includes("objects.copyAllAsTable"));
+    expect(tableCopyItems).toHaveLength(1);
+    expect(tableCopyItems[0].textContent).toContain("objects.copyCurrentPageAsTable");
+    tableCopyItems[0].click();
+    await vi.waitFor(() => expect(mocks.copyToClipboard).toHaveBeenCalledWith(expect.stringContaining("objects.name")));
+  });
 
   it("loads only selected capacity once and preserves it after late attributes", async () => {
     const attributes = deferred<unknown[]>();

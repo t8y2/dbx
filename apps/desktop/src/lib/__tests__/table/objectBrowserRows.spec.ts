@@ -206,3 +206,18 @@ describe("buildMongoObjectBrowserRows", () => {
     expect(new Set(rows.map((row) => row.id))).toHaveLength(3);
   });
 });
+
+describe("Object Browser table charset sorting", () => {
+  const rows: ObjectBrowserRow[] = [
+    { id: "utf8-bin", name: "utf8_bin", displayName: "utf8_bin", type: "TABLE", characterSet: "utf8mb4", collation: "utf8mb4_bin" },
+    { id: "utf8-ci", name: "utf8_ci", displayName: "utf8_ci", type: "TABLE", characterSet: "utf8mb4", collation: "utf8mb4_0900_ai_ci" },
+    { id: "latin", name: "latin", displayName: "latin", type: "TABLE", characterSet: "latin1", collation: "latin1_swedish_ci" },
+    { id: "view", name: "view", displayName: "view", type: "VIEW" },
+  ];
+
+  it.each(["characterSet", "collation"] as const)("sorts %s while keeping absent table metadata last", (key) => {
+    expect(sortObjectBrowserRows(rows, key, "asc").map((row) => row.id)).toEqual(key === "characterSet" ? ["latin", "utf8-bin", "utf8-ci", "view"] : ["latin", "utf8-ci", "utf8-bin", "view"]);
+    expect(sortObjectBrowserRows(rows, key, "desc").map((row) => row.id)).toEqual(["utf8-bin", "utf8-ci", "latin", "view"]);
+    expect(rows.map((row) => row.id)).toEqual(["utf8-bin", "utf8-ci", "latin", "view"]);
+  });
+});

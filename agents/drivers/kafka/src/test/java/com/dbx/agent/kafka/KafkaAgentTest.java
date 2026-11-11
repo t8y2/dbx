@@ -32,6 +32,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import javax.net.ssl.TrustManagerFactory;
@@ -1057,21 +1058,21 @@ class KafkaAgentTest {
     @Test
     void offsetStartPositionAllowsAllPartitionsButRequiresANonNegativeOffset() {
         assertDoesNotThrow(() ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, null, 0L, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, null, 0L, null, null, null));
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, 0, null, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, 0, null, null, null, null));
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, -1, 0L, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, -1, 0L, null, null, null));
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, 0, -1L, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, 0, -1L, null, null, null));
     }
 
     @Test
     void nonOffsetStartPositionsRejectAnOffset() {
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.LATEST, true, 0, 7L, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.LATEST, true, 0, 7L, null, null, null));
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, true, 0, 7L, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, true, 0, 7L, null, null, null));
     }
 
     @Test
@@ -1084,14 +1085,14 @@ class KafkaAgentTest {
     @Test
     void everyStartPositionRejectsNegativePartitions() {
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.LATEST, true, -1, null, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.LATEST, true, -1, null, null, null, null));
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, true, -1, null, null));
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, true, -1, null, null, null, null));
     }
 
     @Test
     void legacyOffsetWithoutStartPositionKeepsTheExistingReadBehavior() {
-        KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, false, null, 7L, null);
+        KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, false, null, 7L, null, null, null);
         assertEquals(7L, KafkaAgent.requestedPeekOffset(
             KafkaAgent.PeekStartPosition.EARLIEST, 7L, true, 0L, 10L
         ));
@@ -1400,6 +1401,116 @@ class KafkaAgentTest {
         assertEquals(1, messages.size());
         assertEquals(7L, messages.get(0).get("offset"));
         assertEquals("hello", messages.get(0).get("payloadText"));
+    }
+
+    @Test
+    void collectPeekedMessagesNewestFirstWalksBackwardBatchByBatch() {
+        TopicPartition tp = new TopicPartition("events", 0);
+        // 模拟稀疏日志窗口 [0, 1200)：每个 500 条宽的批次里只有少量真实记录，
+        // 首批从 700 读起，消费尽后回退到 200，再回退到窗口左端 0 后停止。
+        Map<Long, List<Long>> offsetsByBatchStart = new LinkedHashMap<>();
+        offsetsByBatchStart.put(700L, List.of(709L, 809L, 909L));
+        offsetsByBatchStart.put(200L, List.of(209L, 309L));
+        offsetsByBatchStart.put(0L, List.of(9L, 109L));
+        Map<Long, Long> batchEndByBatchStart = Map.of(700L, 1200L, 200L, 700L, 0L, 200L);
+
+        AtomicLong position = new AtomicLong(700L);
+        List<Long> seekTargets = new ArrayList<>();
+        AtomicInteger polls = new AtomicInteger();
+        KafkaAgent.PeekRecordPoller poller = timeout -> {
+            polls.incrementAndGet();
+            long batchStart = position.get();
+            List<ConsumerRecord<String, byte[]>> records = new ArrayList<>();
+            for (long offset : offsetsByBatchStart.getOrDefault(batchStart, List.of())) {
+                records.add(new ConsumerRecord<>(
+                    "events", 0, offset, "k", "v".getBytes(StandardCharsets.UTF_8)
+                ));
+            }
+            position.set(batchEndByBatchStart.getOrDefault(batchStart, batchStart));
+            return records.isEmpty()
+                ? ConsumerRecords.empty()
+                : new ConsumerRecords<>(Map.of(tp, records));
+        };
+
+        List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessagesNewestFirst(
+            poller,
+            partition -> position.get(),
+            (partition, offset) -> {
+                seekTargets.add(offset);
+                position.set(offset);
+            },
+            record -> true,
+            List.of(tp),
+            Map.of(tp, 0L),
+            Map.of(tp, 1200L),
+            8,
+            1_000,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        assertEquals(List.of(200L, 0L), seekTargets);
+        assertEquals(3, polls.get());
+        assertEquals(
+            List.of(709L, 809L, 909L, 209L, 309L, 9L, 109L),
+            messages.stream().map(message -> message.get("offset")).toList()
+        );
+    }
+
+    @Test
+    void collectPeekedMessagesNewestFirstStopsOnceEveryQuotaIsSatisfied() {
+        TopicPartition tp = new TopicPartition("events", 0);
+        AtomicLong position = new AtomicLong(700L);
+        AtomicInteger polls = new AtomicInteger();
+        List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessagesNewestFirst(
+            timeout -> {
+                polls.incrementAndGet();
+                position.set(1200L);
+                return new ConsumerRecords<>(Map.of(tp, List.of(
+                    new ConsumerRecord<>("events", 0, 709L, "k", "v".getBytes(StandardCharsets.UTF_8)),
+                    new ConsumerRecord<>("events", 0, 800L, "k", "v".getBytes(StandardCharsets.UTF_8))
+                )));
+            },
+            partition -> position.get(),
+            (partition, offset) -> {
+                throw new AssertionError("quota was met before any backward seek");
+            },
+            record -> true,
+            List.of(tp),
+            Map.of(tp, 0L),
+            Map.of(tp, 1200L),
+            2,
+            1_000,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        assertEquals(1, polls.get());
+        assertEquals(List.of(709L, 800L), messages.stream()
+            .map(message -> message.get("offset")).toList());
+    }
+
+    @Test
+    void collectPeekedMessagesNewestFirstStopsAtTheScanLimit() {
+        TopicPartition tp = new TopicPartition("events", 0);
+        ConsumerRecord<String, byte[]> record =
+            new ConsumerRecord<>("events", 0, 900L, "k", "v".getBytes(StandardCharsets.UTF_8));
+
+        List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessagesNewestFirst(
+            timeout -> new ConsumerRecords<>(Map.of(tp, List.of(record, record, record))),
+            partition -> 0L,
+            (partition, offset) -> { },
+            ignored -> true,
+            List.of(tp),
+            Map.of(tp, 0L),
+            Map.of(tp, 1200L),
+            100,
+            2,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        assertEquals(2, messages.size());
     }
 
     @Test
@@ -1846,13 +1957,60 @@ class KafkaAgentTest {
             KafkaAgent.peekStartPosition(JsonParser.parseString("{\"startPosition\":\"timestamp\"}").getAsJsonObject())
         );
         assertDoesNotThrow(() -> KafkaAgent.validatePeekRequest(
-            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null, 1_700_000_000_000L));
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null, 1_700_000_000_000L, null, null));
         assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
-            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null, null));
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null, null, null, null));
         assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
-            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null, -1L));
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null, -1L, null, null));
         assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
-            KafkaAgent.PeekStartPosition.EARLIEST, true, null, null, 1_700_000_000_000L));
+            KafkaAgent.PeekStartPosition.EARLIEST, true, null, null, 1_700_000_000_000L, null, null));
+    }
+
+    @Test
+    void peekAcceptsAnEndTimestampOnlyInsideATimestampWindow() {
+        assertDoesNotThrow(() -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
+            1_700_000_000_000L, 1_700_000_060_000L, null));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
+            1_700_000_000_000L, 1_699_999_999_999L, null));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
+            1_700_000_000_000L, -1L, null));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.LATEST, true, null, null, null, 1_700_000_060_000L, null));
+    }
+
+    @Test
+    void peekAcceptsASortOrderOnlyInsideATimestampWindow() {
+        assertDoesNotThrow(() -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
+            1_700_000_000_000L, 1_700_000_060_000L, "newest"));
+        assertDoesNotThrow(() -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
+            1_700_000_000_000L, null, "oldest"));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.TIMESTAMP, true, null, null,
+            1_700_000_000_000L, 1_700_000_060_000L, "banana"));
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.validatePeekRequest(
+            KafkaAgent.PeekStartPosition.EARLIEST, true, null, null, null, null, "newest"));
+    }
+
+    @Test
+    void boundedPeekEndOffsetsClampToTheEndTimestamp() {
+        TopicPartition bounded = new TopicPartition("t", 0);
+        TopicPartition unbounded = new TopicPartition("t", 1);
+        Map<TopicPartition, Long> logEndOffsets = new LinkedHashMap<>();
+        logEndOffsets.put(bounded, 100L);
+        logEndOffsets.put(unbounded, 50L);
+        Map<TopicPartition, Long> timestampEndOffsets = new LinkedHashMap<>();
+        timestampEndOffsets.put(bounded, 40L);
+
+        Map<TopicPartition, Long> resolved =
+            KafkaAgent.boundedPeekEndOffsets(logEndOffsets, timestampEndOffsets);
+
+        assertEquals(40L, resolved.get(bounded));
+        assertEquals(50L, resolved.get(unbounded));
     }
 
     @Test

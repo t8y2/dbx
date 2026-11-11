@@ -34,9 +34,15 @@ export function parseMysqlTableCollation(result: QueryResult | undefined): strin
  */
 export function parseMysqlTableCharset(result: QueryResult | undefined): MysqlTableCharsetMetadata {
   const collation = parseMysqlTableCollation(result);
-  const separator = collation.indexOf("_");
   return {
-    charset: separator > 0 ? collation.slice(0, separator) : "",
+    charset: mysqlTableCharsetFromCollation(collation),
     collation,
   };
+}
+
+export function mysqlTableCharsetFromCollation(value: string | null | undefined): string {
+  const collation = value?.trim() ?? "";
+  if (collation === "binary") return "binary";
+  const separator = collation.indexOf("_");
+  return separator > 0 ? collation.slice(0, separator) : "";
 }

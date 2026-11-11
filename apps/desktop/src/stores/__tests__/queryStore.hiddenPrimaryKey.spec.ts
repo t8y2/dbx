@@ -1122,7 +1122,7 @@ describe("queryStore hidden primary key editing", () => {
     expect(store.tabs.find((item) => item.id === tabId)?.result?.hidden_column_indexes).toEqual([2]);
   });
 
-  it("executes an unqualified Oracle query without enumerating objects when its type is unknown", async () => {
+  it("keeps an unqualified Oracle query editable through the keyless fallback when its type is unknown", async () => {
     getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
     getColumns.mockResolvedValue([
       { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
@@ -1160,8 +1160,10 @@ describe("queryStore hidden primary key editing", () => {
     expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT * FROM CUSTOMER_VIEW", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
     const tab = store.tabs.find((item) => item.id === tabId)!;
     expect(tab.result?.hidden_column_indexes).toBeUndefined();
-    await vi.waitFor(() => expect(tab.queryEditabilityReason).toBe("no-primary-key"));
-    expect(tab.queryAnalysis).toBeUndefined();
+    // #14270: an unknown type must not lock a direct base table out of the
+    // keyless whole-row fallback the table-data tab already offers.
+    await vi.waitFor(() => expect(tab.queryEditabilityReason ?? null).toBeNull());
+    expect(tab.tableMeta?.primaryKeys ?? []).toEqual([]);
   });
 
   it("does not check Oracle ROWID eligibility when query metadata returns no columns", async () => {
@@ -1710,6 +1712,30 @@ describe("queryStore hidden primary key editing", () => {
     expect(tab.queryAnalysis).toBeDefined();
     expect(tab.queryAnalysis?.allowInsertDelete).not.toBe(false);
     expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it("keeps a known Oracle view read-only for keyless editing", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+      { name: "PLATFORM", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "PLATFORM_VIEW", type: "view", schema: "APP" }]);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: { schema: "APP", tableName: "PLATFORM_VIEW", selectStar: true, columns: [] },
+    });
+    executeMulti.mockResolvedValue([{ columns: ["ID", "PLATFORM"], rows: [[72, "轻卡"]], affected_rows: 0, execution_time_ms: 1 }]);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, "SELECT * FROM APP.PLATFORM_VIEW");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.tableMeta?.tableType).toBe("VIEW"));
+    expect(tab.queryEditabilityReason).toBe("no-primary-key");
   });
 
   it("does not inject Oracle ROWID into keyless view queries", async () => {
@@ -3062,5 +3088,139 @@ describe("queryStore hidden primary key editing", () => {
     expect(executeMulti).toHaveBeenCalledTimes(1);
     expect(tab.result?.rows).toEqual(rows);
     expect(tab.result?.has_more).toBe(false);
+  });
+
+  it("injects a hidden PostgreSQL tuple locator for keyless base-table queries so duplicate rows stay individually editable", async () => {
+    getConnectionConfig.mockReturnValue({ id: "pg-1", name: "Postgres", db_type: "postgres", database: "app", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "a", data_type: "integer", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      { name: "b", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    listIndexes.mockResolvedValue([]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "test_no_pk", type: "table", schema: "public" }]);
+    const { analyzeEditableQueryEditability: analyzeSqlEditability } = await import("@/lib/sql/sqlAnalysis");
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => analyzeSqlEditability(sql));
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["a", "b", "__DBX_PK_0"],
+        rows: [
+          [1, "same", "16384:(0,1):742"],
+          [1, "same", "16384:(0,2):743"],
+        ],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Query");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, "SELECT * FROM test_no_pk");
+
+    expect(executeMulti).toHaveBeenCalledWith("pg-1", "app", "SELECT *, tableoid::text || ':' || ctid::text || ':' || xmin::text AS \"__DBX_PK_0\" FROM test_no_pk", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.result?.hidden_column_indexes).toEqual([2]);
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["a", "b", "__DBX_ROWID"]));
+    expect(tab.tableMeta?.primaryKeys).toEqual(["__DBX_ROWID"]);
+    expect(tab.queryAnalysis).toBeDefined();
+    expect(tab.queryEditabilityReason).toBeUndefined();
+  });
+
+  it("keeps a known PostgreSQL view read-only for keyless editing without injecting a tuple locator", async () => {
+    getConnectionConfig.mockReturnValue({ id: "pg-1", name: "Postgres", db_type: "postgres", database: "app", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([{ name: "a", data_type: "integer", is_nullable: true, column_default: null, is_primary_key: false, extra: null }]);
+    listIndexes.mockResolvedValue([]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "test_view", type: "view", schema: "public" }]);
+    const { analyzeEditableQueryEditability: analyzeSqlEditability } = await import("@/lib/sql/sqlAnalysis");
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => analyzeSqlEditability(sql));
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["a"],
+        rows: [[1]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Query");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, "SELECT * FROM test_view");
+
+    expect(executeMulti).toHaveBeenCalledWith("pg-1", "app", "SELECT * FROM test_view", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.tableMeta?.tableType).toBe("VIEW"));
+    expect(tab.result?.hidden_column_indexes).toBeUndefined();
+    expect(tab.queryEditabilityReason).toBe("no-primary-key");
+  });
+
+  it("replays the original SQL once when the engine rejects the hidden PostgreSQL locator", async () => {
+    const { resetRowIdLocatorStateForTests } = await import("@/lib/table/tableRowIdSupport");
+    resetRowIdLocatorStateForTests();
+    getConnectionConfig.mockReturnValue({ id: "pg-1", name: "Postgres", db_type: "postgres", database: "app", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([
+      { name: "a", data_type: "integer", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+      { name: "b", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    listIndexes.mockResolvedValue([]);
+    lookupLocalCompletionTables.mockReturnValue([{ name: "test_no_pk", type: "table", schema: "public" }]);
+    const { analyzeEditableQueryEditability: analyzeSqlEditability } = await import("@/lib/sql/sqlAnalysis");
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => analyzeSqlEditability(sql));
+    // First attempt: the engine rejects the rewritten SQL (Hologres-style #12647).
+    executeMulti.mockResolvedValueOnce([{ columns: ["db error"], rows: [["ERROR: column tableoid does not exist"]], affected_rows: 0, execution_time_ms: 1, execution_error: true, error: { message: 'column "tableoid" does not exist' } as never }]);
+    executeMulti.mockResolvedValueOnce([{ columns: ["a", "b"], rows: [[1, "same"]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Query");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, "SELECT * FROM test_no_pk");
+
+    // The rewrite ran, failed, and the original SQL was replayed once (the
+    // replay is deferred one tick so the error result is published first).
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(executeMulti.mock.calls[1]?.[2]).toBe("SELECT * FROM test_no_pk"));
+    expect(executeMulti.mock.calls[0]?.[2]).toContain("tableoid");
+    expect(executeMulti).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(tab.result?.columns).toEqual(["a", "b"]));
+    expect(tab.result?.hidden_column_indexes).toBeUndefined();
+
+    // The connection is remembered: the next execution skips the locator entirely.
+    await store.executeTabSql(tabId, "SELECT * FROM test_no_pk");
+    expect(executeMulti).toHaveBeenCalledTimes(3);
+    expect(executeMulti.mock.calls[2]?.[2]).toBe("SELECT * FROM test_no_pk");
+  });
+
+  it("keeps a keyless PostgreSQL view with an unknown type on the keyless whole-row fallback", async () => {
+    const { resetRowIdLocatorStateForTests } = await import("@/lib/table/tableRowIdSupport");
+    resetRowIdLocatorStateForTests();
+    getConnectionConfig.mockReturnValue({ id: "pg-1", name: "Postgres", db_type: "postgres", database: "app", query_timeout_secs: 30 });
+    getColumns.mockResolvedValue([{ name: "a", data_type: "integer", is_nullable: true, column_default: null, is_primary_key: false, extra: null }]);
+    listIndexes.mockResolvedValue([]);
+    // No completion rows and no stamped tableType: main could not tell this
+    // auto-updatable view from a base table and kept it editable with the keyless
+    // whole-row warning. The narrowing must only reject *known* views.
+    lookupLocalCompletionTables.mockReturnValue([]);
+    const { analyzeEditableQueryEditability: analyzeSqlEditability } = await import("@/lib/sql/sqlAnalysis");
+    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => analyzeSqlEditability(sql));
+    executeMulti.mockResolvedValue([{ columns: ["a"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Query");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, "SELECT * FROM test_maybe_view");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.tableMeta).toBeDefined());
+    expect(tab.result?.hidden_column_indexes).toBeUndefined();
+    expect(tab.queryEditabilityReason).toBeUndefined();
+    expect(tab.queryAnalysis).toBeDefined();
   });
 });

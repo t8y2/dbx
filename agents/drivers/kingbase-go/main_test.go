@@ -2079,11 +2079,14 @@ func TestListTriggerDefinitionsFallsBackToSingleArgument(t *testing.T) {
 
 func TestListTriggersFallsBackToV7InternalPredicate(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "||") {
+			t.Fatalf("listTriggers query must not use string || operator: %s", query)
+		}
 		if strings.Contains(query, "tg.tgisinternal") {
 			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column TG.TGISINTERNAL does not exist"}
 		}
 		if strings.Contains(query, "tg.tgkind <> 'c'") {
-			return &valueRows{columns: []string{"tgname", "events", "tgtype"}, rows: [][]driver.Value{{"orders_audit", "INSERT", int64(7)}}}, nil
+			return &valueRows{columns: []string{"tgname", "tgtype"}, rows: [][]driver.Value{{"orders_audit", int64(7)}}}, nil
 		}
 		return nil, errors.New("unexpected query: " + query)
 	}}
@@ -2095,7 +2098,7 @@ func TestListTriggersFallsBackToV7InternalPredicate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(triggers) != 1 || triggers[0].Name != "orders_audit" {
+		if len(triggers) != 1 || triggers[0].Name != "orders_audit" || triggers[0].Event != "INSERT" || triggers[0].Timing != "BEFORE" {
 			t.Fatalf("unexpected triggers: %#v", triggers)
 		}
 	}
@@ -2155,6 +2158,9 @@ func TestMetadataNormalizationHelpers(t *testing.T) {
 	}
 	if decodeTriggerTiming(1<<6) != "INSTEAD OF" || decodeTriggerTiming(1<<1) != "BEFORE" || decodeTriggerTiming(0) != "AFTER" {
 		t.Fatal("trigger timing decoding is incorrect")
+	}
+	if decodeTriggerEvent(4|8|16|32) != "INSERT,DELETE,UPDATE,TRUNCATE" || decodeTriggerEvent(4|16) != "INSERT,UPDATE" || decodeTriggerEvent(0) != "" {
+		t.Fatal("trigger event decoding is incorrect")
 	}
 	length := boundedVarcharLength("character varying ( 128 )")
 	if length == nil || *length != 128 {
@@ -3291,6 +3297,16 @@ func TestKingbaseCustomTypeQueriesFollowCatalog(t *testing.T) {
 	if !strings.Contains(pgQueries.domainRenderedDefault, "pg_get_expr") || !strings.Contains(sysQueries.domainRenderedDefault, "sys_get_expr") {
 		t.Fatal("domain default renderer must follow the selected catalog")
 	}
+	for _, query := range []string{
+		pgQueries.general, pgQueries.compositeMembers, pgQueries.domainBaseType,
+		pgQueries.rangeAttributes, pgQueries.rangeAttributesForMultirange, pgQueries.collationName,
+		sysQueries.general, sysQueries.compositeMembers, sysQueries.domainBaseType,
+		sysQueries.rangeAttributes, sysQueries.rangeAttributesForMultirange, sysQueries.collationName,
+	} {
+		if strings.Contains(query, "||") {
+			t.Fatalf("custom type query must not use || string operator: %s", query)
+		}
+	}
 }
 
 func TestKingbaseDomainDefaultRenderFailureIsDegradable(t *testing.T) {
@@ -3445,12 +3461,15 @@ func TestCustomTypeDetailsJSONNeverNullsSlices(t *testing.T) {
 
 func TestListTriggersUsesCompatibilityCatalogAndDecodesTiming(t *testing.T) {
 	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "||") {
+			return nil, errors.New("listTriggers query must not use || operator: " + query)
+		}
 		if !strings.Contains(query, "FROM pg_catalog.pg_trigger") || !strings.Contains(query, "NOT tg.tgisinternal") {
 			return nil, errors.New("unexpected query: " + query)
 		}
 		return &valueRows{
-			columns: []string{"tgname", "event", "tgtype"},
-			rows:    [][]driver.Value{{"orders_before", "INSERT,UPDATE", int64(2)}, {"orders_instead", "DELETE", int64(64)}},
+			columns: []string{"tgname", "tgtype"},
+			rows:    [][]driver.Value{{"orders_before", int64(22)}, {"orders_instead", int64(72)}},
 		}, nil
 	}}
 	server := newServer()
@@ -3461,7 +3480,9 @@ func TestListTriggersUsesCompatibilityCatalogAndDecodesTiming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(triggers) != 2 || triggers[0].Timing != "BEFORE" || triggers[1].Timing != "INSTEAD OF" {
+	if len(triggers) != 2 ||
+		triggers[0].Event != "INSERT,UPDATE" || triggers[0].Timing != "BEFORE" ||
+		triggers[1].Event != "DELETE" || triggers[1].Timing != "INSTEAD OF" {
 		t.Fatalf("unexpected triggers: %#v", triggers)
 	}
 }
@@ -5013,7 +5034,7 @@ func TestPagedQueryKeepsContextUntilSessionCloses(t *testing.T) {
 		t.Fatal("paged query context was canceled before session close")
 	default:
 	}
-	if !server.closeQuerySession(*result.SessionID) {
+	if closed, _ := server.closeQuerySession(*result.SessionID); !closed {
 		t.Fatal("query session was not closed")
 	}
 	assertContextCanceled(t, state.queryCtx)
@@ -5176,5 +5197,690 @@ func TestQualifiedCatalogTypeExpressionHandlesJsonTypes(t *testing.T) {
 		!strings.Contains(expr, "WHEN t.typname = '_json'") ||
 		!strings.Contains(expr, "THEN 'json[]'") {
 		t.Fatalf("qualifiedCatalogTypeExpression missing json handling: %s", expr)
+	}
+}
+
+func TestIsQuerySQLClassifiesProcedureCalls(t *testing.T) {
+	tests := []struct {
+		name  string
+		sql   string
+		query bool
+	}{
+		{name: "call procedure", sql: "CALL get_users()", query: true},
+		{name: "call with comment and arguments", sql: "/* comment */ call app.get_users(1, 'a')", query: true},
+		{name: "exec procedure", sql: "EXEC dbo.get_users", query: true},
+		{name: "execute procedure with argument", sql: "EXECUTE dbo.get_users 1", query: true},
+		{name: "create procedure statement", sql: "CREATE OR REPLACE PROCEDURE p() AS $$ BEGIN PERFORM 1; END; $$ LANGUAGE plpgsql", query: false},
+		{name: "create trigger with execute function", sql: "CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION fn()", query: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isQuerySQL(test.sql); got != test.query {
+				t.Fatalf("isQuerySQL(%q) = %v, expected %v", test.sql, got, test.query)
+			}
+		})
+	}
+}
+
+type procTestDriverState struct {
+	mu             sync.Mutex
+	queries        []string
+	execStatements []string
+	queryFn        func(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error)
+	execFn         func(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error)
+	closeConnCalls int
+}
+
+type procTestDriver struct {
+	state *procTestDriverState
+}
+
+func (d *procTestDriver) Open(string) (driver.Conn, error) {
+	return &procTestConn{state: d.state}, nil
+}
+
+type procTestConnector struct {
+	driver *procTestDriver
+}
+
+func (c *procTestConnector) Connect(context.Context) (driver.Conn, error) {
+	return &procTestConn{state: c.driver.state}, nil
+}
+
+func (c *procTestConnector) Driver() driver.Driver {
+	return c.driver
+}
+
+type procTestConn struct {
+	state *procTestDriverState
+}
+
+func (c *procTestConn) Prepare(string) (driver.Stmt, error) {
+	return nil, driver.ErrSkip
+}
+
+func (c *procTestConn) Close() error {
+	if c.state != nil {
+		c.state.mu.Lock()
+		c.state.closeConnCalls++
+		c.state.mu.Unlock()
+	}
+	return nil
+}
+
+func (c *procTestConn) Begin() (driver.Tx, error) {
+	return nil, driver.ErrSkip
+}
+
+func (c *procTestConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.state.mu.Lock()
+	c.state.queries = append(c.state.queries, query)
+	fn := c.state.queryFn
+	c.state.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, query, args)
+	}
+	return nil, errors.New("no query handler defined")
+}
+
+func (c *procTestConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	c.state.mu.Lock()
+	c.state.execStatements = append(c.state.execStatements, query)
+	fn := c.state.execFn
+	c.state.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, query, args)
+	}
+	return driver.RowsAffected(1), nil
+}
+
+type procTestResultSet struct {
+	columns     []string
+	columnTypes []string
+	rows        [][]driver.Value
+}
+
+type procTestRows struct {
+	mu         sync.Mutex
+	sets       []procTestResultSet
+	currentSet int
+	currentRow int
+	closed     bool
+	closeCalls int
+	// closeErr models gokb semantics: Next() returns io.EOF at the next
+	// RowDescription, and errors raised later in the stream surface only
+	// from Close while draining the remaining protocol messages.
+	closeErr error
+}
+
+func (r *procTestRows) Columns() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.currentSet >= len(r.sets) {
+		return []string{}
+	}
+	return r.sets[r.currentSet].columns
+}
+
+func (r *procTestRows) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closed = true
+	r.closeCalls++
+	return r.closeErr
+}
+
+func (r *procTestRows) Next(dest []driver.Value) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.currentSet >= len(r.sets) {
+		return io.EOF
+	}
+	rs := r.sets[r.currentSet]
+	if r.currentRow >= len(rs.rows) {
+		return io.EOF
+	}
+	row := rs.rows[r.currentRow]
+	for i := range dest {
+		if i < len(row) {
+			dest[i] = row[i]
+		} else {
+			dest[i] = nil
+		}
+	}
+	r.currentRow++
+	return nil
+}
+
+func (r *procTestRows) ColumnTypeDatabaseTypeName(index int) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.currentSet >= len(r.sets) {
+		return ""
+	}
+	types := r.sets[r.currentSet].columnTypes
+	if index < 0 || index >= len(types) {
+		return ""
+	}
+	return types[index]
+}
+
+func (r *procTestRows) HasNextResultSet() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.currentSet+1 < len(r.sets)
+}
+
+func (r *procTestRows) NextResultSet() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.currentSet+1 >= len(r.sets) {
+		return io.EOF
+	}
+	r.currentSet++
+	r.currentRow = 0
+	return nil
+}
+
+func openProcTestServer(t *testing.T, state *procTestDriverState) (*server, *sql.DB) {
+	t.Helper()
+	driver := &procTestDriver{state: state}
+	db := sql.OpenDB(&procTestConnector{driver: driver})
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	srv := newServer()
+	srv.db = db
+	return srv, db
+}
+
+func TestExecuteProcedureCallsFetchRowsAndPaged(t *testing.T) {
+	newProcRows := func() *procTestRows {
+		return &procTestRows{
+			sets: []procTestResultSet{
+				{
+					columns:     []string{"id", "name"},
+					columnTypes: []string{"INT4", "VARCHAR"},
+					rows: [][]driver.Value{
+						{int64(1), "Alice"},
+						{int64(2), "Bob"},
+						{int64(3), "Charlie"},
+						{int64(4), "David"},
+						{int64(5), "Eve"},
+					},
+				},
+			},
+		}
+	}
+
+	state := &procTestDriverState{
+		queryFn: func(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+			return newProcRows(), nil
+		},
+	}
+	srv, _ := openProcTestServer(t, state)
+
+	// 1. Verify executeQuery on CALL pkg_report.fetch_rows()
+	callSQL := "CALL pkg_report.fetch_rows()"
+	res, err := srv.executeQuery(queryOptions{SQL: callSQL})
+	if err != nil {
+		t.Fatalf("executeQuery failed: %v", err)
+	}
+	state.mu.Lock()
+	if len(state.execStatements) != 0 {
+		t.Fatalf("expected 0 ExecContext calls, got %v", state.execStatements)
+	}
+	if len(state.queries) == 0 || state.queries[0] != callSQL {
+		t.Fatalf("expected QueryContext called with %q, got %v", callSQL, state.queries)
+	}
+	state.mu.Unlock()
+
+	expectedCols := []string{"id", "name"}
+	if !reflect.DeepEqual(res.Columns, expectedCols) {
+		t.Fatalf("expected columns %v, got %v", expectedCols, res.Columns)
+	}
+	expectedTypes := []string{"INT4", "VARCHAR"}
+	if !reflect.DeepEqual(res.ColumnTypes, expectedTypes) {
+		t.Fatalf("expected column types %v, got %v", expectedTypes, res.ColumnTypes)
+	}
+	if len(res.Rows) != 5 {
+		t.Fatalf("expected 5 rows, got %d", len(res.Rows))
+	}
+	if res.Rows[0][0] != int64(1) || res.Rows[0][1] != "Alice" {
+		t.Fatalf("unexpected row 0: %v", res.Rows[0])
+	}
+	if res.AffectedRows != 0 {
+		t.Fatalf("expected affected rows 0, got %d", res.AffectedRows)
+	}
+
+	// 2. Verify executeQuery on EXEC fetch_rows
+	execSQL := "EXEC fetch_rows"
+	execRows := &procTestRows{
+		sets: []procTestResultSet{
+			{
+				columns:     []string{"id", "name"},
+				columnTypes: []string{"INT4", "VARCHAR"},
+				rows: [][]driver.Value{
+					{int64(10), "Ten"},
+				},
+			},
+		},
+	}
+	state.mu.Lock()
+	state.queries = nil
+	state.execStatements = nil
+	state.queryFn = func(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+		return execRows, nil
+	}
+	state.mu.Unlock()
+
+	resExec, err := srv.executeQuery(queryOptions{SQL: execSQL})
+	if err != nil {
+		t.Fatalf("executeQuery EXEC failed: %v", err)
+	}
+	state.mu.Lock()
+	if len(state.execStatements) != 0 {
+		t.Fatalf("expected 0 ExecContext calls for EXEC, got %v", state.execStatements)
+	}
+	if len(state.queries) == 0 || state.queries[0] != execSQL {
+		t.Fatalf("expected QueryContext called with %q, got %v", execSQL, state.queries)
+	}
+	state.mu.Unlock()
+	if len(resExec.Rows) != 1 || resExec.Rows[0][1] != "Ten" {
+		t.Fatalf("unexpected EXEC result: %v", resExec.Rows)
+	}
+
+	// 3. Verify executeQueryPage with paged session handling when rows > pageSize
+	state.mu.Lock()
+	state.queries = nil
+	state.execStatements = nil
+	state.queryFn = func(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+		return newProcRows(), nil
+	}
+	state.mu.Unlock()
+
+	page1, err := srv.executeQueryPage(queryOptions{SQL: callSQL}, 2)
+	if err != nil {
+		t.Fatalf("executeQueryPage page 1 failed: %v", err)
+	}
+	state.mu.Lock()
+	if len(state.execStatements) != 0 {
+		t.Fatalf("expected 0 ExecContext calls in executeQueryPage, got %v", state.execStatements)
+	}
+	state.mu.Unlock()
+	if !reflect.DeepEqual(page1.Columns, expectedCols) {
+		t.Fatalf("expected page1 columns %v, got %v", expectedCols, page1.Columns)
+	}
+	if !reflect.DeepEqual(page1.ColumnTypes, expectedTypes) {
+		t.Fatalf("expected page1 column types %v, got %v", expectedTypes, page1.ColumnTypes)
+	}
+	if len(page1.Rows) != 2 {
+		t.Fatalf("expected 2 rows in page 1, got %d", len(page1.Rows))
+	}
+	if !page1.HasMore {
+		t.Fatalf("expected page1 HasMore to be true")
+	}
+	if page1.SessionID == nil || *page1.SessionID == "" {
+		t.Fatalf("expected page1 SessionID to be set")
+	}
+
+	sessionID := *page1.SessionID
+	page2, err := srv.fetchQueryPage(sessionID, 2)
+	if err != nil {
+		t.Fatalf("fetchQueryPage page 2 failed: %v", err)
+	}
+	if len(page2.Rows) != 2 {
+		t.Fatalf("expected 2 rows in page 2, got %d", len(page2.Rows))
+	}
+	if !page2.HasMore {
+		t.Fatalf("expected page2 HasMore to be true")
+	}
+	if page2.SessionID == nil || *page2.SessionID != sessionID {
+		t.Fatalf("expected page2 SessionID to remain %s", sessionID)
+	}
+
+	page3, err := srv.fetchQueryPage(sessionID, 2)
+	if err != nil {
+		t.Fatalf("fetchQueryPage page 3 failed: %v", err)
+	}
+	if len(page3.Rows) != 1 {
+		t.Fatalf("expected 1 row in page 3, got %d", len(page3.Rows))
+	}
+	if page3.HasMore {
+		t.Fatalf("expected page3 HasMore to be false")
+	}
+	if page3.SessionID != nil {
+		t.Fatalf("expected page3 SessionID to be nil, got %v", page3.SessionID)
+	}
+
+	// Verify session was cleaned up
+	if srv.sessions[sessionID] != nil {
+		t.Fatalf("expected session to be cleaned up from srv.sessions")
+	}
+	exhausted, err := srv.fetchQueryPage(sessionID, 2)
+	if err != nil {
+		t.Fatalf("unexpected error on exhausted session: %v", err)
+	}
+	if len(exhausted.Rows) != 0 || exhausted.HasMore || exhausted.SessionID != nil {
+		t.Fatalf("unexpected result on exhausted session: %#v", exhausted)
+	}
+
+	// 4. Verify executeQueryPage on EXEC fetch_rows
+	state.mu.Lock()
+	state.queries = nil
+	state.execStatements = nil
+	state.queryFn = func(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+		return &procTestRows{
+			sets: []procTestResultSet{
+				{
+					columns:     []string{"id", "name"},
+					columnTypes: []string{"INT4", "VARCHAR"},
+					rows: [][]driver.Value{
+						{int64(20), "Twenty"},
+					},
+				},
+			},
+		}, nil
+	}
+	state.mu.Unlock()
+
+	pageExec, err := srv.executeQueryPage(queryOptions{SQL: execSQL}, 10)
+	if err != nil {
+		t.Fatalf("executeQueryPage EXEC failed: %v", err)
+	}
+	if len(pageExec.Rows) != 1 || pageExec.Rows[0][1] != "Twenty" {
+		t.Fatalf("unexpected pageExec rows: %v", pageExec.Rows)
+	}
+	if pageExec.HasMore {
+		t.Fatalf("expected pageExec HasMore to be false")
+	}
+	if pageExec.SessionID != nil {
+		t.Fatalf("expected pageExec SessionID to be nil")
+	}
+
+	// 5. Verify closeQuerySession releases connection and closes rows early
+	earlyRows := newProcRows()
+	state.mu.Lock()
+	state.queries = nil
+	state.queryFn = func(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+		return earlyRows, nil
+	}
+	state.mu.Unlock()
+
+	earlyPage, err := srv.executeQueryPage(queryOptions{SQL: callSQL}, 2)
+	if err != nil {
+		t.Fatalf("executeQueryPage earlyPage failed: %v", err)
+	}
+	if earlyPage.SessionID == nil {
+		t.Fatalf("expected earlyPage SessionID to be set")
+	}
+	earlySessionID := *earlyPage.SessionID
+	if closed, _ := srv.closeQuerySession(earlySessionID); !closed {
+		t.Fatalf("expected closeQuerySession to return true")
+	}
+	if !earlyRows.closed {
+		t.Fatalf("expected earlyRows to be closed after closeQuerySession")
+	}
+}
+
+func TestExecuteProcedureMultiResultSetDMLFirst(t *testing.T) {
+	newMultiRows := func() *procTestRows {
+		return &procTestRows{
+			sets: []procTestResultSet{
+				{
+					// Result set 0: DML step (0 columns, 0 rows)
+					columns:     []string{},
+					columnTypes: []string{},
+					rows:        [][]driver.Value{},
+				},
+				{
+					// Result set 1: SELECT step
+					columns:     []string{"user_id", "status"},
+					columnTypes: []string{"INT4", "VARCHAR"},
+					rows: [][]driver.Value{
+						{int64(101), "active"},
+						{int64(102), "pending"},
+					},
+				},
+			},
+		}
+	}
+
+	state := &procTestDriverState{
+		queryFn: func(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+			return newMultiRows(), nil
+		},
+	}
+	srv, _ := openProcTestServer(t, state)
+
+	// 1. executeQuery advances past 0-column result set
+	res, err := srv.executeQuery(queryOptions{SQL: "CALL proc_with_dml()"})
+	if err != nil {
+		t.Fatalf("executeQuery failed: %v", err)
+	}
+	expectedCols := []string{"user_id", "status"}
+	if !reflect.DeepEqual(res.Columns, expectedCols) {
+		t.Fatalf("expected columns %v, got %v", expectedCols, res.Columns)
+	}
+	expectedTypes := []string{"INT4", "VARCHAR"}
+	if !reflect.DeepEqual(res.ColumnTypes, expectedTypes) {
+		t.Fatalf("expected column types %v, got %v", expectedTypes, res.ColumnTypes)
+	}
+	if len(res.Rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(res.Rows))
+	}
+	if res.Rows[0][0] != int64(101) || res.Rows[0][1] != "active" {
+		t.Fatalf("unexpected row 0: %v", res.Rows[0])
+	}
+	if res.Rows[1][0] != int64(102) || res.Rows[1][1] != "pending" {
+		t.Fatalf("unexpected row 1: %v", res.Rows[1])
+	}
+
+	// 2. executeQueryPage advances past 0-column result set
+	page, err := srv.executeQueryPage(queryOptions{SQL: "CALL proc_with_dml()"}, 10)
+	if err != nil {
+		t.Fatalf("executeQueryPage failed: %v", err)
+	}
+	if !reflect.DeepEqual(page.Columns, expectedCols) {
+		t.Fatalf("expected page columns %v, got %v", expectedCols, page.Columns)
+	}
+	if !reflect.DeepEqual(page.ColumnTypes, expectedTypes) {
+		t.Fatalf("expected page column types %v, got %v", expectedTypes, page.ColumnTypes)
+	}
+	if len(page.Rows) != 2 {
+		t.Fatalf("expected 2 page rows, got %d", len(page.Rows))
+	}
+	if page.HasMore {
+		t.Fatalf("expected HasMore to be false")
+	}
+	if page.SessionID != nil {
+		t.Fatalf("expected SessionID to be nil")
+	}
+}
+
+func TestExecuteProcedureNoResultSetCleansUp(t *testing.T) {
+	newEmptyRows := func() *procTestRows {
+		return &procTestRows{
+			sets: []procTestResultSet{
+				{
+					columns:     []string{},
+					columnTypes: []string{},
+					rows:        [][]driver.Value{},
+				},
+			},
+		}
+	}
+
+	var lastRows *procTestRows
+	state := &procTestDriverState{
+		queryFn: func(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+			lastRows = newEmptyRows()
+			return lastRows, nil
+		},
+	}
+	srv, db := openProcTestServer(t, state)
+
+	// 1. executeQuery with 0 columns and no further result sets
+	res, err := srv.executeQuery(queryOptions{SQL: "CALL do_cleanup()"})
+	if err != nil {
+		t.Fatalf("executeQuery failed: %v", err)
+	}
+	if res.Columns == nil || len(res.Columns) != 0 {
+		t.Fatalf("expected non-nil empty Columns, got %#v", res.Columns)
+	}
+	if res.ColumnTypes == nil || len(res.ColumnTypes) != 0 {
+		t.Fatalf("expected non-nil empty ColumnTypes, got %#v", res.ColumnTypes)
+	}
+	if res.Rows == nil || len(res.Rows) != 0 {
+		t.Fatalf("expected non-nil empty Rows, got %#v", res.Rows)
+	}
+	if res.AffectedRows != 0 {
+		t.Fatalf("expected AffectedRows 0, got %d", res.AffectedRows)
+	}
+	if !lastRows.closed {
+		t.Fatalf("expected rows to be closed after executeQuery")
+	}
+
+	// Verify connection was released by running another query on the pool (max open conns = 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if conn, err := db.Conn(ctx); err != nil {
+		t.Fatalf("connection was not released back to pool after executeQuery: %v", err)
+	} else {
+		_ = conn.Close()
+	}
+
+	// 2. executeQueryPage with 0 columns and no further result sets
+	page, err := srv.executeQueryPage(queryOptions{SQL: "CALL do_cleanup()"}, 100)
+	if err != nil {
+		t.Fatalf("executeQueryPage failed: %v", err)
+	}
+	if page.Columns == nil || len(page.Columns) != 0 {
+		t.Fatalf("expected non-nil empty page.Columns, got %#v", page.Columns)
+	}
+	if page.ColumnTypes == nil || len(page.ColumnTypes) != 0 {
+		t.Fatalf("expected non-nil empty page.ColumnTypes, got %#v", page.ColumnTypes)
+	}
+	if page.Rows == nil || len(page.Rows) != 0 {
+		t.Fatalf("expected non-nil empty page.Rows, got %#v", page.Rows)
+	}
+	if page.HasMore {
+		t.Fatalf("expected page.HasMore to be false, got true")
+	}
+	if page.SessionID != nil {
+		t.Fatalf("expected page.SessionID to be nil, got %v", page.SessionID)
+	}
+	if !lastRows.closed {
+		t.Fatalf("expected rows to be closed after executeQueryPage")
+	}
+
+	// Verify connection was released again
+	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	if conn, err := db.Conn(ctx2); err != nil {
+		t.Fatalf("connection was not released back to pool after executeQueryPage: %v", err)
+	} else {
+		_ = conn.Close()
+	}
+}
+
+func TestExecuteProcedureMultipleEmptyResultSetsBeforeSELECT(t *testing.T) {
+	newMultiRows := func() *procTestRows {
+		return &procTestRows{
+			sets: []procTestResultSet{
+				{
+					// Result set 0: DML step 1 (0 columns)
+					columns: []string{},
+					rows:    [][]driver.Value{},
+				},
+				{
+					// Result set 1: DML step 2 (0 columns)
+					columns: []string{},
+					rows:    [][]driver.Value{},
+				},
+				{
+					// Result set 2: SELECT step
+					columns:     []string{"report_id", "total"},
+					columnTypes: []string{"INT8", "NUMERIC"},
+					rows: [][]driver.Value{
+						{int64(999), "123.45"},
+					},
+				},
+			},
+		}
+	}
+
+	state := &procTestDriverState{
+		queryFn: func(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+			return newMultiRows(), nil
+		},
+	}
+	srv, _ := openProcTestServer(t, state)
+
+	res, err := srv.executeQuery(queryOptions{SQL: "CALL proc_multi_dml()"})
+	if err != nil {
+		t.Fatalf("executeQuery failed: %v", err)
+	}
+	if !reflect.DeepEqual(res.Columns, []string{"report_id", "total"}) {
+		t.Fatalf("unexpected columns: %v", res.Columns)
+	}
+	if !reflect.DeepEqual(res.ColumnTypes, []string{"INT8", "NUMERIC"}) {
+		t.Fatalf("unexpected column types: %v", res.ColumnTypes)
+	}
+	if len(res.Rows) != 1 || res.Rows[0][1] != "123.45" {
+		t.Fatalf("unexpected rows: %v", res.Rows)
+	}
+
+	page, err := srv.executeQueryPage(queryOptions{SQL: "CALL proc_multi_dml()"}, 10)
+	if err != nil {
+		t.Fatalf("executeQueryPage failed: %v", err)
+	}
+	if !reflect.DeepEqual(page.Columns, []string{"report_id", "total"}) {
+		t.Fatalf("unexpected page columns: %v", page.Columns)
+	}
+	if !reflect.DeepEqual(page.ColumnTypes, []string{"INT8", "NUMERIC"}) {
+		t.Fatalf("unexpected page column types: %v", page.ColumnTypes)
+	}
+	if len(page.Rows) != 1 || page.Rows[0][1] != "123.45" {
+		t.Fatalf("unexpected page rows: %v", page.Rows)
+	}
+}
+
+func TestExecuteProcedureSurfacesErrorAfterFirstResultSet(t *testing.T) {
+	// gokb reports a failure raised after the first result set only while
+	// draining the stream during Close; the agent must not report success
+	// for a procedure that selects rows and then fails.
+	newRows := func() *procTestRows {
+		return &procTestRows{
+			sets: []procTestResultSet{
+				{
+					columns:     []string{"report_id", "total"},
+					columnTypes: []string{"INT8", "NUMERIC"},
+					rows: [][]driver.Value{
+						{int64(1), "10.00"},
+					},
+				},
+			},
+			closeErr: errors.New("KINGBASE ERROR: raise_exception after first result set"),
+		}
+	}
+
+	state := &procTestDriverState{
+		queryFn: func(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+			return newRows(), nil
+		},
+	}
+	srv, _ := openProcTestServer(t, state)
+
+	if _, err := srv.executeQuery(queryOptions{SQL: "CALL proc_selects_then_raises()"}); err == nil {
+		t.Fatal("expected executeQuery to surface the drain error after the first result set, got nil")
+	} else if !strings.Contains(err.Error(), "raise_exception") {
+		t.Fatalf("expected drain error to propagate, got: %v", err)
+	}
+
+	if _, err := srv.executeQueryPage(queryOptions{SQL: "CALL proc_selects_then_raises()"}, 10); err == nil {
+		t.Fatal("expected executeQueryPage to surface the close error, got nil")
+	} else if !strings.Contains(err.Error(), "raise_exception") {
+		t.Fatalf("expected close error to propagate, got: %v", err)
 	}
 }

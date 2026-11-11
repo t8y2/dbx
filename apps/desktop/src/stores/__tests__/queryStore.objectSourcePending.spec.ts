@@ -39,7 +39,7 @@ const CONNECTION_ID = "ora-1";
 const DATABASE = "ORCL";
 const SCHEMA = "APP";
 
-const pendingOptions = (request: { name: string; objectType: "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY"; signature?: string }) => ({
+const pendingOptions = (request: { name: string; objectType: "VIEW" | "PROCEDURE" | "FUNCTION" | "SEQUENCE" | "PACKAGE" | "PACKAGE_BODY" | "TRIGGER"; signature?: string }) => ({
   connectionId: CONNECTION_ID,
   database: DATABASE,
   title: `Source - ${request.name}`,
@@ -449,6 +449,52 @@ describe("queryStore pending object source tab", () => {
     expect(tab.sourceLoad).toBeUndefined();
   });
 
+  it("reuses a read-only trigger tab and refreshes its DDL instead of opening a new tab (issue #14517)", async () => {
+    // PostgreSQL 触发器源码仍为只读（不挂 objectSource），覆盖 findLoadedReadOnlySourceTab
+    // 复用路径；MySQL/Oracle 系触发器已可保存（#14489），走 objectSource 判重分支。
+    mocks.connectionStore.dbType = "postgresql";
+    const triggerSource = (source: string) => ({ ...objectSource(source), object_type: "TRIGGER" as const });
+    mocks.getObjectSource.mockResolvedValue(triggerSource("CREATE TRIGGER app.trg_audit BEFORE INSERT ON app.t FOR EACH ROW BEGIN END"));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const options = pendingOptions({ name: "trg_audit", objectType: "TRIGGER" });
+    const id = store.openObjectSourceTabPending(options);
+    await settle();
+    expect(store.tabs).toHaveLength(1);
+    expect(store.tabs[0]?.objectSource).toBeUndefined();
+    expect(store.tabs[0]?.sourceLoad).toBeUndefined();
+
+    mocks.getObjectSource.mockResolvedValue(triggerSource("CREATE TRIGGER app.trg_audit BEFORE INSERT ON app.t FOR EACH ROW SET NEW.updated_at = NOW()"));
+    expect(store.openObjectSourceTabPending(options)).toBe(id);
+    await settle();
+
+    expect(store.tabs).toHaveLength(1);
+    expect(store.activeTabId).toBe(id);
+    expect(store.tabs[0]?.sql).toContain("SET NEW.updated_at = NOW()");
+    expect(store.tabs[0]?.sourceLoad).toBeUndefined();
+    expect(mocks.getObjectSource).toHaveBeenCalledTimes(2);
+  });
+
+  it("switches to a dirty read-only trigger tab without refetching or clobbering edits", async () => {
+    mocks.connectionStore.dbType = "postgresql";
+    mocks.getObjectSource.mockResolvedValue({ ...objectSource("CREATE TRIGGER app.trg_audit BEFORE INSERT ON app.t FOR EACH ROW BEGIN END"), object_type: "TRIGGER" as const });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const options = pendingOptions({ name: "trg_audit", objectType: "TRIGGER" });
+    const id = store.openObjectSourceTabPending(options);
+    await settle();
+    store.updateSql(id, "user's unsaved draft");
+
+    expect(store.openObjectSourceTabPending(options)).toBe(id);
+    await settle();
+
+    expect(store.tabs).toHaveLength(1);
+    expect(store.tabs[0]?.sql).toBe("user's unsaved draft");
+    expect(mocks.getObjectSource).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps a routine source tab saveable when opened from the view entry", async () => {
     // 侧栏单击/双击存储过程走的是「查看源码」(initialEditing=false)。该 tab 必须
     // 仍然挂着 objectSource，否则 Ctrl+S 会退化成「保存到 SQL 库」，用户再也改不了
@@ -468,6 +514,24 @@ describe("queryStore pending object source tab", () => {
     expect(store.openObjectSourceTabPending(options)).toBe(id);
     await settle();
     expect(store.tabs).toHaveLength(1);
+  });
+
+  it("reuses a view-only sequence tab on repeated view opens", async () => {
+    mocks.connectionStore.dbType = "oceanbase-oracle";
+    mocks.getObjectSource.mockResolvedValue(objectSource('CREATE SEQUENCE "APP"."SEQ_USERS" START WITH 10 INCREMENT BY 2'));
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+
+    const options = { ...pendingOptions({ name: "SEQ_USERS", objectType: "SEQUENCE" as const }), initialEditing: false };
+    const id = store.openObjectSourceTabPending(options);
+    await settle();
+    expect(store.tabs[0]?.objectSource).toBeUndefined();
+
+    expect(store.openObjectSourceTabPending(options)).toBe(id);
+    await settle();
+    expect(store.tabs).toHaveLength(1);
+    expect(store.tabs[0]?.sql).toContain("CREATE SEQUENCE");
+    expect(store.tabs[0]?.objectSource).toBeUndefined();
   });
 
   it("keeps OceanBase sequence CREATE source for viewing and uses ALTER only for editing", async () => {

@@ -536,6 +536,7 @@ const MYSQL_SQL_KEYWORDS = [
   "JSON",
   "BOOL",
   "BOOLEAN",
+  "MEDIUMINT",
   "TINYTEXT",
   "MEDIUMTEXT",
   "LONGTEXT",
@@ -551,6 +552,7 @@ const MYSQL_SQL_KEYWORDS = [
   "USER",
   "CURRENT_USER",
   "DUPLICATE KEY",
+  "FORCE INDEX",
   "JSON_EXTRACT",
   "JSON_UNQUOTE",
   "DATE_FORMAT",
@@ -1078,6 +1080,7 @@ const DATA_TYPE_KEYWORDS = new Set([
   "REAL",
   "SMALLDATETIME",
   "SMALLINT",
+  "MEDIUMINT",
   "SMALLMONEY",
   "TEXT",
   "TIME",
@@ -2257,6 +2260,10 @@ export function shouldAutoOpenSqlCompletion(sql: string, cursor: number, options
   if (isSqlCompletionSuppressedContext(sql, cursor, options)) return false;
   const previousChar = sql[cursor - 1];
   if (!previousChar) return false;
+  // Whitespace typed directly in front of an existing token (re-indenting a select
+  // list, spacing out "a,b") is layout, not a request for a new token; accepting a
+  // suggestion there would glue it onto that token (dbx#14144).
+  if (/\s/.test(previousChar) && /[\w$@`"[\p{Script=Han}]/u.test(sql[cursor] ?? "")) return false;
   // Statement-bounded prefix: every probe below is anchored at the cursor and
   // only looks back within the current statement. Slicing the whole prefix (and
   // the literal-masking scans inside the modifier/expression helpers) made each
@@ -3812,7 +3819,10 @@ function preferredKeywordsForCompletion(
   }
   if (selectListColumnContext && hasSelectListExpression(beforeCursor, databaseType)) keywords.push("FROM");
   if (isAfterJoinModifierContext(beforeCursor, databaseType)) keywords.push("JOIN");
-  if (!exclusiveTableSuggestions && isAfterSelectBodyExpression(beforeToken, databaseType)) keywords.push("LIMIT");
+  if (!exclusiveTableSuggestions && isAfterSelectBodyExpression(beforeToken, databaseType)) {
+    if (databaseType === "mysql" && /\sforce$/i.test(beforeToken)) keywords.push("INDEX");
+    keywords.push("LIMIT");
+  }
   if (isAfterConditionExpression(beforeToken, databaseType)) keywords.push("AND", "OR");
   if (updateInfo?.afterTarget) keywords.push("SET");
   if (updateInfo?.afterSetAssignments) keywords.push("WHERE");
@@ -6947,6 +6957,7 @@ function buildKeywordItems(prefix: string, context: SqlCompletionContext, databa
     .filter((keyword) => {
       if (functionSignatures.has(keyword) && !dataTypeKeywords.has(keyword) && !DUAL_ROLE_SQL_KEYWORDS.has(keyword)) return false;
       if (WINDOW_FUNCTIONS.has(keyword)) return false;
+      if (keyword === "FORCE INDEX" && context.preferredKeywords.includes("INDEX")) return false;
       if (!matchesPrefix(keyword, prefix, matchMode)) return false;
       if (!showDdl && isDml && (DDL_ONLY_KEYWORDS.has(keyword) || dataTypeKeywords.has(keyword))) return false;
       if (context.followingKeyword && keyword.includes(" ") && keyword.toUpperCase().endsWith(` ${context.followingKeyword}`)) return false;
@@ -6968,7 +6979,7 @@ function buildKeywordItems(prefix: string, context: SqlCompletionContext, databa
     });
 }
 
-const TABLE_REFERENCE_CLAUSE_KEYWORDS = new Set(["WHERE", "GROUP", "GROUP BY", "ORDER", "ORDER BY", "HAVING", "UNION", "INTERSECT", "EXCEPT"]);
+const TABLE_REFERENCE_CLAUSE_KEYWORDS = new Set(["WHERE", "GROUP", "GROUP BY", "ORDER", "ORDER BY", "HAVING", "UNION", "INTERSECT", "EXCEPT", "FORCE INDEX"]);
 // Enough to outrank a routine's initials match plus the procedure type boost.
 const TABLE_REFERENCE_CLAUSE_KEYWORD_BOOST = 3000;
 

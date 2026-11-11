@@ -1229,8 +1229,29 @@ async fn execute_sql_file_paths_inner(
 
             let should_finish_splitter = !zip_package || file_index + 1 == file_count;
             if should_finish_splitter {
-                let mut next_statements =
-                    splitter.take().expect("splitter is finished at each ordinary file or the last ZIP part").finish();
+                let streaming_splitter =
+                    splitter.take().expect("splitter is finished at each ordinary file or the last ZIP part");
+                // Never hand the database a trailing fragment left by a file that
+                // was cut off mid-statement: the server would only answer with a
+                // syntax error near the cut, which reads like a problem in the
+                // dump rather than a truncated file (#14455).
+                if let Some(reason) = streaming_splitter.incomplete_tail_reason() {
+                    let error = format!(
+                        "SQL file '{file_name}' ends inside an {reason} at statement #{} ({} bytes). \
+                         The incomplete statement was not sent to the database; the file may have been \
+                         truncated while it was written, copied, or uploaded.",
+                        progress.statement_index + pending_statements.len() + 1,
+                        streaming_splitter.pending_tail_len(),
+                    );
+                    emit(sql_file_execution_error_progress(
+                        &request.execution_id,
+                        started_at,
+                        &progress,
+                        error.clone(),
+                    ));
+                    return Err(error);
+                }
+                let mut next_statements = streaming_splitter.finish();
                 if let Some(filter) = restore_filter.as_mut() {
                     if let Err(error) = filter_restore_statements(
                         &mut next_statements,
@@ -2066,6 +2087,17 @@ impl StreamingSqlFileSplitter {
     pub(crate) fn finish(self) -> Vec<SqlStatementWithControl> {
         self.0.finish()
     }
+
+    /// See [`SqlStatementSplitter::incomplete_tail_reason`]. A file that ends
+    /// inside a literal or block comment must not send its fragment to the
+    /// database (#14455).
+    fn incomplete_tail_reason(&self) -> Option<&'static str> {
+        self.0.incomplete_tail_reason()
+    }
+
+    fn pending_tail_len(&self) -> usize {
+        self.0.pending_tail_len()
+    }
 }
 
 impl StreamingSqlFileSplitterKind {
@@ -2091,13 +2123,34 @@ impl StreamingSqlFileSplitterKind {
     fn finish(self) -> Vec<SqlStatementWithControl> {
         match self {
             Self::Statements(splitter) => splitter.finish_with_control(),
-            Self::SqlServerBatches(splitter) => {
+            Self::SqlServerBatches(mut splitter) => {
                 splitter.finish().into_iter().map(|sql| SqlStatementWithControl { sql, stop_on_error: false }).collect()
             }
         }
     }
+
+    fn incomplete_tail_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Statements(splitter) => splitter.incomplete_tail_reason(),
+            Self::SqlServerBatches(splitter) => match splitter.final_lexical_state() {
+                SqlServerLexicalState::Normal | SqlServerLexicalState::LineComment => None,
+                SqlServerLexicalState::SingleQuote => Some("unterminated string literal"),
+                SqlServerLexicalState::DoubleQuote => Some("unterminated quoted string"),
+                SqlServerLexicalState::BracketIdentifier => Some("unterminated bracket identifier"),
+                SqlServerLexicalState::BlockComment => Some("unclosed block comment"),
+            },
+        }
+    }
+
+    fn pending_tail_len(&self) -> usize {
+        match self {
+            Self::Statements(splitter) => splitter.pending_tail_len(),
+            Self::SqlServerBatches(splitter) => splitter.batch.len() + splitter.partial_line.len(),
+        }
+    }
 }
 
+#[derive(Clone)]
 struct SqlServerBatchSplitter {
     batch: String,
     partial_line: String,
@@ -2145,7 +2198,7 @@ impl SqlServerBatchSplitter {
         batches
     }
 
-    fn finish(mut self) -> Vec<String> {
+    fn finish(&mut self) -> Vec<String> {
         let mut batches = Vec::new();
         if !self.partial_line.is_empty() {
             let line = std::mem::take(&mut self.partial_line);
@@ -2220,6 +2273,18 @@ impl SqlServerBatchSplitter {
         if matches!(self.lexical_state, SqlServerLexicalState::LineComment) {
             self.lexical_state = SqlServerLexicalState::Normal;
         }
+    }
+
+    /// Lexical state after consuming the trailing partial line, without
+    /// flushing the pending batch (which resets the state to `Normal`).
+    fn final_lexical_state(&self) -> SqlServerLexicalState {
+        let mut probe = self.clone();
+        if !probe.partial_line.is_empty() {
+            let line = std::mem::take(&mut probe.partial_line);
+            let mut ignored = Vec::new();
+            probe.push_line(line.trim_end_matches('\r'), &mut ignored);
+        }
+        probe.lexical_state
     }
 
     fn push_batch(&mut self, batches: &mut Vec<String>) {
@@ -3183,6 +3248,45 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEMP_SQL_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn streaming_splitter_flags_a_file_cut_mid_statement() {
+        let options = SqlParsingOptions::for_database_type(DatabaseType::Mysql);
+        let mut truncated = StreamingSqlFileSplitter::new(Some(DatabaseType::Mysql), options, false);
+        truncated.push_chunk("INSERT INTO t VALUES (1, 'ok');\nINSERT INTO t VALUES (2, 'cut");
+        assert_eq!(truncated.incomplete_tail_reason(), Some("unterminated string literal"));
+        assert!(truncated.pending_tail_len() > 0);
+
+        let mut complete = StreamingSqlFileSplitter::new(Some(DatabaseType::Mysql), options, false);
+        complete.push_chunk("INSERT INTO t VALUES (1, 'ok');\n-- trailing comment\n");
+        assert_eq!(complete.incomplete_tail_reason(), None);
+
+        let mut comment = StreamingSqlFileSplitter::new(Some(DatabaseType::Mysql), options, false);
+        comment.push_chunk("INSERT INTO t VALUES (1);\n/* never closed");
+        assert_eq!(comment.incomplete_tail_reason(), Some("unclosed block comment"));
+    }
+
+    #[test]
+    fn streaming_splitter_flags_a_truncated_sqlserver_batch() {
+        let options = SqlParsingOptions::for_database_type(DatabaseType::SqlServer);
+        let mut truncated = StreamingSqlFileSplitter::new(Some(DatabaseType::SqlServer), options, false);
+        truncated.push_chunk("SELECT 1\nGO\nSELECT 'cut");
+        assert_eq!(truncated.incomplete_tail_reason(), Some("unterminated string literal"));
+    }
+
+    #[test]
+    fn mysql_file_plan_splits_an_oversized_extended_insert() {
+        let tuples: Vec<String> = (0..16_000).map(|row| format!("({row},'value-{row}')")).collect();
+        let sql = format!("INSERT INTO `t` (`id`, `name`) VALUES {};", tuples.join(","));
+        assert!(sql.len() > crate::sql::SQL_FILE_INSERT_STATEMENT_MAX_BYTES);
+
+        let statements = split_sql_file_import_statements_with_control(&sql, Some(DatabaseType::Mysql), None);
+        let planned = plan_sql_file_statements(&statements, Some(DatabaseType::Mysql), None, false, None);
+
+        assert!(planned.len() > 1);
+        assert!(planned.iter().all(|item| item.statement.sql.len() <= crate::sql::SQL_FILE_INSERT_STATEMENT_MAX_BYTES));
+        assert!(planned.iter().all(|item| item.statement.source_statement_count == 1));
+    }
 
     #[test]
     fn manual_file_plan_keeps_insert_error_boundaries() {

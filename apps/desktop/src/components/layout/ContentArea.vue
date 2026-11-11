@@ -251,6 +251,7 @@ type DataGridHandle = DataGridColumnLayoutHandle & {
   focusSearch: (target?: Element | null) => boolean;
   focusWhere: () => boolean;
   focusGrid: () => boolean;
+  copyActiveResult: (isValid?: () => boolean) => Promise<boolean>;
   openGoToColumn: () => boolean;
   openCellDetailSearch: () => boolean;
   nullColumnsHidden: boolean;
@@ -807,6 +808,10 @@ const resultRunFallbackLabel = (sequence: number) => t(resultTabNamingMode.value
 const activeResultGridCacheKey = computed(() => resultGridCacheKey(props.activeTab));
 const activeResultGridColumnWidthCacheKey = computed(() => resultGridColumnWidthCacheKey(props.activeTab));
 const activeResultGridInstanceKey = computed(() => resultGridInstanceKey(props.activeTab));
+const activeResultColumnWidthKey = computed(() => {
+  const revision = props.activeTab.resultColumnWidthRevision;
+  return revision ? `${activeResultGridInstanceKey.value}:${revision}` : activeResultGridInstanceKey.value;
+});
 const hasNeo4jNodes = computed(() => activeEffectiveDatabaseType.value === "neo4j" && !!props.activeTab.result?.neo4j_node_cells?.length);
 const neo4jNodeTable = useNeo4jNodeTableResult(
   computed(() => props.activeTab.result),
@@ -1192,6 +1197,51 @@ function toggleResultsPane(): boolean {
 function focusSqlEditor(): boolean {
   return props.activeTab.mode === "query" && !props.resultOnly && (queryEditorRef.value?.focusEditor?.() ?? false);
 }
+
+const pendingGridCopy = shallowRef<{ isValid: () => boolean; started: boolean }>();
+let gridCopyRequest = 0;
+function copyActiveResult(isWorkspaceValid: () => boolean = () => true): boolean {
+  if (props.editorOnly || !hasFocusableQueryResult(props.activeTab) || activeElasticsearchJsonResponse.value || redisResultViewMode.value !== "grid" || !isWorkspaceValid()) return false;
+  const request = ++gridCopyRequest;
+  const tabId = props.activeTab.id;
+  const result = props.activeTab.result;
+  const generation = props.activeTab.resultViewGeneration;
+  const isValid = () => request === gridCopyRequest && isWorkspaceValid() && props.activeTab.id === tabId && props.activeTab.result === result && props.activeTab.resultViewGeneration === generation && props.activeOutputView === "result";
+  pendingGridCopy.value = { isValid, started: false };
+  if (!props.resultOnly) resultsPaneOpen.value = true;
+  showElasticsearchRawJson.value = false;
+  selectOutputView(tabId, "result");
+  return true;
+}
+
+watch(
+  [pendingGridCopy, dataGridRef, () => props.activeTab.id, () => props.activeTab.result, () => props.activeTab.resultViewGeneration, () => props.activeOutputView],
+  () => {
+    const request = pendingGridCopy.value;
+    if (!request) return;
+    if (!request.isValid()) {
+      ++gridCopyRequest;
+      pendingGridCopy.value = undefined;
+      return;
+    }
+    const grid = dataGridRef.value;
+    if (!grid || request.started) return;
+    request.started = true;
+    void grid
+      .copyActiveResult(request.isValid)
+      .catch((error: unknown) => {
+        if (request.isValid()) toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+      })
+      .finally(() => {
+        if (pendingGridCopy.value === request) pendingGridCopy.value = undefined;
+      });
+  },
+  { flush: "post" },
+);
+onUnmounted(() => {
+  ++gridCopyRequest;
+  pendingGridCopy.value = undefined;
+});
 
 const pendingGridFocus = shallowRef<{ tabId: string; result: QueryResult; source: Element | null }>();
 function cancelResultGridFocus() {
@@ -1955,14 +2005,16 @@ function dispatchBeforeResultTabSwitch() {
 }
 
 /**
- * 点击结果标签：切换显示的同时切换固定状态（issue #9975、#13306）。
+ * 点击结果标签：切换显示的同时固定该结果（issue #9975、#13306、#14599）。
  * 未固定的结果会被下一次普通查询复用/覆盖，点击后固定即可保留下来；
- * 点击已固定的结果则直接取消固定，无需再打开右键菜单。
+ * 再次点击当前已固定的结果会取消固定，无需再打开右键菜单；
+ * 从其他结果标签切换过来时只切换显示，不会取消已有的固定。
  */
 async function selectResultRunFromTab(runId: string) {
+  const wasActive = runId === props.activeTab.activeResultRunId;
   if (!(await selectResultRun(runId))) return;
   const run = resultRuns.value.find((item) => item.id === runId);
-  if (shouldPinResultRunOnClick(run, settingsStore.editorSettings.pinResultTabOnClick)) toggleResultRunPinned(runId);
+  if (shouldPinResultRunOnClick(run, settingsStore.editorSettings.pinResultTabOnClick, wasActive)) toggleResultRunPinned(runId);
 }
 
 async function focusResultRunByIndex(index: number) {
@@ -2096,6 +2148,11 @@ function foldAll(): boolean {
   return queryEditorRef.value?.foldAll?.() ?? false;
 }
 
+function toggleLineComment(): boolean {
+  if (!sourceSectionActive.value) return false;
+  return queryEditorRef.value?.toggleLineComment?.() ?? false;
+}
+
 function unfoldAll(): boolean {
   return queryEditorRef.value?.unfoldAll?.() ?? false;
 }
@@ -2225,6 +2282,7 @@ function locateExecutionSummaryError(item: ExecutionSummaryItem) {
 }
 
 defineExpose({
+  copyActiveResult,
   focusSqlEditor,
   focusResultGrid,
   cancelResultGridFocus,
@@ -2254,6 +2312,7 @@ defineExpose({
   focusErrorPosition,
   locateActiveResultError,
   foldAll,
+  toggleLineComment,
   unfoldAll,
 });
 </script>
@@ -3087,6 +3146,7 @@ defineExpose({
                 :key="activeResultGridInstanceKey"
                 :cache-key="activeResultGridCacheKey"
                 :column-width-cache-key="activeResultGridColumnWidthCacheKey"
+                :column-width-result-key="activeResultColumnWidthKey"
                 :pending-state-key="activeResultGridInstanceKey"
                 :tab-id="activeTab.id"
                 :view-generation="activeTab.resultViewGeneration"

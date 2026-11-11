@@ -1204,12 +1204,57 @@ jobs:
           else
             aws s3 cp "$RUNNER_TEMP/manifest/latest.json" "${versioned}latest.json" --endpoint-url "$endpoint" --cache-control "no-cache"
           fi
+          # R2 intermittently rejects CompleteMultipartUpload (InvalidPart) on the
+          # hundreds-of-megabytes installers. Retry every transfer, and let the
+          # retry resume from what is already in R2 instead of restarting it.
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then
+                return 0
+              fi
+              echo "::warning::R2 publish attempt ${attempt}/3 failed: $*"
+              sleep $((attempt * 15))
+            done
+            return 1
+          }
           # gh release download fetched the signed installers and portable
           # archives as well as latest.json. Keep those immutable assets beside
           # the versioned beta manifest so the manifest's R2 URLs are usable.
-          aws s3 sync "$RUNNER_TEMP/manifest/" "$versioned" --endpoint-url "$endpoint" --cache-control "no-cache"
-          aws s3 sync "$RUNNER_TEMP/manifest/" "s3://${R2_BUCKET_NAME}/releases/beta/latest/" --endpoint-url "$endpoint" --cache-control "no-cache" --delete
-          aws s3 cp "$RUNNER_TEMP/manifest/latest.json" "s3://${R2_BUCKET_NAME}/releases/beta/latest.json" --endpoint-url "$endpoint" --cache-control "no-cache"
+          # Assets are immutable for a tag, so --size-only retries only copy what
+          # is still missing instead of re-uploading the full ~1.6 GiB.
+          retry aws s3 sync "$RUNNER_TEMP/manifest/" "$versioned" \
+            --endpoint-url "$endpoint" --cache-control "no-cache" --size-only
+          # Mirror the versioned prefix into releases/beta/latest/ so the
+          # portable fallback URLs stay current. Copy object by object: the
+          # high-level `aws s3 cp/sync` between two prefixes calls
+          # GetObjectTagging to replicate tags, and R2 answers NotImplemented,
+          # which made every mirror run fail on the large installers.
+          tag_prefix="releases/beta/${{ inputs.release_tag || github.ref_name }}/"
+          mirror_prefix="releases/beta/latest/"
+          mapfile -t asset_keys < <(
+            aws s3api list-objects-v2 --bucket "$R2_BUCKET_NAME" --prefix "$tag_prefix" \
+              --endpoint-url "$endpoint" --output json | jq -r '.Contents[]?.Key'
+          )
+          for key in "${asset_keys[@]}"; do
+            relative="${key#"$tag_prefix"}"
+            retry aws s3api copy-object --bucket "$R2_BUCKET_NAME" \
+              --copy-source "${R2_BUCKET_NAME}/${key}" --key "${mirror_prefix}${relative}" \
+              --endpoint-url "$endpoint" >/dev/null
+          done
+          # Drop mirror entries that this beta no longer ships.
+          mapfile -t mirror_keys < <(
+            aws s3api list-objects-v2 --bucket "$R2_BUCKET_NAME" --prefix "$mirror_prefix" \
+              --endpoint-url "$endpoint" --output json | jq -r '.Contents[]?.Key'
+          )
+          for key in "${mirror_keys[@]}"; do
+            if ! printf '%s\n' "${asset_keys[@]}" | grep -Fxq "${tag_prefix}${key#"$mirror_prefix"}"; then
+              retry aws s3api delete-object --bucket "$R2_BUCKET_NAME" --key "$key" \
+                --endpoint-url "$endpoint" >/dev/null
+            fi
+          done
+          retry aws s3 cp "$RUNNER_TEMP/manifest/latest.json" "s3://${R2_BUCKET_NAME}/releases/beta/latest.json" \
+            --endpoint-url "$endpoint" --cache-control "no-cache"
 
       - name: Keep latest five beta releases in R2
         continue-on-error: true

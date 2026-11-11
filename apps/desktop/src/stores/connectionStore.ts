@@ -126,6 +126,7 @@ import { oracleDatabaseLinksFromResult, oracleDatabaseLinksSql, supportsOracleDa
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, schemaNodeHasLoadableName, shouldShowDorisCatalogTree, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
+import { invalidateSchemaOptionsCache } from "@/lib/database/schemaOptionsCache";
 import {
   connectionDatabaseMetadataSchema,
   connectionObjectTreeNodeSchema,
@@ -257,6 +258,8 @@ const SIDEBAR_DATABASE_STORAGE_CACHE_TTL_MS = 30_000;
 const SIDEBAR_DATABASE_STORAGE_CACHE_MAX_ENTRIES = 32;
 const SIDEBAR_TABLE_STORAGE_CACHE_MAX_ENTRIES = 64;
 const SIDEBAR_TABLE_SEARCH_INDEX_CACHE_MAX_ENTRIES = 32;
+/** Above this many schemas an unattributed index beats hundreds of round trips. */
+const SIDEBAR_TABLE_SEARCH_INDEX_MAX_SCHEMA_SCOPES = 200;
 export const COMPLETION_METADATA_CONCURRENCY = 2;
 const MONGO_LEGACY_DRIVER_PROFILE = "mongodb-legacy";
 const MONGO_LEGACY_DRIVER_LABEL = "MongoDB (Legacy)";
@@ -4071,7 +4074,16 @@ export const useConnectionStore = defineStore("connection", () => {
     const read = (async () => {
       const decoded = decodeSchemaTreeCache<TreeNode[]>(await api.loadSchemaCache<unknown>(cacheKey).catch(() => null));
       const index = decoded?.tableSearchIndex;
-      const entries = index ? index.entries.map((entry) => ({ name: entry.name, table_type: entry.tableType, ...(entry.comment !== undefined ? { comment: entry.comment } : {}) })) : null;
+      const entries = index
+        ? index.entries.map((entry) => ({
+            name: entry.name,
+            table_type: entry.tableType,
+            ...(entry.comment !== undefined ? { comment: entry.comment } : {}),
+            ...(entry.schema !== undefined ? { schema: entry.schema } : {}),
+            ...(entry.parentSchema !== undefined ? { parent_schema: entry.parentSchema } : {}),
+            ...(entry.parentName !== undefined ? { parent_name: entry.parentName } : {}),
+          }))
+        : null;
       const indexedAt = index ? Date.parse(index.indexedAt) : Number.NaN;
       const value = { entries, stale: decoded?.isStale ?? false, staleAt: Number.isFinite(indexedAt) ? indexedAt + SCHEMA_TREE_CACHE_TTL_MS : Date.now() };
       if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return { entries: null, stale: false, staleAt: Date.now() };
@@ -4140,6 +4152,58 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  /**
+   * One schema a table-search index has to walk, split into the schema to query
+   * with and the schema to attribute rows to. The two are the same everywhere
+   * except the database-name fallback of a schema-less node: flat engines
+   * (MySQL-style) still query with the database name but their rows must stay
+   * unattributed, because the live tree resolves no node schema for them.
+   */
+  interface SidebarTableSearchIndexSchemaScope {
+    querySchema: string;
+    attribution?: string;
+  }
+
+  /**
+   * Schema scopes a table-search index has to walk so every entry can be attributed.
+   *
+   * A schema-scoped node knows its schema. A schema-less node can only attribute
+   * rows for schemas it has already listed, so it uses its loaded schema children
+   * (no extra round trip) and otherwise falls back to the database name, where a
+   * schema and a database are the same thing (MySQL/SQLite). `parent_schema` is
+   * never an option: drivers use it for the partitioned parent table (#14316).
+   */
+  function sidebarTableSearchIndexSchemas(parent: TreeNode): SidebarTableSearchIndexSchemaScope[] {
+    const scopeSchema = parent.schema?.trim();
+    if (scopeSchema) return [{ querySchema: scopeSchema, attribution: scopeSchema }];
+    const loadedSchemas = [
+      ...new Set(
+        (parent.children ?? [])
+          .filter((child) => child.type === "schema" || child.type === "linked-server-schema")
+          .map((child) => child.schema?.trim())
+          .filter((schema): schema is string => !!schema),
+      ),
+    ];
+    // Hundreds of schemas would turn one index build into hundreds of round
+    // trips; stay unattributed there and let the live tree answer instead.
+    if (loadedSchemas.length > 0 && loadedSchemas.length <= SIDEBAR_TABLE_SEARCH_INDEX_MAX_SCHEMA_SCOPES) return loadedSchemas.map((schema) => ({ querySchema: schema, attribution: schema }));
+    // No loaded schema to query with: the database name is the query schema on
+    // drivers where the two are the same thing.
+    if (!parent.database) return [];
+    // Attribution is gated on the live tree's own resolution: stamp the database
+    // as the owning schema only where connectionObjectTreeNodeSchema also puts it
+    // on the node (the database IS the schema, e.g. SQLite). Flat trees (MySQL)
+    // carry no node schema, so their live table ids have no schema infix; a
+    // stamped index row would build child ids with a `${database}:` infix that
+    // never matches a live child, and the global-search merge — which dedupes by
+    // node id — appended every indexed table next to its live copy.
+    // Dropping only the attribution keeps the query intact, and `schema.table`
+    // queries still match through the parent node's own database in
+    // filterLocallySearchedTables' scopeMatches fallback.
+    const databaseIsSchema = !!connectionObjectTreeNodeSchema(getConfig(parent.connectionId || ""), parent.database, undefined);
+    return [{ querySchema: parent.database, ...(databaseIsSchema ? { attribution: parent.database } : {}) }];
+  }
+
   async function buildSidebarTableSearchIndex(parentNodeId: string, identity?: SidebarRegexScopeIdentity): Promise<TableInfo[] | null> {
     const parent = identity ? findSidebarTreeNodeByIdentity(parentNodeId, identity) : findNode(treeNodes.value, parentNodeId);
     if (!parent?.connectionId || !hasTreeNodeDatabaseContext(parent)) return [];
@@ -4155,7 +4219,6 @@ export const useConnectionStore = defineStore("connection", () => {
     const scopeGeneration = sidebarTableSearchIndexScopeGeneration(cacheKey);
     await ensureConnected(connectionId);
     const config = getConfig(connectionId);
-    const querySchema = connectionObjectTreeQuerySchema(config, parent.database, parent.schema);
     const objectTypes = sidebarIndexedObjectGroupTypes.has(parent.type) ? (objectTypesForGroupNode(parent.type) ?? undefined) : undefined;
     const pageSize = sidebarObjectGroupPageSize();
     // 搜索索引必须与连接的表过滤器保持一致：用户右键设置的过滤条件在正常加载路径
@@ -4172,17 +4235,34 @@ export const useConnectionStore = defineStore("connection", () => {
       }),
     );
     const entries: TableInfo[] = [];
-    for (let offset = 0; ; offset += pageSize) {
-      if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return [];
-      const page = await listTablesWithOptionalTableNameFilter(connectionId, parent.database, querySchema, undefined, pageSize, offset, objectTypes, parent.catalog, tableNameFilter);
-      entries.push(...page);
-      if (page.length < pageSize) break;
+    // A table row does not say which schema owns it (the backend answers for the
+    // schema that was queried), so attribute every row while we still know it.
+    // `parent_schema` cannot stand in: drivers use it for the partitioned parent.
+    // Attribution may be absent per scope (flat engines stay unattributed) —
+    // see sidebarTableSearchIndexSchemas.
+    const indexSchemas = sidebarTableSearchIndexSchemas(parent);
+    for (const { querySchema: scopeQuerySchema, attribution } of indexSchemas) {
+      const querySchema = connectionObjectTreeQuerySchema(config, parent.database, scopeQuerySchema || undefined);
+      for (let offset = 0; ; offset += pageSize) {
+        if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return [];
+        const page = await listTablesWithOptionalTableNameFilter(connectionId, parent.database, querySchema, undefined, pageSize, offset, objectTypes, parent.catalog, tableNameFilter);
+        entries.push(...page.map((row) => (attribution ? { ...row, schema: attribution } : row)));
+        if (page.length < pageSize) break;
+      }
     }
-    const deduped = [...new Map(entries.map((entry) => [`${entry.table_type}\0${entry.name}`, entry])).values()];
+    const deduped = [...new Map(entries.map((entry) => [`${entry.schema ?? ""}\0${entry.table_type}\0${entry.name}\0${entry.parent_schema ?? ""}\0${entry.parent_name ?? ""}`, entry])).values()];
     const tableSearchIndex = {
+      version: 4 as const,
       complete: true as const,
       indexedAt: new Date().toISOString(),
-      entries: deduped.map((entry) => ({ name: entry.name, tableType: entry.table_type, ...(entry.comment !== undefined ? { comment: entry.comment } : {}) })),
+      entries: deduped.map((entry) => ({
+        name: entry.name,
+        tableType: entry.table_type,
+        ...(entry.comment !== undefined ? { comment: entry.comment } : {}),
+        ...(entry.schema ? { schema: entry.schema } : {}),
+        ...(entry.parent_schema !== undefined ? { parentSchema: entry.parent_schema } : {}),
+        ...(entry.parent_name !== undefined ? { parentName: entry.parent_name } : {}),
+      })),
     };
     if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return [];
     let indexIsCurrent = false;
@@ -4667,6 +4747,11 @@ export const useConnectionStore = defineStore("connection", () => {
     bumpCompletionCacheRevision(connectionId, database);
     invalidateMetadataCaches({ connectionId, database });
     if (database == null) delete completionDatabasesCache.value[connectionId];
+    // The editor's schema picker caches the same names the completion schema list
+    // does, so the two must drop together: every caller of this function is a
+    // metadata freshness boundary (disconnect, edit, visible-database change,
+    // refresh), and leaving the picker holding the old set is exactly #14582.
+    invalidateSchemaOptionsCache(connectionId, database);
     const cachePrefix = database == null ? `${connectionId}:` : `${connectionId}:${database}:`;
     const exactCacheKey = database == null ? null : `${connectionId}:${database}`;
     for (const key of Object.keys(completionTablesCache.value)) {
@@ -6216,6 +6301,14 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadDatabases(connectionId: string, options?: LoadTreeOptions) {
+    if (options?.force) {
+      // Single-database engines keep their schemas under the connection root, so
+      // creating or dropping one lands here instead of loadSchemas. A forced
+      // database reload is therefore also a "schema set changed" signal and must
+      // drop the same caches (#14582); invalidateCompletionCache drops the
+      // schema picker cache with them.
+      invalidateCompletionCache(connectionId);
+    }
     const configForScope = getConfig(connectionId);
     const searchFilter = activeTreeLoadSearchFilter(options);
     if (!options?.force && !options?.connectedOnly && !searchFilter) {
@@ -7014,6 +7107,12 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadSchemas(connectionId: string, database: string, options?: LoadTreeOptions) {
+    if (options?.force) {
+      // A forced reload is the app's "the schema set changed" signal (create/drop, or an
+      // explicit refresh). Completion and the editor's schema picker hold their own
+      // copies, so both have to go with it (#14582).
+      invalidateCompletionCache(connectionId, database);
+    }
     const configForScope = getConfig(connectionId);
     return runTreeMetadataLoad(
       {
@@ -7112,6 +7211,13 @@ export const useConnectionStore = defineStore("connection", () => {
     const nodeId = `${connectionId}:${database}`;
     const node = findNode(treeNodes.value, nodeId);
     if (!node) return;
+    if (options?.force) {
+      // SQL Server schema sets load through this loader instead of loadSchemas;
+      // a forced reload must drop the picker and completion caches the same way
+      // so the editor cannot keep offering a stale schema list (#14582);
+      // invalidateCompletionCache drops the schema picker cache with them.
+      invalidateCompletionCache(connectionId, database);
+    }
     let load = beginTreeNodeLoad(node);
     try {
       await ensureConnected(connectionId);
@@ -9031,6 +9137,12 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function refreshDatabaseTreeNode(connectionId: string, database: string, catalog?: string) {
+    // Refreshing a database means its schema set may have changed outside the app
+    // (CREATE SCHEMA in another client, or the app's own create/drop). Drop the
+    // schema picker and completion lists too, or the editor keeps offering the set
+    // it cached on mount (#14582). invalidateCompletionCache drops the schema
+    // picker cache with them, so one call covers both.
+    invalidateCompletionCache(connectionId, database);
     const node = findDatabaseTreeNode(treeNodes.value, connectionId, database, catalog);
     if (node) {
       await refreshTreeNode(node);

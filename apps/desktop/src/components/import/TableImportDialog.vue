@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useI18n } from "vue-i18n";
+import { FocusScope } from "reka-ui";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { Dialog, DialogHeader, DialogTitle, DialogFooter, DialogScrollContent } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -20,8 +21,10 @@ import {
   autoMapImportColumns,
   buildTableImportParseOptions,
   defaultTableImportEmptyStringAsNull,
+  fixedValueFromGenerator,
   formatTableImportPreviewCell,
   formatTableImportElapsed,
+  isFixedValueGenerator,
   nextTableImportWizardStep,
   previousTableImportWizardStep,
   requiredImportTargetColumns,
@@ -31,6 +34,7 @@ import {
   TABLE_IMPORT_ENCODING_OPTIONS,
   TABLE_IMPORT_GENERATOR_OPTIONS,
   tableImportProgressPercent,
+  toFixedValueGenerator,
   type TableImportGeneratorKey,
   type TableImportWizardStep,
   validateImportMappings,
@@ -368,7 +372,7 @@ const selectedSourceName = computed(() => {
 });
 const createColumnSummaries = computed(() =>
   mappedColumns.value.map((mapping) => ({
-    sourceColumn: mapping.sourceColumn || (mapping.generator ? `[${mapping.generator}]` : ""),
+    sourceColumn: mapping.sourceColumn || (mapping.generator ? `[${generatorBadgeLabel(mapping.generator)}]` : ""),
     targetColumn: mapping.targetColumn,
     targetDataType: mapping.targetDataType || "",
   })),
@@ -1237,9 +1241,14 @@ function updateGeneratorPickerPosition() {
     }
   }
 
+  const menuHeight = document.getElementById("table-import-generator-options")?.offsetHeight ?? 0;
+  const belowTop = triggerRect.bottom + 2;
+  // 底部放不下整个菜单时向上弹出；上方也不够就钳制在视口内（菜单自身可滚动）
+  const openAbove = menuHeight > 0 && belowTop + menuHeight > window.innerHeight - 8 && triggerRect.top - 2 - menuHeight >= 8;
+  const top = openAbove ? triggerRect.top - 2 - menuHeight : Math.max(8, Math.min(belowTop, window.innerHeight - menuHeight - 8));
   generatorPickerStyle.value = {
     position: "fixed",
-    top: `${triggerRect.bottom + 2}px`,
+    top: `${top}px`,
     left: `${Math.max(10, Math.min(triggerRect.left, window.innerWidth - 260))}px`,
     width: "250px",
   };
@@ -1253,6 +1262,8 @@ function openGeneratorPicker(target: { type: "source"; sourceColumn: string } | 
   activeGeneratorColumn.value = target;
   generatorPickerOpen.value = true;
   updateGeneratorPickerPosition();
+  // 首次打开时菜单尚未渲染、量不到高度，渲染后再定位一次才能正确向上翻转
+  void nextTick(updateGeneratorPickerPosition);
   checkSyncListeners();
 }
 
@@ -1338,18 +1349,53 @@ function checkSyncListeners() {
 
 function selectGeneratorOption(generator: string) {
   if (!activeGeneratorColumn.value) return;
+  // 固定值需要接着输入常量：选中后不关 popover，保留已有值便于改选回来
+  const next = generator === "fixed" ? toFixedValueGenerator(isFixedValueGenerator(activeGeneratorKey.value) ? fixedValueFromGenerator(activeGeneratorKey.value!) : "") : generator;
   if (activeGeneratorColumn.value.type === "source") {
-    updateColumnGenerator(activeGeneratorColumn.value.sourceColumn, generator);
+    updateColumnGenerator(activeGeneratorColumn.value.sourceColumn, next);
   } else {
-    updateGeneratedColumn(activeGeneratorColumn.value.id, { generator });
+    updateGeneratedColumn(activeGeneratorColumn.value.id, { generator: next });
   }
-  closeGeneratorPicker();
+  if (generator !== "fixed") {
+    closeGeneratorPicker();
+    return;
+  }
+  // 固定值输入框让菜单变高：等渲染后重新定位（必要时向上翻转）并聚焦输入框
+  void nextTick(() => {
+    updateGeneratorPickerPosition();
+    document.querySelector<HTMLInputElement>("input[data-fixed-value-input]")?.focus();
+  });
+}
+
+const activeGeneratorKey = computed(() => {
+  const target = activeGeneratorColumn.value;
+  if (!target) return undefined;
+  return target.type === "source" ? columnGenerators.value[target.sourceColumn] : generatedColumns.value.find((col) => col.id === target.id)?.generator;
+});
+
+function updateActiveFixedValue(value: string) {
+  const target = activeGeneratorColumn.value;
+  if (!target) return;
+  if (target.type === "source") {
+    updateColumnGenerator(target.sourceColumn, toFixedValueGenerator(value));
+  } else {
+    updateGeneratedColumn(target.id, { generator: toFixedValueGenerator(value) });
+  }
 }
 
 function generatorLabel(key: string | undefined): string {
   if (!key) return t("tableImport.sourceValue");
+  if (isFixedValueGenerator(key)) {
+    const value = fixedValueFromGenerator(key);
+    return value ? `${t("tableImport.generatorFixed")}: ${value}` : t("tableImport.generatorFixed");
+  }
   const opt = TABLE_IMPORT_GENERATOR_OPTIONS.find((o) => o.value === key);
   return opt ? t(opt.labelKey) : key;
+}
+
+// 预览/摘要列头标记：固定值只显示国际化名称，不带用户常量（下方单元格已逐行展示）
+function generatorBadgeLabel(key: string): string {
+  return isFixedValueGenerator(key) ? t("tableImport.generatorFixed") : key;
 }
 
 function updateColumnGenerator(sourceColumn: string, generator: string) {
@@ -1392,8 +1438,10 @@ function updateGeneratedColumn(id: string, updates: Partial<GeneratedColumnItem>
   generatedColumns.value = generatedColumns.value.map((col) => {
     if (col.id !== id) return col;
     const updated = { ...col, ...updates };
-    if (updates.generator && updates.generator !== col.generator && targetMode.value === "create") {
-      updated.targetDataType = suggestDataTypeForGenerator(updates.generator, structureDatabaseType.value);
+    // 固定值逐键输入也是 generator 变化，不能每次都重置用户选好的数据类型
+    const kindChanged = updates.generator && (isFixedValueGenerator(updates.generator) ? "fixed" : updates.generator) !== (isFixedValueGenerator(col.generator) ? "fixed" : col.generator);
+    if (kindChanged && targetMode.value === "create") {
+      updated.targetDataType = suggestDataTypeForGenerator(updates.generator!, structureDatabaseType.value);
     }
     return updated;
   });
@@ -2452,13 +2500,13 @@ watch(rawProgressPercent, (percent) => {
                           :title="isSourceColumnSkipped(column) ? `${column} (${t('tableImport.skipColumn')})` : column"
                         >
                           {{ column }}
-                          <span v-if="columnGenerators[column]" class="ml-1 text-[10px] text-primary not-italic font-normal"> [{{ columnGenerators[column] }}] </span>
+                          <span v-if="columnGenerators[column]" class="ml-1 text-[10px] text-primary not-italic font-normal"> [{{ generatorBadgeLabel(columnGenerators[column]) }}] </span>
                         </span>
                       </th>
                       <th v-for="genCol in activeGeneratedColumns" :key="genCol.id" class="border-b border-r px-2 py-1.5 text-left font-medium transition-colors bg-muted/10">
-                        <span class="block max-w-[140px] truncate text-primary font-medium" :title="`${genCol.targetColumn} (${genCol.generator})`">
+                        <span class="block max-w-[140px] truncate text-primary font-medium" :title="`${genCol.targetColumn} (${generatorBadgeLabel(genCol.generator)})`">
                           {{ genCol.targetColumn }}
-                          <span class="ml-1 text-[10px] text-muted-foreground">[{{ genCol.generator }}]</span>
+                          <span class="ml-1 text-[10px] text-muted-foreground">[{{ generatorBadgeLabel(genCol.generator) }}]</span>
                         </span>
                       </th>
                     </tr>
@@ -2681,17 +2729,30 @@ watch(rawProgressPercent, (percent) => {
 
       <!-- 全局生成器 popover -->
       <Teleport to="body">
-        <div v-if="generatorPickerOpen" id="table-import-generator-options" role="listbox" :style="generatorPickerStyle" class="pointer-events-auto z-[9999] max-h-60 overflow-auto rounded-md border bg-popover p-1 shadow-md">
-          <div class="px-2 py-1 text-[11px] font-semibold text-muted-foreground">
-            {{ t("tableImport.valueSource") }}
+        <!-- FocusScope 压入全局焦点栈并暂停 Dialog 的焦点陷阱：否则 modal Dialog 会把焦点抢回对话框内，固定值输入框无法点击输入 -->
+        <FocusScope v-if="generatorPickerOpen" :trapped="false" :loop="false">
+          <div id="table-import-generator-options" role="listbox" :style="generatorPickerStyle" class="pointer-events-auto z-[9999] max-h-60 overflow-auto rounded-md border bg-popover p-1 shadow-md">
+            <div class="px-2 py-1 text-[11px] font-semibold text-muted-foreground">
+              {{ t("tableImport.valueSource") }}
+            </div>
+            <button v-if="activeGeneratorColumn?.type === 'source'" type="button" role="option" class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono hover:bg-accent hover:text-accent-foreground" @click="selectGeneratorOption('')">
+              {{ t("tableImport.sourceValue") }}
+            </button>
+            <button v-for="opt in TABLE_IMPORT_GENERATOR_OPTIONS" :key="opt.value" type="button" role="option" class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono hover:bg-accent hover:text-accent-foreground" @click="selectGeneratorOption(opt.value)">
+              {{ t(opt.labelKey) }}
+            </button>
+            <div v-if="isFixedValueGenerator(activeGeneratorKey)" class="mt-1 border-t px-1 pt-2 pb-1">
+              <input
+                data-fixed-value-input
+                autofocus
+                :value="fixedValueFromGenerator(activeGeneratorKey!)"
+                :placeholder="t('tableImport.fixedValuePlaceholder')"
+                class="h-7 w-full min-w-0 rounded-md border bg-background px-2 text-xs font-mono shadow-none focus-visible:ring-1 focus-visible:ring-ring/25"
+                @input="(e) => updateActiveFixedValue((e.target as HTMLInputElement).value)"
+              />
+            </div>
           </div>
-          <button v-if="activeGeneratorColumn?.type === 'source'" type="button" role="option" class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono hover:bg-accent hover:text-accent-foreground" @click="selectGeneratorOption('')">
-            {{ t("tableImport.sourceValue") }}
-          </button>
-          <button v-for="opt in TABLE_IMPORT_GENERATOR_OPTIONS" :key="opt.value" type="button" role="option" class="flex h-7 w-full items-center rounded-sm px-2 text-left text-xs font-mono hover:bg-accent hover:text-accent-foreground" @click="selectGeneratorOption(opt.value)">
-            {{ t(opt.labelKey) }}
-          </button>
-        </div>
+        </FocusScope>
       </Teleport>
 
       <DialogFooter class="shrink-0">

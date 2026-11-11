@@ -1,7 +1,112 @@
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use regex::Regex;
+use sqlparser::ast::{Expr, Function, Select, Statement, TableFactor, Visit, Visitor};
+use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::parser::Parser;
+use sqlparser::tokenizer::{Token, Tokenizer};
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::sync::LazyLock;
+
+/// Upper bound on the tokens the PostgreSQL scope proof will hand to the parser.
+///
+/// The bound exists because the parser and the AST visitor recurse, and this runs on
+/// MCP worker stacks. It is deliberately below the measured crash point for an
+/// unoptimised 2 MiB stack (roughly 28.5k tokens on a long additive expression,
+/// #14586), and pathological nesting is refused separately by
+/// `MAX_SCOPE_QUERY_NESTING_DEPTH` before anything is parsed.
+const MAX_SCOPE_QUERY_TOKENS: usize = 16_384;
+
+/// Deepest bracket nesting the scope proof attempts. Bracket depth is what a
+/// recursive-descent parser turns into stack frames, so bounding it keeps a
+/// long-but-flat query provable while still refusing adversarial input whose token
+/// count alone stays under the cap.
+const MAX_SCOPE_QUERY_NESTING_DEPTH: usize = 128;
+
+/// Function-call syntax supported by PostgreSQL scope recognition. This policy
+/// is independent of the manual-transaction read proof.
+const POSTGRES_SCOPE_QUERY_FUNCTIONS: &[&str] = &[
+    "abs",
+    "age",
+    "array_agg",
+    "array_length",
+    "ascii",
+    "avg",
+    "btrim",
+    "cardinality",
+    "ceil",
+    "ceiling",
+    "char_length",
+    "character_length",
+    "chr",
+    "coalesce",
+    "concat",
+    "concat_ws",
+    "count",
+    "current_catalog",
+    "current_date",
+    "current_schema",
+    "current_setting",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "date_part",
+    "date_trunc",
+    "decode",
+    "div",
+    "encode",
+    "every",
+    "exp",
+    "floor",
+    "format",
+    "gen_random_uuid",
+    "greatest",
+    "left",
+    "length",
+    "localtime",
+    "localtimestamp",
+    "log",
+    "lower",
+    "lpad",
+    "ltrim",
+    "max",
+    "md5",
+    "min",
+    "mod",
+    "now",
+    "nullif",
+    "position",
+    "power",
+    "repeat",
+    "replace",
+    "reverse",
+    "right",
+    "round",
+    "rpad",
+    "rtrim",
+    "sha224",
+    "sha256",
+    "sha384",
+    "sha512",
+    "sign",
+    "split_part",
+    "sqrt",
+    "starts_with",
+    "strpos",
+    "string_agg",
+    "substr",
+    "substring",
+    "sum",
+    "to_char",
+    "to_date",
+    "to_hex",
+    "to_number",
+    "to_timestamp",
+    "trunc",
+    "unnest",
+    "upper",
+    "version",
+];
 
 const IDENTIFIER_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*";
 const TARGET_NAME_PATTERN: &str = r"[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*(?:\s*\.\s*(?:\*|[A-Za-z0-9_@$#-]*[A-Za-z_@$#][A-Za-z0-9_@$#-]*)){0,3}";
@@ -205,7 +310,7 @@ pub fn targets_production_database(config: &ConnectionConfig, active_database: &
         return false;
     }
 
-    let assessment = referenced_databases(sql, &config.db_type, active_database, false);
+    let assessment = referenced_databases(sql, &config.db_type, active_database, false, false);
     assessment.databases.into_iter().any(|database| marked.contains(&database)) || assessment.uncertain
 }
 
@@ -222,12 +327,45 @@ pub fn sql_references_disallowed_database(
     active_database: &str,
     allowed_databases: &[String],
 ) -> bool {
+    sql_database_scope_is_disallowed(sql, db_type, active_database, allowed_databases, false)
+}
+
+/// Uses the connection profile to recognize PostgreSQL query blocks. Compatible
+/// engines with different database qualifiers keep the original scope scan.
+pub fn sql_references_disallowed_database_for_connection(
+    sql: &str,
+    connection: &ConnectionConfig,
+    active_database: &str,
+    allowed_databases: &[String],
+) -> bool {
+    let static_postgres_query = matches!(connection.db_type, DatabaseType::Postgres)
+        && connection
+            .driver_profile
+            .as_deref()
+            .is_none_or(|profile| profile.is_empty() || profile.eq_ignore_ascii_case("postgres"))
+        && has_static_postgres_query_structure(sql);
+    sql_database_scope_is_disallowed(
+        sql,
+        &connection.db_type,
+        active_database,
+        allowed_databases,
+        static_postgres_query,
+    )
+}
+
+fn sql_database_scope_is_disallowed(
+    sql: &str,
+    db_type: &DatabaseType,
+    active_database: &str,
+    allowed_databases: &[String],
+    static_postgres_query: bool,
+) -> bool {
     let allowed = allowed_databases
         .iter()
         .map(|database| normalize_database_name(database))
         .filter(|database| !database.is_empty())
         .collect::<HashSet<_>>();
-    let assessment = referenced_databases(sql, db_type, active_database, true);
+    let assessment = referenced_databases(sql, db_type, active_database, true, static_postgres_query);
     assessment.uncertain || assessment.databases.into_iter().any(|database| !allowed.contains(&database))
 }
 
@@ -240,6 +378,7 @@ fn referenced_databases(
     db_type: &DatabaseType,
     active_database: &str,
     include_read_references: bool,
+    static_postgres_query: bool,
 ) -> ReferencedDatabaseAssessment {
     let mut assessment = ReferencedDatabaseAssessment::default();
     let cleaned = sql_target_safety_text(sql, db_type);
@@ -286,6 +425,7 @@ fn referenced_databases(
             ],
         );
         if include_read_references
+            && !static_postgres_query
             && collect_comma_separated_from_databases(
                 statement,
                 db_type,
@@ -370,6 +510,114 @@ fn collect_qualified_target_databases(
             pattern,
             &[1],
         );
+    }
+}
+
+/// Recognizes PostgreSQL query blocks without changing database-name resolution.
+/// Unsupported statements, call syntax and FROM factors keep the existing scan.
+fn has_static_postgres_query_structure(sql: &str) -> bool {
+    let dialect = PostgreSqlDialect {};
+    let Ok(tokens) = Tokenizer::new(&dialect, sql).with_unescape(false).tokenize() else {
+        return false;
+    };
+    // Bound AST traversal and drop on worker stacks; larger queries keep the
+    // original scan even when parsing itself would not exceed its depth limit.
+    if tokens.iter().filter(|token| !matches!(token, Token::Whitespace(_))).count() > MAX_SCOPE_QUERY_TOKENS {
+        return false;
+    }
+    if bracket_nesting_exceeds(&tokens, MAX_SCOPE_QUERY_NESTING_DEPTH) {
+        return false;
+    }
+    // Ordinary backslash strings depend on standard_conforming_strings, which
+    // is not available here. E strings and dollar quotes have explicit semantics.
+    if tokens.iter().any(|token| {
+        matches!(token, Token::SingleQuotedString(value) | Token::NationalStringLiteral(value) if value.contains('\\'))
+    }) {
+        return false;
+    }
+    let Ok(statements) = Parser::new(&dialect).with_tokens(tokens).parse_statements() else {
+        return false;
+    };
+    !statements.is_empty() && matches!(statements.visit(&mut StaticPostgresQuery), ControlFlow::Continue(()))
+}
+
+/// Whether bracket nesting goes deeper than `limit`.
+///
+/// Only `(` counts: it is the only token that makes the parser and the visitor
+/// recurse without bound. Brackets and braces appear in fixed-shape syntax.
+fn bracket_nesting_exceeds(tokens: &[Token], limit: usize) -> bool {
+    let mut depth = 0usize;
+    for token in tokens {
+        match token {
+            Token::LParen => {
+                depth += 1;
+                if depth > limit {
+                    return true;
+                }
+            }
+            Token::RParen => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Matches supported scope-call syntax, without resolving runtime function identity.
+fn is_supported_postgres_scope_call(function: &Function) -> bool {
+    if function.over.is_some() {
+        return false;
+    }
+    let [part] = function.name.0.as_slice() else {
+        return false;
+    };
+    let Some(ident) = part.as_ident() else {
+        return false;
+    };
+    POSTGRES_SCOPE_QUERY_FUNCTIONS.iter().any(|name| {
+        if ident.quote_style.is_some() {
+            ident.value == *name
+        } else {
+            ident.value.eq_ignore_ascii_case(name)
+        }
+    })
+}
+
+/// Limits relaxation to static relations, supported calls and queries without DML or INTO.
+struct StaticPostgresQuery;
+
+impl Visitor for StaticPostgresQuery {
+    type Break = ();
+
+    fn pre_visit_statement(&mut self, statement: &Statement) -> ControlFlow<Self::Break> {
+        // This callback also receives data-modifying statements inside CTEs.
+        match statement {
+            Statement::Query(_) => ControlFlow::Continue(()),
+            _ => ControlFlow::Break(()),
+        }
+    }
+
+    fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<Self::Break> {
+        if select.into.is_some() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    }
+
+    fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        match expr {
+            Expr::Function(function) if !is_supported_postgres_scope_call(function) => ControlFlow::Break(()),
+            _ => ControlFlow::Continue(()),
+        }
+    }
+
+    fn pre_visit_table_factor(&mut self, table: &TableFactor) -> ControlFlow<Self::Break> {
+        match table {
+            TableFactor::Table { args: None, .. } | TableFactor::Derived { .. } | TableFactor::NestedJoin { .. } => {
+                ControlFlow::Continue(())
+            }
+            _ => ControlFlow::Break(()),
+        }
     }
 }
 
@@ -1130,6 +1378,326 @@ mod tests {
             &allowed,
         ));
         assert!(!sql_references_disallowed_database("SELECT * FROM dbo.users", &sqlserver, "reporting", &allowed,));
+    }
+
+    /// Exercises connection-aware scope checks with the existing connection fixture.
+    fn connection_scope_rejects(sql: &str, db_type: &DatabaseType, active: &str, allowed: &[String]) -> bool {
+        let mut connection = config();
+        connection.db_type = *db_type;
+        super::sql_references_disallowed_database_for_connection(sql, &connection, active, allowed)
+    }
+
+    #[test]
+    fn postgres_query_blocks_require_a_postgres_connection_profile() {
+        // Compatible engines may resolve database qualifiers differently even
+        // when they share DatabaseType::Postgres.
+        let mut connection = config();
+        connection.db_type = DatabaseType::Postgres;
+        let allowed = vec!["reporting".to_string()];
+        let cte = "WITH c AS (SELECT id FROM public.users) SELECT id, 2 FROM c";
+        for profile in [None, Some(""), Some("postgres"), Some("POSTGRES")] {
+            connection.driver_profile = profile.map(str::to_string);
+            assert!(
+                !super::sql_references_disallowed_database_for_connection(cte, &connection, "reporting", &allowed,)
+            );
+        }
+        for profile in ["cockroachdb", "unknown-profile"] {
+            connection.driver_profile = Some(profile.to_string());
+            for sql in [
+                cte,
+                "WITH c AS (SELECT id FROM reporting.users) SELECT c.id, 2 FROM c, production.secrets s",
+                "WITH c AS (SELECT id FROM reporting.public.users) SELECT c.id, 2 FROM c, production.public.secrets s",
+            ] {
+                assert!(
+                    super::sql_references_disallowed_database_for_connection(sql, &connection, "reporting", &allowed,),
+                    "compatible profile changed scope behavior ({profile}): {sql}"
+                );
+            }
+        }
+        assert!(sql_references_disallowed_database(cte, &DatabaseType::Postgres, "reporting", &allowed));
+    }
+
+    #[test]
+    fn postgres_query_block_boundaries_do_not_trip_mcp_database_scope() {
+        // A CTE's FROM must stop at its closing parenthesis so commas in the
+        // outer SELECT list are not treated as additional table factors.
+        let allowed = vec!["reporting".to_string()];
+        for sql in [
+            "WITH c AS (VALUES (1)), compared AS (SELECT * FROM c) SELECT 1, 2 FROM compared;",
+            "WITH c(x) AS (VALUES (1), (2)), compared AS (SELECT x FROM c)
+             SELECT COUNT(*) AS n, SUM(x) AS total FROM compared;",
+            r#"WITH samples(state_code, event_code, checked_on, expected_result) AS (
+                VALUES
+                    (NULL::varchar, NULL::varchar, NULL::date, 'R0'::varchar),
+                    (NULL::varchar, NULL::varchar, DATE '2020-01-02', 'R1'::varchar),
+                    ('new'::varchar, 'requested'::varchar, NULL::date, 'R2'::varchar),
+                    ('other'::varchar, 'responded'::varchar, NULL::date, 'R3'::varchar),
+                    ('final_a'::varchar, 'requested'::varchar, NULL::date, 'R6'::varchar)
+            ),
+            compared AS (
+                SELECT s.*,
+                    CASE
+                        WHEN s.state_code = CAST('final_a' AS varchar) THEN CAST('R6' AS varchar)
+                        WHEN s.state_code = CAST('final_b' AS varchar) THEN CAST('R5' AS varchar)
+                        WHEN s.state_code = CAST('intermediate' AS varchar) THEN CAST('R4' AS varchar)
+                        WHEN s.event_code = CAST('responded' AS varchar) THEN CAST('R3' AS varchar)
+                        WHEN s.event_code = CAST('requested' AS varchar) THEN CAST('R2' AS varchar)
+                        WHEN s.checked_on::date BETWEEN DATE '2020-01-02' AND DATE '2020-01-05'
+                            THEN CAST('R1' AS varchar)
+                        ELSE CAST('R0' AS varchar)
+                    END AS actual_result,
+                    CASE
+                        WHEN s.state_code = 'final_a' THEN 'R6'
+                        WHEN s.state_code = 'final_b' THEN 'R5'
+                        WHEN s.state_code = 'intermediate' THEN 'R4'
+                        WHEN (s.state_code IS NULL OR s.state_code = 'new')
+                            AND s.event_code = 'responded' THEN 'R3'
+                        WHEN (s.state_code IS NULL OR s.state_code = 'new')
+                            AND s.event_code = 'requested' THEN 'R2'
+                        WHEN s.checked_on::date BETWEEN DATE '2020-01-02' AND DATE '2020-01-05'
+                            THEN 'R1'
+                        ELSE 'R0'
+                    END AS previous_result
+                FROM samples s
+            )
+            SELECT COUNT(1) AS sample_count,
+                SUM(CASE WHEN actual_result IS DISTINCT FROM expected_result
+                    THEN 1 ELSE 0 END) AS rule_mismatches,
+                SUM(CASE WHEN actual_result IS DISTINCT FROM previous_result
+                    THEN 1 ELSE 0 END) AS changed_count,
+                SUM(CASE WHEN actual_result IS DISTINCT FROM previous_result
+                    AND NOT (state_code = 'other' AND event_code IN ('requested', 'responded'))
+                    THEN 1 ELSE 0 END) AS unexpected_changes
+            FROM compared;"#,
+            "WITH c AS (VALUES (1)), compared AS (SELECT * FROM c) SELECT 1 FROM compared;",
+            "WITH c AS (VALUES (1)), compared AS (SELECT * FROM c WHERE TRUE) SELECT 1, 2 FROM compared;",
+            "WITH c AS (VALUES (1)), compared AS (SELECT * FROM c LIMIT 1) SELECT 1, 2 FROM compared;",
+            "WITH c AS (VALUES (1)), compared AS (SELECT * FROM c) SELECT 1, 2 FROM compared WHERE TRUE;",
+            "SELECT (SELECT COUNT(*) FROM public.users) AS n, 2 FROM public.audit_log;",
+        ] {
+            assert!(
+                !connection_scope_rejects(sql, &DatabaseType::Postgres, "reporting", &allowed),
+                "query block boundaries must not be treated as FROM targets: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn long_read_only_postgres_queries_keep_the_static_scope_proof() {
+        // #14586: the token bound only exists to keep the parser off a blown stack, so
+        // it must sit far above ordinary long reports. A read-only CTE with thousands
+        // of tokens used to fall back to the comma-FROM scan and be denied as
+        // DATABASE_OUT_OF_SCOPE even though every reference was inside the allowlist.
+        let allowed = vec!["reporting".to_string()];
+        let mut sql = String::from("WITH c AS (SELECT id FROM reporting.users) SELECT c.id");
+        for _ in 0..1200 {
+            sql.push_str(" + 1");
+        }
+        sql.push_str(" AS total FROM c");
+        assert!(
+            sql.split_whitespace().count() > 2048,
+            "the regression needs more tokens than the old bound: {}",
+            sql.split_whitespace().count()
+        );
+        assert!(
+            !connection_scope_rejects(&sql, &DatabaseType::Postgres, "reporting", &allowed),
+            "a long read-only query must keep the static scope proof"
+        );
+    }
+
+    #[test]
+    fn deep_bracket_nesting_is_refused_before_parsing() {
+        // The token bound alone cannot bound recursion: a short query can nest far
+        // deeper than a long flat one, so depth is refused separately.
+        let nested = |depth: usize| format!("SELECT {}1{}", "(".repeat(depth), ")".repeat(depth));
+        let tokenize = |sql: &str| {
+            sqlparser::tokenizer::Tokenizer::new(&sqlparser::dialect::PostgreSqlDialect {}, sql)
+                .with_unescape(false)
+                .tokenize()
+                .expect("valid tokens")
+        };
+        let limit = super::MAX_SCOPE_QUERY_NESTING_DEPTH;
+        assert!(!super::bracket_nesting_exceeds(&tokenize(&nested(limit)), limit));
+        assert!(super::bracket_nesting_exceeds(&tokenize(&nested(limit + 2)), limit));
+        // A long, flat query adds tokens but no depth.
+        assert!(!super::bracket_nesting_exceeds(&tokenize(&format!("SELECT {}1", "1 + ".repeat(3000))), limit));
+
+        // And the refusal is fail-closed: the query loses the static proof and the
+        // comma-FROM scan sees the disallowed database again.
+        let allowed = vec!["reporting".to_string()];
+        let deep = format!(
+            "WITH c AS (SELECT id FROM reporting.users) SELECT {}c.id{} FROM c, production.secrets s",
+            "(".repeat(limit + 2),
+            ")".repeat(limit + 2)
+        );
+        assert!(
+            connection_scope_rejects(&deep, &DatabaseType::Postgres, "reporting", &allowed),
+            "a pathologically nested query must not be relaxed"
+        );
+    }
+
+    #[test]
+    fn postgres_query_structure_preserves_scope_and_literal_semantics() {
+        // Schema names, quoted identifiers and unused allowlist entries do not
+        // change whether an otherwise static PostgreSQL query can be resolved.
+        for sql in [
+            "WITH c AS (SELECT id FROM public.users) SELECT id, 2 FROM c",
+            "WITH c AS (TABLE public.users) SELECT id, 2 FROM c",
+            "SELECT d.id, 2 FROM (SELECT id FROM public.users) d, public.audit_log a",
+            "SELECT (SELECT COUNT(*) FROM public.users) AS n, 2 FROM public.audit_log",
+            r#"WITH c AS (SELECT id FROM public."users.with.dots]") SELECT id, 2 FROM c"#,
+            r#"WITH c AS (SELECT id FROM public."users\history") SELECT id, 2 FROM c"#,
+            "WITH c AS (SELECT id FROM public.users) SELECT id, '/*!' FROM c",
+            r"WITH c AS (SELECT id FROM public.users) SELECT id, E'it\'s' FROM c",
+            r"WITH c AS (SELECT id FROM public.users) SELECT id, $$\$$ FROM c",
+        ] {
+            for database in ["reporting", "reporting]"] {
+                for allowed in [vec![database.to_string()], vec![database.to_string(), "archive]".to_string()]] {
+                    assert!(
+                        !connection_scope_rejects(sql, &DatabaseType::Postgres, database, &allowed),
+                        "static PostgreSQL query rejected: {sql}"
+                    );
+                }
+            }
+        }
+        assert!(connection_scope_rejects(
+            "SELECT id FROM public.users",
+            &DatabaseType::Postgres,
+            "reporting",
+            &["other".to_string()],
+        ));
+    }
+
+    #[test]
+    fn postgres_non_static_queries_keep_the_existing_scope_scan() {
+        // Function sources, session-dependent literals and writes remain on the
+        // original path; no function-name exceptions weaken this boundary.
+        for sql in [
+            "WITH c AS (SELECT * FROM generate_series(1, 2) AS n) SELECT n, 2 FROM c",
+            r#"WITH c AS (SELECT * FROM jsonb_each('{"a":1}'::jsonb)) SELECT key, value FROM c"#,
+            "WITH c AS (SELECT * FROM regexp_split_to_table('a,b', ',') AS value) SELECT value, 2 FROM c",
+            "WITH c AS (SELECT * FROM dblink('dbname=other', 'SELECT 1') AS t(id int)) SELECT id, 2 FROM c",
+            r"WITH c AS (SELECT id FROM public.users) SELECT id, '\' FROM c",
+            r"WITH c AS (SELECT id FROM public.users) SELECT id, N'\' FROM c",
+            r"WITH c AS (SELECT id FROM public.users) SELECT 1, '\' -- '; DELETE FROM public.secret; -- ' FROM c",
+            "WITH c AS (DELETE FROM public.users RETURNING id) SELECT id, 2 FROM c",
+            "WITH seed AS (SELECT id FROM public.users), c AS (UPDATE public.users SET id = 1 RETURNING id) SELECT id, 2 FROM c",
+            "WITH seed AS (SELECT id FROM public.users), c AS (INSERT INTO public.users VALUES (1) RETURNING id) SELECT id, 2 FROM c",
+            "WITH c AS (SELECT id FROM public.users) SELECT id, 2 AS marker INTO public.copy FROM c",
+            "EXPLAIN WITH c AS (SELECT id FROM public.users) SELECT id, 2 FROM c",
+            "WITH c AS (SELECT id FROM public.users) SELECT id, 2 FROM c; DELETE FROM public.audit_log",
+            "WITH c AS (SELECT id FROM public.users) SELECT id, 2 FROM c UNSUPPORTED SYNTAX",
+        ] {
+            assert!(
+                connection_scope_rejects(
+                    sql,
+                    &DatabaseType::Postgres,
+                    "reporting",
+                    &["reporting".to_string()]
+                ),
+                "unsupported PostgreSQL query lost its existing check: {sql}"
+            );
+        }
+        assert!(!connection_scope_rejects(
+            "DELETE FROM public.users WHERE id = 1",
+            &DatabaseType::Postgres,
+            "reporting",
+            &["reporting".to_string()],
+        ));
+    }
+
+    #[test]
+    fn postgres_unreviewed_expression_calls_keep_the_existing_scope_scan() {
+        // The same call rule covers every expression position, including
+        // nested arguments and aggregate filters; it is not a function denylist.
+        let allowed = vec!["reporting".to_string()];
+        for sql in [
+            "WITH c AS (SELECT id FROM public.users) SELECT dblink_connect('remote', 'dbname=production'), 2 FROM c",
+            "WITH c AS (SELECT id FROM public.users) SELECT dblink_exec('dbname=production', 'SET application_name = ''scope_review'''), 2 FROM c",
+            "WITH c AS (SELECT id FROM public.users) SELECT dblink('dbname=production', 'SELECT 1'), 2 FROM c",
+            "WITH c AS (SELECT id FROM public.users) SELECT remote_value(id), 2 FROM c",
+            "WITH c AS (SELECT remote_value(id) AS id FROM public.users) SELECT id, 2 FROM c",
+            "WITH c AS (SELECT id FROM public.users) SELECT id, 2 FROM c WHERE remote_value(id) > 0",
+            "WITH c AS (SELECT id FROM public.users) SELECT id, COUNT(*) FROM c GROUP BY id HAVING remote_value(id) > 0",
+            "WITH c AS (SELECT id FROM public.users) SELECT id, 2 FROM c ORDER BY remote_value(id)",
+            "WITH c AS (SELECT id FROM public.users) SELECT COALESCE(remote_value(id), 0), 2 FROM c",
+            "WITH c AS (SELECT id FROM public.users) SELECT (SELECT remote_value(id) FROM c), 2 FROM c",
+            "WITH c AS (SELECT id FROM public.users) SELECT public.count(id), 2 FROM c",
+            "WITH c AS (SELECT id FROM public.users) SELECT \"COUNT\"(id), 2 FROM c",
+            "WITH c AS (SELECT id FROM public.users) SELECT COUNT(*) OVER (), 2 FROM c",
+        ] {
+            assert!(sql_references_disallowed_database(sql, &DatabaseType::Postgres, "reporting", &allowed));
+            assert!(
+                connection_scope_rejects(sql, &DatabaseType::Postgres, "reporting", &allowed),
+                "unreviewed expression call changed its original rejection: {sql}"
+            );
+        }
+        for sql in [
+            "WITH c AS (SELECT id FROM public.users) SELECT COUNT(*), SUM(id) FROM c",
+            "WITH c AS (SELECT id FROM public.users) SELECT \"count\"(*), \"sum\"(id) FROM c",
+        ] {
+            assert!(!connection_scope_rejects(sql, &DatabaseType::Postgres, "reporting", &allowed));
+        }
+        // These shapes already pass the original scanner; falling back must
+        // preserve that behavior rather than impose a new function policy.
+        for sql in [
+            "SELECT remote_value(id) FROM public.users",
+            "WITH c AS (SELECT id FROM public.users) SELECT COUNT(*) FILTER (WHERE remote_value(id) > 0), 2 FROM c",
+        ] {
+            assert!(!sql_references_disallowed_database(sql, &DatabaseType::Postgres, "reporting", &allowed));
+            assert!(!connection_scope_rejects(sql, &DatabaseType::Postgres, "reporting", &allowed));
+        }
+    }
+
+    #[test]
+    fn postgres_query_block_fix_does_not_change_other_engines() {
+        // Other engines retain their original rejection of these query shapes,
+        // including case-sensitive names and mode-dependent MySQL strings.
+        let allowed = vec!["reporting".to_string()];
+        for (db_type, sql) in [
+            (DatabaseType::Mysql, "WITH c AS (SELECT id FROM REPORTING.users) SELECT id, 2 FROM c"),
+            (
+                DatabaseType::Mysql,
+                r"WITH c AS (SELECT id FROM reporting.users) SELECT c.id, '\' FROM c, production.secrets s -- ' FROM c",
+            ),
+            (DatabaseType::Mysql, "WITH c AS (SELECT id FROM `reporting```.users) SELECT id, 2 FROM c"),
+            (DatabaseType::SqlServer, "WITH c AS (SELECT id FROM [reporting]]].dbo.users) SELECT id, 2 FROM c"),
+            (
+                DatabaseType::Doris,
+                "WITH c AS (SELECT id FROM reporting.users) SELECT c.id, 2 FROM c, reporting.production.secrets s",
+            ),
+            (
+                DatabaseType::StarRocks,
+                "WITH c AS (SELECT id FROM reporting.users) SELECT c.id, 2 FROM c, reporting.production.secrets s",
+            ),
+            (DatabaseType::Gaussdb, "WITH c AS (SELECT id FROM public.users) SELECT id, 2 FROM c"),
+        ] {
+            assert!(
+                connection_scope_rejects(sql, &db_type, "reporting", &allowed),
+                "non-PostgreSQL query changed behavior ({db_type:?}): {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_postgres_queries_keep_the_existing_scope_scan() {
+        // A long left-associative expression can exhaust a worker stack while
+        // traversing or dropping its AST despite the parser's recursion limit.
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let expression = vec!["1"; 30_000].join("+");
+                let sql = format!("WITH c AS (SELECT id FROM public.users) SELECT {expression}, 2 FROM c");
+                let allowed = vec!["reporting".to_string()];
+                assert!(sql_references_disallowed_database(&sql, &DatabaseType::Postgres, "reporting", &allowed));
+                assert!(connection_scope_rejects(&sql, &DatabaseType::Postgres, "reporting", &allowed));
+                let sql = format!("SELECT {expression} FROM public.users");
+                assert!(!sql_references_disallowed_database(&sql, &DatabaseType::Postgres, "reporting", &allowed));
+                assert!(!connection_scope_rejects(&sql, &DatabaseType::Postgres, "reporting", &allowed));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

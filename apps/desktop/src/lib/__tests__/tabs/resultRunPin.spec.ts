@@ -7,8 +7,18 @@ describe("shouldPinResultRunOnClick", () => {
     expect(shouldPinResultRunOnClick({}, true)).toBe(true);
   });
 
-  it("unpins an already pinned run on click instead of leaving it alone (#13306)", () => {
-    expect(shouldPinResultRunOnClick({ pinned: true }, true)).toBe(true);
+  it("unpins the pinned run that is already shown when it is clicked again (#13306)", () => {
+    expect(shouldPinResultRunOnClick({ pinned: true }, true, true)).toBe(true);
+  });
+
+  it("keeps a pinned run pinned when switching to it from another result tab (#14599)", () => {
+    expect(shouldPinResultRunOnClick({ pinned: true }, true, false)).toBe(false);
+    expect(shouldPinResultRunOnClick({ pinned: true }, true)).toBe(false);
+  });
+
+  it("pins an unpinned run whether or not it was already shown", () => {
+    expect(shouldPinResultRunOnClick({ pinned: false }, true, true)).toBe(true);
+    expect(shouldPinResultRunOnClick({ pinned: false }, true, false)).toBe(true);
   });
 
   it("does not toggle when the user disabled click-to-pin", () => {

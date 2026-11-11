@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use sqlparser::ast::{
     Expr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident, JoinConstraint, JoinOperator,
-    ObjectName, ObjectNamePart, OrderByKind, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
+    ObjectName, ObjectNamePart, OrderByKind, Query, Select, SelectItem, SetExpr, Statement, TableAlias, TableFactor,
     TableWithJoins,
 };
 use sqlparser::dialect::{
@@ -184,9 +184,15 @@ struct Analyzer {
     group_by_violations: Vec<SqlGroupByViolation>,
     /// Two-part column references, kept for the unknown-qualifier check.
     qualified_columns: Vec<QualifiedColumnRef>,
-    /// Scopes holding a relation the analyzer does not model as a physical
-    /// table (CTE references, derived tables, table functions). Their aliases
-    /// stay invisible here, so the unknown-qualifier check skips them.
+    /// Relation names of the current scope that are not physical tables: CTE
+    /// names and their aliases, derived-table aliases, the alias of a
+    /// parenthesized join. A qualifier may name any of them, so the
+    /// unknown-qualifier check resolves against them too.
+    relation_names: Vec<(usize, String)>,
+    /// Scopes holding a relation the analyzer cannot even name (table
+    /// functions, `UNNEST`, `PIVOT`, ...). A qualifier that does not resolve
+    /// there would be a guess, so the unknown-qualifier check skips those
+    /// scopes.
     non_plain_scopes: HashSet<usize>,
     projection_items: Vec<ProjectionItemAcc>,
     current_projection_item: Option<ProjectionItemAcc>,
@@ -1791,25 +1797,41 @@ impl Analyzer {
                         self.current_scope_id(),
                     ) {
                         Some(table) => self.tables.push(table),
-                        // A name the analyzer cannot turn into a table reference
-                        // leaves its alias invisible; skip the scope.
+                        // Not a plain object name, so it cannot become a table
+                        // reference. Its alias is still a name a qualifier may
+                        // use; without one the scope stays unexplained.
+                        None => {
+                            if !self.record_alias(alias.as_ref()) {
+                                self.mark_scope_non_plain();
+                            }
+                        }
+                    }
+                } else if args.is_none() {
+                    // A CTE reference. `is_visible_cte` only accepts a
+                    // single-part identifier, so the CTE name is always
+                    // readable here; the alias, when present, is the other
+                    // name a qualifier may use.
+                    match object_name_last_ident(name) {
+                        Some(ident) => {
+                            self.record_relation_name(ident);
+                        }
                         None => self.mark_scope_non_plain(),
                     }
+                    self.record_alias(alias.as_ref());
                 } else {
-                    // A CTE reference or a table function is not recorded as a
-                    // physical table, so its alias stays invisible to the
-                    // unknown-qualifier check. Mark the scope instead of
-                    // guessing which relation the qualifier meant.
+                    // A table-valued function. Its relation name is engine
+                    // specific, so the scope stays unexplained for now.
                     self.mark_scope_non_plain();
                 }
             }
-            TableFactor::Derived { subquery, .. } => {
-                self.mark_scope_non_plain();
+            TableFactor::Derived { subquery, alias, .. } => {
+                self.record_alias(alias.as_ref());
                 self.visit_child_query(subquery);
             }
-            TableFactor::NestedJoin { table_with_joins, .. } => {
-                // The alias of a parenthesized join is not recorded either.
-                self.mark_scope_non_plain();
+            TableFactor::NestedJoin { table_with_joins, alias, .. } => {
+                // The parenthesized join may carry its own alias; the aliases
+                // inside it are recorded by the recursion below.
+                self.record_alias(alias.as_ref());
                 self.visit_table_with_joins(table_with_joins);
             }
             TableFactor::TableFunction { expr, .. } => {
@@ -2033,8 +2055,28 @@ impl Analyzer {
         });
     }
 
-    /// Mark the current scope as holding a relation the analyzer does not model
-    /// as a physical table.
+    /// Remember a relation name of the current scope that is not a physical
+    /// table, so the unknown-qualifier check can resolve it. Returns whether a
+    /// name was recorded.
+    fn record_relation_name(&mut self, ident: &Ident) -> bool {
+        let Some(scope_id) = self.current_scope_id() else {
+            return false;
+        };
+        self.relation_names.push((scope_id, ident.value.to_ascii_lowercase()));
+        true
+    }
+
+    /// Record the alias of a non-physical relation. Returns whether the factor
+    /// carried one.
+    fn record_alias(&mut self, alias: Option<&TableAlias>) -> bool {
+        match alias {
+            Some(alias) => self.record_relation_name(&alias.name),
+            None => false,
+        }
+    }
+
+    /// Mark the current scope as holding a relation whose name the analyzer
+    /// cannot model, so the unknown-qualifier check skips it.
     fn mark_scope_non_plain(&mut self) {
         if let Some(scope_id) = self.current_scope_id() {
             self.non_plain_scopes.insert(scope_id);
@@ -2044,11 +2086,13 @@ impl Analyzer {
     /// Two-part qualifiers that name neither a table nor an alias visible in
     /// the reference scope.
     ///
-    /// A qualifier resolves against the tables and aliases of its own scope and
-    /// of every enclosing scope, so a correlated subquery can still refer to an
-    /// outer alias. Scopes holding a relation the analyzer does not model (CTE
-    /// references, derived tables, table functions) are skipped: those aliases
-    /// are invisible here, so an unresolved qualifier would be a guess.
+    /// A qualifier resolves against the relations of its own scope and of every
+    /// enclosing scope, so a correlated subquery can still refer to an outer
+    /// alias. Relations cover physical tables, CTE names and their aliases,
+    /// derived-table aliases and the alias of a parenthesized join. Scopes
+    /// holding a relation the analyzer cannot even name (table functions,
+    /// `UNNEST`, `PIVOT`, ...) are skipped: an unresolved qualifier would be a
+    /// guess there.
     fn unknown_qualifiers(&self) -> Vec<SqlUnknownQualifier> {
         let mut scope_parents: HashMap<usize, Option<usize>> = HashMap::new();
         for scope in &self.scopes {
@@ -2061,6 +2105,9 @@ impl Analyzer {
             if let Some(alias) = &table.alias {
                 names.insert(alias.to_ascii_lowercase());
             }
+        }
+        for (scope_id, name) in &self.relation_names {
+            names_by_scope.entry(*scope_id).or_default().insert(name.clone());
         }
 
         let mut unknown = Vec::new();
@@ -2558,11 +2605,68 @@ mod unknown_qualifier_tests {
     }
 
     #[test]
-    fn skips_scopes_with_derived_tables_or_cte_references() {
-        // The alias of a derived table is not visible to the check.
+    fn accepts_derived_table_and_cte_aliases() {
+        // The alias of a derived table is a relation name of the scope.
         assert!(qualifiers("SELECT x.id FROM (SELECT id FROM t) x", Some("mysql")).is_empty());
-        // The same holds for a CTE and for the alias of its reference.
+        // The same holds for a CTE: both the CTE name and the alias of its
+        // reference resolve.
+        assert!(qualifiers("WITH demo AS (SELECT id FROM t) SELECT demo.id FROM demo", Some("mysql")).is_empty());
         assert!(qualifiers("WITH c AS (SELECT id FROM t) SELECT ro.id FROM c ro", Some("mysql")).is_empty());
+        assert!(qualifiers("WITH demo AS (SELECT id, v FROM t) SELECT d.id FROM demo d", Some("mysql")).is_empty());
+    }
+
+    #[test]
+    fn reports_a_qualifier_that_names_no_cte_or_derived_alias() {
+        assert_eq!(
+            qualifiers("WITH demo AS (SELECT id FROM t) SELECT zz.id FROM demo d", Some("mysql")),
+            vec!["zz".to_string()]
+        );
+        assert_eq!(qualifiers("SELECT zz.id FROM (SELECT id FROM t) AS x", Some("mysql")), vec!["zz".to_string()]);
+    }
+
+    #[test]
+    fn reports_a_qualifier_inside_a_cte_body() {
+        // The body is its own scope, so an alias that no relation declares
+        // there is reported even though it sits inside a WITH clause.
+        assert_eq!(
+            qualifiers("WITH c AS (SELECT zz.y FROM t) SELECT c.id FROM c", Some("mysql")),
+            vec!["zz".to_string()]
+        );
+    }
+
+    #[test]
+    fn reports_a_qualifier_that_names_no_parenthesized_join_alias() {
+        // The alias of the parenthesized join and the aliases inside it all
+        // resolve; anything else in that scope is an error. Keeping the inner
+        // aliases resolvable next to the join alias is the same conservative
+        // choice the physical-table path makes (`FROM t x` accepts both `t` and
+        // `x`), so a dialect that hides them once the join is aliased is
+        // under-reported rather than mis-reported.
+        let legit = "SELECT ab.id, a.id, b.id FROM (t1 a JOIN t2 b ON a.id = b.id) ab";
+        assert!(qualifiers(legit, Some("postgres")).is_empty());
+        assert_eq!(
+            qualifiers("SELECT zz.id FROM (t1 a JOIN t2 b ON a.id = b.id) ab", Some("postgres")),
+            vec!["zz".to_string()]
+        );
+    }
+
+    #[test]
+    fn does_not_resolve_a_derived_table_source_in_the_outer_scope() {
+        // `t` belongs to the derived table's own scope, so the outer query
+        // cannot qualify a column with it.
+        assert_eq!(qualifiers("SELECT t.id FROM (SELECT * FROM t) x", Some("mysql")), vec!["t".to_string()]);
+    }
+
+    #[test]
+    fn skips_scopes_with_relations_it_cannot_name() {
+        // Table-valued functions, UNNEST and PIVOT expose names the analyzer
+        // does not model, so the scope stays unexplained instead of guessed.
+        assert!(qualifiers("SELECT zz.id FROM generate_series(1, 10) g", Some("postgres")).is_empty());
+        assert!(qualifiers("SELECT zz.id FROM UNNEST([1, 2]) AS numbers", Some("duckdb")).is_empty());
+        assert!(qualifiers("SELECT zz.id FROM t PIVOT(sum(v) FOR k IN ('a')) p", Some("duckdb")).is_empty());
+        // MSSQL's `FROM t (NOLOCK)` parses as a table with arguments, so it
+        // shares the table-function branch.
+        assert!(qualifiers("SELECT zz.id FROM t (NOLOCK)", Some("sqlserver")).is_empty());
     }
 
     #[test]

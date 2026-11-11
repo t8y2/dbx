@@ -4,6 +4,8 @@ export type SqlMetadataRefreshTarget = { scope: "none" } | { scope: "connection"
 const DATABASE_DDL_RE = /\b(CREATE|DROP)\s+DATABASE\b/i;
 const SCHEMA_DDL_RE = /\b(CREATE|DROP)\s+SCHEMA\b/i;
 const OBJECT_DDL_RE = /\b(CREATE|ALTER|DROP|RENAME)\s+(OR\s+REPLACE\s+)?(((GLOBAL|LOCAL)\s+)?TEMP(ORARY)?\s+)?(MATERIALIZED\s+)?(TABLE|VIEW|INDEX|SEQUENCE|PROCEDURE|FUNCTION|TRIGGER|TYPE)\b/i;
+const MYSQL_DEFINER_ACCOUNT = "(?:`(?:``|[^`])*`|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|[^\\s@]+)";
+const ROUTINE_DDL_HEADER_RE = new RegExp(`\\b(?:CREATE|ALTER|RECREATE)\\s+(?:(?:OR\\s+(?:REPLACE|ALTER)|EDITIONABLE|NONEDITIONABLE|FORCE)\\s+)*(?:DEFINER\\s*=\\s*(?:CURRENT_USER(?:\\(\\))?|${MYSQL_DEFINER_ACCOUNT}(?:\\s*@\\s*${MYSQL_DEFINER_ACCOUNT})?)\\s+)?(?:PROCEDURE|PROC|FUNCTION)\\b`, "i");
 const EXPLICIT_TEMP_OBJECT_DDL_RE = /\b(?:CREATE|ALTER|DROP|RENAME)\s+(?:OR\s+REPLACE\s+)?(?:(?:GLOBAL|LOCAL)\s+)?TEMP(?:ORARY)?\s+(?:TABLE|VIEW|INDEX)\b/i;
 const SQLSERVER_TEMP_TABLE_DDL_RE = /\b(?:CREATE|ALTER|DROP)\s+TABLE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:\[##?[^\]]+\]|##?[A-Za-z_][\w$#]*)/i;
 const OBJECT_NAME_DDL_RE =
@@ -48,7 +50,9 @@ function schemaFromQualifiedName(qualifiedName: string): string | undefined {
 }
 
 function schemaFromObjectDdl(statement: string): string | undefined {
-  const match = statement.match(INDEX_TABLE_DDL_RE) || statement.match(OBJECT_NAME_DDL_RE);
+  // Normalize only the metadata classifier's header; executable SQL stays unchanged.
+  const normalized = statement.replace(ROUTINE_DDL_HEADER_RE, "CREATE PROCEDURE");
+  const match = normalized.match(INDEX_TABLE_DDL_RE) || normalized.match(OBJECT_NAME_DDL_RE);
   return match?.[1] ? schemaFromQualifiedName(match[1]) : undefined;
 }
 
@@ -68,7 +72,7 @@ export function sqlMetadataRefreshTarget(sql: string, activeSchema?: string): Sq
       hasDatabaseRefresh = true;
       continue;
     }
-    if (!OBJECT_DDL_RE.test(statement)) continue;
+    if (!OBJECT_DDL_RE.test(statement) && !ROUTINE_DDL_HEADER_RE.test(statement)) continue;
     if (isTemporaryObjectDdl(statement)) continue;
     hasDatabaseRefresh = true;
     const schema = schemaFromObjectDdl(statement) || activeSchema;

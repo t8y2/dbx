@@ -42,7 +42,7 @@ export function useSidebarDataOpenRuntime() {
     const reuseMode = options.reuseMode ?? settingsStore.editorSettings.dataTabReuseMode;
     if (config?.db_type === "hbase") {
       await connectionStore.ensureConnected(node.connectionId);
-      if (options.isCurrent?.() === false) return;
+      if (request?.isCurrent() === false || options.isCurrent?.() === false) return;
       const tabId = queryStore.createTab(node.connectionId, node.database, node.label, "hbase", undefined, node.label, undefined, {
         forceNew: openMode === "new-tab" || reuseMode === "always-new",
         insertAfterActive: settingsStore.editorSettings.openDataTabsNextToActive,

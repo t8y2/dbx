@@ -71,6 +71,17 @@ describe("executableStatementRangeCacheForDoc", () => {
     expect(executableStatementRangeStartingAt(cache, doc.line(1).from)?.sql).toBe(sql.slice(0, -1));
   });
 
+  it.each(["-- 存储过程说明\n-- 作者 : 张三", "/* 说明 /* 内部说明 */\nGO\n保留完整注释 */"])("includes SQL Server procedure header comments when running from the CREATE line: %s", (header) => {
+    const procedure = `${header}\nCREATE PROCEDURE dbo.p AS\nBEGIN\n    SELECT 1;\n    SELECT 2;\nEND;`;
+    const sql = `${procedure}\nGO\nSELECT 3;`;
+    const doc = Text.of(sql.split("\n"));
+    const cache = executableStatementRangeCacheForDoc(null, doc, "sqlserver");
+
+    expect(executableStatementRangeStartingAt(cache, doc.lineAt(sql.indexOf("CREATE PROCEDURE")).from)?.sql).toBe(procedure);
+    expect(executableStatementRangeStartingAt(cache, doc.lineAt(sql.indexOf("SELECT 1")).from)).toBeNull();
+    expect(executableStatementRangeAtCursor(cache, sql.indexOf("SELECT 2"))?.sql).toBe(procedure);
+  });
+
   it("keeps a valid placeholder-only line executable and respects disabled MyBatis syntax", () => {
     const sql = ["SELECT *", "FROM t", "#{where_clause};"].join("\n");
     const doc = Text.of(sql.split("\n"));

@@ -16,7 +16,7 @@ export interface SidebarTreeRuntimeGeneration {
 export interface SidebarTreeRuntimeHost {
   buildContextMenu(node: TreeNode): ContextMenuItem[];
   resolveContextMenu(node: TreeNode, staticItems: ContextMenuItem[]): Promise<ContextMenuItem[]> | ContextMenuItem[];
-  handleRowClick(node: TreeNode, clickDetail: number): void;
+  handleRowClick(node: TreeNode, clickDetail: number, tableClickNavigation?: boolean): void;
   handleRowDoubleClick(node: TreeNode, event: MouseEvent): void;
   handleRowKeydown(node: TreeNode, event: KeyboardEvent): void;
   openPrimaryVisibleFilter(node: TreeNode): void;
@@ -41,7 +41,7 @@ export interface SidebarTreeRuntime {
   isCurrent(token: SidebarTreeRuntimeGeneration): boolean;
   buildContextMenu(node: TreeNode): ContextMenuItem[];
   resolveContextMenu(node: TreeNode, staticItems: ContextMenuItem[]): Promise<ContextMenuItem[]> | ContextMenuItem[];
-  handleRowClick(node: TreeNode, clickDetail: number): void;
+  handleRowClick(node: TreeNode, clickDetail: number, tableClickNavigation?: boolean): void;
   handleRowDoubleClick(node: TreeNode, event: MouseEvent): void;
   handleRowKeydown(node: TreeNode, event: KeyboardEvent): void;
   openPrimaryVisibleFilter(node: TreeNode): void;
@@ -98,8 +98,9 @@ export function createSidebarTreeRuntime(): SidebarTreeRuntime {
     resolveContextMenu(node, staticItems) {
       return currentHost()?.resolveContextMenu(node, staticItems) ?? staticItems;
     },
-    handleRowClick(node, clickDetail) {
-      currentHost()?.handleRowClick(node, clickDetail);
+    handleRowClick(node, clickDetail, tableClickNavigation) {
+      if (tableClickNavigation) currentHost()?.handleRowClick(node, clickDetail, true);
+      else currentHost()?.handleRowClick(node, clickDetail);
     },
     handleRowDoubleClick(node, event) {
       currentHost()?.handleRowDoubleClick(node, event);

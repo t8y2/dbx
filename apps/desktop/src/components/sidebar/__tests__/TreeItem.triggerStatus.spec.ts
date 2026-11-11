@@ -24,6 +24,7 @@ const connectionStore = {
   selectedTreeNodeIds: [] as string[],
   selectedTreeNodeIdsSet: new Set<string>(),
   sidebarTableSearchQueries: {},
+  sidebarLayout: { groups: [], order: [] },
   tableNameFilterForScope: () => undefined,
   treeNodes: [],
   treeSelectionAnchorId: null as string | null,
@@ -31,18 +32,18 @@ const connectionStore = {
 
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => connectionStore }));
 vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ openDatabaseKeys: new Set<string>() }) }));
-vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({
-    editorSettings: {
-      shortcuts: { openDataInNewTab: "" },
-      sidebarActivation: "double",
-      sidebarAllowHorizontalScroll: false,
-      sidebarHiddenTablePrefixes: [],
-      sidebarObjectInfoMode: "none",
-      sidebarShowTooltips: true,
-    },
-  }),
-}));
+const settingsStore = {
+  editorSettings: {
+    shortcuts: { openDataInNewTab: "" },
+    sidebarActivation: "double",
+    sidebarTableClickNavigation: false,
+    sidebarAllowHorizontalScroll: false,
+    sidebarHiddenTablePrefixes: [],
+    sidebarObjectInfoMode: "none",
+    sidebarShowTooltips: true,
+  },
+};
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => settingsStore }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 
 const mountedApps: App[] = [];
@@ -92,6 +93,8 @@ async function mountTreeItem(initialNode: TreeNode) {
 
 beforeEach(async () => {
   databaseType = "sqlserver";
+  settingsStore.editorSettings.sidebarTableClickNavigation = false;
+  settingsStore.editorSettings.shortcuts.openDataInNewTab = "";
   await setLocale("en");
 });
 
@@ -181,6 +184,36 @@ describe("TreeItem trigger status", () => {
     node.value.meta = { ...(node.value.meta as TriggerInfo), enabled: false };
     await nextTick();
     expect(container.querySelector(disabledSelector)).not.toBeNull();
+  });
+
+  it("does not dispatch modified double clicks for table click navigation", async () => {
+    settingsStore.editorSettings.sidebarTableClickNavigation = true;
+    const table = { ...triggerNode(true), id: "connection-1:app:dbo:orders", type: "table" as const };
+    const { container, host } = await mountTreeItem(table);
+    const row = container.querySelector<HTMLElement>("[data-node-id]")!;
+
+    for (const modifier of ["shiftKey", "ctrlKey", "metaKey"] as const) {
+      row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, [modifier]: true }));
+      row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 2, [modifier]: true }));
+      row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, detail: 2, [modifier]: true }));
+    }
+
+    row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, detail: 2 }));
+
+    expect(host.handleRowDoubleClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the configured modified click shortcut opening a new tab", async () => {
+    settingsStore.editorSettings.sidebarTableClickNavigation = true;
+    settingsStore.editorSettings.shortcuts.openDataInNewTab = "Mod";
+    const table = { ...triggerNode(true), id: "connection-1:app:dbo:orders", type: "table" as const };
+    const { container, host } = await mountTreeItem(table);
+    const row = container.querySelector<HTMLElement>("[data-node-id]")!;
+
+    row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, ctrlKey: true }));
+
+    expect(host.openDataInNewTab).toHaveBeenCalledWith(table);
+    expect(host.handleRowDoubleClick).not.toHaveBeenCalled();
   });
 
   it("localizes the badge tooltip and accessible name without disabling row activation", async () => {

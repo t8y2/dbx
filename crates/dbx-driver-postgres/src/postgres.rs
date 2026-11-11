@@ -82,7 +82,7 @@ pub fn gaussdb_identifier_quote_for_compatibility_mode(compatibility_mode: &str)
 pub async fn opengauss_compatibility_mode(pool: &Pool) -> Result<Option<String>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let client = &EncodingClient::new(&client);
-    let row = postgres_query_one_cached(client, GAUSSDB_COMPATIBILITY_SQL, &[]).await.map_err(|e| e.to_string())?;
+    let row = postgres_query_one_cached(client, GAUSSDB_COMPATIBILITY_SQL, &[]).await.map_err(pg_error_to_string)?;
     Ok(row.try_get::<_, Option<String>>(0).ok().flatten().filter(|value| !value.trim().is_empty()))
 }
 
@@ -1558,9 +1558,9 @@ fn escape_tsvector_lexeme(value: &str) -> String {
 fn pg_error_to_string(err: impl Into<PgError>) -> String {
     let err = err.into();
     let Some(db_error) = err.as_db_error() else {
-        return err.to_string();
+        return error_with_sources_to_string(&err);
     };
-    let mut message = pg_db_error_to_string(db_error);
+    let mut message = db_error.to_string();
     // Carry the server-reported cursor position across the `db` layer's
     // `Result<_, String>` boundary; `query.rs` resolves it against the executed
     // statement and strips the suffix before the message reaches any client.
@@ -1577,7 +1577,7 @@ fn pg_error_to_string(err: impl Into<PgError>) -> String {
 /// be resolved against the user's SQL and point at the wrong place.
 fn pg_error_to_string_plain(err: impl Into<PgError>) -> String {
     let err = err.into();
-    err.as_db_error().map(pg_db_error_to_string).unwrap_or_else(|| err.to_string())
+    err.as_db_error().map(pg_db_error_to_string).unwrap_or_else(|| error_with_sources_to_string(&err))
 }
 
 /// Tries each SQL tier in `tiers` in order (most-capable first), via `run`,
@@ -1816,7 +1816,11 @@ fn pg_pool_error_to_string(err: PoolError) -> String {
 }
 
 fn should_retry_postgres_text_query(err: &PgError) -> bool {
-    let message = err.as_db_error().map(ToString::to_string).unwrap_or_else(|| err.to_string()).to_ascii_lowercase();
+    let message = err
+        .as_db_error()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| error_with_sources_to_string(err))
+        .to_ascii_lowercase();
     should_retry_postgres_text_query_message(&message)
 }
 
@@ -1834,7 +1838,8 @@ fn should_retry_postgres_stale_cache(err: &PgError) -> bool {
             db_error.message(),
         );
     }
-    should_retry_postgres_stale_cache_fields(None, None, &err.to_string())
+    let message = error_with_sources_to_string(err);
+    should_retry_postgres_stale_cache_fields(None, None, &message)
 }
 
 fn should_retry_postgres_stale_cache_fields(sqlstate: Option<&str>, routine: Option<&str>, message: &str) -> bool {
@@ -1850,7 +1855,8 @@ fn should_fallback_postgres_missing_prepared_statement(err: &PgError) -> bool {
             db_error.message(),
         );
     }
-    should_fallback_postgres_missing_prepared_statement_fields(None, &err.to_string())
+    let message = error_with_sources_to_string(err);
+    should_fallback_postgres_missing_prepared_statement_fields(None, &message)
 }
 
 fn should_fallback_postgres_missing_prepared_statement_fields(sqlstate: Option<&str>, message: &str) -> bool {
@@ -3932,7 +3938,7 @@ fn database_storage_sql() -> &'static str {
 pub async fn list_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let client = &EncodingClient::new(&client);
-    let rows = postgres_query_cached(client, list_databases_sql(), &[]).await.map_err(|e| e.to_string())?;
+    let rows = postgres_query_cached(client, list_databases_sql(), &[]).await.map_err(pg_error_to_string)?;
 
     Ok(rows.iter().map(|row| DatabaseInfo { name: pg_row_try_string(row, 0), ..Default::default() }).collect())
 }
@@ -3943,7 +3949,7 @@ pub async fn list_opengauss_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, 
     let rows = match postgres_query_cached(client, list_opengauss_databases_sql(), &[]).await {
         Ok(rows) => rows,
         Err(primary_error) => {
-            let primary_error = primary_error.to_string();
+            let primary_error = pg_error_to_string(primary_error);
             return postgres_query_cached(client, list_databases_sql(), &[])
                 .await
                 .map(|rows| {
@@ -3952,6 +3958,7 @@ pub async fn list_opengauss_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, 
                         .collect()
                 })
                 .map_err(|fallback_error| {
+                    let fallback_error = pg_error_to_string(fallback_error);
                     format!(
                         "openGauss database compatibility lookup failed: {primary_error}; database list fallback failed: {fallback_error}"
                     )
@@ -8328,32 +8335,40 @@ pub async fn list_schema_infos_with_system(pool: &Pool, show_system_schemas: boo
         .collect())
 }
 
-/// Distinct user-defined type names for the structure editor's type dropdown.
-/// Same predicate as the object browser's TYPE branch (base/composite/domain/
+/// A user-defined type reference for the structure editor's type dropdown:
+/// same predicate as the object browser's TYPE branch (base/composite/domain/
 /// enum/range/multirange types outside the system schemas), so types provided
-/// by installed extensions — `vector`, `hstore`, `ltree`, … — become
-/// selectable in the create/edit column type picker (#14525).
-///
-/// Types visible through `search_path` are returned bare so they stay
-/// interchangeable with the static list; everything else comes back
-/// schema-qualified (quoted only when the identifier requires it) so the
-/// generated `CREATE TABLE` / `ALTER TABLE ... TYPE` still resolves outside
-/// the search path instead of failing with `type "..." does not exist`
-/// (#14525 review).
-pub async fn list_data_types(pool: &Pool) -> Result<Vec<String>, String> {
+/// by installed extensions — `vector`, `hstore`, `ltree`, … — reach the
+/// picker (#14525). `visible` reports whether the owning schema is in the
+/// session's `search_path`; the caller decides between the bare name and a
+/// schema-qualified one.
+#[derive(Debug)]
+pub struct PostgresUserTypeName {
+    pub schema: String,
+    pub name: String,
+    pub visible: bool,
+}
+
+pub async fn list_data_types(pool: &Pool) -> Result<Vec<PostgresUserTypeName>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let client = &EncodingClient::new(&client);
     let rows = postgres_query_cached(client, list_data_types_sql(), &[]).await.map_err(|e| e.to_string())?;
 
-    Ok(rows.iter().map(|row| pg_row_try_string(row, 0)).filter(|name| !name.is_empty()).collect())
+    Ok(rows
+        .iter()
+        .map(|row| PostgresUserTypeName {
+            schema: pg_row_try_string(row, 0),
+            name: pg_row_try_string(row, 1),
+            visible: pg_row_try_bool(row, 2).unwrap_or(false),
+        })
+        .filter(|entry| !entry.name.is_empty())
+        .collect())
 }
 
 fn list_data_types_sql() -> &'static str {
-    "SELECT DISTINCT CASE \
-       WHEN t.typname ~ '^[a-z_][a-z0-9_$]*$' AND n.nspname = ANY (current_schemas(true)) \
-         THEN t.typname \
-       ELSE format('%I.%I', n.nspname, t.typname) \
-     END AS type_name \
+    "SELECT n.nspname AS schema_name, \
+       t.typname AS type_name, \
+       (n.nspname = ANY (current_schemas(true))) AS visible \
      FROM pg_catalog.pg_type t \
      JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
      LEFT JOIN pg_catalog.pg_class c ON c.oid = t.typrelid \
@@ -8365,7 +8380,7 @@ fn list_data_types_sql() -> &'static str {
        AND n.nspname <> 'information_schema' \
        AND n.nspname NOT LIKE 'pg_toast%' \
        AND n.nspname NOT LIKE 'pg_temp%' \
-     ORDER BY type_name"
+     ORDER BY n.nspname, t.typname"
 }
 
 // Sibling of `postgres_columns_for_relations_sql`/`_compat_sql` above (~line
@@ -8650,6 +8665,49 @@ pub async fn get_columns_compat_first(pool: &Pool, schema: &str, table: &str) ->
     get_columns_with_tiers(pool, schema, table, false).await
 }
 
+/// Resolves the stored spelling of a relation when the requested name only
+/// matches case-insensitively.
+///
+/// PostgreSQL-compatible engines do not all fold unquoted identifiers the same
+/// way: TDSQL-PG / OpenTenBase fold them to upper case while stock PostgreSQL
+/// folds to lower. DBX resolves a query's table reference through the stock rule,
+/// so on an upper-folding engine the catalog lookup misses, the grid falls back to
+/// the result set's own columns, and the generated UPDATE quotes the lower-case
+/// guess (`"etl"."t_df_batch"`) and fails with 42P01 (#14330). The frontend always
+/// prefers `resolved_schema` / `resolved_table` when a driver reports them, so
+/// finding the real spelling here is enough to fix the write path.
+///
+/// Only an unambiguous match is returned: `"Foo"` and `foo` may coexist, and this
+/// must never silently retarget a write.
+fn postgres_relation_case_insensitive_sql() -> &'static str {
+    "SELECT n.nspname, c.relname \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE c.relkind IN ('r','p','f','v','m') \
+       AND lower(c.relname) = lower($2) \
+       AND (CASE WHEN coalesce(length($1::text), 0) = 0 THEN pg_catalog.pg_table_is_visible(c.oid) \
+                 ELSE lower(n.nspname) = lower($1) END) \
+       AND 1 = (SELECT count(*) FROM pg_catalog.pg_class c2 \
+                JOIN pg_catalog.pg_namespace n2 ON n2.oid = c2.relnamespace \
+                WHERE n2.nspname = n.nspname AND lower(c2.relname) = lower(c.relname) \
+                  AND c2.relkind IN ('r','p','f','v','m')) \
+     LIMIT 1"
+}
+
+async fn resolve_relation_case_insensitive(
+    client: &deadpool_postgres::Client,
+    schema: &str,
+    table: &str,
+) -> Result<Option<(String, String)>, PgError> {
+    let client = &EncodingClient::new(client);
+    let rows = postgres_query_cached(client, postgres_relation_case_insensitive_sql(), &[&schema, &table]).await?;
+    Ok(rows.first().and_then(|row| {
+        let schema = row.try_get::<_, Option<String>>(0).ok().flatten()?;
+        let table = row.try_get::<_, Option<String>>(1).ok().flatten()?;
+        Some((schema, table))
+    }))
+}
+
 async fn get_columns_with_tiers(
     pool: &Pool,
     schema: &str,
@@ -8672,7 +8730,7 @@ async fn get_columns_with_tiers(
         }
     };
     let tiers = column_metadata_tiers(modern_tier_supported);
-    query_with_column_metadata_fallback(
+    let columns = query_with_column_metadata_fallback(
         &tiers,
         |sql| get_columns_with_sql(&client, sql, schema, table),
         total_started,
@@ -8680,7 +8738,34 @@ async fn get_columns_with_tiers(
         |error: &PgError| error.as_db_error().map(|db_error| db_error.code().code().to_string()),
         log_get_columns_tier_diagnostic,
     )
-    .await
+    .await;
+    // A tier that matched nothing means the requested spelling is not addressable
+    // on this engine. Retry once with the stored spelling and report it back so the
+    // caller writes to the real relation instead of the folded guess (#14330).
+    if columns.as_ref().is_ok_and(|columns| !columns.is_empty()) {
+        return columns;
+    }
+    let Ok(Some((resolved_schema, resolved_table))) = resolve_relation_case_insensitive(&client, schema, table).await
+    else {
+        return columns;
+    };
+    if resolved_schema == schema && resolved_table == table {
+        return columns;
+    }
+    let mut resolved = query_with_column_metadata_fallback(
+        &tiers,
+        |sql| get_columns_with_sql(&client, sql, &resolved_schema, &resolved_table),
+        total_started,
+        pg_error_to_string,
+        |error: &PgError| error.as_db_error().map(|db_error| db_error.code().code().to_string()),
+        log_get_columns_tier_diagnostic,
+    )
+    .await?;
+    for column in &mut resolved {
+        column.resolved_schema = Some(resolved_schema.clone());
+        column.resolved_table = Some(resolved_table.clone());
+    }
+    Ok(resolved)
 }
 
 pub fn pg_quote_literal(value: &str) -> String {
@@ -13241,6 +13326,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_columns_report_the_stored_spelling_of_an_upper_case_relation() {
+        // TDSQL-PG / OpenTenBase fold unquoted names to upper case while DBX
+        // resolves a query's table reference through the stock lower-case rule, so
+        // the grid used to write `"etl"."t_df_batch"` and fail with 42P01 (#14330).
+        // The lookup must recover the stored spelling and report it, because the
+        // frontend then targets it for every generated UPDATE/DELETE.
+        let Some(container) = start_docker_postgres().await else {
+            return;
+        };
+        let pool = connect(&container.url(), Duration::from_secs(5)).await.expect("connect postgres");
+        execute_query(&pool, "CREATE SCHEMA \"ETL\"").await.expect("create schema");
+        execute_query(
+            &pool,
+            "CREATE TABLE \"ETL\".\"T_DF_BATCH\" (\"BATCH_ID\" text PRIMARY KEY, \"BATCH_NAME\" text)",
+        )
+        .await
+        .expect("create upper-case table");
+
+        let columns = get_columns(&pool, "etl", "t_df_batch").await.expect("read columns through the folded name");
+
+        assert_eq!(columns.len(), 2, "{columns:?}");
+        assert_eq!(columns[0].name, "BATCH_ID");
+        assert!(columns[0].is_primary_key);
+        assert_eq!(columns[0].resolved_schema.as_deref(), Some("ETL"));
+        assert_eq!(columns[0].resolved_table.as_deref(), Some("T_DF_BATCH"));
+    }
+
+    #[tokio::test]
     async fn postgres_dml_returning_preserves_result_rows() {
         let Some(container) = start_docker_postgres().await else {
             return;
@@ -13531,11 +13644,11 @@ mod tests {
     #[test]
     fn list_data_types_sql_targets_user_defined_types() {
         let sql = list_data_types_sql();
-        assert!(sql.contains("DISTINCT"), "{sql}");
-        // Types visible through search_path stay bare; everything else comes back
-        // schema-qualified so generated DDL resolves outside the search path.
-        assert!(sql.contains("n.nspname = ANY (current_schemas(true))"), "{sql}");
-        assert!(sql.contains("format('%I.%I', n.nspname, t.typname)"), "{sql}");
+        // Visibility is decided per row in Rust (bare for search_path-visible
+        // simple names, schema-qualified otherwise) so reserved words keep their
+        // quotes.
+        assert!(sql.contains("(n.nspname = ANY (current_schemas(true))) AS visible"), "{sql}");
+        assert!(sql.contains("t.typname AS type_name"), "{sql}");
         assert!(sql.contains("t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm')"), "{sql}");
         assert!(sql.contains("t.typisdefined"), "{sql}");
         assert!(sql.contains("t.typelem = 0"), "{sql}");
@@ -13562,12 +13675,16 @@ mod tests {
             execute_query(&pool, &format!("CREATE TYPE {schema_ident}.mood AS ENUM ('sad', 'ok')")).await?;
             // Mixed-case identifiers need the %I quoting.
             execute_query(&pool, &format!("CREATE TYPE {schema_ident}.\"Mood\" AS ENUM ('sad', 'ok')")).await?;
+            // A lowercase reserved word must come back quoted — bare `order`
+            // would break generated DDL (#14536 review follow-up).
+            execute_query(&pool, "CREATE TYPE public.\"order\" AS ENUM ('asc', 'desc')").await?;
             let qualified_mood = format!("{schema}.mood");
 
             // The returned names must be directly usable in DDL: create a column
             // from the qualified name, then ALTER it to the same-name public type.
             let probe = format!("{schema_ident}.usage_probe");
-            execute_query(&pool, &format!("CREATE TABLE {probe} (id bigint, m {qualified_mood})")).await?;
+            execute_query(&pool, &format!("CREATE TABLE {probe} (id bigint, m {qualified_mood}, r public.\"order\")"))
+                .await?;
             execute_query(
                 &pool,
                 &format!("ALTER TABLE {probe} ALTER COLUMN m TYPE public.mood USING m::text::public.mood"),
@@ -13582,14 +13699,27 @@ mod tests {
         let cleanup = execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await;
         cleanup.expect("drop schema");
         execute_query(&pool, "DROP TYPE IF EXISTS public.mood").await.expect("drop public.mood");
+        execute_query(&pool, "DROP TYPE IF EXISTS public.\"order\"").await.expect("drop public.order");
         let types = exercise.expect("list data types");
 
-        assert!(types.iter().any(|name| name == "hstore"), "search_path extension type stays bare: {types:?}");
-        assert!(types.iter().any(|name| name == "mood"), "public enum stays bare: {types:?}");
-        let qualified_mood = format!("{schema}.mood");
-        assert!(types.iter().any(|name| name == &qualified_mood), "off-search_path enum must be qualified: {types:?}");
-        let qualified_mixed = format!("{schema}.\"Mood\"");
-        assert!(types.iter().any(|name| name == &qualified_mixed), "mixed-case type must keep quoting: {types:?}");
+        // Raw rows drive the caller-side rendering: visible rows keep the bare
+        // name, off-search_path ones carry the schema, and reserved words stay
+        // distinct entries.
+        let find = |schema_name: &str, type_name: &str| {
+            types
+                .iter()
+                .find(|entry| entry.schema == schema_name && entry.name == type_name)
+                .unwrap_or_else(|| panic!("missing {schema_name}.{type_name} in {types:?}"))
+        };
+        let hstore = find("public", "hstore");
+        assert!(hstore.visible, "public is on the search path: {types:?}");
+        let mood = find("public", "mood");
+        assert!(mood.visible, "{types:?}");
+        let custom_mood = find(&schema, "mood");
+        assert!(!custom_mood.visible, "off-search_path schema must be flagged: {types:?}");
+        assert!(find(&schema, "Mood").name == "Mood", "mixed-case name must not be folded: {types:?}");
+        let order = find("public", "order");
+        assert!(order.visible, "{types:?}");
     }
 
     #[tokio::test]
@@ -15074,6 +15204,20 @@ mod tests {
         assert!(!POSTGRES_COLUMNS_SQL.contains("information_schema.columns"));
         assert!(POSTGRES_COLUMNS_SQL.contains("pg_enum"));
         assert!(POSTGRES_COLUMNS_SQL.contains("AS enum_values"));
+    }
+
+    #[test]
+    fn postgres_relation_case_insensitive_lookup_only_returns_an_unambiguous_match() {
+        // Upper-folding engines (TDSQL-PG / OpenTenBase) store `T_DF_BATCH` while a
+        // stock-PostgreSQL folding turns the query's reference into `t_df_batch`
+        // (#14330). The recovery lookup must never pick between `Foo` and `foo`.
+        let sql = postgres_relation_case_insensitive_sql();
+
+        assert!(sql.contains("lower(c.relname) = lower($2)"), "{sql}");
+        assert!(sql.contains("AND 1 = (SELECT count(*)"), "{sql}");
+        assert!(sql.contains("n2.nspname = n.nspname"), "{sql}");
+        assert!(sql.contains("pg_table_is_visible(c.oid)"), "{sql}");
+        assert!(sql.contains("c.relkind IN ('r','p','f','v','m')"), "{sql}");
     }
 
     #[test]
@@ -17876,6 +18020,109 @@ mod tests {
         );
         let other_schema = format!("CREATE OR REPLACE PROCEDURE other.p1{body}");
         assert_eq!(strip_routine_schema_qualifier(&other_schema, "cux"), other_schema);
+    }
+
+    #[test]
+    fn pg_error_to_string_preserves_underlying_sources_when_as_db_error_is_none() {
+        // The `port=invalid` config error chain is: "invalid connection
+        // string" caused by "invalid value for option `port`" — this
+        // tokio-postgres version does not expose the integer parse error as
+        // a deeper source, so assert the chain we actually get, joined.
+        let err = tokio_postgres::Config::from_str("port=invalid").unwrap_err();
+        let formatted = pg_error_to_string(err);
+        assert_eq!(
+            formatted, "invalid connection string: invalid value for option `port`",
+            "formatted error should chain all sources: {formatted}"
+        );
+
+        let err2 = tokio_postgres::Config::from_str("port=invalid").unwrap_err();
+        let plain = pg_error_to_string_plain(err2);
+        assert_eq!(
+            plain, "invalid connection string: invalid value for option `port`",
+            "plain formatted error should chain all sources: {plain}"
+        );
+    }
+
+    #[test]
+    fn error_with_sources_to_string_deduplicates_and_chains_all_levels() {
+        #[derive(Debug)]
+        struct TestCustomError {
+            msg: &'static str,
+            source: Option<Box<dyn std::error::Error + 'static>>,
+        }
+        impl std::fmt::Display for TestCustomError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.msg)
+            }
+        }
+        impl std::error::Error for TestCustomError {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.source.as_deref()
+            }
+        }
+
+        let inner = TestCustomError { msg: "`V` field contained an invalid value", source: None };
+        let middle = TestCustomError { msg: "error parsing response from server", source: Some(Box::new(inner)) };
+        let outer = TestCustomError { msg: "error parsing response from server", source: Some(Box::new(middle)) };
+
+        assert_eq!(
+            error_with_sources_to_string(&outer),
+            "error parsing response from server: `V` field contained an invalid value"
+        );
+    }
+
+    #[tokio::test]
+    async fn pg_error_to_string_surfaces_server_error_even_with_non_standard_v_severity() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // NoTls skips the SSLRequest handshake, so the first message is
+            // the StartupMessage itself: read its length, then its body.
+            // (Reading an 8-byte SSLRequest first and replying 'N' hangs:
+            // the client is waiting for a framed message, not a bare byte.)
+            let mut len_bytes = [0u8; 4];
+            socket.read_exact(&mut len_bytes).await.unwrap();
+            let len = u32::from_be_bytes(len_bytes) as usize;
+            let mut startup_body = vec![0u8; len - 4];
+            socket.read_exact(&mut startup_body).await.unwrap();
+
+            // Send ErrorResponse message with invalid 'V' field
+            // 'E' + length (4 bytes) + fields + '\0'
+            let mut payload = Vec::new();
+            payload.push(b'S');
+            payload.extend_from_slice(b"ERROR\0");
+            payload.push(b'V');
+            payload.extend_from_slice(b"NON_STANDARD_SEVERITY\0");
+            payload.push(b'C');
+            payload.extend_from_slice(b"42P01\0");
+            payload.push(b'M');
+            payload.extend_from_slice(b"relation does not exist\0");
+            payload.push(0); // delimiter
+
+            let total_len = (payload.len() + 4) as u32;
+            let mut msg = Vec::new();
+            msg.push(b'E');
+            msg.extend_from_slice(&total_len.to_be_bytes());
+            msg.extend_from_slice(&payload);
+
+            socket.write_all(&msg).await.unwrap();
+        });
+
+        let config = format!("host=127.0.0.1 port={port} user=postgres dbname=test connect_timeout=3");
+        let client_err = match tokio_postgres::connect(&config, tokio_postgres::NoTls).await {
+            Ok(_) => panic!("connection must fail"),
+            Err(err) => err,
+        };
+
+        let formatted = pg_error_to_string(client_err);
+        assert_eq!(
+            formatted, "ERROR: relation does not exist",
+            "formatted error should surface the actual server message: {formatted}"
+        );
+
+        server.await.unwrap();
     }
 }
 

@@ -178,7 +178,7 @@ const canDropUser = computed(() => !!provider.value?.dropUserSql);
 const canGrantPrivileges = computed(() => !!actions.value?.grantPrivilegesSql);
 const canRevokePrivileges = computed(() => !!actions.value?.revokePrivilegesSql);
 const canEditPrivileges = computed(() => canGrantPrivileges.value || canRevokePrivileges.value);
-const supportsCreateTableGrants = computed(() => !!provider.value?.supportsTableGrantsOnCreate);
+const supportsEditTableGrants = computed(() => provider.value?.supportsTableGrantsOnEdit ?? !!provider.value?.supportsTableGrantsOnCreate);
 const selectedUser = computed(() => users.value.find((user) => userKey(user) === selectedUserKey.value));
 const filteredUsers = computed(() => {
   const query = search.value.trim().toLowerCase();
@@ -199,7 +199,7 @@ const selectedDetail = computed(() => {
 const grantsSqlText = computed(() => grants.value.join("\n") || t("userAdmin.noGrants"));
 const highlightedGrantsSql = computed(() => highlight(grantsSqlText.value));
 const createDatabaseAuthorizationsValid = computed(() => authorizationSelectionsValid(createDatabaseAuthorizations.value));
-const usePrivilegeScopeEditor = computed(() => canEditPrivileges.value && (isOracle.value ? privilegeScope.value === "table" : supportsCreateTableGrants.value && privilegeScope.value !== "role" && (provider.value?.authorizationModel !== "postgres" || privilegeScope.value === "table")));
+const usePrivilegeScopeEditor = computed(() => canEditPrivileges.value && (isOracle.value ? privilegeScope.value === "table" : supportsEditTableGrants.value && privilegeScope.value !== "role" && (provider.value?.authorizationModel !== "postgres" || privilegeScope.value === "table")));
 const oracleObjectScope = computed(() => {
   if (!isOracle.value) return undefined;
   const connectionId = props.connection.id;

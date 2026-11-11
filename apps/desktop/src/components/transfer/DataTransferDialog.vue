@@ -1934,36 +1934,27 @@ async function saveConfigTask() {
                   {{ t("transfer.objects") }}
                   <span v-if="objectSelectionSummary.total" class="text-muted-foreground/60">({{ objectSelectionSummary.selected }}/{{ objectSelectionSummary.total }})</span>
                 </div>
+                <span v-if="tableFilterSupported && transferContent !== 'structureOnly' && activeTableFilterCount" class="text-xs text-primary">{{ t("transfer.tableFilterSection") }} ({{ activeTableFilterCount }})</span>
               </div>
 
               <div v-if="(!loadingObjects && !sourceConnectionId) || !sourceDatabase" class="text-xs text-muted-foreground py-4 text-center">
                 {{ t("transfer.selectSourceFirst") }}
               </div>
-              <ObjectSelectionTree v-model="treeSelection" :groups="treeGroups" :disabled-groups="treeDisabledGroups" :disabled-hints="treeDisabledHints" :qualifiers="objectQualifiers" v-model:search="objectSearch" :loading="loadingObjects" class="min-h-0 flex-1" />
-              <!-- Per-table SQL filters (MySQL / PostgreSQL sources) -->
-              <div v-if="tableFilterSupported && transferContent !== 'structureOnly' && selectedTableList.length" class="shrink-0 rounded-lg border border-border/60 bg-card/60 p-1.5">
-                <div class="flex items-center justify-between gap-2 px-1 pb-1">
-                  <span class="text-xs font-medium text-muted-foreground">
-                    {{ t("transfer.tableFilterSection") }}
-                    <span v-if="activeTableFilterCount" class="text-primary">({{ activeTableFilterCount }})</span>
-                  </span>
-                  <span class="text-[11px] text-muted-foreground/70">{{ t("transfer.tableFilterSectionHint") }}</span>
-                </div>
-                <div class="max-h-24 space-y-0.5 overflow-auto">
-                  <div v-for="name in selectedTableList" :key="name" class="flex items-center gap-1.5 rounded px-1.5 py-1 text-xs hover:bg-muted/60">
-                    <span class="min-w-0 flex-1 truncate" :title="name">{{ name }}</span>
-                    <span v-if="tableFilters[name]" class="max-w-[45%] truncate rounded bg-primary/10 px-1 text-[11px] text-primary" :title="tableFilters[name]">
-                      {{ tableFilters[name] }}
+              <ObjectSelectionTree v-model="treeSelection" :groups="treeGroups" :disabled-groups="treeDisabledGroups" :disabled-hints="treeDisabledHints" :qualifiers="objectQualifiers" v-model:search="objectSearch" :loading="loadingObjects" class="min-h-0 flex-1">
+                <template #item-actions="{ kind, item, selected, disabled }">
+                  <div v-if="kind === 'TABLE' && selected && tableFilterSupported && transferContent !== 'structureOnly'" class="flex shrink-0 items-center gap-1 pr-1">
+                    <span v-if="tableFilters[item]" class="max-w-40 truncate rounded bg-primary/10 px-1 text-[11px] text-primary" :title="tableFilters[item]">
+                      {{ tableFilters[item] }}
                     </span>
-                    <Button variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-[11px]" @click="openTableFilter(name)">
-                      {{ tableFilters[name] ? t("transfer.tableFilterEdit") : t("transfer.tableFilterSet") }}
+                    <Button variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-[11px]" :disabled="disabled" @click="openTableFilter(item)">
+                      {{ tableFilters[item] ? t("transfer.tableFilterEdit") : t("transfer.tableFilterSet") }}
                     </Button>
-                    <Button v-if="tableFilters[name]" variant="ghost" size="icon" class="h-6 w-6 shrink-0" :title="t('transfer.tableFilterClear')" :aria-label="t('transfer.tableFilterClear')" @click="clearTableFilter(name)">
+                    <Button v-if="tableFilters[item]" variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="disabled" :title="t('transfer.tableFilterClear')" :aria-label="t('transfer.tableFilterClear')" @click="clearTableFilter(item)">
                       <X class="h-3 w-3" />
                     </Button>
                   </div>
-                </div>
-              </div>
+                </template>
+              </ObjectSelectionTree>
               <div v-if="showCrossFamilyViewHint" class="mt-1.5 rounded-md border border-amber-300/40 bg-amber-50 px-2 py-1.5 text-xs text-amber-700">
                 {{ t("transfer.crossFamilyViewHint") }}
               </div>

@@ -2002,8 +2002,8 @@ fn split_sql_batch_ranges(sql: &str, profile: SqlDialectProfile) -> Vec<SqlState
 }
 
 fn push_batch_range(ranges: &mut Vec<SqlStatementRange>, sql: &str, start: usize, end: usize) {
-    let Some((relative_start, relative_end)) = executable_sql_bounds(&sql[start..end], SqlParsingOptions::default())
-    else {
+    let options = SqlParsingOptions::for_database_type(DatabaseType::SqlServer);
+    let Some((relative_start, relative_end)) = executable_sql_bounds(&sql[start..end], options) else {
         return;
     };
     let statement_start = start + relative_start;
@@ -2326,7 +2326,9 @@ fn starts_with_sqlserver_control_flow_batch(sql: &str) -> bool {
 }
 
 pub fn starts_with_sqlserver_module_ddl(sql: &str) -> bool {
-    let tokens = first_sql_tokens(sql, 4);
+    let executable =
+        leading_executable_sql_with_options(sql, SqlParsingOptions::for_database_type(DatabaseType::SqlServer));
+    let tokens = first_sql_tokens(executable, 4);
     if tokens.len() >= 4
         && tokens[0].eq_ignore_ascii_case("CREATE")
         && tokens[1].eq_ignore_ascii_case("OR")
@@ -4817,11 +4819,15 @@ fn executable_sql_bounds(statement: &str, options: SqlParsingOptions) -> Option<
         return None;
     }
     let executable_start = trimmed.len() - executable.len();
-    let start = if options.profile.preserves_tdsql_leading_directives {
-        crate::tdsql_mysql::leading_directive_start(trimmed, executable_start).unwrap_or(executable_start)
-    } else {
-        executable_start
-    };
+    let start =
+        if options.profile.keeps_sqlserver_module_batch_at_cursor && starts_with_sqlserver_module_ddl(executable) {
+            // SQL Server stores a module's leading comments as part of its definition.
+            trimmed.len() - trimmed.trim_start().len()
+        } else if options.profile.preserves_tdsql_leading_directives {
+            crate::tdsql_mysql::leading_directive_start(trimmed, executable_start).unwrap_or(executable_start)
+        } else {
+            executable_start
+        };
     Some((start, trimmed_end))
 }
 
@@ -6178,6 +6184,38 @@ mod tests {
             super::split_sql_batches("SELECT 1;\n/*\nGO\n*/\nSELECT 2;\nGO\nSELECT 3;"),
             vec!["SELECT 1;\n/*\nGO\n*/\nSELECT 2;", "SELECT 3;"]
         );
+    }
+
+    #[test]
+    fn sqlserver_batches_preserve_module_header_comments() {
+        for header in [
+            "-- 存储过程名 : usp_GetUserById\n-- 作者 : 张三",
+            "/* 根据用户ID查询用户信息 */",
+            "/* 说明 /* 内部说明 */\nGO\n保留完整注释 */",
+        ] {
+            for operation in ["CREATE PROCEDURE", "ALTER PROC", "CREATE OR ALTER PROCEDURE"] {
+                let procedure = format!(
+                    "{header}\n{operation} dbo.usp_GetUserById @UserId INT AS\nBEGIN\n    SET NOCOUNT ON;\n    -- 查询用户\n    SELECT UserId FROM dbo.Users WHERE UserId = @UserId;\nEND;"
+                );
+                let sql = format!("SELECT 0;\nGO\n\n{procedure}\nGO\nSELECT 2;");
+
+                assert_eq!(super::split_sql_batches(&sql), vec!["SELECT 0;", &procedure, "SELECT 2;"]);
+                for marker in [header, operation, "WHERE UserId"] {
+                    let cursor = sql[..sql.find(marker).unwrap()].encode_utf16().count();
+                    assert_eq!(
+                        super::find_statement_at_cursor_for_database(&sql, cursor, DatabaseType::SqlServer),
+                        procedure,
+                        "{operation}: cursor on {marker}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sqlserver_batch_headers_keep_comment_only_batches_non_executable() {
+        let sql = "-- CREATE PROCEDURE fake AS SELECT 0;\nGO\n/* 说明 /* CREATE PROC fake */ 仍是注释 */\nGO\n-- 普通查询说明\nSELECT 1;";
+        assert_eq!(super::split_sql_batches(sql), vec!["SELECT 1;"]);
     }
 
     // --- DELIMITER support ---

@@ -45,24 +45,84 @@ class SapHanaAgentTest {
     }
 
     @Test
+    void getObjectSourceReadsViewDefinitionFromSystemCatalog() {
+        List<String> calls = new ArrayList<>();
+        String definition = "SELECT \"ID\", \"STATUS\" FROM \"APP\".\"ORDERS\" WHERE \"ACTIVE\" = TRUE";
+        SapHanaAgent agent = agentWithDefinition(calls, definition, true);
+
+        ObjectSource source = agent.getObjectSource("APP", "ACTIVE_ORDERS", " view ");
+
+        Assertions.assertEquals("ACTIVE_ORDERS", source.getName());
+        Assertions.assertEquals("VIEW", source.getObject_type());
+        Assertions.assertEquals("APP", source.getSchema());
+        Assertions.assertEquals(definition, source.getSource());
+        Assertions.assertTrue(source.isEditable());
+        Assertions.assertEquals(
+            List.of(
+                "sql:SELECT DEFINITION FROM SYS.VIEWS WHERE SCHEMA_NAME = ? AND VIEW_NAME = ?",
+                "param:1=APP",
+                "param:2=ACTIVE_ORDERS"
+            ),
+            calls
+        );
+    }
+
+    @Test
+    void getObjectSourceResolvesBlankViewSchemaAgainstCurrentSchema() {
+        List<String> calls = new ArrayList<>();
+        String definition = "SELECT \"ID\" FROM \"ORDERS\"";
+        SapHanaAgent agent = agentWithRowValues(calls, new String[]{"APP", definition}, true);
+
+        ObjectSource source = agent.getObjectSource("  ", "ACTIVE_ORDERS", "VIEW");
+
+        Assertions.assertEquals("ACTIVE_ORDERS", source.getName());
+        Assertions.assertEquals("VIEW", source.getObject_type());
+        Assertions.assertEquals("APP", source.getSchema());
+        Assertions.assertEquals(definition, source.getSource());
+        Assertions.assertTrue(source.isEditable());
+        Assertions.assertEquals(
+            List.of(
+                "sql:SELECT SCHEMA_NAME, DEFINITION FROM SYS.VIEWS WHERE SCHEMA_NAME = CURRENT_SCHEMA AND VIEW_NAME = ?",
+                "param:1=ACTIVE_ORDERS"
+            ),
+            calls
+        );
+    }
+
+    @Test
+    void getObjectSourceMarksModeledOrHiddenViewReadOnlyWhenDefinitionIsNull() {
+        SapHanaAgent agent = agentWithDefinition(new ArrayList<>(), null, true);
+
+        ObjectSource source = agent.getObjectSource("_SYS_BIC", "pkg/CALC_ORDERS", "VIEW");
+
+        Assertions.assertEquals("", source.getSource());
+        Assertions.assertFalse(source.isEditable());
+    }
+
+    @Test
     void getObjectSourceKeepsOtherObjectTypesUnsupported() {
         SapHanaAgent agent = new SapHanaAgent();
 
         UnsupportedOperationException error = Assertions.assertThrows(
             UnsupportedOperationException.class,
-            () -> agent.getObjectSource("APP", "ACTIVE_ORDERS", "VIEW")
+            () -> agent.getObjectSource("APP", "ORDERS", "TABLE")
         );
 
         Assertions.assertEquals("Object source is not supported", error.getMessage());
     }
 
     private static SapHanaAgent agentWithDefinition(List<String> calls, String definition, boolean hasRow) {
+        return agentWithRowValues(calls, new String[]{definition}, hasRow);
+    }
+
+    private static SapHanaAgent agentWithRowValues(List<String> calls, String[] rowValues, boolean hasRow) {
         ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
             if ("next".equals(method.getName())) {
                 return hasRow;
             }
             if ("getString".equals(method.getName())) {
-                return definition;
+                int index = (Integer) args[0];
+                return index >= 1 && index <= rowValues.length ? rowValues[index - 1] : null;
             }
             return defaultValue(method.getReturnType());
         });

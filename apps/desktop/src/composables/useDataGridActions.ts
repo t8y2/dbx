@@ -544,6 +544,10 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         pendingDataReloads.delete(tab);
       }
     }
+    const refreshOptions = {
+      ...refreshActiveResultRunOptions(tab),
+      ...(tab.mode === "query" && (intent === "refresh" || intent === "auto-refresh") ? { publicationOrigin: "refresh" as const } : {}),
+    };
     if ((intent === "refresh" || intent === "auto-refresh" || intent === "row-identifier-change") && tab.mode === "query" && (tab.results?.length ?? 0) > 1) {
       const resultGroupSql = tab.resultBaseSql || tab.lastExecutedSql || tab.sql;
       if (!resultGroupSql.trim()) return;
@@ -554,7 +558,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       tab.resultSortedSql = undefined;
       await queryStore.executeTabSql(tab.id, resultGroupSql, {
         ...activeQueryTargetOptions(tab),
-        ...refreshActiveResultRunOptions(tab),
+        ...refreshOptions,
         resultBaseSql: resultGroupSql,
         resultSortedSql: undefined,
         preserveResultDuringExecution: true,
@@ -567,7 +571,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const rebuildHiddenKeySort = !!tab.result?.hidden_column_indexes?.length && tab.resultSortMode === "database" && !!tab.resultSortDirection && !!tab.resultSortColumn && !!sortColumns;
       await queryStore.executeTabSql(tab.id, rebuildHiddenKeySort ? (tab.resultBaseSql ?? tab.sql) : tab.resultSortedSql, {
         ...activeQueryTargetOptions(tab),
-        ...refreshActiveResultRunOptions(tab),
+        ...refreshOptions,
         resultBaseSql: tab.resultBaseSql ?? tab.sql,
         ...(rebuildHiddenKeySort
           ? {
@@ -588,7 +592,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const hasMultiResults = tab.mode === "query" && (tab.results?.length ?? 0) > 1;
       await queryStore.executeTabSql(tab.id, sql, {
         ...(tab.mode === "query" ? activeQueryTargetOptions(tab) : {}),
-        ...refreshActiveResultRunOptions(tab),
+        ...refreshOptions,
         resultBaseSql: sql,
         resultSortedSql: undefined,
         preserveResultDuringExecution: true,

@@ -860,6 +860,27 @@ async fn list_schema_infos_once(
     Ok(schemas.into_iter().map(|name| db::SchemaInfo { name, comment: None }).collect())
 }
 
+/// Renders one `list_data_types` row for the structure editor's dropdown:
+/// search_path-visible simple lowercase names stay bare so they remain
+/// interchangeable with the static list; everything else — off-search_path
+/// schemas, mixed case, lowercase reserved words like a type literally named
+/// `order` — comes back schema-qualified with the quoting the identifier
+/// requires, so generated `CREATE TABLE` / `ALTER TABLE ... TYPE` resolves
+/// (#14525 review follow-up).
+fn render_postgres_type_name(schema: &str, name: &str, visible: bool) -> String {
+    if visible
+        && crate::sql_dialect::is_simple_lower_identifier(name)
+        && !crate::sql_dialect::is_postgres_reserved_identifier(name)
+    {
+        return name.to_string();
+    }
+    format!(
+        "{}.{}",
+        crate::sql_dialect::quote_gaussdb_jdbc_identifier(schema, "\""),
+        crate::sql_dialect::quote_gaussdb_jdbc_identifier(name, "\"")
+    )
+}
+
 pub async fn list_data_types_core(
     state: &AppState,
     connection_id: &str,
@@ -889,7 +910,14 @@ pub async fn list_data_types_core(
                 .map(deduplicate_data_type_names);
         }
         if let Some(PoolKind::Postgres(pool)) = pool_handle.as_ref() {
-            return db::postgres::list_data_types(pool).await.map(deduplicate_data_type_names);
+            let entries = db::postgres::list_data_types(pool).await?;
+            return Ok(entries
+                .into_iter()
+                .map(|entry| render_postgres_type_name(&entry.schema, &entry.name, entry.visible))
+                .filter(|name| !name.is_empty())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .collect());
         }
         Ok(Vec::new())
     })
@@ -3619,8 +3647,8 @@ mod tests {
         gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config,
         is_mysql_external_driver_config, is_oracle_external_driver_config, is_retryable_metadata_error,
         is_sqlserver_external_driver_config, metadata_error_action, metadata_name_or_comment_matches,
-        mysql_auto_increment_from_query_result, mysql_auto_increment_metadata_sql, mysql_database_list_timeout,
-        mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
+        mysql_auto_increment_from_query_result, mysql_auto_increment_metadata_sql, mysql_browser_interactive_budget,
+        mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
         mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
         mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
         oracle_columns_sql, oracle_columns_sql_for_resolved_owner, oracle_completion_synonyms_sql,
@@ -5160,6 +5188,37 @@ done
     }
 
     #[test]
+    fn mysql_browser_interactive_budget_follows_session_query_timeout() {
+        let mut config = test_connection_config(DatabaseType::Mysql);
+
+        // Configured query timeout: enumeration follows it (plus the protocol margin)
+        // instead of the driver's historical 5s constant.
+        config.query_timeout_secs = 120;
+        assert_eq!(mysql_browser_interactive_budget(Some(&config)), Duration::from_secs(125));
+
+        // A short query timeout cannot shrink enumeration below the browsing floor:
+        // `mysql_browser_explicit_budget` clamps to 15s and the interactive floor keeps
+        // at least the historical 5s, so a small setting never strangles browsing.
+        for short in [1, 5, 9] {
+            config.query_timeout_secs = short;
+            let budget = mysql_browser_interactive_budget(Some(&config));
+            assert_eq!(budget, Duration::from_secs(15), "query_timeout_secs={short} must not shrink to the raw value");
+            assert!(budget >= Duration::from_secs(5), "query_timeout_secs={short} must keep the browsing floor");
+        }
+
+        // UI "no limit" (0) stays bounded instead of reverting to the 5s constant.
+        config.query_timeout_secs = 0;
+        assert_eq!(mysql_browser_interactive_budget(Some(&config)), Duration::from_secs(60));
+
+        // Default 60s session timeout: a comfortable browse budget, still bounded.
+        config.query_timeout_secs = crate::models::connection::default_query_timeout_secs();
+        assert_eq!(mysql_browser_interactive_budget(Some(&config)), Duration::from_secs(65));
+
+        // Unknown config (pool only) keeps the historical driver default.
+        assert_eq!(mysql_browser_interactive_budget(None), Duration::from_secs(5));
+    }
+
+    #[test]
     fn metadata_retry_excludes_pool_saturation_from_reconnects() {
         assert!(!is_retryable_metadata_error("Pool not found"));
         assert!(!is_retryable_metadata_error(crate::query::METADATA_POOL_BUSY_ERROR));
@@ -5826,6 +5885,20 @@ for line in sys.stdin:
         });
         assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::ShowFullTables);
         assert!(super::is_mycat_config(&config));
+    }
+
+    #[test]
+    fn render_postgres_type_name_keeps_reserved_words_quoted() {
+        // #14536 review follow-up: a type literally named `order` must not be
+        // emitted bare even though it is a simple lowercase identifier.
+        assert_eq!(super::render_postgres_type_name("public", "hstore", true), "hstore");
+        assert_eq!(super::render_postgres_type_name("public", "mood", true), "mood");
+        // %I/quote semantics: simple lowercase names stay unquoted — schema
+        // qualification alone already bypasses the search path.
+        assert_eq!(super::render_postgres_type_name("dbx_custom", "mood", false), "dbx_custom.mood");
+        assert_eq!(super::render_postgres_type_name("dbx_custom", "Mood", false), "dbx_custom.\"Mood\"");
+        assert_eq!(super::render_postgres_type_name("public", "order", true), "public.\"order\"");
+        assert!(!crate::sql_dialect::is_simple_lower_identifier("with space"));
     }
 
     #[test]
@@ -7944,6 +8017,22 @@ fn mysql_browser_explicit_budget(config: &ConnectionConfig) -> Duration {
     }
 }
 
+/// Budget for interactive MySQL browser enumeration (`lightweight` listing and the
+/// object list it feeds).
+///
+/// The driver's historical `BROWSER_METADATA_TIMEOUT` (5s) is a floor, not a ceiling:
+/// enumeration follows the session query timeout, the only timeout users can already
+/// tune for metadata-heavy catalogs, and stays bounded when the server timeout is
+/// disabled (0) instead of falling back to the hard-coded 5s. With default/unset
+/// settings this resolves to the historical 5s, so fast links keep the snappy
+/// behavior and #14139's budget contract is unchanged.
+fn mysql_browser_interactive_budget(config: Option<&ConnectionConfig>) -> Duration {
+    let Some(config) = config else {
+        return Duration::from_secs(5);
+    };
+    mysql_browser_explicit_budget(config).max(Duration::from_secs(5))
+}
+
 fn is_native_mysql_browser_config(config: &ConnectionConfig) -> bool {
     config.db_type == DatabaseType::Mysql
         && config
@@ -7978,11 +8067,9 @@ pub async fn list_objects_core_with_loading_options(
             clone_metadata_pool(state, &pool_key).await,
             Some(PoolKind::Mysql(_, MysqlMode::Normal | MysqlMode::Bare))
         ) {
-            let budget = if lightweight {
-                Duration::from_secs(5)
-            } else {
-                mysql_browser_explicit_budget(config.as_ref().expect("native mysql config verified above"))
-            };
+            // `lightweight` selects the cheaper query shape, not a separate wall clock:
+            // both paths follow the session query timeout.
+            let budget = mysql_browser_interactive_budget(config.as_ref());
             return retry_metadata_connection(state, connection_id, Some(database), || async {
                 let pool_key =
                     state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;

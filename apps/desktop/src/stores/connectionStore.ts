@@ -4153,7 +4153,19 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   /**
-   * Schemas a table-search index has to walk so every entry can be attributed.
+   * One schema a table-search index has to walk, split into the schema to query
+   * with and the schema to attribute rows to. The two are the same everywhere
+   * except the database-name fallback of a schema-less node: flat engines
+   * (MySQL-style) still query with the database name but their rows must stay
+   * unattributed, because the live tree resolves no node schema for them.
+   */
+  interface SidebarTableSearchIndexSchemaScope {
+    querySchema: string;
+    attribution?: string;
+  }
+
+  /**
+   * Schema scopes a table-search index has to walk so every entry can be attributed.
    *
    * A schema-scoped node knows its schema. A schema-less node can only attribute
    * rows for schemas it has already listed, so it uses its loaded schema children
@@ -4161,9 +4173,9 @@ export const useConnectionStore = defineStore("connection", () => {
    * schema and a database are the same thing (MySQL/SQLite). `parent_schema` is
    * never an option: drivers use it for the partitioned parent table (#14316).
    */
-  function sidebarTableSearchIndexSchemas(parent: TreeNode): string[] {
+  function sidebarTableSearchIndexSchemas(parent: TreeNode): SidebarTableSearchIndexSchemaScope[] {
     const scopeSchema = parent.schema?.trim();
-    if (scopeSchema) return [scopeSchema];
+    if (scopeSchema) return [{ querySchema: scopeSchema, attribution: scopeSchema }];
     const loadedSchemas = [
       ...new Set(
         (parent.children ?? [])
@@ -4174,10 +4186,22 @@ export const useConnectionStore = defineStore("connection", () => {
     ];
     // Hundreds of schemas would turn one index build into hundreds of round
     // trips; stay unattributed there and let the live tree answer instead.
-    if (loadedSchemas.length > 0 && loadedSchemas.length <= SIDEBAR_TABLE_SEARCH_INDEX_MAX_SCHEMA_SCOPES) return loadedSchemas;
-    // No loaded schema to attribute with: fall back to the database name, which is
-    // the schema on drivers where the two are the same thing.
-    return parent.database ? [parent.database] : [];
+    if (loadedSchemas.length > 0 && loadedSchemas.length <= SIDEBAR_TABLE_SEARCH_INDEX_MAX_SCHEMA_SCOPES) return loadedSchemas.map((schema) => ({ querySchema: schema, attribution: schema }));
+    // No loaded schema to query with: the database name is the query schema on
+    // drivers where the two are the same thing.
+    if (!parent.database) return [];
+    // Attribution is gated on the live tree's own resolution: stamp the database
+    // as the owning schema only where connectionObjectTreeNodeSchema also puts it
+    // on the node (the database IS the schema, e.g. SQLite). Flat trees (MySQL)
+    // carry no node schema, so their live table ids have no schema infix; a
+    // stamped index row would build child ids with a `${database}:` infix that
+    // never matches a live child, and the global-search merge — which dedupes by
+    // node id — appended every indexed table next to its live copy.
+    // Dropping only the attribution keeps the query intact, and `schema.table`
+    // queries still match through the parent node's own database in
+    // filterLocallySearchedTables' scopeMatches fallback.
+    const databaseIsSchema = !!connectionObjectTreeNodeSchema(getConfig(parent.connectionId || ""), parent.database, undefined);
+    return [{ querySchema: parent.database, ...(databaseIsSchema ? { attribution: parent.database } : {}) }];
   }
 
   async function buildSidebarTableSearchIndex(parentNodeId: string, identity?: SidebarRegexScopeIdentity): Promise<TableInfo[] | null> {
@@ -4214,19 +4238,21 @@ export const useConnectionStore = defineStore("connection", () => {
     // A table row does not say which schema owns it (the backend answers for the
     // schema that was queried), so attribute every row while we still know it.
     // `parent_schema` cannot stand in: drivers use it for the partitioned parent.
+    // Attribution may be absent per scope (flat engines stay unattributed) —
+    // see sidebarTableSearchIndexSchemas.
     const indexSchemas = sidebarTableSearchIndexSchemas(parent);
-    for (const entrySchema of indexSchemas) {
-      const querySchema = connectionObjectTreeQuerySchema(config, parent.database, entrySchema || undefined);
+    for (const { querySchema: scopeQuerySchema, attribution } of indexSchemas) {
+      const querySchema = connectionObjectTreeQuerySchema(config, parent.database, scopeQuerySchema || undefined);
       for (let offset = 0; ; offset += pageSize) {
         if (!sidebarTableSearchIndexGenerationIsCurrent(connectionId, cacheKey, connectionGeneration, scopeGeneration)) return [];
         const page = await listTablesWithOptionalTableNameFilter(connectionId, parent.database, querySchema, undefined, pageSize, offset, objectTypes, parent.catalog, tableNameFilter);
-        entries.push(...page.map((row) => (entrySchema ? { ...row, schema: entrySchema } : row)));
+        entries.push(...page.map((row) => (attribution ? { ...row, schema: attribution } : row)));
         if (page.length < pageSize) break;
       }
     }
     const deduped = [...new Map(entries.map((entry) => [`${entry.schema ?? ""}\0${entry.table_type}\0${entry.name}\0${entry.parent_schema ?? ""}\0${entry.parent_name ?? ""}`, entry])).values()];
     const tableSearchIndex = {
-      version: 3 as const,
+      version: 4 as const,
       complete: true as const,
       indexedAt: new Date().toISOString(),
       entries: deduped.map((entry) => ({

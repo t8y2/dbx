@@ -4656,7 +4656,7 @@ fn list_tables_objects_sql(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> String {
-    list_tables_objects_sql_with_loading(database, object_types, limit, offset, false)
+    list_tables_objects_sql_with_loading(database, object_types, limit, offset, false, false)
 }
 
 fn list_tables_objects_sql_with_loading(
@@ -4665,11 +4665,14 @@ fn list_tables_objects_sql_with_loading(
     limit: Option<usize>,
     offset: Option<usize>,
     lightweight: bool,
+    comment_in_lightweight: bool,
 ) -> String {
-    let details = if lightweight {
-        "NULL AS object_comment, NULL AS created_at, NULL AS updated_at"
-    } else {
-        "TABLE_COMMENT AS object_comment, CREATE_TIME AS created_at, UPDATE_TIME AS updated_at"
+    let details = match (lightweight, comment_in_lightweight) {
+        // MySQL 8+ resolves TABLE_COMMENT from the data dictionary, so the light
+        // browser load keeps comments while still skipping the heavy stat columns (#14382).
+        (true, true) => "TABLE_COMMENT AS object_comment, NULL AS created_at, NULL AS updated_at",
+        (true, false) => "NULL AS object_comment, NULL AS created_at, NULL AS updated_at",
+        (false, _) => "TABLE_COMMENT AS object_comment, CREATE_TIME AS created_at, UPDATE_TIME AS updated_at",
     };
     let wants_tables = requested_object_type(object_types, "TABLE");
     let wants_views = requested_object_type(object_types, "VIEW");
@@ -4974,6 +4977,7 @@ pub async fn list_objects(
 }
 
 /// Explicit browser mode; existing metadata consumers retain the full legacy API.
+#[allow(clippy::too_many_arguments)]
 pub async fn list_objects_for_browser(
     pool: &MySqlPool,
     database: &str,
@@ -4981,13 +4985,21 @@ pub async fn list_objects_for_browser(
     limit: Option<usize>,
     offset: Option<usize>,
     lightweight: bool,
+    comment_in_lightweight: bool,
     budget: Duration,
 ) -> Result<PagedObjectList, String> {
     let paging_applied = limit.is_some() && object_query_supports_paging(object_types);
     let (query_limit, query_offset) = if paging_applied { (limit, offset) } else { (None, None) };
     let mut objects = Vec::new();
     if wants_table_objects(object_types) {
-        let sql = list_tables_objects_sql_with_loading(database, object_types, query_limit, query_offset, lightweight);
+        let sql = list_tables_objects_sql_with_loading(
+            database,
+            object_types,
+            query_limit,
+            query_offset,
+            lightweight,
+            comment_in_lightweight,
+        );
         match browser_metadata_rows_with_budget(pool, &sql, false, budget).await {
             Ok(rows) if !rows.is_empty() => objects.extend(rows.iter().map(|row| row_to_object(row, database))),
             Err(error) if error.contains("timed out") => return Err(error),
@@ -9232,7 +9244,7 @@ mod tests {
     #[test]
     fn mysql_browser_queries_separate_names_from_details_and_capacity() {
         let types = vec!["VIEW".to_string()];
-        let light = list_tables_objects_sql_with_loading("app's", Some(&types), Some(7), Some(14), true);
+        let light = list_tables_objects_sql_with_loading("app's", Some(&types), Some(7), Some(14), true, false);
         for heavy in ["TABLE_COMMENT", "CREATE_TIME", "UPDATE_TIME", "DATA_LENGTH", "INDEX_LENGTH"] {
             assert!(!light.contains(heavy), "unexpected heavy field: {heavy}");
         }
@@ -9250,6 +9262,17 @@ mod tests {
         assert!(!capacity.contains("JOIN"));
     }
 
+    #[test]
+    fn mysql_browser_lightweight_keeps_dictionary_comments_on_mysql8() {
+        let types = vec!["TABLE".to_string(), "VIEW".to_string()];
+        let light = list_tables_objects_sql_with_loading("app's", Some(&types), Some(7), Some(14), true, true);
+        assert!(light.contains("TABLE_COMMENT AS object_comment"), "comment stays in the light list: {light}");
+        assert!(light.contains("NULL AS created_at, NULL AS updated_at"), "stat columns stay lazy: {light}");
+        for heavy in ["CREATE_TIME", "UPDATE_TIME", "DATA_LENGTH", "INDEX_LENGTH"] {
+            assert!(!light.contains(heavy), "unexpected heavy field: {heavy}");
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires isolated fixture via DBX_LIVE_MYSQL_METADATA_URL"]
     async fn live_mysql_browser_metadata_loading_and_cancellation() {
@@ -9261,7 +9284,7 @@ mod tests {
         let types = vec!["TABLE".to_string(), "VIEW".to_string()];
         let start = Instant::now();
         let light =
-            list_objects_for_browser(&pool, &database, Some(&types), None, None, true, BROWSER_METADATA_TIMEOUT)
+            list_objects_for_browser(&pool, &database, Some(&types), None, None, true, false, BROWSER_METADATA_TIMEOUT)
                 .await
                 .unwrap();
         eprintln!("light objects={} elapsed_ms={}", light.objects.len(), start.elapsed().as_millis());
@@ -9271,20 +9294,49 @@ mod tests {
             .iter()
             .all(|object| object.comment.is_none() && object.created_at.is_none() && object.updated_at.is_none()));
         let start = Instant::now();
-        let full =
-            list_objects_for_browser(&pool, &database, Some(&types), None, None, false, BROWSER_METADATA_TIMEOUT)
-                .await
-                .unwrap();
+        let full = list_objects_for_browser(
+            &pool,
+            &database,
+            Some(&types),
+            None,
+            None,
+            false,
+            false,
+            BROWSER_METADATA_TIMEOUT,
+        )
+        .await
+        .unwrap();
         eprintln!("full objects={} elapsed_ms={}", full.objects.len(), start.elapsed().as_millis());
         assert_eq!(
             light.objects.iter().map(|object| (&object.name, &object.object_type)).collect::<Vec<_>>(),
             full.objects.iter().map(|object| (&object.name, &object.object_type)).collect::<Vec<_>>()
         );
         assert!(full.objects.iter().any(|object| object.created_at.is_some()));
-        let page =
-            list_objects_for_browser(&pool, &database, Some(&types), Some(7), Some(14), true, BROWSER_METADATA_TIMEOUT)
+        let light_with_comment =
+            list_objects_for_browser(&pool, &database, Some(&types), None, None, true, true, BROWSER_METADATA_TIMEOUT)
                 .await
                 .unwrap();
+        assert_eq!(
+            light_with_comment.objects.iter().map(|object| &object.name).collect::<Vec<_>>(),
+            light.objects.iter().map(|object| &object.name).collect::<Vec<_>>()
+        );
+        assert!(light_with_comment.objects.iter().all(|object| object.created_at.is_none()));
+        assert_eq!(
+            light_with_comment.objects.iter().map(|object| &object.comment).collect::<Vec<_>>(),
+            full.objects.iter().map(|object| &object.comment).collect::<Vec<_>>()
+        );
+        let page = list_objects_for_browser(
+            &pool,
+            &database,
+            Some(&types),
+            Some(7),
+            Some(14),
+            true,
+            false,
+            BROWSER_METADATA_TIMEOUT,
+        )
+        .await
+        .unwrap();
         assert!(page.paging_applied);
         assert_eq!(
             page.objects.iter().map(|object| &object.name).collect::<Vec<_>>(),

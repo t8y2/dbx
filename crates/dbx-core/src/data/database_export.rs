@@ -6434,6 +6434,26 @@ fn build_database_export_object_source_sql(
     schema: &str,
     drop_if_exists: bool,
 ) -> String {
+    // SQL Server 的 GO 批次包裹由 dbx-sql-core 的 build_export_object_source_sql 统一完成
+    // （#14295），这里不能再包一层，否则会输出 `GO\nGO ... GO\nGO`。
+    build_database_export_object_source_sql_unwrapped(
+        database_type,
+        object_type,
+        object_name,
+        source,
+        schema,
+        drop_if_exists,
+    )
+}
+
+fn build_database_export_object_source_sql_unwrapped(
+    database_type: DatabaseType,
+    object_type: &ObjectSourceKind,
+    object_name: &str,
+    source: &str,
+    schema: &str,
+    drop_if_exists: bool,
+) -> String {
     let wrapped_source;
     let source = if matches!(object_type, ObjectSourceKind::View | ObjectSourceKind::MaterializedView)
         && !source.trim().to_ascii_uppercase().starts_with("CREATE")
@@ -7384,6 +7404,68 @@ mod tests {
                 true
             ),
             "CREATE DEFINER=`root`@`%` VIEW public.v AS SELECT 1;"
+        );
+    }
+
+    #[test]
+    fn sqlserver_export_wraps_batch_scoped_objects_with_go() {
+        let cases = [
+            (ObjectSourceKind::View, "CREATE VIEW [dbo].[v] AS SELECT 1;"),
+            (ObjectSourceKind::Procedure, "CREATE PROCEDURE [dbo].[p] AS SELECT 1;"),
+            (ObjectSourceKind::Function, "CREATE FUNCTION [dbo].[f]() RETURNS INT AS BEGIN RETURN 1 END;"),
+            (ObjectSourceKind::Trigger, "CREATE TRIGGER [dbo].[trg] ON [dbo].[orders] AFTER INSERT AS SELECT 1;"),
+        ];
+        for (kind, source) in cases {
+            let ddl =
+                build_database_export_object_source_sql(DatabaseType::SqlServer, &kind, "obj", source, "dbo", false);
+            assert_eq!(ddl, format!("GO\n{source}\nGO"), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn sqlserver_export_keeps_non_batch_scoped_objects_unchanged() {
+        let source = "CREATE SEQUENCE [dbo].[s] START WITH 1;";
+        let ddl = build_database_export_object_source_sql(
+            DatabaseType::SqlServer,
+            &ObjectSourceKind::Sequence,
+            "s",
+            source,
+            "dbo",
+            false,
+        );
+        assert_eq!(ddl, source);
+    }
+
+    #[test]
+    fn sqlserver_export_batches_place_each_create_first() {
+        let view = build_database_export_object_source_sql(
+            DatabaseType::SqlServer,
+            &ObjectSourceKind::View,
+            "v",
+            "CREATE VIEW [dbo].[v] AS SELECT 1;",
+            "dbo",
+            false,
+        );
+        let trigger = build_database_export_object_source_sql(
+            DatabaseType::SqlServer,
+            &ObjectSourceKind::Trigger,
+            "trg",
+            "CREATE TRIGGER [dbo].[trg] ON [dbo].[orders] AFTER INSERT AS SELECT 1;",
+            "dbo",
+            false,
+        );
+        let script = format!(
+            "CREATE TABLE [dbo].[orders] ([id] int);\nINSERT INTO [dbo].[orders] VALUES (1);\n{view}\n{trigger}\n"
+        );
+
+        let batches = crate::sql::split_sql_batches(&script);
+        assert!(
+            batches.iter().any(|batch| batch.trim_start().starts_with("CREATE VIEW [dbo].[v]")),
+            "view must start its own batch: {batches:?}"
+        );
+        assert!(
+            batches.iter().any(|batch| batch.trim_start().starts_with("CREATE TRIGGER [dbo].[trg]")),
+            "trigger must start its own batch: {batches:?}"
         );
     }
 
@@ -11564,6 +11646,48 @@ mod tests {
         assert_eq!(directory_identity, file_identity);
 
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    // #14007 review: `omit_database_qualifier` only strips the `db.` qualifier
+    // from the generated INSERT statements — it must not touch anything else
+    // (in particular a `USE` preamble written by the export preamble stays
+    // authoritative), and it applies to MySQL-family tables only.
+    #[tokio::test]
+    async fn omit_database_qualifier_strips_only_insert_qualifiers() {
+        let sql = build_database_sql_export(BuildDatabaseSqlExportOptions {
+            database_name: "shop".to_string(),
+            exported_at: None,
+            tables: vec![ExportedTableSql {
+                display_name: "orders".to_string(),
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: Some("`".to_string()),
+                schema: None,
+                table_name: Some("orders".to_string()),
+                qualified_table_name: Some("`shop`.`orders`".to_string()),
+                ddl: Some("CREATE TABLE `orders` (`id` INT);".to_string()),
+                columns: vec!["id".to_string()],
+                column_types: vec![Some("int".to_string())],
+                column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
+                rows: vec![vec![json!(1)]],
+                truncated: false,
+            }],
+            row_limit_per_table: None,
+            insert_batch_size: None,
+            insert_dialect: SqlInsertDialect::Source,
+            connection_id: None,
+            database: Some("shop".to_string()),
+            schema: None,
+            omit_auto_increment: false,
+            omit_database_qualifier: true,
+            preserve_original_language: false,
+        })
+        .unwrap();
+
+        assert!(sql.contains("INSERT INTO `orders`"), "INSERT loses the db. qualifier: {sql}");
+        assert!(!sql.contains("`shop`.`orders`"), "no qualified INSERT target may remain: {sql}");
+        assert!(sql.contains("CREATE TABLE `orders`"), "DDL keeps its original form: {sql}");
     }
 
     #[tokio::test]

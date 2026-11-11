@@ -412,3 +412,19 @@ describe("Oracle formatting regressions #13650", () => {
     expect(await formatSqlText(result, dialect, settings)).toBe(result);
   });
 });
+
+describe("qualified-name boundaries in expanded custom rules #14338", () => {
+  it.each([
+    "COMMENT ON COLUMN test_table.h IS '客户类别(01-个人,02-企业,03-金融,04-客户群)';",
+    "COMMENT ON COLUMN app.test_table.h IS '客户类别(01-个人,02-企业,03-金融,04-客户群)';",
+    `COMMENT ON COLUMN "App"."Test Table"."Column" IS '客户类别(01-个人,02-企业,03-金融,04-客户群)';`,
+    "SELECT DISTINCT t.* FROM test_table t WHERE t.id = 123456789;",
+    "SELECT DISTINCT t.items[1] FROM test_table t WHERE t.id = 123456789;",
+    "SELECT COALESCE(t.items[1], t.items[2]) FROM test_table t;",
+  ])("preserves tokens in %s", async (sql) => {
+    const options = rules({ expressionWidth: 50, collapseShortStatements: false });
+    const result = await formatSqlText(sql, "postgres", options);
+    expect(tokenizeSqlSemantic(result, "postgres").map((token) => token.normalized)).toEqual(tokenizeSqlSemantic(sql, "postgres").map((token) => token.normalized));
+    expect(await formatSqlText(result, "postgres", options)).toBe(result);
+  });
+});

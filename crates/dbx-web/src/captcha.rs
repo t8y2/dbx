@@ -412,6 +412,17 @@ fn adler32(data: &[u8]) -> u32 {
 }
 
 #[cfg(test)]
+impl CaptchaStore {
+    fn code_of(&self, id: &str) -> Option<String> {
+        self.lock().get(id).map(|challenge| challenge.code.clone())
+    }
+
+    fn insert_for_test(&self, id: &str, code: &str, age: Duration) {
+        self.lock().insert(id.to_string(), Challenge { code: code.to_string(), issued: Instant::now() - age });
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -539,16 +550,5 @@ mod tests {
             store.issue();
         }
         assert!(store.lock().len() <= MAX_PENDING, "captcha store must stay bounded");
-    }
-}
-
-#[cfg(test)]
-impl CaptchaStore {
-    fn code_of(&self, id: &str) -> Option<String> {
-        self.lock().get(id).map(|challenge| challenge.code.clone())
-    }
-
-    fn insert_for_test(&self, id: &str, code: &str, age: Duration) {
-        self.lock().insert(id.to_string(), Challenge { code: code.to_string(), issued: Instant::now() - age });
     }
 }

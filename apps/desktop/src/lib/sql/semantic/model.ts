@@ -928,7 +928,15 @@ function nearestPreviousSyntaxWord(tokens: readonly SqlSemanticToken[]): string 
 function isTableListContinuation(tokens: readonly SqlSemanticToken[], position: number): boolean {
   const before = tokens.filter((item) => item.span.end <= position && item.kind !== "comment");
   let commaIndex = before.length - 1;
-  while (commaIndex >= 0 && (tokenIsIdentifier(before[commaIndex]) || before[commaIndex]?.text === ".")) commaIndex -= 1;
+  while (commaIndex >= 0 && (tokenIsIdentifier(before[commaIndex]) || before[commaIndex]?.text === ".")) {
+    // A clause keyword after the comma-separated sources (`FROM a, b WHERE`) closes the
+    // table slot: the cursor sits in the new clause even though a comma precedes it.
+    // Without this guard `WHERE`/`GROUP`… are skipped as identifiers and the implicit
+    // join keeps reporting a table context, so the WHERE clause never offers columns.
+    const token = before[commaIndex];
+    if (token?.kind === "word" && (CLAUSE_BOUNDARIES.has(token.normalized) || token.normalized === "select")) return false;
+    commaIndex -= 1;
+  }
   const comma = before[commaIndex];
   if (comma?.text !== ",") return false;
   const depth = comma.depth;

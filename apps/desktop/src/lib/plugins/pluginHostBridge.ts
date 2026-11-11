@@ -91,6 +91,10 @@ export interface PluginBridgeTheme {
 }
 
 export interface PluginWorkbenchContext {
+  /** Explicit New Query; restore this workspace's state or start with blank input. */
+  newQuery?: boolean;
+  /** Source workspace on the same connection; plugins may inherit its location. */
+  sourceWorkbenchId?: string;
   connectionId?: string;
   database?: string;
   schema?: string;

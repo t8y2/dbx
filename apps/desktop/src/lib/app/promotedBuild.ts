@@ -1,5 +1,6 @@
 import { ref } from "vue";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
 const PROMOTED_BUILD_STORAGE_KEY = "dbx:promoted-build";
 
@@ -18,12 +19,24 @@ function normalizeBuildVersion(version: string): string {
   return version.trim().replace(/^v/i, "");
 }
 
+/**
+ * Hands the promoted build to the backend, which renders the native macOS About
+ * panel. localStorage alone is not enough: that panel is built in Rust before
+ * the webview runs any update check, and macOS WebViews may drop localStorage
+ * between restarts.
+ */
+function publishPromotedBuild(): void {
+  if (!promotedBuild.value || !isTauriRuntime()) return;
+  void import("@tauri-apps/api/core").then(({ invoke }) => invoke("set_promoted_build", { buildVersion: promotedBuild.value })).catch((error) => console.warn("[DBX][promoted-build:sync]", error));
+}
+
 export function recordPromotedBuild(info: { current_version: string; promoted_from?: string | null }): void {
   const promotedFrom = normalizeBuildVersion(info.promoted_from ?? "");
   if (!promotedFrom || promotedFrom !== normalizeBuildVersion(info.current_version)) return;
   if (promotedBuild.value === promotedFrom) return;
   promotedBuild.value = promotedFrom;
   safeLocalStorageSet(PROMOTED_BUILD_STORAGE_KEY, promotedFrom);
+  publishPromotedBuild();
 }
 
 /**
@@ -36,3 +49,7 @@ export function displayAppVersion(buildVersion: string): string {
   if (!build || build !== promotedBuild.value) return buildVersion;
   return build.split(/[-+]/, 1)[0];
 }
+
+// Re-report the remembered build once at startup: the backend may have lost it
+// (fresh data directory, cleared app state) while localStorage still has it.
+if (promotedBuild.value) publishPromotedBuild();

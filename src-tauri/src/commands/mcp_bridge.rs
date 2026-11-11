@@ -1758,9 +1758,9 @@ async fn ensure_mcp_sql_allowed_with_approval(
     ensure_database_in_mcp_scope(&policy, &config.id, database)?;
     if let Some(rule) = policy.connection_policies.iter().find(|rule| rule.connection_id == config.id) {
         if rule.database_scope == McpDatabaseScope::Selected
-            && dbx_core::production_safety::sql_references_disallowed_database(
+            && dbx_core::production_safety::sql_references_disallowed_database_for_connection(
                 sql,
-                &config.db_type,
+                config,
                 database,
                 &rule.allowed_databases,
             )

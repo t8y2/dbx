@@ -59,6 +59,7 @@ vi.mock("@/components/ui/searchable-select", () => ({ SearchableSelect: { render
 vi.mock("@/components/ui/ToolbarOverflowMenu.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/ui/CustomContextMenu.vue", () => ({
   default: defineComponent({
+    inheritAttrs: false,
     setup(_, { slots }) {
       return () => slots.default?.({ onContextMenu: () => undefined, isOpen: false });
     },
@@ -81,6 +82,7 @@ const connection = {
 } as unknown as ConnectionConfig;
 
 const scope = { connectionId: connection.id, database: "pgdemo", schema: "public" };
+const mysqlScope = { connectionId: connection.id, database: "pgdemo", schema: "pgdemo" };
 const cachedRows: ObjectBrowserRow[] = [
   {
     id: "table:orders",
@@ -114,17 +116,17 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function mountBrowser(schema = ref("public"), database = ref("pgdemo")) {
+async function mountBrowser(schema = ref("public"), database = ref("pgdemo"), selectedObjectFilter?: "all") {
   const host = document.createElement("div");
   document.body.append(host);
-  const app = createApp({ setup: () => () => h(ObjectBrowser, { connection, database: database.value, schema: schema.value }) });
+  const app = createApp({ setup: () => () => h(ObjectBrowser, { connection, database: database.value, schema: schema.value, selectedObjectFilter }) });
   mountedApps.push({ app, host });
   app.mount(host);
   return host;
 }
 
-function primeRowsCache(cachedAt: number) {
-  cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(scope), cachedRows, { cachedAt });
+function primeRowsCache(cachedAt: number, target = scope) {
+  cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(target), cachedRows, { cachedAt });
 }
 
 describe("ObjectBrowser table statistics on a cached scaffold (#10461)", () => {
@@ -193,7 +195,6 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-const mysqlScope = { ...scope, schema: "pgdemo" };
 const names = [{ name: "orders", object_type: "TABLE", schema: "pgdemo" }];
 const details = [{ ...names[0], comment: "order details" }];
 
@@ -217,12 +218,12 @@ describe("MySQL automatic progressive metadata", () => {
     expect(host.textContent).not.toContain("objects.loading");
     expect(mocks.listObjects.mock.calls[0][10]).toEqual({ lightweight: true });
     expect(mocks.listObjects.mock.calls[1][10]).toEqual({ lightweight: false });
-    expect(mocks.listObjectStatistics).not.toHaveBeenCalled();
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
     expect(getCachedObjectBrowserRowsForScaffold(mysqlScope)?.detailsComplete).toBe(false);
     pending.resolve(details);
-    await vi.waitFor(() => expect(host.textContent).toContain("901"));
+    await vi.waitFor(() => expect(getCachedObjectBrowserRows(mysqlScope)?.[0].comment).toBe("order details"));
+    expect(host.textContent).toContain("901");
     expect(host.textContent).toContain("192 KB");
-    expect(getCachedObjectBrowserRows(mysqlScope)?.[0].comment).toBe("order details");
     expect(getCachedObjectBrowserRowsForScaffold(mysqlScope)?.detailsComplete).toBe(true);
     expect(retryButton(host)).toBeUndefined();
   });
@@ -230,11 +231,18 @@ describe("MySQL automatic progressive metadata", () => {
   it("shares both enumeration and automatic details across equivalent browsers", async () => {
     const enumeration = deferred<unknown[]>();
     const enrichment = deferred<unknown[]>();
+    const statistics = deferred<unknown[]>();
+    mocks.listObjectStatistics.mockReturnValueOnce(statistics.promise);
     mocks.listObjects.mockReturnValueOnce(enumeration.promise).mockReturnValueOnce(enrichment.promise);
     const first = await mountBrowser();
     const second = await mountBrowser();
     await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(1));
     enumeration.resolve(names);
+    await vi.waitFor(() => expect(first.textContent).toContain("common.loading"));
+    await vi.waitFor(() => expect(second.textContent).toContain("common.loading"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+    statistics.resolve([{ name: "orders", schema: "pgdemo", estimated_rows: 901, total_bytes: 196_608 }]);
     await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
     expect(first.textContent).toContain("orders");
     expect(second.textContent).toContain("orders");
@@ -258,10 +266,11 @@ describe("MySQL automatic progressive metadata", () => {
     expect(mocks.listObjects).toHaveBeenCalledTimes(2);
     expect(getCachedObjectBrowserRowsForScaffold(mysqlScope)?.detailsComplete).toBe(false);
     const retry = deferred<unknown[]>();
-    mocks.listObjects.mockReturnValueOnce(retry.promise);
+    if (stage === "details") mocks.listObjects.mockReturnValueOnce(retry.promise);
+    else mocks.listObjectStatistics.mockReturnValueOnce(retry.promise);
     retryButton(host)!.click();
-    await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(3));
-    expect(mocks.listObjects.mock.calls[2][10]).toEqual({ lightweight: false });
+    await vi.waitFor(() => expect(stage === "details" ? mocks.listObjects : mocks.listObjectStatistics).toHaveBeenCalledTimes(stage === "details" ? 3 : 2));
+    if (stage === "details") expect(mocks.listObjects.mock.calls[2][10]).toEqual({ lightweight: false });
     expect(host.textContent).toContain("orders");
     expect(retryButton(host)).toBeUndefined();
     retry.resolve(details);
@@ -308,7 +317,7 @@ describe("MySQL automatic progressive metadata", () => {
     mounted.host.remove();
     pending.resolve(details);
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(mocks.listObjectStatistics).not.toHaveBeenCalled();
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
     expect(getCachedObjectBrowserRows(mysqlScope)?.[0].comment).toBeUndefined();
     expect(getCachedObjectBrowserRowsForScaffold(mysqlScope)?.detailsComplete).toBe(false);
   });
@@ -324,7 +333,7 @@ describe("MySQL automatic progressive metadata", () => {
   });
 
   it("enriches stale cached membership without adding objects from the detail response", async () => {
-    cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(mysqlScope), [{ ...cachedRows[0], id: "pgdemo:orders:TABLE:0", schema: "pgdemo" }], { cachedAt: Date.now() - 31_000 });
+    cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(mysqlScope), [{ ...cachedRows[0], id: "pgdemo:orders:TABLE:0", schema: "pgdemo" }], { cachedAt: Date.now() - 31_000, detailsComplete: false });
     mocks.listObjects.mockResolvedValue([...details, { name: "new_table", object_type: "TABLE", schema: "pgdemo" }]);
     const host = await mountBrowser();
     await vi.waitFor(() => expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1));
@@ -340,11 +349,11 @@ describe("MySQL automatic progressive metadata", () => {
       if (database === "other") return Promise.resolve([{ name: "new_table", object_type: "TABLE", schema: "other" }]);
       return args[8]?.lightweight ? Promise.resolve(names) : stage === "details" ? pending.promise : Promise.resolve(details);
     });
-    mocks.listObjectStatistics.mockImplementation((_id, database) => (database === "pgdemo" ? pending.promise : Promise.resolve([{ name: "new_table", schema: "other", estimated_rows: 22, total_bytes: 2048 }])));
+    mocks.listObjectStatistics.mockImplementation((_id, database) => (database === "pgdemo" && stage === "statistics" ? pending.promise : Promise.resolve([{ name: "new_table", schema: "other", estimated_rows: 22, total_bytes: 2048 }])));
     const database = ref("pgdemo");
     const host = await mountBrowser(ref("public"), database);
-    await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
     if (stage === "statistics") await vi.waitFor(() => expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1));
+    else await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
     database.value = "other";
     await vi.waitFor(() => expect(host.textContent).toContain("22"));
     pending.resolve(stage === "details" ? [{ ...names[0], comment: "obsolete" }] : [{ name: "orders", schema: "pgdemo", estimated_rows: 999999, total_bytes: 999999 }]);
@@ -364,18 +373,131 @@ describe("MySQL automatic progressive metadata", () => {
       .mockResolvedValue(details);
     if (stage === "statistics") mocks.listObjectStatistics.mockReturnValueOnce(pending.promise);
     const host = await mountBrowser();
-    await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
     if (stage === "statistics") await vi.waitFor(() => expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1));
+    else await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
     await vi.advanceTimersByTimeAsync(36_000);
     expect(host.textContent).toContain("timed out");
     expect(host.textContent).toContain("orders");
     retryButton(host)!.click();
     await vi.waitFor(() => expect(getCachedObjectBrowserRowsForScaffold(mysqlScope)?.detailsComplete).toBe(true));
-    expect(mocks.listObjects).toHaveBeenCalledTimes(3);
+    expect(mocks.listObjects).toHaveBeenCalledTimes(stage === "details" ? 3 : 2);
     pending.resolve(stage === "details" ? [{ ...names[0], comment: "obsolete" }] : [{ name: "orders", schema: "pgdemo", estimated_rows: 999999, total_bytes: 999999 }]);
     await vi.advanceTimersByTimeAsync(0);
     expect(host.textContent).not.toContain("obsolete");
     expect(host.textContent).not.toContain("999,999");
     expect(getCachedObjectBrowserRows(mysqlScope)?.[0].comment).toBe("order details");
+  });
+});
+
+describe("MySQL table charset and collation columns", () => {
+  beforeEach(() => {
+    connection.db_type = "mysql";
+    localStorage.clear();
+    mocks.listSchemas.mockResolvedValue(["pgdemo"]);
+    mocks.listObjects.mockResolvedValue([
+      { name: "a_utf8", object_type: "TABLE", schema: "pgdemo", comment: "UTF-8 table" },
+      { name: "z_latin", object_type: "TABLE", schema: "pgdemo", comment: "Latin table" },
+      { name: "v_orders", object_type: "VIEW", schema: "pgdemo" },
+    ]);
+    mocks.listObjectStatistics.mockResolvedValue([
+      { name: "a_utf8", schema: "pgdemo", collation: "utf8mb4_0900_ai_ci" },
+      { name: "z_latin", schema: "pgdemo", collation: "latin1_swedish_ci" },
+      { name: "v_orders", schema: "pgdemo", collation: "utf8mb4_bin" },
+    ]);
+  });
+
+  afterEach(() => {
+    connection.db_type = "postgres";
+    localStorage.clear();
+  });
+
+  function displayedNames(host: HTMLElement) {
+    return Array.from(host.querySelectorAll(".object-browser-scroller .grid")).map((row) => /a_utf8|z_latin|v_orders/.exec(row.textContent ?? "")?.[0]);
+  }
+
+  it("shows each table's charset and collation using the shared statistics read", async () => {
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
+    expect(host.textContent).toContain("structureEditor.characterSet");
+    expect(host.textContent).toContain("structureEditor.collation");
+    expect(host.textContent).toContain("latin1_swedish_ci");
+    expect(getCachedObjectBrowserRows(mysqlScope)).toEqual(expect.arrayContaining([expect.objectContaining({ name: "a_utf8", characterSet: "utf8mb4", collation: "utf8mb4_0900_ai_ci" }), expect.objectContaining({ name: "z_latin", characterSet: "latin1", collation: "latin1_swedish_ci" })]));
+    expect(getCachedObjectBrowserRows(mysqlScope)?.find((row) => row.name === "v_orders")).not.toHaveProperty("collation");
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+    expect(host.querySelector('[data-object-column-resize="characterSet"]')).not.toBeNull();
+    expect(host.querySelector('[data-object-column-resize="collation"]')).not.toBeNull();
+  });
+
+  it("sorts tables by charset in both directions while keeping missing values last", async () => {
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain("latin1_swedish_ci"));
+    const sort = Array.from(host.querySelectorAll("button")).find((button) => button.textContent?.trim() === "structureEditor.characterSet")!;
+    expect(sort).toBeDefined();
+    sort.click();
+    await vi.waitFor(() => expect(displayedNames(host)).toEqual(["z_latin", "a_utf8", "v_orders"]));
+    sort.click();
+    await vi.waitFor(() => expect(displayedNames(host)).toEqual(["a_utf8", "z_latin", "v_orders"]));
+  });
+
+  it("persists hidden charset columns and restores them with cached metadata", async () => {
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
+    host.querySelector<HTMLButtonElement>('[aria-label="objects.configureColumns"]')!.click();
+    let toggle: HTMLButtonElement | undefined;
+    await vi.waitFor(() => {
+      toggle = Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.trim() === "structureEditor.characterSet" && button.querySelector("span.border"));
+      expect(toggle).toBeDefined();
+    });
+    toggle!.click();
+    await vi.waitFor(() => expect(host.querySelector('[data-object-column-resize="characterSet"]')).toBeNull());
+    expect(JSON.parse(localStorage.getItem(`dbx-object-browser-columns:v1:${connection.id}:pgdemo:`) ?? "{}")).toMatchObject({ characterSet: false });
+    const mounted = mountedApps.pop()!;
+    mounted.app.unmount();
+    mounted.host.remove();
+
+    const restored = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(restored.textContent).toContain("utf8mb4_0900_ai_ci"));
+    expect(restored.querySelector('[data-object-column-resize="characterSet"]')).toBeNull();
+    expect(restored.querySelector('[data-object-column-resize="collation"]')).not.toBeNull();
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([0, 31_000])("backfills missing metadata in a cached scaffold with comments (age %s ms)", async (ageMs) => {
+    cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(mysqlScope), [{ id: "table:a_utf8", name: "a_utf8", displayName: "a_utf8", schema: "pgdemo", type: "TABLE", comment: "UTF-8 table" }], { cachedAt: Date.now() - ageMs });
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
+    expect(mocks.listObjects).not.toHaveBeenCalled();
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+  });
+
+  it("backfills missing collation in a fresh proxy cache without enabling native detail reads", async () => {
+    const originalInfo = connection.database_info;
+    connection.database_info = { ...originalInfo, serverComment: "MyCat Server" };
+    try {
+      cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(mysqlScope), [{ id: "table:a_utf8", name: "a_utf8", displayName: "a_utf8", schema: "pgdemo", type: "TABLE", comment: "UTF-8 table" }]);
+      const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+      await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
+      expect(mocks.listObjects).not.toHaveBeenCalled();
+      expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+      expect(getCachedObjectBrowserRows(mysqlScope)?.[0]).toMatchObject({ characterSet: "utf8mb4", collation: "utf8mb4_0900_ai_ci" });
+    } finally {
+      connection.database_info = originalInfo;
+    }
+  });
+
+  it("refreshes stale collation metadata even when table comments are cached", async () => {
+    cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(mysqlScope), [{ id: "table:a_utf8", name: "a_utf8", displayName: "a_utf8", schema: "pgdemo", type: "TABLE", comment: "UTF-8 table", characterSet: "latin1", collation: "latin1_bin" }], { cachedAt: Date.now() - 31_000 });
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
+    expect(host.textContent).not.toContain("latin1_bin");
+    expect(mocks.listObjects).not.toHaveBeenCalled();
+  });
+
+  it("keeps the extra columns out of other database browsers", async () => {
+    connection.db_type = "postgres";
+    const host = await mountBrowser();
+    await vi.waitFor(() => expect(host.textContent).toContain("a_utf8"));
+    expect(host.textContent).not.toContain("structureEditor.characterSet");
+    expect(host.textContent).not.toContain("structureEditor.collation");
   });
 });

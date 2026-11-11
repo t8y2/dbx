@@ -705,6 +705,18 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ deepLinkConnectionConfirmMode: "sometimes" } as any).deepLinkConnectionConfirmMode).toBe("always");
   });
 
+  it("keeps duplicate tab titles on ordinal by default and accepts the connection-name mode", () => {
+    // 老配置文件没有这个字段时保持历史行为（序号），升级不该改变已有标签栏。
+    expect(normalizeEditorSettings({}).duplicateTabTitleMode).toBe("ordinal");
+    expect(DEFAULT_EDITOR_SETTINGS.duplicateTabTitleMode).toBe("ordinal");
+    expect(normalizeEditorSettings({ duplicateTabTitleMode: "ordinal" }).duplicateTabTitleMode).toBe("ordinal");
+    expect(normalizeEditorSettings({ duplicateTabTitleMode: "connection" }).duplicateTabTitleMode).toBe("connection");
+    // 非法值（含旧版布尔/数字）一律回落默认值。
+    for (const invalid of ["connection-name", "", null, true, 1] as unknown[]) {
+      expect(normalizeEditorSettings({ duplicateTabTitleMode: invalid } as any).duplicateTabTitleMode).toBe("ordinal");
+    }
+  });
+
   it("remembers connection databases by default and sanitizes the stored map", () => {
     expect(normalizeEditorSettings({}).rememberConnectionDatabaseOnDelete).toBe(true);
     expect(normalizeEditorSettings({ rememberConnectionDatabaseOnDelete: false }).rememberConnectionDatabaseOnDelete).toBe(false);
@@ -1073,6 +1085,13 @@ describe("normalizeDesktopSettings", () => {
     expect(normalizeDesktopSettings({ metadata_cache_max_memory_mb: 1 }).metadata_cache_max_memory_mb).toBe(16);
     expect(normalizeDesktopSettings({ metadata_cache_max_memory_mb: 384 }).metadata_cache_max_memory_mb).toBe(384);
     expect(normalizeDesktopSettings({ metadata_cache_max_memory_mb: 513 }).metadata_cache_max_memory_mb).toBe(64);
+  });
+
+  it("falls back non-positive sidebar table page sizes to the default", () => {
+    expect(normalizeDesktopSettings({}).sidebar_table_page_size).toBe(1000);
+    expect(normalizeDesktopSettings({ sidebar_table_page_size: 500 }).sidebar_table_page_size).toBe(500);
+    expect(normalizeDesktopSettings({ sidebar_table_page_size: 0 }).sidebar_table_page_size).toBe(1000);
+    expect(normalizeDesktopSettings({ sidebar_table_page_size: -10 }).sidebar_table_page_size).toBe(1000);
   });
 
   it("defaults DuckDB worker process isolation to disabled for old settings", () => {

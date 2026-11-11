@@ -32,6 +32,7 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/backend/api")>()),
   listSqlFilesInFolder: vi.fn(async () => [
     { name: "query.sql", path: "/sql/query.sql", is_dir: false, children: [] },
+    { name: "add_salary.prc", path: "/sql/add_salary.prc", is_dir: false, children: [] },
     { name: "report.xlsx", path: "/sql/report.xlsx", is_dir: false, children: [] },
     { name: "notes.pdf", path: "/sql/notes.pdf", is_dir: false, children: [] },
   ]),
@@ -103,6 +104,21 @@ describe("SqlFilePanel open with default application", () => {
     expect(mocks.readExternalSqlFileSnapshot).toHaveBeenCalledWith("/sql/query.sql", expect.any(Number));
     expect(mocks.openPathWithDefaultApp).not.toHaveBeenCalled();
     expect(openTabSpy).toHaveBeenCalledWith("", "", "/sql/query.sql", "SELECT 1;", expect.any(Object), undefined, undefined, undefined, "utf8");
+  });
+
+  it("opens per-engine database script files (#14204) inside the editor tab", async () => {
+    const { host, queryStore } = await mountPanel();
+    const openTabSpy = vi.spyOn(queryStore, "openExternalSqlFile");
+
+    const prcEntry = host.querySelector<HTMLElement>('[data-sql-file-path="/sql/add_salary.prc"]');
+    expect(prcEntry).toBeTruthy();
+
+    prcEntry!.click();
+    await vi.waitFor(() => expect(mocks.readExternalSqlFileSnapshot).toHaveBeenCalledTimes(1));
+
+    expect(mocks.readExternalSqlFileSnapshot).toHaveBeenCalledWith("/sql/add_salary.prc", expect.any(Number));
+    expect(mocks.openPathWithDefaultApp).not.toHaveBeenCalled();
+    expect(openTabSpy).toHaveBeenCalledWith("", "", "/sql/add_salary.prc", "SELECT 1;", expect.any(Object), undefined, undefined, undefined, "utf8");
   });
 
   it("surfaces a toast error when opening with the default application fails", async () => {

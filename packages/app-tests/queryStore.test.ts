@@ -8511,14 +8511,15 @@ test("SQL Server keeps the requested page size when the final fetch is narrowed"
 for (const scenario of [
   { label: "TOP equal to one page", bound: 100, pageLimit: 100, pageOffset: 0, rowCount: 100, expectedTotal: 100 },
   { label: "TOP below one page", bound: 50, pageLimit: 100, pageOffset: 0, rowCount: 50, expectedTotal: 50 },
-  { label: "TOP above the first page", bound: 250, pageLimit: 100, pageOffset: 0, rowCount: 100, expectedTotal: 250 },
-  { label: "TOP above an intermediate page", bound: 250, pageLimit: 100, pageOffset: 100, rowCount: 100, expectedTotal: 250 },
+  { label: "TOP above the first page", bound: 250, pageLimit: 100, pageOffset: 0, rowCount: 100, expectedTotal: 230, countedTotal: 230 },
+  { label: "TOP above an intermediate page", bound: 250, pageLimit: 100, pageOffset: 100, rowCount: 100, expectedTotal: 230, countedTotal: 230 },
   { label: "TOP reached on the final page", bound: 250, pageLimit: 100, pageOffset: 200, rowCount: 50, expectedTotal: 250 },
   { label: "TOP above the actual matching rows", bound: 500, pageLimit: 100, pageOffset: 200, rowCount: 37, expectedTotal: 237 },
-  { label: "TOP above the enabled result cap", bound: 200_000, pageLimit: 100, pageOffset: 0, rowCount: 100, expectedTotal: 180, queryResultMaxRows: 180 },
+  { label: "TOP above the enabled result cap", bound: 200_000, pageLimit: 100, pageOffset: 0, rowCount: 100, expectedTotal: 230, countedTotal: 230, queryResultMaxRows: 180 },
+  { label: "TOP above the first page with automatic counting disabled", bound: 250, pageLimit: 100, pageOffset: 0, rowCount: 100, expectedTotal: undefined, autoCalculateTotalRows: false },
   { label: "TOP overrides an unrelated exact backend total", bound: 100, pageLimit: 100, pageOffset: 0, rowCount: 100, expectedTotal: 100, affectedRows: 500 },
 ]) {
-  test(`SQL Server ${scenario.label} resolves an exact bounded total without COUNT`, async () => {
+  test(`SQL Server ${scenario.label} resolves totals from observed rows or the count policy`, async () => {
     const restoreStorage = installMemoryStorage();
     setActivePinia(createPinia());
     const connectionStore = useConnectionStore();
@@ -8528,7 +8529,7 @@ for (const scenario of [
     let countRequests = 0;
 
     settingsStore.updateEditorSettings({
-      autoCalculateTotalRows: true,
+      autoCalculateTotalRows: scenario.autoCalculateTotalRows ?? true,
       queryResultMaxRowsEnabled: true,
       queryResultMaxRows: scenario.queryResultMaxRows ?? 100_000,
     });
@@ -8562,7 +8563,8 @@ for (const scenario of [
       }
       if (url === "/api/query/execute") {
         countRequests += 1;
-        return new Response("unexpected count", { status: 500 });
+        if (scenario.countedTotal === undefined) return new Response("unexpected count", { status: 500 });
+        return Response.json({ columns: ["total"], rows: [[scenario.countedTotal]], affected_rows: 0, execution_time_ms: 1 });
       }
       if (url === "/api/query/analyze-editability") {
         return Response.json({ editable: false, reason: "complex-source" });
@@ -8575,9 +8577,10 @@ for (const scenario of [
         pagination: { limit: scenario.pageLimit, offset: scenario.pageOffset },
       });
 
+      await waitFor(() => tab.resultTotalRowCount === scenario.expectedTotal && tab.resultTotalRowCountLoading === false);
       assert.equal(tab.resultTotalRowCount, scenario.expectedTotal);
       assert.equal(tab.resultTotalRowCountLoading, false);
-      assert.equal(countRequests, 0);
+      assert.equal(countRequests, scenario.countedTotal === undefined ? 0 : 1);
     } finally {
       globalThis.fetch = originalFetch;
       restoreStorage();

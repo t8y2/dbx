@@ -137,7 +137,7 @@ import { externalSqlFileDisplayTitles, normalizeExternalSqlPath, relocateExterna
 import { clearDataGridPendingSnapshot, clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { combineDataGridOrderByInputs, copyDataGridSortBuilderStatesForTab } from "@/composables/useDataGridSortBuilder";
 import { beginClosingDataGridViewSnapshotsForTab, clearDataGridViewSnapshot, clearDataGridViewSnapshotsForTab } from "@/lib/dataGrid/dataGridViewStateCache";
-import { beginClosingBrowserState } from "@/lib/tabs/documentBrowserStateCache";
+import { beginClosingBrowserState, restoreDocumentBrowserState, saveDocumentBrowserState } from "@/lib/tabs/documentBrowserStateCache";
 import { clearDataGridStructuredFilterStatesForTab, copyDataGridStructuredFilterStatesForTab } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { clearDataGridSearchStatesForTab } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, pruneTabResultSnapshots, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
@@ -5685,6 +5685,10 @@ export const useQueryStore = defineStore("query", () => {
       // cannot recover which conditions belong to the manual input or quick UI.
       copyDataGridStructuredFilterStatesForTab(id, newId);
       copyDataGridSortBuilderStatesForTab(id, newId);
+    } else if (newTab.mode === "mongo") {
+      const state = restoreDocumentBrowserState(id);
+      // Copy query conditions before mounting the new browser so it can load its own rows.
+      if (state) saveDocumentBrowserState(newId, cloneTabDraft({ ...state, data: undefined }));
     }
     tabs.value.splice(idx + 1, 0, newTab);
 

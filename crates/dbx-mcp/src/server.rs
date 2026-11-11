@@ -15,7 +15,7 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router, ServerHandler,
 };
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use url::Url;
 use uuid::Uuid;
 
@@ -30,6 +30,7 @@ use dbx_core::{
     agent_tools::{
         format_query_result_as_text, normalize_sql_for_confirmation, QueryCellWindow, MAX_EXECUTE_QUERY_ROWS,
     },
+    ai::sidebar_groups::{self as sidebar_groups, GroupSelector, SidebarGroup, SidebarGroupError, SidebarSummary},
     connection::SalesforceCurrentUser,
     database_manifest,
     db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety},
@@ -38,7 +39,7 @@ use dbx_core::{
         self as docs_notes, SchemaNoteBudget, SCHEMA_NOTE_COLUMN_MAX_CHARS, SCHEMA_NOTE_TABLE_MAX_CHARS,
     },
     history::HistoryEntry,
-    mcp_access::{McpAccessLevel, McpCallDecision, McpConfirmPolicy},
+    mcp_access::{McpAccessLevel, McpCallDecision, McpConfirmPolicy, McpRuleTarget},
     mcp_policy::connection_allows_salesforce_dml,
     models::connection::ConnectionConfig,
     models::connection::DatabaseType,
@@ -469,6 +470,57 @@ pub struct AddConnectionRequest {
     /// host/port/username/password/database with the desktop defaults
     /// (`implementation=nacos`, `versionMode=v2`, `contextPath=/nacos`).
     pub external_config: Option<serde_json::Value>,
+    #[schemars(
+        description = "Stable target sidebar group id (preferred over group_path). Use dbx_list_sidebar_groups to find it."
+    )]
+    #[schemars(extend("type" = "string"))]
+    pub group_id: Option<String>,
+    #[schemars(description = "Target sidebar group path by display name, for example [\"本地\", \"MySQL\"]")]
+    #[schemars(extend("type" = "array"))]
+    pub group_path: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[schemars(extend("properties" = {}))]
+pub struct ListSidebarGroupsRequest {}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateSidebarGroupRequest {
+    #[schemars(description = "New group name for one level. Omit when `path` is set.")]
+    #[schemars(extend("type" = "string"))]
+    pub name: Option<String>,
+    #[schemars(
+        description = "Full group path from the sidebar root, for example [\"本地\", \"MySQL\", \"MySQL 8.0\"]. Missing levels are created."
+    )]
+    #[schemars(extend("type" = "array"))]
+    pub path: Option<Vec<String>>,
+    #[schemars(description = "Stable parent group id (preferred over parent_group_path)")]
+    #[schemars(extend("type" = "string"))]
+    pub parent_group_id: Option<String>,
+    #[schemars(description = "Parent group path by display name, for example [\"本地\", \"MySQL\"]")]
+    #[schemars(extend("type" = "array"))]
+    pub parent_group_path: Option<Vec<String>>,
+    #[schemars(
+        description = "When parent_group_path names missing levels, create them instead of failing (default false)"
+    )]
+    #[serde(default)]
+    pub create_missing_parents: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MoveConnectionsToGroupRequest {
+    #[schemars(description = "Connection ids to move (preferred over connection_names)")]
+    #[serde(default)]
+    pub connection_ids: Vec<String>,
+    #[schemars(description = "Connection names to move when ids are unknown; names must be unique")]
+    #[serde(default)]
+    pub connection_names: Vec<String>,
+    #[schemars(description = "Stable target sidebar group id (preferred over group_path)")]
+    #[schemars(extend("type" = "string"))]
+    pub group_id: Option<String>,
+    #[schemars(description = "Target sidebar group path by display name")]
+    #[schemars(extend("type" = "array"))]
+    pub group_path: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1054,6 +1106,250 @@ impl McpScope {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct GroupRequest {
+    id: Option<String>,
+    path: Option<Vec<String>>,
+}
+
+impl GroupRequest {
+    fn parse(group_id: Option<&str>, group_path: Option<&[String]>) -> Result<Self, SidebarGroupError> {
+        let id = group_id.map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
+        let path = match group_path {
+            Some(path) if !path.is_empty() => {
+                let mut names = Vec::with_capacity(path.len());
+                for segment in path {
+                    let segment = segment.trim();
+                    if segment.is_empty() {
+                        return Err(SidebarGroupError::new(
+                            sidebar_groups::INVALID_GROUP_REQUEST,
+                            "group_path must not contain an empty name",
+                        ));
+                    }
+                    names.push(segment.to_string());
+                }
+                Some(names)
+            }
+            Some(_) => {
+                return Err(SidebarGroupError::new(
+                    sidebar_groups::INVALID_GROUP_REQUEST,
+                    "group_path must not be empty",
+                ));
+            }
+            None => None,
+        };
+        Ok(Self { id, path })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.id.is_none() && self.path.is_none()
+    }
+
+    fn resolve(&self, layout: Option<&Value>) -> Result<SidebarGroup, SidebarGroupError> {
+        match (&self.id, &self.path) {
+            (None, None) => {
+                Err(SidebarGroupError::new(sidebar_groups::INVALID_GROUP_REQUEST, "group_id or group_path is required"))
+            }
+            (Some(id), None) => sidebar_groups::resolve_group(layout, &GroupSelector::Id(id.clone())),
+            (None, Some(path)) => sidebar_groups::resolve_group(layout, &GroupSelector::Path(path.clone())),
+            (Some(id), Some(path)) => {
+                // Both selectors are accepted only when they agree: silently
+                // preferring the id would move into a different group than the
+                // caller named.
+                let by_id = sidebar_groups::resolve_group(layout, &GroupSelector::Id(id.clone()))?;
+                let by_path = sidebar_groups::resolve_group(layout, &GroupSelector::Path(path.clone()))?;
+                if by_id.id != by_path.id {
+                    return Err(SidebarGroupError::new(
+                        sidebar_groups::INVALID_GROUP_REQUEST,
+                        "group_id and group_path resolve to different groups",
+                    ));
+                }
+                Ok(by_id)
+            }
+        }
+    }
+}
+
+fn visible_connection_set(connections: &[ConnectionConfig]) -> HashSet<String> {
+    connections.iter().map(|connection| connection.id.clone()).collect()
+}
+
+/// Resolve a target group but only if the caller may see it under the current
+/// MCP policy. A hidden group's id/name must not be echoed back.
+fn resolve_visible_group(
+    summary: &SidebarSummary,
+    visible_connection_ids: &HashSet<String>,
+    layout: Option<&Value>,
+    request: &GroupRequest,
+) -> Result<SidebarGroup, SidebarGroupError> {
+    let group = request.resolve(layout)?;
+    let visible_groups = sidebar_groups::visible_group_ids(summary, visible_connection_ids);
+    if !visible_groups.contains(&group.id) {
+        return Err(SidebarGroupError::new(sidebar_groups::GROUP_NOT_FOUND, "the requested group was not found"));
+    }
+    Ok(group)
+}
+
+fn resolve_requested_connections(
+    request: &MoveConnectionsToGroupRequest,
+    visible: &[ConnectionConfig],
+) -> Result<Vec<ConnectionConfig>, SidebarGroupError> {
+    if !request.connection_ids.is_empty() && !request.connection_names.is_empty() {
+        return Err(SidebarGroupError::new(
+            sidebar_groups::INVALID_GROUP_REQUEST,
+            "pass either connection_ids or connection_names, not both",
+        ));
+    }
+    if request.connection_ids.is_empty() && request.connection_names.is_empty() {
+        return Err(SidebarGroupError::new(
+            sidebar_groups::INVALID_GROUP_REQUEST,
+            "connection_ids or connection_names is required",
+        ));
+    }
+    let mut selected = Vec::new();
+    let mut seen = HashSet::new();
+    if !request.connection_ids.is_empty() {
+        let mut unknown = Vec::new();
+        for id in &request.connection_ids {
+            let id = id.trim();
+            if id.is_empty() {
+                return Err(SidebarGroupError::new(
+                    sidebar_groups::INVALID_GROUP_REQUEST,
+                    "connection_ids must not contain an empty id",
+                ));
+            }
+            match visible.iter().find(|connection| connection.id == id) {
+                Some(connection) => {
+                    if seen.insert(connection.id.clone()) {
+                        selected.push(connection.clone());
+                    }
+                }
+                None => unknown.push(id.to_string()),
+            }
+        }
+        if !unknown.is_empty() {
+            return Err(SidebarGroupError::new(
+                "UNKNOWN_CONNECTION",
+                format!("unknown connection ids: {}", unknown.join(", ")),
+            ));
+        }
+    } else {
+        for name in &request.connection_names {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(SidebarGroupError::new(
+                    sidebar_groups::INVALID_GROUP_REQUEST,
+                    "connection_names must not contain an empty name",
+                ));
+            }
+            let matches = visible
+                .iter()
+                .filter(|connection| connection.name.eq_ignore_ascii_case(name))
+                .cloned()
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [] => {
+                    return Err(SidebarGroupError::new(
+                        "UNKNOWN_CONNECTION",
+                        format!("connection name \"{name}\" was not found"),
+                    ));
+                }
+                [only] => {
+                    if seen.insert(only.id.clone()) {
+                        selected.push(only.clone());
+                    }
+                }
+                _ => {
+                    return Err(SidebarGroupError::new("AMBIGUOUS_CONNECTION", ambiguous_connections(name, &matches)));
+                }
+            }
+        }
+    }
+    Ok(selected)
+}
+
+struct GroupListingRenderer<'a> {
+    summary: &'a SidebarSummary,
+    children: &'a HashMap<Option<String>, Vec<usize>>,
+    visible_groups: &'a HashSet<String>,
+    connection_by_id: &'a HashMap<&'a str, &'a ConnectionConfig>,
+    grouped: &'a mut HashSet<String>,
+    lines: &'a mut Vec<String>,
+}
+
+impl GroupListingRenderer<'_> {
+    fn render(&mut self, index: usize, depth: usize) {
+        let group = &self.summary.groups[index];
+        if !self.visible_groups.contains(&group.id) {
+            return;
+        }
+        let group_indent = "  ".repeat(depth);
+        self.lines.push(format!("{group_indent}- {} (id: {}, path: {})", group.name, group.id, group.display_path()));
+        let member_indent = "  ".repeat(depth + 1);
+        for connection_id in &group.direct_connection_ids {
+            if let Some(connection) = self.connection_by_id.get(connection_id.as_str()) {
+                self.grouped.insert(connection.id.clone());
+                self.lines.push(format!("{member_indent}- connection: {} (id: {})", connection.name, connection.id));
+            }
+        }
+        if let Some(child_indices) = self.children.get(&Some(group.id.clone())) {
+            for child in child_indices {
+                self.render(*child, depth + 1);
+            }
+        }
+    }
+}
+
+fn format_sidebar_group_listing(summary: &SidebarSummary, visible_connections: &[ConnectionConfig]) -> String {
+    let visible_connection_ids = visible_connection_set(visible_connections);
+    let visible_groups = sidebar_groups::visible_group_ids(summary, &visible_connection_ids);
+    let connection_by_id =
+        visible_connections.iter().map(|connection| (connection.id.as_str(), connection)).collect::<HashMap<_, _>>();
+    let mut children: HashMap<Option<String>, Vec<usize>> = HashMap::new();
+    for (index, group) in summary.groups.iter().enumerate() {
+        children.entry(group.parent_id.clone()).or_default().push(index);
+    }
+    let mut grouped = HashSet::new();
+    let mut lines = Vec::new();
+    let mut renderer = GroupListingRenderer {
+        summary,
+        children: &children,
+        visible_groups: &visible_groups,
+        connection_by_id: &connection_by_id,
+        grouped: &mut grouped,
+        lines: &mut lines,
+    };
+    if let Some(roots) = children.get(&None) {
+        for root in roots {
+            renderer.render(*root, 0);
+        }
+    }
+    let ungrouped = visible_connections
+        .iter()
+        .filter(|connection| !grouped.contains(&connection.id))
+        .map(|connection| format!("{} (id: {})", connection.name, connection.id))
+        .collect::<Vec<_>>();
+    let mut output = format!(
+        "{} sidebar groups, {} grouped connections, {} ungrouped connections.",
+        visible_groups.len(),
+        grouped.len(),
+        ungrouped.len()
+    );
+    if lines.is_empty() {
+        output.push_str("\nNo sidebar groups.");
+    } else {
+        output.push('\n');
+        output.push_str(&lines.join("\n"));
+    }
+    output.push_str("\nUngrouped connections: ");
+    if ungrouped.is_empty() {
+        output.push_str("none");
+    } else {
+        output.push_str(&ungrouped.join(", "));
+    }
+    output
+}
+
 impl DbxMcpServer {
     /// Shared gate for product-provider tools (design §5): tool allowlist,
     /// connection resolution and product type, sub-scope admission and level
@@ -1490,6 +1786,11 @@ impl DbxMcpServer {
             tool_router.disable_route("dbx_add_connection");
             tool_router.disable_route("dbx_duplicate_connection");
             tool_router.disable_route("dbx_remove_connection");
+            // Sidebar group management is global state and the layout names
+            // connections outside the scoped connection set.
+            tool_router.disable_route("dbx_list_sidebar_groups");
+            tool_router.disable_route("dbx_create_sidebar_group");
+            tool_router.disable_route("dbx_move_connections_to_group");
         }
         // Desktop UI bridge operations are intentionally unavailable remotely and in scoped AI sessions.
         if web_mode || scope.enabled() {
@@ -2408,6 +2709,305 @@ impl DbxMcpServer {
             }
             Err(error) => backend_tool_error("CONNECTION_LOAD_ERROR", error),
         }
+    }
+
+    #[tool(
+        name = "dbx_list_sidebar_groups",
+        description = "List DBX sidebar connection groups with stable ids and full paths, the connections inside each group, and the connections that are not grouped. Use this to read back the hierarchy after creating or moving groups.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn list_sidebar_groups(
+        &self,
+        Parameters(ListSidebarGroupsRequest {}): Parameters<ListSidebarGroupsRequest>,
+    ) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_list_sidebar_groups").await {
+            return error;
+        }
+        if let Err(error) =
+            self.ensure_global_mcp_access(dbx_core::mcp_access::McpAccessLevel::Read, "dbx_list_sidebar_groups").await
+        {
+            return error;
+        }
+        let layout = match self.backend.load_sidebar_layout().await {
+            Ok(layout) => layout,
+            Err(error) => return backend_tool_error("SIDEBAR_LOAD_ERROR", error),
+        };
+        let summary = match sidebar_groups::describe_layout(layout.as_ref()) {
+            Ok(summary) => summary,
+            Err(error) => return sidebar_tool_error(error),
+        };
+        let connections = match self.load_scoped_connections().await {
+            Ok(connections) => connections,
+            Err(error) => return backend_tool_error("CONNECTION_LOAD_ERROR", error),
+        };
+        text(format_sidebar_group_listing(&summary, &connections))
+    }
+
+    #[tool(
+        name = "dbx_create_sidebar_group",
+        description = "Create a DBX sidebar connection group, optionally inside an existing parent group or along a full multi-level path. Missing parent levels can be created in the same call. The call is idempotent: an existing group with the same name under the same parent is returned with its stable id instead of being duplicated.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn create_sidebar_group(&self, Parameters(request): Parameters<CreateSidebarGroupRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_create_sidebar_group").await {
+            return error;
+        }
+        if let Err(error) =
+            self.ensure_global_mcp_access(dbx_core::mcp_access::McpAccessLevel::Write, "dbx_create_sidebar_group").await
+        {
+            return error;
+        }
+        let policy = match self.load_policy().await {
+            Ok(policy) => policy,
+            Err(error) => return error,
+        };
+        if policy.read_only {
+            return tool_error(
+                "MCP_READ_ONLY",
+                "DBX global MCP read-only mode is enabled. Sidebar group management is not allowed.",
+            );
+        }
+
+        let name = request.name.as_deref().map(str::trim).filter(|name| !name.is_empty());
+        let path = request
+            .path
+            .as_deref()
+            .filter(|path| !path.is_empty())
+            .map(|path| path.iter().map(|segment| segment.trim().to_string()).collect::<Vec<_>>());
+        if request.name.is_some() && request.path.is_some() {
+            return tool_error(sidebar_groups::INVALID_GROUP_REQUEST, "pass either name or path, not both");
+        }
+        if path.as_ref().is_some_and(Vec::is_empty) {
+            return tool_error(sidebar_groups::INVALID_GROUP_REQUEST, "path must not be empty");
+        }
+        if path.is_some() {
+            if request.parent_group_id.is_some() || request.parent_group_path.is_some() {
+                return tool_error(
+                    sidebar_groups::INVALID_GROUP_REQUEST,
+                    "a full path already names the parent; do not pass parent_group_id or parent_group_path",
+                );
+            }
+        } else if name.is_none() {
+            return tool_error(sidebar_groups::INVALID_GROUP_REQUEST, "either name or path is required");
+        }
+
+        let connections = match self.load_scoped_connections().await {
+            Ok(connections) => connections,
+            Err(error) => return backend_tool_error("CONNECTION_LOAD_ERROR", error),
+        };
+        let visible_connection_ids = visible_connection_set(&connections);
+        let parent_path = request.parent_group_path.as_deref().filter(|path| !path.is_empty());
+        let mut next_id = || Uuid::new_v4().to_string();
+        let mut committed: Option<sidebar_groups::CreateGroupOutcome> = None;
+
+        for _ in 0..8 {
+            let layout = match self.backend.load_sidebar_layout().await {
+                Ok(layout) => layout,
+                Err(error) => return backend_tool_error("SIDEBAR_LOAD_ERROR", error),
+            };
+            let summary = match sidebar_groups::describe_layout(layout.as_ref()) {
+                Ok(summary) => summary,
+                Err(error) => return sidebar_tool_error(error),
+            };
+            let visible_groups = sidebar_groups::visible_group_ids(&summary, &visible_connection_ids);
+            let outcome = if let Some(path) = &path {
+                sidebar_groups::ensure_group_path(layout.as_ref(), path, Some(&visible_groups), &mut next_id)
+            } else {
+                let name = name.expect("validated above");
+                let parent_selector = if let (Some(id), Some(parent_path)) =
+                    (request.parent_group_id.as_deref().map(str::trim).filter(|id| !id.is_empty()), parent_path)
+                {
+                    let parent_request = GroupRequest {
+                        id: Some(id.to_string()),
+                        path: Some(parent_path.iter().map(|segment| segment.trim().to_string()).collect()),
+                    };
+                    match resolve_visible_group(&summary, &visible_connection_ids, layout.as_ref(), &parent_request) {
+                        Ok(parent) => Some(GroupSelector::Id(parent.id)),
+                        Err(error) => return sidebar_tool_error(error),
+                    }
+                } else if let Some(id) = request.parent_group_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+                    let parent_request = GroupRequest { id: Some(id.to_string()), path: None };
+                    match resolve_visible_group(&summary, &visible_connection_ids, layout.as_ref(), &parent_request) {
+                        Ok(parent) => Some(GroupSelector::Id(parent.id)),
+                        Err(error) => return sidebar_tool_error(error),
+                    }
+                } else {
+                    parent_path.map(|parent_path| {
+                        GroupSelector::Path(parent_path.iter().map(|segment| segment.trim().to_string()).collect())
+                    })
+                };
+                sidebar_groups::create_group(
+                    layout.as_ref(),
+                    parent_selector.as_ref(),
+                    name,
+                    request.create_missing_parents,
+                    Some(&visible_groups),
+                    &mut next_id,
+                )
+            };
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => return sidebar_tool_error(error),
+            };
+            // A policy that hides a parent group (all of its real members are
+            // out of scope) must not let MCP create a visible child under it or
+            // reuse the hidden group's name; reject before saving.
+            let next_summary = match sidebar_groups::describe_layout(Some(&outcome.layout)) {
+                Ok(summary) => summary,
+                Err(error) => return sidebar_tool_error(error),
+            };
+            let visible_groups = sidebar_groups::visible_group_ids(&next_summary, &visible_connection_ids);
+            if !outcome.path.ids.iter().all(|id| visible_groups.contains(id)) {
+                return tool_error(
+                    sidebar_groups::INVALID_GROUP_REQUEST,
+                    "the requested group path is not available under the current DBX MCP policy",
+                );
+            }
+            match self.backend.replace_sidebar_layout_if_unchanged(layout.as_ref(), &outcome.layout).await {
+                Ok(true) => {
+                    committed = Some(outcome);
+                    break;
+                }
+                Ok(false) => continue,
+                Err(error) => return backend_tool_error("SIDEBAR_SAVE_ERROR", error),
+            }
+        }
+        let Some(outcome) = committed else {
+            return tool_error(
+                "SIDEBAR_LAYOUT_CONFLICT",
+                "The sidebar layout changed while the group was being created; retry the call.",
+            );
+        };
+        if outcome.created {
+            let created_count = outcome.created_group_ids.len();
+            let first_created = outcome.path.names.len().saturating_sub(created_count);
+            let labels = outcome
+                .created_group_ids
+                .iter()
+                .enumerate()
+                .map(|(index, id)| {
+                    let path = outcome.path.names[..first_created + index + 1].join(" / ");
+                    format!("{path} (id: {id})")
+                })
+                .collect::<Vec<_>>();
+            text(format!("Created {created_count} sidebar group(s): {}.", labels.join(", ")))
+        } else {
+            text(format!("Sidebar group \"{}\" already exists (id: {}).", outcome.path.display(), outcome.group_id))
+        }
+    }
+
+    #[tool(
+        name = "dbx_move_connections_to_group",
+        description = "Move existing DBX connections into an existing sidebar group, selected by stable group id (preferred) or display path. Pass connection_ids or unique connection names. Use dbx_list_sidebar_groups afterwards to verify the hierarchy.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn move_connections_to_group(
+        &self,
+        Parameters(request): Parameters<MoveConnectionsToGroupRequest>,
+    ) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_move_connections_to_group").await {
+            return error;
+        }
+        if let Err(error) = self
+            .ensure_global_mcp_access(dbx_core::mcp_access::McpAccessLevel::Write, "dbx_move_connections_to_group")
+            .await
+        {
+            return error;
+        }
+        let policy = match self.load_policy().await {
+            Ok(policy) => policy,
+            Err(error) => return error,
+        };
+        if policy.read_only {
+            return tool_error(
+                "MCP_READ_ONLY",
+                "DBX global MCP read-only mode is enabled. Sidebar group management is not allowed.",
+            );
+        }
+        let access = match self.backend.load_mcp_access_policy().await {
+            Ok(access) => access,
+            Err(error) => return backend_tool_error("MCP_POLICY_UNAVAILABLE", error),
+        };
+        if access.rules.keys().any(|target| matches!(target, McpRuleTarget::Group { .. }))
+            || dbx_core::mcp_policy::policy_uses_connection_groups(&policy)
+        {
+            // Group membership feeds visibility and execution permissions, so an
+            // agent must not be able to change them by moving connections.
+            return tool_error(
+                "MCP_POLICY_MOVE_BLOCKED",
+                "This MCP policy scopes access by sidebar group, so moving connections would change their permissions. Move them in the DBX window instead.",
+            );
+        }
+        let connections = match self.load_scoped_connections().await {
+            Ok(connections) => connections,
+            Err(error) => return backend_tool_error("CONNECTION_LOAD_ERROR", error),
+        };
+        let selected = match resolve_requested_connections(&request, &connections) {
+            Ok(selected) => selected,
+            Err(error) => return sidebar_tool_error(error),
+        };
+        let target = match GroupRequest::parse(request.group_id.as_deref(), request.group_path.as_deref()) {
+            Ok(target) => target,
+            Err(error) => return sidebar_tool_error(error),
+        };
+        if target.is_empty() {
+            return tool_error(sidebar_groups::INVALID_GROUP_REQUEST, "group_id or group_path is required");
+        }
+        let connection_ids = selected.iter().map(|connection| connection.id.clone()).collect::<Vec<_>>();
+        let visible_connection_ids = visible_connection_set(&connections);
+        let mut committed: Option<(SidebarGroup, Vec<String>)> = None;
+        for _ in 0..8 {
+            let layout = match self.backend.load_sidebar_layout().await {
+                Ok(layout) => layout,
+                Err(error) => return backend_tool_error("SIDEBAR_LOAD_ERROR", error),
+            };
+            let summary = match sidebar_groups::describe_layout(layout.as_ref()) {
+                Ok(summary) => summary,
+                Err(error) => return sidebar_tool_error(error),
+            };
+            let group = match resolve_visible_group(&summary, &visible_connection_ids, layout.as_ref(), &target) {
+                Ok(group) => group,
+                Err(error) => return sidebar_tool_error(error),
+            };
+            let outcome = match sidebar_groups::move_connections(
+                layout.as_ref(),
+                &connection_ids,
+                &GroupSelector::Id(group.id.clone()),
+            ) {
+                Ok(outcome) => outcome,
+                Err(error) => return sidebar_tool_error(error),
+            };
+            match self
+                .backend
+                .replace_sidebar_layout_if_unchanged_for_group_move(layout.as_ref(), &outcome.layout)
+                .await
+            {
+                Ok(true) => {
+                    committed = Some((outcome.group, outcome.moved_connection_ids));
+                    break;
+                }
+                Ok(false) => continue,
+                Err(error) => return backend_tool_error("SIDEBAR_SAVE_ERROR", error),
+            }
+        }
+        let Some((group, moved_ids)) = committed else {
+            return tool_error(
+                "SIDEBAR_LAYOUT_CONFLICT",
+                "The sidebar layout changed while the connections were being moved; retry the call.",
+            );
+        };
+        let labels = selected
+            .iter()
+            .filter(|connection| moved_ids.contains(&connection.id))
+            .map(|connection| format!("{} (id: {})", connection.name, connection.id))
+            .collect::<Vec<_>>();
+        text(format!(
+            "Moved {} connection(s) to \"{}\" (id: {}): {}.",
+            labels.len(),
+            group.display_path(),
+            group.id,
+            labels.join(", ")
+        ))
     }
 
     #[tool(
@@ -4155,6 +4755,47 @@ impl DbxMcpServer {
                 "DBX global MCP read-only mode is enabled. Connection management is not allowed.",
             );
         }
+        let group_request = match GroupRequest::parse(request.group_id.as_deref(), request.group_path.as_deref()) {
+            Ok(group) => group,
+            Err(error) => return sidebar_tool_error(error),
+        };
+        let group_target = if group_request.is_empty() {
+            None
+        } else {
+            // Adding straight into a group can grant the new connection the
+            // group's visibility or execution permissions. Refuse when the
+            // policy derives access from groups; the user can place it in the
+            // DBX window without an agent changing the policy boundary.
+            let access = match self.backend.load_mcp_access_policy().await {
+                Ok(access) => access,
+                Err(error) => return backend_tool_error("MCP_POLICY_UNAVAILABLE", error),
+            };
+            if access.rules.keys().any(|target| matches!(target, McpRuleTarget::Group { .. }))
+                || dbx_core::mcp_policy::policy_uses_connection_groups(&policy)
+            {
+                return tool_error(
+                    "MCP_POLICY_GROUP_MUTATION_BLOCKED",
+                    "This MCP policy scopes access by sidebar group, so adding a connection directly into a group would change its permissions. Add it ungrouped or use the DBX window.",
+                );
+            }
+            let layout = match self.backend.load_sidebar_layout().await {
+                Ok(layout) => layout,
+                Err(error) => return backend_tool_error("SIDEBAR_LOAD_ERROR", error),
+            };
+            let summary = match sidebar_groups::describe_layout(layout.as_ref()) {
+                Ok(summary) => summary,
+                Err(error) => return sidebar_tool_error(error),
+            };
+            let connections = match self.load_scoped_connections().await {
+                Ok(connections) => connections,
+                Err(error) => return backend_tool_error("CONNECTION_LOAD_ERROR", error),
+            };
+            let visible_connection_ids = visible_connection_set(&connections);
+            match resolve_visible_group(&summary, &visible_connection_ids, layout.as_ref(), &group_request) {
+                Ok(group) => Some(group),
+                Err(error) => return sidebar_tool_error(error),
+            }
+        };
         let connections = match self.backend.load_connections().await {
             Ok(connections) => connections,
             Err(error) => return tool_error("CONNECTION_LOAD_ERROR", error),
@@ -4186,8 +4827,18 @@ impl DbxMcpServer {
             Ok(config) => config,
             Err(error) => return tool_error("INVALID_CONNECTION", error),
         };
-        match self.backend.add_connection_for_mcp(config).await {
-            Ok(config) => text(format!("Connection \"{}\" added (id: {}).", config.name, config.id)),
+        let group_id = group_target.as_ref().map(|group| group.id.as_str());
+        match self.backend.add_connection_for_mcp_in_group(config, group_id).await {
+            Ok(config) => match &group_target {
+                Some(group) => text(format!(
+                    "Connection \"{}\" added (id: {}) in sidebar group \"{}\" (id: {}).",
+                    config.name,
+                    config.id,
+                    group.display_path(),
+                    group.id
+                )),
+                None => text(format!("Connection \"{}\" added (id: {}).", config.name, config.id)),
+            },
             Err(error) => backend_tool_error("CONNECTION_SAVE_ERROR", error),
         }
     }
@@ -6188,12 +6839,22 @@ fn tool_error(code: &str, message: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(format!("Error [{code}]: {}", message.into()))])
 }
 
+fn sidebar_tool_error(error: SidebarGroupError) -> CallToolResult {
+    tool_error(error.code, error.message)
+}
+
 fn backend_tool_error(default_code: &str, error: impl Into<String>) -> CallToolResult {
     let error = error.into();
     for code in [
         "MCP_POLICY_UNAVAILABLE",
         "MCP_READ_ONLY",
+        "MCP_POLICY_MOVE_BLOCKED",
         "CONNECTION_OUT_OF_SCOPE",
+        "INVALID_SIDEBAR_LAYOUT",
+        "INVALID_GROUP_REQUEST",
+        "GROUP_NOT_FOUND",
+        "AMBIGUOUS_GROUP_NAME",
+        "SIDEBAR_LAYOUT_CONFLICT",
         "DATABASE_OUT_OF_SCOPE",
         "DATABASE_EXECUTION_POLICY_OUT_OF_SCOPE",
         "INVALID_DATABASE_SCOPE",
@@ -7827,6 +8488,10 @@ mod tests {
         product_calls: std::sync::Mutex<Vec<crate::products::ProductCall>>,
         tool_approvals: std::sync::Mutex<Vec<crate::approval::ToolApprovalRequest>>,
         nacos_namespaces: Option<Vec<String>>,
+        sidebar_layout: std::sync::Mutex<Option<Value>>,
+        /// Simulates a policy save landing between the server's policy read and
+        /// the layout commit.
+        group_mutation_blocked_at_commit: std::sync::atomic::AtomicBool,
     }
 
     impl Default for FakeBackend {
@@ -7864,6 +8529,8 @@ mod tests {
                 product_calls: std::sync::Mutex::new(Vec::new()),
                 tool_approvals: std::sync::Mutex::new(Vec::new()),
                 nacos_namespaces: None,
+                sidebar_layout: std::sync::Mutex::new(None),
+                group_mutation_blocked_at_commit: std::sync::atomic::AtomicBool::new(false),
             }
         }
     }
@@ -8232,6 +8899,51 @@ mod tests {
 
         async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
             Ok(self.connections.clone())
+        }
+
+        async fn load_sidebar_layout(&self) -> Result<Option<Value>, String> {
+            Ok(self.sidebar_layout.lock().unwrap().clone())
+        }
+
+        async fn replace_sidebar_layout_if_unchanged(
+            &self,
+            _expected: Option<&Value>,
+            next: &Value,
+        ) -> Result<bool, String> {
+            *self.sidebar_layout.lock().unwrap() = Some(next.clone());
+            Ok(true)
+        }
+
+        async fn replace_sidebar_layout_if_unchanged_for_group_move(
+            &self,
+            expected: Option<&Value>,
+            next: &Value,
+        ) -> Result<bool, String> {
+            if self.group_mutation_blocked_at_commit.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err(
+                    "MCP_POLICY_MOVE_BLOCKED: The MCP policy now scopes access by sidebar group; the layout write was rejected."
+                        .to_string(),
+                );
+            }
+            self.replace_sidebar_layout_if_unchanged(expected, next).await
+        }
+
+        async fn add_connection_for_mcp_in_group(
+            &self,
+            config: ConnectionConfig,
+            group_id: Option<&str>,
+        ) -> Result<ConnectionConfig, String> {
+            if let Some(group_id) = group_id {
+                let mut layout = self.sidebar_layout.lock().unwrap();
+                let next = sidebar_groups::append_connection(
+                    layout.as_ref(),
+                    &config.id,
+                    &GroupSelector::Id(group_id.to_string()),
+                )
+                .map_err(|error| error.to_string())?;
+                *layout = Some(next);
+            }
+            Ok(config)
         }
 
         async fn list_plugin_mcp_tools(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {
@@ -10305,6 +11017,262 @@ mod tests {
         assert_eq!(output.lines().count(), 3);
     }
 
+    #[tokio::test]
+    async fn sidebar_group_tools_create_move_add_and_read_back_the_hierarchy() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![
+                connection("mysql", "MySQL 8.0", "mysql", "app"),
+                connection("redis", "Redis 7.4", "redis", "0"),
+            ],
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let create_request = || CreateSidebarGroupRequest {
+            name: None,
+            path: Some(vec!["本地".to_string(), "MySQL".to_string()]),
+            parent_group_id: None,
+            parent_group_path: None,
+            create_missing_parents: false,
+        };
+        let created = server.create_sidebar_group(Parameters(create_request())).await;
+        assert_ne!(created.is_error, Some(true), "{}", result_text(&created));
+        let saved = backend.sidebar_layout.lock().unwrap().clone().expect("saved layout");
+        let summary = sidebar_groups::describe_layout(Some(&saved)).unwrap();
+        assert_eq!(summary.groups.len(), 2);
+        let mysql_group = summary.groups.iter().find(|group| group.name == "MySQL").unwrap().clone();
+        assert_eq!(mysql_group.path.names, vec!["本地", "MySQL"]);
+
+        let again = server.create_sidebar_group(Parameters(create_request())).await;
+        assert_ne!(again.is_error, Some(true), "{}", result_text(&again));
+        assert!(result_text(&again).contains("already exists"), "{}", result_text(&again));
+
+        let moved = server
+            .move_connections_to_group(Parameters(MoveConnectionsToGroupRequest {
+                connection_ids: vec!["mysql".to_string()],
+                connection_names: Vec::new(),
+                group_id: Some(mysql_group.id.clone()),
+                group_path: None,
+            }))
+            .await;
+        assert_ne!(moved.is_error, Some(true), "{}", result_text(&moved));
+        assert!(result_text(&moved).contains("Moved 1 connection(s)"), "{}", result_text(&moved));
+
+        let added = server
+            .add_connection(Parameters(AddConnectionRequest {
+                name: "MySQL 8.4".to_string(),
+                db_type: "mysql".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: Some(3307),
+                username: "root".to_string(),
+                password: String::new(),
+                database: Some("app".to_string()),
+                ssl: false,
+                driver_profile: None,
+                external_config: None,
+                group_id: None,
+                group_path: Some(vec!["本地".to_string(), "MySQL".to_string()]),
+            }))
+            .await;
+        assert_ne!(added.is_error, Some(true), "{}", result_text(&added));
+        assert!(result_text(&added).contains("in sidebar group \"本地 / MySQL\""), "{}", result_text(&added));
+
+        let saved = backend.sidebar_layout.lock().unwrap().clone().expect("saved layout");
+        let summary = sidebar_groups::describe_layout(Some(&saved)).unwrap();
+        let mysql = summary.groups.iter().find(|group| group.name == "MySQL").unwrap();
+        assert_eq!(mysql.direct_connection_ids, vec!["mysql".to_string(), backend_added_connection_id(&summary)]);
+
+        let listed = server.list_sidebar_groups(Parameters(ListSidebarGroupsRequest {})).await;
+        assert_ne!(listed.is_error, Some(true), "{}", result_text(&listed));
+        let output = result_text(&listed);
+        assert!(output.contains("MySQL") && output.contains("path: 本地 / MySQL"), "{output}");
+        assert!(output.contains("connection: MySQL 8.0 (id: mysql)"), "{output}");
+        assert!(output.contains("Ungrouped connections: Redis 7.4 (id: redis)"), "{output}");
+    }
+
+    fn backend_added_connection_id(summary: &SidebarSummary) -> String {
+        summary
+            .groups
+            .iter()
+            .flat_map(|group| group.direct_connection_ids.iter())
+            .find(|id| id.as_str() != "mysql")
+            .cloned()
+            .expect("added connection id")
+    }
+
+    #[tokio::test]
+    async fn sidebar_create_does_not_reveal_hidden_group_names() {
+        let policy =
+            McpGlobalPolicy { allowed_connection_ids: Some(vec!["visible".to_string()]), ..Default::default() };
+        let hidden_layout = json!({
+            "groups": [{ "id": "secret", "name": "Secret" }],
+            "order": [{ "type": "group", "id": "secret", "children": [{ "type": "connection", "id": "hidden" }] }]
+        });
+        let backend = Arc::new(FakeBackend {
+            connections: vec![
+                connection("visible", "Visible", "sqlite", "app"),
+                connection("hidden", "Hidden", "sqlite", "app"),
+            ],
+            policy,
+            sidebar_layout: std::sync::Mutex::new(Some(hidden_layout)),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let created = server
+            .create_sidebar_group(Parameters(CreateSidebarGroupRequest {
+                name: None,
+                path: Some(vec!["Secret".to_string()]),
+                parent_group_id: None,
+                parent_group_path: None,
+                create_missing_parents: false,
+            }))
+            .await;
+        assert_ne!(created.is_error, Some(true), "{}", result_text(&created));
+        assert!(result_text(&created).contains("Created 1 sidebar group(s): Secret"), "{}", result_text(&created));
+
+        let saved = backend.sidebar_layout.lock().unwrap().clone().expect("layout");
+        let summary = sidebar_groups::describe_layout(Some(&saved)).unwrap();
+        assert_eq!(summary.groups.iter().filter(|group| group.name == "Secret").count(), 2);
+        let created_group = summary
+            .groups
+            .iter()
+            .find(|group| group.name == "Secret" && group.id != "secret")
+            .expect("new visible group");
+        assert!(created_group.direct_connection_ids.is_empty());
+
+        let listed = server.list_sidebar_groups(Parameters(ListSidebarGroupsRequest {})).await;
+        let output = result_text(&listed);
+        assert_eq!(output.matches("Secret (id:").count(), 1, "{output}");
+        assert!(!output.contains("Hidden"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn sidebar_move_fails_when_policy_changes_before_commit() {
+        let layout = json!({
+            "groups": [{ "id": "g", "name": "G" }],
+            "order": [{ "type": "group", "id": "g", "children": [{ "type": "connection", "id": "c" }] }]
+        });
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("c", "Local", "sqlite", "app")],
+            sidebar_layout: std::sync::Mutex::new(Some(layout.clone())),
+            group_mutation_blocked_at_commit: std::sync::atomic::AtomicBool::new(true),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let moved = server
+            .move_connections_to_group(Parameters(MoveConnectionsToGroupRequest {
+                connection_ids: vec!["c".to_string()],
+                connection_names: Vec::new(),
+                group_id: Some("g".to_string()),
+                group_path: None,
+            }))
+            .await;
+        assert_eq!(moved.is_error, Some(true));
+        assert!(result_text(&moved).contains("MCP_POLICY_MOVE_BLOCKED"), "{}", result_text(&moved));
+        assert_eq!(backend.sidebar_layout.lock().unwrap().clone().unwrap(), layout);
+    }
+
+    #[tokio::test]
+    async fn sidebar_group_mutations_are_blocked_by_group_scoped_policy() {
+        let mut policy = McpGlobalPolicy::default();
+        policy.group_policies.push(dbx_core::storage::McpGroupPolicy {
+            group_id: "g".to_string(),
+            read_only: true,
+            allow_dangerous_sql: false,
+        });
+        let layout = json!({
+            "groups": [{ "id": "g", "name": "G" }],
+            "order": [{ "type": "group", "id": "g", "children": [{ "type": "connection", "id": "c" }] }]
+        });
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("c", "Local", "sqlite", "app")],
+            policy,
+            sidebar_layout: std::sync::Mutex::new(Some(layout)),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let moved = server
+            .move_connections_to_group(Parameters(MoveConnectionsToGroupRequest {
+                connection_ids: vec!["c".to_string()],
+                connection_names: Vec::new(),
+                group_id: Some("g".to_string()),
+                group_path: None,
+            }))
+            .await;
+        assert_eq!(moved.is_error, Some(true));
+        assert!(result_text(&moved).contains("MCP_POLICY_MOVE_BLOCKED"), "{}", result_text(&moved));
+
+        let added = server
+            .add_connection(Parameters(AddConnectionRequest {
+                name: "Another".to_string(),
+                db_type: "sqlite".to_string(),
+                host: ":memory:".to_string(),
+                port: Some(0),
+                username: String::new(),
+                password: String::new(),
+                database: None,
+                ssl: false,
+                driver_profile: None,
+                external_config: None,
+                group_id: Some("g".to_string()),
+                group_path: None,
+            }))
+            .await;
+        assert_eq!(added.is_error, Some(true));
+        assert!(result_text(&added).contains("MCP_POLICY_GROUP_MUTATION_BLOCKED"), "{}", result_text(&added));
+    }
+
+    #[tokio::test]
+    async fn sidebar_list_hides_groups_whose_members_are_all_out_of_scope() {
+        let policy =
+            McpGlobalPolicy { allowed_connection_ids: Some(vec!["visible".to_string()]), ..Default::default() };
+        let backend = Arc::new(FakeBackend {
+            connections: vec![
+                connection("visible", "Visible", "sqlite", "app"),
+                connection("hidden", "Hidden", "sqlite", "app"),
+            ],
+            policy,
+            sidebar_layout: std::sync::Mutex::new(Some(json!({
+                "groups": [
+                    { "id": "secret", "name": "Secret" },
+                    { "id": "local", "name": "Local" },
+                    { "id": "empty", "name": "Empty" }
+                ],
+                "order": [
+                    { "type": "group", "id": "secret", "children": [{ "type": "connection", "id": "hidden" }] },
+                    { "type": "group", "id": "local", "children": [{ "type": "connection", "id": "visible" }] },
+                    { "type": "group", "id": "empty", "children": [] }
+                ]
+            }))),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+        let listed = server.list_sidebar_groups(Parameters(ListSidebarGroupsRequest {})).await;
+        let output = result_text(&listed);
+        assert!(!output.contains("Secret"), "{output}");
+        assert!(output.contains("Local") && output.contains("Visible (id: visible)"), "{output}");
+        assert!(output.contains("Empty"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn sidebar_create_rejects_an_unknown_parent_path() {
+        let backend = Arc::new(FakeBackend::default());
+        let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+        let created = server
+            .create_sidebar_group(Parameters(CreateSidebarGroupRequest {
+                name: Some("MySQL".to_string()),
+                path: None,
+                parent_group_id: None,
+                parent_group_path: Some(vec!["本地".to_string()]),
+                create_missing_parents: false,
+            }))
+            .await;
+        assert_eq!(created.is_error, Some(true));
+        assert!(result_text(&created).contains("GROUP_NOT_FOUND"), "{}", result_text(&created));
+    }
+
     #[test]
     fn server_registers_list_connections_tool() {
         let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
@@ -10313,9 +11281,9 @@ mod tests {
         // 22 product-provider tools (14 Nacos + 8 Consul), plus the three
         // runtime-selectable plugin meta tools retained by auto mode.
         #[cfg(feature = "mq-admin")]
-        assert_eq!(tools.len(), 50);
+        assert_eq!(tools.len(), 53);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(tools.len(), 48);
+        assert_eq!(tools.len(), 51);
         assert!(names.contains(&"dbx_nacos_get_config") && names.contains(&"dbx_consul_kv_get"));
         #[cfg(feature = "mq-admin")]
         assert!(names.contains(&"dbx_peek_messages"));
@@ -10335,6 +11303,9 @@ mod tests {
         assert!(names.contains(&"dbx_add_connection"));
         assert!(names.contains(&"dbx_duplicate_connection"));
         assert!(names.contains(&"dbx_remove_connection"));
+        assert!(names.contains(&"dbx_list_sidebar_groups"));
+        assert!(names.contains(&"dbx_create_sidebar_group"));
+        assert!(names.contains(&"dbx_move_connections_to_group"));
         assert!(names.contains(&"dbx_execute_redis_command"));
         assert!(names.contains(&"dbx_salesforce_current_user"));
         assert!(names.contains(&"dbx_salesforce_prepare_write"));
@@ -10358,6 +11329,7 @@ mod tests {
         }
 
         let read_only_tools = [
+            "dbx_list_sidebar_groups",
             "dbx_list_connections",
             "dbx_list_databases",
             "dbx_list_tables",
@@ -10621,6 +11593,15 @@ mod tests {
             Some(&serde_json::json!({})),
             "dbx_list_connections must have empty properties object"
         );
+        let list_groups = tools
+            .iter()
+            .find(|tool| tool.name == "dbx_list_sidebar_groups")
+            .expect("dbx_list_sidebar_groups should be registered");
+        assert_eq!(
+            list_groups.input_schema.get("properties"),
+            Some(&serde_json::json!({})),
+            "dbx_list_sidebar_groups must have empty properties object"
+        );
     }
 
     #[tokio::test]
@@ -10705,7 +11686,12 @@ mod tests {
             ("dbx_open_session", &["database", "enable_transactions"]),
             ("dbx_open_table", &["database", "schema"]),
             ("dbx_execute_and_show", &["database"]),
-            ("dbx_add_connection", &["port", "database", "driver_profile"]),
+            ("dbx_add_connection", &["port", "database", "driver_profile", "group_id", "group_path"]),
+            (
+                "dbx_create_sidebar_group",
+                &["name", "path", "parent_group_id", "parent_group_path", "create_missing_parents"],
+            ),
+            ("dbx_move_connections_to_group", &["connection_ids", "connection_names", "group_id", "group_path"]),
             ("dbx_remove_connection", &["connection_id", "connection_name"]),
             ("dbx_nacos_register_instance", &["metadata"]),
             ("dbx_execute_redis_command", &["db"]),
@@ -10872,6 +11858,9 @@ mod tests {
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_duplicate_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
+        assert!(!names.iter().any(|name| name == "dbx_list_sidebar_groups"));
+        assert!(!names.iter().any(|name| name == "dbx_create_sidebar_group"));
+        assert!(!names.iter().any(|name| name == "dbx_move_connections_to_group"));
         assert!(!names.iter().any(|name| name == "dbx_open_table"));
         assert!(!names.iter().any(|name| name == "dbx_execute_and_show"));
         assert!(names.iter().any(|name| name == "dbx_execute_batch"));

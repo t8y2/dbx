@@ -3632,8 +3632,12 @@ export async function syncSavedSqlDirectory(request: SavedSqlSyncRequest): Promi
   return invoke("sync_saved_sql_directory", { request });
 }
 
-export async function saveSidebarLayout(layout: import("@/types/database").SidebarLayout): Promise<void> {
-  return invoke("save_sidebar_layout", { layout });
+export async function saveSidebarLayout(layout: import("@/types/database").SidebarLayout, expected?: import("@/types/database").SidebarLayout | null): Promise<boolean> {
+  if (expected === undefined) {
+    await invoke("save_sidebar_layout", { layout });
+    return true;
+  }
+  return invoke("save_sidebar_layout_if_unchanged", { layout, expected });
 }
 
 export async function loadSidebarLayout(): Promise<import("@/types/database").SidebarLayout | null> {

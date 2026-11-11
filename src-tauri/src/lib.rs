@@ -2547,6 +2547,7 @@ pub fn run() {
             commands::connection::save_connections,
             commands::connection::load_connections,
             commands::connection::save_sidebar_layout,
+            commands::connection::save_sidebar_layout_if_unchanged,
             commands::connection::load_sidebar_layout,
             commands::connection::save_table_vgroups,
             commands::connection::load_table_vgroups,

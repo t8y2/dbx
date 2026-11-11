@@ -4986,6 +4986,8 @@ function tableAdminSqlOptions(row: ObjectBrowserRow, options?: { cascade?: boole
     identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
   };
   if (options?.cascade) result.cascade = true;
+  // PostgreSQL needs `DROP FOREIGN TABLE` for relkind = 'f' (#14717).
+  if (row.type?.toUpperCase() === "FOREIGN TABLE") result.foreignTable = true;
   return result;
 }
 

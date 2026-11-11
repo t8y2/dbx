@@ -14,6 +14,9 @@ export interface DropObjectSqlOptions {
    * database type alone (Cloud Spanner's two dialects differ). Mirrors `identifierQuote` on the
    * table-data SQL options. */
   identifierQuote?: string;
+  /** The relation is a foreign table (PostgreSQL `relkind = 'f'`). PostgreSQL rejects `DROP TABLE`
+   * for those and needs `DROP FOREIGN TABLE`, so the drop statement follows the relation kind. */
+  foreignTable?: boolean;
 }
 
 export interface TableAdminSqlOptions {

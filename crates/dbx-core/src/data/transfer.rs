@@ -11469,6 +11469,7 @@ async fn build_rebuild_preview(
                 })?;
             rename_statements.push(rename_sql);
             let drop_sql = crate::db_admin_sql::build_drop_table_sql(crate::db_admin_sql::TableAdminSqlOptions {
+                foreign_table: false,
                 database_type: Some(*target_db_type),
                 schema: if request.target_schema.is_empty() { None } else { Some(request.target_schema.clone()) },
                 table_name: backup.clone(),
@@ -14436,6 +14437,7 @@ pub async fn drop_backup_tables(
             continue;
         };
         let drop_sql = crate::db_admin_sql::build_drop_table_sql(crate::db_admin_sql::TableAdminSqlOptions {
+            foreign_table: false,
             database_type: Some(target_db_type),
             schema: if request.target_schema.is_empty() { None } else { Some(request.target_schema.clone()) },
             table_name: backup_name.clone(),

@@ -107,6 +107,8 @@ describe("consoleFormat", () => {
     ["BEGIN\n  NULL;\nEND;\n/\nSELECT 1;", "oracle", true],
     ["SELECT 'first\nGO", "sqlserver", false],
     ["SELECT 'first\nGO\nlast'\nGO", "sqlserver", true],
+    ["SELECT 1; /* outer /* inner */", "sqlserver", false],
+    ["SELECT 1; /* outer /* inner */\nGO\nouter */", "sqlserver", true],
   ] as const)("checks lexical completion of %j for %s", (sql, dialect, expected) => {
     expect(consoleStatementComplete(sql, dialect)).toBe(expected);
   });

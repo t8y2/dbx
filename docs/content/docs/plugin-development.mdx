@@ -612,6 +612,21 @@ async function pasteFromClipboard() {
 }
 ```
 
+### Copying Images
+
+`window.dbxPlugin.copyImage({ contentType: "image/png" }, data)` writes a PNG to the system clipboard. Pass an `ArrayBuffer`, `Uint8Array`, or Base64 string without a data URL prefix, or pass `{ contentType: "image/png", dataBase64 }` alone. It returns `{ success: true }` only after the host write succeeds; failures reject rather than copying image data as text. Typed arrays send only their view's bytes.
+
+Check `window.dbxPlugin.capabilities?.clipboardImageWrite` first: older hosts and the SDK Dev Host do not provide this capability. Desktop uses the native image clipboard. Web requires a secure context, the browser image clipboard API and browser permission; browsers may also require user activation. Keep a save-image fallback when access is denied. Call from a user-initiated copy action, not in the background. Like `host.copy`, this adds no manifest permission and grants no clipboard read access. The wire method is `host.copyImage`, with `contentType` and `dataBase64` parameters or bytes in the existing binary field.
+
+Only PNG is accepted, limited to 18 MiB encoded bytes (24 MiB Base64) and 16,777,216 pixels. Dimensions are checked from the PNG header rather than caller-supplied `width` / `height`. Prefer binary transfer for larger images to avoid Base64 overhead.
+
+```js
+await window.dbxPlugin.ready;
+if (window.dbxPlugin.capabilities?.clipboardImageWrite) {
+  await window.dbxPlugin.copyImage({ contentType: "image/png" }, pngBytes);
+}
+```
+
 ### File Transfer and OS Drops
 
 Desktop hosts stream local files into plugin sandboxes through `window.dbxPlugin.fileTransfer`. Handles are opened only after explicit user consent: a native open/save dialog (`pick` / `beginSave`) or a file dropped from the OS onto this plugin's workbench area (`onDrop`). Transfers are chunked, so multi-gigabyte files never load into memory.

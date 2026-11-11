@@ -625,6 +625,7 @@ function scanSqlStatementRanges(sql: string, databaseType?: DatabaseType, parame
   let singleQuoteBackslashEscapes = false;
   let dollarTag = "";
   let postgresDollarQuotedRoutine = false;
+  let sqlServerModuleBatch = false;
   let oraclePlSqlStatementEnd: number | null | undefined;
   let unterminatedBlockComment = false;
   let awaitingSlash = false;
@@ -667,6 +668,12 @@ function scanSqlStatementRanges(sql: string, databaseType?: DatabaseType, parame
       // exact /*proxy*/ directive also keeps its historical multiline support.
       const directiveStart = pendingMysqlDirectiveStart !== -1 && (sql.startsWith("/*proxy*/", pendingMysqlDirectiveStart) || pos < pendingMysqlDirectiveLineEnd) ? pendingMysqlDirectiveStart : -1;
       statementStart = directiveStart !== -1 ? directiveStart : pendingHintStart === -1 ? pos : pendingHintStart;
+      sqlServerModuleBatch = databaseType === "sqlserver" && startsWithSqlServerModuleDdl(sql, pos, parameterOptions);
+      if (sqlServerModuleBatch) {
+        // SQL Server stores the module's leading comments in its definition.
+        statementStart = statementHitStart;
+        while (isWhitespace(sql[statementStart])) statementStart += 1;
+      }
       pendingHintStart = -1;
       pendingMysqlDirectiveStart = -1;
       pendingMysqlDirectiveLineEnd = -1;
@@ -681,6 +688,7 @@ function scanSqlStatementRanges(sql: string, databaseType?: DatabaseType, parame
       pendingMysqlDirectiveStart = -1;
       pendingMysqlDirectiveLineEnd = -1;
       postgresDollarQuotedRoutine = false;
+      sqlServerModuleBatch = false;
       oraclePlSqlStatementEnd = undefined;
       return;
     }
@@ -694,6 +702,7 @@ function scanSqlStatementRanges(sql: string, databaseType?: DatabaseType, parame
     pendingMysqlDirectiveStart = -1;
     pendingMysqlDirectiveLineEnd = -1;
     postgresDollarQuotedRoutine = false;
+    sqlServerModuleBatch = false;
     oraclePlSqlStatementEnd = undefined;
     mysqlRoutineScan = null;
   };
@@ -860,7 +869,7 @@ function scanSqlStatementRanges(sql: string, databaseType?: DatabaseType, parame
     if (ch === "/" && next === "*") {
       const hintMarker = sql[i + 2];
       if (statementStart === -1 && pendingHintStart === -1 && (hintMarker === "+" || hintMarker === "@" || hintMarker === "&")) pendingHintStart = i;
-      const close = sql.indexOf("*/", i + 2);
+      const close = findSqlBlockCommentEnd(sql, i, databaseType);
       unterminatedBlockComment = close === -1;
       if (statementStart === -1) {
         if (databaseType === "mysql") {
@@ -933,6 +942,11 @@ function scanSqlStatementRanges(sql: string, databaseType?: DatabaseType, parame
         continue;
       }
     } else if (ch === ";" && !isXmlEntityReferenceSemicolon(sql, i)) {
+      if (sqlServerModuleBatch) {
+        markContent(i);
+        i += 1;
+        continue;
+      }
       const routineTokensBeforeSemicolon = isMysqlRoutineBlockDatabase(databaseType) && statementStart !== -1 ? mysqlRoutineTokensUpTo(i) : null;
       const isMysqlRoutineBlock = routineTokensBeforeSemicolon !== null && isMysqlRoutineDdlStartFromWords(mysqlRoutineDdlStartWords(routineTokensBeforeSemicolon)) && mysqlRoutineTokensContainBegin(routineTokensBeforeSemicolon);
       if (isMysqlRoutineBlock) {
@@ -1097,6 +1111,7 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
   if (isFirebirdRoutineBlockStatement(statement.sql, databaseType)) return [statement];
   // Routine bodies contain top-level-looking SET/INSERT/SELECT lines that are not independent statements.
   if (isMysqlRoutineBlockDatabase(databaseType) && startsWithMysqlRoutineBlock(statement.sql, parameterOptions)) return [statement];
+  if (databaseType === "sqlserver" && startsWithSqlServerModuleDdl(sql, statement.from, parameterOptions)) return [statement];
   // SQL Server control-flow batches use line-oriented BEGIN/EXEC tokens inside one IF/ELSE statement.
   if (isSqlServerControlFlowBatch(sql, statement, databaseType, parameterOptions)) return [statement];
 
@@ -1294,6 +1309,18 @@ function scanSqlServerControlFlow(sql: string, from: number, to: number, databas
   }
 
   return { openBlocks, closedAt, wordAfterClose, sawBlockBegin, hasControlFlowElse };
+}
+
+function startsWithSqlServerModuleDdl(sql: string, from: number, parameterOptions?: SqlParameterOptions): boolean {
+  const operation = nextSqlWordToken(sql, from, "sqlserver", parameterOptions);
+  if (operation?.word !== "CREATE" && operation?.word !== "ALTER") return false;
+  let kind = nextSqlWordToken(sql, operation.end, "sqlserver", parameterOptions);
+  if (operation.word === "CREATE" && kind?.word === "OR") {
+    const alter = nextSqlWordToken(sql, kind.end, "sqlserver", parameterOptions);
+    if (alter?.word !== "ALTER") return false;
+    kind = nextSqlWordToken(sql, alter.end, "sqlserver", parameterOptions);
+  }
+  return kind != null && ["PROC", "PROCEDURE", "FUNCTION", "TRIGGER", "VIEW"].includes(kind.word);
 }
 
 /**
@@ -1883,7 +1910,7 @@ function nextSqlWordToken(sql: string, pos: number, databaseType?: DatabaseType,
       continue;
     }
     if (sql[i] === "/" && sql[i + 1] === "*") {
-      const commentEnd = sql.indexOf("*/", i + 2);
+      const commentEnd = findSqlBlockCommentEnd(sql, i, databaseType);
       if (commentEnd < 0) return null;
       i = commentEnd + 2;
       continue;
@@ -2107,6 +2134,22 @@ export function startsHashLineComment(sql: string, pos: number, databaseType?: D
 
 function startsBlockComment(sql: string, pos: number): boolean {
   return sql[pos] === "/" && sql[pos + 1] === "*";
+}
+
+export function findSqlBlockCommentEnd(sql: string, from: number, databaseType?: DatabaseType): number {
+  if (databaseType !== "sqlserver") return sql.indexOf("*/", from + 2);
+  let depth = 1;
+  for (let index = from + 2; index < sql.length - 1; index += 1) {
+    if (sql[index] === "/" && sql[index + 1] === "*") {
+      depth += 1;
+      index += 1;
+    } else if (sql[index] === "*" && sql[index + 1] === "/") {
+      depth -= 1;
+      if (depth === 0) return index;
+      index += 1;
+    }
+  }
+  return -1;
 }
 
 function trimRangeEnd(sql: string, from: number, to: number): number {

@@ -11,8 +11,14 @@ export interface TableSearchIndexEntry {
 }
 
 export interface TableSearchIndex {
-  /** Version 3 preserves owning schema and partition parent metadata. */
-  version: 3;
+  /**
+   * Version 3 preserved owning schema and partition parent metadata but stamped
+   * the database name onto schema-less scopes (MySQL-style flat trees), whose
+   * live node ids carry no schema infix — the search merge then saw the same
+   * table twice. Version 4 keeps those entries unattributed; the database-name
+   * fallback only applies where the live tree resolves a node schema.
+   */
+  version: 4;
   complete: true;
   indexedAt: string;
   entries: TableSearchIndexEntry[];
@@ -84,7 +90,7 @@ export function encodeSchemaTreeCache<T>(children: T, nowMs = Date.now(), tableS
 function decodeTableSearchIndex(value: unknown): TableSearchIndex | undefined {
   if (!value || typeof value !== "object") return undefined;
   const index = value as Partial<TableSearchIndex>;
-  if (index.version !== 3 || index.complete !== true || typeof index.indexedAt !== "string" || !Array.isArray(index.entries)) return undefined;
+  if (index.version !== 4 || index.complete !== true || typeof index.indexedAt !== "string" || !Array.isArray(index.entries)) return undefined;
   const entries = index.entries.filter(
     (entry): entry is TableSearchIndexEntry =>
       !!entry &&
@@ -95,7 +101,7 @@ function decodeTableSearchIndex(value: unknown): TableSearchIndex | undefined {
       (entry.parentSchema === undefined || entry.parentSchema === null || typeof entry.parentSchema === "string") &&
       (entry.parentName === undefined || entry.parentName === null || typeof entry.parentName === "string"),
   );
-  return entries.length === index.entries.length ? { version: 3, complete: true, indexedAt: index.indexedAt, entries } : undefined;
+  return entries.length === index.entries.length ? { version: 4, complete: true, indexedAt: index.indexedAt, entries } : undefined;
 }
 
 export function decodeSchemaTreeCache<T>(payload: unknown, nowMs = Date.now(), ttlMs = SCHEMA_TREE_CACHE_TTL_MS): DecodedSchemaTreeCache<T> | null {

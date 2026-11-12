@@ -1239,6 +1239,7 @@ export default withEnglishFallback({
     locateTargetNotFound: "사이드바에서 해당 항목을 찾을 수 없습니다. 삭제되었거나 숨겨져 있을 수 있습니다.",
     locateSqlFile: "SQL 파일 목록에서 찾기",
     locateActiveTab: "사이드바에서 찾기",
+    importSqlark: "SQLark 구성 가져오기",
   },
   savedSql: {
     openDefaultQuery: "기본 쿼리 열기",
@@ -4056,6 +4057,8 @@ export default withEnglishFallback({
     next: "다음",
     importSelected: "{count}개 가져오기",
     noConnections: "선택할 연결이 없습니다",
+    importSqlarkSuccess: "SQLark 연결 {count}개를 가져왔고 비밀번호 {passwords}개를 복원했습니다",
+    importSqlarkSkipped: "SQLark 연결 {count}개의 데이터베이스 유형이 아직 지원되지 않아 건너뛰었습니다",
   },
   ai: {
     noConfig: "AI가 구성되지 않았습니다. 설정 > AI에서 AI 공급자를 설정하세요.",

@@ -1213,6 +1213,7 @@ export default withEnglishFallback({
     locateTargetNotFound: "Элемент недоступен на боковой панели. Возможно, он был удалён или скрыт.",
     locateSqlFile: "Найти в списке SQL-файлов",
     locateActiveTab: "Найти в боковой панели",
+    importSqlark: "Импорт конфигурации SQLark",
   },
   savedSql: {
     openDefaultQuery: "Открыть запрос по умолчанию",
@@ -4206,6 +4207,8 @@ export default withEnglishFallback({
     next: "Далее",
     importSelected: "Импортировать ({count})",
     noConnections: "Нет доступных подключений",
+    importSqlarkSuccess: "Импортировано {count} подключений SQLark, восстановлено {passwords} паролей",
+    importSqlarkSkipped: "Пропущено {count} подключений SQLark: тип базы данных пока не поддерживается",
   },
   ai: {
     noConfig: "ИИ не настроен. Настройте провайдера ИИ в разделе «Настройки > ИИ».",

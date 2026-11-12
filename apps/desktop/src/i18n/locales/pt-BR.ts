@@ -1233,6 +1233,7 @@ export default withEnglishFallback({
     locateTargetNotFound: "O item não está disponível na barra lateral. Ele pode ter sido removido ou ocultado.",
     locateSqlFile: "Localizar na lista de arquivos SQL",
     locateActiveTab: "Localizar na barra lateral",
+    importSqlark: "Importar configuração do SQLark",
   },
   savedSql: {
     openDefaultQuery: "Abrir consulta padrão",
@@ -4104,6 +4105,8 @@ export default withEnglishFallback({
     next: "Próximo",
     importSelected: "Importar {count}",
     noConnections: "Nenhuma conexão disponível",
+    importSqlarkSuccess: "Foram importadas {count} conexões do SQLark e restauradas {passwords} senhas",
+    importSqlarkSkipped: "Foram ignoradas {count} conexões do SQLark, pois o tipo de banco de dados ainda não é suportado",
   },
   ai: {
     noConfig: "A AI não está configurada. Configure seu provedor de AI em Configurações > AI.",

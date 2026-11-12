@@ -1233,6 +1233,7 @@ export default withEnglishFallback({
     locateTargetNotFound: "サイドバーに該当する項目が見つかりません。削除または非表示にされている可能性があります。",
     locateSqlFile: "SQL ファイル一覧で表示",
     locateActiveTab: "サイドバーで表示",
+    importSqlark: "SQLark 設定をインポート",
   },
   savedSql: {
     openDefaultQuery: "デフォルトクエリを開く",
@@ -4127,6 +4128,8 @@ export default withEnglishFallback({
     next: "次へ",
     importSelected: "{count}件をインポート",
     noConnections: "選択できる接続がありません",
+    importSqlarkSuccess: "SQLark 接続を {count} 件インポートし、{passwords} 件のパスワードを復元しました",
+    importSqlarkSkipped: "データベースタイプが未対応の SQLark 接続 {count} 件をスキップしました",
   },
   ai: {
     noConfig: "AIが設定されていません。設定 > AIでAIプロバイダーを設定してください。",

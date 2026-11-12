@@ -179,6 +179,7 @@ struct Analyzer {
     scope_stack: Vec<usize>,
     cte_scope_stack: Vec<HashSet<String>>,
     next_scope_id: usize,
+    is_mysql: bool,
     is_sqlserver: bool,
     is_spark: bool,
     group_by_violations: Vec<SqlGroupByViolation>,
@@ -262,6 +263,7 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
     };
 
     let mut analyzer = Analyzer {
+        is_mysql: normalized_dialect.id == "mysql",
         is_sqlserver: normalized_dialect.id == "sqlserver",
         is_spark: normalized_dialect.id == "spark",
         ..Analyzer::default()
@@ -1977,10 +1979,12 @@ impl Analyzer {
 
     fn visit_function_call_args(&mut self, name: &ObjectName, args: &FunctionArguments) {
         let sqlserver_datepart_function = self.is_sqlserver.then(|| sqlserver_datepart_function_name(name)).flatten();
+        let mysql_timestamp_function = self.is_mysql && is_mysql_timestamp_function(name);
         self.visit_function_args_skipping(args, |index, arg| {
             index == 0
-                && sqlserver_datepart_function
-                    .is_some_and(|function_name| is_sqlserver_datepart_argument(function_name, arg))
+                && ((mysql_timestamp_function && is_mysql_timestamp_unit(arg))
+                    || sqlserver_datepart_function
+                        .is_some_and(|function_name| is_sqlserver_datepart_argument(function_name, arg)))
         });
     }
 
@@ -2215,6 +2219,30 @@ fn table_reference_from_name(
 
 fn object_name_last_ident(name: &ObjectName) -> Option<&Ident> {
     name.0.iter().rev().find_map(ObjectNamePart::as_ident)
+}
+
+fn is_mysql_timestamp_function(name: &ObjectName) -> bool {
+    let [part] = name.0.as_slice() else {
+        return false;
+    };
+    part.as_ident().is_some_and(|ident| {
+        ident.quote_style.is_none()
+            && (ident.value.eq_ignore_ascii_case("TIMESTAMPADD") || ident.value.eq_ignore_ascii_case("TIMESTAMPDIFF"))
+    })
+}
+
+fn is_mysql_timestamp_unit(arg: &FunctionArg) -> bool {
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(ident))) = arg else {
+        return false;
+    };
+    if ident.quote_style.is_some() {
+        return false;
+    }
+
+    // MySQL treats the first argument as a unit keyword, including ODBC SQL_TSI_ aliases.
+    let unit = ident.value.to_ascii_uppercase();
+    let unit = unit.strip_prefix("SQL_TSI_").unwrap_or(&unit);
+    matches!(unit, "MICROSECOND" | "SECOND" | "MINUTE" | "HOUR" | "DAY" | "WEEK" | "MONTH" | "QUARTER" | "YEAR")
 }
 
 fn sqlserver_datepart_function_name(name: &ObjectName) -> Option<&str> {

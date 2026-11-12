@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { usesLightweightMysqlBrowser } from "@/lib/database/mysqlBrowserLoading";
+import { mysqlTableCharsetFromCollation } from "@/lib/table/mysqlTableCollation";
 import { useTableCopyTaskStore } from "@/stores/tableCopyTaskStore";
 import { uuid } from "@/lib/common/utils";
 import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
@@ -76,7 +77,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import { DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
@@ -175,6 +176,7 @@ import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
 import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
 import { copyToClipboard, eventTargetAllowsAppClipboardShortcut, eventTargetUsesNativeClipboard } from "@/lib/common/clipboard";
 import { encodeSpreadsheetTsvCell } from "@/lib/common/spreadsheetTsv";
+import { formatRowsAsSpreadsheetTsv } from "@/lib/common/tableClipboard";
 import {
   defaultPasteTableMode,
   pasteTableModeCopiesData,
@@ -212,6 +214,7 @@ import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { buildDamengCompileViewSql } from "@/lib/database/damengCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
+import { COLUMN_NAME_COPY_SEPARATOR_VALUES } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
 import { foreignKeyChecksPreview, foreignKeyChecksTargetResults, isForeignKeyChecksOverride, runForeignKeyChecksBatch, supportsForeignKeyChecksOption, type ForeignKeyChecksMode } from "@/lib/table/foreignKeyChecks";
@@ -267,7 +270,7 @@ import { createLocateTabMenuItem } from "@/lib/tabs/tabMenu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type ObjectFilter = ObjectBrowserFilter;
-type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
+type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -365,6 +368,7 @@ const sortKey = ref<ObjectBrowserSortKey>("name");
 const sortDirection = ref<ObjectBrowserSortDirection>("asc");
 const loadingSchemas = ref(false);
 const loadingObjects = ref(false);
+const copyingObjectRows = ref(false);
 const loadingMoreObjects = ref(false);
 const hasMoreObjects = ref(false);
 let objectPageOffset = 0;
@@ -484,6 +488,7 @@ const supportsSchemaIndexes = computed(() => supportsSchemaIndexManagement(effec
 const exactIndexList = computed(() => supportsSchemaIndexes.value && objectFilter.value === "indexes");
 const usesServerObjectPaging = computed(() => props.connection.db_type === "oceanbase-oracle" || exactIndexList.value || (objectFilter.value === "triggers" && supportsExactTriggerDiscovery.value));
 const objectPageSize = computed(() => Math.max(1, Math.min(10_000, Math.floor(settingsStore.desktopSettings?.sidebar_table_page_size || 500))));
+const OBJECT_COPY_PAGE_SIZE = 1_000;
 const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && props.connection.driver_profile?.toLowerCase() === "gaussdb-m");
 
 function setOracleInvalidObjectsOpen(open: boolean) {
@@ -514,6 +519,7 @@ const supportsBatchTableActions = computed(() => !isVictoriaMetrics.value && !is
 const showTableStatistics = computed(() => !usesServerObjectPaging.value && effectiveDatabaseType.value !== "nebula" && (objectFilter.value === "all" || objectFilter.value === "tables"));
 const showObjectRowStats = computed(() => showTableStatistics.value);
 const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showTableStatistics.value);
+const showMysqlTableCharsetColumns = computed(() => effectiveDatabaseType.value === "mysql" && showTableStatistics.value);
 const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
 
 function toggleTableDdlWordWrap() {
@@ -671,21 +677,121 @@ const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
   type: 110,
   estimatedRows: 110,
   totalBytes: 100,
+  characterSet: 120,
+  collation: 220,
   created_at: 150,
   updated_at: 150,
   comment: 260,
 });
 const objectColumnVisibility = ref<Partial<Record<ObjectBrowserColumnKey, boolean>>>({});
 const objectColumnVisibilityStorageKey = computed(() => `dbx-object-browser-columns:v1:${props.connection.id}:${props.database}:${selectedSchema.value ?? ""}`);
-const objectColumnDefinitions = computed(() => [
+const objectColumnOrder = ref<ObjectBrowserColumnKey[]>([]);
+const objectColumnOrderStorageKey = computed(() => `${objectColumnVisibilityStorageKey.value}:order`);
+const availableObjectColumnDefinitions = computed(() => [
   { key: "name" as const, label: t("objects.name") },
   { key: "type" as const, label: t("objects.type") },
+  ...(showMysqlTableCharsetColumns.value
+    ? [
+        { key: "characterSet" as const, label: t("structureEditor.characterSet") },
+        { key: "collation" as const, label: t("structureEditor.collation") },
+      ]
+    : []),
   ...(showObjectRowStats.value ? [{ key: "estimatedRows" as const, label: objectRowsLabel.value }] : []),
   ...(showObjectSizeStats.value ? [{ key: "totalBytes" as const, label: t("objects.size") }] : []),
   ...(hasCreatedAt.value ? [{ key: "created_at" as const, label: t("objects.createdAt") }] : []),
   ...(hasUpdatedAt.value ? [{ key: "updated_at" as const, label: t("objects.updatedAt") }] : []),
   { key: "comment" as const, label: t("objects.comment") },
 ]);
+const objectColumnDefinitions = computed(() => {
+  const ranks = new Map(objectColumnOrder.value.map((key, index) => [key, index]));
+  return [...availableObjectColumnDefinitions.value].sort((left, right) => (ranks.get(left.key) ?? Number.MAX_SAFE_INTEGER) - (ranks.get(right.key) ?? Number.MAX_SAFE_INTEGER));
+});
+
+function saveObjectColumnOrder(order: ObjectBrowserColumnKey[]): void {
+  objectColumnOrder.value = [...order, ...objectColumnOrder.value.filter((column) => !order.includes(column))];
+  try {
+    localStorage.setItem(objectColumnOrderStorageKey.value, JSON.stringify(objectColumnOrder.value));
+  } catch {
+    // The current session can still use the requested order without persistent storage.
+  }
+  nextTick(() => syncObjectListHeaderScroll());
+}
+
+function moveObjectColumn(key: ObjectBrowserColumnKey, direction: -1 | 1): void {
+  const order: ObjectBrowserColumnKey[] = objectColumnDefinitions.value.map((column) => column.key);
+  const index = order.indexOf(key);
+  const target = index + direction;
+  if (index < 0 || target < 0 || target >= order.length) return;
+  [order[index], order[target]] = [order[target]!, order[index]!];
+  saveObjectColumnOrder(order);
+}
+
+const objectColumnConfigOpen = ref(false);
+const objectColumnListRef = ref<HTMLElement>();
+const objectColumnDrag = ref<{ key: ObjectBrowserColumnKey; pointerId: number; startX: number; startY: number; active: boolean; handle: HTMLElement }>();
+const objectColumnDropTarget = ref<{ key: ObjectBrowserColumnKey; after: boolean }>();
+
+function cancelObjectColumnDrag(): void {
+  const drag = objectColumnDrag.value;
+  objectColumnDrag.value = undefined;
+  objectColumnDropTarget.value = undefined;
+  if (drag?.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId);
+}
+
+function startObjectColumnDrag(event: PointerEvent, key: ObjectBrowserColumnKey): void {
+  if (event.button !== 0 || !event.isPrimary) return;
+  cancelObjectColumnDrag();
+  const handle = event.currentTarget as HTMLElement;
+  handle.focus({ preventScroll: true });
+  handle.setPointerCapture(event.pointerId);
+  objectColumnDrag.value = { key, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, active: false, handle };
+}
+
+function updateObjectColumnDrag(event: PointerEvent): void {
+  const drag = objectColumnDrag.value;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  if (!drag.active && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 5) return;
+  drag.active = true;
+  const row = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-object-column-key]");
+  const key = objectColumnDefinitions.value.find((column) => column.key === row?.dataset.objectColumnKey)?.key;
+  if (!row || !key || key === drag.key || !objectColumnListRef.value?.contains(row)) {
+    objectColumnDropTarget.value = undefined;
+    return;
+  }
+  const rect = row.getBoundingClientRect();
+  objectColumnDropTarget.value = { key, after: event.clientY >= rect.top + rect.height / 2 };
+}
+
+function finishObjectColumnDrag(event: PointerEvent): void {
+  const drag = objectColumnDrag.value;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  updateObjectColumnDrag(event);
+  const target = objectColumnDropTarget.value;
+  if (drag.active && target) {
+    const order: ObjectBrowserColumnKey[] = objectColumnDefinitions.value.map((column) => column.key).filter((key) => key !== drag.key);
+    const index = order.indexOf(target.key);
+    if (index >= 0) {
+      order.splice(index + (target.after ? 1 : 0), 0, drag.key);
+      saveObjectColumnOrder(order);
+    }
+  }
+  cancelObjectColumnDrag();
+}
+
+watch([objectColumnOrderStorageKey, objectColumnConfigOpen], cancelObjectColumnDrag);
+onBeforeUnmount(cancelObjectColumnDrag);
+onDeactivated(cancelObjectColumnDrag);
+
+function loadObjectColumnOrder(): void {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(objectColumnOrderStorageKey.value) || "[]");
+    objectColumnOrder.value = Array.isArray(saved) ? [...new Set(saved.filter((key): key is ObjectBrowserColumnKey => typeof key === "string" && key !== "select" && Object.prototype.hasOwnProperty.call(objectColumnWidths.value, key)))] : [];
+  } catch {
+    objectColumnOrder.value = [];
+  }
+}
+watch(objectColumnOrderStorageKey, loadObjectColumnOrder, { immediate: true });
+
 function isObjectColumnVisible(key: ObjectBrowserColumnKey) {
   return key === "name" || objectColumnVisibility.value[key] !== false;
 }
@@ -1195,6 +1301,7 @@ function toggleSort(key: ObjectBrowserSortKey) {
 
 const sortKeyOptions = computed<ObjectBrowserSortKey[]>(() => {
   const options: ObjectBrowserSortKey[] = ["name", "type"];
+  if (showMysqlTableCharsetColumns.value) options.push("characterSet", "collation");
   if (showObjectRowStats.value) options.push("estimatedRows");
   if (showObjectSizeStats.value) options.push("totalBytes");
   if (hasCreatedAt.value) options.push("created_at");
@@ -1213,6 +1320,8 @@ watch(sortKeyOptions, (options) => {
 function sortKeyLabel(key: ObjectBrowserSortKey): string {
   if (key === "name") return t("objects.name");
   if (key === "type") return t("objects.type");
+  if (key === "characterSet") return t("structureEditor.characterSet");
+  if (key === "collation") return t("structureEditor.collation");
   if (key === "estimatedRows") return objectRowsLabel.value;
   if (key === "totalBytes") return t("objects.size");
   if (key === "created_at") return t("objects.createdAt");
@@ -4379,12 +4488,21 @@ async function confirmDuplicateStructureImpl() {
   }
 }
 
-function objectBrowserTableNamesCopyText(rows: readonly ObjectBrowserRow[]): string {
+function objectBrowserTableNamesCopyText(rows: readonly ObjectBrowserRow[], useDisplayName = false): string {
+  if (useDisplayName && settingsStore.editorSettings.sidebarCopyTableNameIncludeSchema && rows.some((row) => row.signature)) {
+    const separator = COLUMN_NAME_COPY_SEPARATOR_VALUES[settingsStore.editorSettings.sidebarCopyTableNameSeparator] ?? ",";
+    return rows
+      .map((row) => {
+        const qualifiedName = objectBrowserTableNamesCopyText([row]);
+        return row.signature ? `${qualifiedName}(${row.signature})` : qualifiedName;
+      })
+      .join(separator);
+  }
   const targets = rows.map(
     (row) =>
       ({
         id: row.name,
-        label: row.name,
+        label: useDisplayName ? row.displayName : row.name,
         type: "table",
         connectionId: props.connection.id,
         database: props.database,
@@ -4399,6 +4517,139 @@ function objectBrowserTableNamesCopyText(rows: readonly ObjectBrowserRow[]): str
     driverProfile: props.connection.driver_profile,
     identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
   });
+}
+
+function objectBrowserTableCopyColumns() {
+  return objectBrowserColumns.value
+    .filter((key) => key !== "select")
+    .map((key) => {
+      const definition = objectColumnDefinitions.value.find((column) => column.key === key);
+      return {
+        label: definition?.label ?? key,
+        value: (row: ObjectBrowserRow) => {
+          if (key === "name") return row.displayName;
+          if (key === "type") return typeLabel(row);
+          if (key === "estimatedRows") return formatObjectBrowserCount(row.estimatedRows);
+          if (key === "totalBytes") return formatObjectBrowserBytes(row.totalBytes);
+          if (key === "characterSet") return row.characterSet ?? "";
+          if (key === "collation") return row.collation ?? "";
+          if (key === "created_at") return formatObjectBrowserTimestamp(row.created_at);
+          if (key === "updated_at") return formatObjectBrowserTimestamp(row.updated_at);
+          return row.comment ?? "";
+        },
+      };
+    });
+}
+
+async function copyCurrentObjectNames() {
+  const rows = currentObjectRowsForCopy();
+  if (rows.length === 0) return;
+  try {
+    await copyToClipboard(objectBrowserTableNamesCopyText(rows, true));
+    toast(t("objects.copyNamesSuccess", { count: rows.length }), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function copyPrimaryObjectNames() {
+  if (selectedTableCount.value > 0 && supportsBatchTableActions.value && !hasSelectedSchemaIndexes.value) {
+    await copySelectedTablesToClipboard();
+    return;
+  }
+  await copyCurrentObjectNames();
+}
+
+async function copyObjectRowsAsTable(rows: readonly ObjectBrowserRow[]) {
+  if (rows.length === 0) return;
+  try {
+    await copyToClipboard(formatRowsAsSpreadsheetTsv(rows, objectBrowserTableCopyColumns()));
+    toast(t("objects.copyTableDataSuccess", { count: rows.length }), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+function currentObjectRowsForCopy(): readonly ObjectBrowserRow[] {
+  return filteredRows.value;
+}
+
+function allLoadedObjectRowsForCopy(): readonly ObjectBrowserRow[] {
+  return sortObjectBrowserRowsWithPins(objectSearchSummary.value.matchingRows.filter(rowMatchesObjectFilter));
+}
+
+async function fetchAllObjectRowsForCopy(): Promise<ObjectBrowserRow[]> {
+  if (!usesServerObjectPaging.value) return [...allLoadedObjectRowsForCopy()];
+  const copyConnection = { ...props.connection };
+  const copyConnectionId = copyConnection.id;
+  const copyDatabase = props.database;
+  const copyCatalog = props.catalog;
+  const copySelectedSchema = selectedSchema.value;
+  const copySchemaProp = props.schema;
+  const copyObjectFilter = objectFilter.value;
+  const copySearch = search.value.trim();
+  const copyExactIndexList = exactIndexList.value;
+  const copyNeedsSchema = needsSchema.value;
+  const copySupportsSchemaIndexes = supportsSchemaIndexes.value;
+  const copyEffectiveDatabaseType = effectiveDatabaseType.value;
+  const copyNameFilters = Object.fromEntries(Object.entries(objectNameFilters.value).map(([key, filter]) => [key, filter ? { includePatterns: [...filter.includePatterns], excludePatterns: [...filter.excludePatterns] } : undefined])) as typeof objectNameFilters.value;
+  const schema = copyExactIndexList ? (copySelectedSchema ?? copySchemaProp ?? objectListSchemaForConnection(copyConnection, copySelectedSchema) ?? copyDatabase) : copyNeedsSchema ? objectListSchemaForConnection(copyConnection, copySelectedSchema) : copyDatabase;
+  const objectTypes: Partial<Record<ObjectFilter, (SidebarObjectKind | "EVENT")[]>> = {
+    tables: ["TABLE"],
+    views: ["VIEW"],
+    materializedViews: ["MATERIALIZED_VIEW"],
+    procedures: ["PROCEDURE"],
+    functions: ["FUNCTION"],
+    triggers: ["TRIGGER"],
+    events: ["EVENT"],
+    sequences: ["SEQUENCE"],
+    indexes: ["INDEX"],
+    packages: ["PACKAGE", "PACKAGE_BODY"],
+    types: ["TYPE", "TYPE_BODY"],
+  };
+  const queryTypes = copySupportsSchemaIndexes && copyObjectFilter === "all" ? sidebarObjectKindsForDatabase(copyEffectiveDatabaseType).filter((type) => type !== "INDEX") : undefined;
+  const requestedTypes = queryTypes ?? objectTypes[copyObjectFilter];
+  const filter = copySearch || undefined;
+  const readOptions = oracleTriggerObjectReadOptions(copyConnection, requestedTypes, copyCatalog);
+  const exactIdentity = copyExactIndexList;
+  const rowSchema = connectionObjectTreeNodeSchema(copyConnection, copyDatabase, copySelectedSchema);
+  const objects: ObjectInfo[] = [];
+  for (let offset = 0; ; offset += OBJECT_COPY_PAGE_SIZE) {
+    const page = exactIdentity
+      ? await api.listObjects(copyConnectionId, copyDatabase, schema, objectTypes[copyObjectFilter], filter, OBJECT_COPY_PAGE_SIZE, offset, copyCatalog, undefined, undefined, true)
+      : readOptions
+        ? await api.listObjects(copyConnectionId, copyDatabase, schema, requestedTypes, filter, OBJECT_COPY_PAGE_SIZE, offset, copyCatalog, undefined, undefined, readOptions)
+        : await api.listObjects(copyConnectionId, copyDatabase, schema, requestedTypes, filter, OBJECT_COPY_PAGE_SIZE, offset, copyCatalog);
+    objects.push(...page);
+    if (page.length < OBJECT_COPY_PAGE_SIZE) break;
+  }
+  const rows = buildObjectBrowserRows({
+    objects: objects.filter((object) => !copySupportsSchemaIndexes || copyObjectFilter !== "all" || object.object_type !== "INDEX"),
+    database: copyDatabase,
+    fallbackSchema: schema,
+    rowSchema,
+  });
+  return rows.filter((row) => matchesTableNameFilter(row.name, copyNameFilters[row.type]));
+}
+
+async function copyCurrentObjectRowsAsTable() {
+  await copyObjectRowsAsTable(currentObjectRowsForCopy());
+}
+
+async function copyAllObjectRowsAsTable() {
+  if (copyingObjectRows.value) return;
+  copyingObjectRows.value = true;
+  try {
+    await copyObjectRowsAsTable(await fetchAllObjectRowsForCopy());
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    copyingObjectRows.value = false;
+  }
+}
+
+async function copySelectedObjectRowsAsTable() {
+  await copyObjectRowsAsTable(selectedTableRows.value);
 }
 
 async function copySelectedTablesToClipboard() {
@@ -5356,15 +5607,13 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     // Explicit refresh and metadata invalidation still bypass this branch.
     applyObjectBrowserRows(cached.rows);
     finishOnce();
-    // 行数/大小是随对象列表一起缓存的，直接返回缓存会让这两列一直停在上一次统计
-    // （#10461）。对象列表本身仍按上面的约定不动，只把统计信息在后台补一次。
-    if (cached.stale && !detailsPassEnabled.value) void revalidateCachedObjectStatistics(request, cacheWriteToken);
-    // 轻量枚举过的缓存只有名字，注释/时间戳/统计都要回读：陈旧缓存先让统计回源再补
-    // 详情，避免两条重读同时打库；新鲜缓存直接补详情。
+    // 统计信息随对象列表缓存，过期时只在后台刷新统计，保留对象列表本身。
+    // MySQL 的旧缓存可能尚未合并表排序规则，即使仍新鲜也要补读一次。
+    const missingMysqlCollation = showMysqlTableCharsetColumns.value && rows.value.some((row) => row.type === "TABLE" && row.collation === undefined);
+    const statistics = cached.stale || missingMysqlCollation ? revalidateCachedObjectStatistics(request, cacheWriteToken) : undefined;
+    // 缺失的注释/时间戳在统计读完后补齐，避免两条重读同时打库。
     if (detailsPassEnabled.value && !rows.value.some((row) => row.comment?.trim() || row.created_at?.trim() || row.updated_at?.trim())) {
-      const start = detailsPassStarter(request, cacheWriteToken, undefined);
-      if (cached.stale) void revalidateCachedObjectStatistics(request, cacheWriteToken).then(start);
-      else start();
+      detailsPassStarter(request, cacheWriteToken, statistics)();
     }
     return;
   } else {
@@ -5389,8 +5638,8 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows);
     // Row/size statistics come from a separate aggregate read; the MySQL split only
     // skips them on the enumeration, not for the whole view.
-    if (!detailsPassEnabled.value) void loadObjectStatistics(request, cacheWriteToken, cachedAt);
-    else detailsPassStarter(request, cacheWriteToken, cachedAt)();
+    const statistics = loadObjectStatistics(request, cacheWriteToken, cachedAt);
+    if (detailsPassEnabled.value) detailsPassStarter(request, cacheWriteToken, statistics)();
   } catch (e: any) {
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     // Keep visible rows on a background revalidate failure — surface a lightweight
@@ -5545,9 +5794,8 @@ interface ObjectBrowserDetailsPass {
  * row list is still being applied, and deferring one task keeps the list's own
  * render ahead of the second read.
  */
-function detailsPassStarter(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined): () => void {
+function detailsPassStarter(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, waitFor?: Promise<unknown>): () => void {
   const epoch = request.epoch;
-  const waitFor = cachedAt !== undefined ? Promise.resolve(cachedAt) : undefined;
   return () => {
     // The pass is decorative and must never surface as a load failure: defer it and
     // keep any throw inside the pass.
@@ -5587,7 +5835,6 @@ function startObjectBrowserDetails(pass: ObjectBrowserDetailsPass): Promise<unkn
       if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
       applyObjectBrowserDetails(details);
       cacheObjectBrowserRows(pass.cacheWriteToken, rows.value);
-      void loadObjectStatistics(request, pass.cacheWriteToken, undefined);
     } catch (e) {
       // Details are decorative: keep the names already rendered and stay quiet.
       console.debug("[ObjectBrowser] object details unavailable", e);
@@ -5656,6 +5903,7 @@ function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string
       ...row,
       estimatedRows: normalizeStatisticNumber(stat.estimated_rows),
       totalBytes: normalizeStatisticNumber(stat.total_bytes),
+      ...(effectiveDatabaseType.value === "mysql" ? { characterSet: mysqlTableCharsetFromCollation(stat.collation) || null, collation: stat.collation?.trim() || null } : {}),
     };
   });
   cacheObjectBrowserRows(cacheWriteToken, rows.value, { cachedAt });
@@ -6362,6 +6610,41 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <Clipboard class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.pasteTableSelected") }}
       </Button>
+      <div class="flex h-7 shrink-0 items-center">
+        <Button variant="ghost" size="sm" class="h-7 rounded-r-none px-2 text-xs" :disabled="selectedTableCount > 0 ? hasSelectedSchemaIndexes : filteredRows.length === 0" @click="copyPrimaryObjectNames">
+          <Copy class="mr-1.5 h-3.5 w-3.5" />
+          {{ selectedTableCount > 0 && supportsBatchTableActions && !hasSelectedSchemaIndexes ? t("objects.copyTableSelected") : t("objects.copyNames") }}
+        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger as-child>
+            <Button variant="ghost" size="icon" class="h-7 w-6 rounded-l-none border-l border-border/60" :aria-label="t('objects.copyOptions')" :title="t('objects.copyOptions')" data-object-copy-menu>
+              <ChevronDown class="h-3.5 w-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" class="w-56">
+            <DropdownMenuItem :disabled="filteredRows.length === 0" @select="copyCurrentObjectNames">
+              <Copy class="h-3.5 w-3.5" />
+              {{ t("objects.copyNames") }}
+            </DropdownMenuItem>
+            <DropdownMenuItem v-if="supportsBatchTableActions" :disabled="selectedTableCount === 0 || hasSelectedSchemaIndexes" @select="copySelectedTablesToClipboard">
+              <Copy class="h-3.5 w-3.5" />
+              {{ t("objects.copySelectedNames") }}
+            </DropdownMenuItem>
+            <DropdownMenuItem v-if="supportsBatchTableActions" :disabled="selectedTableCount === 0" @select="copySelectedObjectRowsAsTable">
+              <Clipboard class="h-3.5 w-3.5" />
+              {{ t("objects.copySelectedAsTable") }}
+            </DropdownMenuItem>
+            <DropdownMenuItem :disabled="filteredRows.length === 0" @select="copyCurrentObjectRowsAsTable">
+              <Clipboard class="h-3.5 w-3.5" />
+              {{ t("objects.copyCurrentPageAsTable") }}
+            </DropdownMenuItem>
+            <DropdownMenuItem :disabled="copyingObjectRows || loadingObjects || filteredRows.length === 0" @select="copyAllObjectRowsAsTable">
+              <Clipboard class="h-3.5 w-3.5" />
+              {{ t("objects.copyAllAsTable") }}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
       <ToolbarOverflowMenu v-if="showToolbarOverflow" :label="t('toolbar.moreActions')" button-class="h-7 w-7">
         <DropdownMenuSub v-if="!usesServerObjectPaging">
           <DropdownMenuSubTrigger>
@@ -6426,10 +6709,6 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <Upload class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.exportSelected") }}
       </Button>
-      <Button v-if="supportsBatchTableActions && !hasSelectedSchemaIndexes" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="copySelectedTablesToClipboard">
-        <Clipboard class="mr-1.5 h-3.5 w-3.5" />
-        {{ t("objects.copyTableSelected") }}
-      </Button>
       <Button v-if="supportsBatchTableActions && supportsTruncateTable && hasSelectedTablesOnly" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchTruncateTables">
         <Scissors class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.truncateSelected") }}
@@ -6467,133 +6746,192 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <div v-if="isListView" class="object-browser-table flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           <div ref="objectListHeaderRef" class="relative h-7 shrink-0 overflow-hidden">
             <div class="grid h-7 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns, minWidth: `${objectGridMinWidth}px` }">
-              <div v-if="showCheckboxColumn" class="relative flex min-w-0 items-center">
-                <button class="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-accent" type="button" :disabled="visibleSelectableRows.length === 0" @click="toggleVisibleTableSelection">
-                  <CheckSquare v-if="allVisibleTablesSelected" class="h-3.5 w-3.5 text-primary" />
-                  <Square v-else class="h-3.5 w-3.5" />
-                </button>
-                <div class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary" @mousedown="onObjectColumnResizeStart('select', $event)" @dblclick="resetObjectColumnWidth('select', 34, $event)">
-                  <GripVertical class="h-3 w-3" />
+              <template v-for="columnKey in objectBrowserColumns" :key="columnKey">
+                <div v-if="columnKey === 'select'" class="relative flex min-w-0 items-center">
+                  <button class="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-accent" type="button" :disabled="visibleSelectableRows.length === 0" @click="toggleVisibleTableSelection">
+                    <CheckSquare v-if="allVisibleTablesSelected" class="h-3.5 w-3.5 text-primary" />
+                    <Square v-else class="h-3.5 w-3.5" />
+                  </button>
+                  <div
+                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                    @mousedown="onObjectColumnResizeStart('select', $event)"
+                    @dblclick="resetObjectColumnWidth('select', 34, $event)"
+                  >
+                    <GripVertical class="h-3 w-3" />
+                  </div>
                 </div>
-              </div>
-              <div v-if="isObjectColumnVisible('name')" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('name')">
-                  <span class="truncate">{{ t("objects.name") }}</span>
-                  <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
-                </button>
-                <div
-                  v-if="!isLastVisibleObjectColumn('name')"
-                  data-object-column-resize="name"
-                  class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                  @mousedown="onObjectColumnResizeStart('name', $event)"
-                  @dblclick="resetObjectColumnWidth('name', 260, $event)"
-                >
-                  <GripVertical class="h-3 w-3" />
+                <div v-if="columnKey === 'name'" class="relative flex min-w-0 items-center">
+                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('name')">
+                    <span class="truncate">{{ t("objects.name") }}</span>
+                    <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
+                  </button>
+                  <div
+                    v-if="!isLastVisibleObjectColumn('name')"
+                    data-object-column-resize="name"
+                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                    @mousedown="onObjectColumnResizeStart('name', $event)"
+                    @dblclick="resetObjectColumnWidth('name', 260, $event)"
+                  >
+                    <GripVertical class="h-3 w-3" />
+                  </div>
                 </div>
-              </div>
-              <div v-if="isObjectColumnVisible('type')" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('type')">
-                  <span class="truncate">{{ t("objects.type") }}</span>
-                  <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
-                </button>
-                <div
-                  v-if="!isLastVisibleObjectColumn('type')"
-                  data-object-column-resize="type"
-                  class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                  @mousedown="onObjectColumnResizeStart('type', $event)"
-                  @dblclick="resetObjectColumnWidth('type', 110, $event)"
-                >
-                  <GripVertical class="h-3 w-3" />
+                <div v-if="columnKey === 'type'" class="relative flex min-w-0 items-center">
+                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('type')">
+                    <span class="truncate">{{ t("objects.type") }}</span>
+                    <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
+                  </button>
+                  <div
+                    v-if="!isLastVisibleObjectColumn('type')"
+                    data-object-column-resize="type"
+                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                    @mousedown="onObjectColumnResizeStart('type', $event)"
+                    @dblclick="resetObjectColumnWidth('type', 110, $event)"
+                  >
+                    <GripVertical class="h-3 w-3" />
+                  </div>
                 </div>
-              </div>
-              <div v-if="showObjectRowStats && isObjectColumnVisible('estimatedRows')" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
-                  <span class="truncate">{{ objectRowsLabel }}</span>
-                  <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
-                </button>
-                <div
-                  v-if="!isLastVisibleObjectColumn('estimatedRows')"
-                  data-object-column-resize="estimatedRows"
-                  class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                  @mousedown="onObjectColumnResizeStart('estimatedRows', $event)"
-                  @dblclick="resetObjectColumnWidth('estimatedRows', 110, $event)"
-                >
-                  <GripVertical class="h-3 w-3" />
+                <div v-if="columnKey === 'characterSet'" class="relative flex min-w-0 items-center">
+                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('characterSet')">
+                    <span class="truncate">{{ t("structureEditor.characterSet") }}</span>
+                    <component :is="sortIconFor('characterSet')" v-if="sortIconFor('characterSet')" class="h-3 w-3 shrink-0" />
+                  </button>
+                  <div
+                    v-if="!isLastVisibleObjectColumn('characterSet')"
+                    data-object-column-resize="characterSet"
+                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                    @mousedown="onObjectColumnResizeStart('characterSet', $event)"
+                    @dblclick="resetObjectColumnWidth('characterSet', 120, $event)"
+                  >
+                    <GripVertical class="h-3 w-3" />
+                  </div>
                 </div>
-              </div>
-              <div v-if="showObjectSizeStats && isObjectColumnVisible('totalBytes')" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
-                  <span class="truncate">{{ t("objects.size") }}</span>
-                  <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
-                </button>
-                <div
-                  v-if="!isLastVisibleObjectColumn('totalBytes')"
-                  data-object-column-resize="totalBytes"
-                  class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                  @mousedown="onObjectColumnResizeStart('totalBytes', $event)"
-                  @dblclick="resetObjectColumnWidth('totalBytes', 100, $event)"
-                >
-                  <GripVertical class="h-3 w-3" />
+                <div v-if="columnKey === 'collation'" class="relative flex min-w-0 items-center">
+                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('collation')">
+                    <span class="truncate">{{ t("structureEditor.collation") }}</span>
+                    <component :is="sortIconFor('collation')" v-if="sortIconFor('collation')" class="h-3 w-3 shrink-0" />
+                  </button>
+                  <div
+                    v-if="!isLastVisibleObjectColumn('collation')"
+                    data-object-column-resize="collation"
+                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                    @mousedown="onObjectColumnResizeStart('collation', $event)"
+                    @dblclick="resetObjectColumnWidth('collation', 220, $event)"
+                  >
+                    <GripVertical class="h-3 w-3" />
+                  </div>
                 </div>
-              </div>
-              <div v-if="hasCreatedAt && isObjectColumnVisible('created_at')" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('created_at')">
-                  <span class="truncate">{{ t("objects.createdAt") }}</span>
-                  <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
-                </button>
-                <div
-                  v-if="!isLastVisibleObjectColumn('created_at')"
-                  data-object-column-resize="created_at"
-                  class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                  @mousedown="onObjectColumnResizeStart('created_at', $event)"
-                  @dblclick="resetObjectColumnWidth('created_at', 150, $event)"
-                >
-                  <GripVertical class="h-3 w-3" />
+                <div v-if="columnKey === 'estimatedRows'" class="relative flex min-w-0 items-center">
+                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
+                    <span class="truncate">{{ objectRowsLabel }}</span>
+                    <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
+                  </button>
+                  <div
+                    v-if="!isLastVisibleObjectColumn('estimatedRows')"
+                    data-object-column-resize="estimatedRows"
+                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                    @mousedown="onObjectColumnResizeStart('estimatedRows', $event)"
+                    @dblclick="resetObjectColumnWidth('estimatedRows', 110, $event)"
+                  >
+                    <GripVertical class="h-3 w-3" />
+                  </div>
                 </div>
-              </div>
-              <div v-if="hasUpdatedAt && isObjectColumnVisible('updated_at')" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('updated_at')">
-                  <span class="truncate">{{ t("objects.updatedAt") }}</span>
-                  <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
-                </button>
-                <div
-                  v-if="!isLastVisibleObjectColumn('updated_at')"
-                  data-object-column-resize="updated_at"
-                  class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                  @mousedown="onObjectColumnResizeStart('updated_at', $event)"
-                  @dblclick="resetObjectColumnWidth('updated_at', 150, $event)"
-                >
-                  <GripVertical class="h-3 w-3" />
+                <div v-if="columnKey === 'totalBytes'" class="relative flex min-w-0 items-center">
+                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
+                    <span class="truncate">{{ t("objects.size") }}</span>
+                    <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
+                  </button>
+                  <div
+                    v-if="!isLastVisibleObjectColumn('totalBytes')"
+                    data-object-column-resize="totalBytes"
+                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                    @mousedown="onObjectColumnResizeStart('totalBytes', $event)"
+                    @dblclick="resetObjectColumnWidth('totalBytes', 100, $event)"
+                  >
+                    <GripVertical class="h-3 w-3" />
+                  </div>
                 </div>
-              </div>
-              <div v-if="isObjectColumnVisible('comment')" class="relative flex min-w-0 items-center">
-                <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('comment')">
-                  <span class="truncate">{{ t("objects.comment") }}</span>
-                  <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
-                </button>
-                <div
-                  v-if="!isLastVisibleObjectColumn('comment')"
-                  data-object-column-resize="comment"
-                  class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                  @mousedown="onObjectColumnResizeStart('comment', $event)"
-                  @dblclick="resetObjectColumnWidth('comment', 260, $event)"
-                >
-                  <GripVertical class="h-3 w-3" />
+                <div v-if="columnKey === 'created_at'" class="relative flex min-w-0 items-center">
+                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('created_at')">
+                    <span class="truncate">{{ t("objects.createdAt") }}</span>
+                    <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
+                  </button>
+                  <div
+                    v-if="!isLastVisibleObjectColumn('created_at')"
+                    data-object-column-resize="created_at"
+                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                    @mousedown="onObjectColumnResizeStart('created_at', $event)"
+                    @dblclick="resetObjectColumnWidth('created_at', 150, $event)"
+                  >
+                    <GripVertical class="h-3 w-3" />
+                  </div>
                 </div>
-              </div>
+                <div v-if="columnKey === 'updated_at'" class="relative flex min-w-0 items-center">
+                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('updated_at')">
+                    <span class="truncate">{{ t("objects.updatedAt") }}</span>
+                    <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
+                  </button>
+                  <div
+                    v-if="!isLastVisibleObjectColumn('updated_at')"
+                    data-object-column-resize="updated_at"
+                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                    @mousedown="onObjectColumnResizeStart('updated_at', $event)"
+                    @dblclick="resetObjectColumnWidth('updated_at', 150, $event)"
+                  >
+                    <GripVertical class="h-3 w-3" />
+                  </div>
+                </div>
+                <div v-if="columnKey === 'comment'" class="relative flex min-w-0 items-center">
+                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('comment')">
+                    <span class="truncate">{{ t("objects.comment") }}</span>
+                    <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
+                  </button>
+                  <div
+                    v-if="!isLastVisibleObjectColumn('comment')"
+                    data-object-column-resize="comment"
+                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                    @mousedown="onObjectColumnResizeStart('comment', $event)"
+                    @dblclick="resetObjectColumnWidth('comment', 260, $event)"
+                  >
+                    <GripVertical class="h-3 w-3" />
+                  </div>
+                </div>
+              </template>
             </div>
-            <Popover>
+            <Popover v-model:open="objectColumnConfigOpen">
               <PopoverTrigger as-child>
                 <button type="button" class="absolute right-1 top-1/2 z-10 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('objects.configureColumns')" :aria-label="t('objects.configureColumns')">
                   <Settings2 class="h-3.5 w-3.5" />
                 </button>
               </PopoverTrigger>
-              <PopoverContent align="end" class="w-52 p-1">
+              <PopoverContent align="end" class="w-64 p-1">
                 <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ t("objects.configureColumns") }}</div>
-                <button v-for="column in objectColumnDefinitions" :key="column.key" type="button" class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :disabled="column.key === 'name'" @click="toggleObjectColumnVisibility(column.key)">
-                  <span class="flex h-4 w-4 items-center justify-center rounded border" :class="isObjectColumnVisible(column.key) ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background text-transparent'"><Check class="h-3 w-3 stroke-[3]" /></span>
-                  <span class="truncate">{{ column.label }}</span>
-                </button>
+                <div ref="objectColumnListRef">
+                  <div v-for="column in objectColumnDefinitions" :key="column.key" :data-object-column-key="column.key" class="relative flex select-none items-center gap-1" :class="{ 'opacity-40': objectColumnDrag?.active && objectColumnDrag.key === column.key }">
+                    <span v-if="objectColumnDropTarget?.key === column.key" class="pointer-events-none absolute inset-x-0 z-10 h-0.5 bg-primary" :class="objectColumnDropTarget.after ? 'bottom-0' : 'top-0'" />
+                    <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :disabled="column.key === 'name'" @click="toggleObjectColumnVisibility(column.key)">
+                      <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border" :class="isObjectColumnVisible(column.key) ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background text-transparent'"><Check class="h-3 w-3 stroke-[3]" /></span>
+                      <span class="truncate">{{ column.label }}</span>
+                    </button>
+                    <button
+                      type="button"
+                      class="flex h-7 w-7 shrink-0 touch-none items-center justify-center rounded text-muted-foreground hover:bg-accent"
+                      :class="objectColumnDrag?.active ? 'cursor-grabbing' : 'cursor-grab'"
+                      :title="t('objects.columnReorder', { column: column.label })"
+                      :aria-label="t('objects.columnReorder', { column: column.label })"
+                      @pointerdown.stop.prevent="startObjectColumnDrag($event, column.key)"
+                      @pointermove.stop="updateObjectColumnDrag"
+                      @pointerup.stop.prevent="finishObjectColumnDrag"
+                      @pointercancel="cancelObjectColumnDrag"
+                      @lostpointercapture="cancelObjectColumnDrag"
+                      @keydown.esc="cancelObjectColumnDrag"
+                      @keydown.up.stop.prevent="moveObjectColumn(column.key, -1)"
+                      @keydown.down.stop.prevent="moveObjectColumn(column.key, 1)"
+                      @click.stop
+                    >
+                      <GripVertical class="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
               </PopoverContent>
             </Popover>
           </div>
@@ -6610,53 +6948,61 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                   @click="onRowClick(item, $event)"
                   @contextmenu="onContextMenu"
                 >
-                  <button v-if="showCheckboxColumn" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground" type="button" @click.stop="toggleTableSelection(item)">
-                    <CheckSquare v-if="selectedTableIds.has(item.id)" class="h-3.5 w-3.5 text-primary" />
-                    <Square v-else class="h-3.5 w-3.5" />
-                  </button>
-                  <div class="flex min-w-0 items-center gap-2">
-                    <span v-if="partitionRowDepth(item) > 0" :data-partition-depth="partitionRowDepth(item)" :style="{ width: `${partitionRowDepth(item) * PARTITION_TREE_INDENT_PX}px` }" class="h-5 shrink-0" aria-hidden="true" />
-                    <button
-                      v-if="item.partitionCount"
-                      type="button"
-                      class="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
-                      :aria-label="t('objects.partitions', { count: item.partitionCount })"
-                      @click.stop="togglePartitionParent(item)"
-                    >
-                      <ChevronDown v-if="isPartitionParentExpanded(item)" class="h-3.5 w-3.5" />
-                      <ChevronRight v-else class="h-3.5 w-3.5" />
+                  <template v-for="columnKey in objectBrowserColumns" :key="columnKey">
+                    <button v-if="columnKey === 'select'" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground" type="button" @click.stop="toggleTableSelection(item)">
+                      <CheckSquare v-if="selectedTableIds.has(item.id)" class="h-3.5 w-3.5 text-primary" />
+                      <Square v-else class="h-3.5 w-3.5" />
                     </button>
-                    <span v-else-if="item.partitionParentId" class="h-5 w-5 shrink-0" />
-                    <span class="relative flex h-3.5 w-3.5 shrink-0" :class="{ 'overflow-visible': item.valid === false }">
-                      <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" />
-                      <CircleX v-if="item.valid === false" data-invalid-object-indicator="true" class="pointer-events-none absolute -right-1 -bottom-1 h-2.5 w-2.5 rounded-full bg-background text-destructive stroke-[3]" aria-hidden="true" />
-                    </span>
-                    <span class="truncate text-[13px] font-medium text-foreground" :title="item.displayName">{{ item.displayName }}</span>
-                    <span v-if="item.partitionCount" class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
-                      {{ t("objects.partitions", { count: item.partitionCount }) }}
-                    </span>
-                  </div>
-                  <div v-if="isObjectColumnVisible('type')" class="flex min-w-0 items-center gap-1.5 truncate text-xs text-muted-foreground">
-                    <span class="truncate">{{ typeLabel(item) }}</span>
-                    <span v-if="item.valid != null" class="shrink-0 rounded border px-1 py-px text-[10px] font-medium" :class="item.valid ? 'border-emerald-500/30 text-emerald-600' : 'border-destructive/30 text-destructive'">
-                      {{ t(item.valid ? "objects.validStatus" : "objects.invalidStatus") }}
-                    </span>
-                  </div>
-                  <div v-if="showObjectRowStats && isObjectColumnVisible('estimatedRows')" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
-                    {{ formatObjectBrowserCount(item.estimatedRows) }}
-                  </div>
-                  <div v-if="showObjectSizeStats && isObjectColumnVisible('totalBytes')" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserBytes(item.totalBytes)">
-                    {{ formatObjectBrowserBytes(item.totalBytes) }}
-                  </div>
-                  <div v-if="hasCreatedAt && isObjectColumnVisible('created_at')" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.created_at)">
-                    {{ formatObjectBrowserTimestamp(item.created_at) }}
-                  </div>
-                  <div v-if="hasUpdatedAt && isObjectColumnVisible('updated_at')" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.updated_at)">
-                    {{ formatObjectBrowserTimestamp(item.updated_at) }}
-                  </div>
-                  <div v-if="isObjectColumnVisible('comment')" class="truncate text-xs text-muted-foreground" :title="item.comment || ''">
-                    {{ item.comment || "" }}
-                  </div>
+                    <div v-if="columnKey === 'name'" class="flex min-w-0 items-center gap-2">
+                      <span v-if="partitionRowDepth(item) > 0" :data-partition-depth="partitionRowDepth(item)" :style="{ width: `${partitionRowDepth(item) * PARTITION_TREE_INDENT_PX}px` }" class="h-5 shrink-0" aria-hidden="true" />
+                      <button
+                        v-if="item.partitionCount"
+                        type="button"
+                        class="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-accent hover:text-foreground"
+                        :aria-label="t('objects.partitions', { count: item.partitionCount })"
+                        @click.stop="togglePartitionParent(item)"
+                      >
+                        <ChevronDown v-if="isPartitionParentExpanded(item)" class="h-3.5 w-3.5" />
+                        <ChevronRight v-else class="h-3.5 w-3.5" />
+                      </button>
+                      <span v-else-if="item.partitionParentId" class="h-5 w-5 shrink-0" />
+                      <span class="relative flex h-3.5 w-3.5 shrink-0" :class="{ 'overflow-visible': item.valid === false }">
+                        <component :is="iconFor(item)" class="h-3.5 w-3.5 shrink-0" :class="iconClass(item.type)" />
+                        <CircleX v-if="item.valid === false" data-invalid-object-indicator="true" class="pointer-events-none absolute -right-1 -bottom-1 h-2.5 w-2.5 rounded-full bg-background text-destructive stroke-[3]" aria-hidden="true" />
+                      </span>
+                      <span class="truncate text-[13px] font-medium text-foreground" :title="item.displayName">{{ item.displayName }}</span>
+                      <span v-if="item.partitionCount" class="shrink-0 rounded border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground">
+                        {{ t("objects.partitions", { count: item.partitionCount }) }}
+                      </span>
+                    </div>
+                    <div v-if="columnKey === 'type'" class="flex min-w-0 items-center gap-1.5 truncate text-xs text-muted-foreground">
+                      <span class="truncate">{{ typeLabel(item) }}</span>
+                      <span v-if="item.valid != null" class="shrink-0 rounded border px-1 py-px text-[10px] font-medium" :class="item.valid ? 'border-emerald-500/30 text-emerald-600' : 'border-destructive/30 text-destructive'">
+                        {{ t(item.valid ? "objects.validStatus" : "objects.invalidStatus") }}
+                      </span>
+                    </div>
+                    <div v-if="columnKey === 'characterSet'" class="truncate text-xs text-muted-foreground" :title="item.characterSet || ''">
+                      {{ item.characterSet || "" }}
+                    </div>
+                    <div v-if="columnKey === 'collation'" class="truncate text-xs text-muted-foreground" :title="item.collation || ''">
+                      {{ item.collation || "" }}
+                    </div>
+                    <div v-if="columnKey === 'estimatedRows'" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.estimatedRows == null ? '' : formatObjectBrowserCount(item.estimatedRows)">
+                      {{ formatObjectBrowserCount(item.estimatedRows) }}
+                    </div>
+                    <div v-if="columnKey === 'totalBytes'" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserBytes(item.totalBytes)">
+                      {{ formatObjectBrowserBytes(item.totalBytes) }}
+                    </div>
+                    <div v-if="columnKey === 'created_at'" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.created_at)">
+                      {{ formatObjectBrowserTimestamp(item.created_at) }}
+                    </div>
+                    <div v-if="columnKey === 'updated_at'" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.updated_at)">
+                      {{ formatObjectBrowserTimestamp(item.updated_at) }}
+                    </div>
+                    <div v-if="columnKey === 'comment'" class="truncate text-xs text-muted-foreground" :title="item.comment || ''">
+                      {{ item.comment || "" }}
+                    </div>
+                  </template>
                 </div>
               </CustomContextMenu>
             </template>

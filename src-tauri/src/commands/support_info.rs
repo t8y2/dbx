@@ -34,17 +34,28 @@ pub(crate) fn format_support_info_for_native_about() -> String {
 }
 
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn format_support_info_for_clipboard() -> String {
+pub(crate) fn format_support_info_for_clipboard(promoted: Option<&str>) -> String {
     let info = current_app_support_info();
     let operating_system = format_operating_system(&info);
 
     [
-        format!("DBX Version: {}", normalize_app_version(&info.app_version)),
+        format!("DBX Version: {}", clipboard_version(&info.app_version, promoted)),
         "Runtime: Desktop".to_string(),
         format!("Operating System: {}", unknown_if_empty(&operating_system)),
         format!("Architecture: {}", unknown_if_empty(&info.arch)),
     ]
     .join("\n")
+}
+
+/// Version line for the copied report. Matches what Settings → About does for a
+/// promoted build: the stable version with the exact build in parentheses, so a
+/// bug report still names the build that was actually installed.
+#[cfg(any(target_os = "macos", test))]
+fn clipboard_version(app_version: &str, promoted: Option<&str>) -> String {
+    match dbx_platform::version::promoted_base_version(app_version, promoted) {
+        Some(base) => format!("v{base} ({})", dbx_platform::version::normalize_version(app_version)),
+        None => normalize_app_version(app_version),
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -190,8 +201,9 @@ fn unquote_os_release_value(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_windows_version, format_support_info_for_clipboard, format_support_info_for_native_about,
-        normalize_app_version, parse_os_release_value, unknown_if_empty, unquote_os_release_value,
+        clipboard_version, extract_windows_version, format_support_info_for_clipboard,
+        format_support_info_for_native_about, normalize_app_version, parse_os_release_value, unknown_if_empty,
+        unquote_os_release_value,
     };
 
     #[test]
@@ -218,11 +230,27 @@ mod tests {
 
     #[test]
     fn formats_clipboard_support_info_with_labels() {
-        let text = format_support_info_for_clipboard();
+        let text = format_support_info_for_clipboard(None);
         assert!(text.contains("DBX Version:"));
         assert!(text.contains("Runtime:"));
         assert!(text.contains("Operating System:"));
         assert!(text.contains("Architecture:"));
+    }
+
+    #[test]
+    fn clipboard_support_info_matches_the_stable_version_of_a_promoted_build() {
+        // `CARGO_PKG_VERSION` is a plain version in tests, so drive the branch
+        // directly with a prerelease build string.
+        assert_eq!(
+            clipboard_version("0.6.67-beta.20261105.1", Some("0.6.67-beta.20261105.1")),
+            "v0.6.67 (0.6.67-beta.20261105.1)"
+        );
+        assert_eq!(clipboard_version("0.6.67-beta.20261105.1", None), "v0.6.67-beta.20261105.1");
+        assert_eq!(
+            clipboard_version("0.6.67-beta.20261105.1", Some("0.6.67-beta.20261105.2")),
+            "v0.6.67-beta.20261105.1"
+        );
+        assert_eq!(clipboard_version("0.6.67", Some("0.6.67")), "v0.6.67");
     }
 
     #[test]

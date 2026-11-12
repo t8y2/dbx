@@ -53,6 +53,10 @@ use crate::persistence::task_history::{
 use crate::prompt_template::PromptTemplate;
 use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
 
+#[path = "credential_reset.rs"]
+mod credential_reset;
+pub use credential_reset::{CredentialResetFailure, CredentialResetPreparation, CredentialResetReport};
+
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
 const TRANSPORT_LAYER_SECRET_PREFIX: &str = "transport_layers.";
 const URL_PARAMS_SECRET_KEY: &str = "url_params";
@@ -66,6 +70,10 @@ const APP_STATE_EDITOR_SETTINGS_KEY: &str = "editor_settings";
 const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
 const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
 const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
+/// Beta build version the app was told is the promoted stable release. Kept in
+/// app_state (not renderer localStorage) because the native About panel is
+/// built before the webview could report it again on a cold start.
+const APP_STATE_PROMOTED_BUILD_KEY: &str = "promoted_build";
 const APP_APPEARANCE_SETTINGS_KEY: &str = "app_appearance";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 /// Policy v2 (`dbx_core::mcp_access::McpAccessPolicy`). Written next to the
@@ -274,6 +282,8 @@ pub struct Storage {
     /// Without this, each consumer can prompt a locked Secret Service again.
     secret_key_error_cache: Arc<Mutex<Option<CachedSecretKeyError>>>,
     migration_failure: Arc<Mutex<Option<MigrationFailure>>>,
+    desktop_credential_recovery: bool,
+    credential_reset_confirmation: Arc<Mutex<Option<credential_reset::Confirmation>>>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -368,6 +378,12 @@ pub struct MigrationPreflight {
     pub state: MigrationState,
     pub needs_migration: bool,
     pub key_recovery_required: bool,
+    #[serde(default)]
+    pub encrypted_record_count: usize,
+    #[serde(default)]
+    pub credential_reset_allowed: bool,
+    #[serde(default)]
+    pub credential_reset_blocked_reason: Option<String>,
     pub key_provider_available: bool,
     pub key_status: MigrationKeyStatus,
     /// Desktop may provision a new local key only for plaintext-only data.
@@ -1566,6 +1582,8 @@ impl Storage {
             secret_codec_cache: Arc::new(Mutex::new(None)),
             secret_key_error_cache: Arc::new(Mutex::new(None)),
             migration_failure: Arc::new(Mutex::new(None)),
+            desktop_credential_recovery: false,
+            credential_reset_confirmation: Arc::new(Mutex::new(None)),
         };
         // Best-effort: switching journal mode is itself a lock-sensitive
         // operation, so a transient failure here (e.g. another process
@@ -2130,11 +2148,14 @@ impl Storage {
                 self.cache_secret_codec_if_unchanged(resolved.codec, key_files_before);
             }
         }
-        let preflight = MigrationPreflight {
+        let mut preflight = MigrationPreflight {
             migration_id: SECRET_STORE_MIGRATION_ID.to_string(),
             state,
             needs_migration,
             key_recovery_required,
+            encrypted_record_count: encrypted.max(0) as usize,
+            credential_reset_allowed: false,
+            credential_reset_blocked_reason: None,
             key_provider_available,
             key_status,
             key_creation_allowed,
@@ -2158,6 +2179,8 @@ impl Storage {
             persistent_key_configured: key_provider_available,
             key_source,
         };
+        preflight.credential_reset_blocked_reason = self.credential_reset_blocked_reason(&preflight);
+        preflight.credential_reset_allowed = preflight.credential_reset_blocked_reason.is_none();
         Ok(preflight)
     }
 
@@ -6169,6 +6192,22 @@ impl Storage {
     /// Load open tabs from an isolated state key.
     pub async fn load_open_tabs_state_with_key(&self, key: &str) -> Result<Option<serde_json::Value>, String> {
         self.load_app_state_value(key).await
+    }
+
+    /// Store the promoted-build marker. Only the native About panel reads it,
+    /// and only for the build recorded here — a stale marker from another build
+    /// is ignored by its reader rather than rewritten during startup.
+    pub async fn save_promoted_build(&self, build_version: &str) -> Result<(), String> {
+        let value = serde_json::Value::String(build_version.trim().to_string());
+        self.save_app_state_value(APP_STATE_PROMOTED_BUILD_KEY, &value).await
+    }
+
+    pub async fn load_promoted_build(&self) -> Result<Option<String>, String> {
+        Ok(self
+            .load_app_state_value(APP_STATE_PROMOTED_BUILD_KEY)
+            .await?
+            .and_then(|value| value.as_str().map(str::trim).map(ToOwned::to_owned))
+            .filter(|value| !value.is_empty()))
     }
 
     pub async fn save_saved_sql_editor_positions(&self, positions: &serde_json::Value) -> Result<(), String> {
@@ -15160,6 +15199,21 @@ mod tests {
             DesktopSettings { icon_theme: DesktopIconTheme::Black, ..DesktopSettings::default() }
         );
         assert_eq!(storage.load_app_settings_json().await.unwrap().get("open_tabs"), None);
+    }
+
+    #[tokio::test]
+    async fn promoted_build_marker_roundtrips_in_local_app_state() {
+        let path = temp_db_path("promoted-build");
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+
+        assert_eq!(storage.load_promoted_build().await.unwrap(), None);
+
+        storage.save_promoted_build(" 0.6.67-beta.20261105.1 ").await.unwrap();
+        assert_eq!(storage.load_promoted_build().await.unwrap().as_deref(), Some("0.6.67-beta.20261105.1"));
+
+        // Overwriting replaces the marker instead of accumulating values.
+        storage.save_promoted_build("0.6.68-beta.20261106.1").await.unwrap();
+        assert_eq!(storage.load_promoted_build().await.unwrap().as_deref(), Some("0.6.68-beta.20261106.1"));
     }
 
     #[tokio::test]

@@ -198,6 +198,7 @@ export type TransposeScrollAlignment = "start" | "nearest";
 export interface TransposeEndAlignmentSpacerOptions {
   viewportWidth: number;
   pinnedWidth: number;
+  recordsWidth: number;
   lastRecordWidth: number;
 }
 
@@ -374,6 +375,7 @@ export function transposeFieldWidth(columns: string[], options: TransposeFieldWi
 
 export function transposeEndAlignmentSpacerWidth(options: TransposeEndAlignmentSpacerOptions): number {
   const recordViewportWidth = Math.max(0, options.viewportWidth - options.pinnedWidth);
+  if (Math.max(0, options.recordsWidth) <= recordViewportWidth) return 0;
   return Math.max(0, recordViewportWidth - Math.max(0, options.lastRecordWidth));
 }
 

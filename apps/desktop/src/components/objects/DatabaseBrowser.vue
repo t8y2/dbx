@@ -2,10 +2,10 @@
 import { usesLightweightMysqlBrowser } from "@/lib/database/mysqlBrowserLoading";
 import { OBJECT_BROWSER_COMPACT_WIDTHS, normalizeObjectBrowserCompactWidth, type ObjectBrowserCompactWidth } from "@/lib/table/objectBrowserCompactWidth";
 import { computed, nextTick, onActivated, onBeforeUnmount, ref, watch } from "vue";
-import { ArrowDown, ArrowUp, Check, Copy, Database, GripVertical, Grid3X3, LayoutGrid, List, Loader2, RefreshCw, Search, Settings2, TerminalSquare, X } from "@lucide/vue";
+import { ArrowDown, ArrowUp, Check, ChevronDown, Copy, Database, GripVertical, Grid3X3, LayoutGrid, List, Loader2, RefreshCw, Search, Settings2, TerminalSquare, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
-import { DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
@@ -29,6 +29,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useSidebarMenuPresentation } from "@/composables/useSidebarMenuPresentation";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { formatRowsAsSpreadsheetTsv } from "@/lib/common/tableClipboard";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type DatabaseRow = {
@@ -283,6 +284,33 @@ function displayValue(row: DatabaseRow, key: DatabaseBrowserColumnKey): string {
   if (key === "defaultCharset") return row.defaultCharset || "";
   if (key === "defaultCollation") return row.defaultCollation || "";
   return row.comment || "";
+}
+
+function databaseBrowserCopyColumns() {
+  return visibleColumns.value.map((key) => ({
+    label: columnLabel(key),
+    value: (row: DatabaseRow) => displayValue(row, key),
+  }));
+}
+
+async function copyDatabaseNames() {
+  if (visibleRows.value.length === 0) return;
+  try {
+    await copyToClipboard(visibleRows.value.map((row) => row.name).join("\n"));
+    toast(t("objects.copyNamesSuccess", { count: visibleRows.value.length }), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
+async function copyDatabasesAsTable() {
+  if (visibleRows.value.length === 0) return;
+  try {
+    await copyToClipboard(formatRowsAsSpreadsheetTsv(visibleRows.value, databaseBrowserCopyColumns()));
+    toast(t("objects.copyTableDataSuccess", { count: visibleRows.value.length }), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
 }
 
 function compareRows(left: DatabaseRow, right: DatabaseRow, key: DatabaseBrowserSortKey, direction: SortDirection): number {
@@ -644,6 +672,25 @@ defineExpose({ focusSearch, refresh });
         >
           <option v-for="width in OBJECT_BROWSER_COMPACT_WIDTHS" :key="width" :value="width" class="bg-background text-foreground">{{ width }}px</option>
         </select>
+      </div>
+      <div class="flex h-7 shrink-0 items-center">
+        <Button variant="ghost" size="sm" class="h-7 rounded-r-none px-2 text-xs" :disabled="visibleRows.length === 0" @click="copyDatabaseNames">
+          <Copy class="mr-1.5 h-3.5 w-3.5" />
+          {{ t("objects.copyNames") }}
+        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger as-child>
+            <Button variant="ghost" size="icon" class="h-7 w-6 rounded-l-none border-l border-border/60" :aria-label="t('objects.copyOptions')" :title="t('objects.copyOptions')" data-database-copy-menu>
+              <ChevronDown class="h-3.5 w-3.5" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" class="w-56">
+            <DropdownMenuItem :disabled="visibleRows.length === 0" @select="copyDatabasesAsTable">
+              <Copy class="h-3.5 w-3.5" />
+              {{ t("objects.copyCurrentPageAsTable") }}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('contextMenu.refreshTab')" :disabled="loading" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loading }" />

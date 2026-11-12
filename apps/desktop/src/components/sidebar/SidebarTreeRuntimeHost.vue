@@ -192,7 +192,8 @@ import { requestOracleTypeManagement } from "@/lib/table/oracleTypeManagementReq
 import { qualifiedNameForSidebarNode } from "@/lib/sidebar/sidebarTableNameCopy";
 import { schemaIndexIsSameOwner, schemaIndexNodeIdentity } from "@/lib/table/schemaIndexNavigation";
 import { mongoCollectionTableTypeFromNode, mongoCreateDatabasePreview, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
-import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
+import { dataTabOpenModeFromTreeClick, isSameHBaseTable, isSameTable, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
+import { supersedeSidebarDataNavigation } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isEditSidebarTableStructureShortcut, isModRShortcut, isPasteSidebarSelectionShortcut, isRefreshDataShortcut } from "@/lib/editor/keyboardShortcuts";
 import { handleSidebarTreeDeleteShortcut } from "@/lib/sidebar/sidebarTreeDeleteShortcut";
 import { sidebarNodeSupportsStructureEdit } from "@/lib/sidebar/sidebarTreeStructureShortcut";
@@ -1367,7 +1368,15 @@ function runRowClickAction(clickDetail: number) {
     void openObjectBrowser();
     return;
   }
-  const action = treeNodeRowAction(node.type, canExpand.value, settingsStore.editorSettings.sidebarActivation, currentDatabaseType(), settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation, canOpenObjectBrowser.value);
+  const action = treeNodeRowAction(
+    node.type,
+    canExpand.value,
+    settingsStore.editorSettings.sidebarActivation,
+    currentDatabaseType(),
+    settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation,
+    canOpenObjectBrowser.value,
+    settingsStore.editorSettings.sidebarAutoExpandOnDatabaseActivation,
+  );
   // WebKit can keep incrementing click.detail while the pointer moves quickly
   // between adjacent rows. Nacos entries are idempotent navigation targets, so
   // do not mistake that rapid one-click switching for a double-click toggle.
@@ -1835,6 +1844,11 @@ function onDoubleClick(event: MouseEvent) {
     void newQuery({ reuseQueryTabByScope: true });
   }
   if (dataTabOpenModeFromTreeClick(activeNode.value.type, event, settingsStore.editorSettings.shortcuts.openDataInNewTab) === "new-tab") return;
+  if (activeNode.value.type === "table" && settingsStore.editorSettings.sidebarTableClickNavigation) {
+    beginNavigationRequest();
+    openDataInNewTabImmediately();
+    return;
+  }
   if (activeNode.value.type === "event") {
     beginNavigationRequest();
     void openObjectBrowser(false, true);
@@ -1845,7 +1859,16 @@ function onDoubleClick(event: MouseEvent) {
     void openObjectBrowser();
     return;
   }
-  const action = treeNodeRowDoubleClickAction(activeNode.value.type, canOpenObjectBrowser.value, settingsStore.editorSettings.sidebarActivation, canExpand.value, currentDatabaseType(), canOpenConnectionDatabaseBrowser.value, settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation);
+  const action = treeNodeRowDoubleClickAction(
+    activeNode.value.type,
+    canOpenObjectBrowser.value,
+    settingsStore.editorSettings.sidebarActivation,
+    canExpand.value,
+    currentDatabaseType(),
+    canOpenConnectionDatabaseBrowser.value,
+    settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation,
+    settingsStore.editorSettings.sidebarAutoExpandOnDatabaseActivation,
+  );
   // Most trailing dblclick events are intentionally inert in single-click
   // mode, but field and index rows have an explicit editor action.
   if (action === "none") return;
@@ -9116,8 +9139,25 @@ function buildContextMenu(node: TreeNode): ContextMenuItem[] {
   return items;
 }
 
-function handleRowClick(node: TreeNode, clickDetail: number) {
+function handleRowClick(node: TreeNode, clickDetail: number, tableClickNavigation = false) {
   activateRuntimeNode(node);
+  // Only pointer clicks opt into this policy; search Enter keeps its existing action.
+  if (tableClickNavigation && node.type === "table" && settingsStore.editorSettings.sidebarTableClickNavigation) {
+    if (!hasNodeDatabaseContext(node)) return;
+    const config = connectionStore.getConfig(node.connectionId);
+    const target = {
+      connectionId: node.connectionId,
+      database: node.database,
+      catalog: node.catalog,
+      schema: connectionObjectTreeNodeSchema(config, node.database, node.schema),
+      tableName: node.label,
+    };
+    const existing = queryStore.tabs.find((tab) => (config?.db_type === "hbase" ? isSameHBaseTable(tab, target) : isSameTable(tab, target)));
+    supersedeSidebarDataNavigation(node.id);
+    beginNavigationRequest();
+    if (existing) queryStore.switchTab(existing.id);
+    return;
+  }
   runRowClickAction(clickDetail);
 }
 

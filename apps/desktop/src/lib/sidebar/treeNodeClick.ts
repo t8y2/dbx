@@ -165,10 +165,10 @@ function canOpenTreeNodeSource(type: TreeNodeType, dbType?: DatabaseType): boole
   return true;
 }
 
-export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activation: SidebarActivation = "single", dbType?: DatabaseType, browseObjectsOnDatabaseActivation = false, canOpenObjectBrowser = false): TreeNodeRowAction {
+export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activation: SidebarActivation = "single", dbType?: DatabaseType, browseObjectsOnDatabaseActivation = false, canOpenObjectBrowser = false, autoExpandOnDatabaseActivation = true): TreeNodeRowAction {
   if (!shouldActivateTreeNodeOnSingleClick(type, activation)) return "none";
   if (canOpenObjectBrowser && shouldBrowseObjectsOnDatabaseActivation(type, browseObjectsOnDatabaseActivation)) {
-    return canExpand ? "open-object-browser-and-expand" : "open-object-browser";
+    return canExpand && autoExpandOnDatabaseActivation ? "open-object-browser-and-expand" : "open-object-browser";
   }
   if (type === "extension") return "open-extension-details";
   if (type === "event-trigger") return "open-event-trigger-details";
@@ -192,7 +192,16 @@ export function shouldRunTreeNodeRowAction(action: TreeNodeRowAction, clickDetai
   return action !== "none" && clickDetail <= 1;
 }
 
-export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBrowser: boolean, activation: SidebarActivation = "single", canExpand = false, dbType?: DatabaseType, canOpenDatabaseBrowser = false, browseObjectsOnDatabaseActivation = false): TreeNodeRowDoubleClickAction {
+export function treeNodeRowDoubleClickAction(
+  type: TreeNodeType,
+  canOpenObjectBrowser: boolean,
+  activation: SidebarActivation = "single",
+  canExpand = false,
+  dbType?: DatabaseType,
+  canOpenDatabaseBrowser = false,
+  browseObjectsOnDatabaseActivation = false,
+  autoExpandOnDatabaseActivation = true,
+): TreeNodeRowDoubleClickAction {
   // Single-click activation already handles the first click in a dblclick
   // sequence. Most rows have no trailing action, while field/index rows have
   // an explicit structure-editor action in either activation mode.
@@ -206,7 +215,7 @@ export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBr
   if (type === "column" || type === "index") return "open-structure-editor";
   if (activation === "double") {
     if (canOpenObjectBrowser && shouldBrowseObjectsOnDatabaseActivation(type, browseObjectsOnDatabaseActivation)) {
-      return canExpand ? "open-object-browser-and-expand" : "open-object-browser";
+      return canExpand && autoExpandOnDatabaseActivation ? "open-object-browser-and-expand" : "open-object-browser";
     }
     if (canOpenObjectBrowser && type === "object-browser") return "open-object-browser";
     if (type === "extension") return "open-extension-details";

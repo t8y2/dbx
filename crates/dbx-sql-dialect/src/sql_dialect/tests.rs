@@ -16,6 +16,18 @@ fn transfer_identifier_policy_preserves_legacy_output() {
 }
 
 #[test]
+fn tdengine_transfer_identifiers_use_backticks() {
+    // #14540: TDengine treats double quotes as string literals, so every
+    // export/transfer identifier must take the backtick family instead of the
+    // ANSI default arm.
+    assert_eq!(quote_transfer_identifier("device_desc", &DatabaseType::Tdengine), "`device_desc`");
+    assert_eq!(
+        qualified_transfer_table("device_desc", "demo_db", &DatabaseType::Tdengine, None),
+        "`demo_db`.`device_desc`"
+    );
+}
+
+#[test]
 fn backtick_family_predicate_matches_quoting() {
     // `uses_backtick_identifier_quoting` is the single source of truth the "Standard
     // SQL" export dialect consults to decide when to deviate from ANSI double
@@ -276,6 +288,27 @@ fn maps_table_pagination_strategy_by_database_type() {
     // Both Spanner dialects support `LIMIT n OFFSET m`; pin the fallback.
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Spanner)), TablePaginationStrategy::LimitOffset);
     assert_eq!(table_pagination_strategy(None), TablePaginationStrategy::LimitOffset);
+}
+
+/// #14604: Teradata rejects `LIMIT`, so a user query must run unmodified and rely
+/// on the agent's row cap instead of a rewritten page.
+#[test]
+fn keeps_teradata_user_queries_unrewritten_because_it_has_no_limit_clause() {
+    assert_eq!(
+        pagination_strategy(Some(DatabaseType::Teradata), PaginationContext::UserQuery),
+        TablePaginationStrategy::AgentMaxRows
+    );
+    // Table previews and bounded reads are unchanged by this fix: they still ask
+    // for `LIMIT`, which Teradata cannot parse. Pinned here so the follow-up work
+    // is visible instead of silently assumed done.
+    assert_eq!(
+        pagination_strategy(Some(DatabaseType::Teradata), PaginationContext::TablePreview),
+        TablePaginationStrategy::LimitOffset
+    );
+    assert_eq!(
+        pagination_strategy(Some(DatabaseType::Teradata), PaginationContext::BoundedRead),
+        TablePaginationStrategy::LimitOffset
+    );
 }
 
 #[test]

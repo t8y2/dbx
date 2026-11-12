@@ -146,6 +146,11 @@ function installBridge(channel) {
       getAll: () => request("host.getConnections", {}),
     }),
     copy: (text) => request("host.copy", { text }),
+    copyImage: (options = {}, data) => {
+      if (data === undefined) return request("host.copyImage", options);
+      if (typeof data === "string") return request("host.copyImage", { ...options, dataBase64: data });
+      return request("host.copyImage", { ...options, dataBase64: encode(data) });
+    },
     openUrl: (url) => request("host.openUrl", { url }),
     storage: {
       get: (key) => request("host.storageGet", { key }),

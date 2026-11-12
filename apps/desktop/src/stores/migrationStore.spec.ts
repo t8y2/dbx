@@ -269,3 +269,84 @@ describe("migration store", () => {
     expect(store.state.error).toBeNull();
   });
 });
+
+describe("credential recovery", () => {
+  const recovery = () => ({ ...done(), keyRecoveryRequired: true, credentialResetAllowed: true, encryptedRecordCount: 19 });
+  const setup = () => {
+    const backend = {
+      migrationStatus: vi.fn().mockResolvedValue(recovery()),
+      migrationStart: vi.fn(),
+      migrationRetry: vi.fn(),
+      migrationCleanupBackups: vi.fn(),
+      migrationPrepareCredentialReset: vi.fn().mockResolvedValue({ confirmationToken: "private-token", encryptedRecordCount: 19 }),
+      migrationResetCredentials: vi.fn(),
+    };
+    return { backend, store: useMigrationStore(backend) };
+  };
+  it("requires preparation and explicit confirmation, and invalidates cancelled tokens", async () => {
+    const { store, backend } = setup();
+    await store.initialize();
+    await store.resetCredentials(true);
+    expect(backend.migrationResetCredentials).not.toHaveBeenCalled();
+    await store.prepareCredentialReset();
+    await store.resetCredentials(false);
+    expect(backend.migrationResetCredentials).not.toHaveBeenCalled();
+    expect(JSON.stringify(store.diagnostic())).not.toContain("private-token");
+    store.cancelCredentialReset();
+    await store.resetCredentials(true);
+    expect(backend.migrationResetCredentials).not.toHaveBeenCalled();
+  });
+  it("retains reset success until explicit entry and prevents duplicate submissions", async () => {
+    const { store, backend } = setup();
+    await store.initialize();
+    await store.prepareCredentialReset();
+    backend.migrationStatus.mockResolvedValue(done());
+    backend.migrationResetCredentials.mockResolvedValue({ backupPath: "/tmp/reset-backup", clearedRecordCount: 19, state: "succeeded" });
+    await Promise.all([store.resetCredentials(true), store.resetCredentials(true)]);
+    expect(backend.migrationResetCredentials).toHaveBeenCalledTimes(1);
+    expect(backend.migrationResetCredentials).toHaveBeenCalledWith("private-token", true);
+    expect(store.state.resetReport?.backupPath).toBe("/tmp/reset-backup");
+    expect(store.blocking.value).toBe(true);
+    expect(store.state.step).toBe(3);
+    store.enter();
+    expect(store.blocking.value).toBe(false);
+  });
+  it("preserves structured failure and backup information while refreshing status", async () => {
+    const { store, backend } = setup();
+    await store.initialize();
+    await store.prepareCredentialReset();
+    const failure = { code: "KEYRING_WRITE_FAILED", stage: "key_creation", backupPath: "/tmp/reset-backup" };
+    backend.migrationResetCredentials.mockRejectedValue(failure);
+    await store.resetCredentials(true);
+    expect(store.state.resetFailure).toEqual(failure);
+    expect(store.diagnostic().credentialResetFailure).toEqual(failure);
+    expect(store.state.error).toBe("resetFailed");
+    expect(store.state.resetPreparation).toBeNull();
+    expect(backend.migrationStatus).toHaveBeenLastCalledWith(true);
+    expect(store.blocking.value).toBe(true);
+  });
+  it("keeps a postcheck failure visible until entry when the fresh status is ready", async () => {
+    const { store, backend } = setup();
+    await store.initialize();
+    await store.prepareCredentialReset();
+    backend.migrationResetCredentials.mockRejectedValue({ code: "CREDENTIAL_RESET_POSTCHECK_FAILED", stage: "postcheck", backupPath: "/tmp/reset-backup" });
+    backend.migrationStatus.mockResolvedValue(done());
+    await store.resetCredentials(true);
+    expect(store.state.step).toBe(3);
+    expect(store.state.resetReport).toBeNull();
+    expect(store.state.resetFailure?.backupPath).toBe("/tmp/reset-backup");
+    expect(store.blocking.value).toBe(true);
+    store.enter();
+    expect(store.blocking.value).toBe(false);
+  });
+  it("does not offer reset when the backend disallows it and rechecks after preparation", async () => {
+    const { store, backend } = setup();
+    backend.migrationStatus.mockResolvedValue({ ...recovery(), credentialResetAllowed: false });
+    await store.initialize();
+    await store.prepareCredentialReset();
+    expect(backend.migrationPrepareCredentialReset).not.toHaveBeenCalled();
+    store.state.status = { ...recovery(), credentialResetAllowed: true };
+    await store.prepareCredentialReset();
+    expect(store.state.resetPreparation).toBeNull();
+  });
+});

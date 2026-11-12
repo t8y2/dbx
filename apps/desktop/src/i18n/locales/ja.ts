@@ -1,3 +1,4 @@
+import { binlogRecoveryJa as binlogRecovery } from "./binlogRecovery";
 import { tableColumnPasteJa as tableColumnPaste } from "./tableColumnPaste";
 import { sidebarMenuJa as sidebarMenu } from "./sidebarMenuMessages";
 import { oceanbaseCloneDialogJa as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
@@ -66,6 +67,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  binlogRecovery,
   oracleTrigger: {
     errorPositionUnavailable: "ソースを開きました。エラー位置を確認できないため、表示された行と列を確認してください。",
     reconcileStructure: "実行済みの変更を照合",

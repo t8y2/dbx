@@ -37,6 +37,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/dbx-core/Cargo.toml crates/dbx-core/
 COPY crates/dbx-platform/Cargo.toml crates/dbx-platform/
 COPY crates/dbx-types/Cargo.toml crates/dbx-types/
+COPY crates/dbx-binlog/Cargo.toml crates/dbx-binlog/
 COPY crates/dbx-sql/Cargo.toml crates/dbx-sql/
 COPY crates/dbx-sql-core/Cargo.toml crates/dbx-sql-core/
 COPY crates/dbx-sql-data/Cargo.toml crates/dbx-sql-data/
@@ -64,7 +65,7 @@ COPY src-tauri/Cargo.toml src-tauri/
 # Copy every vendored crate: root Cargo.toml [patch.crates-io] points at
 # vendor/{ctor,rumqttc,dirs-sys,pageant,wry}; omitting any breaks the offline build.
 COPY vendor/ vendor/
-RUN for crate in dbx-platform dbx-types dbx-sql dbx-sql-core dbx-sql-data dbx-sql-dialect dbx-sql-schema \
+RUN for crate in dbx-platform dbx-types dbx-binlog dbx-sql dbx-sql-core dbx-sql-data dbx-sql-dialect dbx-sql-schema \
       dbx-formats dbx-ai-provider dbx-plugin-runtime dbx-driver-agent dbx-driver-support \
       dbx-driver-elasticsearch dbx-driver-mongodb dbx-driver-mysql dbx-driver-postgres \
       dbx-driver-redis dbx-driver-sqlserver dbx-drivers dbx-sqlite-worker dbx-tauri-consul dbx-tauri-schema; do \

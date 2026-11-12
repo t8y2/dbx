@@ -1,3 +1,4 @@
+import { binlogRecoveryTh as binlogRecovery } from "./binlogRecovery";
 import { tableColumnPasteTh as tableColumnPaste } from "./tableColumnPaste";
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/th";
@@ -50,6 +51,7 @@ const damengDump = {
 };
 
 export default withEnglishFallback({
+  binlogRecovery,
   oracleTrigger: {
     errorPositionUnavailable: "เปิดซอร์สแล้ว แต่ไม่สามารถยืนยันตำแหน่งข้อผิดพลาดได้ โปรดตรวจสอบบรรทัดและคอลัมน์ที่แสดง",
     reconcileStructure: "ตรวจสอบการเปลี่ยนแปลงที่ใช้แล้ว",

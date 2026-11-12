@@ -1,0 +1,110 @@
+{
+  "scope": "Desktop experimental MVP - local development validation, not release acceptance",
+  "branch": "codex/issue-12838-binlog",
+  "base_commit": "87f1432fc4c3c2e5e8b42c52eb05beafc2b423c2",
+  "native_check": {
+    "command": "CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=examples/mysql-binlog-probe/target cargo check --offline --locked -p dbx --no-default-features --features sqlite-bundled",
+    "result": "passed",
+    "target": "x86_64-apple-darwin",
+    "default_feature_matrix_verified": false
+  },
+  "frontend_typecheck": {
+    "command": "NODE_OPTIONS=--max-old-space-size=6144 pnpm exec vue-tsc --noEmit --project apps/desktop/tsconfig.json",
+    "result": "passed"
+  },
+  "frontend_full_suite": {
+    "command": "pnpm exec vitest run --maxWorkers=4",
+    "files": 1883,
+    "passed": 24712,
+    "failed": 0,
+    "exit_code": 0,
+    "notes": "Existing happy-dom localhost fetch diagnostics and experimental SQLite warnings are present; no failing or unhandled tests."
+  },
+  "architecture_suite": {
+    "command": "node --test scripts/core-architecture.test.mjs",
+    "passed": 28,
+    "failed": 0,
+    "docker_image_built": false
+  },
+  "engine": {
+    "unit_passed": 4,
+    "integration_passed": 41,
+    "cli_integration_passed": 5,
+    "failed": 0,
+    "clippy_warnings_denied": "passed"
+  },
+  "browser": {
+    "component": "real Vue dialog",
+    "transport": "task-owned validation IPC bridge; not actual packaged Tauri WebView IPC",
+    "worker": "real latest compiled CLI --worker",
+    "source_sha256": "d8e9913d7cf725873173cf63bcd90271bb12bda7e85b32c3ca42707da00a23f0",
+    "viewports": [
+      [
+        1440,
+        1000
+      ],
+      [
+        390,
+        844
+      ]
+    ],
+    "themes": [
+      "light",
+      "dark"
+    ],
+    "locales": [
+      "en",
+      "zh-CN"
+    ],
+    "scenarios": [
+      "import real authored MySQL binlog",
+      "whole-transaction selection",
+      "row before/after preview",
+      "historical schema confirmation",
+      "SQL generation",
+      "new-file export",
+      "existing-target error and successful retry",
+      "stale SQL disabled after filter edits",
+      "invalid position filter",
+      "empty results",
+      "responsive overflow checks"
+    ],
+    "session": "binlog12838",
+    "owned_browser_closed": true,
+    "owned_validation_server_closed": true,
+    "unrelated_browsers_preserved": true,
+    "screenshots": [
+      "examples/mysql-binlog-probe/target/browser/final-desktop-zh.png",
+      "examples/mysql-binlog-probe/target/browser/final-mobile-zh.png",
+      "examples/mysql-binlog-probe/target/browser/mobile-dark.png"
+    ]
+  },
+  "editor_parser": {
+    "input": "actual generated SQL export",
+    "statements": 7,
+    "create_procedure_statements": 1,
+    "client_delimiter_directives_sent": 0,
+    "handler_body_retained": true,
+    "database_execution_performed": false
+  },
+  "review": {
+    "original_p2_findings": [
+      "cancel-before-admission race",
+      "unknown signedness shown as a definite integer"
+    ],
+    "resolution": "regression tests RED/GREEN; independent static re-review found no new P1/P2"
+  },
+  "remaining_release_gates": [
+    "Windows/Linux and default-feature distribution matrix",
+    "signed/bundled native WebView IPC and startup smoke test",
+    "broader hostile-input fuzzing and hard OS process resource policy",
+    "DATE/ordinary float/other explicitly unsupported type expansion"
+  ],
+  "delivery_boundary": {
+    "committed": false,
+    "pushed": false,
+    "pull_request_created": false,
+    "released": false,
+    "existing_databases_accessed": false
+  }
+}

@@ -1,0 +1,20 @@
+[package]
+name = "dbx-binlog"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[features]
+process-host = ["dep:sysinfo", "dep:tempfile"]
+
+[dependencies]
+mysql_common = { git = "https://github.com/t8y2/rust_mysql_common.git", rev = "47740d85a8277167a5717afac785d37b46a36296", default-features = false, features = ["binlog"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+crc32fast = "1"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+getrandom = { version = "0.3", features = ["std"] }
+sysinfo = { version = "0.32", features = ["system"], optional = true }
+tempfile = { version = "3", optional = true }

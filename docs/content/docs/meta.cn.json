@@ -21,6 +21,7 @@
     "plsql-debug",
     "data-grid",
     "schema-browser",
+    "mysql-binlog-recovery",
     "object-browser",
     "redis",
     "mongodb",

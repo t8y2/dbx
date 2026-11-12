@@ -1,3 +1,4 @@
+import { binlogRecoveryIt as binlogRecovery } from "./binlogRecovery";
 import { tableColumnPasteIt as tableColumnPaste } from "./tableColumnPaste";
 import { sidebarMenuIt as sidebarMenu } from "./sidebarMenuMessages";
 import { oceanbaseCloneDialogIt as oceanbaseCloneDialog } from "./oceanbaseCloneDialog";
@@ -65,6 +66,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  binlogRecovery,
   oracleTrigger: {
     errorPositionUnavailable: "Sorgente aperto. Impossibile verificare la posizione dell'errore; controllare la riga e la colonna indicate.",
     reconcileStructure: "Riconcilia le modifiche applicate",

@@ -1,0 +1,30 @@
+{
+  "run_directory": "examples/mysql-binlog-probe/target/live-mysql/runs/dbx-binlog-live-5uxjg5ah",
+  "cases": [
+    "post-image conflict refuses and rolls back",
+    "same-session timezone restored after SQLEXCEPTION conflict",
+    "injected SQLWARNING rolls back and restores timezone in same session",
+    "all-column restoration including zero auto-increment, decimal, bytes/text/NULL",
+    "reverse transaction/row order and repeated primary-key changes",
+    "JSON uint64/int64/nested/null/float and DATETIME/TIMESTAMP/TIME microseconds; caller timezone restored",
+    "PK conflict rolls back active inverse tx; previous inverse tx remains committed",
+    "runtime target schema drift refuses before DML"
+  ],
+  "mysql_version": "8.0.27",
+  "status": "passed",
+  "runtime_archive": {
+    "source": "https://cdn.mysql.com/archives/mysql-8.0/mysql-8.0.27-macos11-arm64.tar.gz",
+    "published_md5": "aba688984408a82b65fc0eba4032a127",
+    "observed_md5": "aba688984408a82b65fc0eba4032a127",
+    "architecture": "arm64",
+    "installation": "portable task-owned runtime, no system service"
+  },
+  "comparisons": {
+    "baseline.tsv": "ccac555ab3f52f3a883f3d04c91efc985fefef8750af01cf3529d540abc69152",
+    "changed.tsv": "43242f83f84c1da171f60e3bcd2ad8140705ff4158c310563637155173101bcd",
+    "restored.tsv": "ccac555ab3f52f3a883f3d04c91efc985fefef8750af01cf3529d540abc69152"
+  },
+  "baseline_equals_restored": true,
+  "source_revision": "87f1432fc4c3c2e5e8b42c52eb05beafc2b423c2 + uncommitted feature work",
+  "boundary": "Owned socket-only isolated MySQL test instance, no user/production DB connection; not full release acceptance."
+}

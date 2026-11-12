@@ -45,6 +45,7 @@ const under = (namespace: string, keys: string[]) => keys.map((key) => `${namesp
 // leaks the raw key path, and a key missing from a locale silently shows
 // English.
 const FEATURE_MESSAGES: FeatureMessages[] = [
+  { feature: "binlog recovery (#12838)", keys: ["binlogRecovery.*"], locales: ["en", "es", "it", "ja", "ko", "pt-BR", "ru", "th", "zh-CN", "zh-TW"] },
   { feature: "query connection group path preview", keys: ["connection.groupPath"], translated: true },
   { feature: "SQL file includes", keys: under("sqlFile", ["resolveIncludes", "resolveIncludesHint"]), translated: true },
   { feature: "AstraFlow provider", keys: ["ai.astraflowDescription"], translated: true },

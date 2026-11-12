@@ -485,7 +485,7 @@ describe("buildDuplicateTableStructurePlan", () => {
     expect(apiMock.buildDuplicateTableStructureSql).not.toHaveBeenCalled();
   });
 
-  it("loads Oscar source column comments and keeps table and column comments in the clone plan", async () => {
+  it.each(["oscar", "kingbase"] as const)("loads %s source column comments and keeps table and column comments in the clone plan", async (databaseType) => {
     const columns = [
       { name: "ID", comment: null, data_type: "int", is_nullable: false, column_default: null, is_primary_key: true },
       { name: "NAME", comment: "  用户's;姓名  ", data_type: "varchar(50)", is_nullable: true, column_default: null, is_primary_key: false },
@@ -496,10 +496,10 @@ describe("buildDuplicateTableStructurePlan", () => {
     apiMock.buildDuplicateTableStructureSql.mockResolvedValue(sql);
 
     const plan = await buildDuplicateTableStructurePlan({
-      connectionId: "oscar-1",
+      connectionId: "connection-1",
       database: "osrdb",
       catalog: "catalog",
-      databaseType: "oscar",
+      databaseType,
       schema: "SYSDBA",
       sourceName: "USERS",
       targetName: "USERS_COPY",
@@ -507,9 +507,9 @@ describe("buildDuplicateTableStructurePlan", () => {
       identifierQuote: '"',
     });
 
-    expect(apiMock.getColumns).toHaveBeenCalledExactlyOnceWith("oscar-1", "osrdb", "SYSDBA", "USERS", "catalog");
+    expect(apiMock.getColumns).toHaveBeenCalledExactlyOnceWith("connection-1", "osrdb", "SYSDBA", "USERS", "catalog");
     expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledExactlyOnceWith({
-      databaseType: "oscar",
+      databaseType,
       schema: "SYSDBA",
       sourceName: "USERS",
       targetName: "USERS_COPY",
@@ -552,7 +552,28 @@ describe("buildDuplicateTableStructurePlan", () => {
     expect(apiMock.buildDuplicateTableStructureSql).not.toHaveBeenCalled();
   });
 
-  it.each(["postgres", "mysql", "highgo", "kingbase", undefined] as const)("keeps %s clones on the generic path", async (databaseType) => {
+  it("loads the Kingbase table comment when the source entry has none", async () => {
+    apiMock.getTableComment.mockResolvedValue("table comment");
+    const sql = "CREATE TABLE copy AS SELECT * FROM source WHERE 1=0;\nCOMMENT ON TABLE copy IS 'table comment';";
+    apiMock.buildDuplicateTableStructureSql.mockResolvedValue(sql);
+
+    const plan = await buildDuplicateTableStructurePlan({
+      connectionId: "kingbase-1",
+      database: "app",
+      databaseType: "kingbase",
+      schema: "public",
+      sourceName: "source",
+      targetName: "copy",
+      sourceColumns: [],
+    });
+
+    expect(apiMock.getTableComment).toHaveBeenCalledExactlyOnceWith("kingbase-1", "app", "public", "source", undefined);
+    expect(apiMock.getColumns).not.toHaveBeenCalled();
+    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ tableComment: "table comment", columnComments: [] }));
+    expect(plan).toEqual({ sql, sourceColumns: [], executeAsScript: true });
+  });
+
+  it.each(["postgres", "mysql", "highgo", undefined] as const)("keeps %s clones on the generic path", async (databaseType) => {
     apiMock.buildDuplicateTableStructureSql.mockResolvedValue('CREATE TABLE "copy" (LIKE "source" INCLUDING ALL);');
 
     const plan = await buildDuplicateTableStructurePlan({

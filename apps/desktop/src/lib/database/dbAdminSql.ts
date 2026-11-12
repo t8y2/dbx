@@ -321,17 +321,18 @@ export async function buildDuplicateTableStructurePlan(options: DuplicateTableSt
     return { sql, sourceColumns: columns, executeAsScript: primaryKeyColumns.length > 0 || !!tableComment?.trim() || columnComments.length > 0 || duplicateTableStructureRequiresScript(sql) };
   }
 
-  let sourceColumns = options.sourceColumns;
-  if (options.databaseType === "vastbase" || options.databaseType === "oscar") {
-    sourceColumns ??= await api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog);
-  }
+  const copyColumnComments = options.databaseType === "vastbase" || options.databaseType === "oscar" || options.databaseType === "kingbase";
+  const [sourceColumns, tableComment] = await Promise.all([
+    options.sourceColumns ?? (copyColumnComments ? api.getColumns(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog) : undefined),
+    options.databaseType === "kingbase" && options.tableComment == null ? api.getTableComment(options.connectionId, options.database, options.schema || "", options.sourceName, options.catalog) : options.tableComment,
+  ]);
   const sql = await buildDuplicateTableStructureSql({
     databaseType: options.databaseType,
     schema: options.schema,
     sourceName: options.sourceName,
     targetName: options.targetName,
-    tableComment: options.tableComment,
-    columnComments: options.databaseType === "vastbase" || options.databaseType === "oscar" ? collectDuplicateTableColumnComments(sourceColumns ?? []) : [],
+    tableComment,
+    columnComments: copyColumnComments ? collectDuplicateTableColumnComments(sourceColumns ?? []) : [],
     identifierQuote: options.identifierQuote,
   });
   return { sql, sourceColumns, executeAsScript: duplicateTableStructureRequiresScript(sql) };

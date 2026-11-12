@@ -898,8 +898,9 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
             ));
         }
     }
-    if let Some(database_type @ (DatabaseType::Dameng | DatabaseType::Vastbase | DatabaseType::Oscar)) =
-        options.database_type
+    if let Some(
+        database_type @ (DatabaseType::Dameng | DatabaseType::Vastbase | DatabaseType::Oscar | DatabaseType::Kingbase),
+    ) = options.database_type
     {
         comment_sql.extend(options.column_comments.iter().filter_map(|column| {
             if column.comment.trim().is_empty() {
@@ -1268,6 +1269,7 @@ fn supports_duplicate_table_comment(database_type: DatabaseType) -> bool {
             | DatabaseType::Dameng
             | DatabaseType::Vastbase
             | DatabaseType::Oscar
+            | DatabaseType::Kingbase
     )
 }
 
@@ -2806,7 +2808,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_table_structure_comments_keep_other_dialects_unchanged() {
+    fn duplicate_table_structure_comments_follow_dialect_support() {
         for (database_type, expected) in [
             (
                 Some(DatabaseType::Postgres),
@@ -2814,7 +2816,10 @@ mod tests {
             ),
             (Some(DatabaseType::Mysql), "CREATE TABLE `copy` LIKE `source`;"),
             (Some(DatabaseType::Highgo), "CREATE TABLE \"copy\" AS SELECT * FROM \"source\" WHERE 1=0;"),
-            (Some(DatabaseType::Kingbase), "CREATE TABLE \"copy\" AS SELECT * FROM \"source\" WHERE 1=0;"),
+            (
+                Some(DatabaseType::Kingbase),
+                "CREATE TABLE \"copy\" AS SELECT * FROM \"source\" WHERE 1=0;\nCOMMENT ON TABLE \"copy\" IS '表注释';\nCOMMENT ON COLUMN \"copy\".\"note\" IS '字段注释';",
+            ),
             (Some(DatabaseType::DuckDb), "CREATE TABLE \"copy\" AS SELECT * FROM \"source\" WHERE 1=0;"),
             (None, "CREATE TABLE \"copy\" AS SELECT * FROM \"source\" WHERE 1=0;"),
         ] {

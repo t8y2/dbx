@@ -103,6 +103,14 @@ WHERE n.nspname = %s AND %s ORDER BY p.proname, signature`, kind, identity, cata
 	return result, nil
 }
 
+func routineSignaturePredicate(identity, signature string) string {
+	if signature == "" {
+		// Kingbase can interpret an empty string literal as NULL in Oracle mode.
+		return "length(" + identity + ") = 0"
+	}
+	return identity + " = " + quoteLiteral(signature)
+}
+
 func (s *server) getRoutineSource(schema, name, kind string, signature *string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), metadataTimeout)
 	defer cancel()
@@ -114,7 +122,7 @@ func (s *server) getRoutineSource(schema, name, kind string, signature *string) 
 	querySource := func(definitionFunction string) (string, error) {
 		rows, err := s.routineQueryContext(ctx, signature != nil, func(kindExpression, filter, identity string) string {
 			if signature != nil {
-				filter += " AND " + identity + " = " + quoteLiteral(*signature)
+				filter += " AND " + routineSignaturePredicate(identity, *signature)
 			}
 			return fmt.Sprintf("SELECT %s(p.oid) FROM %s.%s_proc p JOIN %s.%s_namespace n ON n.oid=p.pronamespace WHERE n.nspname=%s AND p.proname=%s AND (%s)=%s AND %s ORDER BY p.oid LIMIT 2", definitionFunction, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(name), kindExpression, quoteLiteral(kind), filter)
 		})
@@ -162,7 +170,7 @@ func (s *server) getLegacyRoutineSource(ctx context.Context, schema, name, kind 
 	countMatches := func(matchSignature bool) (int, error) {
 		rows, err := s.routineQueryContext(ctx, matchSignature, func(kindExpression, filter, identity string) string {
 			if matchSignature {
-				filter += " AND " + identity + " = " + quoteLiteral(*signature)
+				filter += " AND " + routineSignaturePredicate(identity, *signature)
 			}
 			return fmt.Sprintf("SELECT COUNT(*) FROM %s.%s_proc p JOIN %s.%s_namespace n ON n.oid=p.pronamespace WHERE n.nspname=%s AND p.proname=%s AND (%s)=%s AND %s", catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(name), kindExpression, quoteLiteral(kind), filter)
 		})

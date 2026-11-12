@@ -1335,6 +1335,14 @@ jobs:
         with:
           ref: ${{ inputs.release_tag || github.ref }}
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Set release version
+        run: node .github/scripts/set-release-version.mjs "${RELEASE_TAG}"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 

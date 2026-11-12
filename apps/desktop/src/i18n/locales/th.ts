@@ -11179,6 +11179,8 @@ export default withEnglishFallback({
     sidebarTableClickNavigation: "คลิกเพื่อไปยังแท็บตาราง และดับเบิลคลิกเพื่อเปิดแท็บใหม่",
     sidebarTableClickNavigationDescription: "คลิกเพื่อไปยังแท็บที่เปิดอยู่ของตารางเดียวกัน ดับเบิลคลิกจะเปิดแท็บข้อมูลใหม่เสมอ ใช้กับตารางในแถบด้านข้างเท่านั้น",
     sidebarBrowseObjectsOnDatabaseActivationDescription: "เมื่อเปิดใช้ การเปิดโหนดฐานข้อมูลหรือ Schema ด้วยโหมดคลิกเดียวหรือดับเบิลคลิกที่เลือก จะเปิดแท็บ Browse Objects ด้วย",
+    sidebarAutoExpandOnDatabaseActivation: "ขยายแถบด้านข้างอัตโนมัติเมื่อเปิดใช้งานฐานข้อมูล",
+    sidebarAutoExpandOnDatabaseActivationDescription: "เมื่อเปิดการเรียกดูออบเจ็กต์ขณะเปิดใช้งานฐานข้อมูล จะขยายแถบด้านข้างด้วยโหมดคลิกครั้งเดียวหรือสองครั้งที่เลือกด้วย เมื่อปิด จะเปิดหรือโฟกัสแท็บเรียกดูออบเจ็กต์และคงสถานะการขยายของแถบด้านข้างไว้",
     openTabsRestoreMode: "กู้คืนแท็บเมื่อเปิดแอป",
     openTabsRestoreModeDescription: "เลือกวิธีที่ DBX กู้คืนแท็บที่เปิดไว้ครั้งล่าสุด",
     openTabsRestoreModeAll: "เก็บแท็บทั้งหมด",

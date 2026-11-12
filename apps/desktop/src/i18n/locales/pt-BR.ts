@@ -9210,6 +9210,9 @@ export default withEnglishFallback({
     sidebarTableClickNavigation: "Focar tabelas com um clique e abrir novas abas com clique duplo",
     sidebarTableClickNavigationDescription: "Um clique ativa uma aba aberta da mesma tabela. Um clique duplo sempre abre uma nova aba de dados. Aplica-se apenas às tabelas da barra lateral.",
     sidebarBrowseObjectsOnDatabaseActivationDescription: 'Quando ativado, ativar um nó de banco de dados ou esquema com o modo selecionado de clique simples ou duplo também abre a aba "Explorar Objetos".',
+    sidebarAutoExpandOnDatabaseActivation: "Expandir automaticamente a barra lateral ao ativar um banco de dados",
+    sidebarAutoExpandOnDatabaseActivationDescription:
+      "Quando a navegação de objetos ao ativar um banco de dados está habilitada, também expande a barra lateral com o modo de clique simples ou duplo selecionado. Quando desabilitado, abre ou foca Explorar objetos e mantém o estado de expansão da barra lateral.",
     openTabsRestoreMode: "Restaurar abas ao iniciar",
     openTabsRestoreModeDescription: "Escolha como o DBX restaura as abas que estavam abertas na última vez.",
     openTabsRestoreModeAll: "Manter todas as abas",

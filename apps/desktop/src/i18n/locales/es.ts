@@ -9434,6 +9434,9 @@ export default withEnglishFallback({
     sidebarTableClickNavigation: "Enfocar tablas con un clic y abrir pestañas nuevas con doble clic",
     sidebarTableClickNavigationDescription: "Un clic activa una pestaña abierta de la misma tabla. Un doble clic siempre abre otra pestaña de datos. Solo se aplica a las tablas de la barra lateral.",
     sidebarBrowseObjectsOnDatabaseActivationDescription: 'Si está activado, al activar un nodo de base de datos o esquema con el modo seleccionado de uno o dos clics también se abre la pestaña "Explorar objetos".',
+    sidebarAutoExpandOnDatabaseActivation: "Expandir automáticamente la barra lateral al activar una base de datos",
+    sidebarAutoExpandOnDatabaseActivationDescription:
+      "Si está activada la exploración de objetos al activar una base de datos, expande también la barra lateral con el modo de uno o dos clics seleccionado. Si se desactiva, abre o enfoca Explorar objetos y conserva el estado de expansión de la barra lateral.",
     openTabsRestoreMode: "Restaurar pestañas al iniciar",
     openTabsRestoreModeDescription: "Elige cómo DBX restaura las pestañas que estaban abiertas la última vez.",
     openTabsRestoreModeAll: "Conservar todas las pestañas",

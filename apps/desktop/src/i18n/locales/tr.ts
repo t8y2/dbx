@@ -7947,6 +7947,8 @@ export default withEnglishFallback({
     sidebarPinDefaultDatabaseDescription: "Etkinleştirildiğinde, varsayılan veritabanı veritabanı listesinin en üstünde görüntülenir. Devre dışı bırakıldığında alfabetik olarak sıralanır.",
     sidebarBrowseObjectsOnDatabaseActivation: "Veritabanı etkinleştirilirken nesnelere gözat",
     sidebarBrowseObjectsOnDatabaseActivationDescription: 'Etkinleştirildiğinde, seçili tek veya çift tıklama moduyla bir veritabanı ya da şema düğümünü etkinleştirmek "Nesnelere Gözat" sekmesini de açar.',
+    sidebarAutoExpandOnDatabaseActivation: "Veritabanı etkinleştirilirken kenar çubuğunu otomatik genişlet",
+    sidebarAutoExpandOnDatabaseActivationDescription: "Veritabanı etkinleştirilirken nesnelere gözatma açıksa, seçilen tek veya çift tıklama moduyla kenar çubuğunu da genişletir. Kapalıysa Nesnelere Gözat sekmesini açar veya odaklar ve kenar çubuğunun genişleme durumunu korur.",
     openTabsRestoreMode: "Açılışta sekmeleri geri yükle",
     openTabsRestoreModeDescription: "DBX'in en son açık olan sekmeleri nasıl geri yükleyeceğini seçin.",
     openTabsRestoreModeAll: "Tüm sekmeleri koru",

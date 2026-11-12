@@ -10649,6 +10649,8 @@ export default {
     sidebarTableClickNavigation: "Focus tables on click, open new tabs on double-click",
     sidebarTableClickNavigationDescription: "Click to focus an open tab for the same table. Double-click always opens a new data tab. Applies only to sidebar tables.",
     sidebarBrowseObjectsOnDatabaseActivationDescription: 'When enabled, activating a database or schema node using the selected single- or double-click mode also opens the "Browse Objects" tab.',
+    sidebarAutoExpandOnDatabaseActivation: "Automatically expand the sidebar when activating a database",
+    sidebarAutoExpandOnDatabaseActivationDescription: "When browsing objects on database activation is enabled, also expand the sidebar using the selected single- or double-click mode. When disabled, open or focus Browse Objects and preserve the sidebar expansion state.",
     openTabsRestoreMode: "Restore tabs on launch",
     openTabsRestoreModeDescription: "Choose how DBX restores tabs that were open last time.",
     openTabsRestoreModeAll: "Keep all tabs",

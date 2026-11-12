@@ -1914,7 +1914,7 @@ mod tests {
         )
         .expect("start workbook");
         writer.write_row(&[json!(1)]).expect("write row");
-        drop(writer.finish().expect("finish workbook"));
+        writer.finish().expect("finish workbook");
 
         let workbook_xml = read_zip_entry(bytes.get_ref(), "xl/workbook.xml");
         assert!(workbook_xml.contains("name=\"Report\""), "workbook_xml={workbook_xml}");

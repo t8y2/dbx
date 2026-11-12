@@ -1165,9 +1165,14 @@ export class PluginHostBridge {
 
 /**
  * Parse `host.network:<origin>` permission entries into CSP connect-src
- * origins. Must stay aligned with `parse_host_network_permission` in
- * crates/dbx-plugin-runtime/src/plugins/manifest.rs.
+ * origins. Must stay aligned with `parse_host_network_permission` and
+ * `MAX_PLUGIN_NETWORK_ORIGINS` in crates/dbx-plugin-runtime/src/plugins/manifest.rs:
+ * the manifest validator rejects a plugin beyond that bound, so this only
+ * mirrors it instead of silently dropping origins a plugin declared legally
+ * (t8y2/dbx#14299 — 8 was too tight for bookmark collections).
  */
+const MAX_PLUGIN_NETWORK_ORIGINS = 64;
+
 export function pluginNetworkOrigins(permissions: readonly string[] | undefined): string[] {
   const origins = new Set<string>();
   for (const permission of permissions || []) {
@@ -1175,7 +1180,7 @@ export function pluginNetworkOrigins(permissions: readonly string[] | undefined)
     const origin = permission.slice("host.network:".length);
     if (!/^https:\/\/[A-Za-z0-9._-]+(?::[0-9]+)?$/.test(origin)) continue;
     origins.add(origin);
-    if (origins.size >= 8) break;
+    if (origins.size >= MAX_PLUGIN_NETWORK_ORIGINS) break;
   }
   return [...origins];
 }

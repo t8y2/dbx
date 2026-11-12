@@ -339,7 +339,7 @@ watch(
   <Dialog :open="open" @update:open="handleOpenChange">
     <DialogContent
       class="sm:max-w-[700px]"
-      :class="'flex h-[min(720px,calc(var(--dbx-viewport-height)-48px))] flex-col gap-0 overflow-hidden p-0'"
+      :class="'flex max-h-[min(720px,calc(var(--dbx-viewport-height)-48px))] flex-col gap-0 overflow-hidden p-0'"
       :show-close-button="!isCloseBlocked"
       @open-auto-focus="handleOpenAutoFocus"
       @interact-outside="
@@ -353,7 +353,7 @@ watch(
         }
       "
     >
-      <DialogHeader class="border-b py-4 pl-5 pr-12">
+      <DialogHeader class="shrink-0 border-b py-4 pl-5 pr-12">
         <div class="flex items-center justify-between gap-4">
           <DialogTitle class="flex min-w-0 items-center gap-2">
             <span>{{ t("updates.centerTitle") }}</span>
@@ -367,8 +367,8 @@ watch(
         </div>
       </DialogHeader>
 
-      <div class="flex min-h-0 flex-1 flex-col">
-        <div v-if="tabs.length" class="px-5 pb-2.5 pt-1.5">
+      <div class="flex min-h-0 flex-auto flex-col">
+        <div v-if="tabs.length" class="shrink-0 px-5 pb-2.5 pt-1.5">
           <div role="tablist" :aria-label="t('updates.centerTitle')" class="inline-flex h-9 w-full items-center gap-1 overflow-x-auto">
             <button
               v-for="tab in tabs"
@@ -388,7 +388,7 @@ watch(
           </div>
         </div>
 
-        <div data-update-scroll-region class="min-h-0 flex-1 overflow-auto px-5 py-4 text-sm">
+        <div :key="selectedTab" data-update-scroll-region class="min-h-0 flex-auto overflow-auto px-5 py-4 text-sm">
           <ChangelogPanel v-if="selectedTab === 'changelog'" :checking-updates="checkingUpdates || isInstallingUpdate" @check-updates="emit('check-updates')" />
           <template v-else-if="selectedTab === 'app'">
             <div class="space-y-3">
@@ -546,7 +546,7 @@ watch(
           </template>
         </div>
 
-        <DialogFooter v-if="selectedTab === 'app'" data-update-footer class="mx-0 mb-0 min-w-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
+        <DialogFooter v-if="selectedTab === 'app'" data-update-footer class="mx-0 mb-0 min-w-0 shrink-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
           <div v-if="!updateReady && !isInstallingUpdate && !updateDownloaded && (updateInfo?.update_available || updateCheckFailed)" class="flex items-center gap-1.5 self-start sm:mr-auto sm:self-center">
             <span class="text-xs text-muted-foreground">{{ t("updates.source") }}</span>
             <Select :model-value="updateDownloadSource" :disabled="checkingUpdates || isIgnoringUpdate" @update:model-value="(value) => value && emit('change-download-source', value as UpdateDownloadSource)">
@@ -591,7 +591,7 @@ watch(
           </template>
         </DialogFooter>
 
-        <DialogFooter v-else-if="selectedCategory" data-update-footer class="mx-0 mb-0 min-w-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
+        <DialogFooter v-else-if="selectedCategory" data-update-footer class="mx-0 mb-0 min-w-0 shrink-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
           <template v-if="isAnyComponentUpdating">
             <Button variant="ghost" class="shrink-0" @click="handleOpenChange(false)">{{ t("updates.updateInBackground") }}</Button>
             <Button class="shrink-0" disabled>

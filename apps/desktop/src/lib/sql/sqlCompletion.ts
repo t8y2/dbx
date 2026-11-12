@@ -2215,6 +2215,37 @@ class SqlCompletionProvider {
       if (this.databaseType === "clickhouse") {
         this.items.push(...buildClickHouseFunctionItems(context.prefix, context.openingParenAfterCursor, "table", this.input.functionCompletionIncludeParams, this.matchMode));
       }
+      // SQL Server table-valued functions are relation sources used directly in
+      // FROM/JOIN (`FROM dbo.Split(@csv)`), so they belong in the table
+      // candidate set alongside tables and views (#13131). The completion
+      // assistant reports the return kind through dataType: IF/TF/FT functions
+      // come back as "table" while scalar FN/FS functions carry their return
+      // type name, so only the "table" kind is admitted here and unknown
+      // categories stay conservative (#13394 review). Scalar functions remain
+      // in the routine context only.
+      if (this.databaseType === "sqlserver") {
+        // Scope the candidates the way the regular tables arrive: a typed
+        // schema qualifier narrows to that schema, otherwise the current one
+        // applies. Without this the raw object list leaks TVFs from other
+        // schemas into `FROM dbo.` (t8y2/dbx#13394 review).
+        const qualifierSchema = context.qualifierParts?.[context.qualifierParts.length - 1] ?? context.qualifier?.split(".").filter(Boolean).pop();
+        const scope = qualifierSchema ?? this.input.currentSchema;
+        const tableValuedFunctionObjects = (this.input.objects ?? []).filter((object) => object.type === "function" && object.dataType?.trim().toLowerCase() === "table" && (!scope || !object.schema || normalizeIdentifierPart(scope) === normalizeIdentifierPart(object.schema)));
+        const tableValuedFunctions = tableValuedFunctionObjects.map((object) => ({ name: object.name, schema: object.schema, type: "function" as const, detail: object.signature ?? "FUNCTION" }));
+        // Within one schema a function name is unique, so the signature lookup
+        // by name cannot cross schemas once the scope above is applied.
+        const signaturesByLabel = new Map(tableValuedFunctionObjects.map((object) => [object.name.toLowerCase(), object.signature]));
+        const tableItems = buildTableItems(context, tableValuedFunctions, this.dialect, false, context.referencedTables, this.databaseType, this.input.currentSchema, schemaQualification, this.input.identifierCase, this.identifierDialect);
+        // A table-valued function must be invoked as a call: even without a
+        // signature the insert is `Name()`, never the bare name
+        // (t8y2/dbx#13394 review).
+        this.items.push(
+          ...tableItems.map((item) => ({
+            ...item,
+            apply: buildRoutineApply(item.apply || item.label, signaturesByLabel.get(item.label.toLowerCase()), this.input.functionCompletionIncludeParams),
+          })),
+        );
+      }
       if (isOracleLikeDatabase(this.databaseType)) {
         this.items.push(...buildOracleTableFunctionItems(context.prefix, this.input.keywordCase, this.input.functionCase, this.input.functionCompletionIncludeParams, this.matchMode));
       }

@@ -512,6 +512,11 @@ jobs:
           )
 
       - name: Upload Windows WebView2 offline installer
+        # Tauri resolves the WebView2 standalone (offline) installer for every
+        # non-x64 arch to the x86 build (windows/util.rs), so an arm64 "offline"
+        # package would ship a ~190 MB x86 runtime that arm64 DBX cannot load.
+        # Windows on ARM already includes WebView2, so publish x64 only.
+        if: matrix.arch == 'x64'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

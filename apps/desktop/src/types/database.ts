@@ -1093,6 +1093,11 @@ export interface TableInfo {
   /** Optional validity populated by status-aware object loaders. */
   valid?: boolean | null;
   comment?: string | null;
+  /**
+   * Schema that owns this object. The backend list does not return it (it is the
+   * schema that was queried), so the sidebar table index fills it in.
+   */
+  schema?: string | null;
   parent_schema?: string | null;
   parent_name?: string | null;
 }
@@ -1996,6 +2001,8 @@ export interface QueryResultRun {
    * disk eviction/restore. See `dataGridViewStateCache.ts`.
    */
   resultViewGeneration?: string;
+  /** Identifies the latest successful refresh for automatic column sizing. */
+  resultColumnWidthRevision?: string;
   result?: QueryResult;
   results?: QueryResult[];
   activeResultIndex?: number;
@@ -2301,6 +2308,7 @@ export interface TreeNode {
   partitionParentName?: string;
   hiddenChildren?: TreeNode[];
   tableSearchParentId?: string;
+  indexSearchOnly?: boolean;
   savedSqlId?: string;
   savedSqlFolderId?: string;
   /** Set on synthetic table virtual-group container nodes. */
@@ -2670,6 +2678,7 @@ export interface QueryTab {
   resultGridRevision?: string;
   /** Logical-result identity for the tab-switch view snapshot cache; see QueryResultRun. */
   resultViewGeneration?: string;
+  resultColumnWidthRevision?: string;
   resultRuns?: QueryResultRun[];
   activeResultRunId?: string;
   /** Undefined inherits the default on open; false preserves an explicit per-tab opt-out. */

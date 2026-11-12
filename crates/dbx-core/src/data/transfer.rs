@@ -2574,6 +2574,39 @@ async fn execute_sqlserver_identity_batch(
     Ok(())
 }
 
+/// Matches a quoted date literal whose month or day is zero (`'0000-00-00'`,
+/// `'2026-00-00'`, `'2026-05-00 10:00:00'`).
+static MYSQL_ZERO_DATE_LITERAL_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"'\d{4}-(?:00-\d{2}|\d{2}-00)\b").expect("valid MySQL zero date literal regex")
+});
+
+/// Wraps a MySQL write batch that carries zero dates so the target session accepts them.
+///
+/// MySQL 5.7+ enables `NO_ZERO_DATE` and `NO_ZERO_IN_DATE` together with strict mode by
+/// default, so rows that a MySQL source legitimately holds (written under a relaxed
+/// `sql_mode`) fail with `ERROR 1292` when copied verbatim. Only those two flags are
+/// dropped; strict mode keeps rejecting every other invalid value. The original mode is
+/// restored after the batch. When the batch fails, the restoring statement never runs;
+/// transfer pools carry no client session, so they are multi-connection MySQL pools built
+/// with `with_reset_connection`, and the connection is reset before its next use
+/// (covered by `live_mysql_transfer_copies_zero_dates_under_strict_target_sql_mode`).
+///
+/// Returns `None` when the batch has no zero date literal, so ordinary batches (and
+/// MySQL-protocol servers without `sql_mode`) are sent unchanged.
+fn mysql_zero_date_tolerant_write_sql(sql: &str) -> Option<String> {
+    if !MYSQL_ZERO_DATE_LITERAL_RE.is_match(sql) {
+        return None;
+    }
+    let statement = sql.trim_end().trim_end_matches(';');
+    Some(format!(
+        "SET @dbx_transfer_sql_mode = @@SESSION.sql_mode;\n\
+         SET SESSION sql_mode = TRIM(BOTH ',' FROM REPLACE(REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), \
+         ',NO_ZERO_IN_DATE,', ','), ',NO_ZERO_DATE,', ','));\n\
+         {statement};\n\
+         SET SESSION sql_mode = @dbx_transfer_sql_mode"
+    ))
+}
+
 async fn execute_transfer_write_statement(
     state: &AppState,
     target_pool_key: &str,
@@ -2583,6 +2616,12 @@ async fn execute_transfer_write_statement(
     schema: &str,
     needs_identity_insert: bool,
 ) -> Result<(), String> {
+    if *target_db_type == DatabaseType::Mysql {
+        if let Some(wrapped) = mysql_zero_date_tolerant_write_sql(sql) {
+            execute_on_pool(state, target_pool_key, &wrapped).await?;
+            return Ok(());
+        }
+    }
     if !needs_identity_insert || !matches!(target_db_type, DatabaseType::Dameng | DatabaseType::SqlServer) {
         execute_on_pool(state, target_pool_key, sql).await?;
         return Ok(());
@@ -24687,6 +24726,32 @@ SELECT 1 FROM dual"#
     #[test]
     fn parse_mysql_row_error_returns_none_for_non_mysql_error() {
         assert_eq!(parse_mysql_row_error("some other error"), None);
+    }
+
+    #[test]
+    fn mysql_zero_date_write_sql_relaxes_only_zero_date_flags_around_the_batch() {
+        let insert = "INSERT INTO `t` (`id`, `d`) VALUES (1, '2026-11-10'), (2, '0000-00-00 00:00:00');";
+        let wrapped = mysql_zero_date_tolerant_write_sql(insert).expect("zero date batch is wrapped");
+        assert_eq!(
+            wrapped,
+            "SET @dbx_transfer_sql_mode = @@SESSION.sql_mode;\n\
+             SET SESSION sql_mode = TRIM(BOTH ',' FROM REPLACE(REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), \
+             ',NO_ZERO_IN_DATE,', ','), ',NO_ZERO_DATE,', ','));\n\
+             INSERT INTO `t` (`id`, `d`) VALUES (1, '2026-11-10'), (2, '0000-00-00 00:00:00');\n\
+             SET SESSION sql_mode = @dbx_transfer_sql_mode"
+        );
+        assert!(mysql_zero_date_tolerant_write_sql("INSERT INTO t VALUES ('2026-00-00')").is_some());
+        assert!(mysql_zero_date_tolerant_write_sql("INSERT INTO t VALUES ('2026-05-00 08:00:00')").is_some());
+    }
+
+    #[test]
+    fn mysql_zero_date_write_sql_leaves_ordinary_batches_unchanged() {
+        assert_eq!(
+            mysql_zero_date_tolerant_write_sql(
+                "INSERT INTO t VALUES ('2026-11-10 00:00:00', '2000-10-01', 'code 1000-00', 20260000)"
+            ),
+            None
+        );
     }
 
     #[test]

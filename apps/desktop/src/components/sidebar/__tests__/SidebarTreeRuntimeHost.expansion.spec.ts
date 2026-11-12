@@ -71,6 +71,7 @@ const settingsStore = {
     sidebarActivation: "single" as "single" | "double",
     sidebarBrowseObjectsOnDatabaseActivation: false,
     sidebarAutoExpandOnDatabaseActivation: false,
+    sidebarTableClickNavigation: false,
     shortcuts: { openDataInNewTab: "" },
   },
 };
@@ -127,6 +128,7 @@ afterEach(() => {
   settingsStore.editorSettings.sidebarActivation = "single";
   settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation = false;
   settingsStore.editorSettings.sidebarAutoExpandOnDatabaseActivation = false;
+  settingsStore.editorSettings.sidebarTableClickNavigation = false;
   vi.clearAllMocks();
   connectionStore.canUseLoadedTreeNodeToggle.mockReturnValue(true);
   connectionStore.getConfig.mockReturnValue({ db_type: "mysql", name: "connection" });
@@ -251,6 +253,7 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     const database: TreeNode = { id: "mysql:inventory", label: "inventory", type: "database", connectionId: "mysql", database: "inventory", isExpanded, children: [] };
     settingsStore.editorSettings.sidebarActivation = activation;
     settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation = true;
+    settingsStore.editorSettings.sidebarTableClickNavigation = true;
     const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
     const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: database, depth: 0 }) }));
     mountedApps.push(app);
@@ -260,8 +263,8 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     app.mount(container);
 
     // Exercise the complete browser event sequence in either activation mode.
-    host.value!.handleRowClick(database, 1);
-    host.value!.handleRowClick(database, 2);
+    host.value!.handleRowClick(database, 1, true);
+    host.value!.handleRowClick(database, 2, true);
     host.value!.handleRowDoubleClick(database, new MouseEvent("dblclick"));
     await vi.waitFor(() => expect(queryStore.openObjectBrowser).toHaveBeenCalledOnce());
     expect(database.isExpanded).toBe(isExpanded);

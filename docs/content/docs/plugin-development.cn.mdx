@@ -144,7 +144,7 @@ Manifest 中的路径相对于包根目录，不能以 `/` 开头、不能包含
 - `host.clipboard:read` 允许工作台 UI 读取系统剪贴板（见 [系统剪贴板](#系统剪贴板)）。写剪贴板不需要权限；读取会把用户数据（密码、令牌）交给插件代码，因此需要门控。
 - `host.data:read` 允许 `window.dbxPlugin.queryData` 在用户授权给插件的连接上执行一条只读 SQL（见 [只读数据查询](#只读数据查询)）。每个连接都需要用户同意；它不会授予写入、DDL 或重连。
 - `host.connections:read` 允许通过 `window.dbxPlugin.getConnections()` 或 `window.dbxPlugin.connections.list()` 获取当前所有已配置连接的只读脱敏信息（见 [连接信息读取](#连接信息读取)）。
-- `host.network:https://host[:port]` 声明浏览器可访问的 HTTPS origin，DBX 将它加入 CSP 的 `connect-src`；最多 8 个，不允许路径、通配符或 Token。仍受目标服务 CORS 规则约束。该权限不是原生 Sidecar 的网络防火墙。
+- `host.network:https://host[:port]` 声明浏览器可访问的 HTTPS origin，DBX 将它加入 CSP 的 `connect-src`；最多 64 个，不允许路径、通配符或 Token。仍受目标服务 CORS 规则约束。该权限不是原生 Sidecar 的网络防火墙。
 - `host.openUrl:http(s)://host[:port]` 允许请求打开指定站点，最多 8 个精确 origin；与网络权限独立，不允许路径、凭据、通配符或尾部斜杠。使用标准化的 `URL.origin`（默认端口应省略）；IPv6 地址使用方括号。
 
 - `backend.transport` 默认是 `stdio-jsonl`；需要二进制帧时使用 `stdio-framed`，并同时声明 `host.binary`。
@@ -606,6 +606,21 @@ async function pasteFromClipboard() {
     // 缺权限或读取失败：保留键盘粘贴路径。
     return null;
   }
+}
+```
+
+### 复制图片
+
+`window.dbxPlugin.copyImage({ contentType: "image/png" }, data)` 将 PNG 写入系统剪贴板，`data` 可为 `ArrayBuffer`、`Uint8Array` 或不含 data URL 前缀的 Base64 字符串；也可只传 `{ contentType: "image/png", dataBase64 }`。返回 `{ success: true }` 表示宿主写入成功，失败会 reject，不会把图片作为文本复制。`Uint8Array` 只发送其视图范围内的字节。
+
+先检查 `window.dbxPlugin.capabilities?.clipboardImageWrite`，旧宿主和 SDK Dev Host 不提供此能力。桌面端复用原生图片剪贴板；Web 端要求安全上下文、浏览器图片剪贴板 API 和浏览器授权，浏览器也可能要求用户激活，拒绝时应保留保存图片等降级方式。请在用户点击复制时调用，不要在后台自动覆盖剪贴板。与 `host.copy` 一样不新增 manifest 权限，也不授予剪贴板读取权限。底层请求方法为 `host.copyImage`，参数包含 `contentType` 和 `dataBase64`，或通过现有二进制字段传输字节。
+
+仅接受 PNG；编码内容最多 18 MiB（Base64 最多 24 MiB），图像最多 16,777,216 像素。宿主根据 PNG 头校验实际尺寸，不信任调用方的 `width` / `height`。建议大图片使用二进制传输，避免 Base64 开销。
+
+```js
+await window.dbxPlugin.ready;
+if (window.dbxPlugin.capabilities?.clipboardImageWrite) {
+  await window.dbxPlugin.copyImage({ contentType: "image/png" }, pngBytes);
 }
 ```
 

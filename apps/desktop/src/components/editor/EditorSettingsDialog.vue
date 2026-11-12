@@ -1028,6 +1028,7 @@ const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSel
 const editSidebarPinDefaultDatabase = ref(settingsStore.editorSettings.sidebarPinDefaultDatabase);
 const editSidebarBrowseObjectsOnDatabaseActivation = ref(settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation);
 const editSidebarAutoExpandOnDatabaseActivation = ref(settingsStore.editorSettings.sidebarAutoExpandOnDatabaseActivation);
+const editSidebarTableClickNavigation = ref(settingsStore.editorSettings.sidebarTableClickNavigation);
 const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
 const editAutoReloadRestoredDataTabsOnOpen = ref(settingsStore.editorSettings.autoReloadRestoredDataTabsOnOpen);
 const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(settingsStore.editorSettings.disconnectTabHandlingMode);
@@ -1442,6 +1443,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarPinDefaultDatabase: editSidebarPinDefaultDatabase.value,
     sidebarBrowseObjectsOnDatabaseActivation: editSidebarBrowseObjectsOnDatabaseActivation.value,
     sidebarAutoExpandOnDatabaseActivation: editSidebarAutoExpandOnDatabaseActivation.value,
+    sidebarTableClickNavigation: editSidebarTableClickNavigation.value,
     openTabsRestoreMode: editOpenTabsRestoreMode.value,
     autoReloadRestoredDataTabsOnOpen: editAutoReloadRestoredDataTabsOnOpen.value,
     disconnectTabHandlingMode: editDisconnectTabHandlingMode.value,
@@ -2160,6 +2162,7 @@ function syncEditorSettingsDraftFromStore() {
   editSidebarPinDefaultDatabase.value = settingsStore.editorSettings.sidebarPinDefaultDatabase;
   editSidebarBrowseObjectsOnDatabaseActivation.value = settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation;
   editSidebarAutoExpandOnDatabaseActivation.value = settingsStore.editorSettings.sidebarAutoExpandOnDatabaseActivation;
+  editSidebarTableClickNavigation.value = settingsStore.editorSettings.sidebarTableClickNavigation;
   editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
   editAutoReloadRestoredDataTabsOnOpen.value = settingsStore.editorSettings.autoReloadRestoredDataTabsOnOpen;
   editDisconnectTabHandlingMode.value = settingsStore.editorSettings.disconnectTabHandlingMode;
@@ -2344,6 +2347,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   sidebarPinDefaultDatabase: editSidebarPinDefaultDatabase,
   sidebarBrowseObjectsOnDatabaseActivation: editSidebarBrowseObjectsOnDatabaseActivation,
   sidebarAutoExpandOnDatabaseActivation: editSidebarAutoExpandOnDatabaseActivation,
+  sidebarTableClickNavigation: editSidebarTableClickNavigation,
   openTabsRestoreMode: editOpenTabsRestoreMode,
   autoReloadRestoredDataTabsOnOpen: editAutoReloadRestoredDataTabsOnOpen,
   disconnectTabHandlingMode: editDisconnectTabHandlingMode,
@@ -2792,6 +2796,9 @@ async function persistSettings() {
     sidebar_table_page_size: editSidebarTablePageSize.value,
   });
   editMetadataCacheMaxMemoryMb.value = settingsStore.desktopSettings.metadata_cache_max_memory_mb;
+  // 同理：≤0 会被 normalizeDesktopSettings 回退默认值，回填草稿避免 hasChanges() 粘住
+  // （与 #9881 快捷键 / #13233 超时同一类）。
+  editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
   desktopCloseBehaviorResetPending.value = false;
   hasImportedSettingsPendingApply.value = false;
   if (sidebarObjectDisplayChanged) {
@@ -2958,6 +2965,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarPinDefaultDatabase.value = DEFAULT_EDITOR_SETTINGS.sidebarPinDefaultDatabase;
     editSidebarBrowseObjectsOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation;
     editSidebarAutoExpandOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarAutoExpandOnDatabaseActivation;
+    editSidebarTableClickNavigation.value = DEFAULT_EDITOR_SETTINGS.sidebarTableClickNavigation;
     editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
     editAutoReloadRestoredDataTabsOnOpen.value = DEFAULT_EDITOR_SETTINGS.autoReloadRestoredDataTabsOnOpen;
     editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
@@ -3194,6 +3202,7 @@ function resetAllDefaults() {
   editSidebarPinDefaultDatabase.value = DEFAULT_EDITOR_SETTINGS.sidebarPinDefaultDatabase;
   editSidebarBrowseObjectsOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation;
   editSidebarAutoExpandOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarAutoExpandOnDatabaseActivation;
+  editSidebarTableClickNavigation.value = DEFAULT_EDITOR_SETTINGS.sidebarTableClickNavigation;
   editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
   editAutoReloadRestoredDataTabsOnOpen.value = DEFAULT_EDITOR_SETTINGS.autoReloadRestoredDataTabsOnOpen;
   editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
@@ -9766,6 +9775,15 @@ onUnmounted(() => {
                   </HelpTooltip>
                 </div>
                 <Switch id="sidebar-auto-expand-on-database-activation" v-model="editSidebarAutoExpandOnDatabaseActivation" :disabled="!editSidebarBrowseObjectsOnDatabaseActivation" />
+              </div>
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="sidebar-table-click-navigation">{{ t("settings.sidebarTableClickNavigation") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarTableClickNavigation')">
+                    {{ t("settings.sidebarTableClickNavigationDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-table-click-navigation" v-model="editSidebarTableClickNavigation" />
               </div>
               <div class="space-y-2">
                 <div class="flex items-center gap-2">

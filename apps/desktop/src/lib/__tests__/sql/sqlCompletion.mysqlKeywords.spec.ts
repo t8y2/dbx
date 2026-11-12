@@ -25,6 +25,12 @@ describe("MySQL keyword completion", () => {
     expect(labelsFor("rlike")).toContain("RLIKE");
   });
 
+  it("prioritizes INDEX after FORCE and offers the full FORCE INDEX phrase", () => {
+    expect(labelsFor("SELECT * FROM orders FORCE ")[0]).toBe("INDEX");
+    expect(labelsFor("SELECT * FROM orders FORCE I")[0]).toBe("INDEX");
+    expect(labelsFor("SELECT * FROM orders FORC")[0]).toBe("FORCE INDEX");
+  });
+
   it("keeps the MySQL-only phrases out of other dialects", () => {
     expect(labelsFor("binlog", "postgres")).not.toContain("BINLOG EVENTS");
     expect(labelsFor("logs", "postgres")).not.toContain("BINARY LOGS");

@@ -71,6 +71,58 @@ pub struct SecretCodec {
 }
 
 impl SecretCodec {
+    /// Explicit, destructive-recovery provisioning only. Unlike the ordinary
+    /// first-write path, never accept another writer's key as our new key.
+    pub(crate) fn create_credential_recovery_key(
+        policy: SecretKeyPolicy,
+        data_dir: &std::path::Path,
+    ) -> Result<Self, String> {
+        if std::env::var_os("DBX_SECRET_KEY").is_some() || std::env::var_os("DBX_SECRET_KEY_FILE").is_some() {
+            return Err("CREDENTIAL_RESET_EXTERNAL_KEY".to_string());
+        }
+        match Self::resolve(policy, data_dir, false) {
+            Err(error) if matches!(error.as_str(), "MISSING_MANAGED_KEY" | "KEY_PROVIDER_UNAVAILABLE") => {}
+            _ => return Err("CREDENTIAL_RESET_KEY_CHANGED".to_string()),
+        }
+        let mut key = [0u8; 32];
+        OsRng.fill_bytes(&mut key);
+        let codec = Self::new(key);
+        match policy {
+            SecretKeyPolicy::ManagedDataDir => {
+                codec.persist_managed_data_dir_key(data_dir)?;
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            SecretKeyPolicy::TestDataDir => {
+                codec.persist_managed_data_dir_key(data_dir)?;
+            }
+            #[cfg(all(target_os = "windows", feature = "os-keyring"))]
+            SecretKeyPolicy::PlatformDefault => {
+                let _creation_lock = lock_platform_key_creation()?;
+                let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+                    .map_err(|_| "KEYRING_ACCESS_FAILED".to_string())?;
+                match entry.get_password() {
+                    Err(keyring::Error::NoEntry) => {}
+                    Ok(_) => return Err("CREDENTIAL_RESET_KEY_CHANGED".to_string()),
+                    Err(_) => return Err("KEYRING_ACCESS_FAILED".to_string()),
+                }
+                let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key);
+                entry.set_password(&encoded).map_err(|_| "KEYRING_WRITE_FAILED".to_string())?;
+            }
+            _ => return Err("CREDENTIAL_RESET_UNSUPPORTED".to_string()),
+        }
+        // Bypass all Storage caches: persistence and source precedence must be
+        // verified before the caller is allowed to commit credential removal.
+        let persisted = Self::resolve(policy, data_dir, false)?.codec;
+        if persisted.key != codec.key {
+            return Err("CREDENTIAL_RESET_KEY_CHANGED".to_string());
+        }
+        let probe = codec.encrypt("credential-reset", "verification", "readback")?;
+        if persisted.decrypt("credential-reset", "verification", &probe)? != "readback" {
+            return Err("CREDENTIAL_RESET_KEY_VERIFICATION_FAILED".to_string());
+        }
+        Ok(persisted)
+    }
+
     pub const fn new(key: [u8; 32]) -> Self {
         Self { key }
     }
@@ -324,8 +376,10 @@ impl SecretCodec {
     }
 }
 
-#[cfg(all(feature = "os-keyring", any(target_os = "macos", target_os = "windows")))]
+#[cfg(all(feature = "os-keyring", target_os = "macos"))]
 fn platform_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec>, String> {
+    #[cfg(target_os = "windows")]
+    let _creation_lock = if allow_create { Some(lock_platform_key_creation()?) } else { None };
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
         .map_err(|error| format!("keyring entry unavailable: {error}"))?;
     match entry.get_password() {
@@ -347,6 +401,247 @@ fn platform_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec>, Str
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key);
     entry.set_password(&encoded).map_err(|error| format!("KEYRING_WRITE_FAILED: {error}"))?;
     Ok(Some(SecretCodec::new(key)))
+}
+
+// The Windows credential API has no create-if-absent operation. Serialize DBX
+// provisioners across data directories before the NoEntry check and write.
+// Read-only probes never create or acquire this lock.
+#[cfg(all(target_os = "windows", feature = "os-keyring"))]
+fn lock_platform_key_creation() -> Result<std::fs::File, String> {
+    let path =
+        default_key_path().ok_or_else(|| "KEYRING_WRITE_FAILED".to_string())?.with_file_name(".dbx-key-provision.lock");
+    std::fs::create_dir_all(path.parent().ok_or("KEYRING_WRITE_FAILED")?)
+        .map_err(|_| "KEYRING_WRITE_FAILED".to_string())?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|_| "KEYRING_WRITE_FAILED".to_string())?;
+    fs2::FileExt::try_lock_exclusive(&file).map_err(|_| "KEYRING_WRITE_FAILED".to_string())?;
+    Ok(file)
+}
+
+#[cfg(all(feature = "os-keyring", target_os = "windows"))]
+fn platform_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec>, String> {
+    // Mirror restores and fresh-key creation both write to the shared
+    // credential entry, so serialize them across data directories exactly like
+    // fresh provisioning (see `lock_platform_key_creation`).
+    let _creation_lock = if allow_create { Some(lock_platform_key_creation()?) } else { None };
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+        .map_err(|error| format!("keyring entry unavailable: {error}"))?;
+    let keyring_read = match entry.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        // Same classification contract as macOS: an unreadable item is an
+        // access failure, never a trigger for mirror recovery or replacement.
+        Err(error) => return Err(format!("KEYRING_ACCESS_FAILED: {error}")),
+    };
+    let keyring_write =
+        move |material: &str| entry.set_password(material).map_err(|error| format!("KEYRING_WRITE_FAILED: {error}"));
+    keyring_codec_with_recovery_mirror(
+        keyring_read,
+        &keyring_write,
+        recovery_mirror_path().as_deref(),
+        &dpapi_protect,
+        &dpapi_unprotect,
+        allow_create,
+    )
+}
+
+// Windows "cache cleaners" routinely delete Windows Credential Manager
+// entries, which would strand every stored secret envelope behind a lost key.
+// The credential-store key is therefore mirrored into a DPAPI-protected file
+// next to the per-user DBX key location: system cleaners leave application
+// data files alone, and DPAPI keeps the same only-this-user-on-this-machine
+// protection that the Credential Manager itself provides. The mirror never
+// holds independently provisioned key material — it is only ever a copy of
+// the live credential-store key, so it can never outrank or replace it.
+#[cfg(any(test, all(feature = "os-keyring", target_os = "windows")))]
+fn keyring_codec_with_recovery_mirror(
+    keyring_read: Result<Option<String>, String>,
+    keyring_write: &dyn Fn(&str) -> Result<(), String>,
+    mirror_path: Option<&std::path::Path>,
+    protect: &dyn Fn(&[u8]) -> Result<Vec<u8>, String>,
+    unprotect: &dyn Fn(&[u8]) -> Result<Vec<u8>, String>,
+    allow_create: bool,
+) -> Result<Option<SecretCodec>, String> {
+    match keyring_read {
+        Ok(Some(material)) => {
+            let codec =
+                SecretCodec::from_key_material(material.trim()).map_err(|_| "SECRET_KEY_INVALID".to_string())?;
+            if let Some(path) = mirror_path {
+                if recovery_mirror_needs_refresh(path, material.trim(), unprotect) {
+                    if let Err(error) = write_recovery_mirror(path, material.trim(), protect) {
+                        log::warn!("DBX secret key recovery mirror could not be refreshed: {error}");
+                    }
+                }
+            }
+            Ok(Some(codec))
+        }
+        Ok(None) => {
+            if let Some(path) = mirror_path {
+                if let Some(material) = read_recovery_mirror(path, unprotect) {
+                    match SecretCodec::from_key_material(material.trim()) {
+                        Ok(codec) => {
+                            if allow_create {
+                                // Restore the credential entry so the mirror and
+                                // the store stay in sync for the next launch.
+                                // Failure is not fatal: the mirror keeps working.
+                                if let Err(error) = keyring_write(material.trim()) {
+                                    log::warn!(
+                                        "DBX secret key could not be restored into the credential store: {error}"
+                                    );
+                                }
+                            }
+                            return Ok(Some(codec));
+                        }
+                        Err(_) => log::warn!("Ignoring unreadable DBX secret key recovery mirror"),
+                    }
+                }
+            }
+            if !allow_create {
+                return Ok(None);
+            }
+            let mut key = [0u8; 32];
+            OsRng.fill_bytes(&mut key);
+            let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key);
+            keyring_write(&encoded)?;
+            if let Some(path) = mirror_path {
+                if let Err(error) = write_recovery_mirror(path, &encoded, protect) {
+                    log::warn!("DBX secret key recovery mirror could not be created: {error}");
+                }
+            }
+            Ok(Some(SecretCodec::new(key)))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(any(test, all(feature = "os-keyring", target_os = "windows")))]
+const RECOVERY_MIRROR_MAGIC: &[u8] = b"DBXDPAPI1";
+
+#[cfg(any(test, all(feature = "os-keyring", target_os = "windows")))]
+fn recovery_mirror_path() -> Option<std::path::PathBuf> {
+    // Sibling of the per-user compatibility key file; shares its test sandbox.
+    default_key_path().map(|path| path.with_file_name("secret-store.key.dpapi"))
+}
+
+#[cfg(any(test, all(feature = "os-keyring", target_os = "windows")))]
+fn read_recovery_mirror(
+    path: &std::path::Path,
+    unprotect: &dyn Fn(&[u8]) -> Result<Vec<u8>, String>,
+) -> Option<String> {
+    let contents = std::fs::read(path).ok()?;
+    let blob = contents.strip_prefix(RECOVERY_MIRROR_MAGIC)?;
+    let material = unprotect(blob).ok()?;
+    String::from_utf8(material).ok()
+}
+
+#[cfg(any(test, all(feature = "os-keyring", target_os = "windows")))]
+fn recovery_mirror_needs_refresh(
+    path: &std::path::Path,
+    live_material: &str,
+    unprotect: &dyn Fn(&[u8]) -> Result<Vec<u8>, String>,
+) -> bool {
+    match read_recovery_mirror(path, unprotect) {
+        Some(material) => material.trim() != live_material,
+        None => true,
+    }
+}
+
+#[cfg(any(test, all(feature = "os-keyring", target_os = "windows")))]
+fn write_recovery_mirror(
+    path: &std::path::Path,
+    material: &str,
+    protect: &dyn Fn(&[u8]) -> Result<Vec<u8>, String>,
+) -> Result<(), String> {
+    let blob = protect(material.as_bytes())?;
+    let mut contents = Vec::with_capacity(RECOVERY_MIRROR_MAGIC.len() + blob.len());
+    contents.extend_from_slice(RECOVERY_MIRROR_MAGIC);
+    contents.extend_from_slice(&blob);
+    let parent = path.parent().ok_or_else(|| "KEY_FILE_UNAVAILABLE".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|_| "KEY_FILE_UNAVAILABLE".to_string())?;
+    let temp = path.with_extension("dpapi.tmp");
+    std::fs::write(&temp, &contents).map_err(|_| "KEY_FILE_UNAVAILABLE".to_string())?;
+    // Windows rename refuses to replace an existing file; the mirror is only
+    // rewritten with the canonical live key, so drop-and-rename loses nothing.
+    if std::fs::rename(&temp, path).is_err() {
+        let _ = std::fs::remove_file(path);
+        std::fs::rename(&temp, path).map_err(|_| "KEY_FILE_UNAVAILABLE".to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "os-keyring", target_os = "windows"))]
+fn dpapi_protect(plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    use windows_sys::Win32::Security::Cryptography::{CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB};
+
+    let input = CRYPT_INTEGER_BLOB { cbData: plaintext.len() as u32, pbData: plaintext.as_ptr() as *mut u8 };
+    // Optional entropy binds the blob to the DBX service name so unrelated
+    // DPAPI blobs cannot be substituted for the mirror content.
+    let entropy: Vec<u16> = KEYRING_SERVICE.encode_utf16().collect();
+    let entropy_blob = CRYPT_INTEGER_BLOB { cbData: (entropy.len() * 2) as u32, pbData: entropy.as_ptr() as *mut u8 };
+    let mut output = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        CryptProtectData(
+            &input,
+            windows_sys::w!("DBX secret-store key"),
+            &entropy_blob,
+            std::ptr::null(),
+            std::ptr::null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
+    if ok == 0 {
+        return Err("DPAPI protect failed".to_string());
+    }
+    take_crypt_blob(output)
+}
+
+#[cfg(all(feature = "os-keyring", target_os = "windows"))]
+fn dpapi_unprotect(blob: &[u8]) -> Result<Vec<u8>, String> {
+    use windows_sys::Win32::Security::Cryptography::{
+        CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
+    };
+
+    let input = CRYPT_INTEGER_BLOB { cbData: blob.len() as u32, pbData: blob.as_ptr() as *mut u8 };
+    let entropy: Vec<u16> = KEYRING_SERVICE.encode_utf16().collect();
+    let entropy_blob = CRYPT_INTEGER_BLOB { cbData: (entropy.len() * 2) as u32, pbData: entropy.as_ptr() as *mut u8 };
+    let mut output = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        CryptUnprotectData(
+            &input,
+            std::ptr::null_mut(),
+            &entropy_blob,
+            std::ptr::null(),
+            std::ptr::null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        )
+    };
+    if ok == 0 {
+        return Err("DPAPI unprotect failed".to_string());
+    }
+    take_crypt_blob(output)
+}
+
+/// Copies a CryptProtectData output blob out of its LocalAlloc buffer and
+/// frees the allocation, so callers never own raw DPAPI memory.
+#[cfg(all(feature = "os-keyring", target_os = "windows"))]
+fn take_crypt_blob(blob: windows_sys::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB) -> Result<Vec<u8>, String> {
+    use windows_sys::Win32::Foundation::LocalFree;
+
+    if blob.pbData.is_null() {
+        return Ok(Vec::new());
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(blob.pbData, blob.cbData as usize) }.to_vec();
+    unsafe {
+        LocalFree(blob.pbData as _);
+    }
+    Ok(bytes)
 }
 
 #[cfg(all(feature = "os-keyring", target_os = "linux"))]
@@ -647,11 +942,171 @@ mod tests {
     }
 
     use super::{
-        managed_key_path, read_key_file_with_retry, read_secret_service_item, run_secret_service_operation,
-        SecretCodec, SecretKeyPolicy, SecretKeySource,
+        keyring_codec_with_recovery_mirror, managed_key_path, read_key_file_with_retry, read_recovery_mirror,
+        read_secret_service_item, recovery_mirror_path, run_secret_service_operation, write_recovery_mirror,
+        SecretCodec, SecretKeyPolicy, SecretKeySource, RECOVERY_MIRROR_MAGIC,
     };
     use base64::Engine as _;
     use std::sync::{Mutex, OnceLock};
+
+    fn fake_protect(bytes: &[u8]) -> Result<Vec<u8>, String> {
+        let mut out = Vec::with_capacity(bytes.len() + 1);
+        out.push(0xAB);
+        out.extend_from_slice(bytes);
+        Ok(out)
+    }
+
+    fn fake_unprotect(bytes: &[u8]) -> Result<Vec<u8>, String> {
+        match bytes.split_first() {
+            Some((0xAB, rest)) => Ok(rest.to_vec()),
+            _ => Err("fake unprotect failed".to_string()),
+        }
+    }
+
+    fn mirror_material() -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7u8; 32])
+    }
+
+    #[test]
+    fn recovery_mirror_roundtrips_the_live_keyring_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = dir.path().join("secret-store.key.dpapi");
+        let material = mirror_material();
+        let codec = keyring_codec_with_recovery_mirror(
+            Ok(Some(material.clone())),
+            &|_| panic!("existing entry must not be rewritten"),
+            Some(&mirror),
+            &fake_protect,
+            &fake_unprotect,
+            true,
+        )
+        .unwrap()
+        .expect("live key must resolve");
+        assert_eq!(codec.key, [7u8; 32]);
+        let contents = std::fs::read(&mirror).unwrap();
+        assert!(contents.starts_with(RECOVERY_MIRROR_MAGIC));
+        assert_eq!(read_recovery_mirror(&mirror, &fake_unprotect).as_deref(), Some(material.as_str()));
+    }
+
+    #[test]
+    fn missing_credential_entry_recovers_from_the_mirror_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = dir.path().join("secret-store.key.dpapi");
+        let material = mirror_material();
+        let live = keyring_codec_with_recovery_mirror(
+            Ok(Some(material)),
+            &|_| panic!("existing entry must not be rewritten"),
+            Some(&mirror),
+            &fake_protect,
+            &fake_unprotect,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+
+        // Simulate the credential entry being wiped by a system cleaner: a
+        // read-only probe (allow_create = false) must still resolve the key
+        // from the mirror without touching the credential store.
+        let recovered = keyring_codec_with_recovery_mirror(
+            Ok(None),
+            &|_| panic!("read-only probes must not write"),
+            Some(&mirror),
+            &fake_protect,
+            &fake_unprotect,
+            false,
+        )
+        .unwrap()
+        .expect("mirror must recover the key");
+        assert_eq!(recovered.key, live.key);
+    }
+
+    #[test]
+    fn mirror_recovery_restores_the_credential_entry_when_creation_is_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = dir.path().join("secret-store.key.dpapi");
+        let material = mirror_material();
+        write_recovery_mirror(&mirror, &material, &fake_protect).unwrap();
+
+        let restored: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let codec = keyring_codec_with_recovery_mirror(
+            Ok(None),
+            &|value: &str| {
+                restored.borrow_mut().push(value.to_string());
+                Ok(())
+            },
+            Some(&mirror),
+            &fake_protect,
+            &fake_unprotect,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(codec.key, [7u8; 32]);
+        assert_eq!(
+            restored.borrow().as_slice(),
+            [material.as_str()],
+            "the mirrored material must be restored verbatim"
+        );
+    }
+
+    #[test]
+    fn credential_access_failures_never_fall_back_to_the_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = dir.path().join("secret-store.key.dpapi");
+        let material = mirror_material();
+        write_recovery_mirror(&mirror, &material, &fake_protect).unwrap();
+
+        let error = match keyring_codec_with_recovery_mirror(
+            Err("KEYRING_ACCESS_FAILED: locked".to_string()),
+            &|_| panic!("access failures must not write"),
+            Some(&mirror),
+            &fake_protect,
+            &fake_unprotect,
+            true,
+        ) {
+            Err(error) => error,
+            // SecretCodec deliberately has no Debug impl (key material), so
+            // assert on a match instead of unwrap_err.
+            Ok(_) => panic!("access failures must propagate, not resolve"),
+        };
+        assert!(error.starts_with("KEYRING_ACCESS_FAILED"));
+        // The mirror is untouched so a later launch can still recover.
+        assert_eq!(read_recovery_mirror(&mirror, &fake_unprotect).as_deref(), Some(material.as_str()));
+    }
+
+    #[test]
+    fn new_key_creation_replaces_a_corrupt_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = dir.path().join("secret-store.key.dpapi");
+        // A mirror whose blob cannot be unprotected is treated as absent.
+        std::fs::write(&mirror, [RECOVERY_MIRROR_MAGIC, &[0xFF, 0xFE].as_slice()].concat()).unwrap();
+
+        let written: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+        let codec = keyring_codec_with_recovery_mirror(
+            Ok(None),
+            &|value: &str| {
+                *written.borrow_mut() = Some(value.to_string());
+                Ok(())
+            },
+            Some(&mirror),
+            &fake_protect,
+            &fake_unprotect,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        let created = written.borrow().clone().expect("a fresh key must land in the credential store");
+        assert_eq!(read_recovery_mirror(&mirror, &fake_unprotect).as_deref(), Some(created.as_str()));
+        assert_ne!(created, mirror_material());
+        assert!(codec.key != [7u8; 32]);
+    }
+
+    #[test]
+    fn recovery_mirror_path_stays_in_the_test_sandbox() {
+        let path = recovery_mirror_path().expect("test builds keep a sandboxed path");
+        assert_eq!(path.parent(), Some(std::env::temp_dir().as_path()));
+        assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("secret-store.key.dpapi"));
+    }
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

@@ -22,17 +22,24 @@ it("defaults database activation auto-expansion to on for new and existing setti
   }
 });
 
-it.each([true, false])("persists and restores auto-expansion %s independently from browsing objects", async (enabled) => {
+it.each([
+  [true, false],
+  [false, true],
+  [true, true],
+  [false, false],
+])("persists auto-expansion %s and table click navigation %s independently", async (enabled, tableClickNavigation) => {
   const store = useSettingsStore();
   await store.initEditorSettings();
-  await store.updateEditorSettingsAndPersist({ sidebarAutoExpandOnDatabaseActivation: !enabled });
+  await store.updateEditorSettingsAndPersist({ sidebarAutoExpandOnDatabaseActivation: !enabled, sidebarTableClickNavigation: tableClickNavigation });
   await store.updateEditorSettingsAndPersist({ sidebarAutoExpandOnDatabaseActivation: enabled, sidebarBrowseObjectsOnDatabaseActivation: false });
   const saved = backend.saveEditorSettings.mock.calls.at(-1)![0];
   expect(saved.sidebarAutoExpandOnDatabaseActivation).toBe(enabled);
+  expect(saved.sidebarTableClickNavigation).toBe(tableClickNavigation);
   backend.loadEditorSettings.mockResolvedValue(saved);
   setActivePinia(createPinia());
   const restored = useSettingsStore();
   await restored.initEditorSettings();
   expect(restored.editorSettings.sidebarAutoExpandOnDatabaseActivation).toBe(enabled);
+  expect(restored.editorSettings.sidebarTableClickNavigation).toBe(tableClickNavigation);
   expect(restored.editorSettings.sidebarBrowseObjectsOnDatabaseActivation).toBe(false);
 });

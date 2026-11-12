@@ -42,8 +42,11 @@ pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &[
 ];
 
 /// Cap the number of `host.network:<origin>` entries so a manifest cannot bloat
-/// the sandbox CSP or enumerate large origin lists.
-pub const MAX_PLUGIN_NETWORK_ORIGINS: usize = 8;
+/// the sandbox CSP or enumerate large origin lists. 64 keeps that bound while
+/// fitting the bookmark- and server-manager plugins that legitimately track
+/// dozens of origins (t8y2/dbx#14299); the sandbox CSP mirrors it in
+/// apps/desktop/src/lib/plugins/pluginHostBridge.ts.
+pub const MAX_PLUGIN_NETWORK_ORIGINS: usize = 64;
 pub const MAX_PLUGIN_OPEN_URL_ORIGINS: usize = 8;
 /// Bound the `visible_when` / `required_when` expression tree so a hostile
 /// manifest cannot make the host or the dialog evaluator do unbounded work.

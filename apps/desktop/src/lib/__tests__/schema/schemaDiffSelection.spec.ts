@@ -50,6 +50,22 @@ function createDuplicateForeignKeyPreparation(): SchemaDiffPreparation {
 }
 
 describe("schema diff SQL selection projections", () => {
+  it("shows table charset changes and excludes them when table options are deselected", () => {
+    const result = createPreparation();
+    const charset = {
+      source: { characterSet: "utf8mb4", collation: "utf8mb4_0900_ai_ci" },
+      target: { characterSet: "latin1", collation: "latin1_swedish_ci" },
+    };
+    result.diffs[0].tableCharset = charset;
+    const objects = convertToSchemaDiffObjects(result.diffs);
+    const tableOptions = objects[0].children?.find((child) => child.objectKind === "tableOption");
+    expect(tableOptions?.changes).toEqual(["character set: latin1 → utf8mb4", "collation: latin1_swedish_ci → utf8mb4_0900_ai_ci"]);
+    expect(selectSchemaDiffInput(result, objects).diffs[0].tableCharset).toEqual(charset);
+    setSchemaDiffObjectSelected(objects, tableOptions!.id, false);
+    expect(selectSchemaDiffInput(result, objects).diffs[0].tableCharset).toBeUndefined();
+    expect(selectSchemaDiffInput(result, objects).diffs[0].columns).toHaveLength(2);
+  });
+
   it("keeps explicit same-name package specification and body identities separate through projection", () => {
     const functionDiffs = (["PACKAGE", "PACKAGE_BODY"] as const).map((programKind) => ({
       type: "modified" as const,

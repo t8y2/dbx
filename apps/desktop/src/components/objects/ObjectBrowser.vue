@@ -6519,6 +6519,43 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         </span>
         <DatabaseActionsMenu :connection="connection" :database="database" :catalog="catalog" />
       </div>
+      <Popover v-if="isListView && filteredRows.length > 0" v-model:open="objectColumnConfigOpen">
+        <PopoverTrigger as-child>
+          <button type="button" class="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('objects.configureColumns')" :aria-label="t('objects.configureColumns')">
+            <Settings2 class="h-3.5 w-3.5" />
+          </button>
+        </PopoverTrigger>
+        <PopoverContent align="start" class="w-64 p-1">
+          <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ t("objects.configureColumns") }}</div>
+          <div ref="objectColumnListRef">
+            <div v-for="column in objectColumnDefinitions" :key="column.key" :data-object-column-key="column.key" class="relative flex select-none items-center gap-1" :class="{ 'opacity-40': objectColumnDrag?.active && objectColumnDrag.key === column.key }">
+              <span v-if="objectColumnDropTarget?.key === column.key" class="pointer-events-none absolute inset-x-0 z-10 h-0.5 bg-primary" :class="objectColumnDropTarget.after ? 'bottom-0' : 'top-0'" />
+              <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :disabled="column.key === 'name'" @click="toggleObjectColumnVisibility(column.key)">
+                <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border" :class="isObjectColumnVisible(column.key) ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background text-transparent'"><Check class="h-3 w-3 stroke-[3]" /></span>
+                <span class="truncate">{{ column.label }}</span>
+              </button>
+              <button
+                type="button"
+                class="flex h-7 w-7 shrink-0 touch-none items-center justify-center rounded text-muted-foreground hover:bg-accent"
+                :class="objectColumnDrag?.active ? 'cursor-grabbing' : 'cursor-grab'"
+                :title="t('objects.columnReorder', { column: column.label })"
+                :aria-label="t('objects.columnReorder', { column: column.label })"
+                @pointerdown.stop.prevent="startObjectColumnDrag($event, column.key)"
+                @pointermove.stop="updateObjectColumnDrag"
+                @pointerup.stop.prevent="finishObjectColumnDrag"
+                @pointercancel="cancelObjectColumnDrag"
+                @lostpointercapture="cancelObjectColumnDrag"
+                @keydown.esc="cancelObjectColumnDrag"
+                @keydown.up.stop.prevent="moveObjectColumn(column.key, -1)"
+                @keydown.down.stop.prevent="moveObjectColumn(column.key, 1)"
+                @click.stop
+              >
+                <GripVertical class="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        </PopoverContent>
+      </Popover>
       <div class="flex flex-1 items-center gap-2">
         <div class="relative min-w-[12rem] flex-1">
           <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -6897,43 +6934,6 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 </div>
               </template>
             </div>
-            <Popover v-model:open="objectColumnConfigOpen">
-              <PopoverTrigger as-child>
-                <button type="button" class="absolute right-1 top-1/2 z-10 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('objects.configureColumns')" :aria-label="t('objects.configureColumns')">
-                  <Settings2 class="h-3.5 w-3.5" />
-                </button>
-              </PopoverTrigger>
-              <PopoverContent align="end" class="w-64 p-1">
-                <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ t("objects.configureColumns") }}</div>
-                <div ref="objectColumnListRef">
-                  <div v-for="column in objectColumnDefinitions" :key="column.key" :data-object-column-key="column.key" class="relative flex select-none items-center gap-1" :class="{ 'opacity-40': objectColumnDrag?.active && objectColumnDrag.key === column.key }">
-                    <span v-if="objectColumnDropTarget?.key === column.key" class="pointer-events-none absolute inset-x-0 z-10 h-0.5 bg-primary" :class="objectColumnDropTarget.after ? 'bottom-0' : 'top-0'" />
-                    <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :disabled="column.key === 'name'" @click="toggleObjectColumnVisibility(column.key)">
-                      <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border" :class="isObjectColumnVisible(column.key) ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background text-transparent'"><Check class="h-3 w-3 stroke-[3]" /></span>
-                      <span class="truncate">{{ column.label }}</span>
-                    </button>
-                    <button
-                      type="button"
-                      class="flex h-7 w-7 shrink-0 touch-none items-center justify-center rounded text-muted-foreground hover:bg-accent"
-                      :class="objectColumnDrag?.active ? 'cursor-grabbing' : 'cursor-grab'"
-                      :title="t('objects.columnReorder', { column: column.label })"
-                      :aria-label="t('objects.columnReorder', { column: column.label })"
-                      @pointerdown.stop.prevent="startObjectColumnDrag($event, column.key)"
-                      @pointermove.stop="updateObjectColumnDrag"
-                      @pointerup.stop.prevent="finishObjectColumnDrag"
-                      @pointercancel="cancelObjectColumnDrag"
-                      @lostpointercapture="cancelObjectColumnDrag"
-                      @keydown.esc="cancelObjectColumnDrag"
-                      @keydown.up.stop.prevent="moveObjectColumn(column.key, -1)"
-                      @keydown.down.stop.prevent="moveObjectColumn(column.key, 1)"
-                      @click.stop
-                    >
-                      <GripVertical class="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                </div>
-              </PopoverContent>
-            </Popover>
           </div>
           <RecycleScroller ref="listScrollerRef" class="object-browser-scroller min-h-0 flex-1" :style="{ '--dbx-object-grid-min-width': `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
             <template #default="{ item }">

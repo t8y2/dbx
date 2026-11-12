@@ -2453,7 +2453,16 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const meta = tableMeta.value;
     // The backend table exporter currently builds two-part table names. External
     // Doris/StarRocks catalogs need the data-tab paginator's three-part SQL.
-    if (rowIds !== undefined || columnIndexes !== undefined || context.value !== "table-data" || !meta || meta.catalog || !connectionId.value || !database.value) {
+    if (rowIds !== undefined || context.value !== "table-data" || !meta || meta.catalog || !connectionId.value || !database.value) {
+      return false;
+    }
+    // A grid column subset still streams from the backend: SQL INSERT exports
+    // project through `selectedColumns` and every other format narrows the
+    // SELECT column list. Bailing here would push the export onto the local
+    // per-page re-execution path, which re-runs the query once per page
+    // (issue #14732).
+    const projectedColumns = columnIndexes === undefined ? undefined : columnIndexes.map((index) => ({ index, name: columns.value[index] })).filter((entry): entry is { index: number; name: string } => entry.name !== undefined);
+    if (projectedColumns !== undefined && projectedColumns.length === 0) {
       return false;
     }
     if (format !== "sql" && hasActiveColumnFormatters(columnIndexes)) {
@@ -2462,7 +2471,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
     const editorSettings = { ...useSettingsStore().editorSettings };
     const exportId = uuid();
-    const exportedColumns = format === "sql" ? effectiveColumns(sourceColumns.value, columns.value).map((column, index) => column ?? columns.value[index]!) : [...columns.value];
+    const exportedColumns = format === "sql" ? effectiveColumns(sourceColumns.value, columns.value).map((column, index) => column ?? columns.value[index]!) : (projectedColumns?.map((entry) => entry.name) ?? [...columns.value]);
     const request: api.TableExportRequest = {
       exportId,
       connectionId: connectionId.value,
@@ -2484,9 +2493,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       csvQuoteMode: editorSettings.csvQuoteMode,
       nullLiteral: csvNullLiteralForMode(editorSettings.csvNullMode),
       columns: exportedColumns,
-      columnTypes: columnTypes.value ? [...columnTypes.value] : undefined,
+      columnTypes: columnTypes.value ? (projectedColumns?.map((entry) => columnTypes.value?.[entry.index]) ?? [...columnTypes.value]) : undefined,
       ...(format === "sql" ? { columnExtras: sqlExportColumnExtras(exportedColumns) } : {}),
-      columnComments: format === "xlsx" ? buildXlsxHeaderOverrides(columns.value, visibleXlsxColumnComments.value, headerMode) : undefined,
+      columnComments: format === "xlsx" ? buildXlsxHeaderOverrides(projectedColumns?.map((entry) => entry.name) ?? columns.value, projectedColumns ? projectedColumns.map((entry) => visibleXlsxColumnComments.value?.[entry.index]) : visibleXlsxColumnComments.value, headerMode) : undefined,
       headerCommentRows: format === "xlsx" ? xlsxHeaderUsesCommentRows(headerMode) : undefined,
       primaryKeys: meta.primaryKeys ? [...meta.primaryKeys] : undefined,
       ...sqlExportPrimaryKeyOptions(format),
@@ -2697,7 +2706,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     columnIndexes?: number[],
     selectedMode?: ManualExportMode,
   ): Promise<boolean> {
-    if (rowIds !== undefined || columnIndexes !== undefined || context.value !== "results" || !queryResultExportRequest) {
+    // SQL keeps the backend streaming path for a grid column subset: the
+    // INSERT projection travels in `selectedColumns` and the query runs once.
+    // Other formats have no write-side projection, so a subset stays local.
+    if (rowIds !== undefined || (columnIndexes !== undefined && format !== "sql") || context.value !== "results" || !queryResultExportRequest) {
       return false;
     }
     if (format !== "sql" && hasActiveColumnFormatters(columnIndexes)) {
@@ -2791,7 +2803,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportQueryResultSqlViaBackend(rowIds: number[] | undefined, sqlExportOptions: SqlExportOptions, columnIndexes?: number[]): Promise<boolean> {
-    if (!isTauriRuntime() || columnIndexes !== undefined) return false;
+    if (!isTauriRuntime()) return false;
     return exportQueryResultViaBackend("sql", rowIds, false, "name", true, sqlExportOptions, false, columnIndexes);
   }
 

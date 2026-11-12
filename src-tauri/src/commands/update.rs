@@ -85,8 +85,29 @@ impl UpdateDownloadProgressGate {
 
 enum PendingUpdate {
     Downloading(Arc<DownloadCancellation>),
+    /// The package is being renamed into the cache. Cancel is recorded on the token, but the slot
+    /// stays occupied so another download cannot start and cache cleanup cannot sweep staging.
+    Committing(Arc<DownloadCancellation>),
     Installing,
     Ready(Box<CachedUpdate>),
+}
+
+/// Clears a commit slot that `finish_commit` did not finish, including when the commit panics.
+struct CommitGuard<'a> {
+    state: &'a PendingUpdateState,
+    cancellation: &'a Arc<DownloadCancellation>,
+}
+
+impl Drop for CommitGuard<'_> {
+    fn drop(&mut self) {
+        let Ok(mut pending) = self.state.pending.lock() else { return };
+        if matches!(
+            pending.as_ref(),
+            Some(PendingUpdate::Committing(current)) if Arc::ptr_eq(current, self.cancellation)
+        ) {
+            *pending = None;
+        }
+    }
 }
 
 struct CachedUpdate {
@@ -161,6 +182,19 @@ impl PendingUpdateState {
         update: CachedUpdate,
         root: &std::path::Path,
     ) -> Result<(), String> {
+        let guard = self.begin_commit(cancellation)?;
+        let bytes = match &update.ready {
+            ReadyUpdate::Installer { bytes, .. } => bytes,
+            ReadyUpdate::Portable { archive, .. } => archive,
+        };
+        // `commit` retries while security software scans the package. That wait must not run
+        // under the state lock: cancel and a later download both need the lock, and holding it
+        // across the scan would publish a package the user had already canceled.
+        let committed = update_cache::commit(root, &update.record, bytes);
+        self.finish_commit(guard, update, root, committed)
+    }
+
+    fn begin_commit<'a>(&'a self, cancellation: &'a Arc<DownloadCancellation>) -> Result<CommitGuard<'a>, String> {
         let mut pending = self.pending.lock().map_err(|_| "Update state is unavailable.".to_string())?;
         let is_current = matches!(
             pending.as_ref(),
@@ -170,13 +204,63 @@ impl PendingUpdateState {
         if !is_current {
             return Err(DOWNLOAD_CANCELED_ERROR.to_string());
         }
-        let bytes = match &update.ready {
-            ReadyUpdate::Installer { bytes, .. } => bytes,
-            ReadyUpdate::Portable { archive, .. } => archive,
+        *pending = Some(PendingUpdate::Committing(Arc::clone(cancellation)));
+        drop(pending);
+        Ok(CommitGuard { state: self, cancellation })
+    }
+
+    fn finish_commit(
+        &self,
+        guard: CommitGuard<'_>,
+        update: CachedUpdate,
+        root: &std::path::Path,
+        committed: Result<(), String>,
+    ) -> Result<(), String> {
+        let canceled = {
+            let mut pending = self.pending.lock().map_err(|_| "Update state is unavailable.".to_string())?;
+            if !Self::is_our_commit(&pending, guard.cancellation) {
+                drop(pending);
+                return Err("Update state is unavailable.".into());
+            }
+            if guard.cancellation.is_canceled() {
+                true
+            } else if let Err(error) = committed {
+                *pending = None;
+                drop(pending);
+                return Err(error);
+            } else {
+                *pending = Some(PendingUpdate::Ready(Box::new(update)));
+                false
+            }
         };
-        update_cache::commit(root, &update.record, bytes)?;
-        *pending = Some(PendingUpdate::Ready(Box::new(update)));
-        Ok(())
+        if !canceled {
+            return Ok(());
+        }
+        // Stay in `Committing` while the package is removed so a new download cannot observe
+        // or replace the cache directory mid-delete.
+        self.discard_canceled_cache(root);
+        self.clear_our_commit(guard.cancellation);
+        Err(DOWNLOAD_CANCELED_ERROR.to_string())
+    }
+
+    fn discard_canceled_cache(&self, root: &std::path::Path) {
+        if let Err(error) = update_cache::discard(root) {
+            eprintln!("[DBX updater] failed to discard a canceled update cache: {error}");
+        }
+    }
+
+    fn clear_our_commit(&self, cancellation: &Arc<DownloadCancellation>) {
+        let Ok(mut pending) = self.pending.lock() else { return };
+        if Self::is_our_commit(&pending, cancellation) {
+            *pending = None;
+        }
+    }
+
+    fn is_our_commit(pending: &Option<PendingUpdate>, cancellation: &Arc<DownloadCancellation>) -> bool {
+        matches!(
+            pending.as_ref(),
+            Some(PendingUpdate::Committing(current)) if Arc::ptr_eq(current, cancellation)
+        )
     }
 
     fn finish_failed_download(&self, cancellation: &Arc<DownloadCancellation>) -> Result<(), String> {
@@ -192,11 +276,22 @@ impl PendingUpdateState {
     }
 
     pub fn cancel_download(&self) {
-        if let Ok(mut pending) = self.pending.lock() {
-            if let Some(PendingUpdate::Downloading(cancellation)) = pending.as_ref() {
-                cancellation.cancel();
-                *pending = None;
-            }
+        let Ok(mut pending) = self.pending.lock() else { return };
+        let action = Self::cancel_target(pending.as_ref());
+        let Some((cancellation, clear_slot)) = action else { return };
+        cancellation.cancel();
+        if clear_slot {
+            *pending = None;
+        }
+    }
+
+    /// Downloading can be dropped immediately. A commit in progress keeps the slot until
+    /// `finish_commit` has either published the package or discarded it.
+    fn cancel_target(pending: Option<&PendingUpdate>) -> Option<(Arc<DownloadCancellation>, bool)> {
+        match pending {
+            Some(PendingUpdate::Downloading(cancellation)) => Some((Arc::clone(cancellation), true)),
+            Some(PendingUpdate::Committing(cancellation)) => Some((Arc::clone(cancellation), false)),
+            _ => None,
         }
     }
 
@@ -644,8 +739,7 @@ pub async fn download_update(
         };
         // A commit can wait a few seconds for an antivirus scan to release the freshly
         // written package. Run it on the blocking pool so that wait does not stall the
-        // async runtime; the pending-state lock still serializes the commit against the
-        // cancel/install commands.
+        // async runtime. The committing state, not the mutex, keeps this attempt exclusive.
         let commit_app = app.clone();
         let commit_root = update_cache::root(&app)?;
         let commit_cancellation = Arc::clone(&cancellation);
@@ -654,7 +748,7 @@ pub async fn download_update(
             pending.finish_download(&commit_cancellation, cached, &commit_root)
         })
         .await
-        .map_err(|error| format!("Failed to finalize the DBX update cache: {error}"))??;
+        .map_err(|error| format!("Failed to finish the DBX update download: {error}"))??;
         Ok(info)
     }
     .await;
@@ -1152,6 +1246,54 @@ mod tests {
         let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
         assert!(state.finish_download(&attempt, cached_fixture(), &root).is_err());
         assert!(!root.exists());
+        assert!(state.begin_download().is_ok());
+    }
+
+    #[test]
+    fn cancel_during_commit_discards_the_package_without_freeing_the_slot_early() {
+        let state = PendingUpdateState::default();
+        let attempt = state.begin_download().unwrap();
+        let guard = state.begin_commit(&attempt).unwrap();
+        assert!(state.begin_download().is_err());
+
+        state.cancel_download();
+        assert!(attempt.is_canceled());
+        assert!(state.begin_download().is_err());
+
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        let error = state.finish_commit(guard, cached_fixture(), &root, Ok(())).unwrap_err();
+        assert_eq!(error, DOWNLOAD_CANCELED_ERROR);
+        assert!(state.take_ready("cached-id", "99.0.0").is_err());
+        assert!(state.begin_download().is_ok());
+    }
+
+    #[test]
+    fn successful_commit_publishes_the_downloaded_package() {
+        let state = PendingUpdateState::default();
+        let attempt = state.begin_download().unwrap();
+        let guard = state.begin_commit(&attempt).unwrap();
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        state.finish_commit(guard, cached_fixture(), &root, Ok(())).unwrap();
+        assert!(state.take_ready("cached-id", "99.0.0").is_ok());
+    }
+
+    #[test]
+    fn failed_commit_releases_the_slot_without_publishing() {
+        let state = PendingUpdateState::default();
+        let attempt = state.begin_download().unwrap();
+        let guard = state.begin_commit(&attempt).unwrap();
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        let error = state.finish_commit(guard, cached_fixture(), &root, Err("disk full".into())).unwrap_err();
+        assert_eq!(error, "disk full");
+        assert!(state.take_ready("cached-id", "99.0.0").is_err());
+        assert!(state.begin_download().is_ok());
+    }
+
+    #[test]
+    fn dropping_an_unfinished_commit_releases_the_slot() {
+        let state = PendingUpdateState::default();
+        let attempt = state.begin_download().unwrap();
+        drop(state.begin_commit(&attempt).unwrap());
         assert!(state.begin_download().is_ok());
     }
 

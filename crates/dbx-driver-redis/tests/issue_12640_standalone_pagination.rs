@@ -103,6 +103,17 @@ async fn walk_hash(con: &mut redis::aio::MultiplexedConnection, key: &str, scope
         })
     );
 
+    let foreign_conn_scope = RedisOperationScope { connection_id: "foreign-scope-verify".to_string(), db: scope.db };
+    let foreign_conn =
+        load_more_collection_scoped(con, key.as_bytes(), "hash", cursor, PAGE, None, None, &foreign_conn_scope).await;
+    assert!(foreign_conn.is_err(), "a foreign connection hash continuation must be rejected");
+
+    let foreign_db_scope =
+        RedisOperationScope { connection_id: scope.connection_id.clone(), db: if scope.db == 0 { 1 } else { 0 } };
+    let foreign_db =
+        load_more_collection_scoped(con, key.as_bytes(), "hash", cursor, PAGE, None, None, &foreign_db_scope).await;
+    assert!(foreign_db.is_err(), "a foreign db hash continuation must be rejected");
+
     let mut rounds = 0usize;
     while cursor != 0 {
         let page = load_more_collection_scoped(con, key.as_bytes(), "hash", cursor, PAGE, None, None, scope)
@@ -148,6 +159,17 @@ async fn walk_set(con: &mut redis::aio::MultiplexedConnection, key: &str, scope:
     };
     let unscoped = load_more_collection(con, key.as_bytes(), "set", cursor, PAGE, None, None).await;
     assert!(unscoped.is_err(), "an unscoped set continuation must be rejected");
+
+    let foreign_conn_scope = RedisOperationScope { connection_id: "foreign-scope-verify".to_string(), db: scope.db };
+    let foreign_conn =
+        load_more_collection_scoped(con, key.as_bytes(), "set", cursor, PAGE, None, None, &foreign_conn_scope).await;
+    assert!(foreign_conn.is_err(), "a foreign connection set continuation must be rejected");
+
+    let foreign_db_scope =
+        RedisOperationScope { connection_id: scope.connection_id.clone(), db: if scope.db == 0 { 1 } else { 0 } };
+    let foreign_db =
+        load_more_collection_scoped(con, key.as_bytes(), "set", cursor, PAGE, None, None, &foreign_db_scope).await;
+    assert!(foreign_db.is_err(), "a foreign db set continuation must be rejected");
 
     let mut rounds = 0usize;
     while cursor != 0 {

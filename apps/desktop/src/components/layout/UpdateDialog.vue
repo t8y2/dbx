@@ -15,11 +15,13 @@ import { isUpdatePreviewMockEnabled } from "@/lib/updates/updatePreviewMock";
 import { canDownloadAndInstallUpdate, isNewerRemoteVersion, resolveReleaseTagUrl } from "@/composables/useAppUpdater";
 import type { ComponentUpdateCategory } from "@/composables/useComponentUpdates";
 import { currentLocale } from "@/i18n";
-import { changelogLangFromLocale, createLatestRequestGuard, fetchChangelog, type ChangelogRelease } from "@/lib/app/changelog";
+import { displayAppVersion } from "@/lib/app/promotedBuild";
+import { changelogLangFromLocale, createLatestRequestGuard, fetchChangelogIndex, type ChangelogReleaseSummary } from "@/lib/app/changelog";
 import DriverInstallProgressCircle from "@/components/config/DriverInstallProgressCircle.vue";
+import ChangelogPanel from "@/components/settings/ChangelogPanel.vue";
 import { driverInstallProgressPercent, formatDriverInstallProgressText, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 
-type UpdateTab = "app" | ComponentUpdateCategory;
+type UpdateTab = "app" | "changelog" | ComponentUpdateCategory;
 
 const open = defineModel<boolean>("open", { required: true });
 
@@ -30,6 +32,9 @@ const props = withDefaults(
     isDownloadingUpdate: boolean;
     downloadProgress: number | null;
     updateDownloaded: boolean;
+    updateDownloadedVersion?: string;
+    /** Version the user ignored that is currently suppressing an available release. */
+    ignoredReleaseVersion?: string;
     isInstallingUpdate: boolean;
     isPreparingUpdate?: boolean;
     updateReady: boolean;
@@ -64,16 +69,20 @@ const props = withDefaults(
     componentUpdatesUpdating: false,
     updatingComponent: null,
     isUpdatingAll: false,
+    updateDownloadedVersion: "",
+    ignoredReleaseVersion: "",
   },
 );
 
 const emit = defineEmits<{
+  "check-updates": [];
   "open-latest-release": [];
   "download-in-background": [];
   "cancel-download": [];
   "install-downloaded": [];
   restart: [];
   "ignore-version": [];
+  "restore-ignored-version": [];
   "change-download-source": [source: UpdateDownloadSource];
   "install-component-updates": [category: ComponentUpdateCategory];
   "update-all": [];
@@ -85,24 +94,39 @@ const selectedTab = ref<UpdateTab>("app");
 const renderedNotes = ref("");
 
 const hasAppUpdate = computed(() => props.updateDownloaded || props.updateReady || props.updateInfo?.update_available === true);
+/**
+ * A prepared package must stay actionable even when the remote no longer
+ * reports that release as newest (yanked/rolled-back latest, mirror lag): the
+ * download already happened, so hiding the install button would strand the
+ * user with a permanent "downloaded" badge and no way to install it (#13562).
+ */
+const appUpdateActionsVisible = computed(() => props.updateInfo?.update_available === true || props.updateDownloaded || props.updateReady);
 const mcpAvailable = computed(() => (props.mcpUpdate ? mcpUpdateAvailability(props.mcpUpdate) === true : false));
 
 /** 历史版本每页条数（与更新日志一致，避免一次性铺开所有版本） */
 const HISTORY_PAGE_SIZE = 10;
 const historyLoading = ref(false);
 const historyError = ref("");
-const historyReleases = ref<ChangelogRelease[]>([]);
+/** 只需要版本号与日期，因此读轻量索引而不是整份更新日志正文 */
+const historyReleases = ref<ChangelogReleaseSummary[]>([]);
 const historyVisibleCount = ref(HISTORY_PAGE_SIZE);
 const historyRequest = createLatestRequestGuard();
 /** 弹窗可能在“检查更新”完成前打开，这里保存单独取到的应用版本用于比较 */
 const fallbackVersion = ref("");
 const changelogLang = computed(() => changelogLangFromLocale(locale.value || currentLocale()));
 const currentVersion = computed(() => props.updateInfo?.current_version || fallbackVersion.value);
+const stableDowngradeBlocked = computed(() => {
+  const current = currentVersion.value.trim().replace(/^v/i, "");
+  const latest = (props.updateInfo?.latest_version ?? "").trim().replace(/^v/i, "");
+  const currentBase = current.split(/[+-]/, 1)[0];
+  const latestBase = latest.split(/[+-]/, 1)[0];
+  return props.updateInfo?.channel === "stable" && current.includes("-") && !props.updateInfo.update_available && Boolean(currentBase && latestBase) && isNewerRemoteVersion(currentBase, latestBase);
+});
 // 只保留低于当前版本的发布记录：新版本走“客户端更新”，这里专用于回退
 const olderReleases = computed(() => {
   const current = currentVersion.value;
   if (!current) return [];
-  return historyReleases.value.filter((release) => isNewerRemoteVersion(current, release.tag));
+  return historyReleases.value.filter((release) => !release.tag.includes("-beta.") && isNewerRemoteVersion(current, release.tag));
 });
 const visibleOlderReleases = computed(() => olderReleases.value.slice(0, historyVisibleCount.value));
 const hasMoreOlderReleases = computed(() => historyVisibleCount.value < olderReleases.value.length);
@@ -117,11 +141,12 @@ const tabs = computed(() => {
   if (props.jdbcUpdate?.update_available) available.push({ id: "jdbc", label: t("settings.updateJdbc"), count: 1 });
   if (mcpAvailable.value) available.push({ id: "mcp", label: t("settings.updateMcp"), count: 1 });
   if (props.pluginUpdates.length) available.push({ id: "plugins", label: t("settings.updatePlugins"), count: props.pluginUpdates.length });
+  available.push({ id: "changelog", label: t("settings.changelogTitle"), count: 0 });
   return available;
 });
 const totalUpdateCount = computed(() => tabs.value.reduce((total, tab) => total + tab.count, 0));
 const hasComponentUpdates = computed(() => props.driverUpdates.length > 0 || props.jdbcUpdate?.update_available === true || mcpAvailable.value || props.pluginUpdates.length > 0);
-const selectedCategory = computed<ComponentUpdateCategory | null>(() => (selectedTab.value === "app" ? null : selectedTab.value));
+const selectedCategory = computed<ComponentUpdateCategory | null>(() => (selectedTab.value === "app" || selectedTab.value === "changelog" ? null : selectedTab.value));
 const selectedCategoryHasUpdate = computed(() => {
   if (selectedTab.value === "drivers") return props.driverUpdates.length > 0;
   if (selectedTab.value === "jdbc") return props.jdbcUpdate?.update_available === true;
@@ -200,6 +225,15 @@ function handleOpenChange(nextOpen: boolean) {
   open.value = false;
 }
 
+function handleOpenAutoFocus(event: Event) {
+  // Opening the center should not make a tab or update action look selected by
+  // keyboard focus. Keep focus inside the dialog; Tab still reaches its controls.
+  if (event.target instanceof HTMLElement) {
+    event.preventDefault();
+    event.target.focus({ preventScroll: true });
+  }
+}
+
 function openExternalUrl(url: string) {
   if (isTauriRuntime()) {
     import("@tauri-apps/plugin-shell").then(({ open }) => open(url));
@@ -217,7 +251,7 @@ async function loadOlderReleases() {
     if (!props.updateInfo?.current_version && !fallbackVersion.value) {
       fallbackVersion.value = await getAppVersion().catch(() => "");
     }
-    const data = await fetchChangelog(changelogLang.value);
+    const data = await fetchChangelogIndex(changelogLang.value);
     if (!historyRequest.isCurrent(requestId)) return;
     historyReleases.value = data.releases;
   } catch (error) {
@@ -307,6 +341,7 @@ watch(
       class="sm:max-w-[700px]"
       :class="'flex max-h-[min(720px,calc(var(--dbx-viewport-height)-48px))] flex-col gap-0 overflow-hidden p-0'"
       :show-close-button="!isCloseBlocked"
+      @open-auto-focus="handleOpenAutoFocus"
       @interact-outside="
         (e: Event) => {
           if (blocksImplicitDismiss) e.preventDefault();
@@ -334,7 +369,7 @@ watch(
 
       <div class="flex min-h-0 flex-1 flex-col">
         <div v-if="tabs.length" class="px-5 pb-2.5 pt-1.5">
-          <div role="tablist" :aria-label="t('updates.centerTitle')" class="inline-flex h-9 w-full items-center gap-1">
+          <div role="tablist" :aria-label="t('updates.centerTitle')" class="inline-flex h-9 w-full items-center gap-1 overflow-x-auto">
             <button
               v-for="tab in tabs"
               :key="tab.id"
@@ -343,7 +378,7 @@ watch(
               :aria-selected="selectedTab === tab.id"
               :data-state="selectedTab === tab.id ? 'active' : 'inactive'"
               :data-update-tab="tab.id"
-              class="relative inline-flex h-full select-none items-center gap-1.5 whitespace-nowrap px-2.5 text-sm font-medium transition-colors after:absolute after:inset-x-2.5 after:bottom-0 after:h-0.5 after:rounded-full after:bg-foreground after:opacity-0 after:transition-opacity hover:text-foreground focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50"
+              class="relative inline-flex h-full select-none items-center gap-1.5 whitespace-nowrap px-2.5 text-sm font-medium transition-colors after:absolute after:inset-x-2.5 after:bottom-0 after:h-0.5 after:rounded-full after:bg-foreground after:opacity-0 after:transition-opacity hover:text-foreground focus-visible:outline-1 focus-visible:-outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50"
               :class="selectedTab === tab.id ? 'text-foreground after:opacity-100' : 'text-foreground/60'"
               @click="selectTab(tab.id)"
             >
@@ -354,18 +389,31 @@ watch(
         </div>
 
         <div data-update-scroll-region class="min-h-0 flex-1 overflow-auto px-5 py-4 text-sm">
-          <template v-if="selectedTab === 'app'">
+          <ChangelogPanel v-if="selectedTab === 'changelog'" :checking-updates="checkingUpdates || isInstallingUpdate" @check-updates="emit('check-updates')" />
+          <template v-else-if="selectedTab === 'app'">
             <div class="space-y-3">
+              <div v-if="updateInfo?.channel === 'beta'" class="inline-flex rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300">
+                {{ t("updates.betaChannelBadge") }}
+              </div>
+              <p v-if="stableDowngradeBlocked" class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                {{ t("updates.stableDowngradeBlocked") }}
+              </p>
               <p v-if="updateInfo?.update_available">
                 {{
                   t("updates.availableMessage", {
-                    current: updateInfo.current_version,
+                    current: displayAppVersion(updateInfo.current_version),
                     latest: updateInfo.latest_version,
                   })
                 }}
               </p>
-              <p v-else-if="!checkingUpdates" class="text-muted-foreground">
-                {{ updateCheckMessage || t("updates.upToDate", { version: updateInfo?.current_version || "" }) }}
+              <p v-else-if="!checkingUpdates && !updateDownloaded && !updateReady" class="text-muted-foreground">
+                <template v-if="ignoredReleaseVersion">
+                  {{ t("updates.versionIgnored", { version: ignoredReleaseVersion }) }}
+                  <button type="button" data-update-restore-ignored class="text-primary underline underline-offset-2 hover:text-primary/80" :disabled="isIgnoringUpdate" @click="emit('restore-ignored-version')">
+                    {{ t("updates.restoreIgnoredVersion") }}
+                  </button>
+                </template>
+                <template v-else>{{ updateCheckMessage || t("updates.upToDate", { version: displayAppVersion(updateInfo?.current_version || "") }) }}</template>
               </p>
               <div
                 v-if="updateInfo?.update_available && updateInfo.release_notes"
@@ -393,7 +441,7 @@ watch(
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("updates.checking") }}
             </p>
-            <p v-if="updateDownloaded && !isInstallingUpdate" class="mt-3">{{ t("updates.downloadedReady", { version: updateInfo?.latest_version }) }}</p>
+            <p v-if="updateDownloaded && !isInstallingUpdate" class="mt-3">{{ t("updates.downloadedReady", { version: updateDownloadedVersion || updateInfo?.latest_version }) }}</p>
             <p v-if="updateCheckFailed && updateInfo?.update_available" role="alert" class="mt-3 text-destructive">{{ updateCheckMessage }}</p>
 
             <div v-if="olderReleases.length || historyError" data-update-history class="mt-4 border-t pt-3">
@@ -511,15 +559,15 @@ watch(
               </SelectContent>
             </Select>
           </div>
-          <template v-if="updateInfo?.update_available">
-            <div class="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
+          <template v-if="appUpdateActionsVisible">
+            <div v-if="updateInfo?.update_available" class="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
               <Button v-if="canIgnoreVersion" variant="ghost" class="shrink-0" :disabled="isIgnoringUpdate" @click="emit('ignore-version')">
                 <Loader2 v-if="isIgnoringUpdate" class="h-4 w-4 animate-spin" />
                 {{ t("updates.ignoreVersion") }}
               </Button>
               <Button variant="outline" class="shrink-0" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
             </div>
-            <template v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop)">
+            <template v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop) || updateDownloaded || updateReady">
               <Button v-if="updateReady" class="shrink-0" :disabled="activeTaskCount > 0 || isIgnoringUpdate || isUpdatingAll" @click="emit('restart')">{{ t("updates.restart") }}</Button>
               <Button v-else-if="isInstallingUpdate" class="shrink-0" disabled>
                 <Loader2 class="h-4 w-4 animate-spin" />
@@ -543,7 +591,7 @@ watch(
           </template>
         </DialogFooter>
 
-        <DialogFooter v-else data-update-footer class="mx-0 mb-0 min-w-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
+        <DialogFooter v-else-if="selectedCategory" data-update-footer class="mx-0 mb-0 min-w-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
           <template v-if="isAnyComponentUpdating">
             <Button variant="ghost" class="shrink-0" @click="handleOpenChange(false)">{{ t("updates.updateInBackground") }}</Button>
             <Button class="shrink-0" disabled>

@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   executeTabSql: vi.fn(),
   getColumns: vi.fn(),
   invalidateCompletionTableCache: vi.fn(),
+  refreshTableColumnsTree: vi.fn(),
   listIndexes: vi.fn(),
   setErrorResult: vi.fn(),
   setTableMeta: vi.fn(),
@@ -34,6 +35,7 @@ vi.mock("@/stores/connectionStore", () => ({
     connectionIdentifierQuote: () => undefined,
     metadataGenerationFor: () => 0,
     refreshObjectListTreeNode: vi.fn(),
+    refreshTableColumnsTree: mocks.refreshTableColumnsTree,
     invalidateCompletionTableCache: mocks.invalidateCompletionTableCache,
   }),
 }));
@@ -219,9 +221,29 @@ describe("useNavigationTargets openTableTarget", () => {
       tableName: target.tableName,
     });
 
+    expect(mocks.refreshTableColumnsTree).toHaveBeenCalledWith("connection-1", "app", "users", "public", "catalog-1");
     expect(mocks.invalidateCompletionTableCache).toHaveBeenCalledWith("connection-1", "app", "users", "public", "catalog-1");
     expect(mocks.getColumns).toHaveBeenCalledTimes(2);
     expect(mocks.tabs.map((tab) => tab.tableMeta?.primaryKeys)).toEqual([["fresh_id"], ["fresh_id"]]);
+  });
+
+  it("refreshes sidebar columns even without a data tab", async () => {
+    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users" };
+    await useNavigationTargets(dialogs).onStructureEditorSaved(vi.fn(), vi.fn(), target);
+    expect(mocks.refreshTableColumnsTree).toHaveBeenCalledWith("connection-1", "app", "users", "public", undefined);
+    expect(mocks.getColumns).not.toHaveBeenCalled();
+  });
+
+  it("still refreshes data tab metadata if the sidebar reload fails", async () => {
+    const navigation = useNavigationTargets(dialogs);
+    const target = { connectionId: "connection-1", database: "app", schema: "public", tableName: "users" };
+    await navigation.openLineageTarget(target);
+    mocks.refreshTableColumnsTree.mockRejectedValueOnce(new Error("sidebar unavailable"));
+    mocks.getColumns.mockResolvedValueOnce([column("fresh_id")]);
+    const toast = vi.fn();
+    await navigation.onStructureEditorSaved(vi.fn(), toast, target);
+    expect(toast).toHaveBeenCalledWith("sidebar unavailable", 5000);
+    expect(mocks.tabs[0]?.tableMeta?.primaryKeys).toEqual(["fresh_id"]);
   });
 
   it("keeps row identity pending when shared metadata loading fails", async () => {

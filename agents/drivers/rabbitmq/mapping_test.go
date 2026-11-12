@@ -342,3 +342,49 @@ func TestGetTopicConfigPreservesArgumentTypes(t *testing.T) {
 		t.Fatalf("unexpected argument values %#v", configs)
 	}
 }
+
+func TestDecodeDeliveryPayloadTextDecodesThriftBinaryProtocolWhenOptedIn(t *testing.T) {
+	// Strict TBinaryProtocol v1 CALL: method="ping", seqId=7, field 1 (string)="ok", field 2 (i32)=42, STOP
+	strictCall := []byte{
+		0x80, 0x01, 0x00, 0x01,
+		0x00, 0x00, 0x00, 0x04, 'p', 'i', 'n', 'g',
+		0x00, 0x00, 0x00, 0x07,
+		0x0b, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 'o', 'k',
+		0x08, 0x00, 0x02, 0x00, 0x00, 0x00, 0x2a,
+		0x00,
+	}
+	if _, ok := decodeDeliveryPayloadText(strictCall); ok {
+		t.Fatal("expected strict TBinaryProtocol payload not to decode by default")
+	}
+	decoded, ok := decodeDeliveryPayloadText(strictCall, true)
+	if !ok {
+		t.Fatal("expected strict TBinaryProtocol payload to decode when opted in")
+	}
+	parsed := mustObject(t, decoded)
+	if parsed["method"] != "ping" || parsed["type"] != "CALL" {
+		t.Fatalf("unexpected decoded thrift envelope %#v", parsed)
+	}
+	fields := objectOrNil(parsed, "fields")
+	if fields["1"] != "ok" || fields["2"].(json.Number).String() != "42" {
+		t.Fatalf("unexpected decoded thrift fields %#v", fields)
+	}
+
+	// Raw TSerializer struct (valid UTF-8 bytes < 0x80 with NUL/control bytes): field 1 (string)="hello", STOP
+	rawStruct := []byte{0x0b, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05, 'h', 'e', 'l', 'l', 'o', 0x00}
+	if rawDefault, ok := decodeDeliveryPayloadText(rawStruct); !ok || rawDefault != string(rawStruct) {
+		t.Fatalf("expected raw struct to stay undecoded by default, got %q (%v)", rawDefault, ok)
+	}
+	decodedStruct, ok := decodeDeliveryPayloadText(rawStruct, true)
+	if !ok {
+		t.Fatal("expected raw TSerializer struct to decode when opted in")
+	}
+	structObj := mustObject(t, decodedStruct)
+	if structObj["1"] != "hello" {
+		t.Fatalf("unexpected decoded struct %#v", structObj)
+	}
+
+	// Plain text stays untouched.
+	if plain, ok := decodeDeliveryPayloadText([]byte("hello world")); !ok || plain != "hello world" {
+		t.Fatalf("unexpected plain payload %q (%v)", plain, ok)
+	}
+}

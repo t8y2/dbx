@@ -9,8 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	neo4j "github.com/neo4j/neo4j-go-driver/v6/neo4j"
-	neo4jdb "github.com/neo4j/neo4j-go-driver/v6/neo4j/db"
+	neo4j "github.com/t8y2/dbx/agents/drivers/neo4j-go/internal/neo4jcompat"
 )
 
 func TestHandshakeAdvertisesNativeCapabilities(t *testing.T) {
@@ -224,7 +223,7 @@ func TestIsRoutingUnsupported(t *testing.T) {
 			err:  errors.New("feature not supported: Server 127.0.0.1:17690 does not support: routing (requires cluster setup)"),
 			want: true,
 		},
-		{name: "typed feature error", err: &neo4jdb.FeatureNotSupportedError{Server: "db:7687", Feature: "routing", Reason: "requires cluster setup"}, want: true},
+		{name: "typed feature error", err: &neo4j.FeatureNotSupportedError{Server: "db:7687", Feature: "routing", Reason: "requires cluster setup"}, want: true},
 		// #11947: Memgraph speaks Bolt and accepts `neo4j://`, but refuses the
 		// routing-table procedure with its own wording, so the direct fallback
 		// has to recognise it too.
@@ -238,7 +237,7 @@ func TestIsRoutingUnsupported(t *testing.T) {
 			err:  errors.New("You cannot fetch routing table from an instance which is not part of a cluster."),
 			want: true,
 		},
-		{name: "typed route-to-database error", err: &neo4jdb.FeatureNotSupportedError{Server: "db:7687", Feature: "route to database", Reason: "requires at least server v4"}, want: false},
+		{name: "typed route-to-database error", err: &neo4j.FeatureNotSupportedError{Server: "db:7687", Feature: "route to database", Reason: "requires at least server v4"}, want: false},
 		{name: "unrelated error", err: errors.New("connection refused"), want: false},
 		{name: "nil error", err: nil, want: false},
 	} {
@@ -288,7 +287,7 @@ func TestNormalizeQueryValuesPreservesLegacyStringRows(t *testing.T) {
 }
 
 func TestClassifyNeo4jErrors(t *testing.T) {
-	syntax := classifyRPCError("execute_query", "session-1", &neo4jdb.Neo4jError{
+	syntax := classifyRPCError("execute_query", "session-1", &neo4j.Neo4jError{
 		Code: "Neo.ClientError.Statement.SyntaxError", Msg: "invalid input",
 	})
 	if syntax.Data.Category != "sql" || syntax.Data.SQLState != "" || syntax.Data.AgentSessionID != "session-1" {
@@ -300,7 +299,7 @@ func TestClassifyNeo4jErrors(t *testing.T) {
 	if syntax.Message == "" || !strings.Contains(syntax.Message, "Neo.ClientError.Statement.SyntaxError") {
 		t.Fatalf("Neo4j error code was lost: %q", syntax.Message)
 	}
-	resource := classifyRPCError("execute_query", "session-1", &neo4jdb.Neo4jError{
+	resource := classifyRPCError("execute_query", "session-1", &neo4j.Neo4jError{
 		Code: "Neo.TransientError.General.DatabaseUnavailable", Msg: "database unavailable",
 	})
 	if resource.Data.Category != "resource" || resource.Data.SessionDisposition != "replace_runtime" {

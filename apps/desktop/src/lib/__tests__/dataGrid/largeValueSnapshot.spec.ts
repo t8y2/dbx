@@ -5,9 +5,75 @@ import { materializeLargeValueSnapshot, materializeSnapshotResultRows, readLarge
 
 const request = { connectionId: "ob", database: "APP", clientSessionId: "tab-original", valueRef: "original-ref" };
 const response = (data: string, next_offset: number, eof = false) => ({ status: "ok", data, next_offset, eof, value_kind: "text" });
-beforeEach(() => mocks.readLargeValueChunk.mockReset());
+beforeEach(() => {
+  mocks.readLargeValueChunk.mockReset();
+});
 
 describe("original-result LOB snapshot consumption", () => {
+  it("preserves the existing immediate local-abort behavior by default", async () => {
+    let finish!: (chunk: ReturnType<typeof response>) => void;
+    mocks.readLargeValueChunk.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const controller = new AbortController();
+    const consume = vi.fn();
+    const reading = readLargeValueSnapshot(request, () => true, consume, controller.signal);
+    controller.abort(new Error("cancelled locally"));
+    await expect(reading).rejects.toThrow("cancelled locally");
+    finish(response("x", 1, true));
+    expect(consume).not.toHaveBeenCalled();
+  });
+
+  it("retains the native read until it settles before releasing an aborted export", async () => {
+    let finish!: (chunk: ReturnType<typeof response>) => void;
+    mocks.readLargeValueChunk.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const controller = new AbortController();
+    const consume = vi.fn();
+    let settled = false;
+    const reading = readLargeValueSnapshot(request, () => true, consume, controller.signal, mocks.readLargeValueChunk, true).catch((error) => {
+      settled = true;
+      return error;
+    });
+    controller.abort(new Error("cancelled locally"));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    finish(response("x", 1));
+    expect(await reading).toEqual(expect.objectContaining({ message: "cancelled locally" }));
+    expect(consume).not.toHaveBeenCalled();
+    expect(mocks.readLargeValueChunk).toHaveBeenCalledOnce();
+  });
+
+  it("retains native completion while materializing an aborted result", async () => {
+    let finish!: (chunk: ReturnType<typeof response>) => void;
+    mocks.readLargeValueChunk.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const controller = new AbortController();
+    const result = { columns: ["PAYLOAD"], rows: [["preview"]], affected_rows: 0, execution_time_ms: 0, large_value_cells: [{ row_index: 0, column_index: 0, original_bytes: 1, value_ref: "original-ref" }], large_value_context: { connectionId: "ob", database: "APP" } };
+    let settled = false;
+    const reading = materializeSnapshotResultRows(result, () => true, controller.signal, "export-execution", { waitForNative: true }).catch((error) => {
+      settled = true;
+      return error;
+    });
+    controller.abort(new Error("cancelled result"));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    finish(response("x", 1, true));
+    expect(await reading).toEqual(expect.objectContaining({ message: "cancelled result" }));
+    expect(result.rows).toEqual([["preview"]]);
+  });
+
   it("preserves every binary byte and prefixes the assembled value exactly once", async () => {
     const hex = Array.from({ length: 256 }, (_, index) => index.toString(16).padStart(2, "0")).join("");
     mocks.readLargeValueChunk.mockResolvedValueOnce({ ...response(hex.slice(0, 200), 100), value_kind: "binary" }).mockResolvedValueOnce({ ...response(hex.slice(200), 256, true), value_kind: "binary" });

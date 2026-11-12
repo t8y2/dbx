@@ -82,6 +82,31 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
     }
 
     @Test
+    void readsFloatColumnsWithDoublePrecision() throws Exception {
+        DamengAgent agent = new DamengAgent();
+        JdbcExecutor.ColumnAwareResultValueReader reader = (JdbcExecutor.ColumnAwareResultValueReader) agent.resultValueReader();
+        double sitecode = 3_302_110_014d;
+
+        assertEquals(sitecode, reader.read(doubleCell(sitecode), 1, Types.FLOAT, "FLOAT"));
+        assertEquals(sitecode, agent.resultValue(doubleCell(sitecode), 1, Types.FLOAT));
+        assertNull(reader.read(doubleCell(null), 1, Types.FLOAT, "FLOAT"));
+        assertEquals(1.1f, reader.read(doubleCell(1.1d), 1, Types.REAL, "REAL"));
+    }
+
+    private static ResultSet doubleCell(Double value) {
+        return (ResultSet) Proxy.newProxyInstance(
+            ResultSet.class.getClassLoader(),
+            new Class<?>[] {ResultSet.class},
+            (proxy, method, args) -> switch (method.getName()) {
+                case "getDouble" -> value == null ? 0d : value;
+                case "getFloat" -> value == null ? 0f : value.floatValue();
+                case "wasNull" -> value == null;
+                default -> throw new AssertionError("Unexpected ResultSet call: " + method.getName());
+            }
+        );
+    }
+
+    @Test
     void physicalConnectionsDoNotEnableDbmsOutput() throws Exception {
         List<String> executedSql = new ArrayList<>();
         List<Integer> queryTimeouts = new ArrayList<>();
@@ -487,6 +512,19 @@ class DamengAgentTest extends JdbcFakeExecutionBehaviorTest {
         assertFalse(query.sql().contains("SYS.SYSOBJECTS materialized_view"));
         assertTrue(query.sql().contains("o.OBJECT_TYPE IN (?, ?, ?)"));
         assertEquals(List.of("APP", "SEQUENCE", "PACKAGE", "PACKAGE BODY", 20), query.args());
+    }
+
+    @Test
+    void constrainedObjectQueriesIncludeTypesAndBodies() {
+        DamengAgent.MetadataQuery query = DamengAgent.buildConstrainedObjectsQuery(
+            "APP", new MetadataListConstraints(null, 20, null, List.of("TYPE", "TYPE_BODY")));
+        assertTrue(query.sql().contains("o.OBJECT_TYPE IN (?, ?)"));
+        assertEquals(List.of("APP", "TYPE", "TYPE BODY", 20), query.args());
+
+        DamengAgent.MetadataQuery raw = DamengAgent.buildRawConstrainedObjectsQuery(
+            "APP", new MetadataListConstraints(null, null, null, List.of("TYPE", "TYPE_BODY")));
+        assertTrue(raw.sql().contains("o.OBJECT_TYPE IN (?, ?)"));
+        assertEquals(List.of("APP", "TYPE", "TYPE BODY"), raw.args());
     }
 
     @Test

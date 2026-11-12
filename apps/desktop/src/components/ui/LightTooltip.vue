@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { cn } from "@/lib/common/utils";
-import { floatingArrowOffset, floatingViewportShift } from "@/lib/common/floatingViewportPosition";
+import { floatingArrowOffset, floatingViewportShift, visibleTriggerRect } from "@/lib/common/floatingViewportPosition";
 
 const props = withDefaults(
   defineProps<{
@@ -133,7 +133,7 @@ function updatePosition() {
   const el = triggerElement();
   if (!el) return;
   arrowOffset.value = undefined;
-  const rect = el.getBoundingClientRect();
+  const rect = visibleTriggerRect(el);
   const offset = props.sideOffset;
   switch (props.side) {
     case "right":

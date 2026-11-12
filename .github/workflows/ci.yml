@@ -33,7 +33,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           cache: pnpm
 
       - name: Install frontend dependencies
@@ -82,7 +82,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           cache: pnpm
 
       - name: Install frontend dependencies
@@ -115,7 +115,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           cache: pnpm
 
       - name: Install frontend dependencies
@@ -156,7 +156,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
 
       - name: GitHub script tests
         env:
@@ -173,6 +173,19 @@ jobs:
 
       - name: Docker mirror config tests
         run: python3 .github/scripts/configure-docker-mirror.test.py
+
+      - name: APT acquisition tests
+        run: python3 .github/scripts/ci-install-system-deps.test.py
+
+      - name: Gradle acquisition tests
+        run: python3 .github/scripts/ci-gradle.test.py
+
+      - name: Mold acquisition tests
+        run: python3 .github/scripts/ci-install-mold.test.py
+
+      - name: WebView2 acquisition tests
+        shell: pwsh
+        run: ./.github/scripts/prepare-webview2-win7-runtime.test.ps1
 
       - name: PowerShell MCP installer tests
         shell: pwsh
@@ -203,29 +216,17 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           cache: pnpm
 
       - name: Install system dependencies
-        run: |
-          sudo timeout --kill-after=30s 10m apt-get \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            update
-          sudo timeout --kill-after=30s 10m apt-get \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
+        run: sudo python3 .github/scripts/ci-install-system-deps.py
 
       # Pin mold because runner image updates can change bundled DuckDB C++ links.
       # The pinned build prevents duckdb_create_config runtime failures.
       - name: Install mold linker
-        run: |
-          curl -fsSL https://github.com/rui314/mold/releases/download/v2.42.1/mold-2.42.1-x86_64-linux.tar.gz \
-            | sudo tar -C /usr/local --strip-components=1 -xz
-          mold --version
+        timeout-minutes: 8
+        run: bash .github/scripts/ci-install-mold.sh
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -237,7 +238,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Install nextest
-        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b # v2.68.13
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest@0.9.137
 
@@ -312,7 +313,11 @@ jobs:
     timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      # An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so the
+      # 8 MiB main-thread stack must be repeated here: without it the Windows PE
+      # keeps the 1 MiB linker default and deep connect/serde call stacks abort
+      # with 0xC00000FD ("DBX 已停止工作"). Verified below for x64 and ARM64.
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
       RUSTC_WRAPPER: sccache
       # Prefer S3 when available; GitHub's 10 GB cache quota evicts the shared
       # Linux target caches when thousands of GHA sccache entries pile up.
@@ -323,6 +328,27 @@ jobs:
 
       - name: Setup Rust for standard Windows
         uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - name: Windows PE stack reserve audit tests
+        shell: pwsh
+        run: ./.github/scripts/assert-windows-stack-reserve.test.ps1
+
+      - name: MCP replacement temporary file cleanup tests
+        shell: pwsh
+        run: |
+          @'
+          #[path = "src-tauri/src/commands/mcp_cleanup.rs"]
+          mod cleanup;
+          '@ | rustc --edition 2021 --test -o "$env:RUNNER_TEMP/mcp-cleanup-tests.exe" -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP/mcp-cleanup-tests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: PowerShell MCP installer tests
+        shell: pwsh
+        run: ./.github/scripts/install-mcp-powershell.test.ps1
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -352,6 +378,10 @@ jobs:
             echo "SCCACHE_IDLE_TIMEOUT=0"
           } >> "$GITHUB_ENV"
 
+      - name: Verify x64 and ARM64 executable stack reserves
+        shell: pwsh
+        run: ./.github/scripts/test-windows-stack-reserve.ps1
+
       - name: Check standard Windows dependency path
         run: cargo check --locked --package dbx --no-default-features --target x86_64-pc-windows-msvc
 
@@ -372,7 +402,11 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_RELEASE_LTO: "off"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      # An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so the
+      # 8 MiB main-thread stack must be repeated here: without it the Windows PE
+      # keeps the 1 MiB linker default and deep connect/serde call stacks abort
+      # with 0xC00000FD ("DBX 已停止工作"). Guarded by assert-win7-pe-compat.ps1.
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
       RUSTC_WRAPPER: sccache
       # Prefer S3 when available; GitHub's 10 GB cache quota evicts the shared
       # Linux target caches when thousands of GHA sccache entries pile up.
@@ -381,7 +415,7 @@ jobs:
       SCCACHE_IDLE_TIMEOUT: "0"
       # Single source for the job's nightly pin: the toolchain step and the
       # prebuilt AWS-LC artifact name must move together.
-      WIN7_NIGHTLY_TOOLCHAIN: nightly-2026-07-22
+      WIN7_NIGHTLY_TOOLCHAIN: nightly-2026-10-25
     steps:
       - uses: actions/checkout@v7
 
@@ -393,7 +427,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
           cache: pnpm
 
       - name: Install frontend dependencies
@@ -405,6 +439,9 @@ jobs:
           toolchain: ${{ env.WIN7_NIGHTLY_TOOLCHAIN }}
           components: rust-src
 
+      # build-std makes this rustc invocation reach the Windows 32K command-line limit;
+      # sccache 0.16.0 spawns it fine while 0.19.0 fails with `os error 206`. Do not bump
+      # this pin without a green Windows 7 run.
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: "v0.16.0"
@@ -811,7 +848,11 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/duckdb-driver
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
+      # An env RUSTFLAGS replaces .cargo/config.toml target rustflags, so the
+      # 8 MiB main-thread stack must be repeated here: without it the Windows PE
+      # keeps the 1 MiB linker default and deep connect/serde call stacks abort
+      # with 0xC00000FD ("DBX 已停止工作"). Guarded by assert-win7-pe-compat.ps1.
+      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static -C link-arg=/STACK:8388608
       RUSTC_WRAPPER: sccache
       # Prefer S3 when available; GitHub's 10 GB cache quota evicts the shared
       # Linux target caches when thousands of GHA sccache entries pile up.
@@ -826,7 +867,7 @@ jobs:
       - name: Setup Rust for Windows 7
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-07-22
+          toolchain: nightly-2026-10-25
           components: rust-src
 
       - name: Setup MSVC
@@ -836,7 +877,7 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.15"
 
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -891,17 +932,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install system dependencies
-        run: |
-          sudo timeout --kill-after=30s 10m apt-get \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            update
-          sudo timeout --kill-after=30s 10m apt-get \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
+        run: sudo python3 .github/scripts/ci-install-system-deps.py
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
@@ -982,6 +1013,10 @@ jobs:
     env:
       # sccache cannot reuse Cargo incremental artifacts, so avoid generating them in CI.
       CARGO_INCREMENTAL: "0"
+      # Test binaries default to full debug info; the workspace-wide test build
+      # then fills the runner disk during linking (mold: failed to write).
+      # Backtraces stay usable via the minimal line tables.
+      CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
       # Deep async export tests exceed the Rust test harness's default thread stack on Linux.
       RUST_MIN_STACK: 8388608
       RUSTC_WRAPPER: sccache
@@ -998,30 +1033,27 @@ jobs:
           [[ "$ID" == ubuntu ]] || exit 0
           sudo python3 .github/scripts/configure-docker-mirror.py /etc/docker/daemon.json --validate
           timeout 30s sudo systemctl restart docker
-          timeout 15s docker info --format '{{json .RegistryConfig.Mirrors}}' \
-            | python3 -c 'import json, sys; assert any(x.rstrip("/") == "https://mirror.gcr.io" for x in json.load(sys.stdin))'
+          for attempt in {1..12}; do
+            if mirrors="$(timeout 5s docker info --format '{{json .RegistryConfig.Mirrors}}')"; then
+              printf '%s\n' "$mirrors" | python3 -c 'import json, sys; assert any(x.rstrip("/") == "https://mirror.gcr.io" for x in json.load(sys.stdin))'
+              break
+            fi
+            if ((attempt == 12)); then
+              echo '::error::Docker did not become ready after restart' >&2
+              exit 1
+            fi
+            sleep 2
+          done
 
       - name: Install system dependencies
-        run: |
-          sudo timeout --kill-after=30s 10m apt-get \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            update
-          sudo timeout --kill-after=30s 10m apt-get \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libsecret-1-dev
+        run: sudo python3 .github/scripts/ci-install-system-deps.py
         if: matrix.group != 'foundation'
 
       # Pin mold because runner image updates can change bundled C++ links.
       # See the packages job note for the pinned upstream build.
       - name: Install mold linker
-        run: |
-          curl -fsSL https://github.com/rui314/mold/releases/download/v2.42.1/mold-2.42.1-x86_64-linux.tar.gz \
-            | sudo tar -C /usr/local --strip-components=1 -xz
-          mold --version
+        timeout-minutes: 8
+        run: bash .github/scripts/ci-install-mold.sh
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
@@ -1065,6 +1097,8 @@ jobs:
           RUST_FEATURE_MODE: ""
           RUST_TEST_GROUP: ""
         uses: swatinem/rust-cache@v2
+        # Avoid disk exhaustion when restoring the complete target cache for large Rust test groups.
+        if: matrix.group != 'drivers' && matrix.group != 'workspace'
         with:
           prefix-key: v1-rust-complete
           workspaces: "./ -> target"
@@ -1076,7 +1110,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install nextest
-        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest@0.9.137
 
@@ -1150,7 +1184,10 @@ jobs:
           node .github/scripts/check-jdbc-plugin-version.mjs "$BASE_SHA" HEAD
 
       - name: JDBC plugin package check
-        run: ./plugins/jdbc/package.sh
+        run: python3 .github/scripts/ci-gradle.py jdbc -- ./package.sh
+
+      - name: JDBC response recovery tests
+        run: bash ./plugins/jdbc/gradlew -p plugins/jdbc --no-daemon test --tests app.dbx.jdbc.LargeResponseRecoveryTest --tests app.dbx.jdbc.StatementCancelTest --tests app.dbx.jdbc.DeferredLobValuesTest
 
   offline-jdbc-release:
     needs: changes
@@ -1167,7 +1204,7 @@ jobs:
           cache: gradle
 
       - name: Cache approved Maven assets
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/dbx-offline-jdbc-maven
           key: offline-jdbc-${{ hashFiles('apps/desktop/src/lib/database/managedJdbcAssets.json') }}
@@ -1176,7 +1213,7 @@ jobs:
         env:
           DBX_OFFLINE_JDBC_MAVEN_CACHE: ~/.cache/dbx-offline-jdbc-maven
         run: |
-          ./plugins/jdbc/package.sh
+          python3 .github/scripts/ci-gradle.py jdbc -- ./package.sh
           JDBC_VERSION="$(sed -nE "s/^version[[:space:]]*=[[:space:]]*'([^']+)'.*/\1/p" plugins/jdbc/build.gradle | head -n 1)"
           node agents/scripts/build_offline_jdbc_payload.mjs \
             release \
@@ -1303,8 +1340,10 @@ jobs:
               - '.github/workflows/ci.yml'
             jdbc:
               - 'plugins/jdbc/**'
+              - '.github/scripts/ci-gradle*'
             offline_jdbc:
               - 'plugins/jdbc/**'
+              - '.github/scripts/ci-gradle*'
               - 'agents/scripts/build_offline_jdbc_payload.mjs'
               - 'agents/scripts/build_offline_zip.sh'
               - 'agents/scripts/verify_offline_jdbc_release.mjs'
@@ -1399,7 +1438,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
       - name: CI planner and gate tests
         run: node --test .github/scripts/ci-*.test.mjs
       - name: Core architecture contracts
@@ -1435,11 +1474,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22.23.3
+          node-version: 22.23.4
       - name: Install packaging tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y zstd
+        run: sudo python3 ../.github/scripts/ci-install-system-deps.py --group packaging
       - name: Agent script tests
         run: |
           python3 -m unittest discover -s scripts -p '*_test.py'
@@ -1467,11 +1504,11 @@ jobs:
         with:
           cache-provider: basic
       - name: Install packaging tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y zstd
+        run: sudo python3 ../.github/scripts/ci-install-system-deps.py --group packaging
       - name: Java agent tests and packages
-        run: ./gradlew test shadowJar --continue
+        run: python3 ../.github/scripts/ci-gradle.py agents -- ./gradlew test shadowJar --continue
+      - name: Gradle repository authentication tests
+        run: python3 ../.github/scripts/ci-gradle-repositories.test.py
       - name: Agent jar validation
         run: python3 scripts/validate_agent_jars.py
   agent-rust:
@@ -1489,26 +1526,14 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install system dependencies
         if: matrix.driver == 'duckdb'
-        run: |
-          sudo timeout --kill-after=30s 10m apt-get \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            update
-          sudo timeout --kill-after=30s 10m apt-get \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            install -y libdbus-1-dev pkg-config
+        run: sudo python3 ../.github/scripts/ci-install-system-deps.py --group duckdb
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
       # Pin mold because runner image updates can change bundled DuckDB C++ links.
       # See the packages job note for the pinned upstream build.
       - name: Install mold linker
-        run: |
-          curl -fsSL https://github.com/rui314/mold/releases/download/v2.42.1/mold-2.42.1-x86_64-linux.tar.gz \
-            | sudo tar -C /usr/local --strip-components=1 -xz
-          mold --version
+        timeout-minutes: 8
+        run: bash ../.github/scripts/ci-install-mold.sh
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -1555,7 +1580,7 @@ jobs:
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install nextest
-        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest@0.9.137
       # mold -run wraps the whole process tree (see the packages job note);
@@ -1598,7 +1623,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 1.25.x
+          go-version: 1.27.x
           cache-dependency-path: agents/drivers/${{ matrix.driver }}/go.sum
       - name: Native Go tests and target builds
         env:
@@ -1606,6 +1631,15 @@ jobs:
           BINARY: ${{ matrix.binary }}
           RACE: ${{ matrix.race }}
         run: bash ../.github/scripts/ci-agent-go.sh "$DRIVER" "$BINARY" "$RACE"
+      - name: Setup Neo4j Windows-compatible Go
+        if: matrix.driver == 'neo4j-go'
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.20.14"
+          cache-dependency-path: agents/drivers/neo4j-go/go.windows-legacy.sum
+      - name: Test Neo4j Windows-compatible build
+        if: matrix.driver == 'neo4j-go'
+        run: bash drivers/neo4j-go/build-windows-legacy.sh "$RUNNER_TEMP/dbx-agent-neo4j-windows-x64.exe"
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -1627,8 +1661,17 @@ jobs:
           [[ "$ID" == ubuntu ]] || exit 0
           sudo python3 .github/scripts/configure-docker-mirror.py /etc/docker/daemon.json --validate
           timeout 30s sudo systemctl restart docker
-          timeout 15s docker info --format '{{json .RegistryConfig.Mirrors}}' \
-            | python3 -c 'import json, sys; assert any(x.rstrip("/") == "https://mirror.gcr.io" for x in json.load(sys.stdin))'
+          for attempt in {1..12}; do
+            if mirrors="$(timeout 5s docker info --format '{{json .RegistryConfig.Mirrors}}')"; then
+              printf '%s\n' "$mirrors" | python3 -c 'import json, sys; assert any(x.rstrip("/") == "https://mirror.gcr.io" for x in json.load(sys.stdin))'
+              break
+            fi
+            if ((attempt == 12)); then
+              echo '::error::Docker did not become ready after restart' >&2
+              exit 1
+            fi
+            sleep 2
+          done
       - name: Setup RocketMQ server Java
         if: matrix.scenario == 'rocketmq'
         uses: actions/setup-java@v6
@@ -1638,7 +1681,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: 1.25.x
+          go-version: 1.27.x
           cache-dependency-path: agents/drivers/${{ matrix.driver }}/go.sum
         if: matrix.driver != 'tdengine'
       - name: Setup Rust
@@ -1646,7 +1689,7 @@ jobs:
         if: matrix.driver == 'tdengine'
       - name: Install nextest
         if: matrix.driver == 'tdengine'
-        uses: taiki-e/install-action@a3324fb0eb94b8230ec968c3389c1b7929fc2f3b
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest@0.9.137
       - name: TDengine Rust cache

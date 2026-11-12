@@ -44,7 +44,7 @@ const oracleDatabaseVersionProbeTimeout = 3 * time.Second
 const oracleDatabaseVersionSQL = `
 SELECT VERSION
 FROM PRODUCT_COMPONENT_VERSION
-WHERE PRODUCT LIKE 'Oracle Database%'
+WHERE PRODUCT LIKE 'Oracle%Database%'
   AND ROWNUM = 1`
 
 const oracleDisableSegmentAttributesSQL = `BEGIN DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SEGMENT_ATTRIBUTES', FALSE); END;`
@@ -59,7 +59,7 @@ var (
 	oracleNotNullConstraintRegexp        = regexp.MustCompile(`(?i)^\s*\(*\s*(?:"((?:[^"]|"")*)"|([A-Z0-9_$#]+))\s+IS\s+NOT\s+NULL\s*\)*\s*$`)
 	oracleDatabaseVersionQueries         = []string{
 		oracleDatabaseVersionSQL,
-		`SELECT BANNER FROM V$VERSION WHERE BANNER LIKE 'Oracle Database%' AND ROWNUM = 1`,
+		`SELECT BANNER FROM V$VERSION WHERE BANNER LIKE 'Oracle%Database%' AND ROWNUM = 1`,
 	}
 	oracleStringConverters = map[int]converters.IStringConverter{
 		oracleCharsetZHS32GB18030: oracleGB18030Converter{},
@@ -155,11 +155,13 @@ FROM USER_MVIEWS mv
 const oracleListTablesOrderSQL = `ORDER BY OBJECT_NAME`
 const oracleListTablesSQL = oracleListTablesBaseSQL + "\n" + oracleListTablesOrderSQL
 const oracleListObjectsBaseSQL = `
-SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS
+SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS, PARENT_SCHEMA, PARENT_NAME
 FROM (
 SELECT t.TABLE_NAME AS OBJECT_NAME,
        'TABLE' AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
+       CAST(NULL AS VARCHAR2(128)) AS PARENT_SCHEMA,
+       CAST(NULL AS VARCHAR2(128)) AS PARENT_NAME
 FROM ALL_TABLES t
 WHERE t.OWNER = :1
   AND t.NESTED = 'NO'
@@ -177,23 +179,31 @@ SELECT o.OBJECT_NAME,
          WHEN 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW'
          ELSE o.OBJECT_TYPE
        END AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
+       i.TABLE_OWNER AS PARENT_SCHEMA,
+       i.TABLE_NAME AS PARENT_NAME
 FROM ALL_OBJECTS o
+LEFT JOIN ALL_INDEXES i
+  ON o.OBJECT_TYPE = 'INDEX' AND i.OWNER = o.OWNER AND i.INDEX_NAME = o.OBJECT_NAME
 WHERE o.OWNER = :2
-  AND o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY')
+  AND o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'TRIGGER', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY', 'INDEX')
 UNION ALL
 SELECT s.SYNONYM_NAME AS OBJECT_NAME,
        'SYNONYM' AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
+       CAST(NULL AS VARCHAR2(128)) AS PARENT_SCHEMA,
+       CAST(NULL AS VARCHAR2(128)) AS PARENT_NAME
 FROM ALL_SYNONYMS s
 WHERE s.OWNER = :3
 )`
 const oracleListObjectsSessionUserBaseSQL = `
-SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS
+SELECT OBJECT_NAME, OBJECT_TYPE, COMMENTS, PARENT_SCHEMA, PARENT_NAME
 FROM (
 SELECT t.TABLE_NAME AS OBJECT_NAME,
        'TABLE' AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
+       CAST(NULL AS VARCHAR2(128)) AS PARENT_SCHEMA,
+       CAST(NULL AS VARCHAR2(128)) AS PARENT_NAME
 FROM USER_TABLES t
 WHERE t.NESTED = 'NO'
   AND NOT EXISTS (
@@ -206,16 +216,22 @@ UNION ALL
 SELECT o.OBJECT_NAME,
        CASE o.OBJECT_TYPE
          WHEN 'PACKAGE BODY' THEN 'PACKAGE_BODY'
+         WHEN 'TYPE BODY' THEN 'TYPE_BODY'
          WHEN 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW'
          ELSE o.OBJECT_TYPE
        END AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
+       i.TABLE_OWNER AS PARENT_SCHEMA,
+       i.TABLE_NAME AS PARENT_NAME
 FROM USER_OBJECTS o
-WHERE o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY')
+LEFT JOIN USER_INDEXES i ON o.OBJECT_TYPE = 'INDEX' AND i.INDEX_NAME = o.OBJECT_NAME
+WHERE o.OBJECT_TYPE IN ('VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION', 'TRIGGER', 'SEQUENCE', 'PACKAGE', 'PACKAGE BODY', 'INDEX', 'TYPE', 'TYPE BODY')
 UNION ALL
 SELECT s.SYNONYM_NAME AS OBJECT_NAME,
        'SYNONYM' AS OBJECT_TYPE,
-       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
+       CAST(NULL AS VARCHAR2(128)) AS PARENT_SCHEMA,
+       CAST(NULL AS VARCHAR2(128)) AS PARENT_NAME
 FROM USER_SYNONYMS s
 )`
 const oracleListObjectsOrderSQL = `ORDER BY CASE OBJECT_TYPE
@@ -227,9 +243,10 @@ const oracleListObjectsOrderSQL = `ORDER BY CASE OBJECT_TYPE
   WHEN 'SEQUENCE' THEN 5
   WHEN 'SYNONYM' THEN 6
   WHEN 'PACKAGE' THEN 7
-  ELSE 8
-END, OBJECT_NAME`
-const oracleListObjectsSQL = oracleListObjectsBaseSQL + "\n" + oracleListObjectsOrderSQL
+  WHEN 'TYPE' THEN 8
+  WHEN 'TYPE_BODY' THEN 9
+  ELSE 10
+END, OBJECT_NAME, OBJECT_TYPE`
 const oracleListTriggersSQL = `
 SELECT t.TRIGGER_NAME,
        t.TRIGGERING_EVENT,
@@ -245,7 +262,7 @@ LEFT JOIN ALL_SOURCE s
   ON s.OWNER = t.OWNER
  AND s.NAME = t.TRIGGER_NAME
  AND s.TYPE = 'TRIGGER'
-WHERE t.OWNER = :1
+WHERE t.TABLE_OWNER = :1
   AND t.TABLE_NAME = :2
   AND t.BASE_OBJECT_TYPE IN ('TABLE', 'VIEW')
 ORDER BY t.TRIGGER_NAME, s.LINE`
@@ -264,8 +281,9 @@ type response struct {
 }
 
 type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    int           `json:"code"`
+	Message string        `json:"message"`
+	Data    *rpcErrorData `json:"data,omitempty"`
 }
 
 // oracleDriverPanicError keeps a third-party driver panic on the request path
@@ -337,17 +355,21 @@ type queryOptions struct {
 	FetchSize   int    `json:"fetchSize"`
 	TimeoutSecs int    `json:"timeoutSecs"`
 	DeferLOBs   bool   `json:"deferLobs"`
+	// ReportCompilationErrors is opt-in because SQL file imports and transfers
+	// legitimately create objects that stay INVALID until their dependencies exist.
+	ReportCompilationErrors bool `json:"reportCompilationErrors"`
 }
 
 const largeValueBytesColumnPrefix = "__DBX_LARGE_VALUE_BYTES_"
 
 type queryResult struct {
-	Columns         []string `json:"columns"`
-	ColumnTypes     []string `json:"column_types"`
-	Rows            [][]any  `json:"rows"`
-	AffectedRows    int64    `json:"affected_rows"`
-	ExecutionTimeMS int64    `json:"execution_time_ms"`
-	Truncated       bool     `json:"truncated"`
+	Columns         []string       `json:"columns"`
+	ColumnTypes     []string       `json:"column_types"`
+	Rows            [][]any        `json:"rows"`
+	AffectedRows    int64          `json:"affected_rows"`
+	ExecutionTimeMS int64          `json:"execution_time_ms"`
+	Truncated       bool           `json:"truncated"`
+	Messages        []queryMessage `json:"messages,omitempty"`
 }
 
 func (r queryResult) MarshalJSON() ([]byte, error) {
@@ -375,14 +397,15 @@ func (r queryResult) MarshalJSON() ([]byte, error) {
 }
 
 type queryPageResult struct {
-	Columns         []string `json:"columns"`
-	ColumnTypes     []string `json:"column_types"`
-	Rows            [][]any  `json:"rows"`
-	AffectedRows    int64    `json:"affected_rows"`
-	ExecutionTimeMS int64    `json:"execution_time_ms"`
-	Truncated       bool     `json:"truncated"`
-	SessionID       *string  `json:"session_id"`
-	HasMore         bool     `json:"has_more"`
+	Columns         []string       `json:"columns"`
+	ColumnTypes     []string       `json:"column_types"`
+	Rows            [][]any        `json:"rows"`
+	AffectedRows    int64          `json:"affected_rows"`
+	ExecutionTimeMS int64          `json:"execution_time_ms"`
+	Truncated       bool           `json:"truncated"`
+	SessionID       *string        `json:"session_id"`
+	HasMore         bool           `json:"has_more"`
+	Messages        []queryMessage `json:"messages,omitempty"`
 }
 
 func (r queryPageResult) MarshalJSON() ([]byte, error) {
@@ -436,17 +459,23 @@ func normalizeNonFiniteQueryRows(rows [][]any) ([][]any, bool) {
 }
 
 type querySession struct {
-	rows        *sql.Rows
-	columns     []string
-	columnTypes []string
-	pending     []any
-	remaining   int
+	rows           *sql.Rows
+	conn           *sql.Conn
+	columns        []string
+	columnTypes    []string
+	pending        []any
+	remaining      int
+	outputIdentity any
 }
 
 type oracleColumnMeta struct {
 	Name          string
 	DataType      string
 	DataTypeOwner string
+	// GeometryPlaceholder projects a geometry column as a placeholder instead
+	// of converting it, for servers that cannot run the conversion function
+	// (see oracleGeometryFunctionFallbackSQL).
+	GeometryPlaceholder bool
 }
 
 type oracleColumnMetaLoader func(schema, table string) ([]oracleColumnMeta, error)
@@ -462,17 +491,23 @@ type tableInfo struct {
 }
 
 type metadataListConstraints struct {
-	Filter      string
-	Limit       int
-	Offset      int
-	ObjectTypes []string
+	Filter        string
+	Limit         int
+	Offset        int
+	ObjectTypes   []string
+	Exact         bool
+	ExactIdentity bool
 }
 
 type objectInfo struct {
-	Name       string  `json:"name"`
-	ObjectType string  `json:"object_type"`
-	Schema     string  `json:"schema"`
-	Comment    *string `json:"comment"`
+	Name         string       `json:"name"`
+	ObjectType   string       `json:"object_type"`
+	Schema       string       `json:"schema"`
+	Comment      *string      `json:"comment"`
+	Valid        *bool        `json:"valid,omitempty"`
+	ParentSchema *string      `json:"parent_schema,omitempty"`
+	ParentName   *string      `json:"parent_name,omitempty"`
+	Trigger      *triggerInfo `json:"trigger,omitempty"`
 }
 
 type columnInfo struct {
@@ -491,6 +526,7 @@ type columnInfo struct {
 }
 
 type indexInfo struct {
+	Owner               *string  `json:"owner,omitempty"`
 	Name                string   `json:"name"`
 	Columns             []string `json:"columns"`
 	IsUnique            bool     `json:"is_unique"`
@@ -533,11 +569,14 @@ type foreignKeyInfo struct {
 }
 
 type triggerInfo struct {
-	Name      string  `json:"name"`
-	Event     string  `json:"event"`
-	Timing    string  `json:"timing"`
-	Statement *string `json:"statement,omitempty"`
-	Enabled   *bool   `json:"enabled,omitempty"`
+	Name           string                 `json:"name"`
+	Event          string                 `json:"event"`
+	Timing         string                 `json:"timing"`
+	Statement      *string                `json:"statement,omitempty"`
+	Enabled        *bool                  `json:"enabled,omitempty"`
+	Valid          *bool                  `json:"valid,omitempty"`
+	Condition      *string                `json:"condition,omitempty"`
+	OracleMetadata *oracleTriggerMetadata `json:"oracle_metadata,omitempty"`
 }
 
 // constraintInfo represents primary key, unique, and check constraints for a
@@ -613,6 +652,7 @@ type server struct {
 	// commit/rollback control across multiple execute_query RPCs.
 	manualConn             *sql.Conn
 	manualTx               *sql.Tx
+	legacyJob              *legacyJobSession
 	sessions               map[string]*querySession
 	tableReadSessions      map[string]*querySession
 	nextSessionID          int64
@@ -622,6 +662,30 @@ type server struct {
 	activeRows             map[*sql.Rows]context.CancelFunc
 	activeTimer            *time.Timer
 	activeTimedOut         bool
+	dbmsOutput             dbmsOutputTracker
+	dbmsOutputBinding      dbmsOutputBinding
+	statementCtx           context.Context
+	statementCancel        context.CancelFunc
+	statementConn          *sql.Conn
+	statementSchema        string
+	repinnedStatementConn  *sql.Conn
+	plDebugMu              sync.Mutex
+	plDebugSessions        map[string]*plDebugSession
+	plAllocation           *plDebugAllocation
+	plConnection           *sql.Conn
+	plConnector            func(connectParams) (driver.Connector, error)
+	plDebuggeeAllocation   *plDebugAllocation
+	plDebuggeeConnection   *sql.Conn
+	plDebuggeeDB           *sql.DB
+	plDebuggeeOpenDone     chan struct{}
+	plDebuggeeOpenErr      error
+	plRetiring             bool
+	plCleanupDeadline      time.Time
+	plDebuggeeTx           *sql.Tx
+	plTxBeginDone          chan struct{}
+	plTxBeginErr           error
+	plTxRollbackDone       chan struct{}
+	plTxRollbackErr        error
 }
 
 type agentSession struct {
@@ -630,20 +694,28 @@ type agentSession struct {
 }
 
 type runtimeServer struct {
-	mu       sync.RWMutex
-	sessions map[string]*agentSession
+	mu               sync.RWMutex
+	sessions         map[string]*agentSession
+	plDebugRuntime   bool
+	plDebugConnector func(connectParams) (driver.Connector, error)
+	plNativeEntries  map[string]*plDebugNativeEntry
+	plMetadataBusy   bool
+	plCompileEntries map[string]*plDebugNativeCompileEntry
 }
 
 func main() {
-	runtime := newRuntimeServer()
-	encoder := json.NewEncoder(os.Stdout)
+	runOracleAgent(os.Stdin, os.Stdout, os.Stderr, newRuntimeServer())
+}
+
+func runOracleAgent(input io.Reader, output, diagnostics io.Writer, runtime *runtimeServer) {
+	encoder := json.NewEncoder(output)
 	var encoderMu sync.Mutex
 	var requests sync.WaitGroup
 	shutdown := make(chan struct{})
 	var shutdownOnce sync.Once
-	fmt.Fprintln(os.Stdout, `{"ready":true}`)
+	fmt.Fprintln(output, `{"ready":true}`)
 
-	scanner := bufio.NewScanner(os.Stdin)
+	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 0, 64*1024), 512*1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -652,13 +724,19 @@ func main() {
 		}
 		var requestEnvelope request
 		if json.Unmarshal([]byte(line), &requestEnvelope) == nil && requestEnvelope.Method == "shutdown" {
+			if runtime.plDebugRuntime {
+				_ = runtime.closeAllSessions()
+			}
 			requests.Wait()
 			resp, _ := runtime.handleLine(line)
 			encoderMu.Lock()
 			err := encoder.Encode(resp)
 			encoderMu.Unlock()
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to write response: %v\n", err)
+				fmt.Fprintf(diagnostics, "failed to write response: %v\n", err)
+			}
+			if runtime.plDebugRuntime {
+				runtime.awaitNativeDrain()
 			}
 			return
 		}
@@ -670,7 +748,7 @@ func main() {
 			err := encoder.Encode(resp)
 			encoderMu.Unlock()
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "failed to write response: %v\n", err)
+				fmt.Fprintf(diagnostics, "failed to write response: %v\n", err)
 				shutdownOnce.Do(func() { close(shutdown) })
 				return
 			}
@@ -680,19 +758,35 @@ func main() {
 		}()
 		select {
 		case <-shutdown:
+			if runtime.plDebugRuntime {
+				_ = runtime.closeAllSessions()
+			}
 			requests.Wait()
+			if runtime.plDebugRuntime {
+				_ = runtime.closeAllSessions()
+				runtime.awaitNativeDrain()
+			}
 			return
 		default:
 		}
 	}
+	if runtime.plDebugRuntime {
+		_ = runtime.closeAllSessions()
+	}
 	requests.Wait()
+	if runtime.plDebugRuntime {
+		_ = runtime.closeAllSessions()
+		runtime.awaitNativeDrain()
+	}
 	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
-		fmt.Fprintf(os.Stderr, "failed to read stdin: %v\n", err)
+		fmt.Fprintf(diagnostics, "failed to read stdin: %v\n", err)
 	}
 }
 
 func newRuntimeServer() *runtimeServer {
-	return &runtimeServer{sessions: map[string]*agentSession{}}
+	return &runtimeServer{sessions: map[string]*agentSession{},
+		plDebugRuntime:   os.Getenv("DBX_PL_DEBUG_RUNTIME_SCOPE") != "",
+		plDebugConnector: newPLDebugConnector}
 }
 
 func (r *runtimeServer) handleLine(line string) (resp response, shutdown bool) {
@@ -702,30 +796,50 @@ func (r *runtimeServer) handleLine(line string) (resp response, shutdown bool) {
 	// error response instead of an end-of-stream failure.
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			resp = errorResponse(req.ID, fmt.Errorf("agent request panic: %v", recovered))
+			resp = errorResponse(req.ID, fmt.Errorf("agent request panic: %v", recovered), req.Method, stringParam(req.Params, "agentSessionId"))
 			shutdown = false
 		}
 	}()
 	if err := json.Unmarshal([]byte(line), &req); err != nil {
-		return errorResponse(nil, err), false
+		return errorResponse(nil, err, "", ""), false
 	}
 	if len(req.ID) == 0 {
 		req.ID = json.RawMessage("1")
 	}
+	if r.plDebugRuntime && strings.HasPrefix(req.Method, "pl_debug_") && stringParam(req.Params, "metadataPreparation") == "type_only" && len(line) > plDebugTypedRequestWireBytes {
+		return errorResponse(req.ID, errors.New("typed debugger request wire byte budget exceeded"), req.Method, stringParam(req.Params, "agentSessionId")), false
+	}
+	if r.plDebugRuntime && strings.HasPrefix(req.Method, "pl_debug_") && stringParam(req.Params, "metadataPreparation") == "type_only" {
+		if err := plDebugValidateTypedUnicode(line); err != nil {
+			return errorResponse(req.ID, err, req.Method, stringParam(req.Params, "agentSessionId")), false
+		}
+	}
 	result, shouldShutdown, err := r.dispatch(req.Method, req.Params)
 	if err != nil {
-		return errorResponse(req.ID, err), false
+		return errorResponse(req.ID, err, req.Method, stringParam(req.Params, "agentSessionId")), false
 	}
 	return response{JSONRPC: "2.0", ID: req.ID, Result: result}, shouldShutdown
 }
 
 func (r *runtimeServer) dispatch(method string, params map[string]json.RawMessage) (any, bool, error) {
+	if r.plDebugRuntime && strings.HasPrefix(method, "pl_debug_") && method != "pl_debug_probe" {
+		value, err := r.dispatchNativeDebug(method, params)
+		return value, false, err
+	}
 	switch method {
 	case "handshake":
+		if r.plDebugRuntime {
+			return map[string]any{
+				"protocolVersion":      multiSessionProtocolVersion,
+				"agentProtocolVersion": multiSessionProtocolVersion,
+				"capabilities":         []string{"connect", "multi_session", "pl_debug_retained_results_v1"},
+				"plDebug":              map[string]interface{}{"contractVersion": 1, "helperObjects": false, "setValueOperationStatus": true, "breakpointOperationStatus": true, "executeOperationStatus": true},
+			}, false, nil
+		}
 		return map[string]any{
 			"protocolVersion":      multiSessionProtocolVersion,
 			"agentProtocolVersion": multiSessionProtocolVersion,
-			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "multi_session"},
+			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "multi_session", "native_job_legacy_v1", "structured_error_v1", "exact_metadata_identity_v1"},
 		}, false, nil
 	case "open_session":
 		agentSessionID := stringParam(params, "agentSessionId")
@@ -740,6 +854,9 @@ func (r *runtimeServer) dispatch(method string, params map[string]json.RawMessag
 	case "close_session":
 		return map[string]bool{"ok": true}, false, r.closeSession(stringParam(params, "agentSessionId"))
 	case "validate_session":
+		if r.plDebugRuntime {
+			return nil, false, errors.New("dedicated PL/SQL sessions cannot reconnect")
+		}
 		agentSessionID := stringParam(params, "agentSessionId")
 		session, err := r.session(agentSessionID)
 		if err != nil {
@@ -757,6 +874,9 @@ func (r *runtimeServer) dispatch(method string, params map[string]json.RawMessag
 		}
 		return map[string]bool{"ok": true}, false, nil
 	case "cancel_session":
+		if r.plDebugRuntime {
+			return nil, false, errors.New("use the original PL/SQL operation cancellation")
+		}
 		session, err := r.session(stringParam(params, "agentSessionId"))
 		if err != nil {
 			return nil, false, err
@@ -764,6 +884,9 @@ func (r *runtimeServer) dispatch(method string, params map[string]json.RawMessag
 		session.server.cancelActiveQuery()
 		return map[string]bool{"ok": true}, false, nil
 	case "test_connection":
+		if r.plDebugRuntime {
+			return nil, false, errors.New("dedicated PL/SQL runtime cannot open test connections")
+		}
 		return newServer().dispatch(method, params)
 	case "shutdown":
 		return map[string]bool{"ok": true}, true, r.closeAllSessions()
@@ -789,6 +912,9 @@ func (r *runtimeServer) withSession(agentSessionID, method string, params map[st
 	if err != nil {
 		return nil, false, err
 	}
+	if r.plDebugRuntime && method != "pl_debug_probe" {
+		return nil, false, errors.New("native PL/SQL dispatcher is not yet available")
+	}
 	// Oracle connection state, transactions, and cursors are session-scoped;
 	// serialize one session while allowing separate sessions to run in parallel.
 	session.mu.Lock()
@@ -806,7 +932,24 @@ func (r *runtimeServer) openSession(agentSessionID string, params connectParams)
 		r.mu.Unlock()
 		return fmt.Errorf("agent session limit reached: %d", maxAgentSessions)
 	}
+	if r.plDebugRuntime && len(r.sessions) != 0 {
+		r.mu.Unlock()
+		return errors.New("dedicated PL/SQL runtime already owns its logical session")
+	}
+	if r.plDebugRuntime && (len(r.plNativeEntries) != 0 || r.nativeCompileUnresolvedLocked()) {
+		r.mu.Unlock()
+		return errors.New("dedicated PL/SQL runtime retains its original operation receipt")
+	}
 	session := &agentSession{server: newServer()}
+	if r.plDebugRuntime {
+		connector, err := r.plDebugConnector(params)
+		if err != nil {
+			r.mu.Unlock()
+			return err
+		}
+		session.server.plAllocation = &plDebugAllocation{connector: connector, oci: usesOCIProfile(params)}
+		session.server.plConnector = r.plDebugConnector
+	}
 	r.sessions[agentSessionID] = session
 	r.mu.Unlock()
 
@@ -817,7 +960,7 @@ func (r *runtimeServer) openSession(agentSessionID string, params connectParams)
 	session.mu.Unlock()
 	if err != nil {
 		r.mu.Lock()
-		if r.sessions[agentSessionID] == session {
+		if !r.plDebugRuntime && r.sessions[agentSessionID] == session {
 			delete(r.sessions, agentSessionID)
 		}
 		r.mu.Unlock()
@@ -827,6 +970,9 @@ func (r *runtimeServer) openSession(agentSessionID string, params connectParams)
 }
 
 func (r *runtimeServer) replaceSession(agentSessionID string, params connectParams) error {
+	if r.plDebugRuntime {
+		return errors.New("dedicated PL/SQL runtime cannot replace its logical session")
+	}
 	_ = r.closeSession(agentSessionID)
 	return r.openSession(agentSessionID, params)
 }
@@ -845,22 +991,80 @@ func (r *runtimeServer) session(agentSessionID string) (*agentSession, error) {
 }
 
 func (r *runtimeServer) closeSession(agentSessionID string) error {
+	if r.plDebugRuntime {
+		r.mu.RLock()
+		var entry *plDebugNativeEntry
+		for _, candidate := range r.plNativeEntries {
+			if candidate.agentSessionID == agentSessionID {
+				entry = candidate
+				break
+			}
+		}
+		r.mu.RUnlock()
+		if entry != nil {
+			_, err := entry.close()
+			if err != nil {
+				return err
+			}
+			entry.mu.Lock()
+			released, message := entry.releaseState == "released", entry.cleanupError
+			entry.mu.Unlock()
+			if !released {
+				return errors.New(message)
+			}
+			return nil
+		}
+	}
+	return r.closeNativeLogicalSession(agentSessionID)
+}
+
+func (r *runtimeServer) closeNativeLogicalSession(agentSessionID string) error {
 	if agentSessionID == "" {
 		return errors.New("agentSessionId is required")
 	}
 	r.mu.Lock()
 	session := r.sessions[agentSessionID]
-	delete(r.sessions, agentSessionID)
+	if !r.plDebugRuntime {
+		delete(r.sessions, agentSessionID)
+	}
 	r.mu.Unlock()
 	if session == nil {
 		return nil
 	}
+	if r.plDebugRuntime {
+		if err := session.server.closeNativeAllocations(); err != nil {
+			return err
+		}
+	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	return session.server.disconnect()
+	err := session.server.disconnect()
+	if r.plDebugRuntime && err == nil {
+		r.mu.Lock()
+		if r.sessions[agentSessionID] == session {
+			delete(r.sessions, agentSessionID)
+		}
+		r.mu.Unlock()
+	}
+	return err
 }
 
 func (r *runtimeServer) closeAllSessions() error {
+	if r.plDebugRuntime {
+		r.mu.RLock()
+		ids := make([]string, 0, len(r.sessions))
+		for id := range r.sessions {
+			ids = append(ids, id)
+		}
+		r.mu.RUnlock()
+		var firstErr error
+		for _, id := range ids {
+			if err := r.closeSession(id); firstErr == nil && err != nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
 	r.mu.Lock()
 	sessions := r.sessions
 	r.sessions = map[string]*agentSession{}
@@ -888,14 +1092,14 @@ func newServer() *server {
 func (s *server) handleLine(line string) (response, bool) {
 	var req request
 	if err := json.Unmarshal([]byte(line), &req); err != nil {
-		return errorResponse(nil, err), false
+		return errorResponse(nil, err, "", ""), false
 	}
 	if len(req.ID) == 0 {
 		req.ID = json.RawMessage("1")
 	}
 	result, shutdown, err := s.dispatch(req.Method, req.Params)
 	if err != nil {
-		return errorResponse(req.ID, err), false
+		return errorResponse(req.ID, err, req.Method, ""), false
 	}
 	return response{JSONRPC: "2.0", ID: req.ID, Result: result}, shutdown
 }
@@ -911,7 +1115,7 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return map[string]any{
 			"protocolVersion":      protocolVersion,
 			"agentProtocolVersion": protocolVersion,
-			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl"},
+			"capabilities":         []string{"connect", "test_connection", "metadata", "query", "transaction", "ddl", "native_job_legacy_v1", "exact_metadata_identity_v1"},
 		}, false, nil
 	case "connect":
 		var cp connectParams
@@ -935,6 +1139,9 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 			return nil, false, errors.New("not connected")
 		}
 		return map[string]bool{"ok": true}, false, pingDB(s.db, 5*time.Second)
+	case "connection_info":
+		result, err := s.connectionInfo()
+		return result, false, err
 	case "list_databases":
 		result, err := s.listDatabases()
 		return result, false, err
@@ -947,7 +1154,13 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return result, false, err
 	case "list_objects":
 		schema := stringParam(params, "schema")
-		result, err := s.listObjects(schema, metadataListConstraintsFromParams(params))
+		exact, err := exactMetadataReadParam(params)
+		if err != nil {
+			return nil, false, err
+		}
+		constraints := metadataListConstraintsFromParams(params)
+		constraints.Exact = exact
+		result, err := s.listObjects(schema, constraints)
 		return result, false, err
 	case "completion_assistant_search_v1":
 		var request completionAssistantRequest
@@ -959,25 +1172,47 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 	case "get_columns":
 		schema := stringParam(params, "schema")
 		table := stringParam(params, "table")
-		result, err := s.getColumns(schema, table)
+		result, err := s.getColumnsWithIdentity(schema, table, boolParam(params, "exact_identity"))
 		return result, false, err
 	case "get_table_comment":
 		schema := stringParam(params, "schema")
 		table := stringParam(params, "table")
-		result, err := s.getTableComment(schema, table)
+		result, err := s.getTableCommentWithIdentity(schema, table, boolParam(params, "exact_identity"))
 		return result, false, err
 	case "get_object_source":
 		schema := stringParam(params, "schema")
 		name := stringParam(params, "name")
 		objectType := stringParam(params, "object_type")
+		exact, err := exactMetadataReadParam(params)
+		if err != nil {
+			return nil, false, err
+		}
+		if exact && strings.EqualFold(objectType, "TRIGGER") {
+			source, err := s.getExactTriggerSource(schema, name)
+			return source, false, err
+		}
 		source, err := s.getObjectSource(schema, name, objectType)
+		if err == nil && boolParam(params, "include_source_origin") {
+			switch strings.ToUpper(objectType) {
+			case "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY":
+				source["source_origin"] = "oracle-dictionary"
+			}
+		}
 		return source, false, err
 	case "get_table_ddl":
 		schema := stringParam(params, "schema")
 		table := stringParam(params, "table")
 		objectType := stringParam(params, "object_type")
-		ddl, err := s.getTableDDLWithOptions(schema, table, objectType, boolParam(params, "portable"))
+		ddl, err := s.getTableDDLWithIdentity(schema, table, objectType, boolParam(params, "portable"), boolParam(params, "exact_identity"))
 		return ddl, false, err
+	case "pl_debug_probe":
+		return s.plDebugProbe(), false, nil
+	case "pl_debug_inspect":
+		result, err := s.plDebugInspect(params)
+		return result, false, err
+	case "pl_debug_resolve_target":
+		preview, err := s.previewNativeTarget(params)
+		return preview, false, err
 	case "execute_query":
 		var opts queryOptions
 		if err := decodeParams(params, &opts); err != nil {
@@ -1012,22 +1247,30 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 	case "list_indexes":
 		schema := stringParam(params, "schema")
 		table := stringParam(params, "table")
-		result, err := s.listIndexes(schema, table)
+		result, err := s.listIndexesWithIdentity(schema, table, boolParam(params, "exact_identity"))
 		return result, false, err
 	case "list_foreign_keys":
 		schema := stringParam(params, "schema")
 		table := stringParam(params, "table")
-		result, err := s.listForeignKeys(schema, table)
+		result, err := s.listForeignKeysWithIdentity(schema, table, boolParam(params, "exact_identity"))
 		return result, false, err
 	case "list_constraints":
 		schema := stringParam(params, "schema")
 		table := stringParam(params, "table")
-		result, err := s.listConstraints(schema, table)
+		result, err := s.listConstraintsWithIdentity(schema, table, boolParam(params, "exact_identity"))
 		return result, false, err
 	case "list_triggers":
 		schema := stringParam(params, "schema")
 		table := stringParam(params, "table")
-		result, err := s.listTriggers(schema, table)
+		exact, err := exactMetadataReadParam(params)
+		if err != nil {
+			return nil, false, err
+		}
+		if exact {
+			result, err := s.listExactTriggers(schema, table)
+			return result, false, err
+		}
+		result, err := s.listTriggersWithIdentity(schema, table, boolParam(params, "exact_identity"))
 		return result, false, err
 	case "get_explain_info":
 		sqlText := stringParam(params, "sql")
@@ -1043,6 +1286,16 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return result, false, err
 	case "begin_manual_transaction":
 		return map[string]bool{"ok": true}, false, s.beginManualTransaction(stringParam(params, "schema"))
+	case "prepare_legacy_job":
+		var request legacyJobPrepareRequest
+		if err := decodeParams(params, &request); err != nil {
+			return legacyJobResult{Phase: "not_started", Reason: "native_job_request_invalid"}, false, nil
+		}
+		return s.prepareLegacyJob(request), false, nil
+	case "commit_legacy_job", "rollback_legacy_job":
+		return s.finishLegacyJob(stringParam(params, "operationId"), stringParam(params, "jobId"), method == "commit_legacy_job"), false, nil
+	case "legacy_job_status":
+		return s.legacyJobStatus(stringParam(params, "operationId")), false, nil
 	case "commit_manual_transaction":
 		return map[string]bool{"ok": true}, false, s.commitManualTransaction()
 	case "rollback_manual_transaction":
@@ -1058,6 +1311,17 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 }
 
 func (s *server) connect(params connectParams) error {
+	if s.plAllocation != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), plDebugOpenTimeout)
+		defer cancel()
+		s.params = params
+		db, conn, err := s.plAllocation.open(ctx)
+		if err != nil {
+			return err
+		}
+		s.db, s.plConnection = db, conn
+		return nil
+	}
 	_ = s.disconnect()
 	db, err := openConfiguredSessionDB(params, 15*time.Second)
 	if err != nil {
@@ -1125,6 +1389,9 @@ func oracleServerMajorVersionFromDBConn(ctx context.Context, db *sql.DB) (int, b
 func oracleServerMajorVersionFromDriverConn(driverConn any) (int, bool) {
 	if guarded, ok := driverConn.(*oracleQueryConnection); ok {
 		driverConn = guarded.oracleThinConnection
+	}
+	if legacy, ok := driverConn.(*oracleLegacyConnection); ok {
+		driverConn = legacy.oracleThinConnection
 	}
 	conn, ok := driverConn.(*go_ora.Connection)
 	if !ok {
@@ -1229,14 +1496,32 @@ func withOracleLOBFetchPost(params connectParams) connectParams {
 }
 
 func (s *server) disconnect() error {
+	if s.plDebuggeeConnection != nil {
+		_ = s.plDebuggeeConnection.Close()
+		s.plDebuggeeConnection = nil
+	}
+	if s.plDebuggeeDB != nil {
+		_ = s.plDebuggeeDB.Close()
+		s.plDebuggeeDB = nil
+	}
+	s.plDebuggeeTx = nil
+	if s.plConnection != nil {
+		_ = s.plConnection.Close()
+		s.plConnection = nil
+	}
 	s.closeAllQuerySessions()
 	_ = s.rollbackManualTransactionQuiet()
+	jobErr := s.closeLegacyJob()
+	s.dbmsOutput.reset()
 	s.legacyLOBFetchDeferred = false
 	if s.db == nil {
-		return nil
+		return jobErr
 	}
 	err := s.db.Close()
 	s.db = nil
+	if jobErr != nil {
+		return jobErr
+	}
 	return err
 }
 
@@ -1315,19 +1600,15 @@ func openDB(params connectParams) (*sql.DB, error) {
 
 func openDBWithStringConverter(params connectParams, stringConverter converters.IStringConverter) (*sql.DB, error) {
 	if usesOCIProfile(params) {
-		// OCI 由 Oracle 客户端负责字符集转换（NLS_LANG 在进程环境里生效），
-		// go-ora 的 string converter 机制不适用于它。
+		// godror uses UTF-8 explicitly; NLS_LANG does not override its data
+		// encoding. Legacy US7ASCII byte interpretation belongs to Thin.
 		return openOCIDB(params)
 	}
-	dsn, err := buildDSNForConnect(params)
+	connector, err := newOracleThinConnector(params, stringConverter)
 	if err != nil {
 		return nil, err
 	}
-	connector := go_ora.NewConnector(dsn)
-	if stringConverter != nil {
-		go_ora.SetStringConverter(connector, stringConverter, nil)
-	}
-	db := sql.OpenDB(oracleQueryConnector{connector})
+	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(30 * time.Minute)
@@ -1758,6 +2039,17 @@ func (s *server) currentSchema() (string, error) {
 		}
 		return strings.ToUpper(schema), nil
 	}
+	// The connection pinned for a statement's DBMS_OUTPUT capture carries the
+	// statement's CURRENT_SCHEMA the same way.
+	if s.statementConn != nil {
+		if err := s.repinPoisonedStatementConn(); err != nil {
+			return "", err
+		}
+		if err := s.statementConn.QueryRowContext(s.statementContext(), sqlText).Scan(&schema); err != nil {
+			return "", err
+		}
+		return strings.ToUpper(schema), nil
+	}
 	db, err := s.requireDB()
 	if err != nil {
 		return "", err
@@ -1772,6 +2064,16 @@ func (s *server) normalizeSchema(schema string) (string, error) {
 	return resolveOracleSchema(schema, s.currentSchema, s.sessionUser)
 }
 
+func (s *server) metadataSchema(schema string, exactIdentity bool) (string, error) {
+	if !exactIdentity {
+		return s.normalizeSchema(schema)
+	}
+	if schema == "" {
+		return "", errors.New("schema is required for exact metadata identity")
+	}
+	return schema, nil
+}
+
 func resolveOracleSchema(schema string, currentSchema, sessionUser func() (string, error)) (string, error) {
 	if schema = strings.TrimSpace(schema); schema != "" {
 		return strings.ToUpper(schema), nil
@@ -1783,6 +2085,11 @@ func resolveOracleSchema(schema string, currentSchema, sessionUser func() (strin
 }
 
 func (s *server) sessionUser() (string, error) {
+	username, err := s.rawSessionUser()
+	return strings.ToUpper(username), err
+}
+
+func (s *server) rawSessionUser() (string, error) {
 	db, err := s.requireDB()
 	if err != nil {
 		return "", err
@@ -1791,12 +2098,20 @@ func (s *server) sessionUser() (string, error) {
 	if err := db.QueryRow("SELECT SYS_CONTEXT('USERENV', 'SESSION_USER') FROM DUAL").Scan(&username); err != nil {
 		return "", err
 	}
-	return strings.ToUpper(username), nil
+	return username, nil
 }
 
 func (s *server) schemaIsSessionUser(schema string) bool {
 	username, err := s.sessionUser()
 	return err == nil && strings.EqualFold(schema, username)
+}
+
+func (s *server) metadataSchemaIsSessionUser(schema string, exactIdentity bool) bool {
+	if !exactIdentity {
+		return s.schemaIsSessionUser(schema)
+	}
+	username, err := s.rawSessionUser()
+	return err == nil && schema == username
 }
 
 type oracleMetadataListQuery struct {
@@ -1818,10 +2133,11 @@ func metadataListConstraintsFromParams(params map[string]json.RawMessage) metada
 		offset = 0
 	}
 	return metadataListConstraints{
-		Filter:      stringParam(params, "filter"),
-		Limit:       limit,
-		Offset:      offset,
-		ObjectTypes: objectTypes,
+		Filter:        stringParam(params, "filter"),
+		Limit:         limit,
+		Offset:        offset,
+		ObjectTypes:   objectTypes,
+		ExactIdentity: boolParam(params, "exact_identity"),
 	}
 }
 
@@ -1848,20 +2164,40 @@ func oracleListSessionUserTablesQuery(constraints metadataListConstraints) oracl
 }
 
 func oracleListObjectsQuery(schema string, constraints metadataListConstraints) oracleMetadataListQuery {
+	return oracleListObjectsQueryWithTypeOwner(schema, schema, constraints)
+}
+
+func oracleListObjectsQueryWithTypeOwner(schema, typeOwner string, constraints metadataListConstraints) oracleMetadataListQuery {
+	baseSQL := oracleListObjectsBaseSQL + `
+UNION ALL
+SELECT o.OBJECT_NAME,
+       CASE o.OBJECT_TYPE WHEN 'TYPE BODY' THEN 'TYPE_BODY' ELSE o.OBJECT_TYPE END AS OBJECT_TYPE,
+       CAST(NULL AS VARCHAR2(4000)) AS COMMENTS,
+       CAST(NULL AS VARCHAR2(128)) AS PARENT_SCHEMA,
+       CAST(NULL AS VARCHAR2(128)) AS PARENT_NAME
+FROM ALL_OBJECTS o
+WHERE o.OWNER = :4 AND o.OBJECT_TYPE IN ('TYPE', 'TYPE BODY')`
+	if constraints.Exact {
+		baseSQL = strings.Replace(baseSQL, "'PACKAGE BODY', 'INDEX')", "'PACKAGE BODY', 'INDEX', 'TRIGGER')", 1)
+	}
 	return oracleConstrainedMetadataListQuery(
-		oracleListObjectsBaseSQL,
-		"OBJECT_NAME, OBJECT_TYPE, COMMENTS",
+		baseSQL,
+		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, PARENT_SCHEMA, PARENT_NAME",
 		"OBJECT_TYPE",
 		oracleListObjectsOrderSQL,
-		[]any{schema, schema, schema},
+		[]any{schema, schema, schema, typeOwner},
 		constraints,
 	)
 }
 
 func oracleListSessionUserObjectsQuery(constraints metadataListConstraints) oracleMetadataListQuery {
+	baseSQL := oracleListObjectsSessionUserBaseSQL
+	if constraints.Exact {
+		baseSQL = strings.Replace(baseSQL, "'PACKAGE BODY', 'INDEX', 'TYPE', 'TYPE BODY')", "'PACKAGE BODY', 'INDEX', 'TYPE', 'TYPE BODY', 'TRIGGER')", 1)
+	}
 	return oracleConstrainedMetadataListQuery(
-		oracleListObjectsSessionUserBaseSQL,
-		"OBJECT_NAME, OBJECT_TYPE, COMMENTS",
+		baseSQL,
+		"OBJECT_NAME, OBJECT_TYPE, COMMENTS, PARENT_SCHEMA, PARENT_NAME",
 		"OBJECT_TYPE",
 		oracleListObjectsOrderSQL,
 		nil,
@@ -1954,17 +2290,17 @@ func oracleFuzzyLikePattern(value string) string {
 }
 
 func (s *server) listTables(schema string, constraints metadataListConstraints) ([]tableInfo, error) {
-	schema, err := s.normalizeSchema(schema)
+	schema, err := s.metadataSchema(schema, constraints.ExactIdentity)
 	if err != nil {
 		return nil, err
 	}
 	query := oracleListTablesQuery(schema, constraints)
-	if s.schemaIsSessionUser(schema) {
+	if s.metadataSchemaIsSessionUser(schema, constraints.ExactIdentity) {
 		query = oracleListSessionUserTablesQuery(constraints)
 	}
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
-		if isOraclePGALimitError(err) {
+		if isOraclePGALimitError(err) && !constraints.ExactIdentity {
 			return []tableInfo{}, nil
 		}
 		return nil, err
@@ -1982,17 +2318,22 @@ func (s *server) listTables(schema string, constraints metadataListConstraints) 
 }
 
 func (s *server) listObjects(schema string, constraints metadataListConstraints) ([]objectInfo, error) {
-	schema, err := s.normalizeSchema(schema)
+	rawTypeOwner := schema
+	schema, err := s.metadataSchema(schema, constraints.Exact || constraints.ExactIdentity)
 	if err != nil {
 		return nil, err
 	}
-	query := oracleListObjectsQuery(schema, constraints)
-	if s.schemaIsSessionUser(schema) {
+	if rawTypeOwner == "" {
+		rawTypeOwner = schema
+	}
+	query := oracleListObjectsQueryWithTypeOwner(schema, rawTypeOwner, constraints)
+	useSessionUser := !constraints.Exact && rawTypeOwner == schema && s.metadataSchemaIsSessionUser(schema, constraints.ExactIdentity)
+	if useSessionUser {
 		query = oracleListSessionUserObjectsQuery(constraints)
 	}
 	rows, err := s.queryRows(query.SQL, query.Args)
 	if err != nil {
-		if isOraclePGALimitError(err) {
+		if isOraclePGALimitError(err) && !constraints.Exact && !constraints.ExactIdentity && !metadataIncludesIndexes(constraints.ObjectTypes) {
 			return []objectInfo{}, nil
 		}
 		return nil, err
@@ -2001,13 +2342,32 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 	var result []objectInfo
 	for rows.Next() {
 		var item objectInfo
-		item.Schema = schema
-		if err := rows.Scan(&item.Name, &item.ObjectType, &item.Comment); err != nil {
+		if err := rows.Scan(&item.Name, &item.ObjectType, &item.Comment, &item.ParentSchema, &item.ParentName); err != nil {
 			return nil, err
+		}
+		item.Schema = schema
+		if strings.EqualFold(item.ObjectType, "TYPE") || strings.EqualFold(item.ObjectType, "TYPE_BODY") {
+			item.Schema = rawTypeOwner
 		}
 		result = append(result, item)
 	}
-	return emptyIfNil(result), rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	s.closeRows(rows)
+	if constraints.Exact {
+		s.enrichExactTriggerObjects(result, schema)
+	}
+	return emptyIfNil(result), nil
+}
+
+func metadataIncludesIndexes(objectTypes []string) bool {
+	for _, objectType := range normalizedMetadataObjectTypes(objectTypes) {
+		if objectType == "INDEX" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *server) completionAssistantSearch(request completionAssistantRequest) (completionAssistantResponse, error) {
@@ -2658,9 +3018,16 @@ func oracleObjectNameCandidates(name string) (string, string, bool) {
 }
 
 func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
-	schema, err := s.normalizeSchema(schema)
+	return s.getColumnsWithIdentity(schema, table, false)
+}
+
+func (s *server) getColumnsWithIdentity(schema, table string, exactIdentity bool) ([]columnInfo, error) {
+	schema, err := s.metadataSchema(schema, exactIdentity)
 	if err != nil {
 		return nil, err
+	}
+	if exactIdentity {
+		return s.getColumnsByName(schema, table)
 	}
 	exact, uppercase, hasUppercaseFallback := oracleObjectNameCandidates(table)
 	result, err := s.getColumnsByName(schema, exact)
@@ -2726,9 +3093,17 @@ ORDER BY c.COLUMN_ID`, []any{schema, table})
 }
 
 func (s *server) getTableComment(schema, table string) (*string, error) {
-	schema, err := s.normalizeSchema(schema)
+	return s.getTableCommentWithIdentity(schema, table, false)
+}
+
+func (s *server) getTableCommentWithIdentity(schema, table string, exactIdentity bool) (*string, error) {
+	schema, err := s.metadataSchema(schema, exactIdentity)
 	if err != nil {
 		return nil, err
+	}
+	if exactIdentity {
+		comment, _, err := s.getTableCommentByName(schema, table)
+		return comment, err
 	}
 	exact, uppercase, hasUppercaseFallback := oracleObjectNameCandidates(table)
 	comment, found, err := s.getTableCommentByName(schema, exact)
@@ -2801,11 +3176,17 @@ ORDER BY COLUMN_ID`, []any{schema, table})
 }
 
 func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
-	schema, err := s.normalizeSchema(schema)
+	return s.listIndexesWithIdentity(schema, table, false)
+}
+
+func (s *server) listIndexesWithIdentity(schema, table string, exactIdentity bool) ([]indexInfo, error) {
+	schema, err := s.metadataSchema(schema, exactIdentity)
 	if err != nil {
 		return nil, err
 	}
-	table = strings.TrimSpace(table)
+	if !exactIdentity {
+		table = strings.TrimSpace(table)
+	}
 	rows, err := s.queryRows(`
 SELECT i.INDEX_NAME,
        ic.COLUMN_NAME,
@@ -2816,7 +3197,7 @@ SELECT i.INDEX_NAME,
        i.VISIBILITY,
        ic.DESCEND,
        ie.COLUMN_EXPRESSION,
-       ic.COLUMN_POSITION
+       ic.COLUMN_POSITION, i.OWNER
 FROM ALL_INDEXES i
 JOIN ALL_IND_COLUMNS ic ON ic.INDEX_OWNER = i.OWNER AND ic.INDEX_NAME = i.INDEX_NAME
   AND ic.TABLE_OWNER = i.TABLE_OWNER AND ic.TABLE_NAME = i.TABLE_NAME
@@ -2826,27 +3207,30 @@ LEFT JOIN ALL_CONSTRAINTS pk ON pk.OWNER = i.TABLE_OWNER
   AND pk.TABLE_NAME = i.TABLE_NAME
   AND pk.CONSTRAINT_TYPE = 'P'
   AND pk.INDEX_NAME = i.INDEX_NAME
+  AND pk.INDEX_OWNER = i.OWNER
 WHERE i.TABLE_OWNER = :1 AND i.TABLE_NAME = :2
-ORDER BY i.INDEX_NAME, ic.COLUMN_POSITION`, []any{schema, table})
+ORDER BY i.OWNER, i.INDEX_NAME, ic.COLUMN_POSITION`, []any{schema, table})
 	if err != nil {
 		return nil, err
 	}
 	defer s.closeRows(rows)
 
-	byName := map[string]*indexInfo{}
-	order := []string{}
+	byName := map[[2]string]*indexInfo{}
+	order := [][2]string{}
 	for rows.Next() {
-		var name, column, uniqueness, indexType, partitioned, visibility, direction string
+		var name, column, uniqueness, indexType, partitioned, visibility, direction, owner string
 		var expression sql.NullString
 		var primary int
 		var position int
-		if err := rows.Scan(&name, &column, &uniqueness, &primary, &indexType, &partitioned, &visibility, &direction, &expression, &position); err != nil {
+		if err := rows.Scan(&name, &column, &uniqueness, &primary, &indexType, &partitioned, &visibility, &direction, &expression, &position, &owner); err != nil {
 			return nil, err
 		}
-		item := byName[name]
+		identity := [2]string{owner, name}
+		item := byName[identity]
 		if item == nil {
 			visible := visibility
 			item = &indexInfo{
+				Owner:               &owner,
 				Name:                name,
 				Columns:             []string{},
 				IsUnique:            uniqueness == "UNIQUE",
@@ -2858,8 +3242,8 @@ ORDER BY i.INDEX_NAME, ic.COLUMN_POSITION`, []any{schema, table})
 				Visibility:          &visible,
 				KeyMetadataComplete: true,
 			}
-			byName[name] = item
-			order = append(order, name)
+			byName[identity] = item
+			order = append(order, identity)
 		}
 		if position != len(item.Columns)+1 || (direction != "ASC" && direction != "DESC") || (visibility != "VISIBLE" && visibility != "INVISIBLE") || item.Visibility == nil || *item.Visibility != visibility || partitioned != "NO" || (indexType != "NORMAL" && indexType != "FUNCTION-BASED NORMAL") {
 			item.KeyMetadataComplete = false
@@ -2886,11 +3270,17 @@ ORDER BY i.INDEX_NAME, ic.COLUMN_POSITION`, []any{schema, table})
 }
 
 func (s *server) listForeignKeys(schema, table string) ([]foreignKeyInfo, error) {
-	schema, err := s.normalizeSchema(schema)
+	return s.listForeignKeysWithIdentity(schema, table, false)
+}
+
+func (s *server) listForeignKeysWithIdentity(schema, table string, exactIdentity bool) ([]foreignKeyInfo, error) {
+	schema, err := s.metadataSchema(schema, exactIdentity)
 	if err != nil {
 		return nil, err
 	}
-	table = strings.TrimSpace(table)
+	if !exactIdentity {
+		table = strings.TrimSpace(table)
+	}
 	rows, err := s.queryRows(`
 SELECT ac.CONSTRAINT_NAME,
        acc.COLUMN_NAME,
@@ -2954,11 +3344,22 @@ func oracleSystemNotNullConstraint(kind string, generated sql.NullString, defini
 // only contains constraints a user would recognize as such, matching how
 // tools like DBeaver/Navicat present Oracle constraints.
 func (s *server) listConstraints(schema, table string) ([]constraintInfo, error) {
-	schema, err := s.normalizeSchemaForIdentity(schema)
+	return s.listConstraintsWithIdentity(schema, table, false)
+}
+
+func (s *server) listConstraintsWithIdentity(schema, table string, exactIdentity bool) ([]constraintInfo, error) {
+	var err error
+	if exactIdentity {
+		schema, err = s.metadataSchema(schema, true)
+	} else {
+		schema, err = s.normalizeSchemaForIdentity(schema)
+	}
 	if err != nil {
 		return nil, err
 	}
-	table = strings.TrimSpace(table)
+	if !exactIdentity {
+		table = strings.TrimSpace(table)
+	}
 	// SEARCH_CONDITION is a LONG column: Oracle rejects LONG values in WHERE
 	// clauses, functions, or ORDER BY (ORA-00932), so it can only appear in
 	// the SELECT list here. The NOT-NULL-check exclusion below is therefore
@@ -3148,11 +3549,17 @@ WHERE OWNER = :1 AND TABLE_NAME = :2 AND INDEX_OWNER = :3 AND INDEX_NAME = :4
 }
 
 func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
-	schema, err := s.normalizeSchema(schema)
+	return s.listTriggersWithIdentity(schema, table, false)
+}
+
+func (s *server) listTriggersWithIdentity(schema, table string, exactIdentity bool) ([]triggerInfo, error) {
+	schema, err := s.metadataSchema(schema, exactIdentity)
 	if err != nil {
 		return nil, err
 	}
-	table = strings.TrimSpace(table)
+	if !exactIdentity {
+		table = strings.TrimSpace(table)
+	}
 	rows, err := s.queryRows(oracleListTriggersSQL, []any{schema, table})
 	if err != nil {
 		return nil, err
@@ -3263,12 +3670,52 @@ func oracleTriggerBody(source, description string) (string, bool) {
 }
 
 func (s *server) getObjectSource(schema, name, objectType string) (map[string]any, error) {
+	upperType := strings.ToUpper(objectType)
+	if upperType == "TYPE" || upperType == "TYPE_BODY" || upperType == "TYPE BODY" {
+		if schema == "" {
+			var err error
+			schema, err = s.normalizeSchemaForIdentity(schema)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if upperType != "TYPE" {
+			upperType = "TYPE BODY"
+		}
+		source, found, sourceErr := s.loadObjectSourceText(schema, name, upperType)
+		if sourceErr != nil || !found || strings.TrimSpace(source) == "" {
+			db, dbErr := s.requireDB()
+			if dbErr != nil {
+				if sourceErr != nil {
+					return nil, errors.Join(sourceErr, dbErr)
+				}
+				return nil, dbErr
+			}
+			ddlType := "TYPE"
+			if upperType == "TYPE BODY" {
+				ddlType = "TYPE_BODY"
+			}
+			var ddl sql.NullString
+			ddlErr := db.QueryRow("SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) FROM DUAL", ddlType, name, schema).Scan(&ddl)
+			if ddlErr == nil && ddl.Valid && strings.TrimSpace(ddl.String) != "" {
+				source = ddl.String
+			} else {
+				if ddlErr == nil {
+					ddlErr = fmt.Errorf("empty source returned")
+				}
+				if sourceErr != nil {
+					return nil, errors.Join(sourceErr, ddlErr)
+				}
+				return nil, ddlErr
+			}
+		}
+		return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": source, "editable": false}, nil
+	}
 	var err error
 	schema, err = s.normalizeSchemaForIdentity(schema)
 	if err != nil {
 		return nil, err
 	}
-	upperType := strings.ToUpper(objectType)
 	if upperType == "VIEW" {
 		source, err := s.getViewSource(schema, name)
 		if err != nil {
@@ -3282,8 +3729,12 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 
 	// Unquoted Oracle identifiers are stored uppercase; quoted mixed-case names must stay exact.
 	// Try caller-provided identity first, then uppercase fallback (same pattern as column metadata).
+	dictionaryType := upperType
+	if dictionaryType == "PACKAGE_BODY" {
+		dictionaryType = "PACKAGE BODY"
+	}
 	for _, candidate := range oracleObjectIdentityNameCandidates(name) {
-		source, found, queryErr := s.loadObjectSourceText(schema, candidate, upperType)
+		source, found, queryErr := s.loadObjectSourceText(schema, candidate, dictionaryType)
 		if queryErr != nil {
 			return nil, queryErr
 		}
@@ -3399,8 +3850,12 @@ func (s *server) getTableDDL(schema, table, objectType string) (string, error) {
 }
 
 func (s *server) getTableDDLWithOptions(schema, table, objectType string, portable bool) (string, error) {
+	return s.getTableDDLWithIdentity(schema, table, objectType, portable, false)
+}
+
+func (s *server) getTableDDLWithIdentity(schema, table, objectType string, portable, exactIdentity bool) (string, error) {
 	var err error
-	schema, err = s.normalizeSchema(schema)
+	schema, err = s.metadataSchema(schema, exactIdentity)
 	if err != nil {
 		return "", err
 	}
@@ -3408,7 +3863,7 @@ func (s *server) getTableDDLWithOptions(schema, table, objectType string, portab
 	if err != nil {
 		return "", err
 	}
-	objectType, table, err = s.resolveDDLObject(schema, table, objectType)
+	objectType, table, err = s.resolveDDLObjectWithIdentity(schema, table, objectType, exactIdentity)
 	if err != nil {
 		return "", err
 	}
@@ -3447,6 +3902,12 @@ func (s *server) getTableDDLWithOptions(schema, table, objectType string, portab
 		return ddl, nil
 	}
 	if objectType == "TABLE" {
+		if exactIdentity {
+			if err != nil {
+				return "", err
+			}
+			return "", errors.New("exact table DDL is unavailable")
+		}
 		fallback, fallbackErr := s.buildTableDDL(schema, table)
 		if fallbackErr != nil {
 			return "", fallbackErr
@@ -3530,6 +3991,7 @@ WHERE i.TABLE_OWNER = :1
       AND c.TABLE_NAME = :4
       AND c.CONSTRAINT_TYPE IN ('P', 'U')
       AND c.INDEX_NAME IS NOT NULL
+      AND c.INDEX_OWNER = i.OWNER
   )
 ORDER BY i.INDEX_NAME`
 
@@ -3654,7 +4116,14 @@ func oracleStringLiteral(value string) string {
 }
 
 func (s *server) resolveDDLObject(schema, name, requested string) (string, string, error) {
+	return s.resolveDDLObjectWithIdentity(schema, name, requested, false)
+}
+
+func (s *server) resolveDDLObjectWithIdentity(schema, name, requested string, exactIdentity bool) (string, string, error) {
 	exact, uppercase, hasUppercaseFallback := oracleObjectNameCandidates(name)
+	if exactIdentity {
+		exact, hasUppercaseFallback = name, false
+	}
 	objectType := normalizeDDLObjectType(requested)
 	if objectType != "" {
 		return objectType, exact, nil
@@ -4134,28 +4603,36 @@ func (s *server) executeTransaction(params map[string]json.RawMessage) (queryRes
 	if err := decodeParams(params, &payload); err != nil {
 		return queryResult{}, err
 	}
-	db, err := s.requireDB()
+	var result queryResult
+	var err error
+	messages := s.withStatementDBMSOutput(strings.Join(payload.Statements, "\n"), func() error {
+		result, err = s.executeTransactionStatements(payload.Statements, payload.Schema)
+		return err
+	})
+	result.Messages = append(result.Messages, messages...)
+	return result, err
+}
+
+func (s *server) executeTransactionStatements(statements []string, schema string) (queryResult, error) {
+	ctx := s.statementContext()
+	tx, err := s.beginStatementTx(ctx)
 	if err != nil {
 		return queryResult{}, err
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		return queryResult{}, err
-	}
-	if strings.TrimSpace(payload.Schema) != "" {
-		if _, err := tx.Exec("ALTER SESSION SET CURRENT_SCHEMA = " + quoteIdentifier(payload.Schema)); err != nil {
+	if strings.TrimSpace(schema) != "" {
+		if _, err := tx.ExecContext(ctx, "ALTER SESSION SET CURRENT_SCHEMA = "+quoteIdentifier(schema)); err != nil {
 			tx.Rollback()
 			return queryResult{}, err
 		}
 	}
 	var affected int64
 	start := time.Now()
-	for _, statement := range payload.Statements {
+	for _, statement := range statements {
 		statement = trimStatementSQL(statement)
 		if statement == "" {
 			continue
 		}
-		result, err := tx.Exec(statement)
+		result, err := tx.ExecContext(ctx, statement)
 		if err != nil {
 			tx.Rollback()
 			return queryResult{}, err
@@ -4175,6 +4652,24 @@ func (s *server) executeTransaction(params map[string]json.RawMessage) (queryRes
 }
 
 func (s *server) executeQueryPage(opts queryOptions, pageSize int) (queryPageResult, error) {
+	var result queryPageResult
+	var err error
+	conn, messages := s.withPagedStatementDBMSOutput(opts.SQL, func() error {
+		result, err = s.executeQueryPageWithoutOutput(opts, pageSize)
+		return err
+	})
+	result.Messages = append(result.Messages, messages...)
+	if conn != nil {
+		if err == nil && result.SessionID != nil {
+			s.sessions[*result.SessionID].conn = conn
+		} else {
+			_ = conn.Close()
+		}
+	}
+	return result, err
+}
+
+func (s *server) executeQueryPageWithoutOutput(opts queryOptions, pageSize int) (queryPageResult, error) {
 	start := time.Now()
 	if strings.TrimSpace(opts.Schema) != "" && !s.hasManualTransaction() {
 		if err := s.setSchema(opts.Schema); err != nil {
@@ -4217,15 +4712,37 @@ func (s *server) runPagedOracleSelect(sqlText string, opts queryOptions, pageSiz
 	// including panics while reading Columns/ColumnTypes before the first page.
 	var ownedRows *sql.Rows
 	defer func() { s.closeRows(ownedRows) }()
+	originalSQL := sqlText
 	for attempt := 0; ; attempt++ {
-		rows, err := s.queryRowsWithOracleValueRewriteIfNeeded(sqlText, opts.TimeoutSecs, opts.DeferLOBs)
+		// Only the first page may be retried: once rows have been returned the
+		// caller owns them and a second execution would duplicate data.
+		retrySQL := func(err error) (string, bool) {
+			if attempt > 1 || s.hasManualTransaction() || oracleSQLLocksRows(originalSQL) {
+				return "", false
+			}
+			if attempt == 1 {
+				// The retry itself failed. When it was a value rewrite the
+				// server cannot run, project geometry as placeholders instead.
+				return oracleGeometryFunctionFallbackSQL(originalSQL, s.loadOracleColumnMeta, err)
+			}
+			return oraclePagedRetrySQL(sqlText, s.loadOracleColumnMeta, err)
+		}
+		rows, err := s.queryRowsWithOracleValueRewriteIfNeeded(sqlText, opts.TimeoutSecs, deferLobsForQuery(sqlText, opts.DeferLOBs))
 		if err != nil {
+			if rewritten, ok := retrySQL(err); ok {
+				sqlText = rewritten
+				continue
+			}
 			return queryPageResult{}, nil, err
 		}
 		ownedRows = rows
 		columns, err := rows.Columns()
 		if err != nil {
 			s.closeRows(rows)
+			if rewritten, ok := retrySQL(err); ok {
+				sqlText = rewritten
+				continue
+			}
 			return queryPageResult{}, nil, err
 		}
 		columnTypes := columnTypeNames(rows)
@@ -4233,17 +4750,14 @@ func (s *server) runPagedOracleSelect(sqlText string, opts queryOptions, pageSiz
 		if maxRows <= 0 {
 			maxRows = defaultMaxRows
 		}
-		session := &querySession{rows: rows, columns: columns, columnTypes: columnTypes, remaining: maxRows}
+		session := &querySession{rows: rows, columns: columns, columnTypes: columnTypes, remaining: maxRows, outputIdentity: s.currentDBMSOutputIdentity()}
 		result, err := readQuerySessionPage(session, pageSize)
 		result.ExecutionTimeMS = time.Since(start).Milliseconds()
 		if err != nil {
 			s.closeRows(rows)
-			var panicErr oracleDriverPanicError
-			if attempt == 0 && !s.hasManualTransaction() && !oracleSQLLocksRows(sqlText) && errors.As(err, &panicErr) {
-				if placeholder, ok := oraclePlaceholderRetrySQL(sqlText, s.loadOracleColumnMeta); ok {
-					sqlText = placeholder
-					continue
-				}
+			if rewritten, ok := retrySQL(err); ok {
+				sqlText = rewritten
+				continue
 			}
 			return queryPageResult{}, nil, err
 		}
@@ -4267,11 +4781,39 @@ func oraclePlaceholderRetrySQL(sqlText string, loadColumns oracleColumnMetaLoade
 	return placeholder, true
 }
 
+// oraclePagedRetrySQL returns the statement to retry with when the first page
+// of a paged Oracle SELECT fails while reading the response.
+//
+// A driver panic means the driver state for the scanned value is unknown, so it
+// keeps the placeholder projection used by the non-paged fallback. Response
+// reading failures such as go-ora's "TTC error: received code ..." mean a column
+// value could not be decoded (SDO_GEOMETRY, XMLTYPE, ...); those retry with the
+// value rewrite so the columns come back as WKT / serialized text instead of
+// failing the whole page (issue #13179). The non-paged executeSelect path
+// already performs this rewrite in executeOracleSelectWithXMLTypeRetry; without
+// it the paged path (table data and paged query results) surfaced the raw TTC
+// error and the table could not be opened.
+func oraclePagedRetrySQL(sqlText string, loadColumns oracleColumnMetaLoader, err error) (string, bool) {
+	var panicErr oracleDriverPanicError
+	if errors.As(err, &panicErr) {
+		return oraclePlaceholderRetrySQL(sqlText, loadColumns)
+	}
+	if !shouldRetryOracleXMLTypeRewrite(err) {
+		return "", false
+	}
+	rewritten, rewriteErr := rewriteOracleSelectSQL(sqlText, loadColumns, false)
+	if rewriteErr != nil || rewritten == sqlText {
+		return "", false
+	}
+	return rewritten, true
+}
+
 func (s *server) fetchQueryPage(sessionID string, pageSize int) (queryPageResult, error) {
 	session := s.sessions[sessionID]
 	if session == nil {
 		return queryPageResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, SessionID: nil, HasMore: false}, nil
 	}
+	s.dbmsOutput.markDirty(session.outputIdentity)
 	result, err := readQuerySessionPage(session, pageSize)
 	if err != nil {
 		s.closeQuerySession(sessionID)
@@ -4293,6 +4835,7 @@ func (s *server) storeQuerySession(session *querySession) string {
 }
 
 func (s *server) startTableRead(opts queryOptions, pageSize int) (queryPageResult, error) {
+	s.dbmsOutput.markDirty(s.currentDBMSOutputIdentity())
 	start := time.Now()
 	if strings.TrimSpace(opts.Schema) != "" && !s.hasManualTransaction() {
 		if err := s.setSchema(opts.Schema); err != nil {
@@ -4319,6 +4862,7 @@ func (s *server) fetchTableReadPage(sessionID string, pageSize int) (queryPageRe
 	if session == nil {
 		return queryPageResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, SessionID: nil, HasMore: false}, nil
 	}
+	s.dbmsOutput.markDirty(session.outputIdentity)
 	result, err := readQuerySessionPage(session, pageSize)
 	if err != nil {
 		s.closeTableReadSession(sessionID)
@@ -4344,7 +4888,11 @@ func (s *server) closeQuerySession(sessionID string) bool {
 	if session == nil {
 		return false
 	}
+	s.dbmsOutput.markDirty(session.outputIdentity)
 	s.closeRows(session.rows)
+	if session.conn != nil {
+		_ = session.conn.Close()
+	}
 	delete(s.sessions, sessionID)
 	return true
 }
@@ -4354,6 +4902,7 @@ func (s *server) closeTableReadSession(sessionID string) bool {
 	if session == nil {
 		return false
 	}
+	s.dbmsOutput.markDirty(session.outputIdentity)
 	s.closeRows(session.rows)
 	delete(s.tableReadSessions, sessionID)
 	return true
@@ -4424,6 +4973,20 @@ func readQuerySessionPage(session *querySession, pageSize int) (result queryPage
 }
 
 func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
+	var result queryResult
+	var err error
+	messages := s.withStatementDBMSOutput(opts.SQL, func() error {
+		result, err = s.executeQueryWithoutOutput(opts)
+		if err == nil && opts.ReportCompilationErrors {
+			err = s.compilationErrorForStatement(trimStatementSQL(opts.SQL))
+		}
+		return err
+	})
+	result.Messages = append(result.Messages, messages...)
+	return result, err
+}
+
+func (s *server) executeQueryWithoutOutput(opts queryOptions) (queryResult, error) {
 	start := time.Now()
 	if strings.TrimSpace(opts.Schema) != "" && !s.hasManualTransaction() {
 		if err := s.setSchema(opts.Schema); err != nil {
@@ -4436,14 +4999,14 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 		maxRows = defaultMaxRows
 	}
 	if isQuerySQL(sqlText) {
-		result, err := s.executeSelect(sqlText, maxRows, opts.TimeoutSecs, opts.DeferLOBs)
+		result, err := s.executeSelect(sqlText, maxRows, opts.TimeoutSecs, deferLobsForQuery(sqlText, opts.DeferLOBs))
 		result.ExecutionTimeMS = time.Since(start).Milliseconds()
 		return result, err
 	}
 	if _, err := s.requireDB(); err != nil {
 		return queryResult{}, err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(s.statementContext())
 	var timer *time.Timer
 	if opts.TimeoutSecs > 0 {
 		var t *time.Timer
@@ -4482,6 +5045,9 @@ func (s *server) execContext(ctx context.Context, sqlText string) (sql.Result, e
 	if s.manualTx != nil {
 		return s.manualTx.ExecContext(ctx, sqlText)
 	}
+	if s.statementConn != nil {
+		return s.statementConn.ExecContext(ctx, sqlText)
+	}
 	db, err := s.requireDB()
 	if err != nil {
 		return nil, err
@@ -4496,13 +5062,22 @@ func (s *server) executeSelect(sqlText string, maxRows int, timeoutSecs int, def
 			return s.executeSelectOnce(query, maxRows, timeoutSecs, deferLOBs)
 		},
 		s.rewriteXMLTypeSelectSQL,
+		func(query string, err error) (string, bool) {
+			return oracleGeometryFunctionFallbackSQL(query, s.loadOracleColumnMeta, err)
+		},
 	)
 }
 
+// executeOracleSelectWithXMLTypeRetry retries a SELECT whose values could not
+// be decoded with the value rewrite. When the rewritten statement fails too,
+// fallback may supply one more statement for the original SQL (geometry
+// placeholders when the server cannot convert geometry); a nil fallback or a
+// failing fallback statement keeps the rewritten statement's error.
 func executeOracleSelectWithXMLTypeRetry(
 	sqlText string,
 	execute func(string) (queryResult, error),
 	rewrite func(string) (string, error),
+	fallback func(string, error) (string, bool),
 ) (queryResult, error) {
 	result, err := execute(sqlText)
 	if err == nil || !shouldRetryOracleXMLTypeRewrite(err) {
@@ -4512,12 +5087,27 @@ func executeOracleSelectWithXMLTypeRetry(
 	if rewriteErr != nil || rewritten == sqlText {
 		return result, err
 	}
-	return execute(rewritten)
+	result, err = execute(rewritten)
+	if err == nil || fallback == nil {
+		return result, err
+	}
+	placeholder, ok := fallback(sqlText, err)
+	if !ok {
+		return result, err
+	}
+	if placeholderResult, placeholderErr := execute(placeholder); placeholderErr == nil {
+		return placeholderResult, nil
+	}
+	return result, err
 }
 
 func shouldRetryOracleXMLTypeRewrite(err error) bool {
 	if err == nil {
 		return false
+	}
+	var decodeErr oracleProtocolDecodeError
+	if errors.As(err, &decodeErr) {
+		return true
 	}
 	message := err.Error()
 	return strings.Contains(message, "abnormal data representation for date") ||
@@ -4584,15 +5174,27 @@ func columnTypeNames(rows *sql.Rows) []string {
 	return result
 }
 
+// deferLobsForQuery keeps SQL-level large-value previews in charge. When the
+// client already projected __DBX_LARGE_VALUE_BYTES_ marker columns (Oracle
+// table-data previews truncate LOBs with DBMS_LOB.SUBSTR in the SQL), those
+// expressions must pass through untouched and the nested value rewrite
+// (geometry/XMLType/opaque conversions) keeps running as usual, so the
+// deferred-LOB placeholder pass must not engage on top of them.
+func deferLobsForQuery(sqlText string, requested bool) bool {
+	return requested && !strings.Contains(strings.ToUpper(sqlText), largeValueBytesColumnPrefix)
+}
+
 func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeoutSecs int, deferLOBs bool) (resultRows *sql.Rows, queryErr error) {
 	// A statement that keeps row locks while it runs is rewritten before the
 	// first attempt: when such a statement panics after the rows were locked,
 	// the locks stay behind and the retry below blocks on them until the query
-	// times out (issues #9344 / #9180).
-	if oracleSQLLocksRows(sqlText) {
+	// times out (issues #9344 / #9180). A manual transaction cannot retry at
+	// all: the panic leaves its session unusable and the transaction is rolled
+	// back (issue #13455).
+	if oracleSQLLocksRows(sqlText) || s.hasManualTransaction() {
 		rewritten, err := rewriteOracleSelectSQL(sqlText, s.loadOracleColumnMeta, deferLOBs)
 		if err == nil && rewritten != sqlText {
-			return s.queryRowsWithTimeout(rewritten, nil, timeoutSecs)
+			return s.queryOracleValueRewrite(sqlText, rewritten, timeoutSecs)
 		}
 		return s.queryRowsWithTimeout(sqlText, nil, timeoutSecs)
 	}
@@ -4619,20 +5221,7 @@ func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeout
 		if !s.hasManualTransaction() && errors.As(err, &panicErr) {
 			rewritten, rewriteErr := rewriteOracleSelectSQL(sqlText, s.loadOracleColumnMeta, false)
 			if rewriteErr == nil && rewritten != sqlText {
-				rewrittenRows, rewrittenErr := s.queryRowsWithTimeout(rewritten, nil, timeoutSecs)
-				if rewrittenErr == nil {
-					return rewrittenRows, nil
-				}
-				// When the server's ArcSDE extproc agent is broken, the
-				// SDE.ST_AsText rewrite itself fails with ORA-28595 and would
-				// hide the remaining columns; retry once with the placeholder
-				// projection so the query stays readable.
-				if placeholder, ok := oracleExtprocFallbackSQL(sqlText, s.loadOracleColumnMeta, rewrittenErr); ok {
-					if placeholderRows, placeholderErr := s.queryRowsWithTimeout(placeholder, nil, timeoutSecs); placeholderErr == nil {
-						return placeholderRows, nil
-					}
-				}
-				return nil, rewrittenErr
+				return s.queryOracleValueRewrite(sqlText, rewritten, timeoutSecs)
 			}
 		}
 		return nil, err
@@ -4659,7 +5248,7 @@ func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeout
 	// XMLTYPE keeps its metadata-triggered fallback so ordinary non-preview
 	// queries do not run dictionary probes.
 	s.closeRows(rows)
-	return s.queryRowsWithTimeout(rewritten, nil, timeoutSecs)
+	return s.queryOracleValueRewrite(sqlText, rewritten, timeoutSecs)
 }
 
 func oracleColumnTypeNamesContainXMLType(typeNames []string) bool {
@@ -4684,19 +5273,77 @@ func isOracleExtprocAgentFailure(err error) bool {
 	return strings.Contains(strings.ToUpper(err.Error()), "28595")
 }
 
-// oracleExtprocFallbackSQL returns the placeholder projection to retry with
-// when the panic-fallback SDE.ST_AsText rewrite failed because of a broken
-// extproc agent (ORA-28595). It reports false when the error is unrelated or
-// no placeholder rewrite applies.
-func oracleExtprocFallbackSQL(sqlText string, loadColumns oracleColumnMetaLoader, rewriteErr error) (string, bool) {
-	if !isOracleExtprocAgentFailure(rewriteErr) {
+// isOracleSpatialUnavailable reports whether err shows that the server cannot
+// run Oracle Spatial code, so SDO_UTIL.TO_WKTGEOMETRY fails for every value.
+// A missing or invalid MDSYS.SDO_GEOMETRY type body is reported as ORA-04067
+// with ORA-06508 (issue #13827). Matching stays deliberately narrow: one of
+// those ORA codes must appear together with an MDSYS.SDO_ unit name, so an
+// ORA-13xxx error about a single geometry does not match.
+func isOracleSpatialUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToUpper(err.Error())
+	if !strings.Contains(message, "MDSYS.SDO_") {
+		return false
+	}
+	return strings.Contains(message, "ORA-04067") || strings.Contains(message, "ORA-06508")
+}
+
+// isOracleGeometryFunctionFailure reports whether a value-rewritten statement
+// failed because the server cannot run the geometry conversion it calls:
+// SDE.ST_AsText behind a broken extproc agent, or SDO_UTIL.TO_WKTGEOMETRY
+// without a usable Oracle Spatial installation.
+func isOracleGeometryFunctionFailure(err error) bool {
+	return isOracleExtprocAgentFailure(err) || isOracleSpatialUnavailable(err)
+}
+
+// oracleGeometryFunctionFallbackSQL returns the statement to retry with when
+// the value rewrite of sqlText failed because the server cannot convert its
+// geometry columns. It keeps the value rewrite for the other columns and
+// projects geometry columns as placeholders, so the rest of the row stays
+// readable. It reports false when the error is unrelated or no rewrite applies.
+func oracleGeometryFunctionFallbackSQL(sqlText string, loadColumns oracleColumnMetaLoader, rewriteErr error) (string, bool) {
+	if !isOracleGeometryFunctionFailure(rewriteErr) {
 		return "", false
 	}
-	placeholder, err := rewriteOracleSelectSQL(sqlText, loadColumns, true)
+	placeholder, err := rewriteOracleSelectSQL(sqlText, oracleGeometryPlaceholderLoader(loadColumns), false)
 	if err != nil || placeholder == sqlText {
 		return "", false
 	}
 	return placeholder, true
+}
+
+func oracleGeometryPlaceholderLoader(loadColumns oracleColumnMetaLoader) oracleColumnMetaLoader {
+	return func(schema, table string) ([]oracleColumnMeta, error) {
+		columns, err := loadColumns(schema, table)
+		if err != nil {
+			return nil, err
+		}
+		marked := make([]oracleColumnMeta, len(columns))
+		for i, column := range columns {
+			column.GeometryPlaceholder = isOracleGeometryType(column)
+			marked[i] = column
+		}
+		return marked, nil
+	}
+}
+
+// queryOracleValueRewrite runs rewrittenSQL, the value rewrite of originalSQL.
+// When the server cannot run the rewrite's geometry conversion, it retries
+// once with geometry placeholders; otherwise it returns the rewritten
+// statement's error.
+func (s *server) queryOracleValueRewrite(originalSQL, rewrittenSQL string, timeoutSecs int) (*sql.Rows, error) {
+	rows, err := s.queryRowsWithTimeout(rewrittenSQL, nil, timeoutSecs)
+	if err == nil {
+		return rows, nil
+	}
+	if placeholder, ok := oracleGeometryFunctionFallbackSQL(originalSQL, s.loadOracleColumnMeta, err); ok {
+		if placeholderRows, placeholderErr := s.queryRowsWithTimeout(placeholder, nil, timeoutSecs); placeholderErr == nil {
+			return placeholderRows, nil
+		}
+	}
+	return nil, err
 }
 
 func (s *server) rewriteXMLTypeSelectSQL(sqlText string) (string, error) {
@@ -5100,6 +5747,9 @@ func oracleSDOGeometryExpression(columnRef, alias string) string {
 }
 
 func oracleGeometryExpression(column oracleColumnMeta, columnRef, alias string) string {
+	if column.GeometryPlaceholder {
+		return fmt.Sprintf("CASE WHEN %s IS NULL THEN NULL ELSE '%s' END AS %s", columnRef, oracleGeometryPlaceholder(column), alias)
+	}
 	if isOracleSDOGeometry(column) {
 		return oracleSDOGeometryExpression(columnRef, alias)
 	}
@@ -5584,12 +6234,59 @@ func (s *server) setSchema(schema string) error {
 		_, err := s.manualConn.ExecContext(context.Background(), sqlText)
 		return err
 	}
+	if s.statementConn != nil {
+		_, err := s.statementConn.ExecContext(s.statementContext(), sqlText)
+		if err == nil {
+			s.statementSchema = schema
+		}
+		return err
+	}
 	db, err := s.requireDB()
 	if err != nil {
 		return err
 	}
 	_, err = db.Exec(sqlText)
 	return err
+}
+
+// repinPoisonedStatementConn replaces the statement's pinned connection once a
+// driver panic or a response decode error has poisoned it, so the fallbacks of
+// the same statement do not fail on the dead session (issues #13455, #13667).
+// The fresh connection gets the statement's CURRENT_SCHEMA back; the
+// statement's owner closes it together with the original one.
+func (s *server) repinPoisonedStatementConn() error {
+	if s.manualTx != nil || s.statementConn == nil || !oracleConnPoisoned(s.statementConn) {
+		return nil
+	}
+	db, err := s.requireDB()
+	if err != nil {
+		return err
+	}
+	conn, err := db.Conn(s.statementContext())
+	if err != nil {
+		return err
+	}
+	if s.statementSchema != "" {
+		if _, err := conn.ExecContext(s.statementContext(), "ALTER SESSION SET CURRENT_SCHEMA = "+quoteIdentifier(s.statementSchema)); err != nil {
+			_ = conn.Close()
+			return err
+		}
+	}
+	if s.repinnedStatementConn != nil {
+		_ = s.repinnedStatementConn.Close()
+	}
+	s.repinnedStatementConn = conn
+	s.statementConn = conn
+	return nil
+}
+
+// takeRepinnedStatementConn hands a connection opened by
+// repinPoisonedStatementConn to the statement's owner.
+func (s *server) takeRepinnedStatementConn() *sql.Conn {
+	conn := s.repinnedStatementConn
+	s.repinnedStatementConn = nil
+	s.statementSchema = ""
+	return conn
 }
 
 func (s *server) queryRows(sqlText string, args []any) (*sql.Rows, error) {
@@ -5600,7 +6297,10 @@ func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs in
 	if _, err := s.requireDB(); err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	if err := s.repinPoisonedStatementConn(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(s.statementContext())
 	var timer *time.Timer
 	if timeoutSecs > 0 {
 		var t *time.Timer
@@ -5642,6 +6342,8 @@ func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs in
 	}()
 	if s.manualTx != nil {
 		rows, queryErr = s.manualTx.QueryContext(ctx, sqlText, args...)
+	} else if s.statementConn != nil {
+		rows, queryErr = s.statementConn.QueryContext(ctx, sqlText, args...)
 	} else {
 		db, err := s.requireDB()
 		if err != nil {
@@ -5675,6 +6377,9 @@ func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs in
 func (s *server) cancelActiveQuery() {
 	s.activeCancelMu.Lock()
 	cancels := make([]context.CancelFunc, 0, len(s.activeRows)+1)
+	if s.statementCancel != nil {
+		cancels = append(cancels, s.statementCancel)
+	}
 	if s.activeCancel != nil {
 		cancels = append(cancels, s.activeCancel)
 	}
@@ -5748,10 +6453,6 @@ func boolParam(params map[string]json.RawMessage, key string) bool {
 	var value bool
 	_ = json.Unmarshal(params[key], &value)
 	return value
-}
-
-func errorResponse(id json.RawMessage, err error) response {
-	return response{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: -1, Message: err.Error()}}
 }
 
 func parseURLParams(raw string) map[string]string {

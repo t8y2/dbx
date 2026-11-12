@@ -1,6 +1,6 @@
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
-    implementation 'org.firebirdsql.jdbc:jaybird:6.0.5'
+    implementation 'org.firebirdsql.jdbc:jaybird:6.0.7'
 }
 
 tasks.named('shadowJar') {

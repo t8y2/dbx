@@ -7,6 +7,7 @@ import {
   buildTableTreeNodes,
   mergeTableInfosIntoObjects,
   mergeTableTreePageChildren,
+  partitionPageTables,
   tablePageRowAnchorKey,
   tablePartitionGroups,
   syncTablePartitionGroups,
@@ -14,6 +15,7 @@ import {
 } from "@/lib/table/tableTree";
 import type { ObjectInfo, TableInfo, TreeNode } from "@/types/database";
 import { decorateDatabaseSavedSqlTreeNodes } from "@/lib/savedSql/savedSqlDatabaseTree";
+import { objectSourceTargetForTreeNode } from "@/lib/sidebar/treeNodeClick";
 
 const context = {
   nodeId: "connection:db",
@@ -22,6 +24,16 @@ const context = {
 };
 
 describe("case-sensitive database objects", () => {
+  it.each(["oracle", "oceanbase-oracle", "dameng"] as const)("preserves schema index identities in both %s layouts", (databaseType) => {
+    const objects: ObjectInfo[] = [{ name: " Ix (a) ", object_type: "INDEX", schema: " Index Owner ", parent_schema: "Table Owner", parent_name: " T(a) " }];
+    const simple = buildSimpleObjectTreeNodes({ ...context, databaseType, objects });
+    const grouped = buildGroupedObjectTreeNodes({ ...context, databaseType, objects }).find((group) => group.type === "group-database-indexes")?.children;
+    for (const nodes of [simple, grouped]) {
+      expect(nodes).toHaveLength(1);
+      expect(nodes?.[0]).toMatchObject({ type: "index", objectScope: "schema", objectName: " Ix (a) ", schema: " Index Owner ", parentSchema: "Table Owner", parentName: " T(a) " });
+    }
+  });
+
   it("publishes each changed partition group once per page while retaining exact identities", () => {
     const current = buildTableTreeNodes({
       ...context,
@@ -211,6 +223,42 @@ describe("PostgreSQL overloaded routines", () => {
       { label: "calc(numeric)", objectName: "calc", signature: "numeric" },
     ]);
     expect(new Set(functionGroup?.children?.map((node) => node.id) ?? []).size).toBe(3);
+  });
+});
+
+describe("Kingbase overloaded procedures", () => {
+  it.each(["simple", "grouped"] as const)("keeps missing routine signatures and empty non-routine signatures absent in the %s tree", (layout) => {
+    const objects: ObjectInfo[] = [
+      { name: "unknown", object_type: "PROCEDURE", schema: "app", signature: null },
+      { name: "orders_view", object_type: "VIEW", schema: "app", signature: "" },
+      { name: "orders_seq", object_type: "SEQUENCE", schema: "app", signature: "" },
+    ];
+    const options = { ...context, schema: "app", objects, databaseType: "kingbase" as const };
+    const nodes = layout === "simple" ? buildSimpleObjectTreeNodes(options) : buildGroupedObjectTreeNodes(options).flatMap((group) => group.children ?? []);
+
+    expect(nodes).toHaveLength(3);
+    expect(nodes.every((node) => node.signature === undefined)).toBe(true);
+  });
+
+  it.each(["simple", "grouped"] as const)("preserves overloads and the zero-argument signature in the %s tree", (layout) => {
+    const objects: ObjectInfo[] = [
+      { name: "run", object_type: "PROCEDURE", schema: "app", signature: "" },
+      { name: "run", object_type: "PROCEDURE", schema: "app", signature: "v integer" },
+      { name: "run", object_type: "PROCEDURE", schema: "app", signature: "v text" },
+      { name: "run", object_type: "PROCEDURE", schema: "app", signature: "v text" },
+    ];
+    const options = { ...context, schema: "app", objects, databaseType: "kingbase" as const };
+    const nodes = layout === "simple" ? buildSimpleObjectTreeNodes(options) : buildGroupedObjectTreeNodes(options).find((node) => node.type === "group-procedures")!.children!;
+
+    expect(nodes).toHaveLength(3);
+    expect(new Set(nodes.map((node) => node.id)).size).toBe(3);
+    expect(nodes.map(objectSourceTargetForTreeNode)).toEqual(
+      expect.arrayContaining([
+        { name: "run", schema: "app", objectType: "PROCEDURE", signature: "" },
+        { name: "run", schema: "app", objectType: "PROCEDURE", signature: "v integer" },
+        { name: "run", schema: "app", objectType: "PROCEDURE", signature: "v text" },
+      ]),
+    );
   });
 });
 
@@ -510,6 +558,39 @@ describe("PostgreSQL table hierarchy", () => {
   });
 });
 
+describe("PostgreSQL root-paged table windows", () => {
+  const table = (name: string, parentName?: string): TableInfo => ({
+    name,
+    table_type: "BASE TABLE",
+    comment: null,
+    ...(parentName ? { parent_schema: "public", parent_name: parentName } : {}),
+  });
+
+  it("keeps every partition below the roots that fit the page", () => {
+    const tables = [table("orders"), table("orders_2025", "orders"), table("orders_2026", "orders"), table("orders_2026_01", "orders_2026"), table("users"), table("users_2026", "users")];
+
+    expect(partitionPageTables(tables, 2)).toEqual(tables);
+  });
+
+  it("drops the probe root with its complete multi-level subtree", () => {
+    const tables = [table("orders"), table("orders_2026", "orders"), table("orders_2026_01", "orders_2026"), table("users"), table("users_2026", "users"), table("z_probe"), table("z_probe_2026", "z_probe"), table("z_probe_2026_01", "z_probe_2026")];
+
+    expect(partitionPageTables(tables, 2).map((row) => row.name)).toEqual(["orders", "orders_2026", "orders_2026_01", "users", "users_2026"]);
+  });
+
+  it("matches roots by name when the backend resolves a blank schema", () => {
+    const tables = [table("orders"), table("orders_2026", "orders"), table("z_probe"), table("z_probe_2026", "z_probe")];
+
+    expect(partitionPageTables(tables, 1)).toEqual([tables[0], tables[1]]);
+  });
+
+  it("keeps roots whose names differ only by case distinct", () => {
+    const tables = [table("Orders"), table("orders"), table("z_probe")];
+
+    expect(partitionPageTables(tables, 2)).toEqual([tables[0], tables[1]]);
+  });
+});
+
 describe("TDengine table hierarchy", () => {
   it("synchronizes only partition groups and keeps hidden-only loaded children usable", () => {
     const nodes = decorateDatabaseSavedSqlTreeNodes(
@@ -596,6 +677,25 @@ describe("TDengine table hierarchy", () => {
       isExpanded: true,
     });
     expect(nodes[0].children?.[0].children?.map((node) => node.label)).toEqual(["device_a", "device_b"]);
+  });
+
+  it("keeps all supertables visible at the root when a supertable has many child tables (#13728)", () => {
+    const childTables = Array.from({ length: 998 }, (_, i) => ({
+      name: `sub_${String(i).padStart(4, "0")}`,
+      table_type: "TABLE",
+      comment: null,
+      parent_name: "stable_b",
+    }));
+    const tables: TableInfo[] = [{ name: "stable_a", table_type: "STABLE", comment: null }, { name: "stable_b", table_type: "STABLE", comment: null }, { name: "stable_c", table_type: "STABLE", comment: null }, ...childTables.slice(0, 997)];
+
+    const nodes = buildTableTreeNodes({ ...context, tables });
+
+    expect(nodes.map((node) => node.label)).toEqual(["stable_a", "stable_b", "stable_c"]);
+    expect(nodes[1].children?.[0]).toMatchObject({
+      type: "group-partitions",
+      label: "tree.childTables",
+      objectCount: 997,
+    });
   });
 
   it("attaches child tables loaded on later pages to the existing supertable", () => {
@@ -701,5 +801,58 @@ describe("tablePageRowAnchorKey", () => {
   it("keeps a partition's parent in the key so same-named child tables stay distinct", () => {
     expect(tablePageRowAnchorKey("p_2024", "app", "orders")).not.toBe(tablePageRowAnchorKey("p_2024", "app", "customers"));
     expect(tablePageRowAnchorKey("p_2024", "app")).not.toBe(tablePageRowAnchorKey("p_2024", "app", "orders"));
+  });
+});
+
+describe("package and package body groups (#13239)", () => {
+  function pkg(type: string, name: string): ObjectInfo {
+    return { name, object_type: type, schema: "app" } as ObjectInfo;
+  }
+
+  it("splits packages and package bodies into separate groups", () => {
+    const nodes = buildGroupedObjectTreeNodes({
+      ...context,
+      objects: [pkg("PACKAGE", "ledger"), pkg("PACKAGE_BODY", "ledger"), pkg("PACKAGE", "reports")],
+      databaseType: "oracle",
+    });
+    const packagesGroup = nodes.find((node) => node.type === "group-packages");
+    const bodiesGroup = nodes.find((node) => node.type === "group-package-bodies");
+    expect(bodiesGroup).toBeDefined();
+    const packageChildren = packagesGroup!.children!.map((node) => node.label);
+    expect(packageChildren).toEqual(["ledger", "reports"]);
+    expect(bodiesGroup!.children!.map((node) => node.label)).toEqual(["ledger"]);
+  });
+
+  it("keeps the body-only package visible inside the bodies group", () => {
+    const nodes = buildGroupedObjectTreeNodes({
+      ...context,
+      objects: [pkg("PACKAGE_BODY", "orphan")],
+      databaseType: "oracle",
+    });
+    const bodiesGroup = nodes.find((node) => node.type === "group-package-bodies");
+    expect(bodiesGroup!.children!.map((node) => node.label)).toEqual(["orphan"]);
+    // Empty groups may be omitted entirely rather than rendered with zero children.
+    const packagesGroup = nodes.find((node) => node.type === "group-packages");
+    expect(!packagesGroup || (packagesGroup.children ?? []).length === 0).toBe(true);
+  });
+});
+
+describe("withoutTableTreeLoadMoreNodes", () => {
+  const loadMore = (id: string, objectType?: "INDEX"): TreeNode => ({ id, label: "More", type: "load-more", loadMore: { parentId: "p", offset: 1, pageSize: 1, ...(objectType ? { objectType } : {}) } });
+
+  it("drops nested table load-more cursors, keeps index cursors and always returns a fresh list", () => {
+    const untouchedChildren: TreeNode[] = [{ id: "c", label: "c", type: "column" }];
+    const untouched: TreeNode = { id: "t0", label: "t0", type: "table", children: untouchedChildren };
+    const partitions: TreeNode = { id: "g", label: "g", type: "group-partitions", children: [{ id: "t1", label: "t1", type: "table" }, loadMore("nested")] };
+    const indexCursor = loadMore("idx", "INDEX");
+    const input = [untouched, partitions, loadMore("top"), indexCursor];
+
+    const result = withoutTableTreeLoadMoreNodes(input);
+
+    expect(result.map((node) => node.id)).toEqual(["t0", "g", "idx"]);
+    expect(partitions.children!.map((node) => node.id)).toEqual(["t1"]);
+    expect(untouched.children).toBe(untouchedChildren);
+    expect(withoutTableTreeLoadMoreNodes(result)).not.toBe(result);
+    expect(withoutTableTreeLoadMoreNodes(undefined)).toEqual([]);
   });
 });

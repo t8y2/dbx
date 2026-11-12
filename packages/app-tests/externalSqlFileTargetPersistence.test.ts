@@ -43,8 +43,8 @@ test("external SQL open entry points restore a saved data source", () => {
   assert.ok(panelResolve < panelTabOpen);
   assert.ok(panelOpen.includes("snapshot.version, target.catalog, target.schema"));
 
-  const pickerOpen = functionSource(appSource, "async function openSqlFile()", "async function importResultArchive");
-  assert.ok(pickerOpen.includes("applyExternalSqlFileTarget(tab, sqlPath)"));
+  // Picker target restoration is covered through the real query store in
+  // useSqlFilePicker.spec.ts, including preserving the initiating query.
 });
 
 test("external SQL catalog changes persist their complete target", () => {

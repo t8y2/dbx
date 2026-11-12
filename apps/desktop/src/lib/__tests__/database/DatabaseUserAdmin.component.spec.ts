@@ -956,6 +956,45 @@ describe("DatabaseUserAdmin MySQL grant loading", () => {
     expect(root.textContent).toContain("dbx_limited@%");
     expect(root.textContent).not.toContain("Access denied");
   });
+
+  it("previews direct grant and revoke SQL for an existing Doris user", async () => {
+    const dorisConnection: ConnectionConfig = {
+      ...connection,
+      id: "doris-grant-editor",
+      name: "Doris grant editor",
+      db_type: "doris",
+      driver_profile: "doris",
+      database: "analytics",
+      port: 9030,
+    };
+    const grants = {
+      columns: ["UserIdentity", "DatabasePrivs"],
+      rows: [["'reporter'@'%'", "internal.analytics: Select_priv"]],
+    };
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.getConfig.mockReturnValue(dorisConnection);
+    mocks.executeQuery.mockResolvedValueOnce(grants).mockResolvedValueOnce(grants);
+
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(DatabaseUserAdmin, { connection: dorisConnection });
+    app.mount(root);
+
+    await vi.waitFor(() => expect(mocks.executeQuery).toHaveBeenCalledTimes(2));
+    const scopeInputs = root.querySelectorAll<HTMLInputElement>('input[placeholder="*"]');
+    expect(scopeInputs).toHaveLength(2);
+    const tableInput = scopeInputs[1]!;
+    tableInput.value = "orders";
+    tableInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    findButton("userAdmin.grant")!.click();
+    await vi.waitFor(() => expect(root?.textContent).toContain("GRANT SELECT_PRIV ON `internal`.`analytics`.`orders` TO 'reporter'@'%';"));
+    root.querySelector<HTMLButtonElement>("[data-test-request-close]")!.click();
+    await nextTick();
+    findButton("userAdmin.revoke")!.click();
+    await vi.waitFor(() => expect(root?.textContent).toContain("REVOKE SELECT_PRIV ON `internal`.`analytics`.`orders` FROM 'reporter'@'%';"));
+  });
 });
 
 function findButton(text: string): HTMLButtonElement | undefined {

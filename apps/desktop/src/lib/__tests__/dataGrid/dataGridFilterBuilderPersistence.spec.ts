@@ -213,4 +213,19 @@ describe("data grid structured filter persistence", () => {
       serverColumnFilters: { 0: { condition: "`id` = 1", keys: ["1"], labels: ["1"] } },
     });
   });
+
+  it("keeps the not-begins-with / not-ends-with modes across a reload (#14365)", () => {
+    saveDataGridStructuredFilterState("issue-14365", {
+      scopeKey,
+      manualWhereInput: "",
+      rules: [
+        { id: "r1", columnName: "file_name", mode: "not-begins-with", rawValue: "tmp", rawEndValue: "", conjunction: "AND" },
+        { id: "r2", columnName: "file_name", mode: "not-ends-with", rawValue: ".log", rawEndValue: "", conjunction: "AND" },
+      ],
+      appliedWhereInput: "",
+      serverColumnFilters: {},
+    });
+    dropDataGridStructuredFilterMemoryCache();
+    expect(loadDataGridStructuredFilterState("issue-14365", scopeKey)?.rules.map((rule) => rule.mode)).toEqual(["not-begins-with", "not-ends-with"]);
+  });
 });

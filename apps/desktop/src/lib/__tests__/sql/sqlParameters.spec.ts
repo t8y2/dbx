@@ -631,14 +631,62 @@ describe("extractSqlParameters", () => {
   });
 
   it("describes each placeholder syntax for the parameter dialog", () => {
-    const sql = "select ? as a, :named as b, ${shell_name} as c, #{mybatis_name} as d, @sql_server_name as e";
-    expect(extractSqlParameterDescriptors(sql)).toEqual([
+    const sql = "select ? as a, :named as b, ${shell_name} as c, #{mybatis_name} as d, @sql_server_name as e, &substitution_name as f";
+    expect(extractSqlParameterDescriptors(sql, { databaseType: "oracle" })).toEqual([
       { key: "?1", name: "?1", syntax: "positional", token: "?" },
       { key: "named", name: "named", syntax: "named", token: ":named" },
       { key: "shell_name", name: "shell_name", syntax: "shell", token: "${shell_name}" },
       { key: "mybatis_name", name: "mybatis_name", syntax: "mybatis", token: "#{mybatis_name}" },
       { key: "sql_server_name", name: "sql_server_name", syntax: "sqlserver", token: "@sql_server_name" },
+      { key: "substitution_name", name: "substitution_name", syntax: "substitution", token: "&substitution_name" },
     ]);
+  });
+
+  describe("bracketed-shell placeholders", () => {
+    it("recognizes [${name}] as a bracketed-shell parameter covering the brackets", () => {
+      const sql = "select * from t where id = [${userId}]";
+      expect(extractSqlParameterDescriptors(sql)).toEqual([{ key: "userId", name: "userId", syntax: "bracketed-shell", token: "[${userId}]" }]);
+      // Postgres must prefer bracketed-shell over its array-bracket handling too.
+      expect(extractSqlParameterDescriptors(sql, { databaseType: "postgres" })).toEqual([{ key: "userId", name: "userId", syntax: "bracketed-shell", token: "[${userId}]" }]);
+    });
+
+    it("replaces the whole [${name}] token so the brackets disappear", () => {
+      const sql = "select * from t where id = [${userId}]";
+      expect(substituteSqlParameters(sql, { userId: { kind: "number", value: "5" } })).toBe("select * from t where id = 5");
+      expect(substituteSqlParameters(sql, { userId: { kind: "string", value: "abc" } })).toBe("select * from t where id = 'abc'");
+    });
+
+    it("still recognizes bare ${name} as a shell parameter", () => {
+      expect(extractSqlParameterDescriptors("select ${name}")).toEqual([{ key: "name", name: "name", syntax: "shell", token: "${name}" }]);
+    });
+
+    it("falls back to shell recognition when the closing bracket is missing", () => {
+      const sql = "select [${name}";
+      expect(extractSqlParameterDescriptors(sql)).toEqual([{ key: "name", name: "name", syntax: "shell", token: "${name}" }]);
+      expect(substituteSqlParameters(sql, { name: { kind: "number", value: "7" } })).toBe("select [7");
+    });
+
+    it("falls back without swallowing characters when the inner name is invalid", () => {
+      const sql = "select [${bad-name}]";
+      expect(extractSqlParameterDescriptors(sql)).toEqual([]);
+      expect(substituteSqlParameters(sql, {})).toBe(sql);
+    });
+
+    it("does not recognize the syntax when bracketed-shell is disabled", () => {
+      const sql = "select * from t where id = [${userId}]";
+      expect(extractSqlParameterDescriptors(sql, { enabledSyntaxes: ["shell"] })).toEqual([]);
+      expect(substituteSqlParameters(sql, { userId: { kind: "number", value: "5" } }, { enabledSyntaxes: ["shell"] })).toBe(sql);
+      // Postgres never swallows brackets: the inner ${...} stays recognized as shell.
+      expect(extractSqlParameterDescriptors(sql, { databaseType: "postgres", enabledSyntaxes: ["shell"] })).toEqual([{ key: "userId", name: "userId", syntax: "shell", token: "${userId}" }]);
+    });
+
+    it("leaves bracketed-shell candidates inside string literals to embedded shell handling", () => {
+      const sql = "select '[${x}]' as c";
+      expect(extractSqlParameterDescriptors(sql)).toEqual([{ key: "x", name: "x", syntax: "shell", token: "${x}" }]);
+      // Existing behavior: the embedded ${x} inside the string is replaced as a
+      // string fragment while the brackets stay part of the literal.
+      expect(substituteSqlParameters(sql, { x: { kind: "string", value: "hi" } })).toBe("select '[hi]' as c");
+    });
   });
 
   it("ignores declared SQL Server variables and system variables", () => {
@@ -1036,6 +1084,94 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters("SELECT * FROM jobs WHERE state = :LOOP", { databaseType: "mysql" })).toEqual(["LOOP"]);
     expect(extractSqlParameters("BEGIN SELECT :LOOP; END", { databaseType: "mysql" })).toEqual(["LOOP"]);
     expect(extractSqlParameters("read_loop:LOOP")).toEqual(["LOOP"]);
+  });
+
+  it.each([
+    "CREATE PROCEDURE p() run:BEGIN SELECT 1; END;",
+    "DROP PROCEDURE IF EXISTS p; CREATE DEFINER=`root`@`127.0.0.1` PROCEDURE `p`(IN in_username VARCHAR(200))\nrun:BEGIN IF in_username = '' THEN LEAVE run; END IF; END;",
+    "CREATE PROCEDURE `app`.`p`(IN amount DECIMAL(10, 2)) SQL SECURITY INVOKER COMMENT 'begin; :hidden' run:BEGIN SELECT amount; END;",
+    "CREATE /* procedure header */ PROCEDURE p() /* body label */ `run`:BEGIN SELECT 1; END;",
+    "CREATE FUNCTION f() RETURNS INT DETERMINISTIC run:BEGIN RETURN 1; END;",
+    "CREATE FUNCTION f() RETURNS SET('a', 'b') DETERMINISTIC run:BEGIN RETURN 'a'; END;",
+    "CREATE PROCEDURE p() open:BEGIN SELECT 1; END;",
+    "CREATE PROCEDURE p() close:BEGIN SELECT 1; END;",
+    "CREATE PROCEDURE p() lbl:LOOP LEAVE lbl; END LOOP lbl;",
+    "CREATE PROCEDURE p() lbl:WHILE FALSE DO SELECT 1; END WHILE lbl;",
+    "CREATE PROCEDURE p() lbl:REPEAT LEAVE lbl; UNTIL TRUE END REPEAT lbl;",
+    "DROP PROCEDURE IF EXISTS p; CREATE DEFINER=`root`@`127.0.0.1` PROCEDURE p() SQL SECURITY INVOKER COMMENT 'loop; :hidden' lbl:LOOP LEAVE lbl; END LOOP lbl;",
+    "CREATE /* routine */ PROCEDURE `app`.`p`() /* label */ `select`:WHILE FALSE DO SELECT 1; END WHILE `select`;",
+    "CREATE FUNCTION f() RETURNS SET('a', 'b') DETERMINISTIC lbl:LOOP RETURN 'a'; END LOOP lbl;",
+    "CREATE PROCEDURE p() LANGUAGE SQL security:LOOP LEAVE security; END LOOP security;",
+    "CREATE PROCEDURE p() NO SQL security:LOOP LEAVE security; END LOOP security;",
+    "CREATE PROCEDURE p() CONTAINS SQL security:LOOP LEAVE security; END LOOP security;",
+    "CREATE PROCEDURE p() SQL SECURITY INVOKER invoker:LOOP LEAVE invoker; END LOOP invoker;",
+    "CREATE PROCEDURE p() SQL SECURITY DEFINER definer:WHILE FALSE DO SELECT 1; END WHILE definer;",
+    "CREATE PROCEDURE p() READS SQL DATA data:REPEAT LEAVE data; UNTIL TRUE END REPEAT data;",
+    "CREATE PROCEDURE p() returns:LOOP LEAVE returns; END LOOP returns;",
+    "CREATE FUNCTION f() RETURNS INT DETERMINISTIC returns:LOOP RETURN 1; END LOOP returns;",
+    "CREATE PROCEDURE p() `comment`:WHILE FALSE DO SELECT 1; END WHILE `comment`;",
+    "CREATE PROCEDURE p() `language`:REPEAT LEAVE `language`; UNTIL TRUE END REPEAT `language`;",
+    "DELIMITER //\nCREATE PROCEDURE p() run:BEGIN SELECT 1; END//\nDELIMITER ;",
+  ])("preserves compact outer MySQL routine labels (#13242): %s", (sql) => {
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([]);
+    expect(substituteSqlParameters(sql, {}, { databaseType: "mysql" })).toBe(sql);
+  });
+
+  it.each([
+    ["SELECT :BEGIN, :LOOP;", "SELECT 'x', 'y';"],
+    ["CREATE PROCEDURE p() run:BEGIN SELECT :BEGIN, :LOOP; END;", "CREATE PROCEDURE p() run:BEGIN SELECT 'x', 'y'; END;"],
+    ["CREATE PROCEDURE p() SELECT :BEGIN, :LOOP;", "CREATE PROCEDURE p() SELECT 'x', 'y';"],
+    ["CREATE PROCEDURE p() SELECT:BEGIN, :LOOP;", "CREATE PROCEDURE p() SELECT'x', 'y';"],
+    ["CREATE FUNCTION f() RETURNS VARCHAR(20) RETURN CONCAT(:BEGIN, :LOOP);", "CREATE FUNCTION f() RETURNS VARCHAR(20) RETURN CONCAT('x', 'y');"],
+    ["CREATE PROCEDURE p() BEGIN SELECT 1; END; SELECT :BEGIN, :LOOP;", "CREATE PROCEDURE p() BEGIN SELECT 1; END; SELECT 'x', 'y';"],
+    ["SELECT 'CREATE PROCEDURE p()' AS label, :BEGIN, :LOOP;", "SELECT 'CREATE PROCEDURE p()' AS label, 'x', 'y';"],
+    ["/* CREATE PROCEDURE p() */ SELECT :BEGIN, :LOOP;", "/* CREATE PROCEDURE p() */ SELECT 'x', 'y';"],
+  ])("keeps real MySQL parameters named after block keywords: %s", (sql, expected) => {
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual(["BEGIN", "LOOP"]);
+    expect(substituteSqlParameters(sql, { BEGIN: { kind: "string", value: "x" }, LOOP: { kind: "string", value: "y" } }, { databaseType: "mysql" })).toBe(expected);
+  });
+
+  it.each(["LOOP", "WHILE", "REPEAT"])("keeps compact SELECT:%s as a MySQL parameter", (name) => {
+    const sql = `CREATE PROCEDURE p() SELECT:${name};`;
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([name]);
+    expect(substituteSqlParameters(sql, { [name]: { kind: "string", value: "x" } }, { databaseType: "mysql" })).toBe("CREATE PROCEDURE p() SELECT'x';");
+  });
+
+  it.each([
+    ["CREATE PROCEDURE p() COMMENT:WHILE SELECT 1;", "WHILE", { kind: "string", value: "routine comment" }, "CREATE PROCEDURE p() COMMENT'routine comment' SELECT 1;"],
+    ["CREATE PROCEDURE p() LANGUAGE:LOOP SELECT 1;", "LOOP", { kind: "raw", value: "/**/SQL" }, "CREATE PROCEDURE p() LANGUAGE/**/SQL SELECT 1;"],
+    ["CREATE PROCEDURE p() SQL SECURITY:LOOP SELECT 1;", "LOOP", { kind: "raw", value: "/**/INVOKER" }, "CREATE PROCEDURE p() SQL SECURITY/**/INVOKER SELECT 1;"],
+    ["CREATE FUNCTION f() RETURNS:REPEAT DETERMINISTIC RETURN 1;", "REPEAT", { kind: "raw", value: "/**/INT" }, "CREATE FUNCTION f() RETURNS/**/INT DETERMINISTIC RETURN 1;"],
+    ["CREATE PROCEDURE p() CONTAINS:BEGIN SELECT 1;", "BEGIN", { kind: "raw", value: "/**/SQL" }, "CREATE PROCEDURE p() CONTAINS/**/SQL SELECT 1;"],
+    ["CREATE PROCEDURE p() NO:REPEAT SELECT 1;", "REPEAT", { kind: "raw", value: "/**/SQL" }, "CREATE PROCEDURE p() NO/**/SQL SELECT 1;"],
+    ["CREATE PROCEDURE p() READS:WHILE SELECT 1;", "WHILE", { kind: "raw", value: "/**/SQL DATA" }, "CREATE PROCEDURE p() READS/**/SQL DATA SELECT 1;"],
+    ["CREATE PROCEDURE p() MODIFIES:LOOP SELECT 1;", "LOOP", { kind: "raw", value: "/**/SQL DATA" }, "CREATE PROCEDURE p() MODIFIES/**/SQL DATA SELECT 1;"],
+    ["CREATE PROCEDURE p() NOT:REPEAT SELECT 1;", "REPEAT", { kind: "raw", value: "/**/DETERMINISTIC" }, "CREATE PROCEDURE p() NOT/**/DETERMINISTIC SELECT 1;"],
+    ["CREATE PROCEDURE p() DETERMINISTIC:BEGIN;", "BEGIN", { kind: "raw", value: "/**/SELECT 1" }, "CREATE PROCEDURE p() DETERMINISTIC/**/SELECT 1;"],
+    ["CREATE PROCEDURE p() SQL:WHILE SELECT 1;", "WHILE", { kind: "raw", value: "/**/SECURITY INVOKER" }, "CREATE PROCEDURE p() SQL/**/SECURITY INVOKER SELECT 1;"],
+    ["CREATE PROCEDURE p() SQL SECURITY INVOKER:LOOP;", "LOOP", { kind: "raw", value: "/**/SELECT 1" }, "CREATE PROCEDURE p() SQL SECURITY INVOKER/**/SELECT 1;"],
+    ["CREATE PROCEDURE p() SQL SECURITY DEFINER:LOOP;", "LOOP", { kind: "raw", value: "/**/SELECT 1" }, "CREATE PROCEDURE p() SQL SECURITY DEFINER/**/SELECT 1;"],
+    ["CREATE PROCEDURE p() READS SQL DATA:WHILE;", "WHILE", { kind: "raw", value: "/**/SELECT 1" }, "CREATE PROCEDURE p() READS SQL DATA/**/SELECT 1;"],
+    ["CREATE PROCEDURE p() MODIFIES SQL DATA:REPEAT;", "REPEAT", { kind: "raw", value: "/**/SELECT 1" }, "CREATE PROCEDURE p() MODIFIES SQL DATA/**/SELECT 1;"],
+    ["CREATE FUNCTION f() RETURNS INT:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS INT/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS VARCHAR(20) CHARSET:LOOP DETERMINISTIC RETURN 1;", "LOOP", { kind: "raw", value: "/**/utf8mb4" }, "CREATE FUNCTION f() RETURNS VARCHAR(20) CHARSET/**/utf8mb4 DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS VARCHAR(20) CHARSET utf8mb4 COLLATE:WHILE DETERMINISTIC RETURN 1;", "WHILE", { kind: "raw", value: "/**/utf8mb4_general_ci" }, "CREATE FUNCTION f() RETURNS VARCHAR(20) CHARSET utf8mb4 COLLATE/**/utf8mb4_general_ci DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS VARCHAR(20) CHARACTER:REPEAT DETERMINISTIC RETURN 1;", "REPEAT", { kind: "raw", value: "/**/SET utf8mb4" }, "CREATE FUNCTION f() RETURNS VARCHAR(20) CHARACTER/**/SET utf8mb4 DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS VARCHAR(20) CHARSET utf8mb4:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS VARCHAR(20) CHARSET utf8mb4/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS VARCHAR(20) CHARSET utf8mb4 COLLATE utf8mb4_general_ci:REPEAT;", "REPEAT", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS VARCHAR(20) CHARSET utf8mb4 COLLATE utf8mb4_general_ci/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS INT SIGNED:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS INT SIGNED/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS INT UNSIGNED:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS INT UNSIGNED/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS INT ZEROFILL:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS INT ZEROFILL/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS DOUBLE PRECISION:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS DOUBLE PRECISION/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS CHAR(20) ASCII:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS CHAR(20) ASCII/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS CHAR(20) UNICODE:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS CHAR(20) UNICODE/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS CHAR(20) BYTE:LOOP;", "LOOP", { kind: "raw", value: "/**/DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS CHAR(20) BYTE/**/DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS CHAR VARYING:LOOP;", "LOOP", { kind: "raw", value: "(20) DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS CHAR VARYING(20) DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS NATIONAL CHAR:LOOP;", "LOOP", { kind: "raw", value: "(20) DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS NATIONAL CHAR(20) DETERMINISTIC RETURN 1;"],
+    ["CREATE FUNCTION f() RETURNS NATIONAL VARCHAR:LOOP;", "LOOP", { kind: "raw", value: "(20) DETERMINISTIC RETURN 1" }, "CREATE FUNCTION f() RETURNS NATIONAL VARCHAR(20) DETERMINISTIC RETURN 1;"],
+  ] as const)("keeps compact MySQL routine header parameters: %s", (sql, name, value, expected) => {
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([name]);
+    expect(substituteSqlParameters(sql, { [name]: value }, { databaseType: "mysql" })).toBe(expected);
   });
 
   it("ignores HANA SQLScript variable references", () => {
@@ -1569,6 +1705,137 @@ describe("enabledSyntaxes option", () => {
     expect(extractSqlParameters(sql, { enabledSyntaxes: ["shell"] })).toEqual(["shell_name"]);
     expect(extractSqlParameters(sql, { enabledSyntaxes: ["mybatis"] })).toEqual(["mybatis_name"]);
     expect(substituteSqlParameters(sql, { shell_name: { kind: "string", value: "a" }, mybatis_name: { kind: "string", value: "b" } }, { enabledSyntaxes: ["named"] })).toBe(sql);
+  });
+});
+
+describe("Oracle substitution variables", () => {
+  const oracleOptions = { databaseType: "oracle" as const };
+
+  it("extracts single and double ampersand substitution variables in Oracle", () => {
+    const sql = "SELECT * FROM emp WHERE deptno = &dept_id AND mgr_dept = &&dept_id";
+    expect(extractSqlParameters(sql, oracleOptions)).toEqual(["dept_id"]);
+    expect(extractSqlParameterDescriptors(sql, oracleOptions)).toEqual([{ key: "dept_id", name: "dept_id", syntax: "substitution", token: "&dept_id" }]);
+  });
+
+  it("extracts positional numeric substitution variables in Oracle", () => {
+    const sql = "SELECT * FROM emp WHERE deptno = &1 AND job_id = &&2";
+    expect(extractSqlParameters(sql, oracleOptions)).toEqual(["1", "2"]);
+    expect(extractSqlParameterDescriptors(sql, oracleOptions)).toEqual([
+      { key: "1", name: "1", syntax: "substitution", token: "&1" },
+      { key: "2", name: "2", syntax: "substitution", token: "&&2" },
+    ]);
+  });
+
+  it("handles optional dot terminator on substitution variables in Oracle", () => {
+    const sql = "SELECT * FROM &table_name. WHERE id = 1";
+    expect(extractSqlParameters(sql, oracleOptions)).toEqual(["table_name"]);
+    expect(extractSqlParameterDescriptors(sql, oracleOptions)).toEqual([{ key: "table_name", name: "table_name", syntax: "substitution", token: "&table_name." }]);
+    expect(substituteSqlParameters(sql, { table_name: { kind: "raw", value: "employees" } }, oracleOptions)).toBe("SELECT * FROM employees WHERE id = 1");
+  });
+
+  it("handles double dot for schema and table concatenation in Oracle", () => {
+    const sql = "SELECT * FROM &schema..table_name";
+    expect(extractSqlParameters(sql, oracleOptions)).toEqual(["schema"]);
+    expect(extractSqlParameterDescriptors(sql, oracleOptions)).toEqual([{ key: "schema", name: "schema", syntax: "substitution", token: "&schema." }]);
+    expect(substituteSqlParameters(sql, { schema: { kind: "raw", value: "hr" } }, oracleOptions)).toBe("SELECT * FROM hr.table_name");
+  });
+
+  it("extracts and replaces quoted substitution variables in Oracle", () => {
+    const sql = "SELECT * FROM emp WHERE ename = '&ename' AND job = '&job.' AND dept = '&&dept'";
+    expect(extractSqlParameters(sql, oracleOptions)).toEqual(["ename", "job", "dept"]);
+    expect(extractSqlParameterDescriptors(sql, oracleOptions)).toEqual([
+      { key: "ename", name: "ename", syntax: "substitution", token: "'&ename'" },
+      { key: "job", name: "job", syntax: "substitution", token: "'&job.'" },
+      { key: "dept", name: "dept", syntax: "substitution", token: "'&&dept'" },
+    ]);
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          ename: { kind: "string", value: "O'Brien" },
+          job: { kind: "string", value: "CLERK" },
+          dept: { kind: "string", value: "SALES" },
+        },
+        oracleOptions,
+      ),
+    ).toBe("SELECT * FROM emp WHERE ename = 'O''Brien' AND job = 'CLERK' AND dept = 'SALES'");
+  });
+
+  it("does not falsely treat ordinary ampersands as substitution variables in Oracle", () => {
+    const sql = "SELECT 'Tom & Jerry' as a, 'AT&T' as b, flags & 1 as c, array1 && array2 as d, id &lt; 10 as e FROM dual";
+    expect(extractSqlParameters(sql, oracleOptions)).toEqual([]);
+  });
+
+  it("ignores substitution variables in line and block comments in Oracle", () => {
+    const sql = `
+      -- &comment_var
+      /* &block_var */
+      SELECT * FROM emp WHERE id = &real_var
+    `;
+    expect(extractSqlParameters(sql, oracleOptions)).toEqual(["real_var"]);
+  });
+
+  it("substitutes various parameter kinds for substitution variables in Oracle", () => {
+    const sql = "SELECT * FROM emp WHERE deptno = &dept AND ename = &name AND active = &active";
+    expect(
+      substituteSqlParameters(
+        sql,
+        {
+          dept: { kind: "number", value: "10" },
+          name: { kind: "string", value: "KING" },
+          active: { kind: "boolean", value: "true" },
+        },
+        oracleOptions,
+      ),
+    ).toBe("SELECT * FROM emp WHERE deptno = 10 AND ename = 'KING' AND active = TRUE");
+  });
+
+  it.each(["oracle", "oceanbase-oracle", "dameng", "yashandb", "oscar"] as const)("defaults substitution variables to enabled for %s", (databaseType) => {
+    const sql = "SELECT * FROM emp WHERE deptno = &dept_id AND code = '&code'";
+    expect(extractSqlParameters(sql, { databaseType })).toEqual(["dept_id", "code"]);
+  });
+
+  it("enables substitution variables by default for openGauss in A mode but disables in PG mode", () => {
+    const sql = "SELECT * FROM emp WHERE deptno = &dept_id";
+    expect(extractSqlParameters(sql, { databaseType: "opengauss", compatibilityMode: "A" })).toEqual(["dept_id"]);
+    expect(extractSqlParameters(sql, { databaseType: "opengauss", compatibilityMode: "PG" })).toEqual([]);
+  });
+
+  it("enables substitution variables by default for Kingbase in oracle mode but disables in pg mode", () => {
+    const sql = "SELECT * FROM emp WHERE deptno = &dept_id";
+    expect(extractSqlParameters(sql, { databaseType: "kingbase", compatibilityMode: "oracle" })).toEqual(["dept_id"]);
+    expect(extractSqlParameters(sql, { databaseType: "kingbase", compatibilityMode: "pg" })).toEqual([]);
+  });
+
+  it("disables substitution variables by default when databaseType is undefined or non-Oracle", () => {
+    const sql = "SELECT * FROM emp WHERE deptno = &dept_id";
+    expect(extractSqlParameters(sql)).toEqual([]);
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([]);
+  });
+
+  it("does not treat PostgreSQL bitwise & or array overlap && as substitution variables", () => {
+    expect(extractSqlParameters("SELECT flags &mask FROM t", { databaseType: "postgres" })).toEqual([]);
+    expect(extractSqlParameters("SELECT flags & 1 FROM t", { databaseType: "postgres" })).toEqual([]);
+    expect(extractSqlParameters("SELECT a &&b FROM t", { databaseType: "postgres" })).toEqual([]);
+    expect(extractSqlParameters("SELECT array1 && array2 FROM t", { databaseType: "postgres" })).toEqual([]);
+  });
+
+  it("does not treat SQL Server bitwise & as substitution variables", () => {
+    expect(extractSqlParameters("SELECT flags &mask FROM t", { databaseType: "sqlserver" })).toEqual([]);
+    expect(extractSqlParameters("SELECT flags & 1 FROM t", { databaseType: "sqlserver" })).toEqual([]);
+  });
+
+  it("respects enabledSyntaxes toggle for substitution syntax across database types", () => {
+    const sql = "SELECT * FROM emp WHERE deptno = &dept AND id = :id";
+    // Oracle with substitution explicitly excluded
+    expect(extractSqlParameters(sql, { databaseType: "oracle", enabledSyntaxes: ["named"] })).toEqual(["id"]);
+    // PostgreSQL with substitution explicitly included
+    expect(extractSqlParameters(sql, { databaseType: "postgres", enabledSyntaxes: ["substitution"] })).toEqual(["dept"]);
+    expect(extractSqlParameters("SELECT flags &mask FROM t", { databaseType: "postgres", enabledSyntaxes: ["substitution"] })).toEqual(["mask"]);
+    expect(extractSqlParameters("SELECT a &&b FROM t", { databaseType: "postgres", enabledSyntaxes: ["substitution"] })).toEqual(["b"]);
+    // Substitution execution
+    expect(substituteSqlParameters("SELECT * FROM emp WHERE deptno = &dept", { dept: { kind: "number", value: "10" } }, { databaseType: "oracle", enabledSyntaxes: ["named"] })).toBe("SELECT * FROM emp WHERE deptno = &dept");
+    expect(substituteSqlParameters("SELECT * FROM emp WHERE deptno = &dept", { dept: { kind: "number", value: "10" } }, { databaseType: "postgres", enabledSyntaxes: ["substitution"] })).toBe("SELECT * FROM emp WHERE deptno = 10");
   });
 });
 

@@ -28,6 +28,7 @@ import {
   isToggleAiPanelShortcut,
   matchesModifierOnlyShortcut,
   matchesShortcut,
+  saveShortcutSurface,
   tabSwitcherDirectionFromShortcut,
 } from "@/lib/editor/keyboardShortcuts";
 import { formatShortcutDisplay, isMacShortcutPlatform } from "@/lib/editor/shortcutDisplay";
@@ -116,6 +117,25 @@ describe("keyboard shortcut matching", () => {
   it("leaves unshifted and letter keys untouched", () => {
     expect(eventToShortcut({ key: "/", code: "Slash", ctrlKey: true }, "Win32")).toBe("Mod+/");
     expect(eventToShortcut({ key: "A", code: "KeyA", ctrlKey: true, shiftKey: true }, "Win32")).toBe("Shift+Mod+A");
+  });
+
+  it("records Mod+/ from Windows Chinese IME punctuation, Process keys, and numpad divide", () => {
+    // Chinese IME converts "/" to "、" (Ideographic comma)
+    expect(eventToShortcut({ key: "、", code: "Slash", ctrlKey: true }, "Win32")).toBe("Mod+/");
+    // Windows IME keydown with "Process" key
+    expect(eventToShortcut({ key: "Process", code: "Slash", ctrlKey: true }, "Win32")).toBe("Mod+/");
+    expect(eventToShortcut({ key: "Process", code: "Slash", ctrlKey: true, isComposing: true }, "Win32")).toBe("Mod+/");
+    // Numpad divide key (which may report "Divide" or "/")
+    expect(eventToShortcut({ key: "Divide", code: "NumpadDivide", ctrlKey: true }, "Win32")).toBe("Mod+/");
+    expect(eventToShortcut({ key: "/", code: "NumpadDivide", ctrlKey: true }, "Win32")).toBe("Mod+/");
+  });
+
+  it("matches Mod+/ against Chinese IME punctuation, Process keys, and numpad divide", () => {
+    expect(matchesShortcut({ key: "、", code: "Slash", ctrlKey: true }, "Mod+/", "Win32")).toBe(true);
+    expect(matchesShortcut({ key: "Process", code: "Slash", ctrlKey: true }, "Mod+/", "Win32")).toBe(true);
+    expect(matchesShortcut({ key: "Process", code: "Slash", ctrlKey: true, isComposing: true }, "Mod+/", "Win32")).toBe(true);
+    expect(matchesShortcut({ key: "Divide", code: "NumpadDivide", ctrlKey: true }, "Mod+/", "Win32")).toBe(true);
+    expect(matchesShortcut({ key: "/", code: "NumpadDivide", ctrlKey: true }, "Mod+/", "Win32")).toBe(true);
   });
 
   it.each([
@@ -397,5 +417,37 @@ describe("shouldBlockCaretBrowsing", () => {
   it("does not block when F7 is bound to a custom shortcut action", () => {
     expect(shouldBlockCaretBrowsing({ key: "F7" }, { caretBrowsingEnabled: false, shortcuts: { executeSql: "F7" } })).toBe(false);
     expect(shouldBlockCaretBrowsing({ key: "F7" }, { caretBrowsingEnabled: false, shortcuts: { executeSql: "Ctrl+Enter" } })).toBe(true);
+  });
+});
+
+describe("saveShortcutSurface", () => {
+  it("applies the settings draft while the settings page owns the window", () => {
+    expect(saveShortcutSurface({ settingsPageOpen: true, activeTabMode: "query" })).toBe("settings");
+  });
+
+  it("keeps sending Ctrl+S to the save-SQL dialog for an active query tab", () => {
+    expect(saveShortcutSurface({ activeTabMode: "query" })).toBe("query");
+  });
+
+  it("stays out of the query branch while the save-SQL dialog is already open", () => {
+    expect(saveShortcutSurface({ activeTabMode: "query", saveSqlDialogOpen: true })).toBe("none");
+  });
+
+  it("does nothing for a non-query tab", () => {
+    expect(saveShortcutSurface({ activeTabMode: "table" })).toBe("none");
+    expect(saveShortcutSurface({ activeTabMode: null })).toBe("none");
+    expect(saveShortcutSurface({})).toBe("none");
+  });
+
+  // The plugin center and driver store also replace the content area while the
+  // previously active query tab stays active, so the active tab alone used to
+  // send Ctrl+S down the save-SQL branch (#13020).
+  it("does nothing while the plugin center or driver store is open", () => {
+    expect(saveShortcutSurface({ pluginCenterOpen: true, activeTabMode: "query" })).toBe("none");
+    expect(saveShortcutSurface({ driverStoreOpen: true, activeTabMode: "query" })).toBe("none");
+  });
+
+  it("prefers the settings page over the other browsing surfaces", () => {
+    expect(saveShortcutSurface({ settingsPageOpen: true, pluginCenterOpen: true, driverStoreOpen: true, activeTabMode: "query" })).toBe("settings");
   });
 });

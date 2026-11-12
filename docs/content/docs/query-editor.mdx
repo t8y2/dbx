@@ -24,6 +24,37 @@ set clipboard=unnamedplus
 
 With `set clipboard=unnamedplus`, Vim yanks and deletes write to the system clipboard, and normal-mode `p` and `P` read from it. Unsupported commands do not prevent the editor from starting.
 
+### Run DBX actions from Vim
+
+Type `:dbx <action>` in the Vim command line to run a DBX action. Action names match the shortcut action IDs and are case-insensitive, so `:dbx formatsql` also works. An unknown name shows a notice instead of running anything.
+
+| Scope | Actions |
+| --- | --- |
+| Editor | `executeSql`, `executeSqlInNewResultTab`, `explainSql`, `formatSql`, `saveSql`, `expandSelectStar`, `toggleLineComment`, `toggleBlockComment`, `selectCurrentStatement`, `previousStatement`, `nextStatement`, `statementStart`, `uppercaseSelection`, `lowercaseSelection`, `sendSelectionToAi`, `sqlIntentionActions` |
+| App | `newQuery`, `closeTab`, `closeOtherTabs`, `closeAllTabs`, `reopenClosedTab`, `openSettings` |
+
+Editor actions behave like their keyboard shortcuts. For example, `executeSql` runs the selection when there is one, and the current statement otherwise. Running from Visual mode, which enters `:'<,'>dbx executeSql`, restores the visual selection first, so only the selected SQL is used. Linewise and blockwise selections are expanded to whole lines.
+
+Editing actions that Vim already provides, such as undo, indent, delete line, and join lines, are not exposed through `:dbx`; use the native Vim commands instead.
+
+Each action also has a space-free command, `:Dbx` followed by the action name with its first letter capitalized, for example `:DbxExecuteSql` or `:DbxFormatSql`. Use these in `vimrc` mappings, because CodeMirror Vim mappings stop at the first space and cannot map `:dbx executeSql` directly:
+
+```vim
+nnoremap Qr :DbxExecuteSql<CR>
+vnoremap Qr :DbxExecuteSql<CR>
+nnoremap Qf :DbxFormatSql<CR>
+nnoremap Qj :DbxNextStatement<CR>
+nnoremap Qk :DbxPreviousStatement<CR>
+```
+
+CodeMirror Vim runs a built-in command as soon as the typed keys match it, without waiting for more keys the way Vim's `timeoutlen` does. Use a prefix that is not already a single-key command, such as `Q`. Common leader keys like `<Space>` (move right) and `,` (repeat the last `f`/`t` search backward) are consumed by their built-in commands, so mappings like `<Space>r` or `,x` never fire. To use one of them as a prefix, unmap its built-in command first, which also removes that key's original behavior:
+
+```vim
+unmap <Space>
+nnoremap <Space>r :DbxExecuteSql<CR>
+vnoremap <Space>r :DbxExecuteSql<CR>
+```
+
 ## Basic Workflow
 
 <Steps>
@@ -169,6 +200,10 @@ Parameters can be entered as strings, numbers, booleans, `NULL`, or raw SQL valu
 
 Formatting and compacting only change editor text; they do not execute SQL.
 
+## PL/SQL Debugging
+
+For Oracle and OceanBase Oracle mode, use the debug entry points to step through procedures, functions, package members, and anonymous blocks. See [PL/SQL Debugging](/en/docs/plsql-debug) for startup, explicit debug compilation, recovery, and transaction boundaries.
+
 ## Explain Plan
 
 Explain Plan accepts query-like SQL that is safe to analyze, such as `SELECT`, `WITH`, `TABLE`, or `VALUES`. Supported databases can return:
@@ -179,6 +214,14 @@ Explain Plan accepts query-like SQL that is safe to analyze, such as `SELECT`, `
 - Raw details returned by the database
 
 `EXPLAIN` semantics vary by database, and some engines provide only table or text output. A plan reflects optimizer estimates rather than real production performance; evaluate it together with data volume, statistics, indexes, and measured runtime.
+
+### Inspect Existing Session Evidence
+
+For Oracle and OceanBase Oracle connections, open **Process List** from the connection context menu, then choose **Diagnostics** on a session row to inspect SQL, an existing plan, statistics and waits, and long operations. This reads evidence already retained by the database; it does not execute the target SQL or generate a new plan.
+
+Diagnostics freezes the session and SQL identity captured when opened. Refresh reads the same target. If the session moves to another SQL statement, the page marks the change instead of attaching the new statement's data to the original result. Select explicitly when several audit requests or cached plans match. SQL text shows its completeness. Plan rows are estimates; Oracle cursor counters, OB request statistics, and cached-plan cumulative statistics have separate scope labels.
+
+**Stop reading** ends the local wait and attempts to cancel diagnostic queries without terminating the target session. Permission errors, unavailable views, evicted cache entries, and uncollected data have distinct states. Failed refreshes retain earlier data with its sampling time. An empty long-operation result does not mean the SQL has finished. OB long operations show available timing information without inventing a work percentage.
 
 ## Query History
 

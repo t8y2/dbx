@@ -275,8 +275,10 @@ mod tests {
                 "nspname".to_string(),
             ],
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: vec![vec![
                 serde_json::json!("kdb_utils"),

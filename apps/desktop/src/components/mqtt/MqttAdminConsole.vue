@@ -30,6 +30,7 @@ interface MqttTabUiState {
   messageDirectionFilter?: MqttMessageDirectionFilter;
   showSubscriptionDialog?: boolean;
   formTopic?: string;
+  formAlias?: string;
   formQos?: MqttQoS;
   formNoLocal?: boolean;
   formEnabled?: boolean;
@@ -62,6 +63,8 @@ const messages = ref<MqttMessage[]>([]);
 const collapsedMessageKeys = ref<Set<string>>(new Set());
 const noLocalSubscribe = ref(false);
 const selectedTopic = ref<string>(restoredUiState.selectedTopic ?? props.initialTopic ?? "");
+const publishInitialTopic = ref(selectedTopic.value);
+const publishTopic = ref(selectedTopic.value);
 const loading = ref(true);
 const error = ref<string | null>(null);
 const pollingIntervalMs = ref<number>(MQTT_POLLING_INTERVAL_OPTIONS.some((opt) => opt.value === restoredUiState.pollingIntervalMs) ? restoredUiState.pollingIntervalMs! : DEFAULT_MQTT_POLLING_INTERVAL_MS);
@@ -76,6 +79,7 @@ const messageDirectionFilter = ref<MqttMessageDirectionFilter>(restoredUiState.m
 const showSubscriptionDialog = ref(restoredUiState.showSubscriptionDialog ?? false);
 const savingSubscription = ref(false);
 const formTopic = ref(restoredUiState.formTopic ?? "");
+const formAlias = ref(restoredUiState.formAlias ?? "");
 const formQos = ref<MqttQoS>(restoredUiState.formQos ?? "atmostonce");
 const formNoLocal = ref(restoredUiState.formNoLocal ?? false);
 const formEnabled = ref(restoredUiState.formEnabled ?? true);
@@ -110,6 +114,7 @@ trackUiState(() => ({
   messageDirectionFilter: messageDirectionFilter.value,
   showSubscriptionDialog: showSubscriptionDialog.value,
   formTopic: formTopic.value,
+  formAlias: formAlias.value,
   formQos: formQos.value,
   formNoLocal: formNoLocal.value,
   formEnabled: formEnabled.value,
@@ -117,6 +122,12 @@ trackUiState(() => ({
   publishPanelCollapsed: publishPanelCollapsed.value,
   pollingIntervalMs: pollingIntervalMs.value,
 }));
+
+function suggestPublishTopic(topic: string, force = false) {
+  if (!force && publishTopic.value.length > 0) return;
+  publishTopic.value = topic;
+  publishInitialTopic.value = topic;
+}
 
 const connected = computed(() => brokerInfo.value?.connected ?? false);
 const mqtt5 = computed(() => brokerInfo.value?.protocolVersion?.includes("5") ?? false);
@@ -213,6 +224,7 @@ async function handleSubscribe(topic: string, qos: MqttQoS = "atmostonce", noLoc
   try {
     await mqttSubscribe(props.connectionId, topic, qos, noLocal);
     selectedTopic.value = topic;
+    suggestPublishTopic(topic);
     await refreshData();
   } catch (e) {
     error.value = String(e);
@@ -238,7 +250,10 @@ async function handleDelete(config: MqttSavedTopic) {
   try {
     if (subscribedTopics.value.some(([topic]) => topic === config.topic)) await mqttUnsubscribe(props.connectionId, config.topic);
     await mqttDeleteTopicConfig(props.connectionId, config.topic);
-    if (selectedTopic.value === config.topic) selectedTopic.value = "";
+    if (selectedTopic.value === config.topic) {
+      selectedTopic.value = "";
+      suggestPublishTopic("");
+    }
     await refreshData();
   } catch (e) {
     error.value = String(e);
@@ -249,6 +264,7 @@ function openSubscriptionDialog() {
   resetSubscriptionDialogDrag();
   editingTopic.value = null;
   formTopic.value = "";
+  formAlias.value = "";
   formQos.value = "atmostonce";
   formNoLocal.value = false;
   formEnabled.value = true;
@@ -260,6 +276,7 @@ function editSubscription(config: MqttSavedTopic) {
   resetSubscriptionDialogDrag();
   editingTopic.value = config.topic;
   formTopic.value = config.topic;
+  formAlias.value = config.alias ?? "";
   formQos.value = config.qos;
   formNoLocal.value = config.noLocal === true;
   formEnabled.value = config.enabled !== false;
@@ -351,12 +368,13 @@ async function saveSubscription() {
   try {
     // Save the new configuration first so a broker failure cannot remove the
     // previous configuration or leave the edited topic without a retry path.
-    await mqttSaveTopicConfig(props.connectionId, topic, formQos.value, formNoLocal.value, formEnabled.value);
+    await mqttSaveTopicConfig(props.connectionId, topic, formQos.value, formNoLocal.value, formEnabled.value, formAlias.value.trim());
     if (formEnabled.value) await mqttSubscribe(props.connectionId, topic, formQos.value, formNoLocal.value);
     else if (!topicChanged && previousWasActive) await mqttUnsubscribe(props.connectionId, topic);
     if (topicChanged && previousWasActive && previousTopic) await mqttUnsubscribe(props.connectionId, previousTopic);
     if (topicChanged && previousTopic) await mqttDeleteTopicConfig(props.connectionId, previousTopic);
     selectedTopic.value = topic;
+    suggestPublishTopic(topic);
     showSubscriptionDialog.value = false;
     await refreshData();
   } catch (e) {
@@ -369,6 +387,7 @@ async function saveSubscription() {
 
 function handleTopicClick(topic: string) {
   selectedTopic.value = topic;
+  suggestPublishTopic(topic, true);
   void refreshData();
 }
 
@@ -504,6 +523,7 @@ watch(
   (topic) => {
     if (topic !== undefined && topic !== selectedTopic.value) {
       selectedTopic.value = topic;
+      suggestPublishTopic(topic, true);
       void refreshData();
     }
   },
@@ -717,7 +737,7 @@ onUnmounted(stopPolling);
             </div>
           </CustomContextMenu>
         </div>
-        <MqttPublishPanel v-if="connected" v-show="!publishPanelCollapsed" :connection-id="connectionId" :initial-topic="selectedTopic" @published="handleMessagePublished" />
+        <MqttPublishPanel v-if="connected" v-show="!publishPanelCollapsed" :connection-id="connectionId" :initial-topic="publishInitialTopic" @topic-changed="publishTopic = $event" @published="handleMessagePublished" />
       </div>
     </div>
 
@@ -731,6 +751,10 @@ onUnmounted(stopPolling);
             <span>{{ t("connection.mqttTopicFilter") }}</span>
             <input v-model="formTopic" class="h-8 rounded border bg-transparent px-2 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring" :placeholder="t('connection.mqttTopicFilterPlaceholder')" :disabled="savingSubscription" @keydown.enter.prevent="saveSubscription" />
             <span class="text-[11px] font-normal text-muted-foreground">{{ t("connection.mqttTopicFilterHint") }}</span>
+          </label>
+          <label class="grid gap-1.5 text-xs font-medium">
+            <span>{{ t("connection.mqttTopicAlias") }}</span>
+            <input v-model="formAlias" data-mqtt-topic-alias class="h-8 rounded border bg-transparent px-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring" :disabled="savingSubscription" @keydown.enter.prevent="saveSubscription" />
           </label>
           <label class="grid gap-1.5 text-xs font-medium">
             <span>QoS</span>

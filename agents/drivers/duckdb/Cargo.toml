@@ -32,7 +32,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
-dbx-core = { path = "../../../crates/dbx-core", default-features = false, features = ["duckdb-sidecar"] }
+dbx-core = { path = "../../../crates/dbx-core", default-features = false, features = ["duckdb-sidecar", "sqlite-bundled", "test-support"] }
 sysinfo = "0.32"
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
@@ -41,7 +41,7 @@ uuid = { version = "1", features = ["v4"] }
 tokio-postgres = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "ac8ad476de59093d33ab9f294531c956e0c6a724" }
 postgres-types = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "ac8ad476de59093d33ab9f294531c956e0c6a724" }
 postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git", rev = "ac8ad476de59093d33ab9f294531c956e0c6a724" }
-mysql_async = { git = "https://github.com/t8y2/mysql_async.git", rev = "b615bb0b10b5975182a4aa069cabc3d09021f6ab" }
+mysql_async = { git = "https://github.com/t8y2/mysql_async.git", rev = "4cd84d86bb86b060320ce3459561e8093e4422fa" }
 
 [profile.release]
 panic = "abort"

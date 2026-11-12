@@ -33,8 +33,12 @@ export function resetRowIdLocatorStateForTests(): void {
 }
 
 /** A failed data load whose SQL carried the locator is the retry trigger. */
-export function shouldRetryWithoutRowIdLocator(sql: string, connectionId: string, result: QueryResult | undefined | null): boolean {
-  return sql.includes(DBX_ROWID_COLUMN) && !rowIdLocatorUnsupported(connectionId) && !!result && isQueryExecutionErrorResult(result);
+export function shouldRetryWithoutRowIdLocator(sql: string, result: QueryResult | undefined | null): boolean {
+  // The connection capability may have been updated by another tab while this
+  // locator query was already in flight. The SQL itself is the authoritative
+  // record of what was sent; every failed locator-bearing request still needs
+  // its own fallback.
+  return sql.includes(DBX_ROWID_COLUMN) && !!result && isQueryExecutionErrorResult(result);
 }
 
 /** Only a successful fallback keeps the flag; a failed one shows the real error. */

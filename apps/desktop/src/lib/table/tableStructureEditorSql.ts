@@ -153,6 +153,11 @@ export interface EditableStructureTrigger {
   event: string;
   statement: string;
   enabled?: boolean;
+  /** Explicit exact trigger workflow; omitted callers keep the existing SQL contract. */
+  oracleExact?: { owner: string; parentType: "TABLE" | "VIEW" };
+  /** Full authoritative source captured before a structured edit; retained with a failed draft. */
+  loadedOracleSource?: string;
+  loadedOracleStructured?: boolean;
   original?: TriggerInfo;
   markedForDrop: boolean;
 }
@@ -206,6 +211,12 @@ export interface BuildTableStructureChangeSqlOptions {
   };
 }
 
+/** Change only an existing MySQL table's defaults; existing columns are left untouched. */
+export interface MysqlTableCharsetChange {
+  charset: string;
+  collation?: string;
+}
+
 export interface TranswarpCreateTableOptions {
   partitionColumns: string[];
   bucketColumns: string[];
@@ -217,6 +228,18 @@ export interface TranswarpCreateTableOptions {
 export interface TableStructureChangeSql {
   statements: string[];
   warnings: string[];
+  triggerOperations?: OracleTriggerStructureOperation[];
+  oracleTriggerContract?: 1;
+}
+
+export interface OracleTriggerStructureOperation {
+  draftId: string;
+  action: "create" | "replace" | "delete" | "enable" | "disable";
+  owner: string;
+  name: string;
+  statementIndex: number;
+  statementCount: number;
+  enabled?: boolean;
 }
 
 /** Explicit partition maintenance operations (PostgreSQL only). */

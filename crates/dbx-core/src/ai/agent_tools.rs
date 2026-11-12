@@ -1267,7 +1267,7 @@ async fn execute_redis_command(
     // argument happened to be, and a refused command never reads run state.
     let argv = parse_command_argv(&command)
         .map_err(|error| format!("{error} Send one Redis command, for example SCAN 0 MATCH session:* COUNT 100."))?;
-    let command_name = argv[0].to_ascii_uppercase();
+    let command_name = String::from_utf8_lossy(&argv[0]).to_ascii_uppercase();
     if let Some(refusal) = redis_command_refusal(&argv) {
         return Err(refusal);
     }
@@ -1287,8 +1287,8 @@ async fn execute_redis_command(
 /// Kept separate from the handler so the safety boundary is unit-testable
 /// without a live connection: every refusal happens before anything reaches the
 /// database.
-fn redis_command_refusal(argv: &[String]) -> Option<String> {
-    let command_name = argv[0].to_ascii_uppercase();
+fn redis_command_refusal(argv: &[Vec<u8>]) -> Option<String> {
+    let command_name = String::from_utf8_lossy(&argv[0]).to_ascii_uppercase();
     if command_name == "SELECT" {
         return Some(
             "Blocked: Redis SELECT is not available to the AI agent. Pass the db argument to choose the logical database instead."
@@ -1301,7 +1301,7 @@ fn redis_command_refusal(argv: &[String]) -> Option<String> {
     // timeout (it awaits the connection directly), so one of these would hold
     // this connection's agent tool lock until the client goes away and stall
     // every other tool call on the same connection.
-    if command_name == "XREAD" && argv.iter().any(|argument| argument.eq_ignore_ascii_case("BLOCK")) {
+    if command_name == "XREAD" && argv.iter().any(|argument| argument.eq_ignore_ascii_case(b"BLOCK")) {
         return Some(
             "Blocked: XREAD BLOCK waits indefinitely and cannot be interrupted. Drop BLOCK to read the entries already in the stream."
                 .to_string(),
@@ -2076,6 +2076,8 @@ for line in sys.stdin:
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -2576,8 +2578,10 @@ for line in sys.stdin:
         QueryResult {
             columns: columns.into_iter().map(str::to_string).collect(),
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: Vec::new(),
+            raw_key_cells: Vec::new(),
             spatial_values: Vec::new(),
             rows,
             affected_rows,

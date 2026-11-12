@@ -1,3 +1,4 @@
+use super::duckdb_export::DuckDbExportSnapshot;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufWriter, Seek, Write};
@@ -22,13 +23,13 @@ use crate::database_export::{
 };
 use crate::models::connection::DatabaseType;
 use crate::query::{
-    await_stream_with_progress_timeout, canceled_error, close_query_session,
+    await_stream_with_progress_timeout, canceled_error, close_manual_transaction_query_session, close_query_session,
     execute_in_manual_transaction_with_options, execute_sql_statement_with_options, operation_budget_for_pool_key,
     ManualTransactionExecutionOptions, QueryExecutionOptions, StreamProgressClock, QUERY_CANCELED,
 };
 use crate::query_result_sql::{
-    build_query_pagination_execution_plan, has_top_level_top, top_level_top_row_count, QueryPagination,
-    QueryPaginationExecutionPlanOptions,
+    build_query_pagination_execution_plan, has_top_level_top, top_level_rownum_row_count, top_level_top_row_count,
+    QueryPagination, QueryPaginationExecutionPlanOptions,
 };
 use crate::table_export::TableExportProgress;
 use crate::transfer::keyset_pagination_sql_with_identifier_quote;
@@ -36,17 +37,21 @@ use crate::types::SpatialColumn;
 use crate::xlsx_export::{
     finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_options, StreamingXlsxWriter, XlsxWorksheetData,
 };
+use mysql_async::prelude::Queryable;
 use serde_json::Value;
 use sqlparser::ast::{
-    GroupByExpr, ObjectName, ObjectNamePart, ObjectType, OrderByKind, SelectItem, SetExpr, Statement, TableFactor,
+    Expr, GroupByExpr, ObjectName, ObjectNamePart, ObjectType, OrderByKind, SelectItem, Set, SetExpr, Statement,
+    TableFactor,
 };
-use sqlparser::dialect::{GenericDialect, PostgreSqlDialect};
+use sqlparser::dialect::{GenericDialect, MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use tokio_util::sync::CancellationToken;
 
 const AGENT_UNBOUNDED_ROW_LIMIT: usize = i32::MAX as usize;
 const STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str =
-    "Streaming export is unsupported for this query. Simplify it or use a supported driver.";
+    "Streaming export cannot page through this query. Export a single SELECT statement, or load the full result first and export the loaded rows.";
+const STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR: &str =
+    "A manual transaction cannot use a result cursor, and this query cannot be split into pages. Commit or roll back the transaction, then export again.";
 const HIGHGO_STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str =
     "HighGo cannot safely paginate this query for export. Run and export a single SELECT statement that supports LIMIT/OFFSET.";
 const AGENT_SESSION_MISSING_ERROR: &str =
@@ -90,6 +95,8 @@ pub struct QueryResultExportRequest {
     pub insert_mode: SqlInsertMode,
     #[serde(default)]
     pub csv_quote_mode: CsvQuoteMode,
+    #[serde(default)]
+    pub csv_without_bom: bool,
     /// CSV 里 NULL 写成什么。默认 `\N`；空字符串表示关闭该字面量，
     /// 退回「NULL 写成空字段」的旧行为（此时 NULL 与空字符串在文件里无法区分）。
     #[serde(default = "dbx_formats::csv_export::default_csv_null_literal")]
@@ -188,6 +195,14 @@ impl StagedExportTarget {
     }
 
     pub fn commit(self) -> Result<(), String> {
+        self.commit_inner(false).result
+    }
+
+    pub fn commit_with_completion(self) -> crate::table_export::ExportCompletion {
+        self.commit_inner(true)
+    }
+
+    fn prepare_commit(&self) -> Result<(), String> {
         let staged_file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -200,10 +215,40 @@ impl StagedExportTarget {
         }
         staged_file.sync_all().map_err(|error| format!("Failed to synchronize export file: {error}"))?;
         drop(staged_file);
-        self.temporary
-            .persist(&self.destination)
-            .map(|_| ())
-            .map_err(|error| format!("Failed to replace export destination: {}", error.error))
+        Ok(())
+    }
+
+    fn commit_inner(self, report_completion: bool) -> crate::table_export::ExportCompletion {
+        if let Err(error) = self.prepare_commit() {
+            let cleanup = if report_completion {
+                self.discard()
+            } else {
+                drop(self);
+                Ok(())
+            };
+            return crate::table_export::ExportCompletion { result: Err(error), cleanup };
+        }
+        match self.temporary.persist(&self.destination) {
+            Ok(()) => crate::table_export::ExportCompletion { result: Ok(()), cleanup: Ok(()) },
+            Err(error) => {
+                let message = format!("Failed to replace export destination: {}", error.error);
+                let cleanup = if report_completion {
+                    Self { destination: self.destination, temporary: error.path }.discard()
+                } else {
+                    drop(error.path);
+                    Ok(())
+                };
+                crate::table_export::ExportCompletion { result: Err(message), cleanup }
+            }
+        }
+    }
+
+    pub fn discard(self) -> Result<(), String> {
+        match self.temporary.close() {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("Failed to remove staged export file: {error}")),
+        }
     }
 }
 
@@ -232,6 +277,43 @@ fn safe_postgres_temp_setup_sql(setup_sql: &[String]) -> Option<Vec<String>> {
     }
 
     Some(setup_sql.to_vec())
+}
+
+/// MySQL setup statements an export may replay: only `SET @user_var = <literal>`.
+///
+/// Exports run on a dedicated session, so user variables set earlier in the same batch
+/// (`SET @id = '123'; SELECT ... WHERE id = @id`) are NULL there and the export comes back
+/// empty (#13111). Literal user-variable assignments have no side effects and do not depend
+/// on the statements skipped around them, so they are the only ones replayed.
+fn mysql_user_variable_setup_sql(setup_sql: &[String]) -> Vec<String> {
+    let is_user_variable = |name: &ObjectName| {
+        let name = name.to_string();
+        name.starts_with('@') && !name.starts_with("@@")
+    };
+    let is_literal = |expr: &Expr| match expr {
+        Expr::Value(_) => true,
+        Expr::UnaryOp { expr, .. } => matches!(expr.as_ref(), Expr::Value(_)),
+        _ => false,
+    };
+    let dialect = MySqlDialect {};
+    setup_sql
+        .iter()
+        .filter(|sql| {
+            let Ok(statements) = Parser::parse_sql(&dialect, sql) else {
+                return false;
+            };
+            match statements.as_slice() {
+                [Statement::Set(Set::SingleAssignment { scope: None, hivevar: false, variable, values })] => {
+                    is_user_variable(variable) && values.len() == 1 && is_literal(&values[0])
+                }
+                [Statement::Set(Set::MultipleAssignments { assignments })] => assignments.iter().all(|assignment| {
+                    assignment.scope.is_none() && is_user_variable(&assignment.name) && is_literal(&assignment.value)
+                }),
+                _ => false,
+            }
+        })
+        .cloned()
+        .collect()
 }
 
 fn split_excel_cell_text(value: &str) -> Vec<String> {
@@ -411,13 +493,18 @@ struct JsonStreamWriter {
 }
 
 impl JsonStreamWriter {
+    #[cfg(test)]
     fn create(request: &QueryResultExportRequest) -> Result<Self, String> {
-        let target = StagedExportTarget::new(&request.file_path)?;
-        let mut file = BufWriter::new(
-            File::create(target.path()).map_err(|e| format!("Failed to create JSON export temp file: {e}"))?,
-        );
+        Self::create_for_export(request, false)
+    }
+
+    fn create_for_export(request: &QueryResultExportRequest, externally_staged: bool) -> Result<Self, String> {
+        let target = if externally_staged { None } else { Some(StagedExportTarget::new(&request.file_path)?) };
+        let path = target.as_ref().map_or_else(|| Path::new(&request.file_path), StagedExportTarget::path);
+        let mut file =
+            BufWriter::new(File::create(path).map_err(|e| format!("Failed to create JSON export temp file: {e}"))?);
         file.write_all(b"[\n").map_err(|e| format!("Failed to start JSON export: {e}"))?;
-        Ok(Self { file: Some(file), target: Some(target), wrote_row: false })
+        Ok(Self { file: Some(file), target, wrote_row: false })
     }
 
     fn write_row(&mut self, columns: &[String], row: &[Value]) -> Result<(), String> {
@@ -449,22 +536,26 @@ impl JsonStreamWriter {
         file.write_all(b"\n]\n").map_err(|e| format!("Failed to finish JSON export: {e}"))?;
         file.flush().map_err(|e| format!("Failed to flush JSON export: {e}"))?;
         self.file.take();
-        self.target
-            .take()
-            .ok_or_else(|| "JSON export target already finalized".to_string())?
-            .commit()
-            .map_err(|error| format!("Failed to finalize JSON export file: {error}"))
+        if let Some(target) = self.target.take() {
+            target.commit().map_err(|error| format!("Failed to finalize JSON export file: {error}"))?;
+        }
+        Ok(())
     }
 }
 
 impl SqlInsertWriter {
     /// Create the writer and open the temp file. Column metadata is supplied later
     /// via [`SqlInsertWriter::set_columns`] once the executed result is known.
+    #[cfg(test)]
     fn create(request: &QueryResultExportRequest) -> Result<Self, String> {
-        let target = StagedExportTarget::new(&request.file_path)?;
-        let file = BufWriter::new(
-            File::create(target.path()).map_err(|e| format!("Failed to create SQL export temp file: {e}"))?,
-        );
+        Self::create_for_export(request, false)
+    }
+
+    fn create_for_export(request: &QueryResultExportRequest, externally_staged: bool) -> Result<Self, String> {
+        let target = if externally_staged { None } else { Some(StagedExportTarget::new(&request.file_path)?) };
+        let path = target.as_ref().map_or_else(|| Path::new(&request.file_path), StagedExportTarget::path);
+        let file =
+            BufWriter::new(File::create(path).map_err(|e| format!("Failed to create SQL export temp file: {e}"))?);
         let table_name = request
             .export_table_name
             .as_deref()
@@ -473,7 +564,7 @@ impl SqlInsertWriter {
             .to_string();
         Ok(Self {
             file: Some(file),
-            target: Some(target),
+            target,
             pending_rows: Vec::new(),
             pending_spatial_values: Vec::new(),
             insert_mode: request.insert_mode,
@@ -590,11 +681,10 @@ impl SqlInsertWriter {
             file.flush().map_err(|e| format!("Failed to flush SQL file: {e}"))?;
         }
         self.file.take();
-        self.target
-            .take()
-            .ok_or_else(|| "SQL export target already finalized".to_string())?
-            .commit()
-            .map_err(|error| format!("Failed to finalize SQL export file: {error}"))
+        if let Some(target) = self.target.take() {
+            target.commit().map_err(|error| format!("Failed to finalize SQL export file: {error}"))?;
+        }
+        Ok(())
     }
 }
 
@@ -715,6 +805,39 @@ fn supports_streaming_offset_pagination(request: &QueryResultExportRequest, page
         && !first_sql.trim().eq_ignore_ascii_case(second_sql.trim())
 }
 
+/// Whether the export may open/continue an Agent result-session cursor.
+///
+/// The request decides whether the driver has an Agent cursor at all; inside a
+/// manual transaction the cursor additionally requires the transaction's own
+/// connection to be an Agent connection (native/external transaction
+/// connections only page with SQL). Kept separate from the lookup so the export
+/// policy stays unit-testable without an AppState.
+fn export_can_use_agent_cursor(request: &QueryResultExportRequest, txn_supports_agent_cursor: Option<bool>) -> bool {
+    request.use_agent_cursor && txn_supports_agent_cursor.unwrap_or(true)
+}
+
+/// Execution options for one export page read through the open manual
+/// transaction. Cursor pages must forward the page size and the result-session
+/// id, otherwise the transaction would return only the first page and later
+/// pages could never be reached; non-cursor pages stay bounded by their own
+/// page limit.
+fn manual_transaction_page_options(
+    request: &QueryResultExportRequest,
+    plan_limit: usize,
+    use_agent_result_session: bool,
+    agent_max_rows: usize,
+    session_id: Option<&str>,
+) -> ManualTransactionExecutionOptions {
+    ManualTransactionExecutionOptions {
+        max_rows: Some(if use_agent_result_session { agent_max_rows } else { plan_limit }),
+        page_size: use_agent_result_session.then_some(plan_limit),
+        result_session_id: if use_agent_result_session { session_id.map(str::to_owned) } else { None },
+        execution_id: request.execution_id.clone(),
+        timeout_secs: request.timeout_secs,
+        ..Default::default()
+    }
+}
+
 fn streaming_pagination_preflight_error(
     request: &QueryResultExportRequest,
     page_size: usize,
@@ -725,6 +848,14 @@ fn streaming_pagination_preflight_error(
     if has_keyset_plan || supports_streaming_offset_pagination(request, page_size) || has_single_execution_bound {
         return None;
     }
+    // A manual transaction without a usable Agent cursor forces the export
+    // through the transaction's own connection, where result-session cursors
+    // are unavailable. Committing the transaction is the fix, so say that
+    // instead of blaming the query shape. When the caller resolved an Agent
+    // cursor the export pages through it and stays supported.
+    if !use_agent_cursor && request.txn_session_id.as_deref().is_some_and(|id| !id.trim().is_empty()) {
+        return Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR);
+    }
     if request.database_type == DatabaseType::Highgo {
         return Some(HIGHGO_STREAMING_PAGINATION_UNSUPPORTED_ERROR);
     }
@@ -733,21 +864,28 @@ fn streaming_pagination_preflight_error(
 
 /// Enforceable in-memory row bound for a single-execution export, or `None`
 /// when the query cannot be safely streamed in one shot without an Agent
-/// cursor. Kingbase SQL Server compatibility mode TOP queries cannot be
-/// rewritten with LIMIT/OFFSET; a concrete `TOP n` bounds the result and the
-/// user's export row limit caps it further. Percentage TOP / `WITH TIES` have
-/// no concrete row bound, so they are only single-execution-capable when a row
-/// limit is configured.
+/// cursor.
+///
+/// Two statement shapes bound their own rows: Kingbase SQL Server compatibility
+/// mode `TOP n` (which cannot be rewritten with LIMIT/OFFSET) and Oracle-family
+/// queries that already filter with `ROWNUM < n` / `ROWNUM <= n` (which the
+/// ROWNUM wrapper must not page again). Both can be exported with one bounded
+/// execution. Percentage TOP / `WITH TIES` have no concrete row bound, so they
+/// are only single-execution-capable when the export row limit caps them.
 fn single_execution_row_bound(request: &QueryResultExportRequest) -> Option<usize> {
-    if !has_top_level_top(&request.sql) {
-        return None;
-    }
-    match (top_level_top_row_count(&request.sql), request.row_limit) {
-        (Some(top), Some(row_limit)) => Some(top.min(row_limit)),
-        (Some(top), None) => Some(top),
-        (None, Some(row_limit)) => Some(row_limit),
-        (None, None) => None,
-    }
+    let explicit_bound = if has_top_level_top(&request.sql) {
+        match top_level_top_row_count(&request.sql) {
+            Some(top) => Some(top),
+            // TOP without a concrete literal is unbounded by itself; the export
+            // row limit is the only enforceable cap for such statements.
+            None => request.row_limit,
+        }
+    } else if matches!(request.database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
+        top_level_rownum_row_count(&request.sql)
+    } else {
+        None
+    };
+    explicit_bound.map(|bound| request.row_limit.map_or(bound, |row_limit| bound.min(row_limit)))
 }
 
 /// Maps the frozen export header onto the column list a page reported.
@@ -923,27 +1061,108 @@ pub async fn export_query_result_core(
     cancel_token: Option<CancellationToken>,
     on_progress: impl Fn(TableExportProgress),
 ) -> Result<(), String> {
-    let mut session_id: Option<String> = None;
-    let result = export_query_result_core_inner(state, request, cancel_token, &on_progress, &mut session_id).await;
+    export_query_result_with_cleanup(state, request, cancel_token, on_progress, false).await.result
+}
 
+/// The caller owns the staged destination and confirms its commit or removal.
+pub async fn export_query_result_core_with_completion(
+    state: &AppState,
+    request: &QueryResultExportRequest,
+    cancel_token: Option<CancellationToken>,
+    on_progress: impl Fn(TableExportProgress),
+) -> crate::table_export::ExportCompletion {
+    export_query_result_with_cleanup(state, request, cancel_token, on_progress, true).await
+}
+
+async fn export_query_result_with_cleanup(
+    state: &AppState,
+    request: &QueryResultExportRequest,
+    cancel_token: Option<CancellationToken>,
+    on_progress: impl Fn(TableExportProgress),
+    report_completion: bool,
+) -> crate::table_export::ExportCompletion {
+    let policy_check: Result<(), String> = async {
+        crate::query::mysql_data_charset_policy::check_export(state, &request.connection_id, &request.format).await?;
+        if crate::query::mysql_data_charset_policy::enabled_for_connection(state, &request.connection_id).await? {
+            crate::query::check_read_only_for_connection_multi(
+                state,
+                &request.connection_id,
+                &[request.sql.as_str(), request.query_base_sql.as_str()],
+            )
+            .await?;
+            crate::query::check_read_only_for_connection_multi(state, &request.connection_id, &request.setup_sql)
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = policy_check {
+        return crate::table_export::ExportCompletion { result: Err(error), cleanup: Ok(()) };
+    }
+    let mut session_id: Option<String> = None;
+    let mut duckdb_snapshot = None;
+    let result = export_query_result_core_inner(
+        state,
+        request,
+        cancel_token,
+        &on_progress,
+        &mut session_id,
+        report_completion,
+        &mut duckdb_snapshot,
+    )
+    .await;
+
+    let mut cleanup = if let Some(snapshot) = duckdb_snapshot {
+        if report_completion {
+            snapshot.close_with_completion(state).await
+        } else {
+            snapshot.close(state).await;
+            Ok(())
+        }
+    } else {
+        Ok(())
+    };
     if let Some(session_id) = session_id {
-        let _ = close_query_session(
-            state,
-            &request.connection_id,
-            &request.database,
-            &session_id,
-            request.client_session_id.as_deref(),
-            None,
-        )
-        .await;
+        let txn_session_id = request.txn_session_id.as_deref().map(str::trim).filter(|id| !id.is_empty());
+        // A cursor opened through the manual transaction belongs to that
+        // transaction's connection. Closing it through the normal session pool
+        // cannot find it (and could disturb the transaction's own session).
+        let cursor_close = match txn_session_id {
+            Some(txn_session_id) => {
+                close_manual_transaction_query_session(state, &request.connection_id, txn_session_id, &session_id)
+                    .await
+                    .map(|_| ())
+            }
+            None => close_query_session(
+                state,
+                &request.connection_id,
+                &request.database,
+                &session_id,
+                request.client_session_id.as_deref(),
+                None,
+            )
+            .await
+            .map(|_| ()),
+        };
+        if report_completion {
+            cleanup = cleanup.and(cursor_close);
+        }
     }
     if let Some(client_session_id) = request.client_session_id.as_deref() {
         let database = request.database.trim();
         let database = if database.is_empty() { None } else { Some(database) };
-        let _ = state.close_client_session_pool(&request.connection_id, database, client_session_id).await;
+        if report_completion {
+            let pool_close = state
+                .close_client_session_pool_with_completion(&request.connection_id, database, client_session_id)
+                .await
+                .map(|_| ());
+            cleanup = cleanup.and(pool_close);
+        } else {
+            let _ = state.close_client_session_pool(&request.connection_id, database, client_session_id).await;
+        }
     }
 
-    result
+    crate::table_export::ExportCompletion { result, cleanup }
 }
 
 async fn export_query_result_core_inner(
@@ -952,6 +1171,8 @@ async fn export_query_result_core_inner(
     cancel_token: Option<CancellationToken>,
     on_progress: &impl Fn(TableExportProgress),
     session_id: &mut Option<String>,
+    externally_staged: bool,
+    duckdb_snapshot: &mut Option<DuckDbExportSnapshot>,
 ) -> Result<(), String> {
     let format = request.format.to_lowercase();
     if format != "csv" && format != "xlsx" && format != "json" && format != "txt" && format != "sql" {
@@ -967,28 +1188,75 @@ async fn export_query_result_core_inner(
     // The streaming fast paths below check out their own pooled connection, which
     // cannot see an open manual transaction. Inside a transaction the export pages
     // through the transaction's connection instead, the same way the result grid
-    // pages, and result-session cursors are not opened there.
+    // pages. An Agent transaction connection hosts the Agent result session as
+    // well, so keep the cursor there: Oracle 11g cannot offset-paginate a query
+    // whose ROWNUM wrapper is unsafe (an existing ROWNUM bound, wildcards,
+    // duplicate projections, ...), and disabling the cursor for transactional tabs
+    // made those exports fail with "streaming export is unsupported" even though
+    // the grid could page them. Native/external transaction connections have no
+    // cursor, so they keep SQL-only pagination.
     let txn_session_id = request.txn_session_id.as_deref().map(str::trim).filter(|id| !id.is_empty());
-    let use_agent_cursor = request.use_agent_cursor && txn_session_id.is_none();
+    let txn_supports_agent_cursor = match txn_session_id {
+        Some(txn_session_id) => {
+            Some(crate::query::manual_transaction_supports_agent_cursor(state, txn_session_id).await)
+        }
+        None => None,
+    };
+    let use_agent_cursor = export_can_use_agent_cursor(request, txn_supports_agent_cursor);
 
     if txn_session_id.is_none() {
-        if try_export_postgres_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
+        if try_export_postgres_query_result_stream(
+            state,
+            request,
+            &format,
+            cancel_token.clone(),
+            on_progress,
+            externally_staged,
+        )
+        .await?
+        {
             return Ok(());
         }
 
-        if try_export_sqlserver_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
+        if try_export_sqlserver_query_result_stream(
+            state,
+            request,
+            &format,
+            cancel_token.clone(),
+            on_progress,
+            externally_staged,
+        )
+        .await?
+        {
             return Ok(());
         }
 
         // MySQL does not guarantee a stable row order for independent LIMIT/OFFSET
         // executions without ORDER BY, so query-result export must stream one run.
-        if try_export_mysql_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await? {
+        if try_export_mysql_query_result_stream(
+            state,
+            request,
+            &format,
+            cancel_token.clone(),
+            on_progress,
+            externally_staged,
+        )
+        .await?
+        {
             return Ok(());
         }
 
         // ClickHouse HTTP pagination is unsafe for unsorted result sets; stream one
         // response so large exports preserve the server's single execution order.
-        if try_export_clickhouse_query_result_stream(state, request, &format, cancel_token.clone(), on_progress).await?
+        if try_export_clickhouse_query_result_stream(
+            state,
+            request,
+            &format,
+            cancel_token.clone(),
+            on_progress,
+            externally_staged,
+        )
+        .await?
         {
             return Ok(());
         }
@@ -1000,7 +1268,9 @@ async fn export_query_result_core_inner(
         None
     };
     if let Some(file) = text_file.as_mut() {
-        file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
+        if format != "csv" || !request.csv_without_bom {
+            file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
+        }
     }
 
     let mut xlsx = None;
@@ -1010,7 +1280,23 @@ async fn export_query_result_core_inner(
     let mut rows_exported: u64 = 0;
     let mut offset: usize = 0;
     let mut wrote_text_header = false;
-    let mut keyset_plan = build_keyset_plan(state, request).await;
+    if request.database_type == DatabaseType::DuckDb && txn_session_id.is_none() {
+        on_progress(progress(request, 0, ExportStatus::PreparingSnapshot, None));
+        let snapshot = duckdb_snapshot.insert(DuckDbExportSnapshot::new(
+            &request.connection_id,
+            &request.database,
+            request.schema.as_deref(),
+            QueryExecutionOptions {
+                timeout_secs: request.timeout_secs,
+                client_session_id: request.client_session_id.clone(),
+                execution_id: request.execution_id.clone(),
+                catalog: request.catalog.clone(),
+                ..Default::default()
+            },
+        ));
+        snapshot.materialize(state, &request.sql, effective_row_limit, cancel_token.clone()).await?;
+    }
+    let mut keyset_plan = if duckdb_snapshot.is_none() { build_keyset_plan(state, request).await } else { None };
     // A Kingbase SQL Server compat TOP query that cannot be offset-paginated is
     // exported with a single execution whose page size is the enforceable row
     // bound (concrete TOP count and/or the configured export row limit), then it
@@ -1019,16 +1305,17 @@ async fn export_query_result_core_inner(
     if let Some(error) = streaming_pagination_preflight_error(
         request,
         page_size,
-        keyset_plan.is_some(),
+        keyset_plan.is_some() || duckdb_snapshot.is_some(),
         single_execution_bound.is_some(),
         use_agent_cursor,
     ) {
         return Err(error.to_string());
     }
 
-    let mut json_writer = if format == "json" { Some(JsonStreamWriter::create(request)?) } else { None };
+    let mut json_writer =
+        if format == "json" { Some(JsonStreamWriter::create_for_export(request, externally_staged)?) } else { None };
     let mut sql_writer: Option<SqlInsertWriter> =
-        if format == "sql" { Some(SqlInsertWriter::create(request)?) } else { None };
+        if format == "sql" { Some(SqlInsertWriter::create_for_export(request, externally_staged)?) } else { None };
 
     loop {
         if cancel_token.as_ref().is_some_and(|token| token.is_cancelled())
@@ -1055,27 +1342,33 @@ async fn export_query_result_core_inner(
             remaining.map_or(page_size, |rem| rem.min(page_size)).max(1)
         };
 
-        let (sql_to_execute, plan_limit, use_agent_result_session, single_execution) =
-            if let Some(plan) = keyset_plan.as_ref() {
-                (build_keyset_export_sql(plan, request, this_page), this_page, false, false)
-            } else {
-                let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
-                    sql: request.sql.clone(),
-                    query_base_sql: request.query_base_sql.clone(),
-                    database_type: Some(request.database_type),
-                    pagination: QueryPagination { limit: this_page, offset, session_id: session_id.clone() },
-                    use_agent_cursor,
-                    first_page_uses_actual_sql: true,
-                    execution_hint: None,
-                });
-                if let Some(error) = plan.pagination_error {
-                    return Err(error);
-                }
-                let Some(plan_limit) = plan.page_limit else {
-                    return Err("Failed to build query pagination plan for export".to_string());
-                };
-                (plan.sql_to_execute, plan_limit, plan.use_agent_result_session, plan.single_execution)
+        let (sql_to_execute, plan_limit, use_agent_result_session, single_execution) = if duckdb_snapshot.is_some() {
+            (String::new(), this_page, false, false)
+        } else if let Some(plan) = keyset_plan.as_ref() {
+            (build_keyset_export_sql(plan, request, this_page), this_page, false, false)
+        } else if let Some(bound) = single_execution_bound {
+            // The statement already bounds its own rows (Kingbase TOP or an
+            // Oracle ROWNUM predicate), so one execution covers the export: no
+            // LIMIT/OFFSET rewrite and no cursor session are needed.
+            (request.sql.clone(), bound, false, true)
+        } else {
+            let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                sql: request.sql.clone(),
+                query_base_sql: request.query_base_sql.clone(),
+                database_type: Some(request.database_type),
+                pagination: QueryPagination { limit: this_page, offset, session_id: session_id.clone() },
+                use_agent_cursor,
+                first_page_uses_actual_sql: true,
+                execution_hint: None,
+            });
+            if let Some(error) = plan.pagination_error {
+                return Err(error);
+            }
+            let Some(plan_limit) = plan.page_limit else {
+                return Err("Failed to build query pagination plan for export".to_string());
             };
+            (plan.sql_to_execute, plan_limit, plan.use_agent_result_session, plan.single_execution)
+        };
 
         let options = if use_agent_result_session {
             QueryExecutionOptions {
@@ -1101,19 +1394,22 @@ async fn export_query_result_core_inner(
             }
         };
 
-        let page_result = if let Some(txn_session_id) = txn_session_id {
+        let page_result = if let Some(snapshot) = duckdb_snapshot.as_ref() {
+            snapshot.page(state, offset as u64, this_page, cancel_token.clone()).await
+        } else if let Some(txn_session_id) = txn_session_id {
             execute_in_manual_transaction_with_options(
                 state,
                 txn_session_id,
                 &sql_to_execute,
                 &request.database,
                 request.schema.as_deref(),
-                ManualTransactionExecutionOptions {
-                    max_rows: Some(plan_limit),
-                    execution_id: request.execution_id.clone(),
-                    timeout_secs: request.timeout_secs,
-                    ..Default::default()
-                },
+                manual_transaction_page_options(
+                    request,
+                    plan_limit,
+                    use_agent_result_session,
+                    agent_max_rows,
+                    session_id.as_deref(),
+                ),
             )
             .await
             .and_then(|results| {
@@ -1350,6 +1646,7 @@ async fn try_export_postgres_query_result_stream(
     format: &str,
     cancel_token: Option<CancellationToken>,
     on_progress: &impl Fn(TableExportProgress),
+    externally_staged: bool,
 ) -> Result<bool, String> {
     if request.use_agent_cursor
         || !crate::sql::starts_with_executable_sql_keyword(
@@ -1397,16 +1694,19 @@ async fn try_export_postgres_query_result_stream(
     let mut text_file = if format == "csv" || format == "txt" {
         let mut file =
             BufWriter::new(File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?);
-        file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
+        if format != "csv" || !request.csv_without_bom {
+            file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
+        }
         Some(file)
     } else {
         None
     };
     let mut xlsx = None;
     let mut text_buffer = String::new();
-    let mut json_writer = if format == "json" { Some(JsonStreamWriter::create(request)?) } else { None };
+    let mut json_writer =
+        if format == "json" { Some(JsonStreamWriter::create_for_export(request, externally_staged)?) } else { None };
     let mut sql_writer: Option<SqlInsertWriter> =
-        if format == "sql" { Some(SqlInsertWriter::create(request)?) } else { None };
+        if format == "sql" { Some(SqlInsertWriter::create_for_export(request, externally_staged)?) } else { None };
     let budget = operation_budget_for_pool_key(state, &pool_key, query_export_timeout(request.timeout_secs)).await;
     let cancel_context = state.get_postgres_cancel_context(&pool_key).await;
 
@@ -1548,6 +1848,7 @@ async fn try_export_mysql_query_result_stream(
     format: &str,
     cancel_token: Option<CancellationToken>,
     on_progress: &impl Fn(TableExportProgress),
+    externally_staged: bool,
 ) -> Result<bool, String> {
     if request.use_agent_cursor {
         return Ok(false);
@@ -1600,16 +1901,19 @@ async fn try_export_mysql_query_result_stream(
     let mut text_file = if format == "csv" || format == "txt" {
         let mut file =
             BufWriter::new(File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?);
-        file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
+        if format != "csv" || !request.csv_without_bom {
+            file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
+        }
         Some(file)
     } else {
         None
     };
     let mut xlsx = None;
     let mut text_buffer = String::new();
-    let mut json_writer = if format == "json" { Some(JsonStreamWriter::create(request)?) } else { None };
+    let mut json_writer =
+        if format == "json" { Some(JsonStreamWriter::create_for_export(request, externally_staged)?) } else { None };
     let mut sql_writer: Option<SqlInsertWriter> =
-        if format == "sql" { Some(SqlInsertWriter::create(request)?) } else { None };
+        if format == "sql" { Some(SqlInsertWriter::create_for_export(request, externally_staged)?) } else { None };
     let query_timeout = query_export_timeout(request.timeout_secs);
     let operation_budget = operation_budget_for_pool_key(state, &pool_key, query_timeout).await;
     let mut conn = crate::db::mysql::get_conn_with_health_check_with_cancel(
@@ -1619,14 +1923,22 @@ async fn try_export_mysql_query_result_stream(
         cancel_token.as_ref(),
     )
     .await?;
+    for setup in mysql_user_variable_setup_sql(&request.setup_sql) {
+        conn.query_drop(setup)
+            .await
+            .map_err(|error| format!("Failed to restore session variables for export: {error}"))?;
+    }
     let mysql_connection_id = conn.id();
     let kill_opts = conn.opts().clone();
     if let Some(execution_id) = request.execution_id.clone() {
         let interrupt_kill_opts = kill_opts.clone();
+        let kill_timeout = operation_budget.checkout_timeout;
         state.running_queries.register_interrupt(&execution_id, move || {
             let kill_opts = interrupt_kill_opts.clone();
             tokio::spawn(async move {
-                if let Err(error) = crate::db::mysql::kill_query_with_opts(kill_opts, mysql_connection_id).await {
+                if let Err(error) =
+                    crate::db::mysql::kill_query_with_opts(kill_opts, mysql_connection_id, kill_timeout).await
+                {
                     log::warn!("Failed to cancel MySQL export query {mysql_connection_id}: {error}");
                 }
             });
@@ -1660,7 +1972,7 @@ async fn try_export_mysql_query_result_stream(
 
     let progress_clock = Arc::new(StreamProgressClock::new());
     let progress_clock_for_stream = progress_clock.clone();
-    let stream_future = crate::db::mysql::stream_query_result_on_conn(
+    let stream_future = crate::db::mysql::stream_query_result_on_conn_with_data_charset(
         &mut conn,
         &request.sql,
         bare,
@@ -1668,6 +1980,7 @@ async fn try_export_mysql_query_result_stream(
         mysql_dialect,
         &export_cancelled,
         format.eq_ignore_ascii_case("sql"),
+        pool.data_charset(),
         |item| {
             if export_cancelled.load(Ordering::SeqCst)
                 || cancel_token.as_ref().is_some_and(|token| token.is_cancelled())
@@ -1760,7 +2073,9 @@ async fn try_export_mysql_query_result_stream(
     )
     .await;
     if stream_result.as_ref().is_err_and(|error| error == &timeout_error) {
-        let _ = crate::db::mysql::kill_query_with_opts(kill_opts, mysql_connection_id).await;
+        let _ =
+            crate::db::mysql::kill_query_with_opts(kill_opts, mysql_connection_id, operation_budget.checkout_timeout)
+                .await;
     }
     watcher_done.cancel();
 
@@ -1832,6 +2147,7 @@ async fn try_export_clickhouse_query_result_stream(
     format: &str,
     cancel_token: Option<CancellationToken>,
     on_progress: &impl Fn(TableExportProgress),
+    externally_staged: bool,
 ) -> Result<bool, String> {
     if request.database_type != DatabaseType::ClickHouse
         || request.use_agent_cursor
@@ -1880,16 +2196,19 @@ async fn try_export_clickhouse_query_result_stream(
     let mut text_file = if format == "csv" || format == "txt" {
         let mut file =
             BufWriter::new(File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?);
-        file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
+        if format != "csv" || !request.csv_without_bom {
+            file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
+        }
         Some(file)
     } else {
         None
     };
     let mut xlsx = None;
     let mut text_buffer = String::new();
-    let mut json_writer = if format == "json" { Some(JsonStreamWriter::create(request)?) } else { None };
+    let mut json_writer =
+        if format == "json" { Some(JsonStreamWriter::create_for_export(request, externally_staged)?) } else { None };
     let mut sql_writer: Option<SqlInsertWriter> =
-        if format == "sql" { Some(SqlInsertWriter::create(request)?) } else { None };
+        if format == "sql" { Some(SqlInsertWriter::create_for_export(request, externally_staged)?) } else { None };
     let query_timeout = query_export_timeout(request.timeout_secs);
     let clickhouse_database = if database.is_empty() { "default" } else { database };
 
@@ -2037,6 +2356,7 @@ async fn try_export_sqlserver_query_result_stream(
     format: &str,
     cancel_token: Option<CancellationToken>,
     on_progress: &impl Fn(TableExportProgress),
+    externally_staged: bool,
 ) -> Result<bool, String> {
     if request.database_type != DatabaseType::SqlServer || request.use_agent_cursor {
         return Ok(false);
@@ -2066,16 +2386,19 @@ async fn try_export_sqlserver_query_result_stream(
     let mut text_file = if format == "csv" || format == "txt" {
         let mut file =
             BufWriter::new(File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?);
-        file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
+        if format != "csv" || !request.csv_without_bom {
+            file.write_all(b"\xEF\xBB\xBF").map_err(|e| format!("Failed to write BOM: {e}"))?;
+        }
         Some(file)
     } else {
         None
     };
     let mut xlsx = None;
     let mut text_buffer = String::new();
-    let mut json_writer = if format == "json" { Some(JsonStreamWriter::create(request)?) } else { None };
+    let mut json_writer =
+        if format == "json" { Some(JsonStreamWriter::create_for_export(request, externally_staged)?) } else { None };
     let mut sql_writer: Option<SqlInsertWriter> =
-        if format == "sql" { Some(SqlInsertWriter::create(request)?) } else { None };
+        if format == "sql" { Some(SqlInsertWriter::create_for_export(request, externally_staged)?) } else { None };
     let query_timeout = query_export_timeout(request.timeout_secs);
 
     let mut client = match cancel_token.as_ref() {
@@ -2330,6 +2653,32 @@ mod tests {
     }
 
     #[test]
+    fn staged_export_completion_distinguishes_commit_failure_from_cleanup_failure() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let destination = dir.path().join("result.csv");
+        std::fs::write(&destination, "original").expect("original destination");
+        let target = StagedExportTarget::new(destination.to_str().unwrap()).unwrap();
+        let staged = target.path().to_path_buf();
+        std::fs::remove_file(&staged).unwrap();
+        std::fs::create_dir(&staged).unwrap();
+        let completion = target.commit_with_completion();
+        assert!(completion.result.is_err());
+        assert!(completion.cleanup.is_err());
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "original");
+        std::fs::remove_dir(staged).unwrap();
+
+        let blocked_destination = dir.path().join("destination-directory");
+        std::fs::create_dir(&blocked_destination).unwrap();
+        let target = StagedExportTarget::new(blocked_destination.to_str().unwrap()).unwrap();
+        let staged = target.path().to_path_buf();
+        let completion = target.commit_with_completion();
+        assert!(completion.result.is_err());
+        assert!(completion.cleanup.is_ok());
+        assert!(!staged.exists());
+        assert!(blocked_destination.is_dir());
+    }
+
+    #[test]
     fn staged_export_targets_are_unique_same_directory_and_replace_existing_destination() {
         let dir = tempfile::tempdir().expect("temp dir");
         let destination = dir.path().join("result.csv");
@@ -2394,6 +2743,7 @@ mod tests {
             identifier_quote: None,
             insert_mode: SqlInsertMode::Batch,
             csv_quote_mode: Default::default(),
+            csv_without_bom: false,
             null_literal: String::new(),
             primary_key_mode: DataGridPrimaryKeyMode::Include,
             primary_keys: Vec::new(),
@@ -2488,6 +2838,7 @@ mod tests {
             identifier_quote: None,
             insert_mode: Default::default(),
             csv_quote_mode: Default::default(),
+            csv_without_bom: false,
             null_literal: String::new(),
             primary_key_mode: DataGridPrimaryKeyMode::ExcludeAll,
             primary_keys: vec!["id".to_string()],
@@ -2577,6 +2928,24 @@ mod tests {
     }
 
     #[test]
+    fn mysql_setup_replays_only_literal_user_variable_assignments() {
+        let setup = vec![
+            "SET @ID = '123'".to_string(),
+            "SET @a = 1, @b = -2".to_string(),
+            "UPDATE orders SET status = 'x'".to_string(),
+            "SET @@session.sql_mode = ''".to_string(),
+            "SET SESSION wait_timeout = 10".to_string(),
+            "SET @n = (SELECT COUNT(*) FROM orders)".to_string(),
+            "SET @f = my_function()".to_string(),
+        ];
+        assert_eq!(
+            mysql_user_variable_setup_sql(&setup),
+            vec!["SET @ID = '123'".to_string(), "SET @a = 1, @b = -2".to_string()]
+        );
+        assert!(mysql_user_variable_setup_sql(&[]).is_empty());
+    }
+
+    #[test]
     fn postgres_temp_setup_accepts_only_session_local_table_operations() {
         let safe = vec![
             "CREATE TEMPORARY TABLE t1 AS SELECT 1 AS id".to_string(),
@@ -2631,6 +3000,7 @@ mod tests {
             execution_id: None,
             date_time_format: None,
             csv_quote_mode: CsvQuoteMode::All,
+            csv_without_bom: false,
             null_literal: String::new(),
             export_table_name: None,
             export_schema: None,
@@ -2837,6 +3207,29 @@ mod tests {
     }
 
     #[test]
+    fn manual_transaction_export_reports_the_transaction_instead_of_the_query_shape() {
+        let mut req = request("csv", None, None);
+        req.database_type = DatabaseType::OceanbaseOracle;
+        req.sql = "SELECT * FROM users; SELECT 1".to_string();
+        req.query_base_sql = req.sql.clone();
+        // The frontend keeps use_agent_cursor set; the backend drops it for a
+        // manual transaction, which is what surfaces the error.
+        req.use_agent_cursor = true;
+        req.txn_session_id = Some("txn-1".to_string());
+
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 100, false, false, false),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
+        );
+
+        req.txn_session_id = None;
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 100, false, false, false),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+        );
+    }
+
+    #[test]
     fn agent_cursor_export_keeps_unrewritable_fallback_for_other_databases() {
         let mut req = request("csv", None, None);
         req.database_type = DatabaseType::Oracle;
@@ -2870,6 +3263,122 @@ mod tests {
     }
 
     #[test]
+    fn oracle_manual_transaction_export_keeps_the_agent_cursor() {
+        // Regression: exports inside a manual transaction page through the
+        // transaction's connection. An Agent transaction connection also hosts
+        // the result session, so disabling the cursor made Oracle 11g exports fail
+        // with the streaming-unsupported error whenever the ROWNUM wrapper cannot
+        // paginate the statement (here an existing `ROWNUM <` bound, as in "export
+        // current result set" for a grid whose query already bounds its rows).
+        let mut req = request("xlsx", None, None);
+        req.database_type = DatabaseType::Oracle;
+        req.sql = "SELECT FJFY, JCBW FROM T_YL_JCZD01 WHERE ROWNUM < 2000;".to_string();
+        req.query_base_sql = req.sql.clone();
+        req.use_agent_cursor = true;
+        req.txn_session_id = Some("oracle-txn-1".to_string());
+
+        let cursor = export_can_use_agent_cursor(&req, Some(true));
+        assert!(cursor);
+        assert!(!supports_streaming_offset_pagination(&req, 1000));
+        assert_eq!(streaming_pagination_preflight_error(&req, 1000, false, false, cursor), None);
+
+        // Without a usable cursor the manual transaction gets the
+        // transaction-specific guidance instead of the generic query-shape error.
+        let no_cursor = req.use_agent_cursor && req.txn_session_id.is_none();
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 1000, false, false, no_cursor),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
+        );
+
+        // A native/external transaction connection has no result cursor: keep the
+        // honest error instead of silently exporting only the first page.
+        let cursor = export_can_use_agent_cursor(&req, Some(false));
+        assert!(!cursor);
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 1000, false, false, cursor),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
+        );
+
+        // Drivers without an Agent cursor still get the honest error.
+        req.use_agent_cursor = false;
+        let cursor = export_can_use_agent_cursor(&req, None);
+        assert!(!cursor);
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 1000, false, false, cursor),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
+        );
+    }
+
+    #[test]
+    fn manual_transaction_export_pages_forward_the_cursor_session() {
+        let mut req = request("xlsx", None, None);
+        req.use_agent_cursor = true;
+        req.txn_session_id = Some("oracle-txn-1".to_string());
+
+        let first_cursor_page = manual_transaction_page_options(&req, 500, true, 10_000, None);
+        assert_eq!(first_cursor_page.page_size, Some(500));
+        assert_eq!(first_cursor_page.max_rows, Some(10_000));
+        assert!(first_cursor_page.result_session_id.is_none());
+
+        let cursor_page = manual_transaction_page_options(&req, 500, true, 10_000, Some("cursor-1"));
+        assert_eq!(cursor_page.page_size, Some(500));
+        assert_eq!(cursor_page.result_session_id.as_deref(), Some("cursor-1"));
+        assert_eq!(cursor_page.max_rows, Some(10_000));
+
+        // Server-side paginated pages keep their own bounded row count and must
+        // not open a cursor.
+        let bounded_page = manual_transaction_page_options(&req, 500, false, 10_000, None);
+        assert_eq!(bounded_page.max_rows, Some(500));
+        assert!(bounded_page.page_size.is_none());
+        assert!(bounded_page.result_session_id.is_none());
+    }
+
+    #[test]
+    fn oracle_rownum_bounded_export_streams_a_single_bounded_execution() {
+        // Regression for "export current result set" on Oracle 11g: a query that
+        // already bounds itself with ROWNUM cannot be ROWNUM-wrapped for offset
+        // pagination, and a manual transaction has no cursor page to fall back
+        // on. One bounded execution is enough, exactly like Kingbase TOP.
+        let mut req = request("xlsx", None, None);
+        req.database_type = DatabaseType::Oracle;
+        req.sql = "SELECT FJFY, JCBW FROM T_YL_JCZD01 WHERE ROWNUM < 2000;".to_string();
+        req.query_base_sql = req.sql.clone();
+        req.use_agent_cursor = false;
+        req.txn_session_id = Some("oracle-txn-1".to_string());
+
+        assert_eq!(single_execution_row_bound(&req), Some(1999));
+        assert_eq!(single_execution_page_limit(&req, 2000), Some(1999));
+        assert!(supports_single_execution_export(&req, 2000));
+        assert_eq!(streaming_pagination_preflight_error(&req, 2000, false, true, false), None);
+
+        // A page size smaller than the bound keeps the normal pagination path
+        // (and the transaction-specific error when neither cursor nor rewrite
+        // is available inside the open transaction).
+        assert_eq!(single_execution_page_limit(&req, 1000), None);
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 1000, false, false, false),
+            Some(STREAMING_PAGINATION_UNSUPPORTED_IN_TRANSACTION_ERROR)
+        );
+
+        // The export row limit caps the single execution.
+        req.row_limit = Some(500);
+        assert_eq!(single_execution_row_bound(&req), Some(500));
+    }
+
+    #[test]
+    fn rownum_bounds_only_apply_to_oracle_family_requests() {
+        let mut req = request("csv", None, None);
+        req.sql = "SELECT id FROM users WHERE ROWNUM < 10".to_string();
+        req.query_base_sql = req.sql.clone();
+        assert_eq!(single_execution_row_bound(&req), None);
+
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            req.database_type = database_type;
+            assert_eq!(single_execution_row_bound(&req), Some(9));
+        }
+    }
+
+    #[test]
     fn csv_unlimited_export_has_no_effective_row_limit() {
         assert_eq!(effective_row_limit(&request("csv", None, None)), None);
     }
@@ -2885,6 +3394,48 @@ mod tests {
             format_text_export_header("txt", &["id".to_string(), "note".to_string()], CsvQuoteMode::All, None),
             "id\tnote"
         );
+    }
+
+    #[test]
+    fn externally_staged_writers_leave_cleanup_with_the_caller_on_cancel_and_flush_failure() {
+        for format in ["json", "sql"] {
+            for flush_failure in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let destination = dir.path().join("result");
+                std::fs::write(&destination, "original").unwrap();
+                let target = StagedExportTarget::new(destination.to_str().unwrap()).unwrap();
+                let mut req = request(format, None, None);
+                req.file_path = target.path_string().unwrap();
+                if format == "json" {
+                    let mut writer = JsonStreamWriter::create_for_export(&req, true).unwrap();
+                    assert!(writer.target.is_none());
+                    if flush_failure {
+                        writer.file.take();
+                        writer.file = Some(BufWriter::new(File::open(target.path()).unwrap()));
+                        writer.write_row(&["ID".into()], &[json!(7)]).unwrap();
+                        assert!(writer.finish().unwrap_err().contains("flush"));
+                    } else {
+                        drop(writer);
+                    }
+                } else {
+                    let mut writer = SqlInsertWriter::create_for_export(&req, true).unwrap();
+                    assert!(writer.target.is_none());
+                    if flush_failure {
+                        writer.set_columns(vec!["ID".into()], &["NUMBER".into()], &[], &req).unwrap();
+                        writer.file.take();
+                        writer.file = Some(BufWriter::new(File::open(target.path()).unwrap()));
+                        writer.write_row(vec![json!(7)], None).unwrap();
+                        assert!(writer.finish().unwrap_err().contains("flush"));
+                    } else {
+                        drop(writer);
+                    }
+                }
+                assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+                target.discard().unwrap();
+                assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+                assert_eq!(std::fs::read_to_string(destination).unwrap(), "original");
+            }
+        }
     }
 
     #[test]
@@ -3088,9 +3639,97 @@ mod tests {
         let req = request("csv", Some(1000), None);
         assert!(supports_streaming_offset_pagination(&req, 100));
 
+        let oscar_req =
+            QueryResultExportRequest { database_type: DatabaseType::Oscar, ..request("csv", Some(1000), None) };
+        assert!(!supports_streaming_offset_pagination(&oscar_req, 100));
+
         let oracle_req =
             QueryResultExportRequest { database_type: DatabaseType::Oracle, ..request("csv", Some(1000), None) };
         assert!(!supports_streaming_offset_pagination(&oracle_req, 100));
+
+        let oracle_safe_req = QueryResultExportRequest {
+            database_type: DatabaseType::Oracle,
+            sql: "SELECT id, name FROM users".to_string(),
+            query_base_sql: "SELECT id, name FROM users".to_string(),
+            ..request("csv", Some(1000), None)
+        };
+        assert!(supports_streaming_offset_pagination(&oracle_safe_req, 100));
+    }
+
+    #[test]
+    fn oracle_streaming_offset_pagination_supports_single_and_join_queries() {
+        let mut req = request("csv", Some(1000), None);
+        req.database_type = DatabaseType::Oracle;
+        req.sql = "SELECT code, name FROM BD_MATERIAL".to_string();
+        req.query_base_sql = req.sql.clone();
+        assert!(supports_streaming_offset_pagination(&req, 100));
+        assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false, false), None);
+
+        let plan1 = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: req.sql.clone(),
+            query_base_sql: req.query_base_sql.clone(),
+            database_type: Some(DatabaseType::Oracle),
+            pagination: QueryPagination { limit: 100, offset: 0, session_id: None },
+            use_agent_cursor: false,
+            first_page_uses_actual_sql: true,
+            execution_hint: None,
+        });
+        assert_eq!(
+            plan1.page_sql.as_deref(),
+            Some("SELECT * FROM (SELECT code, name FROM BD_MATERIAL) WHERE ROWNUM <= 100;")
+        );
+
+        let plan2 = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: req.sql.clone(),
+            query_base_sql: req.query_base_sql.clone(),
+            database_type: Some(DatabaseType::Oracle),
+            pagination: QueryPagination { limit: 100, offset: 100, session_id: None },
+            use_agent_cursor: false,
+            first_page_uses_actual_sql: true,
+            execution_hint: None,
+        });
+        assert_eq!(
+            plan2.page_sql.as_deref(),
+            Some("SELECT * FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM (SELECT code, name FROM BD_MATERIAL) dbx_inner WHERE ROWNUM <= 200) WHERE \"__dbx_row_num\" > 100;")
+        );
+
+        req.sql = "SELECT DISTINCT bm.code 物料编码, bm.name 物料名称, bs.name 仓库 FROM BD_MATERIAL bm INNER JOIN BD_MATERIALSTOCK bm2 ON bm.PK_MATERIAL = bm2.PK_MATERIAL".to_string();
+        req.query_base_sql = req.sql.clone();
+        assert!(supports_streaming_offset_pagination(&req, 100));
+        assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false, false), None);
+
+        req.sql = "SELECT code, name FROM BD_MATERIAL ORDER BY code ASC".to_string();
+        req.query_base_sql = req.sql.clone();
+        assert!(supports_streaming_offset_pagination(&req, 100));
+        assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false, false), None);
+    }
+
+    #[test]
+    fn oracle_wildcard_and_duplicate_projection_export_require_cursor_and_follow_its_end() {
+        for sql in [
+            "SELECT * FROM events",
+            "SELECT t.* FROM events t",
+            "SELECT a.name, a.* FROM people a ORDER BY a.id",
+            "SELECT a.id, b.id FROM people a JOIN people b ON a.id = b.id",
+            "SELECT id FROM people FOR UPDATE",
+            "SELECT id FROM people WHERE ROWNUM <= 10",
+            "SELECT id FROM people FETCH FIRST 10 ROWS ONLY",
+        ] {
+            let mut req = request("csv", None, None);
+            req.database_type = DatabaseType::Oracle;
+            req.sql = sql.into();
+            req.query_base_sql = req.sql.clone();
+            req.use_agent_cursor = true;
+            assert!(!supports_streaming_offset_pagination(&req, 100));
+            assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false, req.use_agent_cursor), None);
+            assert!(should_fetch_next_page(true, true, 100, 100, 100));
+            assert!(!should_fetch_next_page(true, false, 100, 100, 100));
+            req.use_agent_cursor = false;
+            assert_eq!(
+                streaming_pagination_preflight_error(&req, 100, false, false, req.use_agent_cursor),
+                Some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+            );
+        }
     }
 
     #[test]

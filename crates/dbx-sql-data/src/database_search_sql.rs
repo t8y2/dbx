@@ -139,6 +139,11 @@ pub fn build_database_search_sql(options: DatabaseSearchSqlOptions) -> Option<Da
     let searchable_columns = conditions.searchable_columns;
 
     let sql = match pagination_strategy(options.database_type, PaginationContext::BoundedRead) {
+        // Teradata spells the row cap as `TOP n` and rejects `LIMIT` (#14604). This
+        // query never pages, so `TOP` expresses the limit exactly.
+        _ if options.database_type == Some(DatabaseType::Teradata) => {
+            format!("SELECT TOP {limit} * FROM {table} WHERE ({where_clause});")
+        }
         TablePaginationStrategy::SqlServerTop => format!("SELECT TOP {limit} * FROM {table} WHERE ({where_clause})"),
         TablePaginationStrategy::IrisTop => format!("SELECT TOP {limit} * FROM {table} WHERE ({where_clause})"),
         TablePaginationStrategy::InformixFirst => format!("SELECT FIRST {limit} * FROM {table} WHERE ({where_clause})"),
@@ -334,6 +339,24 @@ mod tests {
 
     fn col(name: &str, data_type: &str, is_primary_key: bool) -> DatabaseSearchColumn {
         DatabaseSearchColumn { name: name.to_string(), data_type: data_type.to_string(), is_primary_key }
+    }
+
+    /// #14604: Teradata rejects `LIMIT`; the row search caps with `TOP n` instead.
+    #[test]
+    fn teradata_search_uses_top_instead_of_limit() {
+        let query = build_database_search_sql(DatabaseSearchSqlOptions {
+            database_type: Some(DatabaseType::Teradata),
+            driver_profile: None,
+            schema: Some("DLWEB".to_string()),
+            table_name: "USERS".to_string(),
+            columns: vec![col("NAME", "varchar", false)],
+            term: "alice".to_string(),
+            limit: Some(20),
+        })
+        .unwrap();
+
+        assert!(query.sql.starts_with("SELECT TOP 20 * FROM"), "{}", query.sql);
+        assert!(!query.sql.to_uppercase().contains("LIMIT"), "{}", query.sql);
     }
 
     #[test]

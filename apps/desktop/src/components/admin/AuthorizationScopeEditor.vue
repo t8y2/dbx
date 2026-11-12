@@ -119,7 +119,8 @@ function toggleDatabase(database: AuthorizationDatabaseOption) {
     commitSelections(currentSelections().filter((selection) => authorizationSelectionKey(selection) !== authorizationOptionKey(database)));
     return;
   }
-  commitSelections([...currentSelections(), { database: database.database, ...(database.catalog ? { catalog: database.catalog } : {}), preset: "readOnly", privileges: ["SELECT"], ...(props.objectScope ? { tables: [] } : {}) }]);
+  const privileges = props.provider?.defaultPrivilegesForScope?.("table") ?? ["SELECT"];
+  commitSelections([...currentSelections(), { database: database.database, ...(database.catalog ? { catalog: database.catalog } : {}), preset: "readOnly", privileges, ...(props.objectScope ? { tables: [] } : {}) }]);
 }
 
 // 表范围下 MySQL 不支持 CREATE ROUTINE / EVENT 等库级权限，需要按目标作用域过滤可选权限

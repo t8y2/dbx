@@ -355,7 +355,7 @@ function clickRefresh(host: HTMLElement) {
 }
 
 function clickLoadMore(host: HTMLElement) {
-  const loadMore = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("redis.loadMoreKeys") && !button.disabled);
+  const loadMore = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("redis.fetchMoreKeys") && !button.disabled);
   expect(loadMore, "load more button").toBeDefined();
   loadMore!.click();
 }

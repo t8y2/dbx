@@ -5,8 +5,33 @@ use sqlparser::keywords::Keyword;
 use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
 
 use crate::models::connection::DatabaseType;
-use crate::sql::split_sql_statements_for_database;
+use crate::sql::{oracle_plsql_block_is_complete, split_sql_statements_for_database};
 use crate::types::ObjectSourceKind;
+
+mod oracle_indexes;
+mod oracle_trigger;
+pub use oracle_trigger::{
+    prepare_oracle_trigger_sql, OracleTriggerSqlBinding, OracleTriggerSqlHeader, OracleTriggerSqlInput,
+    OracleTriggerSqlPurpose, PreparedOracleTriggerSql,
+};
+mod oracle_routines;
+pub use oracle_indexes::{
+    extract_oracle_table_triggers, oracle_index_ddl_sources, oracle_table_created_index_identities,
+    oracle_trigger_ddl_sources, oracle_trigger_ddl_sources_with_table_owner, oracle_trigger_definitions_match,
+    oracle_trigger_enabled, oracle_trigger_metadata_matches, oracle_trigger_source_with_create,
+    order_oracle_trigger_sources, parse_oracle_table_ddl, rebase_oracle_table_ddl, rebase_oracle_trigger_ddl,
+    separate_oracle_supporting_indexes, separate_oracle_supporting_indexes_with_retained, split_oracle_table_ddl,
+    split_oracle_table_ddl_with_retained, OracleDdlNameMapping, OracleIndexDdlSource, OracleSupportingIndexDdl,
+    OracleSupportingIndexIdentity, OracleTableConstraintSource, OracleTableDdlParts, OracleTableDdlSource,
+    OracleTriggerDdlSource,
+};
+pub use oracle_routines::{
+    analyze_oracle_package_body_draft, analyze_oracle_routine_draft, compact_oracle_ddl,
+    comparable_oracle_routine_definition, prepare_oracle_routine_definition, validate_oracle_routine_target_definition,
+    OracleDraftIssue, OracleDraftName, OracleDraftPackageCall, OracleDraftPackageMember, OracleDraftPackageMemberKind,
+    OracleDraftParameter, OracleDraftQuery, OracleDraftReference, OracleDraftReferenceRole,
+    OracleRoutineDefinitionInput, OracleRoutineDraftAnalysis,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -506,6 +531,18 @@ fn build_executable_object_source_statements_with_mysql_validation_name(
     } else {
         source
     };
+    if matches!(input.database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng)
+        && matches!(input.object_type, ObjectSourceKind::Type | ObjectSourceKind::TypeBody)
+    {
+        validate_oracle_object_source(
+            input.database_type,
+            &input.object_type,
+            input.schema.as_deref(),
+            &input.name,
+            source,
+        )?;
+        return Ok(vec![oracle_management_ddl(source, input.schema.as_deref(), &input.object_type)?]);
+    }
     if (input.database_type == DatabaseType::Oracle || input.database_type == DatabaseType::OceanbaseOracle)
         && matches!(
             input.object_type,
@@ -536,7 +573,12 @@ fn build_executable_object_source_statements_with_mysql_validation_name(
         return Ok(vec![executable_duckdb_view_ddl(input.schema.as_deref(), &input.name, source)]);
     }
 
-    if is_postgres_like(input.database_type) && input.object_type == ObjectSourceKind::View {
+    if (is_postgres_like(input.database_type) || input.database_type == DatabaseType::SapHana)
+        && input.object_type == ObjectSourceKind::View
+    {
+        if source.is_empty() {
+            return Ok(vec![String::new()]);
+        }
         if let Some(sql) = executable_postgres_view_ddl(source) {
             return Ok(vec![sql]);
         }
@@ -557,16 +599,36 @@ fn build_executable_object_source_statements_with_mysql_validation_name(
         return Ok(vec![executable_oracle_view_ddl(input.schema.as_deref(), &input.name, source)]);
     }
 
-    if is_oracle_like(input.database_type)
-        && matches!(input.object_type, ObjectSourceKind::Function | ObjectSourceKind::Procedure)
+    if (is_oracle_like(input.database_type) || input.database_type == DatabaseType::OceanbaseOracle)
+        && matches!(
+            input.object_type,
+            ObjectSourceKind::Function
+                | ObjectSourceKind::Procedure
+                | ObjectSourceKind::Package
+                | ObjectSourceKind::PackageBody
+                | ObjectSourceKind::Type
+                | ObjectSourceKind::TypeBody
+        )
     {
         return Ok(vec![executable_oracle_routine_ddl(source)]);
+    }
+
+    if (is_oracle_like(input.database_type) || input.database_type == DatabaseType::OceanbaseOracle)
+        && input.object_type == ObjectSourceKind::Trigger
+    {
+        // Dictionary sources carry the bare `TRIGGER ...` definition without a CREATE
+        // header, which is not executable on its own (ORA-00900); rebuild the header.
+        return Ok(vec![executable_oracle_trigger_ddl(source)]);
     }
 
     if matches!(input.database_type, DatabaseType::Informix | DatabaseType::Gbase8s)
         && input.object_type == ObjectSourceKind::View
     {
         return Ok(executable_informix_view_statements(input.schema.as_deref(), &input.name, source));
+    }
+
+    if is_mysql_like(input.database_type) && input.object_type == ObjectSourceKind::Trigger {
+        return Ok(executable_mysql_trigger_statements(&input, source));
     }
 
     if is_mysql_like(input.database_type)
@@ -586,6 +648,9 @@ fn build_executable_object_source_statements_with_mysql_validation_name(
 }
 
 pub fn validate_oracle_executable_object_source(input: OracleObjectSourceValidationInput) -> Result<(), String> {
+    if input.object_type == ObjectSourceKind::Trigger {
+        return oracle_trigger::validate(input);
+    }
     if !matches!(input.database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
         || !matches!(
             input.object_type,
@@ -608,9 +673,15 @@ pub fn validate_oracle_executable_object_source(input: OracleObjectSourceValidat
 
 pub fn fingerprint_oracle_routine_object_source(input: EditableObjectSourceSqlInput) -> Result<String, String> {
     if !matches!(input.database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
-        || !matches!(input.object_type, ObjectSourceKind::Procedure | ObjectSourceKind::Function)
+        || !matches!(
+            input.object_type,
+            ObjectSourceKind::Procedure
+                | ObjectSourceKind::Function
+                | ObjectSourceKind::Package
+                | ObjectSourceKind::PackageBody
+        )
     {
-        return Err("Routine source fingerprinting is supported only for Oracle procedures and functions.".into());
+        return Err("Routine source fingerprinting is supported only for Oracle routines and packages.".into());
     }
     validate_oracle_object_source(
         input.database_type,
@@ -669,12 +740,35 @@ fn validate_oracle_object_source(
     name: &str,
     source: &str,
 ) -> Result<(), String> {
+    let is_type = matches!(object_type, ObjectSourceKind::Type | ObjectSourceKind::TypeBody);
+    let keyword_is = |token: &Token, keyword: &str| {
+        if is_type {
+            unquoted_keyword_is(token, keyword)
+        } else {
+            token_word_is(token, keyword)
+        }
+    };
+    let identifier_is = |token: &Token, expected: &str| {
+        if is_type {
+            matches!(token, Token::Word(word) if if word.quote_style.is_some() { word.value == expected } else { word.value.to_ascii_uppercase() == expected })
+        } else {
+            oracle_identifier_matches(token, expected)
+        }
+    };
     let initial_tokens =
         Tokenizer::new(&OracleDialect {}, source).tokenize_with_location().map_err(|error| error.to_string())?;
     let first_significant = initial_tokens.iter().find(|token| !matches!(token.token, Token::Whitespace(_)));
-    let source = if first_significant.is_some_and(|token| token_word_is(&token.token, "CREATE")) {
+    let source = if first_significant.is_some_and(|token| keyword_is(&token.token, "CREATE")) {
         source.to_string()
-    } else if matches!(object_type, ObjectSourceKind::Procedure | ObjectSourceKind::Function) {
+    } else if matches!(
+        object_type,
+        ObjectSourceKind::Procedure
+            | ObjectSourceKind::Function
+            | ObjectSourceKind::Package
+            | ObjectSourceKind::PackageBody
+            | ObjectSourceKind::Type
+            | ObjectSourceKind::TypeBody
+    ) {
         format!("CREATE OR REPLACE {}", source.trim())
     } else {
         format!("CREATE {}", source.trim())
@@ -693,19 +787,17 @@ fn validate_oracle_object_source(
         .collect::<Vec<_>>();
     let token_at = |position: usize| significant.get(position).map(|index| &tokens[*index].token);
     let mut position = 0;
-    if !token_at(position).is_some_and(|token| token_word_is(token, "CREATE")) {
+    if !token_at(position).is_some_and(|token| keyword_is(token, "CREATE")) {
         return Err("Oracle object source must begin with CREATE.".to_string());
     }
     position += 1;
-    if token_at(position).is_some_and(|token| token_word_is(token, "OR")) {
-        if !token_at(position + 1).is_some_and(|token| token_word_is(token, "REPLACE")) {
+    if token_at(position).is_some_and(|token| keyword_is(token, "OR")) {
+        if !token_at(position + 1).is_some_and(|token| keyword_is(token, "REPLACE")) {
             return Err("Oracle object source has an invalid CREATE prefix.".to_string());
         }
         position += 2;
     }
-    if token_at(position)
-        .is_some_and(|token| token_word_is(token, "EDITIONABLE") || token_word_is(token, "NONEDITIONABLE"))
-    {
+    if token_at(position).is_some_and(|token| keyword_is(token, "EDITIONABLE") || keyword_is(token, "NONEDITIONABLE")) {
         position += 1;
     }
 
@@ -720,13 +812,23 @@ fn validate_oracle_object_source(
             token_at(position).is_some_and(|token| token_word_is(token, "PACKAGE"))
                 && token_at(position + 1).is_some_and(|token| token_word_is(token, "BODY"))
         }
+        ObjectSourceKind::Type => {
+            token_at(position).is_some_and(|token| unquoted_keyword_is(token, "TYPE"))
+                && !token_at(position + 1).is_some_and(|token| unquoted_keyword_is(token, "BODY"))
+        }
+        ObjectSourceKind::TypeBody => {
+            token_at(position).is_some_and(|token| unquoted_keyword_is(token, "TYPE"))
+                && token_at(position + 1).is_some_and(|token| unquoted_keyword_is(token, "BODY"))
+        }
+        ObjectSourceKind::View => token_at(position).is_some_and(|token| unquoted_keyword_is(token, "VIEW")),
+        ObjectSourceKind::Trigger => token_at(position).is_some_and(|token| unquoted_keyword_is(token, "TRIGGER")),
         _ => false,
     };
     if !kind_matches {
         return Err(format!("Oracle object source declaration does not match {object_type:?}."));
     }
     position += 1;
-    if *object_type == ObjectSourceKind::PackageBody {
+    if *object_type == ObjectSourceKind::PackageBody || *object_type == ObjectSourceKind::TypeBody {
         position += 1;
     }
 
@@ -738,11 +840,11 @@ fn validate_oracle_object_source(
     } else {
         (None, first_name, 1)
     };
-    if !oracle_identifier_matches(declared_name, name) {
+    if !identifier_is(declared_name, name) {
         return Err(format!("Oracle source declares a different object than {name}."));
     }
     if let Some(Token::Word(owner)) = owner {
-        if schema.is_some_and(|schema| !oracle_identifier_matches(&Token::Word(owner.clone()), schema)) {
+        if schema.is_some_and(|schema| !identifier_is(&Token::Word(owner.clone()), schema)) {
             return Err("Oracle object source owner does not match the selected schema.".to_string());
         }
     } else if owner.is_some() {
@@ -751,11 +853,226 @@ fn validate_oracle_object_source(
     if token_at(position + consumed).is_some_and(|token| token == &Token::Period) {
         return Err("Three-part Oracle object names are not supported.".to_string());
     }
+    if matches!(object_type, ObjectSourceKind::Type | ObjectSourceKind::TypeBody)
+        && significant.iter().enumerate().any(|(index, token_index)| {
+            unquoted_keyword_is(&tokens[*token_index].token, "FORCE")
+                && significant[..index].iter().all(|earlier| {
+                    !unquoted_keyword_is(&tokens[*earlier].token, "AS")
+                        && !unquoted_keyword_is(&tokens[*earlier].token, "IS")
+                })
+        })
+    {
+        return Err("FORCE is not supported when editing an Oracle-family type.".to_string());
+    }
+    if matches!(object_type, ObjectSourceKind::Type | ObjectSourceKind::TypeBody) {
+        let mut brackets = Vec::new();
+        for index in &significant {
+            match &tokens[*index].token {
+                Token::LParen => brackets.push(Token::RParen),
+                Token::LBracket => brackets.push(Token::RBracket),
+                Token::RParen | Token::RBracket if brackets.pop().as_ref() != Some(&tokens[*index].token) => {
+                    return Err("TYPE source contains an unmatched closing bracket.".into());
+                }
+                _ => {}
+            }
+        }
+        if !brackets.is_empty() {
+            return Err("TYPE source contains an incomplete declaration.".into());
+        }
+        if !significant[position + consumed..].iter().any(|index| {
+            ["AS", "IS", "UNDER"].iter().any(|keyword| unquoted_keyword_is(&tokens[*index].token, keyword))
+        }) {
+            return Err("TYPE source has no complete definition after its name.".into());
+        }
+        if *object_type == ObjectSourceKind::TypeBody && !oracle_plsql_block_is_complete(&source) {
+            return Err("TYPE BODY source is missing its outer END or contains an incomplete block.".into());
+        }
+    }
     Ok(())
+}
+
+fn oracle_management_ddl(source: &str, schema: Option<&str>, object_type: &ObjectSourceKind) -> Result<String, String> {
+    let mut source = strip_standalone_trailing_slash(source).to_string();
+    let tokenize = |source: &str| {
+        Tokenizer::new(&OracleDialect {}, source)
+            .tokenize_with_location()
+            .map(|tokens| {
+                tokens.into_iter().filter(|token| !matches!(token.token, Token::Whitespace(_))).collect::<Vec<_>>()
+            })
+            .map_err(|error| error.to_string())
+    };
+    let tokens = tokenize(&source)?;
+    let first = tokens.first().ok_or_else(|| "TYPE source is empty.".to_string())?;
+    if unquoted_keyword_is(&first.token, "CREATE") {
+        if !tokens.get(1).is_some_and(|token| unquoted_keyword_is(&token.token, "OR")) {
+            let offset =
+                routine_location_to_byte_offset(&source, first.span.end).ok_or("Cannot locate TYPE CREATE prefix")?;
+            source.insert_str(offset, " OR REPLACE");
+        }
+    } else {
+        let offset =
+            routine_location_to_byte_offset(&source, first.span.start).ok_or("Cannot locate TYPE declaration")?;
+        source.insert_str(offset, "CREATE OR REPLACE ");
+    }
+    if let Some(owner) = schema.filter(|owner| !owner.is_empty()) {
+        let tokens = tokenize(&source)?;
+        let keyword = match object_type {
+            ObjectSourceKind::Type | ObjectSourceKind::TypeBody => "TYPE",
+            ObjectSourceKind::Package | ObjectSourceKind::PackageBody => "PACKAGE",
+            ObjectSourceKind::Procedure => "PROCEDURE",
+            ObjectSourceKind::Function => "FUNCTION",
+            ObjectSourceKind::View => "VIEW",
+            ObjectSourceKind::Trigger => "TRIGGER",
+            _ => return Err("This object cannot be rebuilt by the TYPE manager.".into()),
+        };
+        let type_index = tokens
+            .iter()
+            .position(|token| unquoted_keyword_is(&token.token, keyword))
+            .ok_or("Cannot locate the object declaration keyword")?;
+        let name_index = type_index
+            + if matches!(object_type, ObjectSourceKind::TypeBody | ObjectSourceKind::PackageBody) { 2 } else { 1 };
+        if tokens.get(name_index + 1).is_none_or(|token| token.token != Token::Period) {
+            let token = tokens.get(name_index).ok_or("TYPE declaration has no name")?;
+            let offset = routine_location_to_byte_offset(&source, token.span.start).ok_or("Cannot locate TYPE name")?;
+            source.insert_str(offset, &format!("\"{}\".", owner.replace('"', "\"\"")));
+        }
+    }
+    Ok(ensure_semicolon(&source))
+}
+
+/// Build a source-backed step and its comparison value for TYPE management.
+/// This deliberately does not change the ordinary object-source save contract.
+pub fn build_oracle_type_management_source(input: EditableObjectSourceSqlInput) -> Result<(String, String), String> {
+    if !matches!(input.database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng)
+        || !matches!(
+            input.object_type,
+            ObjectSourceKind::Type
+                | ObjectSourceKind::TypeBody
+                | ObjectSourceKind::Procedure
+                | ObjectSourceKind::Function
+                | ObjectSourceKind::Package
+                | ObjectSourceKind::PackageBody
+                | ObjectSourceKind::View
+                | ObjectSourceKind::Trigger
+        )
+    {
+        return Err("TYPE management supports only Oracle-family source-backed dependencies.".into());
+    }
+    validate_oracle_object_source(
+        input.database_type,
+        &input.object_type,
+        input.schema.as_deref(),
+        &input.name,
+        &input.source,
+    )?;
+    let sql = oracle_management_ddl(&input.source, input.schema.as_deref(), &input.object_type)?;
+    let tokens = Tokenizer::new(&OracleDialect {}, &sql).tokenize().map_err(|error| error.to_string())?;
+    let significant = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| (!matches!(token, Token::Whitespace(_))).then_some(index))
+        .collect::<Vec<_>>();
+    let keyword = match input.object_type {
+        ObjectSourceKind::Type | ObjectSourceKind::TypeBody => "TYPE",
+        ObjectSourceKind::Package | ObjectSourceKind::PackageBody => "PACKAGE",
+        ObjectSourceKind::Procedure => "PROCEDURE",
+        ObjectSourceKind::Function => "FUNCTION",
+        ObjectSourceKind::View => "VIEW",
+        ObjectSourceKind::Trigger => "TRIGGER",
+        _ => unreachable!(),
+    };
+    let kind_position = significant
+        .iter()
+        .position(|index| unquoted_keyword_is(&tokens[*index], keyword))
+        .ok_or("Missing management declaration")?;
+    let first_name = kind_position
+        + if matches!(input.object_type, ObjectSourceKind::TypeBody | ObjectSourceKind::PackageBody) { 2 } else { 1 };
+    let qualified = significant.get(first_name + 1).is_some_and(|index| tokens[*index] == Token::Period);
+    let name_index =
+        *significant.get(first_name + if qualified { 2 } else { 0 }).ok_or("Missing management object name")?;
+    let owner_index = qualified.then(|| significant[first_name]);
+    let fingerprint = tokens
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, token)| {
+            if index == name_index {
+                Some(format!("target-name:{}", input.name))
+            } else if Some(index) == owner_index {
+                let owner = input.schema.clone().unwrap_or_else(|| match &token {
+                    Token::Word(word) if word.quote_style.is_none() => word.value.to_ascii_uppercase(),
+                    Token::Word(word) => word.value.clone(),
+                    _ => token.to_string(),
+                });
+                Some(format!("target-owner:{owner}"))
+            } else {
+                match token {
+                    Token::Whitespace(Whitespace::Space | Whitespace::Tab | Whitespace::Newline) | Token::EOF => None,
+                    Token::Word(word) if word.quote_style.is_none() => {
+                        Some(format!("word:{}", word.value.to_ascii_uppercase()))
+                    }
+                    token => Some(format!("token:{token}")),
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    let fingerprint = serde_json::to_string(&fingerprint).map_err(|error| error.to_string())?;
+    Ok((sql, fingerprint))
+}
+
+/// Rebuild directly in the original firing state, never ENABLE then DISABLE.
+pub fn build_oracle_type_management_trigger_source(
+    mut input: EditableObjectSourceSqlInput,
+    enabled: bool,
+) -> Result<(String, String), String> {
+    if input.object_type != ObjectSourceKind::Trigger {
+        return Err("A trigger firing state applies only to a TRIGGER definition.".into());
+    }
+    let (mut sql, fingerprint) = build_oracle_type_management_source(input.clone())?;
+    if input.database_type == DatabaseType::Dameng {
+        return if enabled {
+            Ok((sql, fingerprint))
+        } else {
+            Err("DM cannot yet rebuild a disabled trigger without a verified disabled-at-create syntax. Keep its definition unchanged for COMPILE, or prepare that dependency separately before starting this TYPE plan.".into())
+        };
+    }
+    let tokens = Tokenizer::new(&OracleDialect {}, &sql).tokenize_with_location().map_err(|e| e.to_string())?;
+    let tokens: Vec<_> = tokens.iter().filter(|t| !matches!(t.token, Token::Whitespace(_))).collect();
+    let declaration =
+        tokens.iter().position(|t| unquoted_keyword_is(&t.token, "TRIGGER")).ok_or("Missing TRIGGER declaration")?;
+    let name = declaration + 1;
+    let after_name = name + if tokens.get(name + 1).is_some_and(|t| t.token == Token::Period) { 3 } else { 1 };
+    let body = tokens
+        .iter()
+        .enumerate()
+        .skip(after_name)
+        .find(|(_, t)| {
+            ["WHEN", "DECLARE", "BEGIN", "CALL", "COMPOUND"].iter().any(|word| unquoted_keyword_is(&t.token, word))
+        })
+        .map(|(i, _)| i)
+        .ok_or(
+            "Cannot locate a supported trigger body or WHEN clause; keep the draft and prepare this trigger separately",
+        )?;
+    let state = if enabled { "ENABLE" } else { "DISABLE" };
+    let previous =
+        tokens.get(body - 1).filter(|t| ["ENABLE", "DISABLE"].iter().any(|word| unquoted_keyword_is(&t.token, word)));
+    let (start, end, replacement) = if let Some(previous) = previous {
+        (previous.span.start, previous.span.end, state.to_string())
+    } else {
+        (tokens[body].span.start, tokens[body].span.start, format!("{state} "))
+    };
+    let start = routine_location_to_byte_offset(&sql, start).ok_or("Cannot locate the trigger state")?;
+    let end = routine_location_to_byte_offset(&sql, end).ok_or("Cannot locate the trigger state")?;
+    sql.replace_range(start..end, &replacement);
+    input.source = sql;
+    build_oracle_type_management_source(input)
 }
 
 fn oracle_identifier_matches(token: &Token, expected: &str) -> bool {
     matches!(token, Token::Word(word) if identifier_matches(word, expected))
+}
+
+fn unquoted_keyword_is(token: &Token, expected: &str) -> bool {
+    matches!(token, Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(expected))
 }
 
 /// Convert a raw database object source into a form suitable for the source editor.
@@ -769,7 +1086,7 @@ fn oracle_identifier_matches(token: &Token, expected: &str) -> bool {
 /// statements.
 pub fn build_editable_object_source(input: EditableObjectSourceSqlInput) -> String {
     let source = input.source.clone();
-    if is_postgres_like(input.database_type)
+    if (is_postgres_like(input.database_type) || input.database_type == DatabaseType::SapHana)
         && input.object_type == ObjectSourceKind::View
         && source_starts_with_create_or_alter(&source)
     {
@@ -786,6 +1103,16 @@ pub fn build_editable_object_source(input: EditableObjectSourceSqlInput) -> Stri
     {
         return ensure_semicolon(source.trim());
     }
+    if is_mysql_like(input.database_type) && input.object_type == ObjectSourceKind::Trigger {
+        // The editable text stays the CREATE statement; the executable form adds
+        // the DROP via build_executable_object_source_statements.
+        return ensure_semicolon(source.trim());
+    }
+    if (is_oracle_like(input.database_type) || input.database_type == DatabaseType::OceanbaseOracle)
+        && input.object_type == ObjectSourceKind::Trigger
+    {
+        return ensure_semicolon(source.trim());
+    }
     if input.database_type == DatabaseType::Mysql && input.object_type == ObjectSourceKind::View {
         // Existing view DDL opens as ALTER, while save must preserve CREATE for new views and TiDB.
         return executable_mysql_view_ddl(&source);
@@ -798,6 +1125,9 @@ pub fn build_editable_object_source(input: EditableObjectSourceSqlInput) -> Stri
 
 pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
     let source = input.source.trim();
+    if source.is_empty() {
+        return String::new();
+    }
     if input.database_type.is_some_and(is_mysql_like) {
         return display_mysql_view_ddl(source, &quote_mysql_identifier(&input.name));
     }
@@ -809,7 +1139,7 @@ pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
     } else {
         ensure_semicolon(source)
     };
-    if Regex::new(r"(?i)^(?:CREATE|ALTER)\s+").unwrap().is_match(source) {
+    if source_starts_with_create_or_alter(source) {
         return terminated_source;
     }
 
@@ -852,6 +1182,17 @@ pub fn build_export_object_source_sql(
     if source.is_empty() {
         return String::new();
     }
+    if is_oracle_plsql_script_target(database_type)
+        && matches!(
+            object_type,
+            ObjectSourceKind::Procedure
+                | ObjectSourceKind::Function
+                | ObjectSourceKind::Package
+                | ObjectSourceKind::PackageBody
+        )
+    {
+        return oracle_plsql_script_unit(source);
+    }
     // MySQL routine bodies, trigger bodies and event bodies may contain `;`, so the
     // exported statements need a client-side delimiter the same way `mysqldump` emits one.
     if is_mysql_like(database_type)
@@ -864,6 +1205,19 @@ pub fn build_export_object_source_sql(
         )
     {
         return mysql_delimited_routine_source(source);
+    }
+    // T-SQL only accepts these as the first statement of a batch and a module runs to the
+    // end of its batch, so a `;` cannot separate them from the rest of an exported script.
+    if database_type == DatabaseType::SqlServer
+        && matches!(
+            object_type,
+            ObjectSourceKind::View
+                | ObjectSourceKind::Procedure
+                | ObjectSourceKind::Function
+                | ObjectSourceKind::Trigger
+        )
+    {
+        return format!("GO\n{source}\nGO");
     }
     ensure_semicolon(source)
 }
@@ -1170,9 +1524,80 @@ fn executable_oracle_view_ddl(schema: Option<&str>, name: &str, source: &str) ->
     format!("CREATE OR REPLACE VIEW {} AS\n{}", postgres_qualified_name(schema, name), ensure_semicolon(trimmed))
 }
 
+fn is_oracle_plsql_script_target(database_type: DatabaseType) -> bool {
+    matches!(database_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng)
+}
+
+static STORED_PLSQL_UNIT_START: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"(?i)^(?:PROCEDURE|FUNCTION|PACKAGE)\b").unwrap());
+static CREATE_PLSQL_UNIT_LINE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(
+        r"(?im)^[ \t]*CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?(?:PACKAGE|PROCEDURE|FUNCTION|TYPE|TRIGGER)\b",
+    )
+    .unwrap()
+});
+static CREATE_PACKAGE_BODY_LINE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"(?im)^[ \t]*CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?PACKAGE\s+BODY\b").unwrap()
+});
+
+/// Split package DDL into the spec and the body it may carry.
+///
+/// Oracle's `DBMS_METADATA.GET_DDL('PACKAGE', ...)` returns the spec followed by
+/// `CREATE OR REPLACE ... PACKAGE BODY`; other sources return the spec alone. An
+/// export writes the body later than the spec, after the routines it may call.
+pub fn split_package_spec_and_body(source: &str) -> (&str, Option<&str>) {
+    let statement_start = leading_sql_statement_start(source);
+    match CREATE_PACKAGE_BODY_LINE.find_iter(source).map(|found| found.start()).find(|&start| start > statement_start) {
+        Some(body_start) => {
+            let spec = strip_standalone_trailing_slash(&source[..body_start]);
+            (spec, Some(source[body_start..].trim()))
+        }
+        None => (source, None),
+    }
+}
+
+/// Stored PL/SQL source starts at `PROCEDURE`/`FUNCTION`/`PACKAGE [BODY]` without
+/// `CREATE OR REPLACE`, and its body contains `;`, so a replayable script needs the
+/// prefix plus a `/` line that ends the unit. A source carrying several units gets a
+/// `/` between them as well.
+fn oracle_plsql_script_unit(source: &str) -> String {
+    let source = strip_standalone_trailing_slash(source);
+    let statement_start = leading_sql_statement_start(source);
+    let (leading, executable) = source.split_at(statement_start);
+    let unit = if STORED_PLSQL_UNIT_START.is_match(executable) {
+        format!("{leading}CREATE OR REPLACE {executable}")
+    } else {
+        source.to_string()
+    };
+    let mut script = String::with_capacity(unit.len() + 8);
+    let mut previous = 0;
+    for next in
+        CREATE_PLSQL_UNIT_LINE.find_iter(&unit).map(|found| found.start()).filter(|&start| start > statement_start)
+    {
+        let previous_unit = unit[previous..next].trim_end();
+        script.push_str(previous_unit);
+        script.push_str(if previous_unit.lines().last().map(str::trim) == Some("/") { "\n" } else { "\n/\n" });
+        previous = next;
+    }
+    script.push_str(unit[previous..].trim_end());
+    script.push_str("\n/");
+    script
+}
+
 fn executable_oracle_routine_ddl(source: &str) -> String {
     let trimmed = source.trim();
-    if Regex::new(r"(?i)^(?:PROCEDURE|FUNCTION)\b").unwrap().is_match(trimmed) {
+    if Regex::new(r"(?i)^(?:PROCEDURE|FUNCTION|PACKAGE(?:\s+BODY)?|TYPE(?:\s+BODY)?)\b").unwrap().is_match(trimmed) {
+        return ensure_semicolon(&format!("CREATE OR REPLACE {trimmed}"));
+    }
+    ensure_semicolon(trimmed)
+}
+
+/// Oracle-family trigger sources come back as the bare `TRIGGER ...` definition
+/// (no CREATE header), which fails with ORA-00900 when replayed; rebuild the
+/// header. A user-provided full `CREATE [DEFINER = ...] TRIGGER` passes through.
+fn executable_oracle_trigger_ddl(source: &str) -> String {
+    let trimmed = strip_standalone_trailing_slash(source);
+    if Regex::new(r"(?i)^TRIGGER\b").unwrap().is_match(trimmed) {
         return ensure_semicolon(&format!("CREATE OR REPLACE {trimmed}"));
     }
     ensure_semicolon(trimmed)
@@ -1350,6 +1775,46 @@ fn executable_mysql_routine_statements(
 
 fn mysql_drop_routine_if_exists(object_type: ObjectSourceKind, schema: Option<&str>, name: &str) -> String {
     format!("DROP {} IF EXISTS {};", object_type_keyword(&object_type), mysql_qualified_name(schema, name))
+}
+
+fn mysql_drop_trigger_if_exists(schema: Option<&str>, name: &str) -> String {
+    format!("DROP TRIGGER IF EXISTS {};", mysql_qualified_name(schema, name))
+}
+
+fn mysql_source_starts_with_create_trigger(source: &str) -> bool {
+    Regex::new(r"(?is)^\s*CREATE\s+(?:DEFINER\s*=.+?\s+)?TRIGGER\b").unwrap().is_match(source)
+}
+
+/// The trigger name being (re)created, taken from the declaration so a rename in
+/// the source drops the right object; unquoted and unqualified.
+fn mysql_trigger_declaration_name(source: &str) -> Option<String> {
+    let captures = Regex::new(r"(?is)^\s*CREATE\s+(?:DEFINER\s*=.+?\s+)?TRIGGER\s+((?:`[^`]+`|[A-Za-z0-9_$]+)(?:\s*\.\s*(?:`[^`]+`|[A-Za-z0-9_$]+))?)")
+        .unwrap()
+        .captures(source)?;
+    let reference = captures.get(1)?.as_str();
+    let name = reference.rsplit('.').next()?.trim().trim_matches('`');
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// MySQL has no `CREATE OR REPLACE TRIGGER`: replaying the dictionary source fails
+/// with ER_TRG_ALREADY_EXISTS (1359), so a save drops the trigger before creating it.
+fn executable_mysql_trigger_statements(input: &EditableObjectSourceSqlInput, source: &str) -> Vec<String> {
+    if !mysql_source_starts_with_create_trigger(source) {
+        return vec![ensure_semicolon(source)];
+    }
+    let declared = mysql_trigger_declaration_name(source);
+    let create_name = declared.as_deref().unwrap_or(input.name.as_str());
+    let mut statements = Vec::with_capacity(3);
+    if !create_name.eq_ignore_ascii_case(input.name.trim()) {
+        statements.push(mysql_drop_trigger_if_exists(input.schema.as_deref(), input.name.trim()));
+    }
+    statements.push(mysql_drop_trigger_if_exists(input.schema.as_deref(), create_name));
+    statements.push(ensure_semicolon(source));
+    statements
 }
 
 fn mysql_source_starts_with_create_routine(source: &str) -> bool {
@@ -1868,9 +2333,18 @@ fn replace_sqlserver_create_with_alter(source: &str) -> String {
 }
 
 fn build_sqlserver_alter_view_sql(schema: Option<&str>, name: &str, source: &str) -> String {
+    // A view definition fetched from SQL Server carries the same header comment
+    // block a routine does. Matching the CREATE prefix at offset 0 made the
+    // rewrite miss on those, so the body kept its own `CREATE VIEW` underneath a
+    // freshly prepended `ALTER VIEW ... AS` header — two conflicting statements
+    // in one save (issue #13004). Mirror the routine path: locate the first
+    // statement start, match there, and keep the leading prefix untouched.
+    let statement_start = leading_sql_statement_start(source);
+    let executable = &source[statement_start..];
     let existing_view_statement = Regex::new(r"(?i)^CREATE\s+(?:OR\s+ALTER\s+)?VIEW\s+|^ALTER\s+VIEW\s+").unwrap();
-    if existing_view_statement.is_match(source) {
-        return ensure_semicolon(&existing_view_statement.replace(source, "ALTER VIEW "));
+    if existing_view_statement.is_match(executable) {
+        let replaced = existing_view_statement.replace(executable, "ALTER VIEW ");
+        return ensure_semicolon(&format!("{}{}", &source[..statement_start], replaced));
     }
 
     format!("ALTER VIEW {} AS\n{}", sqlserver_qualified_name(schema, name), ensure_semicolon(source))
@@ -1976,6 +2450,278 @@ mod tests {
         ] {
             assert!(oracle_routine_fingerprint(source).is_err(), "accepted invalid source: {source}");
         }
+    }
+
+    fn type_management_source(
+        database_type: DatabaseType,
+        object_type: ObjectSourceKind,
+        name: &str,
+        source: &str,
+    ) -> EditableObjectSourceSqlInput {
+        EditableObjectSourceSqlInput {
+            database_type,
+            object_type,
+            schema: Some("Exact Owner".to_string()),
+            name: name.to_string(),
+            source: source.to_string(),
+        }
+    }
+
+    #[test]
+    fn oracle_family_type_management_accepts_one_exact_type_or_body_definition() {
+        let type_source = "CREATE OR REPLACE TYPE \"Exact Owner\".\"Address Type\" AS OBJECT (id NUMBER);";
+        let body_source = "CREATE OR REPLACE TYPE BODY \"Exact Owner\".\"Address Type\" AS MEMBER FUNCTION score RETURN NUMBER IS BEGIN RETURN 1; END; END;\n/";
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+            for (object_type, source) in
+                [(ObjectSourceKind::Type, type_source), (ObjectSourceKind::TypeBody, body_source)]
+            {
+                let statements = build_executable_object_source_statements(type_management_source(
+                    database_type,
+                    object_type.clone(),
+                    "Address Type",
+                    source,
+                ))
+                .unwrap();
+                assert_eq!(statements.len(), 1, "{database_type:?} {object_type:?}");
+                assert!(statements[0].contains("Address Type"));
+            }
+        }
+    }
+
+    #[test]
+    fn oracle_family_type_management_rejects_wrong_name_kind_and_extra_ddl() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+            for (object_type, name, source) in [
+                (
+                    ObjectSourceKind::Type,
+                    "Address Type",
+                    "CREATE TYPE \"Exact Owner\".\"Other Type\" AS OBJECT (id NUMBER);",
+                ),
+                (ObjectSourceKind::Type, "Address Type", "CREATE TYPE BODY \"Exact Owner\".\"Address Type\" AS END;"),
+                (
+                    ObjectSourceKind::TypeBody,
+                    "Address Type",
+                    "CREATE TYPE \"Exact Owner\".\"Address Type\" AS OBJECT (id NUMBER);",
+                ),
+                (
+                    ObjectSourceKind::Type,
+                    "Address Type",
+                    "CREATE TYPE \"Exact Owner\".\"Address Type\" AS OBJECT (id NUMBER); DROP TABLE \"Exact Owner\".T;",
+                ),
+                (
+                    ObjectSourceKind::Type,
+                    "Address Type",
+                    "CREATE TYPE \"Other Owner\".\"Address Type\" AS OBJECT (id NUMBER);",
+                ),
+            ] {
+                assert!(
+                    build_executable_object_source_statements(type_management_source(
+                        database_type,
+                        object_type.clone(),
+                        name,
+                        source
+                    ))
+                    .is_err(),
+                    "accepted {database_type:?} {object_type:?}: {source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oracle_family_type_management_requires_complete_blocks_and_rejects_getddl_mixtures() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+            for (kind, source) in [
+                (ObjectSourceKind::Type, "CREATE TYPE \"Exact Owner\".\"Address Type\" AS OBJECT (ID NUMBER"),
+                (ObjectSourceKind::TypeBody, "CREATE TYPE BODY \"Exact Owner\".\"Address Type\" AS MEMBER FUNCTION F RETURN NUMBER IS BEGIN RETURN 1; END;"),
+                (ObjectSourceKind::Type, "CREATE TYPE \"Exact Owner\".\"Address Type\" AS OBJECT(ID NUMBER); CREATE TYPE BODY \"Exact Owner\".\"Address Type\" AS MEMBER FUNCTION F RETURN NUMBER IS BEGIN RETURN 1; END; END;"),
+                (ObjectSourceKind::Type, "CREATE TYPE \"Exact Owner\".\"Address Type\" FORCE AS OBJECT(ID NUMBER);"),
+            ] {
+                assert!(build_executable_object_source_statements(type_management_source(database_type, kind.clone(), "Address Type", source)).is_err(), "accepted {database_type:?} {kind:?}: {source}");
+            }
+        }
+    }
+
+    #[test]
+    fn oracle_family_type_management_qualifies_dictionary_source_and_preserves_comments_and_literals() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+            for source in [
+                "-- source header\nTYPE \"Address Type\" AS OBJECT(ID NUMBER)",
+                "CREATE /* retained */ TYPE \"Address Type\" AS OBJECT(ID NUMBER)",
+                "TYPE BODY \"Address Type\" AS MEMBER FUNCTION F RETURN NUMBER IS V VARCHAR2(80):=q'[END; DROP TABLE literal_only;]'; BEGIN IF 1=1 THEN RETURN 1; END IF; RETURN 0; END; END;\n/",
+            ] {
+                let kind = if source.contains("TYPE BODY") { ObjectSourceKind::TypeBody } else { ObjectSourceKind::Type };
+                let sql = build_executable_object_source_statements(type_management_source(database_type, kind, "Address Type", source)).unwrap().join("\n");
+                assert!(sql.contains("\"Exact Owner\".\"Address Type\""), "target owner not bound: {sql}");
+                if source.contains("retained") { assert!(sql.contains("/* retained */")); }
+                if source.contains("literal_only") { assert!(sql.contains("q'[END; DROP TABLE literal_only;]'")); }
+            }
+        }
+    }
+
+    #[test]
+    fn oracle_family_type_management_accepts_vendor_forms_and_quoted_keyword_names() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+            for name in ["BODY", "FORCE", "TYPE"] {
+                for qualifier in ["\"Exact Owner\".", ""] {
+                    let source = format!("CREATE TYPE {qualifier}\"{name}\" AS OBJECT(ID NUMBER);");
+                    assert!(
+                        build_executable_object_source_statements(type_management_source(
+                            database_type,
+                            ObjectSourceKind::Type,
+                            name,
+                            &source
+                        ))
+                        .is_ok(),
+                        "rejected quoted {name} for {database_type:?}"
+                    );
+                }
+            }
+        }
+        for source in [
+            "TYPE \"Address Type\" IS RECORD (ID NUMBER, LABEL VARCHAR(40));",
+            "TYPE \"Address Type\" IS ARRAY INTEGER[3];",
+            "TYPE \"Address Type\" AS TABLE OF NUMBER INDEX BY VARCHAR(40);",
+            "TYPE \"Address Type\" AS VARRAY(20) OF NUMBER;",
+            "TYPE \"Address Type\" UNDER \"Parent Type\" (LABEL VARCHAR(40)) NOT FINAL;",
+        ] {
+            assert!(
+                build_executable_object_source_statements(type_management_source(
+                    DatabaseType::Dameng,
+                    ObjectSourceKind::Type,
+                    "Address Type",
+                    source
+                ))
+                .is_ok(),
+                "rejected DM type form: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn oracle_family_type_management_quoted_keywords_do_not_hide_force() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+            let source = "CREATE OR REPLACE TYPE \"Exact Owner\".\"AS\" FORCE AS OBJECT(ID NUMBER);";
+            assert!(
+                build_executable_object_source_statements(type_management_source(
+                    database_type,
+                    ObjectSourceKind::Type,
+                    "AS",
+                    source
+                ))
+                .is_err(),
+                "quoted AS name bypassed FORCE rejection for {database_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn type_management_trigger_rebuild_has_the_requested_state_in_the_create_statement() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            for header in [
+                "BEFORE INSERT ON APP.T FOR EACH ROW",
+                "BEFORE INSERT ON APP.T FOR EACH ROW ENABLE WHEN (NEW.ID > 0)",
+                "FOR INSERT ON APP.T",
+            ] {
+                for enabled in [false, true] {
+                    let body = if header.starts_with("FOR ") {
+                        "COMPOUND TRIGGER BEFORE STATEMENT IS BEGIN NULL; END BEFORE STATEMENT; END;"
+                    } else {
+                        "BEGIN NULL; END;"
+                    };
+                    let input = type_management_source(
+                        database_type,
+                        ObjectSourceKind::Trigger,
+                        "Address Type",
+                        &format!("TRIGGER \"Address Type\" {header} {body}"),
+                    );
+                    let (sql, expected) = build_oracle_type_management_trigger_source(input.clone(), enabled).unwrap();
+                    let state = if enabled { "ENABLE" } else { "DISABLE" };
+                    assert!(
+                        sql.contains(&format!("{state} WHEN"))
+                            || sql.contains(&format!("{state} BEGIN"))
+                            || sql.contains(&format!("{state} COMPOUND")),
+                        "{sql}"
+                    );
+                    assert_eq!(split_sql_statements_for_database(&sql, database_type).len(), 1);
+                    assert_eq!(
+                        build_oracle_type_management_source(EditableObjectSourceSqlInput { source: sql, ..input })
+                            .unwrap()
+                            .1,
+                        expected
+                    );
+                }
+            }
+        }
+        let input = type_management_source(
+            DatabaseType::Dameng,
+            ObjectSourceKind::Trigger,
+            "Address Type",
+            "TRIGGER \"Address Type\" BEFORE INSERT ON APP.T BEGIN NULL; END;",
+        );
+        assert!(build_oracle_type_management_trigger_source(input.clone(), false).is_err());
+        assert!(build_oracle_type_management_trigger_source(input, true).is_ok());
+    }
+
+    #[test]
+    fn type_management_dependency_builder_binds_callers_and_compares_normalized_source() {
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+            for (kind, source) in [
+                (ObjectSourceKind::Procedure, "PROCEDURE \"Address Type\" AS BEGIN NULL; END;"),
+                (ObjectSourceKind::Function, "FUNCTION \"Address Type\" RETURN NUMBER AS BEGIN RETURN 1; END;"),
+                (ObjectSourceKind::View, "CREATE VIEW \"Address Type\" AS SELECT 1 AS ID FROM DUAL;"),
+                (ObjectSourceKind::Trigger, "CREATE TRIGGER \"Address Type\" BEFORE INSERT ON T BEGIN NULL; END;"),
+                (ObjectSourceKind::Package, "CREATE PACKAGE \"Address Type\" AS PROCEDURE P; END;"),
+                (
+                    ObjectSourceKind::PackageBody,
+                    "CREATE PACKAGE BODY \"Address Type\" AS PROCEDURE P IS BEGIN NULL; END; END;",
+                ),
+            ] {
+                let input = type_management_source(database_type, kind.clone(), "Address Type", source);
+                let (sql, fingerprint) = build_oracle_type_management_source(input.clone()).unwrap();
+                assert!(sql.contains("\"Exact Owner\".\"Address Type\""));
+                let (_, readback) =
+                    build_oracle_type_management_source(EditableObjectSourceSqlInput { source: sql, ..input }).unwrap();
+                assert_eq!(fingerprint, readback);
+                let input = type_management_source(database_type, kind, "Different Type", source);
+                assert!(build_oracle_type_management_source(input).is_err());
+            }
+        }
+        let (first, second) = (
+            "procedure \"Address Type\" as begin null; end;",
+            "CREATE OR REPLACE PROCEDURE \"Exact Owner\".\"Address Type\" AS BEGIN NULL; END;",
+        );
+        let make = |source| {
+            build_oracle_type_management_source(type_management_source(
+                DatabaseType::Oracle,
+                ObjectSourceKind::Procedure,
+                "Address Type",
+                source,
+            ))
+            .unwrap()
+            .1
+        };
+        assert_eq!(make(first), make(second));
+        assert_ne!(make(second), make("CREATE PROCEDURE \"Address Type\" AS BEGIN NULL; /* preserved */ END;"));
+    }
+
+    #[test]
+    fn type_management_readback_compares_the_validated_target_not_catalogue_quoting() {
+        let make = |source: &str| {
+            build_oracle_type_management_source(EditableObjectSourceSqlInput {
+                database_type: DatabaseType::OceanbaseOracle,
+                object_type: ObjectSourceKind::Type,
+                schema: Some("APP".into()),
+                name: "ROOT".into(),
+                source: source.into(),
+            })
+            .map(|(_, fingerprint)| fingerprint)
+        };
+        let expected = make("CREATE OR REPLACE TYPE APP.ROOT AS OBJECT (ID NUMBER);").unwrap();
+        assert_eq!(expected, make("TYPE ROOT AS OBJECT (ID NUMBER);").unwrap());
+        assert_eq!(expected, make("CREATE TYPE \"APP\".\"ROOT\" AS OBJECT (ID NUMBER);").unwrap());
+        assert!(make("\"CREATE\" TYPE APP.ROOT AS OBJECT (ID NUMBER);").is_err());
+        assert!(make("CREATE \"OR\" REPLACE TYPE APP.ROOT AS OBJECT (ID NUMBER);").is_err());
     }
 
     fn ob_sequence(source: &str, schema: Option<&str>, name: &str) -> EditableObjectSourceSqlInput {
@@ -2245,6 +2991,48 @@ mod tests {
         .unwrap();
 
         assert_eq!(sql, "ALTER VIEW [dbo].[new_view] AS\nSELECT\n  *\nFROM AppInfo;");
+    }
+
+    #[test]
+    fn sqlserver_commented_view_source_preserves_comments_and_uses_alter_view() {
+        // SQL Server returns view definitions with the same header comment block
+        // a routine carries. The view rewrite used to match its CREATE prefix at
+        // offset 0, so the comment made it miss and the saved script became
+        // `ALTER VIEW ... AS` followed by the untouched `CREATE VIEW ...` body —
+        // two conflicting statements (issue #13004).
+        let source = "-- =============================================\n-- Author: DBX\n-- =============================================\n\nCREATE VIEW [dbo].[v_demo]\nAS\nSELECT id FROM users;";
+        let expected = "-- =============================================\n-- Author: DBX\n-- =============================================\n\nALTER VIEW [dbo].[v_demo]\nAS\nSELECT id FROM users;";
+
+        assert_sqlserver_editable_and_executable(ObjectSourceKind::View, source, expected);
+    }
+
+    #[test]
+    fn sqlserver_block_commented_view_source_preserves_comment_and_uses_alter_view() {
+        let source = "/* keep this view header */\nCREATE OR ALTER VIEW dbo.v_demo AS SELECT id FROM users;";
+        let expected = "/* keep this view header */\nALTER VIEW dbo.v_demo AS SELECT id FROM users;";
+
+        assert_sqlserver_editable_and_executable(ObjectSourceKind::View, source, expected);
+    }
+
+    #[test]
+    fn sqlserver_commented_alter_view_source_remains_unchanged() {
+        let source = "-- keep this note\nALTER VIEW dbo.v_demo AS SELECT id FROM users;";
+
+        assert_sqlserver_editable_and_executable(ObjectSourceKind::View, source, source);
+    }
+
+    #[test]
+    fn sqlserver_unclosed_block_commented_view_source_is_not_rewritten() {
+        // An unclosed block comment has no statement start, so nothing is
+        // rewritten: the whole payload stays the view body and only gets the
+        // ALTER VIEW header, exactly like a bare SELECT body does.
+        let source = "/* unclosed header\nCREATE VIEW dbo.v_demo AS SELECT id FROM users;";
+
+        assert_sqlserver_editable_and_executable(
+            ObjectSourceKind::View,
+            source,
+            "ALTER VIEW [dbo].[usp_demo] AS\n/* unclosed header\nCREATE VIEW dbo.v_demo AS SELECT id FROM users;",
+        );
     }
 
     #[test]
@@ -2817,6 +3605,64 @@ mod tests {
     }
 
     #[test]
+    fn saphana_view_ddl_and_editable_source_handle_catalog_and_modeled_views() {
+        let display_ddl = build_view_ddl_sql(BuildViewDdlInput {
+            database_type: Some(DatabaseType::SapHana),
+            schema: Some("APP".to_string()),
+            name: "ACTIVE_ORDERS".to_string(),
+            source: "SELECT \"ID\" FROM \"APP\".\"ORDERS\" WHERE \"ACTIVE\" = TRUE".to_string(),
+            identifier_quote: None,
+        });
+        assert_eq!(
+            display_ddl,
+            "CREATE VIEW \"APP\".\"ACTIVE_ORDERS\" AS\nSELECT \"ID\" FROM \"APP\".\"ORDERS\" WHERE \"ACTIVE\" = TRUE;"
+        );
+
+        let modeled_ddl = build_view_ddl_sql(BuildViewDdlInput {
+            database_type: Some(DatabaseType::SapHana),
+            schema: Some("_SYS_BIC".to_string()),
+            name: "pkg/CALC_ORDERS".to_string(),
+            source: "   ".to_string(),
+            identifier_quote: None,
+        });
+        assert_eq!(modeled_ddl, "");
+
+        let editable = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::SapHana,
+            object_type: ObjectSourceKind::View,
+            schema: Some("APP".to_string()),
+            name: "ACTIVE_ORDERS".to_string(),
+            source: "SELECT \"ID\" FROM \"APP\".\"ORDERS\"".to_string(),
+        });
+        assert_eq!(
+            editable,
+            "CREATE OR REPLACE VIEW \"APP\".\"ACTIVE_ORDERS\" AS\nSELECT \"ID\" FROM \"APP\".\"ORDERS\";"
+        );
+
+        let executable = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::SapHana,
+            object_type: ObjectSourceKind::View,
+            schema: Some("APP".to_string()),
+            name: "ACTIVE_ORDERS".to_string(),
+            source: "CREATE VIEW \"APP\".\"ACTIVE_ORDERS\" AS SELECT \"ID\" FROM \"APP\".\"ORDERS\"".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            executable,
+            "CREATE OR REPLACE VIEW \"APP\".\"ACTIVE_ORDERS\" AS SELECT \"ID\" FROM \"APP\".\"ORDERS\";"
+        );
+
+        let empty_editable = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::SapHana,
+            object_type: ObjectSourceKind::View,
+            schema: Some("_SYS_BIC".to_string()),
+            name: "pkg/CALC_ORDERS".to_string(),
+            source: String::new(),
+        });
+        assert_eq!(empty_editable, "");
+    }
+
+    #[test]
     fn view_ddl_uses_backtick_quote_when_identifier_quote_reports_mysql_compat() {
         let sql = build_view_ddl_sql(BuildViewDdlInput {
             database_type: Some(DatabaseType::Kingbase),
@@ -2887,6 +3733,30 @@ mod tests {
             assert_eq!(
                 statements,
                 vec!["CREATE OR REPLACE FUNCTION refresh_cache RETURN NUMBER AS\nBEGIN\n  RETURN 1;\nEND;"]
+            );
+        }
+    }
+
+    #[test]
+    fn oceanbase_oracle_bare_package_body_source_saves_as_create_or_replace() {
+        let source = "PACKAGE BODY PAYROLL AS\n  PROCEDURE PROCESS IS BEGIN NULL; END;\nEND PAYROLL;";
+
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle, DatabaseType::Dameng] {
+            let statements =
+                build_executable_object_source_statements(input(database_type, ObjectSourceKind::PackageBody, source))
+                    .unwrap();
+
+            assert_eq!(
+                statements,
+                vec![
+                    "CREATE OR REPLACE PACKAGE BODY PAYROLL AS\n  PROCEDURE PROCESS IS BEGIN NULL; END;\nEND PAYROLL;"
+                ]
+            );
+
+            let editable = build_editable_object_source(input(database_type, ObjectSourceKind::PackageBody, source));
+            assert_eq!(
+                editable,
+                "CREATE OR REPLACE PACKAGE BODY PAYROLL AS\n  PROCEDURE PROCESS IS BEGIN NULL; END;\nEND PAYROLL;"
             );
         }
     }
@@ -3111,6 +3981,108 @@ mod tests {
     }
 
     #[test]
+    fn mysql_trigger_source_save_drops_before_create() {
+        let source = "CREATE DEFINER=`root`@`%` TRIGGER `trg_orders` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.updated_at = NOW()";
+        let statements = build_executable_object_source_statements(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Mysql,
+            object_type: ObjectSourceKind::Trigger,
+            schema: Some("shop".to_string()),
+            name: "trg_orders".to_string(),
+            source: source.to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "DROP TRIGGER IF EXISTS `shop`.`trg_orders`;".to_string(),
+                "CREATE DEFINER=`root`@`%` TRIGGER `trg_orders` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.updated_at = NOW();".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_trigger_rename_drops_the_old_trigger_too() {
+        let statements = build_executable_object_source_statements(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Mysql,
+            object_type: ObjectSourceKind::Trigger,
+            schema: Some("shop".to_string()),
+            name: "trg_orders".to_string(),
+            source: "CREATE TRIGGER `trg_orders_v2` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.updated_at = NOW()"
+                .to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "DROP TRIGGER IF EXISTS `shop`.`trg_orders`;".to_string(),
+                "DROP TRIGGER IF EXISTS `shop`.`trg_orders_v2`;".to_string(),
+                "CREATE TRIGGER `trg_orders_v2` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.updated_at = NOW();"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn oracle_trigger_source_save_rebuilds_the_create_header() {
+        let statements = build_executable_object_source_statements(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::Trigger,
+            schema: Some("HR".to_string()),
+            name: "TRG_EMP".to_string(),
+            source: "TRIGGER HR.TRG_EMP BEFORE INSERT ON HR.EMP FOR EACH ROW BEGIN :new.id := 1; END".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec!["CREATE OR REPLACE TRIGGER HR.TRG_EMP BEFORE INSERT ON HR.EMP FOR EACH ROW BEGIN :new.id := 1; END;"
+                .to_string()]
+        );
+    }
+
+    #[test]
+    fn oracle_trigger_source_with_full_create_passes_through() {
+        let source = "CREATE OR REPLACE TRIGGER HR.TRG_EMP BEFORE INSERT ON HR.EMP FOR EACH ROW BEGIN NULL; END";
+        let statements = build_executable_object_source_statements(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::Trigger,
+            schema: Some("HR".to_string()),
+            name: "TRG_EMP".to_string(),
+            source: source.to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(statements, vec![format!("{source};")]);
+    }
+
+    #[test]
+    fn trigger_source_opened_for_editing_keeps_the_raw_statement() {
+        let mysql = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Mysql,
+            object_type: ObjectSourceKind::Trigger,
+            schema: Some("shop".to_string()),
+            name: "trg_orders".to_string(),
+            source: "CREATE TRIGGER `trg_orders` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.updated_at = NOW()"
+                .to_string(),
+        });
+        assert_eq!(
+            mysql,
+            "CREATE TRIGGER `trg_orders` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.updated_at = NOW();"
+        );
+
+        let oracle = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::Oracle,
+            object_type: ObjectSourceKind::Trigger,
+            schema: Some("HR".to_string()),
+            name: "TRG_EMP".to_string(),
+            source: "TRIGGER HR.TRG_EMP BEFORE INSERT ON HR.EMP FOR EACH ROW BEGIN NULL; END".to_string(),
+        });
+        assert_eq!(oracle, "TRIGGER HR.TRG_EMP BEFORE INSERT ON HR.EMP FOR EACH ROW BEGIN NULL; END;");
+    }
+
+    #[test]
     fn mysql_view_source_opened_for_editing_uses_alter_view() {
         let source = "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `new_view` AS select `base_plugins`.`id` AS `id` from `base_plugins`";
         let expected = "ALTER ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `new_view` AS select `base_plugins`.`id` AS `id` from `base_plugins`;";
@@ -3241,6 +4213,93 @@ mod tests {
     }
 
     #[test]
+    fn oracle_plsql_export_is_a_replayable_script_unit() {
+        let cases = [
+            (
+                "stored procedure source",
+                DatabaseType::Oracle,
+                ObjectSourceKind::Procedure,
+                "PROCEDURE prc_clear_orders AS\nBEGIN\n  DELETE FROM t_order;\nEND;",
+                "CREATE OR REPLACE PROCEDURE prc_clear_orders AS\nBEGIN\n  DELETE FROM t_order;\nEND;\n/",
+            ),
+            (
+                "function source",
+                DatabaseType::Dameng,
+                ObjectSourceKind::Function,
+                "function fn_total RETURN NUMBER AS\nBEGIN\n  RETURN 1;\nEND;",
+                "CREATE OR REPLACE function fn_total RETURN NUMBER AS\nBEGIN\n  RETURN 1;\nEND;\n/",
+            ),
+            (
+                "package spec",
+                DatabaseType::OceanbaseOracle,
+                ObjectSourceKind::Package,
+                "PACKAGE pkg_order AS\n  PROCEDURE clear_all;\nEND pkg_order;",
+                "CREATE OR REPLACE PACKAGE pkg_order AS\n  PROCEDURE clear_all;\nEND pkg_order;\n/",
+            ),
+            (
+                "package body after a comment",
+                DatabaseType::Oracle,
+                ObjectSourceKind::PackageBody,
+                "-- body\nPACKAGE BODY pkg_order AS\n  PROCEDURE clear_all IS BEGIN NULL; END;\nEND pkg_order;",
+                "-- body\nCREATE OR REPLACE PACKAGE BODY pkg_order AS\n  PROCEDURE clear_all IS BEGIN NULL; END;\nEND pkg_order;\n/",
+            ),
+            (
+                "package DDL carrying the body",
+                DatabaseType::Oracle,
+                ObjectSourceKind::Package,
+                "\n  CREATE OR REPLACE EDITIONABLE PACKAGE \"HR\".\"PKG_ORDER\" AS\n  PROCEDURE clear_all;\nEND pkg_order;\nCREATE OR REPLACE EDITIONABLE PACKAGE BODY \"HR\".\"PKG_ORDER\" AS\n  PROCEDURE clear_all IS BEGIN NULL; END;\nEND pkg_order;",
+                "CREATE OR REPLACE EDITIONABLE PACKAGE \"HR\".\"PKG_ORDER\" AS\n  PROCEDURE clear_all;\nEND pkg_order;\n/\nCREATE OR REPLACE EDITIONABLE PACKAGE BODY \"HR\".\"PKG_ORDER\" AS\n  PROCEDURE clear_all IS BEGIN NULL; END;\nEND pkg_order;\n/",
+            ),
+            (
+                "package DDL already split by a slash",
+                DatabaseType::Oracle,
+                ObjectSourceKind::Package,
+                "CREATE OR REPLACE PACKAGE p AS\n  x NUMBER;\nEND p;\n/\n\nCREATE OR REPLACE PACKAGE BODY p AS\nBEGIN\n  NULL;\nEND p;\n/",
+                "CREATE OR REPLACE PACKAGE p AS\n  x NUMBER;\nEND p;\n/\nCREATE OR REPLACE PACKAGE BODY p AS\nBEGIN\n  NULL;\nEND p;\n/",
+            ),
+            (
+                "full DDL already terminated",
+                DatabaseType::Oracle,
+                ObjectSourceKind::Procedure,
+                "CREATE OR REPLACE EDITIONABLE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;\n/",
+                "CREATE OR REPLACE EDITIONABLE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;\n/",
+            ),
+        ];
+
+        for (name, database_type, object_type, source, expected) in cases {
+            assert_eq!(build_export_object_source_sql(database_type, object_type, source), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn package_ddl_splits_into_spec_and_body() {
+        let cases = [
+            (
+                "Oracle DDL carrying the body",
+                "CREATE OR REPLACE EDITIONABLE PACKAGE \"HR\".\"P\" AS\n  x NUMBER;\nEND p;\n  CREATE OR REPLACE EDITIONABLE PACKAGE BODY \"HR\".\"P\" AS\nBEGIN NULL; END p;\n",
+                "CREATE OR REPLACE EDITIONABLE PACKAGE \"HR\".\"P\" AS\n  x NUMBER;\nEND p;",
+                Some("CREATE OR REPLACE EDITIONABLE PACKAGE BODY \"HR\".\"P\" AS\nBEGIN NULL; END p;"),
+            ),
+            (
+                "slash between spec and body",
+                "CREATE OR REPLACE PACKAGE p AS\n  x NUMBER;\nEND p;\n/\nCREATE OR REPLACE PACKAGE BODY p AS\nBEGIN NULL; END p;",
+                "CREATE OR REPLACE PACKAGE p AS\n  x NUMBER;\nEND p;",
+                Some("CREATE OR REPLACE PACKAGE BODY p AS\nBEGIN NULL; END p;"),
+            ),
+            (
+                "stored spec alone mentioning the body in a comment",
+                "PACKAGE p AS\n  -- see the PACKAGE BODY for details\n  x NUMBER;\nEND p;",
+                "PACKAGE p AS\n  -- see the PACKAGE BODY for details\n  x NUMBER;\nEND p;",
+                None,
+            ),
+        ];
+
+        for (name, source, spec, body) in cases {
+            assert_eq!(split_package_spec_and_body(source), (spec, body), "{name}");
+        }
+    }
+
+    #[test]
     fn mysql_view_export_keeps_regular_statement_terminator() {
         let sql = build_export_object_source_sql(
             DatabaseType::Mysql,
@@ -3249,6 +4308,48 @@ mod tests {
         );
 
         assert_eq!(sql, "CREATE VIEW `active_users` AS SELECT `id` FROM `users`;");
+    }
+
+    #[test]
+    fn sqlserver_exported_modules_run_as_their_own_batches() {
+        let before = "CREATE TABLE dbo.orders (id INT);\nINSERT INTO dbo.orders (id) VALUES (1);";
+        let after = "CREATE TABLE dbo.audit_log (id INT);";
+        let cases = [
+            ("view", ObjectSourceKind::View, "CREATE VIEW dbo.v_orders AS\nSELECT id FROM dbo.orders"),
+            (
+                "procedure",
+                ObjectSourceKind::Procedure,
+                "CREATE PROCEDURE dbo.recalc AS\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND",
+            ),
+            (
+                "function",
+                ObjectSourceKind::Function,
+                "CREATE FUNCTION dbo.total() RETURNS INT AS\nBEGIN\n  RETURN 1;\nEND;",
+            ),
+            (
+                "trigger",
+                ObjectSourceKind::Trigger,
+                "CREATE TRIGGER dbo.tr_orders ON dbo.orders AFTER INSERT AS\nBEGIN\n  SELECT 1;\nEND",
+            ),
+        ];
+
+        for (name, object_type, source) in cases {
+            let exported = build_export_object_source_sql(DatabaseType::SqlServer, object_type, source);
+            let script = format!("{before}\n\n{exported}\n\n{exported}\n\n{after}\n");
+
+            assert_eq!(crate::sql::split_sql_batches(&script), vec![before, source, source, after], "{name}");
+        }
+    }
+
+    #[test]
+    fn sqlserver_sequence_export_keeps_regular_statement_terminator() {
+        let sql = build_export_object_source_sql(
+            DatabaseType::SqlServer,
+            ObjectSourceKind::Sequence,
+            "CREATE SEQUENCE dbo.order_seq AS INT",
+        );
+
+        assert_eq!(sql, "CREATE SEQUENCE dbo.order_seq AS INT;");
     }
 
     #[test]

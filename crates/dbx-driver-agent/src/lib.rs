@@ -17,6 +17,8 @@ pub mod backend_error;
 pub mod database_capabilities;
 pub mod driver_delta;
 pub mod oracle_oci;
+pub mod pl_debug_channel;
+mod startup_cleanup;
 
 pub mod db {
     pub use crate::agent_driver;

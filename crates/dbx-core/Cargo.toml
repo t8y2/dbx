@@ -44,7 +44,7 @@ percent-encoding = "2"
 encoding_rs = "0.8"
 log = "0.4"
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["compat"] }
+tokio-util = { version = "0.7", features = ["compat", "rt"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 fs2 = "0.4"
@@ -94,7 +94,9 @@ arc-swap = "1"
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security"] }
+# Win32_Security_Cryptography: CryptProtectData/CryptUnprotectData (DPAPI) for
+# the Windows credential-store key recovery mirror (see secret_codec.rs).
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography"] }
 
 [dev-dependencies]
 dbx-core = { path = ".", default-features = false, features = ["test-support"] }

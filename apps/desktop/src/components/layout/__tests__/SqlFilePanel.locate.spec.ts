@@ -8,7 +8,7 @@ import { useQueryStore } from "@/stores/queryStore";
 
 vi.mock("@/lib/sqlFile/sqlFileFolders", () => ({
   getSqlFileFilter: () => "*.sql",
-  getSqlFileFolderPaths: () => ["/sql"],
+  getSqlFileFolderPaths: vi.fn(() => ["/sql"]),
   saveSqlFileFilter: vi.fn(),
   saveSqlFileFolderPaths: vi.fn(),
   notifySqlFileFoldersChanged: vi.fn(),
@@ -23,29 +23,33 @@ vi.mock("@/lib/backend/api", async (importOriginal) => ({
 }));
 
 import SqlFilePanel from "../SqlFilePanel.vue";
+import { getSqlFileFolderPaths, saveSqlFileFolderPaths } from "@/lib/sqlFile/sqlFileFolders";
+import { listSqlFilesInFolder, type SqlFileEntry } from "@/lib/backend/api";
 
 const mounted: Array<{ app: App; host: HTMLElement }> = [];
 const scrollIntoView = vi.fn();
 
-async function mountPanel(path?: string) {
+async function mountPanel(path?: string, options: { waitForLoad?: boolean; locateRequest?: { id: number; path: string } } = {}) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const queryStore = useQueryStore();
   if (path) queryStore.openExternalSqlFile("", "", path, "SELECT 1");
   const host = document.createElement("div");
   document.body.appendChild(host);
-  const app = createApp(SqlFilePanel);
+  const app = createApp(SqlFilePanel, { locateRequest: options.locateRequest });
   app.use(pinia);
   app.use(i18n);
   app.mount(host);
   mounted.push({ app, host });
-  await vi.waitFor(() => expect(host.textContent).toContain("other.sql"));
+  if (options.waitForLoad !== false) await vi.waitFor(() => expect(host.textContent).toContain("other.sql"));
   const button = host.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.global.t("sqlFileTree.locateActiveFile")}"]`);
   expect(button).not.toBeNull();
-  return { host, button: button!, queryStore };
+  return { app, host, button: button!, queryStore };
 }
 
 beforeEach(() => {
+  vi.mocked(getSqlFileFolderPaths).mockReturnValue(["/sql"]);
+  vi.mocked(saveSqlFileFolderPaths).mockClear();
   vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(scrollIntoView);
 });
 
@@ -59,6 +63,44 @@ afterEach(() => {
 });
 
 describe("SQL file panel locate active file", () => {
+  it("preserves every saved root when closed during the first scan", async () => {
+    vi.mocked(getSqlFileFolderPaths).mockReturnValue(["/sql", "/second"]);
+    let finishScan!: (entries: SqlFileEntry[]) => void;
+    vi.mocked(listSqlFilesInFolder).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishScan = resolve;
+        }),
+    );
+    const { app, host } = await mountPanel(undefined, { waitForLoad: false });
+    expect(host.textContent).toContain("second");
+    app.unmount();
+    host.remove();
+    mounted.splice(
+      mounted.findIndex((item) => item.app === app),
+      1,
+    );
+    finishScan([]);
+    await nextTick();
+    await nextTick();
+    expect(saveSqlFileFolderPaths).not.toHaveBeenCalled();
+    const reopened = await mountPanel();
+    expect(reopened.host.textContent).toContain("second");
+    expect(saveSqlFileFolderPaths).not.toHaveBeenCalled();
+  });
+
+  it("locates a requested DDL file after loading without switching the active query", async () => {
+    vi.mocked(listSqlFilesInFolder).mockResolvedValueOnce([
+      { name: "target.ddl", path: "/sql/target.ddl", is_dir: false, children: [] },
+      { name: "other.sql", path: "/sql/other.sql", is_dir: false, children: [] },
+    ]);
+    const { host, queryStore } = await mountPanel("/sql/other.sql", { locateRequest: { id: 1, path: "/sql/target.ddl" } });
+    const activeTabId = queryStore.activeTabId;
+    await vi.waitFor(() => expect(host.querySelector('[data-sql-file-path="/sql/target.ddl"]')?.classList.contains("bg-accent")).toBe(true));
+    expect(queryStore.activeTabId).toBe(activeTabId);
+    expect(queryStore.tabs.find((tab) => tab.id === activeTabId)?.externalSqlPath).toBe("/sql/other.sql");
+  });
+
   it("expands collapsed parents, highlights and scrolls without reopening the file", async () => {
     const { host, button, queryStore } = await mountPanel("/sql/nested/deep/current.sql");
     const openFile = vi.spyOn(queryStore, "openExternalSqlFile");
@@ -77,7 +119,8 @@ describe("SQL file panel locate active file", () => {
     expect(row!.classList.contains("bg-accent")).toBe(true);
     expect(row!.parentElement!.parentElement!.style.display).not.toBe("none");
     expect(scrollIntoView).toHaveBeenCalledWith({ block: "center", inline: "nearest" });
-    expect(scrollIntoView.mock.contexts[0]).toBe(row);
+    const locateScrollIndex = scrollIntoView.mock.calls.findIndex(([options]) => options.block === "center");
+    expect(scrollIntoView.mock.contexts[locateScrollIndex]).toBe(row);
     expect(openFile).not.toHaveBeenCalled();
     expect(queryStore.activeTabId).toBe(tabId);
   });
@@ -90,7 +133,7 @@ describe("SQL file panel locate active file", () => {
     await nextTick();
     button.click();
     await nextTick();
-    expect(host.querySelector('[data-sql-file-path="/sql/other.sql"]')!.classList.contains("bg-accent")).toBe(true);
+    await vi.waitFor(() => expect(host.querySelector('[data-sql-file-path="/sql/other.sql"]')!.classList.contains("bg-accent")).toBe(true));
     expect(host.querySelector('[data-sql-file-path="/sql/nested/deep/current.sql"]')!.classList.contains("bg-accent")).toBe(false);
   });
 
@@ -107,7 +150,7 @@ describe("SQL file panel locate active file", () => {
     expect(button.disabled).toBe(false);
     button.click();
     await nextTick();
-    expect(host.querySelector('[data-sql-file-path="/sql/nested/deep/current.sql"]')!.classList.contains("bg-accent")).toBe(true);
+    await vi.waitFor(() => expect(host.querySelector('[data-sql-file-path="/sql/nested/deep/current.sql"]')?.classList.contains("bg-accent")).toBe(true));
   });
 
   it("disables locating after switching to an unsaved query", async () => {

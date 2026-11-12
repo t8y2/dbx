@@ -110,24 +110,42 @@ pub fn uses_single_row_insert_statements(database_type: DatabaseType) -> bool {
 pub fn pagination_strategy(database_type: Option<DatabaseType>, context: PaginationContext) -> TablePaginationStrategy {
     match database_type {
         Some(DatabaseType::Jdbc) => TablePaginationStrategy::AgentMaxRows,
+        // Teradata has no `LIMIT` clause — appending one is a syntax error
+        // ("expected something between ... and the 'LIMIT' keyword", #14604) —
+        // and it has no `OFFSET` either, so a page cannot be expressed in SQL.
+        // User queries therefore take the same route as generic JDBC: the
+        // statement runs unmodified, the agent caps it with
+        // `Statement.setMaxRows()`, and later pages consume the result session
+        // up to the requested offset (#8993).
+        //
+        // Table previews and bounded reads keep `LIMIT` for now: rewriting them
+        // needs a `ROW_NUMBER() ... QUALIFY` strategy, and dropping the bound
+        // there would either re-return the same rows on page 2 or scan the whole
+        // table, so that is a separate change rather than part of this fix.
+        Some(DatabaseType::Teradata) if matches!(context, PaginationContext::UserQuery) => {
+            TablePaginationStrategy::AgentMaxRows
+        }
         Some(DatabaseType::Cassandra)
             if matches!(context, PaginationContext::TablePreview | PaginationContext::UserQuery) =>
         {
             TablePaginationStrategy::AgentMaxRows
         }
-        Some(DatabaseType::Oracle) if matches!(context, PaginationContext::TablePreview) => {
-            TablePaginationStrategy::Rownum
-        }
         // Oracle's row-limiting clause (`FETCH FIRST`/`OFFSET ... FETCH`) was
         // introduced in 12c. ROWNUM remains compatible with the supported 11g
-        // baseline while still providing a bounded read for newer servers.
-        Some(DatabaseType::Oracle) if matches!(context, PaginationContext::BoundedRead) => {
-            TablePaginationStrategy::Rownum
+        // baseline while still providing a bounded read and user query pagination (#12789).
+        Some(DatabaseType::Oracle) => TablePaginationStrategy::Rownum,
+        // OSCAR (神通) rejects a statement that mixes its ROWNUM pseudo-column
+        // with a LIMIT. The JDBC agent caps every table-data statement with
+        // `Statement.setMaxRows()`, which the OSCAR driver forwards as a row
+        // limit, so a ROWNUM-wrapped later page (its inner bound is
+        // `offset + limit`, above the driver cap) collides. OSCAR supports
+        // `LIMIT n OFFSET m` directly, so table previews use that single
+        // pagination form instead of ROWNUM. Bounded reads (export, compare,
+        // transfer) do not set the driver cap, so they keep ROWNUM.
+        Some(DatabaseType::Oscar) if matches!(context, PaginationContext::TablePreview) => {
+            TablePaginationStrategy::LimitOffset
         }
-        Some(DatabaseType::Oracle) => TablePaginationStrategy::Unbounded,
-        Some(DatabaseType::Oscar)
-            if matches!(context, PaginationContext::TablePreview | PaginationContext::BoundedRead) =>
-        {
+        Some(DatabaseType::Oscar) if matches!(context, PaginationContext::BoundedRead) => {
             TablePaginationStrategy::Rownum
         }
         Some(DatabaseType::Oscar) => TablePaginationStrategy::Unbounded,

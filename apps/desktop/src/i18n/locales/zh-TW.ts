@@ -10008,6 +10008,9 @@ export default withEnglishFallback({
     exportError: "匯出失敗： {error}",
     exportCancelled: "匯出已取消",
     runInBackground: "背景執行",
+    limitRowsPerTable: "限制每表資料列數",
+    rowsPerTableLimit: "每表資料列數",
+    limitRowsPerTableDescription: "每張表最多匯出所填資料列數。資料列順序沿用匯出時的既有讀取順序；無穩定順序的表兩次匯出可能取到不同資料列。",
   },
   nacos: {
     ...nacosAccessControlMessages,

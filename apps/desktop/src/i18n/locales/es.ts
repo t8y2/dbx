@@ -11141,6 +11141,9 @@ export default withEnglishFallback({
     exportCancelled: "Exportación cancelada",
     filterTables: "Buscar tablas (separadas por comas o /expresión regular/)...",
     runInBackground: "Ejecutar en segundo plano",
+    limitRowsPerTable: "Limitar filas por tabla",
+    rowsPerTableLimit: "Filas por tabla",
+    limitRowsPerTableDescription: "Para cada tabla, se exporta como máximo el número de filas indicado. El orden de las filas sigue el orden de lectura existente de la exportación; en tablas sin un orden estable, dos exportaciones pueden obtener filas diferentes.",
   },
   nacos: {
     ...nacosAccessControlMessages,

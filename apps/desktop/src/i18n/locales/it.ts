@@ -10889,6 +10889,9 @@ export default withEnglishFallback({
     exportError: "Esportazione non riuscita: {error}",
     exportCancelled: "Esportazione annullata",
     runInBackground: "Esegui in background",
+    limitRowsPerTable: "Limita righe per tabella",
+    rowsPerTableLimit: "Righe per tabella",
+    limitRowsPerTableDescription: "Per ogni tabella, esporta al massimo il numero di righe inserito. L'ordine delle righe segue l'ordine di lettura esistente dell'esportazione; per le tabelle prive di un ordine stabile, due esportazioni potrebbero restituire righe diverse.",
   },
   nacos: {
     ...nacosAccessControlMessages,

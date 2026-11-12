@@ -10883,6 +10883,9 @@ export default withEnglishFallback({
     allSchemas: "Todos os esquemas",
     exportError: "Falha na exportação: {error}",
     exportCancelled: "Exportação cancelada",
+    limitRowsPerTable: "Limitar linhas por tabela",
+    rowsPerTableLimit: "Linhas por tabela",
+    limitRowsPerTableDescription: "Exporta no máximo o número de linhas informado por tabela. A ordem das linhas segue a ordem de leitura existente na exportação; tabelas sem ordem estável podem retornar linhas diferentes em duas exportações.",
   },
   nacos: {
     ...nacosAccessControlMessages,

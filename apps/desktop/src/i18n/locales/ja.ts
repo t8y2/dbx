@@ -10914,6 +10914,9 @@ export default withEnglishFallback({
     allSchemas: "すべてのスキーマ",
     exportError: "エクスポートに失敗しました: {error}",
     exportCancelled: "エクスポートがキャンセルされました",
+    limitRowsPerTable: "テーブルごとの行数を制限",
+    rowsPerTableLimit: "テーブルごとの行数",
+    limitRowsPerTableDescription: "各テーブルにつき、入力した行数までエクスポートします。行の順序はエクスポート時の既存の読み取り順序に従います。安定した順序を持たないテーブルでは、2回のエクスポートで異なる行が取得される可能性があります。",
   },
   nacos: {
     ...nacosAccessControlMessages,

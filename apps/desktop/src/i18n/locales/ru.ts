@@ -12476,6 +12476,9 @@ export default withEnglishFallback({
     exportError: "Экспорт не удался: {error}",
     exportCancelled: "Экспорт отменён",
     runInBackground: "Выполнять в фоне",
+    limitRowsPerTable: "Ограничить число строк на таблицу",
+    rowsPerTableLimit: "Строк на таблицу",
+    limitRowsPerTableDescription: "Для каждой таблицы экспортируется не более указанного числа строк. Порядок строк соответствует существующему порядку чтения при экспорте; для таблиц без стабильного порядка два экспорта могут получить разные строки.",
   },
   databaseBackup: {
     savedTimeZoneHint: "Следующий запуск использует сохранённый часовой пояс расписания.",

@@ -12837,6 +12837,9 @@ export default withEnglishFallback({
     exportError: "ส่งออกไม่สำเร็จ: {error}",
     exportCancelled: "ยกเลิกการส่งออกแล้ว",
     runInBackground: "ทำงานเบื้องหลัง",
+    limitRowsPerTable: "จำกัดจำนวนแถวต่อตาราง",
+    rowsPerTableLimit: "จำนวนแถวต่อตาราง",
+    limitRowsPerTableDescription: "ส่งออกได้สูงสุดตามจำนวนแถวที่ระบุต่อตาราง ลำดับแถวจะเป็นไปตามลำดับการอ่านที่มีอยู่ของการส่งออก ตารางที่ไม่มีลำดับที่แน่นอนอาจได้แถวต่างกันในการส่งออกสองครั้ง",
   },
   databaseBackup: {
     savedTimeZoneHint: "การเรียกใช้ครั้งถัดไปใช้เขตเวลาที่บันทึกไว้ของกำหนดการ",

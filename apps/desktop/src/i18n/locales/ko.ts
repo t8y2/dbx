@@ -10976,6 +10976,9 @@ export default withEnglishFallback({
     exportError: "내보내기 실패: {error}",
     exportCancelled: "내보내기 취소됨",
     runInBackground: "백그라운드에서 실행",
+    limitRowsPerTable: "테이블당 행 수 제한",
+    rowsPerTableLimit: "테이블당 행 수",
+    limitRowsPerTableDescription: "각 테이블에서 입력한 행 수까지만 내보냅니다. 행 순서는 내보내기의 기존 읽기 순서를 따릅니다. 안정적인 순서가 없는 테이블은 두 번 내보낼 때 서로 다른 행이 선택될 수 있습니다.",
   },
   databaseBackup: {
     savedTimeZoneHint: "다음 실행 시간은 일정에 저장된 시간대로 계산됩니다.",

@@ -6752,6 +6752,11 @@ export interface DatabaseExportRequest {
   snapshotSessionId?: string;
   batchSize: number;
   splitMaxMb?: number;
+  /**
+   * Cap each exported table at this many data rows (#14750). `undefined` keeps
+   * the unlimited behavior; the backend rejects zero.
+   */
+  rowLimitPerTable?: number;
 }
 
 export interface DatabaseBackupSnapshot {

@@ -13,10 +13,29 @@ export interface DatabaseExportSavedOptions {
   preserveOriginalLanguage: boolean;
   splitSqlOutput: boolean;
   splitSqlPartMaxMb: number;
+  limitRowsPerTable: boolean;
+  rowsPerTableLimit: number;
 }
 
 export const MIN_SPLIT_SQL_PART_MB = 1;
 export const MAX_SPLIT_SQL_PART_MB = 4096;
+
+export const MIN_ROWS_PER_TABLE_LIMIT = 1;
+
+/** Largest row cap accepted in the dialog; exports stream per table and keep counting in u64. */
+export const MAX_ROWS_PER_TABLE_LIMIT = Number.MAX_SAFE_INTEGER;
+
+/**
+ * Normalizes the dialog's rows-per-table input. Anything that is not a positive,
+ * safe integer (blank, zero, negative, fractional, non-numeric) falls back to the
+ * smallest valid cap, so a stale or hand-edited value can never silently disable
+ * a limit the user enabled.
+ */
+export function normalizeRowsPerTableLimit(value?: number | null): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) return MIN_ROWS_PER_TABLE_LIMIT;
+  return Math.min(MAX_ROWS_PER_TABLE_LIMIT, Math.max(MIN_ROWS_PER_TABLE_LIMIT, Math.floor(parsed)));
+}
 
 export const DEFAULT_DATABASE_EXPORT_OPTIONS: DatabaseExportSavedOptions = {
   includeStructure: true,
@@ -31,6 +50,8 @@ export const DEFAULT_DATABASE_EXPORT_OPTIONS: DatabaseExportSavedOptions = {
   preserveOriginalLanguage: false,
   splitSqlOutput: false,
   splitSqlPartMaxMb: 100,
+  limitRowsPerTable: false,
+  rowsPerTableLimit: MIN_ROWS_PER_TABLE_LIMIT,
 };
 
 export const DATABASE_EXPORT_OPTIONS_STORAGE_KEY = "dbx-database-export-last-options-v1";
@@ -59,6 +80,8 @@ export function loadSavedDatabaseExportOptions(storage?: Pick<Storage, "getItem"
       preserveOriginalLanguage: typeof parsed.preserveOriginalLanguage === "boolean" ? parsed.preserveOriginalLanguage : DEFAULT_DATABASE_EXPORT_OPTIONS.preserveOriginalLanguage,
       splitSqlOutput: typeof parsed.splitSqlOutput === "boolean" ? parsed.splitSqlOutput : DEFAULT_DATABASE_EXPORT_OPTIONS.splitSqlOutput,
       splitSqlPartMaxMb: typeof parsed.splitSqlPartMaxMb === "number" && Number.isFinite(parsed.splitSqlPartMaxMb) ? Math.min(MAX_SPLIT_SQL_PART_MB, Math.max(MIN_SPLIT_SQL_PART_MB, Math.round(parsed.splitSqlPartMaxMb))) : DEFAULT_DATABASE_EXPORT_OPTIONS.splitSqlPartMaxMb,
+      limitRowsPerTable: typeof parsed.limitRowsPerTable === "boolean" ? parsed.limitRowsPerTable : DEFAULT_DATABASE_EXPORT_OPTIONS.limitRowsPerTable,
+      rowsPerTableLimit: parsed.rowsPerTableLimit === undefined ? DEFAULT_DATABASE_EXPORT_OPTIONS.rowsPerTableLimit : normalizeRowsPerTableLimit(parsed.rowsPerTableLimit),
     };
   } catch {
     return { ...DEFAULT_DATABASE_EXPORT_OPTIONS };

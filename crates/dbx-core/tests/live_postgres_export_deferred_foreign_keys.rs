@@ -146,6 +146,7 @@ async fn live_postgres_export_with_foreign_key_cycle_restores_into_empty_databas
             snapshot_session_id: None,
             batch_size: 1000,
             split_max_mb: None,
+            row_limit_per_table: None,
         },
         |_| {},
     )

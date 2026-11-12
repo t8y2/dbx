@@ -147,6 +147,7 @@ async fn round_trip(snapshot: bool, dialect: SqlInsertDialect, extension_schema:
                 snapshot_session_id: session.as_ref().map(|s| s.session_id.clone()),
                 batch_size: 2,
                 split_max_mb: None,
+                row_limit_per_table: None,
             },
             |_| {},
         ),

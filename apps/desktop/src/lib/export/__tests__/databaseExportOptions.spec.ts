@@ -61,6 +61,8 @@ describe("databaseExportOptions", () => {
       preserveOriginalLanguage: true,
       splitSqlOutput: true,
       splitSqlPartMaxMb: 250,
+      limitRowsPerTable: false,
+      rowsPerTableLimit: 1,
     });
   });
 
@@ -81,6 +83,49 @@ describe("databaseExportOptions", () => {
 
     saveDatabaseExportOptions({ splitSqlPartMaxMb: -10 }, storage);
     expect(loadSavedDatabaseExportOptions(storage).splitSqlPartMaxMb).toBe(1);
+  });
+
+  it("defaults to unlimited rows and keeps legacy stored options unlimited (#14750)", () => {
+    expect(DEFAULT_DATABASE_EXPORT_OPTIONS.limitRowsPerTable).toBe(false);
+    expect(DEFAULT_DATABASE_EXPORT_OPTIONS.rowsPerTableLimit).toBe(1);
+
+    // A preference written before the row limit existed must load as unlimited.
+    const legacyStorage = createMemoryStorage({
+      [DATABASE_EXPORT_OPTIONS_STORAGE_KEY]: JSON.stringify({ includeData: true, splitSqlPartMaxMb: 250 }),
+    });
+    const legacy = loadSavedDatabaseExportOptions(legacyStorage);
+    expect(legacy.limitRowsPerTable).toBe(false);
+    expect(legacy.rowsPerTableLimit).toBe(1);
+    expect(legacy.splitSqlPartMaxMb).toBe(250);
+  });
+
+  it("clamps rowsPerTableLimit to a positive safe integer (#14750)", () => {
+    const storage = createMemoryStorage();
+    saveDatabaseExportOptions({ rowsPerTableLimit: 500 }, storage);
+    expect(loadSavedDatabaseExportOptions(storage).rowsPerTableLimit).toBe(500);
+
+    saveDatabaseExportOptions({ rowsPerTableLimit: 0 }, storage);
+    expect(loadSavedDatabaseExportOptions(storage).rowsPerTableLimit).toBe(1);
+
+    saveDatabaseExportOptions({ rowsPerTableLimit: -3 }, storage);
+    expect(loadSavedDatabaseExportOptions(storage).rowsPerTableLimit).toBe(1);
+
+    saveDatabaseExportOptions({ rowsPerTableLimit: 12.9 }, storage);
+    expect(loadSavedDatabaseExportOptions(storage).rowsPerTableLimit).toBe(12);
+
+    saveDatabaseExportOptions({ rowsPerTableLimit: "x" as unknown as number }, storage);
+    expect(loadSavedDatabaseExportOptions(storage).rowsPerTableLimit).toBe(1);
+  });
+
+  it("keeps limitRowsPerTable independent of rowsPerTableLimit when saving partial options", () => {
+    const storage = createMemoryStorage();
+    saveDatabaseExportOptions({ limitRowsPerTable: true, rowsPerTableLimit: 25 }, storage);
+    saveDatabaseExportOptions({ includeData: false }, storage);
+
+    const loaded = loadSavedDatabaseExportOptions(storage);
+    expect(loaded.limitRowsPerTable).toBe(true);
+    expect(loaded.rowsPerTableLimit).toBe(25);
+    expect(loaded.includeData).toBe(false);
   });
 
   it("sorts table names alphabetically", () => {

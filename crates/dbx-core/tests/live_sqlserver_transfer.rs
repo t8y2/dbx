@@ -978,6 +978,7 @@ async fn live_sqlserver_database_export_replays_composite_foreign_keys() {
         insert_mode: Default::default(),
         batch_size: 1000,
         split_max_mb: None,
+        row_limit_per_table: None,
     };
 
     let test_result = async {

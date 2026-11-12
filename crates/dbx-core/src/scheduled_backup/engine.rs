@@ -375,6 +375,9 @@ impl BackupService {
                         snapshot_session_id: Some(snapshot.session_id.clone()),
                         batch_size: 1000,
                         split_max_mb: None,
+                        // Scheduled backups stay full-table exports; the manual
+                        // dialog's rows-per-table preference must never shrink them (#14750).
+                        row_limit_per_table: None,
                     };
                     let terminal_cancelled = std::sync::atomic::AtomicBool::new(false);
                     let created = Arc::new(std::sync::atomic::AtomicBool::new(false));

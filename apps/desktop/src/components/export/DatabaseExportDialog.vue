@@ -25,7 +25,7 @@ import { isQueryTimeoutErrorMessage } from "@/lib/sql/queryError";
 import type { SqlInsertDialect, SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { revealExportedPath } from "@/lib/export/exportPath";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { databaseExportFileStem, loadSavedDatabaseExportOptions, MAX_SPLIT_SQL_PART_MB, MIN_SPLIT_SQL_PART_MB, saveDatabaseExportOptions, sortDatabaseTableNames } from "@/lib/export/databaseExportOptions";
+import { databaseExportFileStem, loadSavedDatabaseExportOptions, MAX_ROWS_PER_TABLE_LIMIT, MAX_SPLIT_SQL_PART_MB, MIN_ROWS_PER_TABLE_LIMIT, MIN_SPLIT_SQL_PART_MB, normalizeRowsPerTableLimit, saveDatabaseExportOptions, sortDatabaseTableNames } from "@/lib/export/databaseExportOptions";
 import { notifyExportComplete } from "@/lib/export/exportReveal";
 import ExportExecutionMode from "@/components/export/ExportExecutionMode.vue";
 import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode";
@@ -94,6 +94,8 @@ const omitDatabaseQualifier = ref(savedOptions.omitDatabaseQualifier);
 const preserveOriginalLanguage = ref(savedOptions.preserveOriginalLanguage);
 const splitSqlOutput = ref(savedOptions.splitSqlOutput);
 const splitSqlPartMaxMb = ref(savedOptions.splitSqlPartMaxMb);
+const limitRowsPerTable = ref(savedOptions.limitRowsPerTable);
+const rowsPerTableLimitInput = ref<string>(savedOptions.rowsPerTableLimit.toString());
 const executionMode = ref<ManualExportMode>("immediate");
 const desktopTaskStatus = ref<ExportTask["status"] | null>(null);
 let disposed = false;
@@ -112,6 +114,8 @@ function applyStoredExportOptions() {
   preserveOriginalLanguage.value = saved.preserveOriginalLanguage;
   splitSqlOutput.value = saved.splitSqlOutput;
   splitSqlPartMaxMb.value = saved.splitSqlPartMaxMb;
+  limitRowsPerTable.value = saved.limitRowsPerTable;
+  rowsPerTableLimitInput.value = saved.rowsPerTableLimit.toString();
 }
 
 function persistExportOptions() {
@@ -128,6 +132,8 @@ function persistExportOptions() {
     preserveOriginalLanguage: preserveOriginalLanguage.value,
     splitSqlOutput: splitSqlOutput.value,
     splitSqlPartMaxMb: normalizedSplitSqlPartMaxMb(),
+    limitRowsPerTable: limitRowsPerTable.value,
+    rowsPerTableLimit: normalizedRowsPerTableLimit(),
   });
 }
 // `AUTO_INCREMENT` stripping is a MySQL-only DDL transform (backend gates on
@@ -262,6 +268,22 @@ function normalizedSplitSqlPartMaxMb(): number {
   const value = Number(splitSqlPartMaxMb.value);
   if (!Number.isFinite(value)) return 100;
   return Math.min(MAX_SPLIT_SQL_PART_MB, Math.max(MIN_SPLIT_SQL_PART_MB, Math.round(value)));
+}
+
+/**
+ * The rows-per-table cap as the request carries it: `undefined` when the user
+ * did not enable the limit, a positive safe integer otherwise. Invalid or blank
+ * input falls back to the smallest cap instead of silently disabling the
+ * enabled toggle.
+ */
+function rowsPerTableLimitRequest(): number | undefined {
+  if (!limitRowsPerTable.value) return undefined;
+  return normalizeRowsPerTableLimit(Number(rowsPerTableLimitInput.value));
+}
+
+/** The rows-per-table cap as the preference stores it, so a reload keeps the user's intent. */
+function normalizedRowsPerTableLimit(): number {
+  return normalizeRowsPerTableLimit(Number(rowsPerTableLimitInput.value));
 }
 
 // Lenient exports write per-object failures into the SQL file as `-- ERROR`
@@ -475,6 +497,7 @@ async function startDesktopExport() {
       preserveOriginalLanguage: preserveOriginalLanguage.value,
       batchSize: 1000,
       splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
+      rowLimitPerTable: rowsPerTableLimitRequest(),
     },
   };
   let destination: string;
@@ -768,6 +791,7 @@ async function startExport() {
           snapshotSessionId,
           batchSize: 1000,
           splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
+          rowLimitPerTable: rowsPerTableLimitRequest(),
         };
         return runDatabaseExportUntilTerminal(request, (progress) => {
           exportProgress.value = { ...progress };
@@ -920,6 +944,7 @@ async function startAllDatabasesExport() {
               snapshotSessionId,
               batchSize: 1000,
               splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
+              rowLimitPerTable: rowsPerTableLimitRequest(),
             },
             (progress) => {
               const nextRowsExported = Math.max(0, progress.rowsExported);
@@ -1187,7 +1212,7 @@ watch(
   { immediate: true },
 );
 
-watch([includeStructure, includeData, insertDialect, insertMode, includeObjects, includeCreateDatabase, dropTableIfExists, omitAutoIncrement, omitDatabaseQualifier, preserveOriginalLanguage, splitSqlOutput, splitSqlPartMaxMb], () => {
+watch([includeStructure, includeData, insertDialect, insertMode, includeObjects, includeCreateDatabase, dropTableIfExists, omitAutoIncrement, omitDatabaseQualifier, preserveOriginalLanguage, splitSqlOutput, splitSqlPartMaxMb, limitRowsPerTable, rowsPerTableLimitInput], () => {
   if (open.value) {
     persistExportOptions();
   }
@@ -1413,6 +1438,27 @@ watch([includeStructure, includeData, insertDialect, insertMode, includeObjects,
             </div>
             <p v-if="splitSqlOutput" class="pl-5 text-[11px] text-muted-foreground">
               {{ t("databaseExport.splitSqlOutputDescription", { min: MIN_SPLIT_SQL_PART_MB, max: MAX_SPLIT_SQL_PART_MB }) }}
+            </p>
+            <div class="flex items-center justify-between gap-2 text-xs">
+              <button type="button" class="flex min-w-0 items-center gap-2 text-left" :class="includeData ? 'cursor-pointer' : 'cursor-not-allowed text-muted-foreground/50'" :disabled="!includeData" @click="includeData && (limitRowsPerTable = !limitRowsPerTable)">
+                <CheckSquare v-if="limitRowsPerTable" class="w-3.5 h-3.5 text-primary shrink-0" />
+                <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
+                <span>{{ t("databaseExport.limitRowsPerTable") }}</span>
+              </button>
+              <Input
+                v-if="includeData && limitRowsPerTable"
+                v-model="rowsPerTableLimitInput"
+                type="number"
+                inputmode="numeric"
+                :min="MIN_ROWS_PER_TABLE_LIMIT"
+                :max="MAX_ROWS_PER_TABLE_LIMIT"
+                class="h-7 w-28 text-xs"
+                :aria-label="t('databaseExport.rowsPerTableLimit')"
+                @blur="rowsPerTableLimitInput = normalizedRowsPerTableLimit().toString()"
+              />
+            </div>
+            <p v-if="includeData && limitRowsPerTable" class="pl-5 text-[11px] text-muted-foreground">
+              {{ t("databaseExport.limitRowsPerTableDescription") }}
             </p>
             <ExportExecutionMode v-if="isTauriRuntime()" v-model="executionMode" />
           </div>

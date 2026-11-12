@@ -4,15 +4,14 @@ import { createApp, h, nextTick, reactive, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { undo, redo } from "@codemirror/commands";
+import { undo, redo, deleteCharBackward } from "@codemirror/commands";
 import type { QuickOpenItem } from "@/composables/useQuickOpen";
 
-const mocks = vi.hoisted(() => ({ read: vi.fn(), write: vi.fn(), copy: vi.fn(), toast: vi.fn(), encoding: "utf8" }));
+const mocks = vi.hoisted(() => ({ read: vi.fn(), write: vi.fn(), toast: vi.fn(), encoding: "utf8" }));
 vi.mock("@/lib/backend/api", () => ({
   readExternalSqlFileSnapshot: async (...args: unknown[]) => ({ content: await mocks.read(...args), version: { contentHash: "original", modifiedNs: "1", sizeBytes: 34 }, encoding: mocks.encoding }),
   writeExternalSqlFile: mocks.write,
 }));
-vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: mocks.copy, clipboardLineEndings: (text: string) => text }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { fontSize: 13, fontFamily: "monospace", theme: "app" } }) }));
@@ -65,7 +64,6 @@ beforeEach(() => {
   vi.useFakeTimers();
   mocks.read.mockReset().mockResolvedValue("-- heading\nSELECT needle;\nSELECT 2;");
   mocks.write.mockReset().mockResolvedValue({ kind: "written", version: { contentHash: "saved", modifiedNs: "2", sizeBytes: 35 } });
-  mocks.copy.mockReset().mockResolvedValue(undefined);
   mocks.toast.mockReset();
   mocks.encoding = "utf8";
 });
@@ -78,30 +76,20 @@ afterEach(() => {
 });
 
 describe("quick-open file preview", () => {
-  it("copies the selection, or the whole file when nothing is selected", async () => {
+  it("keeps native text selection available without a copy button and blocks edits", async () => {
     const { host } = mountPreview();
-    expect(button(host, "common.copy").disabled).toBe(true);
     await settle();
-    button(host, "common.copy").click();
-    await nextTick();
-    expect(mocks.copy).toHaveBeenLastCalledWith("-- heading\nSELECT needle;\nSELECT 2;");
     const view = editor(host);
-    const from = view.state.doc.line(2).from;
-    view.dispatch({ selection: { anchor: from, head: from + 6 } });
-    button(host, "common.copy").click();
-    await nextTick();
-    expect(mocks.copy).toHaveBeenLastCalledWith("SELECT");
-    expect(mocks.toast).toHaveBeenCalledWith("grid.copied");
-  });
-
-  it("reports clipboard failures and keeps the file available", async () => {
-    mocks.copy.mockRejectedValue(new Error("denied"));
-    const { host } = mountPreview();
-    await settle();
-    button(host, "common.copy").click();
-    await nextTick();
-    expect(mocks.toast).toHaveBeenCalledWith("grid.copyFailed", 5000);
-    expect(editor(host).state.doc.toString()).toContain("needle");
+    expect(host.querySelector('button[aria-label="common.copy"]')).toBeNull();
+    expect(view.contentDOM.getAttribute("contenteditable")).toBe("true");
+    expect(view.contentDOM.getAttribute("aria-readonly")).toBe("true");
+    view.focus();
+    view.contentDOM.dispatchEvent(new KeyboardEvent("keydown", { key: "a", ctrlKey: true, bubbles: true, cancelable: true }));
+    expect(view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to)).toBe(view.state.doc.toString());
+    const original = view.state.doc.toString();
+    expect(deleteCharBackward(view)).toBe(false);
+    expect(view.state.doc.toString()).toBe(original);
+    expect(mocks.write).not.toHaveBeenCalled();
   });
 
   it("edits in place, supports undo/redo, and saves with the original version", async () => {
@@ -123,9 +111,8 @@ describe("quick-open file preview", () => {
     expect(editor(host)).toBe(view);
     expect(view.state.readOnly).toBe(true);
     expect(onEditing).toHaveBeenLastCalledWith(false);
-    button(host, "common.copy").click();
-    await nextTick();
-    expect(mocks.copy).toHaveBeenLastCalledWith(view.state.sliceDoc());
+    expect(view.contentDOM.getAttribute("contenteditable")).toBe("true");
+    expect(view.contentDOM.getAttribute("aria-readonly")).toBe("true");
     await beginEditing(host);
     view.dispatch({ changes: { from: view.state.doc.length, insert: "\n-- second edit" } });
     button(host, "common.save").click();
@@ -143,6 +130,7 @@ describe("quick-open file preview", () => {
     await nextTick();
     expect(view.state.doc.toString()).toBe(original);
     expect(view.state.readOnly).toBe(true);
+    expect(view.contentDOM.getAttribute("contenteditable")).toBe("true");
     expect(mocks.write).not.toHaveBeenCalled();
     await beginEditing(host);
     expect(undo(view)).toBe(false);
@@ -283,7 +271,7 @@ describe("quick-open file preview", () => {
     expect(mocks.read).toHaveBeenCalledWith("/sql/first.sql", 32 * 1024 * 1024);
     expect(view.state.doc.toString()).toContain("SELECT 2;");
     expect(view.state.facet(EditorState.readOnly)).toBe(true);
-    expect(view.state.facet(EditorView.editable)).toBe(false);
+    expect(view.state.facet(EditorView.editable)).toBe(true);
     expect(view.state.selection.main.head).toBe(view.state.doc.line(2).from + 7);
     expect(host.querySelector(".cm-preview-match")?.textContent).toBe("needle");
     expect(view.contentDOM.getAttribute("aria-label")).toBe("/sql/first.sql");

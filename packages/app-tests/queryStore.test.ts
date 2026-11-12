@@ -171,12 +171,12 @@ test("setErrorResult stops loading and shows the error result", () => {
   assert.deepEqual(tab?.result?.rows, [["metadata failed"]]);
 });
 
-test("renames query tab titles", () => {
+test("renames query tab titles", async () => {
   setActivePinia(createPinia());
   const store = useQueryStore();
   const tabId = store.createTab("conn-1", "db");
 
-  assert.equal(store.renameTab(tabId, " Revenue checks "), true);
+  assert.equal(await store.renameTab(tabId, " Revenue checks "), true);
 
   const tab = store.tabs.find((item) => item.id === tabId);
   assert.equal(tab?.title, "Revenue checks");
@@ -3522,7 +3522,9 @@ test("enables DISTINCT inserts only for an insertable base-table target", async 
   for (const scenario of [
     { id: "table", databaseType: "postgres", tableType: "TABLE" },
     { id: "view", databaseType: "postgres", tableType: "VIEW" },
-    { id: "unsupported", databaseType: "jdbc", tableType: "TABLE" },
+    // influxdb stays non-insertable; generic JDBC became insertable (#14715),
+    // so it no longer represents an unsupported DISTINCT-insert target here.
+    { id: "unsupported", databaseType: "influxdb", tableType: "TABLE" },
     { id: "computed", databaseType: "postgres", tableType: "TABLE" },
   ] as const) {
     const restoreStorage = installMemoryStorage();
@@ -7504,6 +7506,48 @@ test("buildQueryResultExportRequest includes PostgreSQL batch setup for a trunca
   }
 });
 
+test("buildQueryResultExportRequest includes MySQL batch setup so user variables reach the export session (#13111)", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  connectionStore.addEphemeralConnection({ ...conn("conn-mysql"), db_type: "mysql", port: 3306 });
+  const tabId = store.createTab("conn-mysql", "lishi", "Query");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+  const batchSql = ["SET @ID = '123'", "SELECT * FROM NewTable nt WHERE ID = @ID"].join(";\n");
+  tab.lastExecutedSql = batchSql;
+  tab.resultBaseSql = batchSql;
+  tab.result = {
+    columns: ["ID"],
+    rows: [["123"]],
+    affected_rows: 0,
+    execution_time_ms: 1,
+    statement_index: 1,
+    sourceStatement: "SELECT * FROM NewTable nt WHERE ID = @ID",
+    truncated: true,
+    has_more: false,
+  };
+
+  globalThis.fetch = withConnectionHealthMock(async () => new Response("unexpected request", { status: 500 }));
+
+  try {
+    const request = await store.buildQueryResultExportRequest(tabId, {
+      exportId: "export-mysql-vars",
+      filePath: "C:\\tmp\\new-table.xlsx",
+      format: "xlsx",
+    });
+
+    assert.equal(request?.sql, "SELECT * FROM NewTable nt WHERE ID = @ID");
+    assert.deepEqual(request?.setupSql, ["SET @ID = '123'"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("buildQueryResultExportRequest caps progress total when export row limit is enabled", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
@@ -8469,14 +8513,15 @@ test("SQL Server keeps the requested page size when the final fetch is narrowed"
 for (const scenario of [
   { label: "TOP equal to one page", bound: 100, pageLimit: 100, pageOffset: 0, rowCount: 100, expectedTotal: 100 },
   { label: "TOP below one page", bound: 50, pageLimit: 100, pageOffset: 0, rowCount: 50, expectedTotal: 50 },
-  { label: "TOP above the first page", bound: 250, pageLimit: 100, pageOffset: 0, rowCount: 100, expectedTotal: 250 },
-  { label: "TOP above an intermediate page", bound: 250, pageLimit: 100, pageOffset: 100, rowCount: 100, expectedTotal: 250 },
+  { label: "TOP above the first page", bound: 250, pageLimit: 100, pageOffset: 0, rowCount: 100, expectedTotal: 230, countedTotal: 230 },
+  { label: "TOP above an intermediate page", bound: 250, pageLimit: 100, pageOffset: 100, rowCount: 100, expectedTotal: 230, countedTotal: 230 },
   { label: "TOP reached on the final page", bound: 250, pageLimit: 100, pageOffset: 200, rowCount: 50, expectedTotal: 250 },
   { label: "TOP above the actual matching rows", bound: 500, pageLimit: 100, pageOffset: 200, rowCount: 37, expectedTotal: 237 },
-  { label: "TOP above the enabled result cap", bound: 200_000, pageLimit: 100, pageOffset: 0, rowCount: 100, expectedTotal: 180, queryResultMaxRows: 180 },
+  { label: "TOP above the enabled result cap", bound: 200_000, pageLimit: 100, pageOffset: 0, rowCount: 100, expectedTotal: 230, countedTotal: 230, queryResultMaxRows: 180 },
+  { label: "TOP above the first page with automatic counting disabled", bound: 250, pageLimit: 100, pageOffset: 0, rowCount: 100, expectedTotal: undefined, autoCalculateTotalRows: false },
   { label: "TOP overrides an unrelated exact backend total", bound: 100, pageLimit: 100, pageOffset: 0, rowCount: 100, expectedTotal: 100, affectedRows: 500 },
 ]) {
-  test(`SQL Server ${scenario.label} resolves an exact bounded total without COUNT`, async () => {
+  test(`SQL Server ${scenario.label} resolves totals from observed rows or the count policy`, async () => {
     const restoreStorage = installMemoryStorage();
     setActivePinia(createPinia());
     const connectionStore = useConnectionStore();
@@ -8486,7 +8531,7 @@ for (const scenario of [
     let countRequests = 0;
 
     settingsStore.updateEditorSettings({
-      autoCalculateTotalRows: true,
+      autoCalculateTotalRows: scenario.autoCalculateTotalRows ?? true,
       queryResultMaxRowsEnabled: true,
       queryResultMaxRows: scenario.queryResultMaxRows ?? 100_000,
     });
@@ -8520,7 +8565,8 @@ for (const scenario of [
       }
       if (url === "/api/query/execute") {
         countRequests += 1;
-        return new Response("unexpected count", { status: 500 });
+        if (scenario.countedTotal === undefined) return new Response("unexpected count", { status: 500 });
+        return Response.json({ columns: ["total"], rows: [[scenario.countedTotal]], affected_rows: 0, execution_time_ms: 1 });
       }
       if (url === "/api/query/analyze-editability") {
         return Response.json({ editable: false, reason: "complex-source" });
@@ -8533,9 +8579,10 @@ for (const scenario of [
         pagination: { limit: scenario.pageLimit, offset: scenario.pageOffset },
       });
 
+      await waitFor(() => tab.resultTotalRowCount === scenario.expectedTotal && tab.resultTotalRowCountLoading === false);
       assert.equal(tab.resultTotalRowCount, scenario.expectedTotal);
       assert.equal(tab.resultTotalRowCountLoading, false);
-      assert.equal(countRequests, 0);
+      assert.equal(countRequests, scenario.countedTotal === undefined ? 0 : 1);
     } finally {
       globalThis.fetch = originalFetch;
       restoreStorage();

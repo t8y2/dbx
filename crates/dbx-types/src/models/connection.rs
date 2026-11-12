@@ -64,6 +64,8 @@ pub struct ConnectionIdleClosedEvent {
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseConnectionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product_version: Option<String>,
@@ -183,9 +185,13 @@ pub struct ConnectionConfig {
     /// Frontend navigation preference: exhaust the paginated Tables group when opened.
     #[serde(default, skip_serializing_if = "is_false")]
     pub sidebar_auto_load_all_tables: bool,
-    /// Oracle sidebar preference. Absent means shown; only an explicit opt-out is stored.
+    /// Sidebar preference. Absent means shown; only an explicit opt-out is stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_database_links: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_native_jobs: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_user_admin: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     /// SQL statements executed right after the connection is established
@@ -491,6 +497,12 @@ pub struct SshTunnelConfig {
     pub connect_timeout_secs: u64,
     #[serde(default)]
     pub expose_lan: bool,
+    /// Fixed local port for the connection's primary tunnel when this is the
+    /// last transport layer. Unset means a random free port. A shared tunnel
+    /// profile (`profile_id`) supplies its own configuration, so a fixed port
+    /// is not applied to a layer that references one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_port: Option<u16>,
     #[serde(default)]
     pub use_ssh_agent: bool,
     /// Custom SSH agent socket path (e.g. `~/.ssh/agent.sock`).
@@ -498,6 +510,10 @@ pub struct SshTunnelConfig {
     /// the `SSH_AUTH_SOCK` environment variable.
     #[serde(default)]
     pub ssh_agent_sock_path: String,
+    /// SHA-256 fingerprint (`SHA256:...`) of the one agent identity to use.
+    /// Empty means every identity the agent reports is tried, in order.
+    #[serde(default)]
+    pub ssh_agent_key_fingerprint: String,
     /// Login method: `"password"`, `"key"`, `"key+password"`, `"agent"`, or `"none"`.
     /// Empty string means an older saved connection predating this field —
     /// the backend falls back to probing key > password > agent based on
@@ -570,11 +586,21 @@ pub struct HttpTunnelConfig {
     pub url: String,
     #[serde(default)]
     pub token: String,
+    #[serde(default)]
+    pub protocol: HttpTunnelProtocol,
     #[serde(default = "default_http_tunnel_connect_timeout_secs")]
     pub connect_timeout_secs: u64,
     /// See [`SshTunnelConfig::profile_id`].
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub profile_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpTunnelProtocol {
+    #[default]
+    DbxTcp,
+    NavicatMysql,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -667,6 +693,53 @@ pub enum ProxyType {
 
 include!(concat!(env!("OUT_DIR"), "/database_type.rs"));
 
+/// A dialect fact that is safe to retain on a connection response after its URL is redacted.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum JdbcDialectHint {
+    OceanbaseOracle,
+    Oracle,
+}
+
+/// Connection data returned to a client, with response-only metadata flattened into the JSON.
+/// This type is never used for persistence, runtime configuration, or request deserialization.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ConnectionResponse {
+    #[serde(flatten)]
+    pub config: ConnectionConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jdbc_dialect: Option<JdbcDialectHint>,
+}
+
+impl ConnectionResponse {
+    pub fn from_config(config: ConnectionConfig) -> Self {
+        let jdbc_dialect = jdbc_dialect_hint(&config);
+        Self { config, jdbc_dialect }
+    }
+
+    pub fn with_jdbc_dialect(config: ConnectionConfig, jdbc_dialect: Option<JdbcDialectHint>) -> Self {
+        Self { config, jdbc_dialect }
+    }
+}
+
+/// Derive only the approved non-sensitive mode identity from an explicit JDBC URL.
+pub fn jdbc_dialect_hint(config: &ConnectionConfig) -> Option<JdbcDialectHint> {
+    if config.db_type != DatabaseType::Jdbc {
+        return None;
+    }
+    let url = config.connection_string.as_deref()?.trim();
+    if url
+        .get(.."jdbc:oceanbase:oracle://".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("jdbc:oceanbase:oracle://"))
+    {
+        return Some(JdbcDialectHint::OceanbaseOracle);
+    }
+    if url.get(.."jdbc:oracle:".len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case("jdbc:oracle:")) {
+        return Some(JdbcDialectHint::Oracle);
+    }
+    None
+}
+
 #[derive(Deserialize)]
 struct ConnectionConfigData {
     pub id: String,
@@ -701,6 +774,10 @@ struct ConnectionConfigData {
     pub sidebar_auto_load_all_tables: bool,
     #[serde(default)]
     pub show_database_links: Option<bool>,
+    #[serde(default)]
+    pub show_native_jobs: Option<bool>,
+    #[serde(default)]
+    pub show_user_admin: Option<bool>,
     #[serde(default)]
     pub attached_databases: Vec<AttachedDatabaseConfig>,
     #[serde(default)]
@@ -826,6 +903,8 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             show_system_schemas: data.show_system_schemas,
             sidebar_auto_load_all_tables: data.sidebar_auto_load_all_tables,
             show_database_links: data.show_database_links,
+            show_native_jobs: data.show_native_jobs,
+            show_user_admin: data.show_user_admin,
             attached_databases: data.attached_databases,
             init_script: data.init_script,
             color: data.color,
@@ -1168,12 +1247,20 @@ impl ConnectionConfig {
             config.driver_profile = Some("mongodb".to_string());
             config.driver_label = Some("MongoDB".to_string());
         }
-        if config.db_type == DatabaseType::SqlServer
-            && sqlserver_legacy_compatibility_param(config.url_params.as_deref())
-        {
-            config.driver_profile = Some("sqlserver-legacy".to_string());
-            config.driver_label = Some("SQL Server legacy compatibility component".to_string());
-            config.url_params = without_sqlserver_legacy_compatibility_param(config.url_params.as_deref());
+        if config.db_type == DatabaseType::SqlServer {
+            let (normalized_host, parsed_port) = normalize_sqlserver_host_port(&config.host);
+            config.host = normalized_host;
+            if let Some(port) = parsed_port {
+                config.port = port;
+                let mut ext = config.external_config.as_ref().and_then(|v| v.as_object()).cloned().unwrap_or_default();
+                ext.insert("portExplicit".to_string(), serde_json::Value::Bool(true));
+                config.external_config = Some(serde_json::Value::Object(ext));
+            }
+            if sqlserver_legacy_compatibility_param(config.url_params.as_deref()) {
+                config.driver_profile = Some("sqlserver-legacy".to_string());
+                config.driver_label = Some("SQL Server legacy compatibility component".to_string());
+                config.url_params = without_sqlserver_legacy_compatibility_param(config.url_params.as_deref());
+            }
         }
         if config.db_type == DatabaseType::Mysql
             && config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("tdengine"))
@@ -1881,6 +1968,31 @@ fn sqlserver_url_param_parts(params: Option<&str>) -> Vec<(Option<char>, &str)> 
 
     parts.push((separator, &source[start..]));
     parts
+}
+
+pub fn sqlserver_url_instance_name(params: Option<&str>) -> Result<Option<String>, String> {
+    let property = sqlserver_url_param_parts(params)
+        .into_iter()
+        .rev()
+        .filter_map(|(_, part)| part.split_once('='))
+        .find(|(key, _)| percent_decode_str(key.trim()).decode_utf8_lossy().eq_ignore_ascii_case("instanceName"));
+    let Some((_, value)) = property else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    let name = if let Some(quoted) = value.strip_prefix('{').and_then(|value| value.strip_suffix('}')) {
+        quoted.to_owned()
+    } else {
+        percent_decode_str(value)
+            .decode_utf8()
+            .map_err(|_| "Invalid SQL Server instanceName URL parameter")?
+            .into_owned()
+    };
+    // A name must not be interpreted as part of the host or port.
+    if name.contains(['\\', ',', ':', '{', '}']) || name.chars().any(char::is_control) {
+        return Err("Invalid SQL Server instanceName URL parameter".to_owned());
+    }
+    Ok((!name.is_empty()).then_some(name))
 }
 
 fn sqlserver_legacy_compatibility_part(part: &str) -> bool {
@@ -3072,6 +3184,58 @@ fn gaussdb_single_host_port(host: &str, default_port: u16) -> (String, u16) {
     (bracket_ipv6(host), default_port)
 }
 
+pub fn normalize_sqlserver_host_port(raw_host: &str) -> (String, Option<u16>) {
+    let parse_port = |value: &str| {
+        let value = value.trim();
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        value.parse::<u16>().ok().filter(|port| *port > 0)
+    };
+    let trimmed = raw_host.trim();
+    if trimmed.is_empty() {
+        return (String::new(), None);
+    }
+
+    let without_tcp = if trimmed.to_ascii_lowercase().starts_with("tcp:") { trimmed[4..].trim() } else { trimmed };
+
+    // Bracketed IPv6: [fe80::1],9005 or [::1]:9005 or [::1]
+    if without_tcp.starts_with('[') {
+        if let Some(close) = without_tcp.find(']') {
+            let bracketed = &without_tcp[..=close];
+            let remainder = without_tcp[close + 1..].trim();
+            if let Some(port_str) = remainder.strip_prefix(',').or_else(|| remainder.strip_prefix(':')) {
+                if let Some(port) = parse_port(port_str) {
+                    return (bracketed.to_string(), Some(port));
+                }
+            }
+            return (if remainder.is_empty() { bracketed } else { without_tcp }.to_string(), None);
+        }
+    }
+
+    // Comma-separated port: host,port or host\instance,port
+    if let Some((server_part, port_part)) = without_tcp.rsplit_once(',') {
+        let candidate_host = server_part.trim();
+        let candidate_port = port_part.trim();
+        if let Some(port) = parse_port(candidate_port) {
+            return (candidate_host.to_string(), Some(port));
+        }
+    }
+
+    // Colon-separated port: host:port (single colon only to avoid unbracketed IPv6)
+    if without_tcp.matches(':').count() == 1 {
+        if let Some((server_part, port_part)) = without_tcp.rsplit_once(':') {
+            let candidate_host = server_part.trim();
+            let candidate_port = port_part.trim();
+            if let Some(port) = parse_port(candidate_port) {
+                return (candidate_host.to_string(), Some(port));
+            }
+        }
+    }
+
+    (without_tcp.to_string(), None)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -3100,9 +3264,42 @@ mod tests {
     use super::{
         database_info_from_protocol_value, default_query_timeout_secs, default_redis_key_separator,
         default_ssh_connect_timeout_secs, sqlserver_legacy_compatibility_param,
-        without_sqlserver_legacy_compatibility_param, ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo,
-        DatabaseType, IdentifierCase, ProductionBadgeScope, ProxyTunnelConfig, ProxyType, TransportLayerConfig,
+        without_sqlserver_legacy_compatibility_param, ConnectionConfig, ConnectionResponse, ConnectionTestResult,
+        DatabaseConnectionInfo, DatabaseType, IdentifierCase, ProductionBadgeScope, ProxyTunnelConfig, ProxyType,
+        TransportLayerConfig,
     };
+
+    #[test]
+    fn connection_response_derives_approved_hints_from_explicit_jdbc_url() {
+        let mut config = mysql_config("root", "", None);
+        config.db_type = DatabaseType::Jdbc;
+        config.connection_string = Some(" JDBC:OCEANBASE:ORACLE://host/service ".into());
+        let response = ConnectionResponse::from_config(config.clone());
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["jdbc_dialect"], "oceanbase-oracle");
+        assert_eq!(value["db_type"], "jdbc");
+        assert_eq!(response.config, config);
+
+        config.connection_string = Some("jdbc:oracle:thin:@host/service".into());
+        let oracle_response = ConnectionResponse::from_config(config.clone());
+        let oracle_value = serde_json::to_value(&oracle_response).unwrap();
+        assert_eq!(oracle_value["jdbc_dialect"], "oracle");
+        assert_eq!(oracle_value["db_type"], "jdbc");
+
+        config.connection_string = Some("jdbc:mysql://host:3306/service".into());
+        assert!(serde_json::to_value(ConnectionResponse::from_config(config.clone()))
+            .unwrap()
+            .get("jdbc_dialect")
+            .is_none());
+        config.connection_string = Some("jdbc:oceanbase:oracle://host/service".into());
+        config.db_type = DatabaseType::Oracle;
+        assert!(serde_json::to_value(ConnectionResponse::from_config(config)).unwrap().get("jdbc_dialect").is_none());
+
+        let mut legacy = serde_json::to_value(&response.config).unwrap();
+        legacy["jdbc_dialect"] = serde_json::json!("oceanbase-oracle");
+        let restored: ConnectionConfig = serde_json::from_value(legacy).unwrap();
+        assert!(serde_json::to_value(restored).unwrap().get("jdbc_dialect").is_none());
+    }
 
     #[test]
     fn default_query_timeout_is_sixty_seconds() {
@@ -3139,7 +3336,8 @@ mod tests {
                 "productName": "H2",
                 "currentDatabase": "app",
                 "serverCharset": "utf8mb4",
-                "jdbcVersion": "4.2"
+                "jdbcVersion": "4.2",
+                "compatibilityMode": "oracle"
             }
         }))
         .unwrap();
@@ -3147,6 +3345,7 @@ mod tests {
         assert_eq!(parsed.current_database.as_deref(), Some("app"));
         assert_eq!(parsed.server_charset.as_deref(), Some("utf8mb4"));
         assert_eq!(parsed.jdbc_version.as_deref(), Some("4.2"));
+        assert_eq!(parsed.compatibility_mode.as_deref(), Some("oracle"));
         assert_eq!(database_info_from_protocol_value(&serde_json::json!({ "ok": true })), None);
     }
 
@@ -3269,6 +3468,24 @@ mod tests {
         assert_eq!(serde_json::to_value(hidden).unwrap()["show_database_links"], serde_json::json!(false));
     }
 
+    #[test]
+    fn sidebar_visibility_preferences_round_trip() {
+        let base = serde_json::json!({
+            "id": "sidebar", "name": "Sidebar", "db_type": "oracle", "host": "localhost",
+            "port": 1521, "username": "test", "password": ""
+        });
+        for field in ["show_database_links", "show_native_jobs", "show_user_admin"] {
+            let legacy: ConnectionConfig = serde_json::from_value(base.clone()).unwrap();
+            assert!(serde_json::to_value(legacy).unwrap().get(field).is_none());
+            for visible in [true, false] {
+                let mut value = base.clone();
+                value[field] = serde_json::json!(visible);
+                let config: ConnectionConfig = serde_json::from_value(value).unwrap();
+                assert_eq!(serde_json::to_value(config).unwrap()[field], serde_json::json!(visible));
+            }
+        }
+    }
+
     fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
             oracle_oci_nls_lang: None,
@@ -3294,6 +3511,8 @@ mod tests {
             show_system_schemas: false,
             sidebar_auto_load_all_tables: false,
             show_database_links: None,
+            show_native_jobs: None,
+            show_user_admin: None,
             attached_databases: Vec::new(),
             init_script: None,
             color: None,
@@ -3815,6 +4034,40 @@ mod tests {
     }
 
     #[test]
+    fn ssh_layer_local_port_is_optional_and_round_trips() {
+        let cases = [(serde_json::json!({}), None), (serde_json::json!({ "local_port": 4059 }), Some(4059_u16))];
+        for (layer_fields, expected) in cases {
+            let mut layer =
+                serde_json::json!({ "type": "ssh", "id": "ssh-1", "host": "bastion", "port": 22, "user": "deploy" });
+            layer.as_object_mut().unwrap().extend(layer_fields.as_object().unwrap().clone());
+            let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+                "id": "id",
+                "name": "name",
+                "db_type": "mysql",
+                "host": "10.1.2.3",
+                "port": 3306,
+                "username": "root",
+                "password": "",
+                "database": null,
+                "transport_layers": [layer]
+            }))
+            .unwrap();
+            let TransportLayerConfig::Ssh(ssh) = &config.transport_layers[0] else {
+                panic!("expected ssh layer");
+            };
+            assert_eq!(ssh.local_port, expected);
+
+            let saved = serde_json::to_value(&config).unwrap();
+            match expected {
+                Some(port) => assert_eq!(saved["transport_layers"][0]["local_port"], port),
+                None => assert!(saved["transport_layers"][0].get("local_port").is_none()),
+            }
+            let restored: ConnectionConfig = serde_json::from_value(saved).unwrap();
+            assert_eq!(restored.transport_layers, config.transport_layers);
+        }
+    }
+
+    #[test]
     fn query_timeout_zero_disables_timeout() {
         let mut config = mysql_config("root", "", None);
         config.query_timeout_secs = 0;
@@ -4153,6 +4406,64 @@ mod tests {
         assert_eq!(canonical.driver_profile.as_deref(), Some("sqlserver"));
         assert_eq!(canonical.driver_label.as_deref(), Some("SQL Server"));
         assert_eq!(canonical.url_params.as_deref(), Some("applicationName=dbx&encrypt=false"));
+    }
+
+    #[test]
+    fn normalize_sqlserver_host_port_handles_commas_colons_and_tcp_prefix() {
+        assert_eq!(super::normalize_sqlserver_host_port("gg.test.com,9005"), ("gg.test.com".to_string(), Some(9005)));
+        assert_eq!(
+            super::normalize_sqlserver_host_port("tcp:gg.test.com,9005"),
+            ("gg.test.com".to_string(), Some(9005))
+        );
+        assert_eq!(super::normalize_sqlserver_host_port("tcp:gg.test.com"), ("gg.test.com".to_string(), None));
+        assert_eq!(super::normalize_sqlserver_host_port("gg.test.com:9005"), ("gg.test.com".to_string(), Some(9005)));
+        assert_eq!(
+            super::normalize_sqlserver_host_port(" 192.168.1.100, 14333 "),
+            ("192.168.1.100".to_string(), Some(14333))
+        );
+        assert_eq!(
+            super::normalize_sqlserver_host_port(r"192.168.1.10\SQL2022,14333"),
+            (r"192.168.1.10\SQL2022".to_string(), Some(14333))
+        );
+        assert_eq!(
+            super::normalize_sqlserver_host_port(r"tcp:192.168.1.10\SQL2022"),
+            (r"192.168.1.10\SQL2022".to_string(), None)
+        );
+        assert_eq!(super::normalize_sqlserver_host_port("[::1],9005"), ("[::1]".to_string(), Some(9005)));
+        assert_eq!(super::normalize_sqlserver_host_port("[::1]:9005"), ("[::1]".to_string(), Some(9005)));
+        assert_eq!(super::normalize_sqlserver_host_port("[fe80::1]"), ("[fe80::1]".to_string(), None));
+        assert_eq!(super::normalize_sqlserver_host_port("localhost"), ("localhost".to_string(), None));
+        assert_eq!(super::normalize_sqlserver_host_port(""), ("".to_string(), None));
+    }
+
+    #[test]
+    fn sqlserver_canonicalized_normalizes_host_with_port_and_sets_explicit_flag() {
+        let mut config = mysql_config("sa", "secret", Some("master"));
+        config.db_type = DatabaseType::SqlServer;
+        config.host = "gg.test.com,9005".to_string();
+        config.port = 1433;
+
+        let canonical = config.canonicalized();
+        assert_eq!(canonical.host, "gg.test.com");
+        assert_eq!(canonical.port, 9005);
+        assert!(canonical.sqlserver_port_explicit());
+
+        let mut tcp_config = mysql_config("sa", "secret", Some("master"));
+        tcp_config.db_type = DatabaseType::SqlServer;
+        tcp_config.host = "tcp:sql.example.com,1444".to_string();
+        tcp_config.port = 1433;
+
+        let canonical_tcp = tcp_config.canonicalized();
+        assert_eq!(canonical_tcp.host, "sql.example.com");
+        assert_eq!(canonical_tcp.port, 1444);
+        assert!(canonical_tcp.sqlserver_port_explicit());
+    }
+
+    #[test]
+    fn sqlserver_invalid_endpoint_text_is_not_silently_retargeted() {
+        for host in ["[::1],70000", "[::1]:oops", "[::1]:0", "[::1]unexpected", "server:1e3", "server,0x599"] {
+            assert_eq!(super::normalize_sqlserver_host_port(host), (host.to_string(), None));
+        }
     }
 
     #[test]

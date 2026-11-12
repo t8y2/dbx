@@ -965,6 +965,7 @@ fn index_info_from_model(model: IndexModel) -> IndexInfo {
         .and_then(|options| options.partial_filter_expression.as_ref())
         .map(|filter| bson_to_json(&Bson::Document(filter.clone())).to_string());
     IndexInfo {
+        owner: None,
         key_directions: Vec::new(),
         visibility: None,
         key_metadata_complete: false,
@@ -4502,6 +4503,7 @@ mod tests {
     #[test]
     fn index_spec_from_index_info_marks_properties_as_incomplete() {
         let spec = index_spec_from_index_info(&IndexInfo {
+            owner: None,
             key_directions: Vec::new(),
             visibility: None,
             key_metadata_complete: false,
@@ -4533,6 +4535,7 @@ mod tests {
     #[test]
     fn index_spec_from_index_info_falls_back_to_columns_without_an_index_type() {
         let spec = index_spec_from_index_info(&IndexInfo {
+            owner: None,
             key_directions: Vec::new(),
             visibility: None,
             key_metadata_complete: false,
@@ -4782,6 +4785,7 @@ mod tests {
     fn diff_dropped_index_names_reports_removed_indexes() {
         let before = vec![
             IndexInfo {
+                owner: None,
                 key_directions: Vec::new(),
                 visibility: None,
                 key_metadata_complete: false,
@@ -4799,6 +4803,7 @@ mod tests {
                 constraint_backed: false,
             },
             IndexInfo {
+                owner: None,
                 key_directions: Vec::new(),
                 visibility: None,
                 key_metadata_complete: false,
@@ -4816,6 +4821,7 @@ mod tests {
                 constraint_backed: false,
             },
             IndexInfo {
+                owner: None,
                 key_directions: Vec::new(),
                 visibility: None,
                 key_metadata_complete: false,

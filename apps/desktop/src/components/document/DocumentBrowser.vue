@@ -21,8 +21,10 @@ import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { Switch } from "@/components/ui/switch";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import * as api from "@/lib/backend/api";
+import { SnapshotCompletionError, type ExportReadControl } from "@/lib/export/snapshotCompletion";
 import type { DynamoDbIndexInfo, DynamoDbTableDescription } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 import { getDataGridConditionSuggestionPosition, type DataGridConditionSuggestionPosition } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 import { documentViewerFontStyle } from "@/lib/document/documentViewerFontStyle";
@@ -104,6 +106,7 @@ import {
   type MongoDocumentQueryKind,
 } from "@/lib/mongo/mongoCompletion";
 import { mongoDocumentsToQueryResult } from "@/lib/mongo/mongoShellCommand";
+import { handleMongoQueryInputBrackets } from "@/lib/mongo/mongoQueryInputBrackets";
 import type { GridNewRowMeta } from "@/lib/dataGrid/gridNewRowPlacement";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { documentDataGridColumnLayoutScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
@@ -196,6 +199,7 @@ const viewMode = computed<ViewMode>({
   set: (value) => settingsStore.updateEditorSettings({ mongoViewMode: value }),
 });
 const filterInput = ref(restoredDocumentBrowserState?.filterInput ?? "");
+const filterEnabled = ref(restoredDocumentBrowserState?.filterEnabled ?? true);
 const sortInput = ref(restoredDocumentBrowserState?.sortInput ?? "");
 const localColumnFilters = ref<SerializedDataGridLocalColumnFilters>(restoredDocumentBrowserState?.localColumnFilters ?? {});
 const localColumnFilterColumns = ref<string[] | undefined>(restoredDocumentBrowserState?.localColumnFilterColumns);
@@ -390,6 +394,7 @@ function persistDocumentBrowserState(options: { includeData?: boolean } = {}) {
   if (!props.stateKey) return;
   saveDocumentBrowserState(props.stateKey, {
     filterInput: filterInput.value,
+    filterEnabled: filterEnabled.value,
     sortInput: sortInput.value,
     appliedDocumentFilter: appliedDocumentFilter.value,
     documentFilterRules: documentFilterRules.value,
@@ -414,7 +419,7 @@ function handleLocalColumnFiltersChange(filters: SerializedDataGridLocalColumnFi
 // changed query means the local-filter snapshot no longer describes what the
 // user is looking at.
 watch(
-  [filterInput, sortInput, appliedDocumentFilter],
+  [filterInput, filterEnabled, sortInput, appliedDocumentFilter],
   () => {
     localColumnFilters.value = {};
     localColumnFilterColumns.value = undefined;
@@ -462,8 +467,7 @@ if (restoredDocumentData) {
 }
 
 const elasticsearchMappingFields = ref<ColumnInfo[]>([]);
-function elasticsearchGridColumnTypesFor(columns: readonly string[]): string[] {
-  const mappingTypes = elasticsearchFieldTypes.value;
+function elasticsearchGridColumnTypesFor(columns: readonly string[], mappingTypes = elasticsearchFieldTypes.value): string[] {
   return columns.map((column) => {
     // Elasticsearch metadata fields are not part of an index mapping, but they
     // are textual identifiers in the document grid just like mapped keywords.
@@ -474,8 +478,8 @@ function elasticsearchGridColumnTypesFor(columns: readonly string[]): string[] {
 const elasticsearchGridColumnTypes = computed(() => elasticsearchGridColumnTypesFor(lastGridColumns.value));
 const solrSchemaFields = ref<ColumnInfo[]>([]);
 const solrFieldTypes = computed(() => new Map(solrSchemaFields.value.map((field) => [field.name, field.data_type])));
-function solrGridColumnTypesFor(columns: readonly string[]): string[] {
-  return columns.map((column) => (column === "_id" ? "string" : (solrFieldTypes.value.get(column) ?? "")));
+function solrGridColumnTypesFor(columns: readonly string[], fieldTypes = solrFieldTypes.value): string[] {
+  return columns.map((column) => (column === "_id" ? "string" : (fieldTypes.get(column) ?? "")));
 }
 const solrGridColumnTypes = computed(() => solrGridColumnTypesFor(lastGridColumns.value));
 const dynamodbTableDescription = ref<DynamoDbTableDescription | null>(null);
@@ -650,7 +654,7 @@ const gridResult = computed<QueryResult>(() => {
   };
 });
 
-async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void): Promise<QueryResult | undefined> {
+function captureDocumentStoreExport(queued = true) {
   const kind = documentStoreProvider.value.kind;
   if (kind !== "mongodb" && kind !== "dynamodb" && kind !== "elasticsearch" && kind !== "solr") return undefined;
 
@@ -662,71 +666,119 @@ async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExporte
   const exportSettings = settingsStore.editorSettings;
   const batchSize = Math.max(1, Math.trunc(exportSettings.exportBatchSize));
   const rowLimit = exportSettings.exportRowLimitEnabled ? Math.max(0, Math.trunc(exportSettings.exportRowLimit)) : kind === "dynamodb" ? DYNAMODB_DEFAULT_EXPORT_ROW_LIMIT : Number.POSITIVE_INFINITY;
-  const exportExecutionId = uuid();
-  const exportStartedAt = performance.now();
-  const exportedDocuments: JsonRecord[] = [];
-  let exportedCopyDocuments: JsonRecord[] | undefined = kind === "mongodb" ? [] : undefined;
-  let totalRows: number | null = null;
-  let cursor: string | undefined;
-  let lastCursor: string | undefined;
-  const seenCursors = new Set<string>();
+  const fallbackColumns = [...gridResult.value.columns];
+  const mappingTypes = new Map(elasticsearchFieldTypes.value);
+  const fieldTypes = new Map(solrFieldTypes.value);
+  const config = queued ? connectionStore.getConfig(connectionId) : undefined;
+  const fingerprint = config ? connectionConfigFingerprint(config) : undefined;
 
-  try {
-    while (exportedDocuments.length < rowLimit) {
-      const requestLimit = Math.min(batchSize, kind === "dynamodb" ? 1000 : kind === "elasticsearch" ? ELASTICSEARCH_DEFAULT_MAX_RESULT_WINDOW : Number.POSITIVE_INFINITY, rowLimit - exportedDocuments.length);
-      if (requestLimit <= 0) break;
-      if (cursor) lastCursor = cursor;
-      const result = await api.documentFindDocuments(connectionId, database, collection, kind === "dynamodb" || kind === "elasticsearch" ? 0 : exportedDocuments.length, requestLimit, filter, undefined, sort, undefined, exportExecutionId, cursor, kind === "elasticsearch");
-      const pageDocuments = result.documents.slice(0, requestLimit).map(asRecord);
-      exportedDocuments.push(...pageDocuments);
+  return async (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void, control?: ExportReadControl): Promise<QueryResult | undefined> => {
+    let unknownError: SnapshotCompletionError | undefined;
+    const check = () => {
+      if (unknownError) throw unknownError;
+      if (control?.signal.aborted) throw new SnapshotCompletionError("cancelled", "Export cancelled");
+      if (queued) {
+        const current = connectionStore.getConfig(connectionId);
+        if (!current || connectionConfigFingerprint(current) !== fingerprint) throw new Error(t("exportProgress.connectionChanged"));
+      }
+    };
+    try {
+      check();
+      if (queued) {
+        await connectionStore.ensureConnected(connectionId);
+        check();
+      }
+      const exportExecutionId = uuid();
+      const exportStartedAt = performance.now();
+      const exportedDocuments: JsonRecord[] = [];
+      let exportedCopyDocuments: JsonRecord[] | undefined = kind === "mongodb" ? [] : undefined;
+      let totalRows: number | null = null;
+      let cursor: string | undefined;
+      let lastCursor: string | undefined;
+      const seenCursors = new Set<string>();
 
-      if (kind === "mongodb" && exportedCopyDocuments) {
-        if (result.extended_documents?.length === result.documents.length) {
-          exportedCopyDocuments.push(...result.extended_documents.slice(0, pageDocuments.length).map(asRecord));
-        } else {
-          exportedCopyDocuments = undefined;
+      try {
+        while (exportedDocuments.length < rowLimit) {
+          check();
+          const requestLimit = Math.min(batchSize, kind === "dynamodb" ? 1000 : kind === "elasticsearch" ? ELASTICSEARCH_DEFAULT_MAX_RESULT_WINDOW : Number.POSITIVE_INFINITY, rowLimit - exportedDocuments.length);
+          if (requestLimit <= 0) break;
+          if (cursor) lastCursor = cursor;
+          const result = await api.documentFindDocuments(connectionId, database, collection, kind === "dynamodb" || kind === "elasticsearch" ? 0 : exportedDocuments.length, requestLimit, filter, undefined, sort, undefined, exportExecutionId, cursor, kind === "elasticsearch").catch((error) => {
+            if (!queued) throw error;
+            unknownError = new SnapshotCompletionError("unknown", error instanceof Error ? error.message : String(error));
+            throw unknownError;
+          });
+          if (queued && result.next_cursor) lastCursor = result.next_cursor;
+          check();
+          const pageDocuments = result.documents.slice(0, requestLimit).map(asRecord);
+          exportedDocuments.push(...pageDocuments);
+
+          if (kind === "mongodb" && exportedCopyDocuments) {
+            if (result.extended_documents?.length === result.documents.length) {
+              exportedCopyDocuments.push(...result.extended_documents.slice(0, pageDocuments.length).map(asRecord));
+            } else {
+              exportedCopyDocuments = undefined;
+            }
+          }
+
+          if ((kind === "mongodb" || kind === "elasticsearch" || kind === "solr") && result.total_is_exact !== false) totalRows = Math.min(result.total, rowLimit);
+          onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
+
+          if (kind === "dynamodb" || kind === "elasticsearch") {
+            cursor = result.next_cursor;
+            if (!cursor) break;
+            if (seenCursors.has(cursor)) throw new Error(kind === "dynamodb" ? t("dynamodb.repeatedCursor") : "Elasticsearch cursor repeated during export");
+            seenCursors.add(cursor);
+            continue;
+          }
+
+          const reachedExactTotal = result.total_is_exact !== false && exportedDocuments.length >= result.total;
+          if (pageDocuments.length === 0 || pageDocuments.length < requestLimit || reachedExactTotal) break;
+        }
+      } finally {
+        if (kind === "elasticsearch") {
+          const cursorToClose = lastCursor ?? cursor;
+          if (cursorToClose) {
+            if (queued) {
+              try {
+                await api.closeQuerySession(connectionId, database, cursorToClose);
+              } catch (error) {
+                unknownError ??= new SnapshotCompletionError("unknown", error instanceof Error ? error.message : String(error));
+              }
+            } else void closeElasticsearchCursor(cursorToClose);
+          }
+        }
+      }
+      if (unknownError) throw unknownError;
+
+      if (kind === "dynamodb" || kind === "elasticsearch") {
+        const truncatedByLimit = !!cursor && exportedDocuments.length >= rowLimit;
+        totalRows = truncatedByLimit ? null : exportedDocuments.length;
+        onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
+        if (truncatedByLimit) {
+          toast(kind === "dynamodb" ? t("dynamodb.exportLimitReached", { count: rowLimit }) : `Elasticsearch export limit reached (${rowLimit})`, 6000);
         }
       }
 
-      if ((kind === "mongodb" || kind === "elasticsearch" || kind === "solr") && result.total_is_exact !== false) totalRows = Math.min(result.total, rowLimit);
-      onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
-
-      if (kind === "dynamodb" || kind === "elasticsearch") {
-        cursor = result.next_cursor;
-        if (!cursor) break;
-        if (seenCursors.has(cursor)) throw new Error(kind === "dynamodb" ? t("dynamodb.repeatedCursor") : "Elasticsearch cursor repeated during export");
-        seenCursors.add(cursor);
-        continue;
-      }
-
-      const reachedExactTotal = result.total_is_exact !== false && exportedDocuments.length >= result.total;
-      if (pageDocuments.length === 0 || pageDocuments.length < requestLimit || reachedExactTotal) break;
+      // Exports consume source text (CSV/SQL), not the live grid's BSON-faithful
+      // cell encoding, so every document store keeps plain JSON cells here.
+      const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null, { documentGridValues: false });
+      if (result.columns.length === 0) result.columns = fallbackColumns;
+      result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : kind === "elasticsearch" ? elasticsearchGridColumnTypesFor(result.columns, mappingTypes) : kind === "solr" ? solrGridColumnTypesFor(result.columns, fieldTypes) : undefined;
+      result.affected_rows = exportedDocuments.length;
+      result.truncated = (kind === "dynamodb" || kind === "elasticsearch") && !!cursor && exportedDocuments.length >= rowLimit;
+      result.has_more = result.truncated;
+      return result;
+    } catch (error) {
+      if (unknownError) throw unknownError;
+      if (!queued || error instanceof SnapshotCompletionError) throw error;
+      throw new SnapshotCompletionError("failed", error instanceof Error ? error.message : String(error));
     }
-  } finally {
-    if (kind === "elasticsearch") {
-      const cursorToClose = lastCursor ?? cursor;
-      if (cursorToClose) void closeElasticsearchCursor(cursorToClose);
-    }
-  }
+  };
+}
 
-  if (kind === "dynamodb" || kind === "elasticsearch") {
-    const truncatedByLimit = !!cursor && exportedDocuments.length >= rowLimit;
-    totalRows = truncatedByLimit ? null : exportedDocuments.length;
-    onProgress?.({ rowsExported: exportedDocuments.length, totalRows });
-    if (truncatedByLimit) {
-      toast(kind === "dynamodb" ? t("dynamodb.exportLimitReached", { count: rowLimit }) : `Elasticsearch export limit reached (${rowLimit})`, 6000);
-    }
-  }
-
-  // Exports consume source text (CSV/SQL), not the live grid's BSON-faithful
-  // cell encoding, so every document store keeps plain JSON cells here.
-  const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null, { documentGridValues: false });
-  if (result.columns.length === 0) result.columns = gridResult.value.columns;
-  result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : kind === "elasticsearch" ? elasticsearchGridColumnTypesFor(result.columns) : kind === "solr" ? solrGridColumnTypesFor(result.columns) : undefined;
-  result.affected_rows = exportedDocuments.length;
-  result.truncated = (kind === "dynamodb" || kind === "elasticsearch") && !!cursor && exportedDocuments.length >= rowLimit;
-  result.has_more = result.truncated;
-  return result;
+async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void): Promise<QueryResult | undefined> {
+  return captureDocumentStoreExport(false)?.(onProgress);
 }
 const expandedDocumentFilterFieldPaths = ref<Set<string>>(new Set());
 const elasticsearchFieldTypes = computed(() => new Map(elasticsearchMappingFields.value.map((field) => [field.name, field.data_type])));
@@ -997,7 +1049,7 @@ function resetElasticsearchPagination() {
 }
 
 function currentDocumentFilter(): string | undefined {
-  const filter = currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value, documentStoreProvider.value.kind);
+  const filter = filterEnabled.value ? currentDocumentFilterJson(filterInput.value, appliedDocumentFilter.value, documentStoreProvider.value.kind) : undefined;
   if (documentStoreProvider.value.kind !== "dynamodb" || dynamodbIndexName.value === "__table__") return filter;
   const parsed = filter ? JSON.parse(filter) : {};
   return JSON.stringify({ ...parsed, $index: dynamodbIndexName.value });
@@ -1076,6 +1128,7 @@ const documentQueryCompletionActiveDescendant = computed(() => (documentQueryCom
 // Guards the field lookup: a keystroke that lands while a previous refresh is
 // still awaiting fields must win, and a dismiss must cancel both.
 let documentQueryCompletionRequestId = 0;
+let documentQueryCompletionSelectionVersion = 0;
 
 function documentQueryCompletionKind(target: DocumentQueryCompletionTarget): MongoDocumentQueryKind {
   return target === "filter" ? "filter" : "sortKeys";
@@ -1139,18 +1192,27 @@ async function refreshDocumentQueryCompletions(target: DocumentQueryCompletionTa
   }
 
   const requestId = ++documentQueryCompletionRequestId;
+  const selectionVersion = documentQueryCompletionSelectionVersion;
+  let displayedLocalItems = false;
+  const publishItems = (fields: MongoCompletionField[]) => {
+    const selectedLabel = displayedLocalItems && selectionVersion !== documentQueryCompletionSelectionVersion ? documentQueryCompletionItems.value[documentQueryCompletionIndex.value]?.label : undefined;
+    const items = buildMongoCompletionItemsFromContext(context, { fields }).slice(0, DOCUMENT_QUERY_COMPLETION_MENU_LIMIT);
+    if (items.length === 0) return false;
+    documentQueryCompletionTarget.value = target;
+    documentQueryCompletionItems.value = items;
+    documentQueryCompletionIndex.value = Math.max(
+      0,
+      items.findIndex((item) => item.label === selectedLabel),
+    );
+    updateDocumentQueryCompletionPosition(target);
+    return true;
+  };
+  // A partially typed field can use the loaded page immediately. Sampling may
+  // take seconds on a remote collection and only needs to enrich these items.
+  if (context.prefix && mongoCompletionNeedsFields(context.mode)) displayedLocalItems = publishItems(documentQueryCompletionLocalFields.value);
   const fields = mongoCompletionNeedsFields(context.mode) ? await documentQueryCompletionFields() : [];
   if (requestId !== documentQueryCompletionRequestId) return;
-
-  const items = buildMongoCompletionItemsFromContext(context, { fields }).slice(0, DOCUMENT_QUERY_COMPLETION_MENU_LIMIT);
-  if (items.length === 0) {
-    dismissDocumentQueryCompletions();
-    return;
-  }
-  documentQueryCompletionTarget.value = target;
-  documentQueryCompletionItems.value = items;
-  documentQueryCompletionIndex.value = 0;
-  updateDocumentQueryCompletionPosition(target);
+  if (!publishItems(fields)) dismissDocumentQueryCompletions();
 }
 
 /**
@@ -1188,6 +1250,7 @@ watch(documentQueryCompletionOpen, (open) => {
 
 function selectDocumentQueryCompletion(index: number) {
   if (index < 0 || index >= documentQueryCompletionItems.value.length) return;
+  documentQueryCompletionSelectionVersion++;
   documentQueryCompletionIndex.value = index;
   void nextTick(() => {
     const listbox = document.getElementById(documentQueryCompletionListboxId);
@@ -1331,6 +1394,10 @@ function onDocumentQueryKeydown(event: KeyboardEvent, target: DocumentQueryCompl
   if (event.isComposing) return;
 
   if (documentQueryCompletionEnabled.value) {
+    if (handleMongoQueryInputBrackets(event, settingsStore.editorSettings.autoCloseBrackets)) {
+      void nextTick(() => refreshDocumentQueryCompletions(target));
+      return;
+    }
     if ((event.ctrlKey || event.metaKey) && event.code === "Space") {
       event.preventDefault();
       void refreshDocumentQueryCompletions(target, { force: true });
@@ -1552,7 +1619,7 @@ async function gridSave(changes: DocumentGridChanges) {
     }
 
     await api.documentSaveMeilisearchBatch(props.connectionId, props.collection, updates, deleteIds, inserts);
-    await reloadDocumentsAfterMutationOrRefresh();
+    await reloadDocumentsAfterGridSave();
     return;
   }
 
@@ -1624,7 +1691,7 @@ async function gridSave(changes: DocumentGridChanges) {
     page.value = 0;
     resetDynamoDbPagination();
   }
-  await reloadDocumentsAfterMutationOrRefresh();
+  await reloadDocumentsAfterGridSave();
 }
 
 function buildPathIdentityInsertDocument(row: MongoInputValue[], columns: string[], kind: Exclude<DocumentStoreKind, "mongodb">): JsonRecord {
@@ -2055,6 +2122,13 @@ async function countExactDocumentTotal(): Promise<number | undefined> {
 async function refreshDocuments() {
   if (documentStoreProvider.value.kind === "elasticsearch") resetElasticsearchTotals({ preservePaginationTotal: true });
   if (documentStoreProvider.value.kind === "dynamodb") resetDynamoDbExactCount();
+  await reloadDocumentsAfterMutationOrRefresh();
+}
+
+async function reloadDocumentsAfterGridSave() {
+  // Reload like the grid's own Refresh so the viewport and selection survive
+  // instead of the new page being treated as a fresh result (#12649).
+  dataGridRef.value?.prepareFullReload?.();
   await reloadDocumentsAfterMutationOrRefresh();
 }
 
@@ -2667,7 +2741,7 @@ onMounted(async () => {
   try {
     // A restored tab issues no query, so a blocking health probe here would be
     // the only round trip left on the switch.
-    await connectionStore.ensureConnected(props.connectionId, { ...(restoredDocumentData ? { verifyHealth: false } : {}), skipIfClosedByUser: true });
+    await connectionStore.ensureConnected(props.connectionId, { ...(restoredDocumentData ? { verifyHealth: false, passive: true } : {}), skipIfClosedByUser: true });
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
@@ -2994,6 +3068,7 @@ defineExpose({ focusSearch });
       :load-all-rows-enabled="false"
       :count-total-rows="countExactDocumentTotal"
       :full-export-result="documentStoreProvider.kind === 'mongodb' || documentStoreProvider.kind === 'dynamodb' || documentStoreProvider.kind === 'elasticsearch' ? exportAllDocumentStoreDocuments : undefined"
+      :capture-full-export-result="documentStoreProvider.kind === 'mongodb' || documentStoreProvider.kind === 'dynamodb' || documentStoreProvider.kind === 'elasticsearch' ? captureDocumentStoreExport : undefined"
       @sort="onSort"
       @reload="refreshDocuments"
       @paginate="(offset: number, limit: number) => paginate(offset, limit)"
@@ -3240,7 +3315,10 @@ defineExpose({ focusSearch });
                 </div>
               </PopoverContent>
             </Popover>
-            <span class="text-blue-600 dark:text-blue-400 text-xs font-medium select-none shrink-0">{{ documentStoreLabels.filterInputLabel }}</span>
+            <label class="flex shrink-0 items-center gap-1 text-xs font-medium select-none" :class="filterEnabled ? 'text-blue-600 dark:text-blue-400' : 'text-muted-foreground'">
+              <input v-model="filterEnabled" type="checkbox" class="h-3.5 w-3.5 accent-primary" :aria-label="t('grid.applyFilter')" :disabled="loading" @change="applyFilter" />
+              {{ documentStoreLabels.filterInputLabel }}
+            </label>
             <textarea
               ref="filterInputRef"
               v-model="filterInput"

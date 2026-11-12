@@ -4,7 +4,7 @@ import { createApp, h, nextTick, reactive, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorView } from "@codemirror/view";
 
-const mocks = vi.hoisted(() => ({ select: vi.fn(), updateOpen: vi.fn(), read: vi.fn(), write: vi.fn(), toast: vi.fn() }));
+const mocks = vi.hoisted(() => ({ select: vi.fn(), updateOpen: vi.fn(), read: vi.fn(), write: vi.fn(), toast: vi.fn(), folders: [] as string[], listFiles: vi.fn() }));
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ connections: [], treeNodes: [], connectedIds: new Set() }) }));
 vi.mock("@/stores/savedSqlStore", () => ({ useSavedSqlStore: () => ({ allFiles: [] }) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { shortcuts: {}, fontSize: 13, fontFamily: "monospace", theme: "app" } }) }));
@@ -19,7 +19,7 @@ vi.mock("@/lib/plugins/pluginCommandPalette", async () => {
 });
 vi.mock("@/lib/sqlFile/sqlFileFolders", async () => {
   const { ref } = await import("vue");
-  return { getSqlFileFolderPaths: () => [], getSqlFileFilter: () => "*.sql", sqlFileFoldersVersion: ref(0) };
+  return { getSqlFileFolderPaths: () => mocks.folders, getSqlFileFilter: () => "*.sql", sqlFileFoldersVersion: ref(0) };
 });
 vi.mock("@/lib/globalSearch/globalSearchSettings", async () => {
   const { ref } = await import("vue");
@@ -27,6 +27,7 @@ vi.mock("@/lib/globalSearch/globalSearchSettings", async () => {
 });
 vi.mock("@/lib/backend/api", () => ({
   listPlugins: async () => [],
+  listSqlFilesInFolder: mocks.listFiles,
   readExternalSqlFileSnapshot: async (...args: unknown[]) => ({ content: await mocks.read(...args), version: { contentHash: "original", modifiedNs: "1", sizeBytes: 26 }, encoding: "utf8" }),
   writeExternalSqlFile: mocks.write,
   globalSearch: async () => [
@@ -76,6 +77,8 @@ async function mountSearch() {
 }
 
 beforeEach(() => {
+  mocks.folders = [];
+  mocks.listFiles.mockReset().mockResolvedValue([]);
   mocks.select.mockReset();
   mocks.updateOpen.mockReset();
   mocks.read.mockReset().mockResolvedValue("-- heading\nSELECT needle;");
@@ -87,6 +90,56 @@ afterEach(() => {
   app?.unmount();
   host?.remove();
   vi.restoreAllMocks();
+});
+
+describe("object search metadata regression", () => {
+  it("removes false matches and opens the correct file after keyboard navigation", async () => {
+    mocks.folders = ["/order-reports"];
+    const firstName = "report-v2024-07-customer-order-detail-export.sql";
+    const firstPath = `/order-reports/export/${firstName}`;
+    const secondPath = "/order-reports/export/summary.sql";
+    mocks.listFiles.mockResolvedValue([
+      { name: firstName, path: firstPath, is_dir: false, children: [] },
+      { name: "summary.sql", path: secondPath, is_dir: false, children: [] },
+    ]);
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    const props = reactive({ open: false, onSelect: mocks.select, "onUpdate:open": mocks.updateOpen });
+    app = createApp({ render: () => h(QuickOpenDialog, props) });
+    app.use(i18n);
+    app.mount(host);
+    props.open = true;
+    await nextTick();
+    const input = host.querySelector<HTMLInputElement>("input")!;
+    async function search(query: string) {
+      input.value = query;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await nextTick();
+    }
+    await vi.waitFor(() => expect(host.querySelectorAll("[data-selected]")).toHaveLength(2));
+    await search("cordetxprep");
+    expect(host.querySelectorAll("[data-selected]")).toHaveLength(0);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(mocks.select).not.toHaveBeenCalled();
+    await search("cordetxp");
+    expect(host.querySelectorAll("[data-selected]")).toHaveLength(1);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(mocks.select).toHaveBeenLastCalledWith(expect.objectContaining({ filePath: firstPath, label: firstName }));
+    mocks.select.mockClear();
+    await search("ORDER-REPORTS");
+    const rows = [...host.querySelectorAll<HTMLElement>("[data-selected]")];
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain("summary.sql");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    await nextTick();
+    expect(rows[1].dataset.selected).toBe("true");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(mocks.select).toHaveBeenLastCalledWith(expect.objectContaining({ filePath: firstPath }));
+    await search("missing-file");
+    expect(host.querySelectorAll("[data-selected]")).toHaveLength(0);
+    await search("summary");
+    expect(host.querySelector('[data-selected="true"]')?.textContent).toContain("summary.sql");
+  });
 });
 
 describe("content search preview navigation", () => {
@@ -166,6 +219,22 @@ describe("content search preview navigation", () => {
     props.initialContentMode = false;
     await nextTick();
     expect(host.querySelector(".cm-editor")).toBeNull();
+  });
+
+  // File-content search is not connection-scoped, so offering the picker there would be a
+  // control that silently does nothing.
+  it("shows the connection scope picker only in object mode", async () => {
+    const { props } = await mountSearch();
+    const scopeTitle = i18n.global.t("quickOpen.scope");
+    expect([...host.querySelectorAll<HTMLElement>(`[title="${scopeTitle}"]`)]).toHaveLength(0);
+
+    props.initialContentMode = false;
+    await nextTick();
+    expect([...host.querySelectorAll<HTMLElement>(`[title="${scopeTitle}"]`)]).toHaveLength(1);
+
+    props.initialContentMode = true;
+    await nextTick();
+    expect([...host.querySelectorAll<HTMLElement>(`[title="${scopeTitle}"]`)]).toHaveLength(0);
   });
 
   it("preserves single-click opening a search result", async () => {

@@ -88,6 +88,14 @@ Foreign-key DDL statements commit one at a time. If CREATE succeeds and a later 
 
 Foreign-key editing on other databases depends on the implementation for that dialect. Trigger editing depends on source retrieval and safe DDL generation; unsupported databases can still expose source or copyable DDL.
 
+### Complete Source for Oracle-Family Triggers
+
+Select a trigger and use **Edit full source** for complex definitions. This opens the existing source dialog without flattening compound, CALL, WHEN, or other complex clauses into a simple form. For body-only or incomplete reads, keep the correction candidate and obtain an authoritative definition before saving. See [Object Browser](/en/docs/object-browser#inspect-and-edit-oracle-family-triggers) for states and recovery.
+
+The source dialog updates only that trigger, leaving columns, indexes, constraints, and other trigger drafts intact. If the same trigger has a structured draft or an unknown write result, verify without writing first, then explicitly decide whether to discard only that trigger's structured draft. Other structure drafts remain.
+
+Existing combination limits still apply: indexes, primary keys, constraints, or existing-table foreign keys that require separate saves cannot be mixed with trigger edits. Allowed combinations execute and read back one statement at a time in preview order. Renaming a trigger may drop the old object before creating the new one; a later failure can leave the old trigger absent. DBX stops remaining steps and retains the complete draft and per-step results. Verify state, then preview only necessary remaining changes without automatic rollback or replay.
+
 ## DDL Preview
 
 Edits do not immediately change the database. Before save, DBX generates highlighted dialect-specific SQL such as:

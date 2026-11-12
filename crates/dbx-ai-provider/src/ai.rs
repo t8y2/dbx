@@ -1498,6 +1498,62 @@ fn decorate_chat_completion_body(body: &mut serde_json::Value, config: &AiConfig
     crate::ai_effort::apply_runtime_effort(body, config);
 }
 
+/// Only lower an output budget when the provider explicitly reports its bound.
+/// Do not infer model capabilities from model names or unrelated context errors.
+fn reduce_chat_output_limit(body: &mut serde_json::Value, error: &str) -> bool {
+    for field in ["max_completion_tokens", "max_tokens"] {
+        let Some(requested) = body[field].as_u64() else { continue };
+        let Some((_, detail)) = error.split_once(field) else { continue };
+        let detail: String = detail.chars().take(200).collect();
+        let range = detail.split_once('[').and_then(|(_, range)| range.split_once(']')).and_then(|(range, _)| {
+            let (min, max) = range.split_once(',')?;
+            let min = min.trim().parse::<u32>().ok()?;
+            let max = max.trim().parse::<u32>().ok()?;
+            (min > 0 && min <= max).then_some(max)
+        });
+        let maximum = range.or_else(|| {
+            let (_, tail) = detail.split_once("at most ")?;
+            tail.split(|c: char| !c.is_ascii_digit()).next()?.parse::<u32>().ok().filter(|max| *max > 0)
+        });
+        if let Some(max) = maximum.filter(|max| u64::from(*max) < requested) {
+            body[field] = json!(max);
+            return true;
+        }
+    }
+    false
+}
+
+/// A 400 rejection has produced no output, so one retry with the reported
+/// output limit is safe for both normal completions and streaming/tool calls.
+/// Other errors keep their normal classification, redaction and retry policy.
+async fn send_chat_completion(
+    client: &reqwest::Client,
+    endpoint: &str,
+    headers: &reqwest::header::HeaderMap,
+    mut body: serde_json::Value,
+    secrets: &[String],
+) -> Result<reqwest::Response, String> {
+    for attempt in 0..2 {
+        let response = client
+            .post(endpoint)
+            .headers(headers.clone())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format_request_error("AI", e))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        let error = stream_error(response, "API error", secrets).await;
+        if attempt == 0 && status == reqwest::StatusCode::BAD_REQUEST && reduce_chat_output_limit(&mut body, &error) {
+            continue;
+        }
+        return Err(error);
+    }
+    unreachable!()
+}
+
 /// Kimi K2.5+ models (including K2.7-Code) handle thinking flags differently
 /// and reject the OpenAI-compatible `extra_body.chat_template_kwargs` toggle.
 ///
@@ -1536,7 +1592,10 @@ fn apply_chat_completion_thinking_toggle(body: &mut serde_json::Value, config: &
     }
 
     if matches!(config.provider, AiProvider::MiniMax) {
-        body["thinking"] = json!({ "type": "disabled" });
+        // Flash is adaptive-only, even when a saved legacy toggle is off.
+        if !config.model.trim().eq_ignore_ascii_case("MiniMax-M3.1-Flash") {
+            body["thinking"] = json!({ "type": "disabled" });
+        }
     } else if matches!(config.provider, AiProvider::Ollama) {
         // Ollama's OpenAI-compatible API uses reasoning_effort instead of
         // forwarding provider-specific chat template arguments.
@@ -2500,19 +2559,15 @@ pub async fn call_openai_compatible(client: &reqwest::Client, request: AiComplet
     });
     decorate_chat_completion_body(&mut body_obj, &request.config, request.max_tokens);
 
-    let res = client
-        .post(resolve_endpoint(&request.config))
-        .headers(headers)
-        .json(&body_obj)
-        .send()
-        .await
-        .map_err(|e| format_request_error("AI", e))?;
-
-    let status = res.status();
+    let res = send_chat_completion(
+        client,
+        &resolve_endpoint(&request.config),
+        &headers,
+        body_obj,
+        &sensitive_values(&request.config),
+    )
+    .await?;
     let data: serde_json::Value = res.json().await.map_err(|e| format_response_body_error("AI", e))?;
-    if !status.is_success() {
-        return Err(redacted_http_detail(&data, format!("API error: {status}"), &sensitive_values(&request.config)));
-    }
 
     Ok(openai_response_text(&data))
 }
@@ -3967,16 +4022,7 @@ async fn stream_openai(
         let emitted = emitted.clone();
         async move {
             let mut minimax_state = MiniMaxStreamState::new(minimax_semantics);
-            let res = client
-                .post(&endpoint)
-                .headers(headers)
-                .json(&body_obj)
-                .send()
-                .await
-                .map_err(|e| format_request_error("AI", e))?;
-            if !res.status().is_success() {
-                return Err(stream_error(res, "API error", &secrets).await);
-            }
+            let res = send_chat_completion(client, &endpoint, &headers, body_obj, &secrets).await?;
 
             let mut byte_stream = res.bytes_stream();
             let mut buf = Vec::new();
@@ -4674,16 +4720,7 @@ async fn stream_openai_with_tools(
         async move {
             let mut minimax_state = MiniMaxStreamState::new(minimax_semantics);
             let mut first_tool_index = None;
-            let res = client
-                .post(&endpoint)
-                .headers(headers)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| format_request_error("AI", e))?;
-            if !res.status().is_success() {
-                return Err(stream_error(res, "API error", &secrets).await);
-            }
+            let res = send_chat_completion(client, &endpoint, &headers, body, &secrets).await?;
 
             let mut byte_stream = res.bytes_stream();
             let mut buf = Vec::new();
@@ -5342,6 +5379,156 @@ mod tests {
     }
 
     #[test]
+    fn chat_output_limit_only_uses_explicit_smaller_provider_bounds() {
+        for (field, message) in [
+            ("max_tokens", "max_tokens参数非法：限制数值范围[1,131072]"),
+            ("max_completion_tokens", "max_completion_tokens must be in [1, 8192]"),
+            ("max_tokens", "max_tokens is too large. This model supports at most 4096 completion tokens."),
+        ] {
+            let mut body = serde_json::json!({field: 1_000_000, "model": "custom-model"});
+            assert!(super::reduce_chat_output_limit(&mut body, message), "{message}");
+            assert!(body[field].as_u64().unwrap() < 1_000_000);
+            assert_eq!(body["model"], "custom-model");
+            assert!(!super::reduce_chat_output_limit(&mut body, message), "must never retry an equal limit");
+        }
+        for message in [
+            "invalid max_tokens",
+            "context_length must be in [1,131072]",
+            "max_tokens must be in [131072,1]",
+            "max_tokens must be in [0,0]",
+            "max_tokens must be in [1,2000000]",
+            "max_tokens must be in [1,99999999999999999999]",
+            "max_tokens must be at least 4096",
+        ] {
+            let mut body = serde_json::json!({"max_tokens": 1_000_000});
+            assert!(!super::reduce_chat_output_limit(&mut body, message), "{message}");
+            assert_eq!(body["max_tokens"], 1_000_000);
+        }
+    }
+
+    async fn spawn_output_limit_server(
+        responses: Vec<(&'static str, &'static str, &'static str)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<serde_json::Value>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for (status, content_type, response_body) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                let header_end = loop {
+                    if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                        break index + 4;
+                    }
+                    let n = socket.read(&mut chunk).await.unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&chunk[..n]);
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                while request.len() < header_end + length {
+                    let n = socket.read(&mut chunk).await.unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&chunk[..n]);
+                }
+                bodies.push(serde_json::from_slice(&request[header_end..header_end + length]).unwrap());
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            bodies
+        });
+        (format!("http://{address}/v1"), server)
+    }
+
+    #[tokio::test]
+    async fn chat_output_limit_recovers_completion_stream_and_agent_requests() {
+        const ERROR: &str = r#"{"error":{"message":"max_tokens参数非法：限制数值范围[1,131072]"}}"#;
+        const STREAM: &str =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        for kind in ["complete", "stream", "agent"] {
+            let success = if kind == "complete" {
+                ("200 OK", "application/json", r#"{"choices":[{"message":{"content":"ok"}}]}"#)
+            } else {
+                ("200 OK", "text/event-stream", STREAM)
+            };
+            let (endpoint, server) =
+                spawn_output_limit_server(vec![("400 Bad Request", "application/json", ERROR), success]).await;
+            let mut config = test_config(AiProvider::Zhipu);
+            config.endpoint = endpoint;
+            config.api_key = "test-key".to_string();
+            config.max_retries = Some(0);
+            config.max_output_tokens = Some(1_000_000);
+            let mut request = prompt_cache_test_request(config, None);
+            request.max_tokens = Some(1_000_000);
+            let cancelled = Notify::new();
+            let output = std::sync::Mutex::new(String::new());
+            let run = async {
+                match kind {
+                    "complete" => assert_eq!(complete(&request).await.unwrap(), "ok"),
+                    "stream" => {
+                        stream("output-limit", &request, &cancelled, |chunk| {
+                            output.lock().unwrap().push_str(&chunk.delta)
+                        })
+                        .await
+                        .unwrap();
+                        assert_eq!(*output.lock().unwrap(), "ok");
+                    }
+                    _ => {
+                        stream_with_tools(&request.config, &request, "output-limit", &[], &cancelled, |chunk| {
+                            output.lock().unwrap().push_str(&chunk.delta);
+                        })
+                        .await
+                        .unwrap();
+                        assert_eq!(*output.lock().unwrap(), "ok");
+                    }
+                }
+                let bodies = server.await.unwrap();
+                assert_eq!(bodies.len(), 2);
+                assert_eq!(bodies[0]["max_tokens"], 1_000_000);
+                assert_eq!(bodies[1]["max_tokens"], 131_072);
+                let mut expected = bodies[0].clone();
+                expected["max_tokens"] = serde_json::json!(131_072);
+                assert_eq!(bodies[1], expected, "only the output budget may change");
+                assert_eq!(request.config.max_output_tokens, Some(1_000_000));
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(5), run).await.expect(kind);
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_output_limit_does_not_loop_or_retry_authentication_failures() {
+        const ERROR: &str = r#"{"error":{"message":"max_tokens参数非法：限制数值范围[1,131072] test-secret"}}"#;
+        for (status, attempts) in [("400 Bad Request", 2), ("401 Unauthorized", 1)] {
+            let (endpoint, server) =
+                spawn_output_limit_server(vec![(status, "application/json", ERROR); attempts]).await;
+            let mut config = test_config(AiProvider::OpenaiCompatible);
+            config.endpoint = endpoint;
+            config.api_key = "test-secret".to_string();
+            config.max_retries = Some(0);
+            let mut request = prompt_cache_test_request(config, None);
+            request.max_tokens = Some(1_000_000);
+            let run = async {
+                let error = complete(&request).await.unwrap_err();
+                assert!(!error.contains("test-secret"));
+                assert!(error.contains("max_tokens"));
+                assert_eq!(server.await.unwrap().len(), attempts);
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(5), run).await.unwrap();
+        }
+    }
+
+    #[test]
     fn structured_image_attachment_becomes_openai_image_content() {
         let message = AiMessage {
             role: "user".to_string(),
@@ -5451,13 +5638,17 @@ mod tests {
                     let (name, value) = line.split_once(':')?;
                     name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
                 })
-                .unwrap();
+                .unwrap_or(0);
             while request.len() < header_end + content_length {
                 let read = socket.read(&mut chunk).await.unwrap();
                 assert!(read > 0, "request ended before body was complete");
                 request.extend_from_slice(&chunk[..read]);
             }
-            let body = serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap();
+            let body = if content_length == 0 {
+                serde_json::Value::Null
+            } else {
+                serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap()
+            };
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: {response_content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
                 response_body.len()
@@ -8205,6 +8396,63 @@ mod tests {
         assert!(captured.body.get("max_tokens").is_none());
     }
 
+    #[tokio::test]
+    async fn minimax_catalog_prefers_flash_without_changing_saved_models() {
+        let (endpoint, server) = spawn_json_capture_server(
+            "application/json",
+            r#"{"data":[
+            {"id":"MiniMax-M2.7"},{"id":"MiniMax-M3"},{"id":"MiniMax-M3.1-Flash"}
+        ]}"#,
+        )
+        .await;
+        let mut config = minimax_test_config(endpoint.trim_end_matches("/messages"));
+        config.model = "MiniMax-M2.7".to_string();
+        let models = list_models_core(&config).await.unwrap();
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["MiniMax-M3.1-Flash", "MiniMax-M3"]
+        );
+        assert_eq!(config.model, "MiniMax-M2.7");
+        assert!(server.await.unwrap().headers.starts_with("GET /v1/models "));
+    }
+
+    #[tokio::test]
+    async fn minimax_flash_completion_preserves_model_and_serializes_supported_effort() {
+        for model in ["MiniMax-M3.1-Flash", "MiniMax-M3", "MiniMax-M2.7", "private-model"] {
+            for effort in [None, Some(AiEffortSelection::ProviderDefault)] {
+                let (endpoint, server) =
+                    spawn_json_capture_server("application/json", r#"{"choices":[{"message":{"content":"ok"}}]}"#)
+                        .await;
+                let mut request = minimax_test_request(endpoint.trim_end_matches("/messages"));
+                request.config.model = model.to_string();
+                request.config.enable_thinking = false;
+                request.config.runtime_effort = effort.clone();
+                assert_eq!(complete(&request).await.unwrap(), "ok");
+                let captured = server.await.unwrap();
+                assert_eq!(captured.body["model"], model);
+                assert_eq!(captured.body["reasoning_split"], true);
+                assert!(captured.body.get("reasoning_effort").is_none());
+                if model == "MiniMax-M3.1-Flash" || effort.is_some() {
+                    assert!(captured.body.get("thinking").is_none());
+                } else {
+                    assert_eq!(captured.body["thinking"]["type"], "disabled");
+                }
+                assert!(captured.body.get("service_tier").is_none());
+            }
+        }
+        for effort in ["low", "medium", "high", "xhigh", "max"] {
+            let (endpoint, server) =
+                spawn_json_capture_server("application/json", r#"{"choices":[{"message":{"content":"ok"}}]}"#).await;
+            let mut request = minimax_test_request(endpoint.trim_end_matches("/messages"));
+            request.config.model = "MiniMax-M3.1-Flash".to_string();
+            request.config.runtime_effort = Some(AiEffortSelection::Enum(effort.to_string()));
+            assert_eq!(complete(&request).await.unwrap(), "ok");
+            let captured = server.await.unwrap();
+            assert_eq!(captured.body["reasoning_effort"], effort);
+            assert!(captured.body.get("thinking").is_none());
+        }
+    }
+
     #[test]
     fn minimax_cumulative_text_normalizer_emits_only_new_suffixes() {
         let mut normalizer = MiniMaxTextAccumulator::default();
@@ -8481,12 +8729,45 @@ mod tests {
         );
         let (capture_endpoint, server) = spawn_json_capture_server("text/event-stream", response).await;
         let endpoint = capture_endpoint.trim_end_matches("/v1/messages").to_string();
-        let request = minimax_test_request(endpoint);
+        let mut request = minimax_test_request(endpoint);
+        request.config.model = "MiniMax-M3.1-Flash".to_string();
+        request.config.enable_thinking = false;
+        request.config.runtime_effort = Some(AiEffortSelection::Enum("high".to_string()));
+        request.messages[0]
+            .images
+            .push(AiInlineImage { media_type: "image/png".to_string(), data: "aGVsbG8=".to_string() });
+        let details = serde_json::json!([{"type": "reasoning.text", "text": "Inspect tables"}]);
+        request.messages.push(AiMessage {
+            role: "assistant".to_string(),
+            content: String::new(),
+            images: vec![],
+            tool_call_id: None,
+            tool_calls: vec![ToolCallRef {
+                id: "previous_call".to_string(),
+                name: "list_tables".to_string(),
+                arguments: serde_json::json!({"schema": "public"}),
+                provider_payload: Some(serde_json::json!({MINIMAX_REASONING_DETAILS_PAYLOAD_KEY: details})),
+            }],
+        });
+        request.messages.push(AiMessage {
+            role: "tool".to_string(),
+            content: "users".to_string(),
+            images: vec![],
+            tool_call_id: Some("previous_call".to_string()),
+            tool_calls: vec![],
+        });
+        let tools = [crate::agent_events::ToolDefinition {
+            name: "list_tables".into(),
+            description: "List tables".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {"schema": {"type": "string"}}}),
+            read_only: true,
+            parallel_ok: true,
+        }];
         let chunks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let observed = chunks.clone();
 
         let (calls, _) =
-            stream_with_tools(&request.config, &request, "minimax-tool-test", &[], &Notify::new(), move |chunk| {
+            stream_with_tools(&request.config, &request, "minimax-tool-test", &tools, &Notify::new(), move |chunk| {
                 observed.lock().unwrap().push(chunk)
             })
             .await
@@ -8516,6 +8797,15 @@ mod tests {
         assert!(captured.headers.starts_with("POST /v1/chat/completions "));
         assert_eq!(captured.body["reasoning_split"], true);
         assert_eq!(captured.body["max_completion_tokens"], 64);
+        assert_eq!(captured.body["model"], "MiniMax-M3.1-Flash");
+        assert_eq!(captured.body["reasoning_effort"], "high");
+        assert!(captured.body.get("thinking").is_none());
+        assert_eq!(captured.body["tools"][0]["function"]["name"], "list_tables");
+        assert_eq!(captured.body["messages"][1]["content"][1]["image_url"]["url"], "data:image/png;base64,aGVsbG8=");
+        assert_eq!(captured.body["messages"][2]["reasoning_details"], details);
+        assert_eq!(captured.body["messages"][2]["tool_calls"][0]["function"]["arguments"], r#"{"schema":"public"}"#);
+        assert_eq!(captured.body["messages"][3]["tool_call_id"], "previous_call");
+        assert_eq!(captured.body["messages"][3]["content"], "users");
     }
 
     #[test]

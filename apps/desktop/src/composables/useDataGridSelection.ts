@@ -691,6 +691,8 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
 
   function columnIsSelected(colIndex: number): boolean {
     if (hasColumnSelection.value) return selectedColumnIndexes.value.has(colIndex);
+    // Ctrl/Cmd+A 是"选中数据区"：复制只包含单元格，不含表头与行号，所以表头不跟着高亮。
+    if (isSelectingAll.value) return false;
     const range = selectedRange.value;
     if (!range) return false;
     return range.startCol <= colIndex && range.endCol >= colIndex && range.startRow === 0 && range.endRow >= displayItems.value.length - 1;

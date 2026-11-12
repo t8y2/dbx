@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::io::{BufRead, BufWriter, Write};
+use std::io::{BufRead, BufWriter, Read, Seek, Write};
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -76,6 +76,8 @@ pub enum DatabaseExportOutputCompression {
     #[default]
     None,
     Gzip,
+    /// Navicat `.nb3` backup archive (MySQL and PostgreSQL only).
+    Nb3,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +126,12 @@ pub struct DatabaseExportRequest {
     pub file_path: String,
     #[serde(default)]
     pub selected_tables: Vec<String>,
+    /// Objects picked in the object browser ("export selected"). `Some` limits the
+    /// export to these objects, matched by type and name (and signature for
+    /// overloaded routines), and takes precedence over `selected_tables`; an empty
+    /// list is rejected instead of meaning the whole schema (#13940).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_objects: Option<Vec<DatabaseExportSelectedObject>>,
     #[serde(default)]
     pub excluded_tables: Vec<String>,
     pub include_structure: bool,
@@ -136,6 +144,13 @@ pub struct DatabaseExportRequest {
     pub include_create_database: bool,
     #[serde(default)]
     pub drop_table_if_exists: bool,
+    /// Omit the database qualifier from MySQL-family table references in the
+    /// exported SQL (INSERT targets keep plain `table` names; the `USE`
+    /// preamble stays the authority for the database). Defaults to `false`
+    /// (preserve `db`.`table`) for callers that import into a different
+    /// database than the one named by the dump (issue #13509).
+    #[serde(default)]
+    pub omit_database_qualifier: bool,
     /// Drop the table-level `AUTO_INCREMENT=N` clause from exported MySQL DDL,
     /// so the script can initialize a fresh database without pinning a sequence
     /// position. No-op for non-MySQL databases. Defaults to `false` (preserve).
@@ -173,10 +188,149 @@ pub struct DatabaseExportRequest {
     pub split_max_mb: Option<u32>,
 }
 
+/// One object picked in the object browser for "export selected".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseExportSelectedObject {
+    /// Object browser type such as `TABLE`, `VIEW`, `PROCEDURE`, `FUNCTION`,
+    /// `SEQUENCE`, `PACKAGE` or `PACKAGE_BODY`.
+    pub object_type: String,
+    pub name: String,
+    /// Routine argument signature, for engines that list overloads separately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum DatabaseExportObjectKind {
+    /// Tables and views, which share one namespace in every engine that lists both.
+    Relation,
+    Sequence,
+    Procedure,
+    Function,
+    Package,
+    PackageBody,
+}
+
+impl DatabaseExportObjectKind {
+    fn from_object_type(object_type: &str) -> Option<Self> {
+        let object_type = object_type.trim().to_uppercase();
+        match object_type.as_str() {
+            "PACKAGE" => Some(Self::Package),
+            "PACKAGE BODY" | "PACKAGE_BODY" => Some(Self::PackageBody),
+            "SEQUENCE" => Some(Self::Sequence),
+            _ if object_type.contains("PROCEDURE") => Some(Self::Procedure),
+            _ if object_type.contains("FUNCTION") => Some(Self::Function),
+            _ if object_type.contains("TABLE") || object_type.contains("VIEW") => Some(Self::Relation),
+            _ => None,
+        }
+    }
+}
+
+/// Which objects of the schema a database export covers.
+enum DatabaseExportSelection {
+    WholeSchema,
+    /// `selected_tables`: names only. They match tables and views, plus standalone
+    /// sequences, which share the table namespace; routines and packages are not
+    /// matched because a routine may have the same name as a table.
+    TableNames(HashSet<String>),
+    /// `selected_objects`, matched by kind. A routine picked with a signature only
+    /// matches that overload.
+    Objects {
+        names: HashSet<(DatabaseExportObjectKind, String)>,
+        signatures: HashSet<(DatabaseExportObjectKind, String, String)>,
+    },
+}
+
+impl DatabaseExportSelection {
+    fn from_request(request: &DatabaseExportRequest) -> Self {
+        if let Some(objects) = &request.selected_objects {
+            let mut names = HashSet::new();
+            let mut signatures = HashSet::new();
+            for object in objects {
+                let Some(kind) = DatabaseExportObjectKind::from_object_type(&object.object_type) else {
+                    continue;
+                };
+                match object.signature.as_deref().map(str::trim) {
+                    Some(signature)
+                        if matches!(kind, DatabaseExportObjectKind::Procedure | DatabaseExportObjectKind::Function) =>
+                    {
+                        signatures.insert((kind, object.name.clone(), signature.to_string()));
+                    }
+                    _ => {
+                        names.insert((kind, object.name.clone()));
+                    }
+                }
+                // A package is exported with its body so the spec does not replay alone.
+                if kind == DatabaseExportObjectKind::Package {
+                    names.insert((DatabaseExportObjectKind::PackageBody, object.name.clone()));
+                }
+            }
+            return Self::Objects { names, signatures };
+        }
+        if request.selected_tables.is_empty() {
+            Self::WholeSchema
+        } else {
+            Self::TableNames(request.selected_tables.iter().cloned().collect())
+        }
+    }
+
+    fn includes_relation(&self, name: &str) -> bool {
+        match self {
+            Self::WholeSchema => true,
+            Self::TableNames(names) => names.contains(name),
+            Self::Objects { names, .. } => names.contains(&(DatabaseExportObjectKind::Relation, name.to_string())),
+        }
+    }
+
+    /// Picked sequence names for an object browser selection; `None` otherwise.
+    fn sequence_names(&self) -> Option<HashSet<String>> {
+        match self {
+            Self::Objects { names, .. } => Some(
+                names
+                    .iter()
+                    .filter(|(kind, _)| *kind == DatabaseExportObjectKind::Sequence)
+                    .map(|(_, name)| name.clone())
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// Selected table and view names; empty for a whole-schema export.
+    fn relation_names(&self) -> Vec<String> {
+        match self {
+            Self::WholeSchema => Vec::new(),
+            Self::TableNames(names) => names.iter().cloned().collect(),
+            Self::Objects { names, .. } => names
+                .iter()
+                .filter(|(kind, _)| *kind == DatabaseExportObjectKind::Relation)
+                .map(|(_, name)| name.clone())
+                .collect(),
+        }
+    }
+
+    fn includes_object(&self, kind: DatabaseExportObjectKind, object: &crate::types::ObjectInfo) -> bool {
+        match self {
+            Self::WholeSchema => true,
+            Self::TableNames(names) => kind == DatabaseExportObjectKind::Sequence && names.contains(&object.name),
+            Self::Objects { names, signatures } => {
+                names.contains(&(kind, object.name.clone()))
+                    || signatures.contains(&(
+                        kind,
+                        object.name.clone(),
+                        object.signature.as_deref().unwrap_or_default().trim().to_string(),
+                    ))
+            }
+        }
+    }
+}
+
 enum DatabaseExportWriter {
     Plain(BufWriter<std::fs::File>),
     Gzip(Box<GzEncoder<BufWriter<std::fs::File>>>),
     SplitZip(Box<crate::export_split_zip::SplitZipExportWriter>),
+    Nb3(Box<crate::navicat_nb3::Nb3ExportWriter>),
 }
 
 impl DatabaseExportWriter {
@@ -185,6 +339,7 @@ impl DatabaseExportWriter {
             Self::Plain(writer) => writer.write_all(unit),
             Self::Gzip(writer) => writer.write_all(unit),
             Self::SplitZip(writer) => writer.write_sql_unit(unit),
+            Self::Nb3(writer) => writer.write_all(unit),
         }
     }
 }
@@ -195,6 +350,7 @@ impl Write for DatabaseExportWriter {
             Self::Plain(writer) => writer.write(buffer),
             Self::Gzip(writer) => writer.write(buffer),
             Self::SplitZip(writer) => writer.write(buffer),
+            Self::Nb3(writer) => writer.write(buffer),
         }
     }
 
@@ -209,6 +365,7 @@ impl Write for DatabaseExportWriter {
             Self::Plain(writer) => writer.flush(),
             Self::Gzip(writer) => writer.flush(),
             Self::SplitZip(writer) => writer.flush(),
+            Self::Nb3(writer) => writer.flush(),
         }
     }
 }
@@ -224,6 +381,7 @@ impl DatabaseExportWriter {
                 .and_then(|mut output| output.flush())
                 .map_err(|error| format!("Failed to finalize export file: {error}")),
             Self::SplitZip(writer) => writer.finish(source_file_name),
+            Self::Nb3(writer) => writer.finish(),
         }
     }
 }
@@ -233,10 +391,14 @@ struct DatabaseExportObjectCounts {
     tables: usize,
     views: usize,
     sequences: usize,
+    /// Oracle/Kingbase/Vastbase sequences, collected only when they are exported.
+    standalone_sequences: usize,
     extensions: usize,
     enums: usize,
     procedures: usize,
     functions: usize,
+    /// Package specs and bodies, collected only when they are exported.
+    packages: usize,
     triggers: usize,
     events: usize,
 }
@@ -245,16 +407,28 @@ fn exports_database_tables(request: &DatabaseExportRequest) -> bool {
     request.include_structure || request.include_data
 }
 
-fn exports_database_routines(request: &DatabaseExportRequest) -> bool {
-    // Routine export is schema-wide, so an explicit table selection must not
-    // add unrelated procedures or functions to either execution or progress.
-    exports_schema_wide_objects(request)
+fn exports_whole_schema(request: &DatabaseExportRequest) -> bool {
+    request.selected_objects.is_none() && request.selected_tables.is_empty()
 }
 
-/// Schema-wide objects (routines, triggers, events) are exported as a whole. An explicit
+/// Routines are exported for the whole schema or for an object browser selection,
+/// which carries their types. A table-name selection adds none, so a table never
+/// pulls in a routine of the same name (#13940).
+fn exports_database_routines(request: &DatabaseExportRequest) -> bool {
+    request.include_objects && (request.selected_objects.is_some() || request.selected_tables.is_empty())
+}
+
+/// Packages are exported for engines whose package source replays as PL/SQL
+/// units terminated by a `/` line (see `build_export_object_source_sql`).
+fn exports_package_objects(request: &DatabaseExportRequest, db_type: DatabaseType) -> bool {
+    exports_database_routines(request)
+        && matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::Dameng)
+}
+
+/// Schema-wide objects (MySQL triggers and events) are exported as a whole. An explicit
 /// table selection must not add unrelated objects to either execution or progress.
 fn exports_schema_wide_objects(request: &DatabaseExportRequest) -> bool {
-    request.include_objects && request.selected_tables.is_empty()
+    request.include_objects && exports_whole_schema(request)
 }
 
 /// MySQL lists triggers and events as schema-wide objects (see
@@ -278,7 +452,7 @@ fn exports_standalone_sequence_objects(request: &DatabaseExportRequest, db_type:
 }
 
 fn exports_oracle_sequence_objects(request: &DatabaseExportRequest, db_type: DatabaseType) -> bool {
-    matches!(db_type, DatabaseType::Oracle) && request.include_structure && request.selected_tables.is_empty()
+    matches!(db_type, DatabaseType::Oracle) && request.include_structure && exports_whole_schema(request)
 }
 
 /// Oracle backs every identity column with a system-named `ISEQ$$_<object id>` sequence.
@@ -295,7 +469,11 @@ fn database_export_total_objects(request: &DatabaseExportRequest, counts: &Datab
     }
     if request.include_structure {
         total += counts.sequences + counts.extensions + counts.enums;
+    } else if request.include_objects && request.selected_objects.is_some() {
+        // PostgreSQL sequences picked in the object browser, listed without the structure.
+        total += counts.sequences;
     }
+    total += counts.standalone_sequences + counts.packages;
     if request.include_objects {
         total += counts.views;
     }
@@ -350,6 +528,42 @@ async fn list_mysql_export_view_dependencies(
     )
     .await?;
     Ok(mysql_view_dependencies_from_rows(&result.rows))
+}
+
+/// Views and materialized views reference relations through their rewrite rules, so
+/// `pg_depend` rows of the rule name every relation a view reads (#14178). The rule
+/// also depends on its own view, which is excluded.
+const POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL: &str = "SELECT DISTINCT src.relname, tgt.relname \
+     FROM pg_catalog.pg_depend dep \
+     JOIN pg_catalog.pg_rewrite rewrite ON rewrite.oid = dep.objid \
+     JOIN pg_catalog.pg_class src ON src.oid = rewrite.ev_class \
+     JOIN pg_catalog.pg_namespace src_ns ON src_ns.oid = src.relnamespace \
+     JOIN pg_catalog.pg_class tgt ON tgt.oid = dep.refobjid \
+     JOIN pg_catalog.pg_namespace tgt_ns ON tgt_ns.oid = tgt.relnamespace \
+     WHERE dep.classid = 'pg_catalog.pg_rewrite'::regclass \
+       AND dep.refclassid = 'pg_catalog.pg_class'::regclass \
+       AND src.relkind IN ('v', 'm') \
+       AND src.oid <> tgt.oid \
+       AND src_ns.nspname = $1 \
+       AND tgt_ns.nspname = $1 \
+     ORDER BY 1, 2";
+
+async fn list_postgres_export_view_dependencies(
+    state: &crate::connection::AppState,
+    pool_key: &str,
+    schema: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let pool = {
+        let pool_handle = state.pool_handle(pool_key).await;
+        match pool_handle.as_ref() {
+            Some(crate::connection::PoolKind::Postgres(pool)) => pool.clone(),
+            _ => return Ok(Vec::new()),
+        }
+    };
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let client = crate::db::postgres::PostgresTextClient::new(&client);
+    let rows = client.query(POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL, &[&schema]).await.map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().map(|row| (row.get::<_, String>(0), row.get::<_, String>(1))).collect())
 }
 
 fn sort_export_views_by_dependencies<'a>(
@@ -465,6 +679,7 @@ impl LenientExportErrors {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExportStatus {
+    PreparingSnapshot,
     Running,
     Writing,
     Done,
@@ -625,6 +840,9 @@ pub struct BuildDatabaseSqlExportOptions {
     /// Defaults to `false` (preserve). See `DatabaseExportRequest::omit_auto_increment`.
     #[serde(default)]
     pub omit_auto_increment: bool,
+    /// See `DatabaseExportRequest::omit_database_qualifier`.
+    #[serde(default)]
+    pub omit_database_qualifier: bool,
     /// See `DatabaseExportRequest::preserve_original_language`.
     #[serde(default)]
     pub preserve_original_language: bool,
@@ -699,6 +917,9 @@ fn format_export_sql_literal_typed(
         return literal;
     }
     if let Some(literal) = format_xugu_spatial_export_literal(value, database_type, column_type) {
+        return literal;
+    }
+    if let Some(literal) = format_sqlserver_spatial_export_literal(value, database_type, column_type) {
         return literal;
     }
     if is_mysql_compatible_export_literal_target(database_type) {
@@ -1298,6 +1519,58 @@ pub(crate) fn is_geometry_spatial_column_type(column_type: &str) -> bool {
     matches!(base, "geometry" | "geography")
 }
 
+// PostgreSQL database export streams carry only values, not the spatial
+// metadata used by grid exports. Preserve PostGIS's canonical HEXEWKB text
+// behind a marker so normal query decoding cannot turn it into display WKT.
+const POSTGRES_SPATIAL_EXPORT_PREFIX: &str = "DBX_PG_EWKB:";
+
+fn is_postgres_spatial_export_type(column_type: &str) -> bool {
+    // Catalog array types may include a scalar typmod before the array suffix.
+    // Their text representation is an array literal, not a single HEXEWKB value.
+    if column_type.trim_end().ends_with("[]") {
+        return false;
+    }
+    let mut quoted = false;
+    let mut start = 0;
+    let mut end = column_type.len();
+    for (index, ch) in column_type.char_indices() {
+        match ch {
+            '"' => quoted = !quoted,
+            '.' if !quoted => start = index + 1,
+            '(' if !quoted => {
+                end = index;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let name = column_type[start..end].trim();
+    if let Some(name) = name.strip_prefix('"').and_then(|name| name.strip_suffix('"')) {
+        matches!(name, "geometry" | "geography")
+    } else {
+        name.eq_ignore_ascii_case("geometry") || name.eq_ignore_ascii_case("geography")
+    }
+}
+
+fn postgres_spatial_export_hex<'a>(
+    value: &'a Value,
+    database_type: Option<DatabaseType>,
+    column_type: Option<&str>,
+) -> Result<Option<&'a str>, String> {
+    if database_type != Some(DatabaseType::Postgres) || !column_type.is_some_and(is_postgres_spatial_export_type) {
+        return Ok(None);
+    }
+    let Some(hex) = value.as_str().and_then(|text| text.strip_prefix(POSTGRES_SPATIAL_EXPORT_PREFIX)) else {
+        return Ok(None);
+    };
+    if hex.is_empty() || hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Invalid PostgreSQL spatial export value: expected hexadecimal EWKB".to_string());
+    }
+    // Do not use the display WKB decoder to validate/re-encode: PostGIS also
+    // supports curves and surfaces that the preview decoder does not support.
+    Ok(Some(hex))
+}
+
 /// Xugu returns spatial values as readable WKT/EWKT text. Plain WKT is
 /// accepted by the server, but it cannot carry a non-zero SRID; database
 /// exports therefore select EWKT and replay it through the Xugu constructor.
@@ -1334,6 +1607,76 @@ fn format_xugu_spatial_export_literal_with_srid(
     // Xugu accepts a plain WKT string for both GEOMETRY and GEOGRAPHY. Keep
     // that form for SRID 0/legacy values rather than inventing a constructor.
     Some(quote_standard_export_sql_string(&text))
+}
+
+pub(crate) fn is_sqlserver_spatial_export_type(column_type: &str) -> Option<&'static str> {
+    let lower = column_type.trim().trim_matches(['[', ']']).to_ascii_lowercase();
+    let base = lower.split(['(', ':', ' ', '\t', '\n']).next().unwrap_or("").trim();
+    let base = base.split('.').next_back().unwrap_or(base).trim_matches(['[', ']']).trim();
+    if base == "geometry" {
+        Some("geometry")
+    } else if base == "geography" {
+        Some("geography")
+    } else {
+        None
+    }
+}
+
+/// SQL Server exposes spatial columns as `geometry` and `geography`. T-SQL
+/// rejects inserting plain string literals into spatial columns (`Operand type
+/// clash: varchar is incompatible with geometry`). Database exports and INSERT
+/// scripts construct spatial instances via `geometry::STGeomFromText(wkt, srid)`
+/// or `geography::STGeomFromText(wkt, srid)`. Default SRID is 0 for geometry
+/// and 4326 for geography.
+pub(crate) fn format_sqlserver_spatial_export_literal(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_type: Option<&str>,
+) -> Option<String> {
+    format_sqlserver_spatial_export_literal_with_srid(value, database_type, column_type, None)
+}
+
+fn format_sqlserver_spatial_export_literal_with_srid(
+    value: &Value,
+    database_type: Option<DatabaseType>,
+    column_type: Option<&str>,
+    spatial_srid: Option<u32>,
+) -> Option<String> {
+    if database_type != Some(DatabaseType::SqlServer) {
+        return None;
+    }
+    let kind = column_type.and_then(is_sqlserver_spatial_export_type)?;
+    if value.is_null() {
+        return Some("NULL".to_string());
+    }
+    let text = value.as_str().map_or_else(|| value.to_string(), ToString::to_string);
+    let trimmed = text.trim();
+    if trimmed.to_ascii_lowercase().starts_with("geometry::") || trimmed.to_ascii_lowercase().starts_with("geography::")
+    {
+        return Some(trimmed.to_string());
+    }
+    let (wkt, marker_srid) = extract_sqlserver_spatial_wkt_and_srid(trimmed);
+    let effective_srid = marker_srid
+        .or(spatial_srid)
+        .filter(|&srid| srid != 0 || kind != "geography")
+        .unwrap_or(if kind == "geography" { 4326 } else { 0 });
+    Some(format!("{kind}::STGeomFromText({}, {effective_srid})", quote_standard_export_sql_string(wkt)))
+}
+
+fn extract_sqlserver_spatial_wkt_and_srid(text: &str) -> (&str, Option<u32>) {
+    let trimmed = text.trim();
+    if trimmed.len() > 5 && trimmed[..5].eq_ignore_ascii_case("srid=") {
+        if let Some((srid_part, wkt_part)) = trimmed[5..].split_once(';') {
+            if let Ok(srid) = srid_part.trim().parse::<u32>() {
+                if srid > 0 {
+                    return (wkt_part.trim(), Some(srid));
+                } else {
+                    return (wkt_part.trim(), None);
+                }
+            }
+        }
+    }
+    (trimmed, None)
 }
 
 /// PostgreSQL's geometry text input treats a plain WKT literal as SRID 0,
@@ -1463,7 +1806,15 @@ fn export_column_type<'a>(
     spatial_columns: &HashMap<usize, Option<u32>>,
 ) -> Option<&'a str> {
     column_types.get(index).and_then(|value| value.as_deref()).filter(|value| !value.trim().is_empty()).or_else(|| {
-        (database_type == Some(DatabaseType::Xugu) && spatial_columns.contains_key(&index)).then_some("GEOMETRY")
+        if spatial_columns.contains_key(&index) {
+            match database_type {
+                Some(DatabaseType::Xugu) => Some("GEOMETRY"),
+                Some(DatabaseType::SqlServer) => Some("geometry"),
+                _ => None,
+            }
+        } else {
+            None
+        }
     })
 }
 
@@ -1475,6 +1826,11 @@ fn format_export_sql_literal_typed_with_spatial(
     spatial_srid: Option<u32>,
 ) -> String {
     if let Some(literal) = format_xugu_spatial_export_literal_with_srid(value, database_type, column_type, spatial_srid)
+    {
+        return literal;
+    }
+    if let Some(literal) =
+        format_sqlserver_spatial_export_literal_with_srid(value, database_type, column_type, spatial_srid)
     {
         return literal;
     }
@@ -1706,7 +2062,12 @@ pub(crate) fn build_export_insert_statements_excluding_with_dialect(
             } else {
                 value
             };
-            let literal = if insert_dialect == SqlInsertDialect::Standard {
+            let literal = if let Some(hex) = postgres_spatial_export_hex(value, options.database_type, column_type)? {
+                // PostGIS accepts canonical HEXEWKB for both geometry and
+                // geography. A literal also works in Standard SQL mode and
+                // does not depend on the extension's schema/search_path.
+                quote_standard_export_sql_string(hex)
+            } else if insert_dialect == SqlInsertDialect::Standard {
                 format_standard_sql_literal(value, options.database_type)
             } else if let Some(literal) =
                 crate::data_grid_sql::format_oracle_lob_export_literal(value, options.database_type, column_type)?
@@ -2052,13 +2413,21 @@ pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Resu
             lines.push(format!("-- Exported rows: {}", table.rows.len()));
         }
 
+        // #13509: with the `USE` preamble as the database authority, MySQL-family
+        // dumps can drop the `db`. qualifier so the script replays against any
+        // database the USE targets.
+        let mysql_omit = options.omit_database_qualifier
+            && table.database_type.as_ref().is_some_and(supports_database_qualifier_omission);
+        // Both dialects must honor the flag: Source dialect prefers the passed
+        // pre-qualified name over the schema, so it has to be cleared too
+        // (#13601 review point 3).
         let inserts = build_export_insert_statements_excluding_with_dialect(
             BuildExportInsertStatementsOptions {
                 database_type: table.database_type,
                 identifier_quote: table.identifier_quote.clone(),
-                schema: table.schema,
+                schema: if mysql_omit { None } else { table.schema.clone() },
                 table_name: table.table_name,
-                qualified_table_name: table.qualified_table_name,
+                qualified_table_name: if mysql_omit { None } else { table.qualified_table_name },
                 columns: table.columns,
                 column_types: table.column_types,
                 column_extras: table.column_extras,
@@ -2596,11 +2965,39 @@ async fn postgres_export_sequence_parameters_legacy(
     }))
 }
 
+/// Table-owned sequences follow their table. Standalone sequences are exported with the
+/// whole schema's objects, or, for an object browser selection (`selected_sequences`),
+/// only when picked; a table-name selection never adds them.
+fn exports_postgres_sequence(
+    name: &str,
+    owner_table: Option<&str>,
+    selected_tables: &HashSet<&str>,
+    excluded_tables: &HashSet<&str>,
+    include_objects: bool,
+    selected_sequences: Option<&HashSet<String>>,
+) -> bool {
+    match owner_table {
+        Some(owner_table) => {
+            !excluded_tables.contains(owner_table)
+                && ((selected_tables.is_empty() && selected_sequences.is_none())
+                    || selected_tables.contains(owner_table))
+        }
+        None => {
+            include_objects
+                && match selected_sequences {
+                    Some(sequences) => sequences.contains(name),
+                    None => selected_tables.is_empty(),
+                }
+        }
+    }
+}
+
 async fn list_postgres_export_sequences(
     state: &crate::connection::AppState,
     pool_key: &str,
     schema: &str,
     selected_tables: &[String],
+    selected_sequences: Option<&HashSet<String>>,
     excluded_tables: &[String],
     include_objects: bool,
     fail_on_error: bool,
@@ -2651,11 +3048,15 @@ async fn list_postgres_export_sequences(
             created_by_table: row.get::<_, bool>(10),
         })
         .filter(|sequence| {
-            sequence.owner_table.as_deref().is_none_or(|owner_table| !excluded.contains(owner_table))
-                && (selected.is_empty()
-                    || sequence.owner_table.as_deref().is_some_and(|owner_table| selected.contains(owner_table)))
+            exports_postgres_sequence(
+                &sequence.name,
+                sequence.owner_table.as_deref(),
+                &selected,
+                &excluded,
+                include_objects,
+                selected_sequences,
+            )
         })
-        .filter(|sequence| sequence.owner_table.is_some() || (include_objects && selected.is_empty()))
         .collect::<Vec<_>>();
 
     if sequences.is_empty() {
@@ -2874,6 +3275,12 @@ pub async fn begin_database_backup_snapshot_core_for_export(
     database: &str,
     export_id: Option<&str>,
 ) -> Result<DatabaseBackupSnapshot, String> {
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        connection_id,
+        crate::query::mysql_data_charset_policy::EXPORT_UNSUPPORTED,
+    )
+    .await?;
     let db_type = state
         .configs
         .read()
@@ -2881,8 +3288,10 @@ pub async fn begin_database_backup_snapshot_core_for_export(
         .get(connection_id)
         .map(|config| config.db_type)
         .ok_or_else(|| format!("Connection config not found: {connection_id}"))?;
-    if !matches!(db_type, DatabaseType::Mysql | DatabaseType::Postgres) {
-        return Err("Consistent database backup snapshots are only supported for MySQL and PostgreSQL".to_string());
+    if !matches!(db_type, DatabaseType::Mysql | DatabaseType::Postgres | DatabaseType::OpenGauss) {
+        return Err(
+            "Consistent database backup snapshots are only supported for MySQL, PostgreSQL, and openGauss".to_string()
+        );
     }
 
     let session_id = if let Some(export_id) = export_id {
@@ -2912,7 +3321,7 @@ pub async fn begin_database_backup_snapshot_core_for_export(
         crate::query::begin_database_backup_snapshot(state, connection_id, database).await?
     };
 
-    let schemas_result = if matches!(db_type, DatabaseType::Postgres) {
+    let schemas_result = if matches!(db_type, DatabaseType::Postgres | DatabaseType::OpenGauss) {
         const POSTGRES_BACKUP_SCHEMAS_SQL: &str = "SELECT n.nspname FROM pg_catalog.pg_namespace n \
              WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
              AND n.nspname NOT LIKE 'pg_toast_temp_%' \
@@ -2999,7 +3408,7 @@ fn database_export_metadata_prefetch_concurrency(db_type: DatabaseType) -> usize
     // PostgreSQL exports can hold a snapshot connection while metadata and UI
     // requests share the base pool. Keep enough capacity available for normal
     // browsing instead of filling nearly the entire ten-connection pool.
-    if db_type == DatabaseType::Postgres {
+    if matches!(db_type, DatabaseType::Postgres | DatabaseType::OpenGauss) {
         4
     } else {
         8
@@ -3044,6 +3453,19 @@ fn database_export_select_list(columns: &[String], column_types: &[Option<String
                 && column_types.get(index).and_then(|value| value.as_deref()).is_some_and(is_mysql_spatial_export_type)
             {
                 mysql_spatial_export_marker_expression(column)
+            } else if *db_type == DatabaseType::Postgres
+                && column_types
+                    .get(index)
+                    .and_then(|value| value.as_deref())
+                    .is_some_and(is_postgres_spatial_export_type)
+            {
+                let quoted = quote_identifier(column, db_type);
+                // PostGIS's text output is HEXEWKB, including SRID and Z/M.
+                // The text cast needs no extension function or type lookup.
+                // Do not alias this expression to the source column: ORDER BY
+                // would then sort the hex text instead of the spatial key used
+                // by WHERE. Export writers use catalog names and positional rows.
+                format!("'{POSTGRES_SPATIAL_EXPORT_PREFIX}' || {quoted}::text")
             } else if *db_type == DatabaseType::Xugu
                 && column_types
                     .get(index)
@@ -3118,7 +3540,15 @@ fn write_database_export_rows<W: Write>(
         SqlInsertMode::default(),
         false,
         None,
+        false,
     )
+}
+
+/// MySQL-family engines are the ones whose whole-database dump pairs a `USE`
+/// preamble with `db`.`table` targets; other engines ignore the flag so a
+/// persisted option can never strip a PostgreSQL/Oracle schema (#13601).
+fn supports_database_qualifier_omission(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Mysql | DatabaseType::Goldendb | DatabaseType::Doris | DatabaseType::StarRocks)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3135,6 +3565,7 @@ fn write_database_export_rows_with_mode<W: Write>(
     insert_mode: SqlInsertMode,
     preserve_original_language: bool,
     table_ddl: Option<&str>,
+    omit_database_qualifier: bool,
 ) -> Result<(), String> {
     let normalized_column_extras;
     let column_extras = if *db_type == DatabaseType::Dameng && table_ddl.is_some_and(is_dameng_auto_increment_ddl) {
@@ -3196,7 +3627,17 @@ fn write_database_export_rows_with_mode<W: Write>(
     // Database exports use the same table qualification as the SELECT/DDL
     // path and the legacy typed INSERT writer. In particular, MySQL uses the
     // selected database rather than a schema-qualified table name.
-    let qualified_table_name = crate::transfer::qualified_table(table, schema, db_type, None);
+    // `omit_database_qualifier` drops the schema qualifier for the MySQL
+    // family: the export's `USE` preamble already sets the database, and a
+    // `db`.`table` INSERT target pins the dump to one database (#13509).
+    // Rebuild with an empty schema instead of stripping the rendered name:
+    // MySQL-family targets never carry a schema prefix, so a table whose own
+    // name contains a dot must not be split at that dot (#13601).
+    let qualified_table_name = if omit_database_qualifier && supports_database_qualifier_omission(db_type) {
+        crate::transfer::qualified_table(table, "", db_type, None)
+    } else {
+        crate::transfer::qualified_table(table, schema, db_type, None)
+    };
     // Batch database exports do not currently thread a per-connection identifier
     // quote through BuildDatabaseSqlExportOptions; Kingbase MySQL-compat users
     // should fall back to the single-table export path which carries the quote.
@@ -3204,7 +3645,15 @@ fn write_database_export_rows_with_mode<W: Write>(
         BuildExportInsertStatementsOptions {
             database_type: Some(*db_type),
             identifier_quote: None,
-            schema: (!schema.is_empty()).then(|| schema.to_string()),
+            // Standard dialect re-derives `db`.`table` from the schema, so the
+            // flag also has to blank it there — but only for engines that own
+            // the flag; a persisted `true` must not strip a PostgreSQL schema
+            // (#13601).
+            schema: if omit_database_qualifier && supports_database_qualifier_omission(db_type) {
+                None
+            } else {
+                (!schema.is_empty()).then(|| schema.to_string())
+            },
             table_name: Some(table.to_string()),
             qualified_table_name: Some(qualified_table_name),
             columns: insert_columns.to_vec(),
@@ -3280,12 +3729,19 @@ const EXPORT_DESTINATION_IDENTITY_MAGIC: &[u8; 5] = b"DBXEI";
 const EXPORT_DESTINATION_IDENTITY_VERSION: u8 = 1;
 const EXPORT_DESTINATION_IDENTITY_DEVICE_KIND: u8 = 1;
 const EXPORT_DESTINATION_IDENTITY_VOLUME_UUID_KIND: u8 = 2;
+const EXPORT_DESTINATION_IDENTITY_NETWORK_MOUNT_SOURCE_KIND: u8 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ExportDestinationIdentity {
     Device(u64),
     PersistentVolumeUuid([u8; 16]),
     LegacyDevice(u64),
+    /// Network filesystems whose device identity changes on every remount
+    /// (rclone, sshfs, NFS, CIFS/SMB). The stable identifier is the **mount
+    /// source string** from `/proc/mounts` (the remote the path is mounted
+    /// from), so a same-source remount is accepted while a different storage
+    /// mounted at the same path is still refused (#14018).
+    NetworkMountSource(String),
 }
 
 impl ExportDestinationIdentity {
@@ -3301,6 +3757,12 @@ impl ExportDestinationIdentity {
             Self::PersistentVolumeUuid(uuid) => {
                 encoded.push(EXPORT_DESTINATION_IDENTITY_VOLUME_UUID_KIND);
                 encoded.extend_from_slice(uuid);
+            }
+            Self::NetworkMountSource(source) => {
+                encoded.push(EXPORT_DESTINATION_IDENTITY_NETWORK_MOUNT_SOURCE_KIND);
+                let bytes = source.as_bytes();
+                encoded.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                encoded.extend_from_slice(bytes);
             }
             Self::LegacyDevice(_) => unreachable!("legacy identities are decoded for migration, never written"),
         }
@@ -3330,6 +3792,18 @@ impl ExportDestinationIdentity {
             EXPORT_DESTINATION_IDENTITY_VOLUME_UUID_KIND => <[u8; 16]>::try_from(payload)
                 .map(|bytes| Some(Self::PersistentVolumeUuid(bytes)))
                 .map_err(|_| "Stored database export destination volume UUID has an invalid length".to_string()),
+            EXPORT_DESTINATION_IDENTITY_NETWORK_MOUNT_SOURCE_KIND => {
+                let Some((length, source)) = payload.split_at_checked(4) else {
+                    return Err("Stored database export destination mount source is truncated".to_string());
+                };
+                let length = u32::from_le_bytes([length[0], length[1], length[2], length[3]]);
+                if source.len() != length as usize {
+                    return Err("Stored database export destination mount source has an invalid length".to_string());
+                }
+                let source = std::str::from_utf8(source)
+                    .map_err(|_| "Stored database export destination mount source is not valid UTF-8".to_string())?;
+                Ok(Some(Self::NetworkMountSource(source.to_string())))
+            }
             _ => Err("Stored database export destination identity has an unknown kind".to_string()),
         }
     }
@@ -3341,6 +3815,11 @@ impl ExportDestinationIdentity {
             | (Self::Device(expected), Self::LegacyDevice(actual))
             | (Self::LegacyDevice(expected), Self::LegacyDevice(actual)) => expected == actual,
             (Self::PersistentVolumeUuid(expected), Self::PersistentVolumeUuid(actual)) => expected == actual,
+            // The mount source (e.g. `rclone://remote:path`, `nas:/export`)
+            // identifies the backing storage, not the transient device number:
+            // the same source remounted keeps it, a different storage mounted
+            // at the same path changes it (#14018).
+            (Self::NetworkMountSource(expected), Self::NetworkMountSource(actual)) => expected == actual,
             _ => false,
         }
     }
@@ -3395,7 +3874,8 @@ pub async fn verify_export_destination_identity(
         .transpose()?
         .flatten();
     if recorded.as_ref().is_some_and(|identity| {
-        recorded_export_destination_identity_mismatch(identity, export_destination_identity_for_path(dir).as_ref())
+        let current = export_destination_identity_for_path(dir);
+        recorded_export_destination_identity_mismatch(identity, current.as_ref())
     }) {
         return Err(format!("Backup directory now resolves to a different filesystem: {}", dir.display()));
     }
@@ -3500,13 +3980,35 @@ async fn ensure_export_destination_dir(
         save_export_destination_identity(state, dir, current_identity.as_ref()).await?;
         return Ok(current_identity);
     } else {
+        // The recorded state is `Option<Option<_>>`: an outer `Some` means the
+        // directory was previously used by dbx (or recorded when the schedule
+        // was configured); the inner value carries its filesystem identity.
         if recorded_identity.is_some() {
-            return Err(format!(
-                "Backup directory {} is missing. It was configured or previously used for exports to \
-                 this location, so dbx will not recreate it automatically -- if this is on a removable \
-                 or network drive, reconnect it and try again.",
-                dir.display()
-            ));
+            // Recreating the directory is only safe when it would land on the
+            // same filesystem it was recorded on, so compare the recorded
+            // identity against the destination's parent. A missing or
+            // differently-resolving parent keeps the fail-closed behavior for
+            // vanished removable/network mounts (#6327). A matching parent
+            // means dbx removed the empty leaf itself -- backup deletion
+            // cleans up the per-run directory once its files are gone -- and
+            // the next run must be able to recreate it (#13610). A record
+            // without a usable identity cannot prove the filesystem and also
+            // keeps failing closed.
+            let parent_identity = dir.parent().and_then(export_destination_identity_for_path);
+            let same_filesystem = recorded_identity.flatten().is_some_and(|recorded| {
+                // The leaf itself is missing, so the remount check runs against
+                // the parent path — the closest surviving witness of the
+                // filesystem the leaf was recorded on.
+                !recorded_export_destination_identity_mismatch(&recorded, parent_identity.as_ref())
+            });
+            if !same_filesystem {
+                return Err(format!(
+                    "Backup directory {} is missing. It was configured or previously used for exports to \
+                     this location, so dbx will not recreate it automatically -- if this is on a removable \
+                     or network drive, reconnect it and try again.",
+                    dir.display()
+                ));
+            }
         }
         // A run-specific child directory is intentionally new on every
         // scheduled backup. Before creating it, still honor a recorded parent
@@ -3537,11 +4039,168 @@ fn recorded_export_destination_identity_mismatch(
     export_destination_identity_mismatch(Some(recorded), current)
 }
 
-/// Whether a destination's identity, checked once via [`ensure_export_destination_dir`]
-/// and then again against the file dbx actually opened, indicates the mount
-/// changed in between. An unknown expected identity has nothing to compare,
-/// but once an expected identity is known, failing to identify the opened
-/// handle must fail closed rather than allowing an unverified write.
+/// Pure predicate over Linux `statfs` `f_type` magic numbers: the network
+/// filesystem family whose device identity changes on every remount (issue
+/// #14018). Everything else — ext4, btrfs, xfs, tmpfs, overlay, … — keeps the
+/// strict identity check.
+#[cfg(any(target_os = "linux", test))]
+fn linux_f_type_is_network_filesystem(f_type: i64) -> bool {
+    matches!(
+        f_type as u64,
+        0x65735546 // FUSE_SUPER_MAGIC: rclone, sshfs, s3fs, …
+            | 0x00006969 // NFS_SUPER_MAGIC
+            | 0xFF534D42 // CIFS_MAGIC_NUMBER
+            | 0xFE534D42 // SMB2_MAGIC_NUMBER
+            | 0x0000517B // SMB_SUPER_MAGIC
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_f_type_for_path(path: &std::path::Path) -> Option<i64> {
+    let text = path.to_str()?;
+    let Ok(c_path) = std::ffi::CString::new(text) else { return None };
+    let mut buf: nix::libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c_path` is a NUL-terminated string owned by this call and `buf`
+    // is a fully-initialized statfs buffer the kernel fills in.
+    let result = unsafe { nix::libc::statfs(c_path.as_ptr(), &mut buf) };
+    if result != 0 {
+        return None;
+    }
+    Some(buf.f_type as i64)
+}
+
+/// `statfs` on the opened descriptor, so the check describes the file the
+/// writer actually holds rather than the path it was opened from.
+#[cfg(target_os = "linux")]
+fn linux_f_type_for_file(file: &std::fs::File) -> Option<i64> {
+    use std::os::fd::AsRawFd;
+    let mut buf: nix::libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `file` keeps the descriptor valid for the duration of the call
+    // and `buf` is a fully-initialized statfs buffer the kernel fills in.
+    let result = unsafe { nix::libc::fstatfs(file.as_raw_fd(), &mut buf) };
+    if result != 0 {
+        return None;
+    }
+    Some(buf.f_type as i64)
+}
+
+/// Reads `/proc/mounts` and returns the source of the mount entry that
+/// contains `path` (the longest matching mount point wins, so nested mounts
+/// resolve to their own entry). `/proc/mounts` escapes spaces as `\040` and
+/// tabs as `\011`; both are decoded before matching.
+#[cfg(target_os = "linux")]
+fn linux_mount_source_for_path(path: &std::path::Path) -> Option<String> {
+    let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
+    linux_mount_source_from_proc(path, &mounts)
+}
+
+/// Identity of a network-mounted file derived from its device
+/// (`/proc/self/mountinfo` exposes each mount's `major:minor`), not from the
+/// path the writer was given. It therefore agrees with the directory-side
+/// [`ExportDestinationIdentity::NetworkMountSource`] and still fails closed when
+/// the device is no longer a mounted source.
+#[cfg(any(target_os = "linux", test))]
+fn linux_network_file_identity_from_mountinfo(
+    major: u32,
+    minor: u32,
+    mountinfo: &str,
+) -> Option<ExportDestinationIdentity> {
+    let source = linux_mount_source_from_mountinfo(major, minor, mountinfo)?;
+    Some(ExportDestinationIdentity::NetworkMountSource(source))
+}
+
+/// Pure parsing half of [`linux_mount_source_for_device`]: maps `major:minor`
+/// to the source field of the matching `/proc/self/mountinfo` line. Multiple
+/// entries for the same device are accepted only when they agree on the source;
+/// otherwise the identity is treated as unknown and the caller fails closed.
+#[cfg(any(target_os = "linux", test))]
+fn linux_mount_source_from_mountinfo(major: u32, minor: u32, mountinfo: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    for line in mountinfo.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let Some((entry_major, entry_minor)) = fields.get(2).and_then(|field| parse_major_minor(field)) else {
+            continue;
+        };
+        if entry_major != major || entry_minor != minor {
+            continue;
+        }
+        let Some(separator) = fields.iter().position(|field| *field == "-") else {
+            continue;
+        };
+        let Some(source) = fields.get(separator + 2) else {
+            continue;
+        };
+        let source = decode_proc_mounts_field(source);
+        match found.as_deref() {
+            None => found = Some(source),
+            Some(existing) if existing != source => return None,
+            Some(_) => {}
+        }
+    }
+    found
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_major_minor(field: &str) -> Option<(u32, u32)> {
+    let (major, minor) = field.split_once(':')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// Pure parsing half of [`linux_mount_source_for_path`], split out so tests can
+/// feed synthetic `/proc/mounts` content without a Linux filesystem.
+#[cfg(any(target_os = "linux", test))]
+fn linux_mount_source_from_proc(path: &std::path::Path, mounts: &str) -> Option<String> {
+    let mut best: Option<(usize, String)> = None;
+    for line in mounts.lines() {
+        let mut fields = line.split(' ');
+        let (Some(source), Some(mount_point)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let mount_point = decode_proc_mounts_field(mount_point);
+        if source.is_empty() || mount_point.is_empty() {
+            continue;
+        }
+        if path.starts_with(&mount_point) {
+            // Count path components, not slashes: `/` and `/backup` both
+            // contain one slash, so a slash count let the root entry win over
+            // a first-level mount (#14018 review). `>=` keeps the later entry
+            // for the same mount point, which is the visible overmount.
+            let depth = std::path::Path::new(&mount_point).components().count();
+            if best.as_ref().is_none_or(|(best_depth, _)| depth >= *best_depth) {
+                best = Some((depth, source.to_string()));
+            }
+        }
+    }
+    best.map(|(_, source)| source)
+}
+
+/// Decodes the octal escapes (`\040` space, `\011` tab, `\012` newline,
+/// `\134` backslash) that `/proc/mounts` uses inside its source and
+/// mount-point fields. Works on bytes so the rest of a UTF-8 path is copied
+/// verbatim.
+#[cfg(any(target_os = "linux", test))]
+fn decode_proc_mounts_field(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 3 < bytes.len() {
+            let digits = &bytes[i + 1..i + 4];
+            if digits.iter().all(|digit| (b'0'..=b'7').contains(digit)) {
+                let value = digits.iter().fold(0u16, |acc, digit| acc * 8 + u16::from(digit - b'0'));
+                if let Ok(value) = u8::try_from(value) {
+                    decoded.push(value);
+                    i += 4;
+                    continue;
+                }
+            }
+        }
+        decoded.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
 fn export_destination_identity_mismatch(
     expected: Option<&ExportDestinationIdentity>,
     actual: Option<&ExportDestinationIdentity>,
@@ -3551,11 +4210,39 @@ fn export_destination_identity_mismatch(
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn export_destination_identity_for_path(dir: &std::path::Path) -> Option<ExportDestinationIdentity> {
+    // On Linux, network filesystems (FUSE/NFS/CIFS/SMB) get a fresh device
+    // identity on every remount, so their stable identifier is the mount
+    // source string from /proc/mounts instead of st_dev (#14018).
+    #[cfg(target_os = "linux")]
+    if let Some(f_type) = linux_f_type_for_path(dir) {
+        if linux_f_type_is_network_filesystem(f_type) {
+            let source = linux_mount_source_for_path(dir)?;
+            return Some(ExportDestinationIdentity::NetworkMountSource(source));
+        }
+    }
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(dir).ok().map(|metadata| ExportDestinationIdentity::Device(metadata.dev()))
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+/// Identity of the **opened file**. On Linux this must agree with
+/// [`export_destination_identity_for_path`]: network mounts are identified by
+/// their mount source, local files by their device (#14018 review round 4).
+#[cfg(target_os = "linux")]
+fn export_destination_identity_for_file(file: &std::fs::File) -> Option<ExportDestinationIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let device = file.metadata().ok()?.dev();
+    let f_type = linux_f_type_for_file(file)?;
+    if !linux_f_type_is_network_filesystem(f_type) {
+        return Some(ExportDestinationIdentity::Device(device));
+    }
+    let dev = device as nix::libc::dev_t;
+    let major = nix::libc::major(dev);
+    let minor = nix::libc::minor(dev);
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    linux_network_file_identity_from_mountinfo(major, minor, &mountinfo)
+}
+
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "linux")))]
 fn export_destination_identity_for_file(file: &std::fs::File) -> Option<ExportDestinationIdentity> {
     use std::os::unix::fs::MetadataExt;
     file.metadata().ok().map(|metadata| ExportDestinationIdentity::Device(metadata.dev()))
@@ -3688,6 +4375,15 @@ pub async fn export_database_sql_core(
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
 ) -> Result<(), String> {
+    if request.selected_objects.as_ref().is_some_and(Vec::is_empty) {
+        return Err("No objects are selected for export".to_string());
+    }
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        &request.connection_id,
+        crate::query::mysql_data_charset_policy::EXPORT_UNSUPPORTED,
+    )
+    .await?;
     let db_type = state
         .configs
         .read()
@@ -3698,11 +4394,12 @@ pub async fn export_database_sql_core(
     // Keep the large export state machine on the heap. Besides making the
     // caller future small, this prevents the metadata-prefetch locals from
     // exhausting the bounded stack used by test and runtime worker threads.
-    let result = if matches!(db_type, DatabaseType::Postgres) && request.schema.trim().is_empty() {
-        Box::pin(export_postgres_all_schemas_sql_core(state, request, &on_progress)).await
-    } else {
-        Box::pin(export_database_sql_core_inner(state, request, &on_progress)).await
-    };
+    let result =
+        if matches!(db_type, DatabaseType::Postgres | DatabaseType::OpenGauss) && request.schema.trim().is_empty() {
+            Box::pin(export_postgres_all_schemas_sql_core(state, request, &on_progress)).await
+        } else {
+            Box::pin(export_database_sql_core_inner(state, request, &on_progress)).await
+        };
     let metadata_session_id = database_export_client_session_id(&request.export_id);
     if let Err(error) =
         state.close_metadata_session_pool(&request.connection_id, Some(&request.database), &metadata_session_id).await
@@ -3791,6 +4488,20 @@ async fn create_database_export_writer(
         }
         return Ok(DatabaseExportWriter::SplitZip(Box::new(writer)));
     }
+    // Reject unsupported connections before the destination is created or truncated.
+    let nb3_database_type = if request.output_compression == DatabaseExportOutputCompression::Nb3 {
+        let db_type = state
+            .configs
+            .read()
+            .await
+            .get(&request.connection_id)
+            .map(|config| config.db_type)
+            .ok_or_else(|| format!("Connection config not found: {}", request.connection_id))?;
+        crate::navicat_nb3::ensure_supported_database_type(db_type)?;
+        Some(db_type)
+    } else {
+        None
+    };
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -3835,7 +4546,248 @@ async fn create_database_export_writer(
         DatabaseExportOutputCompression::Gzip => {
             DatabaseExportWriter::Gzip(Box::new(GzEncoder::new(BufWriter::new(file), Compression::default())))
         }
+        DatabaseExportOutputCompression::Nb3 => {
+            let db_type = nb3_database_type.expect("Navicat backup database type is validated before opening");
+            let writer = crate::navicat_nb3::Nb3ExportWriter::new(
+                file,
+                export_destination_parent_dir(&request.file_path),
+                db_type,
+                &request.database,
+                &request.schema,
+            )
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(&request.file_path);
+            })?;
+            DatabaseExportWriter::Nb3(Box::new(writer))
+        }
     })
+}
+
+// Phase records are created at the existing emission boundaries, never reconstructed
+// by parsing SQL. Table data stays in the pre-view spool; only view identities and
+// byte ranges are retained in memory across schemas.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PostgresExportRelation {
+    schema: String,
+    name: String,
+}
+
+struct PostgresExportView {
+    relation: PostgresExportRelation,
+    kind: ObjectSourceKind,
+    offset: u64,
+    length: u64,
+}
+
+struct PostgresSchemaExportPhases {
+    tail_path: std::path::PathBuf,
+    view_path: std::path::PathBuf,
+    view_spool: Option<BufWriter<std::fs::File>>,
+    view_bytes: u64,
+    views: Vec<PostgresExportView>,
+    table_structures: Vec<PostgresExportRelation>,
+}
+
+impl PostgresSchemaExportPhases {
+    fn new(directory: &std::path::Path, schema_index: usize) -> Result<Self, String> {
+        let view_path = directory.join(format!("schema-{schema_index}-views.sql"));
+        let view_spool =
+            BufWriter::new(std::fs::File::create(&view_path).map_err(|e| format!("Failed to create view spool: {e}"))?);
+        Ok(Self {
+            tail_path: directory.join(format!("schema-{schema_index}-tail.sql")),
+            view_path,
+            view_spool: Some(view_spool),
+            view_bytes: 0,
+            views: Vec::new(),
+            table_structures: Vec::new(),
+        })
+    }
+
+    fn push_view(&mut self, schema: &str, view: &crate::types::TableInfo, source: &str) -> Result<(), String> {
+        let sql = format!("{source}\n");
+        self.view_spool
+            .as_mut()
+            .expect("collecting view spool")
+            .write_all(sql.as_bytes())
+            .map_err(|e| format!("Failed to write view spool: {e}"))?;
+        self.views.push(PostgresExportView {
+            relation: PostgresExportRelation { schema: schema.to_string(), name: view.name.clone() },
+            kind: if view.table_type.contains("MATERIALIZED") {
+                ObjectSourceKind::MaterializedView
+            } else {
+                ObjectSourceKind::View
+            },
+            offset: self.view_bytes,
+            length: sql.len() as u64,
+        });
+        self.view_bytes += sql.len() as u64;
+        Ok(())
+    }
+}
+
+const POSTGRES_ALL_SCHEMA_VIEW_DEPENDENCIES_SQL: &str =
+    "SELECT DISTINCT src_ns.nspname, src.relname, tgt_ns.nspname, tgt.relname \
+     FROM pg_catalog.pg_depend dep \
+     JOIN pg_catalog.pg_rewrite rewrite ON rewrite.oid = dep.objid \
+     JOIN pg_catalog.pg_class src ON src.oid = rewrite.ev_class \
+     JOIN pg_catalog.pg_namespace src_ns ON src_ns.oid = src.relnamespace \
+     JOIN pg_catalog.pg_class tgt ON tgt.oid = dep.refobjid \
+     JOIN pg_catalog.pg_namespace tgt_ns ON tgt_ns.oid = tgt.relnamespace \
+     WHERE dep.classid = 'pg_catalog.pg_rewrite'::regclass \
+       AND dep.refclassid = 'pg_catalog.pg_class'::regclass \
+       AND src.relkind IN ('v', 'm') \
+       AND src.oid <> tgt.oid \
+       AND src_ns.nspname = ANY($1) \
+       AND tgt_ns.nspname = ANY($1) \
+     ORDER BY 1, 2, 3, 4";
+
+type PostgresExportViewDependency = (PostgresExportRelation, PostgresExportRelation);
+
+async fn list_postgres_all_schema_view_dependencies(
+    state: &crate::connection::AppState,
+    request: &DatabaseExportRequest,
+    schemas: &[String],
+) -> Result<Vec<PostgresExportViewDependency>, String> {
+    let client_session_id = database_export_client_session_id(&request.export_id);
+    let pool_key = state
+        .get_or_create_pool_for_session(&request.connection_id, Some(&request.database), Some(&client_session_id))
+        .await?;
+    let pool = match state.pool_handle(&pool_key).await {
+        Some(crate::connection::PoolKind::Postgres(pool)) => pool,
+        _ => return Err("PostgreSQL view dependency lookup requires a PostgreSQL pool".to_string()),
+    };
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let client = crate::db::postgres::PostgresTextClient::new(&client);
+    let rows = client.query(POSTGRES_ALL_SCHEMA_VIEW_DEPENDENCIES_SQL, &[&schemas]).await.map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                PostgresExportRelation { schema: row.get(0), name: row.get(1) },
+                PostgresExportRelation { schema: row.get(2), name: row.get(3) },
+            )
+        })
+        .collect())
+}
+
+fn sort_postgres_all_schema_views(
+    views: &[PostgresExportRelation],
+    dependencies: &[PostgresExportViewDependency],
+) -> Result<Vec<usize>, String> {
+    let indices: HashMap<_, _> = views.iter().enumerate().map(|(index, relation)| (relation, index)).collect();
+    if indices.len() != views.len() {
+        return Err("Duplicate PostgreSQL view identities in export".to_string());
+    }
+    // Assigned IDs are lossless even for identifiers containing dots/quotes. Only
+    // actually exported views are nodes; tables are ready and omitted objects stay omitted.
+    let names: Vec<_> = (0..views.len()).map(|index| index.to_string()).collect();
+    let mut edges: Vec<_> = dependencies
+        .iter()
+        .filter_map(|(dependent, dependency)| {
+            let child = *indices.get(dependent)?;
+            let parent = *indices.get(dependency)?;
+            (child != parent).then_some((child, parent))
+        })
+        .collect();
+    edges.sort_unstable();
+    edges.dedup();
+    let named_edges: Vec<_> =
+        edges.iter().map(|(child, parent)| (names[*child].clone(), names[*parent].clone())).collect();
+    let order = crate::transfer::sort_table_names_by_dependencies(&names, &named_edges, true);
+    let order: Vec<usize> = order.iter().map(|name| name.parse().expect("assigned numeric view ID")).collect();
+    let mut positions = vec![0; views.len()];
+    for (position, index) in order.iter().enumerate() {
+        positions[*index] = position;
+    }
+    // The shared sorter deliberately appends cycle leftovers. Do not silently
+    // present that fallback as a valid dependency order for an executable dump.
+    if edges.iter().any(|(child, parent)| positions[*parent] >= positions[*child]) {
+        return Err("Cannot order exported PostgreSQL views: cyclic dependencies".to_string());
+    }
+    Ok(order)
+}
+
+/// Preserve the old schema-block layout unless it already places an included
+/// referenced relation after its dependent view. Otherwise moving every routine
+/// to the tail would break valid earlier-schema function -> later table/view cases.
+fn postgres_export_requires_global_view_phase(
+    schemas: &[String],
+    views: &[PostgresExportRelation],
+    table_structures: &[PostgresExportRelation],
+    dependencies: &[PostgresExportViewDependency],
+) -> bool {
+    let schema_positions: HashMap<_, _> = schemas.iter().enumerate().map(|(index, schema)| (schema, index)).collect();
+    let selected_views: HashSet<_> = views.iter().collect();
+    let included_relations: HashSet<_> = views.iter().chain(table_structures).collect();
+    dependencies.iter().any(|(dependent, dependency)| {
+        selected_views.contains(dependent)
+            && included_relations.contains(dependency)
+            && matches!((schema_positions.get(&dependent.schema), schema_positions.get(&dependency.schema)),
+                (Some(child), Some(parent)) if parent > child)
+    })
+}
+
+enum PostgresExportPhase<'a> {
+    Schema(&'a str, &'a str),
+    View(&'a PostgresSchemaExportPhases, &'a PostgresExportView),
+    Tail(&'a std::path::Path),
+}
+
+fn postgres_view_order_or_fallback<W: Write>(
+    order: Result<Vec<usize>, String>,
+    view_count: usize,
+    file: &mut W,
+    fail_on_error: bool,
+    errors: &mut LenientExportErrors,
+) -> Result<Vec<usize>, String> {
+    match order {
+        Ok(order) => Ok(order),
+        Err(error) if error == EXPORT_CANCELLED_ERROR => Err(error),
+        Err(error) => {
+            // Match the single-schema lenient policy: discovery order is a
+            // fallback, visibly annotated and counted, not a valid topology.
+            record_export_error(
+                file,
+                fail_on_error,
+                format!("resolving global view dependency order: {error}"),
+                errors,
+            )?;
+            Ok((0..view_count).collect())
+        }
+    }
+}
+
+fn copy_postgres_export_phase<W: Write>(
+    source: &mut dyn BufRead,
+    destination: &mut W,
+    export_id: &str,
+) -> Result<(), String> {
+    let mut splitter = SqlStatementSplitter::with_options(SqlParsingOptions::for_database_type(DatabaseType::Postgres));
+    let mut chunk = String::new();
+    loop {
+        if is_export_cancelled_now(export_id) {
+            return Err(EXPORT_CANCELLED_ERROR.to_string());
+        }
+        chunk.clear();
+        if source.read_line(&mut chunk).map_err(|e| format!("Failed to read export phase: {e}"))? == 0 {
+            break;
+        }
+        for statement in splitter.push_chunk(&chunk) {
+            if is_export_cancelled_now(export_id) {
+                return Err(EXPORT_CANCELLED_ERROR.to_string());
+            }
+            // Keep statement boundaries intact for split/compressed writers. This
+            // parses existing SQL solely for output units, not to recover phases.
+            writeln!(destination, "{statement};").map_err(|e| format!("Failed to write export phase: {e}"))?;
+        }
+    }
+    for statement in splitter.finish() {
+        if is_export_cancelled_now(export_id) {
+            return Err(EXPORT_CANCELLED_ERROR.to_string());
+        }
+        writeln!(destination, "{statement};").map_err(|e| format!("Failed to write export phase: {e}"))?;
+    }
+    Ok(())
 }
 
 fn postgres_export_schema_names(schemas: Vec<String>) -> Vec<String> {
@@ -3876,6 +4828,13 @@ async fn export_postgres_all_schemas_sql_core(
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
 ) -> Result<(), String> {
+    let collect_phases = request.include_objects
+        && state
+            .configs
+            .read()
+            .await
+            .get(&request.connection_id)
+            .is_some_and(|config| config.db_type == DatabaseType::Postgres);
     let schemas = postgres_export_schema_names(
         crate::schema::list_schemas_core(state, &request.connection_id, &request.database).await?,
     );
@@ -3926,7 +4885,18 @@ async fn export_postgres_all_schemas_sql_core(
                 on_progress(progress);
             };
 
-            Box::pin(export_database_sql_core_inner(state, &schema_request, child_progress)).await?;
+            let mut phases = if collect_phases {
+                Some(PostgresSchemaExportPhases::new(temp_dir.path(), schema_index)?)
+            } else {
+                None
+            };
+            Box::pin(export_database_sql_core_inner_with_phases(
+                state,
+                &schema_request,
+                child_progress,
+                phases.as_mut(),
+            ))
+            .await?;
             let terminal = terminal.lock().expect("export terminal mutex poisoned").clone();
             if terminal.as_ref().is_some_and(|progress| matches!(progress.status, ExportStatus::Cancelled)) {
                 return Err(EXPORT_CANCELLED_ERROR.to_string());
@@ -3944,9 +4914,47 @@ async fn export_postgres_all_schemas_sql_core(
                     });
                 }
             }
-            schema_outputs.push((schema_name.clone(), schema_request.file_path));
+            schema_outputs.push((schema_name.clone(), schema_request.file_path, phases));
         }
 
+        let view_records: Vec<_> = schema_outputs
+            .iter()
+            .filter_map(|(_, _, phases)| phases.as_ref())
+            .flat_map(|phases| phases.views.iter().map(move |view| (phases, view)))
+            .collect();
+        let view_relations: Vec<_> = view_records.iter().map(|(_, view)| view.relation.clone()).collect();
+        let table_structures: Vec<_> = schema_outputs
+            .iter()
+            .filter_map(|(_, _, phases)| phases.as_ref())
+            .flat_map(|phases| phases.table_structures.iter().cloned())
+            .collect();
+        // Even one view may read a table in a later schema. Data-only/omitted
+        // relations are absent from table_structures and cannot trigger reordering.
+        let dependencies = if !view_records.is_empty() && schemas.len() > 1 {
+            await_export_operation(
+                &request.export_id,
+                Box::pin(list_postgres_all_schema_view_dependencies(state, request, &schemas)),
+            )
+            .await
+        } else {
+            Ok(Vec::new())
+        };
+        let requires_global_phase = dependencies.as_ref().is_ok_and(|dependencies| {
+            postgres_export_requires_global_view_phase(&schemas, &view_relations, &table_structures, dependencies)
+        });
+        let view_order =
+            dependencies.and_then(|dependencies| sort_postgres_all_schema_views(&view_relations, &dependencies));
+        // Unknown/invalid metadata in lenient mode must not introduce a new
+        // reordering. Each schema's collected views already have the old local sort.
+        let use_global_phase = requires_global_phase && view_order.is_ok();
+        if is_export_cancelled_now(&request.export_id) {
+            return Err(EXPORT_CANCELLED_ERROR.to_string());
+        }
+        if let Err(error) = &view_order {
+            if error == EXPORT_CANCELLED_ERROR || request.fail_on_error {
+                return Err(error.clone());
+            }
+        }
         let mut file = create_database_export_writer(state, request).await?;
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         writeln!(file, "-- Database export: {}", request.database).map_err(|e| format!("Failed to write file: {e}"))?;
@@ -3961,14 +4969,95 @@ async fn export_postgres_all_schemas_sql_core(
         }
         writeln!(file).map_err(|e| format!("Failed to write file: {e}"))?;
 
-        for (schema_name, path) in schema_outputs {
-            writeln!(file, "-- Schema export: {schema_name}").map_err(|e| format!("Failed to write file: {e}"))?;
-            let mut source = std::io::BufReader::new(
-                std::fs::File::open(path).map_err(|e| format!("Failed to read temporary schema export: {e}"))?,
-            );
-            combine_schema_sql_export(&mut source, &mut file)
-                .map_err(|e| format!("Failed to combine schema export: {e}"))?;
-            writeln!(file).map_err(|e| format!("Failed to write file: {e}"))?;
+        let mut ordering_errors = LenientExportErrors::default();
+        let order = postgres_view_order_or_fallback(
+            view_order,
+            view_records.len(),
+            &mut file,
+            request.fail_on_error,
+            &mut ordering_errors,
+        )?;
+        error_count += ordering_errors.count as u64;
+        if let Some(message) = ordering_errors.first {
+            error_summary = Some(match error_summary.take() {
+                Some(existing) => format!("{existing}; {message}"),
+                None => message,
+            });
+        }
+        let mut output_phases = Vec::new();
+        for (schema_name, path, phases) in &schema_outputs {
+            output_phases.push(PostgresExportPhase::Schema(schema_name, path));
+            if !use_global_phase {
+                if let Some(phases) = phases {
+                    output_phases.extend(phases.views.iter().map(|view| PostgresExportPhase::View(phases, view)));
+                    output_phases.push(PostgresExportPhase::Tail(&phases.tail_path));
+                }
+            }
+        }
+        if use_global_phase {
+            output_phases.extend(order.iter().map(|index| {
+                let (phases, view) = view_records[*index];
+                PostgresExportPhase::View(phases, view)
+            }));
+            output_phases.extend(schema_outputs.iter().filter_map(|(_, _, phases)| {
+                phases.as_ref().map(|phases| PostgresExportPhase::Tail(phases.tail_path.as_path()))
+            }));
+        }
+        let mut view_position = 0;
+        for phase in output_phases {
+            if is_export_cancelled_now(&request.export_id) {
+                return Err(EXPORT_CANCELLED_ERROR.to_string());
+            }
+            match phase {
+                PostgresExportPhase::Schema(schema_name, path) => {
+                    writeln!(file, "-- Schema export: {schema_name}")
+                        .map_err(|e| format!("Failed to write file: {e}"))?;
+                    let mut source = std::io::BufReader::new(
+                        std::fs::File::open(path)
+                            .map_err(|e| format!("Failed to read temporary schema export: {e}"))?,
+                    );
+                    if collect_phases {
+                        copy_postgres_export_phase(&mut source, &mut file, &request.export_id)?;
+                    } else {
+                        combine_schema_sql_export(&mut source, &mut file)
+                            .map_err(|e| format!("Failed to combine schema export: {e}"))?;
+                    }
+                    writeln!(file).map_err(|e| format!("Failed to write file: {e}"))?;
+                }
+                PostgresExportPhase::View(phases, view) => {
+                    let kind = if matches!(view.kind, ObjectSourceKind::MaterializedView) {
+                        "materialized view"
+                    } else {
+                        "view"
+                    };
+                    emit_database_export_running(
+                        &on_progress,
+                        &request.export_id,
+                        format!("{kind}: {}.{}", view.relation.schema, view.relation.name),
+                        view_position,
+                        view_records.len(),
+                        rows_exported,
+                        false,
+                    );
+                    let mut source = std::fs::File::open(&phases.view_path)
+                        .map_err(|e| format!("Failed to read view spool: {e}"))?;
+                    source
+                        .seek(std::io::SeekFrom::Start(view.offset))
+                        .map_err(|e| format!("Failed to seek view spool: {e}"))?;
+                    let mut source = std::io::BufReader::new(source.take(view.length));
+                    copy_postgres_export_phase(&mut source, &mut file, &request.export_id)?;
+                    view_position += 1;
+                }
+                PostgresExportPhase::Tail(path) => {
+                    let mut source = std::io::BufReader::new(
+                        std::fs::File::open(path).map_err(|e| format!("Failed to read export tail: {e}"))?,
+                    );
+                    copy_postgres_export_phase(&mut source, &mut file, &request.export_id)?;
+                }
+            }
+        }
+        if is_export_cancelled_now(&request.export_id) {
+            return Err(EXPORT_CANCELLED_ERROR.to_string());
         }
         file.finish(&export_source_file_name(&request.file_path))?;
         on_progress(ExportProgress {
@@ -3995,6 +5084,15 @@ async fn export_database_sql_core_inner(
     state: &Arc<crate::connection::AppState>,
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
+) -> Result<(), String> {
+    Box::pin(export_database_sql_core_inner_with_phases(state, request, on_progress, None)).await
+}
+
+async fn export_database_sql_core_inner_with_phases(
+    state: &Arc<crate::connection::AppState>,
+    request: &DatabaseExportRequest,
+    on_progress: impl Fn(ExportProgress) + Sync,
+    mut phases: Option<&mut PostgresSchemaExportPhases>,
 ) -> Result<(), String> {
     let _snapshot_keep_alive = if let Some(snapshot_session_id) = request.snapshot_session_id.as_deref() {
         Some(crate::query::keep_manual_transaction_alive(state, snapshot_session_id).await?)
@@ -4143,20 +5241,16 @@ async fn export_database_sql_core_inner(
         .into_iter()
         .filter(|table| !postgres_extension_members.relation_names.contains(&table.name))
         .collect::<Vec<_>>();
+    let selection = DatabaseExportSelection::from_request(request);
     let mut tables: Vec<_> = all_tables
         .iter()
         .filter(|t| !t.table_type.contains("VIEW"))
-        .filter(|t| request.selected_tables.is_empty() || request.selected_tables.contains(&t.name))
+        .filter(|t| selection.includes_relation(&t.name))
         .collect();
     let mut views: Vec<_> = all_tables
         .iter()
         .filter(|t| t.table_type.contains("VIEW"))
-        .filter(|t| {
-            if !request.include_objects {
-                return false;
-            }
-            request.selected_tables.is_empty() || request.selected_tables.contains(&t.name)
-        })
+        .filter(|t| request.include_objects && selection.includes_relation(&t.name))
         .collect();
     if request.include_objects && db_type == DatabaseType::Mysql && views.len() > 1 {
         match list_mysql_export_view_dependencies(state, &request.connection_id, &request.database, &client_session_id)
@@ -4171,36 +5265,66 @@ async fn export_database_sql_core_inner(
             }
         }
     }
-    let postgres_sequences = if request.include_structure && matches!(db_type, DatabaseType::Postgres) {
+    if request.include_objects && db_type == DatabaseType::Postgres && views.len() > 1 {
         match await_export_operation(
             &request.export_id,
-            Box::pin(list_postgres_export_sequences(
-                state,
-                &pool_key,
-                &request.schema,
-                &request.selected_tables,
-                &request.excluded_tables,
-                request.include_objects,
-                request.fail_on_error,
-            )),
+            Box::pin(list_postgres_export_view_dependencies(state, &pool_key, &request.schema)),
         )
         .await
         {
-            Ok(sequences) => sequences,
+            Ok(dependencies) => views = sort_export_views_by_dependencies(&views, &dependencies),
             Err(e) if e == EXPORT_CANCELLED_ERROR => return Err(EXPORT_CANCELLED_ERROR.to_string()),
             Err(e) => {
                 record_export_error(
                     &mut file,
                     request.fail_on_error,
-                    format!("exporting sequences: {e}"),
+                    format!("resolving view dependency order: {e}"),
                     &mut lenient_errors,
                 )?;
-                Vec::new()
             }
         }
-    } else {
-        Vec::new()
-    };
+    }
+    // Table-owned sequences come with the table structure. An empty table list means
+    // the whole schema, so a selection without tables or views lists none of them.
+    // Standalone sequences picked in the object browser are objects of their own.
+    let selected_sequence_names = selection.sequence_names();
+    let sequence_owner_tables = if request.include_structure { selection.relation_names() } else { Vec::new() };
+    let lists_table_sequences =
+        request.include_structure && (exports_whole_schema(request) || !sequence_owner_tables.is_empty());
+    let lists_picked_sequences =
+        request.include_objects && selected_sequence_names.as_ref().is_some_and(|names| !names.is_empty());
+    let postgres_sequences =
+        if matches!(db_type, DatabaseType::Postgres) && (lists_table_sequences || lists_picked_sequences) {
+            match await_export_operation(
+                &request.export_id,
+                Box::pin(list_postgres_export_sequences(
+                    state,
+                    &pool_key,
+                    &request.schema,
+                    &sequence_owner_tables,
+                    selected_sequence_names.as_ref(),
+                    &request.excluded_tables,
+                    request.include_objects,
+                    request.fail_on_error,
+                )),
+            )
+            .await
+            {
+                Ok(sequences) => sequences,
+                Err(e) if e == EXPORT_CANCELLED_ERROR => return Err(EXPORT_CANCELLED_ERROR.to_string()),
+                Err(e) => {
+                    record_export_error(
+                        &mut file,
+                        request.fail_on_error,
+                        format!("exporting sequences: {e}"),
+                        &mut lenient_errors,
+                    )?;
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
 
     // Sort tables by foreign key dependency so referenced (parent) tables are
     // exported before referencing (child) tables. MySQL exports always emit
@@ -4236,10 +5360,14 @@ async fn export_database_sql_core_inner(
     let mut triggers: Vec<crate::types::ObjectInfo> = Vec::new();
     let mut events: Vec<crate::types::ObjectInfo> = Vec::new();
     let mut standalone_sequences: Vec<crate::types::ObjectInfo> = Vec::new();
+    let mut packages: Vec<crate::types::ObjectInfo> = Vec::new();
+    let mut package_bodies: Vec<crate::types::ObjectInfo> = Vec::new();
+    let collects_routines = exports_database_routines(request);
     let collects_schema_wide_objects = exports_schema_wide_objects(request);
     let collects_standalone_sequences = exports_standalone_sequence_objects(request, db_type);
+    let collects_packages = exports_package_objects(request, db_type);
 
-    if collects_schema_wide_objects || collects_standalone_sequences {
+    if collects_routines || collects_schema_wide_objects || collects_standalone_sequences || collects_packages {
         match crate::schema::list_objects_core(
             state,
             &request.connection_id,
@@ -4265,16 +5393,29 @@ async fn export_database_sql_core_inner(
                         }
                         continue;
                     }
-                    if !collects_schema_wide_objects {
+                    if ot == "PACKAGE" || ot == "PACKAGE_BODY" || ot == "PACKAGE BODY" {
+                        if collects_packages {
+                            if ot == "PACKAGE" {
+                                packages.push(obj.clone())
+                            } else {
+                                package_bodies.push(obj.clone())
+                            }
+                        }
                         continue;
                     }
-                    if ot.contains("PROCEDURE") {
+                    if collects_routines && ot.contains("PROCEDURE") {
                         procedures.push(obj.clone());
-                    } else if ot.contains("FUNCTION") {
+                    } else if collects_routines && ot.contains("FUNCTION") {
                         functions.push(obj.clone());
-                    } else if exports_mysql_trigger_objects(db_type) && ot.contains("TRIGGER") {
+                    } else if collects_schema_wide_objects
+                        && exports_mysql_trigger_objects(db_type)
+                        && ot.contains("TRIGGER")
+                    {
                         triggers.push(obj.clone());
-                    } else if exports_mysql_trigger_objects(db_type) && ot.contains("EVENT") {
+                    } else if collects_schema_wide_objects
+                        && exports_mysql_trigger_objects(db_type)
+                        && ot.contains("EVENT")
+                    {
                         events.push(obj.clone());
                     }
                 }
@@ -4284,10 +5425,14 @@ async fn export_database_sql_core_inner(
         }
     }
 
-    if !request.selected_tables.is_empty() {
-        standalone_sequences.retain(|s| request.selected_tables.contains(&s.name));
-        procedures.retain(|p| request.selected_tables.contains(&p.name));
-        functions.retain(|f| request.selected_tables.contains(&f.name));
+    for (kind, objects) in [
+        (DatabaseExportObjectKind::Sequence, &mut standalone_sequences),
+        (DatabaseExportObjectKind::Procedure, &mut procedures),
+        (DatabaseExportObjectKind::Function, &mut functions),
+        (DatabaseExportObjectKind::Package, &mut packages),
+        (DatabaseExportObjectKind::PackageBody, &mut package_bodies),
+    ] {
+        objects.retain(|object| selection.includes_object(kind, object));
     }
 
     // A determinate total must describe the same object categories guarded by
@@ -4297,12 +5442,13 @@ async fn export_database_sql_core_inner(
         &DatabaseExportObjectCounts {
             tables: tables.len(),
             views: views.len(),
-            sequences: postgres_sequences.iter().filter(|sequence| !sequence.created_by_table).count()
-                + standalone_sequences.len(),
+            sequences: postgres_sequences.iter().filter(|sequence| !sequence.created_by_table).count(),
+            standalone_sequences: standalone_sequences.len(),
             extensions: postgres_extensions.len(),
             enums: postgres_enums.len(),
             procedures: procedures.len(),
             functions: functions.len(),
+            packages: packages.len() + package_bodies.len(),
             triggers: triggers.len(),
             events: events.len(),
         },
@@ -4662,6 +5808,14 @@ async fn export_database_sql_core_inner(
                         DdlNormalizeOptions { omit_auto_increment: request.omit_auto_increment },
                     );
                     writeln!(file, "{ddl}\n").map_err(|e| format!("Failed to write file: {e}"))?;
+                    if let Some(phases) = phases.as_deref_mut() {
+                        if !ddl.trim().is_empty() {
+                            phases.table_structures.push(PostgresExportRelation {
+                                schema: request.schema.clone(),
+                                name: table_name.clone(),
+                            });
+                        }
+                    }
                 }
                 Err(e) => {
                     record_export_error(
@@ -4773,6 +5927,7 @@ async fn export_database_sql_core_inner(
                                     request.insert_mode,
                                     request.preserve_original_language,
                                     table_ddl_text.as_deref(),
+                                    request.omit_database_qualifier,
                                 )?;
                                 total_rows_exported += rows.len() as u64;
                                 on_progress(ExportProgress {
@@ -4893,12 +6048,22 @@ async fn export_database_sql_core_inner(
                             request.insert_mode,
                             request.preserve_original_language,
                             table_ddl_text.as_deref(),
+                            request.omit_database_qualifier,
                         )?;
                         total_rows_exported += row_count as u64;
                         if use_keyset {
                             if let Some(last_row) = result.rows.last() {
-                                last_primary_key_values =
-                                    primary_key_indices.iter().map(|&index| last_row[index].clone()).collect();
+                                last_primary_key_values = primary_key_indices
+                                    .iter()
+                                    .map(|&index| {
+                                        let value = &last_row[index];
+                                        let column_type = col_types.get(index).and_then(|value| value.as_deref());
+                                        // Keep the internal marker out of the next WHERE boundary.
+                                        // A spatial key compares using the original canonical value.
+                                        Ok(postgres_spatial_export_hex(value, Some(db_type), column_type)?
+                                            .map_or_else(|| value.clone(), |hex| Value::String(hex.to_string())))
+                                    })
+                                    .collect::<Result<Vec<_>, String>>()?;
                             }
                         } else {
                             offset += row_count as u64;
@@ -4927,7 +6092,8 @@ async fn export_database_sql_core_inner(
         object_index += 1;
     }
 
-    if request.include_structure && !postgres_sequences.is_empty() {
+    // Only listed for the table structure or for picked standalone sequences.
+    if !postgres_sequences.is_empty() {
         for sequence in &postgres_sequences {
             if let Some(sql) = generate_postgres_sequence_post_table_ddl(sequence, &request.schema) {
                 writeln!(file, "{};\n", sql).map_err(|e| format!("Failed to write file: {e}"))?;
@@ -4938,6 +6104,15 @@ async fn export_database_sql_core_inner(
                 writeln!(file, "{};\n", sql).map_err(|e| format!("Failed to write file: {e}"))?;
             }
         }
+    }
+
+    // Only whole-database PostgreSQL exports opt into phase collection. The pre-view
+    // stream is already complete; all remaining ordinary writes belong to the tail.
+    if let Some(phases) = phases.as_deref_mut() {
+        file.finish(&export_source_file_name(&request.file_path))?;
+        let mut tail_request = request.clone();
+        tail_request.file_path = phases.tail_path.display().to_string();
+        file = create_database_export_writer(state, &tail_request).await?;
     }
 
     // Export views (if include_objects)
@@ -4985,7 +6160,11 @@ async fn export_database_sql_core_inner(
                         request.drop_table_if_exists,
                     );
                     if !source.is_empty() {
-                        writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
+                        if let Some(phases) = phases.as_deref_mut() {
+                            phases.push_view(&request.schema, view_info, &source)?;
+                        } else {
+                            writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
+                        }
                     }
                 }
                 Err(e) => {
@@ -5001,17 +6180,27 @@ async fn export_database_sql_core_inner(
             object_index += 1;
         }
 
-        // Export procedures
-        for procedure in &procedures {
+        // Package specs go first because standalone routines may call into them;
+        // package bodies go last because they may call standalone routines.
+        let routine_objects = packages
+            .iter()
+            .map(|object| (object, ObjectSourceKind::Package, "package"))
+            .chain(procedures.iter().map(|object| (object, ObjectSourceKind::Procedure, "procedure")))
+            .chain(functions.iter().map(|object| (object, ObjectSourceKind::Function, "function")))
+            .chain(package_bodies.iter().map(|object| (object, ObjectSourceKind::PackageBody, "package body")));
+        // Oracle's package DDL also carries the body; it is held back for the body's slot
+        // instead of being written with the spec or fetched a second time.
+        let mut deferred_package_bodies: HashMap<String, String> = HashMap::new();
+        for (routine, object_type, kind_label) in routine_objects {
             if is_export_cancelled(&request.export_id).await {
                 return Err("Export cancelled".to_string());
             }
 
-            let proc_name = &procedure.name;
+            let routine_name = &routine.name;
 
             on_progress(ExportProgress {
                 export_id: request.export_id.clone(),
-                current_object: proc_name.clone(),
+                current_object: routine_name.clone(),
                 object_index,
                 total_objects,
                 rows_exported: total_rows_exported,
@@ -5023,24 +6212,42 @@ async fn export_database_sql_core_inner(
                 error_summary: None,
             });
 
-            match crate::schema::get_object_source_core(
-                state,
-                &request.connection_id,
-                &request.database,
-                &request.schema,
-                proc_name,
-                crate::db::ObjectSourceKind::Procedure,
-                procedure.signature.as_deref(),
-                None,
-            )
-            .await
-            {
-                Ok(obj_source) => {
+            let deferred_body = if object_type == ObjectSourceKind::PackageBody {
+                deferred_package_bodies.remove(routine_name)
+            } else {
+                None
+            };
+            let routine_source = match deferred_body {
+                Some(body) => Ok(body),
+                None => crate::schema::get_object_source_core(
+                    state,
+                    &request.connection_id,
+                    &request.database,
+                    &request.schema,
+                    routine_name,
+                    object_type.clone(),
+                    routine.signature.as_deref(),
+                    None,
+                )
+                .await
+                .map(|obj_source| obj_source.source),
+            };
+            match routine_source {
+                Ok(routine_source) => {
+                    let routine_source = if object_type == ObjectSourceKind::Package {
+                        let (spec, body) = crate::object_source_sql::split_package_spec_and_body(&routine_source);
+                        if let Some(body) = body {
+                            deferred_package_bodies.insert(routine_name.clone(), body.to_string());
+                        }
+                        spec.to_string()
+                    } else {
+                        routine_source
+                    };
                     let source = build_database_export_object_source_sql(
                         db_type,
-                        &ObjectSourceKind::Procedure,
-                        proc_name,
-                        &obj_source.source,
+                        &object_type,
+                        routine_name,
+                        &routine_source,
                         &request.schema,
                         request.drop_table_if_exists,
                     );
@@ -5052,7 +6259,7 @@ async fn export_database_sql_core_inner(
                     record_export_error(
                         &mut file,
                         request.fail_on_error,
-                        format!("exporting procedure {proc_name}: {e}"),
+                        format!("exporting {kind_label} {routine_name}: {e}"),
                         &mut lenient_errors,
                     )?;
                 }
@@ -5060,65 +6267,21 @@ async fn export_database_sql_core_inner(
 
             object_index += 1;
         }
-
-        // Export functions
-        for function in &functions {
-            if is_export_cancelled(&request.export_id).await {
-                return Err("Export cancelled".to_string());
-            }
-
-            let func_name = &function.name;
-
-            on_progress(ExportProgress {
-                export_id: request.export_id.clone(),
-                current_object: func_name.clone(),
-                object_index,
-                total_objects,
-                rows_exported: total_rows_exported,
-                total_rows: None,
-                status: ExportStatus::Running,
-                error: None,
-                preparing: false,
-                error_count: 0,
-                error_summary: None,
-            });
-
-            match crate::schema::get_object_source_core(
-                state,
-                &request.connection_id,
-                &request.database,
+        // A body that arrived with its spec but has no listed slot of its own is still written.
+        let mut unlisted_package_bodies: Vec<_> = deferred_package_bodies.into_iter().collect();
+        unlisted_package_bodies.sort();
+        for (name, body) in unlisted_package_bodies {
+            let source = build_database_export_object_source_sql(
+                db_type,
+                &ObjectSourceKind::PackageBody,
+                &name,
+                &body,
                 &request.schema,
-                func_name,
-                crate::db::ObjectSourceKind::Function,
-                function.signature.as_deref(),
-                None,
-            )
-            .await
-            {
-                Ok(obj_source) => {
-                    let source = build_database_export_object_source_sql(
-                        db_type,
-                        &ObjectSourceKind::Function,
-                        func_name,
-                        &obj_source.source,
-                        &request.schema,
-                        request.drop_table_if_exists,
-                    );
-                    if !source.is_empty() {
-                        writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
-                    }
-                }
-                Err(e) => {
-                    record_export_error(
-                        &mut file,
-                        request.fail_on_error,
-                        format!("exporting function {func_name}: {e}"),
-                        &mut lenient_errors,
-                    )?;
-                }
+                request.drop_table_if_exists,
+            );
+            if !source.is_empty() {
+                writeln!(file, "{source}\n").map_err(|e| format!("Failed to write file: {e}"))?;
             }
-
-            object_index += 1;
         }
 
         // Export triggers and events after routines: a trigger body may call a routine,
@@ -5213,6 +6376,11 @@ async fn export_database_sql_core_inner(
     }
 
     file.finish(&export_source_file_name(&request.file_path))?;
+    if let Some(phases) = phases {
+        if let Some(mut spool) = phases.view_spool.take() {
+            spool.flush().map_err(|e| format!("Failed to finalize view spool: {e}"))?;
+        }
+    }
 
     // Emit Done progress
     on_progress(ExportProgress {
@@ -5259,6 +6427,26 @@ fn drop_table_if_exists_sql(table_name: &str, schema: &str, db_type: &DatabaseTy
 /// （#12322）。因此这里与复制/传输路径保持一致，先剥离 definer 再写出；`SQL SECURITY
 /// DEFINER` 保留，导入后的 definer 即为执行导入的用户，与 Navicat 导出的行为一致。
 fn build_database_export_object_source_sql(
+    database_type: DatabaseType,
+    object_type: &ObjectSourceKind,
+    object_name: &str,
+    source: &str,
+    schema: &str,
+    drop_if_exists: bool,
+) -> String {
+    // SQL Server 的 GO 批次包裹由 dbx-sql-core 的 build_export_object_source_sql 统一完成
+    // （#14295），这里不能再包一层，否则会输出 `GO\nGO ... GO\nGO`。
+    build_database_export_object_source_sql_unwrapped(
+        database_type,
+        object_type,
+        object_name,
+        source,
+        schema,
+        drop_if_exists,
+    )
+}
+
+fn build_database_export_object_source_sql_unwrapped(
     database_type: DatabaseType,
     object_type: &ObjectSourceKind,
     object_name: &str,
@@ -5337,28 +6525,31 @@ mod tests {
         concurrent_metadata_prefetch_allowed, database_export_metadata_prefetch_concurrency,
         emit_database_export_cancelled, metadata_prefetch_concurrency, metadata_prefetch_pool_capacity,
         postgres_create_schema_sql, postgres_export_schema_names, set_export_cancelled, snapshot_batch_cancelled,
-        ExportStatus, EXPORT_CANCELLED_ERROR,
+        ExportStatus, EXPORT_CANCELLED_ERROR, EXPORT_DESTINATION_IDENTITY_NETWORK_MOUNT_SOURCE_KIND,
     };
     use super::{
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
-        build_export_insert_statements_excluding, build_export_object_source_sql, build_export_sql_insert,
-        create_database_export_writer, database_export_query_options_for_timeout, database_export_select_sql,
-        database_export_total_objects, decode_unicode_escapes_for_export, drop_table_if_exists_sql,
-        ensure_export_destination_dir, export_destination_identity_mismatch, extract_postgres_deferred_foreign_keys,
-        filter_export_table_infos, format_export_sql_literal, format_export_table_ddl,
-        format_mysql_spatial_export_literal, format_postgres_spatial_export_literal_with_srid,
+        build_export_insert_statements_excluding, build_export_insert_statements_excluding_with_dialect,
+        build_export_object_source_sql, build_export_sql_insert, create_database_export_writer,
+        database_export_query_options_for_timeout, database_export_select_sql, database_export_total_objects,
+        decode_unicode_escapes_for_export, drop_table_if_exists_sql, ensure_export_destination_dir,
+        export_destination_identity_mismatch, extract_postgres_deferred_foreign_keys, filter_export_table_infos,
+        format_export_sql_literal, format_export_table_ddl, format_mysql_spatial_export_literal,
+        format_postgres_spatial_export_literal_with_srid, format_sqlserver_spatial_export_literal,
         format_xugu_spatial_export_literal, generate_postgres_enum_ddl, generate_postgres_extension_ddl,
         generate_postgres_sequence_create_ddl, generate_postgres_sequence_post_table_ddl,
         generate_postgres_sequence_setval_sql, is_dameng_auto_increment_ddl, is_postgres_extension_member_routine,
-        mysql_database_export_preamble, mysql_view_dependencies_from_rows, mysql_view_dependencies_sql,
-        normalize_export_table_ddl, record_export_destination_identity, record_export_error,
-        replace_database_export_select_list, sort_export_views_by_dependencies, split_postgres_export_table_ddl,
-        write_database_export_rows, write_database_export_rows_with_mode, BuildDatabaseSqlExportOptions,
-        BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions, DatabaseExportObjectCounts,
-        DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportedTableSql, PostgresExportEnum,
-        PostgresExportExtension, PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode,
+        linux_f_type_is_network_filesystem, linux_mount_source_from_mountinfo, linux_mount_source_from_proc,
+        linux_network_file_identity_from_mountinfo, mysql_database_export_preamble, mysql_view_dependencies_from_rows,
+        mysql_view_dependencies_sql, normalize_export_table_ddl, record_export_destination_identity,
+        record_export_error, replace_database_export_select_list, sort_export_views_by_dependencies,
+        split_postgres_export_table_ddl, write_database_export_rows, write_database_export_rows_with_mode,
+        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, BuildExportSqlInsertOptions,
+        DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions,
+        ExportDestinationIdentity, ExportedTableSql, PostgresExportEnum, PostgresExportExtension,
+        PostgresExportSequence, PostgresExtensionMembers, SqlInsertDialect, SqlInsertMode,
         DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT, POSTGRES_EXPORT_SEQUENCES_COMPAT_SQL,
-        POSTGRES_EXPORT_SEQUENCES_SQL,
+        POSTGRES_EXPORT_SEQUENCES_SQL, POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL,
     };
     use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
@@ -5549,6 +6740,7 @@ mod tests {
             schema: "public".to_string(),
             file_path: "export.sql".to_string(),
             selected_tables,
+            selected_objects: None,
             excluded_tables: Vec::new(),
             include_structure,
             include_data,
@@ -5556,6 +6748,7 @@ mod tests {
             include_create_database: false,
             drop_table_if_exists: false,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             fail_on_error: false,
             prevent_overwrite: false,
             output_compression: Default::default(),
@@ -5642,6 +6835,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backup_writers_write_after_the_destination_identity_check() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(test_app_state(directory.path()).await);
+        for (name, split_max_mb) in [("plain.sql", None), ("split.sql", Some(1))] {
+            let path = directory.path().join(name);
+            let mut request = export_request(true, true, true, Vec::new());
+            request.file_path = path.to_string_lossy().into_owned();
+            request.split_max_mb = split_max_mb;
+
+            let mut writer = create_database_export_writer(&state, &request).await.expect("writer");
+            writer.write_all(b"SELECT 1;\n").unwrap();
+            writer.finish(name).unwrap();
+
+            assert!(path.is_file(), "{name} should exist after a successful write");
+        }
+    }
+
+    #[tokio::test]
     async fn backup_writer_does_not_overwrite_an_existing_file() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("existing.sql");
@@ -5672,6 +6883,7 @@ mod tests {
             functions: 1,
             triggers: 2,
             events: 1,
+            ..Default::default()
         };
 
         let cases = [
@@ -5700,9 +6912,9 @@ mod tests {
     }
 
     #[test]
-    fn export_progress_total_excludes_schema_routines_for_selected_tables() {
-        // Counts are already filtered to the selected table/view set before
-        // workload calculation; schema-wide routines remain intentionally out.
+    fn export_progress_total_counts_selected_routines_but_not_schema_wide_objects() {
+        // Counts are already filtered to the selection before workload
+        // calculation, so selected routines count while triggers/events stay out.
         let counts = DatabaseExportObjectCounts {
             tables: 1,
             views: 1,
@@ -5713,10 +6925,288 @@ mod tests {
             functions: 5,
             triggers: 2,
             events: 3,
+            ..Default::default()
         };
-        let request = export_request(true, true, true, vec!["users".to_string(), "active_users".to_string()]);
+        let mut request = object_selection_request(vec![
+            selected_object("TABLE", "users", None),
+            selected_object("FUNCTION", "refresh_cache", None),
+        ]);
+        request.include_structure = true;
+        request.include_data = true;
+        assert_eq!(database_export_total_objects(&request, &counts), 14);
 
-        assert_eq!(database_export_total_objects(&request, &counts), 5);
+        // A table-name selection collects no routines, so none are counted either.
+        let table_names = export_request(true, true, true, vec!["users".to_string()]);
+        assert_eq!(database_export_total_objects(&table_names, &counts), 5);
+    }
+
+    #[test]
+    fn export_progress_total_counts_collected_standalone_sequences_and_packages() {
+        // These lists are only filled when their objects are exported, so they always
+        // count, including the objects-only export that used to report 10/7 (#13940).
+        let counts = DatabaseExportObjectCounts {
+            views: 2,
+            standalone_sequences: 3,
+            procedures: 3,
+            functions: 2,
+            packages: 4,
+            ..Default::default()
+        };
+
+        assert_eq!(database_export_total_objects(&export_request(false, false, true, Vec::new()), &counts), 14);
+    }
+
+    fn selected_object(object_type: &str, name: &str, signature: Option<&str>) -> super::DatabaseExportSelectedObject {
+        super::DatabaseExportSelectedObject {
+            object_type: object_type.to_string(),
+            name: name.to_string(),
+            signature: signature.map(str::to_string),
+        }
+    }
+
+    fn object_selection_request(objects: Vec<super::DatabaseExportSelectedObject>) -> DatabaseExportRequest {
+        let mut request = export_request(false, false, true, Vec::new());
+        request.selected_objects = Some(objects);
+        request
+    }
+
+    fn routine_object(object_type: &str, name: &str, signature: Option<&str>) -> ObjectInfo {
+        ObjectInfo {
+            object_type: object_type.to_string(),
+            signature: signature.map(str::to_string),
+            ..routine(name, "")
+        }
+    }
+
+    #[test]
+    fn routines_and_packages_follow_include_objects_and_typed_selections() {
+        use super::{exports_database_routines, exports_package_objects};
+
+        let picked = || vec![selected_object("PROCEDURE", "PRC_CLEAR_ORDERS", None)];
+        let cases = [
+            (
+                "objects only, object browser selection",
+                DatabaseType::Oracle,
+                object_selection_request(picked()),
+                true,
+                true,
+            ),
+            (
+                "objects only, whole schema",
+                DatabaseType::Oracle,
+                export_request(false, false, true, Vec::new()),
+                true,
+                true,
+            ),
+            // Table names carry no type, so they must not pull in routines of the same name.
+            (
+                "table name selection",
+                DatabaseType::Oracle,
+                export_request(true, true, true, vec!["ORDERS".to_string()]),
+                false,
+                false,
+            ),
+            ("structure only", DatabaseType::Oracle, export_request(true, false, false, Vec::new()), false, false),
+            ("oceanbase oracle", DatabaseType::OceanbaseOracle, object_selection_request(picked()), true, true),
+            ("dameng", DatabaseType::Dameng, object_selection_request(picked()), true, true),
+            ("postgres has no packages", DatabaseType::Postgres, object_selection_request(picked()), true, false),
+        ];
+        for (name, db_type, request, routines, packages) in cases {
+            assert_eq!(exports_database_routines(&request), routines, "{name}");
+            assert_eq!(exports_package_objects(&request, db_type), packages, "{name}");
+        }
+    }
+
+    #[test]
+    fn selections_match_objects_by_type_name_and_signature() {
+        use super::{DatabaseExportObjectKind as Kind, DatabaseExportSelection};
+
+        let orders_table = selected_object("TABLE", "orders", None);
+        let orders_function = selected_object("FUNCTION", "orders", Some("integer"));
+        let cases = [
+            (
+                "a table does not select a function of the same name",
+                object_selection_request(vec![orders_table.clone()]),
+                Kind::Function,
+                routine_object("FUNCTION", "orders", Some("integer")),
+                false,
+            ),
+            (
+                "a function does not select a procedure of the same name",
+                object_selection_request(vec![selected_object("FUNCTION", "sync", None)]),
+                Kind::Procedure,
+                routine_object("PROCEDURE", "sync", None),
+                false,
+            ),
+            (
+                "a picked overload selects that overload",
+                object_selection_request(vec![orders_function.clone()]),
+                Kind::Function,
+                routine_object("FUNCTION", "orders", Some(" integer ")),
+                true,
+            ),
+            (
+                "a picked overload does not select another one",
+                object_selection_request(vec![orders_function.clone()]),
+                Kind::Function,
+                routine_object("FUNCTION", "orders", Some("integer, text")),
+                false,
+            ),
+            (
+                "a routine picked without a signature selects every overload",
+                object_selection_request(vec![selected_object("PROCEDURE", "PRC_CLEAR_ORDERS", None)]),
+                Kind::Procedure,
+                routine_object("PROCEDURE", "PRC_CLEAR_ORDERS", Some("p_days NUMBER")),
+                true,
+            ),
+            (
+                "a package selects its body",
+                object_selection_request(vec![selected_object("PACKAGE", "PKG_ORDER", None)]),
+                Kind::PackageBody,
+                routine_object("PACKAGE BODY", "PKG_ORDER", None),
+                true,
+            ),
+            (
+                "a package body does not select its spec",
+                object_selection_request(vec![selected_object("PACKAGE_BODY", "PKG_ORDER", None)]),
+                Kind::Package,
+                routine_object("PACKAGE", "PKG_ORDER", None),
+                false,
+            ),
+            (
+                "a sequence is matched as a sequence",
+                object_selection_request(vec![selected_object("SEQUENCE", "SEQ_ORDER", None)]),
+                Kind::Sequence,
+                routine_object("SEQUENCE", "SEQ_ORDER", None),
+                true,
+            ),
+            (
+                "table names do not select a routine of the same name",
+                export_request(true, true, true, vec!["orders".to_string()]),
+                Kind::Function,
+                routine_object("FUNCTION", "orders", None),
+                false,
+            ),
+            (
+                "table names still select a standalone sequence",
+                export_request(true, false, true, vec!["SEQ_ORDER".to_string()]),
+                Kind::Sequence,
+                routine_object("SEQUENCE", "SEQ_ORDER", None),
+                true,
+            ),
+            (
+                "the whole schema selects everything",
+                export_request(false, false, true, Vec::new()),
+                Kind::Function,
+                routine_object("FUNCTION", "orders", None),
+                true,
+            ),
+        ];
+        for (name, request, kind, object, expected) in cases {
+            assert_eq!(
+                DatabaseExportSelection::from_request(&request).includes_object(kind, &object),
+                expected,
+                "{name}"
+            );
+        }
+
+        let functions_only = DatabaseExportSelection::from_request(&object_selection_request(vec![orders_function]));
+        assert!(!functions_only.includes_relation("orders"), "a function does not select a table of the same name");
+        assert!(functions_only.relation_names().is_empty());
+        let tables_and_views = DatabaseExportSelection::from_request(&object_selection_request(vec![
+            orders_table,
+            selected_object("VIEW", "v_orders", None),
+            selected_object("MATERIALIZED_VIEW", "mv_orders", None),
+        ]));
+        for relation in ["orders", "v_orders", "mv_orders"] {
+            assert!(tables_and_views.includes_relation(relation), "{relation}");
+        }
+    }
+
+    #[test]
+    fn postgres_sequences_follow_their_table_or_an_object_browser_pick() {
+        use super::exports_postgres_sequence;
+        use std::collections::HashSet;
+
+        let none = HashSet::new();
+        let orders = HashSet::from(["orders"]);
+        let picked = HashSet::from(["invoice_seq".to_string()]);
+        let nothing_picked = HashSet::new();
+        let cases = [
+            ("whole schema, owned", "orders_id_seq", Some("orders"), &none, true, None, true),
+            ("whole schema, standalone", "invoice_seq", None, &none, true, None, true),
+            ("whole schema without objects, standalone", "invoice_seq", None, &none, false, None, false),
+            ("table names, owned by a picked table", "orders_id_seq", Some("orders"), &orders, true, None, true),
+            ("table names, standalone", "invoice_seq", None, &orders, true, None, false),
+            ("object pick, standalone", "invoice_seq", None, &none, true, Some(&picked), true),
+            ("object pick, other standalone", "other_seq", None, &none, true, Some(&picked), false),
+            ("object pick without objects", "invoice_seq", None, &none, false, Some(&picked), false),
+            (
+                "object pick, owned by an unpicked table",
+                "orders_id_seq",
+                Some("orders"),
+                &none,
+                true,
+                Some(&picked),
+                false,
+            ),
+            (
+                "object pick, owned by a picked table",
+                "orders_id_seq",
+                Some("orders"),
+                &orders,
+                true,
+                Some(&nothing_picked),
+                true,
+            ),
+        ];
+        for (name, sequence, owner, selected_tables, include_objects, selected_sequences, expected) in cases {
+            assert_eq!(
+                exports_postgres_sequence(sequence, owner, selected_tables, &none, include_objects, selected_sequences),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn object_selections_never_fall_back_to_the_whole_schema() {
+        use super::{exports_oracle_sequence_objects, exports_schema_wide_objects, exports_whole_schema};
+
+        let mut request = object_selection_request(vec![selected_object("FUNCTION", "orders", None)]);
+        request.include_structure = true;
+        assert!(!exports_whole_schema(&request));
+        assert!(!exports_schema_wide_objects(&request));
+        assert!(!exports_oracle_sequence_objects(&request, DatabaseType::Oracle));
+
+        let empty: DatabaseExportRequest = serde_json::from_value(json!({
+            "exportId": "export-1",
+            "connectionId": "connection-1",
+            "database": "app",
+            "schema": "public",
+            "filePath": "app.sql",
+            "selectedObjects": [],
+            "includeStructure": false,
+            "includeData": false,
+            "includeObjects": true,
+            "batchSize": 1000
+        }))
+        .expect("deserialize an empty object selection");
+        assert_eq!(empty.selected_objects, Some(Vec::new()));
+        assert!(!exports_whole_schema(&empty), "an empty selection is not the whole schema");
+    }
+
+    #[tokio::test]
+    async fn empty_object_selection_is_rejected_before_exporting() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(test_app_state(directory.path()).await);
+        let mut request = object_selection_request(Vec::new());
+        request.file_path = directory.path().join("empty.sql").to_string_lossy().into_owned();
+
+        let error = super::export_database_sql_core(&state, &request, |_| {}).await.unwrap_err();
+
+        assert_eq!(error, "No objects are selected for export");
+        assert!(!directory.path().join("empty.sql").exists());
     }
 
     #[test]
@@ -5914,6 +7404,68 @@ mod tests {
                 true
             ),
             "CREATE DEFINER=`root`@`%` VIEW public.v AS SELECT 1;"
+        );
+    }
+
+    #[test]
+    fn sqlserver_export_wraps_batch_scoped_objects_with_go() {
+        let cases = [
+            (ObjectSourceKind::View, "CREATE VIEW [dbo].[v] AS SELECT 1;"),
+            (ObjectSourceKind::Procedure, "CREATE PROCEDURE [dbo].[p] AS SELECT 1;"),
+            (ObjectSourceKind::Function, "CREATE FUNCTION [dbo].[f]() RETURNS INT AS BEGIN RETURN 1 END;"),
+            (ObjectSourceKind::Trigger, "CREATE TRIGGER [dbo].[trg] ON [dbo].[orders] AFTER INSERT AS SELECT 1;"),
+        ];
+        for (kind, source) in cases {
+            let ddl =
+                build_database_export_object_source_sql(DatabaseType::SqlServer, &kind, "obj", source, "dbo", false);
+            assert_eq!(ddl, format!("GO\n{source}\nGO"), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn sqlserver_export_keeps_non_batch_scoped_objects_unchanged() {
+        let source = "CREATE SEQUENCE [dbo].[s] START WITH 1;";
+        let ddl = build_database_export_object_source_sql(
+            DatabaseType::SqlServer,
+            &ObjectSourceKind::Sequence,
+            "s",
+            source,
+            "dbo",
+            false,
+        );
+        assert_eq!(ddl, source);
+    }
+
+    #[test]
+    fn sqlserver_export_batches_place_each_create_first() {
+        let view = build_database_export_object_source_sql(
+            DatabaseType::SqlServer,
+            &ObjectSourceKind::View,
+            "v",
+            "CREATE VIEW [dbo].[v] AS SELECT 1;",
+            "dbo",
+            false,
+        );
+        let trigger = build_database_export_object_source_sql(
+            DatabaseType::SqlServer,
+            &ObjectSourceKind::Trigger,
+            "trg",
+            "CREATE TRIGGER [dbo].[trg] ON [dbo].[orders] AFTER INSERT AS SELECT 1;",
+            "dbo",
+            false,
+        );
+        let script = format!(
+            "CREATE TABLE [dbo].[orders] ([id] int);\nINSERT INTO [dbo].[orders] VALUES (1);\n{view}\n{trigger}\n"
+        );
+
+        let batches = crate::sql::split_sql_batches(&script);
+        assert!(
+            batches.iter().any(|batch| batch.trim_start().starts_with("CREATE VIEW [dbo].[v]")),
+            "view must start its own batch: {batches:?}"
+        );
+        assert!(
+            batches.iter().any(|batch| batch.trim_start().starts_with("CREATE TRIGGER [dbo].[trg]")),
+            "trigger must start its own batch: {batches:?}"
         );
     }
 
@@ -6122,6 +7674,7 @@ mod tests {
     #[test]
     fn postgres_metadata_prefetch_reserves_pool_capacity() {
         assert_eq!(database_export_metadata_prefetch_concurrency(DatabaseType::Postgres), 4);
+        assert_eq!(database_export_metadata_prefetch_concurrency(DatabaseType::OpenGauss), 4);
         assert_eq!(database_export_metadata_prefetch_concurrency(DatabaseType::Mysql), 8);
     }
 
@@ -6221,6 +7774,172 @@ mod tests {
         let sorted = sort_export_views_by_dependencies(&views, &dependencies);
 
         assert_eq!(sorted.iter().map(|view| view.name.as_str()).collect::<Vec<_>>(), vec!["z_view", "a_view"]);
+    }
+
+    fn postgres_view_relation(schema: &str, name: &str) -> super::PostgresExportRelation {
+        super::PostgresExportRelation { schema: schema.to_string(), name: name.to_string() }
+    }
+
+    #[test]
+    fn postgres_all_schema_view_order_follows_objects_not_schema_blocks() {
+        let views = vec![
+            postgres_view_relation("a", "last"),
+            postgres_view_relation("z", "middle"),
+            postgres_view_relation("a", "first"),
+        ];
+        let dependencies = vec![(views[0].clone(), views[1].clone()), (views[1].clone(), views[2].clone())];
+        assert_eq!(super::sort_postgres_all_schema_views(&views, &dependencies).unwrap(), vec![2, 1, 0]);
+    }
+
+    #[test]
+    fn postgres_all_schema_view_order_preserves_qualified_identity_and_selection() {
+        let views = vec![
+            postgres_view_relation("a.b", "c"),
+            postgres_view_relation("a", "b.c"),
+            postgres_view_relation("a", "same"),
+            postgres_view_relation("z", "same"),
+            postgres_view_relation("Quoted\"Schema", "Case.Sensitive"),
+        ];
+        let mut dependencies = vec![
+            (views[0].clone(), views[1].clone()),
+            (views[2].clone(), views[3].clone()),
+            (views[2].clone(), views[3].clone()), // duplicate edge
+            (views[4].clone(), views[4].clone()), // rewrite rule's own relation
+            (views[4].clone(), postgres_view_relation("outside", "omitted")),
+            (postgres_view_relation("outside", "unselected"), views[0].clone()),
+        ];
+        let order = super::sort_postgres_all_schema_views(&views, &dependencies).unwrap();
+        assert_eq!(order, vec![1, 3, 4, 0, 2]);
+        dependencies.reverse();
+        assert_eq!(super::sort_postgres_all_schema_views(&views, &dependencies).unwrap(), order);
+        assert_eq!(super::sort_postgres_all_schema_views(&views, &[]).unwrap(), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn postgres_all_schema_view_order_rejects_cycles_and_duplicate_nodes() {
+        let views = vec![postgres_view_relation("a", "v"), postgres_view_relation("z", "v")];
+        let cycle = vec![(views[0].clone(), views[1].clone()), (views[1].clone(), views[0].clone())];
+        assert!(super::sort_postgres_all_schema_views(&views, &cycle).unwrap_err().contains("cyclic"));
+        assert!(super::sort_postgres_all_schema_views(&[views[0].clone(), views[0].clone()], &[]).is_err());
+    }
+
+    #[test]
+    fn postgres_all_schema_layout_preserves_valid_schema_blocks() {
+        let schemas = vec!["a".to_string(), "z".to_string()];
+        let views = vec![postgres_view_relation("a", "base"), postgres_view_relation("z", "report")];
+        let tables = vec![postgres_view_relation("z", "items")];
+        // No relation edges: a.function -> z.table DEFAULT / z.view must retain
+        // a's tail before z's prefix/views. Function edges are deliberately not modeled.
+        assert!(!super::postgres_export_requires_global_view_phase(&schemas, &views, &tables, &[]));
+        // A forward cross-schema relation edge does not justify disturbing that layout.
+        let forward = vec![(views[1].clone(), views[0].clone())];
+        assert!(!super::postgres_export_requires_global_view_phase(&schemas, &views, &tables, &forward));
+        let local = vec![(views[1].clone(), tables[0].clone())];
+        assert!(!super::postgres_export_requires_global_view_phase(&schemas, &views, &tables, &local));
+    }
+
+    #[test]
+    fn postgres_all_schema_layout_reorders_backward_included_view_or_table_edges() {
+        let schemas = vec!["a".to_string(), "z".to_string()];
+        let views = vec![postgres_view_relation("a", "report"), postgres_view_relation("z", "base")];
+        let tables = vec![postgres_view_relation("z", "items")];
+        let backward_view = vec![(views[0].clone(), views[1].clone())];
+        assert!(super::postgres_export_requires_global_view_phase(&schemas, &views, &tables, &backward_view));
+        let backward_table = vec![(views[0].clone(), tables[0].clone())];
+        assert!(
+            super::postgres_export_requires_global_view_phase(&schemas, &views[..1], &tables, &backward_table),
+            "even a single exported view can require a later table structure"
+        );
+    }
+
+    #[test]
+    fn postgres_all_schema_layout_ignores_omitted_and_data_only_relations() {
+        let schemas = vec!["a".to_string(), "z".to_string()];
+        let views = vec![postgres_view_relation("a", "report")];
+        let later_table = postgres_view_relation("z", "items");
+        let dependencies = vec![(views[0].clone(), later_table.clone())];
+        // An excluded/extension-owned/failed-DDL/data-only table is not a created
+        // relation. Moving schema blocks cannot supply its missing structure.
+        assert!(!super::postgres_export_requires_global_view_phase(&schemas, &views, &[], &dependencies));
+        let omitted_view = vec![(postgres_view_relation("a", "unselected"), later_table.clone())];
+        assert!(!super::postgres_export_requires_global_view_phase(&schemas, &views, &[later_table], &omitted_view));
+    }
+
+    #[test]
+    fn postgres_all_schema_view_order_failure_policy_is_explicit() {
+        let mut file = Vec::new();
+        let mut errors = LenientExportErrors::default();
+        let failure = "catalog lookup failed".to_string();
+        assert!(super::postgres_view_order_or_fallback(Err(failure.clone()), 2, &mut file, true, &mut errors).is_err());
+        assert!(file.is_empty());
+        assert_eq!(errors.count, 0);
+        assert_eq!(
+            super::postgres_view_order_or_fallback(Err(failure), 2, &mut file, false, &mut errors).unwrap(),
+            vec![0, 1]
+        );
+        assert_eq!(errors.count, 1);
+        assert!(String::from_utf8(file.clone())
+            .unwrap()
+            .contains("-- ERROR resolving global view dependency order: catalog lookup failed"));
+        let before = file.clone();
+        assert_eq!(
+            super::postgres_view_order_or_fallback(
+                Err(super::EXPORT_CANCELLED_ERROR.to_string()),
+                2,
+                &mut file,
+                false,
+                &mut errors
+            )
+            .unwrap_err(),
+            super::EXPORT_CANCELLED_ERROR
+        );
+        assert_eq!(file, before, "cancellation is never converted into a lenient success");
+        assert_eq!(errors.count, 1);
+    }
+
+    #[test]
+    fn postgres_all_schema_view_spool_keeps_exact_ddl_ranges() {
+        use std::io::Seek;
+        let dir = tempfile::tempdir().unwrap();
+        let mut phases = super::PostgresSchemaExportPhases::new(dir.path(), 0).unwrap();
+        let sources = [
+            "CREATE VIEW \"a.b\".\"c\" AS SELECT 'x;y' AS value;",
+            "CREATE MATERIALIZED VIEW a.\"b.c\" AS SELECT 42 AS value;",
+        ];
+        phases.push_view("a.b", &table("c", "VIEW"), sources[0]).unwrap();
+        phases.push_view("a", &table("b.c", "MATERIALIZED VIEW"), sources[1]).unwrap();
+        phases.view_spool.take().unwrap().flush().unwrap();
+        assert!(matches!(phases.views[1].kind, ObjectSourceKind::MaterializedView));
+        let mut output = Vec::new();
+        for index in [1, 0] {
+            let view = &phases.views[index];
+            let mut file = std::fs::File::open(&phases.view_path).unwrap();
+            file.seek(std::io::SeekFrom::Start(view.offset)).unwrap();
+            let mut source = std::io::BufReader::new(file.take(view.length));
+            super::copy_postgres_export_phase(&mut source, &mut output, "view-spool-unit").unwrap();
+        }
+        assert_eq!(String::from_utf8(output).unwrap(), format!("{}\n{}\n", sources[1], sources[0]));
+    }
+
+    #[tokio::test]
+    async fn postgres_all_schema_phase_copy_observes_cancellation() {
+        let export_id = uuid::Uuid::new_v4().to_string();
+        super::set_export_cancelled(&export_id).await;
+        let mut source = std::io::Cursor::new("CREATE TABLE a.t (id int);\n");
+        let mut output = Vec::new();
+        let result = super::copy_postgres_export_phase(&mut source, &mut output, &export_id);
+        super::clear_export_cancelled(&export_id).await;
+        assert_eq!(result.unwrap_err(), super::EXPORT_CANCELLED_ERROR);
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn postgres_view_dependency_query_reads_view_and_materialized_view_rules_in_one_schema() {
+        let sql = POSTGRES_EXPORT_VIEW_DEPENDENCIES_SQL;
+        assert!(sql.contains("dep.classid = 'pg_catalog.pg_rewrite'::regclass"), "{sql}");
+        assert!(sql.contains("src.relkind IN ('v', 'm')"), "{sql}");
+        assert!(sql.contains("src.oid <> tgt.oid"), "{sql}");
+        assert!(sql.contains("src_ns.nspname = $1") && sql.contains("tgt_ns.nspname = $1"), "{sql}");
     }
 
     #[test]
@@ -6419,6 +8138,113 @@ mod tests {
     }
 
     #[test]
+    fn postgres_spatial_export_type_preserves_quoted_identifier_boundaries() {
+        for data_type in
+            ["geometry", "GEOGRAPHY(Point,4326)", "spatial.geometry", "\"spatial.schema(1)\".\"geometry\"(PointZ,4326)"]
+        {
+            assert!(super::is_postgres_spatial_export_type(data_type), "{data_type}");
+        }
+        for data_type in [
+            "text",
+            "geometry[]",
+            "geometry(Point,4326)[]",
+            "geography(Point,4326)[]",
+            "\"spatial\".\"geometry\"(PointZ,4326)[]",
+            "\"fake.geometry\"",
+            "spatial.\"fake.geometry\"",
+            "\"GEOMETRY\"",
+        ] {
+            assert!(!super::is_postgres_spatial_export_type(data_type), "{data_type}");
+        }
+    }
+
+    #[test]
+    fn postgres_spatial_database_export_preserves_canonical_ewkb_in_both_dialects() {
+        let hex = "0101000020E6100000000000000000F03F0000000000000040";
+        for dialect in [SqlInsertDialect::Source, SqlInsertDialect::Standard] {
+            let mut output = Vec::new();
+            super::write_database_export_rows_with_mode(
+                &mut output,
+                &[vec![json!(format!("DBX_PG_EWKB:{hex}")), Value::Null, json!("DBX_PG_EWKB:not geometry")]],
+                &["shape".into(), "location".into(), "label".into()],
+                &[Some("geometry(Point,4326)".into()), Some("geography".into()), Some("text".into())],
+                &[],
+                "places",
+                "public",
+                &DatabaseType::Postgres,
+                dialect,
+                Default::default(),
+                false,
+                None,
+                false,
+            )
+            .unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains(&format!("VALUES ('{hex}', NULL, 'DBX_PG_EWKB:not geometry');")), "{output}");
+        }
+    }
+
+    #[test]
+    fn postgres_spatial_database_export_rejects_corrupt_internal_values() {
+        for value in ["DBX_PG_EWKB:", "DBX_PG_EWKB:0", "DBX_PG_EWKB:xx", "DBX_PG_EWKB:00');--"] {
+            let mut output = Vec::new();
+            let error = write_database_export_rows(
+                &mut output,
+                &[vec![json!(value)]],
+                &["shape".into()],
+                &[Some("geometry".into())],
+                &[],
+                "places",
+                "public",
+                &DatabaseType::Postgres,
+                SqlInsertDialect::Source,
+            )
+            .unwrap_err();
+            assert!(error.contains("expected hexadecimal EWKB"));
+            assert!(output.is_empty());
+        }
+        let marker = json!("DBX_PG_EWKB:0101000000000000000000F03F0000000000000040");
+        for (db, column_type) in [
+            (Some(DatabaseType::Mysql), Some("geometry")),
+            (Some(DatabaseType::Xugu), Some("geometry")),
+            (Some(DatabaseType::Postgres), Some("text")),
+            (Some(DatabaseType::Postgres), Some("geometry(Point,4326)[]")),
+            (Some(DatabaseType::Postgres), Some("geography(Point,4326)[]")),
+            (Some(DatabaseType::Postgres), None),
+            (None, Some("geometry")),
+        ] {
+            assert!(super::postgres_spatial_export_hex(&marker, db, column_type).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn postgres_spatial_export_projection_handles_qualified_types_and_quoted_identifiers() {
+        let columns = vec!["id".into(), "shape\"quoted".into(), "location".into(), "label".into()];
+        let types = vec![
+            Some("int".into()),
+            Some("\"spatial\".\"geometry\"(PointZ,4326)".into()),
+            Some("spatial.geography".into()),
+            Some("text".into()),
+        ];
+        let sql = database_export_select_sql(&columns, &types, "places", "public", &DatabaseType::Postgres);
+        assert_eq!(sql, "SELECT \"id\", 'DBX_PG_EWKB:' || \"shape\"\"quoted\"::text, 'DBX_PG_EWKB:' || \"location\"::text, \"label\" FROM \"public\".\"places\"");
+        let paged = crate::transfer::keyset_pagination_sql_with_identifier_quote(
+            &columns,
+            "places",
+            "public",
+            &DatabaseType::Postgres,
+            &["id".into()],
+            &[json!(7)],
+            2,
+            None,
+        );
+        let rewritten = replace_database_export_select_list(paged, &columns, &types, &DatabaseType::Postgres);
+        assert!(rewritten.contains("WHERE \"id\" > 7"), "{rewritten}");
+        assert!(rewritten.contains("ORDER BY \"id\" ASC LIMIT 2"), "{rewritten}");
+        assert!(rewritten.contains("'DBX_PG_EWKB:' || \"location\"::text"));
+    }
+
+    #[test]
     fn xugu_spatial_export_selects_ewkt_to_preserve_srid() {
         let sql = database_export_select_sql(
             &["id".to_string(), "shape".to_string(), "location".to_string(), "name".to_string()],
@@ -6496,6 +8322,179 @@ mod tests {
                 r#"INSERT INTO "app"."places" ("shape") VALUES (ST_GeomFromEWKT('SRID=3857;POINT(1 2)'));"#.to_string()
             ]
         );
+    }
+
+    #[test]
+    fn sqlserver_spatial_export_literal_formatting() {
+        assert_eq!(
+            format_sqlserver_spatial_export_literal(
+                &json!("POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some("geometry")
+            ),
+            Some("geometry::STGeomFromText('POINT (1 2)', 0)".to_string())
+        );
+        assert_eq!(
+            format_sqlserver_spatial_export_literal(
+                &json!("POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some("geography")
+            ),
+            Some("geography::STGeomFromText('POINT (1 2)', 4326)".to_string())
+        );
+        assert_eq!(
+            format_sqlserver_spatial_export_literal(
+                &json!("SRID=3857;POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some("geometry")
+            ),
+            Some("geometry::STGeomFromText('POINT (1 2)', 3857)".to_string())
+        );
+        assert_eq!(
+            format_sqlserver_spatial_export_literal(
+                &json!("SRID=4326;POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some("geography")
+            ),
+            Some("geography::STGeomFromText('POINT (1 2)', 4326)".to_string())
+        );
+        assert_eq!(
+            format_sqlserver_spatial_export_literal(
+                &json!("geometry::STGeomFromText('POINT (1 2)', 0)"),
+                Some(DatabaseType::SqlServer),
+                Some("geometry")
+            ),
+            Some("geometry::STGeomFromText('POINT (1 2)', 0)".to_string())
+        );
+        assert_eq!(
+            format_sqlserver_spatial_export_literal(&Value::Null, Some(DatabaseType::SqlServer), Some("geometry")),
+            Some("NULL".to_string())
+        );
+        assert_eq!(
+            format_sqlserver_spatial_export_literal(
+                &json!("POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some("[sys].[geometry]")
+            ),
+            Some("geometry::STGeomFromText('POINT (1 2)', 0)".to_string())
+        );
+        assert_eq!(
+            format_sqlserver_spatial_export_literal(
+                &json!("POINT (1 2)"),
+                Some(DatabaseType::SqlServer),
+                Some("sys.geography")
+            ),
+            Some("geography::STGeomFromText('POINT (1 2)', 4326)".to_string())
+        );
+        assert!(format_sqlserver_spatial_export_literal(
+            &json!("POINT (1 2)"),
+            Some(DatabaseType::SqlServer),
+            Some("varchar")
+        )
+        .is_none());
+        assert!(format_sqlserver_spatial_export_literal(
+            &json!("POINT (1 2)"),
+            Some(DatabaseType::Postgres),
+            Some("geometry")
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn sqlserver_spatial_export_with_real_driver_mixed_srid() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            schema: Some("dbo".to_string()),
+            table_name: Some("spatial_data".to_string()),
+            qualified_table_name: None,
+            columns: vec!["geom".to_string(), "geog".to_string()],
+            column_types: vec![Some("geometry".to_string()), Some("geography".to_string())],
+            column_extras: vec![None, None],
+            spatial_columns: vec![
+                SpatialColumn { column_index: 0, srid: Some(0) },
+                SpatialColumn { column_index: 1, srid: Some(4326) },
+            ],
+            // Real driver result shape: rows contain plain WKT without SRID prefix,
+            // while spatial_values holds per-cell SRIDs.
+            spatial_values: vec![
+                vec![Some(3857), Some(4326)],
+                vec![Some(2154), Some(4269)],
+                vec![None, None], // column fallback: 0 for geometry, 4326 for geography
+            ],
+            rows: vec![
+                vec![json!("POINT (1 2)"), json!("POINT (10 20)")],
+                vec![json!("POINT (3 4)"), json!("POINT (30 40)")],
+                vec![json!("POINT (5 6)"), json!("POINT (50 60)")],
+            ],
+            batch_size: None,
+            preserve_original_language: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                "INSERT INTO [dbo].[spatial_data] ([geom], [geog]) VALUES\n(geometry::STGeomFromText('POINT (1 2)', 3857), geography::STGeomFromText('POINT (10 20)', 4326)),\n(geometry::STGeomFromText('POINT (3 4)', 2154), geography::STGeomFromText('POINT (30 40)', 4269)),\n(geometry::STGeomFromText('POINT (5 6)', 0), geography::STGeomFromText('POINT (50 60)', 4326));".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlserver_spatial_metadata_recovers_missing_type_and_cell_srid() {
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::SqlServer),
+            identifier_quote: None,
+            schema: Some("dbo".to_string()),
+            table_name: Some("places".to_string()),
+            qualified_table_name: None,
+            columns: vec!["geom".to_string(), "geog".to_string(), "untyped_geom".to_string()],
+            column_types: vec![Some("geometry".to_string()), Some("geography".to_string()), None],
+            column_extras: vec![None, None, None],
+            spatial_columns: vec![
+                SpatialColumn { column_index: 0, srid: Some(0) },
+                SpatialColumn { column_index: 1, srid: Some(4326) },
+                SpatialColumn { column_index: 2, srid: Some(3857) },
+            ],
+            spatial_values: vec![vec![Some(0), Some(4326), Some(3857)]],
+            rows: vec![vec![json!("POINT (1 2)"), json!("POINT (3 4)"), json!("POINT (5 6)")]],
+            batch_size: None,
+            preserve_original_language: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            statements,
+            vec![
+                r#"INSERT INTO [dbo].[places] ([geom], [geog], [untyped_geom]) VALUES (geometry::STGeomFromText('POINT (1 2)', 0), geography::STGeomFromText('POINT (3 4)', 4326), geometry::STGeomFromText('POINT (5 6)', 3857));"#.to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn sqlserver_spatial_standard_insert_dialect_keeps_plain_literal() {
+        let statements = build_export_insert_statements_excluding_with_dialect(
+            BuildExportInsertStatementsOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                identifier_quote: None,
+                schema: Some("dbo".to_string()),
+                table_name: Some("places".to_string()),
+                qualified_table_name: None,
+                columns: vec!["geom".to_string()],
+                column_types: vec![Some("geometry".to_string())],
+                column_extras: vec![None],
+                spatial_columns: vec![SpatialColumn { column_index: 0, srid: Some(0) }],
+                spatial_values: vec![vec![Some(0)]],
+                rows: vec![vec![json!("POINT (1 2)")]],
+                batch_size: None,
+                preserve_original_language: false,
+            },
+            &[],
+            SqlInsertDialect::Standard,
+        )
+        .unwrap();
+
+        assert_eq!(statements, vec![r#"INSERT INTO "dbo"."places" ("geom") VALUES ('POINT (1 2)');"#.to_string()]);
     }
 
     #[test]
@@ -6922,6 +8921,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             preserve_original_language: false,
         })
         .expect("build SQL Server database export");
@@ -8314,6 +10314,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             preserve_original_language: false,
         })
         .unwrap();
@@ -8388,6 +10389,139 @@ mod tests {
     }
 
     #[test]
+    fn qualifier_omission_strips_only_the_database_even_for_dotted_tables() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("orders.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        // A table whose own name contains a dot renders as `app`.`order.items`;
+        // the strip removes the leading database, never the table (#13601).
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1)]],
+            &["id".to_string()],
+            &[Some("int".to_string())],
+            &[None],
+            "order.items",
+            "app",
+            &DatabaseType::Mysql,
+            SqlInsertDialect::Standard,
+            SqlInsertMode::default(),
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO `order.items` (`id`) VALUES (1);
+
+"
+        );
+    }
+
+    #[test]
+    fn source_dialect_keeps_dotted_mysql_table_when_omitting_qualifier() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("orders.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        // Source dialect reuses the qualified target verbatim; with the
+        // qualifier omitted the dotted table name must survive intact
+        // instead of being split at its own dot (#13601).
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1)]],
+            &["id".to_string()],
+            &[Some("int".to_string())],
+            &[None],
+            "order.items",
+            "app",
+            &DatabaseType::Mysql,
+            SqlInsertDialect::Source,
+            SqlInsertMode::default(),
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        drop(file);
+
+        let sql = std::fs::read_to_string(path).unwrap();
+        assert!(sql.contains("INSERT INTO `order.items`"), "unexpected export: {sql}");
+    }
+
+    #[test]
+    fn qualifier_omission_is_ignored_for_non_mysql_engines() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("users.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        // A persisted `true` must not strip a PostgreSQL schema when the
+        // exported engine is not the MySQL family (#13601 review point 1).
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1)]],
+            &["id".to_string()],
+            &[Some("int".to_string())],
+            &[None],
+            "users",
+            "app",
+            &DatabaseType::Postgres,
+            SqlInsertDialect::Standard,
+            SqlInsertMode::default(),
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO \"app\".\"users\" (\"id\") VALUES (1);
+
+"
+        );
+    }
+
+    #[test]
+    fn mysql_export_can_omit_the_database_qualifier_from_insert_targets() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("users.sql");
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        // The USE preamble owns the database context, so the flag drops the
+        // `db`. prefix in both Standard and Source dialects (#13509).
+        write_database_export_rows_with_mode(
+            &mut file,
+            &[vec![json!(1), json!("Ada")]],
+            &["id".to_string(), "name".to_string()],
+            &[Some("int".to_string()), Some("varchar(32)".to_string())],
+            &[None, None],
+            "users",
+            "app",
+            &DatabaseType::Mysql,
+            SqlInsertDialect::Standard,
+            SqlInsertMode::default(),
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        drop(file);
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');
+
+"
+        );
+    }
+
+    #[test]
     fn database_row_writer_standard_dialect_uses_mysql_backticks() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("users.sql");
@@ -8432,6 +10566,7 @@ mod tests {
             SqlInsertMode::Single,
             false,
             None,
+            false,
         )
         .unwrap();
         drop(file);
@@ -8668,6 +10803,133 @@ mod tests {
         assert_eq!(combined.matches("INSERT INTO").count(), 20);
     }
 
+    fn postgres_phase_writer_fixture() -> (Vec<String>, Vec<String>) {
+        let mut prefix = vec!["CREATE TABLE z.items (id integer, body text);".to_string()];
+        let payload = "x".repeat(120_000);
+        for id in 0..12 {
+            prefix.push(format!("INSERT INTO z.items VALUES ({id}, '{payload};still one literal');"));
+        }
+        let views = vec![
+            "CREATE VIEW z.base AS SELECT id, body FROM z.items;".to_string(),
+            "CREATE VIEW a.report AS SELECT id, body FROM z.base WHERE body <> ';';".to_string(),
+        ];
+        let tail = vec![
+            "CREATE FUNCTION a.answer() RETURNS integer AS $body$\nBEGIN\n  PERFORM 1;\n  RETURN 42;\nEND\n$body$ LANGUAGE plpgsql;".to_string(),
+            "CREATE INDEX item_id ON z.items (id);".to_string(),
+        ];
+        let phases = [&prefix, &views, &tail].iter().map(|units| format!("{}\n", units.join("\n"))).collect();
+        let units = prefix.into_iter().chain(views).chain(tail).collect();
+        (phases, units)
+    }
+
+    #[test]
+    fn postgres_phase_copy_split_zip_preserves_prefix_view_tail_units() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("phases.zip");
+        let split = crate::export_split_zip::SplitZipExportWriter::create(
+            &path,
+            crate::export_split_zip::MIN_SPLIT_PART_MAX_MB,
+            "phases",
+            "sql",
+        )
+        .unwrap();
+        let mut writer = DatabaseExportWriter::SplitZip(Box::new(split));
+        let (phases, units) = postgres_phase_writer_fixture();
+        for phase in &phases {
+            let mut source = std::io::Cursor::new(phase.as_bytes());
+            super::copy_postgres_export_phase(&mut source, &mut writer, "phase-split-writer-unit").unwrap();
+        }
+        writer.finish("phases.sql").unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+        let mut parts = Vec::new();
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            if entry.name().ends_with(".sql") {
+                let mut contents = String::new();
+                entry.read_to_string(&mut contents).unwrap();
+                parts.push((entry.name().to_string(), contents));
+            }
+        }
+        parts.sort_by(|left, right| left.0.cmp(&right.0));
+        assert!(parts.len() > 1, "must exercise actual split-part rotation");
+        let combined = parts.iter().map(|(_, contents)| contents.as_str()).collect::<String>();
+        assert_eq!(combined, phases.concat(), "all phases retain their complete SQL and order");
+        for unit in units {
+            assert_eq!(
+                parts.iter().filter(|(_, contents)| contents.contains(&unit)).count(),
+                1,
+                "each statement, including the dollar-quoted routine, stays whole in one part"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_phase_copy_gzip_preserves_prefix_view_tail_units() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("phases.sql.gz");
+        let mut writer = DatabaseExportWriter::Gzip(Box::new(flate2::write::GzEncoder::new(
+            std::io::BufWriter::new(std::fs::File::create(&path).unwrap()),
+            flate2::Compression::default(),
+        )));
+        let (phases, _) = postgres_phase_writer_fixture();
+        for phase in &phases {
+            let mut source = std::io::Cursor::new(phase.as_bytes());
+            super::copy_postgres_export_phase(&mut source, &mut writer, "phase-gzip-writer-unit").unwrap();
+        }
+        writer.finish("phases.sql").unwrap();
+        let mut decoded = String::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap()).read_to_string(&mut decoded).unwrap();
+        assert_eq!(decoded, phases.concat(), "gzip round-trip preserves all SQL units and phase order");
+    }
+
+    #[tokio::test]
+    async fn postgres_phase_copy_stops_after_first_unit_when_writer_cancels() {
+        struct CancellingWriter {
+            export_id: String,
+            units: Vec<String>,
+        }
+        impl Write for CancellingWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                panic!("SQL units must use write_fmt");
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn write_fmt(&mut self, arguments: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+                let unit = std::fmt::format(arguments);
+                self.units.push(unit);
+                super::EXPORT_CANCELLED.write().unwrap().insert(self.export_id.clone());
+                Ok(())
+            }
+        }
+        for sql in ["SELECT 1;\nSELECT 2;\n", "SELECT 1; SELECT 2;\n", "SELECT 1; SELECT 2"] {
+            let export_id = uuid::Uuid::new_v4().to_string();
+            let mut writer = CancellingWriter { export_id: export_id.clone(), units: Vec::new() };
+            let mut source = std::io::Cursor::new(sql);
+            let result = super::copy_postgres_export_phase(&mut source, &mut writer, &export_id);
+            super::clear_export_cancelled(&export_id).await;
+            assert_eq!(result.unwrap_err(), super::EXPORT_CANCELLED_ERROR);
+            assert_eq!(writer.units, vec!["SELECT 1;\n"], "must not write the second SQL unit for input {sql:?}");
+        }
+    }
+
+    #[test]
+    fn postgres_phase_copy_propagates_destination_failure() {
+        struct FailingWriter;
+        impl Write for FailingWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("injected phase destination failure"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut source = std::io::Cursor::new("CREATE VIEW a.v AS SELECT 1;\n");
+        let error =
+            super::copy_postgres_export_phase(&mut source, &mut FailingWriter, "phase-write-failure-unit").unwrap_err();
+        assert!(error.contains("Failed to write export phase") && error.contains("injected phase destination failure"));
+    }
+
     #[test]
     fn postgres_identity_export_preserves_explicit_values_in_each_batch() {
         for (extra, overrides) in [
@@ -8788,6 +11050,7 @@ mod tests {
             SqlInsertMode::Single,
             false,
             Some(ddl),
+            false,
         )
         .unwrap();
         drop(file);
@@ -8867,6 +11130,7 @@ mod tests {
             database: None,
             schema: None,
             omit_auto_increment: false,
+            omit_database_qualifier: false,
             preserve_original_language: false,
         })
         .unwrap();
@@ -9193,6 +11457,239 @@ mod tests {
     // the local root filesystem, and the backup would "succeed" while writing
     // to the wrong disk.
 
+    // #14018: the remount relaxation only applies to the network filesystem
+    // family whose device identity changes on every mount. Parameterized over
+    // the full magic set plus out-of-family members so the polarity is locked
+    // by assertions, not comments.
+    #[test]
+    fn linux_f_type_is_network_filesystem_covers_exactly_the_remount_family() {
+        for f_type in [0x65735546i64, 0x6969, 0xFF534D42, 0xFE534D42, 0x517B] {
+            assert!(linux_f_type_is_network_filesystem(f_type), "f_type {f_type:#x} must relax");
+        }
+        for f_type in [0xEF53i64, 0x9123683E, 0x58465342, 0x01021994, 0x794C7630, 0x0, -1] {
+            assert!(!linux_f_type_is_network_filesystem(f_type), "f_type {f_type:#x} must keep the strict check");
+        }
+    }
+
+    // #14018 review round 2: the network-filesystem identity is the mount
+    // source string, so same-source remounts are accepted while different
+    // storages mounted at the same path are refused. These four cases are the
+    // ones the review asked to distinguish; they run on the identity values
+    // because a real FUSE mount cannot be reproduced in the test sandbox.
+    #[test]
+    fn network_mount_source_identity_distinguishes_the_four_review_scenarios() {
+        let nas_a = ExportDestinationIdentity::NetworkMountSource("rclone://remote:backup".to_string());
+        let nas_b = ExportDestinationIdentity::NetworkMountSource("nas-b:/export".to_string());
+
+        // 同源重挂载（same-source remount）
+        assert!(nas_a.matches(&ExportDestinationIdentity::NetworkMountSource("rclone://remote:backup".to_string())));
+        // 异源同类型替换（different storage mounted at the same path）
+        assert!(!nas_a.matches(&nas_b));
+        // 挂载消失：current is None, the strict mismatch keeps failing closed
+        assert!(export_destination_identity_mismatch(Some(&nas_a), None));
+        // 不同身份类型（device vs network mount）也视为不匹配
+        assert!(export_destination_identity_mismatch(Some(&nas_a), Some(&ExportDestinationIdentity::Device(4242))));
+    }
+
+    #[test]
+    fn network_mount_source_identity_encodes_and_decodes_round_trip() {
+        let source = "rclone://remote:backup";
+        let encoded = ExportDestinationIdentity::NetworkMountSource(source.to_string()).encode();
+        assert_eq!(encoded[6], EXPORT_DESTINATION_IDENTITY_NETWORK_MOUNT_SOURCE_KIND);
+        assert_eq!(
+            ExportDestinationIdentity::decode(&encoded).unwrap(),
+            Some(ExportDestinationIdentity::NetworkMountSource(source.to_string()))
+        );
+
+        // The length prefix is part of the wire format: a truncated payload
+        // must be rejected instead of silently producing a shorter source.
+        let mut truncated = encoded.clone();
+        truncated.pop();
+        assert!(ExportDestinationIdentity::decode(&truncated).is_err());
+        let mut inflated = encoded.clone();
+        inflated.push(b'x');
+        assert!(ExportDestinationIdentity::decode(&inflated).is_err());
+    }
+
+    #[test]
+    fn linux_f_type_classifies_network_filesystems() {
+        for f_type in [0x65735546u64, 0x6969, 0xFF534D42, 0xFE534D42, 0x517B] {
+            assert!(linux_f_type_is_network_filesystem(f_type as i64), "0x{f_type:x} should be network");
+        }
+        // Local filesystems keep the strict device check.
+        for f_type in [0xEF53u64, 0x58465342, 0x9123683E, 0x01021994, 0x794C7630] {
+            assert!(!linux_f_type_is_network_filesystem(f_type as i64), "0x{f_type:x} should be local");
+        }
+    }
+
+    // Linux 执行级用例：/proc/mounts 解析（最长前缀、八进制转义、无匹配）
+    #[test]
+    fn linux_mount_source_for_path_prefers_the_deepest_mount_point() {
+        let mounts =
+            "proc /proc proc rw 0 0\n/dev/sda1 / ext4 rw 0 0\nrclone://remote:backup /mnt/backup fuse.rclone rw 0 0\n";
+        assert_eq!(
+            linux_mount_source_from_proc(std::path::Path::new("/mnt/backup/data"), mounts).as_deref(),
+            Some("rclone://remote:backup")
+        );
+        assert_eq!(linux_mount_source_from_proc(std::path::Path::new("/mnt"), mounts).as_deref(), Some("/dev/sda1"));
+        // The root mount covers every absolute path without a dedicated entry,
+        // and `/mnt/backup2` must not match the `/mnt/backup` entry because
+        // matching is component-wise.
+        assert_eq!(linux_mount_source_from_proc(std::path::Path::new("/opt"), mounts).as_deref(), Some("/dev/sda1"));
+        assert_eq!(
+            linux_mount_source_from_proc(std::path::Path::new("/mnt/backup2"), mounts).as_deref(),
+            Some("/dev/sda1")
+        );
+        // Without a root entry nothing matches.
+        assert_eq!(linux_mount_source_from_proc(std::path::Path::new("/opt"), "proc /proc proc rw 0 0\n"), None);
+        // A first-level mount has the same slash count as `/`; component depth
+        // must still prefer it (#14018 review round 4).
+        let mounts = "/dev/root / ext4 rw 0 0\nnas-a:/export /backup nfs rw 0 0\n";
+        assert_eq!(
+            linux_mount_source_from_proc(std::path::Path::new("/backup/db"), mounts).as_deref(),
+            Some("nas-a:/export")
+        );
+    }
+
+    #[test]
+    fn linux_mount_source_for_path_prefers_the_visible_overmount() {
+        let mounts = "/dev/root / ext4 rw 0 0\nnas-a:/export /backup nfs rw 0 0\nnas-b:/export /backup nfs rw 0 0\n";
+        assert_eq!(
+            linux_mount_source_from_proc(std::path::Path::new("/backup/db"), mounts).as_deref(),
+            Some("nas-b:/export")
+        );
+    }
+
+    #[test]
+    fn linux_mount_source_for_path_decodes_octal_escapes() {
+        // Rust has no octal escapes: the source literal needs `\\040` so the
+        // parser sees the same `\040` text the kernel writes to /proc/mounts.
+        let mounts = "usbhd /mnt/backup\\040drive vfat rw 0 0\n";
+        assert_eq!(
+            linux_mount_source_from_proc(std::path::Path::new("/mnt/backup drive"), mounts).as_deref(),
+            Some("usbhd")
+        );
+        let mounts = "nas:/export /mnt/back\\134slash nfs rw 0 0\n";
+        assert_eq!(
+            linux_mount_source_from_proc(std::path::Path::new("/mnt/back\\slash"), mounts).as_deref(),
+            Some("nas:/export")
+        );
+        // Non-ASCII bytes are not escaped by the kernel and must survive
+        // decoding unchanged.
+        let mounts = "nas:/数据 /mnt/备份 nfs rw 0 0\n";
+        assert_eq!(
+            linux_mount_source_from_proc(std::path::Path::new("/mnt/备份/db"), mounts).as_deref(),
+            Some("nas:/数据")
+        );
+    }
+
+    #[test]
+    fn linux_mount_source_from_mountinfo_maps_device_to_source() {
+        let mountinfo = "21 1 0:20 / / rw,relatime - ext4 /dev/root rw\n\
+                         36 21 0:45 / /backup rw,relatime - nfs4 nas-a:/export rw\n";
+        assert_eq!(linux_mount_source_from_mountinfo(0, 20, mountinfo).as_deref(), Some("/dev/root"));
+        assert_eq!(linux_mount_source_from_mountinfo(0, 45, mountinfo).as_deref(), Some("nas-a:/export"));
+        // The unmounted device is no longer listed: the identity is unknown.
+        assert_eq!(linux_mount_source_from_mountinfo(0, 99, mountinfo), None);
+    }
+
+    #[test]
+    fn linux_mount_source_from_mountinfo_decodes_escapes_and_rejects_ambiguous_devices() {
+        let mountinfo = "36 21 0:45 / /mnt/back\\040drive rw - nfs4 nas\\040share:/export rw\n";
+        assert_eq!(linux_mount_source_from_mountinfo(0, 45, mountinfo).as_deref(), Some("nas share:/export"));
+        // Two mounts sharing one device but reporting different sources cannot
+        // prove which storage the handle belongs to: fail closed.
+        let ambiguous = "36 21 0:45 / /a rw - nfs4 nas-a:/export rw\n\
+                         37 21 0:45 / /b rw - nfs4 nas-b:/export rw\n";
+        assert_eq!(linux_mount_source_from_mountinfo(0, 45, ambiguous), None);
+        // Malformed devices are skipped rather than treated as a match.
+        let malformed = "36 21 nope / /backup rw - nfs4 nas-a:/export rw\n";
+        assert_eq!(linux_mount_source_from_mountinfo(0, 45, malformed), None);
+    }
+
+    #[test]
+    fn linux_network_file_identity_agrees_with_the_directory_identity() {
+        let mounts = "/dev/root / ext4 rw 0 0\nnas-a:/export /backup nfs rw 0 0\n";
+        let mountinfo = "21 1 0:20 / / rw,relatime - ext4 /dev/root rw\n\
+                         36 21 0:45 / /backup rw,relatime - nfs4 nas-a:/export rw\n";
+        let directory = linux_mount_source_from_proc(std::path::Path::new("/backup/db"), mounts)
+            .map(ExportDestinationIdentity::NetworkMountSource)
+            .expect("directory identity");
+        let file = linux_network_file_identity_from_mountinfo(0, 45, mountinfo).expect("file identity");
+        assert!(directory.matches(&file));
+        assert!(!ExportDestinationIdentity::NetworkMountSource("nas-b:/export".to_string()).matches(&file));
+
+        // Same source remounted under a new device keeps matching.
+        let remounted = "36 21 0:47 / /backup rw,relatime - nfs4 nas-a:/export rw\n";
+        let remounted_file = linux_network_file_identity_from_mountinfo(0, 47, remounted).expect("remounted identity");
+        assert!(directory.matches(&remounted_file));
+
+        // The mount disappeared: the opened file's device has no entry, so the
+        // current identity is unknown and the shared predicate fails closed.
+        let unmounted = linux_network_file_identity_from_mountinfo(0, 46, mountinfo);
+        assert!(unmounted.is_none());
+        assert!(export_destination_identity_mismatch(Some(&directory), unmounted.as_ref()));
+    }
+
+    #[test]
+    fn export_destination_identity_agrees_for_path_and_open_file() {
+        let scratch = std::env::temp_dir().join(format!("dbx-export-identity-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let file_path = scratch.join("backup.sql");
+        std::fs::write(&file_path, b"x").unwrap();
+        let file = std::fs::File::open(&file_path).unwrap();
+
+        let directory_identity = super::export_destination_identity_for_path(&scratch);
+        let file_identity = super::export_destination_identity_for_file(&file);
+
+        assert!(directory_identity.is_some());
+        assert_eq!(directory_identity, file_identity);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    // #14007 review: `omit_database_qualifier` only strips the `db.` qualifier
+    // from the generated INSERT statements — it must not touch anything else
+    // (in particular a `USE` preamble written by the export preamble stays
+    // authoritative), and it applies to MySQL-family tables only.
+    #[tokio::test]
+    async fn omit_database_qualifier_strips_only_insert_qualifiers() {
+        let sql = build_database_sql_export(BuildDatabaseSqlExportOptions {
+            database_name: "shop".to_string(),
+            exported_at: None,
+            tables: vec![ExportedTableSql {
+                display_name: "orders".to_string(),
+                database_type: Some(DatabaseType::Mysql),
+                identifier_quote: Some("`".to_string()),
+                schema: None,
+                table_name: Some("orders".to_string()),
+                qualified_table_name: Some("`shop`.`orders`".to_string()),
+                ddl: Some("CREATE TABLE `orders` (`id` INT);".to_string()),
+                columns: vec!["id".to_string()],
+                column_types: vec![Some("int".to_string())],
+                column_extras: Vec::new(),
+                spatial_columns: Vec::new(),
+                spatial_values: Vec::new(),
+                rows: vec![vec![json!(1)]],
+                truncated: false,
+            }],
+            row_limit_per_table: None,
+            insert_batch_size: None,
+            insert_dialect: SqlInsertDialect::Source,
+            connection_id: None,
+            database: Some("shop".to_string()),
+            schema: None,
+            omit_auto_increment: false,
+            omit_database_qualifier: true,
+            preserve_original_language: false,
+        })
+        .unwrap();
+
+        assert!(sql.contains("INSERT INTO `orders`"), "INSERT loses the db. qualifier: {sql}");
+        assert!(!sql.contains("`shop`.`orders`"), "no qualified INSERT target may remain: {sql}");
+        assert!(sql.contains("CREATE TABLE `orders`"), "DDL keeps its original form: {sql}");
+    }
+
     #[tokio::test]
     async fn ensure_export_destination_dir_creates_a_never_before_seen_local_directory() {
         let scratch = std::env::temp_dir().join(format!("dbx-export-dest-new-{}", uuid::Uuid::new_v4()));
@@ -9232,6 +11729,37 @@ mod tests {
 
         assert!(result.is_err(), "a destination that existed before should not be silently recreated");
         assert!(!destination.exists(), "the backup directory must not be resurrected on the wrong filesystem");
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    // Regression test for #13610: deleting the last backup of a run removes the
+    // emptied per-run directory (`remove_empty_directories`), while its recorded
+    // destination identity survives in state. The next run into the same dated
+    // directory refused to recreate it even though dbx itself had removed the
+    // directory and the parent still resolved to the same filesystem. The
+    // vanished-mount refusals above stay intact: there the parent is missing,
+    // so the identity comparison fails closed.
+    #[tokio::test]
+    async fn ensure_export_destination_dir_recreates_a_recorded_destination_whose_parent_kept_the_same_filesystem() {
+        let scratch = std::env::temp_dir().join(format!("dbx-export-dest-cleaned-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let state = test_app_state(&scratch).await;
+
+        let destination = scratch.join("backups").join("mydb");
+        ensure_export_destination_dir(&state, &destination).await.expect("initial export should create the directory");
+        assert!(destination.is_dir());
+
+        // Simulates dbx's own cleanup after the last backup file in the
+        // directory is deleted: the empty run directory is removed, its parent
+        // stays.
+        std::fs::remove_dir(&destination).unwrap();
+        assert!(!destination.exists());
+
+        ensure_export_destination_dir(&state, &destination)
+            .await
+            .expect("a leaf directory dbx itself removed must be recreated when the parent still matches");
+        assert!(destination.is_dir());
 
         let _ = std::fs::remove_dir_all(&scratch);
     }
@@ -9337,6 +11865,7 @@ mod tests {
             super::ExportDestinationIdentity::LegacyDevice(_) => {
                 unreachable!("freshly resolved identities are never legacy values")
             }
+            other => other,
         };
         state
             .storage

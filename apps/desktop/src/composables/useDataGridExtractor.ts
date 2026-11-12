@@ -20,6 +20,7 @@ import {
   type DataGridExtractResult,
   type DataGridExtractorOptions,
   type DataGridExtractWarningCode,
+  type DataGridValueFormat,
 } from "@/lib/dataGrid/dataGridCopyExtractor";
 import type { DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
@@ -29,12 +30,13 @@ import { tableMetaWithoutOptionalDatabaseQualifier } from "@/lib/table/tableSele
 import { isPartiallyLoadedCopy, partialLoadCopyHintKey, type PartialLoadCopyInfo } from "@/lib/dataGrid/copyPartialLoadHint";
 import { isTemporalColumnType } from "@/lib/dataGrid/columnFormatter";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
-import type { DatabaseType } from "@/types/database";
+import type { DatabaseType, QueryResult } from "@/types/database";
 
 interface ExtractorRowItem {
   id: number;
   data: SelectionData["rows"][number];
   isDraft?: boolean;
+  sourceIndex?: number;
 }
 
 interface ExtractorRequestSource {
@@ -44,6 +46,8 @@ interface ExtractorRequestSource {
   normalizeValues: boolean;
   keepUnsafeJsonText: boolean;
   presentBinaryText: boolean;
+  valueFormat: DataGridValueFormat;
+  formatNumbers: "inherit" | "native" | "display";
   rawRows: unknown[][];
 }
 
@@ -53,7 +57,10 @@ interface ResolvedDataGridExtraction {
   result: DataGridExtractResult;
 }
 
+const NUMERIC_COLUMN_TYPES = new Set(["int", "integer", "smallint", "bigint", "tinyint", "mediumint", "decimal", "numeric", "number", "float", "double", "real", "serial", "smallserial", "bigserial", "money", "smallmoney", "dec", "fixed"]);
+
 interface UseDataGridExtractorOptions {
+  allowExtractor?: (extractor: DataGridCopyExtractorId) => boolean;
   columns: ComputedRef<string[]>;
   displayItems: ComputedRef<ExtractorRowItem[]>;
   allColumns: ComputedRef<string[]>;
@@ -62,10 +69,13 @@ interface UseDataGridExtractorOptions {
   visibleColumnIndexes: ComputedRef<number[]>;
   columnTypes: ComputedRef<Array<string | undefined> | undefined>;
   allColumnTypes?: ComputedRef<Array<string | undefined> | undefined>;
+  columnComments?: ComputedRef<Array<string | undefined> | undefined>;
+  allColumnComments?: ComputedRef<Array<string | undefined> | undefined>;
   extractorOptions?: ComputedRef<DataGridExtractorOptions>;
   databaseType: ComputedRef<DatabaseType | undefined>;
   identifierQuote?: ComputedRef<string | undefined>;
   tableMeta: ComputedRef<DataGridTableMeta | undefined>;
+  database?: ComputedRef<string | undefined>;
   /** Editor setting "Include database name in generated SQL". When false, SQL extractors omit optional schema/database qualifiers. */
   includeDatabaseName?: ComputedRef<boolean>;
   hasCellSelection: ComputedRef<boolean>;
@@ -77,13 +87,17 @@ interface UseDataGridExtractorOptions {
   resolveSourceValues?: (rowIds: number[], sourceColumnIndexes: number[]) => Promise<Map<number, Map<number, unknown>>>;
   contextCell: ComputedRef<{ rowId: number; rowIndex: number; col: number } | null> | Ref<{ rowId: number; rowIndex: number; col: number } | null>;
   contextSelectionIsSynthetic: ComputedRef<boolean> | Ref<boolean>;
-  copyText: (text: string, gridCopy?: { rows: readonly (readonly unknown[])[]; header?: readonly unknown[] }) => Promise<boolean>;
+  copyText: (text: string, gridCopy?: { rows: readonly (readonly unknown[])[]; header?: readonly unknown[] }, richHtml?: string) => Promise<boolean>;
+  onCopied?: (result: DataGridExtractResult) => void;
   displayValue?: (value: CellValue, columnIndex: number) => string;
+  editValue?: (value: CellValue, columnIndex: number) => string;
   hasColumnFormatter?: (columnIndex: number) => boolean;
   applyColumnFormattersOnExport?: ComputedRef<boolean>;
   externalCellValue?: (value: unknown, columnIndex: number) => unknown;
   /** Present when the grid cannot guarantee the whole result set is loaded; drives the partial-copy hint. */
   partialLoadInfo?: ComputedRef<PartialLoadCopyInfo | null>;
+  spatialColumns?: ComputedRef<QueryResult["spatial_columns"] | undefined>;
+  spatialValues?: ComputedRef<QueryResult["spatial_values"] | undefined>;
   canCopySqlInsert: (request: DataGridExtractRequest) => boolean;
   buildMongoInsert: (extractorOptions: DataGridExtractorOptions, rowLimit?: number) => Promise<string | undefined>;
   buildMongoUpdate?: (request: DataGridExtractRequest, rowLimit?: number) => Promise<string | undefined>;
@@ -113,6 +127,12 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     return (dbType === "oracle" || dbType === "oceanbase-oracle") && isTemporalColumnType(columnType);
   }
 
+  function isNumericColumnType(columnType: string | undefined): boolean {
+    const tokens = columnType?.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+    const first = tokens[0];
+    return !!first && (NUMERIC_COLUMN_TYPES.has(first) || /^(?:int|uint|float)\d+$/.test(first));
+  }
+
   function shouldApplyColumnFormatter(columnIndex: number): boolean {
     if (!options.hasColumnFormatter?.(columnIndex)) return false;
     if (options.applyColumnFormattersOnExport?.value !== undefined) {
@@ -124,7 +144,18 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   // 除 SQL 外的剪贴板展示格式都可把文本型 MySQL VARBINARY 从 `0x<hex>` 还原为原始字符串，
   // 并把 Oracle temporal 单元格及配置了列格式化的单元格渲染为与网格一致的显示文本；SQL 必须继续持有 hex / 原始时间值
   // （display 格式化会丢时区与高精度小数秒）才能保证 round-trip；rawRows 则始终保存原值，供 DBX 内部网格回粘使用。
-  function extractorCellValue(value: unknown, columnType: string | undefined, normalizeValues: boolean, keepUnsafeJsonText: boolean, presentBinaryText: boolean, columnIndex: number, sourceIndex?: number): unknown {
+  function extractorCellValue(value: unknown, columnType: string | undefined, normalizeValues: boolean, keepUnsafeJsonText: boolean, presentBinaryText: boolean, columnIndex: number, sourceIndex?: number, valueFormat: DataGridValueFormat = "legacy"): unknown {
+    if (valueFormat === "display" || valueFormat === "edit") {
+      const external = options.externalCellValue?.(value, columnIndex);
+      if ((external === undefined ? value : external) === null || (external === undefined ? value : external) === undefined) return null;
+      const callbackIndex = sourceIndex ?? columnIndex;
+      return valueFormat === "display" ? (options.displayValue?.(value as CellValue, callbackIndex) ?? value) : (options.editValue?.(value as CellValue, callbackIndex) ?? value);
+    }
+    if (valueFormat === "native") {
+      const normalized = normalizeValues ? normalizeCellValue(value, columnType, keepUnsafeJsonText) : value;
+      const external = options.externalCellValue?.(normalized, columnIndex);
+      return external === undefined ? normalized : external;
+    }
     if (presentBinaryText) {
       const text = binaryCellClipboardText(value, columnType, options.databaseType.value);
       if (text !== null) return text;
@@ -159,6 +190,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const fullItemsById = new Map(options.allDisplayItems.value.map((item) => [item.id, item]));
     let sourceRows: unknown[][] = [];
     let sourceRowIds: number[] = [];
+    let sourceItems: ExtractorRowItem[] = [];
     let selectedSourceIndexes: number[] = [];
     let selectionKind: DataGridExtractRequest["selectionKind"] = "cells";
 
@@ -188,7 +220,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     // INSERT and UPDATE need the complete record to retain key columns and
     // writable values. Other extractors should respect the actual cell range
     // that a right-click creates, just like keyboard copy does.
-    const requiresFullRowContext = extractor === "sql-inserts" || extractor === "sql-deletes-inserts" || (extractor === "sql-updates" && options.databaseType.value !== "mongodb");
+    const requiresFullRowContext = extractor === "sql-inserts" || extractor === "sql-deletes" || extractor === "sql-deletes-inserts" || (extractor === "sql-updates" && options.databaseType.value !== "mongodb");
 
     if (contextPredicateCell) {
       const item = fullItemsById.get(contextPredicateCell.rowId);
@@ -196,27 +228,31 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       if (item && !item.isDraft && sourceIndex !== undefined) {
         sourceRows = [item.data];
         sourceRowIds = [item.id];
+        sourceItems = [item];
         selectedSourceIndexes = [sourceIndex];
       }
     } else if (options.hasRowSelection.value && options.selectedRowIds.value.size > 0) {
       const items = options.displayItems.value.filter((item) => options.selectedRowIds.value.has(item.id) && !item.isDraft);
       sourceRows = items.map((item) => (fullItemsById.get(item.id) ?? item).data);
       sourceRowIds = items.map((item) => item.id);
+      sourceItems = items.map((item) => fullItemsById.get(item.id) ?? item);
       selectedSourceIndexes = dedupeColumnIndexes(visibleIndexes).filter((index) => index < fullColumns.length);
       selectionKind = "rows";
     } else if (isMultiCellSelection && matrix) {
       const items = matrix.rowIndexes.map((rowIndex) => options.displayItems.value[rowIndex]).filter((item): item is ExtractorRowItem => !!item && !item.isDraft);
       sourceRows = items.map((item) => (fullItemsById.get(item.id) ?? item).data);
       sourceRowIds = items.map((item) => item.id);
+      sourceItems = items.map((item) => fullItemsById.get(item.id) ?? item);
       selectedSourceIndexes = dedupeColumnIndexes(matrix.columnIndexes.map((index) => visibleIndexes[index] ?? index)).filter((index) => index < fullColumns.length);
       if (options.hasColumnSelection.value) selectionKind = "columns";
     } else if (requiresFullRowContext && (hasRightClickContext || hasNonSyntheticContextCell) && options.contextCell.value) {
-      // SQL INSERT/UPDATE needs the full row so that right-clicking a selected
+      // SQL INSERT/DELETE/UPDATE needs the full row so that right-clicking a selected
       // primary-key cell still includes writable columns.
       const item = fullItemsById.get(options.contextCell.value.rowId);
       if (item && !item.isDraft) {
         sourceRows = [item.data];
         sourceRowIds = [item.id];
+        sourceItems = [item];
         selectedSourceIndexes = dedupeColumnIndexes(visibleIndexes).filter((index) => index < fullColumns.length);
         selectionKind = "rows";
       }
@@ -225,6 +261,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       const items = matrix.rowIndexes.map((rowIndex) => options.displayItems.value[rowIndex]).filter((item): item is ExtractorRowItem => !!item && !item.isDraft);
       sourceRows = items.map((item) => (fullItemsById.get(item.id) ?? item).data);
       sourceRowIds = items.map((item) => item.id);
+      sourceItems = items.map((item) => fullItemsById.get(item.id) ?? item);
       selectedSourceIndexes = dedupeColumnIndexes(matrix.columnIndexes.map((index) => visibleIndexes[index] ?? index)).filter((index) => index < fullColumns.length);
       if (options.hasColumnSelection.value) selectionKind = "columns";
     }
@@ -237,7 +274,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       const hasCompleteIdentity = primaryKeys.length > 0 && identityIndexes.every((index) => index >= 0) && sourceRows.every((row) => identityIndexes.every((index) => row[index] !== null && row[index] !== undefined));
       selectedSourceIndexes = hasCompleteIdentity ? identityIndexes : [...fullColumns.keys()];
       requiredSourceIndexes.splice(0, requiredSourceIndexes.length, ...selectedSourceIndexes);
-    } else if (extractor === "sql-updates" || extractor === "sql-deletes-inserts") {
+    } else if (extractor === "sql-updates" || extractor === "sql-deletes" || extractor === "sql-deletes-inserts") {
       for (const primaryKey of options.tableMeta.value?.primaryKeys ?? []) {
         const primaryKeyIndex = fullColumns.findIndex((displayName, index) => normalizeName(sourceNames?.[index] ?? displayName) === normalizeName(primaryKey));
         if (primaryKeyIndex >= 0 && !requiredSourceIndexes.includes(primaryKeyIndex)) requiredSourceIndexes.push(primaryKeyIndex);
@@ -246,15 +283,19 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const compactIndexBySource = new Map(requiredSourceIndexes.map((sourceIndex, compactIndex) => [sourceIndex, compactIndex]));
     const columnTypesBySource = new Map(visibleIndexes.map((sourceIndex, visibleIndex) => [sourceIndex, options.columnTypes.value?.[visibleIndex]]));
     const columnType = (sourceIndex: number) => options.allColumnTypes?.value?.[sourceIndex] ?? columnTypesBySource.get(sourceIndex);
-    const columns = requiredSourceIndexes.map((sourceIndex, compactIndex) => ({
-      displayName: fullColumns[sourceIndex],
-      // Query results without source metadata still expose their database column
-      // names as display names. Keep the request mapping aligned with the
-      // availability check so SQL SELECT can use that safe fallback.
-      sourceName: sourceNames?.[sourceIndex] ?? fullColumns[sourceIndex],
-      sourceIndex: compactIndex,
-      dataType: columnType(sourceIndex),
-    }));
+    const columns = requiredSourceIndexes.map((sourceIndex, compactIndex) => {
+      const description = options.allColumnComments?.value?.[sourceIndex] ?? options.columnComments?.value?.[visibleIndexes.indexOf(sourceIndex)];
+      return {
+        displayName: fullColumns[sourceIndex],
+        // Query results without source metadata still expose their database column
+        // names as display names. Keep the request mapping aligned with the
+        // availability check so SQL SELECT can use that safe fallback.
+        sourceName: sourceNames?.[sourceIndex] ?? fullColumns[sourceIndex],
+        sourceIndex: compactIndex,
+        dataType: columnType(sourceIndex),
+        ...(description !== undefined ? { description } : {}),
+      };
+    });
     const descriptor = DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor];
     const selectedColumnIndexes = selectedSourceIndexes.map((sourceIndex) => compactIndexBySource.get(sourceIndex)).filter((index): index is number => index !== undefined);
     const columnTypes = requiredSourceIndexes.map(columnType);
@@ -262,28 +303,53 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const keepUnsafeJsonText = descriptor.category === "sql";
     const presentBinaryText = descriptor.category !== "sql";
     const rawRows = sourceRows.map((row) => requiredSourceIndexes.map((sourceIndex) => row[sourceIndex]));
-    const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, columnTypes[index], normalizeValues, keepUnsafeJsonText, presentBinaryText, index, requiredSourceIndexes[index])));
+    const effectiveValueFormat = descriptor.category === "sql" ? "native" : extractorOptions.valueFormat === "default" ? (extractor === "dbunit" || extractor === "php" ? "native" : "legacy") : extractorOptions.valueFormat;
+    const rows = rawRows.map((row) =>
+      row.map((value, index) => {
+        const formatNumbers = ["csv", "csv-with-headers", "dsv", "tsv", "tsv-with-headers"].includes(extractor) ? extractorOptions.dsv.formatNumbers : "inherit";
+        const cellFormat = formatNumbers !== "inherit" && isNumericColumnType(columnTypes[index]) ? formatNumbers : effectiveValueFormat;
+        return extractorCellValue(value, columnTypes[index], normalizeValues, keepUnsafeJsonText, presentBinaryText, index, requiredSourceIndexes[index], cellFormat);
+      }),
+    );
     // 「包含数据库名称」：复制/导出 SQL 时，提取器自身的勾选框与编辑器全局设置
     // （`generateSqlIncludeDatabaseName`）任一开启都保留库名/模式名；后者还会影响
     // 保存 SQL、侧栏导出等其它路径，因此这里取“或”，不覆盖全局偏好。
     const extractorOptionValues = normalizeDataGridExtractorOptions(extractorOptions);
+    const effectiveTableMeta = options.tableMeta.value
+      ? {
+          ...options.tableMeta.value,
+          database: options.tableMeta.value.database ?? options.database?.value,
+        }
+      : undefined;
     const tableMeta =
       descriptor.category === "sql"
         ? tableMetaWithoutOptionalDatabaseQualifier(
             compactTableMeta(
-              options.tableMeta.value,
+              effectiveTableMeta,
               columns.map((column) => column.sourceName ?? column.displayName),
             ),
             options.databaseType.value,
             options.includeDatabaseName?.value === true || extractorOptionValues.sql.includeDatabaseName === true,
           )
         : undefined;
+    const spatialColumns = options.spatialColumns?.value?.flatMap((column) => {
+      const compactIndex = compactIndexBySource.get(column.column_index);
+      return compactIndex === undefined ? [] : [{ column_index: compactIndex, srid: column.srid }];
+    });
+    const allSpatialValues = options.spatialValues?.value;
+    const spatialValues = allSpatialValues?.length
+      ? sourceItems.map((item, rowIndex) => {
+          const rowIdx = item.sourceIndex ?? rowIndex;
+          return requiredSourceIndexes.map((sourceIndex) => allSpatialValues[rowIdx]?.[sourceIndex] ?? null);
+        })
+      : undefined;
     const request: DataGridExtractRequest = {
       version: DATA_GRID_EXTRACTOR_CONTRACT_VERSION,
       extractor,
-      databaseType: descriptor.category === "sql" ? options.databaseType.value : undefined,
+      databaseType: descriptor.category === "sql" || extractor === "php" ? options.databaseType.value : undefined,
       identifierQuote: descriptor.category === "sql" ? options.identifierQuote?.value : undefined,
       tableMeta,
+      sourceTableName: options.tableMeta.value?.tableName,
       columns,
       selectedColumnIndexes,
       rows,
@@ -294,6 +360,8 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       // the default output to a bare table name; keep the flag aligned with
       // the qualified tableMeta we intentionally preserved.
       options: tableMeta && (tableMeta.schema !== undefined || tableMeta.database !== undefined) ? { ...extractorOptionValues, sql: { ...extractorOptionValues.sql, includeDatabaseName: true } } : extractorOptionValues,
+      spatialColumns: spatialColumns?.length ? spatialColumns : undefined,
+      spatialValues: spatialValues?.length ? spatialValues : undefined,
     };
     requestSources.set(request, {
       rowIds: sourceRowIds,
@@ -302,6 +370,8 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       normalizeValues,
       keepUnsafeJsonText,
       presentBinaryText,
+      valueFormat: effectiveValueFormat,
+      formatNumbers: ["csv", "csv-with-headers", "dsv", "tsv", "tsv-with-headers"].includes(extractor) ? extractorOptions.dsv.formatNumbers : "inherit",
       rawRows,
     });
     return request;
@@ -309,7 +379,14 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
 
   async function resolveRequestSourceValues(request: DataGridExtractRequest, rowLimit?: number): Promise<DataGridExtractRequest> {
     const source = requestSources.get(request);
-    if (!source) return rowLimit === undefined ? request : { ...request, rows: request.rows.slice(0, rowLimit) };
+    if (!source) {
+      if (rowLimit === undefined) return request;
+      return {
+        ...request,
+        rows: request.rows.slice(0, rowLimit),
+        spatialValues: request.spatialValues?.slice(0, rowLimit),
+      };
+    }
 
     const limitedSource: ExtractorRequestSource =
       rowLimit === undefined
@@ -321,7 +398,11 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
           };
     if (!options.resolveSourceValues) {
       if (rowLimit === undefined) return request;
-      const limitedRequest = { ...request, rows: request.rows.slice(0, rowLimit) };
+      const limitedRequest = {
+        ...request,
+        rows: request.rows.slice(0, rowLimit),
+        spatialValues: request.spatialValues?.slice(0, rowLimit),
+      };
       requestSources.set(limitedRequest, limitedSource);
       return limitedRequest;
     }
@@ -335,8 +416,17 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
         return sourceIndex !== undefined && values.has(sourceIndex) ? values.get(sourceIndex) : value;
       });
     });
-    const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, limitedSource.columnTypes[index], limitedSource.normalizeValues, limitedSource.keepUnsafeJsonText, limitedSource.presentBinaryText, index, limitedSource.sourceColumnIndexes[index])));
-    const resolvedRequest = { ...request, rows };
+    const rows = rawRows.map((row) =>
+      row.map((value, index) => {
+        const cellFormat = limitedSource.formatNumbers !== "inherit" && isNumericColumnType(limitedSource.columnTypes[index]) ? limitedSource.formatNumbers : limitedSource.valueFormat;
+        return extractorCellValue(value, limitedSource.columnTypes[index], limitedSource.normalizeValues, limitedSource.keepUnsafeJsonText, limitedSource.presentBinaryText, index, limitedSource.sourceColumnIndexes[index], cellFormat);
+      }),
+    );
+    const resolvedRequest = {
+      ...request,
+      rows,
+      spatialValues: rowLimit === undefined ? request.spatialValues : request.spatialValues?.slice(0, rowLimit),
+    };
     requestSources.set(resolvedRequest, { ...limitedSource, rawRows });
     return resolvedRequest;
   }
@@ -360,6 +450,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   }
 
   function canCopyWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): boolean {
+    if (options.allowExtractor?.(extractor) === false) return false;
     const contextPredicateTarget = hasContextPredicateTarget(extractor);
     if (hasUnsupportedDiscreteSelection.value && !contextPredicateTarget) return false;
     if (!options.hasRowSelection.value && !options.hasCellSelection.value && !options.contextCell.value) return false;
@@ -372,6 +463,15 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       const request = buildRequest(extractor, extractorOptions);
       const primaryKeys = request?.tableMeta?.primaryKeys ?? [];
       if (!request || primaryKeys.length === 0 || !options.canCopySqlInsert(request)) return false;
+      return primaryKeys.every((primaryKey) => {
+        const column = request.columns.find((candidate) => normalizeName(candidate.sourceName ?? candidate.displayName) === normalizeName(primaryKey));
+        return !!column && request.rows.every((row) => row[column.sourceIndex] !== null && row[column.sourceIndex] !== undefined);
+      });
+    }
+    if (extractor === "sql-deletes") {
+      const request = buildRequest(extractor, extractorOptions);
+      const primaryKeys = request?.tableMeta?.primaryKeys ?? [];
+      if (!request || primaryKeys.length === 0) return false;
       return primaryKeys.every((primaryKey) => {
         const column = request.columns.find((candidate) => normalizeName(candidate.sourceName ?? candidate.displayName) === normalizeName(primaryKey));
         return !!column && request.rows.every((row) => row[column.sourceIndex] !== null && row[column.sourceIndex] !== undefined);
@@ -435,6 +535,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   }
 
   async function extractWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, maxRows?: number): Promise<ResolvedDataGridExtraction | null> {
+    if (options.allowExtractor?.(extractor) === false) return null;
     const initialRequest = buildRequest(extractor, extractorOptions);
     if (!initialRequest) return null;
     const rowLimit = maxRows === undefined ? undefined : Math.min(initialRequest.rows.length, maxRows);
@@ -445,7 +546,8 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     return { initialRequest, request, result };
   }
 
-  async function copyWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): Promise<boolean> {
+  async function copyWithExtractor(extractor: DataGridCopyExtractorId, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, isSessionValid?: () => boolean): Promise<boolean> {
+    if (isSessionValid && !isSessionValid()) return false;
     if (hasUnsupportedDiscreteSelection.value && !hasContextPredicateTarget(extractor)) {
       toast(t("grid.copyExtractorUnsupportedSelection"), 5000);
       return false;
@@ -453,7 +555,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     if (!canCopyWithExtractor(extractor, extractorOptions)) return false;
     try {
       const extraction = await extractWithExtractor(extractor, extractorOptions);
-      if (!extraction) return false;
+      if (!extraction || (isSessionValid && !isSessionValid())) return false;
       const { request, result } = extraction;
       // Derive the grid paste-back payload from the effective request schema so
       // hidden support columns, row headers, NULLs, tabs, and newlines keep the
@@ -472,8 +574,10 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
             return { rows, header };
           })()
         : undefined;
-      const copied = await options.copyText(result.text, gridCopy);
+      if (isSessionValid && !isSessionValid()) return false;
+      const copied = await options.copyText(result.text, gridCopy, extractor === "html" ? result.text : undefined);
       if (!copied) return false;
+      options.onCopied?.(result);
       showWarnings(result.warnings, result.omittedColumns);
       const partialLoadInfo = options.partialLoadInfo?.value;
       if (partialLoadInfo && isPartiallyLoadedCopy(partialLoadInfo)) {
@@ -495,13 +599,14 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     return { ...result, sourceRowCount, truncated: sourceRowCount > result.rowCount };
   }
 
-  async function copyWithPreference(preference: DataGridCopyPreference, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS): Promise<boolean> {
+  async function copyWithPreference(preference: DataGridCopyPreference, extractorOptions: DataGridExtractorOptions = options.extractorOptions?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, isSessionValid?: () => boolean): Promise<boolean> {
+    if (isSessionValid && !isSessionValid()) return false;
     if (hasUnsupportedDiscreteSelection.value) {
       toast(t("grid.copyExtractorUnsupportedSelection"), 5000);
       return false;
     }
     const extractor = resolveCopyPreference(preference, extractorOptions);
-    return extractor ? copyWithExtractor(extractor, extractorOptions) : false;
+    return extractor ? copyWithExtractor(extractor, extractorOptions, isSessionValid) : false;
   }
 
   async function previewWithPreference(preference: DataGridCopyPreference, extractorOptions: DataGridExtractorOptions): Promise<DataGridExtractPreview> {
@@ -514,7 +619,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   function showWarnings(warnings: Array<{ code: DataGridExtractWarningCode; message: string }> | undefined, omittedColumns: string[] | undefined) {
     if (!warnings?.length) return;
     for (const warning of warnings) {
-      const message = warning.code === "omitted-columns" ? t("grid.copyExtractorWarningOmittedColumns", { columns: omittedColumns?.join(", ") || "-" }) : t("grid.copyExtractorWarningDuplicateJsonColumns");
+      const message = warning.code === "omitted-columns" ? t("grid.copyExtractorWarningOmittedColumns", { columns: omittedColumns?.join(", ") || "-" }) : warning.code === "php-date-not-iso" ? t("grid.copyExtractorWarningPhpDateNotIso") : t("grid.copyExtractorWarningDuplicateJsonColumns");
       toast(message, 5000);
     }
   }

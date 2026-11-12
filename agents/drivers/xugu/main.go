@@ -893,9 +893,7 @@ func (r *runtimeServer) openSession(agentSessionID string, params connectParams)
 			}
 		}
 	} else {
-		// SYSTEM control is optional for ordinary users (no SYSTEM account / no SYS_SESSIONS).
-		// Fall back to a business-database-only session so metadata and queries still
-		// work. Do not carry the optional APP_NAME into this degraded login path.
+		// Open the session with the original attributes if SYSTEM control is unavailable.
 		_, err = server.connectWithControl(businessParams, nil, false)
 		controlKey = ""
 	}
@@ -1422,12 +1420,11 @@ func xuguIdentifiedSessionParams(params connectParams, agentSessionID string) co
 	return params
 }
 
-// Ordinary Xugu users often cannot use the SYSTEM control session, and some
-// server builds close the socket when an optional APP_NAME is sent for them.
-// Keep that path for explicit SYSDBA logins only; other users use a direct
-// business session with the parameters they supplied.
+// Xugu authenticates SYSDBA separately for each database. Probing SYSTEM with
+// a business database's credentials can lock the client IP before fallback.
 func xuguControlSessionEligible(params connectParams) bool {
-	return strings.EqualFold(strings.TrimSpace(params.Username), "SYSDBA")
+	return strings.EqualFold(strings.TrimSpace(params.Username), "SYSDBA") &&
+		strings.EqualFold(configuredDatabaseName(params), "SYSTEM")
 }
 
 func xuguControlParams(params connectParams) connectParams {
@@ -4794,9 +4791,19 @@ func renderXuguTableDDL(schema, table string, columns []columnInfo, metadata xug
 	// any FK whose parent is not yet visible) during CREATE, matching DBeaver's
 	// xugu-metadata exporter which always emits ALTER for F/PK/CHECK extras.
 	var foreignKeys []xuguConstraintInfo
+	var deferredPrimaryKeys []xuguConstraintInfo
+	deferLargeObjectPrimaryKeys := metadata.CopyNum > 0 && xuguTableHasLargeObjectColumn(columns)
 	for _, constraint := range constraints {
 		if strings.EqualFold(strings.TrimSpace(constraint.Type), "F") {
 			foreignKeys = append(foreignKeys, constraint)
+			continue
+		}
+		// On XuguDB, a CREATE TABLE combining a LOB column, an inline primary
+		// key, and explicit COPY NUMBER can remain blocked. Emit the same named
+		// key immediately after CREATE TABLE so the transfer does not lose its
+		// constraint semantics while avoiding that inline path.
+		if deferLargeObjectPrimaryKeys && strings.EqualFold(strings.TrimSpace(constraint.Type), "P") {
+			deferredPrimaryKeys = append(deferredPrimaryKeys, constraint)
 			continue
 		}
 		// Xugu exposes the implicit unique key that it creates for every
@@ -4832,6 +4839,12 @@ func renderXuguTableDDL(schema, table string, columns []columnInfo, metadata xug
 		builder.WriteString("\nCOMMENT ")
 		builder.WriteString(quoteStringLiteral(strings.TrimSpace(metadata.Comment)))
 	}
+	for _, constraint := range deferredPrimaryKeys {
+		if item := renderXuguConstraintAlterDDL(schema, table, constraint); item != "" {
+			builder.WriteString(";\n\n")
+			builder.WriteString(item)
+		}
+	}
 	for _, constraint := range foreignKeys {
 		if item := renderXuguForeignKeyAlterDDL(schema, table, constraint); item != "" {
 			builder.WriteString(";\n\n")
@@ -4852,6 +4865,20 @@ func renderXuguTableDDL(schema, table string, columns []columnInfo, metadata xug
 	// appendTableIndexDDL to terminate the CREATE/ALTER statement: tables with
 	// no independent indexes must remain directly executable as well.
 	return terminateDDLScript(builder.String())
+}
+
+func xuguTableHasLargeObjectColumn(columns []columnInfo) bool {
+	for _, column := range columns {
+		dataType := strings.ToUpper(strings.TrimSpace(column.DataType))
+		if separator := strings.IndexAny(dataType, " (["); separator >= 0 {
+			dataType = dataType[:separator]
+		}
+		switch dataType {
+		case "BLOB", "CLOB", "NCLOB", "JSON", "XML":
+			return true
+		}
+	}
+	return false
 }
 
 func shouldSkipXuguIdentityUniqueConstraint(constraint xuguConstraintInfo, identities map[string]xuguIdentityInfo) bool {
@@ -4888,6 +4915,14 @@ func renderXuguConstraintDDL(constraint xuguConstraintInfo) string {
 	default:
 		return ""
 	}
+}
+
+func renderXuguConstraintAlterDDL(schema, table string, constraint xuguConstraintInfo) string {
+	item := renderXuguConstraintDDL(constraint)
+	if item == "" {
+		return ""
+	}
+	return "ALTER TABLE " + quoteIdentifier(schema) + "." + quoteIdentifier(table) + " ADD " + item
 }
 
 // renderXuguForeignKeyAlterDDL emits FK constraints after CREATE TABLE. Self-

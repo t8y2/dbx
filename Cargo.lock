@@ -287,6 +287,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
+name = "ashpd"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2f3f79755c74fd155000314eb349864caa787c6592eace6c6882dad873d9c39"
+dependencies = [
+ "enumflags2",
+ "futures-channel",
+ "futures-util",
+ "rand 0.9.5",
+ "raw-window-handle",
+ "serde",
+ "serde_repr",
+ "tokio",
+ "url",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "zbus 5.18.0",
+]
+
+[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2143,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.6.49"
+version = "0.6.69"
 dependencies = [
  "anyhow",
  "axum",
@@ -2154,6 +2175,7 @@ dependencies = [
  "dbx-binlog",
  "dbx-core",
  "dbx-mcp",
+ "dbx-platform",
  "dbx-tauri-consul",
  "dbx-tauri-schema",
  "deadpool-postgres",
@@ -2162,6 +2184,7 @@ dependencies = [
  "grep",
  "gtk",
  "ignore",
+ "libc",
  "libloading 0.8.9",
  "log",
  "minisign-verify",
@@ -2192,7 +2215,6 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-log",
  "tauri-plugin-opener",
- "tauri-plugin-process",
  "tauri-plugin-shell",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
@@ -2204,6 +2226,7 @@ dependencies = [
  "tokio-util",
  "uuid",
  "webview2-com",
+ "windows 0.61.3",
  "windows-core 0.61.2",
  "windows-sys 0.61.2",
  "wry",
@@ -2245,7 +2268,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.125"
+version = "0.4.142"
 dependencies = [
  "async-trait",
  "dbx-core",
@@ -2403,12 +2426,14 @@ dependencies = [
  "dbx-sql-core",
  "dbx-sql-dialect",
  "dbx-types",
+ "encoding_rs",
  "futures",
  "log",
  "mysql_async",
  "mysql_common",
  "percent-encoding",
  "rust_decimal",
+ "rustls 0.23.43",
  "serde_json",
  "sqlparser",
  "tokio",
@@ -2430,7 +2455,6 @@ dependencies = [
  "log",
  "openssl",
  "percent-encoding",
- "portpicker",
  "postgres-openssl",
  "rustls 0.23.43",
  "rustls-pemfile 2.2.0",
@@ -2487,10 +2511,12 @@ dependencies = [
 name = "dbx-driver-support"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "dbx-platform",
  "dbx-types",
  "glob",
+ "log",
  "portpicker",
  "reqwest 0.12.28",
  "russh",
@@ -2508,6 +2534,7 @@ name = "dbx-drivers"
 version = "0.1.0"
 dependencies = [
  "aws-sdk-dynamodb",
+ "axum",
  "base64 0.22.1",
  "bytes",
  "chrono",
@@ -2584,7 +2611,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.125"
+version = "0.4.142"
 dependencies = [
  "async-trait",
  "axum",
@@ -2618,8 +2645,10 @@ name = "dbx-platform"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "httpdate",
  "nix 0.31.3",
  "reqwest 0.12.28",
+ "semver",
  "serde",
  "tokio",
  "uuid",
@@ -2768,7 +2797,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-web"
-version = "0.6.49"
+version = "0.6.69"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -2779,6 +2808,7 @@ dependencies = [
  "dbx-core",
  "dbx-mcp",
  "futures",
+ "getrandom 0.3.4",
  "log",
  "mime_guess",
  "pbkdf2 0.12.2",
@@ -5931,7 +5961,7 @@ dependencies = [
 [[package]]
 name = "mysql_async"
 version = "0.37.0"
-source = "git+https://github.com/zipg/mysql_async.git?rev=4a9e60a62f5a48e35ef9ccc9fc8277d5012b19dd#4a9e60a62f5a48e35ef9ccc9fc8277d5012b19dd"
+source = "git+https://github.com/t8y2/mysql_async.git?rev=4cd84d86bb86b060320ce3459561e8093e4422fa#4cd84d86bb86b060320ce3459561e8093e4422fa"
 dependencies = [
  "bytes",
  "crossbeam-queue",
@@ -7110,6 +7140,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pollster"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
+
+[[package]]
 name = "poly1305"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7182,7 +7218,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.12"
-source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=ac8ad476de59093d33ab9f294531c956e0c6a724#ac8ad476de59093d33ab9f294531c956e0c6a724"
+source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89#5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89"
 dependencies = [
  "base64 0.23.0",
  "byteorder",
@@ -7201,7 +7237,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.14"
-source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=ac8ad476de59093d33ab9f294531c956e0c6a724#ac8ad476de59093d33ab9f294531c956e0c6a724"
+source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89#5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89"
 dependencies = [
  "bytes",
  "chrono",
@@ -7891,18 +7927,18 @@ version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a15ad77d9e70a92437d8f74c35d99b4e4691128df018833e99f90bcd36152672"
 dependencies = [
+ "ashpd",
  "block2",
  "dispatch2",
- "glib-sys",
- "gobject-sys",
- "gtk-sys",
  "js-sys",
  "log",
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",
  "objc2-foundation",
+ "pollster",
  "raw-window-handle",
+ "urlencoding",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -8555,6 +8591,12 @@ dependencies = [
  "serde_derive_internals 0.30.0",
  "syn 3.0.3",
 ]
+
+[[package]]
+name = "scoped-tls"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
 
 [[package]]
 name = "scopeguard"
@@ -9823,16 +9865,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tauri-plugin-process"
-version = "2.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d55511a7bf6cd70c8767b02c97bf8134fa434daf3926cfc1be0a0f94132d165a"
-dependencies = [
- "tauri",
- "tauri-plugin",
-]
-
-[[package]]
 name = "tauri-plugin-shell"
 version = "2.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10277,7 +10309,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.18"
-source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=ac8ad476de59093d33ab9f294531c956e0c6a724#ac8ad476de59093d33ab9f294531c956e0c6a724"
+source = "git+https://github.com/t8y2/tokio-postgres-gaussdb.git?rev=5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89#5f37ebd1ae8e2c81ac07b89a046c9319f7a1bc89"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -10898,6 +10930,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
+
+[[package]]
 name = "urlpattern"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11156,6 +11194,7 @@ dependencies = [
  "cc",
  "downcast-rs",
  "rustix",
+ "scoped-tls",
  "smallvec",
  "wayland-sys",
 ]
@@ -11214,6 +11253,8 @@ version = "0.31.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8eab23fefc9e41f8e841df4a9c707e8a8c4ed26e944ef69297184de2785e3be"
 dependencies = [
+ "dlib",
+ "log",
  "pkg-config",
 ]
 
@@ -12252,6 +12293,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",
@@ -12522,6 +12564,7 @@ dependencies = [
  "endi",
  "enumflags2",
  "serde",
+ "url",
  "winnow 1.0.4",
  "zvariant_derive 5.13.1",
  "zvariant_utils 3.5.0",

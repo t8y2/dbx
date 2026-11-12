@@ -86,6 +86,19 @@ fn exact_backup_scope_preserves_literal_names_and_rejects_empty_or_foreign_scope
     assert!(config.validate().is_err());
 }
 
+#[test]
+fn scheduled_backup_system_databases_filter_templates_for_postgres_and_opengauss() {
+    assert!(super::engine::system_database("template0", true));
+    assert!(super::engine::system_database("template1", true));
+    assert!(super::engine::system_database("TEMPLATE0", true));
+    assert!(!super::engine::system_database("my_db", true));
+    assert!(super::engine::system_database("information_schema", false));
+    assert!(super::engine::system_database("mysql", false));
+    assert!(super::engine::system_database("performance_schema", false));
+    assert!(super::engine::system_database("sys", false));
+    assert!(!super::engine::system_database("my_db", false));
+}
+
 #[tokio::test]
 async fn schedule_survives_reopen_and_rejects_stale_edit() {
     let dir = tempfile::tempdir().unwrap();
@@ -207,6 +220,115 @@ async fn deletion_only_removes_recorded_files_within_the_backup_root() {
     assert!(!inside.exists());
     assert!(outside.exists());
     assert!(service.store.snapshot().await.unwrap().runs.is_empty());
+}
+
+#[tokio::test]
+async fn imported_backups_restore_from_their_folder_and_are_never_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = service(dir.path(), None).await;
+    let downloads = dir.path().join("downloads");
+    std::fs::create_dir(&downloads).unwrap();
+    let dump = downloads.join("before-upgrade.sql.gz");
+    std::fs::write(&dump, "not inspected").unwrap();
+    let import = |path: &std::path::Path| BackupCommand::Import { files: vec![path.to_string_lossy().into_owned()] };
+
+    let imported = service.command(import(&dump)).await.unwrap();
+    let run: BackupRun = serde_json::from_value(imported[0].clone()).unwrap();
+    assert_eq!((run.source.as_str(), run.status.as_str()), (IMPORTED_SOURCE, "success"));
+    assert_eq!(run.files[0].display_name, "before-upgrade.sql.gz");
+    assert!(!run.files[0].owned);
+    assert_eq!(service.file(&run.id, 0).await.unwrap(), dump.canonicalize().unwrap());
+
+    assert!(service.command(import(&dump)).await.unwrap_err().contains("already in the history"));
+    let notes = downloads.join("notes.txt");
+    std::fs::write(&notes, "x").unwrap();
+    assert!(service.command(import(&notes)).await.unwrap_err().contains("Unsupported"));
+    assert!(service.command(import(&downloads)).await.is_err());
+
+    service.delete_runs(vec![run.id]).await.unwrap();
+    assert!(dump.exists());
+    assert!(service.store.snapshot().await.unwrap().runs.is_empty());
+}
+
+#[tokio::test]
+async fn imported_navicat_archives_record_their_source_and_web_imports_stay_in_the_root() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("backups");
+    std::fs::create_dir(&root).unwrap();
+    let service = service(dir.path(), Some(root.clone())).await;
+    let write_archive = |path: &std::path::Path| {
+        let mut writer = crate::navicat_nb3::Nb3ExportWriter::new(
+            std::fs::File::create(path).unwrap(),
+            None,
+            crate::models::connection::DatabaseType::Postgres,
+            "shop",
+            "sales",
+        )
+        .unwrap();
+        writer.write_all(b"CREATE TABLE \"sales\".\"orders\" (\"id\" int);\n").unwrap();
+        writer.finish().unwrap();
+    };
+
+    let outside = dir.path().join("outside.nb3");
+    write_archive(&outside);
+    let files = vec![outside.to_string_lossy().into_owned()];
+    assert!(service
+        .command(BackupCommand::Import { files })
+        .await
+        .unwrap_err()
+        .contains("outside the server backup root"));
+
+    let archive = root.join("navicat.nb3");
+    write_archive(&archive);
+    let files = vec![archive.to_string_lossy().into_owned()];
+    let imported = service.command(BackupCommand::Import { files }).await.unwrap();
+    let run: BackupRun = serde_json::from_value(imported[0].clone()).unwrap();
+    let file = &run.files[0];
+    assert_eq!(
+        (file.database.as_str(), file.schema.as_str(), file.display_name.as_str()),
+        ("shop", "sales", "shop.sales")
+    );
+    assert_eq!(service.file(&run.id, 0).await.unwrap(), archive.canonicalize().unwrap());
+}
+
+#[tokio::test]
+async fn deletion_removes_emptied_run_directories_but_keeps_shared_ones_and_the_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("backups");
+    let run_dir = root.join("dbx-backup__daily__20261020023000__abcd1234");
+    let nested = root.join("2026").join("10").join("20");
+    let shared = root.join("shared");
+    for path in [&run_dir, &nested, &shared] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    let user_file = shared.join("notes.txt");
+    std::fs::write(&user_file, "keep").unwrap();
+    let files = [run_dir.join("app.sql"), nested.join("app.sql.gz"), shared.join("app.sql"), root.join("flat.sql")];
+    for file in &files {
+        std::fs::write(file, "SELECT 1;").unwrap();
+    }
+    let service = service(dir.path(), Some(root.clone())).await;
+    let mut run = service.store.enqueue(request(schedule(&root).config)).await.unwrap();
+    service.store.claim().await.unwrap();
+    run.status = "success".into();
+    run.files = files
+        .iter()
+        .map(|file| BackupFile {
+            database: "app".into(),
+            schema: "app".into(),
+            display_name: "app".into(),
+            file_path: file.to_string_lossy().into_owned(),
+            owned: true,
+        })
+        .collect();
+    service.store.finish(run.clone()).await.unwrap();
+    service.delete_runs(vec![run.id]).await.unwrap();
+    assert!(files.iter().all(|file| !file.exists()));
+    assert!(!run_dir.exists());
+    assert!(!root.join("2026").exists());
+    assert!(user_file.exists());
+    assert!(root.is_dir());
 }
 
 #[tokio::test]
@@ -405,7 +527,7 @@ async fn live_mysql_worker_scenario() {
         plan.config.table_filter_mode = "include".into();
         plan.config.table_patterns = vec!["chosen".into()];
         service.command(BackupCommand::Save { schedule: plan }).await?;
-        let mut previous = None;
+        let mut previous: Option<std::path::PathBuf> = None;
         for _ in 0..2 {
             let run = service
                 .store
@@ -443,6 +565,10 @@ async fn live_mysql_worker_scenario() {
                 })
                 .await
                 .map_err(|_| "Retention did not remove the old file")?;
+                let previous_directory = previous.parent().unwrap();
+                assert_ne!(previous_directory, path.parent().unwrap());
+                assert!(!previous_directory.exists(), "Retention left the old run directory behind");
+                assert!(dir.path().is_dir());
             }
             previous = Some(path);
         }

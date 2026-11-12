@@ -5,11 +5,14 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -18,9 +21,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StandardJdbcMetadataTest {
@@ -218,6 +223,42 @@ class StandardJdbcMetadataTest {
         assertEquals("PROCEDURE", objects.get(0).getObject_type());
         assertEquals("SHARED_ROUTINE", objects.get(1).getName());
         assertEquals("PROCEDURE", objects.get(1).getObject_type());
+    }
+
+    @Test
+    void stripsSqlServerProcedureGroupSuffix() {
+        Connection conn = routineConnection(
+            "Microsoft SQL Server",
+            rows(
+                row("PROCEDURE_NAME", "dt_addtosourcecontrol;1", "REMARKS", null),
+                row("PROCEDURE_NAME", "dt_addtosourcecontrol_u;1", "REMARKS", null)
+            ),
+            rows()
+        );
+        MetadataListConstraints constraints =
+            new MetadataListConstraints(null, null, null, Collections.singletonList("PROCEDURE"));
+
+        List<ObjectInfo> objects = StandardJdbcMetadata.INSTANCE.listObjects(conn, profile, "", "APP", constraints);
+
+        assertEquals(2, objects.size());
+        assertEquals("dt_addtosourcecontrol", objects.get(0).getName());
+        assertEquals("dt_addtosourcecontrol_u", objects.get(1).getName());
+    }
+
+    @Test
+    void keepsRoutineSuffixesForNonSqlServerDrivers() {
+        Connection conn = routineConnection(
+            "PostgreSQL",
+            rows(row("PROCEDURE_NAME", "proc;1", "REMARKS", null)),
+            rows()
+        );
+        MetadataListConstraints constraints =
+            new MetadataListConstraints(null, null, null, Collections.singletonList("PROCEDURE"));
+
+        List<ObjectInfo> objects = StandardJdbcMetadata.INSTANCE.listObjects(conn, profile, "", "APP", constraints);
+
+        assertEquals(1, objects.size());
+        assertEquals("proc;1", objects.get(0).getName());
     }
 
     @Test
@@ -688,6 +729,50 @@ class StandardJdbcMetadataTest {
     }
 
     @Test
+    void unscopedCompletionPreservesSchemasForSubsequentColumnLookup() throws Exception {
+        try (Connection conn = DriverManager.getConnection("jdbc:h2:mem:completion_schemas");
+             Statement sql = conn.createStatement()) {
+            sql.execute("CREATE SCHEMA APP");
+            sql.execute("CREATE SCHEMA \"SalesApp\"");
+            sql.execute("CREATE TABLE APP.CT_CITYAREA (APP_ID INT)");
+            sql.execute("CREATE TABLE \"SalesApp\".CT_CITYAREA (SALES_ID INT)");
+
+            CompletionAssistantResponse tables = StandardJdbcMetadata.INSTANCE.completionAssistantSearch(
+                conn, profile, null,
+                request(null, null, "CT_CITYAREA", List.of(CompletionAssistantObjectKind.TABLE), null)
+            );
+
+            assertEquals(List.of("APP", "SalesApp"), tables.getCandidates().stream()
+                .map(CompletionAssistantCandidate::getSchema).sorted().toList());
+            for (CompletionAssistantCandidate table : tables.getCandidates()) {
+                CompletionAssistantResponse columns = StandardJdbcMetadata.INSTANCE.completionAssistantSearch(
+                    conn, profile, null,
+                    request(null, table.getSchema(), "", List.of(CompletionAssistantObjectKind.COLUMN), table.getName())
+                );
+                assertEquals(List.of("APP".equals(table.getSchema()) ? "APP_ID" : "SALES_ID"),
+                    columns.getCandidates().stream().map(CompletionAssistantCandidate::getName).toList());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({",APP", "'',APP", "'   ',APP", "ActualOwner,ActualOwner"})
+    void completionUsesRowSchemaWithRequestedSchemaFallback(String rowSchema, String expectedSchema) {
+        Connection conn = connection(
+            rows(),
+            rows(row("TABLE_NAME", "ACCOUNTS", "TABLE_TYPE", "TABLE", "TABLE_SCHEM", rowSchema)),
+            rows(), rows(), rows(), rows()
+        );
+
+        CompletionAssistantResponse tables = StandardJdbcMetadata.INSTANCE.completionAssistantSearch(
+            conn, profile, "sales",
+            request("sales", "APP", "ACC", List.of(CompletionAssistantObjectKind.TABLE), null)
+        );
+
+        assertEquals(expectedSchema, tables.getCandidates().get(0).getSchema());
+    }
+
+    @Test
     void completionAssistantSearchesTablesAndColumnsWithServerSideMasks() {
         AtomicReference<Object[]> capturedTableArgs = new AtomicReference<>();
         AtomicReference<Object[]> capturedColumnArgs = new AtomicReference<>();
@@ -762,6 +847,183 @@ class StandardJdbcMetadataTest {
                 assertEquals(expected, capturedPattern.get(), kind + " " + mode);
                 assertEquals(mask + "MATCH", result.getCandidates().get(0).getName());
             }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource(value = {
+        "/|A_B|A/_B",
+        "/|A%B|A/%B",
+        "/|A/B_%|A//B/_/%",
+        "\\|A\\B_%|A\\\\B\\_\\%",
+        "/|ACCOUNTS|ACCOUNTS",
+        "''|A_B|A_B"
+    }, delimiter = '|')
+    void completionEscapesExactParentTable(String escape, String table, String expectedPattern) {
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, (method, args) -> {
+            switch (method.getName()) {
+                case "getSearchStringEscape": return escape;
+                case "getColumns":
+                    assertEquals(expectedPattern, args[2]);
+                    assertEquals("ID%", args[3]);
+                    return rows(row("TABLE_NAME", table, "COLUMN_NAME", "ID", "TYPE_NAME", "INTEGER"));
+                default: return defaultValue(method.getReturnType());
+            }
+        });
+        Connection conn = proxy(Connection.class, (method, args) ->
+            "getMetaData".equals(method.getName()) ? meta : defaultValue(method.getReturnType()));
+        CompletionAssistantRequest request = request("sales", "APP", "ID", Collections.singletonList(CompletionAssistantObjectKind.COLUMN), table);
+
+        CompletionAssistantResponse result = StandardJdbcMetadata.INSTANCE.completionAssistantSearch(conn, profile, "sales", request);
+
+        assertEquals(1, result.getCandidates().size());
+        assertEquals("ID", result.getCandidates().get(0).getName());
+        assertEquals(table, result.getCandidates().get(0).getParent_name());
+    }
+
+    @Test
+    void listsOracleTriggersInTheSchemaObjectGroup() throws Exception {
+        try (Connection connection = oracleFixture()) {
+            List<ObjectInfo> objects = StandardJdbcMetadata.INSTANCE.listObjects(
+                connection, oracleProfile(), "ORCL", "APP", MetadataListConstraints.NONE);
+
+            List<ObjectInfo> triggers = objects.stream()
+                .filter(object -> "TRIGGER".equals(object.getObject_type()))
+                .collect(Collectors.toList());
+            assertEquals(1, triggers.size());
+            ObjectInfo trigger = triggers.get(0);
+            assertEquals("Trigger A", trigger.getName());
+            assertEquals("APP", trigger.getSchema());
+            assertNotNull(trigger.getTrigger());
+            assertEquals("Trigger A", trigger.getTrigger().getName());
+            assertEquals("PARENT_OWNER", trigger.getParent_schema());
+            assertEquals("PARENT_TABLE", trigger.getParent_name());
+        }
+    }
+
+    @Test
+    void nonOracleConnectionsNeverReadTheOracleTriggerDictionary() {
+        AtomicInteger preparedStatements = new AtomicInteger();
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getTables".equals(method.getName())) {
+                    return rows(row("TABLE_NAME", "T", "TABLE_TYPE", "TABLE", "REMARKS", null));
+                }
+                if ("getDatabaseProductName".equals(method.getName())) {
+                    return "PostgreSQL";
+                }
+                if ("getTableTypes".equals(method.getName())) {
+                    return rows(row("TABLE_TYPE", "TABLE"));
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        Connection conn = proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getMetaData".equals(method.getName())) {
+                    return meta;
+                }
+                if ("prepareStatement".equals(method.getName())) {
+                    preparedStatements.incrementAndGet();
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+
+        List<ObjectInfo> objects = StandardJdbcMetadata.INSTANCE.listObjects(
+            conn, profile, "postgres", "public", MetadataListConstraints.NONE);
+        assertEquals(0, preparedStatements.get());
+        assertTrue(objects.stream().noneMatch(object -> "TRIGGER".equals(object.getObject_type())));
+    }
+
+    @Test
+    void oracleTriggerReadFailureKeepsTheRestOfTheObjectGroup() throws Exception {
+        try (Connection h2 = oracleH2Fixture()) {
+            h2.createStatement().execute("DROP TABLE ALL_TRIGGERS");
+            List<ObjectInfo> objects = StandardJdbcMetadata.INSTANCE.listObjects(
+                asOracleConnection(h2), oracleProfile(), "ORCL", "APP", MetadataListConstraints.NONE);
+            assertTrue(objects.stream().noneMatch(object -> "TRIGGER".equals(object.getObject_type())));
+        }
+    }
+
+    private static JdbcAgentProfile oracleProfile() {
+        return new JdbcAgentProfile(
+            "oracle.jdbc.OracleDriver",
+            "jdbc:oracle:thin:@{host}:{port}/{database}",
+            1521,
+            false,
+            Collections.singleton("SYS"),
+            Arrays.asList("TABLE", "VIEW")
+        );
+    }
+
+    /**
+     * An Oracle-flavoured connection whose ALL_TRIGGERS dictionary answers the
+     * schema-level trigger query used by the object tree's 触发器 group.
+     */
+    private static Connection oracleFixture() throws Exception {
+        return asOracleConnection(oracleH2Fixture());
+    }
+
+    private static Connection oracleH2Fixture() throws Exception {
+        Connection h2 = java.sql.DriverManager.getConnection(
+            "jdbc:h2:mem:" + java.util.UUID.randomUUID() + ";MODE=Oracle;NON_KEYWORDS=SEQUENCE,POSITION,LINE");
+        try (var statement = h2.createStatement()) {
+            statement.execute("CREATE TABLE ALL_TRIGGERS (OWNER VARCHAR, TRIGGER_NAME VARCHAR, TRIGGERING_EVENT VARCHAR, TRIGGER_TYPE VARCHAR, STATUS VARCHAR, TABLE_OWNER VARCHAR, TABLE_NAME VARCHAR, BASE_OBJECT_TYPE VARCHAR, WHEN_CLAUSE VARCHAR, REFERENCING_NAMES VARCHAR, DESCRIPTION VARCHAR, TRIGGER_BODY CLOB)");
+            statement.execute("CREATE TABLE ALL_OBJECTS (OWNER VARCHAR, OBJECT_NAME VARCHAR, OBJECT_TYPE VARCHAR, OBJECT_ID BIGINT, LAST_DDL_TIME TIMESTAMP, STATUS VARCHAR)");
+        }
+        try (java.sql.PreparedStatement statement = h2.prepareStatement(
+            "INSERT INTO ALL_TRIGGERS VALUES ('APP', 'Trigger A', 'INSERT', 'BEFORE EACH ROW', 'ENABLED', 'PARENT_OWNER', 'PARENT_TABLE', 'TABLE', NULL, NULL, NULL, 'BEGIN NULL; END;')")) {
+            statement.executeUpdate();
+        }
+        try (java.sql.PreparedStatement statement = h2.prepareStatement(
+            "INSERT INTO ALL_OBJECTS VALUES ('APP', 'Trigger A', 'TRIGGER', 42, CURRENT_TIMESTAMP, 'VALID')")) {
+            statement.executeUpdate();
+        }
+        return h2;
+    }
+
+    /**
+     * The Oracle JDBC driver reports "Oracle" as its product name; H2 cannot, so the
+     * fixture connection is wrapped to answer like the real driver.
+     */
+    private static Connection asOracleConnection(Connection delegate) {
+        return proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getMetaData".equals(method.getName())) {
+                    DatabaseMetaData meta = (DatabaseMetaData) invoke(method, delegate, args);
+                    return proxy(DatabaseMetaData.class, new MethodHandler() {
+                        @Override
+                        public Object handle(Method inner, Object[] innerArgs) {
+                            if ("getDatabaseProductName".equals(inner.getName())) {
+                                return "Oracle";
+                            }
+                            return invoke(inner, meta, innerArgs);
+                        }
+                    });
+                }
+                return invoke(method, delegate, args);
+            }
+        });
+    }
+
+    private static Object invoke(Method method, Object target, Object[] args) {
+        try {
+            return method.invoke(target, args);
+        } catch (InvocationTargetException error) {
+            Throwable cause = error.getCause();
+            if (cause instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            if (cause instanceof Error fatal) {
+                throw fatal;
+            }
+            throw new IllegalStateException(cause);
+        } catch (Exception error) {
+            throw new IllegalStateException(error);
         }
     }
 
@@ -1009,10 +1271,17 @@ class StandardJdbcMetadataTest {
     }
 
     private static Connection routineConnection(ResultSet procedures, ResultSet functions) {
+        return routineConnection(null, procedures, functions);
+    }
+
+    private static Connection routineConnection(String productName, ResultSet procedures, ResultSet functions) {
         DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
             @Override
             public Object handle(Method method, Object[] args) {
                 String name = method.getName();
+                if ("getDatabaseProductName".equals(name)) {
+                    return productName;
+                }
                 if ("getTables".equals(name) || "getTableTypes".equals(name)) {
                     return rows();
                 }

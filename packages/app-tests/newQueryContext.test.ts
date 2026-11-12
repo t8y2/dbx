@@ -83,6 +83,7 @@ test("new query target uses the selected sidebar node when there is no active ta
     connectionId: "conn-tree",
     database: "reporting",
     schema: "public",
+    schemaQualifiesSql: true,
     catalog: undefined,
     shouldRefreshDefaultDatabase: false,
   });

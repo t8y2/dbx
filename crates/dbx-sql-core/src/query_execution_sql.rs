@@ -234,6 +234,13 @@ pub fn estimated_plan_strategy(database_type: Option<DatabaseType>) -> Option<Es
         DatabaseType::Postgres => {
             EstimatedPlanStrategy { sql_generation: Postgres, acquisition: GeneratedSql, format: Json }
         }
+        // openGauss documents EXPLAIN (FORMAT TEXT|XML|JSON|YAML) but JSON output
+        // additionally depends on the session's explain_perf_mode; plain text avoids
+        // assuming that GUC, so the plan is generated as plain `EXPLAIN <statement>`
+        // text (#13055).
+        DatabaseType::OpenGauss => {
+            EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text }
+        }
         DatabaseType::Questdb => {
             EstimatedPlanStrategy { sql_generation: Plain, acquisition: GeneratedSql, format: Text }
         }
@@ -946,6 +953,11 @@ fn is_write_sql_statement(
         return !is_safe_read_pragma(&upper);
     }
 
+    // Special handling for SET: allow safe variable assignments and session configuration
+    if !starts_with_read && starts_with_keyword(&upper, "SET") {
+        return !is_safe_read_only_set(&upper, &cleaned) || contains_dangerous_sql_keyword(sql);
+    }
+
     // SHOW CREATE returns object metadata; CREATE is part of its read-only syntax.
     if starts_with_show_create(&upper) {
         return false;
@@ -1036,6 +1048,143 @@ fn is_safe_read_pragma(upper_stripped: &str) -> bool {
     }
     // PRAGMA table_info = something or other unsafe form — blocked
     false
+}
+
+/// Check if a SET statement is a safe read-only variable assignment or session setting.
+///
+/// Allows:
+/// - User variables: `SET @var = 1`, `SET @var := 1`, `SET @begin_id = 0, @end_id = 100`
+/// - Session variables: `SET @@session.var = 1`, `SET SESSION var = 1`, `SET var = 1`
+/// - Safe character set/encoding: `SET NAMES 'utf8mb4'`, `SET CHARSET utf8mb4`, `SET CHARACTER SET utf8mb4`
+/// - Safe search path / timezone: `SET search_path TO public`, `SET TIME ZONE 'UTC'`, `SET search_path = public`
+///
+/// Blocks:
+/// - Global / persistent modifications: `SET GLOBAL ...`, `SET @@global...`, `SET PERSIST...`, `SET @@persist...`
+/// - Password modifications: `SET PASSWORD...`
+/// - File exports: `INTO OUTFILE`, `INTO DUMPFILE`
+/// - Executable verbs: `CALL`, `EXEC`, `EXECUTE`
+/// - Dangerous write/DDL keywords: `DELETE`, `UPDATE`, `INSERT`, `DROP`, `ALTER`, `TRUNCATE`, `CREATE`, `MERGE`
+fn is_safe_read_only_set(upper: &str, cleaned: &str) -> bool {
+    if !starts_with_keyword(upper, "SET") {
+        return false;
+    }
+
+    let tokens = tokenize_set_statement(cleaned);
+    if tokens.is_empty() || !tokens[0].eq_ignore_ascii_case("SET") {
+        return false;
+    }
+
+    let mut has_assignment = false;
+    let after_set = &tokens[1..];
+
+    for token in after_set {
+        let norm = token.to_ascii_uppercase();
+
+        // Forbidden global or persistent modifications
+        if norm == "GLOBAL" || norm == "PERSIST" || norm == "PERSIST_ONLY" {
+            return false;
+        }
+        if norm.starts_with("@@GLOBAL") || norm.starts_with("@@PERSIST") {
+            return false;
+        }
+
+        // Forbidden password changes
+        if norm == "PASSWORD" {
+            return false;
+        }
+
+        // Forbidden file exports
+        if norm == "OUTFILE" || norm == "DUMPFILE" {
+            return false;
+        }
+
+        // Forbidden stored procedure / command executions
+        if norm == "CALL" || norm == "EXEC" || norm == "EXECUTE" {
+            return false;
+        }
+
+        // Dangerous DML/DDL keywords
+        if matches!(norm.as_str(), "DROP" | "DELETE" | "TRUNCATE" | "ALTER" | "UPDATE" | "MERGE" | "CREATE") {
+            return false;
+        }
+
+        if norm == "=" || norm == ":=" || norm == "TO" {
+            has_assignment = true;
+        }
+    }
+
+    if has_assignment {
+        return true;
+    }
+
+    // Check non-assignment safe session keywords
+    let first = after_set.first().map(|s| s.to_ascii_uppercase());
+    let second = after_set.get(1).map(|s| s.to_ascii_uppercase());
+
+    if matches!(first.as_deref(), Some("NAMES" | "CHARSET")) {
+        return true;
+    }
+    if first.as_deref() == Some("CHARACTER") && second.as_deref() == Some("SET") {
+        return true;
+    }
+    if first.as_deref() == Some("TIME") && second.as_deref() == Some("ZONE") {
+        return true;
+    }
+
+    false
+}
+
+fn tokenize_set_statement(cleaned: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut chars = cleaned.chars().peekable();
+
+    while let Some(&ch) = chars.peek() {
+        if ch.is_ascii_whitespace() {
+            chars.next();
+            continue;
+        }
+
+        if ch == ':' {
+            chars.next();
+            if chars.peek() == Some(&'=') {
+                chars.next();
+                tokens.push(":=".to_string());
+            } else {
+                tokens.push(":".to_string());
+            }
+            continue;
+        }
+
+        if ch == '=' {
+            chars.next();
+            tokens.push("=".to_string());
+            continue;
+        }
+
+        if ch == '(' || ch == ')' || ch == ',' || ch == ';' {
+            chars.next();
+            tokens.push(ch.to_string());
+            continue;
+        }
+
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '@' || ch == '$' || ch == '#' {
+            let mut word = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '@' || c == '$' || c == '#' || c == '.' {
+                    word.push(c);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            tokens.push(word);
+            continue;
+        }
+
+        chars.next();
+    }
+
+    tokens
 }
 
 /// True when `upper` starts with `keyword` followed by a non-alphanumeric byte
@@ -2226,6 +2375,7 @@ mod tests {
             (DatabaseType::Doris, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Xugu, "EXPLAIN VERBOSE SELECT 1", Text, GeneratedSql),
             (DatabaseType::Postgres, "EXPLAIN (FORMAT JSON) SELECT 1", Json, GeneratedSql),
+            (DatabaseType::OpenGauss, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Questdb, "EXPLAIN SELECT 1", Text, GeneratedSql),
             (DatabaseType::Dameng, "EXPLAIN SELECT 1", Text, DriverNative),
             (DatabaseType::Oracle, "EXPLAIN PLAN FOR SELECT 1", Text, DriverNative),
@@ -2953,6 +3103,55 @@ mod tests {
     }
 
     #[test]
+    fn check_read_only_allows_safe_session_variables_and_blocks_unsafe_set() {
+        // Safe variable assignments and session configuration
+        for sql in [
+            "SET @begin_id = 0",
+            "SET @end_id = @begin_id + 100000;",
+            "SET @begin_id = 0;\nSET @end_id = @begin_id + 100000;",
+            "SET @var := 1",
+            "SET @a = 1, @b = 2;",
+            "SET NAMES utf8mb4",
+            "SET CHARSET utf8mb4",
+            "SET CHARACTER SET utf8mb4",
+            "SET @@session.sort_buffer_size = 10000",
+            "SET @@sort_buffer_size = 10000",
+            "SET SESSION sort_buffer_size = 10000",
+            "SET sort_buffer_size = 10000",
+            "SET @val = REPLACE('hello', 'l', 'w')",
+            "SET @val = INSERT('hello', 1, 2, 'hi')",
+            "SET @val = 'DELETE FROM users'",
+        ] {
+            assert_eq!(check_read_only(sql, "readonly", DatabaseType::Mysql), Ok(()), "expected allowed SET: {sql}");
+        }
+
+        // PostgreSQL search_path and timezone
+        assert_eq!(check_read_only("SET search_path TO public, \"$user\"", "readonly", DatabaseType::Postgres), Ok(()));
+        assert_eq!(check_read_only("SET search_path = public", "readonly", DatabaseType::Postgres), Ok(()));
+        assert_eq!(check_read_only("SET TIME ZONE 'UTC'", "readonly", DatabaseType::Postgres), Ok(()));
+
+        // Unsafe SET statements
+        for sql in [
+            "SET GLOBAL max_connections = 100",
+            "SET @@global.max_connections = 100",
+            "SET @@GLOBAL.sort_buffer_size = 1000",
+            "SET PERSIST max_connections = 100",
+            "SET @@persist.max_connections = 100",
+            "SET @@persist_only.max_connections = 100",
+            "SET PASSWORD = 'secret'",
+            "SET PASSWORD FOR 'user'@'localhost' = 'secret'",
+            "SET @x = (DELETE FROM users)",
+            "SET @x = (UPDATE users SET a = 1)",
+            "SET @x = (DROP TABLE users)",
+            "SET @x = (ALTER TABLE users ADD c INT)",
+            "SET @x = (TRUNCATE TABLE users)",
+            "SET @begin_id = 0; DROP TABLE users",
+        ] {
+            assert!(check_read_only(sql, "readonly", DatabaseType::Mysql).is_err(), "expected blocked SET: {sql}");
+        }
+    }
+
+    #[test]
     fn check_read_only_only_treats_executable_comments_as_writes_for_mysql_compatible_connections() {
         let mysql_executable_comment = "SELECT 3156 /*!50000 INTO OUTFILE '/var/lib/mysql-files/dbx_ro_probe.txt' */";
         let mariadb_executable_comment =
@@ -3015,6 +3214,23 @@ mod tests {
                 &format!("DBX DYNAMODB {operation}\ntable: \"orders\""),
                 DatabaseType::DynamoDb
             ));
+        }
+    }
+
+    #[test]
+    fn classifies_dynamodb_partiql_reads_and_writes_for_read_only_protection() {
+        assert!(!is_write_sql_for_database(
+            "SELECT * FROM \"items\" WHERE \"status\"='PENDING'",
+            DatabaseType::DynamoDb
+        ));
+        assert!(!is_write_sql_for_database("-- comment\nSELECT 'UPDATE' FROM \"items\"", DatabaseType::DynamoDb));
+        for statement in [
+            "INSERT INTO \"items\" VALUE {'pk':'x'}",
+            "UPDATE \"items\" SET flag=true WHERE pk='x'",
+            "DELETE FROM \"items\" WHERE pk='x'",
+            "SELECT * FROM \"items\"; DELETE FROM \"items\" WHERE pk='x'",
+        ] {
+            assert!(is_write_sql_for_database(statement, DatabaseType::DynamoDb), "{statement}");
         }
     }
 

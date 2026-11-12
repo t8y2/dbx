@@ -27,8 +27,17 @@ export function dataGridDistinctValueKey(value: CellValue, columnInfo?: Pick<Col
   return dataGridLocalFilterKey(value);
 }
 
+/**
+ * Filter modes whose meaning is "everything except this value". Picking NULL out
+ * of the value list has to keep that negation, so these map to `is-not-null`.
+ *
+ * The `satisfies` clause breaks compilation when the union gains a mode that the
+ * list and the comment above were not reconsidered for (#14365 review).
+ */
+const NEGATED_DATA_GRID_FILTER_MODES = ["not-equals", "not-like", "not-between", "not-begins-with", "not-ends-with"] as const satisfies readonly DataGridContextFilterMode[];
+
 export function dataGridNullSuggestionFilterMode(mode: DataGridContextFilterMode): "is-null" | "is-not-null" {
-  return mode === "not-equals" || mode === "not-like" || mode === "not-between" ? "is-not-null" : "is-null";
+  return (NEGATED_DATA_GRID_FILTER_MODES as readonly DataGridContextFilterMode[]).includes(mode) ? "is-not-null" : "is-null";
 }
 
 export function toggleAllDataGridDistinctValueOptions(selectedValues: ReadonlyMap<string, CellValue>, options: readonly DataGridLocalFilterOption[]): Map<string, CellValue> {

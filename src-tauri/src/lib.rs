@@ -11,6 +11,9 @@ mod macos_escape_guard;
 mod migration_gate;
 mod models;
 mod plugin_ui_protocol;
+mod promoted_build;
+#[cfg(any(target_os = "windows", test))]
+mod startup_messages;
 #[cfg(any(target_os = "windows", test))]
 mod startup_recovery;
 #[cfg(all(not(target_os = "windows"), not(test)))]
@@ -18,9 +21,19 @@ mod startup_recovery;
 mod startup_recovery;
 #[cfg(any(target_os = "windows", test))]
 mod webview2_legacy_css;
+#[cfg(target_os = "windows")]
+mod webview2_preflight;
 #[cfg(any(target_os = "windows", test))]
 mod webview2_recovery;
+mod window_geometry;
 mod window_state_guard;
+#[cfg(target_os = "windows")]
+mod windows_appcompat;
+#[cfg(not(target_os = "windows"))]
+#[path = "windows_appcompat_noop.rs"]
+mod windows_appcompat;
+#[cfg(any(target_os = "windows", test))]
+mod windows_appcompat_state;
 
 use commands::connection::AppState;
 use dbx_core::persistence::secret_codec::SecretKeyPolicy;
@@ -179,9 +192,8 @@ pub(crate) fn linux_compositing_available() -> bool {
     gtk::gdk::Screen::default().is_some_and(|screen| screen.is_composited())
 }
 
-/// Desktops where the transparent floating frame is known to render correctly. Others (notably
-/// KDE, which shows flickering or missing content with some driver/WebKitGTK combinations) keep
-/// the opaque window unless the user forces the frame on.
+/// Desktops where the floating frame is enabled automatically. Driver/WebKitGTK combinations
+/// can still cause flickering on GNOME, so the saved setting can disable this default.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn linux_desktop_supports_floating_frame(current_desktop: Option<&std::ffi::OsStr>) -> bool {
     current_desktop
@@ -189,12 +201,17 @@ fn linux_desktop_supports_floating_frame(current_desktop: Option<&std::ffi::OsSt
         .unwrap_or(false)
 }
 
-/// `DBX_LINUX_FLOATING_FRAME=1|0` is an optional override; without it the desktop decides.
+/// `DBX_LINUX_FLOATING_FRAME=1|0` overrides the saved preference; otherwise the frame is only used on
+/// GNOME running as a native Wayland client. GNOME on X11 ("GNOME on Xorg") keeps the opaque
+/// window: there the transparent WebKitGTK window stays see-through and only repaints the regions
+/// that get damaged (e.g. under the mouse).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn should_enable_linux_floating_frame(
     compositing: bool,
+    native_wayland: bool,
     override_value: Option<&std::ffi::OsStr>,
     current_desktop: Option<&std::ffi::OsStr>,
+    enabled: bool,
 ) -> bool {
     if !compositing {
         return false;
@@ -202,23 +219,35 @@ fn should_enable_linux_floating_frame(
     match override_value.and_then(|value| value.to_str()) {
         Some("1") => true,
         Some("0") => false,
-        _ => linux_desktop_supports_floating_frame(current_desktop),
+        _ => enabled && native_wayland && linux_desktop_supports_floating_frame(current_desktop),
     }
 }
 
 /// The Linux config declares the main window with `create: false` so its transparency can
-/// depend at runtime on the desktop and on whether a compositor is available.
+/// depend at runtime on the desktop, the Wayland/X11 session and whether a compositor is available.
 #[cfg(target_os = "linux")]
-fn create_linux_main_window(app: &tauri::App) -> tauri::Result<()> {
+fn create_linux_main_window(app: &tauri::App, floating_frame_enabled: bool) -> tauri::Result<()> {
     let Some(config) = app.config().app.windows.iter().find(|window| window.label == "main").cloned() else {
         return Ok(());
     };
     let compositing = linux_compositing_available();
+    let native_wayland = linux_uses_native_wayland(
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+        std::env::var_os("XDG_SESSION_TYPE").as_deref(),
+        std::env::var_os("GDK_BACKEND").as_deref(),
+    );
     let override_value = std::env::var_os("DBX_LINUX_FLOATING_FRAME");
     let current_desktop = std::env::var_os("XDG_CURRENT_DESKTOP");
-    let floating_frame =
-        should_enable_linux_floating_frame(compositing, override_value.as_deref(), current_desktop.as_deref());
-    log::info!("[WINDOW] Linux main window compositing={compositing}; floating_frame={floating_frame}");
+    let floating_frame = should_enable_linux_floating_frame(
+        compositing,
+        native_wayland,
+        override_value.as_deref(),
+        current_desktop.as_deref(),
+        floating_frame_enabled,
+    );
+    log::info!(
+        "[WINDOW] Linux main window compositing={compositing}; native_wayland={native_wayland}; floating_frame={floating_frame}"
+    );
     let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?.transparent(floating_frame);
     if floating_frame {
         // Read by index.html before first paint to draw the rounded, shadowed frame.
@@ -258,6 +287,23 @@ fn should_confirm_app_exit_request(target_os: &str, exit_code: Option<i32>, conf
     should_hide_window_on_close(target_os) && exit_code != Some(tauri::RESTART_EXIT_CODE) && !confirmed_exit
 }
 
+/// Route a Linux compositor close request (Wayland `xdg_toplevel.close`, X11
+/// `WM_DELETE_WINDOW`) through the tray-aware close flow instead of the default
+/// window destroy, which would bypass the "minimize to tray on close" setting.
+/// Requires the main window, a ready frontend listener, and a registered tray.
+/// The tray is only created when the tray setting is on with AppIndicator
+/// available and is never destroyed or hidden at runtime, so its presence is a
+/// sound proxy for the window being restorable; any missed premise keeps the
+/// native close.
+fn should_route_linux_close_through_tray(
+    target_os: &str,
+    window_label: &str,
+    frontend_ready: bool,
+    tray_registered: bool,
+) -> bool {
+    target_os == "linux" && window_label == "main" && frontend_ready && tray_registered
+}
+
 fn should_fallback_to_native_quit(target: &str, frontend_ready: bool) -> bool {
     target == "quit" && !frontend_ready
 }
@@ -273,9 +319,16 @@ fn native_window_decorations_override(target_os: &str) -> Option<bool> {
 fn build_app_menu<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
     let pkg_info = app_handle.package_info();
     let app_name = pkg_info.name.clone();
+    let build_version = pkg_info.version.to_string();
+    // A promoted stable build keeps its beta version inside the binary; the
+    // renderer reports the promotion so the panel can show the stable version
+    // like Settings → About and the copied support info do.
+    let promoted = app_handle.try_state::<promoted_build::PromotedBuildState>().and_then(|state| state.get());
+    let (version, short_version) = promoted_build::about_version_pair(&build_version, promoted.as_deref());
     let about_metadata = AboutMetadata {
         name: Some(app_name.clone()),
-        version: Some(pkg_info.version.to_string()),
+        version: Some(version),
+        short_version,
         copyright: Some(commands::support_info::format_support_info_for_native_about()),
         icon: Some(ABOUT_APP_ICON),
         ..Default::default()
@@ -385,8 +438,15 @@ fn linux_nvidia_driver_from_state(
     proprietary_control_exists: bool,
     proprietary_proc_exists: bool,
     render_driver: Option<&str>,
+    prime_render_offload: bool,
 ) -> LinuxNvidiaDriver {
-    if proprietary_control_exists || proprietary_proc_exists {
+    // On hybrid laptops the proprietary module is loaded for the dGPU while the
+    // integrated GPU (i915/xe/amdgpu) drives the display and WebKit's renderer.
+    // Applying the NVIDIA workarounds there needlessly disables DMABuf and drops
+    // WebKitGTK to the slow shared-memory path (laggy scrolling everywhere).
+    let renders_on_nvidia =
+        prime_render_offload || render_driver.is_none_or(|driver| driver.eq_ignore_ascii_case("nvidia"));
+    if (proprietary_control_exists || proprietary_proc_exists) && renders_on_nvidia {
         LinuxNvidiaDriver::Proprietary
     } else if render_driver.is_some_and(|driver| driver.eq_ignore_ascii_case("nouveau")) {
         LinuxNvidiaDriver::Nouveau
@@ -586,6 +646,7 @@ fn apply_linux_webkit_rendering_workarounds() {
         std::path::Path::new("/dev/nvidiactl").exists(),
         std::path::Path::new("/proc/driver/nvidia/version").exists(),
         selected_device.and_then(|device| device.driver.as_deref()),
+        std::env::var_os("__NV_PRIME_RENDER_OFFLOAD").is_some_and(|value| value == "1"),
     );
     let has_hardware_render_device =
         render_devices.iter().any(|device| !linux_drm_driver_is_software_only(device.driver.as_deref()));
@@ -627,21 +688,26 @@ fn apply_linux_webkit_rendering_workarounds() {
 fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let Some(window) = app.get_webview_window("main") else {
         eprintln!("[WINDOW] show_main_window: no \"main\" webview window to reveal");
+        startup_recovery::record("show_main_window: main webview window is missing");
         return false;
     };
     if let Err(err) = window.show() {
         eprintln!("[WINDOW] show_main_window: show() failed: {err}");
+        startup_recovery::record(format!("show_main_window: show() failed: {err}"));
     }
     if let Err(err) = window.unminimize() {
         eprintln!("[WINDOW] show_main_window: unminimize() failed: {err}");
+        startup_recovery::record(format!("show_main_window: unminimize() failed: {err}"));
     }
     if let Err(err) = window.set_focus() {
         eprintln!("[WINDOW] show_main_window: set_focus() failed: {err}");
+        startup_recovery::record(format!("show_main_window: set_focus() failed: {err}"));
     }
     match window.is_visible() {
         Ok(visible) => visible,
         Err(err) => {
             eprintln!("[WINDOW] show_main_window: is_visible() failed: {err}");
+            startup_recovery::record(format!("show_main_window: is_visible() failed: {err}"));
             false
         }
     }
@@ -739,6 +805,11 @@ pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, ta
         return;
     }
     show_main_window(app);
+    // The prompt only resolves to a quit after the user answers, by which
+    // point the window may already be hidden. Record its visible frame now;
+    // `complete_app_close` and the dock/menu quit keep this capture unless the
+    // window has meanwhile moved.
+    window_state_guard::remember_main_window_geometry(app);
     let _ = app.emit(APP_CLOSE_REQUESTED_EVENT, target);
 }
 
@@ -1147,6 +1218,9 @@ fn run_shutdown_on_dedicated_thread(shutdown: impl FnOnce() + Send + 'static) ->
 }
 
 pub(crate) fn cleanup_before_updater_forced_exit(app_handle: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    window_state_guard::save_current_main_window_geometry(app_handle);
+
     let shutdown_app = app_handle.clone();
     if let Err(error) = run_shutdown_on_dedicated_thread(move || {
         tauri::async_runtime::block_on(shutdown_runtime_resources(&shutdown_app));
@@ -1167,9 +1241,9 @@ mod tests {
         linux_webkit_rendering_workarounds, native_window_decorations_override, run_shutdown_on_dedicated_thread,
         should_confirm_app_exit_request, should_enable_linux_floating_frame, should_enable_single_instance,
         should_fallback_to_native_quit, should_hide_window_before_exit, should_hide_window_on_close,
-        should_setup_desktop_tray, should_show_main_window_after_setup, should_show_main_window_before_setup_tasks,
-        startup_data_dir_mode, tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice,
-        LinuxNvidiaDriver,
+        should_route_linux_close_through_tray, should_setup_desktop_tray, should_show_main_window_after_setup,
+        should_show_main_window_before_setup_tasks, startup_data_dir_mode, tray_menu_labels_for_locale,
+        uses_application_level_icon, LinuxDrmRenderDevice, LinuxNvidiaDriver,
     };
     use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
@@ -1239,30 +1313,85 @@ mod tests {
     }
 
     #[test]
-    fn linux_floating_frame_is_enabled_by_default_on_gnome_only() {
+    fn linux_floating_frame_is_enabled_by_default_on_gnome_wayland_only() {
         for desktop in ["GNOME", "ubuntu:GNOME", "gnome", "GNOME-Classic:GNOME"] {
-            assert!(should_enable_linux_floating_frame(true, None, Some(OsStr::new(desktop))), "{desktop}");
+            assert!(should_enable_linux_floating_frame(true, true, None, Some(OsStr::new(desktop)), true), "{desktop}");
         }
         for desktop in ["KDE", "XFCE", "X-Cinnamon", "sway", "", "GNOMEISH"] {
-            assert!(!should_enable_linux_floating_frame(true, None, Some(OsStr::new(desktop))), "{desktop}");
+            assert!(
+                !should_enable_linux_floating_frame(true, true, None, Some(OsStr::new(desktop)), true),
+                "{desktop}"
+            );
         }
-        assert!(!should_enable_linux_floating_frame(true, None, None));
+        assert!(!should_enable_linux_floating_frame(true, true, None, None, true));
+    }
+
+    #[test]
+    fn linux_floating_frame_is_disabled_by_default_on_gnome_x11() {
+        for desktop in ["GNOME", "ubuntu:GNOME", "GNOME-Classic:GNOME"] {
+            assert!(
+                !should_enable_linux_floating_frame(true, false, None, Some(OsStr::new(desktop)), true),
+                "{desktop}"
+            );
+        }
+        assert!(should_enable_linux_floating_frame(
+            true,
+            false,
+            Some(OsStr::new("1")),
+            Some(OsStr::new("GNOME")),
+            true
+        ));
     }
 
     #[test]
     fn linux_floating_frame_override_wins_over_desktop() {
-        assert!(should_enable_linux_floating_frame(true, Some(OsStr::new("1")), Some(OsStr::new("KDE"))));
-        assert!(!should_enable_linux_floating_frame(true, Some(OsStr::new("0")), Some(OsStr::new("GNOME"))));
+        assert!(should_enable_linux_floating_frame(true, true, Some(OsStr::new("1")), Some(OsStr::new("KDE")), true));
+        assert!(!should_enable_linux_floating_frame(
+            true,
+            true,
+            Some(OsStr::new("0")),
+            Some(OsStr::new("GNOME")),
+            true
+        ));
         for value in ["", "true", "auto", "01"] {
-            assert!(should_enable_linux_floating_frame(true, Some(OsStr::new(value)), Some(OsStr::new("GNOME"))));
-            assert!(!should_enable_linux_floating_frame(true, Some(OsStr::new(value)), Some(OsStr::new("KDE"))));
+            assert!(should_enable_linux_floating_frame(
+                true,
+                true,
+                Some(OsStr::new(value)),
+                Some(OsStr::new("GNOME")),
+                true
+            ));
+            assert!(!should_enable_linux_floating_frame(
+                true,
+                true,
+                Some(OsStr::new(value)),
+                Some(OsStr::new("KDE")),
+                true
+            ));
         }
     }
 
     #[test]
     fn linux_floating_frame_requires_compositing() {
-        assert!(!should_enable_linux_floating_frame(false, Some(OsStr::new("1")), Some(OsStr::new("GNOME"))));
-        assert!(!should_enable_linux_floating_frame(false, None, Some(OsStr::new("GNOME"))));
+        assert!(!should_enable_linux_floating_frame(
+            false,
+            true,
+            Some(OsStr::new("1")),
+            Some(OsStr::new("GNOME")),
+            true
+        ));
+        assert!(!should_enable_linux_floating_frame(false, true, None, Some(OsStr::new("GNOME")), true));
+    }
+
+    #[test]
+    fn linux_floating_frame_setting_can_disable_gnome_default() {
+        let desktop = Some(OsStr::new("GNOME"));
+        assert!(!should_enable_linux_floating_frame(true, true, None, desktop, false));
+        assert!(!should_enable_linux_floating_frame(true, true, Some(OsStr::new("auto")), desktop, false));
+        assert!(should_enable_linux_floating_frame(true, true, Some(OsStr::new("1")), desktop, false));
+        assert!(!should_enable_linux_floating_frame(true, true, Some(OsStr::new("0")), desktop, true));
+        assert!(!should_enable_linux_floating_frame(true, false, None, desktop, true));
+        assert!(!should_enable_linux_floating_frame(false, true, Some(OsStr::new("1")), desktop, false));
     }
 
     #[test]
@@ -1332,6 +1461,17 @@ mod tests {
     #[test]
     fn does_not_hide_window_on_close_for_other_platforms() {
         assert!(!should_hide_window_on_close("linux"));
+    }
+
+    #[test]
+    fn routes_linux_close_through_tray_only_with_main_window_frontend_and_tray() {
+        assert!(should_route_linux_close_through_tray("linux", "main", true, true));
+        assert!(!should_route_linux_close_through_tray("linux", "main", true, false));
+        assert!(!should_route_linux_close_through_tray("linux", "main", false, true));
+        assert!(!should_route_linux_close_through_tray("linux", "detached-tab-1", true, true));
+        assert!(!should_route_linux_close_through_tray("linux", "plugin-floating-audio", true, true));
+        assert!(!should_route_linux_close_through_tray("macos", "main", true, true));
+        assert!(!should_route_linux_close_through_tray("windows", "main", true, true));
     }
 
     #[test]
@@ -1441,13 +1581,19 @@ mod tests {
 
     #[test]
     fn classifies_linux_nvidia_driver_from_selected_renderer() {
-        assert_eq!(linux_nvidia_driver_from_state(true, false, None), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(false, true, None), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(true, false, Some("nouveau")), LinuxNvidiaDriver::Proprietary);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("nouveau")), LinuxNvidiaDriver::Nouveau);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("i915")), LinuxNvidiaDriver::None);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("amdgpu")), LinuxNvidiaDriver::None);
-        assert_eq!(linux_nvidia_driver_from_state(false, false, None), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, false, None, false), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(false, true, None, false), LinuxNvidiaDriver::Proprietary);
+        assert_eq!(linux_nvidia_driver_from_state(true, false, Some("nouveau"), false), LinuxNvidiaDriver::Nouveau);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("nouveau"), false), LinuxNvidiaDriver::Nouveau);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("i915"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, Some("amdgpu"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(false, false, None, false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("nvidia"), false), LinuxNvidiaDriver::Proprietary);
+        // Hybrid laptops: the iGPU renders, so the proprietary dGPU module must not disable DMABuf.
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("i915"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("xe"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("amdgpu"), false), LinuxNvidiaDriver::None);
+        assert_eq!(linux_nvidia_driver_from_state(true, true, Some("i915"), true), LinuxNvidiaDriver::Proprietary);
     }
 
     fn drm_render_device(path: &str, driver: &str, boot_vga: bool) -> LinuxDrmRenderDevice {
@@ -1535,7 +1681,10 @@ mod tests {
 
         let selected = linux_selected_drm_render_device(None, &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("i915"));
-        assert_eq!(linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()), LinuxNvidiaDriver::None);
+        assert_eq!(
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
+            LinuxNvidiaDriver::None
+        );
     }
 
     #[test]
@@ -1548,7 +1697,7 @@ mod tests {
         let selected = linux_selected_drm_render_device(Some(Path::new("/dev/dri/renderD129")), &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("nouveau"));
         assert_eq!(
-            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()),
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
             LinuxNvidiaDriver::Nouveau
         );
 
@@ -1558,7 +1707,10 @@ mod tests {
         ];
         let selected = linux_selected_drm_render_device(Some(Path::new("/dev/dri/renderD128")), &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("i915"));
-        assert_eq!(linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()), LinuxNvidiaDriver::None);
+        assert_eq!(
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
+            LinuxNvidiaDriver::None
+        );
     }
 
     #[test]
@@ -1571,7 +1723,7 @@ mod tests {
         let selected = linux_selected_drm_render_device(None, &devices).unwrap();
         assert_eq!(selected.driver.as_deref(), Some("nouveau"));
         assert_eq!(
-            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref()),
+            linux_nvidia_driver_from_state(false, false, selected.driver.as_deref(), false),
             LinuxNvidiaDriver::Nouveau
         );
     }
@@ -1707,6 +1859,17 @@ fn route_external_commands(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebView2 warm-up child mode: when a compatibility profile asks for a
+    // preflight, the parent re-launches this executable with
+    // DBX_WEBVIEW2_PREFLIGHT_CHILD=1. The child only creates and releases a
+    // WebView2 environment (forcing AV products to scan/trust msedgewebview2.exe)
+    // and exits before any Tauri/window setup. Doing this in a separate process
+    // isolates a hanging environment creation from the real startup attempt.
+    #[cfg(target_os = "windows")]
+    if webview2_preflight::run_child_if_requested() {
+        return;
+    }
+
     // Metadata/completion command chains nest very large async futures and can
     // exhaust tokio's default 2 MiB worker stack, which aborts the process with
     // STATUS_STACK_OVERFLOW. Share the roomier stack the backup worker and Web
@@ -1719,6 +1882,68 @@ pub fn run() {
     startup_recovery::initialize();
     rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install rustls crypto provider");
     append_startup_probe("runtime prerequisites configured");
+    // Record the WebView2 / security-software environment before any window is
+    // created. This is the first thing to look at when a startup recovery chain
+    // fails: it distinguishes a missing/hooked WebView2 runtime from an AV
+    // product that blocks the child browser process.
+    #[cfg(target_os = "windows")]
+    let webview2_runtime_health = webview2_preflight::runtime_health();
+    #[cfg(target_os = "windows")]
+    append_startup_probe(format!("webview2 runtime_health={}", webview2_runtime_health.as_str()));
+
+    #[cfg(target_os = "windows")]
+    {
+        // Collect WebView2/AV diagnostics on a worker thread with a hard deadline:
+        // on machines where a security product hooks the WebView2 loader (the very
+        // machines this diagnostics targets) the version query must never be able
+        // to delay the real startup path. A timed-out worker is abandoned and dies
+        // with the process.
+        let (diagnostics_tx, diagnostics_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let diagnostics = webview2_preflight::collect_diagnostics();
+            let _ = diagnostics_tx.send(webview2_preflight::format_diagnostics(&diagnostics));
+        });
+        match diagnostics_rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(lines) => {
+                for line in lines {
+                    append_startup_probe(line);
+                }
+            }
+            Err(_) => append_startup_probe("webview2 diagnostics timed out after 3s; continuing startup"),
+        }
+    }
+    // A missing/damaged WebView2 runtime is the #1 cause of "the window never
+    // appears" on enterprise Windows machines, and it used to be misdiagnosed as a
+    // security product blocking WebView2 (the compatibility ladder then retried for
+    // minutes). Detect it before Tauri tries to create the window and show one
+    // clear, actionable message instead.
+    #[cfg(target_os = "windows")]
+    {
+        // Diagnostic escape hatch: a user who wants the AV compatibility ladder to
+        // run even though the WebView2 runtime is missing/damaged can force it.
+        // This makes no difference on a healthy runtime but lets support reproduce
+        // "try everything" behaviour on a broken machine.
+        let force_compat_on_broken_runtime =
+            std::env::var_os("DBX_TRY_COMPAT_ON_BROKEN_WEBVIEW2").is_some_and(|value| value == "1");
+        match webview2_runtime_health {
+            webview2_preflight::WebView2RuntimeHealth::Missing if !force_compat_on_broken_runtime => {
+                startup_recovery::handle_missing_webview2_runtime();
+                return;
+            }
+            webview2_preflight::WebView2RuntimeHealth::RegisteredButDamaged if !force_compat_on_broken_runtime => {
+                startup_recovery::handle_damaged_webview2_runtime(
+                    webview2_preflight::collect_diagnostics().runtime_version.as_deref(),
+                );
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    // Profile-specific pre-Tauri work (scan delay, WebView2 warm-up preflight).
+    // This must run before `Builder::default().build()` because wry reads the
+    // WebView2 environment variables during window creation.
+    startup_recovery::run_profile_pre_tauri_hooks();
     #[cfg(target_os = "linux")]
     apply_linux_webkit_rendering_workarounds();
 
@@ -1777,10 +2002,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(window_state_guard::persisted_main_window_state_flags())
+                // The main window's geometry is restored by `window_state_guard`
+                // in logical units; the plugin's physical restore is the bug in
+                // issue #13168.
                 .skip_initial_state("main")
                 .build(),
         );
@@ -1792,7 +2019,9 @@ pub fn run() {
         if event.id() == APP_MENU_QUIT_ID {
             request_app_close(app, "quit");
         } else if event.id() == APP_MENU_COPY_SUPPORT_INFO_ID {
-            if let Err(err) = app.clipboard().write_text(commands::support_info::format_support_info_for_clipboard()) {
+            let promoted = app.try_state::<promoted_build::PromotedBuildState>().and_then(|state| state.get());
+            let text = commands::support_info::format_support_info_for_clipboard(promoted.as_deref());
+            if let Err(err) = app.clipboard().write_text(text) {
                 log::warn!("Failed to copy support info from app menu: {err}");
             }
         } else if event.id() == APP_MENU_CLOSE_TAB_ID {
@@ -1806,6 +2035,9 @@ pub fn run() {
         .manage(commands::plugin_media::PluginMediaState::new())
         .manage(commands::plugin_storage::PluginUiStorageState::new())
         .manage(AppLocaleState::new())
+        // Managed on the builder, not in setup: `build_app_menu` runs before
+        // setup and reads it to render the About panel.
+        .manage(promoted_build::PromotedBuildState::new())
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {
                 if let Some(state) = webview.app_handle().try_state::<CloseBehaviorState>() {
@@ -1815,19 +2047,24 @@ pub fn run() {
         })
         .setup(move |app| {
             let setup_start = Instant::now();
-            #[cfg(target_os = "linux")]
-            create_linux_main_window(app)?;
             eprintln!("[STARTUP] plugins registered in {:?}", startup_begin.elapsed());
             append_startup_probe(format!("setup entered after {:?}", startup_begin.elapsed()));
-            window_state_guard::restore_main_window_state(app.handle());
+            #[cfg(not(target_os = "linux"))]
+            {
+                window_state_guard::restore_main_window_state(app.handle());
+                window_state_guard::track_main_window_geometry(app.handle());
 
-            if should_show_main_window_before_setup_tasks() {
-                prepare_main_window_for_display(app.handle());
-                show_main_window(app.handle());
-                append_startup_probe(format!(
-                    "early main window show requested; {}",
-                    main_window_probe_state(app.handle())
-                ));
+                if should_show_main_window_before_setup_tasks() {
+                    prepare_main_window_for_display(app.handle());
+                    show_main_window(app.handle());
+                    append_startup_probe(format!(
+                        "early main window show requested; {}",
+                        main_window_probe_state(app.handle())
+                    ));
+                    startup_recovery::report_window_visibility_probe(startup_recovery::probe_main_window_visible(
+                        app.handle(),
+                    ));
+                }
             }
 
             append_startup_probe("resolving app data dir");
@@ -1854,7 +2091,10 @@ pub fn run() {
             let t = Instant::now();
             append_startup_probe(format!("opening storage file=dbx.db data_dir_mode={data_dir_mode}"));
             let storage = tauri::async_runtime::block_on(async {
-                let mut s = Storage::open_unmigrated(&db_path).await.expect("Failed to open storage");
+                let mut s = Storage::open_unmigrated(&db_path)
+                    .await
+                    .expect("Failed to open storage")
+                    .with_desktop_credential_recovery();
                 if portable_mode {
                     s = s.with_secret_key_policy(SecretKeyPolicy::ManagedDataDir);
                     match s.prepare_portable_secret_key().await {
@@ -1879,6 +2119,30 @@ pub fn run() {
             let migration_gate = Arc::new(migration_gate::MigrationGate::new(migration_ready));
             app.manage(migration_gate.clone());
             let desktop_settings = tauri::async_runtime::block_on(storage.load_desktop_settings()).unwrap_or_default();
+            // The app menu — and with it the About panel metadata — is built
+            // before storage exists, so hand the stored marker over now.
+            #[cfg(target_os = "macos")]
+            {
+                let stored_promotion = tauri::async_runtime::block_on(storage.load_promoted_build()).unwrap_or(None);
+                promoted_build::apply_stored_promotion(app.handle(), stored_promotion);
+            }
+            #[cfg(target_os = "linux")]
+            {
+                // Transparency must be chosen before creating the native window. Read the saved
+                // preference first so a disabled frame is never briefly shown during startup.
+                create_linux_main_window(app, desktop_settings.linux_floating_frame_enabled)?;
+                window_state_guard::restore_main_window_state(app.handle());
+                window_state_guard::track_main_window_geometry(app.handle());
+
+                if should_show_main_window_before_setup_tasks() {
+                    prepare_main_window_for_display(app.handle());
+                    show_main_window(app.handle());
+                    append_startup_probe(format!(
+                        "early main window show requested; {}",
+                        main_window_probe_state(app.handle())
+                    ));
+                }
+            }
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
                     .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
@@ -1948,6 +2212,7 @@ pub fn run() {
             dbx_core::db::sqlite_worker::enable_sqlite_ssh_runtime(env!("CARGO_PKG_VERSION"));
             state.set_duckdb_worker_process_isolation_enabled(desktop_settings.duckdb_worker_process_isolation);
             state.set_duckdb_worker_max_processes(desktop_settings.duckdb_worker_max_processes);
+            state.set_honor_fixed_ssh_local_ports(true);
             let oidc_app_handle = app.handle().clone();
             state.set_mongo_oidc_browser_opener(Arc::new(move |url| {
                 oidc_app_handle
@@ -2011,6 +2276,8 @@ pub fn run() {
             open_plugin_install_deep_links(app.handle(), startup_plugin_install_links);
 
             let app_handle = app.handle().clone();
+            #[cfg(target_os = "windows")]
+            tauri::async_runtime::spawn_blocking(commands::mcp::cleanup_mcp_installation_temp_files);
             tauri::async_runtime::spawn(async move {
                 migration_gate.wait().await;
                 commands::mcp_bridge::start(app_handle, state, data_dir);
@@ -2038,6 +2305,9 @@ pub fn run() {
                 append_startup_probe(format!(
                     "final main window show requested; {}",
                     main_window_probe_state(app.handle())
+                ));
+                startup_recovery::report_window_visibility_probe(startup_recovery::probe_main_window_visible(
+                    app.handle(),
                 ));
             }
             #[cfg(any(windows, target_os = "linux"))]
@@ -2097,11 +2367,20 @@ pub fn run() {
                     let _ = window.emit("dbx:detached-tab-close-requested", serde_json::json!({ "tabId": tab_id }));
                     return;
                 }
-                if !should_hide_window_on_close(std::env::consts::OS) {
+                let app = window.app_handle();
+                let close_behavior = app.try_state::<CloseBehaviorState>();
+                // Only intercept Linux close requests when the tray can restore
+                // the main window and the frontend can handle the close event.
+                let linux_tray_close = should_route_linux_close_through_tray(
+                    std::env::consts::OS,
+                    window.label(),
+                    close_behavior.as_ref().is_some_and(|state| state.is_frontend_ready()),
+                    app.tray_by_id(DESKTOP_TRAY_ID).is_some(),
+                );
+                if !should_hide_window_on_close(std::env::consts::OS) && !linux_tray_close {
                     return;
                 }
-                let app = window.app_handle();
-                if app.try_state::<CloseBehaviorState>().is_none() {
+                if close_behavior.is_none() {
                     api.prevent_close();
                     hide_main_window_for_close(app, window);
                     return;
@@ -2161,6 +2440,7 @@ pub fn run() {
             commands::app_settings::load_app_appearance_settings,
             commands::app_settings::update_app_appearance_settings,
             commands::app_settings::set_app_locale,
+            commands::app_settings::set_promoted_build,
             commands::app_settings::complete_app_close,
             commands::app_settings::mark_frontend_ready,
             commands::app_settings::request_app_close_from_window_controls,
@@ -2174,6 +2454,14 @@ pub fn run() {
             commands::app_settings::save_pinned_tree_node_ids,
             commands::app_settings::load_mcp_global_policy,
             commands::app_settings::save_mcp_global_policy,
+            commands::app_settings::load_mcp_tool_catalog,
+            commands::app_settings::load_mcp_access_policy,
+            commands::app_settings::reset_invalid_mcp_access_policy,
+            commands::app_settings::set_mcp_plugin_scope_rule,
+            commands::app_settings::list_plugin_mcp_views,
+            commands::app_settings::load_plugin_mcp_view,
+            commands::app_settings::list_mcp_plugin_scopes,
+            commands::app_settings::save_plugin_mcp_grant,
             commands::mcp_bridge::respond_mcp_sql_approval,
             commands::background_image::save_background_image,
             commands::background_image::clear_background_image,
@@ -2206,6 +2494,8 @@ pub fn run() {
             commands::cloud_sync::migration_start,
             commands::cloud_sync::migration_retry,
             commands::cloud_sync::migration_cleanup_backups,
+            commands::cloud_sync::migration_prepare_credential_reset,
+            commands::cloud_sync::migration_reset_credentials,
             commands::cloud_sync::webdav_password_status,
             commands::cloud_sync::save_webdav_saved_password,
             commands::cloud_sync::forget_webdav_saved_password,
@@ -2237,6 +2527,7 @@ pub fn run() {
             commands::binlog_recovery::binlog_recovery_export,
             commands::connection::test_connection,
             commands::connection::test_connection_with_info,
+            commands::connection::connection_parameters,
             commands::connection::test_ssh_tunnel,
             commands::salesforce_oauth::salesforce_oauth_browser_authorize,
             commands::salesforce_oauth::salesforce_oauth_device_start,
@@ -2338,6 +2629,17 @@ pub fn run() {
             commands::tab_runtime_cache::delete_tab_runtime_cache_owner,
             commands::tab_runtime_cache::delete_tab_runtime_cache,
             commands::query::execute_query,
+            commands::pl_debug::pl_debug_bootstrap,
+            commands::pl_debug::pl_debug_inspect,
+            commands::pl_debug::pl_debug_compile,
+            commands::pl_debug::pl_debug_compile_status,
+            commands::pl_debug::pl_debug_list,
+            commands::pl_debug::pl_debug_start,
+            commands::pl_debug::pl_debug_status,
+            commands::pl_debug::pl_debug_heartbeat,
+            commands::pl_debug::pl_debug_operation,
+            commands::pl_debug::pl_debug_operate,
+            commands::pl_debug::pl_debug_read,
             commands::query::execute_conditional_update,
             commands::query::execute_multi,
             commands::query::cancel_query,
@@ -2398,6 +2700,7 @@ pub fn run() {
             commands::query::build_copy_table_data_sql,
             commands::query::build_executable_object_source_statements,
             commands::query::validate_oracle_executable_object_source,
+            commands::query::prepare_oracle_trigger_sql,
             commands::query::fingerprint_oracle_routine_object_source,
             commands::query::build_executable_object_source_sql,
             commands::query::build_editable_object_source,
@@ -2450,6 +2753,7 @@ pub fn run() {
             commands::external_sql::write_external_sql_file,
             commands::external_sql::save_external_sql_file,
             commands::list_sql_files::list_sql_files_in_folder,
+            commands::list_sql_files::search_sql_file_contents,
             commands::list_sql_files::create_sql_file_in_folder,
             commands::list_sql_files::rename_sql_file_in_folder,
             commands::list_sql_files::delete_sql_file_in_folder,
@@ -2480,6 +2784,7 @@ pub fn run() {
             commands::redis_cmd::redis_list_databases,
             commands::redis_cmd::redis_scan_keys,
             commands::redis_cmd::redis_scan_keys_batch,
+            commands::redis_cmd::redis_key_metadata_batch,
             commands::redis_cmd::redis_scan_values,
             commands::redis_cmd::redis_get_value,
             commands::redis_cmd::redis_get_raw_value,
@@ -2599,6 +2904,7 @@ pub fn run() {
             commands::saved_sql::sync_saved_sql_directory,
             commands::shortcut_recording::set_shortcut_recording,
             commands::fs_open::reveal_path_in_file_manager,
+            commands::fs_open::open_path_with_default_app,
             commands::fs_open::is_sqlite_database_file,
             commands::fs_open::delete_database_backup_files,
             background_backup::database_backup_command,
@@ -2885,8 +3191,11 @@ pub fn run() {
             commands::mcp::install_native_mcp_server,
             commands::mcp::uninstall_mcp_server,
             commands::mcp::uninstall_npm_mcp_server,
+            commands::app_relaunch::relaunch_app,
             commands::update::check_for_updates,
             commands::update::fetch_changelog,
+            commands::update::fetch_changelog_index,
+            commands::update::fetch_changelog_release,
             commands::update::get_system_proxy_url,
             commands::update::get_downloaded_update,
             commands::update::discard_downloaded_update,
@@ -2952,6 +3261,7 @@ pub fn run() {
             commands::tunnel_profiles::load_tunnel_profiles,
             commands::tunnel_profiles::save_tunnel_profiles,
             commands::tunnel_profiles::test_tunnel_profile,
+            commands::tunnel_profiles::list_ssh_agent_identities,
         ])))
         .build(tauri::generate_context!())
         .inspect(|app| {
@@ -2981,6 +3291,7 @@ pub fn run() {
                     // shutdown below gives WindowServer time to remove it.
                     if should_hide_window_before_exit(std::env::consts::OS) {
                         if let Some(window) = app_handle.get_webview_window("main") {
+                            window_state_guard::remember_main_window_geometry(app_handle);
                             let _ = window.hide();
                         }
                     }

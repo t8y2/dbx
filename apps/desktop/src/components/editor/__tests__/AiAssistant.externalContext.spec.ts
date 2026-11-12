@@ -72,8 +72,7 @@ describe("editor selections reach the AI panel as context (#10058)", () => {
     const body = bodyOf("function clearContextReferences()");
 
     expect(body).toContain("selectedEditorSelections.value = [];");
-    // send() clears it alongside the attachments, or the next turn would resend it.
-    expect(bodyOf("async function send()")).toContain("selectedEditorSelections.value = [];");
+    // Mounted tests cover consuming sent selections without discarding a newer draft.
     // Queuing carries text/mode/action only, so — like every other composer
     // context — the selection must not stay behind looking like it was sent.
     expect(bodyOf("function queueInput()")).toContain("selectedEditorSelections.value = [];");

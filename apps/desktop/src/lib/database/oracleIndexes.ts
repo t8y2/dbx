@@ -67,6 +67,7 @@ function sameTargetIdentity(left: OracleIndexSnapshot, right: OracleIndexSnapsho
 function actualIndexMatchesLoaded(index: OracleIndexDefinition, original: IndexInfo, target: OracleConstraintTarget): boolean {
   return (
     index.owner === target.schema &&
+    (original.owner == null || original.owner === index.owner) &&
     index.tableOwner === target.schema &&
     index.tableName === target.tableName &&
     index.name === original.name &&
@@ -245,6 +246,7 @@ function expectedCreatedIndex(draft: EditableStructureIndex, target: OracleConst
 
 function completedCreateMatchesLoaded(index: IndexInfo, expected: OracleIndexDefinition): boolean {
   return (
+    (index.owner == null || index.owner === expected.owner) &&
     index.name === expected.name &&
     index.is_unique === (expected.uniqueness === "UNIQUE") &&
     !index.is_primary &&
@@ -259,28 +261,43 @@ function completedCreateMatchesLoaded(index: IndexInfo, expected: OracleIndexDef
 }
 
 export function mergeOracleIndexDraftsAfterRefresh(drafts: EditableStructureIndex[], actualIndexes: IndexInfo[], completedCreates: OracleIndexDefinition[]): EditableStructureIndex[] {
-  const loadedByName = new Map(actualIndexes.map((index) => [index.name, index]));
+  // Resolve uniqueness against the complete readback, never against a map that
+  // earlier drafts have already consumed. Unknown legacy owners may match one
+  // unique name; known owners cannot claim a different owner's row.
+  const byName = new Map<string, IndexInfo[]>();
+  for (const index of actualIndexes) byName.set(index.name, [...(byName.get(index.name) ?? []), index]);
+  const remaining = new Set(actualIndexes);
+  const findActual = (name: string, owner?: string | null, completed = false) => {
+    const named = byName.get(name) ?? [];
+    const candidates = owner == null ? named : named.filter((index) => index.owner === owner || (completed && index.owner == null && named.length === 1));
+    return candidates.length === 1 && remaining.has(candidates[0]!) ? candidates[0] : undefined;
+  };
   const refreshedDrafts: EditableStructureIndex[] = [];
   for (const draft of drafts) {
-    const current = loadedByName.get(draft.original?.name || draft.name);
+    const completed = completedCreates.filter((created) => created.name === draft.name);
+    const expected = completed.length === 1 ? completed[0] : undefined;
+    if (!draft.original && !expected) {
+      refreshedDrafts.push(draft);
+      continue;
+    }
+    const current = draft.original ? findActual(draft.original.name, draft.original.owner) : expected && findActual(expected.name, expected.owner, true);
     if (current) {
-      loadedByName.delete(current.name);
+      remaining.delete(current);
       refreshedDrafts.push({ ...draft, original: current, indexType: current.index_type ?? draft.indexType, oracleOriginalMissing: false, isPrimary: current.is_primary });
       continue;
     }
     if (draft.original) {
-      const expected = completedCreates.find((index) => index.name === draft.name);
-      const actual = loadedByName.get(draft.name);
+      const actual = expected && findActual(expected.name, expected.owner, true);
       if (expected && actual && completedCreateMatchesLoaded(actual, expected)) {
-        loadedByName.delete(actual.name);
+        remaining.delete(actual);
         const committedDraft = { ...draft, original: actual, indexType: actual.index_type ?? draft.indexType, oracleOriginalMissing: false, isPrimary: actual.is_primary };
         refreshedDrafts.push(draftMatchesCompletedCreate(committedDraft, expected) ? createIndexDrafts([actual])[0]! : committedDraft);
         continue;
       }
     }
-    if (!draft.markedForDrop) refreshedDrafts.push({ ...draft, oracleOriginalMissing: !!draft.original, isPrimary: false });
+    if (!draft.markedForDrop || (draft.original && byName.has(draft.original.name))) refreshedDrafts.push({ ...draft, oracleOriginalMissing: !!draft.original, isPrimary: false });
   }
-  return [...refreshedDrafts, ...createIndexDrafts([...loadedByName.values()])];
+  return [...refreshedDrafts, ...createIndexDrafts([...remaining])];
 }
 
 function draftMatchesCompletedCreate(draft: EditableStructureIndex, expected: OracleIndexDefinition): boolean {

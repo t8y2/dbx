@@ -1,7 +1,7 @@
 import { RangeSet, RangeValue, type ChangeSet, type Text } from "@codemirror/state";
 import type { DatabaseType } from "@/types/database";
-import { readSqlBracedParameterAt, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
-import { executableStatementRanges, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
+import { executableStatementRanges, findSqlBlockCommentEnd, startsHashLineComment, statementParsingDatabaseType, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { cursorBelongsToTrailingStatementDelimiter } from "@/lib/sql/statementDelimiter";
 
 export interface ExecutableStatementRangeCache {
@@ -78,13 +78,16 @@ export function executableStatementRangeCacheForDoc(
   const byExecutableLineStart = new Map<number, SqlTextRange>();
   const sql = doc.toString();
   const ranges = parse(sql, databaseType, parameterOptions);
+  let currentLine = doc.lines > 0 ? doc.line(1) : null;
   for (const range of ranges) {
     byStart.set(range.from, range);
-    const line = doc.lineAt(range.from);
-    if (doc.sliceString(line.from, range.from).trim() === "") {
-      byExecutableLineStart.set(line.from, range);
+    if (!currentLine || currentLine.to < range.from || currentLine.from > range.from) {
+      currentLine = doc.lineAt(range.from);
     }
-    const executableStart = executableStartAfterLeadingDirective(sql, range, databaseType, parameterOptions);
+    if (doc.sliceString(currentLine.from, range.from).trim() === "") {
+      byExecutableLineStart.set(currentLine.from, range);
+    }
+    const executableStart = executableStartAfterLeadingComments(sql, range, databaseType, parameterOptions);
     if (executableStart !== null) {
       byExecutableLineStart.set(doc.lineAt(executableStart).from, range);
     }
@@ -92,17 +95,19 @@ export function executableStatementRangeCacheForDoc(
   return { doc, databaseType, parameterOptions, parameterSyntaxKey, byStart, byExecutableLineStart, ranges };
 }
 
-function executableStartAfterLeadingDirective(sql: string, range: SqlTextRange, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): number | null {
+function executableStartAfterLeadingComments(sql: string, range: SqlTextRange, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): number | null {
+  databaseType = statementParsingDatabaseType(databaseType, parameterOptions);
   const text = range.sql;
   const hasExecutableDirective = text.startsWith("/*+") || text.startsWith("/*@") || text.startsWith("/*&") || (databaseType === "mysql" && text.startsWith("/*proxy*/"));
-  if (!hasExecutableDirective) return null;
+  const hasModuleComment = databaseType === "sqlserver" && (text.startsWith("--") || text.startsWith("/*"));
+  if (!hasExecutableDirective && !hasModuleComment) return null;
 
   let offset = 0;
   while (offset < text.length) {
     while (/\s/.test(text[offset] ?? "")) offset += 1;
 
     if (text.startsWith("/*", offset)) {
-      const close = text.indexOf("*/", offset + 2);
+      const close = findSqlBlockCommentEnd(text, offset, databaseType);
       if (close < 0) return null;
       offset = close + 2;
       continue;
@@ -115,7 +120,7 @@ function executableStartAfterLeadingDirective(sql: string, range: SqlTextRange, 
       continue;
     }
 
-    if (databaseType !== "sqlserver" && text[offset] === "#" && readSqlBracedParameterAt(sql, range.from + offset, parameterOptions)?.syntax !== "mybatis") {
+    if (startsHashLineComment(sql, range.from + offset, databaseType, parameterOptions)) {
       const newline = text.indexOf("\n", offset + 1);
       if (newline < 0) return null;
       offset = newline + 1;
@@ -137,7 +142,7 @@ export function executableStatementRangeAtCursor(cache: ExecutableStatementRange
   const line = cache.doc.lineAt(pos);
   const lineText = line.text.trim();
   const lineContentStart = line.from + line.text.search(/\S|$/);
-  const startsHashComment = lineText.startsWith("#") && readSqlBracedParameterAt(cache.doc.toString(), lineContentStart, cache.parameterOptions)?.syntax !== "mybatis";
+  const startsHashComment = lineText.startsWith("#") && startsHashLineComment(cache.doc.toString(), lineContentStart, statementParsingDatabaseType(cache.databaseType, cache.parameterOptions), cache.parameterOptions);
   if (!lineText || lineText.startsWith("--") || startsHashComment || isCursorOnLeadingBlockComment(line.text, pos - line.from)) return null;
 
   for (let index = 0; index < cache.ranges.length; index += 1) {

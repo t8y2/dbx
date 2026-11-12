@@ -145,6 +145,17 @@ describe("useDataGridSelection", () => {
     expect(selection.columnIsExclusivelySelected(2)).toBe(false);
   });
 
+  it("keeps headers unhighlighted after select-all because copying excludes them", () => {
+    const selection = createSelection();
+
+    selection.selectAllCells();
+
+    expect(selection.isSelectingAll.value).toBe(true);
+    expect(selection.cellIsSelected(0, 0)).toBe(true);
+    expect(selection.columnIsSelected(0)).toBe(false);
+    expect(selection.columnIsSelected(2)).toBe(false);
+  });
+
   it("treats an explicit multi-column header selection as exclusive for every column it contains", () => {
     const selection = createSelection();
 

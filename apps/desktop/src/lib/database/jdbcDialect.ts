@@ -1,8 +1,9 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { isSchemaAware, spannerObjectTreeSchema, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
+import { isSavedCredential } from "@/lib/security/passwordViewer";
 
-export type JdbcDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "connection_string" | "url_params" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config" | "username">>;
+export type JdbcDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "connection_string" | "jdbc_dialect" | "url_params" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config" | "username">>;
 
 export type GaussdbIdentifierQuoteStyle = "auto" | "double" | "backtick";
 export type GaussdbConnectionMode = "native" | "m-jdbc" | "dws";
@@ -38,7 +39,7 @@ const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> =
   { type: "opengauss", patterns: [/jdbc:opengauss:/i, /org\.opengauss/i, /opengauss/i] },
   { type: "postgres", patterns: [/jdbc:postgresql:/i, /postgres/i] },
   { type: "sqlserver", patterns: [/jdbc:sqlserver:/i, /sqlserver/i, /mssql/i] },
-  { type: "oracle", patterns: [/jdbc:oracle:/i, /oracle/i] },
+  { type: "oracle", patterns: [/jdbc:oracle:/i, /oracle/i, /ojdbc/i] },
   { type: "clickhouse", patterns: [/jdbc:clickhouse:/i, /clickhouse/i] },
   { type: "tdengine", patterns: [/jdbc:taos(?:-rs|-ws)?:/i, /taosdata/i, /tdengine/i] },
   { type: "h2", patterns: [/jdbc:h2:/i, /\bh2\b/i] },
@@ -59,6 +60,13 @@ const JDBC_ASE_PROFILE_PATTERNS = [/(?:^|[\s_-])ase(?:$|[\s_-])/i, /\bsap[\s_-]+
 export function inferJdbcDialect(connection?: JdbcDialectConnection): DatabaseType | undefined {
   if (!connection || connection.db_type !== "jdbc") return undefined;
   if (isGbase8sProfile(connection.driver_profile)) return undefined;
+  const connectionString = connection.connection_string?.trim() ?? "";
+  if (isSavedCredential(connectionString)) {
+    if (connection.jdbc_dialect === "oceanbase-oracle") return "oceanbase-oracle";
+    if (connection.jdbc_dialect === "oracle") return "oracle";
+  }
+  if (/^jdbc:oceanbase:oracle:\/\//i.test(connectionString)) return "oceanbase-oracle";
+  if (/^jdbc:oracle:/i.test(connectionString)) return "oracle";
   const haystack = [connection.driver_profile, connection.driver_label, connection.connection_string, connection.jdbc_driver_class, ...(connection.jdbc_driver_paths ?? []), connection.database_info?.productName, connection.database_info?.serverComment, connection.database_info?.driverName]
     .filter(Boolean)
     .join("\n");
@@ -150,6 +158,11 @@ export function connectionShouldLoadIdentifierQuote(connection: JdbcDialectConne
   if (connection.db_type === "spanner") return true;
   if (gaussdbIdentifierQuoteStyle(connection) !== "auto") return false;
   if (connection.db_type === "gaussdb") return true;
+  // openGauss inherits the database compatibility mode for identifier quoting:
+  // MySQL-compatible (B) databases only accept backticks, while A/PG modes use
+  // double quotes. The backend probes `pg_database.datcompatibility`, so fetch
+  // the reported quote instead of assuming the PostgreSQL default.
+  if (connection.db_type === "opengauss") return true;
   if (connection.db_type !== "jdbc") return false;
   const dialect = inferJdbcDialect(connection);
   return dialect === "jdbc" || ["gaussdb", "opengauss", "postgres"].includes(dialect ?? "");
@@ -244,7 +257,27 @@ export function sqlSnippetDatabaseTypeForConnection(connection?: JdbcDialectConn
   // ASE uses T-SQL snippets, but mapping it globally to SQL Server would also
   // enable incompatible SQL Server metadata and pagination behavior.
   if (isJdbcAseProfile(connection)) return "sqlserver";
+  const kingbaseType = kingbaseSqlDatabaseType(connection);
+  if (kingbaseType) return kingbaseType;
   return effectiveDatabaseTypeForConnection(connection);
+}
+
+/** SQL syntax only: never use this mapping for transport, catalogs or capabilities. */
+export function kingbaseSqlDatabaseType(connection?: JdbcDialectConnection): "mysql" | "postgres" | "oracle" | "sqlserver" | undefined {
+  if (connection?.db_type !== "kingbase") return undefined;
+  const mode = connection.database_info?.compatibilityMode?.trim().toLowerCase();
+  switch (mode) {
+    case "pg":
+    case "postgres":
+    case "postgresql":
+      return "postgres";
+    case "oracle":
+    case "mysql":
+    case "sqlserver":
+      return mode;
+    default:
+      return undefined;
+  }
 }
 
 export function tableStructureDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
@@ -275,6 +308,16 @@ export function connectionShouldDiscoverJdbcSchemas(connection?: JdbcDialectConn
 
 export function connectionUsesSchemaExecutionContext(connection?: JdbcDialectConnection): boolean {
   return connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend";
+}
+
+/**
+ * SQL Server 没有会话级 Schema 切换：后端会把 SQL 文本里未限定的表名改写成
+ * `[schema].[table]`（#8951）。因此页签 Schema 一旦随执行下发就会改变 SQL 语义，
+ * 只有用户显式选择的 Schema 才可以参与改写；连接默认 / 恢复 / 保存的 Schema
+ * 仅用于浏览与补全。IRIS/Kingbase 复用同一改写机制，但本次只收紧 SQL Server。
+ */
+export function sqlServerQualifiesSqlWithTabSchema(connection?: JdbcDialectConnection): boolean {
+  return effectiveDatabaseTypeForConnection(connection) === "sqlserver";
 }
 
 export function connectionQueryExecutionSchema(connection: JdbcDialectConnection | undefined, database: string | undefined, schema: string | undefined, dataMode: boolean): string | undefined {
@@ -364,20 +407,23 @@ export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection
 
 /** GBase 8s reports the table owner as a schema, but does not accept it in table DML/DDL names. */
 export function connectionTableSqlSchema(connection: JdbcDialectConnection | undefined, schema?: string): string | undefined {
-  if (connection?.db_type === "gbase8s") return undefined;
+  if (connection?.db_type === "gbase8s" || isGbase8sProfile(connection?.driver_profile)) return undefined;
   return schema;
 }
 
 /** Maps a database type to the corresponding CodeMirror SQL dialect name used by QueryEditor and DdlViewDialog. */
 export function codeMirrorSqlDialect(dbType: DatabaseType | undefined): "mysql" | "postgres" | "sqlserver" {
-  if (dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss") return "postgres";
+  if (dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss" || dbType === "kingbase") return "postgres";
   if (dbType === "sqlserver") return "sqlserver";
   return "mysql";
 }
 
 export function codeMirrorSqlDialectForConnection(connection?: JdbcDialectConnection): CodeMirrorSqlDialectName {
   if (isJdbcAseProfile(connection)) return "sqlserver";
+  const kingbaseType = kingbaseSqlDatabaseType(connection);
+  if (kingbaseType) return kingbaseType;
   const databaseType = effectiveDatabaseTypeForConnection(connection);
+  if (databaseType === "kingbase") return "postgres";
   if (databaseType === "clickhouse") return "clickhouse";
   return codeMirrorSqlDialect(databaseType);
 }

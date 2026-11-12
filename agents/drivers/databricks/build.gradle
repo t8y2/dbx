@@ -1,6 +1,6 @@
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
-    implementation 'com.databricks:databricks-jdbc:3.4.3'
+    implementation 'com.databricks:databricks-jdbc:3.4.4'
 }
 
 tasks.named('shadowJar') {

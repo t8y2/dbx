@@ -1404,6 +1404,7 @@ dependencies = [
  "dbx-sql-core",
  "dbx-sql-dialect",
  "dbx-types",
+ "encoding_rs",
  "futures",
  "log",
  "mysql_async",
@@ -1482,10 +1483,12 @@ dependencies = [
 name = "dbx-driver-support"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "dbx-platform",
  "dbx-types",
  "glob",
+ "log",
  "portpicker",
  "reqwest",
  "russh",
@@ -1590,9 +1593,11 @@ name = "dbx-platform"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "httpdate",
  "nix",
  "reqwest",
  "serde",
+ "semver",
  "tokio",
  "uuid",
  "windows-sys 0.61.2",
@@ -3260,6 +3265,7 @@ version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
 dependencies = [
+ "cc",
  "pkg-config",
  "vcpkg",
 ]
@@ -3425,6 +3431,12 @@ name = "memo-map"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38d1115007560874e373613744c6fba374c17688327a71c1476d1a5954cc857b"
+
+[[package]]
+name = "mime"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "minijinja"
@@ -3596,7 +3608,7 @@ dependencies = [
 [[package]]
 name = "mysql_async"
 version = "0.37.0"
-source = "git+https://github.com/t8y2/mysql_async.git?rev=b615bb0b10b5975182a4aa069cabc3d09021f6ab#b615bb0b10b5975182a4aa069cabc3d09021f6ab"
+source = "git+https://github.com/t8y2/mysql_async.git?rev=4cd84d86bb86b060320ce3459561e8093e4422fa#4cd84d86bb86b060320ce3459561e8093e4422fa"
 dependencies = [
  "bytes",
  "crossbeam-queue",
@@ -4754,6 +4766,7 @@ dependencies = [
  "bytes",
  "cookie",
  "cookie_store",
+ "encoding_rs",
  "futures-core",
  "futures-util",
  "http",
@@ -4764,6 +4777,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime",
  "percent-encoding",
  "pin-project-lite",
  "quinn",

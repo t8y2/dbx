@@ -17,7 +17,7 @@ const backend = vi.hoisted(() => ({
 }));
 
 vi.mock("vue-i18n", () => ({
-  useI18n: () => ({ t: (key: string) => key }),
+  useI18n: () => ({ t: (key: string, params?: { count?: number }) => (key === "mqSubscriptions.consumerCount" ? `${params?.count}` : key) }),
 }));
 
 vi.mock("@/lib/backend/api", () => backend);
@@ -139,6 +139,24 @@ afterEach(() => {
   root = null;
 });
 
+describe("SubscriptionsPanel Kafka partial results", () => {
+  it.each([undefined, 0, 1])("distinguishes unavailable members from a known count of %s", async (onlineMembers) => {
+    backend.mqListSubscriptions.mockResolvedValue([
+      {
+        ...subscription("orders-service", "consumer-group"),
+        onlineMembers,
+        backlogUnavailable: onlineMembers == null,
+        consumers: Array.from({ length: onlineMembers ?? 0 }, () => ({ consumerName: "consumer-orders" })),
+      },
+    ]);
+    const panel = await mountPanel();
+    const row = panel.querySelector(".subscriptions-table tbody tr")!;
+
+    expect(row.querySelector('[data-testid="online-members"]')?.textContent?.trim()).toBe(onlineMembers == null ? "-" : `${onlineMembers}`);
+    expect(row.querySelectorAll("td")[2].textContent?.trim()).toBe(onlineMembers == null ? "-" : "0");
+  });
+});
+
 describe("SubscriptionsPanel message peek", () => {
   it("warns when a Kafka peek is incomplete and clears the warning after a complete refresh", async () => {
     backend.mqPeekMessages
@@ -215,6 +233,43 @@ describe("SubscriptionsPanel message peek", () => {
 
     expect(panel.textContent).toContain("payments message");
     expect(panel.textContent).not.toContain("orders message");
+  });
+
+  it("keeps peeked payloads raw by default and decodes thrift.TBinaryProtocol when toggled on", async () => {
+    const rawPayloadText = "\u000b\u0000\u0001\u0000\u0000\u0000\u0005hello\u0000";
+    backend.mqPeekMessages.mockResolvedValueOnce({
+      messages: [
+        {
+          position: 1,
+          messageId: "thrift-1",
+          payloadBase64: "CwABAAAABWhlbGxvAA==",
+          payloadText: rawPayloadText,
+          properties: {},
+          headers: {},
+        },
+      ],
+      incomplete: false,
+    });
+    const panel = await mountPanel({ mqSystemKind: "rabbitmq" });
+
+    buttonByText(panel, "mqSubscriptions.peek").click();
+    await flushUi();
+
+    const decodeToggle = panel.querySelector<HTMLInputElement>('[data-testid="peek-decode-payload"]');
+    if (!decodeToggle) throw new Error("Peek decode payload checkbox not found");
+    const payloadEl = () => panel.querySelector<HTMLElement>(".peek-payload");
+    expect(decodeToggle.checked).toBe(false);
+    expect(payloadEl()?.textContent).toBe(rawPayloadText);
+
+    decodeToggle.click();
+    await flushUi();
+    expect(decodeToggle.checked).toBe(true);
+    expect(payloadEl()?.textContent).toBe('{\n  "1": "hello"\n}');
+
+    decodeToggle.click();
+    await flushUi();
+    expect(decodeToggle.checked).toBe(false);
+    expect(payloadEl()?.textContent).toBe(rawPayloadText);
   });
 });
 

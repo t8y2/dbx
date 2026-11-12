@@ -717,7 +717,7 @@ jobs:
           VSIGN_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
         run: ./.github/scripts/setup-vsign.ps1
 
-      - name: Bundle and upload Windows 7 / Server 2012 R2 fixed-runtime installer
+      - name: Bundle and upload Windows 7 / Server 2008 R2 fixed-runtime installer
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -727,7 +727,9 @@ jobs:
           $tagVersion = "${env:RELEASE_TAG}".TrimStart("v")
           $version = $tagVersion -replace '-beta\..*$', ''
           $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
-          $offlineName = "DBX_${version}_x64-win7-server2012r2-offline-setup.exe"
+          # Keep "win7" first: Windows 7 users scan the asset list for it, and the
+          # package also covers Windows Server 2008 R2 through Server 2012 R2.
+          $offlineName = "DBX_${version}_x64-win7-server2008r2-offline-setup.exe"
           $checksumName = "${offlineName}.sha256"
           $cargoMetadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
           $appVersion = ($cargoMetadata.packages | Where-Object { $_.name -eq "dbx" } | Select-Object -First 1).version
@@ -745,7 +747,7 @@ jobs:
             Sort-Object LastWriteTimeUtc -Descending |
             Select-Object -First 1
           if (!$installer) {
-            Write-Error "Missing Windows 7 / Server 2012 R2 fixed-runtime installer in ${bundleDir}"
+            Write-Error "Missing Windows 7 / Server 2008 R2 fixed-runtime installer in ${bundleDir}"
             exit 1
           }
 

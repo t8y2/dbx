@@ -4,6 +4,7 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 const MAX_SCAN_DEPTH: usize = 10;
 /// Database-script extensions shown by default in the SQL file panel (#14204):
@@ -47,6 +48,7 @@ pub struct SqlFileEntry {
     pub path: String,
     pub is_dir: bool,
     pub children: Vec<SqlFileEntry>,
+    pub modified_at: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -251,6 +253,15 @@ fn scan_sql_files_with_directories(
     scan_sql_files_with_diagnostics(dir, depth, visited, file_filter, include_empty_directories, None)
 }
 
+fn file_modified_at(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
 fn scan_sql_files_with_diagnostics(
     dir: &Path,
     depth: usize,
@@ -340,7 +351,13 @@ fn scan_sql_files_with_diagnostics(
                 skipped_files.as_deref_mut(),
             );
             if include_empty_directories || !children.is_empty() {
-                entries.push(SqlFileEntry { name, path: path.to_string_lossy().to_string(), is_dir: true, children });
+                entries.push(SqlFileEntry {
+                    name,
+                    path: path.to_string_lossy().to_string(),
+                    is_dir: true,
+                    children,
+                    modified_at: file_modified_at(&path),
+                });
             }
         } else if file_type.is_file() && file_filter.is_match(&name) {
             entries.push(SqlFileEntry {
@@ -348,6 +365,7 @@ fn scan_sql_files_with_diagnostics(
                 path: path.to_string_lossy().to_string(),
                 is_dir: false,
                 children: vec![],
+                modified_at: file_modified_at(&path),
             });
         }
     }
@@ -930,6 +948,16 @@ mod tests {
         }
     }
 
+    fn collect_file_mtimes(entries: &[SqlFileEntry], mtimes: &mut Vec<u64>) {
+        for entry in entries {
+            if entry.is_dir {
+                collect_file_mtimes(&entry.children, mtimes);
+            } else {
+                mtimes.push(entry.modified_at);
+            }
+        }
+    }
+
     #[test]
     fn scan_sql_files_skips_pruned_metadata_directories() {
         let root = std::env::temp_dir().join(format!("dbx-sql-folder-scan-{}", uuid::Uuid::new_v4()));
@@ -953,6 +981,9 @@ mod tests {
         let mut names = Vec::new();
         collect_file_names(&entries, &mut names);
         names.sort();
+        let mut mtimes = Vec::new();
+        collect_file_mtimes(&entries, &mut mtimes);
+        assert!(mtimes.iter().all(|modified_at| *modified_at > 0));
 
         assert_eq!(
             names,

@@ -1589,7 +1589,7 @@ function onHandleStructureViewData() {
     name: tableName,
     database: meta?.database || tab.database,
     schema: meta?.schema || tab.schema,
-    type: tab.structureTableType === "view" ? "view" : "table",
+    type: tab.structureTableType || "table",
   });
 }
 

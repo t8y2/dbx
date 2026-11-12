@@ -223,6 +223,40 @@ describe("connectionStore completion assistant", () => {
     expect(tables).toEqual([{ name: "users", schema: "public", type: "table", detail: "→ Application users" }]);
   });
 
+  it("preserves materialized view candidates from the remote completion catalog", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [{ name: "daily_orders_mv", kind: "materialized_view", schema: "public" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ checkConnectionHealth: vi.fn().mockResolvedValue(undefined), completionAssistantSearch }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    await expect(store.listCompletionTables("pg-1", "app", "daily_orders_mv", 20, "public")).resolves.toEqual([{ name: "daily_orders_mv", schema: "public", type: "materialized_view" }]);
+  });
+
+  it("does not connect when metadata search explicitly disallows connection activation", async () => {
+    const connectDb = vi.fn().mockResolvedValue("pg-1");
+    const completionAssistantSearch = vi.fn().mockResolvedValue({ candidates: [], incomplete: false, fallback_used: false });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({ connectDb, completionAssistantSearch }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+
+    await expect(store.listCompletionTables("pg-1", "app", "users", 20, undefined, true, undefined, undefined, { activateConnection: false, allowConnection: false })).resolves.toEqual([]);
+    expect(connectDb).not.toHaveBeenCalled();
+    expect(completionAssistantSearch).not.toHaveBeenCalled();
+  });
+
   it("falls back to the server COMMAND catalog when COMMAND DOCS is unsupported", async () => {
     const redisExecuteCommand = vi
       .fn()

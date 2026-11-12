@@ -6,9 +6,20 @@ import { createI18n } from "vue-i18n";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
+vi.mock("@/lib/backend/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/backend/api")>()),
+  loadOpenTabsState: mocks.loadOpenTabsState,
+  saveOpenTabsState: mocks.saveOpenTabsState,
+  listPlugins: mocks.listPlugins,
+}));
 vi.mock("@/components/editor/QueryEditor.vue", () => ({ default: { render: () => null } }));
 vi.mock("@/components/transfer/QueryResultTransferDialog.vue", () => ({ __esModule: true, default: { render: () => null } }));
-const mocks = vi.hoisted(() => ({ openTableStructureEditor: vi.fn(() => true) }));
+const mocks = vi.hoisted(() => ({
+  openTableStructureEditor: vi.fn(() => true),
+  loadOpenTabsState: vi.fn(async () => null),
+  saveOpenTabsState: vi.fn(async () => undefined),
+  listPlugins: vi.fn(async () => []),
+}));
 vi.mock("@/components/grid/DataGrid.vue", () => ({
   __esModule: true,
   default: {
@@ -22,6 +33,17 @@ vi.mock("@/components/grid/DataGrid.vue", () => ({
 import ContentArea from "../ContentArea.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { sqlObjectNavigationContextTarget, type SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
+
+vi.mock("@/components/structure/TableStructureEditor.vue", () => ({
+  __esModule: true,
+  default: {
+    emits: ["view-data"],
+    setup(_props: unknown, { emit }: { emit: (event: "view-data") => void }) {
+      return () => h("button", { "data-view-structure-data": "", onClick: () => emit("view-data") }, "View data");
+    },
+  },
+}));
 
 const mounted: Array<{ app: App; host: HTMLElement }> = [];
 const connection: ConnectionConfig = {
@@ -64,10 +86,12 @@ async function mountDataTab() {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
+  const viewTableData = vi.fn();
   const app = createApp({
     setup: () => () =>
       h(ContentArea, {
         ref: contentAreaRef,
+        onViewTableData: viewTableData,
         activeTab: tab,
         activeConnection: connection,
         activeOutputView: "result",
@@ -84,10 +108,36 @@ async function mountDataTab() {
   app.mount(host);
   mounted.push({ app, host });
   await nextTick();
-  return { host, store, tab, contentAreaRef };
+  return { host, store, tab, contentAreaRef, viewTableData };
 }
 
 describe("table data header navigation", () => {
+  it.each(["table", "view", "materialized_view", undefined] as const)("preserves structure view-data identity for %s", async (type) => {
+    const { host, tab, viewTableData } = await mountDataTab();
+    tab.mode = "structure";
+    tab.structureTableName = "Mixed.Object";
+    tab.structureTableType = type;
+    tab.catalog = "tab-catalog";
+    await vi.waitFor(() => expect(host.querySelector("[data-view-structure-data]")).not.toBeNull());
+
+    for (const metadataCatalog of [undefined, "metadata-catalog"]) {
+      tab.tableMeta!.catalog = metadataCatalog;
+      host.querySelector<HTMLButtonElement>("[data-view-structure-data]")!.click();
+      const [tabId, target] = viewTableData.mock.lastCall as [string, SqlObjectNavigationTarget];
+      expect(tabId).toBe(tab.id);
+      expect(target).toEqual({ name: "Mixed.Object", database: "Inspharmacy", schema: "dbo", type: type ?? "table" });
+      // App resolves structured events against the active tab, including catalog fallback.
+      expect(sqlObjectNavigationContextTarget(target, tab)).toEqual({
+        connectionId: connection.id,
+        database: "Inspharmacy",
+        schema: "dbo",
+        catalog: metadataCatalog ?? "tab-catalog",
+        tableName: "Mixed.Object",
+        tableType: (type ?? "table").toUpperCase(),
+      });
+    }
+  });
+
   it("delegates openTableStructureEditor to the data grid for active table data tabs", async () => {
     const { contentAreaRef, tab } = await mountDataTab();
     tab.result = { columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 };

@@ -65,7 +65,9 @@ The sidebar also has configurable actions for copy, paste, edit connection, and 
 
 ## Quick Open
 
-Press `Mod+P` to search connections, databases, schemas, tables, views, and saved SQL in the current workspace. Results come from loaded and searchable objects. For a large connection whose metadata is not loaded yet, expand or refresh the relevant node first.
+Press `Mod+P` to open the global search workbench. It searches connections, databases, schemas, tables, views, materialized views, fields, comments, SQL files, file contents, and plugin commands. Use `kind:`, `db:`, `schema:`, `comment:`, `file:`, `source:`, or `category:` filters to narrow results; `Ctrl/Cmd+1` through `Ctrl/Cmd+8` switches categories. Enter runs the default action shown in the preview, while the secondary shortcut opens the related structure or data view.
+
+Results use loaded metadata and add connected database results when needed. Opening Quick Open does not connect inactive databases, and content search only scans configured local directories. For a large connection whose metadata is not loaded yet, expand or refresh the relevant node first.
 
 ## Customization and Conflicts
 

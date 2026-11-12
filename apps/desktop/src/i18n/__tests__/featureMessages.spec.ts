@@ -101,6 +101,7 @@ const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "plugin batch actions", keys: ["pluginPlatform.batchDuplicateSources", "pluginPlatform.batchRefreshFailed"], locales: EXCEPT_AZ_TR },
   { feature: "plugin marketplace sorting (#10078)", keys: under("pluginPlatform", ["sortBy", "sortByName", "sortByRecentlyUpdated", "sortByRecentlyListed", "sortByUpdatesFirst", "sortByInstalls", "installCount"]), locales: EXCEPT_AZ_TR, translated: true },
   { feature: "shared refresh action (#8768)", keys: ["common.refresh"] },
+  { feature: "shared column label", keys: ["common.column"], translated: true },
   {
     feature: "Xugu field lineage scope and coverage",
     keys: under("lineage", ["xuguScopeNotice", "xuguPartialCoverage"]),

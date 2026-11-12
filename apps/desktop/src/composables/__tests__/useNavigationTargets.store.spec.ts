@@ -135,6 +135,37 @@ describe("useNavigationTargets with the real query store", () => {
     }));
   });
 
+  it.each(["always-new", "same-table", "active-tab"] as const)("preserves structure view-data types and catalog fallback in %s mode", async (mode) => {
+    mocks.settingsStore.editorSettings.dataTabReuseMode = mode;
+    const { navigation, queryStore } = await setupNavigation();
+    const { sqlObjectNavigationContextTarget } = await import("@/lib/sql/sqlNavigation");
+    for (const type of ["table", "view", "materialized_view"] as const) {
+      for (const metadataCatalog of [undefined, "metadata-catalog"]) {
+        const origin = {
+          connectionId: "connection-1",
+          database: "app",
+          schema: "public",
+          catalog: "tab-catalog",
+          tableMeta: { tableName: "Mixed.Object", catalog: metadataCatalog, columns: [], primaryKeys: [] },
+        };
+        // Same structured-target resolution used by App's onViewTableData.
+        const target = sqlObjectNavigationContextTarget({ name: "Mixed.Object", database: "app", schema: "public", type }, origin);
+        await navigation.openObjectBrowserTableTarget(target);
+        expect(queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId)).toMatchObject({
+          mode: "data",
+          connectionId: origin.connectionId,
+          database: origin.database,
+          tableMeta: {
+            tableName: "Mixed.Object",
+            schema: "public",
+            catalog: metadataCatalog ?? "tab-catalog",
+            tableType: type.toUpperCase(),
+          },
+        });
+      }
+    }
+  });
+
   it.each(["always-new", "same-table", "active-tab"] as const)("reports the selected SQL tab before loading completes in %s mode", async (mode) => {
     mocks.settingsStore.editorSettings.dataTabReuseMode = mode;
     const { navigation, queryStore } = await setupNavigation();
@@ -196,6 +227,14 @@ describe("useNavigationTargets with the real query store", () => {
     });
     await navigation.openObjectBrowserTableTarget({ ...target, tableName: "orders" }, { onOpened });
     expect(onOpened).toHaveBeenCalledExactlyOnceWith(originalId);
+  });
+
+  it("preserves materialized view type when opening a field structure target", async () => {
+    const { navigation, queryStore } = await setupNavigation();
+    await navigation.openDatabaseSearchTarget({ connectionId: "connection-1", database: "app", schema: "public", tableName: "daily_rollup", columnName: "total", tableType: "MATERIALIZED_VIEW", searchScope: "structure" });
+    const tab = queryStore.tabs.find((item) => item.mode === "structure");
+    expect(tab?.structureTableType).toBe("materialized_view");
+    expect(tab?.structureInitialTarget).toEqual({ kind: "column", name: "total" });
   });
 
   it("opens same-table search results with different predicates in separate tabs", async () => {

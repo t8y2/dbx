@@ -193,7 +193,7 @@ import { createModifierDoubleTapShortcutController, isModifierDoubleTapShortcut,
 import { createTabSwitcherKeyboardController } from "@/lib/tabs/tabSwitcherKeyboard";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { isShortcutEditingKeydown, isShortcutEditingTarget } from "@/lib/editor/shortcutRecorder";
-import { supportsSqlFileExecution } from "@/lib/database/databaseCapabilities";
+import { connectionIsDorisFamilyCatalogCapable, supportsSqlFileExecution } from "@/lib/database/databaseCapabilities";
 import { classifyAiSqlExecution } from "@/lib/ai/aiSqlExecutionPolicy";
 import { aiSqlActionFeedback, type AiSqlActionOutcome, type AiSqlActionReport } from "@/lib/ai/aiSqlActionFeedback";
 import type { SqlExecutionOutcome } from "@/lib/sql/sqlExecutionOutcome";
@@ -4135,6 +4135,7 @@ async function handleQuickOpenSelect(item: any) {
     await connectionStore.ensureConnected(item.connectionId);
   } catch (error) {
     console.error("Failed to connect:", error);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, error) }), 5000);
     return;
   }
 
@@ -4193,6 +4194,19 @@ async function handleQuickOpenSelect(item: any) {
       }
     }
 
+    if (item.catalog && connectionIsDorisFamilyCatalogCapable(connectionStore.getConfig(item.connectionId))) {
+      const findCatalogDatabase = (nodes: TreeNode[]): TreeNode | undefined => {
+        for (const node of nodes) {
+          if (node.type === "database" && node.connectionId === item.connectionId && node.catalog === item.catalog && node.database === item.database) return node;
+          const match = node.children && findCatalogDatabase(node.children);
+          if (match) return match;
+        }
+      };
+      const catalogDatabase = findCatalogDatabase(connectionStore.treeNodes);
+      if (catalogDatabase && !catalogDatabase.isExpanded) await connectionStore.loadDorisCatalogTables(catalogDatabase);
+      return;
+    }
+
     // Expand database node
     // Tree node ID for database is `${connectionId}:${database_name}`
     const dbNodeId = `${item.connectionId}:${item.database}`;
@@ -4210,19 +4224,38 @@ async function handleQuickOpenSelect(item: any) {
     }
     return;
   } else if (item.type === "schema") {
+    // External Doris/StarRocks catalogs have database → table trees, without schema nodes.
     const dbNode = findTreeNodeById(connectionStore.treeNodes, `${item.connectionId}:${item.database}`);
     if (dbNode && !dbNode.isExpanded) await connectionStore.loadSchemas(item.connectionId, item.database);
     const schemaNode = findTreeNodeById(connectionStore.treeNodes, `${item.connectionId}:${item.database}:${item.schema}`);
     if (schemaNode && !schemaNode.isExpanded) await connectionStore.loadTables(item.connectionId, item.database, item.schema);
     return;
   } else if (item.type === "table" || item.type === "view" || item.type === "materialized_view") {
-    // Open the table/view in a data tab
-    await openTableTarget({
+    const tableTarget = {
       connectionId: item.connectionId,
+      catalog: item.catalog,
       database: item.database,
       schema: item.schema,
       tableName: item.objectName || item.tableName,
       tableType: item.type === "view" ? "VIEW" : item.type === "materialized_view" ? "MATERIALIZED_VIEW" : "TABLE",
+    };
+    if (item.searchScope === "structure") {
+      await openDatabaseSearchTarget({ ...tableTarget, searchScope: "structure" });
+      return;
+    }
+    // Open the table/view in a data tab
+    await openTableTarget(tableTarget);
+  } else if (item.type === "column") {
+    // Structure hits carry their owning table, so Enter can focus the exact field.
+    await openDatabaseSearchTarget({
+      connectionId: item.connectionId,
+      catalog: item.catalog,
+      database: item.database,
+      schema: item.schema,
+      tableName: item.tableName,
+      tableType: item.tableType || "TABLE",
+      columnName: item.columnName || item.label,
+      searchScope: "structure",
     });
   } else if (item.type === "procedure" || item.type === "function" || item.type === "trigger" || item.type === "event" || item.type === "sequence" || item.type === "package" || item.type === "package-body" || item.type === "type" || item.type === "type-body") {
     // Open the object source in a source tab

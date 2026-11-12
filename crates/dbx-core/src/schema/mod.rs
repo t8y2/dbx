@@ -8358,7 +8358,10 @@ async fn completion_assistant_fallback_core(
         )
         .await?;
         for table in tables {
-            let kind = if table.table_type.to_uppercase().contains("VIEW") {
+            let normalized_table_type = table.table_type.to_ascii_uppercase().replace(' ', "_");
+            let kind = if normalized_table_type == "MATERIALIZED_VIEW" {
+                db::CompletionAssistantCandidateKind::MaterializedView
+            } else if normalized_table_type.contains("VIEW") {
                 db::CompletionAssistantCandidateKind::View
             } else {
                 db::CompletionAssistantCandidateKind::Table

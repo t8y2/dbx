@@ -1,5 +1,6 @@
 import type { DatabaseType } from "@/types/database";
 import type { ColumnInfo } from "@/types/database";
+import { normalizeBackendError } from "@/lib/backend/errorUtils";
 import * as api from "@/lib/backend/api.ts";
 import { supportsDatabaseStructureSearch as supportsDatabaseStructureSearchCapability, usesDocumentStructureSearch, usesSqlCatalogStructureSearch } from "@/lib/database/databaseStructureSearchCapabilities";
 
@@ -12,6 +13,8 @@ export interface DatabaseStructureSearchSqlOptions {
   schema?: string;
   term: string;
   limit?: number;
+  /** Dameng may need a catalog fallback when SYS.SYSOBJECTS is not readable. */
+  classifyDamengMaterializedViews?: boolean;
 }
 
 export interface DatabaseStructureSearchSql {
@@ -19,6 +22,7 @@ export interface DatabaseStructureSearchSql {
 }
 
 export interface DatabaseStructureSearchHit {
+  catalog?: string;
   schema?: string;
   tableName: string;
   tableType?: string;
@@ -31,6 +35,7 @@ export interface DatabaseStructureSearchHit {
 }
 
 export interface DatabaseStructureSearchOptions {
+  catalog?: string;
   connectionId: string;
   databaseType: DatabaseType;
   driverProfile?: string;
@@ -42,7 +47,7 @@ export interface DatabaseStructureSearchOptions {
   shouldAbort?: () => boolean;
   listTables: (schema?: string) => Promise<Array<{ name: string; table_type: string }>>;
   getColumns: (schema: string, tableName: string) => Promise<ColumnInfo[]>;
-  executeQuery: (sql: string, executionId: string) => Promise<{ columns: string[]; rows: unknown[][] }>;
+  executeQuery: (sql: string, executionId: string) => Promise<{ columns: string[]; rows: unknown[][]; execution_error?: true }>;
 }
 
 function cleanTerm(term: string): string {
@@ -124,20 +129,66 @@ export async function supportsDatabaseStructureSearchBackend(databaseType?: Data
   return api.supportsDatabaseStructureSearch(databaseType, driverProfile);
 }
 
-export async function runSqlCatalogStructureSearch(options: DatabaseStructureSearchOptions): Promise<DatabaseStructureSearchHit[]> {
-  if (options.shouldAbort?.()) return [];
-  const query = await buildDatabaseStructureSearchSql({
+function isDamengStructureSearch(options: DatabaseStructureSearchOptions): boolean {
+  const profile = options.driverProfile?.trim().toLocaleLowerCase() || "";
+  return options.databaseType === "dameng" || (options.databaseType === "jdbc" && (profile.includes("dameng") || profile.includes("dm")));
+}
+
+function isDamengCatalogFallbackError(error: unknown): boolean {
+  const backendError = normalizeBackendError(error);
+  const code = backendError?.code || "";
+  if (/DBX-(?:JDBC-(?:1001|1002|2001|2002|2003|5001)|TXN-)/.test(code)) return false;
+  const diagnostics = backendError?.diagnostics || {};
+  const text = [error instanceof Error ? error.message : typeof error === "string" ? error : "", backendError?.detail, diagnostics.sqlState, diagnostics.exceptionClass].filter(Boolean).join(" ").toLocaleLowerCase();
+  const catalogReference = ["sysobjects", "sys.sysobjects", "all_objects", "all_tab_columns", "all_tab_comments", "all_col_comments"].some((marker) => text.includes(marker));
+  const permissionError = ["权限", "无权", "permission", "privilege", "access denied", "not authorized", "insufficient privilege"].some((marker) => text.includes(marker));
+  if (diagnostics.vendorCode === -5669 || (catalogReference && permissionError)) return true;
+  const missingCatalog = ["does not exist", "not found", "不存在", "无法解析", "invalid object", "invalid table", "无效的对象"].some((marker) => text.includes(marker));
+  return catalogReference && missingCatalog;
+}
+
+function structureSearchSqlOptions(options: DatabaseStructureSearchOptions, classifyDamengMaterializedViews?: boolean): DatabaseStructureSearchSqlOptions {
+  return {
     databaseType: options.databaseType,
     driverProfile: options.driverProfile,
     database: options.database,
     schema: options.schema,
     term: options.term,
     limit: options.limit,
-  });
-  if (!query?.sql || options.shouldAbort?.()) return [];
-  const result = await options.executeQuery(query.sql, options.executionId);
+    ...(isDamengStructureSearch(options) && classifyDamengMaterializedViews !== undefined ? { classifyDamengMaterializedViews } : {}),
+  };
+}
+
+export async function runSqlCatalogStructureSearch(options: DatabaseStructureSearchOptions): Promise<DatabaseStructureSearchHit[]> {
   if (options.shouldAbort?.()) return [];
-  return mapStructureSearchRows(result.columns, result.rows, options.term);
+  const dameng = isDamengStructureSearch(options);
+  let query = await buildDatabaseStructureSearchSql(structureSearchSqlOptions(options, dameng ? true : undefined));
+  if (!query?.sql || options.shouldAbort?.()) return [];
+
+  let damengFallbackAttempted = false;
+  const runDamengFallback = async (): Promise<{ columns: string[]; rows: unknown[][]; execution_error?: true } | undefined> => {
+    if (damengFallbackAttempted) return undefined;
+    damengFallbackAttempted = true;
+    if (options.shouldAbort?.()) return undefined;
+    const fallbackQuery = await buildDatabaseStructureSearchSql(structureSearchSqlOptions(options, false));
+    if (!fallbackQuery?.sql || options.shouldAbort?.()) return undefined;
+    try {
+      return await options.executeQuery(fallbackQuery.sql, options.executionId);
+    } catch {
+      return undefined;
+    }
+  };
+
+  let result: { columns: string[]; rows: unknown[][]; execution_error?: true } | undefined;
+  try {
+    result = await options.executeQuery(query.sql, options.executionId);
+  } catch (error) {
+    if (!dameng || !isDamengCatalogFallbackError(error)) return [];
+    result = await runDamengFallback();
+  }
+  if (result?.execution_error && dameng && !damengFallbackAttempted) result = await runDamengFallback();
+  if (!result || options.shouldAbort?.() || result.execution_error) return [];
+  return mapStructureSearchRows(result.columns, result.rows, options.term).map((hit) => (options.catalog ? { ...hit, catalog: options.catalog } : hit));
 }
 
 async function runDocumentStructureSearch(options: DatabaseStructureSearchOptions): Promise<DatabaseStructureSearchHit[]> {

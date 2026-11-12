@@ -400,7 +400,8 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
   async function openDatabaseSearchTarget(target: NavigationTarget) {
     dialogs.showDatabaseSearchDialog.value = false;
     if (target.searchScope === "structure" && target.tableName) {
-      const tableType = (target.tableType || "").toUpperCase() === "VIEW" ? "view" : "table";
+      const normalizedTableType = (target.tableType || "").toUpperCase().replaceAll(" ", "_");
+      const tableType = normalizedTableType === "VIEW" ? "view" : normalizedTableType === "MATERIALIZED_VIEW" ? "materialized_view" : "table";
       queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName, "columns", target.columnName ? { kind: "column", name: target.columnName } : undefined, target.catalog, tableType);
       return;
     }

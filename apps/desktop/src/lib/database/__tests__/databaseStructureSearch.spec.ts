@@ -88,6 +88,84 @@ describe("databaseStructureSearch", () => {
     buildSpy.mockRestore();
   });
 
+  it("falls back to the Dameng catalog when SYS.SYSOBJECTS is unavailable", async () => {
+    const buildSpy = vi.spyOn(api, "buildDatabaseStructureSearchSql").mockImplementation(async (options) => ({ sql: options.classifyDamengMaterializedViews === false ? "SELECT fallback" : "SELECT classified" }));
+    const executeQuery = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("DM permission denied for SYS.SYSOBJECTS"))
+      .mockResolvedValueOnce({ columns: ["object_name", "column_name"], rows: [["users", "email"]] });
+
+    try {
+      const hits = await runSqlCatalogStructureSearch({
+        connectionId: "c1",
+        databaseType: "dameng",
+        database: "SYSDBA",
+        schema: "APP",
+        term: "email",
+        executionId: "exec-dameng-1",
+        listTables: async () => [],
+        getColumns: async () => [],
+        executeQuery,
+      });
+
+      expect(hits).toHaveLength(1);
+      expect(executeQuery).toHaveBeenNthCalledWith(1, "SELECT classified", "exec-dameng-1");
+      expect(executeQuery).toHaveBeenNthCalledWith(2, "SELECT fallback", "exec-dameng-1");
+      expect(buildSpy).toHaveBeenNthCalledWith(1, expect.objectContaining({ classifyDamengMaterializedViews: true }));
+      expect(buildSpy).toHaveBeenNthCalledWith(2, expect.objectContaining({ classifyDamengMaterializedViews: false }));
+    } finally {
+      buildSpy.mockRestore();
+    }
+  });
+
+  it("does not retry Dameng metadata after a transport or timeout failure", async () => {
+    const buildSpy = vi.spyOn(api, "buildDatabaseStructureSearchSql").mockResolvedValue({ sql: "SELECT structure" });
+    const executeQuery = vi.fn().mockRejectedValue(new Error("query timed out while reading the database"));
+
+    try {
+      const hits = await runSqlCatalogStructureSearch({
+        connectionId: "c1",
+        databaseType: "dameng",
+        database: "SYSDBA",
+        term: "email",
+        executionId: "exec-dameng-timeout",
+        listTables: async () => [],
+        getColumns: async () => [],
+        executeQuery,
+      });
+
+      expect(hits).toEqual([]);
+      expect(executeQuery).toHaveBeenCalledTimes(1);
+      expect(buildSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      buildSpy.mockRestore();
+    }
+  });
+
+  it("does not repeat a failed Dameng fallback", async () => {
+    const buildSpy = vi.spyOn(api, "buildDatabaseStructureSearchSql").mockResolvedValue({ sql: "SELECT structure" });
+    const executeQuery = vi.fn().mockRejectedValueOnce(new Error("DM permission denied for SYS.SYSOBJECTS")).mockResolvedValueOnce({ execution_error: true, columns: [], rows: [] });
+
+    try {
+      const hits = await runSqlCatalogStructureSearch({
+        connectionId: "c1",
+        databaseType: "dameng",
+        database: "SYSDBA",
+        term: "email",
+        executionId: "exec-dameng-failed-fallback",
+        listTables: async () => [],
+        getColumns: async () => [],
+        executeQuery,
+      });
+
+      expect(hits).toEqual([]);
+      expect(executeQuery).toHaveBeenCalledTimes(2);
+      expect(buildSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      buildSpy.mockRestore();
+    }
+  });
+
   it("aborts document structure search between tables", async () => {
     let abortBeforeNextTable = false;
     const getColumns = vi.fn().mockImplementation(async () => {

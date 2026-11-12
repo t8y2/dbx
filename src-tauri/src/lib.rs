@@ -2691,6 +2691,7 @@ pub fn run() {
             commands::list_sql_files::rename_sql_folder_in_folder,
             commands::list_sql_files::delete_sql_folder_in_folder,
             commands::global_search::global_search,
+            commands::global_search::cancel_global_search,
             commands::external_db::pending_open_db_files,
             commands::keychain::read_keychain_password,
             commands::keychain::read_keychain_passwords,

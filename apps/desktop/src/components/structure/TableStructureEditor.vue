@@ -156,7 +156,7 @@ import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataG
 import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { codeMirrorSqlDialect, codeMirrorSqlDialectForConnection, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { postgresListRolesSql, usersFromPostgresRolesResult } from "@/lib/database/databaseUserAdmin";
-import type { CatalogInfo, ColumnInfo, ConnectionConfig, ConstraintInfo, PgPartitionKind, PgPartitionNode, PgTablePartitioning, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
+import type { CatalogInfo, ColumnInfo, ConnectionConfig, ConstraintInfo, ObjectSourceKind, PgPartitionKind, PgPartitionNode, PgTablePartitioning, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
 import {
   applyManticoreDdlColumnExtras,
   buildStructureTargetLabel,
@@ -279,8 +279,8 @@ const props = defineProps<{
   catalog?: string;
   schema?: string;
   tableName: string;
-  /** `view` loads `CREATE OR REPLACE VIEW` instead of table DDL. */
-  tableType?: "table" | "view";
+  /** `view` and `materialized_view` load view-specific metadata instead of table DDL. */
+  tableType?: "table" | "view" | "materialized_view";
   initialTab?: TableInfoTab;
   initialTabRequestId?: number;
   initialTarget?: TableStructureEditorTarget;
@@ -563,7 +563,7 @@ type StructureDdlRequest = {
   schema: string;
   tableName: string;
   catalog?: string;
-  objectType?: "VIEW";
+  objectType?: ObjectSourceKind;
   exactIdentity?: boolean;
 };
 
@@ -575,7 +575,7 @@ function ddlRequest(): StructureDdlRequest {
     schema: metadataSchema.value,
     tableName: props.tableName,
     catalog: props.catalog,
-    objectType: props.tableType === "view" ? "VIEW" : undefined,
+    objectType: props.tableType === "view" ? "VIEW" : props.tableType === "materialized_view" ? "MATERIALIZED_VIEW" : undefined,
     ...(props.exactIdentity ? { exactIdentity: true } : {}),
   };
 }
@@ -3472,7 +3472,7 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
         metadata?.parent && (metadata.scope === "TABLE" || metadata.scope === "VIEW")
           ? { owner: metadata.owner, parentType: metadata.scope }
           : !trigger.original && oracleTriggerReadOptions(databaseType.value) && metadataSchema.value
-            ? (trigger.oracleExact ?? { owner: metadataSchema.value, parentType: props.tableType === "view" ? ("VIEW" as const) : ("TABLE" as const) })
+            ? (trigger.oracleExact ?? { owner: metadataSchema.value, parentType: props.tableType === "view" || props.tableType === "materialized_view" ? ("VIEW" as const) : ("TABLE" as const) })
             : undefined;
       return { ...trigger, oracleExact };
     }),
@@ -3831,7 +3831,7 @@ async function refreshSqlPreview() {
           owner: metadataSchema.value!,
           tableName: isCreateMode.value ? foldCreatedTableName(newTableName.value, databaseType.value) : props.tableName!,
           executionSchema: props.schema || metadataSchema.value!,
-          parentType: props.tableType === "view" ? "VIEW" : "TABLE",
+          parentType: props.tableType === "view" || props.tableType === "materialized_view" ? "VIEW" : "TABLE",
           databaseType: databaseType.value as "oracle" | "oceanbase-oracle" | "dameng",
           newTable: isCreateMode.value,
         },

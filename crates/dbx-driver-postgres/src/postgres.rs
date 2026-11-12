@@ -4194,11 +4194,7 @@ async fn completion_assistant_search_inner(
             let table_type: String = pg_row_try_string(&row, 2);
             candidates.push(CompletionAssistantCandidate {
                 name: pg_row_try_string(&row, 0),
-                kind: if table_type.contains("VIEW") {
-                    CompletionAssistantCandidateKind::View
-                } else {
-                    CompletionAssistantCandidateKind::Table
-                },
+                kind: postgres_completion_candidate_kind(&table_type),
                 database: Some(request.database.clone()),
                 schema: Some(pg_row_try_string(&row, 1)),
                 parent_schema: row.try_get::<_, Option<String>>(4).ok().flatten(),
@@ -4363,7 +4359,7 @@ async fn completion_assistant_search_inner(
 
 fn postgres_completion_tables_sql() -> &'static str {
     "SELECT c.relname, n.nspname, \
-            CASE c.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'VIEW' ELSE 'TABLE' END AS table_type, \
+            CASE c.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED_VIEW' ELSE 'TABLE' END AS table_type, \
             obj_description(c.oid) AS table_comment, \
             CASE WHEN pc.relkind = 'p' THEN pn.nspname ELSE NULL END AS parent_schema, \
             CASE WHEN pc.relkind = 'p' THEN pc.relname ELSE NULL END AS parent_name \
@@ -4456,6 +4452,14 @@ fn postgres_visible_table_schema_sql() -> &'static str {
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      WHERE c.relname = $1 AND pg_catalog.pg_table_is_visible(c.oid) \
      LIMIT 1"
+}
+
+fn postgres_completion_candidate_kind(table_type: &str) -> CompletionAssistantCandidateKind {
+    match table_type {
+        "MATERIALIZED_VIEW" => CompletionAssistantCandidateKind::MaterializedView,
+        "VIEW" => CompletionAssistantCandidateKind::View,
+        _ => CompletionAssistantCandidateKind::Table,
+    }
 }
 
 fn postgres_completion_relkinds(kinds: &[CompletionAssistantObjectKind]) -> Vec<String> {
@@ -17479,9 +17483,16 @@ mod tests {
 
     #[test]
     fn postgres_completion_sql_filters_before_limit() {
+        assert_eq!(postgres_completion_candidate_kind("TABLE"), CompletionAssistantCandidateKind::Table);
+        assert_eq!(postgres_completion_candidate_kind("VIEW"), CompletionAssistantCandidateKind::View);
+        assert_eq!(
+            postgres_completion_candidate_kind("MATERIALIZED_VIEW"),
+            CompletionAssistantCandidateKind::MaterializedView
+        );
         assert!(postgres_completion_tables_sql().contains("c.relname ILIKE $2 ESCAPE '~'"));
         assert!(postgres_completion_tables_sql().contains("pg_catalog.pg_table_is_visible(c.oid)"));
         assert!(postgres_completion_tables_sql().contains("c.relkind::text = ANY($3::text[])"));
+        assert!(postgres_completion_tables_sql().contains("WHEN 'm' THEN 'MATERIALIZED_VIEW'"));
         assert!(postgres_completion_tables_sql().contains("ORDER BY c.relname LIMIT $4"));
         assert!(postgres_completion_routines_sql(true).contains("p.proname ILIKE $2 ESCAPE '~'"));
         assert!(postgres_completion_routines_sql(true).contains("p.prokind::text = ANY($3::text[])"));

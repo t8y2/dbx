@@ -97,7 +97,7 @@ export interface SqlShortcutAction {
 
 export type CompletionAssistantObjectKind = "database" | "schema" | "table" | "view" | "routine" | "procedure" | "function" | "column" | "sequence";
 
-export type CompletionAssistantCandidateKind = "database" | "schema" | "table" | "view" | "procedure" | "function" | "column" | "sequence" | "object";
+export type CompletionAssistantCandidateKind = "database" | "schema" | "table" | "view" | "materialized_view" | "procedure" | "function" | "column" | "sequence" | "object";
 
 export type CompletionAssistantMatchMode = "prefix" | "contains";
 
@@ -2792,7 +2792,7 @@ export interface QueryTab {
   structureTableName?: string;
   structureExactIdentity?: boolean;
   /** Navigation type of the opened structure object; views matter for "view data" routing. */
-  structureTableType?: "table" | "view";
+  structureTableType?: "table" | "view" | "materialized_view";
   structureInitialTab?: TableInfoTab;
   structureInitialTabRequestId?: number;
   structureInitialTarget?: TableStructureEditorTarget;

@@ -642,7 +642,19 @@ pub async fn download_update(
             },
             ready,
         };
-        state.finish_download(&cancellation, cached, &update_cache::root(&app)?)?;
+        // A commit can wait a few seconds for an antivirus scan to release the freshly
+        // written package. Run it on the blocking pool so that wait does not stall the
+        // async runtime; the pending-state lock still serializes the commit against the
+        // cancel/install commands.
+        let commit_app = app.clone();
+        let commit_root = update_cache::root(&app)?;
+        let commit_cancellation = Arc::clone(&cancellation);
+        tauri::async_runtime::spawn_blocking(move || {
+            let pending = commit_app.state::<PendingUpdateState>();
+            pending.finish_download(&commit_cancellation, cached, &commit_root)
+        })
+        .await
+        .map_err(|error| format!("Failed to finalize the DBX update cache: {error}"))??;
         Ok(info)
     }
     .await;

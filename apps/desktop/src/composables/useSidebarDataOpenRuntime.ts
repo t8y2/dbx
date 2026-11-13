@@ -14,7 +14,7 @@ import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordi
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { buildTableSelectSql, requiresEagerTableMetadataForDataOpen } from "@/lib/table/tableSelectSql";
 import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
-import { physicalTablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
+import { physicalTablePrimaryKeys, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
@@ -428,7 +428,7 @@ export function useSidebarDataOpenRuntime() {
       const defaultOrderBy = defaultSort.orderBy;
       // #12647：首开路径同样尊重"该连接的行定位器已被引擎拒绝"的记忆，否则
       // 被降级过的连接每次重新单击表都会再发一次注定失败的定位器查询。
-      const includeRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableType) && !rowIdLocatorUnsupported(node.connectionId);
+      const includeRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableType) && !rowIdLocatorUnsupported(node.connectionId) && !postgresTupleLocatorUnsupportedEngine(connectionStore.getConfig(node.connectionId));
       const buildOpenSql = (withRowId: boolean) =>
         buildTableSelectSql({
           databaseType: effectiveDbType,

@@ -55,6 +55,17 @@ export interface TableDataGridColumnOrderScope {
 interface StoredTableDataGridColumnOrder {
   version: number;
   order: string[];
+  // The database column order the arrangement was made against. Entries saved
+  // before this field existed carry none and are applied unconditionally.
+  baseOrder?: string[];
+}
+
+function sameRelativeOrder(left: readonly string[], right: readonly string[]): boolean {
+  const leftKeys = new Set(left);
+  const shared = new Set(right.filter((key) => leftKeys.has(key)));
+  const leftShared = left.filter((key) => shared.has(key));
+  const rightShared = right.filter((key) => shared.has(key));
+  return leftShared.every((key, index) => key === rightShared[index]);
 }
 
 function normalizeSql(sql?: string): string {
@@ -129,22 +140,41 @@ export function tableDataGridColumnOrderScopeKey(scope: TableDataGridColumnOrder
   return [scope.connectionId, scope.database, namespace, scope.tableName].join("\u0001");
 }
 
-export function loadTableDataGridColumnOrder(scopeKey: string): string[] {
+/**
+ * Returns the table's shared column order, or `null` when the table has no
+ * entry at all. Pass the table's current database column order as
+ * `databaseOrder` to discard an arrangement made against a different physical
+ * order: once the table is rebuilt with its columns in a new order, the saved
+ * arrangement no longer reflects what the user chose and would hide the new
+ * database order. The discarded entry is replaced by an empty order rather than
+ * removed, so every view sharing the table learns that the database order now
+ * applies, whichever view notices the rebuild first.
+ */
+export function loadTableDataGridColumnOrderEntry(scopeKey: string, databaseOrder?: readonly string[]): string[] | null {
   const raw = safeLocalStorageGet(`${TABLE_STORAGE_PREFIX}${scopeKey}`);
-  if (!raw) return [];
+  if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as Partial<StoredTableDataGridColumnOrder>;
-    if (parsed.version !== STORAGE_VERSION || !Array.isArray(parsed.order)) return [];
+    if (parsed.version !== STORAGE_VERSION || !Array.isArray(parsed.order)) return null;
+    if (databaseOrder?.length && Array.isArray(parsed.baseOrder) && !sameRelativeOrder(parsed.baseOrder, databaseOrder)) {
+      saveTableDataGridColumnOrder(scopeKey, [], databaseOrder);
+      return [];
+    }
     return parsed.order.filter((key): key is string => typeof key === "string");
   } catch {
-    return [];
+    return null;
   }
 }
 
-export function saveTableDataGridColumnOrder(scopeKey: string, order: readonly string[]) {
+export function loadTableDataGridColumnOrder(scopeKey: string, databaseOrder?: readonly string[]): string[] {
+  return loadTableDataGridColumnOrderEntry(scopeKey, databaseOrder) ?? [];
+}
+
+export function saveTableDataGridColumnOrder(scopeKey: string, order: readonly string[], baseOrder?: readonly string[]) {
   const payload: StoredTableDataGridColumnOrder = {
     version: STORAGE_VERSION,
     order: [...order],
+    ...(baseOrder?.length ? { baseOrder: [...baseOrder] } : {}),
   };
   safeLocalStorageSet(`${TABLE_STORAGE_PREFIX}${scopeKey}`, JSON.stringify(payload));
 }

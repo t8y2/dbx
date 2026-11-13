@@ -8,7 +8,7 @@ import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/table
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { tableDataLargeValuePreviewOptions, tableDataPreviewRowBudget } from "@/lib/dataGrid/dataGridLargeValues";
 import { elasticsearchCursorPageJumpRequestCount } from "@/lib/dataGrid/dataGridPagination";
-import { editablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
+import { editablePrimaryKeys, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { loadVirtualRowIdentifier } from "@/lib/table/virtualRowIdentifier";
@@ -124,7 +124,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : (tableMeta?.primaryKeys ?? []);
     // 已确认该连接拒绝合成行定位器（如 Hologres 拒绝 tableoid，#12647）时不再注入，
     // 避免无主键表每次打开都报错。
-    const useRowId = includeRowId ?? (shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta?.tableType) && !rowIdLocatorUnsupported(tab.connectionId));
+    const useRowId = includeRowId ?? (shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta?.tableType) && !rowIdLocatorUnsupported(tab.connectionId) && !postgresTupleLocatorUnsupportedEngine(config));
     // 列投影只信任真实元数据列：tableMetaForDataTab 的 fallback 列来自查询
     // 结果（可能是失败结果的 ["Error"]），进入 SQL 会生成非法投影；
     // 真实列缺失时省略 columns 让 builder 生成 SELECT *

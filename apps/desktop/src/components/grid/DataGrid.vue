@@ -145,6 +145,7 @@ import {
   isTdengineExistingRowReadonlyColumn,
   shouldIncludeSyntheticRowId,
   showsKeylessEditWarning,
+  postgresTupleLocatorUnsupportedEngine,
 } from "@/lib/table/tableEditing";
 import { rowIdLocatorUnsupported } from "@/lib/table/tableRowIdSupport";
 import { buildDataGridConditionalUpdateSql, buildDataGridContextFilterCondition, buildDataGridCountSql, buildHiveTablePropertiesSql, type DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
@@ -4722,7 +4723,8 @@ async function refreshSavedRows(request: { dirtyRows: ReadonlyMap<number, Readon
     ...largeValuePreviewOptions,
     whereInput: identityConditions.join(" OR "),
     limit: planResult.plan.sourceIndexes.length + 1,
-    includeRowId: shouldIncludeSyntheticRowId(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType) && !(props.connectionId && rowIdLocatorUnsupported(props.connectionId)),
+    includeRowId:
+      shouldIncludeSyntheticRowId(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType) && !(props.connectionId && rowIdLocatorUnsupported(props.connectionId)) && !postgresTupleLocatorUnsupportedEngine(props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined),
   });
   const refreshed = await executeDataGridSavedRowRefreshQuery(api, {
     connectionId,
@@ -8403,7 +8405,10 @@ async function applyOrderBySearch(_value?: string, structuredOrderByOverride?: s
       injectDefaultTimeSeriesWhere: true,
       limit: pageSize.value,
       whereInput: currentWhereInput(),
-      includeRowId: shouldIncludeSyntheticRowId(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType) && !(props.connectionId && rowIdLocatorUnsupported(props.connectionId)),
+      includeRowId:
+        shouldIncludeSyntheticRowId(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType) &&
+        !(props.connectionId && rowIdLocatorUnsupported(props.connectionId)) &&
+        !postgresTupleLocatorUnsupportedEngine(props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined),
     });
     markConditionInputsApplied();
     await props.onExecuteSql(sql);
@@ -8446,7 +8451,10 @@ async function applyWhereFilter() {
       limit: pageSize.value,
       injectDefaultTimeSeriesWhere: true,
       whereInput,
-      includeRowId: shouldIncludeSyntheticRowId(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType) && !(props.connectionId && rowIdLocatorUnsupported(props.connectionId)),
+      includeRowId:
+        shouldIncludeSyntheticRowId(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType) &&
+        !(props.connectionId && rowIdLocatorUnsupported(props.connectionId)) &&
+        !postgresTupleLocatorUnsupportedEngine(props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined),
     });
     markConditionInputsApplied();
     await props.onExecuteSql(sql);

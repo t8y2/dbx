@@ -455,11 +455,17 @@ export function isPhysicalTableColumnOrderChange(dbType: DatabaseType | undefine
   return reorderColumn && originalPosition !== currentPosition;
 }
 
-export function hasLocalTableColumnOrderChange(columns: readonly { originalPosition?: number; original?: unknown; markedForDrop?: boolean }[]): boolean {
+/** Active columns in the order the database holds them once the draft is saved. */
+export function localTableColumnDatabaseOrder<T extends { originalPosition?: number; original?: unknown; markedForDrop?: boolean }>(columns: readonly T[]): T[] {
   const activeColumns = columns.filter((column) => !column.markedForDrop);
   // Databases without physical reorder support keep existing columns in ordinal order
   // and append newly added columns, so compare against that post-save layout.
-  const databaseOrder = [...activeColumns.filter((column) => column.original).sort((left, right) => (left.originalPosition ?? Number.MAX_SAFE_INTEGER) - (right.originalPosition ?? Number.MAX_SAFE_INTEGER)), ...activeColumns.filter((column) => !column.original)];
+  return [...activeColumns.filter((column) => column.original).sort((left, right) => (left.originalPosition ?? Number.MAX_SAFE_INTEGER) - (right.originalPosition ?? Number.MAX_SAFE_INTEGER)), ...activeColumns.filter((column) => !column.original)];
+}
+
+export function hasLocalTableColumnOrderChange(columns: readonly { originalPosition?: number; original?: unknown; markedForDrop?: boolean }[]): boolean {
+  const activeColumns = columns.filter((column) => !column.markedForDrop);
+  const databaseOrder = localTableColumnDatabaseOrder(columns);
   return activeColumns.some((column, index) => column !== databaseOrder[index]);
 }
 

@@ -553,6 +553,8 @@ const MYSQL_SQL_KEYWORDS = [
   "CURRENT_USER",
   "DUPLICATE KEY",
   "FORCE INDEX",
+  "IGNORE INDEX",
+  "USE INDEX",
   "JSON_EXTRACT",
   "JSON_UNQUOTE",
   "DATE_FORMAT",
@@ -3073,8 +3075,16 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   // CTE bodies are their own scope: resolve them first so the outer query's
   // referenced tables are read from a statement with those bodies blanked out.
   const cteDefs = scanCteDefinitions(fullStatement, options.databaseType);
-  let referencedTables = extractReferencedTables(maskResolvedCteBodies(fullStatement, cursorInStatement, cteDefs), options.databaseType);
-  for (const cte of cteDefs) {
+  // Inside a CTE body only that body's own sources and the CTEs declared before it
+  // are in scope; the CTE being defined (unless the body references it, as a
+  // recursive CTE does) and the outer query would otherwise count as extra row
+  // sources and force every column suggestion to be qualified (#14109).
+  const enclosingCteIndex = cteDefs.findIndex((cte) => cursorInStatement > cte.bodyStart && cursorInStatement <= cte.bodyEnd);
+  const enclosingCte = enclosingCteIndex >= 0 ? cteDefs[enclosingCteIndex] : undefined;
+  const scopedStatement = enclosingCte ? keepOnlyCteBody(fullStatement, enclosingCte) : maskResolvedCteBodies(fullStatement, cursorInStatement, cteDefs);
+  let referencedTables = extractReferencedTables(scopedStatement, options.databaseType);
+  const visibleCteDefs = enclosingCte ? cteDefs.slice(0, enclosingCteIndex).concat(referencedTables.some((rt) => rt.name.toLowerCase() === enclosingCte.name.toLowerCase()) ? [enclosingCte] : []) : cteDefs;
+  for (const cte of visibleCteDefs) {
     const matching = referencedTables.filter((rt) => rt.name.toLowerCase() === cte.name.toLowerCase());
     if (matching.length === 0) {
       referencedTables.push({ name: cte.name, columns: cte.columns, kind: "cte" });
@@ -3089,7 +3099,7 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   }
 
   // Merge subquery alias references
-  const subqueryRefs = extractSubqueryReferences(fullStatement, cteDefs, options.databaseType);
+  const subqueryRefs = extractSubqueryReferences(enclosingCte ? scopedStatement : fullStatement, cteDefs, options.databaseType);
   for (const sq of subqueryRefs) {
     if (!referencedTables.some((rt) => rt.name.toLowerCase() === sq.name.toLowerCase() && rt.alias === sq.alias)) {
       referencedTables.push(sq);
@@ -3854,7 +3864,7 @@ function preferredKeywordsForCompletion(
   if (selectListColumnContext && hasSelectListExpression(beforeCursor, databaseType)) keywords.push("FROM");
   if (isAfterJoinModifierContext(beforeCursor, databaseType)) keywords.push("JOIN");
   if (!exclusiveTableSuggestions && isAfterSelectBodyExpression(beforeToken, databaseType)) {
-    if (databaseType === "mysql" && /\sforce$/i.test(beforeToken)) keywords.push("INDEX");
+    if (databaseType === "mysql" && /\s(?:force|ignore|use)$/i.test(beforeToken)) keywords.push("INDEX");
     keywords.push("LIMIT");
   }
   if (isAfterConditionExpression(beforeToken, databaseType)) keywords.push("AND", "OR");
@@ -4724,6 +4734,14 @@ function maskResolvedCteBodies(statement: string, cursorOffset: number, ctes: re
     masked = `${masked.slice(0, cte.bodyStart + 1)}${" ".repeat(bodyLength)}${masked.slice(cte.bodyEnd)}`;
   }
   return masked;
+}
+
+/**
+ * Blanks everything outside one CTE body, keeping offsets, so completion inside
+ * that body reads only the body's own row sources (#14109).
+ */
+function keepOnlyCteBody(statement: string, cte: ScannedCteDefinition): string {
+  return `${" ".repeat(cte.bodyStart + 1)}${statement.slice(cte.bodyStart + 1, cte.bodyEnd)}${" ".repeat(Math.max(0, statement.length - cte.bodyEnd))}`;
 }
 
 function extractSubqueryReferences(sql: string, knownCtes?: readonly ScannedCteDefinition[], databaseType?: DatabaseType): SqlCompletionReferencedTable[] {
@@ -6991,7 +7009,7 @@ function buildKeywordItems(prefix: string, context: SqlCompletionContext, databa
     .filter((keyword) => {
       if (functionSignatures.has(keyword) && !dataTypeKeywords.has(keyword) && !DUAL_ROLE_SQL_KEYWORDS.has(keyword)) return false;
       if (WINDOW_FUNCTIONS.has(keyword)) return false;
-      if (keyword === "FORCE INDEX" && context.preferredKeywords.includes("INDEX")) return false;
+      if (MYSQL_INDEX_HINT_KEYWORDS.has(keyword) && context.preferredKeywords.includes("INDEX")) return false;
       if (!matchesPrefix(keyword, prefix, matchMode)) return false;
       if (!showDdl && isDml && (DDL_ONLY_KEYWORDS.has(keyword) || dataTypeKeywords.has(keyword))) return false;
       if (context.followingKeyword && keyword.includes(" ") && keyword.toUpperCase().endsWith(` ${context.followingKeyword}`)) return false;
@@ -7013,7 +7031,9 @@ function buildKeywordItems(prefix: string, context: SqlCompletionContext, databa
     });
 }
 
-const TABLE_REFERENCE_CLAUSE_KEYWORDS = new Set(["WHERE", "GROUP", "GROUP BY", "ORDER", "ORDER BY", "HAVING", "UNION", "INTERSECT", "EXCEPT", "FORCE INDEX"]);
+// MySQL index hints that follow a table reference (#14431, #14598).
+const MYSQL_INDEX_HINT_KEYWORDS = new Set(["FORCE INDEX", "IGNORE INDEX", "USE INDEX"]);
+const TABLE_REFERENCE_CLAUSE_KEYWORDS = new Set(["WHERE", "GROUP", "GROUP BY", "ORDER", "ORDER BY", "HAVING", "UNION", "INTERSECT", "EXCEPT", ...MYSQL_INDEX_HINT_KEYWORDS]);
 // Enough to outrank a routine's initials match plus the procedure type boost.
 const TABLE_REFERENCE_CLAUSE_KEYWORD_BOOST = 3000;
 

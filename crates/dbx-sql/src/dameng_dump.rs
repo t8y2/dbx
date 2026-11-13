@@ -261,7 +261,10 @@ mod tests {
 
     #[test]
     fn userid_is_first_and_carries_credentials() {
-        assert_eq!(userid_token("SYSDBA", "Dameng123", "127.0.0.1", 5236), "USERID=SYSDBA/\"Dameng123\"@127.0.0.1:5236");
+        assert_eq!(
+            userid_token("SYSDBA", "Dameng123", "127.0.0.1", 5236),
+            "USERID=SYSDBA/\"Dameng123\"@127.0.0.1:5236"
+        );
         assert_eq!(
             userid_token("ATUSER", "P@ssw0rd@123", "127.0.0.1", 5236),
             "USERID=ATUSER/\"P@ssw0rd@123\"@127.0.0.1:5236"
@@ -320,10 +323,16 @@ mod tests {
         // Quotes are invalid in FILE/LOG paths (the tool rejects them), but the
         // USERID password segment is deliberately quoted (#14779).
         assert!(
-            !argv.iter().filter(|arg| arg.starts_with("FILE=") || arg.starts_with("LOG=") || arg.starts_with("PARFILE=")).any(|arg| arg.contains('"')),
+            !argv
+                .iter()
+                .filter(|arg| arg.starts_with("FILE=") || arg.starts_with("LOG=") || arg.starts_with("PARFILE="))
+                .any(|arg| arg.contains('"')),
             "quotes are invalid in FILE/LOG: {argv:?}"
         );
-        assert!(argv.iter().any(|arg| arg.starts_with("USERID=") && arg.contains("/\"")), "USERID must quote the password: {argv:?}");
+        assert!(
+            argv.iter().any(|arg| arg.starts_with("USERID=") && arg.contains("/\"")),
+            "USERID must quote the password: {argv:?}"
+        );
     }
 
     #[test]

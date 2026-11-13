@@ -2436,6 +2436,8 @@ const gridVerticalScrollbarTrackRef = ref<HTMLDivElement>();
 const gridVerticalScrollbarThumbRef = ref<HTMLDivElement>();
 const hasGridHorizontalOverflow = ref(false);
 const hasGridVerticalOverflow = ref(false);
+const gridHorizontalScrollbarDragging = ref(false);
+const statusSqlTooltipOpen = ref(false);
 let gridHorizontalScrollbarThumbLeftPercent = 0;
 let gridHorizontalScrollbarThumbWidthPercent = 100;
 let gridVerticalScrollbarThumbTopPercent = 0;
@@ -3273,7 +3275,13 @@ function applyGridVerticalScrollbarThumbStyle(): boolean {
 }
 
 function setGridHorizontalScrollbarDragging(dragging: boolean) {
+  gridHorizontalScrollbarDragging.value = dragging;
+  if (dragging) statusSqlTooltipOpen.value = false;
   gridHorizontalScrollbarTrackRef.value?.classList.toggle(GRID_HORIZONTAL_SCROLLBAR_DRAGGING_CLASS, dragging);
+}
+
+function updateStatusSqlTooltipOpen(open: boolean) {
+  statusSqlTooltipOpen.value = gridHorizontalScrollbarDragging.value ? false : open;
 }
 
 function setGridVerticalScrollbarDragging(dragging: boolean) {
@@ -17576,7 +17584,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       </div>
       <div v-else-if="settingsStore.editorSettings.showDataGridStatusSql && sqlOneLiner" class="flex min-w-0 max-w-full items-center gap-1 overflow-hidden">
         <CustomContextMenu :items="statusSqlContextMenuItems" v-slot="{ onContextMenu }">
-          <Tooltip>
+          <Tooltip :open="statusSqlTooltipOpen" @update:open="updateStatusSqlTooltipOpen">
             <TooltipTrigger as-child>
               <button type="button" class="block min-w-0 max-w-full truncate text-left cursor-pointer hover:text-foreground" data-result-sql :aria-label="t(context === 'table-data' ? 'grid.viewQuerySql' : 'grid.copyQuerySql')" @click="viewStatusSql" @contextmenu="onContextMenu">
                 <span v-if="result.sqlPage">{{ t("grid.currentPageSql") }}: </span>

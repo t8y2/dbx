@@ -9614,6 +9614,9 @@ export default {
     warnings: "Warnings",
   },
   diff: {
+    additionalSchemas: "Also compare these schemas",
+    additionalSchemasHint: "Each one is compared with the schema of the same name on the target, then reviewed and deployed separately.",
+    schemaResults: "Schema results",
     progress: {
       loadingObjects: "Reading source and target database objects...",
       loadingSourceDetails: "Reading source database table structures",

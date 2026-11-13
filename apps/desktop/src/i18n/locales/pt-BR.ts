@@ -8208,6 +8208,9 @@ export default withEnglishFallback({
     completedWithErrors: "Execução concluída: {succeeded} com sucesso, {failed} com falha",
   },
   diff: {
+    additionalSchemas: "Comparar também estes esquemas",
+    additionalSchemasHint: "Cada um é comparado com o esquema de mesmo nome no destino e depois revisado e implantado separadamente.",
+    schemaResults: "Resultados por esquema",
     progress: {
       loadingObjects: "Lendo os objetos dos bancos de dados de origem e destino...",
       loadingSourceDetails: "Lendo a estrutura das tabelas do banco de dados de origem",

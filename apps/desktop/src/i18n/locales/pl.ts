@@ -7884,6 +7884,9 @@ export default withEnglishFallback({
     warnings: "Ostrzeżenia",
   },
   diff: {
+    additionalSchemas: "Porównaj także te schematy",
+    additionalSchemasHint: "Każdy jest porównywany ze schematem o tej samej nazwie w celu, a następnie sprawdzany i wdrażany osobno.",
+    schemaResults: "Wyniki schematów",
     progress: {
       loadingObjects: "Odczytywanie obiektów źródłowej i docelowej bazy danych...",
       loadingSourceDetails: "Odczytywanie struktur tabel źródłowej bazy danych",

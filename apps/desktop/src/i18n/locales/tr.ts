@@ -7027,6 +7027,9 @@ export default withEnglishFallback({
     fileFilterHint: "*.sql ya da *.sh gibi bir glob veya {regex} gibi bir düzenli ifade kullanın.",
   },
   diff: {
+    additionalSchemas: "Bu şemaları da karşılaştır",
+    additionalSchemasHint: "Her biri hedefteki aynı adlı şemayla karşılaştırılır, ardından ayrı ayrı incelenir ve dağıtılır.",
+    schemaResults: "Şema sonuçları",
     progress: {
       loadingObjects: "Kaynak ve hedef veritabanı nesneleri okunuyor...",
       loadingSourceDetails: "Kaynak veritabanı tablo yapıları okunuyor",

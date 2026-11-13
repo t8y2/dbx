@@ -7843,6 +7843,9 @@ export default withEnglishFallback({
     fileFilterHint: "Gunakan pola glob seperti *.sql atau *.sh, atau ekspresi reguler seperti {regex}.",
   },
   diff: {
+    additionalSchemas: "Bandingkan juga skema ini",
+    additionalSchemasHint: "Masing-masing dibandingkan dengan skema bernama sama di target, lalu ditinjau dan di-deploy secara terpisah.",
+    schemaResults: "Hasil skema",
     progress: {
       loadingObjects: "Membaca objek database sumber dan target...",
       loadingSourceDetails: "Membaca struktur tabel database sumber",

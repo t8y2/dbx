@@ -99,6 +99,90 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+function mountAdditionalSchemas(extraProps: Record<string, unknown> = {}) {
+  mocks.listSchemas.mockImplementation(async (connectionId: string) => (connectionId === "pg-1" ? ["dbo", "audit", "meta", "source_only"] : ["dbo", "audit", "meta", "target_only"]));
+  const state = reactive({ additionalSchemas: ["meta"] as string[], selectedTables: undefined as string[] | undefined, tableMappings: [] as { sourceTable: string; targetTable: string }[], sourceDatabase: "app", sourceSchema: "dbo", ...extraProps });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const app = createApp(
+    defineComponent({
+      setup: () => () =>
+        h(SchemaDiffConfigStep, {
+          sourceConnectionId: "pg-1",
+          sourceDatabase: state.sourceDatabase,
+          sourceSchema: state.sourceSchema,
+          targetConnectionId: "pg-2",
+          targetDatabase: "app",
+          targetSchema: "dbo",
+          configs: [],
+          activeConfigId: "",
+          ignoreComments: false,
+          options: { ...getDefaultOptionsForDbType("postgres"), functions: false, selectedTables: state.selectedTables, tableMappings: state.tableMappings },
+          selectedTables: state.selectedTables,
+          additionalSchemas: state.additionalSchemas,
+          tableListLoader: { load: vi.fn().mockResolvedValue([]) },
+          loading: false,
+          recentConfigs: [],
+          "onUpdate:additionalSchemas": (value: string[]) => {
+            state.additionalSchemas = value;
+          },
+        }),
+    }),
+  );
+  mountedApps.push(app);
+  app.use(i18n);
+  app.mount(container);
+  return { state, container };
+}
+
+it("offers only schemas on both sides as additional schemas, excluding the chosen pair", async () => {
+  const { container } = mountAdditionalSchemas();
+  await flushAsyncSetup();
+  const heading = i18n.global.t("diff.additionalSchemas");
+  expect(container.textContent).toContain(heading);
+  expect(container.textContent).toContain("audit");
+  expect(container.textContent).toContain("meta");
+  expect(container.textContent).not.toContain("source_only");
+  expect(container.textContent).not.toContain("target_only");
+});
+
+it("drops an additional schema that becomes the chosen schema or is ruled out by a table selection", async () => {
+  const { state, container } = mountAdditionalSchemas();
+  await flushAsyncSetup();
+  state.sourceSchema = "meta";
+  await flushAsyncSetup();
+  expect(state.additionalSchemas).toEqual([]);
+
+  state.additionalSchemas = ["audit"];
+  state.selectedTables = ["orders"];
+  await flushAsyncSetup();
+  expect(state.additionalSchemas).toEqual([]);
+  expect(container.textContent).not.toContain(i18n.global.t("diff.additionalSchemas"));
+});
+
+it("drops a selection the picker no longer offers before comparing, even if the schema lists failed to load", async () => {
+  const { state } = mountAdditionalSchemas();
+  await flushAsyncSetup();
+  mocks.listSchemas.mockRejectedValue(new Error("offline"));
+  state.sourceDatabase = "other";
+  await flushAsyncSetup();
+  expect(state.additionalSchemas).toEqual(["meta"]);
+  const compare = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === i18n.global.t("diff.compare"))!;
+  expect(compare.disabled).toBe(false);
+  compare.click();
+  await flushAsyncSetup();
+  expect(state.additionalSchemas).toEqual([]);
+});
+
+it("rules out additional schemas when mappings belong to the chosen schema", async () => {
+  const { state, container } = mountAdditionalSchemas();
+  await flushAsyncSetup();
+  state.tableMappings = [{ sourceTable: "orders", targetTable: "orders_v2" }];
+  await flushAsyncSetup();
+  expect(state.additionalSchemas).toEqual([]);
+  expect(container.textContent).not.toContain(i18n.global.t("diff.additionalSchemas"));
+});
+
 it("offers Oracle schemas as schema-diff database choices", async () => {
   const container = document.createElement("div");
   document.body.append(container);

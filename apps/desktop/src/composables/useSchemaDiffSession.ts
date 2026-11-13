@@ -61,6 +61,8 @@ export interface SchemaDiffSession {
   error: string | null;
   startedAt: number;
   finishedAt?: number;
+  /** Ids of the sessions started together, one per schema pair, including this one. */
+  group?: string[];
 }
 
 export interface SchemaDiffSessionDependencies {
@@ -93,7 +95,7 @@ function cloneOptions(options: SchemaDiffCompareOptions): SchemaDiffCompareOptio
   };
 }
 
-function resultObjectCount(result: SchemaDiffPreparation): number {
+export function resultObjectCount(result: SchemaDiffPreparation): number {
   return result.diffs.length + (result.functionDiffs?.length ?? 0) + (result.sequenceDiffs?.length ?? 0) + (result.ruleDiffs?.length ?? 0) + (result.ownerDiffs?.length ?? 0);
 }
 
@@ -173,10 +175,13 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
   const sessionOptions = options;
   const isPostgresLike = isSchemaDiffPostgresLike(input.targetDbType);
   const hasExtraObjectPhase = shouldLoadSchemaDiffExtraObjectPhase(sourceRoutineType, targetRoutineType, sessionOptions);
-  const tableFilter = compileSchemaDiffTableFilter(sessionOptions);
   const loadTableMetadata = !!(sessionOptions.tables || sessionOptions.views);
 
   try {
+    // A queued session can be cancelled before its turn comes.
+    signal.throwIfAborted();
+    // An invalid pattern throws, and must fail the session rather than leave it running.
+    const tableFilter = compileSchemaDiffTableFilter(sessionOptions);
     if (sessionOptions.functions && (typedRoutines || sessionOptions.selectedRoutineObjects !== undefined)) {
       if (!isOracleRoutineEngine(sourceRoutineType ?? "") || !isOracleRoutineEngine(targetRoutineType ?? "")) throw new Error("Typed program comparison requires two Oracle product endpoints");
       if (!typedRoutines || sessionOptions.selectedRoutines !== undefined) throw new Error("Typed program selection requires explicit kinds and cannot use legacy routine names");
@@ -401,7 +406,41 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
   }
 }
 
-export function startSchemaDiffSession(input: Omit<SchemaDiffSessionConfig, "options"> & { options: SchemaDiffCompareOptions }, dependencies: SchemaDiffSessionDependencies, handoff?: OraclePackageComparisonHandoff): SchemaDiffSession {
+type SchemaDiffSessionInput = Omit<SchemaDiffSessionConfig, "options"> & { options: SchemaDiffCompareOptions };
+
+export function startSchemaDiffSession(input: SchemaDiffSessionInput, dependencies: SchemaDiffSessionDependencies, handoff?: OraclePackageComparisonHandoff): SchemaDiffSession {
+  return createSchemaDiffSession(input, dependencies, handoff).session;
+}
+
+/**
+ * Starts one session per schema pair. They run one after another because each
+ * reads table lists and routines outside the shared metadata lane, where
+ * concurrent compares could still lose the race for SQL Server's capacity-1
+ * metadata gate. A failed session does not stop the ones after it.
+ */
+export function startSchemaDiffSessions(inputs: readonly SchemaDiffSessionInput[], dependencies: SchemaDiffSessionDependencies): SchemaDiffSession[] {
+  let previous: Promise<void> | undefined;
+  const sessions = inputs.map((input) => {
+    const { session, settled } = createSchemaDiffSession(input, dependencies, undefined, previous);
+    previous = settled;
+    return session;
+  });
+  if (sessions.length > 1) {
+    const group = reactive(sessions.map((session) => session.id));
+    for (const session of sessions) session.group = group;
+  }
+  return sessions;
+}
+
+/** Keeps a recompared schema in its group, in place of the session it replaces. */
+export function replaceSchemaDiffSessionInGroup(previous: SchemaDiffSession, next: SchemaDiffSession): void {
+  const index = previous.group?.indexOf(previous.id) ?? -1;
+  if (!previous.group || index < 0) return;
+  previous.group[index] = next.id;
+  next.group = previous.group;
+}
+
+function createSchemaDiffSession(input: SchemaDiffSessionInput, dependencies: SchemaDiffSessionDependencies, handoff?: OraclePackageComparisonHandoff, after?: Promise<void>): { session: SchemaDiffSession; settled: Promise<void> } {
   const id = uuid();
   const session = shallowReactive<SchemaDiffSession>({
     id,
@@ -431,9 +470,10 @@ export function startSchemaDiffSession(input: Omit<SchemaDiffSessionConfig, "opt
     target: { ...handoff.target },
     drafts: handoff.drafts.map(({ identity, sourceName, sql, packageBodySource, packageContract, reviewedTargetDraft }) => ({ identity: { ...identity }, sourceName, sql, packageBodySource, packageContract, reviewedTargetDraft })),
   };
-  const settled = runSchemaDiffSession(session, dependencies, controller.signal, frozenHandoff);
+  const run = () => runSchemaDiffSession(session, dependencies, controller.signal, frozenHandoff);
+  const settled = after ? after.then(run, run) : run();
   registerSchemaDiffTask([input.sourceConnectionId, input.targetConnectionId], controller, settled);
-  return session;
+  return { session, settled };
 }
 
 export function getSchemaDiffSession(id: string | null | undefined): SchemaDiffSession | undefined {

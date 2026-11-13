@@ -500,6 +500,10 @@ export function isEditSidebarTableStructureShortcut(event: ShortcutLikeEvent, sh
   return matchesShortcut(event, actionShortcut("editSidebarTableStructure", shortcuts, platform), platform);
 }
 
+export function isCreateSidebarTableShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("createSidebarTable", shortcuts));
+}
+
 export function isQuickOpenShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("quickOpen", shortcuts));
 }

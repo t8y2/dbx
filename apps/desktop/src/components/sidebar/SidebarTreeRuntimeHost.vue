@@ -6429,6 +6429,13 @@ function createTable() {
   queryStore.openTableStructure(node.connectionId, node.database, node.schema, "");
 }
 
+function createTableForSelection(node: TreeNode): boolean {
+  activateRuntimeNode(node);
+  if (!canCreateTable.value || isXuguSyntheticTreeNode(currentDatabaseType(), node.type, node.schema)) return false;
+  createTable();
+  return true;
+}
+
 function createView() {
   const node = activeNode.value;
   if (!node.connectionId || !node.database) return;
@@ -7345,6 +7352,10 @@ const shortcutEditConnection = computed(() => settingsStore.editorSettings.short
 
 const shortcutDisconnectConnection = computed(() => settingsStore.editorSettings.shortcuts.disconnectSidebarConnection);
 
+function createTableMenuItem(): ContextMenuItem {
+  return { sidebarActionId: "contextMenu.createTable", label: t("contextMenu.createTable"), action: createTable, icon: Plus, shortcut: settingsStore.editorSettings.shortcuts.createSidebarTable };
+}
+
 const shortcutRename = "F2";
 
 const shortcutRefresh = computed(() => settingsStore.editorSettings.shortcuts.refreshData || "F5");
@@ -7761,7 +7772,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.push({ sidebarActionId: "contextMenu.copyName", label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
       if (canCreateTable.value) {
         items.push({ label: "", separator: true });
-        items.push({ sidebarActionId: "contextMenu.createTable", label: t("contextMenu.createTable"), action: createTable, icon: Plus });
+        items.push(createTableMenuItem());
       }
       items.push({
         sidebarActionId: "contextMenu.refreshChildren",
@@ -7840,7 +7851,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       });
     }
     if (canCreateTable.value) {
-      items.push({ sidebarActionId: "contextMenu.createTable", label: t("contextMenu.createTable"), action: createTable, icon: Plus });
+      items.push(createTableMenuItem());
     }
     const isSimpleDisplay = settingsStore.editorSettings.sidebarObjectDisplay === "simple";
     if (canCreateTable.value && isSimpleDisplay && isTableVGroupContainerNode(node) && !node.children?.some(isGroupLabel)) {
@@ -7981,7 +7992,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
   // 5. Redis DB / Mongo DB
   if (currentDatabaseType() === "hbase" && node.type === "group-tables") {
     if (canCreateTable.value) {
-      items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
+      items.push(createTableMenuItem());
     }
     if (isTableVGroupContainerNode(node)) {
       items.push({
@@ -8741,7 +8752,7 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || canCreateTableGroup || canCreateGroupView || canCreateTrigger || !!objectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction || canCreateSchemaIndex;
     const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-dolt-system-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
-      items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
+      items.push(createTableMenuItem());
     }
     if (canCreateGroupView) {
       items.push({ label: t("contextMenu.createView"), action: createView, icon: Plus });
@@ -9256,6 +9267,7 @@ defineExpose({
   openDataInNewTab,
   openDdlForSelection,
   openStructureEditorForSelection,
+  createTableForSelection,
   refreshNode,
   requestPaste,
   toggleNode,

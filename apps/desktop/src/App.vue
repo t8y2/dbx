@@ -286,6 +286,7 @@ type AiAssistantHandle = {
    * may not be on screen (#9902 keeps AI actions from moving the workspace).
    */
   reportAiSqlAction: (report: AiSqlActionReport) => void;
+  prepareForWindowClose: () => Promise<void>;
 };
 
 type AuxiliarySearchSurface = "ai" | "history" | "sqlLibrary" | null;
@@ -530,7 +531,7 @@ watch(
   // Also cancel a close/reopen in the same tick before the lazy panel mounts.
   { flush: "sync" },
 );
-const showAiPanel = ref(safeLocalStorageGet("dbx-ai-panel-open") === "true");
+const showAiPanel = ref(!isDetachedWindowContext && safeLocalStorageGet("dbx-ai-panel-open") === "true");
 const isAiPanelMaximized = ref(false);
 const isHistoryPanelMaximized = ref(false);
 const isZenMode = ref(false);
@@ -742,6 +743,7 @@ async function handleDetachedTabDropped(payload: unknown) {
 async function finishDetachedWindowClose() {
   if (!isDetachedWindowContext) return;
   detachedCloseInProgress = true;
+  await aiAssistantRef.value?.prepareForWindowClose();
   await api.approveDetachedWindowClose().catch(() => {});
   const { getCurrentWindow } = await import("@tauri-apps/api/window");
   await getCurrentWindow()
@@ -899,7 +901,7 @@ async function handleDetachedReturnRequested(payload: unknown) {
 async function initDetachedWindow() {
   if (!isDetachedWindowContext || !detachedContextTabId) return;
   await settingsStore.initEditorSettings();
-  await Promise.all([settingsStore.initDesktopSettings(), connectionStore.initFromDisk(), initSavedSqlEditorPositions(), savedSqlStore.initFromStorage()]);
+  await Promise.all([settingsStore.initDesktopSettings(), connectionStore.initFromDisk(), initSavedSqlEditorPositions(), savedSqlStore.initFromStorage(), settingsStore.initAiConfigs().catch((error) => console.error("[STARTUP] settingsStore.initAiConfigs failed", error))]);
   const handoff = await api.loadDetachedTabHandoff(detachedContextTabId);
   if (!handoff) {
     toast(t("tabs.detachedTabUnavailable"), 5000);
@@ -932,6 +934,13 @@ async function setupDetachedWindowEvents() {
         ["dbx:detached-tab-dragging", handleDetachedTabDragging],
         ["dbx:detached-tab-dropped", handleDetachedTabDropped],
         ["dbx:detached-tab-lost", handleDetachedTabLost],
+        [
+          "dbx:open-ai-settings",
+          async () => {
+            openSettings("ai");
+            await raiseMainWindow();
+          },
+        ],
       ];
   for (const [event, handler] of events) {
     detachedEventUnlisteners.push(await listen(event, (message) => void (handler as (payload: unknown) => Promise<void>)(message.payload)));
@@ -2127,7 +2136,7 @@ function applyRightSidebarPanelState(next: RightSidebarPanelState) {
     if (panelRef.value === next[panelId]) continue;
     panelRef.value = next[panelId];
     const storageKey = rightSidebarPanelStorageKeys[panelId];
-    if (storageKey) safeLocalStorageSet(storageKey, String(next[panelId]));
+    if (storageKey && !isDetachedWindowContext) safeLocalStorageSet(storageKey, String(next[panelId]));
   }
 }
 
@@ -2137,6 +2146,7 @@ function setRightSidebarPanelOpen(panelId: RightSidebarPanelId, open: boolean) {
   }
   if ((panelId === "history" && !open) || (panelId !== "history" && open)) isHistoryPanelMaximized.value = false;
   if (panelId === "ai" && !open) {
+    if (isDetachedWindowContext) void aiAssistantRef.value?.prepareForWindowClose();
     isAiPanelMaximized.value = false;
   } else if (open && panelId !== "ai" && isAiPanelMaximized.value) {
     // Opening another right-side panel should make the hidden panel visible again
@@ -2296,6 +2306,19 @@ async function addToAi(nodesInput: TreeNode | TreeNode[]) {
 
 function openAiPanel() {
   openRightSidebarPanel("ai");
+}
+
+async function openAiSettings() {
+  if (!isDetachedWindowContext) {
+    openSettings("ai");
+    return;
+  }
+  const { emitTo } = await import("@tauri-apps/api/event");
+  await emitTo("main", "dbx:open-ai-settings");
+}
+
+function refreshDetachedAiConfigs() {
+  if (isDetachedWindowContext) void settingsStore.reloadAiConfigs().catch((error) => console.error("[DBX] reload detached AI configs failed", error));
 }
 
 /** A background AI run reached a terminal/confirmation state while the panel
@@ -3431,7 +3454,25 @@ async function newQuery(options: NewQueryOptions = {}) {
     await connectionStore.ensureConnected(target.connectionId);
     if (target.shouldRefreshDefaultDatabase) {
       const options = await getDatabaseOptions(target.connectionId);
-      queryStore.updateDatabase(tabId, resolveDefaultDatabase(conn, options));
+      const nextDb = resolveDefaultDatabase(conn, options);
+      if (nextDb !== target.database) {
+        queryStore.updateDatabase(tabId, nextDb);
+        if (target.schema) {
+          queryStore.updateSchema(tabId, target.schema);
+        }
+      }
+      if (!target.schema && (conn.db_type === "oracle" || conn.db_type === "oceanbase-oracle")) {
+        try {
+          const orderedSchemas = await api.listSchemas(target.connectionId, nextDb);
+          const schema = schemaAfterConnectionSwitch(conn.db_type, orderedSchemas, conn.default_schema);
+          const latestTab = queryStore.tabs.find((candidate) => candidate.id === tabId);
+          if (schema && latestTab && latestTab.connectionId === target.connectionId) {
+            queryStore.updateSchema(tabId, schema);
+          }
+        } catch {
+          // Schema metadata failure must not turn a successful connection into an error.
+        }
+      }
     }
   } catch (e: any) {
     toast(
@@ -3494,18 +3535,26 @@ async function openConnectionQuery(connectionId: string) {
     }
     return;
   }
-  // The quick-start page opens a query directly, bypassing newQuery() and its
-  // default-schema fallback. Pass the configured schema here too, otherwise an
-  // Oracle connection with a default schema opens the editor without a session
-  // schema and unqualified tables resolve against the session default (#11844).
-  const tabId = queryStore.createTab(connectionId, initialTarget.database, undefined, "query", initialTarget.schema);
+  const initialSchema = initialTarget.kind === "query" ? initialTarget.schema : undefined;
+  const tabId = queryStore.createTab(connectionId, initialTarget.database, undefined, "query", initialSchema);
   try {
     await connectionStore.ensureConnected(connectionId);
     const options = await getDatabaseOptions(connectionId);
     const target = quickConnectionOpenTarget(connection, options);
     if (target.kind === "query") {
       queryStore.updateDatabase(tabId, target.database);
-      if (target.schema) queryStore.updateSchema(tabId, target.schema);
+      if (connection.default_schema || connection.db_type === "oracle" || connection.db_type === "oceanbase-oracle") {
+        try {
+          const orderedSchemas = connection.default_schema ? [] : await api.listSchemas(connectionId, target.database);
+          const schema = schemaAfterConnectionSwitch(connection.db_type, orderedSchemas, connection.default_schema);
+          const latestTab = queryStore.tabs.find((candidate) => candidate.id === tabId);
+          if (schema && latestTab && latestTab.connectionId === connectionId) {
+            queryStore.updateSchema(tabId, schema);
+          }
+        } catch {
+          // Schema metadata failure must not turn a successful connection into an error.
+        }
+      }
     }
   } catch (e: any) {
     toast(
@@ -3818,6 +3867,18 @@ function ensureQueryTabForConnection(target: AiConversationBinding, options: { m
   if (!target.connectionId) return "";
   const database = target.database || "";
   const schema = target.schema || undefined;
+  // A detached window hands back only its original tab. Never create a hidden
+  // AI output tab that would be lost when this window returns to the main host.
+  if (isDetachedWindowContext) {
+    return (
+      resolveAiSqlTargetTabId(
+        queryStore.tabs.filter((tab) => tab.id === detachedContextTabId),
+        detachedContextTabId,
+        target,
+        "current",
+      ) ?? ""
+    );
+  }
   const mode = options.mode ?? settingsStore.editorSettings.aiSqlApplyTargetMode;
   const resolvedId = resolveAiSqlTargetTabId(queryStore.tabs, queryStore.activeTabId, target, mode);
   if (resolvedId !== null) return resolvedId;
@@ -5322,6 +5383,8 @@ onMounted(async () => {
     await initDetachedWindow()
       .then(() => {
         updateWindowReady = true;
+        aiPanelReady.value = true;
+        window.addEventListener("focus", refreshDetachedAiConfigs);
       })
       .catch((error) => {
         console.error("[STARTUP] detached window initialization failed", error);
@@ -5463,6 +5526,7 @@ onUnmounted(() => {
   window.removeEventListener(OBJECT_BROWSER_SEARCH_FOCUS_EVENT, focusRequestedObjectBrowserSearch);
   window.removeEventListener("dbx-mcp-status-changed", handleMcpStatusChanged);
   window.removeEventListener("dbx:ai-run-notify", handleAiRunNotify);
+  window.removeEventListener("focus", refreshDetachedAiConfigs);
   window.removeEventListener("beforeunload", handleWebBeforeUnload);
   document.removeEventListener("contextmenu", handleContextMenu);
   window.clearTimeout(sqlLibraryFlyAnimationTimer);
@@ -5655,6 +5719,8 @@ onUnmounted(() => {
                 v-else-if="activeTab"
                 :title="activeTab.title"
                 :dirty="queryStore.isTabDirty(activeTab)"
+                :show-ai-panel="showAiPanel"
+                @toggle-ai="toggleRightSidebarPanel('ai')"
                 @return="requestDetachedReturn('return')"
                 @close="requestDetachedReturn('close')"
                 @drag-start="handleDetachedHeaderDragStart"
@@ -5858,7 +5924,7 @@ onUnmounted(() => {
           </div>
 
           <div
-            v-if="!isDetachedWindowContext && showAiPanel"
+            v-if="showAiPanel"
             v-show="!isSpecialPageActive && !isHistoryPanelMaximized && !isZenMode"
             :class="[isClassicLayout ? 'h-full relative z-30 isolate bg-background' : 'h-full relative z-30 isolate dbx-panel bg-background', isAiPanelMaximized ? 'min-w-0 flex-1' : 'min-w-[240px] max-w-full']"
             :style="isAiPanelMaximized ? {} : { width: aiPanelWidth + 'px' }"
@@ -5879,7 +5945,7 @@ onUnmounted(() => {
                 @execute-redis-command="(command: string, target: AiConversationBinding) => routeAiRedisCommand(command, true, target)"
                 @open-explain-plan="onAiOpenExplainPlan"
                 @toggle-maximize="toggleAiPanelMaximized"
-                @open-settings="activateSettingsPage"
+                @open-settings="openAiSettings"
                 @close="closeRightSidebarPanel('ai')"
               />
             </div>

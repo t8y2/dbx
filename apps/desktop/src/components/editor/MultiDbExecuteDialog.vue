@@ -467,7 +467,7 @@ function databaseTargets(connectionId: string, catalog: string | undefined, data
   const base = databaseTarget(connectionId, catalog, database);
   const schemas = targetSupportsSchema(connection) ? targetSelection.schemaNamesForTarget(base) : [];
   if (schemas.length > 0) return schemas.filter((schema) => schemaVisible(connection, catalog, database, schema)).map((schema) => databaseTarget(connectionId, catalog, database, schema));
-  return queryMatches(connectionLabel(connection), catalog, database) ? [base] : [];
+  return queryMatches(connection, catalog, database) ? [base] : [];
 }
 
 function catalogTargets(connectionId: string, catalog: MultiDbTargetCatalogOption): MultiDbExecutionTarget[] {
@@ -476,44 +476,40 @@ function catalogTargets(connectionId: string, catalog: MultiDbTargetCatalogOptio
 }
 
 function connectionTargets(connection: ConnectionConfig): MultiDbExecutionTarget[] {
-  if (targetUsesConnectionOnlyScope(connection)) return queryMatches(connectionLabel(connection), connection.id) ? [{ connectionId: connection.id, database: "" }] : [];
+  if (targetUsesConnectionOnlyScope(connection)) return queryMatches(connection) ? [{ connectionId: connection.id, database: "" }] : [];
   if (targetSupportsCatalog(connection)) {
     return targetSelection.catalogsForConnection(connection.id).flatMap((catalog) => catalogTargets(connection.id, catalog));
   }
   const databases = targetSelection.databaseNamesForConnection(connection.id);
-  if (databases.length === 0 && targetAllowsEmptyDatabase(connection)) return queryMatches(connectionLabel(connection), connection.id) ? [{ connectionId: connection.id, database: "" }] : [];
+  if (databases.length === 0 && targetAllowsEmptyDatabase(connection)) return queryMatches(connection) ? [{ connectionId: connection.id, database: "" }] : [];
   return databases.flatMap((database) => databaseTargets(connection.id, undefined, database));
 }
 
-function queryMatches(...values: Array<string | undefined>): boolean {
+function queryMatches(connection: ConnectionConfig, ...values: Array<string | undefined>): boolean {
   if (!searchQuery.value) return true;
-  return values.some((value) => value?.toLocaleLowerCase().includes(searchQuery.value));
+  return [connectionLabel(connection), connection.id, ...values].some((value) => value?.toLocaleLowerCase().includes(searchQuery.value));
 }
 
 function schemaVisible(connection: ConnectionConfig, catalog: string | undefined, database: string, schema: string): boolean {
-  return queryMatches(connectionLabel(connection), catalog, database, schema);
+  return queryMatches(connection, catalog, database, schema);
 }
 
 function databaseVisible(connection: ConnectionConfig, catalog: string | undefined, database: string): boolean {
-  if (queryMatches(connectionLabel(connection), catalog, database)) return true;
+  if (queryMatches(connection, catalog, database)) return true;
   if (!targetSupportsSchema(connection)) return false;
   const base = databaseTarget(connection.id, catalog, database);
   return targetSelection.schemaNamesForTarget(base).some((schema) => schemaVisible(connection, catalog, database, schema));
 }
 
 function catalogVisible(connection: ConnectionConfig, catalog: MultiDbTargetCatalogOption): boolean {
-  if (queryMatches(connectionLabel(connection), catalog.name)) return true;
+  if (queryMatches(connection, catalog.name)) return true;
   return targetSelection.databaseNamesForConnection(connection.id, catalog.targetCatalog).some((database) => databaseVisible(connection, catalog.targetCatalog, database));
 }
 
 function connectionVisible(connection: ConnectionConfig): boolean {
-  // Connections are the lazy-loading root of the selector. Do not hide an
-  // unexpanded compatible connection merely because its database metadata has
-  // not been requested yet; users must be able to expand it first.
-  if (!searchQuery.value) return true;
-  if (!expandedConnections.value.has(connection.id)) return queryMatches(connectionLabel(connection), connection.id);
-  if (queryMatches(connectionLabel(connection), connection.id)) return true;
-  if (targetUsesConnectionOnlyScope(connection)) return false;
+  if (queryMatches(connection)) return true;
+  // Search descendants only after the connection is expanded.
+  if (!expandedConnections.value.has(connection.id) || targetUsesConnectionOnlyScope(connection)) return false;
   if (targetSupportsCatalog(connection)) return targetSelection.catalogsForConnection(connection.id).some((catalog) => catalogVisible(connection, catalog));
   return targetSelection.databaseNamesForConnection(connection.id).some((database) => databaseVisible(connection, undefined, database));
 }

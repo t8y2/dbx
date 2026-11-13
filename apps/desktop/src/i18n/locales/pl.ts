@@ -3590,10 +3590,8 @@ export default withEnglishFallback({
     providerCustom: "Własne",
     builtinProviders: "Obsługa wbudowana",
     partnerProviders: "Sponsorzy premium",
-    jalapenoSponsored: "1 $ darmowego kredytu",
     hualongSponsored: "1 $ darmowego kredytu",
     aicodemirrorSponsored: "8 ¥ darmowego kredytu",
-    jalapenoDescription: "    Korporacyjnej klasy AI zaufane przez wiodące zespoły jest teraz dostępne dla Ciebie! Wypróbuj najnowocześniejsze modele z 50% rabatem i zyskaj więcej bonusowych środków przy większych doładowaniach!",
     hualongDescription:
       "    Oficjalny przekaźnik modeli dla zaawansowanych programistów AI! W 100% autentyczne serie Codex i Claude z weryfikowalnym rozliczaniem na poziomie tokenów, umowami korporacyjnymi i fakturami.\n Zarejestruj się z kodem promocyjnym DBX&HUALONG, aby otrzymać 1 $ darmowego kredytu!",
     aicodemirrorDescription: "    AICodeMirror zapewnia współbieżność klasy enterprise, szybkie fakturowanie i dedykowane wsparcie 7×24; nowi użytkownicy otrzymują 8 ¥ darmowego kredytu oraz 20% zniżki na pierwsze doładowanie.",

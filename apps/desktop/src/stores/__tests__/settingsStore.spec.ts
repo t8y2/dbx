@@ -1555,10 +1555,6 @@ describe("settingsStore AI API key normalization", () => {
   });
 
   it("provides the current partner default models", () => {
-    expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "jalapeno-cloud")).toMatchObject({
-      model: "GLM-5.3",
-      models: [{ name: "GLM-5.3" }, { name: "DeepSeek-V4-Pro" }, { name: "MiniMax-M3" }],
-    });
     expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "hualong-ai")).toMatchObject({
       model: "deepseek-v4.1-flash",
       models: [{ name: "deepseek-v4.1-flash" }],

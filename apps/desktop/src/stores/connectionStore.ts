@@ -9070,6 +9070,9 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  /** Table-like nodes reload their detail groups on refresh; their caret must stay as the user left it (#14919). */
+  const isTableLikeNode = (node: TreeNode) => node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection";
+
   async function refreshTreeNode(node: TreeNode, options?: { skipObjectCacheInvalidation?: boolean; sidebarSearch?: boolean }): Promise<void> {
     if (options?.sidebarSearch) {
       return withSidebarSearchLoad(node.connectionId, () => refreshTreeNode(node, { ...options, sidebarSearch: false }));
@@ -9133,7 +9136,19 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadTreeNodeChildren(node, { force: true });
       if (isCurrentRefresh()) {
         await restoreExpandedChildren(node, expandedIds, { force: true }, isCurrentRefresh);
-        if (isCurrentRefresh()) await invalidateSidebarTableSearchIndexesForTreeRefresh(node);
+        if (isCurrentRefresh()) {
+          // Table nodes load their detail groups (columns/indexes/…) on refresh; the
+          // loaders mark the node expanded for a first expand, so refreshing a
+          // collapsed table used to pop it open as if its caret had been clicked
+          // (#14919). Other node types keep the existing load-marks-expanded
+          // behaviour that container/type refreshes rely on.
+          if (!previousExpanded && isTableLikeNode(node)) {
+            node.isExpanded = false;
+            const target = treeNodeInSidebarTree(node);
+            if (target && target !== node) target.isExpanded = false;
+          }
+          await invalidateSidebarTableSearchIndexesForTreeRefresh(node);
+        }
       }
     } catch (error) {
       // A stale failure must never overwrite a newer successful (including empty) result.

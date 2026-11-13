@@ -539,3 +539,38 @@ describe("connection node refresh awaits object cache invalidation", () => {
     expect(objectCacheDeletePrefixes(deleteSchemaCachePrefix).sort()).toEqual(["object-ddl:v1:pg-1:app:", "object-meta:v1:pg-1:app:"]);
   });
 });
+
+describe("connectionStore refresh keeps the node expansion state (#14919)", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.unstubAllGlobals();
+    installLocalStorage();
+    setActivePinia(createPinia());
+  });
+
+  function tableNode(expanded: boolean): TreeNode {
+    return { id: "pg-1:app:public:users", label: "users", type: "table", connectionId: "pg-1", database: "app", schema: "public", isExpanded: expanded, children: [] };
+  }
+
+  it("reloads a collapsed table's groups without expanding it", async () => {
+    installApiMocks();
+    const table = tableNode(false);
+    const store = await createStore(schemaNode([table]));
+
+    await store.refreshTreeNode(table);
+
+    expect(table.isExpanded).toBe(false);
+    expect(table.children?.map((child) => child.type)).toContain("group-columns");
+  });
+
+  it("keeps an expanded table expanded", async () => {
+    installApiMocks();
+    const table = tableNode(true);
+    const store = await createStore(schemaNode([table]));
+
+    await store.refreshTreeNode(table);
+
+    expect(table.isExpanded).toBe(true);
+    expect(table.children?.map((child) => child.type)).toContain("group-columns");
+  });
+});

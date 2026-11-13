@@ -358,6 +358,34 @@ describe("QueryEditor component split integration", () => {
     expect(await editor.pasteClipboardAsSqlInCondition()).toBe(false);
   });
 
+  function pasteText(view: EditorView, text: string) {
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: { getData: (type: string) => (type === "text/plain" ? text : "") } });
+    view.contentDOM.dispatchEvent(event);
+  }
+
+  it.each(["", "SELECT 0;\n"])("runs the pasted statement immediately after a paste ending in blank lines (%j)", async (prefix) => {
+    const { editor, view, onExecute } = await mountEditor({ modelValue: prefix });
+    const sql = "SELECT 1;\nSELECT 2;";
+    view.dispatch({ selection: { anchor: prefix.length } });
+
+    pasteText(view, sql.replaceAll("\n", "\r\n") + "\r\n \r\n");
+    expect(view.state.doc.toString()).toBe(prefix + sql + "\n \n");
+    expect(editor.requestExecute({ bypassPicker: true })).toBe(true);
+    expect(onExecute).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ selectedSql: "SELECT 2", cursorPos: prefix.length + sql.length }));
+
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(prefix);
+  });
+
+  it("preserves the normal paste caret when inserting in the middle of a query", async () => {
+    const { view } = await mountEditor({ modelValue: "SELECT 2;" });
+    pasteText(view, "SELECT 1;\n");
+
+    expect(view.state.doc.toString()).toBe("SELECT 1;\nSELECT 2;");
+    expect(view.state.selection.main.head).toBe("SELECT 1;\n".length);
+  });
+
   it.each([false, true])("preserves the blank-line execution fallback setting (%s)", async (fallback) => {
     const { editor, view, props, settingsStore, onExecute } = await mountEditor({ modelValue: "SELECT 1;\n\nSELECT 2;" });
     settingsStore.editorSettings.executeAllOnBlankLine = fallback;
@@ -399,6 +427,29 @@ describe("QueryEditor component split integration", () => {
     expect(view.state.doc.toString()).toBe("SELECT 3;");
     expect(editor.captureExecutionSnapshot()).toBeUndefined();
     expect(host.querySelector(".cm-editor")).toBe(view.dom);
+  });
+
+  it("does not accumulate page styles while repeatedly restoring cached SQL tabs", async () => {
+    const { props, view, settingsStore } = await mountEditor({ modelValue: "SELECT 1;", tabId: "styles-a" });
+    settingsStore.editorSettings.theme = "cursor-light";
+    const activate = async (tabId: string, sql: string) => {
+      props.tabId = tabId;
+      props.modelValue = sql;
+      await nextTick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+    await activate("styles-b", "SELECT 2;");
+    await activate("styles-a", "SELECT 1;");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const stylesheetSize = () => [...document.head.querySelectorAll("style")].reduce((total, style) => total + (style.textContent?.length ?? 0), 0);
+    const initialSize = stylesheetSize();
+    for (let index = 0; index < 20; index += 1) {
+      await activate("styles-b", "SELECT 2;");
+      await activate("styles-a", "SELECT 1;");
+    }
+    expect(stylesheetSize() - initialSize).toBe(0);
+    view.dispatch({ selection: { anchor: 0, head: 6 } });
+    expect(view.state.sliceDoc(0, 6)).toBe("SELECT");
   });
 
   it("connects manual completion to the provider without preselecting a candidate", async () => {

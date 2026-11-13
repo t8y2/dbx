@@ -1,5 +1,6 @@
-//! Regression coverage for #9479: a single-statement `BEGIN` typed in an
-//! auto-commit tab must not pin that tab's read snapshot.
+//! Regression coverage for MySQL auto-commit writes, explicit transactions,
+//! and read snapshots. Also run with the server started with `--autocommit=0`
+//! to cover sessions inheriting a manual-commit server default.
 //!
 //! Run against a writable MySQL database:
 //! `DBX_LIVE_AUTOCOMMIT_MYSQL_HOST=... DBX_LIVE_AUTOCOMMIT_MYSQL_USER=... \
@@ -9,8 +10,9 @@
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::{
+    begin_manual_transaction, commit_manual_transaction, execute_in_manual_transaction,
     execute_multi_core_with_options_for_client_typed, execute_sql_statement, execute_sql_statement_with_options,
-    ExecuteMultiResult, QueryExecutionOptions,
+    rollback_manual_transaction, ExecuteMultiResult, QueryExecutionOptions,
 };
 use std::sync::Arc;
 
@@ -69,6 +71,105 @@ fn assert_row_count(rows: &[Vec<serde_json::Value>], expected: i64) {
     assert_eq!(rows[0].len(), 1);
     let count = rows[0][0].as_i64().or_else(|| rows[0][0].as_str().and_then(|value| value.parse().ok()));
     assert_eq!(count, Some(expected));
+}
+
+/// Also run these cases with the server started with `--autocommit=0`: an
+/// auto-commit editor must commit ordinary writes even when the server's
+/// default for new sessions is manual commit.
+async fn assert_plain_insert_is_committed(use_batch: bool) {
+    let config = live_config("DBX_LIVE_AUTOCOMMIT_MYSQL");
+    let database = config.database.clone().expect("database");
+    let (state, storage_path, table_name) = setup(&config).await;
+    let client_session_id = format!("query-tab-{}", uuid::Uuid::new_v4().simple());
+    let insert = format!("INSERT INTO {table_name} (id) VALUES (2)");
+
+    let affected_rows = if use_batch {
+        let results = run_batch_in_tab(&state, &config, &database, &client_session_id, &insert, false).await;
+        assert!(!last_result(&results).execution_error);
+        last_result(&results).result.affected_rows
+    } else {
+        run_in_tab(&state, &config, &database, &client_session_id, &insert).await.affected_rows
+    };
+    assert_eq!(affected_rows, 1, "INSERT reports one affected row");
+
+    let select = format!("SELECT COUNT(*) FROM {table_name} WHERE id = 2");
+    let same_tab = run_in_tab(&state, &config, &database, &client_session_id, &select).await;
+    let independent = execute_sql_statement(&state, &config.id, &database, &select, None, None)
+        .await
+        .expect("read the committed insert from an independent connection");
+    cleanup(&state, &config, &table_name, storage_path).await;
+
+    assert_row_count(&same_tab.rows, 1);
+    assert_row_count(&independent.rows, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_AUTOCOMMIT_MYSQL_* pointing at a writable MySQL database"]
+async fn live_mysql_plain_single_insert_is_committed() {
+    assert_plain_insert_is_committed(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_AUTOCOMMIT_MYSQL_* pointing at a writable MySQL database"]
+async fn live_mysql_plain_batch_insert_is_committed() {
+    assert_plain_insert_is_committed(true).await;
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_AUTOCOMMIT_MYSQL_* pointing at a writable MySQL database"]
+async fn live_mysql_manual_insert_still_requires_commit() {
+    let config = live_config("DBX_LIVE_AUTOCOMMIT_MYSQL");
+    let database = config.database.clone().expect("database");
+    let (state, storage_path, table_name) = setup(&config).await;
+    let select = format!("SELECT COUNT(*) FROM {table_name} WHERE id = 2");
+    let insert = format!("INSERT INTO {table_name} (id) VALUES (2)");
+
+    let transaction = begin_manual_transaction(&state, &config.id, &database, None, None).await.expect("begin");
+    let result = execute_in_manual_transaction(&state, &transaction, &insert, &database, None, None)
+        .await
+        .expect("insert in manual transaction");
+    assert_eq!(result.last().expect("insert result").affected_rows, 1);
+    let pending = execute_in_manual_transaction(&state, &transaction, &select, &database, None, None)
+        .await
+        .expect("read own uncommitted insert");
+    assert_row_count(&pending.last().expect("select result").rows, 1);
+    let independent = execute_sql_statement(&state, &config.id, &database, &select, None, None).await.expect("read");
+    assert_row_count(&independent.rows, 0);
+    rollback_manual_transaction(&state, &transaction).await.expect("rollback");
+    let rolled_back = execute_sql_statement(&state, &config.id, &database, &select, None, None).await.expect("read");
+    assert_row_count(&rolled_back.rows, 0);
+
+    let transaction = begin_manual_transaction(&state, &config.id, &database, None, None).await.expect("begin");
+    execute_in_manual_transaction(&state, &transaction, &insert, &database, None, None).await.expect("insert");
+    commit_manual_transaction(&state, &transaction).await.expect("commit");
+    let committed = execute_sql_statement(&state, &config.id, &database, &select, None, None).await.expect("read");
+    cleanup(&state, &config, &table_name, storage_path).await;
+    assert_row_count(&committed.rows, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_AUTOCOMMIT_MYSQL_* pointing at a writable MySQL database"]
+async fn live_mysql_explicit_connection_autocommit_off_is_preserved() {
+    let config = live_config("DBX_LIVE_AUTOCOMMIT_MYSQL");
+    let database = config.database.clone().expect("database");
+    let (state, storage_path, table_name) = setup_probe(&config, "dbx-autocommit-override").await;
+    let mut manual_config = config.clone();
+    manual_config.id = format!("autocommit-override-{}", uuid::Uuid::new_v4().simple());
+    manual_config.url_params = Some("sessionVariables=autocommit%3D0".to_string());
+    state.configs.write().await.insert(manual_config.id.clone(), manual_config.clone());
+    let client_session_id = format!("query-tab-{}", uuid::Uuid::new_v4().simple());
+
+    let status =
+        run_batch_in_tab(&state, &manual_config, &database, &client_session_id, "SELECT @@session.autocommit", true)
+            .await;
+    assert_row_count(&last_result(&status).result.rows, 0);
+    let update = format!("START TRANSACTION; UPDATE {table_name} SET v = 9 WHERE id = 1");
+    let results = run_batch_in_tab(&state, &manual_config, &database, &client_session_id, &update, true).await;
+    assert_eq!(last_result(&results).auto_commit_open_transaction, Some(true));
+    assert_eq!(committed_value(&state, &config, &database, &table_name).await, 0);
+    run_batch_in_tab(&state, &manual_config, &database, &client_session_id, "COMMIT", true).await;
+    assert_eq!(committed_value(&state, &config, &database, &table_name).await, 9);
+    cleanup(&state, &config, &table_name, storage_path).await;
 }
 
 /// Runs one statement on the tab-scoped client session that pools a single

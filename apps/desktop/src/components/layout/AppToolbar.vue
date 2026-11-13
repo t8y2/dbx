@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
+import { computed, defineAsyncComponent, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -44,6 +44,9 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { isSystemAppThemeMode, type AppThemeMode } from "@/lib/app/appTheme";
 import { formatShortcutTooltip } from "@/lib/editor/shortcutDisplay";
 
+const RecentClosedTabsDialog = defineAsyncComponent(() => import("@/components/tabs/RecentClosedTabsDialog.vue"));
+const showRecentClosedTabs = ref(false);
+
 const GithubIcon = {
   render() {
     return h("svg", { class: "h-4 w-4", viewBox: "0 0 24 24", fill: "currentColor" }, [
@@ -80,6 +83,7 @@ const props = defineProps<{
   agentDriverUpdateCount: number;
   hasMcpUpdateAvailable: boolean;
   hasConnections: boolean;
+  hasClosedTabs?: boolean;
   canNewQuery: boolean;
   hasSqlFileConnections: boolean;
   immediateSyncing: boolean;
@@ -489,6 +493,17 @@ type ToolbarMenuItem = LightDropdownItem & { action: () => void };
 function buildToolbarMenuItems(includeVisiblePrimaryItems: boolean): ToolbarMenuItem[] {
   const items: ToolbarMenuItem[] = [];
 
+  if (props.hasClosedTabs) {
+    items.push({
+      value: "recent-closed-tabs",
+      label: t("tabs.recentClosedTitle"),
+      icon: History,
+      action: () => {
+        showRecentClosedTabs.value = true;
+      },
+    });
+  }
+
   items.push({
     value: "open-sql-editor-file",
     label: t("toolbar.openSql"),
@@ -891,6 +906,7 @@ const toolbarStyle = computed(() => {
     </Tooltip>
 
     <WindowControls v-if="showControls" :is-maximized="isMaximized" @minimize="minimize" @toggle-maximize="toggleMaximize" @close="close" />
+    <RecentClosedTabsDialog v-if="showRecentClosedTabs" v-model:open="showRecentClosedTabs" />
   </div>
 </template>
 

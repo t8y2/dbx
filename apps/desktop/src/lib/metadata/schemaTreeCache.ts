@@ -4,9 +4,21 @@ export interface TableSearchIndexEntry {
   name: string;
   tableType: string;
   comment?: string | null;
+  /** Schema that owns this object; `parent_schema` belongs to the partitioned parent. */
+  schema?: string;
+  parentSchema?: string | null;
+  parentName?: string | null;
 }
 
 export interface TableSearchIndex {
+  /**
+   * Version 3 preserved owning schema and partition parent metadata but stamped
+   * the database name onto schema-less scopes (MySQL-style flat trees), whose
+   * live node ids carry no schema infix — the search merge then saw the same
+   * table twice. Version 4 keeps those entries unattributed; the database-name
+   * fallback only applies where the live tree resolves a node schema.
+   */
+  version: 4;
   complete: true;
   indexedAt: string;
   entries: TableSearchIndexEntry[];
@@ -78,9 +90,18 @@ export function encodeSchemaTreeCache<T>(children: T, nowMs = Date.now(), tableS
 function decodeTableSearchIndex(value: unknown): TableSearchIndex | undefined {
   if (!value || typeof value !== "object") return undefined;
   const index = value as Partial<TableSearchIndex>;
-  if (index.complete !== true || typeof index.indexedAt !== "string" || !Array.isArray(index.entries)) return undefined;
-  const entries = index.entries.filter((entry): entry is TableSearchIndexEntry => !!entry && typeof entry.name === "string" && typeof entry.tableType === "string" && (entry.comment === undefined || entry.comment === null || typeof entry.comment === "string"));
-  return entries.length === index.entries.length ? { complete: true, indexedAt: index.indexedAt, entries } : undefined;
+  if (index.version !== 4 || index.complete !== true || typeof index.indexedAt !== "string" || !Array.isArray(index.entries)) return undefined;
+  const entries = index.entries.filter(
+    (entry): entry is TableSearchIndexEntry =>
+      !!entry &&
+      typeof entry.name === "string" &&
+      typeof entry.tableType === "string" &&
+      (entry.comment === undefined || entry.comment === null || typeof entry.comment === "string") &&
+      (entry.schema === undefined || typeof entry.schema === "string") &&
+      (entry.parentSchema === undefined || entry.parentSchema === null || typeof entry.parentSchema === "string") &&
+      (entry.parentName === undefined || entry.parentName === null || typeof entry.parentName === "string"),
+  );
+  return entries.length === index.entries.length ? { version: 4, complete: true, indexedAt: index.indexedAt, entries } : undefined;
 }
 
 export function decodeSchemaTreeCache<T>(payload: unknown, nowMs = Date.now(), ttlMs = SCHEMA_TREE_CACHE_TTL_MS): DecodedSchemaTreeCache<T> | null {

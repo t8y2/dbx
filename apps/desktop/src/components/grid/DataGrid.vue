@@ -377,7 +377,7 @@ import { claimDataGridPaste, claimDataGridSelectAll, clearDataGridClipboardCopy,
 import { parseInsertStatementPaste, parseInsertStatementPasteInBatches } from "@/lib/dataGrid/dataGridInsertPaste";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
 import { DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS, DATA_GRID_COPY_EXTRACTOR_IDS, DATA_GRID_DEFAULT_COPY_PREFERENCES, extractorUnavailableForDatabase, type DataGridCopyExtractorId, type DataGridCopyPreference, type DataGridPrimaryKeyMode } from "@/lib/dataGrid/dataGridCopyExtractor";
-import { columnNamesForCopy } from "@/lib/dataGrid/dataGridColumnNameCopy";
+import { columnNamesForCopy, formatColumnNamesForCopy, type ColumnNameCopyQuoteStyle, type ColumnNameCopySeparator } from "@/lib/dataGrid/dataGridColumnNameCopy";
 import { DATA_GRID_ROW_NUM_WIDTH, dataGridRowNumberColumnWidth, resolveDataGridMaxRowNumber, useDataGridColumnResize } from "@/composables/useDataGridColumnResize";
 import { createDataGridColumnStructureSignature } from "@/lib/dataGrid/dataGridColumnWidthState";
 import { useDataGridColumnLayout, useDataGridColumnLayoutState, type ColumnHeaderReferenceDragController } from "@/composables/useDataGridColumnLayout";
@@ -673,6 +673,7 @@ interface DataGridProps {
   tabId?: string;
   cacheKey?: string;
   columnWidthCacheKey?: string;
+  columnWidthResultKey?: string;
   pendingStateKey?: string;
   /**
    * Owner key for the tab-switch view snapshot. Defaults to `cacheKey`, which
@@ -1397,6 +1398,8 @@ const allFilterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "not-like", labelKey: "grid.filterBuilderNotContains" },
   { value: "begins-with", labelKey: "grid.filterBuilderBeginsWith" },
   { value: "ends-with", labelKey: "grid.filterBuilderEndsWith" },
+  { value: "not-begins-with", labelKey: "grid.filterBuilderNotBeginsWith" },
+  { value: "not-ends-with", labelKey: "grid.filterBuilderNotEndsWith" },
   { value: "greater-than", labelKey: "grid.filterBuilderGreaterThan" },
   {
     value: "greater-than-or-equal",
@@ -2433,6 +2436,8 @@ const gridVerticalScrollbarTrackRef = ref<HTMLDivElement>();
 const gridVerticalScrollbarThumbRef = ref<HTMLDivElement>();
 const hasGridHorizontalOverflow = ref(false);
 const hasGridVerticalOverflow = ref(false);
+const gridHorizontalScrollbarDragging = ref(false);
+const statusSqlTooltipOpen = ref(false);
 let gridHorizontalScrollbarThumbLeftPercent = 0;
 let gridHorizontalScrollbarThumbWidthPercent = 100;
 let gridVerticalScrollbarThumbTopPercent = 0;
@@ -2929,6 +2934,7 @@ const { initColumnWidths, growColumnWidthsToFitSamples, onResizeStart, autoFitCo
   compactColumnHeaderActions,
   columnIndexIndicators: visibleColumnIndexIndicators,
   cacheKey: columnWidthCacheKey,
+  resultKey: computed(() => props.columnWidthResultKey),
   columnStructureSignature,
   measureHeaderText: measureColumnHeaderText,
   headerMeasurementKey: columnHeaderMeasurementKey,
@@ -3269,7 +3275,13 @@ function applyGridVerticalScrollbarThumbStyle(): boolean {
 }
 
 function setGridHorizontalScrollbarDragging(dragging: boolean) {
+  gridHorizontalScrollbarDragging.value = dragging;
+  if (dragging) statusSqlTooltipOpen.value = false;
   gridHorizontalScrollbarTrackRef.value?.classList.toggle(GRID_HORIZONTAL_SCROLLBAR_DRAGGING_CLASS, dragging);
+}
+
+function updateStatusSqlTooltipOpen(open: boolean) {
+  statusSqlTooltipOpen.value = gridHorizontalScrollbarDragging.value ? false : open;
 }
 
 function setGridVerticalScrollbarDragging(dragging: boolean) {
@@ -6128,6 +6140,8 @@ const {
   formatterJsonPath,
   formatterMaskPrefix,
   formatterMaskSuffix,
+  formatterNumberGrouping,
+  formatterNumberDecimalPlaces,
   formatterCustomId,
   formatterCustomName,
   formatterCustomTemplate,
@@ -8175,6 +8189,13 @@ function selectHeaderSort(value: string, column: string, columnIndex: number) {
     return;
   }
   const [mode, direction] = value.split("-") as [DataGridSortMode, DataGridSortDirection];
+  applyColumnSort(column, columnIndex, direction, mode);
+}
+
+function toggleHeaderSort(column: string, columnIndex: number): void {
+  const mode = props.databaseSortEnabled !== false && databaseSortSupportedForDatabase(resolvedDatabaseType.value) ? localSortMode.value : "local";
+  const direction = columnIsSorted(column, columnIndex) && sortDir.value === "asc" ? "desc" : "asc";
+  headerSortMenuOpenColumn.value = null;
   applyColumnSort(column, columnIndex, direction, mode);
 }
 
@@ -13044,6 +13065,14 @@ function openCopyAllColumnNamesDialog() {
   openCopyColumnNamesDialog(columnNamesForCopy({ allColumnNames: props.result.columns, displayableIndexes: displayableColumnIndexes.value, visibleColumnNames: visibleColumns.value, scope: "all" }));
 }
 
+// One-click variants of the "copy column names" dialog's two most-used formats, so
+// building a field list or an IN (...) literal does not need the dialog each time (#14495).
+function copyAllColumnNamesAs(separator: ColumnNameCopySeparator, quoteStyle?: ColumnNameCopyQuoteStyle) {
+  const names = columnNamesForCopy({ allColumnNames: props.result.columns, displayableIndexes: displayableColumnIndexes.value, visibleColumnNames: visibleColumns.value, scope: "all" });
+  if (names.length === 0) return;
+  void copyText(formatColumnNamesForCopy(names, { separator, quote: !!quoteStyle, quoteStyle, databaseType: resolvedDatabaseType.value }));
+}
+
 function copyHeaderColumnOrSelected() {
   if (selectedColumnNamesForCopy.value.length > 1) {
     openCopyColumnNamesDialog(selectedColumnNamesForCopy.value);
@@ -14947,6 +14976,14 @@ function copySubmenu(): ContextMenuItem {
     label: t("grid.copyColumnNames"),
     action: openCopyAllColumnNamesDialog,
   });
+  items.push({
+    label: t("grid.copyColumnNamesComma"),
+    action: () => copyAllColumnNamesAs("comma"),
+  });
+  items.push({
+    label: t("grid.copyColumnNamesQuotedComma"),
+    action: () => copyAllColumnNamesAs("comma", "single"),
+  });
   return { label: t("grid.copy"), icon: Copy, children: items };
 }
 
@@ -16242,10 +16279,13 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                               type="button"
                               class="flex h-4 w-4 shrink-0 items-center justify-center rounded"
                               :class="columnIsSorted(col.name, col.actualColIdx) ? 'bg-primary text-primary-foreground opacity-100 shadow-sm hover:bg-primary/90' : 'text-muted-foreground opacity-80 hover:bg-accent hover:text-foreground'"
-                              :title="t('grid.sort')"
+                              :title="t('grid.quickSortHint')"
+                              :aria-label="t('grid.sort')"
                               :aria-expanded="open"
                               @mousedown.stop
-                              @click.stop="toggle"
+                              @click.stop="toggleHeaderSort(col.name, col.actualColIdx)"
+                              @contextmenu.prevent.stop="toggle"
+                              @keydown.shift.f10.prevent.stop="toggle"
                             >
                               <ArrowUp v-if="columnIsSorted(col.name, col.actualColIdx) && sortDir === 'asc'" class="h-3 w-3 shrink-0" />
                               <ArrowDown v-else-if="columnIsSorted(col.name, col.actualColIdx) && sortDir === 'desc'" class="h-3 w-3 shrink-0" />
@@ -16328,6 +16368,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                                     <SelectItem value="datetime">{{ t("grid.formatterDatetime") }}</SelectItem>
                                     <SelectItem value="json-path">{{ t("grid.formatterJsonPath") }}</SelectItem>
                                     <SelectItem value="mask">{{ t("grid.formatterMask") }}</SelectItem>
+                                    <SelectItem value="number">{{ t("grid.formatterNumber") }}</SelectItem>
                                     <SelectItem value="foreign-key-display">{{ t("grid.formatterForeignKeyDisplay") }}</SelectItem>
                                     <SelectItem value="custom-template">{{ t("grid.formatterCustomTemplate") }}</SelectItem>
                                   </SelectContent>
@@ -16385,6 +16426,18 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                                     @update:model-value="(value: any) => (formatterDateTimezone = value)"
                                   />
                                 </div>
+                              </div>
+
+                              <div v-else-if="formatterKind === 'number'" class="space-y-3">
+                                <label class="flex items-center justify-between gap-3 text-xs font-medium">
+                                  <span>{{ t("grid.formatterNumberGrouping") }}</span>
+                                  <Switch v-model="formatterNumberGrouping" size="sm" />
+                                </label>
+                                <label class="block space-y-1.5">
+                                  <span class="text-xs font-medium text-muted-foreground">{{ t("grid.formatterNumberDecimalPlaces") }}</span>
+                                  <input v-model.number="formatterNumberDecimalPlaces" type="number" min="0" max="20" step="1" :placeholder="t('grid.formatterNumberAutomatic')" class="h-8 w-full rounded border bg-background px-2 text-xs outline-none focus:border-primary" />
+                                </label>
+                                <div class="text-[11px] leading-4 text-muted-foreground">{{ t("grid.formatterNumberHint") }}</div>
                               </div>
 
                               <div v-else-if="formatterKind === 'json-path'" class="space-y-1.5">
@@ -17541,7 +17594,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       </div>
       <div v-else-if="settingsStore.editorSettings.showDataGridStatusSql && sqlOneLiner" class="flex min-w-0 max-w-full items-center gap-1 overflow-hidden">
         <CustomContextMenu :items="statusSqlContextMenuItems" v-slot="{ onContextMenu }">
-          <Tooltip>
+          <Tooltip :open="statusSqlTooltipOpen" @update:open="updateStatusSqlTooltipOpen">
             <TooltipTrigger as-child>
               <button type="button" class="block min-w-0 max-w-full truncate text-left cursor-pointer hover:text-foreground" data-result-sql :aria-label="t(context === 'table-data' ? 'grid.viewQuerySql' : 'grid.copyQuerySql')" @click="viewStatusSql" @contextmenu="onContextMenu">
                 <span v-if="result.sqlPage">{{ t("grid.currentPageSql") }}: </span>

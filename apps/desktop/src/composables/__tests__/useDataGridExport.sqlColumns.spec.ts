@@ -208,6 +208,48 @@ describe("SQL export column selection across entrypoints", () => {
     expect(saveTextFile).toHaveBeenCalledOnce();
   });
 
+  it("routes a table-data grid column subset through the backend SQL stream (issue #14732)", async () => {
+    const selected = sqlExportColumnChoices(["name"]);
+    vi.mocked(showSqlInsertModeDialog).mockResolvedValue({ insertMode: "single", selectedColumns: selected });
+    await useDataGridExport(
+      createOptions({
+        context: computed(() => "table-data"),
+        tableMeta: computed(() => ({
+          tableName: "users",
+          primaryKeys: ["id"],
+          columns: [
+            { name: "id", data_type: "int" },
+            { name: "name", data_type: "text" },
+          ],
+        })),
+      }),
+    ).exportSql({ columnIndexes: [1] });
+    expect(api.startTableExport).toHaveBeenCalledWith(expect.objectContaining({ format: "sql", tableName: "users", columns: ["id", "name"], selectedColumns: selected }), expect.any(Function), true);
+    expect(api.startQueryResultExport).not.toHaveBeenCalled();
+    expect(formatSqlInsert).not.toHaveBeenCalled();
+    expect(saveTextFile).not.toHaveBeenCalled();
+  });
+
+  it("keeps the query-result SQL export on the backend for a grid column subset (issue #14732)", async () => {
+    const selected = sqlExportColumnChoices(["name"]);
+    vi.mocked(showSqlInsertModeDialog).mockResolvedValue({ insertMode: "batch", selectedColumns: selected });
+    await useDataGridExport(createOptions()).exportSql({ columnIndexes: [1] });
+    expect(api.startQueryResultExport).toHaveBeenCalledWith(expect.objectContaining({ format: "sql", selectedColumns: selected }), expect.any(Function), true);
+    expect(api.startTableExport).not.toHaveBeenCalled();
+    expect(formatSqlInsert).not.toHaveBeenCalled();
+    expect(saveTextFile).not.toHaveBeenCalled();
+  });
+
+  it("projects a table-data grid column subset onto the backend CSV export (issue #14732)", async () => {
+    await useDataGridExport(
+      createOptions({
+        context: computed(() => "table-data"),
+      }),
+    ).exportCsv({ columnIndexes: [1] });
+    expect(api.startTableExport).toHaveBeenCalledWith(expect.objectContaining({ format: "csv", columns: ["name"], columnTypes: ["text"] }), expect.any(Function), true);
+    expect(saveTextFile).not.toHaveBeenCalled();
+  });
+
   it.each([
     { includeDatabaseName: true, expectedSchema: "APP_OWNER" },
     { includeDatabaseName: false, expectedSchema: undefined },

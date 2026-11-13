@@ -3431,6 +3431,23 @@ mod tests {
         }
     }
 
+    /// #14604: Teradata has no `LIMIT` clause, so a rewritten page is a syntax
+    /// error ("expected something between ... and the 'LIMIT' keyword"). The
+    /// statement has to reach the server exactly as the user wrote it.
+    #[test]
+    fn teradata_user_queries_reach_the_server_without_a_limit_clause() {
+        let paginated = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: "SELECT id, name FROM employee".into(),
+            database_type: Some(DatabaseType::Teradata),
+            limit: 100,
+            offset: 0,
+        });
+        assert!(paginated.ok, "Teradata user queries must not need a rewrite");
+        let sql = paginated.sql.expect("the untouched statement is returned");
+        assert!(!sql.to_uppercase().contains("LIMIT"), "{sql}");
+        assert_eq!(sql.trim_end_matches(';'), "SELECT id, name FROM employee");
+    }
+
     #[test]
     fn oceanbase_columns_named_like_pseudocolumns_keep_bounded_sql() {
         for sql in ["SELECT t.\"nextval\" AS v FROM t", "SELECT nextval AS v FROM t"] {

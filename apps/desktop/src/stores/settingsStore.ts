@@ -604,8 +604,8 @@ export const AI_PROVIDER_PARTNER_PRESETS: readonly AiPartnerProviderPreset[] = [
     apiStyle: "completions",
     authMethod: "bearer",
     requiresApiKey: true,
-    websiteUrl: "https://api.hualong.online/register?promo=DBX%26HUALONG",
-    apiKeyUrl: "https://api.hualong.online/register?promo=DBX%26HUALONG",
+    websiteUrl: "https://dbx.hualong.online/",
+    apiKeyUrl: "https://dbx.hualong.online/",
     descriptionKey: "ai.hualongDescription",
     badgeKey: "ai.hualongSponsored",
   },
@@ -1037,6 +1037,7 @@ export interface EditorSettings {
   /** Whether the query toolbar connection picker shows the full group path. */
   showConnectionGroupPath: boolean;
   autoAliasTables: boolean;
+  qualifyColumnCompletions: boolean;
   batchColumnSelectionIncludeComments: boolean;
   tableCompletionSchemaQualification: SqlTableCompletionSchemaQualification;
   insertSpaceAfterCompletion: boolean;
@@ -1208,6 +1209,7 @@ export interface EditorSettings {
   shortcuts: ShortcutSettings;
   sqlFormatter: SqlFormatterSettings;
   sidebarActivation: SidebarActivation;
+  sidebarColumnDoubleClickAction: "structure" | "query";
   sidebarMenuLayout: SidebarMenuLayout;
   sidebarMenuPinnedActions: SidebarMenuPinnedActions;
   sidebarMenuHiddenPrimaryActions: SidebarMenuPinnedActions;
@@ -1223,6 +1225,8 @@ export interface EditorSettings {
   autoSelectActiveSidebarNode: boolean;
   sidebarPinDefaultDatabase: boolean;
   sidebarBrowseObjectsOnDatabaseActivation: boolean;
+  sidebarAutoExpandOnDatabaseActivation: boolean;
+  sidebarTableClickNavigation: boolean;
   openQueryOnConnectionOpen: boolean;
   sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: number;
   openTabsRestoreMode: OpenTabsRestoreMode;
@@ -1455,6 +1459,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   showInsertValueHints: true,
   showConnectionGroupPath: false,
   autoAliasTables: true,
+  qualifyColumnCompletions: true,
   batchColumnSelectionIncludeComments: true,
   tableCompletionSchemaQualification: DEFAULT_SQL_TABLE_COMPLETION_SCHEMA_QUALIFICATION,
   insertSpaceAfterCompletion: true,
@@ -1592,6 +1597,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   shortcuts: normalizeShortcutSettings(),
   sqlFormatter: normalizeSqlFormatterSettings(DEFAULT_SQL_FORMATTER_SETTINGS),
   sidebarActivation: "single",
+  sidebarColumnDoubleClickAction: "structure",
   sidebarMenuLayout: "grouped",
   sidebarMenuPinnedActions: {},
   sidebarMenuHiddenPrimaryActions: {},
@@ -1607,6 +1613,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   autoSelectActiveSidebarNode: false,
   sidebarPinDefaultDatabase: true,
   sidebarBrowseObjectsOnDatabaseActivation: false,
+  sidebarAutoExpandOnDatabaseActivation: true,
+  sidebarTableClickNavigation: false,
   openQueryOnConnectionOpen: false,
   sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
   openTabsRestoreMode: "all",
@@ -2195,6 +2203,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     showInsertValueHints: typeof settings.showInsertValueHints === "boolean" ? settings.showInsertValueHints : DEFAULT_EDITOR_SETTINGS.showInsertValueHints,
     showConnectionGroupPath: typeof settings.showConnectionGroupPath === "boolean" ? settings.showConnectionGroupPath : DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath,
     autoAliasTables: settings.autoAliasTables ?? DEFAULT_EDITOR_SETTINGS.autoAliasTables,
+    qualifyColumnCompletions: typeof settings.qualifyColumnCompletions === "boolean" ? settings.qualifyColumnCompletions : DEFAULT_EDITOR_SETTINGS.qualifyColumnCompletions,
     batchColumnSelectionIncludeComments: typeof settings.batchColumnSelectionIncludeComments === "boolean" ? settings.batchColumnSelectionIncludeComments : DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments,
     tableCompletionSchemaQualification: normalizeSqlTableCompletionSchemaQualification(settings.tableCompletionSchemaQualification),
     insertSpaceAfterCompletion: typeof settings.insertSpaceAfterCompletion === "boolean" ? settings.insertSpaceAfterCompletion : DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion,
@@ -2331,6 +2340,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     shortcuts: normalizeShortcutSettings(settings.shortcuts),
     sqlFormatter: normalizeSqlFormatterSettings(settings.sqlFormatter),
     sidebarActivation: settings.sidebarActivation === "single" || settings.sidebarActivation === "double" ? settings.sidebarActivation : DEFAULT_EDITOR_SETTINGS.sidebarActivation,
+    sidebarColumnDoubleClickAction: settings.sidebarColumnDoubleClickAction === "query" ? "query" : "structure",
     sidebarMenuLayout: settings.sidebarMenuLayout === "full" ? "full" : "grouped",
     sidebarMenuPinnedActions: normalizeSidebarMenuPinnedActions(settings.sidebarMenuPinnedActions),
     sidebarMenuHiddenPrimaryActions: normalizeSidebarMenuPinnedActions(settings.sidebarMenuHiddenPrimaryActions),
@@ -2345,7 +2355,9 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sidebarSearchOpenedDatabasesOnly: typeof settings.sidebarSearchOpenedDatabasesOnly === "boolean" ? settings.sidebarSearchOpenedDatabasesOnly : DEFAULT_EDITOR_SETTINGS.sidebarSearchOpenedDatabasesOnly,
     autoSelectActiveSidebarNode: settings.autoSelectActiveSidebarNode ?? DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode,
     sidebarPinDefaultDatabase: typeof settings.sidebarPinDefaultDatabase === "boolean" ? settings.sidebarPinDefaultDatabase : DEFAULT_EDITOR_SETTINGS.sidebarPinDefaultDatabase,
+    sidebarTableClickNavigation: settings.sidebarTableClickNavigation === true,
     openQueryOnConnectionOpen: typeof settings.openQueryOnConnectionOpen === "boolean" ? settings.openQueryOnConnectionOpen : DEFAULT_EDITOR_SETTINGS.openQueryOnConnectionOpen,
+    sidebarAutoExpandOnDatabaseActivation: typeof settings.sidebarAutoExpandOnDatabaseActivation === "boolean" ? settings.sidebarAutoExpandOnDatabaseActivation : DEFAULT_EDITOR_SETTINGS.sidebarAutoExpandOnDatabaseActivation,
     sidebarBrowseObjectsOnDatabaseActivation:
       typeof settings.sidebarBrowseObjectsOnDatabaseActivation === "boolean"
         ? settings.sidebarBrowseObjectsOnDatabaseActivation
@@ -3164,6 +3176,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.showInsertValueHints !== undefined) editorSettings.value.showInsertValueHints = partial.showInsertValueHints === true;
     if (partial.showConnectionGroupPath !== undefined) editorSettings.value.showConnectionGroupPath = partial.showConnectionGroupPath === true;
     if (partial.autoAliasTables !== undefined) editorSettings.value.autoAliasTables = partial.autoAliasTables;
+    if (partial.qualifyColumnCompletions !== undefined) editorSettings.value.qualifyColumnCompletions = partial.qualifyColumnCompletions === true;
     if (partial.batchColumnSelectionIncludeComments !== undefined) editorSettings.value.batchColumnSelectionIncludeComments = partial.batchColumnSelectionIncludeComments === true;
     if (partial.tableCompletionSchemaQualification !== undefined) editorSettings.value.tableCompletionSchemaQualification = normalizeSqlTableCompletionSchemaQualification(partial.tableCompletionSchemaQualification);
     if (partial.insertSpaceAfterCompletion !== undefined) editorSettings.value.insertSpaceAfterCompletion = partial.insertSpaceAfterCompletion === true;
@@ -3313,6 +3326,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.shortcuts !== undefined) editorSettings.value.shortcuts = normalizeShortcutSettings(partial.shortcuts);
     if (partial.sqlFormatter !== undefined) editorSettings.value.sqlFormatter = normalizeSqlFormatterSettings(partial.sqlFormatter);
     if (partial.sidebarActivation !== undefined) editorSettings.value.sidebarActivation = partial.sidebarActivation;
+    if (partial.sidebarColumnDoubleClickAction !== undefined) editorSettings.value.sidebarColumnDoubleClickAction = partial.sidebarColumnDoubleClickAction === "query" ? "query" : "structure";
     if (partial.sidebarMenuLayout !== undefined) editorSettings.value.sidebarMenuLayout = partial.sidebarMenuLayout === "full" ? "full" : "grouped";
     if (partial.sidebarMenuPinnedActions !== undefined) editorSettings.value.sidebarMenuPinnedActions = normalizeSidebarMenuPinnedActions(partial.sidebarMenuPinnedActions);
     if (partial.sidebarMenuHiddenPrimaryActions !== undefined) editorSettings.value.sidebarMenuHiddenPrimaryActions = normalizeSidebarMenuPinnedActions(partial.sidebarMenuHiddenPrimaryActions);
@@ -3328,6 +3342,8 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.autoSelectActiveSidebarNode !== undefined) editorSettings.value.autoSelectActiveSidebarNode = partial.autoSelectActiveSidebarNode;
     if (partial.sidebarPinDefaultDatabase !== undefined) editorSettings.value.sidebarPinDefaultDatabase = partial.sidebarPinDefaultDatabase === true;
     if (partial.sidebarBrowseObjectsOnDatabaseActivation !== undefined) editorSettings.value.sidebarBrowseObjectsOnDatabaseActivation = partial.sidebarBrowseObjectsOnDatabaseActivation === true;
+    if (partial.sidebarAutoExpandOnDatabaseActivation !== undefined) editorSettings.value.sidebarAutoExpandOnDatabaseActivation = partial.sidebarAutoExpandOnDatabaseActivation === true;
+    if (partial.sidebarTableClickNavigation !== undefined) editorSettings.value.sidebarTableClickNavigation = partial.sidebarTableClickNavigation === true;
     if (partial.openQueryOnConnectionOpen !== undefined) editorSettings.value.openQueryOnConnectionOpen = partial.openQueryOnConnectionOpen === true;
     if (partial.openTabsRestoreMode !== undefined) editorSettings.value.openTabsRestoreMode = normalizeOpenTabsRestoreMode(partial.openTabsRestoreMode);
     if (partial.autoReloadRestoredDataTabsOnOpen !== undefined) editorSettings.value.autoReloadRestoredDataTabsOnOpen = partial.autoReloadRestoredDataTabsOnOpen === true;

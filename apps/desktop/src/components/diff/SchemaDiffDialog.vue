@@ -30,6 +30,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { getSchemaDiffOptionsForDbType } from "@/lib/schema/schemaDiffOptions";
 import { buildContinueOnErrorDeployLog, buildDeployTxResult, type DeployTxResult } from "@/lib/schema/deployTxResult";
 import { getSchemaDiffNextProgressStep, isSchemaDiffPostgresLike, shouldLoadSchemaDiffExtraObjectPhase, type SchemaDiffProgressPhase } from "@/lib/schema/schemaDiffProgress";
+import { schemaDiffDefersTableDdl } from "@/lib/schema/schemaDiffMetadataLoad";
 import { createSchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
 import { countSchemaDiffActionableObjects, partitionSchemaDiffObjectsByResultTab, swapSchemaDiffRoutineMappings } from "@/lib/schema/schemaDiffRoutine";
 import { schemaDiffRoutineObjectTypesIntersection, schemaDiffRoutineProductType } from "@/lib/database/databaseObjectCapabilities";
@@ -563,19 +564,33 @@ watch([selectedObject, () => ddlPreferences.value.separateDdlIndexes, sourceConn
   const generation = ++independentPreviewGeneration;
   independentPreview.value = null;
   const object = selectedObject.value;
-  if (!open.value || !ddlPreferences.value.separateDdlIndexes || object?.objectKind !== "table") return;
+  if (!open.value || object?.objectKind !== "table") return;
   const diff = lastDiffResult.value?.diffs.find((diff) => diff.name === object.name);
   if (!diff) return;
+  const separateIndexes = ddlPreferences.value.separateDdlIndexes;
   const sides = [
-    { side: "source" as const, exists: diff.type !== "removed", type: sourceEngineDbType.value, connectionId: sourceConnectionId.value, database: sourceDatabase.value, schema: sourceSchema.value, tableName: diff.name },
-    { side: "target" as const, exists: diff.type !== "added", type: targetEngineDbType.value, connectionId: targetConnectionId.value, database: targetDatabase.value, schema: targetSchema.value, tableName: diff.targetName ?? diff.name },
-  ].filter((side) => side.exists && (side.type === "oracle" || side.type === "oceanbase-oracle"));
+    { side: "source" as const, exists: diff.type !== "removed", deferred: !object.sourceDdl && schemaDiffDefersTableDdl(sourceDbType.value), type: sourceEngineDbType.value, connectionId: sourceConnectionId.value, database: sourceDatabase.value, schema: sourceSchema.value, tableName: diff.name },
+    {
+      side: "target" as const,
+      exists: diff.type !== "added",
+      deferred: !object.targetDdl && schemaDiffDefersTableDdl(targetDbType.value),
+      type: targetEngineDbType.value,
+      connectionId: targetConnectionId.value,
+      database: targetDatabase.value,
+      schema: targetSchema.value,
+      tableName: diff.targetName ?? diff.name,
+    },
+  ].filter((side) => side.exists && (side.deferred || (separateIndexes && (side.type === "oracle" || side.type === "oceanbase-oracle"))));
   if (!sides.length) return;
   independentPreview.value = { objectId: object.id, issues: [], loading: true };
   const results = await Promise.all(
     sides.map(async (side) => {
       try {
-        const { ddl } = await loadObjectDdl({ connectionId: side.connectionId, queryTimeoutSecs: store.getConfig(side.connectionId)?.query_timeout_secs, database: side.database, schema: side.schema, tableName: side.tableName, separateIndexes: true });
+        // A deferred table was just found to differ, so a cached DDL could contradict that result.
+        const { ddl } = await loadObjectDdl(
+          { connectionId: side.connectionId, queryTimeoutSecs: store.getConfig(side.connectionId)?.query_timeout_secs, database: side.database, schema: side.schema, tableName: side.tableName, ...(side.deferred ? {} : { separateIndexes: true }) },
+          side.deferred ? { force: true } : undefined,
+        );
         return { side: side.side, ddl, issue: undefined };
       } catch (error: any) {
         return { side: side.side, ddl: undefined, issue: `${t(side.side === "source" ? "diff.sourceDdl" : "diff.targetDdl")} ${side.schema}.${side.tableName}: ${error?.message || String(error)}` };

@@ -860,6 +860,27 @@ async fn list_schema_infos_once(
     Ok(schemas.into_iter().map(|name| db::SchemaInfo { name, comment: None }).collect())
 }
 
+/// Renders one `list_data_types` row for the structure editor's dropdown:
+/// search_path-visible simple lowercase names stay bare so they remain
+/// interchangeable with the static list; everything else — off-search_path
+/// schemas, mixed case, lowercase reserved words like a type literally named
+/// `order` — comes back schema-qualified with the quoting the identifier
+/// requires, so generated `CREATE TABLE` / `ALTER TABLE ... TYPE` resolves
+/// (#14525 review follow-up).
+fn render_postgres_type_name(schema: &str, name: &str, visible: bool) -> String {
+    if visible
+        && crate::sql_dialect::is_simple_lower_identifier(name)
+        && !crate::sql_dialect::is_postgres_reserved_identifier(name)
+    {
+        return name.to_string();
+    }
+    format!(
+        "{}.{}",
+        crate::sql_dialect::quote_gaussdb_jdbc_identifier(schema, "\""),
+        crate::sql_dialect::quote_gaussdb_jdbc_identifier(name, "\"")
+    )
+}
+
 pub async fn list_data_types_core(
     state: &AppState,
     connection_id: &str,
@@ -889,7 +910,14 @@ pub async fn list_data_types_core(
                 .map(deduplicate_data_type_names);
         }
         if let Some(PoolKind::Postgres(pool)) = pool_handle.as_ref() {
-            return db::postgres::list_data_types(pool).await.map(deduplicate_data_type_names);
+            let entries = db::postgres::list_data_types(pool).await?;
+            return Ok(entries
+                .into_iter()
+                .map(|entry| render_postgres_type_name(&entry.schema, &entry.name, entry.visible))
+                .filter(|name| !name.is_empty())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .collect());
         }
         Ok(Vec::new())
     })
@@ -5857,6 +5885,20 @@ for line in sys.stdin:
         });
         assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::ShowFullTables);
         assert!(super::is_mycat_config(&config));
+    }
+
+    #[test]
+    fn render_postgres_type_name_keeps_reserved_words_quoted() {
+        // #14536 review follow-up: a type literally named `order` must not be
+        // emitted bare even though it is a simple lowercase identifier.
+        assert_eq!(super::render_postgres_type_name("public", "hstore", true), "hstore");
+        assert_eq!(super::render_postgres_type_name("public", "mood", true), "mood");
+        // %I/quote semantics: simple lowercase names stay unquoted — schema
+        // qualification alone already bypasses the search path.
+        assert_eq!(super::render_postgres_type_name("dbx_custom", "mood", false), "dbx_custom.mood");
+        assert_eq!(super::render_postgres_type_name("dbx_custom", "Mood", false), "dbx_custom.\"Mood\"");
+        assert_eq!(super::render_postgres_type_name("public", "order", true), "public.\"order\"");
+        assert!(!crate::sql_dialect::is_simple_lower_identifier("with space"));
     }
 
     #[test]
@@ -17502,6 +17544,21 @@ fn postgres_pool_serves_one_request_at_a_time(pool: &deadpool_postgres::Pool) ->
 /// 与并发执行的端到端耗时相同（一条连接本来也只能串行处理），但不会产生排队
 /// 导致的 checkout 超时。
 macro_rules! postgres_metadata_batch {
+    // Labeled form first: `("columns", future)` is also a valid tuple expression,
+    // so the unlabeled arm below would otherwise swallow it. A vendor kernel can
+    // reject one facet with an opaque message (`db error`), and an unlabeled batch
+    // gives the user nothing to act on.
+    ($pool:expr, $(($facet:literal, $call:expr)),+ $(,)?) => {{
+        if postgres_pool_serves_one_request_at_a_time($pool) {
+            Ok(($(
+                $call.await.map_err(|error| format!("{}: {error}", $facet))?,
+            )+))
+        } else {
+            tokio::try_join!($(
+                async { $call.await.map_err(|error| format!("{}: {error}", $facet)) }
+            ),+)
+        }
+    }};
     ($pool:expr, $($call:expr),+ $(,)?) => {{
         if postgres_pool_serves_one_request_at_a_time($pool) {
             Ok(($($call.await?,)+))
@@ -17520,14 +17577,14 @@ pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -
     let (columns, indexes, fkeys, constraints, table_comment, partition_info, trigger_definitions, check_constraints) =
         postgres_metadata_batch!(
             pool,
-            db::postgres::get_columns(pool, schema, table),
-            db::postgres::list_indexes(pool, schema, table),
-            db::postgres::list_foreign_keys(pool, schema, table),
-            db::postgres::list_constraints(pool, schema, table),
-            db::postgres::get_table_comment(pool, schema, table),
-            db::postgres::get_table_partition_info(pool, schema, table),
-            db::postgres::list_trigger_definitions(pool, schema, table),
-            db::postgres::list_check_constraints(pool, schema, table),
+            ("columns", db::postgres::get_columns(pool, schema, table)),
+            ("indexes", db::postgres::list_indexes(pool, schema, table)),
+            ("foreign keys", db::postgres::list_foreign_keys(pool, schema, table)),
+            ("constraints", db::postgres::list_constraints(pool, schema, table)),
+            ("table comment", db::postgres::get_table_comment(pool, schema, table)),
+            ("partition info", db::postgres::get_table_partition_info(pool, schema, table)),
+            ("triggers", db::postgres::list_trigger_definitions(pool, schema, table)),
+            ("check constraints", db::postgres::list_check_constraints(pool, schema, table)),
         )?;
     let partition_local_objects = if partition_info.is_partition {
         db::postgres::get_table_partition_local_objects(pool, schema, table).await?
@@ -17603,13 +17660,13 @@ pub async fn pg_ddl_with_partitions(
         local_objects_by_oid,
     ) = postgres_metadata_batch!(
         pool,
-        db::postgres::get_columns_for_relations(pool, &relations),
-        db::postgres::list_indexes_for_relations(pool, &relations),
-        db::postgres::list_foreign_keys_for_relations(pool, &relation_pairs),
-        db::postgres::get_table_comments_for_relations(pool, &oids),
-        db::postgres::list_trigger_definitions_for_relations(pool, &oids),
-        db::postgres::list_check_constraints_for_relations(pool, &oids),
-        db::postgres::get_table_partition_local_objects_for_relations(pool, &oids),
+        ("columns", db::postgres::get_columns_for_relations(pool, &relations)),
+        ("indexes", db::postgres::list_indexes_for_relations(pool, &relations)),
+        ("foreign keys", db::postgres::list_foreign_keys_for_relations(pool, &relation_pairs)),
+        ("table comment", db::postgres::get_table_comments_for_relations(pool, &oids)),
+        ("triggers", db::postgres::list_trigger_definitions_for_relations(pool, &oids)),
+        ("check constraints", db::postgres::list_check_constraints_for_relations(pool, &oids)),
+        ("partition info", db::postgres::get_table_partition_local_objects_for_relations(pool, &oids)),
     )?;
 
     // `list_foreign_keys_for_relations` is keyed by (schema, table) since its

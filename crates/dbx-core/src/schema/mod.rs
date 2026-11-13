@@ -7420,6 +7420,134 @@ done
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// `DBMS_METADATA` has no table DDL for a synonym, so the table DDL of a synonym comes
+    /// from the object the column reader resolved it to (t8y2/dbx#14733). A synonym whose
+    /// target cannot be resolved keeps the driver error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn jdbc_oracle_table_ddl_of_a_synonym_renders_the_resolved_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-jdbc-oracle-synonym-ddl-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let calls = dir.join("calls.log");
+        std::fs::write(
+            &executable,
+            format!(
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{}'
+  id=$(printf '%s' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"getObjectSource"'*)
+      case "$line" in
+        *'"name":"ORDERS"'*'"schema":"SYSTEM"'*|*'"schema":"SYSTEM"'*'"name":"ORDERS"'*)
+          printf '{{"id":%s,"result":{{"schema":"SYSTEM","source":"CREATE TABLE \\"SYSTEM\\".\\"ORDERS\\" (\\"ID\\" NUMBER(10,0))"}}}}\n' "$id"
+          ;;
+        *)
+          printf '{{"id":%s,"error":{{"message":"object not found"}}}}\n' "$id"
+          ;;
+      esac
+      ;;
+    *'"method":"getColumns"'*)
+      printf '{{"id":%s,"result":[]}}\n' "$id"
+      ;;
+    *'"method":"executeQuery"'*)
+      case "$line" in
+        *'FROM ALL_SYNONYMS s'*'ORDERS_ALIAS'*)
+          printf '{{"id":%s,"result":{{"columns":["TABLE_OWNER","TABLE_NAME"],"rows":[["SYSTEM","ORDERS"]],"affected_rows":1,"execution_time_ms":1}}}}\n' "$id"
+          ;;
+        *"c.OWNER = 'SYSTEM' AND c.TABLE_NAME = 'ORDERS'"*)
+          printf '{{"id":%s,"result":{{"columns":["COLUMN_NAME","DATA_TYPE","NULLABLE","DATA_DEFAULT","DATA_LENGTH","DATA_PRECISION","DATA_SCALE","COLUMN_ID","IS_PK","COMMENTS"],"rows":[["ID","NUMBER","N",null,"22","10","0","1","1",null]],"affected_rows":1,"execution_time_ms":1}}}}\n' "$id"
+          ;;
+        *'FROM ALL_OBJECTS'*)
+          printf '{{"id":%s,"result":{{"columns":["OBJECT_TYPE"],"rows":[["TABLE"]],"affected_rows":1,"execution_time_ms":1}}}}\n' "$id"
+          ;;
+        *)
+          printf '{{"id":%s,"result":{{"columns":[],"rows":[],"affected_rows":0,"execution_time_ms":0}}}}\n' "$id"
+          ;;
+      esac
+      ;;
+    *)
+      printf '{{"id":%s,"result":{{}}}}\n' "$id"
+      ;;
+  esac
+done
+"#,
+                calls.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+                ..PluginManifest::default()
+            },
+            path: dir.clone(),
+            compatibility: crate::plugins::PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(dir.join("plugin.sh")),
+                ..Default::default()
+            },
+            provenance: None,
+        };
+        let session = std::sync::Arc::new(
+            PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),
+        );
+        let state = AppState::new(crate::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap());
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.id = "jdbc-oracle-synonym-ddl".to_string();
+        config.database = Some("demo".to_string());
+        config.connection_string = Some("jdbc:oracle:thin:@127.0.0.1:1521/demo".to_string());
+        config.jdbc_driver_class = Some("oracle.jdbc.OracleDriver".to_string());
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(
+                    config.id.clone(),
+                    PoolKind::ExternalDriver {
+                        driver_id: "jdbc".to_string(),
+                        config: std::sync::Arc::new(config),
+                        session,
+                    },
+                );
+            })
+            .await;
+
+        let ddl =
+            super::get_table_ddl_core(&state, "jdbc-oracle-synonym-ddl", "demo", "DBX_TEST", "ORDERS_ALIAS", None)
+                .await
+                .unwrap();
+        assert!(ddl.contains(r#"CREATE TABLE "SYSTEM"."ORDERS""#), "{ddl}");
+
+        let missing =
+            super::get_table_ddl_core(&state, "jdbc-oracle-synonym-ddl", "demo", "DBX_TEST", "MISSING_ALIAS", None)
+                .await
+                .unwrap_err();
+        assert!(missing.contains("object not found"), "{missing}");
+
+        let calls = std::fs::read_to_string(&calls).unwrap();
+        assert!(calls.contains(r#""name":"ORDERS_ALIAS""#), "{calls}");
+        assert!(calls.contains("FROM ALL_SYNONYMS s"), "{calls}");
+
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// The Oracle synonym fallback is keyed on the JDBC Oracle signals, so another JDBC
     /// vendor must keep answering from the driver even when it reports no columns.
     #[cfg(unix)]
@@ -11373,10 +11501,56 @@ async fn get_table_ddl_core_with_options(
         }
     }
 
-    let ddl = retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || {
-        get_table_ddl_once(state, connection_id, database, schema, table, options, client_session_id)
-    })
-    .await?;
+    // A synonym has no table DDL of its own, so a table request that names one renders the
+    // table or view behind it. The resolved target is never a synonym, so the call below
+    // recurses at most once.
+    if object_type.is_none() {
+        if let Some(target) =
+            sqlserver_table_ddl_synonym_target(state, connection_id, database, schema, table, client_session_id).await
+        {
+            return Box::pin(get_table_ddl_core_with_options(
+                state,
+                connection_id,
+                database,
+                &target.schema,
+                &target.name,
+                target.object_type,
+                options,
+                client_session_id,
+            ))
+            .await;
+        }
+    }
+
+    let ddl =
+        match retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || {
+            get_table_ddl_once(state, connection_id, database, schema, table, options, client_session_id)
+        })
+        .await
+        {
+            Ok(ddl) => ddl,
+            Err(error) if object_type.is_none() => {
+                match oracle_table_ddl_synonym_target(state, connection_id, database, schema, table, client_session_id)
+                    .await
+                {
+                    Some(target) => {
+                        return Box::pin(get_table_ddl_core_with_options(
+                            state,
+                            connection_id,
+                            database,
+                            &target.schema,
+                            &target.name,
+                            target.object_type,
+                            options,
+                            client_session_id,
+                        ))
+                        .await;
+                    }
+                    None => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
 
     let db_config = connection_config(state, connection_id).await;
     if should_append_oracle_style_comment_ddl(db_config.as_ref()) {
@@ -11398,6 +11572,85 @@ async fn get_table_ddl_core_with_options(
     } else {
         Ok(sanitize_ddl_string(ddl))
     }
+}
+
+/// The object whose DDL stands in for a synonym's.
+#[derive(Debug, Clone)]
+struct SynonymDdlTarget {
+    schema: String,
+    name: String,
+    object_type: Option<db::ObjectSourceKind>,
+}
+
+/// SQL Server keeps synonyms in the same namespace as tables and views, so a synonym never
+/// hides a table of the same name and the lookup can run before the table DDL. A failed
+/// lookup keeps the previous behaviour.
+async fn sqlserver_table_ddl_synonym_target(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    client_session_id: Option<&str>,
+) -> Option<SynonymDdlTarget> {
+    if connection_config(state, connection_id).await?.db_type != DatabaseType::SqlServer {
+        return None;
+    }
+    let pool_key =
+        state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await.ok()?;
+    let pool_handle = state.pool_handle(&pool_key).await;
+    let client = extract_pool!(pool_handle.as_ref(), SqlServer)?;
+    let mut client = lock_sqlserver_metadata_client(&client).await.ok()?;
+    match db::sqlserver::resolve_synonym_target(&mut client, schema, table).await {
+        Ok(target) => target.map(|target| SynonymDdlTarget {
+            schema: target.schema,
+            name: target.name,
+            object_type: target.is_view.then_some(db::ObjectSourceKind::View),
+        }),
+        Err(error) => {
+            log::debug!(
+                "[schema][sqlserver:get_table_ddl:synonym-lookup-failed] connection_id={connection_id} database={database} schema={schema} table={table} error={error}"
+            );
+            None
+        }
+    }
+}
+
+/// Oracle resolves a name to the requested schema's own object before any private or PUBLIC
+/// synonym, so the synonym is only looked up once the table DDL fails. The column reader
+/// already follows synonym chains and reports the local object it reached; a database link
+/// target, a missing target, or an object that is not a table, view or materialized view
+/// resolves to nothing and the original error stands.
+async fn oracle_table_ddl_synonym_target(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    client_session_id: Option<&str>,
+) -> Option<SynonymDdlTarget> {
+    let config = connection_config(state, connection_id).await?;
+    if config.db_type != DatabaseType::Oracle && !is_oracle_external_driver_config(&config) {
+        return None;
+    }
+    let columns =
+        get_columns_core_for_session(state, connection_id, database, schema, table, client_session_id).await.ok()?;
+    let column = columns.first()?;
+    let (Some(target_schema), Some(target_name)) =
+        (column.resolved_schema.as_deref(), column.resolved_table.as_deref())
+    else {
+        return None;
+    };
+    if target_schema.eq_ignore_ascii_case(schema) && target_name == table {
+        return None;
+    }
+    let object_type = match column.resolved_object_type.as_deref() {
+        Some("TABLE") => None,
+        Some("VIEW") => Some(db::ObjectSourceKind::View),
+        Some("MATERIALIZED VIEW") => Some(db::ObjectSourceKind::MaterializedView),
+        _ => return None,
+    };
+    Some(SynonymDdlTarget { schema: target_schema.to_string(), name: target_name.to_string(), object_type })
 }
 
 pub(crate) fn sanitize_ddl_string(mut ddl: String) -> String {

@@ -424,6 +424,7 @@ pub fn build_table_data_select_sql_with_database(
             &options.columns,
             tdengine_should_include_tbname(database_type, options.table_type.as_deref()),
             options.identifier_quote.as_deref(),
+            options.project_columns,
         )
     };
     let rownum_select_columns = quoted_table_columns_or_star(database_type, &options.columns);
@@ -888,6 +889,7 @@ pub(super) fn build_select_columns(
     columns: &[String],
     include_tdengine_tbname: bool,
     identifier_quote: Option<&str>,
+    project_columns: bool,
 ) -> String {
     if columns.is_empty() {
         if database_type == Some(DatabaseType::Tdengine) && include_tdengine_tbname {
@@ -932,23 +934,26 @@ pub(super) fn build_select_columns(
     // OSCAR table previews keep their explicit projection: switching the
     // pagination form from ROWNUM to LIMIT/OFFSET must not also widen a
     // generated page to every column (#13515).
-    if !matches!(
-        database_type,
-        Some(
-            DatabaseType::Hive
-                | DatabaseType::Kyuubi
-                | DatabaseType::Impala
-                | DatabaseType::Argo
-                | DatabaseType::Transwarp
-                | DatabaseType::Oscar
+    // `project_columns` is the explicit opt-in for SQL the user reads or copies.
+    if !project_columns
+        && !matches!(
+            database_type,
+            Some(
+                DatabaseType::Hive
+                    | DatabaseType::Kyuubi
+                    | DatabaseType::Impala
+                    | DatabaseType::Argo
+                    | DatabaseType::Transwarp
+                    | DatabaseType::Oscar
+            )
         )
-    ) {
+    {
         return "*".to_string();
     }
     columns
         .iter()
         .map(|column| {
-            let ident = if database_type == Some(DatabaseType::Kyuubi) {
+            let ident = if database_type == Some(DatabaseType::Kyuubi) || project_columns {
                 quote_table_data_identifier(database_type, column, identifier_quote)
             } else {
                 quote_table_identifier(database_type, column)
@@ -1241,7 +1246,80 @@ mod tests {
             where_input: None,
             inject_default_time_series_where: false,
             include_row_id: false,
+            project_columns: false,
         }
+    }
+
+    #[test]
+    fn table_select_ignores_columns_unless_projection_is_requested() {
+        // Table loading keeps `SELECT *` for most engines even when the caller
+        // lists columns; only an explicit `project_columns` narrows the list.
+        let columns = vec!["id".to_string(), "item".to_string()];
+        for (database_type, schema, expected_star, expected_projection) in [
+            (
+                DatabaseType::Mysql,
+                "app",
+                "SELECT * FROM `app`.`orders` LIMIT 100;",
+                "SELECT `id`, `item` FROM `app`.`orders` LIMIT 100;",
+            ),
+            (
+                DatabaseType::Postgres,
+                "app",
+                "SELECT * FROM \"app\".\"orders\" LIMIT 100;",
+                "SELECT \"id\", \"item\" FROM \"app\".\"orders\" LIMIT 100;",
+            ),
+            (
+                DatabaseType::Sqlite,
+                "main",
+                "SELECT * FROM \"main\".\"orders\" LIMIT 100;",
+                "SELECT \"id\", \"item\" FROM \"main\".\"orders\" LIMIT 100;",
+            ),
+        ] {
+            let build = |project_columns| {
+                build_table_data_select_sql(TableDataSelectSqlOptions {
+                    database_type: Some(database_type),
+                    schema: Some(schema.to_string()),
+                    table_name: "orders".to_string(),
+                    columns: columns.clone(),
+                    project_columns,
+                    ..Default::default()
+                })
+            };
+            assert_eq!(build(false), expected_star, "{database_type:?}");
+            assert_eq!(build(true), expected_projection, "{database_type:?}");
+        }
+    }
+
+    #[test]
+    fn table_select_projection_keeps_where_order_and_pagination() {
+        let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            schema: Some("app".to_string()),
+            table_name: "orders".to_string(),
+            columns: vec!["id".to_string(), "status".to_string()],
+            project_columns: true,
+            where_input: Some("status = 4".to_string()),
+            order_by: Some("id DESC".to_string()),
+            limit: Some(100),
+            offset: Some(100),
+            ..Default::default()
+        });
+        assert_eq!(
+            sql,
+            "SELECT `id`, `status` FROM `app`.`orders` WHERE (status = 4) ORDER BY id DESC LIMIT 100 OFFSET 100;"
+        );
+    }
+
+    #[test]
+    fn table_select_projection_without_columns_stays_star() {
+        let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            schema: Some("app".to_string()),
+            table_name: "orders".to_string(),
+            project_columns: true,
+            ..Default::default()
+        });
+        assert_eq!(sql, "SELECT * FROM `app`.`orders` LIMIT 100;");
     }
 
     #[test]

@@ -10,6 +10,7 @@ import DatabaseActionsMenu from "@/components/objects/DatabaseActionsMenu.vue";
 import FirebirdObjectManager from "@/components/objects/FirebirdObjectManager.vue";
 import { useDatabaseBrowserMutation } from "@/lib/database/databaseBrowserActions";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
+import { scrollbarGutterWidth } from "@/lib/dataGrid/dataGridScrollGutter";
 
 import { computed, createApp, nextTick, onActivated, onBeforeUnmount, onDeactivated, ref, shallowRef, watch, type Component } from "vue";
 import { RecycleScroller } from "vue-virtual-scroller";
@@ -934,6 +935,7 @@ type ObjectBrowserScroller =
 const listScrollerRef = ref<ObjectBrowserScroller | null>(null);
 const gridScrollerRef = ref<ObjectBrowserScroller | null>(null);
 const objectListHeaderRef = ref<HTMLElement | null>(null);
+const objectListScrollbarWidth = ref(0);
 let viewportFrame = 0;
 let restoreViewportFrame = 0;
 
@@ -1035,8 +1037,21 @@ watch(
     if (!el) return;
     el.addEventListener("scroll", onObjectsScroll, { passive: true });
     restoreObjectBrowserViewport();
-    nextTick(() => syncObjectListHeaderScroll());
-    onCleanup(() => el.removeEventListener("scroll", onObjectsScroll));
+    let resizeObserver: ResizeObserver | undefined;
+    if (isListView.value) {
+      const syncHeader = () => {
+        // The header and rows need the same visible width for the last column to align.
+        objectListScrollbarWidth.value = scrollbarGutterWidth(el);
+        nextTick(syncObjectListHeaderScroll);
+      };
+      syncHeader();
+      resizeObserver = new ResizeObserver(syncHeader);
+      resizeObserver.observe(el);
+    }
+    onCleanup(() => {
+      el.removeEventListener("scroll", onObjectsScroll);
+      resizeObserver?.disconnect();
+    });
   },
   { flush: "post" },
 );
@@ -6519,43 +6534,6 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         </span>
         <DatabaseActionsMenu :connection="connection" :database="database" :catalog="catalog" />
       </div>
-      <Popover v-if="isListView && filteredRows.length > 0" v-model:open="objectColumnConfigOpen">
-        <PopoverTrigger as-child>
-          <button type="button" class="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('objects.configureColumns')" :aria-label="t('objects.configureColumns')">
-            <Settings2 class="h-3.5 w-3.5" />
-          </button>
-        </PopoverTrigger>
-        <PopoverContent align="start" class="w-64 p-1">
-          <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ t("objects.configureColumns") }}</div>
-          <div ref="objectColumnListRef">
-            <div v-for="column in objectColumnDefinitions" :key="column.key" :data-object-column-key="column.key" class="relative flex select-none items-center gap-1" :class="{ 'opacity-40': objectColumnDrag?.active && objectColumnDrag.key === column.key }">
-              <span v-if="objectColumnDropTarget?.key === column.key" class="pointer-events-none absolute inset-x-0 z-10 h-0.5 bg-primary" :class="objectColumnDropTarget.after ? 'bottom-0' : 'top-0'" />
-              <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :disabled="column.key === 'name'" @click="toggleObjectColumnVisibility(column.key)">
-                <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border" :class="isObjectColumnVisible(column.key) ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background text-transparent'"><Check class="h-3 w-3 stroke-[3]" /></span>
-                <span class="truncate">{{ column.label }}</span>
-              </button>
-              <button
-                type="button"
-                class="flex h-7 w-7 shrink-0 touch-none items-center justify-center rounded text-muted-foreground hover:bg-accent"
-                :class="objectColumnDrag?.active ? 'cursor-grabbing' : 'cursor-grab'"
-                :title="t('objects.columnReorder', { column: column.label })"
-                :aria-label="t('objects.columnReorder', { column: column.label })"
-                @pointerdown.stop.prevent="startObjectColumnDrag($event, column.key)"
-                @pointermove.stop="updateObjectColumnDrag"
-                @pointerup.stop.prevent="finishObjectColumnDrag"
-                @pointercancel="cancelObjectColumnDrag"
-                @lostpointercapture="cancelObjectColumnDrag"
-                @keydown.esc="cancelObjectColumnDrag"
-                @keydown.up.stop.prevent="moveObjectColumn(column.key, -1)"
-                @keydown.down.stop.prevent="moveObjectColumn(column.key, 1)"
-                @click.stop
-              >
-                <GripVertical class="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </div>
-        </PopoverContent>
-      </Popover>
       <div class="flex flex-1 items-center gap-2">
         <div class="relative min-w-[12rem] flex-1">
           <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -6781,161 +6759,202 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     <div v-else class="flex min-h-0 min-w-0 flex-1" :class="{ 'event-editor-layout': isEventEditor }">
       <div class="flex min-h-0 min-w-0 flex-1 flex-col">
         <div v-if="isListView" class="object-browser-table flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <div ref="objectListHeaderRef" class="relative h-7 shrink-0 overflow-hidden">
-            <div class="grid h-7 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns, minWidth: `${objectGridMinWidth}px` }">
-              <template v-for="columnKey in objectBrowserColumns" :key="columnKey">
-                <div v-if="columnKey === 'select'" class="relative flex min-w-0 items-center">
-                  <button class="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-accent" type="button" :disabled="visibleSelectableRows.length === 0" @click="toggleVisibleTableSelection">
-                    <CheckSquare v-if="allVisibleTablesSelected" class="h-3.5 w-3.5 text-primary" />
-                    <Square v-else class="h-3.5 w-3.5" />
-                  </button>
-                  <div
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('select', $event)"
-                    @dblclick="resetObjectColumnWidth('select', 34, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
+          <div class="flex h-7 shrink-0 border-b bg-muted/40">
+            <div ref="objectListHeaderRef" class="min-w-0 flex-1 overflow-hidden" :style="{ marginRight: `${objectListScrollbarWidth}px` }">
+              <div class="grid h-full items-center gap-3 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns, minWidth: `${objectGridMinWidth}px` }">
+                <template v-for="columnKey in objectBrowserColumns" :key="columnKey">
+                  <div v-if="columnKey === 'select'" class="relative flex min-w-0 items-center">
+                    <button class="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-accent" type="button" :disabled="visibleSelectableRows.length === 0" @click="toggleVisibleTableSelection">
+                      <CheckSquare v-if="allVisibleTablesSelected" class="h-3.5 w-3.5 text-primary" />
+                      <Square v-else class="h-3.5 w-3.5" />
+                    </button>
+                    <div
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('select', $event)"
+                      @dblclick="resetObjectColumnWidth('select', 34, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
                   </div>
-                </div>
-                <div v-if="columnKey === 'name'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('name')">
-                    <span class="truncate">{{ t("objects.name") }}</span>
-                    <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('name')"
-                    data-object-column-resize="name"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('name', $event)"
-                    @dblclick="resetObjectColumnWidth('name', 260, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
+                  <div v-if="columnKey === 'name'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('name')">
+                      <span class="truncate">{{ t("objects.name") }}</span>
+                      <component :is="sortIconFor('name')" v-if="sortIconFor('name')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('name')"
+                      data-object-column-resize="name"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('name', $event)"
+                      @dblclick="resetObjectColumnWidth('name', 260, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
                   </div>
-                </div>
-                <div v-if="columnKey === 'type'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('type')">
-                    <span class="truncate">{{ t("objects.type") }}</span>
-                    <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('type')"
-                    data-object-column-resize="type"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('type', $event)"
-                    @dblclick="resetObjectColumnWidth('type', 110, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
+                  <div v-if="columnKey === 'type'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('type')">
+                      <span class="truncate">{{ t("objects.type") }}</span>
+                      <component :is="sortIconFor('type')" v-if="sortIconFor('type')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('type')"
+                      data-object-column-resize="type"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('type', $event)"
+                      @dblclick="resetObjectColumnWidth('type', 110, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
                   </div>
-                </div>
-                <div v-if="columnKey === 'characterSet'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('characterSet')">
-                    <span class="truncate">{{ t("structureEditor.characterSet") }}</span>
-                    <component :is="sortIconFor('characterSet')" v-if="sortIconFor('characterSet')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('characterSet')"
-                    data-object-column-resize="characterSet"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('characterSet', $event)"
-                    @dblclick="resetObjectColumnWidth('characterSet', 120, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
+                  <div v-if="columnKey === 'characterSet'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('characterSet')">
+                      <span class="truncate">{{ t("structureEditor.characterSet") }}</span>
+                      <component :is="sortIconFor('characterSet')" v-if="sortIconFor('characterSet')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('characterSet')"
+                      data-object-column-resize="characterSet"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('characterSet', $event)"
+                      @dblclick="resetObjectColumnWidth('characterSet', 120, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
                   </div>
-                </div>
-                <div v-if="columnKey === 'collation'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('collation')">
-                    <span class="truncate">{{ t("structureEditor.collation") }}</span>
-                    <component :is="sortIconFor('collation')" v-if="sortIconFor('collation')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('collation')"
-                    data-object-column-resize="collation"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('collation', $event)"
-                    @dblclick="resetObjectColumnWidth('collation', 220, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
+                  <div v-if="columnKey === 'collation'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('collation')">
+                      <span class="truncate">{{ t("structureEditor.collation") }}</span>
+                      <component :is="sortIconFor('collation')" v-if="sortIconFor('collation')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('collation')"
+                      data-object-column-resize="collation"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('collation', $event)"
+                      @dblclick="resetObjectColumnWidth('collation', 220, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
                   </div>
-                </div>
-                <div v-if="columnKey === 'estimatedRows'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
-                    <span class="truncate">{{ objectRowsLabel }}</span>
-                    <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('estimatedRows')"
-                    data-object-column-resize="estimatedRows"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('estimatedRows', $event)"
-                    @dblclick="resetObjectColumnWidth('estimatedRows', 110, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
+                  <div v-if="columnKey === 'estimatedRows'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('estimatedRows')">
+                      <span class="truncate">{{ objectRowsLabel }}</span>
+                      <component :is="sortIconFor('estimatedRows')" v-if="sortIconFor('estimatedRows')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('estimatedRows')"
+                      data-object-column-resize="estimatedRows"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('estimatedRows', $event)"
+                      @dblclick="resetObjectColumnWidth('estimatedRows', 110, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
                   </div>
-                </div>
-                <div v-if="columnKey === 'totalBytes'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
-                    <span class="truncate">{{ t("objects.size") }}</span>
-                    <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('totalBytes')"
-                    data-object-column-resize="totalBytes"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('totalBytes', $event)"
-                    @dblclick="resetObjectColumnWidth('totalBytes', 100, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
+                  <div v-if="columnKey === 'totalBytes'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" :title="t('objects.statisticsHint')" @click="toggleSort('totalBytes')">
+                      <span class="truncate">{{ t("objects.size") }}</span>
+                      <component :is="sortIconFor('totalBytes')" v-if="sortIconFor('totalBytes')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('totalBytes')"
+                      data-object-column-resize="totalBytes"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('totalBytes', $event)"
+                      @dblclick="resetObjectColumnWidth('totalBytes', 100, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
                   </div>
-                </div>
-                <div v-if="columnKey === 'created_at'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('created_at')">
-                    <span class="truncate">{{ t("objects.createdAt") }}</span>
-                    <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('created_at')"
-                    data-object-column-resize="created_at"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('created_at', $event)"
-                    @dblclick="resetObjectColumnWidth('created_at', 150, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
+                  <div v-if="columnKey === 'created_at'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('created_at')">
+                      <span class="truncate">{{ t("objects.createdAt") }}</span>
+                      <component :is="sortIconFor('created_at')" v-if="sortIconFor('created_at')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('created_at')"
+                      data-object-column-resize="created_at"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('created_at', $event)"
+                      @dblclick="resetObjectColumnWidth('created_at', 150, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
                   </div>
-                </div>
-                <div v-if="columnKey === 'updated_at'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('updated_at')">
-                    <span class="truncate">{{ t("objects.updatedAt") }}</span>
-                    <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('updated_at')"
-                    data-object-column-resize="updated_at"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('updated_at', $event)"
-                    @dblclick="resetObjectColumnWidth('updated_at', 150, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
+                  <div v-if="columnKey === 'updated_at'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('updated_at')">
+                      <span class="truncate">{{ t("objects.updatedAt") }}</span>
+                      <component :is="sortIconFor('updated_at')" v-if="sortIconFor('updated_at')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('updated_at')"
+                      data-object-column-resize="updated_at"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('updated_at', $event)"
+                      @dblclick="resetObjectColumnWidth('updated_at', 150, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
                   </div>
-                </div>
-                <div v-if="columnKey === 'comment'" class="relative flex min-w-0 items-center">
-                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('comment')">
-                    <span class="truncate">{{ t("objects.comment") }}</span>
-                    <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
-                  </button>
-                  <div
-                    v-if="!isLastVisibleObjectColumn('comment')"
-                    data-object-column-resize="comment"
-                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
-                    @mousedown="onObjectColumnResizeStart('comment', $event)"
-                    @dblclick="resetObjectColumnWidth('comment', 260, $event)"
-                  >
-                    <GripVertical class="h-3 w-3" />
+                  <div v-if="columnKey === 'comment'" class="relative flex min-w-0 items-center">
+                    <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('comment')">
+                      <span class="truncate">{{ t("objects.comment") }}</span>
+                      <component :is="sortIconFor('comment')" v-if="sortIconFor('comment')" class="h-3 w-3 shrink-0" />
+                    </button>
+                    <div
+                      v-if="!isLastVisibleObjectColumn('comment')"
+                      data-object-column-resize="comment"
+                      class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                      @mousedown="onObjectColumnResizeStart('comment', $event)"
+                      @dblclick="resetObjectColumnWidth('comment', 260, $event)"
+                    >
+                      <GripVertical class="h-3 w-3" />
+                    </div>
                   </div>
-                </div>
-              </template>
+                </template>
+              </div>
+            </div>
+            <div class="flex w-8 shrink-0 items-center justify-center border-l">
+              <Popover v-if="filteredRows.length > 0" v-model:open="objectColumnConfigOpen">
+                <PopoverTrigger as-child>
+                  <button type="button" class="flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('objects.configureColumns')" :aria-label="t('objects.configureColumns')">
+                    <Settings2 class="h-3.5 w-3.5" />
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent align="end" class="w-64 p-1">
+                  <div class="px-2 py-1.5 text-xs font-medium text-foreground">{{ t("objects.configureColumns") }}</div>
+                  <div ref="objectColumnListRef">
+                    <div v-for="column in objectColumnDefinitions" :key="column.key" :data-object-column-key="column.key" class="relative flex select-none items-center gap-1" :class="{ 'opacity-40': objectColumnDrag?.active && objectColumnDrag.key === column.key }">
+                      <span v-if="objectColumnDropTarget?.key === column.key" class="pointer-events-none absolute inset-x-0 z-10 h-0.5 bg-primary" :class="objectColumnDropTarget.after ? 'bottom-0' : 'top-0'" />
+                      <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent" :disabled="column.key === 'name'" @click="toggleObjectColumnVisibility(column.key)">
+                        <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded border" :class="isObjectColumnVisible(column.key) ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background text-transparent'"><Check class="h-3 w-3 stroke-[3]" /></span>
+                        <span class="truncate">{{ column.label }}</span>
+                      </button>
+                      <button
+                        type="button"
+                        class="flex h-7 w-7 shrink-0 touch-none items-center justify-center rounded text-muted-foreground hover:bg-accent"
+                        :class="objectColumnDrag?.active ? 'cursor-grabbing' : 'cursor-grab'"
+                        :title="t('objects.columnReorder', { column: column.label })"
+                        :aria-label="t('objects.columnReorder', { column: column.label })"
+                        @pointerdown.stop.prevent="startObjectColumnDrag($event, column.key)"
+                        @pointermove.stop="updateObjectColumnDrag"
+                        @pointerup.stop.prevent="finishObjectColumnDrag"
+                        @pointercancel="cancelObjectColumnDrag"
+                        @lostpointercapture="cancelObjectColumnDrag"
+                        @keydown.esc="cancelObjectColumnDrag"
+                        @keydown.up.stop.prevent="moveObjectColumn(column.key, -1)"
+                        @keydown.down.stop.prevent="moveObjectColumn(column.key, 1)"
+                        @click.stop
+                      >
+                        <GripVertical class="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </PopoverContent>
+              </Popover>
             </div>
           </div>
-          <RecycleScroller ref="listScrollerRef" class="object-browser-scroller min-h-0 flex-1" :style="{ '--dbx-object-grid-min-width': `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
+          <RecycleScroller ref="listScrollerRef" class="object-browser-scroller mr-8 min-h-0 flex-1" :style="{ '--dbx-object-grid-min-width': `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
             <template #default="{ item }">
               <CustomContextMenu :items="() => getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu, isOpen }">
                 <div

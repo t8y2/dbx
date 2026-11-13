@@ -530,6 +530,35 @@ it("loads independent DDL from each mapped comparison side without mutating comp
   expect(session.result?.diffs[0].targetDdl).toBe(targetDdl);
 });
 
+it("loads a SQL Server table's deferred DDL fresh when it is selected and reports a failed side", async () => {
+  calls.compare.mockResolvedValue({ diffs: [{ type: "modified", name: "T", ddl: "", targetDdl: "", columns: [] }], functionDiffs: [], syncSql: "", renameCandidates: [] });
+  calls.loadDdl.mockImplementation(async (request: any) => {
+    if (request.connectionId === "target") throw new Error("target ddl unavailable");
+    return { ddl: "CREATE TABLE [Source].[T] ([SOURCE_ONLY_COL] int);" };
+  });
+  await mountComparison("sqlserver", "sqlserver", undefined, true);
+  expect(calls.loadDdl).not.toHaveBeenCalled();
+  [...document.querySelectorAll<HTMLElement>('div[class*="grid-cols-"][class*="cursor-pointer"]')].find((row) => row.textContent?.includes("T"))!.click();
+  await vi.waitFor(() => expect(calls.loadDdl).toHaveBeenCalledTimes(2));
+  await flush();
+  expect(calls.loadDdl.mock.calls).toEqual(
+    expect.arrayContaining([
+      [expect.objectContaining({ connectionId: "source", database: "tenant", schema: "Source", tableName: "T" }), { force: true }],
+      [expect.objectContaining({ connectionId: "target", database: "tenant", schema: "Target", tableName: "T" }), { force: true }],
+    ]),
+  );
+  expect(document.body.textContent).toContain("SOURCE_ONLY_COL");
+  expect(document.body.textContent).toContain("target ddl unavailable");
+});
+
+it("does not reload DDL for a SQL Server table that already has it", async () => {
+  calls.compare.mockResolvedValue({ diffs: [{ type: "modified", name: "T", ddl: "CREATE TABLE s", targetDdl: "CREATE TABLE t", columns: [] }], functionDiffs: [], syncSql: "", renameCandidates: [] });
+  await mountComparison("sqlserver", "sqlserver", undefined, true);
+  [...document.querySelectorAll<HTMLElement>('div[class*="grid-cols-"][class*="cursor-pointer"]')].find((row) => row.textContent?.includes("T"))!.click();
+  await flush();
+  expect(calls.loadDdl).not.toHaveBeenCalled();
+});
+
 it("drops a late independent comparison preview after switching the option off (#13224)", async () => {
   const ddl = 'CREATE TABLE "Source"."T" ("ORIGINAL_ID" NUMBER);';
   calls.compare.mockResolvedValue({ diffs: [{ type: "added", name: "T", ddl }], functionDiffs: [], syncSql: ddl, renameCandidates: [] });

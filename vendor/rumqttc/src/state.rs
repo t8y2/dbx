@@ -95,7 +95,7 @@ impl MqttState {
             // index 0 is wasted as 0 is not a valid packet id
             outgoing_pub: vec![None; max_inflight as usize + 1],
             outgoing_rel: vec![None; max_inflight as usize + 1],
-            incoming_pub: vec![None; std::u16::MAX as usize + 1],
+            incoming_pub: vec![None; u16::MAX as usize + 1],
             collision: None,
             // TODO: Optimize these sizes later
             events: VecDeque::with_capacity(100),

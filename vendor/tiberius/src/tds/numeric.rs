@@ -112,7 +112,7 @@ impl Numeric {
             #[cfg(target_endian = "big")]
             let (low_part, high_part) = (high_part, low_part);
 
-            let high_part = high_part * (u64::max_value() as u128 + 1);
+            let high_part = high_part * (u64::MAX as u128 + 1);
             low_part + high_part
         }
 

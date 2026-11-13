@@ -25,6 +25,7 @@ use sqlparser::dialect::{GenericDialect, MsSqlDialect, MySqlDialect, OracleDiale
 use sqlparser::parser::Parser;
 
 use crate::connection::{task_client_session_id, AppState, PoolKind};
+#[cfg(feature = "duckdb-sidecar")]
 use crate::db;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::sql::SqlParsingOptions;
@@ -761,10 +762,12 @@ async fn duckdb_import_context_for_source(
     }
 }
 
+#[cfg(feature = "duckdb-sidecar")]
 fn duckdb_sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+#[cfg(feature = "duckdb-sidecar")]
 fn duckdb_parquet_scan_sql(path: &str, limit: usize, offset: Option<usize>) -> String {
     let mut sql = format!("SELECT * FROM read_parquet({}) LIMIT {}", duckdb_sql_string_literal(path), limit);
     if let Some(offset) = offset {
@@ -773,10 +776,12 @@ fn duckdb_parquet_scan_sql(path: &str, limit: usize, offset: Option<usize>) -> S
     sql
 }
 
+#[cfg(feature = "duckdb-sidecar")]
 fn duckdb_parquet_count_sql(path: &str) -> String {
     format!("SELECT COUNT(*) AS dbx_total_rows FROM read_parquet({})", duckdb_sql_string_literal(path))
 }
 
+#[cfg(feature = "duckdb-sidecar")]
 fn duckdb_count_result(result: &db::QueryResult) -> Result<usize, String> {
     let value = result
         .rows
@@ -2663,6 +2668,9 @@ impl ImportRowSource {
         first_batch_rows: usize,
         duckdb_context: Option<DuckDbImportContext>,
     ) -> Result<Self, String> {
+        // Parquet 导入仅在 duckdb-sidecar 构建下读取该上下文。
+        #[cfg(not(feature = "duckdb-sidecar"))]
+        let _ = duckdb_context;
         if source_format == TableImportSourceFormat::Sql {
             let bytes_read = Arc::new(AtomicU64::new(0));
             let mut stream = SqlImportRowStream::open(file_path, parse_options, Some(bytes_read.clone())).await?;
@@ -9350,6 +9358,7 @@ mod tests {
         assert_eq!(import_file_kind("sales.parquet").unwrap(), ImportFileKind::Parquet);
     }
 
+    #[cfg(feature = "duckdb-sidecar")]
     #[test]
     fn parquet_scan_sql_escapes_paths_and_adds_offset_after_limit() {
         let sql = duckdb_parquet_scan_sql(r"C:\data\customer's.parquet", 250, Some(500));

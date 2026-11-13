@@ -1339,9 +1339,26 @@ func openConfiguredSessionDB(params connectParams, timeout time.Duration) (*sql.
 	if err != nil {
 		return nil, err
 	}
+	if !usesOCIProfile(params) {
+		// oracleNLSConnector initializes every physical thin connection, so
+		// the one that answered the ping already carries the session settings.
+		return db, nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if _, err := db.ExecContext(ctx, "ALTER SESSION SET NLS_LANGUAGE='AMERICAN'"); err != nil {
+	// OCI connects through godror directly; pin one connection so both ALTERs
+	// land on the same session.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("pin Oracle session for NLS setup: %w", err)
+	}
+	defer conn.Close()
+	dateLanguage, fallbackDateLanguage := sessionNLSDateLanguages()
+	if err := applyOracleSessionNLS(func(query string) error {
+		_, err := conn.ExecContext(ctx, query)
+		return err
+	}, dateLanguage, fallbackDateLanguage); err != nil {
 		db.Close()
 		return nil, err
 	}

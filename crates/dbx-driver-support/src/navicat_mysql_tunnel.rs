@@ -139,10 +139,7 @@ impl NavicatMysqlEndpoint {
             let text = String::from_utf8_lossy(&body);
             return Err(format!("Navicat HTTP tunnel returned HTTP {status}: {}", text.trim()));
         }
-        if body.len() < 16
-            || u32::from_be_bytes(body[0..4].try_into().unwrap()) != 1111
-            || u16::from_be_bytes(body[4..6].try_into().unwrap()) != 204
-        {
+        if body.len() < 16 || u32::from_be_bytes(body[0..4].try_into().unwrap()) != 1111 {
             let header_bytes = body.iter().take(16).map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ");
             let preview = String::from_utf8_lossy(body.get(..body.len().min(120)).unwrap_or_default())
                 .chars()
@@ -155,6 +152,14 @@ impl NavicatMysqlEndpoint {
                 body.len(),
                 header_bytes,
                 preview.trim()
+            );
+            log::warn!("[navicat-http] {message}");
+            return Err(message);
+        }
+        let script_version = u16::from_be_bytes(body[4..6].try_into().unwrap());
+        if !is_supported_navicat_tunnel_version(script_version) {
+            let message = format!(
+                "Unsupported Navicat HTTP tunnel script version {script_version} (supported: {NAVICAT_TUNNEL_MIN_SCRIPT_VERSION}-{NAVICAT_TUNNEL_MAX_SCRIPT_VERSION}), final_url={response_url}; the PHP endpoint answered but reports a script revision this client does not recognise"
             );
             log::warn!("[navicat-http] {message}");
             return Err(message);
@@ -356,12 +361,34 @@ struct NavicatColumn {
     length: u32,
 }
 
+/// Lowest tunnel-script version whose wire format we can parse.
+///
+/// The 16-byte response header is `u32` magic (1111) + `u16` script version +
+/// `u32` errno + 6 reserved bytes. The `u16` is the *tunnel script* version
+/// (`$versionNum` in `ntunnel_mysql.php`), not a protocol revision: the
+/// result-set serialisation has been byte-identical since at least 2.01. The
+/// official script ships as 2.06 today, while older and locally patched copies
+/// (common on shared hosting, where the file is often renamed) report 2.01 or
+/// 2.02. Accepting the whole range avoids rejecting an otherwise compatible
+/// endpoint purely because it advertises a different script revision.
+const NAVICAT_TUNNEL_MIN_SCRIPT_VERSION: u16 = 201;
+
+/// Highest tunnel-script version we have verified the parser against.
+const NAVICAT_TUNNEL_MAX_SCRIPT_VERSION: u16 = 299;
+
+fn is_supported_navicat_tunnel_version(raw: u16) -> bool {
+    (NAVICAT_TUNNEL_MIN_SCRIPT_VERSION..=NAVICAT_TUNNEL_MAX_SCRIPT_VERSION).contains(&raw)
+}
+
 fn parse_navicat_response(data: &[u8]) -> Result<NavicatResult, String> {
     if data.len() < 16 || u32::from_be_bytes(data[0..4].try_into().unwrap()) != 1111 {
         return Err("Invalid Navicat HTTP tunnel response header".to_string());
     }
-    if u16::from_be_bytes(data[4..6].try_into().unwrap()) != 204 {
-        return Err("Unsupported Navicat HTTP tunnel response version".to_string());
+    let script_version = u16::from_be_bytes(data[4..6].try_into().unwrap());
+    if !is_supported_navicat_tunnel_version(script_version) {
+        return Err(format!(
+            "Unsupported Navicat HTTP tunnel script version {script_version} (supported: {NAVICAT_TUNNEL_MIN_SCRIPT_VERSION}-{NAVICAT_TUNNEL_MAX_SCRIPT_VERSION}); re-export the tunnel script from a current Navicat install"
+        ));
     }
     let connect_error = u32::from_be_bytes(data[6..10].try_into().unwrap());
     let mut cursor = 16;
@@ -577,8 +604,9 @@ fn push_lenenc_bytes(output: &mut Vec<u8>, value: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_navicat_response, parse_use_database, push_lenenc_bytes, read_packet, validate_stateless_query,
-        write_packet, NavicatMysqlEndpoint, CLIENT_PROTOCOL_41, CLIENT_SECURE_CONNECTION,
+        is_supported_navicat_tunnel_version, parse_navicat_response, parse_use_database, push_lenenc_bytes,
+        read_packet, validate_stateless_query, write_packet, NavicatMysqlEndpoint, CLIENT_PROTOCOL_41,
+        CLIENT_SECURE_CONNECTION,
     };
     use tokio::net::{TcpListener, TcpStream};
 
@@ -621,6 +649,45 @@ mod tests {
         assert_eq!(result.columns.len(), 1);
         assert_eq!(result.columns[0].name, b"id");
         assert_eq!(result.rows, vec![vec![Some(b"42".to_vec())]]);
+    }
+
+    #[test]
+    fn accepts_older_navicat_script_versions() {
+        // Locally patched or older tunnel scripts report 2.01 / 2.02 instead of
+        // the 2.04+ that Navicat's current export ships. The wire format of the
+        // result set is identical, so these must parse rather than be rejected.
+        for script_version in [201u16, 202, 204, 206] {
+            let mut body = Vec::from([0, 0, 4, 87]);
+            body.extend_from_slice(&script_version.to_be_bytes());
+            body.extend_from_slice(&[0; 10]);
+            body.extend_from_slice(&[0; 4]);
+            body.extend_from_slice(&[0, 0, 0, 1]);
+            body.extend_from_slice(&[0; 4]);
+            body.extend_from_slice(&[0, 0, 0, 1]);
+            body.extend_from_slice(&[0, 0, 0, 1]);
+            body.extend_from_slice(&[0; 12]);
+            push_lenenc_bytes(&mut body, b"id");
+            push_lenenc_bytes(&mut body, b"users");
+            body.extend_from_slice(&3u32.to_be_bytes());
+            body.extend_from_slice(&2u32.to_be_bytes());
+            body.extend_from_slice(&11u32.to_be_bytes());
+            push_lenenc_bytes(&mut body, b"42");
+            body.push(0);
+
+            let result = parse_navicat_response(&body)
+                .unwrap_or_else(|error| panic!("script version {script_version} should parse: {error}"));
+            assert_eq!(result.rows, vec![vec![Some(b"42".to_vec())]], "script version {script_version}");
+        }
+    }
+
+    #[test]
+    fn rejects_implausible_navicat_script_versions() {
+        for script_version in [0u16, 100, 200, 300, 999] {
+            assert!(
+                !is_supported_navicat_tunnel_version(script_version),
+                "script version {script_version} must be rejected"
+            );
+        }
     }
 
     #[test]

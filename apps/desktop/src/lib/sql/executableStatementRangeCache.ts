@@ -1,7 +1,7 @@
 import { RangeSet, RangeValue, type ChangeSet, type Text } from "@codemirror/state";
 import type { DatabaseType } from "@/types/database";
 import type { SqlParameterOptions } from "@/lib/sql/sqlParameters";
-import { executableStatementRanges, startsHashLineComment, statementParsingDatabaseType, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+import { executableStatementRanges, findSqlBlockCommentEnd, startsHashLineComment, statementParsingDatabaseType, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { cursorBelongsToTrailingStatementDelimiter } from "@/lib/sql/statementDelimiter";
 
 export interface ExecutableStatementRangeCache {
@@ -87,7 +87,7 @@ export function executableStatementRangeCacheForDoc(
     if (doc.sliceString(currentLine.from, range.from).trim() === "") {
       byExecutableLineStart.set(currentLine.from, range);
     }
-    const executableStart = executableStartAfterLeadingDirective(sql, range, databaseType, parameterOptions);
+    const executableStart = executableStartAfterLeadingComments(sql, range, databaseType, parameterOptions);
     if (executableStart !== null) {
       byExecutableLineStart.set(doc.lineAt(executableStart).from, range);
     }
@@ -95,18 +95,19 @@ export function executableStatementRangeCacheForDoc(
   return { doc, databaseType, parameterOptions, parameterSyntaxKey, byStart, byExecutableLineStart, ranges };
 }
 
-function executableStartAfterLeadingDirective(sql: string, range: SqlTextRange, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): number | null {
+function executableStartAfterLeadingComments(sql: string, range: SqlTextRange, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): number | null {
   databaseType = statementParsingDatabaseType(databaseType, parameterOptions);
   const text = range.sql;
   const hasExecutableDirective = text.startsWith("/*+") || text.startsWith("/*@") || text.startsWith("/*&") || (databaseType === "mysql" && text.startsWith("/*proxy*/"));
-  if (!hasExecutableDirective) return null;
+  const hasModuleComment = databaseType === "sqlserver" && (text.startsWith("--") || text.startsWith("/*"));
+  if (!hasExecutableDirective && !hasModuleComment) return null;
 
   let offset = 0;
   while (offset < text.length) {
     while (/\s/.test(text[offset] ?? "")) offset += 1;
 
     if (text.startsWith("/*", offset)) {
-      const close = text.indexOf("*/", offset + 2);
+      const close = findSqlBlockCommentEnd(text, offset, databaseType);
       if (close < 0) return null;
       offset = close + 2;
       continue;

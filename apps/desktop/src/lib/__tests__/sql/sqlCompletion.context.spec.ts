@@ -2030,6 +2030,19 @@ describe("sqlCompletion scoped context classification", () => {
     expect(context.exclusiveColumnSuggestions).toBe(true);
   });
 
+  // #14637
+  it.each([
+    ["INSERT IGNORE INTO orders (", undefined, "orders"],
+    ["insert ignore into `shop`.`orders` (id, ", "shop", "orders"],
+  ])("classifies MySQL INSERT IGNORE column-list contexts: %s", (sql, schema, table) => {
+    const context = getSqlCompletionContext(sql, sql.length, { databaseType: "mysql" });
+
+    expect(context.contextKind).toBe("column");
+    expect(context.insertSchema).toBe(schema);
+    expect(context.insertTable).toBe(table);
+    expect(context.exclusiveColumnSuggestions).toBe(true);
+  });
+
   it("classifies UPDATE SET column contexts", () => {
     const sql = "UPDATE dbo.Users SET ";
     const context = getSqlCompletionContext(sql, sql.length);

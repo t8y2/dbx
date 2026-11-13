@@ -347,6 +347,10 @@ export function isFocusSqlEditorShortcut(event: ShortcutLikeEvent, shortcuts?: P
   return matchesShortcut(event, actionShortcut("focusSqlEditor", shortcuts), platform);
 }
 
+export function isCopyActiveResultShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform?: string): boolean {
+  return matchesShortcut(event, actionShortcut("copyActiveResult", shortcuts), platform);
+}
+
 export function isModRShortcut(event: ShortcutLikeEvent): boolean {
   return matchesShortcut(event, "Mod+R");
 }

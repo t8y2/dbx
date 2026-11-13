@@ -337,6 +337,28 @@ fn sqlserver_uses_named_instance_resolution(endpoint: &SqlServerEndpoint<'_>, po
     endpoint.instance_name.is_some() && (port == 0 || (port == SQLSERVER_DEFAULT_PORT && !port_explicit))
 }
 
+fn sqlserver_host_with_url_instance<'a>(
+    host: &'a str,
+    port: u16,
+    port_explicit: bool,
+    url_params: Option<&str>,
+) -> Result<Cow<'a, str>, String> {
+    use dbx_types::models::connection::{normalize_sqlserver_host_port, sqlserver_url_instance_name};
+
+    if port_explicit || !matches!(port, 0 | SQLSERVER_DEFAULT_PORT) || host.contains('\\') || url_params.is_none() {
+        return Ok(Cow::Borrowed(host));
+    }
+    let (normalized_host, embedded_port) = normalize_sqlserver_host_port(host);
+    if normalized_host.is_empty() || embedded_port.is_some() {
+        return Ok(Cow::Borrowed(host));
+    }
+
+    Ok(match sqlserver_url_instance_name(url_params)? {
+        Some(instance) => Cow::Owned(format!(r"{normalized_host}\{instance}")),
+        None => Cow::Borrowed(host),
+    })
+}
+
 fn query_result_row_limit(max_rows: Option<usize>) -> usize {
     max_rows.unwrap_or(MAX_ROWS).max(1)
 }
@@ -368,6 +390,8 @@ pub async fn connect_with_port_explicit(
     url_params: Option<&str>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
+    let host = sqlserver_host_with_url_instance(host, port, port_explicit, url_params)?;
+    let host = host.as_ref();
     if sqlserver_native_encryption_disabled(url_params) {
         let skipped = "encryption was disabled by encrypt=false / sqlserverEncryption=disabled".to_string();
         return try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)
@@ -2756,10 +2780,16 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
         && object_kinds.iter().any(crate::types::CompletionAssistantObjectKind::is_table_like)
     {
         let object_like = sqlserver_completion_object_search_clause(request, &like_pattern);
+        // NOTE: Any session that creates a temp table inside an open transaction
+        // keeps its tempdb catalog rows locked until it commits. A READ COMMITTED
+        // scan of `tempdb.sys.all_objects` waits on those rows with no timeout,
+        // holding the only SQL Server metadata connection, so every later
+        // metadata request fails with the pool-busy error. Completion only needs
+        // candidate names, so dirty catalog reads are acceptable here.
         queries.push(format!(
             "SELECT TOP ({limit}) o.name, s.name AS schema_name, 'TABLE' AS object_type, CAST(NULL AS NVARCHAR(128)) AS parent_schema, CAST(NULL AS NVARCHAR(128)) AS parent_name, CAST(NULL AS NVARCHAR(MAX)) AS object_comment, CAST(NULL AS NVARCHAR(128)) AS data_type \
-             FROM tempdb.sys.all_objects o \
-             JOIN tempdb.sys.schemas s ON s.schema_id = o.schema_id \
+             FROM tempdb.sys.all_objects o WITH (NOLOCK) \
+             JOIN tempdb.sys.schemas s WITH (NOLOCK) ON s.schema_id = o.schema_id \
              WHERE o.type = 'U' {object_like}"
         ));
         return format!("SELECT * FROM ({}) AS dbx_completion ORDER BY name", queries.remove(0));
@@ -5124,6 +5154,90 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_host_with_url_instance_appends_instance_from_url_params() {
+        use std::borrow::Cow;
+
+        let host = "db.example.com";
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=SQLEXPRESS")),
+            Ok(Cow::Owned(r"db.example.com\SQLEXPRESS".to_string()))
+        );
+        // Semicolon-separated and case-insensitive keys, percent-encoded value.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 1433, false, Some(";InstanceName=SQL%45XPR%45SS")),
+            Ok(Cow::Owned(r"db.example.com\SQLEXPRESS".to_string()))
+        );
+        // Braced values keep whitespace and separators literally.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName={SQL EXPR}")),
+            Ok(Cow::Owned(r"db.example.com\SQL EXPR".to_string()))
+        );
+        // Duplicate keys: the last occurrence wins.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=OLD;instanceName=NEW")),
+            Ok(Cow::Owned(r"db.example.com\NEW".to_string()))
+        );
+        // No instanceName property leaves the host untouched.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("encrypt=true;applicationName=dbx")),
+            Ok(Cow::Borrowed(host))
+        );
+        // Empty instanceName is treated as absent.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=")),
+            Ok(Cow::Borrowed(host))
+        );
+        // Explicit port, non-default port, inline instance, or missing params all skip URL lookup.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 1433, true, Some("instanceName=SQLEXPRESS")),
+            Ok(Cow::Borrowed(host))
+        );
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 40030, false, Some("instanceName=SQLEXPRESS")),
+            Ok(Cow::Borrowed(host))
+        );
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(
+                r"db.example.com\INLINE",
+                0,
+                false,
+                Some("instanceName=SQLEXPRESS")
+            ),
+            Ok(Cow::Borrowed(r"db.example.com\INLINE"))
+        );
+        assert_eq!(super::sqlserver_host_with_url_instance(host, 0, false, None), Ok(Cow::Borrowed(host)));
+    }
+
+    #[test]
+    fn sqlserver_host_with_url_instance_validates_parsed_names() {
+        let host = "db.example.com";
+        // Host-embedded ports keep the host as-is instead of using the URL instance.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance("db.example.com,1433", 0, false, Some("instanceName=SQLEXPRESS")),
+            Ok(Cow::Borrowed("db.example.com,1433"))
+        );
+        // Names carrying host/port separators are rejected.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some(r"instanceName=BAD\NAME")),
+            Err("Invalid SQL Server instanceName URL parameter".to_string())
+        );
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=BAD:NAME")),
+            Err("Invalid SQL Server instanceName URL parameter".to_string())
+        );
+        // Control characters are rejected.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=BAD\u{0007}NAME")),
+            Err("Invalid SQL Server instanceName URL parameter".to_string())
+        );
+        // Undecodable percent sequences are rejected.
+        assert_eq!(
+            super::sqlserver_host_with_url_instance(host, 0, false, Some("instanceName=%FF%FE")),
+            Err("Invalid SQL Server instanceName URL parameter".to_string())
+        );
+    }
+
+    #[test]
     fn sqlserver_connect_uses_named_instance_resolution() {
         let source = include_str!("sqlserver.rs");
         let try_connect = source.split("\nasync fn try_connect(").nth(1).unwrap();
@@ -6372,7 +6486,8 @@ mod tests {
 
         let sql = sqlserver_completion_assistant_sql(&request, 100);
 
-        assert!(sql.contains("FROM tempdb.sys.all_objects o"));
+        assert!(sql.contains("FROM tempdb.sys.all_objects o WITH (NOLOCK)"));
+        assert!(sql.contains("JOIN tempdb.sys.schemas s WITH (NOLOCK)"));
         assert!(sql.contains("o.type = 'U'"));
         assert!(sql.contains("LOWER(o.name) LIKE LOWER('#Temp%') ESCAPE '\\'"));
         assert!(sql.contains("CAST(NULL AS NVARCHAR(128)) AS parent_schema"));

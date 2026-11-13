@@ -1,10 +1,9 @@
 // @vitest-environment happy-dom
-import { createApp, defineComponent, h, ref, nextTick, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, type App } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { clearDataGridStructuredFilterStates, saveDataGridStructuredFilterState, loadDataGridStructuredFilterState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 const mocks = vi.hoisted(() => ({
   executeBatch: vi.fn(async () => []),
   getColumns: vi.fn(),
@@ -42,7 +41,6 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 const mounted: Array<{ app: App; host: HTMLElement }> = [];
 const col = (name: string) => ({ name, data_type: "int", is_nullable: false, is_primary_key: name === "id", extra: null, column_default: null });
-const scope = (columns: string[]) => ["mysql-1", "app", "", "table-data", "", "users", columns.join("\0")].join("\u0001");
 async function settle() {
   for (let i = 0; i < 8; i++) {
     await nextTick();
@@ -54,84 +52,41 @@ afterEach(() => {
     app.unmount();
     host.remove();
   }
-  clearDataGridStructuredFilterStates();
   vi.restoreAllMocks();
   vi.clearAllMocks();
 });
-describe("DataGrid drop column cross-tab refresh", () => {
-  it.each([false, true])("cleans another tab before refresh and reopening (mounted sibling: %s)", async (mountedSibling) => {
+describe("DataGrid drop column availability", () => {
+  it("does not expose column deletion in the table data view", async () => {
     const pinia = createPinia();
     setActivePinia(pinia);
     useSettingsStore().updateEditorSettings({ dataGridRenderMode: "canvas" });
     const query = useQueryStore();
     vi.spyOn(useConnectionStore(), "getConfig").mockReturnValue({ id: "mysql-1", name: "mysql", database: "app", db_type: "mysql" } as never);
-    const firstId = query.createTab("mysql-1", "app", "users", "data");
-    // createTab deduplicates identical titles; both tabs have the same tableMeta.
-    const otherId = query.createTab("mysql-1", "app", "users copy", "data");
-    expect(otherId).not.toBe(firstId);
-    for (const id of [firstId, otherId]) {
-      query.setTableMeta(id, { tableName: "users", database: "app", columns: [col("id"), col("status"), col("score")], primaryKeys: ["id"] });
-      query.tabs.find((tab) => tab.id === id)!.result = { columns: ["id", "status", "score"], rows: [[1, 2, 3]], affected_rows: 0, execution_time_ms: 0 };
-    }
-    query.activateTab(firstId);
-    const first = query.tabs.find((tab) => tab.id === firstId)!;
-    const other = query.tabs.find((tab) => tab.id === otherId)!;
-    other.whereInput = "status = 2 AND score = 3";
-    other.orderByInput = "status DESC";
-    other.result!.local_column_filters = { "1": ["2"], "2": ["3"] };
-    saveDataGridStructuredFilterState(otherId, {
-      scopeKey: scope(["id", "status", "score"]),
-      manualWhereInput: "status = 2",
-      appliedWhereInput: "score = 3",
-      rules: [{ id: "score-rule", columnName: "score", mode: "equals", rawValue: "3", rawEndValue: "", conjunction: "AND" }],
-      serverColumnFilters: {},
-    });
-    mocks.getColumns.mockResolvedValue([col("id"), col("score")]);
-    const refresh = vi.spyOn(query, "refreshDataTab").mockImplementation(async (id) => {
-      const tab = query.tabs.find((tab) => tab.id === id)!;
-      expect(tab.whereInput).not.toContain("status");
-      expect(tab.whereInput).toContain("score");
-      expect(tab.orderByInput).toBeUndefined();
-      expect(tab.result!.local_column_filters).toEqual({ "2": ["3"] });
-      return true;
-    });
-    const grid = ref<{ selectSingleCell(row: number, column: number): void; onToolbarRefresh(): Promise<void> }>();
-    const secondGrid = ref<{ onToolbarRefresh(): Promise<void> }>();
-    const shownTab = ref(firstId);
+    const tabId = query.createTab("mysql-1", "app", "users", "data");
+    query.setTableMeta(tabId, { tableName: "users", database: "app", columns: [col("id"), col("status")], primaryKeys: ["id"] });
+    const tab = query.tabs.find((candidate) => candidate.id === tabId)!;
+    tab.result = { columns: ["id", "status"], rows: [[1, 2]], affected_rows: 0, execution_time_ms: 0 };
+    query.activateTab(tabId);
     const onReload = vi.fn();
     const Root = defineComponent({
-      setup: () => () => {
-        const tabs = shownTab.value === firstId ? [first, ...(mountedSibling ? [other] : [])] : [other];
-        return h(
+      setup: () => () =>
+        h(
           TooltipProvider,
           { delayDuration: 0 },
           {
             default: () =>
-              tabs.map((tab, index) =>
-                h(DataGrid, {
-                  key: tab.id,
-                  ref: index === 0 ? grid : secondGrid,
-                  cacheKey: tab.id,
-                  result: tab.result!,
-                  databaseType: "mysql",
-                  context: "table-data",
-                  connectionId: tab.connectionId,
-                  database: tab.database,
-                  tableMeta: tab.tableMeta,
-                  initialWhereInput: tab.whereInput,
-                  initialOrderByInput: tab.orderByInput,
-                  "onUpdate:whereInput": (value: string) => {
-                    tab.whereInput = value;
-                  },
-                  "onUpdate:orderByInput": (value: string) => {
-                    tab.orderByInput = value;
-                  },
-                  onReload,
-                }),
-              ),
+              h(DataGrid, {
+                cacheKey: tabId,
+                result: tab.result!,
+                databaseType: "mysql",
+                context: "table-data",
+                connectionId: tab.connectionId,
+                database: tab.database,
+                tableMeta: tab.tableMeta,
+                onReload,
+              }),
           },
-        );
-      },
+        ),
     });
     const host = document.createElement("div");
     document.body.append(host);
@@ -141,39 +96,15 @@ describe("DataGrid drop column cross-tab refresh", () => {
     app.mount(host);
     mounted.push({ app, host });
     await settle();
-    grid.value!.selectSingleCell(0, 1);
-    await settle();
-    const header = host.querySelectorAll<HTMLElement>(".data-grid-header-cell")[2];
+    const header = host.querySelectorAll<HTMLElement>(".data-grid-header-cell")[1];
     expect(header).toBeDefined();
     header!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 12, clientY: 12 }));
     await settle();
-    const danger = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === i18n.global.t("dangerDialog.title"));
-    expect(danger).toBeDefined();
-    danger!.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse" }));
-    danger!.click();
-    await settle();
-    const drop = [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === i18n.global.t("grid.deleteColumn"));
-    expect(drop).toBeDefined();
-    expect(drop!.disabled).toBe(false);
-    drop!.click();
-    await settle();
-    const confirm = [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((button) => button.textContent?.trim() === i18n.global.t("grid.deleteColumn"))!;
-    expect(confirm).toBeDefined();
-    expect(confirm.disabled).toBe(false);
-    confirm.click();
-    await vi.waitFor(() => expect(mocks.executeBatch).toHaveBeenCalledOnce());
-    await vi.waitFor(() => expect(refresh).toHaveBeenCalledOnce());
-    await settle();
-    expect(loadDataGridStructuredFilterState(otherId, scope(["id", "score"]))?.rules.map((rule) => rule.columnName)).toEqual(["score"]);
-    if (mountedSibling) {
-      await secondGrid.value!.onToolbarRefresh();
-      expect(onReload.mock.lastCall?.[2]).toContain("score");
-      expect(onReload.mock.lastCall?.[2]).not.toContain("status");
-    }
-    shownTab.value = otherId;
-    await settle();
-    await grid.value!.onToolbarRefresh();
-    expect(onReload.mock.lastCall?.[2]).toContain("score");
-    expect(onReload.mock.lastCall?.[2]).not.toContain("status");
+    expect(document.querySelector("[data-dbx-context-menu]")).not.toBeNull();
+    expect(host.querySelector('[data-toolbar-action="deleteColumn"]')).toBeNull();
+    expect([...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].some((button) => button.textContent?.trim() === i18n.global.t("dangerDialog.title"))).toBe(false);
+    expect([...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].some((button) => button.textContent?.trim() === i18n.global.t("grid.deleteColumn"))).toBe(false);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(mocks.buildDropTableChildObjectSql).not.toHaveBeenCalled();
   });
 });

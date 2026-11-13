@@ -19,7 +19,9 @@ use serde_json::json;
 use url::Url;
 use uuid::Uuid;
 
-use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
+use crate::backend::{
+    format_query_result, new_connection_config_with_external_config, parse_database_type, ConnectionSummary, DbxBackend,
+};
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use crate::runtime::McpTransport;
 use crate::session::{McpSession, McpSessionStore};
@@ -461,6 +463,12 @@ pub struct AddConnectionRequest {
     pub ssl: bool,
     #[schemars(extend("type" = "string"))]
     pub driver_profile: Option<String>,
+    /// Dialect-specific external configuration. Nacos: camelCase admin config
+    /// (`implementation`, `versionMode`, `contextPath`, `serverAddr`,
+    /// `namespace`, `auth`, …). Omitted Nacos fields are filled from
+    /// host/port/username/password/database with the desktop defaults
+    /// (`implementation=nacos`, `versionMode=v2`, `contextPath=/nacos`).
+    pub external_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -3915,6 +3923,8 @@ impl DbxMcpServer {
                 partition: request.partition,
                 offset: request.offset,
                 timestamp: None,
+                end_timestamp: None,
+                sort_order: None,
             };
             match self.backend.peek_messages(&resolved.connection, topic, count, options).await {
                 Ok(result) => text(format_peek_messages_result(result, count as usize)),
@@ -4160,7 +4170,7 @@ impl DbxMcpServer {
             Some(port) => port,
             None => return text("Port is required for this database type."),
         };
-        let config = match new_connection_config(
+        let config = match new_connection_config_with_external_config(
             Uuid::new_v4().to_string(),
             request.name,
             db_type,
@@ -4171,6 +4181,7 @@ impl DbxMcpServer {
             request.database,
             request.ssl,
             request.driver_profile,
+            request.external_config,
         ) {
             Ok(config) => config,
             Err(error) => return tool_error("INVALID_CONNECTION", error),

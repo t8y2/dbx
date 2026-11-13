@@ -549,6 +549,7 @@ fn static_tunnel_bypass(config: &ConnectionConfig, plugin_proxy_route: Option<&s
     let (kind, route) = match config.db_type {
         DatabaseType::Sqlite => ("SQLite", "a remote worker over SSH"),
         DatabaseType::ClickHouse => ("ClickHouse", "a SOCKS5 route"),
+        DatabaseType::Consul => ("Consul", "a SOCKS5 route"),
         DatabaseType::Turso => ("Turso", "a SOCKS5 route"),
         DatabaseType::Redis if config.uses_redis_cluster() => ("Redis Cluster", "per-node tunnels"),
         DatabaseType::Redis if config.uses_redis_sentinel() => ("Redis Sentinel", "per-node tunnels"),
@@ -2410,10 +2411,11 @@ impl AppState {
             .with_database_info(database_info_from_protocol_value(&response)));
         }
 
+        // A static tunnel has already chosen the TCP port, even if it is 1433.
         db::sqlserver::connect_with_port_explicit(
             host,
             port,
-            config.sqlserver_port_explicit(),
+            config.sqlserver_port_explicit() || config.has_effective_transport_layers(),
             &config.username,
             &config.password,
             config.database.as_deref(),
@@ -2454,7 +2456,7 @@ impl AppState {
         let client = db::sqlserver::connect_with_port_explicit(
             host,
             port,
-            config.sqlserver_port_explicit(),
+            config.sqlserver_port_explicit() || config.has_effective_transport_layers(),
             &config.username,
             &config.password,
             config.database.as_deref(),
@@ -3929,13 +3931,8 @@ impl AppState {
                 PoolKind::Nacos
             }
             DatabaseType::Consul => {
-                let mut consul_config = crate::consul::ConsulConfig::from_connection(&db_config)?;
-                let original_host = consul_config.base_url.host_str().unwrap_or_default();
-                let original_port = consul_config.base_url.port_or_known_default().unwrap_or(db_config.port);
-                if host != original_host || port != original_port {
-                    consul_config = consul_config.with_connect_override(&host, port);
-                }
-                let client = crate::consul::ConsulClient::new(consul_config).await?;
+                let consul_config = consul_config_for_endpoint(&db_config, &host, port, runtime_proxy.as_ref())?;
+                let client = crate::consul::ConsulClient::new_with_proxy(consul_config, runtime_proxy).await?;
                 client.probe().await?;
                 PoolKind::Consul(client)
             }
@@ -4614,8 +4611,10 @@ impl AppState {
             }
         }
         let resolved_transport = ResolvedTransportLayers::resolve(&transport_layers)?;
-        if matches!(config.db_type, DatabaseType::ClickHouse | DatabaseType::CloudflareD1 | DatabaseType::Turso)
-            && matches!(transport_layers.last(), Some(TransportLayerConfig::Ssh(_) | TransportLayerConfig::Proxy(_)))
+        if matches!(
+            config.db_type,
+            DatabaseType::ClickHouse | DatabaseType::CloudflareD1 | DatabaseType::Turso | DatabaseType::Consul
+        ) && matches!(transport_layers.last(), Some(TransportLayerConfig::Ssh(_) | TransportLayerConfig::Proxy(_)))
         {
             return Ok(ConnectionTransportPlan {
                 source_profile_ids,
@@ -8160,6 +8159,30 @@ fn parse_consul_server_host_port(config: &ConnectionConfig) -> Option<(String, u
     Some((url.host_str()?.to_string(), url.port_or_known_default()?))
 }
 
+fn consul_config_for_endpoint(
+    config: &ConnectionConfig,
+    host: &str,
+    port: u16,
+    runtime_proxy: Option<&PluginRuntimeProxy>,
+) -> Result<crate::consul::ConsulConfig, String> {
+    let consul_config = crate::consul::ConsulConfig::from_connection(config)?;
+    let original_host = consul_config.base_url.host_str().unwrap_or_default();
+    let original_port = consul_config.base_url.port_or_known_default().unwrap_or(config.port);
+
+    // Proxy routes preserve the logical URL and therefore work for both host
+    // names and IP literals. Keep the override marker as a transport safety
+    // signal even though the proxy client does not use it for DNS routing.
+    if runtime_proxy.is_some()
+        || config.has_effective_transport_layers()
+        || host != original_host
+        || port != original_port
+    {
+        Ok(consul_config.with_connect_override(host, port))
+    } else {
+        Ok(consul_config)
+    }
+}
+
 fn parse_mqtt_broker_host_port(config: &ConnectionConfig) -> Option<(String, u16)> {
     let value = config
         .external_config
@@ -8981,17 +9004,18 @@ mod tests {
     use super::{
         agent_connect_timeout, clickhouse_http_proxy, connection_configs_pool_equivalent,
         connection_configs_session_credentials_compatible, connection_probe_endpoints, connection_remote_endpoint,
-        connection_url_for_endpoint, database_connection_config, database_connection_config_with_catalog,
-        gaussdb_identifier_quote_from_query_result, gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver,
-        kafka_loopback_local_port_error, kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead,
-        metadata_connection_config, metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries,
-        oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint, primary_tunnel_fixed_local_port,
-        redact_transport_url, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
-        redis_sentinel_transport_prefix, report_connection_liveness_lost, sqlserver_legacy_agent_config,
-        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, ssh_local_port_config_error,
-        task_client_session_id, transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool,
-        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
-        TxnConnection, CLOUDFLARE_D1_LOCAL_PORT_ERROR, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE,
+        connection_url_for_endpoint, consul_config_for_endpoint, database_connection_config,
+        database_connection_config_with_catalog, gaussdb_identifier_quote_from_query_result,
+        gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver, kafka_loopback_local_port_error,
+        kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead, metadata_connection_config,
+        metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
+        prestosql_jdbc_config_for_endpoint, primary_tunnel_fixed_local_port, redact_transport_url,
+        redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
+        report_connection_liveness_lost, sqlserver_legacy_agent_config, sqlserver_legacy_driver_error,
+        sqlserver_uses_legacy_driver, ssh_local_port_config_error, task_client_session_id,
+        transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
+        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind, TxnConnection,
+        CLOUDFLARE_D1_LOCAL_PORT_ERROR, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE,
         PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
@@ -10778,6 +10802,7 @@ mod tests {
                 None,
                 unsupported("ClickHouse", "a SOCKS5 route"),
             ),
+            ("consul", single(config_of_type(DatabaseType::Consul)), None, unsupported("Consul", "a SOCKS5 route")),
             (
                 "cloudflare d1",
                 single(config_of_type(DatabaseType::CloudflareD1)),
@@ -10964,8 +10989,13 @@ mod tests {
     #[test]
     fn ssh_local_port_is_rejected_for_exactly_the_connection_types_without_a_static_tunnel() {
         let layers = [ssh_layer_with_port(Some(4059), "")];
-        let rejected =
-            [DatabaseType::Sqlite, DatabaseType::ClickHouse, DatabaseType::CloudflareD1, DatabaseType::Turso];
+        let rejected = [
+            DatabaseType::Sqlite,
+            DatabaseType::ClickHouse,
+            DatabaseType::Consul,
+            DatabaseType::CloudflareD1,
+            DatabaseType::Turso,
+        ];
 
         for db_type in DatabaseType::ALL {
             let result = ssh_local_port_config_error(&config_of_type(*db_type), &layers, None);
@@ -15278,6 +15308,67 @@ for line in sys.stdin:
         assert_eq!(host, "127.0.0.1");
         state.proxy_tunnels.stop_tunnel("proxied:transport:0").await;
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn consul_transport_uses_runtime_endpoint_even_when_logical_address_matches() {
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::Consul;
+        config.host = "consul.internal".to_string();
+        config.port = 8500;
+        config.external_config = Some(serde_json::json!({
+            "serverAddr": "http://consul.internal:8500"
+        }));
+        config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            profile_id: String::new(),
+            id: "proxy".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_string(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+        })];
+
+        let consul_config = consul_config_for_endpoint(&config, "127.0.0.1", 59292, None).unwrap();
+
+        assert_eq!(consul_config.base_url.as_str(), "http://consul.internal:8500/");
+        assert_eq!(consul_config.connect_override, Some(("127.0.0.1".to_string(), 59292)));
+    }
+
+    #[test]
+    fn consul_proxy_route_preserves_ip_literal_for_tls_and_host_routing() {
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::Consul;
+        config.host = "192.0.2.51".to_string();
+        config.port = 10840;
+        config.ssl = true;
+        config.external_config = Some(serde_json::json!({
+            "serverAddr": "https://192.0.2.51:10840"
+        }));
+        let proxy = PluginRuntimeProxy::socks5("127.0.0.1".to_string(), 59292, String::new(), String::new());
+
+        let consul_config = consul_config_for_endpoint(&config, "192.0.2.51", 10840, Some(&proxy)).unwrap();
+
+        assert_eq!(consul_config.base_url.as_str(), "https://192.0.2.51:10840/");
+        assert_eq!(consul_config.connect_override, Some(("192.0.2.51".to_string(), 10840)));
+    }
+
+    #[test]
+    fn consul_without_transport_preserves_direct_endpoint() {
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::Consul;
+        config.host = "consul.internal".to_string();
+        config.port = 8500;
+        config.external_config = Some(serde_json::json!({
+            "serverAddr": "http://consul.internal:8500"
+        }));
+
+        let consul_config = consul_config_for_endpoint(&config, "consul.internal", 8500, None).unwrap();
+
+        assert_eq!(consul_config.connect_override, None);
     }
 
     #[test]

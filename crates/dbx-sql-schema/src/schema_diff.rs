@@ -25,6 +25,7 @@ use crate::types::{
 };
 
 mod mysql_charset;
+mod mysql_defaults;
 pub use mysql_charset::{MysqlTableCharset, TableCharsetDiff};
 mod oracle_indexes;
 mod oracle_routines;
@@ -5062,12 +5063,12 @@ fn default_literal(default: &str, data_type: &str, source: DialectKind, extra: O
     // is authoritative, so consult it before looking at the value at all: a
     // default is a literal unless the server says it was generated.
     if extra.is_some_and(|value| value.to_ascii_uppercase().contains("DEFAULT_GENERATED")) {
-        return normalized.to_string();
+        return mysql_defaults::generated_default(normalized, data_type);
     }
 
-    // MySQL writes an expression default wrapped in parentheses, `DEFAULT
-    // (uuid())`, and reports it that way. The wrapping is the syntax, so it is
-    // a reliable marker even when `EXTRA` is not populated. Note this asks
+    // Metadata paths that preserve DDL may keep the expression's parentheses,
+    // `DEFAULT (uuid())`. The wrapping is a reliable marker even when `EXTRA`
+    // is not populated. Note this asks
     // whether the value *is* parenthesised, not whether it merely contains a
     // parenthesis: the string default `a(b)` is not wrapped and is still
     // quoted.
@@ -12744,6 +12745,57 @@ mod tests {
     }
 
     #[test]
+    fn mysql_json_default_sync_restores_expression_syntax() {
+        use sqlparser::{dialect::MySqlDialect, parser::Parser};
+
+        let target = vec![column("pass_attr_list", "json", Some("途径点属性，路径规划使用"))];
+        for value in [r"_utf8mb4\'[0]\'", "_utf8mb4'[0]'", "(_utf8mb4'[0]')"] {
+            let source = vec![ColumnInfo {
+                column_default: Some(value.into()),
+                extra: Some("DEFAULT_GENERATED".into()),
+                ..target[0].clone()
+            }];
+            let diffs = diff_columns_with_options(&source, &target, false, false, false, 0.5);
+            assert_eq!(diffs.len(), 1);
+            assert_eq!(diffs[0].changes.len(), 1);
+            assert!(diffs[0].changes[0].starts_with("default:"));
+
+            for db_type in [DatabaseType::Mysql, DatabaseType::Goldendb] {
+                let sql = generate_schema_sync_sql(
+                    &[wrap_table_diff("place_station", diffs.clone())],
+                    &[],
+                    &[],
+                    &[],
+                    &[],
+                    db_type,
+                    Some("idms"),
+                    false,
+                    None,
+                    &[],
+                );
+                assert!(sql.contains("ALTER TABLE `idms`.`place_station`"), "{sql}");
+                assert!(
+                    sql.contains(
+                        "MODIFY COLUMN `pass_attr_list` json NOT NULL DEFAULT (_utf8mb4'[0]') COMMENT '途径点属性，路径规划使用'"
+                    ),
+                    "{value}: {sql}"
+                );
+                Parser::parse_sql(&MySqlDialect {}, &sql).expect("generated ALTER must be valid MySQL syntax");
+            }
+
+            // The same renderer is used for ADD COLUMN and reconstructed CREATE TABLE.
+            let added = diff_columns_with_options(&source, &[], false, false, false, 0.5);
+            for diff_type in ["modified", "added"] {
+                let mut table = wrap_table_diff("place_station", added.clone());
+                table.diff_type = diff_type.into();
+                let sql = gen_sql(table, DatabaseType::Mysql, None);
+                assert!(sql.contains("DEFAULT (_utf8mb4'[0]')"), "{diff_type}: {sql}");
+                Parser::parse_sql(&MySqlDialect {}, &sql).expect("generated ADD/CREATE must be valid MySQL syntax");
+            }
+        }
+    }
+
+    #[test]
     fn default_value_change_postgres() {
         let source = vec![ColumnInfo { column_default: Some("'guest'".into()), ..column("name", "varchar(50)", None) }];
         let target = vec![ColumnInfo { column_default: None, ..column("name", "varchar(50)", None) }];
@@ -12801,9 +12853,9 @@ mod tests {
         // so a column declared `DEFAULT 'a(b)'` stops emitting invalid
         // `DEFAULT a(b)`.
         assert_eq!(default_literal("a(b)", "varchar(32)", Mysql, None), "'a(b)'");
-        assert_eq!(default_literal("uuid()", "varchar(36)", Mysql, Some("DEFAULT_GENERATED")), "uuid()");
-        // MySQL wraps an expression default in parentheses and reports it that
-        // way, so the wrapping identifies it even when EXTRA is missing. That is
+        assert_eq!(default_literal("uuid()", "varchar(36)", Mysql, Some("DEFAULT_GENERATED")), "(uuid())");
+        // DDL-derived metadata may preserve an expression's parentheses, so the
+        // wrapping identifies it even when EXTRA is missing. That is
         // a different question from whether the value contains a parenthesis,
         // which is what `a(b)` above turns on.
         assert_eq!(default_literal("(uuid())", "varchar(36)", Mysql, None), "(uuid())");

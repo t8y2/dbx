@@ -100,6 +100,7 @@ export type ShortcutActionId =
   | "toggleResultsPane"
   | "focusResultGrid"
   | "focusSqlEditor"
+  | "copyActiveResult"
   | "toggleTranspose"
   | "cancelSearch"
   | "toggleSidebar"
@@ -773,6 +774,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
   {
     id: "focusSqlEditor",
     labelKey: "settings.shortcutFocusSqlEditor",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyActiveResult",
+    labelKey: "settings.shortcutCopyActiveResult",
     scope: "global",
     defaultShortcut: "",
   },

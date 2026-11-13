@@ -206,6 +206,8 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "autoSelectActiveSidebarNode",
     "sidebarPinDefaultDatabase",
     "sidebarBrowseObjectsOnDatabaseActivation",
+    "sidebarAutoExpandOnDatabaseActivation",
+    "sidebarTableClickNavigation",
     "openTabsRestoreMode",
     "autoReloadRestoredDataTabsOnOpen",
     "disconnectTabHandlingMode",
@@ -377,6 +379,7 @@ const EXPECTED_JSON_KINDS = new Map<string, string>(EDITOR_SETTINGS_DRAFT_KEYS.m
  * enum or a non-boolean flag refuses the whole file instead.
  */
 const PASS_THROUGH_BOOLEAN_KEYS = [
+  "sidebarTableClickNavigation",
   "wordWrap",
   "showWhitespace",
   "showExecutionTargetPicker",

@@ -10,7 +10,7 @@ import { notifyExportComplete } from "@/lib/export/exportReveal";
 import { dropsSchemaQualifier } from "@/lib/table/tableSelectSql";
 import * as api from "@/lib/backend/api";
 import { type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
-import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, type DataGridCopyExtractorId, type DataGridExtractRequest, type DataGridExtractorOptions, type DataGridPrimaryKeyMode } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, type DataGridCopyExtractorId, type DataGridCopyPreference, type DataGridExtractRequest, type DataGridExtractorOptions, type DataGridPrimaryKeyMode } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { useToast } from "@/composables/useToast";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { clipboardCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
@@ -307,7 +307,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   const visibleColumnIndexes = visibleColumnIndexesOption ?? computed(() => columns.value.map((_, index) => index));
   const hasColumnSelection = hasColumnSelectionOption ?? computed(() => false);
 
-  async function copyText(text: string, gridCopy?: { rows: readonly (readonly unknown[])[]; header?: readonly unknown[] }, richHtml?: string) {
+  async function copyText(text: string, gridCopy?: { rows: readonly (readonly unknown[])[]; header?: readonly unknown[] }, richHtml?: string, notify = true) {
     const copiedRows = gridCopy?.rows.map((row) => [...row]);
     const copiedHeader = gridCopy?.header ? [...gridCopy.header] : undefined;
     clearDataGridClipboardCopy();
@@ -317,7 +317,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       // Remember the text as it now sits on the clipboard, so a paste back into
       // the grid still matches and keeps its null-cell metadata.
       if (copiedRows) rememberDataGridClipboardCopy(clipboardLineEndings(text), copiedRows, copiedHeader);
-      toast(t("grid.copied"));
+      if (notify) toast(t("grid.copied"));
       return true;
     } catch (e: any) {
       toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
@@ -990,14 +990,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }).length;
   }
 
-  async function buildMongoExtractorInsert(extractorOptions: DataGridExtractorOptions, rowLimit?: number): Promise<string | undefined> {
+  async function buildMongoExtractorInsert(extractorOptions: DataGridExtractorOptions, rowLimit?: number, allRows?: RowItem[]): Promise<string | undefined> {
     const data: CopyInsertData | null =
-      hasRowSelection.value || !hasCellSelection.value
+      allRows || hasRowSelection.value || !hasCellSelection.value
         ? {
             columns: columns.value,
             sourceColumns: sourceColumns.value,
             columnTypes: columnTypes.value?.map((type) => type ?? undefined),
-            rows: insertEligibleRows(),
+            rows: allRows ?? insertEligibleRows(),
           }
         : selectionInsertData();
     if (!data) return undefined;
@@ -1017,11 +1017,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       .filter((index) => index >= 0);
   }
 
-  async function buildMongoExtractorUpdate(request: DataGridExtractRequest, rowLimit?: number): Promise<string | undefined> {
+  async function buildMongoExtractorUpdate(request: DataGridExtractRequest, rowLimit?: number, allRows?: RowItem[]): Promise<string | undefined> {
     const target = options.mongoUpdateTarget?.value;
     const documents = options.mongoDocuments?.value;
     if (!target || !documents) return undefined;
-    const rows = updateEligibleRows();
+    const rows = allRows ?? updateEligibleRows();
     if (rows.length === 0) return undefined;
     const limitedRows = rowLimit === undefined ? rows : rows.slice(0, rowLimit);
     const allCopyColumns = effectiveColumns(sourceColumns.value, columns.value).map((column) => column ?? "");
@@ -1049,10 +1049,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return statements.length > 0 ? statements.join("\n") : undefined;
   }
 
-  function canBuildMongoExtractorUpdate(request: DataGridExtractRequest): boolean {
+  function canBuildMongoExtractorUpdate(request: DataGridExtractRequest, allRows?: RowItem[]): boolean {
     const target = options.mongoUpdateTarget?.value;
     const documents = options.mongoDocuments?.value;
-    const rows = updateEligibleRows();
+    const rows = allRows ?? updateEligibleRows();
     if (!target || !documents || rows.length === 0) return false;
 
     const normalizedIdColumn = normalizeColumnName(target.idColumn);
@@ -1066,7 +1066,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  const { extractWithExtractor, copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor } = useDataGridExtractor({
+  const extractorConfig: Parameters<typeof useDataGridExtractor>[0] = {
     allowExtractor: (extractor) => !options.mysqlDataCharsetReadOnly?.value || (!extractor.startsWith("sql-") && extractor !== "where-clause"),
     columns,
     displayItems,
@@ -1112,7 +1112,48 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     },
     contextCell,
     contextSelectionIsSynthetic,
+  };
+  const { extractWithExtractor, copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor } = useDataGridExtractor(extractorConfig);
+
+  // A separate, read-only selection describes Copy all without touching the
+  // grid's cell/row selection or its right-click target. Use the same visible,
+  // loaded rows as the existing Copy all action; do not fetch another page.
+  const allVisibleCellMatrix = computed<CellSelectionMatrix>(() => {
+    const rowIndexes: number[] = [];
+    const rows: SelectionData["rows"] = [];
+    displayItems.value.forEach((item, index) => {
+      if (item.isDraft) return;
+      rowIndexes.push(index);
+      rows.push(item.data);
+    });
+    return { rowIndexes, columnIndexes: columns.value.map((_, index) => index), columns: columns.value, rows };
   });
+  const allVisibleUpdateRows = () => displayItems.value.filter((item) => !item.isDraft && !item.isNew && !item.isDeleted);
+  const wholeResultExtractor = useDataGridExtractor({
+    ...extractorConfig,
+    hasCellSelection: computed(() => allVisibleCellMatrix.value.rows.length > 0 && columns.value.length > 0),
+    selectedCells: allVisibleCellMatrix,
+    selectedCellMatrix: allVisibleCellMatrix,
+    hasRowSelection: computed(() => false),
+    hasColumnSelection: computed(() => false),
+    selectedRowIds: computed(() => new Set<number>()),
+    contextCell: computed(() => null),
+    contextSelectionIsSynthetic: computed(() => false),
+    buildMongoInsert: (extractorOptions, rowLimit) =>
+      buildMongoExtractorInsert(
+        extractorOptions,
+        rowLimit,
+        displayItems.value.filter((item) => !item.isDraft),
+      ),
+    buildMongoUpdate: (request, rowLimit) => buildMongoExtractorUpdate(request, rowLimit, allVisibleUpdateRows()),
+    canBuildMongoUpdate: (request) => canBuildMongoExtractorUpdate(request, allVisibleUpdateRows()),
+    copyText: (text, gridCopy, richHtml) => copyText(text, gridCopy, richHtml, false),
+    onCopied: (result) => toast(t("grid.copiedRows", { count: result.rowCount })),
+  });
+
+  function copyAllWithPreference(preference: DataGridCopyPreference, isSessionValid?: () => boolean): Promise<boolean> {
+    return wholeResultExtractor.copyWithPreference(preference, extractorOptionsOption?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, () => !scopeDisposed && (isSessionValid?.() ?? true));
+  }
 
   async function copyAll() {
     const rows = (await resolveVisibleRowValues(displayItems.value.filter((item) => !item.isDraft))).map((item) => item.data);
@@ -2412,7 +2453,16 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const meta = tableMeta.value;
     // The backend table exporter currently builds two-part table names. External
     // Doris/StarRocks catalogs need the data-tab paginator's three-part SQL.
-    if (rowIds !== undefined || columnIndexes !== undefined || context.value !== "table-data" || !meta || meta.catalog || !connectionId.value || !database.value) {
+    if (rowIds !== undefined || context.value !== "table-data" || !meta || meta.catalog || !connectionId.value || !database.value) {
+      return false;
+    }
+    // A grid column subset still streams from the backend: SQL INSERT exports
+    // project through `selectedColumns` and every other format narrows the
+    // SELECT column list. Bailing here would push the export onto the local
+    // per-page re-execution path, which re-runs the query once per page
+    // (issue #14732).
+    const projectedColumns = columnIndexes === undefined ? undefined : columnIndexes.map((index) => ({ index, name: columns.value[index] })).filter((entry): entry is { index: number; name: string } => entry.name !== undefined);
+    if (projectedColumns !== undefined && projectedColumns.length === 0) {
       return false;
     }
     if (format !== "sql" && hasActiveColumnFormatters(columnIndexes)) {
@@ -2421,7 +2471,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
     const editorSettings = { ...useSettingsStore().editorSettings };
     const exportId = uuid();
-    const exportedColumns = format === "sql" ? effectiveColumns(sourceColumns.value, columns.value).map((column, index) => column ?? columns.value[index]!) : [...columns.value];
+    const exportedColumns = format === "sql" ? effectiveColumns(sourceColumns.value, columns.value).map((column, index) => column ?? columns.value[index]!) : (projectedColumns?.map((entry) => entry.name) ?? [...columns.value]);
     const request: api.TableExportRequest = {
       exportId,
       connectionId: connectionId.value,
@@ -2443,9 +2493,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       csvQuoteMode: editorSettings.csvQuoteMode,
       nullLiteral: csvNullLiteralForMode(editorSettings.csvNullMode),
       columns: exportedColumns,
-      columnTypes: columnTypes.value ? [...columnTypes.value] : undefined,
+      columnTypes: columnTypes.value ? (projectedColumns?.map((entry) => columnTypes.value?.[entry.index]) ?? [...columnTypes.value]) : undefined,
       ...(format === "sql" ? { columnExtras: sqlExportColumnExtras(exportedColumns) } : {}),
-      columnComments: format === "xlsx" ? buildXlsxHeaderOverrides(columns.value, visibleXlsxColumnComments.value, headerMode) : undefined,
+      columnComments: format === "xlsx" ? buildXlsxHeaderOverrides(projectedColumns?.map((entry) => entry.name) ?? columns.value, projectedColumns ? projectedColumns.map((entry) => visibleXlsxColumnComments.value?.[entry.index]) : visibleXlsxColumnComments.value, headerMode) : undefined,
       headerCommentRows: format === "xlsx" ? xlsxHeaderUsesCommentRows(headerMode) : undefined,
       primaryKeys: meta.primaryKeys ? [...meta.primaryKeys] : undefined,
       ...sqlExportPrimaryKeyOptions(format),
@@ -2656,7 +2706,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     columnIndexes?: number[],
     selectedMode?: ManualExportMode,
   ): Promise<boolean> {
-    if (rowIds !== undefined || columnIndexes !== undefined || context.value !== "results" || !queryResultExportRequest) {
+    // SQL keeps the backend streaming path for a grid column subset: the
+    // INSERT projection travels in `selectedColumns` and the query runs once.
+    // Other formats have no write-side projection, so a subset stays local.
+    if (rowIds !== undefined || (columnIndexes !== undefined && format !== "sql") || context.value !== "results" || !queryResultExportRequest) {
       return false;
     }
     if (format !== "sql" && hasActiveColumnFormatters(columnIndexes)) {
@@ -2750,7 +2803,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportQueryResultSqlViaBackend(rowIds: number[] | undefined, sqlExportOptions: SqlExportOptions, columnIndexes?: number[]): Promise<boolean> {
-    if (!isTauriRuntime() || columnIndexes !== undefined) return false;
+    if (!isTauriRuntime()) return false;
     return exportQueryResultViaBackend("sql", rowIds, false, "name", true, sqlExportOptions, false, columnIndexes);
   }
 
@@ -3004,6 +3057,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     copyRowCount,
     canCopyRow,
     copyAll,
+    copyAllWithPreference,
     copyWithExtractor,
     copyWithPreference,
     previewWithExtractor,

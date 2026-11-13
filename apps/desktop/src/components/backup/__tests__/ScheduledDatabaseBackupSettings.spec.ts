@@ -1030,7 +1030,7 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
       status: "running",
       startedAt: "2026-08-18T00:00:00.000Z",
       files: [],
-      progressPercent: 25,
+      progressPercent: 25.678,
     } satisfies DatabaseBackupRun;
     mocks.runs.push(activeRun);
     mocks.activeRuns.push(activeRun);
@@ -1040,8 +1040,9 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     await mountSettings();
 
     const progress = document.body.querySelector('[role="progressbar"]');
-    expect(progress?.getAttribute("aria-valuenow")).toBe("25");
-    expect(document.body.textContent).toContain("25%");
+    expect(progress?.getAttribute("aria-valuenow")).toBe("25.678");
+    expect(document.body.textContent).toContain("26%");
+    expect(document.body.textContent).not.toContain("25.678%");
     expect(buttonWithTitle(String(i18n.global.t("databaseBackup.renameBackup"))).disabled).toBe(true);
 
     buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();

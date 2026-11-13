@@ -1207,6 +1207,42 @@ impl SqlStatementSplitter {
             && line[..9].eq_ignore_ascii_case(b"delimiter")
             && !has_executable_sql_with_options(self.buffer[..start].trim(), self.options)
     }
+
+    /// Why the buffered trailing statement cannot be complete at end of input.
+    ///
+    /// A file can be truncated while it is being copied, or an upload can be
+    /// cut off. In that case the splitter still holds the fragment of the last
+    /// statement, but no amount of further parsing can make it valid: the
+    /// string literal, quoted identifier, or block comment never closes. The
+    /// importer must report this instead of sending the fragment to the
+    /// database, where it only surfaces as a confusing server syntax error
+    /// (#14455).
+    pub fn incomplete_tail_reason(&self) -> Option<&'static str> {
+        if self.dollar_quote_tag.is_some() {
+            return Some("unterminated dollar-quoted string");
+        }
+        if self.block_comment_depth > 0 {
+            return Some("unclosed block comment");
+        }
+        if self.oracle_q_quote.is_open() {
+            return Some("unterminated q-quoted literal");
+        }
+        if self.in_single_quote {
+            return Some("unterminated string literal");
+        }
+        if self.in_double_quote {
+            return Some("unterminated quoted string");
+        }
+        if self.in_backtick {
+            return Some("unterminated quoted identifier");
+        }
+        None
+    }
+
+    /// Byte length of the trailing statement text still held by the splitter.
+    pub fn pending_tail_len(&self) -> usize {
+        self.buffer.len()
+    }
 }
 
 fn has_odd_trailing_backslashes(sql: &str) -> bool {
@@ -1966,8 +2002,8 @@ fn split_sql_batch_ranges(sql: &str, profile: SqlDialectProfile) -> Vec<SqlState
 }
 
 fn push_batch_range(ranges: &mut Vec<SqlStatementRange>, sql: &str, start: usize, end: usize) {
-    let Some((relative_start, relative_end)) = executable_sql_bounds(&sql[start..end], SqlParsingOptions::default())
-    else {
+    let options = SqlParsingOptions::for_database_type(DatabaseType::SqlServer);
+    let Some((relative_start, relative_end)) = executable_sql_bounds(&sql[start..end], options) else {
         return;
     };
     let statement_start = start + relative_start;
@@ -2290,7 +2326,9 @@ fn starts_with_sqlserver_control_flow_batch(sql: &str) -> bool {
 }
 
 pub fn starts_with_sqlserver_module_ddl(sql: &str) -> bool {
-    let tokens = first_sql_tokens(sql, 4);
+    let executable =
+        leading_executable_sql_with_options(sql, SqlParsingOptions::for_database_type(DatabaseType::SqlServer));
+    let tokens = first_sql_tokens(executable, 4);
     if tokens.len() >= 4
         && tokens[0].eq_ignore_ascii_case("CREATE")
         && tokens[1].eq_ignore_ascii_case("OR")
@@ -2870,6 +2908,24 @@ pub fn optimize_sql_file_import_statements_with_max_insert_batch_statements(
                 });
             }
             SqlFileStatementAction::Execute(sql) => {
+                // A single extended INSERT (mysqldump emits one per table) can be
+                // far larger than the failure-log capture limit and, on a small
+                // `max_allowed_packet`, than one protocol packet. Split it at
+                // top-level tuple boundaries so the database never receives an
+                // oversized statement whose failure detail the log would then
+                // have to truncate.
+                if let Some(parts) =
+                    split_oversized_insert_statement(&sql, db_type, driver_profile, SQL_FILE_INSERT_STATEMENT_MAX_BYTES)
+                {
+                    flush_pending_insert(&mut optimized, &mut pending_insert);
+                    optimized.extend(parts.into_iter().map(|part| SqlFileImportStatement {
+                        kind: SqlFileImportStatementKind::Execute,
+                        source_sqls: vec![part.clone()],
+                        sql: part,
+                        source_statement_count: 1,
+                    }));
+                    continue;
+                }
                 // Combining separate MySQL INSERT statements changes session
                 // semantics such as LAST_INSERT_ID(), so execute them with the
                 // same statement boundaries as the source file.
@@ -2920,6 +2976,14 @@ fn flush_pending_insert(optimized: &mut Vec<SqlFileImportStatement>, pending_ins
 
 const SQL_FILE_INSERT_BATCH_MAX_STATEMENTS: usize = 500;
 const SQL_FILE_INSERT_BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
+/// Largest single statement DBX plans for an SQL file import.
+///
+/// 256 KiB keeps one statement small enough for a conservative MySQL packet
+/// budget and for a failing statement to be captured in full by the failure
+/// log, which only ever records the statement text up to a cap. Anything larger
+/// that is a plain multi-row `INSERT ... VALUES (...), (...)` is split at tuple
+/// boundaries; other oversized statements are left untouched.
+pub const SQL_FILE_INSERT_STATEMENT_MAX_BYTES: usize = 256 * 1024;
 
 /// How a merged insert batch must be spelled for its target dialect.
 ///
@@ -3127,6 +3191,117 @@ fn parse_insert_values_tail(tail: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Splits a plain multi-row `INSERT ... VALUES (...), (...)` that is larger than
+/// `max_statement_bytes` into several statements that each fit the cap.
+///
+/// Splitting happens only at top-level tuple boundaries and only for
+/// MySQL-compatible import targets, where a single extended INSERT is the
+/// common shape of a dump and can otherwise exceed a small
+/// `max_allowed_packet` (or fill the whole failure-log capture budget). Every
+/// returned statement repeats the original `INSERT INTO ...` prefix, so the
+/// inserted rows and their order are unchanged.
+///
+/// Returns `None` when the statement does not need splitting or cannot be split
+/// safely (not a plain multi-row INSERT, already within the cap, a suffix such
+/// as `ON DUPLICATE KEY UPDATE`, or a single tuple larger than the cap). In
+/// those cases the caller keeps the statement exactly as written.
+pub fn split_oversized_insert_statement(
+    sql: &str,
+    db_type: Option<DatabaseType>,
+    driver_profile: Option<&str>,
+    max_statement_bytes: usize,
+) -> Option<Vec<String>> {
+    let db_type = db_type?;
+    if !is_mysql_compatible_import_target(&db_type, driver_profile) {
+        return None;
+    }
+    let options = SqlParsingOptions::for_database_type(db_type);
+    let insert = parse_mergeable_insert(sql, options)?;
+    split_insert_value_tuples(insert, options, max_statement_bytes)
+}
+
+fn split_insert_value_tuples(
+    insert: MergeableInsert,
+    options: SqlParsingOptions,
+    max_statement_bytes: usize,
+) -> Option<Vec<String>> {
+    const VALUES_PREFIX: &str = " VALUES ";
+    let overhead = insert.prefix.len() + VALUES_PREFIX.len() + 1;
+    if overhead + insert.values.len() <= max_statement_bytes {
+        return None;
+    }
+    let budget = max_statement_bytes.checked_sub(overhead)?;
+    let ranges = insert_value_tuple_ranges(&insert.values, options)?;
+    if ranges.len() < 2 {
+        return None;
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for (start, end) in ranges {
+        let tuple = &insert.values[start..end];
+        if tuple.len() > budget {
+            // A single tuple alone cannot fit: splitting further would not make
+            // the statement safe, so leave the original untouched and let the
+            // database report its own size error.
+            return None;
+        }
+        let separator = if current.is_empty() { 0 } else { ",\n".len() };
+        if !current.is_empty() && current.len() + separator + tuple.len() > budget {
+            parts.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push_str(",\n");
+        }
+        current.push_str(tuple);
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    if parts.len() < 2 {
+        return None;
+    }
+
+    Some(parts.into_iter().map(|values| format!("{}{VALUES_PREFIX}{values};", insert.prefix)).collect())
+}
+
+/// Byte ranges of the top-level `(...)` tuples in an INSERT values tail.
+fn insert_value_tuple_ranges(values: &str, options: SqlParsingOptions) -> Option<Vec<(usize, usize)>> {
+    let mut scanner = SqlScanner::with_profile(options.profile);
+    let mut depth = 0usize;
+    let mut ranges = Vec::new();
+    let mut tuple_start = 0usize;
+
+    for (idx, ch) in values.char_indices() {
+        scanner.step(values, idx, ch);
+        if scanner.is_masked() {
+            continue;
+        }
+        match ch {
+            '(' => {
+                if depth == 0 {
+                    tuple_start = idx;
+                }
+                depth += 1;
+            }
+            ')' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    ranges.push((tuple_start, idx + ch.len_utf8()));
+                }
+            }
+            ',' if depth == 0 => {}
+            _ if depth == 0 && !ch.is_whitespace() => return None,
+            _ => {}
+        }
+    }
+
+    (depth == 0 && !ranges.is_empty()).then_some(ranges)
 }
 
 #[derive(Default)]
@@ -4644,11 +4819,15 @@ fn executable_sql_bounds(statement: &str, options: SqlParsingOptions) -> Option<
         return None;
     }
     let executable_start = trimmed.len() - executable.len();
-    let start = if options.profile.preserves_tdsql_leading_directives {
-        crate::tdsql_mysql::leading_directive_start(trimmed, executable_start).unwrap_or(executable_start)
-    } else {
-        executable_start
-    };
+    let start =
+        if options.profile.keeps_sqlserver_module_batch_at_cursor && starts_with_sqlserver_module_ddl(executable) {
+            // SQL Server stores a module's leading comments as part of its definition.
+            trimmed.len() - trimmed.trim_start().len()
+        } else if options.profile.preserves_tdsql_leading_directives {
+            crate::tdsql_mysql::leading_directive_start(trimmed, executable_start).unwrap_or(executable_start)
+        } else {
+            executable_start
+        };
     Some((start, trimmed_end))
 }
 
@@ -4742,11 +4921,12 @@ mod tests {
     use super::{
         contains_or_fuzzy_match, dash_dash_starts_line_comment, decode_sql_file_bytes,
         find_statement_at_cursor_for_database, fuzzy_filter_enabled, fuzzy_like_pattern_with_escape,
-        fuzzy_subsequence_match, optimize_sql_file_import_statements, prepare_sql_file_statement, split_sql_script,
-        split_sql_statement_ranges_with_options, split_sql_statements_for_database, starts_with_executable_sql_keyword,
+        fuzzy_subsequence_match, optimize_sql_file_import_statements, prepare_sql_file_statement,
+        split_oversized_insert_statement, split_sql_script, split_sql_statement_ranges_with_options,
+        split_sql_statements_for_database, starts_with_executable_sql_keyword,
         starts_with_executable_sql_keyword_for_database, starts_with_executable_sql_keyword_sequence,
         starts_with_oracle_style_routine_body, SqlDialectProfile, SqlFileRequest, SqlFileStatementAction,
-        SqlParsingOptions, SqlStatementSplitter,
+        SqlParsingOptions, SqlStatementSplitter, SQL_FILE_INSERT_STATEMENT_MAX_BYTES,
     };
 
     #[test]
@@ -5835,6 +6015,93 @@ mod tests {
         assert_eq!(optimized[0].sql, statements[0]);
     }
 
+    fn oversized_mysql_insert(rows: usize) -> (String, Vec<String>) {
+        let tuples: Vec<String> = (0..rows).map(|row| format!("({row},'天沼小学校{row}','a;b--c#d')")).collect();
+        (format!("INSERT INTO `t` (`id`, `name`, `note`) VALUES {}", tuples.join(",")), tuples)
+    }
+
+    #[test]
+    fn splits_oversized_mysql_insert_at_tuple_boundaries() {
+        let (sql, tuples) = oversized_mysql_insert(600);
+        let max = 2048;
+        assert!(sql.len() > max);
+
+        let parts = split_oversized_insert_statement(&sql, Some(DatabaseType::Mysql), None, max).unwrap();
+
+        assert!(parts.len() > 1);
+        for part in &parts {
+            assert!(part.len() <= max, "part is {} bytes, cap is {max}", part.len());
+            assert!(part.starts_with("INSERT INTO `t` (`id`, `name`, `note`) VALUES "));
+            assert!(part.ends_with(';'));
+            assert_eq!(split_sql_statements_for_database(part, DatabaseType::Mysql).len(), 1);
+        }
+        let rejoined = parts
+            .iter()
+            .map(|part| part.trim_end_matches(';').split_once(" VALUES ").expect("VALUES keyword").1.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(rejoined.replace(",\n", ","), tuples.join(","));
+    }
+
+    #[test]
+    fn split_preserves_quotes_escapes_and_comments_inside_values() {
+        let sql = "INSERT INTO `t` VALUES (1,'a\\'b','x),(y'),(2,'c\\\\d','ef;gh'),(3,'-- no comment','/* nope */'),(4,'多字节','tail')";
+        let parts = split_oversized_insert_statement(sql, Some(DatabaseType::Mysql), None, 80).unwrap();
+
+        assert!(parts.len() > 1, "{parts:?}");
+        for part in &parts {
+            assert!(part.len() <= 80, "{} > 80", part.len());
+            assert_eq!(split_sql_statements_for_database(part, DatabaseType::Mysql).len(), 1);
+            // Every part must still be one balanced INSERT with a quoted tail.
+            assert!(part.starts_with("INSERT INTO `t` VALUES "));
+        }
+        let rejoined = parts
+            .iter()
+            .map(|part| part.trim_end_matches(';').split_once(" VALUES ").expect("VALUES keyword").1.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(
+            rejoined.replace(",\n", ","),
+            "(1,'a\\'b','x),(y'),(2,'c\\\\d','ef;gh'),(3,'-- no comment','/* nope */'),(4,'多字节','tail')"
+        );
+    }
+
+    #[test]
+    fn does_not_split_inserts_that_are_small_or_unsupported() {
+        // Within the cap.
+        let small = "INSERT INTO `t` VALUES (1),(2)";
+        assert_eq!(split_oversized_insert_statement(small, Some(DatabaseType::Mysql), None, 4096), None);
+        // Not MySQL-compatible.
+        let (sql, _) = oversized_mysql_insert(600);
+        assert_eq!(split_oversized_insert_statement(&sql, Some(DatabaseType::Postgres), None, 2048), None);
+        // Non-INSERT statement.
+        let select = format!("SELECT * FROM `t` WHERE note IN ('{}')", "x".repeat(4096));
+        assert_eq!(split_oversized_insert_statement(&select, Some(DatabaseType::Mysql), None, 2048), None);
+        // ON DUPLICATE KEY UPDATE suffix would be lost by the VALUES parser.
+        let upsert = format!(
+            "INSERT INTO `t` VALUES {} ON DUPLICATE KEY UPDATE `name` = VALUES(`name`)",
+            (0..600).map(|row| format!("({row},'n{row}')")).collect::<Vec<_>>().join(",")
+        );
+        assert_eq!(split_oversized_insert_statement(&upsert, Some(DatabaseType::Mysql), None, 2048), None);
+        // A single tuple larger than the cap cannot be split.
+        let huge_tuple = format!("INSERT INTO `t` VALUES (1,'{}'),(2,'b')", "x".repeat(4096));
+        assert_eq!(split_oversized_insert_statement(&huge_tuple, Some(DatabaseType::Mysql), None, 2048), None);
+    }
+
+    #[test]
+    fn optimizer_splits_oversized_mysql_insert_before_execution() {
+        let (sql, tuples) = oversized_mysql_insert(8000);
+        assert!(sql.len() > SQL_FILE_INSERT_STATEMENT_MAX_BYTES);
+
+        let optimized = optimize_sql_file_import_statements(&[sql], Some(DatabaseType::Mysql), None);
+
+        assert!(optimized.len() > 1);
+        assert!(optimized.iter().all(|statement| statement.source_statement_count == 1));
+        assert!(optimized.iter().all(|statement| statement.sql.len() <= SQL_FILE_INSERT_STATEMENT_MAX_BYTES));
+        let total_tuples: usize = optimized.iter().map(|statement| statement.sql.matches("天沼小学校").count()).sum();
+        assert_eq!(total_tuples, tuples.len());
+    }
+
     #[test]
     fn keeps_insert_batches_separate_for_different_targets_or_suffixes() {
         let statements = vec![
@@ -5917,6 +6184,38 @@ mod tests {
             super::split_sql_batches("SELECT 1;\n/*\nGO\n*/\nSELECT 2;\nGO\nSELECT 3;"),
             vec!["SELECT 1;\n/*\nGO\n*/\nSELECT 2;", "SELECT 3;"]
         );
+    }
+
+    #[test]
+    fn sqlserver_batches_preserve_module_header_comments() {
+        for header in [
+            "-- 存储过程名 : usp_GetUserById\n-- 作者 : 张三",
+            "/* 根据用户ID查询用户信息 */",
+            "/* 说明 /* 内部说明 */\nGO\n保留完整注释 */",
+        ] {
+            for operation in ["CREATE PROCEDURE", "ALTER PROC", "CREATE OR ALTER PROCEDURE"] {
+                let procedure = format!(
+                    "{header}\n{operation} dbo.usp_GetUserById @UserId INT AS\nBEGIN\n    SET NOCOUNT ON;\n    -- 查询用户\n    SELECT UserId FROM dbo.Users WHERE UserId = @UserId;\nEND;"
+                );
+                let sql = format!("SELECT 0;\nGO\n\n{procedure}\nGO\nSELECT 2;");
+
+                assert_eq!(super::split_sql_batches(&sql), vec!["SELECT 0;", &procedure, "SELECT 2;"]);
+                for marker in [header, operation, "WHERE UserId"] {
+                    let cursor = sql[..sql.find(marker).unwrap()].encode_utf16().count();
+                    assert_eq!(
+                        super::find_statement_at_cursor_for_database(&sql, cursor, DatabaseType::SqlServer),
+                        procedure,
+                        "{operation}: cursor on {marker}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sqlserver_batch_headers_keep_comment_only_batches_non_executable() {
+        let sql = "-- CREATE PROCEDURE fake AS SELECT 0;\nGO\n/* 说明 /* CREATE PROC fake */ 仍是注释 */\nGO\n-- 普通查询说明\nSELECT 1;";
+        assert_eq!(super::split_sql_batches(sql), vec!["SELECT 1;"]);
     }
 
     // --- DELIMITER support ---
@@ -8396,6 +8695,27 @@ delimiter ;";
                 "CREATE PROCEDURE `fix_collation`()\nBEGIN\nDECLARE done INT DEFAULT FALSE;\nDECLARE tbl_name VARCHAR(255);\nDECLARE cur CURSOR FOR\nSELECT TABLE_NAME FROM information_schema.TABLES\nWHERE TABLE_SCHEMA = DATABASE() AND TABLE_COLLATION = 'utf8mb4_0900_ai_ci';\nDECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;\n\n    OPEN cur;\n    read_loop: LOOP\n        FETCH cur INTO tbl_name;\n        IF done THEN LEAVE read_loop; END IF;\n        SET @sql = CONCAT('ALTER TABLE `', tbl_name, '` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci');\n        PREPARE stmt FROM @sql;\n        EXECUTE stmt;\n        DEALLOCATE PREPARE stmt;\n    END LOOP;\n    CLOSE cur;\nEND",
             ]
         );
+    }
+
+    #[test]
+    fn incomplete_tail_reason_flags_unterminated_constructs() {
+        let options = SqlParsingOptions::for_database_type(DatabaseType::Mysql);
+        let mut complete = SqlStatementSplitter::with_options(options);
+        complete.push_chunk("INSERT INTO t VALUES (1, 'ok');\n-- trailing comment");
+        assert_eq!(complete.incomplete_tail_reason(), None);
+
+        let mut string = SqlStatementSplitter::with_options(options);
+        string.push_chunk("INSERT INTO t VALUES (1, 'ok');\nINSERT INTO t VALUES (2, 'cut");
+        assert_eq!(string.incomplete_tail_reason(), Some("unterminated string literal"));
+        assert!(string.pending_tail_len() > 0);
+
+        let mut comment = SqlStatementSplitter::with_options(options);
+        comment.push_chunk("INSERT INTO t VALUES (1);\n/* never closed");
+        assert_eq!(comment.incomplete_tail_reason(), Some("unclosed block comment"));
+
+        let mut identifier = SqlStatementSplitter::with_options(options);
+        identifier.push_chunk("SELECT `unfinished");
+        assert_eq!(identifier.incomplete_tail_reason(), Some("unterminated quoted identifier"));
     }
 
     #[test]

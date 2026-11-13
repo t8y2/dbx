@@ -860,6 +860,27 @@ async fn list_schema_infos_once(
     Ok(schemas.into_iter().map(|name| db::SchemaInfo { name, comment: None }).collect())
 }
 
+/// Renders one `list_data_types` row for the structure editor's dropdown:
+/// search_path-visible simple lowercase names stay bare so they remain
+/// interchangeable with the static list; everything else — off-search_path
+/// schemas, mixed case, lowercase reserved words like a type literally named
+/// `order` — comes back schema-qualified with the quoting the identifier
+/// requires, so generated `CREATE TABLE` / `ALTER TABLE ... TYPE` resolves
+/// (#14525 review follow-up).
+fn render_postgres_type_name(schema: &str, name: &str, visible: bool) -> String {
+    if visible
+        && crate::sql_dialect::is_simple_lower_identifier(name)
+        && !crate::sql_dialect::is_postgres_reserved_identifier(name)
+    {
+        return name.to_string();
+    }
+    format!(
+        "{}.{}",
+        crate::sql_dialect::quote_gaussdb_jdbc_identifier(schema, "\""),
+        crate::sql_dialect::quote_gaussdb_jdbc_identifier(name, "\"")
+    )
+}
+
 pub async fn list_data_types_core(
     state: &AppState,
     connection_id: &str,
@@ -887,6 +908,16 @@ pub async fn list_data_types_core(
                 .list_data_types::<Vec<String>>(database, agent_metadata_timeout(db_config.as_ref()))
                 .await
                 .map(deduplicate_data_type_names);
+        }
+        if let Some(PoolKind::Postgres(pool)) = pool_handle.as_ref() {
+            let entries = db::postgres::list_data_types(pool).await?;
+            return Ok(entries
+                .into_iter()
+                .map(|entry| render_postgres_type_name(&entry.schema, &entry.name, entry.visible))
+                .filter(|name| !name.is_empty())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .collect());
         }
         Ok(Vec::new())
     })
@@ -2414,7 +2445,7 @@ async fn load_tdengine_table_comments_for_filter(
     Ok(())
 }
 
-async fn load_oracle_table_comments_for_objects(
+pub(super) async fn load_oracle_table_comments_for_objects(
     client: &mut db::agent_driver::AgentDriverClient,
     database: &str,
     schema: &str,
@@ -3616,8 +3647,8 @@ mod tests {
         gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config,
         is_mysql_external_driver_config, is_oracle_external_driver_config, is_retryable_metadata_error,
         is_sqlserver_external_driver_config, metadata_error_action, metadata_name_or_comment_matches,
-        mysql_auto_increment_from_query_result, mysql_auto_increment_metadata_sql, mysql_database_list_timeout,
-        mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
+        mysql_auto_increment_from_query_result, mysql_auto_increment_metadata_sql, mysql_browser_interactive_budget,
+        mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
         mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
         mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
         oracle_columns_sql, oracle_columns_sql_for_resolved_owner, oracle_completion_synonyms_sql,
@@ -5157,6 +5188,37 @@ done
     }
 
     #[test]
+    fn mysql_browser_interactive_budget_follows_session_query_timeout() {
+        let mut config = test_connection_config(DatabaseType::Mysql);
+
+        // Configured query timeout: enumeration follows it (plus the protocol margin)
+        // instead of the driver's historical 5s constant.
+        config.query_timeout_secs = 120;
+        assert_eq!(mysql_browser_interactive_budget(Some(&config)), Duration::from_secs(125));
+
+        // A short query timeout cannot shrink enumeration below the browsing floor:
+        // `mysql_browser_explicit_budget` clamps to 15s and the interactive floor keeps
+        // at least the historical 5s, so a small setting never strangles browsing.
+        for short in [1, 5, 9] {
+            config.query_timeout_secs = short;
+            let budget = mysql_browser_interactive_budget(Some(&config));
+            assert_eq!(budget, Duration::from_secs(15), "query_timeout_secs={short} must not shrink to the raw value");
+            assert!(budget >= Duration::from_secs(5), "query_timeout_secs={short} must keep the browsing floor");
+        }
+
+        // UI "no limit" (0) stays bounded instead of reverting to the 5s constant.
+        config.query_timeout_secs = 0;
+        assert_eq!(mysql_browser_interactive_budget(Some(&config)), Duration::from_secs(60));
+
+        // Default 60s session timeout: a comfortable browse budget, still bounded.
+        config.query_timeout_secs = crate::models::connection::default_query_timeout_secs();
+        assert_eq!(mysql_browser_interactive_budget(Some(&config)), Duration::from_secs(65));
+
+        // Unknown config (pool only) keeps the historical driver default.
+        assert_eq!(mysql_browser_interactive_budget(None), Duration::from_secs(5));
+    }
+
+    #[test]
     fn metadata_retry_excludes_pool_saturation_from_reconnects() {
         assert!(!is_retryable_metadata_error("Pool not found"));
         assert!(!is_retryable_metadata_error(crate::query::METADATA_POOL_BUSY_ERROR));
@@ -5823,6 +5885,20 @@ for line in sys.stdin:
         });
         assert_eq!(mysql_table_list_source_for_config(Some(&config)), MysqlTableListSource::ShowFullTables);
         assert!(super::is_mycat_config(&config));
+    }
+
+    #[test]
+    fn render_postgres_type_name_keeps_reserved_words_quoted() {
+        // #14536 review follow-up: a type literally named `order` must not be
+        // emitted bare even though it is a simple lowercase identifier.
+        assert_eq!(super::render_postgres_type_name("public", "hstore", true), "hstore");
+        assert_eq!(super::render_postgres_type_name("public", "mood", true), "mood");
+        // %I/quote semantics: simple lowercase names stay unquoted — schema
+        // qualification alone already bypasses the search path.
+        assert_eq!(super::render_postgres_type_name("dbx_custom", "mood", false), "dbx_custom.mood");
+        assert_eq!(super::render_postgres_type_name("dbx_custom", "Mood", false), "dbx_custom.\"Mood\"");
+        assert_eq!(super::render_postgres_type_name("public", "order", true), "public.\"order\"");
+        assert!(!crate::sql_dialect::is_simple_lower_identifier("with space"));
     }
 
     #[test]
@@ -7941,6 +8017,22 @@ fn mysql_browser_explicit_budget(config: &ConnectionConfig) -> Duration {
     }
 }
 
+/// Budget for interactive MySQL browser enumeration (`lightweight` listing and the
+/// object list it feeds).
+///
+/// The driver's historical `BROWSER_METADATA_TIMEOUT` (5s) is a floor, not a ceiling:
+/// enumeration follows the session query timeout, the only timeout users can already
+/// tune for metadata-heavy catalogs, and stays bounded when the server timeout is
+/// disabled (0) instead of falling back to the hard-coded 5s. With default/unset
+/// settings this resolves to the historical 5s, so fast links keep the snappy
+/// behavior and #14139's budget contract is unchanged.
+fn mysql_browser_interactive_budget(config: Option<&ConnectionConfig>) -> Duration {
+    let Some(config) = config else {
+        return Duration::from_secs(5);
+    };
+    mysql_browser_explicit_budget(config).max(Duration::from_secs(5))
+}
+
 fn is_native_mysql_browser_config(config: &ConnectionConfig) -> bool {
     config.db_type == DatabaseType::Mysql
         && config
@@ -7975,11 +8067,9 @@ pub async fn list_objects_core_with_loading_options(
             clone_metadata_pool(state, &pool_key).await,
             Some(PoolKind::Mysql(_, MysqlMode::Normal | MysqlMode::Bare))
         ) {
-            let budget = if lightweight {
-                Duration::from_secs(5)
-            } else {
-                mysql_browser_explicit_budget(config.as_ref().expect("native mysql config verified above"))
-            };
+            // `lightweight` selects the cheaper query shape, not a separate wall clock:
+            // both paths follow the session query timeout.
+            let budget = mysql_browser_interactive_budget(config.as_ref());
             return retry_metadata_connection(state, connection_id, Some(database), || async {
                 let pool_key =
                     state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
@@ -11640,7 +11730,7 @@ fn object_types_include_packages(object_types: Option<&[String]>) -> (bool, bool
 /// Used to keep agent errors visible: the native PostgreSQL fallback never
 /// lists custom types, so running it for a dedicated type request would mask a
 /// real catalog failure as an empty type group.
-fn object_types_only_custom_types(object_types: Option<&[String]>) -> bool {
+pub(super) fn object_types_only_custom_types(object_types: Option<&[String]>) -> bool {
     object_types.is_some_and(|types| {
         !types.is_empty() && types.iter().all(|t| t.eq_ignore_ascii_case("TYPE") || t.eq_ignore_ascii_case("TYPE_BODY"))
     })
@@ -17454,6 +17544,21 @@ fn postgres_pool_serves_one_request_at_a_time(pool: &deadpool_postgres::Pool) ->
 /// 与并发执行的端到端耗时相同（一条连接本来也只能串行处理），但不会产生排队
 /// 导致的 checkout 超时。
 macro_rules! postgres_metadata_batch {
+    // Labeled form first: `("columns", future)` is also a valid tuple expression,
+    // so the unlabeled arm below would otherwise swallow it. A vendor kernel can
+    // reject one facet with an opaque message (`db error`), and an unlabeled batch
+    // gives the user nothing to act on.
+    ($pool:expr, $(($facet:literal, $call:expr)),+ $(,)?) => {{
+        if postgres_pool_serves_one_request_at_a_time($pool) {
+            Ok(($(
+                $call.await.map_err(|error| format!("{}: {error}", $facet))?,
+            )+))
+        } else {
+            tokio::try_join!($(
+                async { $call.await.map_err(|error| format!("{}: {error}", $facet)) }
+            ),+)
+        }
+    }};
     ($pool:expr, $($call:expr),+ $(,)?) => {{
         if postgres_pool_serves_one_request_at_a_time($pool) {
             Ok(($($call.await?,)+))
@@ -17472,14 +17577,14 @@ pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -
     let (columns, indexes, fkeys, constraints, table_comment, partition_info, trigger_definitions, check_constraints) =
         postgres_metadata_batch!(
             pool,
-            db::postgres::get_columns(pool, schema, table),
-            db::postgres::list_indexes(pool, schema, table),
-            db::postgres::list_foreign_keys(pool, schema, table),
-            db::postgres::list_constraints(pool, schema, table),
-            db::postgres::get_table_comment(pool, schema, table),
-            db::postgres::get_table_partition_info(pool, schema, table),
-            db::postgres::list_trigger_definitions(pool, schema, table),
-            db::postgres::list_check_constraints(pool, schema, table),
+            ("columns", db::postgres::get_columns(pool, schema, table)),
+            ("indexes", db::postgres::list_indexes(pool, schema, table)),
+            ("foreign keys", db::postgres::list_foreign_keys(pool, schema, table)),
+            ("constraints", db::postgres::list_constraints(pool, schema, table)),
+            ("table comment", db::postgres::get_table_comment(pool, schema, table)),
+            ("partition info", db::postgres::get_table_partition_info(pool, schema, table)),
+            ("triggers", db::postgres::list_trigger_definitions(pool, schema, table)),
+            ("check constraints", db::postgres::list_check_constraints(pool, schema, table)),
         )?;
     let partition_local_objects = if partition_info.is_partition {
         db::postgres::get_table_partition_local_objects(pool, schema, table).await?
@@ -17555,13 +17660,13 @@ pub async fn pg_ddl_with_partitions(
         local_objects_by_oid,
     ) = postgres_metadata_batch!(
         pool,
-        db::postgres::get_columns_for_relations(pool, &relations),
-        db::postgres::list_indexes_for_relations(pool, &relations),
-        db::postgres::list_foreign_keys_for_relations(pool, &relation_pairs),
-        db::postgres::get_table_comments_for_relations(pool, &oids),
-        db::postgres::list_trigger_definitions_for_relations(pool, &oids),
-        db::postgres::list_check_constraints_for_relations(pool, &oids),
-        db::postgres::get_table_partition_local_objects_for_relations(pool, &oids),
+        ("columns", db::postgres::get_columns_for_relations(pool, &relations)),
+        ("indexes", db::postgres::list_indexes_for_relations(pool, &relations)),
+        ("foreign keys", db::postgres::list_foreign_keys_for_relations(pool, &relation_pairs)),
+        ("table comment", db::postgres::get_table_comments_for_relations(pool, &oids)),
+        ("triggers", db::postgres::list_trigger_definitions_for_relations(pool, &oids)),
+        ("check constraints", db::postgres::list_check_constraints_for_relations(pool, &oids)),
+        ("partition info", db::postgres::get_table_partition_local_objects_for_relations(pool, &oids)),
     )?;
 
     // `list_foreign_keys_for_relations` is keyed by (schema, table) since its

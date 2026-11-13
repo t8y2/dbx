@@ -46,6 +46,7 @@ import {
   isRedisJsonContainerValue,
   parseRedisJsonDetail,
   REDIS_VALUE_FORMAT_DISPLAY_ORDER,
+  redisBlobDisplayPreview,
   redisBlobText,
   redisJsonValueText,
   normalizeRedisJsonDraft,
@@ -114,6 +115,7 @@ const REDIS_AUTO_REFRESH_ENABLED_STORAGE_KEY = "dbx-redis-auto-refresh-enabled-v
 const REDIS_AUTO_REFRESH_INTERVAL_STORAGE_KEY = "dbx-redis-auto-refresh-interval-seconds-v2";
 const REDIS_AUTO_REFRESH_INTERVAL_OPTIONS = [1, 3, 5, 10] as const;
 const REDIS_COLLECTION_ROW_HEIGHT = 32;
+const HASH_EAGER_DETAIL_BASE64_LIMIT = Math.ceil((64 * 1024) / 3) * 4;
 const REDIS_STREAM_MIN_ROW_HEIGHT = 96;
 const data = ref<RedisValue | null>(null);
 const loading = ref(false);
@@ -2245,7 +2247,7 @@ function clearSelectedMember() {
 }
 
 function isSelectedMember(title: string, value: unknown, identity?: string) {
-  return selectedMemberKey.value === getRedisMemberSelectionKey(title, value, identity);
+  return selectedMemberKey.value !== "" && selectedMemberKey.value === getRedisMemberSelectionKey(title, value, identity);
 }
 
 function viewMember(title: string, value: unknown, context: RedisMemberContext, identity?: string) {
@@ -2495,6 +2497,8 @@ function selectDefaultMember(redisValue: RedisValue) {
     case "hash": {
       const first = redisValue.data.items[0];
       if (!first) return clearSelectedMember();
+      // Keep full detail work for when the user opens a large hash member.
+      if (!showMemberDetail.value && first.value.raw_base64.length > HASH_EAGER_DETAIL_BASE64_LIMIT) return clearSelectedMember();
       const field = redisBlobText(first.field);
       return selectMember(formatValue(first.field), first.value, { kind: "hash", field, canEdit: field != null && canEditRedisMemberDetail("hash", first.value) });
     }
@@ -3534,7 +3538,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               @click="viewMember(formatValue(row.value.field), row.value.value, { kind: 'hash', field: redisBlobText(row.value.field), canEdit: redisBlobText(row.value.field) != null && canEditRedisMemberDetail('hash', row.value.value) })"
             >
               <div class="px-3 py-1.5 text-blue-500 truncate border-r">{{ formatValue(row.value.field) }}</div>
-              <div class="px-3 py-1.5 truncate text-muted-foreground">{{ formatValue(row.value.value) }}</div>
+              <div class="px-3 py-1.5 truncate text-muted-foreground">{{ redisBlobDisplayPreview(row.value.value) }}</div>
               <div v-if="hashFieldTtlSupported" class="px-2 py-1 flex items-center min-w-0">
                 <Button
                   v-if="redisBlobText(row.value.field) && row.value.field_ttl !== undefined"

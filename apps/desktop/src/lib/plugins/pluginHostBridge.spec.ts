@@ -1189,6 +1189,16 @@ describe("PluginHostBridge", () => {
     expect(closed).toContain("host.stream.chunk");
   });
 
+  it("keeps every declared origin beyond the old eight-entry cap", () => {
+    // A bookmark collection legitimately tracks dozens of origins
+    // (t8y2/dbx#14299); the manifest validator owns the bound now.
+    const permissions = Array.from({ length: 12 }, (_, index) => `host.network:https://api${index}.vendor.com`);
+    const allowed = pluginSandboxDocument("<html><head></head><body></body></html>", permissions);
+    for (let index = 0; index < 12; index++) {
+      expect(allowed).toContain(`https://api${index}.vendor.com`);
+    }
+  });
+
   it("injects a <base> and widens resource CSP sources for the plugin asset origin", () => {
     const document = pluginSandboxDocument('<html><head></head><body><script type="module" src="dbx-plugin://localhost/io.github.t8y2.s3/entry/app.mjs"></script><script type="module" src="https://cdn.example.test/app.mjs"></script></body></html>', [], undefined, {
       baseUrl: "dbx-plugin://localhost/io.github.t8y2.s3/assets/",

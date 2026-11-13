@@ -248,7 +248,7 @@ fn is_explicitly_quoted_identifier(name: &str) -> bool {
             || (name.starts_with('[') && name.ends_with(']')))
 }
 
-fn is_simple_lower_identifier(name: &str) -> bool {
+pub fn is_simple_lower_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -257,7 +257,7 @@ fn is_simple_lower_identifier(name: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_lowercase() || ch.is_ascii_digit())
 }
 
-fn is_postgres_reserved_identifier(name: &str) -> bool {
+pub fn is_postgres_reserved_identifier(name: &str) -> bool {
     matches!(
         name,
         "all"
@@ -462,6 +462,9 @@ pub fn quote_transfer_identifier(name: &str, database_type: &DatabaseType) -> St
         | DatabaseType::Argo
         | DatabaseType::Transwarp
         | DatabaseType::Spark
+        // TDengine treats double quotes as string literals; its identifiers take
+        // backticks, so export/transfer SQL must not fall into the ANSI arm (#14540).
+        | DatabaseType::Tdengine
         | DatabaseType::Questdb => format!("`{}`", name.replace('`', "``")),
         DatabaseType::SqlServer => format!("[{}]", name.replace(']', "]]")),
         _ => format!("\"{}\"", name.replace('\"', "\"\"")),

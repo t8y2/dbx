@@ -286,7 +286,8 @@ describe.each(["conditions", "text"] as const)("DataGrid %s filter editor state"
     await settle();
 
     expect(host.querySelector(sortPanelSelector(view))).toBeNull();
-    sortToggle(host).click();
+    const toggle = sortToggle(host);
+    toggle.click();
     await settle();
     expect(host.querySelector(sortPanelSelector(view))).not.toBeNull();
     expect(sortToggle(host).getAttribute("aria-expanded")).toBe("true");
@@ -295,7 +296,8 @@ describe.each(["conditions", "text"] as const)("DataGrid %s filter editor state"
     await settle();
 
     expect(host.querySelector(sortPanelSelector(view))).toBeNull();
-    expect(host.querySelector('button[aria-label="Sort"][aria-expanded]')).toBeNull();
+    // Column-header sorting remains available when the toolbar editor is hidden.
+    expect(toggle.isConnected).toBe(false);
   });
 
   it("deactivates active structured sort and re-queries without ORDER BY when dataGridOrderByVisible is toggled off", async () => {

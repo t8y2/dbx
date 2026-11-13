@@ -3090,6 +3090,7 @@ export default withEnglishFallback({
     sortCurrentPageAscending: "現在のページを昇順に並べ替え",
     sortCurrentPageDescending: "現在のページを降順に並べ替え",
     sortDatabaseAscending: "データベースで昇順に並べ替え",
+    quickSortHint: "クリックで昇順と降順を切り替え、右クリックで並べ替え方法を選択",
     sortDatabaseDescending: "データベースで降順に並べ替え",
     clearSort: "並べ替えをクリア",
     sortBuilderTitle: "並べ替え",

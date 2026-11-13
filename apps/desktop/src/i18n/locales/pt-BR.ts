@@ -3087,6 +3087,7 @@ export default withEnglishFallback({
     sortCurrentPageAscending: "Ordenar Página Atual Crescente",
     sortCurrentPageDescending: "Ordenar Página Atual Decrescente",
     sortDatabaseAscending: "Ordenar Banco de Dados Crescente",
+    quickSortHint: "Clique para alternar entre crescente e decrescente; clique com o botão direito para opções",
     sortDatabaseDescending: "Ordenar Banco de Dados Decrescente",
     clearSort: "Limpar Ordenação",
     sortBuilderTitle: "Ordenação",

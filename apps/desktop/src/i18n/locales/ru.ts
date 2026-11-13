@@ -3314,6 +3314,7 @@ export default withEnglishFallback({
     sortCurrentPageAscending: "Сортировать текущую страницу по возрастанию",
     sortCurrentPageDescending: "Сортировать текущую страницу по убыванию",
     sortDatabaseAscending: "Сортировать базу данных по возрастанию",
+    quickSortHint: "Нажмите для переключения порядка сортировки; правая кнопка открывает параметры",
     sortDatabaseDescending: "Сортировать базу данных по убыванию",
     clearSort: "Очистить сортировку",
     sortBuilderTitle: "Сортировка",

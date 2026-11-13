@@ -3,7 +3,7 @@ import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 
 export type QuickConnectionOpenTarget = { kind: "mq-admin" } | { kind: "nacos-admin" } | { kind: "plugin-workbench" } | { kind: "etcd" } | { kind: "zookeeper" } | { kind: "consul" } | { kind: "query"; database: string; schema?: string };
 
-export function quickConnectionOpenTarget(connection: Pick<ConnectionConfig, "db_type" | "database" | "default_schema">, databaseOptions: string[] = []): QuickConnectionOpenTarget {
+export function quickConnectionOpenTarget(connection: Pick<ConnectionConfig, "db_type" | "database"> & Partial<Pick<ConnectionConfig, "default_schema">>, databaseOptions: string[] = []): QuickConnectionOpenTarget {
   if (connection.db_type === "mq") {
     return { kind: "mq-admin" };
   }
@@ -22,5 +22,10 @@ export function quickConnectionOpenTarget(connection: Pick<ConnectionConfig, "db
   if (connection.db_type === "consul") {
     return { kind: "consul" };
   }
-  return { kind: "query", database: resolveDefaultDatabase(connection, databaseOptions), schema: connection.default_schema };
+  const configuredSchema = connection.default_schema?.trim() || undefined;
+  return {
+    kind: "query",
+    database: resolveDefaultDatabase(connection, databaseOptions),
+    ...(configuredSchema ? { schema: configuredSchema } : {}),
+  };
 }

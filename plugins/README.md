@@ -772,7 +772,7 @@ A plugin can read the **estimated** execution plan of a query without touching a
 }
 ```
 
-- `format` is `json`, `xml` (SQL Server `ShowPlanXML`), or `text`. `rawPlan` is a parsed JSON document for `json` and the plan text otherwise, so the plugin can parse and normalize it itself.
+- `format` is `json`, `xml` (SQL Server `ShowPlanXML`), or `text`. `rawPlan` is a parsed JSON document for `json` and the plan text otherwise, so the plugin can parse and normalize it itself. DuckDB's `EXPLAIN` plan is returned as text.
 - `warnings` carries `plan_not_json` when the server answered with something that is not JSON (the payload is then reported as `text` rather than pretending it is JSON), `plan_truncated` when the host cut the plan to respect `maxPlanBytes`, and `plan_rows_truncated` when the driver stopped collecting plan rows.
 - `truncated` is `true` whenever the host cut the plan for either reason.
 

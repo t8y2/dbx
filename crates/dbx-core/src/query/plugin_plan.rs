@@ -844,6 +844,7 @@ mod tests {
         for (database_type, expected_acquisition) in [
             (DatabaseType::Mysql, GeneratedSql),
             (DatabaseType::Doris, GeneratedSql),
+            (DatabaseType::DuckDb, GeneratedSql),
             (DatabaseType::Postgres, GeneratedSql),
             (DatabaseType::OpenGauss, GeneratedSql),
             (DatabaseType::Questdb, GeneratedSql),
@@ -999,6 +1000,92 @@ mod tests {
             explain_estimated_plan(&state, request).await.unwrap_err(),
             unsupported_dialect_message(DatabaseType::Redis)
         );
+    }
+
+    #[cfg(feature = "duckdb-sidecar")]
+    #[tokio::test]
+    #[ignore = "requires DBX_DUCKDB_DRIVER_PATH pointing at an installed DuckDB worker"]
+    async fn duckdb_host_api_returns_live_estimated_plan_text() {
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        let config = config(DatabaseType::DuckDb, 30);
+        let (state, _dir) = saved_connection_state(std::slice::from_ref(&config)).await;
+        let driver = PathBuf::from(
+            std::env::var_os("DBX_DUCKDB_DRIVER_PATH").expect("set DBX_DUCKDB_DRIVER_PATH to the DBX DuckDB worker"),
+        );
+        let client = Arc::new(
+            crate::db::duckdb_worker_process::DuckDbWorkerClient::open_with_executable(
+                driver,
+                ":memory:".to_string(),
+                Vec::new(),
+                None,
+            )
+            .await
+            .expect("open actual DuckDB worker"),
+        );
+        state
+            .update_connection_pools(|pools| {
+                pools.insert(config.id.clone(), PoolKind::DuckDbWorker(client.clone()));
+            })
+            .await;
+
+        client
+            .execute(
+                None,
+                "CREATE TABLE plan_example (id INTEGER, category_id INTEGER, name VARCHAR)".to_string(),
+                Some(100),
+                None,
+                None,
+            )
+            .await
+            .expect("create example table");
+        client
+            .execute(None, "CREATE TABLE plan_category (id INTEGER, label VARCHAR)".to_string(), Some(100), None, None)
+            .await
+            .expect("create category table");
+        client
+            .execute(
+                None,
+                "INSERT INTO plan_example VALUES (1, 1, 'alpha'), (2, 2, 'beta')".to_string(),
+                Some(100),
+                None,
+                None,
+            )
+            .await
+            .expect("insert example rows");
+        client
+            .execute(None, "INSERT INTO plan_category VALUES (1, 'one'), (2, 'two')".to_string(), Some(100), None, None)
+            .await
+            .expect("insert category rows");
+
+        let capabilities = plugin_plan_capabilities(&state, &config.id).await.expect("DuckDB capabilities");
+        assert_eq!(capabilities.db_type, "duckdb");
+        assert!(capabilities.supports.estimated_plan);
+
+        for (sql, expected_operator) in [
+            ("SELECT * FROM plan_example", "seq_scan"),
+            (
+                "SELECT e.name, c.label FROM plan_example AS e JOIN plan_category AS c ON c.id = e.category_id",
+                "hash_join",
+            ),
+            ("SELECT id FROM plan_example ORDER BY category_id", "order_by"),
+        ] {
+            let plan = explain_estimated_plan(&state, request(PLUGIN_PLAN_MODE_ESTIMATED, sql))
+                .await
+                .unwrap_or_else(|error| panic!("DuckDB plan for {sql} failed: {error}"));
+            assert_eq!(plan.db_type, "duckdb");
+            assert_eq!(plan.format, EstimatedPlanFormat::Text);
+            assert!(!plan.truncated);
+            assert!(plan.warnings.is_empty());
+            let text = plan.raw_plan.as_str().expect("DuckDB EXPLAIN must remain text").to_ascii_lowercase();
+            assert!(text.contains(expected_operator), "expected {expected_operator} in plan: {text}");
+            assert!(text.contains("plan_example"), "plan should identify the source table: {text}");
+        }
+
+        let unsafe_request = request(PLUGIN_PLAN_MODE_ESTIMATED, "DELETE FROM plan_example");
+        assert!(explain_estimated_plan(&state, unsafe_request).await.unwrap_err().contains("not safe to plan"));
+        client.shutdown().await;
     }
 
     #[tokio::test]

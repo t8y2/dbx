@@ -5154,6 +5154,7 @@ export default withEnglishFallback({
     foreignKeyChecksEnable: "Abilita",
     foreignKeyChecksDisable: "Disabilita",
     foreignKeyChecksHint: "Per impostazione predefinita viene mantenuta l'impostazione della sessione. Se disabilitato, viene eseguito con SET FOREIGN_KEY_CHECKS = 0, così le tabelle referenziate possono essere gestite in qualsiasi ordine; al termine, il valore originale viene ripristinato.",
+    createSequence: "Crea sequenza",
   },
   visibleDatabases: {
     title: "Database Visibili",

@@ -5273,6 +5273,7 @@ export default withEnglishFallback({
     foreignKeyChecksEnable: "Включить",
     foreignKeyChecksDisable: "Отключить",
     foreignKeyChecksHint: "По умолчанию используется параметр сеанса. При отключении выполняется с SET FOREIGN_KEY_CHECKS = 0, что позволяет обрабатывать таблицы, на которые есть ссылки, в любом порядке; после выполнения исходное значение восстанавливается.",
+    createSequence: "Создать последовательность",
   },
   visibleDatabases: {
     title: "Видимые базы данных",

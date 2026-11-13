@@ -171,17 +171,6 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
-        <img src="docs/public/sponsors/atlas-card.png" alt="Atlas Cloud" width="175" />
-      </a>
-    </td>
-    <td>
-      Atlas Cloud gives developers one unified API for 400+ AI models across chat, image, video, and audio.
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">Visit Atlas Cloud</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
       <a href="https://www.qiniu.com/" target="_blank">
         <img src="docs/public/sponsors/qiniu-card.png" alt="Qiniu Cloud" width="175" />
       </a>

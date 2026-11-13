@@ -47,4 +47,21 @@ describe("promoted build recognition", () => {
     expect(restarted.displayAppVersion(BUILD)).toBe("0.6.66");
     expect(restarted.displayAppVersion("0.6.67")).toBe("0.6.67");
   });
+
+  it("reports whether a build was recognised as promoted", async () => {
+    const { isPromotedBuild, recordPromotedBuild } = await loadModule();
+    expect(isPromotedBuild(BUILD)).toBe(false);
+    recordPromotedBuild({ current_version: BUILD, promoted_from: BUILD });
+    expect(isPromotedBuild(BUILD)).toBe(true);
+    expect(isPromotedBuild("0.6.66-beta.20261104.2")).toBe(false);
+    expect(isPromotedBuild("")).toBe(false);
+  });
+
+  it("distinguishes prerelease builds from stable ones", async () => {
+    const { isPrereleaseBuild } = await loadModule();
+    expect(isPrereleaseBuild(BUILD)).toBe(true);
+    expect(isPrereleaseBuild("v0.6.66-beta.20261104.1")).toBe(true);
+    expect(isPrereleaseBuild("0.6.66")).toBe(false);
+    expect(isPrereleaseBuild("")).toBe(false);
+  });
 });

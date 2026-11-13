@@ -165,7 +165,7 @@ async function exportSingleFile(file: SavedSqlFile) {
   try {
     const loadedFile = await savedSqlStore.ensureFileContent(file.id);
     if (!loadedFile) return;
-    const result = await exportSavedSqlFileContent(loadedFile.sql, file.name);
+    const result = await exportSavedSqlFileContent(loadedFile.sql, loadedFile.name);
     if (result === "saved") toast(t("sqlLibrary.exported"), 2000);
   } catch (e: any) {
     toast(t("sqlLibrary.exportFailed", { message: e?.message || String(e) }), 5000);

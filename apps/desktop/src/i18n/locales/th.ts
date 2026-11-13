@@ -45,7 +45,7 @@ const damengDump = {
     toolNotFound: "ไม่พบเครื่องมือ Client Dameng (dexp/dimp) ใน Directory bin ที่กำหนด",
     connectionRequired: "การ Dump แบบ Native ของ dexp/dimp ใช้ได้เฉพาะกับการเชื่อมต่อ Dameng",
     passwordMissing: "การเชื่อมต่อนี้ไม่มี Password ที่บันทึกไว้ ให้เชื่อมต่อใหม่และป้อน Password ก่อน",
-    useridInvalid: "Username หรือ Password ของการเชื่อมต่อมี / หรือ {'@'} ซึ่งเข้ารหัสเป็นอาร์กิวเมนต์ USERID ของ dexp/dimp ไม่ได้ จึงยังไม่เริ่ม Task",
+    useridInvalid: "Username หรือ Password ของการเชื่อมต่อมีอักขระที่เข้ารหัสเป็นอาร์กิวเมนต์ USERID ของ dexp/dimp ไม่ได้ จึงยังไม่เริ่ม Task",
   },
 };
 

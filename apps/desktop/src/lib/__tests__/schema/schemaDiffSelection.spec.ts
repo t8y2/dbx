@@ -50,6 +50,41 @@ function createDuplicateForeignKeyPreparation(): SchemaDiffPreparation {
 }
 
 describe("schema diff SQL selection projections", () => {
+  /**
+   * #14726: comparing a sharded database against an unsharded one marks every
+   * missing table as `delete`. Pre-selecting those meant one click in the review
+   * tree dropped them, so drops now start unchecked while creates and modifies
+   * stay selected.
+   */
+  it("leaves table and view drops unselected by default", () => {
+    const preparation: SchemaDiffPreparation = {
+      diffs: [
+        { type: "removed", objectType: "table", name: "orders_2024", target: { name: "orders_2024" } },
+        { type: "added", objectType: "table", name: "orders_2026", source: { name: "orders_2026" } },
+        { type: "modified", objectType: "table", name: "orders", columns: [{ type: "added", name: "note" }] },
+        { type: "removed", objectType: "view", name: "orders_view", target: { name: "orders_view" } },
+      ],
+      syncSql: "-- orders_2024 removed, orders_2026 added",
+    } as SchemaDiffPreparation;
+
+    const objects = convertToSchemaDiffObjects(preparation.diffs);
+    const byName = new Map(objects.map((object) => [object.name, object]));
+
+    expect(byName.get("orders_2024")?.operationType).toBe("delete");
+    expect(byName.get("orders_2024")?.selected).toBe(false);
+    expect(byName.get("orders_view")?.selected).toBe(false);
+    expect(byName.get("orders_2026")?.selected).toBe(true);
+    expect(byName.get("orders")?.selected).toBe(true);
+
+    // The projection that produces the deploy SQL must therefore contain no drop
+    // until the user selects one explicitly.
+    const dropped = selectSchemaDiffInput(preparation, objects);
+    expect(dropped.diffs.map((diff) => diff.name)).toEqual(["orders_2026", "orders"]);
+
+    setSchemaDiffObjectSelected(objects, byName.get("orders_2024")!.id, true);
+    expect(selectSchemaDiffInput(preparation, objects).diffs.map((diff) => diff.name)).toContain("orders_2024");
+  });
+
   it("shows table charset changes and excludes them when table options are deselected", () => {
     const result = createPreparation();
     const charset = {

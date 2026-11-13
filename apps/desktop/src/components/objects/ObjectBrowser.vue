@@ -488,6 +488,9 @@ const supportsExactTriggerDiscovery = computed(() => !!oracleTriggerObjectReadOp
 const supportsSchemaIndexes = computed(() => supportsSchemaIndexManagement(effectiveDatabaseType.value));
 const exactIndexList = computed(() => supportsSchemaIndexes.value && objectFilter.value === "indexes");
 const usesServerObjectPaging = computed(() => props.connection.db_type === "oceanbase-oracle" || exactIndexList.value || (objectFilter.value === "triggers" && supportsExactTriggerDiscovery.value));
+// Search all loaded Oracle object kinds when Tables is only the browsing default.
+const searchAllOracleObjectKinds = computed(() => effectiveDatabaseType.value === "oracle" && !usesServerObjectPaging.value && objectFilter.value === "tables" && !userHasSelectedFilter.value && !props.selectedObjectFilter && !props.initialObjectFilter);
+const displayedObjectFilter = computed<ObjectFilter>(() => (searchAllOracleObjectKinds.value && search.value.trim() ? "all" : objectFilter.value));
 const objectPageSize = computed(() => Math.max(1, Math.min(10_000, Math.floor(settingsStore.desktopSettings?.sidebar_table_page_size || 500))));
 const OBJECT_COPY_PAGE_SIZE = 1_000;
 const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && props.connection.driver_profile?.toLowerCase() === "gaussdb-m");
@@ -1079,8 +1082,9 @@ watch([sortKey, sortDirection], () => scrollObjectsToTop());
 // filtered results bear no relation to the previous scroll position.
 watch(
   search,
-  (value) => {
+  (value, previousValue) => {
     scrollObjectsToTop();
+    if (searchAllOracleObjectKinds.value && Boolean(value.trim()) !== Boolean(previousValue.trim())) clearTableSelection();
     emit("searchChange", value);
     if (usesServerObjectPaging.value) {
       clearTimeout(objectSearchTimer);
@@ -1412,7 +1416,7 @@ function rowMatchesFilter(row: ObjectBrowserRow, filter: ObjectFilter) {
 }
 
 function rowMatchesObjectFilter(row: ObjectBrowserRow) {
-  return rowMatchesFilter(row, objectFilter.value);
+  return rowMatchesFilter(row, displayedObjectFilter.value);
 }
 
 function objectBrowserPinnedTreeNodeContext() {
@@ -6017,7 +6021,7 @@ function filterLabel(filter: ObjectFilter) {
 }
 
 function selectObjectFilter(filter: ObjectFilter) {
-  if (filter === objectFilter.value) return;
+  if (filter === objectFilter.value && filter === displayedObjectFilter.value) return;
   const wasServerPaged = usesServerObjectPaging.value;
   userHasSelectedFilter.value = true;
   objectFilter.value = filter;
@@ -6553,7 +6557,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             :key="filter"
             type="button"
             class="h-6 shrink-0 whitespace-nowrap rounded-sm px-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
-            :class="{ 'bg-background text-foreground shadow-sm': objectFilter === filter }"
+            :class="{ 'bg-background text-foreground shadow-sm': displayedObjectFilter === filter }"
             @click="selectObjectFilter(filter)"
           >
             {{ filterLabel(filter) }}
@@ -6713,7 +6717,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <DropdownMenuCheckboxItem :model-value="settingsStore.editorSettings.objectBrowserAutoOpenDetailPanel !== false" @select.prevent @update:model-value="toggleAutoOpenDetailPanel()">{{ t("objects.autoOpenDetailPanel") }}</DropdownMenuCheckboxItem>
         <template v-if="showObjectFilter && toolbarTier >= 2">
           <DropdownMenuSeparator />
-          <DropdownMenuCheckboxItem v-for="filter in objectFilters" :key="filter" :model-value="objectFilter === filter" @select.prevent @update:model-value="selectObjectFilter(filter)">{{ filterLabel(filter) }} </DropdownMenuCheckboxItem>
+          <DropdownMenuCheckboxItem v-for="filter in objectFilters" :key="filter" :model-value="displayedObjectFilter === filter" @select.prevent @update:model-value="selectObjectFilter(filter)">{{ filterLabel(filter) }} </DropdownMenuCheckboxItem>
         </template>
         <template v-else-if="singleKindFilter && toolbarTier >= 2">
           <DropdownMenuSeparator />

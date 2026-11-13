@@ -226,6 +226,7 @@ import {
   buildObjectBrowserRows,
   buildMongoObjectBrowserRows,
   countObjectBrowserRowsByFilter,
+  formatObjectBrowserAutoIncrement,
   formatObjectBrowserBytes,
   formatObjectBrowserCount,
   formatObjectBrowserTimestamp,
@@ -270,7 +271,7 @@ import { createLocateTabMenuItem } from "@/lib/tabs/tabMenu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 type ObjectFilter = ObjectBrowserFilter;
-type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
+type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "autoIncrement" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -520,6 +521,8 @@ const showTableStatistics = computed(() => !usesServerObjectPaging.value && effe
 const showObjectRowStats = computed(() => showTableStatistics.value);
 const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showTableStatistics.value);
 const showMysqlTableCharsetColumns = computed(() => effectiveDatabaseType.value === "mysql" && showTableStatistics.value);
+// Only the native MySQL statistics read returns AUTO_INCREMENT (same query and gate as the collation).
+const showMysqlAutoIncrementColumn = computed(() => effectiveDatabaseType.value === "mysql" && showTableStatistics.value);
 const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
 
 function toggleTableDdlWordWrap() {
@@ -677,6 +680,7 @@ const objectColumnWidths = ref<Record<ObjectBrowserColumnKey, number>>({
   type: 110,
   estimatedRows: 110,
   totalBytes: 100,
+  autoIncrement: 130,
   characterSet: 120,
   collation: 220,
   created_at: 150,
@@ -698,6 +702,7 @@ const availableObjectColumnDefinitions = computed(() => [
     : []),
   ...(showObjectRowStats.value ? [{ key: "estimatedRows" as const, label: objectRowsLabel.value }] : []),
   ...(showObjectSizeStats.value ? [{ key: "totalBytes" as const, label: t("objects.size") }] : []),
+  ...(showMysqlAutoIncrementColumn.value ? [{ key: "autoIncrement" as const, label: t("grid.tableInfoAutoIncrement") }] : []),
   ...(hasCreatedAt.value ? [{ key: "created_at" as const, label: t("objects.createdAt") }] : []),
   ...(hasUpdatedAt.value ? [{ key: "updated_at" as const, label: t("objects.updatedAt") }] : []),
   { key: "comment" as const, label: t("objects.comment") },
@@ -1316,6 +1321,7 @@ const sortKeyOptions = computed<ObjectBrowserSortKey[]>(() => {
   if (showMysqlTableCharsetColumns.value) options.push("characterSet", "collation");
   if (showObjectRowStats.value) options.push("estimatedRows");
   if (showObjectSizeStats.value) options.push("totalBytes");
+  if (showMysqlAutoIncrementColumn.value) options.push("autoIncrement");
   if (hasCreatedAt.value) options.push("created_at");
   if (hasUpdatedAt.value) options.push("updated_at");
   options.push("comment");
@@ -1336,6 +1342,7 @@ function sortKeyLabel(key: ObjectBrowserSortKey): string {
   if (key === "collation") return t("structureEditor.collation");
   if (key === "estimatedRows") return objectRowsLabel.value;
   if (key === "totalBytes") return t("objects.size");
+  if (key === "autoIncrement") return t("grid.tableInfoAutoIncrement");
   if (key === "created_at") return t("objects.createdAt");
   if (key === "updated_at") return t("objects.updatedAt");
   if (key === "comment") return t("objects.comment");
@@ -4543,6 +4550,7 @@ function objectBrowserTableCopyColumns() {
           if (key === "type") return typeLabel(row);
           if (key === "estimatedRows") return formatObjectBrowserCount(row.estimatedRows);
           if (key === "totalBytes") return formatObjectBrowserBytes(row.totalBytes);
+          if (key === "autoIncrement") return formatObjectBrowserAutoIncrement(row.autoIncrement);
           if (key === "characterSet") return row.characterSet ?? "";
           if (key === "collation") return row.collation ?? "";
           if (key === "created_at") return formatObjectBrowserTimestamp(row.created_at);
@@ -5621,8 +5629,8 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     finishOnce();
     // 统计信息随对象列表缓存，过期时只在后台刷新统计，保留对象列表本身。
     // MySQL 的旧缓存可能尚未合并表排序规则，即使仍新鲜也要补读一次。
-    const missingMysqlCollation = showMysqlTableCharsetColumns.value && rows.value.some((row) => row.type === "TABLE" && row.collation === undefined);
-    const statistics = cached.stale || missingMysqlCollation ? revalidateCachedObjectStatistics(request, cacheWriteToken) : undefined;
+    const missingMysqlTableMetadata = showMysqlTableCharsetColumns.value && rows.value.some((row) => row.type === "TABLE" && (row.collation === undefined || row.autoIncrement === undefined));
+    const statistics = cached.stale || missingMysqlTableMetadata ? revalidateCachedObjectStatistics(request, cacheWriteToken) : undefined;
     // 缺失的注释/时间戳在统计读完后补齐，避免两条重读同时打库。
     if (detailsPassEnabled.value && !rows.value.some((row) => row.comment?.trim() || row.created_at?.trim() || row.updated_at?.trim())) {
       detailsPassStarter(request, cacheWriteToken, statistics)();
@@ -5915,7 +5923,7 @@ function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string
       ...row,
       estimatedRows: normalizeStatisticNumber(stat.estimated_rows),
       totalBytes: normalizeStatisticNumber(stat.total_bytes),
-      ...(effectiveDatabaseType.value === "mysql" ? { characterSet: mysqlTableCharsetFromCollation(stat.collation) || null, collation: stat.collation?.trim() || null } : {}),
+      ...(effectiveDatabaseType.value === "mysql" ? { characterSet: mysqlTableCharsetFromCollation(stat.collation) || null, collation: stat.collation?.trim() || null, autoIncrement: stat.auto_increment?.trim() || null } : {}),
     };
   });
   cacheObjectBrowserRows(cacheWriteToken, rows.value, { cachedAt });
@@ -6862,6 +6870,21 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     <GripVertical class="h-3 w-3" />
                   </div>
                 </div>
+                <div v-if="columnKey === 'autoIncrement'" class="relative flex min-w-0 items-center">
+                  <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('autoIncrement')">
+                    <span class="truncate">{{ t("grid.tableInfoAutoIncrement") }}</span>
+                    <component :is="sortIconFor('autoIncrement')" v-if="sortIconFor('autoIncrement')" class="h-3 w-3 shrink-0" />
+                  </button>
+                  <div
+                    v-if="!isLastVisibleObjectColumn('autoIncrement')"
+                    data-object-column-resize="autoIncrement"
+                    class="absolute -right-2 top-0 bottom-0 z-10 flex w-3 cursor-col-resize items-center justify-center text-muted-foreground/70 hover:bg-primary/30 hover:text-primary"
+                    @mousedown="onObjectColumnResizeStart('autoIncrement', $event)"
+                    @dblclick="resetObjectColumnWidth('autoIncrement', 130, $event)"
+                  >
+                    <GripVertical class="h-3 w-3" />
+                  </div>
+                </div>
                 <div v-if="columnKey === 'created_at'" class="relative flex min-w-0 items-center">
                   <button class="flex min-w-0 items-center gap-1 truncate pr-4 text-left" type="button" :disabled="usesServerObjectPaging" @click="toggleSort('created_at')">
                     <span class="truncate">{{ t("objects.createdAt") }}</span>
@@ -7009,6 +7032,9 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     </div>
                     <div v-if="columnKey === 'totalBytes'" class="truncate text-xs tabular-nums text-muted-foreground" :title="item.totalBytes == null ? '' : formatObjectBrowserBytes(item.totalBytes)">
                       {{ formatObjectBrowserBytes(item.totalBytes) }}
+                    </div>
+                    <div v-if="columnKey === 'autoIncrement'" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserAutoIncrement(item.autoIncrement)">
+                      {{ formatObjectBrowserAutoIncrement(item.autoIncrement) }}
                     </div>
                     <div v-if="columnKey === 'created_at'" class="truncate text-xs tabular-nums text-muted-foreground" :title="formatObjectBrowserTimestamp(item.created_at)">
                       {{ formatObjectBrowserTimestamp(item.created_at) }}

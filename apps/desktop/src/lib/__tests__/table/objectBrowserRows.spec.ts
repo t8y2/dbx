@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { orderItemsByPinnedTreeNodeOrder, removePinnedTreeNodesFromOrder, treeNodePinIdentity, treeNodePinKey } from "@/lib/app/pinnedItems";
-import { buildMongoObjectBrowserRows, buildObjectBrowserRows, canonicalizeObjectBrowserPinnedTreeNodeIdentity, objectBrowserRowLegacyPinnedTreeNodeIds, objectBrowserRowMatchesPinnedTreeNode, sortObjectBrowserRows, type ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
+import {
+  buildMongoObjectBrowserRows,
+  buildObjectBrowserRows,
+  canonicalizeObjectBrowserPinnedTreeNodeIdentity,
+  formatObjectBrowserAutoIncrement,
+  initialObjectBrowserSortDirection,
+  objectBrowserRowLegacyPinnedTreeNodeIds,
+  objectBrowserRowMatchesPinnedTreeNode,
+  sortObjectBrowserRows,
+  type ObjectBrowserRow,
+} from "@/lib/table/objectBrowserRows";
 import type { TreeNode } from "@/types/database";
 
 describe("buildObjectBrowserRows", () => {
@@ -204,6 +214,37 @@ describe("buildMongoObjectBrowserRows", () => {
 
     expect(rows.map((row) => row.name)).toEqual([" users ", "users", " "]);
     expect(new Set(rows.map((row) => row.id))).toHaveLength(3);
+  });
+});
+
+describe("Object Browser auto-increment column (#13830)", () => {
+  const rows: ObjectBrowserRow[] = [
+    { id: "small", name: "small", displayName: "small", type: "TABLE", autoIncrement: "9" },
+    { id: "mid", name: "mid", displayName: "mid", type: "TABLE", autoIncrement: "100" },
+    { id: "big", name: "big", displayName: "big", type: "TABLE", autoIncrement: "18446744073709551615" },
+    { id: "none", name: "none", displayName: "none", type: "TABLE", autoIncrement: null },
+    { id: "view", name: "view", displayName: "view", type: "VIEW" },
+  ];
+
+  it("sorts by numeric value, keeping tables without a counter last", () => {
+    expect(sortObjectBrowserRows(rows, "autoIncrement", "asc").map((row) => row.id)).toEqual(["small", "mid", "big", "none", "view"]);
+    expect(sortObjectBrowserRows(rows, "autoIncrement", "desc").map((row) => row.id)).toEqual(["big", "mid", "small", "none", "view"]);
+    expect(rows.map((row) => row.id)).toEqual(["small", "mid", "big", "none", "view"]);
+  });
+
+  it("starts with the largest counters first", () => {
+    expect(initialObjectBrowserSortDirection("autoIncrement")).toBe("desc");
+  });
+
+  it("formats the value with digit grouping without losing precision past 2^53", () => {
+    const format = new Intl.NumberFormat();
+    expect(formatObjectBrowserAutoIncrement("1234567")).toBe(format.format(1234567));
+    expect(formatObjectBrowserAutoIncrement("18446744073709551615")).toBe(format.format(BigInt("18446744073709551615")));
+    expect(formatObjectBrowserAutoIncrement(" 42 ")).toBe(format.format(42));
+    expect(formatObjectBrowserAutoIncrement("not a number")).toBe("not a number");
+    expect(formatObjectBrowserAutoIncrement(null)).toBe("");
+    expect(formatObjectBrowserAutoIncrement(undefined)).toBe("");
+    expect(formatObjectBrowserAutoIncrement("")).toBe("");
   });
 });
 

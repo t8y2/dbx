@@ -149,6 +149,14 @@ describe("tableEditing", () => {
     expect(canUseKeylessRowPredicate("postgres", ["id"])).toBe(false);
   });
 
+  it("allows inserts over generic JDBC while keeping existing rows primary-key guarded", () => {
+    expect(canInsertTableRows("jdbc")).toBe(true);
+    expect(isTableDataEditable("jdbc", [], "TABLE")).toBe(true);
+    expect(canEditExistingTableRows("jdbc", undefined, [])).toBe(false);
+    expect(canEditExistingTableRows("jdbc", undefined, ["id"])).toBe(true);
+    expect(supportsDataGridTransaction("jdbc")).toBe(false);
+  });
+
   it("uses unique indexes as row identifiers when primary keys are absent", () => {
     const columns = [column("email"), column("name")].map((value) => ({ ...value, is_nullable: false }));
     expect(editableRowIdentifierColumns("postgres", columns, [index(["email", "name"]), index(["email"])])).toEqual(["email"]);

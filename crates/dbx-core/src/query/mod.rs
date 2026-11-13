@@ -4458,7 +4458,7 @@ impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
         statements: &[String],
         on_result: &mut (dyn FnMut(usize, &db::QueryResult) + Send),
     ) -> db::mysql::MySqlNonResultBatchOutcome {
-        let sql = statements.join(";\n");
+        let sql = mysql_non_result_batch_sql(statements);
         let mut completed_results = Vec::with_capacity(statements.len());
         let mut record_result = |statement_index: usize, result: &db::QueryResult| {
             completed_results.push(result.clone());
@@ -4479,6 +4479,17 @@ impl MysqlBatchStatementExecutor for MysqlBatchConnection<'_> {
 
 const MYSQL_MULTI_STATEMENT_BATCH_MAX_STATEMENTS: usize = 50;
 const MYSQL_MULTI_STATEMENT_BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// Separates the statements of one pipelined MySQL packet.
+///
+/// The splitter keeps a trailing `--` or `#` comment as part of the statement
+/// it follows, so the `;` must start a new line. Otherwise it lands inside that
+/// comment and the server reads the next statement as a continuation (#14735).
+const MYSQL_NON_RESULT_BATCH_SEPARATOR: &str = "\n;\n";
+
+fn mysql_non_result_batch_sql(statements: &[String]) -> String {
+    statements.join(MYSQL_NON_RESULT_BATCH_SEPARATOR)
+}
 
 fn mysql_batch_pool_error_action(db_type: Option<DatabaseType>, error: &str) -> PoolErrorAction {
     if error == QUERY_CANCELED {
@@ -4519,7 +4530,7 @@ fn mysql_non_result_batch_end(
         {
             break;
         }
-        let next_len = byte_len.saturating_add(statement.len()).saturating_add(2);
+        let next_len = byte_len.saturating_add(statement.len()).saturating_add(MYSQL_NON_RESULT_BATCH_SEPARATOR.len());
         if end > start && next_len > max_bytes {
             break;
         }
@@ -10606,6 +10617,22 @@ for line in sys.stdin:
             ]
         );
         assert_eq!(error_action, Some(PoolErrorAction::Keep));
+    }
+
+    #[test]
+    fn mysql_non_result_batch_keeps_separators_out_of_trailing_line_comments() {
+        let statements = vec![
+            "INSERT INTO t (id) SELECT 1 FROM t WHERE 1 = 0   -- trailing comment".to_string(),
+            "UPDATE t SET id = 2 # hash comment".to_string(),
+            "DELETE FROM t".to_string(),
+        ];
+
+        assert_eq!(
+            mysql_non_result_batch_sql(&statements),
+            "INSERT INTO t (id) SELECT 1 FROM t WHERE 1 = 0   -- trailing comment\n;\n\
+             UPDATE t SET id = 2 # hash comment\n;\n\
+             DELETE FROM t"
+        );
     }
 
     #[tokio::test]

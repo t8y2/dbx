@@ -137,7 +137,7 @@ import { externalSqlFileDisplayTitles, normalizeExternalSqlPath, relocateExterna
 import { clearDataGridPendingSnapshot, clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { combineDataGridOrderByInputs, copyDataGridSortBuilderStatesForTab } from "@/composables/useDataGridSortBuilder";
 import { beginClosingDataGridViewSnapshotsForTab, clearDataGridViewSnapshot, clearDataGridViewSnapshotsForTab } from "@/lib/dataGrid/dataGridViewStateCache";
-import { beginClosingBrowserState } from "@/lib/tabs/documentBrowserStateCache";
+import { beginClosingBrowserState, restoreDocumentBrowserState, saveDocumentBrowserState } from "@/lib/tabs/documentBrowserStateCache";
 import { clearDataGridStructuredFilterStatesForTab, copyDataGridStructuredFilterStatesForTab } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { clearDataGridSearchStatesForTab } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, pruneTabResultSnapshots, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
@@ -2105,6 +2105,7 @@ export const useQueryStore = defineStore("query", () => {
     // A legacy run without the token must not inherit a stale tab value: fail
     // safe by starting a fresh logical result.
     tab.resultViewGeneration = run.resultViewGeneration ?? uuid();
+    tab.resultColumnWidthRevision = run.resultColumnWidthRevision;
     tab.batchSqlExecution = cloneBatchSqlExecution(run.batchSqlExecution);
     tab.resultBaseSql = run.resultBaseSql;
     tab.resultEditorFingerprint = run.resultEditorFingerprint;
@@ -2502,6 +2503,7 @@ export const useQueryStore = defineStore("query", () => {
       activeResultIndex: tab.activeResultIndex,
       resultGridRevision: tab.resultGridRevision,
       resultViewGeneration: tab.resultViewGeneration,
+      resultColumnWidthRevision: tab.resultColumnWidthRevision,
       batchSqlExecution: cloneBatchSqlExecution(tab.batchSqlExecution),
       resultBaseSql: tab.resultBaseSql,
       resultEditorFingerprint: tab.resultEditorFingerprint,
@@ -2627,6 +2629,7 @@ export const useQueryStore = defineStore("query", () => {
       activeResultIndex: tab.activeResultIndex,
       resultGridRevision: tab.resultGridRevision,
       resultViewGeneration: tab.resultViewGeneration,
+      resultColumnWidthRevision: tab.resultColumnWidthRevision,
       batchSqlExecution: cloneBatchSqlExecution(tab.batchSqlExecution),
       resultBaseSql: tab.resultBaseSql,
       resultEditorFingerprint: tab.resultEditorFingerprint,
@@ -2711,6 +2714,9 @@ export const useQueryStore = defineStore("query", () => {
       return;
     }
     tab.resultViewGeneration = uuid();
+    if (origin === "refresh" && tab.mode === "query" && tab.result && !isQueryExecutionErrorResult(tab.result)) {
+      tab.resultColumnWidthRevision = tab.resultViewGeneration;
+    }
   }
 
   function sortTabResultLocally(id: string, column: string, columnIndex: number, direction: DataGridSortDirection | null) {
@@ -5679,6 +5685,10 @@ export const useQueryStore = defineStore("query", () => {
       // cannot recover which conditions belong to the manual input or quick UI.
       copyDataGridStructuredFilterStatesForTab(id, newId);
       copyDataGridSortBuilderStatesForTab(id, newId);
+    } else if (newTab.mode === "mongo") {
+      const state = restoreDocumentBrowserState(id);
+      // Copy query conditions before mounting the new browser so it can load its own rows.
+      if (state) saveDocumentBrowserState(newId, cloneTabDraft({ ...state, data: undefined }));
     }
     tabs.value.splice(idx + 1, 0, newTab);
 
@@ -8117,6 +8127,8 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  const pendingQueryMetadata = new WeakMap<QueryResult, Promise<QueryMetadataPatch | undefined>>();
+
   function analyzeQueryMetadataInBackground(tabId: string, sql: string, result: QueryResult, executionDatabase: string, traceId: string, elapsed: () => string, databaseType: DatabaseType | undefined, hiddenPrimaryKeys: HiddenPrimaryKeyProjection[] = [], connection?: ConnectionConfig) {
     void (async () => {
       const tab = tabs.value.find((t) => t.id === tabId);
@@ -8131,17 +8143,25 @@ export const useQueryStore = defineStore("query", () => {
       };
       // Metadata requests outlive the displayed result when another query starts
       // or a retained run is selected. Analyze this result, not the live tab.
-      const patch = await buildQueryMetadataPatch({ ...tab, result }, sql, executionDatabase, traceId, elapsed, hiddenPrimaryKeys, connection, applyDisplayReady);
-      if (patch?.queryAnalysis && hasHiddenPhysicalRowKey(databaseType, hiddenPrimaryKeys)) {
-        patch.queryAnalysis = { ...patch.queryAnalysis, allowInsert: false };
-      }
-      const current = tabs.value.find((t) => t.id === tabId);
-      if (patch && current?.result === result) {
-        applyQueryMetadataPatch(current, patch, databaseType, executionDatabase);
-        if (activeResultRunOwnsDisplayedResult(current)) syncActiveResultRunFromDisplayed(current);
-        queryExecutionLog("info", "metadata:done", { traceId, elapsed: elapsed() });
-      } else {
-        queryExecutionLog("warn", "metadata:stale", { traceId, elapsed: elapsed() });
+      const pending = buildQueryMetadataPatch({ ...tab, result }, sql, executionDatabase, traceId, elapsed, hiddenPrimaryKeys, connection, applyDisplayReady);
+      pendingQueryMetadata.set(result, pending);
+      try {
+        const patch = await pending;
+        if (patch?.queryAnalysis && hasHiddenPhysicalRowKey(databaseType, hiddenPrimaryKeys)) {
+          patch.queryAnalysis = { ...patch.queryAnalysis, allowInsert: false };
+        }
+        const current = tabs.value.find((t) => t.id === tabId);
+        if (patch && current?.result === result) {
+          applyQueryMetadataPatch(current, patch, databaseType, executionDatabase);
+          if (activeResultRunOwnsDisplayedResult(current)) syncActiveResultRunFromDisplayed(current);
+          queryExecutionLog("info", "metadata:done", { traceId, elapsed: elapsed() });
+        } else {
+          queryExecutionLog("warn", "metadata:stale", { traceId, elapsed: elapsed() });
+        }
+      } catch (error) {
+        queryExecutionLog("warn", "metadata:failed", { traceId, elapsed: elapsed(), error });
+      } finally {
+        if (pendingQueryMetadata.get(result) === pending) pendingQueryMetadata.delete(result);
       }
     })();
   }
@@ -8745,7 +8765,7 @@ export const useQueryStore = defineStore("query", () => {
             current.result = allResults[0];
           }
           // Redis command batches always replace the visible result.
-          publishResultGeneration(current, "execute");
+          publishResultGeneration(current, options?.publicationOrigin ?? "execute");
           producedResult = current.result !== undefined;
           touchResult(current);
           current.queryAnalysis = undefined;
@@ -9220,7 +9240,7 @@ export const useQueryStore = defineStore("query", () => {
           if (!captureResultRun && previousDisplayedResults.some(Boolean)) {
             releaseReplacedResultLargeValues(current, ...previousDisplayedResults);
           }
-          publishResultGeneration(current, shouldAppendResult ? "append" : "execute");
+          publishResultGeneration(current, shouldAppendResult ? "append" : (options?.publicationOrigin ?? "execute"));
           producedResult = current.result !== undefined;
           touchResult(current);
           current.queryAnalysis = undefined;
@@ -9294,7 +9314,7 @@ export const useQueryStore = defineStore("query", () => {
           current.activeResultIndex = allResults.length > 1 ? resultIndex : undefined;
           current.result = allResults[resultIndex];
           // Elasticsearch batch requests replace the visible result.
-          publishResultGeneration(current, "execute");
+          publishResultGeneration(current, options?.publicationOrigin ?? "execute");
           producedResult = current.result !== undefined;
           touchResult(current);
           current.queryAnalysis = undefined;
@@ -10884,8 +10904,16 @@ export const useQueryStore = defineStore("query", () => {
     const connection = useConnectionStore().getConfig(location.connectionId);
     const databaseType = effectiveDatabaseTypeForConnection(connection);
     if (result === tab.result) {
-      if (tab.mode === "data" && (tab.tableMetaPending || !tab.tableMeta?.columns.length)) return undefined;
-      const tableMeta = tab.mode === "data" ? tableMetaForDataTab(tab) : tab.tableMeta;
+      let tableMeta = tab.tableMeta;
+      if (tab.mode === "data") {
+        if (tab.tableMetaPending || !tableMeta?.columns.length) return undefined;
+        tableMeta = tableMetaForDataTab(tab);
+      } else {
+        // The grid can show rows before background metadata is ready. Await
+        // the patch for this result, since the active tab can change meanwhile.
+        const pending = pendingQueryMetadata.get(result);
+        if (pending) tableMeta = (await pending)?.tableMeta;
+      }
       const structure = analyzeSelectStructureForDisplay(result.sourceStatement);
       const sameTable = structure?.tableName && tableMeta?.tableName && structure.tableName.toLowerCase() === tableMeta.tableName.toLowerCase() && (!structure.schema || !tableMeta.schema || structure.schema.toLowerCase() === tableMeta.schema.toLowerCase());
       if (!sameTable || !tableMeta?.tableName || !canInsertTableRows(databaseType) || tableMeta.tableType?.toUpperCase().includes("VIEW")) return undefined;

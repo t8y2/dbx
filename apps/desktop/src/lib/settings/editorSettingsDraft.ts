@@ -126,6 +126,8 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "autoSelectActiveSidebarNode",
   "sidebarPinDefaultDatabase",
   "sidebarBrowseObjectsOnDatabaseActivation",
+  "sidebarAutoExpandOnDatabaseActivation",
+  "sidebarTableClickNavigation",
   "openTabsRestoreMode",
   "autoReloadRestoredDataTabsOnOpen",
   "disconnectTabHandlingMode",

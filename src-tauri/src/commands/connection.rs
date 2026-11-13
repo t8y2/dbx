@@ -2084,10 +2084,10 @@ async fn test_connection_with_info_impl(
                     let validate_agent_target = consul_config.agent_target.is_some();
                     let original_host = consul_config.base_url.host_str().unwrap_or_default();
                     let original_port = consul_config.base_url.port_or_known_default().unwrap_or(config.port);
-                    if host != original_host || port != original_port {
+                    if runtime_proxy.is_some() || host != original_host || port != original_port {
                         consul_config = consul_config.with_connect_override(&host, port);
                     }
-                    let client = dbx_core::consul::ConsulClient::new(consul_config).await?;
+                    let client = dbx_core::consul::ConsulClient::new_with_proxy(consul_config, runtime_proxy).await?;
                     client.probe().await?;
                     let identity = if validate_agent_target {
                         Some(client.validate_configured_agent_target().await?)
@@ -2654,10 +2654,10 @@ async fn connect_db_inner(
                 let mut consul_config = dbx_core::consul::ConsulConfig::from_connection(&db_config)?;
                 let original_host = consul_config.base_url.host_str().unwrap_or_default();
                 let original_port = consul_config.base_url.port_or_known_default().unwrap_or(db_config.port);
-                if host != original_host || port != original_port {
+                if runtime_proxy.is_some() || host != original_host || port != original_port {
                     consul_config = consul_config.with_connect_override(&host, port);
                 }
-                let client = dbx_core::consul::ConsulClient::new(consul_config).await?;
+                let client = dbx_core::consul::ConsulClient::new_with_proxy(consul_config, runtime_proxy).await?;
                 client.probe().await?;
                 PoolKind::Consul(client)
             }

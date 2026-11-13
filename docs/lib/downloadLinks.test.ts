@@ -41,12 +41,12 @@ test("Windows downloads include standard, offline, and Windows 7 installers", ()
       {
         id: "windows-7-offline",
         iconId: "windows-legacy",
-        label: "Windows 7 / Server\u00a02012\u00a0R2 专用包",
+        label: "Windows 7 / Server\u00a02008\u00a0R2 及以上",
         description: "内置 WebView2 离线运行库 · 不含",
         driverLinkLabel: "数据库离线驱动",
         descriptionSuffix: undefined,
         badge: "旧系统",
-        href: "https://dl.dbxio.com/releases/v0.5.82/DBX_0.5.82_x64-win7-server2012r2-offline-setup.exe?v=0.5.82",
+        href: "https://dl.dbxio.com/releases/v0.5.82/DBX_0.5.82_x64-win7-server2008r2-offline-setup.exe?v=0.5.82",
       },
     ],
   );
@@ -90,10 +90,7 @@ test("channel releases link into their immutable stable directory by release tag
   const options = createInstallOptions("en", "0.6.63", "v0.6.63-beta.20261101.3");
 
   assert.ok(options.every((option) => option.href.startsWith("https://dl.dbxio.com/releases/stable/v0.6.63-beta.20261101.3/DBX_0.6.63_")));
-  assert.equal(
-    options.find((option) => option.id === "linux")?.href,
-    "https://dl.dbxio.com/releases/stable/v0.6.63-beta.20261101.3/DBX_0.6.63_amd64.AppImage?v=0.6.63",
-  );
+  assert.equal(options.find((option) => option.id === "linux")?.href, "https://dl.dbxio.com/releases/stable/v0.6.63-beta.20261101.3/DBX_0.6.63_amd64.AppImage?v=0.6.63");
 });
 
 test("a release tag outside the published tag formats falls back to the versioned directory", () => {

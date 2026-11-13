@@ -110,6 +110,21 @@ pub fn uses_single_row_insert_statements(database_type: DatabaseType) -> bool {
 pub fn pagination_strategy(database_type: Option<DatabaseType>, context: PaginationContext) -> TablePaginationStrategy {
     match database_type {
         Some(DatabaseType::Jdbc) => TablePaginationStrategy::AgentMaxRows,
+        // Teradata has no `LIMIT` clause — appending one is a syntax error
+        // ("expected something between ... and the 'LIMIT' keyword", #14604) —
+        // and it has no `OFFSET` either, so a page cannot be expressed in SQL.
+        // User queries therefore take the same route as generic JDBC: the
+        // statement runs unmodified, the agent caps it with
+        // `Statement.setMaxRows()`, and later pages consume the result session
+        // up to the requested offset (#8993).
+        //
+        // Table previews and bounded reads keep `LIMIT` for now: rewriting them
+        // needs a `ROW_NUMBER() ... QUALIFY` strategy, and dropping the bound
+        // there would either re-return the same rows on page 2 or scan the whole
+        // table, so that is a separate change rather than part of this fix.
+        Some(DatabaseType::Teradata) if matches!(context, PaginationContext::UserQuery) => {
+            TablePaginationStrategy::AgentMaxRows
+        }
         Some(DatabaseType::Cassandra)
             if matches!(context, PaginationContext::TablePreview | PaginationContext::UserQuery) =>
         {

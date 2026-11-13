@@ -130,6 +130,7 @@ import {
   buildVacuumTableSql,
   supportsDropTableCascade,
   supportsTruncateTableCascade,
+  tableAdminSqlOptionsForRow,
   type TableAdminSqlOptions,
 } from "@/lib/database/dbAdminSql";
 import type { DuplicateTableStructurePlan } from "@/lib/database/dbAdminSql";
@@ -4978,17 +4979,14 @@ async function confirmPasteTableImpl() {
 }
 
 function tableAdminSqlOptions(row: ObjectBrowserRow, options?: { cascade?: boolean }): TableAdminSqlOptions {
-  const result: TableAdminSqlOptions = {
+  return tableAdminSqlOptionsForRow({
+    row,
     databaseType: effectiveDatabaseType.value,
     schema: connectionTableSqlSchema(props.connection, row.schema || selectedSchema.value),
-    tableName: row.name,
     // Cloud Spanner's dialect decides the quote; the static per-type mapping cannot.
     identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
-  };
-  if (options?.cascade) result.cascade = true;
-  // PostgreSQL needs `DROP FOREIGN TABLE` for relkind = 'f' (#14717).
-  if (row.type?.toUpperCase() === "FOREIGN TABLE") result.foreignTable = true;
-  return result;
+    cascade: options?.cascade,
+  });
 }
 
 /**

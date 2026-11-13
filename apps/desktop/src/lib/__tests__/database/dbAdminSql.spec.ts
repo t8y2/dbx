@@ -26,10 +26,53 @@ import {
   sqlServerClonePrimaryKeyConstraintName,
   SQLSERVER_IDENTIFIER_MAX_LENGTH,
   supportsMysqlAutoIncrement,
+  tableAdminSqlOptionsForRow,
 } from "@/lib/database/dbAdminSql";
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+/**
+ * #14717 review: the Object Browser must hand `foreignTable: true` to the drop
+ * builder, or PostgreSQL answers `DROP TABLE` with "is not a table". The flag has
+ * to survive separately from `row.type`, which the row normalizer folds into
+ * "TABLE" for a foreign table.
+ */
+describe("Object Browser table admin SQL options", () => {
+  it("marks a foreign-table row so the drop uses DROP FOREIGN TABLE", () => {
+    const options = tableAdminSqlOptionsForRow({
+      row: { name: "vmes_bfl_last", schema: "de_dd", foreignTable: true },
+      databaseType: "postgres",
+      schema: "de_dd",
+      identifierQuote: '"',
+    });
+
+    expect(options.foreignTable).toBe(true);
+    expect(options.tableName).toBe("vmes_bfl_last");
+    expect(options.databaseType).toBe("postgres");
+  });
+
+  it("leaves an ordinary table without the foreign flag", () => {
+    const options = tableAdminSqlOptionsForRow({
+      row: { name: "orders", schema: "public" },
+      databaseType: "postgres",
+      schema: "public",
+    });
+
+    expect(options.foreignTable).toBeUndefined();
+    expect(options.cascade).toBeUndefined();
+  });
+
+  it("keeps cascade independent from the foreign flag", () => {
+    const options = tableAdminSqlOptionsForRow({
+      row: { name: "remote", schema: "public", foreignTable: true },
+      databaseType: "postgres",
+      cascade: true,
+    });
+
+    expect(options).toMatchObject({ foreignTable: true, cascade: true });
+  });
 });
 
 describe("MySQL AUTO_INCREMENT administration", () => {

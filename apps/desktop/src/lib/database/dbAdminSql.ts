@@ -30,6 +30,28 @@ export interface TableAdminSqlOptions {
   foreignTable?: boolean;
 }
 
+/**
+ * Table admin SQL options for one Object Browser row.
+ *
+ * Lives here rather than inline in the component so the row → statement mapping is
+ * testable without mounting the browser. The foreign-table flag must come from the
+ * row's preserved `foreignTable` field, never from `row.type`: the row type
+ * normalizer folds a PostgreSQL foreign table into "TABLE", so a type check would
+ * miss it and the drop would fall back to `DROP TABLE`, which the server rejects
+ * (#14717 review).
+ */
+export function tableAdminSqlOptionsForRow(options: { row: { name: string; schema?: string | null; foreignTable?: boolean }; databaseType?: DatabaseType; schema?: string | null; identifierQuote?: string; cascade?: boolean }): TableAdminSqlOptions {
+  const result: TableAdminSqlOptions = {
+    databaseType: options.databaseType,
+    schema: options.schema,
+    tableName: options.row.name,
+    identifierQuote: options.identifierQuote,
+  };
+  if (options.cascade) result.cascade = true;
+  if (options.row.foreignTable) result.foreignTable = true;
+  return result;
+}
+
 export interface VacuumTableSqlOptions {
   databaseType?: DatabaseType;
   schema?: string | null;

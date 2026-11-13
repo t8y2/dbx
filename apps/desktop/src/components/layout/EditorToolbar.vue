@@ -156,6 +156,16 @@ function setMongoQueryLanguage(language: MongoQueryLanguage) {
   queryStore.setMongoQueryLanguage(props.activeTab.id, language);
 }
 
+async function copyDatabaseName(database: string) {
+  if (!database) return;
+  try {
+    await copyToClipboard(database);
+    toast(t("connection.copied"));
+  } catch (error) {
+    toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
+
 async function copyGeneratedMongoShell() {
   const shell = props.activeTab.mongoGeneratedShell;
   if (!shell) return;
@@ -1186,6 +1196,20 @@ defineExpose({
               <TruncatedTextTooltip :text="label" class="min-w-0 flex-1" side="left" :side-offset="8" />
               <ProductionContextBadge v-if="databaseOptionIsProduction(option)" compact />
             </div>
+          </template>
+          <template #option-action="{ option }">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              class="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+              :data-copy-database-name="option"
+              :aria-label="`${t('contextMenu.copyName')}: ${option}`"
+              :title="`${t('contextMenu.copyName')}: ${option}`"
+              @click.stop="copyDatabaseName(option)"
+            >
+              <Copy class="h-3.5 w-3.5" />
+            </Button>
           </template>
         </SearchableSelect>
         <Tooltip v-if="showDatabaseHelperButtons && activeDatabaseValue && !isSingleDb">

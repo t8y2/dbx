@@ -256,7 +256,7 @@ import { tableColumnDefaultDisplayValue } from "@/lib/table/tableColumnDefaultPr
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRowsForScaffold, type ObjectBrowserRowsCacheScope, type ObjectBrowserRowsCacheWriteToken } from "@/lib/table/objectBrowserRowsCache";
 import { createObjectBrowserRowsLoadGuard, type ObjectBrowserRowsLoadHandle } from "@/lib/table/objectBrowserRowsLoadGuard";
-import { metadataLoadBudgetMs } from "@/lib/metadata/metadataLoadBudget";
+import { metadataLoadBudgetMs, waitForMetadata } from "@/lib/metadata/metadataLoadBudget";
 import { shareObjectBrowserRead } from "@/lib/table/objectBrowserPendingReads";
 import { loadObjectDdl, type ObjectDdlRequest } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
@@ -348,12 +348,6 @@ let invalidObjectsDialogGeneration = 0;
 let invalidObjectSourceRequestGeneration = 0;
 let objectBrowserUnmounted = false;
 const rows = ref<ObjectBrowserRow[]>([]);
-// MySQL browser split (#14139): names first, details automatically afterwards.
-// Phase-two (details) reads are tracked per cache write token; see
-// scheduleObjectBrowserDetails(). Declared here because loadObjects() starts the
-// passes and helpers below only read from it.
-const objectBrowserDetailsPasses = new Map<ObjectBrowserRowsCacheWriteToken, Promise<unknown>>();
-const detailsPassEnabled = computed(() => usesLightweightMysqlBrowser(props.connection));
 const rootRef = ref<HTMLElement>();
 const search = ref(props.initialSearchQuery ?? "");
 function initialObjectBrowserFilter(): ObjectFilter {
@@ -376,6 +370,9 @@ let objectPageNextAnchor: string | undefined;
 let objectSearchTimer: ReturnType<typeof setTimeout> | undefined;
 const refreshingObjects = ref(false);
 const scaffoldRefreshError = ref("");
+const loadingObjectDetails = ref(false);
+const objectDetailsError = ref("");
+let retryObjectDetails: (() => void) | undefined;
 const sourceLoading = ref(false);
 const sourceContent = ref("");
 const sourceError = ref("");
@@ -5565,13 +5562,13 @@ watch([() => props.initialEventName, () => props.initialEventOpenRequestId, () =
 // 匹配 0 行；schema 解析失败（loadSchemas 抛错或返回空列表）时标签会整体空白
 // (#8301)。经 objectListSchemaForConnection 回退到连接用户名（大写），仅限
 // 达梦；oracle/oceanbase-oracle 维持空 schema 由后端解析当前 schema。
-// MySQL is two-phase and automatic (#14139 follow-up): this pass only enumerates
-// names, and scheduleObjectBrowserDetails() upgrades the rows on screen in the
-// background. No caller has to ask for "details" any more.
 async function loadObjects(options?: { allowCached?: boolean; preserveExistingRows?: boolean }) {
   clearTimeout(objectSearchTimer);
   if (usesServerObjectPaging.value) return loadObjectPage(false, { preserveExistingRows: options?.preserveExistingRows });
   error.value = "";
+  loadingObjectDetails.value = false;
+  objectDetailsError.value = "";
+  retryObjectDetails = undefined;
   // A new load supersedes any in-flight one, so reset the transient refresh flags
   // on entry. A superseded request's finally() can no longer run (the guard's
   // epoch moved on) and would otherwise leave refreshingObjects stuck spinning
@@ -5607,14 +5604,14 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     // Explicit refresh and metadata invalidation still bypass this branch.
     applyObjectBrowserRows(cached.rows);
     finishOnce();
-    // 统计信息随对象列表缓存，过期时只在后台刷新统计，保留对象列表本身。
-    // MySQL 的旧缓存可能尚未合并表排序规则，即使仍新鲜也要补读一次。
-    const missingMysqlCollation = showMysqlTableCharsetColumns.value && rows.value.some((row) => row.type === "TABLE" && row.collation === undefined);
-    const statistics = cached.stale || missingMysqlCollation ? revalidateCachedObjectStatistics(request, cacheWriteToken) : undefined;
-    // 缺失的注释/时间戳在统计读完后补齐，避免两条重读同时打库。
-    if (detailsPassEnabled.value && !rows.value.some((row) => row.comment?.trim() || row.created_at?.trim() || row.updated_at?.trim())) {
-      detailsPassStarter(request, cacheWriteToken, statistics)();
-    }
+    // 行数/大小是随对象列表一起缓存的，直接返回缓存会让这两列一直停在上一次统计
+    // （#10461）。对象列表本身仍按上面的约定不动，只把统计信息在后台补一次。
+    const missingCollation = showMysqlTableCharsetColumns.value && rows.value.some((row) => row.type === "TABLE" && row.collation === undefined);
+    if (usesLightweightMysqlBrowser(props.connection)) {
+      if (!cached.detailsComplete || cached.stale || missingCollation) {
+        void loadMysqlObjectDetails(request, cacheWriteToken, !cached.detailsComplete);
+      }
+    } else if (cached.stale || missingCollation) void revalidateCachedObjectStatistics(request, cacheWriteToken);
     return;
   } else {
     // No scaffold: first load in this scope, cache invalidated by a DDL mutation,
@@ -5635,11 +5632,15 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     const nextRows = await objectBrowserRowsLoadGuard.wait(request.epoch, load, metadataLoadBudgetMs(props.connection.query_timeout_secs));
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     applyObjectBrowserRows(nextRows);
-    const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows);
-    // Row/size statistics come from a separate aggregate read; the MySQL split only
-    // skips them on the enumeration, not for the whole view.
-    const statistics = loadObjectStatistics(request, cacheWriteToken, cachedAt);
-    if (detailsPassEnabled.value) detailsPassStarter(request, cacheWriteToken, statistics)();
+    const progressive = usesLightweightMysqlBrowser(props.connection);
+    const cachedAt = cacheObjectBrowserRows(cacheWriteToken, nextRows, { detailsComplete: !progressive });
+    if (progressive) {
+      // Publish names and release the blocking spinner before awaiting details.
+      loadingObjects.value = false;
+      refreshingObjects.value = false;
+      finishOnce();
+      void loadMysqlObjectDetails(request, cacheWriteToken);
+    } else void loadObjectStatistics(request, cacheWriteToken, cachedAt);
   } catch (e: any) {
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
     // Keep visible rows on a background revalidate failure — surface a lightweight
@@ -5756,11 +5757,15 @@ async function loadSqlObjectBrowserRows(request: ObjectBrowserRowsLoadHandle, de
   // unbounded exact subset into the legacy all view defeats both contracts.
   const types = supportsSchemaIndexes.value ? sidebarObjectKindsForDatabase(effectiveDatabaseType.value).filter((type) => type !== "INDEX") : undefined;
   const readOptions = usesLightweightMysqlBrowser(props.connection) ? { lightweight: !details } : oracleTriggerObjectReadOptions(props.connection, types, request.scope.catalog);
-  const objects: ObjectInfo[] = await shareObjectBrowserRead(objectBrowserReadKey(request, types, readOptions), () =>
-    readOptions
+  const readKey = JSON.stringify([createObjectBrowserRowsCacheWriteToken(request.scope), types, readOptions]);
+  const objects: ObjectInfo[] = await shareObjectBrowserRead(readKey, () => {
+    const read = readOptions
       ? api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog, undefined, undefined, readOptions)
-      : api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog),
-  );
+      : api.listObjects(request.scope.connectionId, request.scope.database, request.scope.schema, types, undefined, undefined, undefined, request.scope.catalog);
+    // Evict a timed-out shared detail read too, so retry starts a new request.
+    // This bounds local waiting; backend statement cancellation remains separate.
+    return details ? waitForMetadata(read, metadataLoadBudgetMs(props.connection.query_timeout_secs)) : read;
+  });
   return buildObjectBrowserRows({
     objects: objects.filter((object) => !supportsSchemaIndexes.value || object.object_type !== "INDEX"),
     database: request.scope.database,
@@ -5769,84 +5774,55 @@ async function loadSqlObjectBrowserRows(request: ObjectBrowserRowsLoadHandle, de
   });
 }
 
+/** One deferred enrichment pass: statistics first, then missing details. */
+async function loadMysqlObjectDetails(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, needsDetails = true) {
+  if (!objectBrowserRowsLoadGuard.isCurrent(request) || loadingObjectDetails.value) return;
+  loadingObjectDetails.value = true;
+  objectDetailsError.value = "";
+  retryObjectDetails = () => void loadMysqlObjectDetails(request, cacheWriteToken, needsDetails);
+  const budget = metadataLoadBudgetMs(props.connection.query_timeout_secs);
+  const failures: string[] = [];
+  try {
+    // Keep the names render ahead of phase two, including a cached scaffold.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+    cacheObjectBrowserRows(cacheWriteToken, rows.value, { detailsComplete: false });
+    if (rows.value.some((row) => row.type === "TABLE")) {
+      try {
+        const statistics = shareObjectBrowserRead(JSON.stringify(["statistics", cacheWriteToken]), () => waitForMetadata(api.listObjectStatistics(request.scope.connectionId, request.scope.database, request.scope.schema), budget));
+        const stats = await objectBrowserRowsLoadGuard.wait(request.epoch, statistics, budget);
+        if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+        mergeObjectStatistics(stats, request.scope.schema, cacheWriteToken, undefined, false);
+      } catch (e) {
+        if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+        failures.push(translateBackendError(t, e));
+      }
+    }
+    if (needsDetails) {
+      try {
+        const details = await objectBrowserRowsLoadGuard.wait(request.epoch, loadSqlObjectBrowserRows(request, true), budget);
+        if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+        // Only detail fields are merged; preserve statistics, collation and identity.
+        applyObjectBrowserDetails(details);
+        needsDetails = false;
+      } catch (e) {
+        if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
+        failures.push(translateBackendError(t, e));
+      }
+    }
+    cacheObjectBrowserRows(cacheWriteToken, rows.value, { detailsComplete: failures.length === 0 });
+    objectDetailsError.value = failures.join(" · ");
+    if (!failures.length) retryObjectDetails = undefined;
+  } finally {
+    if (objectBrowserRowsLoadGuard.isCurrent(request)) loadingObjectDetails.value = false;
+  }
+}
+
 async function loadMongoObjectBrowserRows(connectionId: string, database: string) {
   const collections = await api.mongoListCollections(connectionId, database);
   return buildMongoObjectBrowserRows({ collections: visibleMongoCollections(collections), database });
 }
 
-interface ObjectBrowserDetailsPass {
-  epoch: number;
-  cacheWriteToken: ObjectBrowserRowsCacheWriteToken;
-  waitFor?: Promise<unknown>;
-}
-
-/**
- * Phase two of the MySQL browser read (#14139 follow-up).
- *
- * The lightweight enumeration ships names immediately and leaves comments,
- * create/update times and row/size statistics for later. Instead of a manual
- * toolbar button, run that detail read in the background as soon as the names
- * are visible: rows are patched in place (never blanked), failures stay silent
- * (names remain usable), and a superseded scope drops its result.
- *
- * The pass is started through a bound starter that defers it onto a timer:
- * calling it inline from `loadObjects()` reaches the pass bookkeeping while the
- * row list is still being applied, and deferring one task keeps the list's own
- * render ahead of the second read.
- */
-function detailsPassStarter(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, waitFor?: Promise<unknown>): () => void {
-  const epoch = request.epoch;
-  return () => {
-    // The pass is decorative and must never surface as a load failure: defer it and
-    // keep any throw inside the pass.
-    window.setTimeout(() => {
-      void scheduleObjectBrowserDetails({ epoch, scope: cacheWriteToken.scope } as ObjectBrowserRowsLoadHandle, cacheWriteToken, waitFor);
-    }, 0);
-  };
-}
-
-function scheduleObjectBrowserDetails(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, waitFor?: Promise<unknown>): Promise<unknown> {
-  const existing = objectBrowserDetailsPasses.get(cacheWriteToken);
-  if (existing) return existing;
-  const pending = startObjectBrowserDetails({ epoch: request.epoch, cacheWriteToken, waitFor });
-  objectBrowserDetailsPasses.set(cacheWriteToken, pending);
-  void pending
-    .finally(() => {
-      if (objectBrowserDetailsPasses.get(cacheWriteToken) === pending) objectBrowserDetailsPasses.delete(cacheWriteToken);
-    })
-    .catch(() => undefined);
-  return pending;
-}
-
-function startObjectBrowserDetails(pass: ObjectBrowserDetailsPass): Promise<unknown> {
-  // `loadSqlObjectBrowserRows()` carries no cache-write-token argument, so this handle
-  // only has to describe the same scope and epoch for the load guard.
-  const request: ObjectBrowserRowsLoadHandle = { epoch: pass.epoch, scope: pass.cacheWriteToken.scope };
-  return (async () => {
-    // Let the background statistics read finish first: both statements hit
-    // information_schema on the same metadata pool.
-    await pass.waitFor?.catch(() => undefined);
-    if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
-    // A previous full read may have filled the rows while this pass waited on the
-    // statistics; then there is nothing left to fetch.
-    if (rows.value.some((row) => Boolean(row.comment?.trim()))) return;
-    try {
-      const details = await loadSqlObjectBrowserRows(request, true);
-      if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
-      applyObjectBrowserDetails(details);
-      cacheObjectBrowserRows(pass.cacheWriteToken, rows.value);
-    } catch (e) {
-      // Details are decorative: keep the names already rendered and stay quiet.
-      console.debug("[ObjectBrowser] object details unavailable", e);
-    }
-  })();
-}
-
-/**
- * Merges the details read into the rendered list by object identity: the
- * lightweight pass and the details pass may return different orders, and any
- * other field already on screen must survive untouched.
- */
 function applyObjectBrowserDetails(details: readonly ObjectBrowserRow[]) {
   const byId = new Map(details.map((row) => [row.id, row]));
   rows.value = rows.value.map((row) => {
@@ -5859,16 +5835,6 @@ function applyObjectBrowserDetails(details: readonly ObjectBrowserRow[]) {
       updated_at: detail.updated_at ?? row.updated_at,
     };
   });
-}
-
-/**
- * Shared-read key for an object enumeration. Built from plain values only: the
- * previous `JSON.stringify([writeToken, ...])` embedded the token's generation and
- * frozen scope, so two equivalent browsers never shared a pending read.
- */
-function objectBrowserReadKey(request: ObjectBrowserRowsLoadHandle, types: (SidebarObjectKind | "EVENT")[] | undefined, readOptions: import("@/types/database").MetadataReadOptions | undefined): string {
-  const { connectionId, database, schema, catalog } = request.scope;
-  return JSON.stringify([connectionId, database, schema, catalog ?? "", types ?? null, readOptions?.lightweight ?? null, readOptions?.identityMode ?? null]);
 }
 
 async function loadObjectStatistics(request: ObjectBrowserRowsLoadHandle, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
@@ -5893,7 +5859,7 @@ async function revalidateCachedObjectStatistics(request: ObjectBrowserRowsLoadHa
   await loadObjectStatistics(request, cacheWriteToken, undefined);
 }
 
-function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined) {
+function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string, cacheWriteToken: ObjectBrowserRowsCacheWriteToken, cachedAt: number | undefined, detailsComplete = true) {
   const statsByKey = new Map(stats.map((stat) => [objectStatisticKey(stat.schema || fallbackSchema, stat.name), stat]));
   rows.value = rows.value.map((row) => {
     if (row.type !== "TABLE") return row;
@@ -5906,7 +5872,7 @@ function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string
       ...(effectiveDatabaseType.value === "mysql" ? { characterSet: mysqlTableCharsetFromCollation(stat.collation) || null, collation: stat.collation?.trim() || null } : {}),
     };
   });
-  cacheObjectBrowserRows(cacheWriteToken, rows.value, { cachedAt });
+  cacheObjectBrowserRows(cacheWriteToken, rows.value, { cachedAt, detailsComplete });
 }
 
 function objectStatisticKey(schema: string | undefined, name: string) {
@@ -5950,6 +5916,11 @@ useDatabaseBrowserMutation(({ connectionId, database, operation }) => {
 });
 
 function refresh(): boolean {
+  if (usesLightweightMysqlBrowser(props.connection)) {
+    // A user refresh must not join a pre-refresh detail read or accept its result.
+    objectBrowserRowsLoadGuard.invalidate();
+    invalidateObjectBrowserRowsCache({ connectionId: props.connection.id, database: props.database });
+  }
   void reload({ preserveExistingRows: true });
   void refreshActiveTableInfo();
   return true;
@@ -6070,6 +6041,9 @@ watch(
   () => {
     clearTimeout(objectSearchTimer);
     objectBrowserRowsLoadGuard.invalidate();
+    loadingObjectDetails.value = false;
+    objectDetailsError.value = "";
+    retryObjectDetails = undefined;
     schemaListLoadGuard.invalidate();
     closeSidePanel();
     selectedRowId.value = null;
@@ -6084,6 +6058,9 @@ watch(
   [() => props.connection.id, () => props.database, () => props.schema, () => props.catalog],
   async () => {
     objectBrowserRowsLoadGuard.invalidate();
+    loadingObjectDetails.value = false;
+    objectDetailsError.value = "";
+    retryObjectDetails = undefined;
     const contextEpoch = schemaListLoadGuard.invalidate();
     selectedSchema.value = props.schema;
     userHasSelectedFilter.value = false;
@@ -6603,6 +6580,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <Button v-if="showInlineSidePanelToggle" variant="ghost" size="icon" class="h-7 w-7" :class="{ 'text-primary': isSidePanelOpen }" :title="isSidePanelOpen ? t('objects.closeDetailPanel') : t('objects.openDetailPanel')" @click="toggleSidePanel">
         <PanelRight class="h-3.5 w-3.5" />
       </Button>
+      <span v-if="loadingObjectDetails" role="status" class="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Loader2 class="h-3.5 w-3.5 animate-spin" />
+        {{ t("common.loading") }}
+      </span>
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="refreshTooltip" :disabled="loadingObjects" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingObjects || refreshingObjects }" />
       </Button>
@@ -6727,6 +6708,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </Button>
     </div>
 
+    <div v-if="objectDetailsError" role="status" class="flex h-8 shrink-0 items-center gap-2 border-b border-destructive/30 bg-destructive/5 px-3 text-xs text-destructive">
+      <span class="min-w-0 flex-1 truncate">{{ objectDetailsError }}</span>
+      <Button variant="ghost" size="sm" @click="retryObjectDetails?.()">{{ t("common.retry") }}</Button>
+    </div>
     <div v-if="scaffoldRefreshError" role="status" class="flex h-8 shrink-0 items-center gap-2 border-b border-destructive/30 bg-destructive/5 px-3 text-xs text-destructive">
       <RefreshCw class="h-3 w-3 shrink-0" />
       <span class="min-w-0 truncate">{{ scaffoldRefreshError }}</span>

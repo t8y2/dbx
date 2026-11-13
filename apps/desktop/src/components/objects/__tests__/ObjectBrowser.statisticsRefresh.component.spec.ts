@@ -3,7 +3,7 @@
 import { createApp, defineComponent, h, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ObjectBrowser from "@/components/objects/ObjectBrowser.vue";
-import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRows, invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
+import { cacheObjectBrowserRows, createObjectBrowserRowsCacheWriteToken, getCachedObjectBrowserRows, getCachedObjectBrowserRowsForScaffold, invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
 import type { ObjectBrowserRow } from "@/lib/table/objectBrowserRows";
 import type { ConnectionConfig } from "@/types/database";
 
@@ -98,7 +98,8 @@ const cachedRows: ObjectBrowserRow[] = [
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  connection.db_type = "postgres";
   mocks.listObjects.mockResolvedValue([{ name: "orders", object_type: "TABLE" }]);
   mocks.listSchemas.mockResolvedValue(["public"]);
   mocks.ensureConnected.mockResolvedValue(undefined);
@@ -112,12 +113,13 @@ afterEach(() => {
     host.remove();
   }
   invalidateObjectBrowserRowsCache({});
+  vi.useRealTimers();
 });
 
-async function mountBrowser(schema = ref("public"), selectedObjectFilter?: "all") {
+async function mountBrowser(schema = ref("public"), database = ref("pgdemo"), selectedObjectFilter?: "all") {
   const host = document.createElement("div");
   document.body.append(host);
-  const app = createApp({ setup: () => () => h(ObjectBrowser, { connection, database: "pgdemo", schema: schema.value, selectedObjectFilter }) });
+  const app = createApp({ setup: () => () => h(ObjectBrowser, { connection, database: database.value, schema: schema.value, selectedObjectFilter }) });
   mountedApps.push({ app, host });
   app.mount(host);
   return host;
@@ -183,71 +185,207 @@ describe("ObjectBrowser table statistics on a cached scaffold (#10461)", () => {
   });
 });
 
-describe("MySQL lightweight enumeration", () => {
-  it("shares one pending enumeration across equivalent browsers", async () => {
-    const originalType = connection.db_type;
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+const names = [{ name: "orders", object_type: "TABLE", schema: "pgdemo" }];
+const details = [{ ...names[0], comment: "order details" }];
+
+function retryButton(host: HTMLElement) {
+  return [...host.querySelectorAll("button")].find((item) => item.textContent?.includes("common.retry"));
+}
+
+describe("MySQL automatic progressive metadata", () => {
+  beforeEach(() => {
     connection.db_type = "mysql";
-    let resolve!: (value: unknown[]) => void;
-    mocks.listObjects.mockReturnValue(
-      new Promise<unknown[]>((done) => {
-        resolve = done;
-      }),
-    );
-    try {
-      const first = await mountBrowser();
-      const second = await mountBrowser();
-      await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(1));
-      resolve([{ name: "orders", object_type: "TABLE", schema: "pgdemo" }]);
-      await vi.waitFor(() => {
-        expect(first.textContent).toContain("orders");
-        expect(second.textContent).toContain("orders");
-      });
-      // The cheap name read is shared; the automatic details pass still runs.
-      expect(mocks.listObjects.mock.calls.filter((call) => (call[10] as { lightweight?: boolean } | undefined)?.lightweight === true)).toHaveLength(1);
-    } finally {
-      connection.db_type = originalType;
-    }
+    mocks.listObjectStatistics.mockResolvedValue([{ name: "orders", schema: "pgdemo", estimated_rows: 901, total_bytes: 196_608 }]);
   });
 
-  it("runs the details pass automatically and patches comments in place", async () => {
-    const originalType = connection.db_type;
-    connection.db_type = "mysql";
-    mocks.listObjects.mockImplementation((_id, _database, _schema, _types, _filter, _limit, _offset, _catalog, _tableNameFilter, _executionId, options) =>
-      Promise.resolve([{ name: "orders", object_type: "TABLE", schema: "pgdemo", comment: (options as { lightweight?: boolean } | undefined)?.lightweight === false ? "order details" : null }]),
-    );
-    try {
-      const host = await mountBrowser();
-      await vi.waitFor(() => expect(mocks.listObjects.mock.calls.map((call) => JSON.stringify(call[10] ?? null))).toContain('{"lightweight":false}'));
-      await vi.waitFor(() => expect(getCachedObjectBrowserRows(mysqlScope)?.[0].comment).toBe("order details"));
-      expect(host.textContent).toContain("orders");
-      // Comments arrive without a manual click; the row/size statistics read may
-      // still be running against the same metadata pool, so do not gate on it.
-      const manual = [...host.querySelectorAll("button")].find((item) => item.textContent?.includes("objects.loadDetails"));
-      expect(manual).toBeUndefined();
-    } finally {
-      connection.db_type = originalType;
-    }
+  it("shows names before details resolve, then automatically fills details and statistics", async () => {
+    const pending = deferred<unknown[]>();
+    mocks.listObjects.mockResolvedValueOnce(names).mockReturnValueOnce(pending.promise);
+    const host = await mountBrowser();
+    await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
+    expect(host.textContent).toContain("orders");
+    expect(host.textContent).not.toContain("objects.loadDetails");
+    expect(host.textContent).not.toContain("objects.loading");
+    expect(mocks.listObjects.mock.calls[0][10]).toEqual({ lightweight: true });
+    expect(mocks.listObjects.mock.calls[1][10]).toEqual({ lightweight: false });
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+    expect(getCachedObjectBrowserRowsForScaffold(mysqlScope)?.detailsComplete).toBe(false);
+    pending.resolve(details);
+    await vi.waitFor(() => expect(getCachedObjectBrowserRows(mysqlScope)?.[0].comment).toBe("order details"));
+    expect(host.textContent).toContain("901");
+    expect(host.textContent).toContain("192 KB");
+    expect(getCachedObjectBrowserRowsForScaffold(mysqlScope)?.detailsComplete).toBe(true);
+    expect(retryButton(host)).toBeUndefined();
   });
 
-  it("keeps names visible when the automatic details pass fails", async () => {
-    const originalType = connection.db_type;
-    connection.db_type = "mysql";
-    mocks.listObjects.mockImplementation((_id, _database, _schema, _types, _filter, _limit, _offset, _catalog, _tableNameFilter, _executionId, options) => {
-      if ((options as { lightweight?: boolean } | undefined)?.lightweight === false) return Promise.reject(new Error("details unavailable"));
-      return Promise.resolve([{ name: "orders", object_type: "TABLE", schema: "pgdemo" }]);
+  it("shares both enumeration and automatic details across equivalent browsers", async () => {
+    const enumeration = deferred<unknown[]>();
+    const enrichment = deferred<unknown[]>();
+    const statistics = deferred<unknown[]>();
+    mocks.listObjectStatistics.mockReturnValueOnce(statistics.promise);
+    mocks.listObjects.mockReturnValueOnce(enumeration.promise).mockReturnValueOnce(enrichment.promise);
+    const first = await mountBrowser();
+    const second = await mountBrowser();
+    await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(1));
+    enumeration.resolve(names);
+    await vi.waitFor(() => expect(first.textContent).toContain("common.loading"));
+    await vi.waitFor(() => expect(second.textContent).toContain("common.loading"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+    statistics.resolve([{ name: "orders", schema: "pgdemo", estimated_rows: 901, total_bytes: 196_608 }]);
+    await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
+    expect(first.textContent).toContain("orders");
+    expect(second.textContent).toContain("orders");
+    enrichment.resolve(details);
+    await vi.waitFor(() => expect(first.textContent).toContain("901"));
+    expect(second.textContent).toContain("901");
+    expect(mocks.listObjects).toHaveBeenCalledTimes(2);
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["details", "statistics"])("keeps names on %s failure and retries only when requested", async (stage) => {
+    mocks.listObjects.mockResolvedValueOnce(names);
+    if (stage === "details") mocks.listObjects.mockRejectedValueOnce(new Error("details unavailable"));
+    else {
+      mocks.listObjects.mockResolvedValueOnce(details);
+      mocks.listObjectStatistics.mockRejectedValueOnce(new Error("statistics unavailable"));
+    }
+    const host = await mountBrowser();
+    await vi.waitFor(() => expect(host.textContent).toContain(`${stage} unavailable`));
+    expect(host.textContent).toContain("orders");
+    expect(mocks.listObjects).toHaveBeenCalledTimes(2);
+    expect(getCachedObjectBrowserRowsForScaffold(mysqlScope)?.detailsComplete).toBe(false);
+    const retry = deferred<unknown[]>();
+    if (stage === "details") mocks.listObjects.mockReturnValueOnce(retry.promise);
+    else mocks.listObjectStatistics.mockReturnValueOnce(retry.promise);
+    retryButton(host)!.click();
+    await vi.waitFor(() => expect(stage === "details" ? mocks.listObjects : mocks.listObjectStatistics).toHaveBeenCalledTimes(stage === "details" ? 3 : 2));
+    if (stage === "details") expect(mocks.listObjects.mock.calls[2][10]).toEqual({ lightweight: false });
+    expect(host.textContent).toContain("orders");
+    expect(retryButton(host)).toBeUndefined();
+    retry.resolve(details);
+    await vi.waitFor(() => expect(getCachedObjectBrowserRowsForScaffold(mysqlScope)?.detailsComplete).toBe(true));
+    expect(host.textContent).not.toContain("unavailable");
+  });
+
+  it("resumes incomplete cached names after unmount without enumerating again", async () => {
+    const enrichment = deferred<unknown[]>();
+    mocks.listObjects.mockResolvedValueOnce(names).mockReturnValueOnce(enrichment.promise);
+    await mountBrowser();
+    await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
+    const first = mountedApps.shift()!;
+    first.app.unmount();
+    first.host.remove();
+    const second = await mountBrowser();
+    await vi.waitFor(() => expect(second.textContent).toContain("orders"));
+    enrichment.resolve(details);
+    await vi.waitFor(() => expect(second.textContent).toContain("901"));
+    expect(mocks.listObjects).toHaveBeenCalledTimes(2);
+  });
+
+  it("explicit refresh starts new reads and ignores pre-refresh details", async () => {
+    const oldDetails = deferred<unknown[]>();
+    mocks.listObjects.mockResolvedValueOnce(names).mockReturnValueOnce(oldDetails.promise).mockResolvedValueOnce(names).mockResolvedValueOnce(details);
+    const host = await mountBrowser();
+    await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
+    (host.querySelector('button[title="grid.refresh (F5)"]') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(getCachedObjectBrowserRowsForScaffold(mysqlScope)?.detailsComplete).toBe(true));
+    expect(mocks.listObjects).toHaveBeenCalledTimes(4);
+    oldDetails.resolve([{ ...names[0], comment: "obsolete" }]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(getCachedObjectBrowserRows(mysqlScope)?.[0].comment).toBe("order details");
+    expect(host.textContent).not.toContain("obsolete");
+  });
+
+  it("does not publish details or start statistics after unmount", async () => {
+    const pending = deferred<unknown[]>();
+    mocks.listObjects.mockResolvedValueOnce(names).mockReturnValueOnce(pending.promise);
+    await mountBrowser();
+    await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
+    const mounted = mountedApps.shift()!;
+    mounted.app.unmount();
+    mounted.host.remove();
+    pending.resolve(details);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+    expect(getCachedObjectBrowserRows(mysqlScope)?.[0].comment).toBeUndefined();
+    expect(getCachedObjectBrowserRowsForScaffold(mysqlScope)?.detailsComplete).toBe(false);
+  });
+
+  it("does not re-query a complete fresh cache on remount", async () => {
+    mocks.listObjects.mockResolvedValueOnce(names).mockResolvedValueOnce(details);
+    await mountBrowser();
+    await vi.waitFor(() => expect(getCachedObjectBrowserRowsForScaffold(mysqlScope)?.detailsComplete).toBe(true));
+    const second = await mountBrowser();
+    await vi.waitFor(() => expect(second.textContent).toContain("901"));
+    expect(mocks.listObjects).toHaveBeenCalledTimes(2);
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+  });
+
+  it("enriches stale cached membership without adding objects from the detail response", async () => {
+    cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(mysqlScope), [{ ...cachedRows[0], id: "pgdemo:orders:TABLE:0", schema: "pgdemo" }], { cachedAt: Date.now() - 31_000, detailsComplete: false });
+    mocks.listObjects.mockResolvedValue([...details, { name: "new_table", object_type: "TABLE", schema: "pgdemo" }]);
+    const host = await mountBrowser();
+    await vi.waitFor(() => expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1));
+    expect(mocks.listObjects).toHaveBeenCalledTimes(1);
+    expect(mocks.listObjects.mock.calls[0][10]).toEqual({ lightweight: false });
+    expect(host.textContent).toContain("orders");
+    expect(host.textContent).not.toContain("new_table");
+  });
+
+  it.each(["details", "statistics"])("ignores late %s after switching database", async (stage) => {
+    const pending = deferred<unknown[]>();
+    mocks.listObjects.mockImplementation((_id, database, ...args) => {
+      if (database === "other") return Promise.resolve([{ name: "new_table", object_type: "TABLE", schema: "other" }]);
+      return args[8]?.lightweight ? Promise.resolve(names) : stage === "details" ? pending.promise : Promise.resolve(details);
     });
-    mocks.listObjectStatistics.mockRejectedValueOnce(new Error("statistics unavailable"));
-    try {
-      const host = await mountBrowser();
-      await vi.waitFor(() => expect(mocks.listObjects.mock.calls.map((call) => JSON.stringify(call[10] ?? null))).toContain('{"lightweight":false}'));
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      expect(host.textContent).toContain("orders");
-      // Background failures stay silent: no blocking error, no banner.
-      expect(host.textContent).not.toContain("details unavailable");
-      expect(host.textContent).not.toContain("statistics unavailable");
-    } finally {
-      connection.db_type = originalType;
-    }
+    mocks.listObjectStatistics.mockImplementation((_id, database) => (database === "pgdemo" && stage === "statistics" ? pending.promise : Promise.resolve([{ name: "new_table", schema: "other", estimated_rows: 22, total_bytes: 2048 }])));
+    const database = ref("pgdemo");
+    const host = await mountBrowser(ref("public"), database);
+    if (stage === "statistics") await vi.waitFor(() => expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1));
+    else await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
+    database.value = "other";
+    await vi.waitFor(() => expect(host.textContent).toContain("22"));
+    pending.resolve(stage === "details" ? [{ ...names[0], comment: "obsolete" }] : [{ name: "orders", schema: "pgdemo", estimated_rows: 999999, total_bytes: 999999 }]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(host.textContent).toContain("new_table");
+    expect(host.textContent).not.toContain("obsolete");
+    expect(host.textContent).not.toContain("999,999");
+    expect(getCachedObjectBrowserRowsForScaffold(mysqlScope)?.detailsComplete).toBe(false);
+  });
+
+  it.each(["details", "statistics"])("releases a locally timed-out %s read for retry and ignores its late response", async (stage) => {
+    vi.useFakeTimers();
+    const pending = deferred<unknown[]>();
+    mocks.listObjects
+      .mockResolvedValueOnce(names)
+      .mockImplementationOnce(() => (stage === "details" ? pending.promise : Promise.resolve(details)))
+      .mockResolvedValue(details);
+    if (stage === "statistics") mocks.listObjectStatistics.mockReturnValueOnce(pending.promise);
+    const host = await mountBrowser();
+    if (stage === "statistics") await vi.waitFor(() => expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1));
+    else await vi.waitFor(() => expect(mocks.listObjects).toHaveBeenCalledTimes(2));
+    await vi.advanceTimersByTimeAsync(36_000);
+    expect(host.textContent).toContain("timed out");
+    expect(host.textContent).toContain("orders");
+    retryButton(host)!.click();
+    await vi.waitFor(() => expect(getCachedObjectBrowserRowsForScaffold(mysqlScope)?.detailsComplete).toBe(true));
+    expect(mocks.listObjects).toHaveBeenCalledTimes(stage === "details" ? 3 : 2);
+    pending.resolve(stage === "details" ? [{ ...names[0], comment: "obsolete" }] : [{ name: "orders", schema: "pgdemo", estimated_rows: 999999, total_bytes: 999999 }]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(host.textContent).not.toContain("obsolete");
+    expect(host.textContent).not.toContain("999,999");
+    expect(getCachedObjectBrowserRows(mysqlScope)?.[0].comment).toBe("order details");
   });
 });
 
@@ -278,7 +416,7 @@ describe("MySQL table charset and collation columns", () => {
   }
 
   it("shows each table's charset and collation using the shared statistics read", async () => {
-    const host = await mountBrowser(ref("pgdemo"), "all");
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
     await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
     expect(host.textContent).toContain("structureEditor.characterSet");
     expect(host.textContent).toContain("structureEditor.collation");
@@ -291,7 +429,7 @@ describe("MySQL table charset and collation columns", () => {
   });
 
   it("sorts tables by charset in both directions while keeping missing values last", async () => {
-    const host = await mountBrowser(ref("pgdemo"), "all");
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
     await vi.waitFor(() => expect(host.textContent).toContain("latin1_swedish_ci"));
     const sort = Array.from(host.querySelectorAll("button")).find((button) => button.textContent?.trim() === "structureEditor.characterSet")!;
     expect(sort).toBeDefined();
@@ -302,7 +440,7 @@ describe("MySQL table charset and collation columns", () => {
   });
 
   it("persists hidden charset columns and restores them with cached metadata", async () => {
-    const host = await mountBrowser(ref("pgdemo"), "all");
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
     await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
     host.querySelector<HTMLButtonElement>('[aria-label="objects.configureColumns"]')!.click();
     let toggle: HTMLButtonElement | undefined;
@@ -317,7 +455,7 @@ describe("MySQL table charset and collation columns", () => {
     mounted.app.unmount();
     mounted.host.remove();
 
-    const restored = await mountBrowser(ref("pgdemo"), "all");
+    const restored = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
     await vi.waitFor(() => expect(restored.textContent).toContain("utf8mb4_0900_ai_ci"));
     expect(restored.querySelector('[data-object-column-resize="characterSet"]')).toBeNull();
     expect(restored.querySelector('[data-object-column-resize="collation"]')).not.toBeNull();
@@ -326,15 +464,30 @@ describe("MySQL table charset and collation columns", () => {
 
   it.each([0, 31_000])("backfills missing metadata in a cached scaffold with comments (age %s ms)", async (ageMs) => {
     cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(mysqlScope), [{ id: "table:a_utf8", name: "a_utf8", displayName: "a_utf8", schema: "pgdemo", type: "TABLE", comment: "UTF-8 table" }], { cachedAt: Date.now() - ageMs });
-    const host = await mountBrowser(ref("pgdemo"), "all");
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
     await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
     expect(mocks.listObjects).not.toHaveBeenCalled();
     expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
   });
 
+  it("backfills missing collation in a fresh proxy cache without enabling native detail reads", async () => {
+    const originalInfo = connection.database_info;
+    connection.database_info = { ...originalInfo, serverComment: "MyCat Server" };
+    try {
+      cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(mysqlScope), [{ id: "table:a_utf8", name: "a_utf8", displayName: "a_utf8", schema: "pgdemo", type: "TABLE", comment: "UTF-8 table" }]);
+      const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
+      await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
+      expect(mocks.listObjects).not.toHaveBeenCalled();
+      expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+      expect(getCachedObjectBrowserRows(mysqlScope)?.[0]).toMatchObject({ characterSet: "utf8mb4", collation: "utf8mb4_0900_ai_ci" });
+    } finally {
+      connection.database_info = originalInfo;
+    }
+  });
+
   it("refreshes stale collation metadata even when table comments are cached", async () => {
     cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(mysqlScope), [{ id: "table:a_utf8", name: "a_utf8", displayName: "a_utf8", schema: "pgdemo", type: "TABLE", comment: "UTF-8 table", characterSet: "latin1", collation: "latin1_bin" }], { cachedAt: Date.now() - 31_000 });
-    const host = await mountBrowser(ref("pgdemo"), "all");
+    const host = await mountBrowser(ref("pgdemo"), ref("pgdemo"), "all");
     await vi.waitFor(() => expect(host.textContent).toContain("utf8mb4_0900_ai_ci"));
     expect(host.textContent).not.toContain("latin1_bin");
     expect(mocks.listObjects).not.toHaveBeenCalled();

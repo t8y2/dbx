@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, nextTick, type App } from "vue";
+import { createApp, h, nextTick, type App } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
@@ -381,5 +381,44 @@ describe("SearchableSelect trigger", () => {
     await nextTick();
 
     expect(document.activeElement).not.toBe(editorInput);
+  });
+});
+
+describe("SearchableSelect option actions", () => {
+  it("runs an option action without selecting or closing, then still allows selection", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const selected = vi.fn();
+    const copy = vi.fn();
+    const app = createApp({
+      render: () =>
+        h(
+          SearchableSelect,
+          {
+            modelValue: "current",
+            options: ["current", "other"],
+            placeholder: "Database",
+            searchPlaceholder: "Search",
+            emptyText: "Empty",
+            "onUpdate:modelValue": selected,
+          },
+          { "option-action": ({ option }: { option: string }) => h("button", { type: "button", "aria-label": `Copy ${option}`, onClick: () => copy(option) }, "Copy") },
+        ),
+    });
+    mountedApps.push(app);
+    app.mount(root);
+    root.querySelector("button")!.click();
+    await vi.waitFor(() => expect(document.querySelector('[aria-label="Copy other"]')).not.toBeNull());
+    const action = document.querySelector<HTMLButtonElement>('[aria-label="Copy other"]')!;
+    expect(action.parentElement?.tagName).not.toBe("BUTTON");
+    action.click();
+    await nextTick();
+    expect(copy).toHaveBeenCalledWith("other");
+    expect(selected).not.toHaveBeenCalled();
+    expect(document.querySelector('[aria-label="Copy other"]')).not.toBeNull();
+    const option = Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.trim() === "other")!;
+    option.click();
+    await nextTick();
+    expect(selected).toHaveBeenCalledWith("other");
   });
 });

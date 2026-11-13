@@ -965,7 +965,7 @@ fn consumer_from_json(c: &serde_json::Value) -> ConsumerInfo {
         msg_rate_out: 0.0,
         msg_throughput_out: 0.0,
         available_permits: c.get("prefetch").and_then(|v| v.as_i64()).unwrap_or(0),
-        address: String::new(),
+        address: c.get("address").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
         client_version: String::new(),
     }
 }

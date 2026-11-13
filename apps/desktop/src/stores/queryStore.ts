@@ -137,7 +137,7 @@ import { externalSqlFileDisplayTitles, normalizeExternalSqlPath, relocateExterna
 import { clearDataGridPendingSnapshot, clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { combineDataGridOrderByInputs, copyDataGridSortBuilderStatesForTab } from "@/composables/useDataGridSortBuilder";
 import { beginClosingDataGridViewSnapshotsForTab, clearDataGridViewSnapshot, clearDataGridViewSnapshotsForTab } from "@/lib/dataGrid/dataGridViewStateCache";
-import { beginClosingBrowserState } from "@/lib/tabs/documentBrowserStateCache";
+import { beginClosingBrowserState, restoreDocumentBrowserState, saveDocumentBrowserState } from "@/lib/tabs/documentBrowserStateCache";
 import { clearDataGridStructuredFilterStatesForTab, copyDataGridStructuredFilterStatesForTab } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { clearDataGridSearchStatesForTab } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, pruneTabResultSnapshots, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
@@ -5685,6 +5685,10 @@ export const useQueryStore = defineStore("query", () => {
       // cannot recover which conditions belong to the manual input or quick UI.
       copyDataGridStructuredFilterStatesForTab(id, newId);
       copyDataGridSortBuilderStatesForTab(id, newId);
+    } else if (newTab.mode === "mongo") {
+      const state = restoreDocumentBrowserState(id);
+      // Copy query conditions before mounting the new browser so it can load its own rows.
+      if (state) saveDocumentBrowserState(newId, cloneTabDraft({ ...state, data: undefined }));
     }
     tabs.value.splice(idx + 1, 0, newTab);
 
@@ -5697,6 +5701,15 @@ export const useQueryStore = defineStore("query", () => {
     }
     activeTabId.value = newId;
     if (newTab.mode === "data") void refreshDataTab(newId);
+  }
+
+  function reopenClosedTabEntry(entry: ClosedTabHistoryEntry): string | null {
+    assertUpdateAllowsInteraction();
+    const index = closedTabsHistory.value.indexOf(entry);
+    if (index < 0) return null;
+    closedTabsHistory.value.splice(index, 1);
+    closedTabsHistory.value.push(entry);
+    return reopenClosedTab();
   }
 
   function reopenClosedTab(): string | null {
@@ -6343,6 +6356,27 @@ export const useQueryStore = defineStore("query", () => {
     tab.txnStatus = undefined;
     tab.txnAutoRolledBack = false;
     if (tab.txnPossiblyDirty !== undefined) tab.txnPossiblyDirty = false;
+  }
+
+  /** Backend session was removed and rolled back after idle expiry: clear the
+   *  sticky dirty state together with the session. A session proven read-only
+   *  reports no lost work, so it gets no auto-rollback notice (#9831). */
+  function markManualTransactionIdleExpired(tab: QueryTab) {
+    const rollbackNoticeRequired = manualTransactionRollbackNoticeRequired(tab, effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)));
+    clearTxnPossiblyDirty(tab);
+    tab.txnSessionId = undefined;
+    tab.txnAutoRolledBack = rollbackNoticeRequired;
+  }
+
+  /** An export observed the backend's idle-expiry error for the transaction it
+   *  was reading through. Drop the dead session from its source tab so a retry
+   *  stops sending the stale id. Returns false when no open tab owns it. */
+  function noteExpiredManualTransaction(txnSessionId: string, error: unknown): boolean {
+    const tab = tabs.value.find((item) => item.txnSessionId === txnSessionId);
+    if (!tab) return false;
+    if (isSqlServerTransactionTab(tab)) reportSqlServerTransactionError(tab, error);
+    else markManualTransactionIdleExpired(tab);
+    return true;
   }
 
   function rollbackTabTransaction(tab: QueryTab, options?: { resetAutoCommit?: boolean; resetAutoCommitDbType?: string }) {
@@ -8123,6 +8157,8 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  const pendingQueryMetadata = new WeakMap<QueryResult, Promise<QueryMetadataPatch | undefined>>();
+
   function analyzeQueryMetadataInBackground(tabId: string, sql: string, result: QueryResult, executionDatabase: string, traceId: string, elapsed: () => string, databaseType: DatabaseType | undefined, hiddenPrimaryKeys: HiddenPrimaryKeyProjection[] = [], connection?: ConnectionConfig) {
     void (async () => {
       const tab = tabs.value.find((t) => t.id === tabId);
@@ -8137,17 +8173,25 @@ export const useQueryStore = defineStore("query", () => {
       };
       // Metadata requests outlive the displayed result when another query starts
       // or a retained run is selected. Analyze this result, not the live tab.
-      const patch = await buildQueryMetadataPatch({ ...tab, result }, sql, executionDatabase, traceId, elapsed, hiddenPrimaryKeys, connection, applyDisplayReady);
-      if (patch?.queryAnalysis && hasHiddenPhysicalRowKey(databaseType, hiddenPrimaryKeys)) {
-        patch.queryAnalysis = { ...patch.queryAnalysis, allowInsert: false };
-      }
-      const current = tabs.value.find((t) => t.id === tabId);
-      if (patch && current?.result === result) {
-        applyQueryMetadataPatch(current, patch, databaseType, executionDatabase);
-        if (activeResultRunOwnsDisplayedResult(current)) syncActiveResultRunFromDisplayed(current);
-        queryExecutionLog("info", "metadata:done", { traceId, elapsed: elapsed() });
-      } else {
-        queryExecutionLog("warn", "metadata:stale", { traceId, elapsed: elapsed() });
+      const pending = buildQueryMetadataPatch({ ...tab, result }, sql, executionDatabase, traceId, elapsed, hiddenPrimaryKeys, connection, applyDisplayReady);
+      pendingQueryMetadata.set(result, pending);
+      try {
+        const patch = await pending;
+        if (patch?.queryAnalysis && hasHiddenPhysicalRowKey(databaseType, hiddenPrimaryKeys)) {
+          patch.queryAnalysis = { ...patch.queryAnalysis, allowInsert: false };
+        }
+        const current = tabs.value.find((t) => t.id === tabId);
+        if (patch && current?.result === result) {
+          applyQueryMetadataPatch(current, patch, databaseType, executionDatabase);
+          if (activeResultRunOwnsDisplayedResult(current)) syncActiveResultRunFromDisplayed(current);
+          queryExecutionLog("info", "metadata:done", { traceId, elapsed: elapsed() });
+        } else {
+          queryExecutionLog("warn", "metadata:stale", { traceId, elapsed: elapsed() });
+        }
+      } catch (error) {
+        queryExecutionLog("warn", "metadata:failed", { traceId, elapsed: elapsed(), error });
+      } finally {
+        if (pendingQueryMetadata.get(result) === pending) pendingQueryMetadata.delete(result);
       }
     })();
   }
@@ -10141,13 +10185,7 @@ export const useQueryStore = defineStore("query", () => {
         const errMsg: string = e?.message ?? String(e);
         const idleTimeout = isManualTransactionSessionExpired(e) || errMsg.includes("已自动回滚");
         if (idleTimeout) {
-          // Backend session was removed and rolled back after idle expiry: clear
-          // the sticky dirty state together with the session. Same rule as the
-          // restart path: a session proven read-only reports no lost work.
-          const rollbackNoticeRequired = manualTransactionRollbackNoticeRequired(tab, effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)));
-          clearTxnPossiblyDirty(tab);
-          tab.txnSessionId = undefined;
-          tab.txnAutoRolledBack = rollbackNoticeRequired;
+          markManualTransactionIdleExpired(tab);
         } else if (/rolled.?back/i.test(errMsg) || /transaction session not found/i.test(errMsg) || /agent runtime terminated/i.test(errMsg)) {
           // Statement failure that disposed the manual session: the `rolled back`
           // message fragment is a frontend cleanup compatibility contract.
@@ -10890,8 +10928,16 @@ export const useQueryStore = defineStore("query", () => {
     const connection = useConnectionStore().getConfig(location.connectionId);
     const databaseType = effectiveDatabaseTypeForConnection(connection);
     if (result === tab.result) {
-      if (tab.mode === "data" && (tab.tableMetaPending || !tab.tableMeta?.columns.length)) return undefined;
-      const tableMeta = tab.mode === "data" ? tableMetaForDataTab(tab) : tab.tableMeta;
+      let tableMeta = tab.tableMeta;
+      if (tab.mode === "data") {
+        if (tab.tableMetaPending || !tableMeta?.columns.length) return undefined;
+        tableMeta = tableMetaForDataTab(tab);
+      } else {
+        // The grid can show rows before background metadata is ready. Await
+        // the patch for this result, since the active tab can change meanwhile.
+        const pending = pendingQueryMetadata.get(result);
+        if (pending) tableMeta = (await pending)?.tableMeta;
+      }
       const structure = analyzeSelectStructureForDisplay(result.sourceStatement);
       const sameTable = structure?.tableName && tableMeta?.tableName && structure.tableName.toLowerCase() === tableMeta.tableName.toLowerCase() && (!structure.schema || !tableMeta.schema || structure.schema.toLowerCase() === tableMeta.schema.toLowerCase());
       if (!sameTable || !tableMeta?.tableName || !canInsertTableRows(databaseType) || tableMeta.tableType?.toUpperCase().includes("VIEW")) return undefined;
@@ -11901,6 +11947,18 @@ export const useQueryStore = defineStore("query", () => {
         throw new Error(i18n.global.t("exportProgress.transactionUnavailable"));
     }
 
+    const startExport = async (onProgress: (progress: api.TableExportProgress) => void) => {
+      try {
+        return await (isTauriRuntime() ? api.startQueryResultExport(request, onProgress, true) : api.startQueryResultExport(request, onProgress));
+      } catch (error) {
+        if (request.txnSessionId && isManualTransactionSessionExpired(error)) {
+          noteExpiredManualTransaction(request.txnSessionId, error);
+          throw new Error(i18n.global.t("exportProgress.transactionUnavailable"));
+        }
+        throw error;
+      }
+    };
+
     const tracker = useExportTracker();
     if (!isTauriRuntime()) await connStore.ensureConnected(request.connectionId);
     const task = tracker.addTask("Query Result", format, filePath, request.exportId);
@@ -11923,14 +11981,10 @@ export const useQueryStore = defineStore("query", () => {
             return "settled";
           }
           invoked = true;
-          const result = await api.startQueryResultExport(
-            request,
-            (progress) => {
-              terminal ||= progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled";
-              tracker.updateTableExportTask(request.exportId, progress);
-            },
-            true,
-          );
+          const result = await startExport((progress) => {
+            terminal ||= progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled";
+            tracker.updateTableExportTask(request.exportId, progress);
+          });
           terminal ||= result.status === "Done" || result.status === "Error" || result.status === "Cancelled";
           tracker.updateTableExportTask(request.exportId, result);
           return terminal ? "settled" : "unknown";
@@ -11953,7 +12007,7 @@ export const useQueryStore = defineStore("query", () => {
 
     void (async () => {
       try {
-        await api.startQueryResultExport(request, (progress) => tracker.updateTableExportTask(request.exportId, progress));
+        await startExport((progress) => tracker.updateTableExportTask(request.exportId, progress));
       } catch (error: any) {
         const task = tracker.tasks.value.find((item) => item.exportId === request.exportId);
         if (task) {
@@ -12043,6 +12097,7 @@ export const useQueryStore = defineStore("query", () => {
     duplicateTab,
     closedTabsHistory,
     canReopenClosedTab,
+    reopenClosedTabEntry,
     reopenClosedTab,
     clearClosedTabsHistory,
     closeConnectionTabs,
@@ -12182,6 +12237,7 @@ export const useQueryStore = defineStore("query", () => {
     countTabResultRows,
     buildQueryResultExportRequest,
     captureQueryResultExportRequest,
+    noteExpiredManualTransaction,
     exportQuerySqlDirect,
     applyQueryMetadataPatch,
     getResourceLifecycleDiagnostics: () => resourceLifecycleDiagnostics(tabs.value),

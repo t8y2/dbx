@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1382,10 +1383,137 @@ func TestIsQuerySQLRequiresKeywordBoundary(t *testing.T) {
 		"selectivity FROM stats",
 		"withdraw FROM account",
 		"/* unterminated comment",
+		"((selectivity FROM stats))",
+		"(/* comment */ withdraw FROM account)",
+		"(SELECT1 FROM DUAL)",
+		"((WITH_rows))",
+		"(WITH$rows)",
+		"(/* unterminated comment SELECT 1 FROM DUAL)",
+		"((-- comment without a newline",
+		"(/* comment */)",
+		"(/* comment */ UPDATE test_table SET value = 1)",
 	}
 	for _, sqlText := range tests {
-		if isQuerySQL(sqlText) {
-			t.Fatalf("expected SQL not to be treated as query: %s", sqlText)
+		t.Run(sqlText, func(t *testing.T) {
+			if isQuerySQL(sqlText) {
+				t.Fatalf("expected SQL not to be treated as query: %s", sqlText)
+			}
+		})
+	}
+}
+
+var oracleQueryPrefixTestCases = []struct{ name, sql string }{
+	{"select", "SELECT 1 FROM DUAL"},
+	{"one_parenthesis", "(SELECT 1 FROM DUAL)"},
+	{"multiple_parentheses", "((SELECT 1 FROM DUAL))"},
+	{"inner_block_comment", "(/* comment */ SELECT 1 FROM DUAL)"},
+	{"inner_line_comment", "(-- comment\r\nSELECT 1 FROM DUAL)"},
+	{"mixed_prefixes", "/* before */ ( -- outer\n(/* inner */ (SELECT 1 FROM DUAL)))"},
+	{"minus", "(SELECT 1 FROM DUAL) MINUS (SELECT 2 FROM DUAL)"},
+	{"nested_set_query", "((SELECT 1 FROM DUAL) UNION ALL (SELECT 2 FROM DUAL))"},
+	{"with", "WITH rows AS (SELECT 1 FROM DUAL) SELECT * FROM rows"},
+	{"parenthesized_with", "-- before\n(/* inner */ ((WITH rows AS (SELECT 1 FROM DUAL) SELECT * FROM rows)))"},
+}
+
+func TestIsQuerySQLParenthesizedPrefixes(t *testing.T) {
+	for _, tc := range oracleQueryPrefixTestCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !isQuerySQL(tc.sql) {
+				t.Fatalf("expected SQL to be treated as query: %s", tc.sql)
+			}
+		})
+	}
+}
+
+func TestParenthesizedQueryExecutionPreservesSQL(t *testing.T) {
+	for _, tc := range oracleQueryPrefixTestCases {
+		for _, method := range []string{"execute_query", "execute_query_page", "start_table_read"} {
+			t.Run(tc.name+"/"+method, func(t *testing.T) {
+				db, drv := openOracleManualTxTestDB(t)
+				s := newServer()
+				s.db = db
+				t.Cleanup(s.closeAllQuerySessions)
+				requestJSON, err := json.Marshal(map[string]any{
+					"jsonrpc": "2.0", "id": 1, "method": method,
+					"params": map[string]any{"sql": tc.sql, "maxRows": 10, "pageSize": 1},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp, shutdown := s.handleLine(string(requestJSON))
+				if shutdown || resp.Error != nil {
+					t.Fatalf("query failed: shutdown=%v error=%v", shutdown, resp.Error)
+				}
+				data, err := json.Marshal(resp.Result)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var result struct {
+					Rows      [][]any `json:"rows"`
+					SessionID *string `json:"session_id"`
+				}
+				if err := json.Unmarshal(data, &result); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(result.Rows, [][]any{{float64(1)}}) {
+					t.Fatalf("expected query rows, got %s", data)
+				}
+				if method != "execute_query" {
+					if result.SessionID == nil {
+						t.Fatalf("expected a paging session, got %s", data)
+					}
+					fetchMethod := "fetch_query_page"
+					if method == "start_table_read" {
+						fetchMethod = "fetch_table_read_page"
+					}
+					next, _, err := s.dispatch(fetchMethod, map[string]json.RawMessage{
+						"sessionId": json.RawMessage(strconv.Quote(*result.SessionID)),
+						"pageSize":  json.RawMessage("1"),
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					page, ok := next.(queryPageResult)
+					if !ok || len(page.Rows) != 0 || page.HasMore || page.SessionID != nil {
+						t.Fatalf("expected the fixture cursor to finish without re-execution, got %+v", next)
+					}
+				}
+				drv.mu.Lock()
+				defer drv.mu.Unlock()
+				if !reflect.DeepEqual(drv.queries, []string{tc.sql}) {
+					t.Fatalf("driver SQL changed or query was reissued: got %q, want %q", drv.queries, tc.sql)
+				}
+				if contains(drv.execs, tc.sql) {
+					t.Fatalf("query was passed to ExecContext: %q", drv.execs)
+				}
+			})
+		}
+	}
+}
+
+func TestQueryPrefixNonQueriesUseExecContext(t *testing.T) {
+	for _, sqlText := range []string{
+		"/* comment */ UPDATE test_table SET value = 1",
+		"-- comment\nINSERT INTO test_table (value) VALUES ('SELECT')",
+		"DELETE FROM test_table WHERE value = 1",
+	} {
+		for _, method := range []string{"execute_query", "execute_query_page"} {
+			t.Run(sqlText+"/"+method, func(t *testing.T) {
+				db, drv := openOracleManualTxTestDB(t)
+				s := newServer()
+				s.db = db
+				_, _, err := s.dispatch(method, map[string]json.RawMessage{
+					"sql": json.RawMessage(strconv.Quote(sqlText)),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				drv.mu.Lock()
+				defer drv.mu.Unlock()
+				if len(drv.queries) != 0 || !contains(drv.execs, sqlText) {
+					t.Fatalf("DML routing changed: queries=%q execs=%q", drv.queries, drv.execs)
+				}
+			})
 		}
 	}
 }

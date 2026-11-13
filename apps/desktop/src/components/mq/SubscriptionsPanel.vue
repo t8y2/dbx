@@ -576,6 +576,7 @@ onBeforeUnmount(() => {
           <thead>
             <tr>
               <th>{{ t("mqSubscriptions.subscriptionName") }}</th>
+              <th v-if="mqSystemKind === 'rabbitmq'">{{ t("mqClients.address") }}</th>
               <th>{{ t("mqSubscriptions.type") }}</th>
               <th v-if="isRocketMqCluster">{{ t("mqSubscriptions.mode") }}</th>
               <th v-if="isClusterWideMode">{{ t("mqSubscriptions.subscribedTopics") }}</th>
@@ -588,6 +589,14 @@ onBeforeUnmount(() => {
           <tbody>
             <tr v-for="sub in filteredSubscriptions" :key="sub.name" :class="{ selected: selectedSub?.name === sub.name }" @click="selectSubscription(sub)">
               <td class="sub-name">{{ sub.name }}</td>
+              <td v-if="mqSystemKind === 'rabbitmq'">
+                {{
+                  sub.consumers
+                    .map((consumer) => consumer.address)
+                    .filter(Boolean)
+                    .join(", ") || "-"
+                }}
+              </td>
               <td>
                 <span v-if="isRocketMqCluster" :class="consumerGroupTypeBadgeClass(sub)">{{ consumerGroupTypeLabel(sub) }}</span>
                 <span v-else class="badge">{{ sub.subType }}</span>

@@ -53,7 +53,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { catalogDatabaseOptionsKey, databaseAfterCatalogChange, normalizedQueryTabCatalog, queryCatalogSelectorVisible, selectedQueryCatalogName, useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
-import { formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { canClearDefaultDatabase, formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { isSingleDatabase, supportsClearableQuerySchema, supportsSqlInListPaste, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
 import { supportsQueryExecution } from "@/lib/database/databaseFeatureSupport";
 import { connectionIsDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
@@ -154,6 +154,16 @@ const mongoQueryLanguage = computed(() => props.activeTab.mongoQueryLanguage ?? 
 
 function setMongoQueryLanguage(language: MongoQueryLanguage) {
   queryStore.setMongoQueryLanguage(props.activeTab.id, language);
+}
+
+async function copyDatabaseName(database: string) {
+  if (!database) return;
+  try {
+    await copyToClipboard(database);
+    toast(t("connection.copied"));
+  } catch (error) {
+    toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
 }
 
 async function copyGeneratedMongoShell() {
@@ -528,6 +538,7 @@ watchEffect(() => {
 });
 
 const isActiveDatabaseDefault = computed(() => isDefaultDatabase(props.activeConnection, activeDatabaseValue.value));
+const isDefaultDatabaseReadOnly = computed(() => isActiveDatabaseDefault.value && !canClearDefaultDatabase(props.activeConnection?.db_type));
 
 // Narrow panes (multi-group splits) condense the toolbar by measured width
 // instead of overflowing or scrolling. See resolveEditorToolbarTier for the
@@ -999,7 +1010,7 @@ defineExpose({
               <X class="h-3.5 w-3.5" />
               {{ t("editor.clearDatabase") }}
             </DropdownMenuItem>
-            <DropdownMenuItem v-if="activeDatabaseValue && !activeTab.catalog" @select="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
+            <DropdownMenuItem v-if="activeDatabaseValue && !activeTab.catalog" :disabled="isDefaultDatabaseReadOnly" @select="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
               <Check v-if="isActiveDatabaseDefault" class="h-3 w-3" />
               {{ isActiveDatabaseDefault ? t("editor.defaultDatabase") : t("editor.setDefaultDatabase") }}
             </DropdownMenuItem>
@@ -1186,6 +1197,20 @@ defineExpose({
               <ProductionContextBadge v-if="databaseOptionIsProduction(option)" compact />
             </div>
           </template>
+          <template #option-action="{ option }">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              class="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+              :data-copy-database-name="option"
+              :aria-label="`${t('contextMenu.copyName')}: ${option}`"
+              :title="`${t('contextMenu.copyName')}: ${option}`"
+              @click.stop="copyDatabaseName(option)"
+            >
+              <Copy class="h-3.5 w-3.5" />
+            </Button>
+          </template>
         </SearchableSelect>
         <Tooltip v-if="showDatabaseHelperButtons && activeDatabaseValue && !isSingleDb">
           <TooltipTrigger as-child>
@@ -1195,7 +1220,7 @@ defineExpose({
           </TooltipTrigger>
           <TooltipContent>{{ t("editor.clearDatabase") }}</TooltipContent>
         </Tooltip>
-        <Button v-if="showDatabaseHelperButtons && activeDatabaseValue && !activeTab.catalog" variant="ghost" size="sm" class="h-6 px-2 text-[11px]" @click="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
+        <Button v-if="showDatabaseHelperButtons && activeDatabaseValue && !activeTab.catalog" variant="ghost" size="sm" class="h-6 px-2 text-[11px]" :disabled="isDefaultDatabaseReadOnly" @click="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
           <Check v-if="isActiveDatabaseDefault" class="h-3 w-3" />
           {{ isActiveDatabaseDefault ? t("editor.defaultDatabase") : t("editor.setDefaultDatabase") }}
         </Button>

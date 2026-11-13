@@ -27,11 +27,13 @@ export type ObjectBrowserRow = {
   partitionParentName?: string;
   estimatedRows?: number | null;
   totalBytes?: number | null;
+  /** MySQL AUTO_INCREMENT as returned by the server: a string, since BIGINT UNSIGNED values exceed 2^53. */
+  autoIncrement?: string | null;
   characterSet?: string | null;
   collation?: string | null;
 };
 
-export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
+export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "autoIncrement" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
 export type ObjectBrowserSortDirection = "asc" | "desc";
 export type ObjectBrowserFilterCounts = Record<ObjectBrowserFilter, number>;
 
@@ -432,7 +434,7 @@ export function sortObjectBrowserRows(rows: ObjectBrowserRow[], key: ObjectBrows
 }
 
 export function initialObjectBrowserSortDirection(key: ObjectBrowserSortKey): ObjectBrowserSortDirection {
-  return key === "created_at" || key === "updated_at" || key === "estimatedRows" || key === "totalBytes" ? "desc" : "asc";
+  return key === "created_at" || key === "updated_at" || key === "estimatedRows" || key === "totalBytes" || key === "autoIncrement" ? "desc" : "asc";
 }
 
 export function formatObjectBrowserTimestamp(value: string | null | undefined): string {
@@ -447,6 +449,13 @@ export function formatObjectBrowserTimestamp(value: string | null | undefined): 
 export function formatObjectBrowserCount(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "";
   return new Intl.NumberFormat().format(value);
+}
+
+/** Groups the digits like the row count does, without losing precision on values past 2^53 (BIGINT UNSIGNED). */
+export function formatObjectBrowserAutoIncrement(value: string | null | undefined): string {
+  const text = value?.trim();
+  if (!text) return "";
+  return /^\d+$/.test(text) ? new Intl.NumberFormat().format(BigInt(text)) : text;
 }
 
 export function formatObjectBrowserBytes(value: number | null | undefined): string {

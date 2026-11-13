@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted } from "vue";
-import { ArrowLeft, Minus, Square, Copy, X, Grip, Pin, PinOff } from "@lucide/vue";
+import { ArrowLeft, Minus, Square, Copy, X, Grip, Pin, PinOff, Bot } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { useWindowControls } from "@/composables/useWindowControls";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -10,11 +10,13 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 defineProps<{
   title: string;
   dirty?: boolean;
+  showAiPanel?: boolean;
 }>();
 
 const emit = defineEmits<{
   return: [];
   close: [];
+  "toggle-ai": [];
   "drag-start": [position: { x: number; y: number }];
   dragging: [position: { x: number; y: number }];
   "drag-end": [position: { x: number; y: number }];
@@ -100,6 +102,18 @@ async function handleDragEnd(event: PointerEvent) {
       </button>
       <span class="min-w-0 flex-1 truncate font-medium" data-tauri-drag-region> <span v-if="dirty" class="mr-0.5">*</span>{{ title }} </span>
     </div>
+    <button
+      type="button"
+      class="mr-1 inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+      :class="{ 'bg-accent text-foreground': showAiPanel }"
+      title="AI"
+      aria-label="AI"
+      :aria-pressed="!!showAiPanel"
+      @pointerdown.stop
+      @click="emit('toggle-ai')"
+    >
+      <Bot class="h-3.5 w-3.5" />
+    </button>
     <button type="button" class="mr-1 inline-flex h-7 items-center gap-1 rounded px-2 text-muted-foreground hover:bg-accent hover:text-foreground" :title="t('tabs.returnToMainWindow')" @pointerdown.stop @click="emit('return')">
       <ArrowLeft class="h-3.5 w-3.5" />
       <span>{{ t("tabs.returnToMainWindow") }}</span>

@@ -29,6 +29,16 @@ static POSTGRES_DEFAULT_PRIVILEGES_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^\s*ALTER\s+DEFAULT\s+PRIVILEGES\b").expect("valid PostgreSQL default privileges regex")
 });
 
+/// PostgreSQL's `DROP INDEX CONCURRENTLY [IF EXISTS] name`: sqlparser 0.62's generic
+/// `parse_drop` has no `CONCURRENTLY` slot for `INDEX`, so `CONCURRENTLY` is consumed
+/// as the index name and the trailing `IF EXISTS ...` starts a second statement whose
+/// parse fails at `IF` — a bogus syntax error for a statement PostgreSQL (and the
+/// PG-compatible engines DBX routes through the postgres dialect, e.g. Kingbase) runs
+/// fine (issue #14829).
+static POSTGRES_DROP_INDEX_CONCURRENTLY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*DROP\s+INDEX\s+CONCURRENTLY\b").expect("valid PostgreSQL DROP INDEX CONCURRENTLY regex")
+});
+
 /// Oracle administrative DDL that sqlparser has no grammar for: Oracle and the
 /// Oracle-compatible engines (OceanBase Oracle mode, Dameng) accept these statements, but
 /// the analyzer routes them through sqlparser's generic dialect, which reports a bogus
@@ -179,6 +189,7 @@ struct Analyzer {
     scope_stack: Vec<usize>,
     cte_scope_stack: Vec<HashSet<String>>,
     next_scope_id: usize,
+    is_mysql: bool,
     is_sqlserver: bool,
     is_spark: bool,
     group_by_violations: Vec<SqlGroupByViolation>,
@@ -262,6 +273,7 @@ pub fn analyze_sql_references(sql: &str, dialect: Option<&str>) -> Result<SqlRef
     };
 
     let mut analyzer = Analyzer {
+        is_mysql: normalized_dialect.id == "mysql",
         is_sqlserver: normalized_dialect.id == "sqlserver",
         is_spark: normalized_dialect.id == "spark",
         ..Analyzer::default()
@@ -1220,7 +1232,7 @@ fn blank_out_statement_text(statement: &str) -> String {
 }
 
 fn starts_with_postgres_parser_gap_sql(sql: &str) -> bool {
-    POSTGRES_DEFAULT_PRIVILEGES_RE.is_match(sql)
+    POSTGRES_DEFAULT_PRIVILEGES_RE.is_match(sql) || POSTGRES_DROP_INDEX_CONCURRENTLY_RE.is_match(sql)
 }
 
 struct PostgresCreateProcedureLayout {
@@ -1977,10 +1989,12 @@ impl Analyzer {
 
     fn visit_function_call_args(&mut self, name: &ObjectName, args: &FunctionArguments) {
         let sqlserver_datepart_function = self.is_sqlserver.then(|| sqlserver_datepart_function_name(name)).flatten();
+        let mysql_timestamp_function = self.is_mysql && is_mysql_timestamp_function(name);
         self.visit_function_args_skipping(args, |index, arg| {
             index == 0
-                && sqlserver_datepart_function
-                    .is_some_and(|function_name| is_sqlserver_datepart_argument(function_name, arg))
+                && ((mysql_timestamp_function && is_mysql_timestamp_unit(arg))
+                    || sqlserver_datepart_function
+                        .is_some_and(|function_name| is_sqlserver_datepart_argument(function_name, arg)))
         });
     }
 
@@ -2215,6 +2229,30 @@ fn table_reference_from_name(
 
 fn object_name_last_ident(name: &ObjectName) -> Option<&Ident> {
     name.0.iter().rev().find_map(ObjectNamePart::as_ident)
+}
+
+fn is_mysql_timestamp_function(name: &ObjectName) -> bool {
+    let [part] = name.0.as_slice() else {
+        return false;
+    };
+    part.as_ident().is_some_and(|ident| {
+        ident.quote_style.is_none()
+            && (ident.value.eq_ignore_ascii_case("TIMESTAMPADD") || ident.value.eq_ignore_ascii_case("TIMESTAMPDIFF"))
+    })
+}
+
+fn is_mysql_timestamp_unit(arg: &FunctionArg) -> bool {
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(ident))) = arg else {
+        return false;
+    };
+    if ident.quote_style.is_some() {
+        return false;
+    }
+
+    // MySQL treats the first argument as a unit keyword, including ODBC SQL_TSI_ aliases.
+    let unit = ident.value.to_ascii_uppercase();
+    let unit = unit.strip_prefix("SQL_TSI_").unwrap_or(&unit);
+    matches!(unit, "MICROSECOND" | "SECOND" | "MINUTE" | "HOUR" | "DAY" | "WEEK" | "MONTH" | "QUARTER" | "YEAR")
 }
 
 fn sqlserver_datepart_function_name(name: &ObjectName) -> Option<&str> {
@@ -2707,5 +2745,56 @@ mod unknown_qualifier_tests {
         for dialect in ["mysql", "postgres", "sqlite", "sqlserver", "clickhouse", "duckdb", "spark"] {
             assert_eq!(qualifiers("SELECT b.id FROM t a", Some(dialect)), vec!["b".to_string()], "{dialect}");
         }
+    }
+}
+
+#[cfg(test)]
+mod postgres_parser_gap_tests {
+    use super::*;
+
+    /// #14829: `DROP INDEX CONCURRENTLY [IF EXISTS] name` is valid PostgreSQL (and
+    /// Kingbase) that sqlparser 0.62 cannot parse — the generic `parse_drop` consumes
+    /// `CONCURRENTLY` as the index name and the trailing `IF EXISTS ...` becomes a
+    /// second statement whose parse fails at `IF`. The gap has to route the statement
+    /// to an empty analysis instead of a bogus syntax error.
+    #[test]
+    fn drop_index_concurrently_is_documented_as_a_postgres_parser_gap() {
+        let sql = "DROP INDEX CONCURRENTLY IF EXISTS yxy_bchd_db.idx_x;";
+        assert!(
+            Parser::parse_sql(&PostgreSqlDialect {}, sql).is_err(),
+            "sqlparser 0.62 must still fail to parse it, otherwise the gap hides a real fix upstream"
+        );
+        assert!(starts_with_postgres_parser_gap_sql(sql), "the gap must cover the statement");
+
+        let analysis = analyze_sql_references(sql, Some("postgres"))
+            .expect("the gap must return an empty analysis instead of a parse error");
+        assert!(analysis.tables.is_empty());
+        assert!(analysis.columns.is_empty());
+    }
+
+    #[test]
+    fn drop_index_without_concurrently_still_parses_and_analyzes() {
+        // `DROP INDEX [IF EXISTS] name` is fully supported by sqlparser: no gap, and
+        // the statement analyzes without a bogus parse error. DROP statements carry no
+        // FROM clause, so the reference analysis is legitimately empty — the property
+        // under test is "no parse error", not the reference set.
+        let sql = "DROP INDEX IF EXISTS yxy_bchd_db.idx_x;";
+        assert!(!starts_with_postgres_parser_gap_sql(sql), "no gap for statements sqlparser already parses");
+
+        let analysis = analyze_sql_references(sql, Some("postgres")).expect("plain DROP INDEX should analyze");
+        assert!(analysis.tables.is_empty());
+        assert!(analysis.columns.is_empty());
+    }
+
+    #[test]
+    fn drop_index_gap_does_not_over_match() {
+        // The gap is word-boundary anchored: only statements that actually spell
+        // `DROP INDEX CONCURRENTLY` skip the analyzer. A plain `DROP INDEX` with an
+        // index literally named "concurrently" parses into the same shape — that is
+        // sqlparser's own reading, not the gap's business.
+        assert!(starts_with_postgres_parser_gap_sql("drop index concurrently if exists t.idx"));
+        assert!(!starts_with_postgres_parser_gap_sql("drop index if exists concurrently_idx"));
+        assert!(!starts_with_postgres_parser_gap_sql("DROP INDEX CONCURRENTLYXY"));
+        assert!(!starts_with_postgres_parser_gap_sql("select 1"));
     }
 }

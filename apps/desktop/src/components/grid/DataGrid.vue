@@ -1598,6 +1598,8 @@ const structuredFilterHydrationReady = ref(true);
 let structuredFilterHydrationRequestId = 0;
 const draftStructuredWhereInput = ref("");
 const filterEditorView = computed(() => settingsStore.editorSettings.dataGridFilterEditorView);
+const dataGridOrderByVisible = computed(() => settingsStore.editorSettings.dataGridOrderByVisible);
+const dataGridWhereRatio = computed(() => settingsStore.editorSettings.dataGridWhereRatio);
 const isPersistentFilterView = computed(() => filterEditorView.value === "conditions" || filterEditorView.value === "text");
 // Keep the persisted preference as the initial state for persistent views, but
 // do not use it as a lock: the toolbar toggle must always be able to close them.
@@ -2423,6 +2425,52 @@ async function clearStructuredSortRules() {
 }
 
 watch(filterEditorView, () => sortBuilder.setOpen(false));
+watch(
+  dataGridOrderByVisible,
+  async (visible, previousVisible) => {
+    if (!visible) {
+      // On initial mount, wait for the prop-backed sort state watcher below to
+      // hydrate the owning tab's sort before clearing any persisted ORDER BY.
+      if (previousVisible === undefined) {
+        await nextTick();
+        if (dataGridOrderByVisible.value) return;
+      }
+
+      sortBuilder.setOpen(false);
+      const hadManualOrder = !!orderByInput.value.trim();
+      const hadStructuredOrder = !!appliedStructuredOrderByInput.value.trim();
+      const activeSortColumn = sortCol.value;
+      const activeSortColumnIndex = sortColIndex.value ?? 0;
+      const activeSortMode = localSortMode.value;
+      const hadColumnSort = !!activeSortColumn;
+      const hadDatabaseColumnSort = hadColumnSort && activeSortMode === "database";
+
+      sortBuilder.clear();
+      orderByInput.value = "";
+      emit("update:orderByInput", "");
+      emit("update:structuredOrderByInput", "");
+      clearSort();
+
+      if (hadColumnSort && activeSortColumn) {
+        // Keep the owning tab's sort state in sync too. For database sorts this
+        // event also reloads without ORDER BY; for local sorts it restores the
+        // original row order and clears the persisted column indicator.
+        emit("sort", activeSortColumn, activeSortColumnIndex, null, currentWhereInput(), activeSortMode, hadDatabaseColumnSort ? "" : undefined);
+      }
+
+      // Clearing a database column sort above already requests the replacement
+      // query with an explicit empty ORDER BY, so avoid issuing it a second time.
+      if ((hadManualOrder || hadStructuredOrder) && !hadDatabaseColumnSort) {
+        if (props.onExecuteSql) {
+          await applyOrderBySearch(undefined, "");
+        } else {
+          emit("reload", props.sql, searchText.value, currentWhereInput(), undefined, pageSize.value, (currentPage.value - 1) * pageSize.value);
+        }
+      }
+    }
+  },
+  { immediate: true },
+);
 
 const rowStatusFilter = ref<RowStatusFilter>("all");
 
@@ -2436,6 +2484,8 @@ const gridVerticalScrollbarTrackRef = ref<HTMLDivElement>();
 const gridVerticalScrollbarThumbRef = ref<HTMLDivElement>();
 const hasGridHorizontalOverflow = ref(false);
 const hasGridVerticalOverflow = ref(false);
+const gridHorizontalScrollbarDragging = ref(false);
+const statusSqlTooltipOpen = ref(false);
 let gridHorizontalScrollbarThumbLeftPercent = 0;
 let gridHorizontalScrollbarThumbWidthPercent = 100;
 let gridVerticalScrollbarThumbTopPercent = 0;
@@ -3273,7 +3323,13 @@ function applyGridVerticalScrollbarThumbStyle(): boolean {
 }
 
 function setGridHorizontalScrollbarDragging(dragging: boolean) {
+  gridHorizontalScrollbarDragging.value = dragging;
+  if (dragging) statusSqlTooltipOpen.value = false;
   gridHorizontalScrollbarTrackRef.value?.classList.toggle(GRID_HORIZONTAL_SCROLLBAR_DRAGGING_CLASS, dragging);
+}
+
+function updateStatusSqlTooltipOpen(open: boolean) {
+  statusSqlTooltipOpen.value = gridHorizontalScrollbarDragging.value ? false : open;
 }
 
 function setGridVerticalScrollbarDragging(dragging: boolean) {
@@ -4063,6 +4119,9 @@ function currentWhereInput(): string | undefined {
 
 function effectiveOrderBy(): string | undefined {
   const columnOrderBy = localSortMode.value === "database" && sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined;
+  if (!dataGridOrderByVisible.value) {
+    return columnOrderBy;
+  }
   const manualOrderBy = orderByInput.value.trim() || columnOrderBy;
   return combineDataGridOrderByInputs(manualOrderBy, appliedStructuredOrderByInput.value);
 }
@@ -8181,6 +8240,13 @@ function selectHeaderSort(value: string, column: string, columnIndex: number) {
     return;
   }
   const [mode, direction] = value.split("-") as [DataGridSortMode, DataGridSortDirection];
+  applyColumnSort(column, columnIndex, direction, mode);
+}
+
+function toggleHeaderSort(column: string, columnIndex: number): void {
+  const mode = props.databaseSortEnabled !== false && databaseSortSupportedForDatabase(resolvedDatabaseType.value) ? localSortMode.value : "local";
+  const direction = columnIsSorted(column, columnIndex) && sortDir.value === "asc" ? "desc" : "asc";
+  headerSortMenuOpenColumn.value = null;
   applyColumnSort(column, columnIndex, direction, mode);
 }
 
@@ -15501,6 +15567,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   v-model:filter-builder-open="filterBuilderOpen"
                   :sort-builder-open="sortBuilderOpen"
                   :filter-editor-view="filterEditorView"
+                  :show-order-by="dataGridOrderByVisible"
+                  :where-pane-ratio="dataGridWhereRatio"
                   :columns="props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns"
                   :comment-by-column="columnCommentMap"
                   :condition-columns="conditionColumns"
@@ -15737,7 +15805,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @custom-mode-order="openFilterModeOrderDialog"
         />
         <DataGridSortWorkbench
-          v-if="canUseWhereSearch && filterEditorView === 'conditions' && sortBuilderOpen"
+          v-if="canUseWhereSearch && dataGridOrderByVisible && filterEditorView === 'conditions' && sortBuilderOpen"
           :sql-preview="sortSqlPreview"
           :rules="structuredSortRules"
           :columns="filterBuilderColumnOptions"
@@ -15755,7 +15823,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @apply="applyStructuredSortRules"
         />
         <DataGridTextSortWorkbench
-          v-if="canUseWhereSearch && filterEditorView === 'text' && sortBuilderOpen"
+          v-if="canUseWhereSearch && dataGridOrderByVisible && filterEditorView === 'text' && sortBuilderOpen"
           :height="settingsStore.editorSettings.dataGridTextFilterPanelHeight"
           :sql-preview="sortSqlPreview"
           :rules="structuredSortRules"
@@ -16264,10 +16332,13 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                               type="button"
                               class="flex h-4 w-4 shrink-0 items-center justify-center rounded"
                               :class="columnIsSorted(col.name, col.actualColIdx) ? 'bg-primary text-primary-foreground opacity-100 shadow-sm hover:bg-primary/90' : 'text-muted-foreground opacity-80 hover:bg-accent hover:text-foreground'"
-                              :title="t('grid.sort')"
+                              :title="t('grid.quickSortHint')"
+                              :aria-label="t('grid.sort')"
                               :aria-expanded="open"
                               @mousedown.stop
-                              @click.stop="toggle"
+                              @click.stop="toggleHeaderSort(col.name, col.actualColIdx)"
+                              @contextmenu.prevent.stop="toggle"
+                              @keydown.shift.f10.prevent.stop="toggle"
                             >
                               <ArrowUp v-if="columnIsSorted(col.name, col.actualColIdx) && sortDir === 'asc'" class="h-3 w-3 shrink-0" />
                               <ArrowDown v-else-if="columnIsSorted(col.name, col.actualColIdx) && sortDir === 'desc'" class="h-3 w-3 shrink-0" />
@@ -17576,7 +17647,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
       </div>
       <div v-else-if="settingsStore.editorSettings.showDataGridStatusSql && sqlOneLiner" class="flex min-w-0 max-w-full items-center gap-1 overflow-hidden">
         <CustomContextMenu :items="statusSqlContextMenuItems" v-slot="{ onContextMenu }">
-          <Tooltip>
+          <Tooltip :open="statusSqlTooltipOpen" @update:open="updateStatusSqlTooltipOpen">
             <TooltipTrigger as-child>
               <button type="button" class="block min-w-0 max-w-full truncate text-left cursor-pointer hover:text-foreground" data-result-sql :aria-label="t(context === 'table-data' ? 'grid.viewQuerySql' : 'grid.copyQuerySql')" @click="viewStatusSql" @contextmenu="onContextMenu">
                 <span v-if="result.sqlPage">{{ t("grid.currentPageSql") }}: </span>

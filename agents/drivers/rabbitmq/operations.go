@@ -296,11 +296,14 @@ func consumersFromQueueInfo(info jsonObject) []jsonObject {
 		}
 		consumer := jsonObject(consumerMap)
 		channelName := ""
+		address := ""
 		if channelDetails := objectOrNil(consumer, "channel_details"); channelDetails != nil {
 			channelName = stringOrEmpty(channelDetails, "name")
+			address = stringOrEmpty(channelDetails, "peer_host")
 		}
 		entry := jsonObject{
 			"name":        channelName,
+			"address":     address,
 			"tag":         stringOrEmpty(consumer, "consumer_tag"),
 			"active":      boolOrDefault(consumer, "active", false),
 			"ackRequired": boolOrDefault(consumer, "ack_required", false),

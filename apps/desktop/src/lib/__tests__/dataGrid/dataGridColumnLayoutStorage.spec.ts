@@ -4,6 +4,7 @@ import {
   loadDataGridColumnLayout,
   loadDataGridColumnOrder,
   loadTableDataGridColumnOrder,
+  loadTableDataGridColumnOrderEntry,
   notifyTableDataGridColumnOrderChanged,
   removeDataGridColumnOrder,
   removeTableDataGridColumnOrder,
@@ -64,6 +65,9 @@ describe("table data grid column order storage", () => {
     // The table was dropped and recreated with CF_INFO ahead of NETINC.
     expect(loadTableDataGridColumnOrder(scopeKey, ["ID\u00000", "CF_INFO\u00000", "NETINC\u00000", "LIAGRO\u00000"])).toEqual([]);
     expect(loadTableDataGridColumnOrder(scopeKey)).toEqual([]);
+    // An empty entry stays behind so views that keep their own copy of the order can tell it was discarded.
+    expect(loadTableDataGridColumnOrderEntry(scopeKey)).toEqual([]);
+    expect(loadTableDataGridColumnOrderEntry(tableDataGridColumnOrderScopeKey({ connectionId: "oracle-1", database: "APP", schema: "APP", tableName: "OTHER" }))).toBeNull();
   });
 
   it("keeps an order while the database only adds or drops columns", () => {

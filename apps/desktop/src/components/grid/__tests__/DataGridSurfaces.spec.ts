@@ -1743,6 +1743,75 @@ describe("DataGridQueryControls", () => {
     expect(updateFilterBuilderOpen).toHaveBeenCalledWith(true);
     expect(ensureRule).toHaveBeenCalledOnce();
   });
+
+  it("hides order by pane and expands where pane when showOrderBy is false", async () => {
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["id"],
+      conditionColumns: ["id"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: false,
+      filterEditorView: "quick",
+      filterButtonActive: false,
+      filterButtonCount: 0,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      showOrderBy: false,
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+    });
+
+    const wherePane = findOne(mounted.root, (node) => String(node.props.class).includes("flex flex-1 items-center gap-1"));
+    expect(wherePane.props.style).toEqual({ flex: "1 1 100%", width: "100%" });
+    const resizeButton = findAll(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "Resize WHERE and ORDER BY");
+    expect(resizeButton).toHaveLength(0);
+    const sortButtons = findAll(mounted.root, (node) => node.type === "button" && node.props["aria-label"] === "grid.sortBuilderTitle");
+    expect(sortButtons).toHaveLength(0);
+    const orderInputs = findAll(mounted.root, (node) => node.props["data-stub"] === "DataGridConditionEditor" && node.props.kind === "orderBy");
+    expect(orderInputs).toHaveLength(0);
+  });
+
+  it("applies custom wherePaneRatio to where pane style", async () => {
+    const mounted = mountComponent(DataGridQueryControls, {
+      whereInput: "",
+      orderByInput: "",
+      columns: ["id"],
+      conditionColumns: ["id"],
+      historyScope: {},
+      canUseWhereSearch: true,
+      compact: false,
+      leadingBorder: false,
+      filterBuilderOpen: false,
+      filterEditorView: "quick",
+      filterButtonActive: false,
+      filterButtonCount: 0,
+      hasLocalColumnFilters: false,
+      localFilterCount: 0,
+      localFilterSummaries: [],
+      rules: [],
+      filteredColumns: ["id"],
+      modeOptions: [{ value: "equals", labelKey: "equals" }],
+      columnSearch: "",
+      showOrderBy: true,
+      wherePaneRatio: 0.6,
+      applyWhere: vi.fn(),
+      applyOrderBy: vi.fn(),
+      clearOrderBy: vi.fn(),
+    });
+
+    const wherePane = findOne(mounted.root, (node) => String(node.props.class).includes("flex flex-1 items-center gap-1"));
+    expect(String(wherePane.props.style?.flex)).toContain("60%");
+  });
 });
 
 describe("DataGridDistinctValuePopover", () => {

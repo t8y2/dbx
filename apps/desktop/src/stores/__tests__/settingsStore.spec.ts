@@ -58,6 +58,18 @@ describe("normalizeEditorSettings", () => {
     expect(settings.editorSettings).toMatchObject(defaults);
   });
 
+  it("defaults dataGridOrderByVisible to true and dataGridWhereRatio to 0.5", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.dataGridOrderByVisible).toBe(true);
+    expect(DEFAULT_EDITOR_SETTINGS.dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({}).dataGridOrderByVisible).toBe(true);
+    expect(normalizeEditorSettings({}).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridOrderByVisible: false }).dataGridOrderByVisible).toBe(false);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.7 }).dataGridWhereRatio).toBe(0.7);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.1 as any }).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.95 as any }).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: "0.7" as any }).dataGridWhereRatio).toBe(0.5);
+  });
+
   it("defaults the selection statistic to sum and validates every saved metric", () => {
     expect(DEFAULT_EDITOR_SETTINGS.dataGridSelectionSummaryMetric).toBe("sum");
     expect(normalizeEditorSettings({}).dataGridSelectionSummaryMetric).toBe("sum");

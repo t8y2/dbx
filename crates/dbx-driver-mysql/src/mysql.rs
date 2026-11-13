@@ -2697,6 +2697,22 @@ fn mysql_connection_session_variable_assignments(url: &str) -> Vec<String> {
     split_mysql_session_variables(&value)
 }
 
+/// Initialize native MySQL sessions in auto-commit mode unless the connection
+/// URL explicitly configures it. Apply this only during connection setup/reset,
+/// never on checkout: changing it on a live session could commit a transaction.
+pub fn default_autocommit_setup_query(url: &str) -> Option<&'static str> {
+    let configured = mysql_connection_session_variable_assignments(url).into_iter().any(|assignment| {
+        let Some((name, _)) = assignment.split_once('=') else {
+            return false;
+        };
+        let name = name.trim().trim_end_matches(':').trim().to_ascii_lowercase();
+        let name = name.strip_prefix("@@").unwrap_or(&name);
+        let name = name.strip_prefix("session.").or_else(|| name.strip_prefix("local.")).unwrap_or(name);
+        name.trim_matches('`') == "autocommit"
+    });
+    (!configured).then_some("SET SESSION autocommit = 1")
+}
+
 /// Detects an explicit `group_concat_max_len` assignment in the connection URL.
 /// DBX raises the variable during connection setup, but a value the user (or the
 /// server) asks for must always win, independent of statement execution order.
@@ -6776,7 +6792,7 @@ pub async fn stream_query_rows(
     mut on_row: impl FnMut(&[serde_json::Value]) -> Result<(), String>,
 ) -> Result<u64, String> {
     let mut conn = get_conn_with_health_check(pool).await?;
-    stream_query_result_on_conn_with_data_charset(
+    let result = stream_query_result_on_conn_with_data_charset(
         &mut conn,
         sql,
         bare,
@@ -6792,7 +6808,33 @@ pub async fn stream_query_rows(
             Ok(())
         },
     )
-    .await
+    .await;
+    if stream_may_leave_unread_rows(&result, max_rows) {
+        // A connection returned to the pool with an unread result set is cleaned up by
+        // reading every remaining row. On a large table over a slow link that outlasts the
+        // budget for closing the export session, so the export fails with an unconfirmed
+        // close instead of its own outcome (#14796). Stop the query on the server and
+        // drop the connection instead of recycling it.
+        if let Err(error) = abandon_streaming_conn(conn, pool.checkout_timeout()).await {
+            log::warn!("[db:stream:abandon] {error}");
+        }
+    }
+    result
+}
+
+/// Whether the server may still be sending rows that the stream did not read: the
+/// stream failed (a row, sink or cancellation error) or stopped at `max_rows`.
+fn stream_may_leave_unread_rows(result: &Result<u64, String>, max_rows: Option<usize>) -> bool {
+    match result {
+        Err(_) => true,
+        Ok(rows) => max_rows.is_some_and(|limit| u64::try_from(limit).is_ok_and(|limit| *rows >= limit)),
+    }
+}
+
+async fn abandon_streaming_conn(conn: mysql_async::Conn, timeout: Duration) -> Result<(), String> {
+    let result = kill_query_with_opts(conn.opts().clone(), conn.id(), timeout).await;
+    let _ = tokio::time::timeout(timeout, conn.disconnect()).await;
+    result
 }
 
 pub async fn stream_query_result_on_conn(
@@ -8586,6 +8628,20 @@ mod tests {
         assert!(pool.checkout_verifications().is_some());
         let _ = tokio::time::timeout(Duration::from_secs(1), raw.disconnect()).await;
         let _ = tokio::time::timeout(Duration::from_secs(1), pool.disconnect()).await;
+    }
+
+    #[test]
+    fn stream_abandons_connection_when_rows_may_remain_unread() {
+        assert!(stream_may_leave_unread_rows(&Err("Export cancelled".to_string()), None));
+        assert!(stream_may_leave_unread_rows(&Err("write failed".to_string()), Some(10)));
+        assert!(stream_may_leave_unread_rows(&Ok(10), Some(10)));
+    }
+
+    #[test]
+    fn stream_recycles_connection_after_reading_every_row() {
+        assert!(!stream_may_leave_unread_rows(&Ok(262_144), None));
+        assert!(!stream_may_leave_unread_rows(&Ok(0), None));
+        assert!(!stream_may_leave_unread_rows(&Ok(3), Some(10)));
     }
 
     #[tokio::test]
@@ -12374,6 +12430,37 @@ mod tests {
                 "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)",
             ]
         );
+    }
+
+    #[test]
+    fn mysql_default_autocommit_respects_explicit_session_configuration() {
+        for assignment in [
+            "autocommit=0",
+            "autocommit:=0",
+            "AUTOCOMMIT=OFF",
+            "@@autocommit=0",
+            "@@SESSION.autocommit=0",
+            "@@local.autocommit=0",
+            "`autocommit`=0",
+            "sql_mode='STRICT_ALL_TABLES',autocommit=1",
+        ] {
+            let value = percent_encoding::utf8_percent_encode(assignment, percent_encoding::NON_ALPHANUMERIC);
+            let url = format!("mysql://host/db?sessionVariables={value}");
+            assert_eq!(default_autocommit_setup_query(&url), None, "{assignment}");
+        }
+    }
+
+    #[test]
+    fn mysql_default_autocommit_ignores_user_and_global_variables() {
+        for url in [
+            "mysql://host/db",
+            "mysql://host/db?sessionVariables=",
+            "mysql://host/db?sessionVariables=%40autocommit%3D0",
+            "mysql://host/db?sessionVariables=%40%40global.autocommit%3D0",
+            "mysql://host/db?sessionVariables=sql_mode%3D%27autocommit%3D0%27",
+        ] {
+            assert_eq!(default_autocommit_setup_query(url), Some("SET SESSION autocommit = 1"), "{url}");
+        }
     }
 
     #[test]

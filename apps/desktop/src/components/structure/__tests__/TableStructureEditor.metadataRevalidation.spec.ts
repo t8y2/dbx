@@ -1431,6 +1431,40 @@ afterEach(() => {
 });
 
 describe("TableStructureEditor metadata revalidation (#8816)", () => {
+  it.each(["dameng", "gaussdb"])("renders loaded columns for %s", async (databaseType) => {
+    mocks.connection.db_type = databaseType;
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => ({ value: facet === "columns" ? initialColumns : facet === "comment" ? "" : [], cacheStatus: "remote" }));
+
+    const root = await mountStructureEditor();
+
+    expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("id");
+  });
+
+  it.each(["dameng", "gaussdb", "mysql", "postgres"])("keeps a failed %s column load visible until an explicit retry", async (databaseType) => {
+    mocks.connection.db_type = databaseType;
+    let reads = 0;
+    let unavailable = true;
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => {
+      if (facet === "columns") {
+        reads += 1;
+        // Bound a regression's automatic retry loop so the test can report it.
+        if (unavailable && reads <= 3) throw new Error("Column metadata lookup failed");
+      }
+      return { value: facet === "columns" ? initialColumns : facet === "comment" ? "" : [], cacheStatus: "remote" };
+    });
+
+    const root = await mountStructureEditor();
+
+    expect(reads).toBe(1);
+    expect(root.textContent).toContain("Column metadata lookup failed");
+
+    unavailable = false;
+    root.querySelector<HTMLButtonElement>("[data-refresh-structure-shortcut]")!.click();
+    await vi.waitFor(() => expect(root.querySelector<HTMLInputElement>("[data-column-name-input]")?.value).toBe("id"));
+    expect(reads).toBe(2);
+    expect(root.textContent).not.toContain("Column metadata lookup failed");
+  });
+
   it("re-fetches cache-served columns in the background and applies changes on a clean draft", async () => {
     let columnsCalls = 0;
     mocks.loadObjectMetadataFacet.mockImplementation(async (_request: unknown, facet: string) => {
@@ -1550,6 +1584,67 @@ describe("restored structure snapshots after external DDL", () => {
     const root = await mountStructureEditor(restoredDraft(false));
     await vi.waitFor(() => expect(Array.from(root.querySelectorAll<HTMLInputElement>("[data-column-name-input]")).map((input) => input.value)).toContain("email"));
     expect(columnsFacetCalls()).toHaveLength(1);
+  });
+
+  it.each(["dameng", "gaussdb", "mysql"])("revalidates an empty legacy %s snapshot instead of treating it as loaded", async (databaseType) => {
+    mocks.connection.db_type = databaseType;
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => ({ value: facet === "columns" ? rebuiltColumns : facet === "comment" ? "" : [], cacheStatus: "remote" }));
+    const draft = restoredDraft(undefined);
+    draft.columns = [];
+    draft.loadedMetadataFacets = ["columns", "indexes", "comment"];
+
+    const root = await mountStructureEditor(draft);
+    await settle();
+
+    expect(columnsFacetCalls()).toHaveLength(1);
+    expect(Array.from(root.querySelectorAll<HTMLInputElement>("[data-column-name-input]")).map((input) => input.value)).toContain("email");
+  });
+
+  it.each(["dirty", "comment", "index", "ddl"])("preserves an empty restored snapshot with pending %s edits", async (edit) => {
+    mocks.connection.db_type = "dameng";
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => ({ value: facet === "columns" ? rebuiltColumns : facet === "comment" ? "" : [], cacheStatus: "remote" }));
+    const draft = restoredDraft(edit === "dirty" ? true : undefined);
+    draft.columns = [];
+    draft.loadedMetadataFacets = ["columns", "indexes", "comment"];
+    if (edit === "comment") draft.tableComment = "Pending table comment";
+    if (edit === "index") {
+      draft.indexes = createIndexDrafts([{ name: "idx_id", columns: ["id"], is_unique: false, is_primary: false }]);
+      draft.indexes[0].name = "idx_id_changed";
+    }
+    if (edit === "ddl") {
+      draft.rawDdlContent = "CREATE TABLE users (id BIGINT)";
+      draft.ddlContent = draft.rawDdlContent;
+      draft.ddlDraft = "ALTER TABLE users ADD pending_column INT";
+    }
+
+    const root = await mountStructureEditor(draft);
+    await settle();
+
+    expect(columnsFacetCalls()).toHaveLength(0);
+    expect(root.querySelector("[data-column-name-input]")).toBeNull();
+  });
+
+  it("shows a failed empty-snapshot revalidation and retries it only on refresh", async () => {
+    mocks.connection.db_type = "dameng";
+    let unavailable = true;
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet) => {
+      if (facet === "columns" && unavailable) throw new Error("Restored column metadata unavailable");
+      return { value: facet === "columns" ? rebuiltColumns : facet === "comment" ? "" : [], cacheStatus: "remote" };
+    });
+    const draft = restoredDraft(undefined);
+    draft.columns = [];
+    draft.loadedMetadataFacets = ["columns", "indexes", "comment"];
+
+    const root = await mountStructureEditor(draft);
+    await settle();
+
+    expect(columnsFacetCalls()).toHaveLength(1);
+    expect(root.textContent).toContain("Restored column metadata unavailable");
+    unavailable = false;
+    root.querySelector<HTMLButtonElement>("[data-refresh-structure-shortcut]")!.click();
+    await vi.waitFor(() => expect(Array.from(root.querySelectorAll<HTMLInputElement>("[data-column-name-input]")).map((input) => input.value)).toContain("email"));
+    expect(columnsFacetCalls()).toHaveLength(2);
+    expect(root.textContent).not.toContain("Restored column metadata unavailable");
   });
 
   it("loads missing indexes for legacy field-tab drafts without overwriting pending columns", async () => {

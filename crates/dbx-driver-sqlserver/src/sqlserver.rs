@@ -2780,10 +2780,16 @@ fn sqlserver_completion_assistant_sql(request: &crate::types::CompletionAssistan
         && object_kinds.iter().any(crate::types::CompletionAssistantObjectKind::is_table_like)
     {
         let object_like = sqlserver_completion_object_search_clause(request, &like_pattern);
+        // NOTE: Any session that creates a temp table inside an open transaction
+        // keeps its tempdb catalog rows locked until it commits. A READ COMMITTED
+        // scan of `tempdb.sys.all_objects` waits on those rows with no timeout,
+        // holding the only SQL Server metadata connection, so every later
+        // metadata request fails with the pool-busy error. Completion only needs
+        // candidate names, so dirty catalog reads are acceptable here.
         queries.push(format!(
             "SELECT TOP ({limit}) o.name, s.name AS schema_name, 'TABLE' AS object_type, CAST(NULL AS NVARCHAR(128)) AS parent_schema, CAST(NULL AS NVARCHAR(128)) AS parent_name, CAST(NULL AS NVARCHAR(MAX)) AS object_comment, CAST(NULL AS NVARCHAR(128)) AS data_type \
-             FROM tempdb.sys.all_objects o \
-             JOIN tempdb.sys.schemas s ON s.schema_id = o.schema_id \
+             FROM tempdb.sys.all_objects o WITH (NOLOCK) \
+             JOIN tempdb.sys.schemas s WITH (NOLOCK) ON s.schema_id = o.schema_id \
              WHERE o.type = 'U' {object_like}"
         ));
         return format!("SELECT * FROM ({}) AS dbx_completion ORDER BY name", queries.remove(0));
@@ -6480,7 +6486,8 @@ mod tests {
 
         let sql = sqlserver_completion_assistant_sql(&request, 100);
 
-        assert!(sql.contains("FROM tempdb.sys.all_objects o"));
+        assert!(sql.contains("FROM tempdb.sys.all_objects o WITH (NOLOCK)"));
+        assert!(sql.contains("JOIN tempdb.sys.schemas s WITH (NOLOCK)"));
         assert!(sql.contains("o.type = 'U'"));
         assert!(sql.contains("LOWER(o.name) LIKE LOWER('#Temp%') ESCAPE '\\'"));
         assert!(sql.contains("CAST(NULL AS NVARCHAR(128)) AS parent_schema"));

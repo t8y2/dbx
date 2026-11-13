@@ -458,13 +458,17 @@ fn platform_keyring_codec(allow_create: bool) -> Result<Option<SecretCodec>, Str
 // protection that the Credential Manager itself provides. The mirror never
 // holds independently provisioned key material — it is only ever a copy of
 // the live credential-store key, so it can never outrank or replace it.
+/// Seals or opens the recovery-mirror blob (DPAPI in production, a fake in tests).
+#[cfg(any(test, all(feature = "os-keyring", target_os = "windows")))]
+type MirrorTransform<'a> = &'a dyn Fn(&[u8]) -> Result<Vec<u8>, String>;
+
 #[cfg(any(test, all(feature = "os-keyring", target_os = "windows")))]
 fn keyring_codec_with_recovery_mirror(
     keyring_read: Result<Option<String>, String>,
     keyring_write: &dyn Fn(&str) -> Result<(), String>,
     mirror_path: Option<&std::path::Path>,
-    protect: &dyn Fn(&[u8]) -> Result<Vec<u8>, String>,
-    unprotect: &dyn Fn(&[u8]) -> Result<Vec<u8>, String>,
+    protect: MirrorTransform<'_>,
+    unprotect: MirrorTransform<'_>,
     allow_create: bool,
 ) -> Result<Option<SecretCodec>, String> {
     match keyring_read {
@@ -529,10 +533,7 @@ fn recovery_mirror_path() -> Option<std::path::PathBuf> {
 }
 
 #[cfg(any(test, all(feature = "os-keyring", target_os = "windows")))]
-fn read_recovery_mirror(
-    path: &std::path::Path,
-    unprotect: &dyn Fn(&[u8]) -> Result<Vec<u8>, String>,
-) -> Option<String> {
+fn read_recovery_mirror(path: &std::path::Path, unprotect: MirrorTransform<'_>) -> Option<String> {
     let contents = std::fs::read(path).ok()?;
     let blob = contents.strip_prefix(RECOVERY_MIRROR_MAGIC)?;
     let material = unprotect(blob).ok()?;
@@ -540,11 +541,7 @@ fn read_recovery_mirror(
 }
 
 #[cfg(any(test, all(feature = "os-keyring", target_os = "windows")))]
-fn recovery_mirror_needs_refresh(
-    path: &std::path::Path,
-    live_material: &str,
-    unprotect: &dyn Fn(&[u8]) -> Result<Vec<u8>, String>,
-) -> bool {
+fn recovery_mirror_needs_refresh(path: &std::path::Path, live_material: &str, unprotect: MirrorTransform<'_>) -> bool {
     match read_recovery_mirror(path, unprotect) {
         Some(material) => material.trim() != live_material,
         None => true,
@@ -552,11 +549,7 @@ fn recovery_mirror_needs_refresh(
 }
 
 #[cfg(any(test, all(feature = "os-keyring", target_os = "windows")))]
-fn write_recovery_mirror(
-    path: &std::path::Path,
-    material: &str,
-    protect: &dyn Fn(&[u8]) -> Result<Vec<u8>, String>,
-) -> Result<(), String> {
+fn write_recovery_mirror(path: &std::path::Path, material: &str, protect: MirrorTransform<'_>) -> Result<(), String> {
     let blob = protect(material.as_bytes())?;
     let mut contents = Vec::with_capacity(RECOVERY_MIRROR_MAGIC.len() + blob.len());
     contents.extend_from_slice(RECOVERY_MIRROR_MAGIC);
@@ -1079,7 +1072,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mirror = dir.path().join("secret-store.key.dpapi");
         // A mirror whose blob cannot be unprotected is treated as absent.
-        std::fs::write(&mirror, [RECOVERY_MIRROR_MAGIC, &[0xFF, 0xFE].as_slice()].concat()).unwrap();
+        std::fs::write(&mirror, [RECOVERY_MIRROR_MAGIC, [0xFF, 0xFE].as_slice()].concat()).unwrap();
 
         let written: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
         let codec = keyring_codec_with_recovery_mirror(

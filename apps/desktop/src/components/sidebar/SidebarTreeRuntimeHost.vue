@@ -100,7 +100,7 @@ import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType
 import * as api from "@/lib/backend/api";
 import type { ElasticsearchIndexMetadataKind } from "@/lib/backend/tauri";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
-import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { canClearDefaultDatabase, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { connectionUsesVisibleSchemaFilter } from "@/lib/database/visibleDatabases";
 import { canTreeNodeExpand, canTreeNodePin, canTreeNodeShowExpander } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { sidebarConnectionVisibleFilterMenu } from "@/lib/sidebar/sidebarVisibleFilterMenu";
@@ -146,7 +146,7 @@ import { oracleCompileUnsupportedReason } from "@/lib/database/oracleInvalidObje
 import type { ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
 import { elasticsearchClearIndexPreview, isElasticsearchClearConfirmed, isElasticsearchIndexPattern } from "@/lib/sidebar/elasticsearchIndexActions";
 import { sidebarObjectTemplateForGroup } from "@/lib/sidebar/databaseObjectTemplates";
-import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate, insertTemplatePrimaryKeyConflicts } from "@/lib/table/tableSqlTemplates";
+import { buildColumnSelectTemplate, buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate, insertTemplatePrimaryKeyConflicts } from "@/lib/table/tableSqlTemplates";
 import SqlTemplateInsertRowsDialog from "@/components/sidebar/SqlTemplateInsertRowsDialog.vue";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
 import { qualifiedTableName } from "@/lib/table/tableSelectSql";
@@ -1308,6 +1308,7 @@ async function toggle(requestId = beginNavigationRequest()) {
     } else if (node.type === "linked-server-schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.schema) {
       await connectionStore.loadTables(node.connectionId, node.database, node.schema, treeLoadSearchOptions);
     } else if ((node.type === "table" || node.type === "view" || node.type === "materialized_view") && node.connectionId && hasTreeNodeDatabaseContext(node)) {
+      sidebarTreeContext?.retainSearchDetailTable?.(node);
       await connectionStore.loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id, node.catalog);
     } else if (node.type === "group-columns" && node.connectionId && hasTreeNodeDatabaseContext(node) && node.tableName) {
       await connectionStore.loadColumns(node.connectionId, node.database, node.tableName, node.schema, node.id, node.catalog);
@@ -1847,6 +1848,10 @@ function onDoubleClick(event: MouseEvent) {
   if (activeNode.value.type === "table" && settingsStore.editorSettings.sidebarTableClickNavigation) {
     beginNavigationRequest();
     openDataInNewTabImmediately();
+    return;
+  }
+  if (activeNode.value.type === "column" && settingsStore.editorSettings.sidebarColumnDoubleClickAction === "query" && supportsSqlFileExecution(currentDatabaseType())) {
+    void newColumnQuery(beginNavigationRequest());
     return;
   }
   if (activeNode.value.type === "event") {
@@ -2456,6 +2461,37 @@ async function openMultiTableSqlTemplate(targets: Array<TreeNode & { connectionI
   openSqlTemplateTab(tabTarget.connectionId, tabTarget.database, tabTarget.schema, tabTarget.catalog, sql, title);
 }
 
+async function newColumnQuery(requestId: number) {
+  const node = activeNode.value;
+  if (!node.connectionId || !hasTreeNodeDatabaseContext(node) || !node.tableName) return;
+  const columnName = extractColumnNameFromTreeNode(node);
+  if (!columnName) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    if (!isCurrentNavigationRequest(requestId)) return;
+    const config = connectionStore.getConfig(node.connectionId);
+    const sql = buildColumnSelectTemplate(
+      {
+        databaseType: effectiveDatabaseTypeForConnection(config),
+        driverProfile: config?.driver_profile,
+        identifierQuote: connectionStore.connectionIdentifierQuote(node.connectionId),
+        catalog: node.catalog,
+        database: node.database,
+        schema: node.schema || node.database,
+        defaultSchema: config?.default_schema,
+        includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+        quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+        keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
+        tableName: node.tableName,
+      },
+      columnName,
+    );
+    openSqlTemplateTab(node.connectionId, node.database, node.schema, node.catalog, sql);
+  } catch (error) {
+    toastConnectFailed(node.connectionId, error);
+  }
+}
+
 function openSqlTemplateTab(connectionId: string, database: string, schema: string | undefined, catalog: string | undefined, sql: string, title?: string) {
   const tabId = queryStore.createTab(connectionId, database, title, "query", schema, undefined, catalog, { forceWordWrap: true, schemaQualifiesSql: true });
   queryStore.updateSql(tabId, sql);
@@ -2695,7 +2731,7 @@ async function openSidebarMultiTableDdlTab(targets: Array<TreeNode & { connectio
     async (ddl, target) => {
       const formatDialect = sqlFormatDialectForDbType(databaseTypeForNode(target));
       const formatted = await formatSqlForDisplay(ddl, formatDialect, settingsStore.editorSettings.sqlFormatter);
-      return formatSidebarDdlTemplateForDisplay(formatted, formatDialect, databaseTypeForNode(target), settingsStore.editorSettings.generateSqlIncludeDatabaseName, target.database, settingsStore.editorSettings.generateSqlQuoteIdentifiers, target.catalog);
+      return formatSidebarDdlTemplateForDisplay(formatted, formatDialect, databaseTypeForNode(target), settingsStore.editorSettings.generateSqlIncludeDatabaseName, target.database, settingsStore.editorSettings.generateSqlQuoteIdentifiers, settingsStore.editorSettings, target.catalog);
     },
   );
   connectionStore.activeConnectionId = tabTarget.connectionId;
@@ -7780,7 +7816,7 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (node.type === "database" && currentDatabaseType() !== "cloudflare-d1") {
       if (!isNodeDefaultDatabase.value) {
         items.push({ sidebarActionId: "contextMenu.setDefaultDatabase", label: t("contextMenu.setDefaultDatabase"), action: setNodeAsDefaultDatabase, icon: Database });
-      } else {
+      } else if (canClearDefaultDatabase(currentDatabaseType())) {
         items.push({ sidebarActionId: "contextMenu.clearDefaultDatabase", label: t("contextMenu.clearDefaultDatabase"), action: clearNodeDefaultDatabase, icon: Database });
       }
     }
@@ -9067,7 +9103,7 @@ function activateRuntimeNode(node: TreeNode) {
 // the live node active for later actions, but publish the rendered node so the
 // tree owner can synchronize display projections without losing the toggle.
 function emitNodeToggled(node: TreeNode, wasExpanded: boolean, expandedOverride?: boolean) {
-  const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? node;
+  const liveNode = findSidebarActionTarget(connectionStore.treeNodes, createSidebarActionTarget(node)) ?? sidebarTreeContext?.findSearchDetailNode?.(node) ?? node;
   activeNode.value = liveNode;
   const isExpanded = expandedOverride ?? !wasExpanded;
   if (canTreeNodeExpand(node.type)) {

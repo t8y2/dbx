@@ -1240,6 +1240,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// 保存任意连接都会重发整张连接表，`sync_connection_configs` 因此会在每次保存时
+    /// 重新比较所有连接。插件连接的池条目持有 sidecar 会话句柄，销毁池会发
+    /// connection/disconnect 杀掉该连接全部会话——一旦比较被派生字段/密钥差异判成
+    /// “已变更”，就会连带拆掉其他 tab 的活跃终端（dbx-plugin-ssh#251）。插件连接的
+    /// 自身配置变更由前端显式重连路径处理，持久化同步不得销毁插件池。
+    #[tokio::test]
+    async fn sync_connection_configs_never_drops_open_plugin_pools() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-plugin-sync-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = dbx_core::persistence::test_storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+        let mut plugin = mongodb_config();
+        plugin.id = "ssh-a".to_string();
+        plugin.db_type = DatabaseType::Plugin;
+        plugin.plugin_id = Some("io.dbx.ssh".to_string());
+        plugin.plugin_connection_provider = Some("io.dbx.ssh.connection".to_string());
+        state.configs.write().await.insert(plugin.id.clone(), plugin.clone());
+
+        // 即使端点变化（会被 pool_equivalent 判为不同），插件池也不得由同步销毁。
+        let mut changed = plugin.clone();
+        changed.host = "other-host".to_string();
+        let sync = sync_connection_configs(&state, std::slice::from_ref(&changed)).await;
+        assert!(sync.connection_pool_ids_to_drop.is_empty());
+        assert_eq!(state.configs.read().await.get("ssh-a").map(|c| c.host.as_str()), Some("other-host"));
+
+        // 删除（不再出现在持久化列表）仍必须清理池，删除语义不受本豁免影响。
+        let sync_deleted = sync_connection_configs(&state, &[]).await;
+        assert_eq!(sync_deleted.connection_pool_ids_to_drop.as_slice(), &["ssh-a".to_string()]);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn sync_connection_configs_preserves_nacos_session_password_for_scope_updates() {
         let dir = std::env::temp_dir().join(format!("dbx-tauri-nacos-scope-{}", uuid::Uuid::new_v4()));
@@ -1365,6 +1397,19 @@ async fn sync_connection_configs(state: &AppState, configs: &[ConnectionConfig])
             }
             if previous.db_type == DatabaseType::MessageQueue {
                 mq_adapter_ids_to_drop.insert(config.id.clone());
+            }
+            // 插件连接的池条目持有 sidecar 会话句柄：关闭池会向插件发
+            // connection/disconnect（删注册表 + 杀掉该连接全部会话）。保存任意
+            // 连接都会重发整张连接表，这里一旦因派生字段/密钥差异把插件连接判成
+            // “已变更”，就会连带拆掉其他 tab 的活跃终端（dbx-plugin-ssh#251）。
+            // 插件连接自身的配置变更由前端显式重连路径负责——connect_db_inner 对
+            // Plugin 走 upsert-without-close 再建新会话；显式断开/删除仍走完整关闭
+            // 路径。因此持久化同步只清理会话凭据、绝不销毁插件池。
+            if config.db_type == DatabaseType::Plugin && previous.db_type == DatabaseType::Plugin {
+                if !connection_configs_session_credentials_compatible(&previous, config) {
+                    state.session_credentials.clear_connection(&config.id);
+                }
+                continue;
             }
             if !connection_configs_session_credentials_compatible(&previous, config) {
                 // 端点或认证身份变化后，旧密码不能安全复用。显示范围等本地设置

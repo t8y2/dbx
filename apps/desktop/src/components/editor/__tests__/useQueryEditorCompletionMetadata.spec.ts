@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { useQueryEditorCompletionMetadata } from "../useQueryEditorCompletionMetadata";
 import type { QueryEditorProps } from "../queryEditorTypes";
 import type { SqlCompletionColumn, SqlCompletionTable } from "@/lib/sql/sqlCompletion";
+import type { SqlTableReference } from "@/types/database";
 import { buildSelectStarExpansion, buildSqlCompletionItems, getSqlCompletionContext } from "@/lib/sql/sqlCompletion";
 import { buildSqlSemanticDiagnostics } from "@/lib/sql/semantic/diagnostics";
 
@@ -44,6 +45,88 @@ function createHarness(overrides: Partial<QueryEditorProps> = {}) {
 }
 
 describe("QueryEditor completion metadata ownership", () => {
+  const dual: SqlTableReference = { name: "DUAL", span: { start_line: 1, start_column: 15, end_line: 1, end_column: 18 } };
+
+  it.each(["oracle", "oceanbase-oracle"] as const)("resolves unqualified DUAL through PUBLIC after a scoped miss for %s", async (databaseType) => {
+    const { metadata, store } = createHarness({ databaseType, schema: "APP" });
+    const publicDual: SqlCompletionTable = { name: "DUAL", schema: "PUBLIC", type: "table", detail: "PUBLIC \u00b7 synonym" };
+    store.listCompletionTables.mockResolvedValueOnce([]).mockResolvedValueOnce([publicDual]);
+
+    expect(await metadata.findExactSemanticDiagnosticTable(dual)).toEqual(publicDual);
+    expect(store.listCompletionTables.mock.calls.map((call) => call[4])).toEqual([databaseType === "oceanbase-oracle" ? undefined : "APP", "PUBLIC"]);
+    expect(store.listCompletionTables).toHaveBeenLastCalledWith("connection", "demo", "DUAL", 100, "PUBLIC", false, "APP", undefined, { verifySchemaMetadata: true });
+    expect(metadata.cachedTables).toContainEqual(publicDual);
+  });
+
+  it("uses a public synonym already cached by completion after checking the current schema", async () => {
+    const { metadata, store } = createHarness({ databaseType: "oracle", schema: "APP" });
+    const publicDual: SqlCompletionTable = { name: "DUAL", schema: "PUBLIC", type: "table" };
+    store.lookupLocalCompletionTables.mockReturnValueOnce([]).mockReturnValueOnce([publicDual]);
+
+    expect(await metadata.findExactSemanticDiagnosticTable(dual)).toEqual(publicDual);
+    expect(store.lookupLocalCompletionTables.mock.calls.map((call) => call[4])).toEqual(["APP", "PUBLIC"]);
+    expect(store.listCompletionTables).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a current-schema object ahead of public synonyms", async () => {
+    const { metadata, store } = createHarness({ databaseType: "oracle", schema: "APP" });
+    const localDual: SqlCompletionTable = { name: "DUAL", schema: "APP", type: "table" };
+    store.lookupLocalCompletionTables.mockReturnValue([localDual]);
+
+    expect(await metadata.findExactSemanticDiagnosticTable(dual)).toEqual(localDual);
+    expect(store.lookupLocalCompletionTables).toHaveBeenCalledTimes(1);
+    expect(store.listCompletionTables).not.toHaveBeenCalled();
+  });
+
+  it("resolves other public synonyms without accepting prefix matches", async () => {
+    const { metadata, store } = createHarness({ databaseType: "oracle", schema: "APP" });
+    store.listCompletionTables.mockResolvedValueOnce([{ name: "ORDERS_ARCHIVE", schema: "APP" }]).mockResolvedValueOnce([{ name: "ORDERS", schema: "PUBLIC" }]);
+
+    expect(await metadata.findExactSemanticDiagnosticTable({ ...dual, name: "ORDERS", alias: "o" })).toEqual({ name: "ORDERS", schema: "PUBLIC" });
+  });
+
+  it.each(["APP", "SYS", "PUBLIC"])("does not fall back when SQL explicitly qualifies %s.DUAL", async (schema) => {
+    const { metadata, store } = createHarness({ databaseType: "oracle", schema: "APP" });
+
+    expect(await metadata.findExactSemanticDiagnosticTable({ ...dual, schema })).toBeNull();
+    expect(store.listCompletionTables).toHaveBeenCalledTimes(1);
+    expect(store.listCompletionTables.mock.calls[0]?.[4]).toBe(schema);
+  });
+
+  it.each(["postgres", "mysql", "dameng", undefined] as const)("does not change missing-table lookup for %s", async (databaseType) => {
+    const { metadata, store } = createHarness({ databaseType });
+
+    expect(await metadata.findExactSemanticDiagnosticTable(dual)).toBeNull();
+    expect(store.listCompletionTables).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves the requested database scope for the public-synonym lookup", async () => {
+    const { metadata, store } = createHarness({ databaseType: "oracle", schema: "APP" });
+    store.listCompletionTables.mockResolvedValueOnce([]).mockResolvedValueOnce([{ name: "DUAL", schema: "PUBLIC" }]);
+
+    await metadata.findExactSemanticDiagnosticTable(dual, { database: "other", schema: "REPORTING" });
+    expect(store.listCompletionTables.mock.calls.map((call) => [call[1], call[4]])).toEqual([
+      ["other", "REPORTING"],
+      ["other", "PUBLIC"],
+    ]);
+  });
+
+  it("keeps truly missing tables unresolved after both metadata lookups", async () => {
+    const { metadata, store } = createHarness({ databaseType: "oracle", schema: "APP" });
+    store.listCompletionTables.mockResolvedValueOnce([]).mockResolvedValueOnce([{ name: "DUAL_EXTRA", schema: "PUBLIC" }]);
+
+    expect(await metadata.findExactSemanticDiagnosticTable(dual)).toBeNull();
+    expect(store.listCompletionTables).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves failed metadata requests inconclusive", async () => {
+    const { metadata, store } = createHarness({ databaseType: "oracle", schema: "APP" });
+    store.listCompletionTables.mockRejectedValueOnce(new Error("metadata unavailable"));
+
+    await expect(metadata.findExactSemanticDiagnosticTable(dual)).rejects.toThrow("metadata unavailable");
+    expect(store.listCompletionTables).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ["Alias", "PUBLIC_ID"],
     ["APP.Alias", "PRIVATE_ID"],

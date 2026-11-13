@@ -1,5 +1,9 @@
 import type { QueryResult } from "@/types/database";
-import { mysqlUtf8Literal } from "@/lib/table/mysqlTableEngine";
+import { mysqlUtf8Literal, quoteMysqlTableIdentifier } from "@/lib/table/mysqlTableEngine";
+
+/** Server-side inventories for the object browser's inline charset / collation pickers. */
+export const MYSQL_CHARACTER_SETS_SQL = "SHOW CHARACTER SET";
+export const MYSQL_COLLATIONS_SQL = "SHOW COLLATION";
 
 export interface MysqlTableCharsetMetadata {
   charset: string;
@@ -45,4 +49,40 @@ export function mysqlTableCharsetFromCollation(value: string | null | undefined)
   if (collation === "binary") return "binary";
   const separator = collation.indexOf("_");
   return separator > 0 ? collation.slice(0, separator) : "";
+}
+
+/** MySQL reports the `utf8` charset as `utf8mb3` in collation names, so both spellings compare equal. */
+function normalizeMysqlCharsetName(value: string): string {
+  const charset = value.trim().toLowerCase();
+  return charset === "utf8" ? "utf8mb3" : charset;
+}
+
+function validMysqlCharsetIdentifier(value: string): boolean {
+  return value.length > 0 && value.length <= 64 && /^[A-Za-z0-9_]+$/.test(value);
+}
+
+export function mysqlTableCollationBelongsToCharset(collation: string, charset: string): boolean {
+  const name = collation.trim();
+  if (!name || !charset.trim()) return false;
+  return normalizeMysqlCharsetName(mysqlTableCharsetFromCollation(name)) === normalizeMysqlCharsetName(charset);
+}
+
+/**
+ * `ALTER TABLE ... DEFAULT CHARACTER SET` for the object browser's inline charsets.
+ * Mirrors the server-side builder (`mysql_table_charset.rs`): only the table defaults
+ * change, existing columns keep their own character set.
+ * Returns undefined when either name would need quoting, or when the collation does not
+ * belong to the charset — those values come from `SHOW COLLATION`, so the only way to
+ * hit them is a tampered option list.
+ */
+export function mysqlTableCharsetChangeSql(options: { database?: string | null; table: string; charset: string; collation?: string | null }): string | undefined {
+  const charset = options.charset.trim();
+  if (!validMysqlCharsetIdentifier(charset)) return undefined;
+  const table = options.table.trim();
+  if (!table) return undefined;
+  const collation = options.collation?.trim() ?? "";
+  if (collation && (!validMysqlCharsetIdentifier(collation) || !mysqlTableCollationBelongsToCharset(collation, charset))) return undefined;
+  const database = options.database?.trim();
+  const target = database ? `${quoteMysqlTableIdentifier(database)}.${quoteMysqlTableIdentifier(table)}` : quoteMysqlTableIdentifier(table);
+  return `ALTER TABLE ${target} DEFAULT CHARACTER SET ${charset}${collation ? ` COLLATE ${collation}` : ""}`;
 }

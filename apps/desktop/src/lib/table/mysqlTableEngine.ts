@@ -25,6 +25,26 @@ export function mysqlTableEngineSql(database: string, table: string): string {
   return ["SELECT ENGINE AS engine", "FROM information_schema.TABLES", `WHERE TABLE_SCHEMA = ${mysqlUtf8Literal(database)}`, `  AND TABLE_NAME = ${mysqlUtf8Literal(table)}`, "LIMIT 1"].join("\n");
 }
 
+/** Backtick-quotes a MySQL identifier so `ALTER TABLE` addresses the exact table. */
+export function quoteMysqlTableIdentifier(value: string): string {
+  return `\`${value.replace(/`/g, "``")}\``;
+}
+
+/**
+ * `ALTER TABLE ... ENGINE = ...` for the object browser's inline engine picker.
+ * Returns undefined for anything that is not a bare engine name — the options come
+ * from `SHOW ENGINES`, so a value that needs quoting would be an injection attempt.
+ */
+export function mysqlTableEngineChangeSql(options: { database?: string | null; table: string; engine: string }): string | undefined {
+  const engine = options.engine.trim();
+  if (!/^[A-Za-z0-9_$]+$/.test(engine)) return undefined;
+  const table = options.table.trim();
+  if (!table) return undefined;
+  const database = options.database?.trim();
+  const target = database ? `${quoteMysqlTableIdentifier(database)}.${quoteMysqlTableIdentifier(table)}` : quoteMysqlTableIdentifier(table);
+  return `ALTER TABLE ${target} ENGINE = ${engine}`;
+}
+
 function columnIndex(result: QueryResult, name: string): number {
   return result.columns.findIndex((column) => column.trim().toLowerCase() === name.toLowerCase());
 }

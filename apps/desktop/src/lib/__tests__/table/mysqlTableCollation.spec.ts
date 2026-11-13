@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { QueryResult } from "@/types/database";
-import { mysqlTableCharsetFromCollation, mysqlTableCollationSql, parseMysqlTableCharset, parseMysqlTableCollation } from "@/lib/table/mysqlTableCollation";
+import { mysqlTableCharsetChangeSql, mysqlTableCharsetFromCollation, mysqlTableCollationBelongsToCharset, mysqlTableCollationSql, parseMysqlTableCharset, parseMysqlTableCollation } from "@/lib/table/mysqlTableCollation";
 
 function result(columns: string[], rows: QueryResult["rows"]): QueryResult {
   return { columns, rows, affected_rows: 0, execution_time_ms: 1 };
@@ -51,5 +51,29 @@ describe("mysqlTableCollation", () => {
       charset: "",
       collation: "",
     });
+  });
+
+  it("matches collations to their charset, treating utf8 as utf8mb3", () => {
+    expect(mysqlTableCollationBelongsToCharset("utf8mb4_0900_ai_ci", "utf8mb4")).toBe(true);
+    expect(mysqlTableCollationBelongsToCharset("utf8_general_ci", "utf8mb3")).toBe(true);
+    expect(mysqlTableCollationBelongsToCharset("utf8mb3_general_ci", "utf8")).toBe(true);
+    expect(mysqlTableCollationBelongsToCharset("latin1_swedish_ci", "utf8mb4")).toBe(false);
+    expect(mysqlTableCollationBelongsToCharset("", "utf8mb4")).toBe(false);
+    expect(mysqlTableCollationBelongsToCharset("utf8mb4_bin", "")).toBe(false);
+  });
+
+  it("builds the default-charset ALTER matching the server-side builder", () => {
+    expect(mysqlTableCharsetChangeSql({ database: "shop", table: "订单", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci" })).toBe("ALTER TABLE `shop`.`订单` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci");
+    // No database qualifier keeps the current schema; a missing collation leaves the server default.
+    expect(mysqlTableCharsetChangeSql({ database: "", table: "orders", charset: "utf8mb4" })).toBe("ALTER TABLE `orders` DEFAULT CHARACTER SET utf8mb4");
+    expect(mysqlTableCharsetChangeSql({ database: null, table: "orders", charset: "utf8", collation: "utf8_general_ci" })).toBe("ALTER TABLE `orders` DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci");
+  });
+
+  it("refuses charset/collation names that would need quoting", () => {
+    expect(mysqlTableCharsetChangeSql({ database: "shop", table: "orders", charset: "utf8mb4; DROP TABLE x" })).toBeUndefined();
+    expect(mysqlTableCharsetChangeSql({ database: "shop", table: "orders", charset: "utf8mb4", collation: "utf8mb4_bin'" })).toBeUndefined();
+    // Collation belongs to another charset: the server would reject it anyway.
+    expect(mysqlTableCharsetChangeSql({ database: "shop", table: "orders", charset: "utf8mb4", collation: "latin1_swedish_ci" })).toBeUndefined();
+    expect(mysqlTableCharsetChangeSql({ database: "shop", table: "  ", charset: "utf8mb4" })).toBeUndefined();
   });
 });

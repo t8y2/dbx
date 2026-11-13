@@ -27,11 +27,13 @@ export type ObjectBrowserRow = {
   partitionParentName?: string;
   estimatedRows?: number | null;
   totalBytes?: number | null;
+  /** MySQL storage engine reported by `information_schema.TABLES`. */
+  engine?: string | null;
   characterSet?: string | null;
   collation?: string | null;
 };
 
-export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
+export type ObjectBrowserSortKey = "name" | "type" | "estimatedRows" | "totalBytes" | "engine" | "characterSet" | "collation" | "created_at" | "updated_at" | "comment";
 export type ObjectBrowserSortDirection = "asc" | "desc";
 export type ObjectBrowserFilterCounts = Record<ObjectBrowserFilter, number>;
 

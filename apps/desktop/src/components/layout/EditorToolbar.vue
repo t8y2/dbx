@@ -53,7 +53,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { catalogDatabaseOptionsKey, databaseAfterCatalogChange, normalizedQueryTabCatalog, queryCatalogSelectorVisible, selectedQueryCatalogName, useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSchemaOptions } from "@/composables/useSchemaOptions";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
-import { formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { canClearDefaultDatabase, formatDatabaseLabel, isDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { isSingleDatabase, supportsClearableQuerySchema, supportsSqlInListPaste, supportsTransaction as supportsTransactionFeature } from "@/lib/database/databaseCapabilities";
 import { supportsQueryExecution } from "@/lib/database/databaseFeatureSupport";
 import { connectionIsDorisFamilyCatalogCapable } from "@/lib/database/databaseFeatureSupport";
@@ -528,6 +528,7 @@ watchEffect(() => {
 });
 
 const isActiveDatabaseDefault = computed(() => isDefaultDatabase(props.activeConnection, activeDatabaseValue.value));
+const isDefaultDatabaseReadOnly = computed(() => isActiveDatabaseDefault.value && !canClearDefaultDatabase(props.activeConnection?.db_type));
 
 // Narrow panes (multi-group splits) condense the toolbar by measured width
 // instead of overflowing or scrolling. See resolveEditorToolbarTier for the
@@ -999,7 +1000,7 @@ defineExpose({
               <X class="h-3.5 w-3.5" />
               {{ t("editor.clearDatabase") }}
             </DropdownMenuItem>
-            <DropdownMenuItem v-if="activeDatabaseValue && !activeTab.catalog" @select="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
+            <DropdownMenuItem v-if="activeDatabaseValue && !activeTab.catalog" :disabled="isDefaultDatabaseReadOnly" @select="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
               <Check v-if="isActiveDatabaseDefault" class="h-3 w-3" />
               {{ isActiveDatabaseDefault ? t("editor.defaultDatabase") : t("editor.setDefaultDatabase") }}
             </DropdownMenuItem>
@@ -1195,7 +1196,7 @@ defineExpose({
           </TooltipTrigger>
           <TooltipContent>{{ t("editor.clearDatabase") }}</TooltipContent>
         </Tooltip>
-        <Button v-if="showDatabaseHelperButtons && activeDatabaseValue && !activeTab.catalog" variant="ghost" size="sm" class="h-6 px-2 text-[11px]" @click="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
+        <Button v-if="showDatabaseHelperButtons && activeDatabaseValue && !activeTab.catalog" variant="ghost" size="sm" class="h-6 px-2 text-[11px]" :disabled="isDefaultDatabaseReadOnly" @click="isActiveDatabaseDefault ? emit('clearDefaultDatabase') : emit('setDefaultDatabase')">
           <Check v-if="isActiveDatabaseDefault" class="h-3 w-3" />
           {{ isActiveDatabaseDefault ? t("editor.defaultDatabase") : t("editor.setDefaultDatabase") }}
         </Button>

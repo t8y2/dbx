@@ -126,6 +126,7 @@ import { oracleDatabaseLinksFromResult, oracleDatabaseLinksSql, supportsOracleDa
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { connectionIsDorisFamilyCatalogCapable, isInternalDorisCatalog, isSchemaAware, normalizeSidebarObjectKind, schemaNodeHasLoadableName, shouldShowDorisCatalogTree, sidebarObjectKindsForDatabase, supportsPackageMemberExpansion, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
+import { canClearDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { invalidateSchemaOptionsCache } from "@/lib/database/schemaOptionsCache";
 import {
   connectionDatabaseMetadataSchema,
@@ -5105,8 +5106,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function clearDefaultDatabase(connectionId: string) {
     const config = getConfig(connectionId);
-    if (config?.db_type === "cloudflare-d1") return;
-    if (!config || !config.database) return;
+    if (!config?.database || !canClearDefaultDatabase(config.db_type)) return;
     await updateConnection({
       ...config,
       database: undefined,

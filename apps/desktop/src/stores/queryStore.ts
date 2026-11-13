@@ -6349,6 +6349,27 @@ export const useQueryStore = defineStore("query", () => {
     if (tab.txnPossiblyDirty !== undefined) tab.txnPossiblyDirty = false;
   }
 
+  /** Backend session was removed and rolled back after idle expiry: clear the
+   *  sticky dirty state together with the session. A session proven read-only
+   *  reports no lost work, so it gets no auto-rollback notice (#9831). */
+  function markManualTransactionIdleExpired(tab: QueryTab) {
+    const rollbackNoticeRequired = manualTransactionRollbackNoticeRequired(tab, effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)));
+    clearTxnPossiblyDirty(tab);
+    tab.txnSessionId = undefined;
+    tab.txnAutoRolledBack = rollbackNoticeRequired;
+  }
+
+  /** An export observed the backend's idle-expiry error for the transaction it
+   *  was reading through. Drop the dead session from its source tab so a retry
+   *  stops sending the stale id. Returns false when no open tab owns it. */
+  function noteExpiredManualTransaction(txnSessionId: string, error: unknown): boolean {
+    const tab = tabs.value.find((item) => item.txnSessionId === txnSessionId);
+    if (!tab) return false;
+    if (isSqlServerTransactionTab(tab)) reportSqlServerTransactionError(tab, error);
+    else markManualTransactionIdleExpired(tab);
+    return true;
+  }
+
   function rollbackTabTransaction(tab: QueryTab, options?: { resetAutoCommit?: boolean; resetAutoCommitDbType?: string }) {
     invalidateManualTransactionTarget(tab);
     if (tab.txnSessionId) void rollbackTransaction(tab.id);
@@ -10155,13 +10176,7 @@ export const useQueryStore = defineStore("query", () => {
         const errMsg: string = e?.message ?? String(e);
         const idleTimeout = isManualTransactionSessionExpired(e) || errMsg.includes("已自动回滚");
         if (idleTimeout) {
-          // Backend session was removed and rolled back after idle expiry: clear
-          // the sticky dirty state together with the session. Same rule as the
-          // restart path: a session proven read-only reports no lost work.
-          const rollbackNoticeRequired = manualTransactionRollbackNoticeRequired(tab, effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)));
-          clearTxnPossiblyDirty(tab);
-          tab.txnSessionId = undefined;
-          tab.txnAutoRolledBack = rollbackNoticeRequired;
+          markManualTransactionIdleExpired(tab);
         } else if (/rolled.?back/i.test(errMsg) || /transaction session not found/i.test(errMsg) || /agent runtime terminated/i.test(errMsg)) {
           // Statement failure that disposed the manual session: the `rolled back`
           // message fragment is a frontend cleanup compatibility contract.
@@ -11923,6 +11938,18 @@ export const useQueryStore = defineStore("query", () => {
         throw new Error(i18n.global.t("exportProgress.transactionUnavailable"));
     }
 
+    const startExport = async (onProgress: (progress: api.TableExportProgress) => void) => {
+      try {
+        return await (isTauriRuntime() ? api.startQueryResultExport(request, onProgress, true) : api.startQueryResultExport(request, onProgress));
+      } catch (error) {
+        if (request.txnSessionId && isManualTransactionSessionExpired(error)) {
+          noteExpiredManualTransaction(request.txnSessionId, error);
+          throw new Error(i18n.global.t("exportProgress.transactionUnavailable"));
+        }
+        throw error;
+      }
+    };
+
     const tracker = useExportTracker();
     if (!isTauriRuntime()) await connStore.ensureConnected(request.connectionId);
     const task = tracker.addTask("Query Result", format, filePath, request.exportId);
@@ -11945,14 +11972,10 @@ export const useQueryStore = defineStore("query", () => {
             return "settled";
           }
           invoked = true;
-          const result = await api.startQueryResultExport(
-            request,
-            (progress) => {
-              terminal ||= progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled";
-              tracker.updateTableExportTask(request.exportId, progress);
-            },
-            true,
-          );
+          const result = await startExport((progress) => {
+            terminal ||= progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled";
+            tracker.updateTableExportTask(request.exportId, progress);
+          });
           terminal ||= result.status === "Done" || result.status === "Error" || result.status === "Cancelled";
           tracker.updateTableExportTask(request.exportId, result);
           return terminal ? "settled" : "unknown";
@@ -11975,7 +11998,7 @@ export const useQueryStore = defineStore("query", () => {
 
     void (async () => {
       try {
-        await api.startQueryResultExport(request, (progress) => tracker.updateTableExportTask(request.exportId, progress));
+        await startExport((progress) => tracker.updateTableExportTask(request.exportId, progress));
       } catch (error: any) {
         const task = tracker.tasks.value.find((item) => item.exportId === request.exportId);
         if (task) {
@@ -12204,6 +12227,7 @@ export const useQueryStore = defineStore("query", () => {
     countTabResultRows,
     buildQueryResultExportRequest,
     captureQueryResultExportRequest,
+    noteExpiredManualTransaction,
     exportQuerySqlDirect,
     applyQueryMetadataPatch,
     getResourceLifecycleDiagnostics: () => resourceLifecycleDiagnostics(tabs.value),

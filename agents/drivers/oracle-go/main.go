@@ -2355,6 +2355,7 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 		return nil, err
 	}
 	s.closeRows(rows)
+	s.enrichObjectComments(result, schema, useSessionUser)
 	if constraints.Exact {
 		s.enrichExactTriggerObjects(result, schema)
 	}
@@ -6520,6 +6521,11 @@ func isOraclePlSQLBlock(sqlText string) bool {
 
 func isQuerySQL(sqlText string) bool {
 	executable := trimLeadingSQLComments(sqlText)
+	// Only unwrap the prefix for classification so the driver's SQL keeps
+	// its grouping and comments, including inside nested parentheses.
+	for strings.HasPrefix(executable, "(") {
+		executable = trimLeadingSQLComments(executable[1:])
+	}
 	return startsWithSQLKeyword(executable, "select") || startsWithSQLKeyword(executable, "with")
 }
 

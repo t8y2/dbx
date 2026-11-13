@@ -182,6 +182,16 @@ func TestPLDebugHelperPackageDDLIsRenderableForOutOfBandDeployment(t *testing.T)
 	// there fails the whole body with PLS-00302. The opt-in (Signature) rendering is
 	// covered by TestPLDebugProgramInfoOverloadAttributesAreOptIn.
 	body := plDebugPackageBody("DBX_TEST", plDebugProgramInfoFields{})
+	// Oracle 11g rejects identifiers longer than 30 characters with PLS-00114
+	// and the whole body stops compiling, so no rendered identifier may exceed
+	// it (the package-name-prefixed pending-line variable once did, #14786).
+	for name, text := range map[string]string{"head.sql": head, "body.sql": body} {
+		for _, field := range strings.FieldsFunc(text, func(r rune) bool { return !isIdentifierRune(r) }) {
+			if len(field) > 30 && strings.Contains(field, "DBX_") {
+				t.Fatalf("%s renders identifier %q longer than 30 characters (Oracle 11g PLS-00114)", name, field)
+			}
+		}
+	}
 	for name, text := range map[string]string{"head.sql": head, "body.sql": body} {
 		if err := os.WriteFile(directory+string(os.PathSeparator)+name, []byte(text), 0o644); err != nil {
 			t.Fatalf("cannot write %s: %v", name, err)
@@ -3608,13 +3618,17 @@ func TestPLDebugBodyFixNoteIsOnTheHeaderAndRequired(t *testing.T) {
 		"-- DBX PL Debug Package Fix: V6.2 program_info.entrypointname arm for package subprograms",
 		"-- DBX PL Debug Package Fix: V6.3 DBX_FETCH_OUTPUT one-call DBMS_OUTPUT drain",
 		"-- DBX PL Debug Package Fix: V6.4 DBX_CNT_EXCEPTION native break_exception/break_handler resume",
+		"-- DBX PL Debug Package Fix: V6.5 DBX_FETCH_BACKTRACE structured table-overload backtrace with textual fallback",
 	} {
 		if plDebugBodyFixNote == previous || strings.HasPrefix(plDebugBodyFixNote, previous) {
 			t.Fatalf("the fix note was not bumped past %q: %q", previous, plDebugBodyFixNote)
 		}
 	}
-	if !strings.Contains(plDebugBodyFixNote, "Fix: V6.5") {
-		t.Fatalf("the fix note does not carry the V6.5 stamp: %q", plDebugBodyFixNote)
+	if !strings.Contains(plDebugBodyFixNote, "Fix: V6.6") {
+		t.Fatalf("the fix note does not carry the V6.6 stamp: %q", plDebugBodyFixNote)
+	}
+	if !strings.Contains(plDebugBodyFixNote, "DBX_PLD_PENDING_LINE") {
+		t.Fatalf("the fix note does not name the 11g identifier rename: %q", plDebugBodyFixNote)
 	}
 	if !strings.Contains(plDebugBodyFixNote, "entrypointname") {
 		t.Fatalf("the fix note does not name the entrypoint fix it stands for: %q", plDebugBodyFixNote)
@@ -5125,4 +5139,8 @@ func TestPLDebugVariablesFallbackUsesGetValue(t *testing.T) {
 	if message, _ := response["message"].(string); !strings.Contains(message, "no GET_VALUES") {
 		t.Fatalf("the message does not explain the fallback: %q", message)
 	}
+}
+
+func isIdentifierRune(r rune) bool {
+	return r == '_' || r == '$' || r == '#' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 }

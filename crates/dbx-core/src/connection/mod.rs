@@ -98,6 +98,19 @@ fn oceanbase_mysql_setup_queries(config: &ConnectionConfig) -> Vec<String> {
 
 fn mysql_pool_setup_queries(config: &ConnectionConfig, url: &str) -> Vec<String> {
     let mut queries = oceanbase_mysql_setup_queries(config);
+    let native_mysql = config.db_type == DatabaseType::Mysql
+        && config.driver_profile.as_deref().is_none_or(|profile| {
+            let profile = profile.trim();
+            profile.is_empty() || profile.eq_ignore_ascii_case("mysql") || profile.eq_ignore_ascii_case("mariadb")
+        });
+    if native_mysql {
+        // A server with global autocommit=0 otherwise makes ordinary writes
+        // disappear when the auto-commit execution path cleans up the session.
+        // Pool setup also runs after COM_RESET_CONNECTION, before any user SQL.
+        if let Some(query) = db::mysql::default_autocommit_setup_query(url) {
+            queries.push(query.to_string());
+        }
+    }
     if let Some(dialect) = db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()) {
         if let Some(query) = db::mysql::catalog_setup_query_for_url(dialect, url) {
             queries.push(query);
@@ -166,16 +179,21 @@ impl PoolKind {
 #[derive(Clone)]
 struct PoolPublication {
     identity: Arc<()>,
+    pool_identity: Arc<()>,
     transport: Option<ConnectionTransportStamp>,
 }
 
 impl PoolPublication {
     fn new() -> Self {
-        Self { identity: Arc::new(()), transport: None }
+        Self { identity: Arc::new(()), pool_identity: Arc::new(()), transport: None }
     }
 
     fn is_same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.identity, &other.identity)
+    }
+
+    fn is_same_pool(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.pool_identity, &other.pool_identity)
     }
 }
 
@@ -285,6 +303,7 @@ enum ConnectionDatabaseInfoSource {
     },
     NativeMysql(db::mysql::MySqlPool),
     NativeGaussdbDws(deadpool_postgres::Pool),
+    NativePostgres(deadpool_postgres::Pool),
     NativeHBase(db::hbase_driver::HBaseClient),
     NativeMongo(mongodb::Client, Option<String>),
     Meilisearch(db::meilisearch_driver::MeilisearchClient),
@@ -300,6 +319,23 @@ async fn gaussdb_dws_product_version_from_pool(pool: &deadpool_postgres::Pool) -
     let result = db::postgres::execute_query_with_max_rows(pool, "SELECT version()", Some(1)).await.ok()?;
     let server_version = result.rows.first()?.first()?.as_str()?;
     crate::query::plugin_plan::gaussdb_product_version_from_server_version(server_version)
+}
+
+/// Product display name for a PostgreSQL-family `SELECT version()` string.
+/// Greenplum and Cloudberry both report as `PostgreSQL x.y (...)` with the
+/// real product inside the parentheses, so surface that name when present.
+fn postgres_family_product_name(server_version: &str) -> Option<&str> {
+    let lower = server_version.to_ascii_lowercase();
+    if lower.contains("cloudberry") {
+        return Some("Apache Cloudberry");
+    }
+    if lower.contains("greenplum") {
+        return Some("Greenplum");
+    }
+    if lower.contains("gaussdb") || lower.contains("hologres") {
+        return Some("GaussDB");
+    }
+    lower.contains("postgresql").then_some("PostgreSQL")
 }
 
 /// Held connection for a manual transaction session
@@ -2598,7 +2634,8 @@ impl AppState {
                 if let Some(publication) = connections.publications.get_mut(&pool_key) {
                     if let Some(stamp) = transport.filter(|_| publication.transport.is_some()) {
                         crate::query::pl_debug::adopt_published_transport(self, &config.id, stamp);
-                        *publication = PoolPublication { identity: Arc::new(()), transport: Some(stamp.clone()) };
+                        publication.identity = Arc::new(());
+                        publication.transport = Some(stamp.clone());
                     }
                 }
                 let publication = connections.publications[&pool_key].clone();
@@ -2656,10 +2693,14 @@ impl AppState {
             routing.close_pool_with_timeout(pool_key.clone(), pool).await;
         }
         match self.pool_publication_snapshot(&pool_key).await {
-            Some(current) if !current.publication.is_same(&publication) => {
+            // A concurrent creator may adopt the same pool while its predecessor closes an
+            // unused candidate. Keep the original receipt so it cannot clean up that adoption.
+            Some(current) if !current.publication.is_same_pool(&publication) => {
                 return Err("Connection pool publication was superseded while closing the previous pool".into());
             }
-            Some(current) if current.pool.is_available_for_routing() => {}
+            Some(current) if current.pool.is_available_for_routing() => {
+                self.ensure_current_connection_attempt(&config.id, connection_attempt).await?;
+            }
             current => {
                 if current.is_some() {
                     self.remove_stale_pool_if_current(&pool_key, &publication).await;
@@ -6285,7 +6326,7 @@ impl AppState {
         let mut sessions = self.mysql_client_sessions.write().await;
         if let Some(previous) = sessions.get(pool_key) {
             if previous.physical_connection_id != physical_connection_id
-                || !previous.publication.is_same(&snapshot.publication)
+                || !previous.publication.is_same_pool(&snapshot.publication)
             {
                 sessions.remove(pool_key);
                 drop(sessions);
@@ -6319,7 +6360,7 @@ impl AppState {
             return;
         }
         if let Some(session) = self.mysql_client_sessions.write().await.get_mut(pool_key) {
-            if session.publication.is_same(&snapshot.publication) {
+            if session.publication.is_same_pool(&snapshot.publication) {
                 session.database = database.to_string();
             }
         }
@@ -6739,6 +6780,7 @@ impl AppState {
                 {
                     Some(ConnectionDatabaseInfoSource::NativeGaussdbDws(pool.clone()))
                 }
+                Some(PoolKind::Postgres(pool)) => Some(ConnectionDatabaseInfoSource::NativePostgres(pool.clone())),
                 Some(PoolKind::Mysql(pool, _)) => Some(ConnectionDatabaseInfoSource::NativeMysql(pool.clone())),
                 Some(PoolKind::HBase(client)) => Some(ConnectionDatabaseInfoSource::NativeHBase(client.clone())),
                 Some(PoolKind::MongoDb(client)) => {
@@ -6798,6 +6840,38 @@ impl AppState {
                         .map(str::to_string)
                         .or_else(|| config.effective_database().map(str::to_string)),
                     driver_name: Some("DBX PostgreSQL-compatible driver".to_string()),
+                    ..Default::default()
+                }))
+            }
+            Some(ConnectionDatabaseInfoSource::NativePostgres(pool)) => {
+                // Version discovery is optional metadata; on failure return
+                // versionless info so the frontend still sees a PostgreSQL
+                // connection. The full `SELECT version()` string is kept as
+                // `product_version` because engine sniffing (Greenplum /
+                // Cloudberry, whose AO tables reject system-column locators)
+                // depends on the product keywords it carries (#14745).
+                let product_version = db::postgres::execute_query_with_max_rows(&pool, "SELECT version()", Some(1))
+                    .await
+                    .ok()
+                    .and_then(|result| {
+                        result
+                            .rows
+                            .first()
+                            .and_then(|row| row.first())
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string)
+                    });
+                Ok(Some(DatabaseConnectionInfo {
+                    product_name: product_version
+                        .as_deref()
+                        .and_then(postgres_family_product_name)
+                        .map(str::to_string)
+                        .or_else(|| Some("PostgreSQL".to_string())),
+                    product_version,
+                    current_database: database
+                        .map(str::to_string)
+                        .or_else(|| config.effective_database().map(str::to_string)),
+                    driver_name: Some("DBX PostgreSQL driver".to_string()),
                     ..Default::default()
                 }))
             }
@@ -9088,13 +9162,13 @@ mod tests {
         gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver, kafka_loopback_local_port_error,
         kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead, metadata_connection_config,
         metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
-        prestosql_jdbc_config_for_endpoint, primary_tunnel_fixed_local_port, redact_transport_url,
-        redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
-        report_connection_liveness_lost, sqlserver_legacy_agent_config, sqlserver_legacy_driver_error,
-        sqlserver_uses_legacy_driver, ssh_local_port_config_error, task_client_session_id,
-        transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
-        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind, TxnConnection,
-        CLOUDFLARE_D1_LOCAL_PORT_ERROR, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE,
+        postgres_family_product_name, prestosql_jdbc_config_for_endpoint, primary_tunnel_fixed_local_port,
+        redact_transport_url, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
+        redis_sentinel_transport_prefix, report_connection_liveness_lost, sqlserver_legacy_agent_config,
+        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, ssh_local_port_config_error,
+        task_client_session_id, transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool,
+        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
+        TxnConnection, CLOUDFLARE_D1_LOCAL_PORT_ERROR, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE,
         PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
@@ -10015,6 +10089,37 @@ mod tests {
             mysql_pool_setup_queries(&config, "mysql://root:secret@localhost:9030/bi?catalog=paimon%5Fcatalog"),
             vec!["SWITCH `paimon_catalog`"]
         );
+    }
+
+    #[test]
+    fn native_mysql_pool_setup_initializes_autocommit() {
+        let mut config = mysql_config(Some("dbx"));
+        for profile in [None, Some(""), Some("mysql"), Some("MariaDB")] {
+            config.driver_profile = profile.map(str::to_string);
+            assert_eq!(
+                mysql_pool_setup_queries(&config, "mysql://root:secret@localhost/dbx"),
+                vec!["SET SESSION autocommit = 1"]
+            );
+            assert!(mysql_pool_setup_queries(
+                &config,
+                "mysql://root:secret@localhost/dbx?sessionVariables=autocommit%3D0"
+            )
+            .is_empty());
+        }
+    }
+
+    #[test]
+    fn mysql_compatible_profiles_keep_their_transaction_setup() {
+        let mut config = mysql_config(Some("dbx"));
+        for profile in ["doris", "selectdb", "starrocks", "manticoresearch", "oceanbase", "tidb", "dolt"] {
+            config.driver_profile = Some(profile.to_string());
+            assert!(
+                mysql_pool_setup_queries(&config, "mysql://root:secret@localhost/dbx")
+                    .iter()
+                    .all(|query| !query.contains("autocommit")),
+                "{profile}"
+            );
+        }
     }
 
     #[test]
@@ -12675,6 +12780,10 @@ sleep 30
         assert!(state.mysql_client_session_database_change(key, &pool, 10, "first").await.unwrap());
         state.record_mysql_client_session_database(key, &pool, "first").await;
         assert!(!state.mysql_client_session_database_change(key, &pool, 10, "first").await.unwrap());
+        // Adopting an existing pool changes its publication receipt, but keeps
+        // the same physical session and must not lose its database context.
+        state.connections.write().await.publications.get_mut(key).unwrap().identity = std::sync::Arc::new(());
+        assert!(!state.mysql_client_session_database_change(key, &pool, 10, "first").await.unwrap());
         assert!(state.mysql_client_session_database_change(key, &pool, 10, "second").await.unwrap());
         state.record_mysql_client_session_database(key, &pool, "second").await;
         assert!(!state.mysql_client_session_database_change(key, &pool, 10, "second").await.unwrap());
@@ -14246,6 +14355,194 @@ for line in sys.stdin:
         assert!(current.pool.is_available_for_routing());
         state.shutdown(Duration::from_secs(1)).await;
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn oceanbase_saved_password_concurrent_creators_keep_the_same_pool_during_candidate_close() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(Some("APP"));
+        config.db_type = DatabaseType::OceanbaseOracle;
+        config.save_password = true;
+        config.keepalive_interval_secs = 0;
+        let key = "conn:APP";
+        let first = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        let second = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        let third = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        assert!(first.endpoint.is_ok() && second.endpoint.is_ok() && third.endpoint.is_ok());
+        assert!(first.stamp.same_runtime(&second.stamp));
+        assert!(first.stamp.same_runtime(&third.stamp));
+        let existing = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+            crate::db::agent_driver::AgentDriverClient::test_stub(),
+        ));
+        state
+            .publish_created_pool_with_transport(
+                key.into(),
+                PoolKind::Agent(existing.clone()),
+                &config,
+                &first.stamp,
+                None,
+            )
+            .await
+            .unwrap();
+        let candidate = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+            crate::db::agent_driver::AgentDriverClient::test_stub(),
+        ));
+        let candidate_lock = candidate.lock().await;
+        let publishing = state.publish_created_pool_with_transport(
+            key.into(),
+            PoolKind::Agent(candidate.clone()),
+            &config,
+            &second.stamp,
+            None,
+        );
+        tokio::pin!(publishing);
+        assert!(futures::poll!(publishing.as_mut()).is_pending());
+        let latest = state
+            .publish_created_pool_with_transport(key.into(), agent_pool_stub(), &config, &third.stamp, None)
+            .await
+            .unwrap();
+        drop(candidate_lock);
+        let earlier = publishing.await.expect("adopting the same live pool must not fail an in-flight creator");
+        assert!(state.pool_handle_for_receipt(&earlier).await.is_none());
+        state.discard_connection_pool_receipt(&earlier).await;
+        let current = state.pool_publication_snapshot(key).await.unwrap();
+        assert!(current.publication.is_same(&latest.publication));
+        assert!(matches!(current.pool, PoolKind::Agent(ref client) if Arc::ptr_eq(client, &existing)));
+        assert!(current.pool.is_available_for_routing());
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn pool_publisher_accepts_adoption_without_reviving_a_superseded_connection_attempt() {
+        for supersede_attempt in [false, true] {
+            let (state, dir) = test_app_state().await;
+            let mut config = mysql_config(Some("APP"));
+            config.save_password = true;
+            config.keepalive_interval_secs = 0;
+            let key = "conn:APP";
+            let previous = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+                crate::db::agent_driver::AgentDriverClient::test_stub(),
+            ));
+            state.connections.write().await.insert(key.into(), PoolKind::Agent(previous.clone()));
+            let first = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+            let second = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+            let attempt = state.begin_connection_attempt("conn").await;
+            let previous_lock = previous.lock().await;
+            let publishing = state.insert_connection_pool_inner(
+                key.into(),
+                agent_pool_stub(),
+                &config,
+                true,
+                false,
+                Some(&first.stamp),
+                Some(attempt),
+            );
+            tokio::pin!(publishing);
+            assert!(futures::poll!(publishing.as_mut()).is_pending());
+            let latest = state
+                .publish_created_pool_with_transport(key.into(), agent_pool_stub(), &config, &second.stamp, None)
+                .await
+                .unwrap();
+            if supersede_attempt {
+                state.begin_connection_attempt("conn").await;
+            }
+            drop(previous_lock);
+            if supersede_attempt {
+                assert_eq!(publishing.await.err().unwrap(), "Connection attempt was superseded by a newer attempt");
+            } else {
+                let earlier = publishing.await.expect("adoption must also preserve the first publisher");
+                assert!(state.pool_handle_for_receipt(&earlier).await.is_none());
+                state.discard_connection_pool_receipt(&earlier).await;
+            }
+            let current = state.pool_publication_snapshot(key).await.unwrap();
+            assert!(current.publication.is_same(&latest.publication));
+            assert!(current.pool.is_available_for_routing());
+            state.shutdown(Duration::from_secs(1)).await;
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_creators_still_reject_pool_replacement_and_transport_changes() {
+        for (save_password, replace_transport) in [(true, false), (false, false), (true, true)] {
+            let (state, dir) = test_app_state().await;
+            let mut config = mysql_config(Some("APP"));
+            config.save_password = save_password;
+            config.keepalive_interval_secs = 0;
+            let key = "conn:APP";
+            let first = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+            let second = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+            let existing = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+                crate::db::agent_driver::AgentDriverClient::test_stub(),
+            ));
+            state
+                .publish_created_pool_with_transport(
+                    key.into(),
+                    PoolKind::Agent(existing.clone()),
+                    &config,
+                    &first.stamp,
+                    None,
+                )
+                .await
+                .unwrap();
+            let candidate = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+                crate::db::agent_driver::AgentDriverClient::test_stub(),
+            ));
+            let closing = if save_password { &candidate } else { &existing };
+            let closing_lock = closing.lock().await;
+            let publishing = state.publish_created_pool_with_transport(
+                key.into(),
+                PoolKind::Agent(candidate.clone()),
+                &config,
+                &second.stamp,
+                None,
+            );
+            tokio::pin!(publishing);
+            assert!(futures::poll!(publishing.as_mut()).is_pending());
+            let mut replacement_config = config.clone();
+            if replace_transport {
+                replacement_config.host = "127.0.0.2".into();
+            }
+            let third = state.connection_endpoint_attempt("conn", &replacement_config).await.unwrap();
+            assert!(third.endpoint.is_ok());
+            assert_eq!(second.stamp.same_runtime(&third.stamp), !replace_transport);
+            let latest = if save_password && !replace_transport {
+                state
+                    .insert_connection_pool_inner(
+                        key.into(),
+                        agent_pool_stub(),
+                        &config,
+                        true,
+                        false,
+                        Some(&third.stamp),
+                        None,
+                    )
+                    .await
+                    .unwrap()
+            } else {
+                state
+                    .publish_created_pool_with_transport(
+                        key.into(),
+                        agent_pool_stub(),
+                        &replacement_config,
+                        &third.stamp,
+                        None,
+                    )
+                    .await
+                    .unwrap()
+            };
+            drop(closing_lock);
+            assert_eq!(
+                publishing.await.err().unwrap(),
+                "Connection pool publication was superseded while closing the previous pool"
+            );
+            let current = state.pool_publication_snapshot(key).await.unwrap();
+            assert!(current.publication.is_same(&latest.publication));
+            assert!(current.pool.is_available_for_routing());
+            state.shutdown(Duration::from_secs(1)).await;
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[tokio::test]
@@ -16381,5 +16678,23 @@ for line in sys.stdin:
             .unwrap_or_else(|err| panic!("failed to drop KWDB test schema: {err}"));
         pool.close();
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn postgres_family_product_name_detects_greenplum_cloudberry() {
+        assert_eq!(
+            postgres_family_product_name("PostgreSQL 14.4 (Apache Cloudberry 1.2.0 build 8f2a) on x86_64"),
+            Some("Apache Cloudberry")
+        );
+        assert_eq!(
+            postgres_family_product_name(
+                "PostgreSQL 9.4.24 (Greenplum Database 6.18.2 build commit: 062eba04) on x86_64"
+            ),
+            Some("Greenplum")
+        );
+        assert_eq!(postgres_family_product_name("PostgreSQL 16.2 on aarch64"), Some("PostgreSQL"));
+        // Unrelated engines report their own strings; without a PostgreSQL
+        // marker there is no product name to claim.
+        assert_eq!(postgres_family_product_name("MySQL 8.0.33"), None);
     }
 }

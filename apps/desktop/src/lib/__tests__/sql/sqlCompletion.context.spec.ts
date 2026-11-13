@@ -2030,6 +2030,19 @@ describe("sqlCompletion scoped context classification", () => {
     expect(context.exclusiveColumnSuggestions).toBe(true);
   });
 
+  // #14637
+  it.each([
+    ["INSERT IGNORE INTO orders (", undefined, "orders"],
+    ["insert ignore into `shop`.`orders` (id, ", "shop", "orders"],
+  ])("classifies MySQL INSERT IGNORE column-list contexts: %s", (sql, schema, table) => {
+    const context = getSqlCompletionContext(sql, sql.length, { databaseType: "mysql" });
+
+    expect(context.contextKind).toBe("column");
+    expect(context.insertSchema).toBe(schema);
+    expect(context.insertTable).toBe(table);
+    expect(context.exclusiveColumnSuggestions).toBe(true);
+  });
+
   it("classifies UPDATE SET column contexts", () => {
     const sql = "UPDATE dbo.Users SET ";
     const context = getSqlCompletionContext(sql, sql.length);
@@ -2150,12 +2163,67 @@ describe("sqlCompletion scoped context classification", () => {
     expect(items.filter((item) => item.type === "table").map((item) => item.label)).not.toContain("tm");
   });
 
-  it("keeps the CTE body's own tables while completing inside that body", () => {
+  it("scopes completion inside a CTE body to that body's own tables (#14109)", () => {
     const sql = "WITH cte AS (SELECT id, na FROM orders) SELECT * FROM cte";
     const cursor = sql.indexOf(" FROM orders");
     const context = getSqlCompletionContext(sql, cursor);
 
-    expect(context.referencedTables.map((table) => table.name)).toEqual(expect.arrayContaining(["orders", "cte"]));
+    expect(context.referencedTables.map((table) => table.name)).toEqual(["orders"]);
+  });
+
+  describe("columns inside a CTE body (#14109)", () => {
+    const metadata = {
+      tables: [{ name: "pos_detail" }],
+      columnsByTable: new Map([
+        [
+          "pos_detail",
+          [
+            { name: "serial_no", table: "pos_detail", dataType: "text" },
+            { name: "alipay", table: "pos_detail", dataType: "numeric" },
+          ],
+        ],
+      ]),
+    };
+    const columnApplies = (sql: string, cursor: number) => {
+      const legacy = getSqlCompletionContext(sql, cursor, { databaseType: "postgres" });
+      const semantic = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor, { databaseType: "postgres" }), legacy);
+      return [legacy, semantic].map((context) =>
+        buildSqlCompletionItemsFromContext(context, metadata)
+          .filter((item) => item.type === "column")
+          .map((item) => item.apply ?? item.label),
+      );
+    };
+
+    it.each([
+      ["the select list", "with t as (\nselect serial_no, al from pos_detail\n)", "al from", 2],
+      ["the select list with an outer query", "with t as (\nselect serial_no, al from pos_detail\n)\nselect * from t", "al from", 2],
+      ["the where clause", "with t as (\nselect serial_no from pos_detail where al\n)", "where al", "where al".length],
+    ])("suggests bare columns of the body's single table in %s", (_place, sql, marker, offset) => {
+      const cursor = sql.indexOf(marker) + offset;
+      for (const applies of columnApplies(sql, cursor)) {
+        expect(applies).toEqual(expect.arrayContaining(["alipay", "serial_no"]));
+        expect(applies.some((apply) => apply.startsWith("pos_detail.") || apply.startsWith("t."))).toBe(false);
+      }
+    });
+
+    it("keeps an earlier CTE that the body reads as a row source", () => {
+      const sql = "with a as (select id from orders), b as (select  from a) select * from b";
+      const cursor = sql.indexOf("select  from a") + "select ".length;
+      const context = getSqlCompletionContext(sql, cursor);
+      const semantic = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor), context);
+
+      expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "a", columns: ["id"] })]));
+      expect(context.referencedTables.map((table) => table.name)).not.toContain("b");
+      expect(semantic.referencedTables.map((table) => table.name)).not.toContain("b");
+    });
+
+    it("keeps a recursive CTE's self-reference inside its own body", () => {
+      const sql = "with recursive t(n) as (select 1 union all select  from t where n < 5) select * from t";
+      const cursor = sql.indexOf("select  from t") + "select ".length;
+      const context = getSqlCompletionContext(sql, cursor);
+
+      expect(context.referencedTables).toEqual(expect.arrayContaining([expect.objectContaining({ name: "t", columns: ["n"] })]));
+    });
   });
 
   it("keeps the underlying table when a CTE body projects an unresolved star", () => {

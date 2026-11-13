@@ -22,6 +22,9 @@ concurrency:
 
 jobs:
   update:
+    # 这条流水线用上游的 owner PAT 往受保护的 main 推 hash 更新，
+    # fork 不该跑它，否则 fork 的 main 会被推离上游镜像（同 contributors.yml）。
+    if: github.repository == 't8y2/dbx'
     runs-on: ubuntu-22.04
     steps:
       - name: Verify push token

@@ -89,7 +89,7 @@ import { extractGraphCells, graphResultRows, mergeGraphResults } from "@/lib/gra
 import { formatRedisConsoleValue } from "@/lib/redis/redisValuePresentation";
 import { usesAgentCursorForQuery, usesAgentCursorForTableData } from "@/lib/database/databaseDriverManifest";
 import { connectionIsDorisFamilyCatalogCapable, defaultAutoCommitForDbType, supportsClearableQuerySchema, supportsTransaction, usesOracleStickyTransactionState, usesProvenReadOnlyStickyTransactionState } from "@/lib/database/databaseFeatureSupport";
-import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, isViewTableType, shouldIncludeSyntheticRowId, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, isViewTableType, postgresTupleLocatorUnsupportedEngine, shouldIncludeSyntheticRowId, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { repairRestoredDataTabTableIdentity, tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
@@ -5703,6 +5703,15 @@ export const useQueryStore = defineStore("query", () => {
     if (newTab.mode === "data") void refreshDataTab(newId);
   }
 
+  function reopenClosedTabEntry(entry: ClosedTabHistoryEntry): string | null {
+    assertUpdateAllowsInteraction();
+    const index = closedTabsHistory.value.indexOf(entry);
+    if (index < 0) return null;
+    closedTabsHistory.value.splice(index, 1);
+    closedTabsHistory.value.push(entry);
+    return reopenClosedTab();
+  }
+
   function reopenClosedTab(): string | null {
     assertUpdateAllowsInteraction();
     const entry = closedTabsHistory.value.pop();
@@ -5940,7 +5949,7 @@ export const useQueryStore = defineStore("query", () => {
 
       // #12647：首开路径同样尊重"该连接的行定位器已被引擎拒绝"的记忆，否则
       // 被降级过的连接每次重新单击表都会再发一次注定失败的定位器查询。
-      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta.tableType) && !rowIdLocatorUnsupported(tab.connectionId);
+      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta.tableType) && !rowIdLocatorUnsupported(tab.connectionId) && !postgresTupleLocatorUnsupportedEngine(useConnectionStore().getConfig(tab.connectionId));
       const buildRefreshSql = (includeRowId: boolean) =>
         buildTableSelectSql({
           databaseType: effectiveDbType,
@@ -6347,6 +6356,27 @@ export const useQueryStore = defineStore("query", () => {
     tab.txnStatus = undefined;
     tab.txnAutoRolledBack = false;
     if (tab.txnPossiblyDirty !== undefined) tab.txnPossiblyDirty = false;
+  }
+
+  /** Backend session was removed and rolled back after idle expiry: clear the
+   *  sticky dirty state together with the session. A session proven read-only
+   *  reports no lost work, so it gets no auto-rollback notice (#9831). */
+  function markManualTransactionIdleExpired(tab: QueryTab) {
+    const rollbackNoticeRequired = manualTransactionRollbackNoticeRequired(tab, effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)));
+    clearTxnPossiblyDirty(tab);
+    tab.txnSessionId = undefined;
+    tab.txnAutoRolledBack = rollbackNoticeRequired;
+  }
+
+  /** An export observed the backend's idle-expiry error for the transaction it
+   *  was reading through. Drop the dead session from its source tab so a retry
+   *  stops sending the stale id. Returns false when no open tab owns it. */
+  function noteExpiredManualTransaction(txnSessionId: string, error: unknown): boolean {
+    const tab = tabs.value.find((item) => item.txnSessionId === txnSessionId);
+    if (!tab) return false;
+    if (isSqlServerTransactionTab(tab)) reportSqlServerTransactionError(tab, error);
+    else markManualTransactionIdleExpired(tab);
+    return true;
   }
 
   function rollbackTabTransaction(tab: QueryTab, options?: { resetAutoCommit?: boolean; resetAutoCommitDbType?: string }) {
@@ -7770,9 +7800,7 @@ export const useQueryStore = defineStore("query", () => {
       if (loaded.tableMeta.columns.length === 0) return unchanged;
       if (loaded.tableMeta.tableType?.toUpperCase().includes("VIEW")) return unchanged;
       const primaryKeys = loaded.tableMeta.primaryKeys;
-      const serverVersion = conn?.database_info?.productVersion?.toLowerCase() ?? "";
-      const isGreenplum = serverVersion.includes("greenplum") || serverVersion.includes("cloudberry");
-      const postgresCtidRowId = databaseType === "postgres" && primaryKeys.length === 0 && !isGreenplum && !rowIdLocatorUnsupported(tab.connectionId);
+      const postgresCtidRowId = databaseType === "postgres" && primaryKeys.length === 0 && !postgresTupleLocatorUnsupportedEngine(conn) && !rowIdLocatorUnsupported(tab.connectionId);
       const syntheticRowId = postgresCtidRowId || ((databaseType === "oracle" || databaseType === "oceanbase-oracle" || databaseType === "xugu") && usesSyntheticRowIdKey(databaseType, primaryKeys, loaded.tableMeta.tableType));
       // Base tables without a natural identifier use the same physical row locator
       // as table-data tabs (Oracle, OceanBase Oracle, Xugu, and PostgreSQL). Confirm
@@ -10161,13 +10189,7 @@ export const useQueryStore = defineStore("query", () => {
         const errMsg: string = e?.message ?? String(e);
         const idleTimeout = isManualTransactionSessionExpired(e) || errMsg.includes("已自动回滚");
         if (idleTimeout) {
-          // Backend session was removed and rolled back after idle expiry: clear
-          // the sticky dirty state together with the session. Same rule as the
-          // restart path: a session proven read-only reports no lost work.
-          const rollbackNoticeRequired = manualTransactionRollbackNoticeRequired(tab, effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)));
-          clearTxnPossiblyDirty(tab);
-          tab.txnSessionId = undefined;
-          tab.txnAutoRolledBack = rollbackNoticeRequired;
+          markManualTransactionIdleExpired(tab);
         } else if (/rolled.?back/i.test(errMsg) || /transaction session not found/i.test(errMsg) || /agent runtime terminated/i.test(errMsg)) {
           // Statement failure that disposed the manual session: the `rolled back`
           // message fragment is a frontend cleanup compatibility contract.
@@ -10885,7 +10907,7 @@ export const useQueryStore = defineStore("query", () => {
               identifierQuote: source.identifierQuote,
               serverVersion: source.serverVersion,
               includeDatabaseName: settings.generateSqlIncludeDatabaseName,
-              includeRowId: shouldIncludeSyntheticRowId(source.databaseType, primaryKeys, loaded.tableMeta.tableType) && !rowIdUnsupported,
+              includeRowId: shouldIncludeSyntheticRowId(source.databaseType, primaryKeys, loaded.tableMeta.tableType) && !rowIdUnsupported && !postgresTupleLocatorUnsupportedEngine(connection),
               timeoutSecs: queryTimeoutSecsForConnection(connection, settings.globalQueryTimeoutSecs),
             },
             requests,
@@ -11929,6 +11951,18 @@ export const useQueryStore = defineStore("query", () => {
         throw new Error(i18n.global.t("exportProgress.transactionUnavailable"));
     }
 
+    const startExport = async (onProgress: (progress: api.TableExportProgress) => void) => {
+      try {
+        return await (isTauriRuntime() ? api.startQueryResultExport(request, onProgress, true) : api.startQueryResultExport(request, onProgress));
+      } catch (error) {
+        if (request.txnSessionId && isManualTransactionSessionExpired(error)) {
+          noteExpiredManualTransaction(request.txnSessionId, error);
+          throw new Error(i18n.global.t("exportProgress.transactionUnavailable"));
+        }
+        throw error;
+      }
+    };
+
     const tracker = useExportTracker();
     if (!isTauriRuntime()) await connStore.ensureConnected(request.connectionId);
     const task = tracker.addTask("Query Result", format, filePath, request.exportId);
@@ -11951,14 +11985,10 @@ export const useQueryStore = defineStore("query", () => {
             return "settled";
           }
           invoked = true;
-          const result = await api.startQueryResultExport(
-            request,
-            (progress) => {
-              terminal ||= progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled";
-              tracker.updateTableExportTask(request.exportId, progress);
-            },
-            true,
-          );
+          const result = await startExport((progress) => {
+            terminal ||= progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled";
+            tracker.updateTableExportTask(request.exportId, progress);
+          });
           terminal ||= result.status === "Done" || result.status === "Error" || result.status === "Cancelled";
           tracker.updateTableExportTask(request.exportId, result);
           return terminal ? "settled" : "unknown";
@@ -11981,7 +12011,7 @@ export const useQueryStore = defineStore("query", () => {
 
     void (async () => {
       try {
-        await api.startQueryResultExport(request, (progress) => tracker.updateTableExportTask(request.exportId, progress));
+        await startExport((progress) => tracker.updateTableExportTask(request.exportId, progress));
       } catch (error: any) {
         const task = tracker.tasks.value.find((item) => item.exportId === request.exportId);
         if (task) {
@@ -12071,6 +12101,7 @@ export const useQueryStore = defineStore("query", () => {
     duplicateTab,
     closedTabsHistory,
     canReopenClosedTab,
+    reopenClosedTabEntry,
     reopenClosedTab,
     clearClosedTabsHistory,
     closeConnectionTabs,
@@ -12210,6 +12241,7 @@ export const useQueryStore = defineStore("query", () => {
     countTabResultRows,
     buildQueryResultExportRequest,
     captureQueryResultExportRequest,
+    noteExpiredManualTransaction,
     exportQuerySqlDirect,
     applyQueryMetadataPatch,
     getResourceLifecycleDiagnostics: () => resourceLifecycleDiagnostics(tabs.value),

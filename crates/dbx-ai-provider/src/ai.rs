@@ -1880,16 +1880,6 @@ fn normalized_api_key(config: &AiConfig) -> &str {
     config.api_key.trim()
 }
 
-fn is_jalapeno_config(config: &AiConfig) -> bool {
-    if !matches!(config.provider, AiProvider::OpenaiCompatible) {
-        return false;
-    }
-    reqwest::Url::parse(config.endpoint.trim())
-        .ok()
-        .and_then(|url| url.host_str().map(|host| host.eq_ignore_ascii_case("api.jalapeno-cloud.ai")))
-        .unwrap_or(false)
-}
-
 fn validate_config(config: &AiConfig) -> Result<(), String> {
     crate::ai_effort::validate_runtime_effort(config)?;
     if is_cli_provider(&config.provider) {
@@ -1924,9 +1914,6 @@ fn validate_model_list_config(config: &AiConfig) -> Result<(), String> {
 pub fn maybe_bearer_headers(config: &AiConfig) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    if is_jalapeno_config(config) {
-        headers.insert("HTTP-Referer", HeaderValue::from_static("https://dbxio.com"));
-    }
     let api_key = normalized_api_key(config);
     if !api_key.is_empty() {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| e.to_string())?);
@@ -7339,22 +7326,6 @@ mod tests {
 
         config.custom_headers = HashMap::from([("X-Test".to_string(), "bad\r\nvalue".to_string())]);
         assert!(maybe_bearer_headers(&config).unwrap_err().contains("Invalid AI custom header value"));
-    }
-
-    #[test]
-    fn jalapeno_requests_include_dbx_referer() {
-        let mut config = test_config(AiProvider::OpenaiCompatible);
-        config.endpoint = "https://api.jalapeno-cloud.ai/v1".to_string();
-
-        let headers = maybe_bearer_headers(&config).unwrap();
-        assert_eq!(headers.get("HTTP-Referer").unwrap(), "https://dbxio.com");
-
-        config.endpoint = "https://api.jalapeno-cloud.ai.example.com/v1".to_string();
-        assert!(maybe_bearer_headers(&config).unwrap().get("HTTP-Referer").is_none());
-
-        config.endpoint = "https://api.jalapeno-cloud.ai/v1".to_string();
-        config.provider = AiProvider::Custom;
-        assert!(maybe_bearer_headers(&config).unwrap().get("HTTP-Referer").is_none());
     }
 
     #[test]

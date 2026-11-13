@@ -75,7 +75,7 @@ const FIX_REQUEST_RE = /修复|修一下|修一修|改正|纠正|排查|调试|�
 const ZH_CONVERT_VERBS = [/转成/, /转换/, /转为/, /改成/, /改为/, /换成/, /译成/, /翻译成/, /改写成/];
 const EN_CONVERT_VERBS = [/\bconvert\b/i, /\btranslate\b/i, /\brewrite\b/i, /\bport\b/i, /\bmigrate\b/i];
 // A named target dialect is what makes a convert request actionable.
-const DIALECT_NAME_RE = /\b(?:mysql|mariadb|postgres(?:ql)?|oracle|sql\s*server|sqlserver|mssql|sqlite|clickhouse|duckdb|hive|spark|trino|presto|redshift|snowflake|bigquery|tidb|oceanbase|db2|firebird|pg)\b|达梦|人大金仓|金仓|高斯|opengauss|kingbase/i;
+const DIALECT_NAME_RE = /\b(?:mysql|mariadb|postgres(?:ql)?|oracle|sql\s*server|sqlserver|mssql|sqlite|clickhouse|duckdb|hive|spark|trino|presto|redshift|snowflake|bigquery|tidb|oceanbase|db2|firebird|pg|xugu(?:db)?)\b|达梦|人大金仓|金仓|高斯|虚谷|opengauss|kingbase/i;
 
 const SAMPLE_DATA_RE = /测试数据|样例数据|示例数据|模拟数据|假数据|造数据|填充数据|演示数据|测试用数据|(?:mock|sample|dummy|fake|test|seed|demo)\s+(?:数据|data|rows|records|values)/i;
 

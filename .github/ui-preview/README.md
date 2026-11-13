@@ -41,8 +41,7 @@ scripts, and in the rust lane the PR's backend itself. Any PR's code can therefo
 the planner's API key (`PLAN_API_KEY`, environment `ui-preview`), so the key there should
 have a low spending limit. That job has no write access, and the job that writes never
 runs the PR's code. The planner talks to any OpenAI-compatible endpoint
-(`PLAN_API_URL`, default AtlasCloud; `PLAN_MODEL`, overridable via the
-`UI_PREVIEW_PLAN_MODEL` repo variable).
+(`PLAN_API_URL` and `PLAN_MODEL`, both defaulting to DeepSeek).
 
 Known limits: the recording is of the web build, so desktop-shell behaviour (detached tabs,
 OS dialogs) is not covered; in the web lane the backend is the released dbx-web, so a PR

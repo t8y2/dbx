@@ -2750,6 +2750,8 @@ export default withEnglishFallback({
     collapseTabBar: "ยุบแถบแท็บ",
     expandTabBar: "ขยายแถบแท็บ",
     switcherTitle: "สลับแท็บ",
+    recentClosedTitle: "แท็บที่เพิ่งปิด",
+    recentClosedSearch: "ค้นหาชื่อ การเชื่อมต่อ ฐานข้อมูล หรือตัวอย่าง SQL",
     switcherHint: "กดค้างเพื่อย้าย ปล่อยเพื่อสลับ",
     noMatchingTabs: "ไม่มีแท็บที่ตรงกัน",
     editGroupTitle: "แก้ไขกลุ่ม: {name}",

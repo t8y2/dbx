@@ -2602,6 +2602,8 @@ export default withEnglishFallback({
     collapseTabBar: "Свернуть панель вкладок",
     expandTabBar: "Развернуть панель вкладок",
     switcherTitle: "Переключение вкладок",
+    recentClosedTitle: "Недавно закрытые вкладки",
+    recentClosedSearch: "Поиск по заголовку, подключению, базе данных или SQL",
     switcherHint: "удерживайте, чтобы перемещаться, отпустите для переключения",
     noMatchingTabs: "Нет подходящих вкладок",
     editGroupTitle: "Изменить группу: {name}",

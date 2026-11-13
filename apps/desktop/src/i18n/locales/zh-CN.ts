@@ -2827,6 +2827,8 @@ export default withEnglishFallback({
     pluginTabs: "插件",
     expandTabBar: "展开标签栏",
     switcherTitle: "切换标签页",
+    recentClosedTitle: "最近关闭的标签页",
+    recentClosedSearch: "搜索标题、连接、数据库或 SQL 预览",
     switcherHint: "继续按选择，松开修饰键切换",
     noMatchingTabs: "未找到匹配的标签页",
     editGroupTitle: "编辑分组：{name}",

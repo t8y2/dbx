@@ -6447,6 +6447,7 @@ export default withEnglishFallback({
     preview: "SQL önbaxışı",
     execute: "İcra et",
     clearValues: "Dəyərləri təmizlə",
+    clearHistory: "Tarixçəni təmizlə",
     useRawForAll: "Hamısı üçün xam SQL-dən istifadə et",
     ignore: "Nəzərə alma",
     kind: {

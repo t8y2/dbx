@@ -7741,6 +7741,7 @@ export default withEnglishFallback({
     preview: "Vista previa SQL",
     execute: "Ejecutar",
     clearValues: "Borrar valores",
+    clearHistory: "Borrar historial",
     useRawForAll: "Usar SQL sin procesar para todos",
     ignore: "Ignorar",
     kind: {

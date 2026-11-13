@@ -7555,6 +7555,7 @@ export default withEnglishFallback({
     preview: "Anteprima SQL",
     execute: "Esegui",
     clearValues: "Cancella valori",
+    clearHistory: "Cancella cronologia",
     useRawForAll: "Usa SQL non elaborato per tutti",
     ignore: "Ignora",
     kind: {

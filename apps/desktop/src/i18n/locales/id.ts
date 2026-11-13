@@ -7109,6 +7109,7 @@ export default withEnglishFallback({
     preview: "Pratinjau SQL",
     execute: "Jalankan",
     clearValues: "Bersihkan Nilai",
+    clearHistory: "Hapus riwayat",
     useRawForAll: "Gunakan SQL Mentah untuk Semua",
     ignore: "Abaikan",
     kind: {

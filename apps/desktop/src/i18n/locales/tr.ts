@@ -6340,6 +6340,7 @@ export default withEnglishFallback({
     preview: "SQL Önizlemesi",
     execute: "Çalıştır",
     clearValues: "Değerleri Temizle",
+    clearHistory: "Geçmişi temizle",
     useRawForAll: "Tümü İçin Ham SQL Kullan",
     kind: {
       string: "Dize",

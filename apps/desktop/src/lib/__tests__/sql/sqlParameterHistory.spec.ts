@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { loadSqlParameterHistory, MAX_SQL_PARAMETER_HISTORY, rememberSqlParameterValue } from "@/lib/sql/sqlParameterHistory";
+import { clearSqlParameterHistory, loadSqlParameterHistory, MAX_SQL_PARAMETER_HISTORY, rememberSqlParameterValue } from "@/lib/sql/sqlParameterHistory";
 
 const storage = new Map<string, string>();
 
@@ -13,6 +13,18 @@ beforeEach(() => {
 });
 
 describe("sqlParameterHistory", () => {
+  /** #14894: the dialog needs one action that drops every remembered value. */
+  it("clears history for every parameter name", () => {
+    rememberSqlParameterValue("start_date", { kind: "string", value: "2026-01-01" });
+    rememberSqlParameterValue("user_id", { kind: "number", value: "7" });
+    expect(loadSqlParameterHistory("start_date")).toHaveLength(1);
+
+    clearSqlParameterHistory();
+
+    expect(loadSqlParameterHistory("start_date")).toEqual([]);
+    expect(loadSqlParameterHistory("user_id")).toEqual([]);
+  });
+
   it("stores recent values by parameter name", () => {
     rememberSqlParameterValue("start_date", { kind: "string", value: "2026-01-01" });
     rememberSqlParameterValue("start_date", { kind: "string", value: "2026-01-02" });

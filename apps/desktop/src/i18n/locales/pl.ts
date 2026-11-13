@@ -7129,6 +7129,7 @@ export default withEnglishFallback({
     preview: "Podgląd SQL",
     execute: "Wykonaj",
     clearValues: "Wyczyść wartości",
+    clearHistory: "Wyczyść historię",
     useRawForAll: "Użyj surowego SQL dla wszystkich",
     ignore: "Ignoruj",
     kind: {

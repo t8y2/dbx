@@ -7565,6 +7565,7 @@ export default withEnglishFallback({
     preview: "SQLプレビュー",
     execute: "実行",
     clearValues: "値をクリア",
+    clearHistory: "履歴を消去",
     useRawForAll: "すべてを生の SQL に設定",
     ignore: "無視",
     kind: {

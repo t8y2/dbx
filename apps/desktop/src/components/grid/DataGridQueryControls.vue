@@ -25,41 +25,49 @@ type LocalFilterSummary = {
   hiddenValueCount: number;
 };
 
-const props = defineProps<{
-  whereInput: string;
-  orderByInput: string;
-  columns: readonly string[];
-  commentByColumn?: ReadonlyMap<string, string>;
-  conditionColumns: readonly DataGridConditionColumnOption[];
-  identifierQuote?: string;
-  databaseType?: DatabaseType;
-  historyScope: DataGridConditionHistoryScope;
-  canUseWhereSearch: boolean;
-  compact: boolean;
-  leadingBorder: boolean;
-  filterBuilderOpen: boolean;
-  filterEditorView: DataGridFilterEditorView;
-  filterButtonActive: boolean;
-  filterButtonCount: number;
-  hasLocalColumnFilters: boolean;
-  localFilterCount: number;
-  localFilterSummaries: LocalFilterSummary[];
-  rules: DataGridStructuredFilterRule[];
-  filteredColumns: string[];
-  modeOptions: Array<{ value: DataGridContextFilterMode; labelKey: string }>;
-  columnSearch: string;
-  applyOnlyBusy?: boolean;
-  valueSuggestions?: DataGridDistinctValueSuggestionState;
-  applyWhere: (value?: string) => void | boolean | Promise<void | boolean>;
-  applyOrderBy: (value?: string) => void | boolean | Promise<void | boolean>;
-  clearOrderBy: () => void | Promise<void>;
-  sortBuilderOpen?: boolean;
-  sortButtonActive?: boolean;
-  sortButtonCount?: number;
-  sortRules?: readonly DataGridStructuredSortRule[];
-  sortBuilderBusy?: boolean;
-  sortApplyOnlyBusy?: boolean;
-}>();
+const props = withDefaults(
+  defineProps<{
+    whereInput: string;
+    orderByInput: string;
+    columns: readonly string[];
+    commentByColumn?: ReadonlyMap<string, string>;
+    conditionColumns: readonly DataGridConditionColumnOption[];
+    identifierQuote?: string;
+    databaseType?: DatabaseType;
+    historyScope: DataGridConditionHistoryScope;
+    canUseWhereSearch: boolean;
+    compact: boolean;
+    leadingBorder: boolean;
+    filterBuilderOpen: boolean;
+    filterEditorView: DataGridFilterEditorView;
+    filterButtonActive: boolean;
+    filterButtonCount: number;
+    hasLocalColumnFilters: boolean;
+    localFilterCount: number;
+    localFilterSummaries: LocalFilterSummary[];
+    rules: DataGridStructuredFilterRule[];
+    filteredColumns: string[];
+    modeOptions: Array<{ value: DataGridContextFilterMode; labelKey: string }>;
+    columnSearch: string;
+    applyOnlyBusy?: boolean;
+    valueSuggestions?: DataGridDistinctValueSuggestionState;
+    applyWhere: (value?: string) => void | boolean | Promise<void | boolean>;
+    applyOrderBy: (value?: string) => void | boolean | Promise<void | boolean>;
+    clearOrderBy: () => void | Promise<void>;
+    sortBuilderOpen?: boolean;
+    sortButtonActive?: boolean;
+    sortButtonCount?: number;
+    sortRules?: readonly DataGridStructuredSortRule[];
+    sortBuilderBusy?: boolean;
+    sortApplyOnlyBusy?: boolean;
+    showOrderBy?: boolean;
+    wherePaneRatio?: number;
+  }>(),
+  {
+    showOrderBy: true,
+    wherePaneRatio: 0.5,
+  },
+);
 
 const emit = defineEmits<{
   "update:whereInput": [value: string];
@@ -110,17 +118,23 @@ defineExpose({ focusWhere });
 const filterBuilderRef = ref<InstanceType<typeof DataGridFilterBuilder>>();
 const pendingFirstEmptyRuleColumnSearch = ref(false);
 let openingFirstEmptyRuleColumnSearch = false;
-const DEFAULT_WHERE_PANE_RATIO = 0.7;
 const whereWidth = ref<number | null>(null);
 const resizing = ref(false);
 let resizeStartX = 0;
 let resizeStartWidth = 0;
 
-const wherePaneStyle = computed(() => ({
-  // Give conditions more room by default, but retain the dragged preference and
-  // keep ORDER BY visible when the container shrinks.
-  flex: `0 0 clamp(min(${MIN_SEARCH_SPLIT_PANE_WIDTH}px, 50%), ${whereWidth.value == null ? `${DEFAULT_WHERE_PANE_RATIO * 100}%` : `${whereWidth.value}px`}, max(50%, calc(100% - ${MIN_SEARCH_SPLIT_PANE_WIDTH}px)))`,
-}));
+const effectiveShowOrderBy = computed(() => props.showOrderBy);
+const effectiveWhereRatio = computed(() => (typeof props.wherePaneRatio === "number" && Number.isFinite(props.wherePaneRatio) && props.wherePaneRatio >= 0.2 && props.wherePaneRatio <= 0.85 ? props.wherePaneRatio : 0.5));
+
+const wherePaneStyle = computed(() => {
+  if (!effectiveShowOrderBy.value) {
+    return { flex: "1 1 100%", width: "100%" };
+  }
+  const defaultRatio = effectiveWhereRatio.value;
+  return {
+    flex: `0 0 clamp(min(${MIN_SEARCH_SPLIT_PANE_WIDTH}px, 50%), ${whereWidth.value == null ? `${defaultRatio * 100}%` : `${whereWidth.value}px`}, max(50%, calc(100% - ${MIN_SEARCH_SPLIT_PANE_WIDTH}px)))`,
+  };
+});
 
 function containerWidth(): number {
   return containerRef.value?.getBoundingClientRect().width ?? 0;
@@ -132,7 +146,7 @@ function onResizeStart(event: MouseEvent) {
   event.preventDefault();
   resizing.value = true;
   resizeStartX = event.clientX;
-  resizeStartWidth = clampSearchSplitWidth({ containerWidth: width, desiredWidth: whereWidth.value ?? undefined, defaultRatio: DEFAULT_WHERE_PANE_RATIO });
+  resizeStartWidth = clampSearchSplitWidth({ containerWidth: width, desiredWidth: whereWidth.value ?? undefined, defaultRatio: effectiveWhereRatio.value });
   whereWidth.value = resizeStartWidth;
   document.body.classList.add("select-none", "cursor-col-resize");
   window.addEventListener("mousemove", onResizeMove);
@@ -219,7 +233,7 @@ onUnmounted(onResizeEnd);
 
 <template>
   <div ref="containerRef" class="flex flex-1 min-w-0">
-    <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0 relative" :class="{ 'border-l': leadingBorder }" :style="wherePaneStyle">
+    <div class="flex flex-1 items-center gap-1 px-2 py-0.5 min-w-0 relative" :class="[{ 'border-l': leadingBorder }, !effectiveShowOrderBy ? 'border-r' : '']" :style="wherePaneStyle">
       <template v-if="filterEditorView === 'quick'">
         <Popover :open="filterBuilderOpen" @update:open="updateQuickFilterBuilderOpen">
           <PopoverTrigger as-child>
@@ -328,6 +342,7 @@ onUnmounted(onResizeEnd);
       />
     </div>
     <button
+      v-if="effectiveShowOrderBy"
       type="button"
       class="group relative flex w-2 shrink-0 cursor-col-resize items-center justify-center border-l border-r border-border/80 bg-muted/15 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
       aria-label="Resize WHERE and ORDER BY"
@@ -336,7 +351,7 @@ onUnmounted(onResizeEnd);
     >
       <span class="h-5 w-px bg-border group-hover:bg-primary/60" />
     </button>
-    <div class="flex flex-1 items-center gap-1 px-2 py-0.5 border-r min-w-0">
+    <div v-if="effectiveShowOrderBy" class="flex flex-1 items-center gap-1 px-2 py-0.5 border-r min-w-0">
       <template v-if="filterEditorView === 'quick'">
         <Popover :open="sortBuilderOpen" @update:open="updateSortBuilderOpen">
           <PopoverTrigger as-child>

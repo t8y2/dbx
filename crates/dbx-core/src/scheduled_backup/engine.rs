@@ -221,15 +221,8 @@ impl BackupService {
         let mut included_count = 0;
         for (db_index, database) in databases.iter().enumerate() {
             check_cancel(stop)?;
-            let schemas = if postgres {
-                schema::list_schemas_core(state, &job.config.connection_id, database)
-                    .await?
-                    .into_iter()
-                    .filter(|s| s != "information_schema" && !s.starts_with("pg_"))
-                    .collect::<Vec<_>>()
-            } else {
-                vec![database.clone()]
-            };
+            let schemas =
+                database_export::list_database_backup_schemas_core(state, &job.config.connection_id, database).await?;
             if schemas.is_empty() {
                 return Err(format!("Database {database} has no exportable schemas"));
             }

@@ -6,7 +6,7 @@ import { useExportTracker } from "@/composables/useExportTracker";
 import { filterSchemaDiffTables } from "@/lib/schema/schemaDiffTableFilter";
 import { compileSchemaDiffTableFilter } from "@/lib/schema/schemaDiffTableFilter";
 import { filterSchemaDiffFunctions, schemaDiffRoutineKeyFromFunction } from "@/lib/schema/schemaDiffRoutine";
-import { loadSchemaDetails } from "@/lib/schema/schemaDiffMetadataLoad";
+import { loadSchemaDetails, schemaDiffDeferredDdlTables } from "@/lib/schema/schemaDiffMetadataLoad";
 import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
 import { registerSchemaDiffTask } from "@/lib/schema/schemaDiffCancellation";
 import type { SchemaDiffTableIdentity, SchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
@@ -225,6 +225,7 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
           schema: input.sourceSchema,
           dbType: input.sourceDbType,
           options: sessionOptions,
+          deferredDdlTables: schemaDiffDeferredDdlTables(input.sourceDbType, sourceTables, targetTables, sessionOptions.tableMappings),
           signal,
           onProgress: (progress) => publishProgress(session, { phase: "loading-source-details", ...progress }),
         },
@@ -241,6 +242,7 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
           schema: input.targetSchema,
           dbType: input.targetDbType,
           options: sessionOptions,
+          deferredDdlTables: schemaDiffDeferredDdlTables(input.targetDbType, sourceTables, targetTables, sessionOptions.tableMappings),
           signal,
           onProgress: (progress) => publishProgress(session, { phase: "loading-target-details", ...progress }),
         },

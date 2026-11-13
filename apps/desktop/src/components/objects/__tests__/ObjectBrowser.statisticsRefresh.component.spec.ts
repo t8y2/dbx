@@ -348,3 +348,72 @@ describe("MySQL table charset and collation columns", () => {
     expect(host.textContent).not.toContain("structureEditor.collation");
   });
 });
+
+describe("MySQL table auto-increment column (#13830)", () => {
+  const BIGINT_UNSIGNED_MAX = "18446744073709551615";
+
+  beforeEach(() => {
+    connection.db_type = "mysql";
+    localStorage.clear();
+    mocks.listSchemas.mockResolvedValue(["pgdemo"]);
+    mocks.listObjects.mockResolvedValue([
+      { name: "a_small", object_type: "TABLE", schema: "pgdemo", comment: "Small counter" },
+      { name: "m_mid", object_type: "TABLE", schema: "pgdemo", comment: "Mid counter" },
+      { name: "z_big", object_type: "TABLE", schema: "pgdemo", comment: "Big counter" },
+      { name: "v_orders", object_type: "VIEW", schema: "pgdemo" },
+    ]);
+    mocks.listObjectStatistics.mockResolvedValue([
+      { name: "a_small", schema: "pgdemo", auto_increment: "9" },
+      { name: "m_mid", schema: "pgdemo", auto_increment: "100" },
+      { name: "z_big", schema: "pgdemo", auto_increment: BIGINT_UNSIGNED_MAX },
+      { name: "v_orders", schema: "pgdemo", auto_increment: "5" },
+    ]);
+  });
+
+  afterEach(() => {
+    connection.db_type = "postgres";
+    localStorage.clear();
+  });
+
+  function displayedNames(host: HTMLElement) {
+    return Array.from(host.querySelectorAll(".object-browser-scroller .grid")).map((row) => /a_small|m_mid|z_big|v_orders/.exec(row.textContent ?? "")?.[0]);
+  }
+
+  it("shows each table's next AUTO_INCREMENT value from the shared statistics read", async () => {
+    const host = await mountBrowser(ref("pgdemo"), "all");
+    // Grouped like the row counts, and exact past 2^53 (BIGINT UNSIGNED).
+    await vi.waitFor(() => expect(host.textContent).toContain(new Intl.NumberFormat().format(BigInt(BIGINT_UNSIGNED_MAX))));
+    expect(host.textContent).toContain("grid.tableInfoAutoIncrement");
+    expect(host.textContent).toContain(new Intl.NumberFormat().format(100));
+    expect(getCachedObjectBrowserRows(mysqlScope)).toEqual(expect.arrayContaining([expect.objectContaining({ name: "a_small", autoIncrement: "9" }), expect.objectContaining({ name: "z_big", autoIncrement: BIGINT_UNSIGNED_MAX })]));
+    expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1);
+    expect(host.querySelector('[data-object-column-resize="autoIncrement"]')).not.toBeNull();
+  });
+
+  it("sorts tables by the numeric value in both directions, not as text", async () => {
+    const host = await mountBrowser(ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(host.textContent).toContain(new Intl.NumberFormat().format(100)));
+    const sort = Array.from(host.querySelectorAll("button")).find((button) => button.textContent?.trim() === "grid.tableInfoAutoIncrement")!;
+    expect(sort).toBeDefined();
+    sort.click();
+    await vi.waitFor(() => expect(displayedNames(host)).toEqual(["z_big", "m_mid", "a_small", "v_orders"]));
+    sort.click();
+    await vi.waitFor(() => expect(displayedNames(host)).toEqual(["a_small", "m_mid", "z_big", "v_orders"]));
+  });
+
+  it("refreshes a cached scaffold that has collation metadata but no auto-increment yet", async () => {
+    cacheObjectBrowserRows(createObjectBrowserRowsCacheWriteToken(mysqlScope), [{ id: "table:a_small", name: "a_small", displayName: "a_small", schema: "pgdemo", type: "TABLE", comment: "Small counter", characterSet: "utf8mb4", collation: "utf8mb4_bin" }], { cachedAt: Date.now() });
+    const host = await mountBrowser(ref("pgdemo"), "all");
+    await vi.waitFor(() => expect(mocks.listObjectStatistics).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(getCachedObjectBrowserRows(mysqlScope)?.find((row) => row.name === "a_small")?.autoIncrement).toBe("9"));
+    expect(mocks.listObjects).not.toHaveBeenCalled();
+    expect(host.textContent).toContain("a_small");
+  });
+
+  it("keeps the column out of other database browsers", async () => {
+    connection.db_type = "postgres";
+    const host = await mountBrowser();
+    await vi.waitFor(() => expect(host.textContent).toContain("a_small"));
+    expect(host.textContent).not.toContain("grid.tableInfoAutoIncrement");
+  });
+});

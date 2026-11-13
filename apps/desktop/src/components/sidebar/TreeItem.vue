@@ -1551,15 +1551,21 @@ function onClick(event: MouseEvent) {
   }
   selectSingleTreeNode(props.node);
   rowRef.value?.focus({ preventScroll: true });
-  if (!shouldActivateTreeNodeOnSingleClick(props.node.type, settingsStore.editorSettings.sidebarActivation) && props.node.type !== "load-more") return;
+  const tableClickNavigation = event.detail > 0 && props.node.type === "table" && settingsStore.editorSettings.sidebarTableClickNavigation;
+  if (!tableClickNavigation && !shouldActivateTreeNodeOnSingleClick(props.node.type, settingsStore.editorSettings.sidebarActivation) && props.node.type !== "load-more") return;
   if (props.node.type === "oracle-db-link") {
     showDatabaseLinks.value = true;
+    return;
+  }
+  if (tableClickNavigation) {
+    treeRuntime.handleRowClick(props.node, event.detail, true);
     return;
   }
   treeRuntime.handleRowClick(props.node, event.detail);
 }
 
 function onDoubleClick(event: MouseEvent) {
+  if (props.node.type === "table" && settingsStore.editorSettings.sidebarTableClickNavigation && (event.shiftKey || event.ctrlKey || event.metaKey)) return;
   if (props.node.type === "oracle-db-link" || props.node.type === "oracle-db-links") {
     showDatabaseLinks.value = true;
     return;

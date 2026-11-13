@@ -59,6 +59,15 @@ describe("routeIntentByRules — Ask mode golden cases", () => {
     expect(routeIntentByRules(input({ text: "convert this query to SQL Server", hasCurrentSql: true }))).toBe("convert");
   });
 
+  it.each(["把这段 SQL 转成虚谷方言", "把这段 SQL 转换成虚谷数据库能用的写法", "Convert this SQL to Xugu", "Convert this SQL to xUgUdB"])("routes %s to SQL production in both modes", (text) => {
+    expect(routeIntentByRules(input({ text, hasCurrentSql: true, mode: "ask" }))).toBe("convert");
+    expect(routeIntentByRules(input({ text, hasCurrentSql: true, mode: "agent" }))).toBe("generate");
+  });
+
+  it.each(["Convert this SQL to NotXugu", "Convert this SQL to XuguDBCustom", "XuguDB is a database"])("does not match %s as a dialect conversion", (text) => {
+    expect(routeIntentByRules(input({ text, hasCurrentSql: true }))).toBeNull();
+  });
+
   it("routes sample/mock data requests to sampleData", () => {
     expect(routeIntentByRules(input({ text: "生成一批测试数据插入到订单表" }))).toBe("sampleData");
     expect(routeIntentByRules(input({ text: "create sample data for the orders table" }))).toBe("sampleData");

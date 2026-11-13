@@ -186,7 +186,7 @@ export function buildTableImportParseOptions(settings: TableImportParseSettings)
   // SQL 脚本与分隔文本一样是纯文本源，需要传递编码供后端解码（支持 GBK 等常见转储编码）
   const isTextSource = isDelimited || settings.format === "sql";
   return {
-    delimiter: settings.format === "tsv" ? "\\t" : settings.format === "csv" ? "," : settings.delimiter,
+    delimiter: settings.delimiter,
     decimalSeparator: isDelimited ? (settings.decimalSeparator ?? ".") : null,
     encoding: isTextSource ? settings.textEncoding : null,
     titleRow: settings.titleRow,

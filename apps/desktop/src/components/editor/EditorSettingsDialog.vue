@@ -6,6 +6,7 @@ import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } fr
 import type { Ref } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useI18n } from "vue-i18n";
+import SidebarActivationSettings from "@/components/editor/SidebarActivationSettings.vue";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { MAX_CONNECT_TIMEOUT_SECS, MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import {
@@ -1019,6 +1020,7 @@ const editingShortcutId = ref<ShortcutActionId | null>(null);
 const modifierDoubleTapRecorder = createModifierDoubleTapShortcutController();
 watch(editingShortcutId, () => modifierDoubleTapRecorder.reset(), { flush: "sync" });
 const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation);
+const editSidebarColumnDoubleClickAction = ref(settingsStore.editorSettings.sidebarColumnDoubleClickAction);
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
 const dataTabReuseModeHelp = ref<DataTabReuseMode | null>(null);
@@ -1437,6 +1439,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     shortcuts: editShortcuts.value,
     sqlFormatter: normalizeSqlFormatterSettings(editSqlFormatter.value),
     sidebarActivation: editSidebarActivation.value,
+    sidebarColumnDoubleClickAction: editSidebarColumnDoubleClickAction.value,
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
     routineSourceOpenMode: editRoutineSourceOpenMode.value,
     sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
@@ -2157,6 +2160,7 @@ function syncEditorSettingsDraftFromStore() {
   editSqlFormatter.value = normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter);
   sqlFormatterConfigValid.value = true;
   editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
+  editSidebarColumnDoubleClickAction.value = settingsStore.editorSettings.sidebarColumnDoubleClickAction;
   editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
   editRoutineSourceOpenMode.value = settingsStore.editorSettings.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
@@ -2343,6 +2347,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   shortcuts: editShortcuts,
   sqlFormatter: editSqlFormatter,
   sidebarActivation: editSidebarActivation,
+  sidebarColumnDoubleClickAction: editSidebarColumnDoubleClickAction,
   sidebarObjectDisplay: editSidebarObjectDisplay,
   routineSourceOpenMode: editRoutineSourceOpenMode,
   sidebarTableSearchEnabled: editSidebarTableSearchEnabled,
@@ -2962,6 +2967,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
   } else if (tab === "navigation") {
     editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
     editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
+    editSidebarColumnDoubleClickAction.value = DEFAULT_EDITOR_SETTINGS.sidebarColumnDoubleClickAction;
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
     editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
     editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
@@ -3200,6 +3206,7 @@ function resetAllDefaults() {
   editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
   sqlFormatterConfigValid.value = true;
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
+  editSidebarColumnDoubleClickAction.value = DEFAULT_EDITOR_SETTINGS.sidebarColumnDoubleClickAction;
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
   editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
@@ -3840,6 +3847,10 @@ function setTabGroupRows(value: TabGroupRowMode) {
 
 function setSidebarActivation(value: "single" | "double") {
   editSidebarActivation.value = value;
+}
+
+function setSidebarColumnDoubleClickAction(value: "structure" | "query") {
+  editSidebarColumnDoubleClickAction.value = value;
 }
 
 // Custom AI skill root (read-only SKILL.md discovery; desktop-only, prd 09-21-public-skill-loader).
@@ -9747,31 +9758,7 @@ onUnmounted(() => {
             </section>
 
             <section v-else-if="activeSettingsTab === 'navigation'" data-settings-search-id="navigation" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('navigation')]">
-              <div class="space-y-2">
-                <Label>{{ t("settings.sidebarActivation") }}</Label>
-                <div class="grid grid-cols-2 gap-2">
-                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'single' ? 'dbx-choice-selected' : ''" @click="setSidebarActivation('single')">
-                    <div class="text-left">
-                      <div class="text-sm font-medium">
-                        {{ t("settings.sidebarActivationSingle") }}
-                      </div>
-                      <div class="text-xs text-muted-foreground">
-                        {{ t("settings.sidebarActivationSingleDescription") }}
-                      </div>
-                    </div>
-                  </Button>
-                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'double' ? 'dbx-choice-selected' : ''" @click="setSidebarActivation('double')">
-                    <div class="text-left">
-                      <div class="text-sm font-medium">
-                        {{ t("settings.sidebarActivationDouble") }}
-                      </div>
-                      <div class="text-xs text-muted-foreground">
-                        {{ t("settings.sidebarActivationDoubleDescription") }}
-                      </div>
-                    </div>
-                  </Button>
-                </div>
-              </div>
+              <SidebarActivationSettings :activation="editSidebarActivation" :column-action="editSidebarColumnDoubleClickAction" @update:activation="setSidebarActivation" @update:column-action="setSidebarColumnDoubleClickAction" />
               <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="sidebar-browse-objects-on-database-activation">{{ t("settings.sidebarBrowseObjectsOnDatabaseActivation") }}</Label>

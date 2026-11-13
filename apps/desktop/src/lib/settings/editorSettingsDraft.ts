@@ -120,6 +120,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "shortcuts",
   "sqlFormatter",
   "sidebarActivation",
+  "sidebarColumnDoubleClickAction",
   "sidebarObjectDisplay",
   "routineSourceOpenMode",
   "sidebarTableSearchEnabled",

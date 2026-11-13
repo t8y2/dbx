@@ -146,7 +146,7 @@ import { oracleCompileUnsupportedReason } from "@/lib/database/oracleInvalidObje
 import type { ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
 import { elasticsearchClearIndexPreview, isElasticsearchClearConfirmed, isElasticsearchIndexPattern } from "@/lib/sidebar/elasticsearchIndexActions";
 import { sidebarObjectTemplateForGroup } from "@/lib/sidebar/databaseObjectTemplates";
-import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate, insertTemplatePrimaryKeyConflicts } from "@/lib/table/tableSqlTemplates";
+import { buildColumnSelectTemplate, buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate, insertTemplatePrimaryKeyConflicts } from "@/lib/table/tableSqlTemplates";
 import SqlTemplateInsertRowsDialog from "@/components/sidebar/SqlTemplateInsertRowsDialog.vue";
 import { joinExportedDdls } from "@/lib/export/ddlExport";
 import { qualifiedTableName } from "@/lib/table/tableSelectSql";
@@ -1849,6 +1849,10 @@ function onDoubleClick(event: MouseEvent) {
     openDataInNewTabImmediately();
     return;
   }
+  if (activeNode.value.type === "column" && settingsStore.editorSettings.sidebarColumnDoubleClickAction === "query" && supportsSqlFileExecution(currentDatabaseType())) {
+    void newColumnQuery(beginNavigationRequest());
+    return;
+  }
   if (activeNode.value.type === "event") {
     beginNavigationRequest();
     void openObjectBrowser(false, true);
@@ -2454,6 +2458,37 @@ async function openMultiTableSqlTemplate(targets: Array<TreeNode & { connectionI
   const title = targets.length === 1 ? undefined : `${titlePrefix} - ${targets.map((target) => target.label).join(", ")}`;
   const tabTarget = targets.find((target) => target.id === activeNode.value.id) ?? targets[0]!;
   openSqlTemplateTab(tabTarget.connectionId, tabTarget.database, tabTarget.schema, tabTarget.catalog, sql, title);
+}
+
+async function newColumnQuery(requestId: number) {
+  const node = activeNode.value;
+  if (!node.connectionId || !hasTreeNodeDatabaseContext(node) || !node.tableName) return;
+  const columnName = extractColumnNameFromTreeNode(node);
+  if (!columnName) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    if (!isCurrentNavigationRequest(requestId)) return;
+    const config = connectionStore.getConfig(node.connectionId);
+    const sql = buildColumnSelectTemplate(
+      {
+        databaseType: effectiveDatabaseTypeForConnection(config),
+        driverProfile: config?.driver_profile,
+        identifierQuote: connectionStore.connectionIdentifierQuote(node.connectionId),
+        catalog: node.catalog,
+        database: node.database,
+        schema: node.schema || node.database,
+        defaultSchema: config?.default_schema,
+        includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+        quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
+        keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
+        tableName: node.tableName,
+      },
+      columnName,
+    );
+    openSqlTemplateTab(node.connectionId, node.database, node.schema, node.catalog, sql);
+  } catch (error) {
+    toastConnectFailed(node.connectionId, error);
+  }
 }
 
 function openSqlTemplateTab(connectionId: string, database: string, schema: string | undefined, catalog: string | undefined, sql: string, title?: string) {

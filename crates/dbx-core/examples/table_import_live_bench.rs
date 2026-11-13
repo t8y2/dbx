@@ -177,6 +177,8 @@ fn connection_config(id: &str, database: BenchDatabase) -> Result<ConnectionConf
         show_system_schemas: false,
         sidebar_auto_load_all_tables: false,
         show_database_links: None,
+        show_native_jobs: None,
+        show_user_admin: None,
         attached_databases: Vec::new(),
         init_script: None,
         color: None,
@@ -408,6 +410,7 @@ fn import_request(
                 source_column: column.clone(),
                 target_column: column,
                 target_data_type: None,
+                generator: None,
             })
             .collect(),
         mode: TableImportMode::Append,
@@ -418,6 +421,7 @@ fn import_request(
         retain_source: false,
         conflict_policy: None,
         skip_duplicate_rows: false,
+        continue_on_error: false,
     }
 }
 

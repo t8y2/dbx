@@ -63,7 +63,9 @@ function isSelected(id: string) {
 
 function toggle(id: string, checked: boolean) {
   pinnedIds.value = checked ? [...new Set([...pinnedIds.value, id])] : pinnedIds.value.filter((entry) => entry !== id);
-  if (recommendedIds.value.has(id)) hiddenIds.value = checked ? hiddenIds.value.filter((entry) => entry !== id) : [...new Set([...hiddenIds.value, id])];
+  // Unchecking any non-built-in action hides it outright; leaving it in its group
+  // made the checkbox look inert for grouped entries (#12791).
+  hiddenIds.value = checked ? hiddenIds.value.filter((entry) => entry !== id) : [...new Set([...hiddenIds.value, id])];
 }
 
 function sectionItems(section: Section) {

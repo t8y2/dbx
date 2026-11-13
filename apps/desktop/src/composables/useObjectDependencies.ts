@@ -3,10 +3,13 @@ import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { uuid } from "@/lib/common/utils";
 import { objectDependencyRows, objectDependencySql, type ObjectDependencyRow, type ObjectDependencyTarget } from "@/lib/database/objectDependencyDetails";
+import type { ObjectRelationKind } from "@/lib/database/oracleObjectDependencies";
+import type { QueryResult } from "@/types/database";
+import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 
-export function useObjectDependencies(target: Readonly<Ref<ObjectDependencyTarget | undefined>>, enabled: Readonly<Ref<boolean>>) {
+export function useObjectDependencies<Row = ObjectDependencyRow>(target: Readonly<Ref<ObjectDependencyTarget | undefined>>, enabled: Readonly<Ref<boolean>>, options?: { kind: ObjectRelationKind; parse: (result: QueryResult) => Row[] }) {
   const connectionStore = useConnectionStore();
-  const rows = ref<ObjectDependencyRow[]>([]);
+  const rows = ref<Row[]>([]) as Ref<Row[]>;
   const loading = ref(false);
   const error = ref("");
   const loaded = ref(false);
@@ -23,7 +26,7 @@ export function useObjectDependencies(target: Readonly<Ref<ObjectDependencyTarge
 
   async function refresh() {
     const identity = target.value;
-    if (!identity) return;
+    if (!identity || !enabled.value) return;
     invalidate();
     const serial = generation;
     const requestKey = key.value;
@@ -34,9 +37,10 @@ export function useObjectDependencies(target: Readonly<Ref<ObjectDependencyTarge
     try {
       await connectionStore.ensureConnected(identity.connectionId);
       if (serial !== generation || requestKey !== key.value) return;
-      const result = await api.executeQuery(identity.connectionId, identity.database, objectDependencySql(identity), identity.schema, id, { catalog: identity.catalog });
+      const result = await api.executeQuery(identity.connectionId, identity.database, objectDependencySql(identity, options?.kind), identity.schema, id, { catalog: identity.catalog });
       if (serial !== generation || requestKey !== key.value) return;
-      rows.value = objectDependencyRows(result);
+      if (isQueryExecutionErrorResult(result)) throw new Error(String(result.rows[0]?.[0] ?? "Unable to read object relations."));
+      rows.value = options ? options.parse(result) : (objectDependencyRows(result) as Row[]);
       truncated.value = !!(result.truncated || result.has_more);
       loaded.value = true;
     } catch (e: unknown) {
@@ -65,6 +69,10 @@ export function useObjectDependencies(target: Readonly<Ref<ObjectDependencyTarge
   watch(
     enabled,
     (value) => {
+      if (!value) {
+        invalidate();
+        loading.value = false;
+      }
       if (value && !loaded.value && !loading.value && target.value) void refresh();
     },
     { immediate: true },

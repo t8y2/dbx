@@ -1116,8 +1116,10 @@ mod tests {
             Ok(QueryResult {
                 columns: Vec::new(),
                 column_types: Vec::new(),
+                deferred_large_value_cells: Vec::new(),
                 column_sortables: Vec::new(),
                 spatial_columns: vec![],
+                raw_key_cells: Vec::new(),
                 spatial_values: vec![],
                 rows: Vec::new(),
                 affected_rows: 2,
@@ -1218,8 +1220,10 @@ mod tests {
         let mut result = QueryResult {
             columns: Vec::new(),
             column_types: Vec::new(),
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: vec![],
+            raw_key_cells: Vec::new(),
             spatial_values: vec![],
             rows: Vec::new(),
             affected_rows: 1,
@@ -1278,8 +1282,10 @@ mod tests {
         let result = QueryResult {
             columns: vec!["amount".to_string()],
             column_types: vec!["NUMBER(38,12)".to_string()],
+            deferred_large_value_cells: Vec::new(),
             column_sortables: Vec::new(),
             spatial_columns: Vec::new(),
+            raw_key_cells: Vec::new(),
             spatial_values: Vec::new(),
             rows: vec![vec![serde_json::from_str(value).unwrap()]],
             affected_rows: 0,

@@ -18,6 +18,7 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
 import SidebarTableVGroupDialog from "@/components/sidebar/SidebarTableVGroupDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { showTableVGroupDialog, tableVGroupName, tableVGroupDialogScope, tableVGroupDialogParentGroupId, tableVGroupDialogTableNames } from "@/components/sidebar/sidebarTreeDialogState";
 
 const connection = { id: "pg-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgresql", host: "localhost", port: 5432, username: "postgres", password: "" };
@@ -95,6 +96,38 @@ describe("table virtual group context menus and dialog", () => {
     expect(tableVGroupDialogTableNames.value).toEqual([]);
   });
 
+  it("does not provide 'New Group' on database container in grouped mode (issue #13030)", async () => {
+    const host = await mountHost();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+    const databaseNode: TreeNode = {
+      id: "pg-1:app",
+      type: "database",
+      label: "app",
+      connectionId: connection.id,
+      database: "app",
+    };
+    const items = host.buildContextMenu(databaseNode);
+    const createGroupItem = items.find((item) => item.label === tr("connectionGroup.createGroup"));
+    expect(createGroupItem).toBeUndefined();
+  });
+
+  it("provides 'New Group' on database container in simple mode", async () => {
+    const host = await mountHost();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "simple";
+    const databaseNode: TreeNode = {
+      id: "pg-1:app",
+      type: "database",
+      label: "app",
+      connectionId: connection.id,
+      database: "app",
+    };
+    const items = host.buildContextMenu(databaseNode);
+    const createGroupItem = items.find((item) => item.label === tr("connectionGroup.createGroup"));
+    expect(createGroupItem).toBeDefined();
+  });
+
   it("provides 'New Group' on group-views container", async () => {
     const host = await mountHost();
     const viewsGroupNode: TreeNode = {
@@ -130,6 +163,56 @@ describe("table virtual group context menus and dialog", () => {
     expect(tableVGroupDialogScope.value).toBe(vgroupNode);
     expect(tableVGroupDialogParentGroupId.value).toBe("grp-1");
     expect(tableVGroupDialogTableNames.value).toEqual([]);
+  });
+
+  it("lists existing groups for a search-projected table row the live tree does not contain (#14228)", async () => {
+    const host = await mountHost();
+    const settingsStore = useSettingsStore();
+    settingsStore.editorSettings.sidebarObjectDisplay = "grouped";
+    const connectionStore = useConnectionStore();
+    connectionStore.treeNodes = [
+      {
+        id: connection.id,
+        type: "connection",
+        label: connection.name,
+        connectionId: connection.id,
+        children: [
+          {
+            id: `${connection.id}:app`,
+            type: "database",
+            label: "app",
+            connectionId: connection.id,
+            database: "app",
+            children: [
+              {
+                id: `${connection.id}:app:public:group-tables`,
+                type: "group-tables",
+                label: "Tables",
+                connectionId: connection.id,
+                database: "app",
+                schema: "public",
+                children: [{ id: `${connection.id}:app:public:t_a`, label: "t_a", type: "table", connectionId: connection.id, database: "app", schema: "public" }],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+    const scope = { connectionId: connection.id, database: "app", schema: "public", objectType: "tables" as const };
+    const groupId = connectionStore.createTableVGroup(scope, "Group A");
+    expect(groupId).toBeTruthy();
+
+    // 首页之外的表：搜索投影出该行，但 live 树里没有同 id 节点。
+    const projectedRow: TreeNode = { id: `${connection.id}:app:public:t_hidden`, label: "t_hidden", type: "table", connectionId: connection.id, database: "app", schema: "public" };
+    const items = host.buildContextMenu(projectedRow);
+    const moveItem = items.find((item) => item.label === tr("tableVGroup.moveToGroup"));
+    expect(moveItem).toBeDefined();
+    const groupEntry = moveItem?.children?.find((child) => child.label === "Group A");
+    expect(groupEntry).toBeDefined();
+    expect(groupEntry?.disabled).toBe(false);
+
+    groupEntry?.action?.();
+    expect(connectionStore.tableVGroupPathForTable(scope, "t_hidden", "table")).toContain(groupId!);
   });
 
   it("dynamically sets the dialog title for container group creation, subgroup, and move-in", async () => {

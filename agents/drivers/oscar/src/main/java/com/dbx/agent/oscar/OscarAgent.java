@@ -1,13 +1,18 @@
 package com.dbx.agent.oscar;
 
 import com.dbx.agent.ConfiguredJdbcAgent;
+import com.dbx.agent.DatabaseInfo;
 import com.dbx.agent.JdbcAgentProfile;
 import com.dbx.agent.JdbcIdentifiers;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.ObjectSource;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * 神通 OSCAR v7 agent。
@@ -51,6 +56,20 @@ public final class OscarAgent extends ConfiguredJdbcAgent {
             return "";
         }
         return "SET SEARCH_PATH TO " + JdbcIdentifiers.INSTANCE.doubleQuote(schema);
+    }
+
+    @Override
+    public List<DatabaseInfo> listDatabases() {
+        return deduplicateDatabases(super.listDatabases());
+    }
+
+    static List<DatabaseInfo> deduplicateDatabases(List<DatabaseInfo> databases) {
+        Map<String, DatabaseInfo> unique = new LinkedHashMap<>();
+        for (DatabaseInfo database : databases) {
+            // OSCAR normalizes unquoted database names to uppercase; keep the first JDBC spelling.
+            unique.putIfAbsent(database.getName().toUpperCase(Locale.ROOT), database);
+        }
+        return new ArrayList<>(unique.values());
     }
 
     /**

@@ -8,9 +8,12 @@ import {
   importDataTypeForDatabase,
   nextTableImportWizardStep,
   previousTableImportWizardStep,
+  previewValueForGenerator,
   requiredImportTargetColumns,
   resolveTableImportElapsed,
+  suggestDataTypeForGenerator,
   suggestImportTargetDataTypes,
+  TABLE_IMPORT_GENERATOR_OPTIONS,
   tableImportProgressPercent,
   validateImportMappings,
 } from "@/lib/table/tableImport";
@@ -237,5 +240,46 @@ describe("tableImport", () => {
     expect(importDataTypeForDatabase("decimal", "postgres")).toBe("DOUBLE PRECISION");
     expect(importDataTypeForDatabase("decimal", "sqlite")).toBe("REAL");
     expect(importDataTypeForDatabase("decimal", "oracle")).toBe("BINARY_DOUBLE");
+  });
+
+  it("supports auto-generator keys and previews", () => {
+    expect(TABLE_IMPORT_GENERATOR_OPTIONS.map((opt) => opt.value)).toEqual(["uuid", "uuid_simple", "current_timestamp", "current_date", "sequence", "fixed"]);
+
+    expect(previewValueForGenerator("uuid")).toBe("<UUID>");
+    expect(previewValueForGenerator("uuid_simple")).toBe("<UUID32>");
+    expect(previewValueForGenerator("current_timestamp")).toBe("<NOW>");
+    expect(previewValueForGenerator("current_date")).toBe("<TODAY>");
+    expect(previewValueForGenerator("sequence", 1)).toBe("<SEQ:1>");
+    expect(previewValueForGenerator("sequence", 42)).toBe("<SEQ:42>");
+
+    expect(formatTableImportPreviewCell("original", "uuid", 0)).toBe("<UUID>");
+    expect(formatTableImportPreviewCell(null, "sequence", 2)).toBe("<SEQ:3>");
+  });
+
+  it("previews the fixed value verbatim, including case, hyphens and colons (issue #14503)", () => {
+    expect(previewValueForGenerator("fixed:Hello-World")).toBe("Hello-World");
+    expect(previewValueForGenerator("fixed:a:b:c")).toBe("a:b:c");
+    expect(previewValueForGenerator("fixed:")).toBe("");
+    expect(formatTableImportPreviewCell("original", "fixed:42", 0)).toBe("42");
+  });
+
+  it("suggests data types for generators by database type", () => {
+    expect(suggestDataTypeForGenerator("uuid", "postgres")).toBe("UUID");
+    expect(suggestDataTypeForGenerator("uuid", "sqlserver")).toBe("UNIQUEIDENTIFIER");
+    expect(suggestDataTypeForGenerator("uuid", "mysql")).toBe("VARCHAR(36)");
+    expect(suggestDataTypeForGenerator("uuid_simple", "mysql")).toBe("VARCHAR(32)");
+    expect(suggestDataTypeForGenerator("current_timestamp", "mysql")).toBe("DATETIME");
+    expect(suggestDataTypeForGenerator("current_timestamp", "postgres")).toBe("TIMESTAMP");
+    expect(suggestDataTypeForGenerator("current_date", "postgres")).toBe("DATE");
+    expect(suggestDataTypeForGenerator("sequence", "mysql")).toBe("BIGINT");
+    expect(suggestDataTypeForGenerator("sequence", "sqlite")).toBe("INTEGER");
+  });
+
+  it("suggests integer for integer fixed values and text otherwise", () => {
+    expect(suggestDataTypeForGenerator("fixed:42", "mysql")).toBe("BIGINT");
+    expect(suggestDataTypeForGenerator("fixed:-7", "sqlite")).toBe("INTEGER");
+    expect(suggestDataTypeForGenerator("fixed:abc", "mysql")).toBe("TEXT");
+    expect(suggestDataTypeForGenerator("fixed:", "mysql")).toBe("TEXT");
+    expect(suggestDataTypeForGenerator("fixed:12.5", "mysql")).toBe("TEXT");
   });
 });

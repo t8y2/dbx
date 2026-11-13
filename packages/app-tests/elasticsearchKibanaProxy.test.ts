@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import {
   buildElasticsearchExternalConfig,
+  elasticsearchAuthTypeFromConfig,
   elasticsearchConnectionModeFromConfig,
   elasticsearchConnectivityCheckPathFromConfig,
   elasticsearchKibanaBasePathFromConfig,
@@ -40,4 +41,16 @@ test("stores connectivity check path for direct and kibana modes", () => {
     kibanaBasePath: "/kibana",
     connectivityCheckPath: "/my-index/_search",
   });
+});
+
+test("round trips API key authentication without storing the credential in external config", () => {
+  assert.equal(elasticsearchAuthTypeFromConfig(undefined), "basic");
+  assert.equal(elasticsearchAuthTypeFromConfig({ authType: "unknown" }), "basic");
+  for (const mode of ["direct", "kibana"] as const) {
+    const config = buildElasticsearchExternalConfig(mode, "/kibana", "/orders/_search", "", false, "apiKey");
+    assert.equal(elasticsearchAuthTypeFromConfig(config), "apiKey");
+    assert.equal(config?.connectivityCheckPath, "/orders/_search");
+    assert.equal(elasticsearchConnectionModeFromConfig(config), mode);
+  }
+  assert.deepEqual(buildElasticsearchExternalConfig("direct", "", "", "", false, "apiKey"), { authType: "apiKey" });
 });

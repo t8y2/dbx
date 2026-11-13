@@ -173,3 +173,5 @@ Small PRs are easier to review and merge.
 - [Official docs](https://dbxio.com/en/docs/what-is-dbx)
 
 Merged contributors appear on the [DBX contributors wall](https://dbxio.com/en/community).
+
+The wall recognizes a GitHub account after it authors at least one PR merged into `t8y2/dbx`; commit counts alone do not qualify. Open your PR from the account you want credited.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sidebarProductionBadgeScope, showSidebarRowProductionBadge, showSidebarStickyProductionBadge } from "../sidebarProductionBadge";
+import { isSidebarProductionContainer, sidebarProductionBadgeScope, showSidebarRowProductionBadge, showSidebarStickyProductionBadge } from "../sidebarProductionBadge";
 import { assessProductionSql } from "@/lib/database/productionSafety";
 import type { ConnectionConfig, ProductionBadgeScope, TreeNodeType } from "@/types/database";
 
@@ -47,6 +47,15 @@ describe("production badge display scope", () => {
     expect(showSidebarStickyProductionBadge(node("schema"), config)).toBe(scope === "connection");
     expect(showSidebarStickyProductionBadge(node("schema", "other"), config)).toBe(false);
     expect(showSidebarStickyProductionBadge(node("schema"), { ...config, production_databases: [] })).toBe(false);
+  });
+
+  it("splits container rows from object rows for badge placement", () => {
+    for (const type of ["connection", "database", "schema", "redis-db", "mongo-db", "nacos-namespace"] as const) {
+      expect(isSidebarProductionContainer(node(type))).toBe(true);
+    }
+    for (const type of ["table", "view", "materialized_view", "procedure", "mongo-collection", "column", "group-tables"] as const) {
+      expect(isSidebarProductionContainer(node(type))).toBe(false);
+    }
   });
 
   it("warns on the connection for selected production databases in connection-only mode", () => {

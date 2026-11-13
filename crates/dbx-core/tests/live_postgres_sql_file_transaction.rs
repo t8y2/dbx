@@ -78,6 +78,7 @@ fn request(database: &str, execution_id: &str) -> SqlFileRequest {
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
         failure_log_enabled: true,
+        resolve_includes: false,
         encoding: Default::default(),
     }
 }

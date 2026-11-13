@@ -140,4 +140,54 @@ describe("keepGuttersAttachedDuringSync", () => {
     const { instance } = createInstance([]);
     instance.destroy();
   });
+
+  it("marks scrollDOM and cm-gutters when horizontally scrolled", () => {
+    const { ViewPlugin } = fakeViewPlugin();
+    const spec = keepGuttersAttachedDuringSync(ViewPlugin) as unknown as { create: (view: EditorView) => FakeInstance };
+
+    const scrollDOM = document.createElement("div");
+    const gutters = document.createElement("div");
+    gutters.className = "cm-gutters";
+    scrollDOM.appendChild(gutters);
+
+    const gutter = fakeGutterHost();
+    const view = {
+      plugins: [{ value: gutter.host }],
+      scrollDOM,
+    };
+
+    // Initially scrollLeft is 0
+    scrollDOM.scrollLeft = 0;
+    const instance = spec.create(view as unknown as EditorView);
+
+    expect(scrollDOM.hasAttribute("data-scrolled-x")).toBe(false);
+    expect(gutters.hasAttribute("data-scrolled-x")).toBe(false);
+    expect(gutters.classList.contains("cm-gutters-scrolled-x")).toBe(false);
+
+    // Scroll horizontally right
+    scrollDOM.scrollLeft = 50;
+    scrollDOM.dispatchEvent(new Event("scroll"));
+
+    expect(scrollDOM.hasAttribute("data-scrolled-x")).toBe(true);
+    expect(gutters.hasAttribute("data-scrolled-x")).toBe(true);
+    expect(gutters.classList.contains("cm-gutters-scrolled-x")).toBe(true);
+
+    // Scroll back to start
+    scrollDOM.scrollLeft = 0;
+    scrollDOM.dispatchEvent(new Event("scroll"));
+
+    expect(scrollDOM.hasAttribute("data-scrolled-x")).toBe(false);
+    expect(gutters.hasAttribute("data-scrolled-x")).toBe(false);
+    expect(gutters.classList.contains("cm-gutters-scrolled-x")).toBe(false);
+
+    // Cleanup on destroy
+    scrollDOM.scrollLeft = 20;
+    scrollDOM.dispatchEvent(new Event("scroll"));
+    expect(scrollDOM.hasAttribute("data-scrolled-x")).toBe(true);
+
+    instance.destroy();
+    expect(scrollDOM.hasAttribute("data-scrolled-x")).toBe(false);
+    expect(gutters.hasAttribute("data-scrolled-x")).toBe(false);
+    expect(gutters.classList.contains("cm-gutters-scrolled-x")).toBe(false);
+  });
 });

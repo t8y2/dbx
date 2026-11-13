@@ -8,15 +8,15 @@
 //!
 //! The password necessarily rides on the command line (Dameng requires `USERID`
 //! as the first argument — see the dbx-sql module docs), so the spawned
-//! process must stay short-lived; `PARFILE` keeps everything else out of the
-//! process list.
+//! process must stay short-lived; `PARFILE` keeps the schema/table parameters out
+//! of the process list, while FILE/LOG ride on the command line so Windows paths
+//! keep their native separators (#13585).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
 
 pub use dbx_sql::dameng_dump::DamengDumpKind as DamengDumpKindReexport;
 use dbx_sql::dameng_dump::{
@@ -180,6 +180,17 @@ fn prepare_import_source(file_path: &Path) -> Result<(), String> {
     }
 }
 
+fn decode_output_bytes(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.strip_prefix('\u{feff}').unwrap_or(text).to_string();
+    }
+    let (text, _) = encoding_rs::GB18030.decode_without_bom_handling(bytes);
+    text.into_owned()
+}
+
 /// Run the tool once and return the combined diagnostic text (log file
 /// preferred, console capture as fallback) plus the process exit status.
 ///
@@ -235,19 +246,23 @@ async fn run_tool_and_collect(
 
     // Prefer the tool's own log (the parse target); fall back to console
     // capture for early failures (missing lib, bad args) that never reach it.
-    let log_text = tokio::fs::read_to_string(log_path).await.unwrap_or_default();
+    // Dameng on Chinese Windows emits logs and console output in GBK/GB18030,
+    // so reading raw bytes and decoding with GB18030 fallback prevents silent
+    // UTF-8 decoding failures from discarding the real tool error (#13117).
+    let log_bytes = tokio::fs::read(log_path).await.unwrap_or_default();
+    let log_text = decode_output_bytes(&log_bytes);
     if !log_text.trim().is_empty() {
         return Ok((log_text, exit_code));
     }
     let mut console = String::new();
-    let mut out_file = tokio::fs::File::open(out_path).await.ok();
-    let mut err_file = tokio::fs::File::open(err_path).await.ok();
-    if let Some(file) = out_file.as_mut() {
-        let _ = file.read_to_string(&mut console).await;
+    if let Ok(out_bytes) = tokio::fs::read(out_path).await {
+        let out_text = decode_output_bytes(&out_bytes);
+        if !out_text.trim().is_empty() {
+            console.push_str(&out_text);
+        }
     }
-    if let Some(file) = err_file.as_mut() {
-        let mut err_text = String::new();
-        let _ = file.read_to_string(&mut err_text).await;
+    if let Ok(err_bytes) = tokio::fs::read(err_path).await {
+        let err_text = decode_output_bytes(&err_bytes);
         if !err_text.trim().is_empty() {
             if !console.trim().is_empty() {
                 console.push('\n');
@@ -665,6 +680,49 @@ mod tests {
         let message = failure_message(&outcome, exit_code, &text);
         assert!(message.contains("exit code 2"), "got: {message}");
         assert!(message.contains("unrecognized parameter TABLESPACE"), "got: {message}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// On Chinese Windows, Dameng's tool writes console output in GBK/GB18030.
+    /// `run_tool_and_collect` must decode it properly instead of dropping it as invalid UTF-8.
+    #[tokio::test]
+    async fn run_tool_and_collect_decodes_gbk_console_output() {
+        let dir = std::env::temp_dir().join(format!("dbx-dameng-gbk-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log_path = dir.join("never-written.log");
+        let out_path = dir.join("run.out");
+        let err_path = dir.join("run.err");
+
+        // Simulate Chinese Windows where dimp output on stderr is GBK-encoded.
+        let err_src = dir.join("gbk_err.bin");
+        let (gbk_bytes, _, _) = encoding_rs::GBK.encode("[-2106]: 无效的用户名或密码\n");
+        std::fs::write(&err_src, &gbk_bytes).unwrap();
+
+        #[cfg(windows)]
+        let (tool, tool_args) = {
+            let tool = dir.join("dummy.bat");
+            std::fs::write(&tool, "@echo off\r\ntype \"%~1\" 1>&2\r\nexit /b 1\r\n").unwrap();
+            (tool, vec![err_src.to_string_lossy().into_owned()])
+        };
+        #[cfg(not(windows))]
+        let (tool, tool_args) = {
+            use std::os::unix::fs::PermissionsExt;
+            let tool = dir.join("dummy.sh");
+            std::fs::write(&tool, "#!/bin/sh\ncat \"$1\" >&2\nexit 1\n").unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+            (tool, vec![err_src.to_string_lossy().into_owned()])
+        };
+
+        let mut argv = vec![tool.to_string_lossy().into_owned()];
+        argv.extend(tool_args);
+        let (text, exit_code) = run_tool_and_collect(&argv, &log_path, &out_path, &err_path, "gbk-task").await.unwrap();
+        assert_eq!(exit_code, Some(1));
+        assert!(text.contains("无效的用户名或密码"), "should decode GBK stderr: {text}");
+
+        let outcome = parse_dump_log(&text, DamengDumpKind::Import);
+        assert!(!outcome.success);
+        let message = failure_message(&outcome, exit_code, &text);
+        assert!(message.contains("无效的用户名或密码"), "surfaces in failure message: {message}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

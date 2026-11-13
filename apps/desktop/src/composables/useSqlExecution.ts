@@ -1,10 +1,13 @@
-import { ref, watch, type Ref, type ComputedRef } from "vue";
+import { shouldReportOracleCompilationErrors } from "@/lib/query/oracleCompilationErrors";
+import { getCurrentScope, onScopeDispose, ref, watch, type Ref, type ComputedRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { useQueryStore } from "@/stores/queryStore";
 import { useHistoryStore } from "@/stores/historyStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
+import { dataGridPendingChangesState } from "@/composables/useDataGridEditor";
+import { resultGridInstanceKey } from "@/lib/tabs/tabPresentation";
 import { isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseCapabilities";
 import { supportsConnectionScopedQueryExecution } from "@/lib/database/databaseFeatureSupport";
 import { supportsTransaction } from "@/lib/database/databaseFeatureSupport";
@@ -14,7 +17,7 @@ import { supportsConnectionLevelSqlExecution } from "@/lib/connection/connection
 import { classifySqlActivityKind } from "@/lib/history/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sql/sqlMetadataRefresh";
 import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
-import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
+import { defaultViewForResult, statementRunsWithoutResultGrid } from "@/lib/query/queryResultDefaultView";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { classifyRedisCommandSafety } from "@/lib/redis/redisCommandSafety";
 import { isRedisCommentLine } from "@/lib/redis/redisCommandTokenizer";
@@ -27,11 +30,13 @@ import { expandSqlVariables } from "@/lib/sql/sqlVariables";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { assessProductionSql } from "@/lib/database/productionSafety";
 import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
+import { mysqlDataCharsetEnabled } from "@/lib/connection/mysqlDataCharset";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { SqlExecutionDangerRequest } from "@/stores/sqlExecutionDangerStore";
 import type { ConnectionConfig, DatabaseType, QueryResult, QueryTab } from "@/types/database";
 import type { MultiDbExecutionTarget, MultiDbResultRunExecution, MultiDbTargetExecutionResult, MultiDbManualTransaction } from "@/types/sqlExecution";
 import { effectiveDatabaseTypeForConnection, kingbaseSqlDatabaseType } from "@/lib/database/jdbcDialect";
+import { oracleTriggerReadOptions } from "@/lib/database/oracleTriggerIdentity";
 import type { SqlExecutionTargetContext } from "@/lib/database/sqlExecutionTargetRegistry";
 import { MULTI_SOURCE_MAX_ROWS_PER_SOURCE } from "@/lib/query/multiSourceResult";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -161,6 +166,12 @@ function firstQueryExecutionError(tab: Pick<QueryTab, "result" | "results">) {
   return results.find((result) => isQueryExecutionErrorResult(result));
 }
 
+function resultExecutionTimeMs(tab: Pick<QueryTab, "result" | "results">, fallbackMs: number): number {
+  const results = tab.results?.length ? tab.results : tab.result ? [tab.result] : [];
+  if (!results.length || results.some((result) => !Number.isFinite(result.execution_time_ms) || result.execution_time_ms < 0)) return fallbackMs;
+  return results.reduce((total, result) => total + result.execution_time_ms, 0);
+}
+
 export function useSqlExecution(deps: {
   activeTab: ComputedRef<QueryTab | undefined>;
   activeConnection: ComputedRef<ConnectionConfig | undefined>;
@@ -192,6 +203,17 @@ export function useSqlExecution(deps: {
   const dangerSql = ref("");
   const pendingDangerSql = ref("");
   const showDangerDialog = ref(false);
+  const showResultChangesDialog = ref(false);
+  let resolveResultChanges: ((confirmed: boolean) => void) | undefined;
+
+  function onResultChangesConfirm(confirmed: boolean) {
+    const resolve = resolveResultChanges;
+    resolveResultChanges = undefined;
+    showResultChangesDialog.value = false;
+    resolve?.(confirmed);
+  }
+  if (getCurrentScope()) onScopeDispose(() => onResultChangesConfirm(false));
+
   const suppressDangerConfirm = ref(false);
   const explainMode = ref<"explain" | "autotrace">("explain");
   const showSqlParameterDialog = ref(false);
@@ -332,6 +354,13 @@ export function useSqlExecution(deps: {
       cancelEditorViewportRequest(editorViewportRequestId);
       return notStarted("missing-database", context.tabId);
     }
+    if (tab.objectSource?.objectType === "TRIGGER" && oracleTriggerReadOptions(effectiveDatabaseTypeForConnection(context.connection))) {
+      const previousResult = queryStore.oracleTriggerSourceState(tab.id)?.result;
+      const ok = await queryStore.runOracleTriggerSourceAction(tab.id, "replace", sql);
+      cancelEditorViewportRequest(editorViewportRequestId);
+      const state = queryStore.oracleTriggerSourceState(tab.id);
+      return ok || (state?.result !== previousResult && state?.result?.steps.some((step) => step.receipt !== undefined)) ? { status: "started", ok, tabId: tab.id, errorMessage: state?.error } : notStarted("blocked", tab.id);
+    }
     if (supportsSqlTemplateParameters(context.connection, sql) && prepareSqlParameterDialog(sql, sourceOffset, executionOptions)) {
       return deferred("parameters", context.tabId);
     }
@@ -349,10 +378,10 @@ export function useSqlExecution(deps: {
       return notStarted("no-tab", context.tabId);
     }
     if (!(await ensureReadOnlyWriteAccess({ connection: context.connection, sql, source: t("production.sourceSqlEditor") }))) {
-      // The read-only unlock dialog was dismissed: the user saw UI, so the panel
-      // adds nothing (see aiSqlActionFeedback).
+      // Compatibility denial is a policy block; ordinary unlock dismissal
+      // remains cancellation. The shared guard owns the denial notification.
       cancelEditorViewportRequest(options.editorViewportRequestId);
-      return notStarted("cancelled", context.tabId);
+      return notStarted(mysqlDataCharsetEnabled(context.connection) ? "blocked" : "cancelled", context.tabId);
     }
     // Redis: block dangerous commands when toggle is on (scan entire batch for highest safety level)
     if (context.connection?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
@@ -426,10 +455,12 @@ export function useSqlExecution(deps: {
   function prepareSqlParameterDialog(sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}, continuation?: (sql: string, sourceOffset?: number) => Promise<void> | void): boolean {
     const connection = resolveExecutionConnection(options.tabId);
     const databaseType = effectiveDatabaseTypeForConnection(connection) ?? connection?.db_type;
-    const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, databaseType, settingsStore.editorSettings.sqlVariableSubstitutionEnabled);
+    const tab = resolveExecutionTab(options.tabId);
+    const compatibilityMode = databaseType === "opengauss" ? (tab ? connectionStore.databaseCompatibilityMode(tab.connectionId, tab.database) : undefined) : databaseType === "kingbase" ? connection?.database_info?.compatibilityMode : undefined;
+    const toggles = resolveSqlVariableSyntaxToggles(settingsStore.editorSettings.sqlVariableSyntaxOverrides, databaseType, settingsStore.editorSettings.sqlVariableSubstitutionEnabled, compatibilityMode);
     const enabledSyntaxes = enabledSqlParameterSyntaxes(toggles);
     const parameterDatabaseType = kingbaseSqlDatabaseType(connection) ?? databaseType;
-    const parameters = extractSqlParameterDescriptors(sql, { databaseType: parameterDatabaseType, enabledSyntaxes });
+    const parameters = extractSqlParameterDescriptors(sql, { databaseType: parameterDatabaseType, compatibilityMode, enabledSyntaxes });
     if (!parameters.length) {
       return false;
     }
@@ -507,16 +538,52 @@ export function useSqlExecution(deps: {
       cancelEditorViewportRequest(options.editorViewportRequestId);
       return notStarted("missing-database", executionTabId);
     }
+    if (options.openInNewResultTab !== true) {
+      const gridKey = resultGridInstanceKey(tab);
+      const previousResult = tab.result;
+      const gridKeys = Array.from({ length: Math.max(tab.results?.length ?? 0, 1) }, (_, activeResultIndex) => resultGridInstanceKey({ ...tab, activeResultIndex }));
+      const pendingState = () => {
+        const states = gridKeys.map((key) => dataGridPendingChangesState(key, tab.id, tab.resultViewGeneration));
+        return states.includes("saving") ? "saving" : states.includes("pending") ? "pending" : undefined;
+      };
+      if (showResultChangesDialog.value) {
+        cancelEditorViewportRequest(options.editorViewportRequestId);
+        return notStarted("busy", executionTabId);
+      }
+      if (pendingState() === "saving") {
+        toast(t("grid.queryWhileSaving"), 5000);
+        cancelEditorViewportRequest(options.editorViewportRequestId);
+        return notStarted("busy", executionTabId);
+      }
+      if (pendingState() === "pending") {
+        const confirmed = await new Promise<boolean>((resolve) => {
+          resolveResultChanges = resolve;
+          showResultChangesDialog.value = true;
+        });
+        if (!confirmed || resolveExecutionTab(executionTabId) !== tab || resultGridInstanceKey(tab) !== gridKey || tab.result !== previousResult) {
+          cancelEditorViewportRequest(options.editorViewportRequestId);
+          return notStarted("cancelled", executionTabId);
+        }
+        if (tab.isExecuting || pendingState() === "saving") {
+          cancelEditorViewportRequest(options.editorViewportRequestId);
+          return notStarted("busy", executionTabId);
+        }
+      }
+    }
     const statementCount = splitSqlStatementRanges(
       sql,
       executionDatabaseType,
       sqlStatementParameterOptionsForCompatibility(executionDatabaseType, executionDatabaseType === "opengauss" ? connectionStore.databaseCompatibilityMode(tab.connectionId, tab.database) : executionDatabaseType === "kingbase" ? executionConnection?.database_info?.compatibilityMode : undefined),
     ).length;
     const redisConsoleSelected = executionDatabaseType === "redis" && tab.uiState?.redisResultViewMode === "console";
+    // A single write/DDL statement has no result grid to show while it runs, so
+    // it starts on the summary tab where the in-flight status is rendered
+    // instead of leaving an empty data grid up (issue #12283).
+    const autoSummaryWhileRunning = statementCount === 1 && !redisConsoleSelected && executionDatabaseType !== "redis" && statementRunsWithoutResultGrid(sql);
     // Output-view switching belongs to the tab the user is looking at — both
     // when the query starts and when it finishes.
     if (deps.activeTab.value?.id === executionTabId) {
-      deps.activeOutputView.value = redisConsoleSelected ? "result" : statementCount > 1 ? settingsStore.editorSettings.multiStatementDefaultView : "result";
+      deps.activeOutputView.value = redisConsoleSelected ? "result" : statementCount > 1 ? settingsStore.editorSettings.multiStatementDefaultView : autoSummaryWhileRunning ? "summary" : "result";
     }
     updateExecutionTabUiState(tab, { autoSwitchedToMessagesDuringExecution: false });
     const connName = executionConnection?.name || "";
@@ -566,6 +633,10 @@ export function useSqlExecution(deps: {
           deps.activeOutputView.value = targetView;
         }
       }
+    } else if (executionTabStillActive && autoSummaryWhileRunning && deps.activeOutputView.value === "summary" && ((currentTab.result?.columns.length ?? 0) > 0 || currentTab.results?.some((result) => result.columns.length > 0))) {
+      // `INSERT ... RETURNING` and siblings do return a grid even though their
+      // leading keyword normally means "no result set"; show it once it lands.
+      deps.activeOutputView.value = "result";
     }
     updateExecutionTabUiState(currentTab, { autoSwitchedToMessagesDuringExecution: false });
     const elapsed = Date.now() - start;
@@ -576,7 +647,7 @@ export function useSqlExecution(deps: {
       connection_name: connName,
       database: currentTab.database,
       sql,
-      execution_time_ms: elapsed,
+      execution_time_ms: resultExecutionTimeMs(currentTab, elapsed),
       success,
       error: failure ? (failure.error ? translateBackendError(t, failure.error, failure.rows?.[0]?.[0]) : String(failure.rows?.[0]?.[0] ?? "")) : undefined,
       activity_kind: classifySqlActivityKind(sql),
@@ -640,7 +711,7 @@ export function useSqlExecution(deps: {
     if (cancelRequested()) return finish({ status: "cancelled" });
     if (!sql.trim()) return finish({ status: "failed", errorMessage: t("explain.emptySql") });
     if (!(await ensureReadOnlyWriteAccess({ connection, sql, source: t("production.sourceMultiDbSql") }))) {
-      return finish({ status: "skipped", errorMessage: t("dangerDialog.cancel") });
+      return finish({ status: "skipped", errorMessage: t(mysqlDataCharsetEnabled(connection) ? "connection.mysqlDataCharsetWriteBlocked" : "dangerDialog.cancel") });
     }
     if (requiresConnectionSelection(executionTab, connection)) {
       deps.onMissingConnection?.(executionTab.id);
@@ -817,7 +888,9 @@ export function useSqlExecution(deps: {
         const results: NonNullable<QueryTab["results"]> = [];
         for (const [statementIndex, statement] of (statements.length ? statements : [{ sql, from: 0, to: sql.length }]).entries()) {
           if (cancelRequested()) return await failedManualResult("cancelled");
-          const statementResults = await api.executeInManualTransaction(manualSessionId, statement.sql, executionTab.database, executionTab.schema, maxRows);
+          const statementResults = await (shouldReportOracleCompilationErrors(databaseType, statement.sql)
+            ? api.executeInManualTransaction(manualSessionId, statement.sql, executionTab.database, executionTab.schema, maxRows, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)
+            : api.executeInManualTransaction(manualSessionId, statement.sql, executionTab.database, executionTab.schema, maxRows));
           results.push(
             ...statementResults.map((result) => ({
               ...result,
@@ -858,7 +931,7 @@ export function useSqlExecution(deps: {
       const mergeResult = snapshotResultForMerge(latest.result);
       const resultStatus = success ? (input.manualTransaction ? "pending_commit" : "success") : "failed";
       recordedRunId = captureWorkerResult(resultStatus, errorMessage);
-      const executionDuration = elapsedMs();
+      const executionDuration = resultExecutionTimeMs(latest, elapsedMs());
       const recordOutcome = async () => {
         await historyStore.add({
           connection_id: executionTab.connectionId,
@@ -1025,7 +1098,7 @@ export function useSqlExecution(deps: {
     const connection = connectionStore.getConfig(tab.connectionId);
     if (!(await ensureReadOnlyWriteAccess({ connection, sql, source: t("production.sourceSqlEditor") }))) {
       cancelEditorViewportRequest(editorViewportRequestId);
-      reportDeferredExecution(notStarted("cancelled", tab.id));
+      reportDeferredExecution(notStarted(mysqlDataCharsetEnabled(connection) ? "blocked" : "cancelled", tab.id));
       return;
     }
     try {
@@ -1107,6 +1180,8 @@ export function useSqlExecution(deps: {
 
   return {
     dangerSql,
+    showResultChangesDialog,
+    onResultChangesConfirm,
     pendingDangerSql,
     showDangerDialog,
     suppressDangerConfirm,

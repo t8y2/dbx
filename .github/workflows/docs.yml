@@ -19,11 +19,16 @@ concurrency:
 
 jobs:
   build:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    # 文档站部署到上游的 Cloudflare Workers，需要上游的 R2 凭据；
+    # fork 没有这些凭据，每次同步带进 docs/** 改动都会失败一次。
+    # 部署目标固定是上游的站点，fork 不该跑它（同 contributors.yml）。
+    # 仓库守卫与 workflow_run 的结论判断必须合并在同一行：job 级 if: 只有一行，
+    # 写两行会让后一行覆盖前一行。
+    if: github.repository == 't8y2/dbx' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - uses: pnpm/action-setup@v6

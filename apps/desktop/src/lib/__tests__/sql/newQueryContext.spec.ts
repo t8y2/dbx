@@ -312,6 +312,14 @@ describe("buildSelectAllSql", () => {
     expect(buildSelectAllSql("influxdb3", { tableName: "cpu" })).toBe(`SELECT * FROM "cpu" WHERE time > now() - INTERVAL '5 minutes' ORDER BY time DESC LIMIT 100`);
   });
 
+  it("honors lower keywordCase for new-query SQL prefill (#12933)", () => {
+    expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" }, undefined, undefined, false, true, "lower")).toBe('select * from "users"');
+    expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" }, undefined, undefined, false, true, "upper")).toBe('SELECT * FROM "users"');
+    expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" }, undefined, undefined, false, true, "preserve")).toBe('SELECT * FROM "users"');
+    expect(buildSelectAllSql("influxdb", { tableName: "cpu" }, undefined, undefined, false, true, "lower")).toBe('select * from "cpu" where time > now() - 5m order by time desc limit 100');
+    expect(buildSelectAllSql("influxdb3", { tableName: "cpu" }, undefined, undefined, false, true, "lower")).toBe(`select * from "cpu" where time > now() - interval '5 minutes' order by time desc limit 100`);
+  });
+
   it("bracket-quotes a SQL Server table", () => {
     expect(buildSelectAllSql("sqlserver", { schema: "dbo", tableName: "users" })).toBe("SELECT * FROM [dbo].[users]");
     expect(buildSelectAllSql("sqlserver", { tableName: "users" })).toBe("SELECT * FROM [users]");
@@ -390,6 +398,19 @@ describe("resolveNewQueryInitialSql", () => {
         quoteIdentifiers: false,
       }),
     ).toBe("SELECT * FROM public.users");
+  });
+
+  it("honors lower keywordCase when resolving initial new-query SQL (#12933)", () => {
+    expect(
+      resolveNewQueryInitialSql({
+        activeTab: dataTab(),
+        prefillEnabled: true,
+        targetConnectionId: "conn-1",
+        targetDatabase: "app_db",
+        databaseType: "postgres",
+        keywordCase: "lower",
+      }),
+    ).toBe('select * from "users"');
   });
 
   it("passes the Phoenix driver profile into the initial SQL builder", () => {

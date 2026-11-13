@@ -54,6 +54,7 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   "mongodb+srv": { type: "mongodb", profile: "mongodb", label: "MongoDB", defaultPort: 27017 },
   dynamodb: { type: "dynamodb", profile: "dynamodb", label: "Amazon DynamoDB", defaultPort: 443 },
   clickhouse: { type: "clickhouse", profile: "clickhouse", label: "ClickHouse", defaultPort: 8123 },
+  databend: { type: "databend", profile: "databend", label: "Databend", defaultPort: 8000 },
   nebula: { type: "nebula", profile: "nebula", label: "NebulaGraph", defaultPort: 9669 },
   sqlserver: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
   mssql: { type: "sqlserver", profile: "sqlserver", label: "SQL Server", defaultPort: 1433 },
@@ -80,7 +81,10 @@ const SCHEME_PROFILES: Record<string, ConnectionProfile> = {
   opengauss: { type: "gaussdb", profile: "opengauss", label: "openGauss", defaultPort: 5432 },
   questdb: { type: "questdb", profile: "questdb", label: "QuestDB", defaultPort: 8812 },
   tdengine: { type: "tdengine", profile: "tdengine", label: "TDengine", defaultPort: 6041 },
+  taosws: { type: "tdengine", profile: "tdengine", label: "TDengine", defaultPort: 6041 },
+  taoswss: { type: "tdengine", profile: "tdengine", label: "TDengine", defaultPort: 6041 },
   "taos-ws": { type: "tdengine", profile: "tdengine", label: "TDengine", defaultPort: 6041 },
+  "taos-rs": { type: "tdengine", profile: "tdengine", label: "TDengine", defaultPort: 6041 },
   oscar: { type: "oscar", profile: "oscar", label: "神通 OSCAR", defaultPort: 2003 },
   xugu: { type: "xugu", profile: "xugu", label: "XuguDB", defaultPort: 5138 },
   iotdb: { type: "iotdb", profile: "iotdb", label: "Apache IoTDB", defaultPort: 6667 },
@@ -403,7 +407,49 @@ function urlParamsRequireTls(dbType: DatabaseType, params: string): boolean {
     return sslMode === "require" || sslMode === "verify-ca" || sslMode === "verify-full";
   }
 
+  if (dbType === "tdengine") {
+    const useSsl = (queryParamLastValue(params, "useSSL") || queryParamLastValue(params, "ssl") || "").toLowerCase();
+    return ["true", "1", "yes", "on"].includes(useSsl);
+  }
+
   return false;
+}
+
+function databendUrlOptions(params: string, isJdbcUrl: boolean): { ssl: boolean; urlParams: string; defaultPort: number } {
+  const tlsOptions = new Map<string, string>();
+  // Match the JDBC query delimiter. Semicolons can be part of other values.
+  const normalizedParams = params
+    .split("&")
+    .map((part) => {
+      const [rawKey, ...rest] = part.split("=");
+      const key = decodeUrlPart(rawKey).toLowerCase();
+      if (key !== "ssl" && key !== "sslmode") return part;
+      if (tlsOptions.has(key)) {
+        throw new Error(`Duplicate Databend ${key} parameter`);
+      }
+      const value = decodeUrlPart(rest.join("=")).trim().toLowerCase();
+      tlsOptions.set(key, value);
+      // JDBC property names are case-sensitive. Emit the values we validate.
+      return `${key}=${value}`;
+    })
+    .join("&");
+  const explicitSsl = tlsOptions.get("ssl");
+  const sslMode = tlsOptions.get("sslmode");
+  if (explicitSsl !== undefined && explicitSsl !== "true" && explicitSsl !== "false") {
+    throw new Error("Invalid Databend ssl parameter: expected true or false");
+  }
+  if (sslMode !== undefined && !["enable", "require", "disable"].includes(sslMode)) {
+    throw new Error("Invalid Databend sslmode parameter: expected enable, require or disable");
+  }
+  if (explicitSsl !== undefined && sslMode !== undefined && (explicitSsl === "true") !== (sslMode !== "disable")) {
+    throw new Error("Conflicting Databend ssl and sslmode parameters");
+  }
+
+  // Native DSNs default to HTTPS. JDBC defaults to HTTP and only consumes URL
+  // parameters, not the connection form's top-level ssl flag.
+  const ssl = explicitSsl === "true" || sslMode === "enable" || sslMode === "require" || (explicitSsl === undefined && sslMode === undefined && !isJdbcUrl);
+  const urlParams = explicitSsl === undefined && (ssl || !isJdbcUrl) ? [normalizedParams, `ssl=${ssl}`].filter(Boolean).join("&") : normalizedParams;
+  return { ssl, urlParams, defaultPort: ssl ? 443 : isJdbcUrl ? 8000 : 80 };
 }
 
 function isTidbCloudHost(host: string): boolean {
@@ -668,12 +714,44 @@ function parseJdbcDremioUrl(source: string): ParsedConnectionUrl | null {
   };
 }
 
+/** Schemes that address a web endpoint, where `#` really does start a fragment. */
+const WEB_URL_SCHEMES = new Set(["http", "https"]);
+
+/**
+ * Database connection URLs are DSNs, not web pages: the query is a parameter
+ * list that is read to the end (PgJDBC, and DBX's own Hive/Oracle JDBC
+ * importers), and a `#` inside a credential, database name or parameter value
+ * is literal text. WHATWG `URL` stops at the first `#` instead, which imported
+ * `…?password=Jxc#2026@n` as the password `Jxc` and dropped the rest without a
+ * warning, and rejected `user:p#ss@host` as an invalid URL.
+ *
+ * Escaping the literal `#` before parsing fixes both: `decodeUrlPart` restores
+ * the original character for credentials, and DBX re-encodes credentials when it
+ * builds the driver URL, so the value reaches the driver unchanged. Only Redis
+ * documents a fragment of its own (`#insecure`), so that suffix stays an alias;
+ * `http`/`https` endpoints keep standard fragment behaviour.
+ */
+function normalizeConnectionUrlFragment(source: string): { source: string; redisInsecure: boolean } {
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(source)?.[1]?.toLowerCase() ?? "";
+  if (WEB_URL_SCHEMES.has(scheme)) return { source, redisInsecure: false };
+
+  const fragmentStart = source.indexOf("#");
+  if (fragmentStart < 0) return { source, redisInsecure: false };
+
+  const fragment = source.slice(fragmentStart + 1);
+  if ((scheme === "redis" || scheme === "rediss") && decodeUrlPart(fragment).trim().toLowerCase() === "insecure") {
+    return { source: source.slice(0, fragmentStart), redisInsecure: true };
+  }
+
+  return { source: source.replace(/#/g, "%23"), redisInsecure: false };
+}
+
 function parseJdbcDremioArrowFlightSqlUrl(source: string): ParsedConnectionUrl | null {
   if (!/^jdbc:arrow-flight-sql:\/\//i.test(source)) return null;
 
   let parsed: URL;
   try {
-    parsed = new URL(source.replace(/^jdbc:/i, ""));
+    parsed = new URL(normalizeConnectionUrlFragment(source.replace(/^jdbc:/i, "")).source);
   } catch {
     return null;
   }
@@ -731,9 +809,10 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   const zooKeeperResult = parseZooKeeperUrl(source);
   if (zooKeeperResult) return zooKeeperResult;
 
+  const normalizedSource = normalizeConnectionUrlFragment(source);
   let parsed: URL;
   try {
-    parsed = new URL(source);
+    parsed = new URL(normalizedSource.source);
   } catch {
     throw new Error("Invalid connection URL");
   }
@@ -747,14 +826,14 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   const urlParams = parsed.search.replace(/^\?/, "");
   const name = connectionNameParam(parsed);
   const urlParamsWithoutName = stripConnectionNameParam(urlParams);
-  const normalizedFragment = decodeUrlPart(parsed.hash.replace(/^#/, "")).trim().toLowerCase();
   // A Redis path can carry pasted redis-cli flags ("…/0 --tls --insecure");
   // salvage the db index plus the TLS/insecure intent before they are dropped.
   const redisPath = profile.type === "redis" ? parseRedisUrlPath(databaseFromPath(parsed.pathname) || "") : null;
-  const redisInsecure = redisPath?.insecure || normalizedFragment === "insecure";
+  const redisInsecure = redisPath?.insecure || normalizedSource.redisInsecure;
   const parsedUrlParams = profile.type === "redis" && redisInsecure && !/(^|&)insecure=/i.test(urlParamsWithoutName) ? [urlParamsWithoutName, "insecure=true"].filter(Boolean).join("&") : urlParamsWithoutName;
   const jdbcCredentials = isJdbcUrl && (profile.type === "mysql" || profile.profile === "oceanbase-oracle") ? extractMysqlCredentialParams(parsedUrlParams) : undefined;
-  const effectiveUrlParams = jdbcCredentials?.urlParams ?? parsedUrlParams;
+  const databendOptions = profile.type === "databend" ? databendUrlOptions(parsedUrlParams, isJdbcUrl) : undefined;
+  const effectiveUrlParams = databendOptions?.urlParams ?? jdbcCredentials?.urlParams ?? parsedUrlParams;
   if (profile.type === "mongodb") {
     return {
       dbType: profile.type,
@@ -789,7 +868,7 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
   }
 
   const isMeilisearch = profile.type === "meilisearch";
-  const defaultPort = isJdbcUrl && scheme === "oceanbase" ? 3306 : isMeilisearch && scheme === "http" ? 80 : isMeilisearch && scheme === "https" ? 443 : profile.defaultPort;
+  const defaultPort = databendOptions?.defaultPort ?? (isJdbcUrl && scheme === "oceanbase" ? 3306 : isMeilisearch && scheme === "http" ? 80 : isMeilisearch && scheme === "https" ? 443 : profile.defaultPort);
   // A Redis URL path is a numeric db index; redis-cli flags salvaged above.
   const pathDatabase = redisPath ? redisPath.database : databaseFromPath(parsed.pathname);
 
@@ -805,7 +884,7 @@ export function parseConnectionUrl(value: string, preferredProfile?: string): Pa
     password: jdbcCredentials?.password ?? decodeUrlPart(parsed.password),
     database: profile.type === "victoriametrics" ? "metrics" : profile.type === "dynamodb" ? dynamodbRegionFromHost(parsed.hostname) : isMeilisearch || profile.type === "solr" ? undefined : pathDatabase,
     urlParams: effectiveUrlParams,
-    ssl: scheme === "rediss" || scheme === "https" || (redisPath?.tls ?? false) || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname)),
+    ssl: databendOptions?.ssl ?? (scheme === "rediss" || scheme === "https" || scheme === "taoswss" || (redisPath?.tls ?? false) || urlParamsRequireTls(profile.type, effectiveUrlParams) || (profile.type === "mysql" && isTidbCloudHost(parsed.hostname))),
     ...(profile.type === "victoriametrics" ? { apiPath: parsed.pathname.replace(/\/+$/, "") } : {}),
     ...(isMeilisearch ? { basePath: parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "") } : {}),
   };

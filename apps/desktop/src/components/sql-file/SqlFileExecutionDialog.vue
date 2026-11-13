@@ -20,7 +20,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { connectionIsEffectivelyReadOnly, ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
-import { supportsSqlFileExecution, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, supportsSqlFileExecution, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
 import { formatError, isManualTransactionSessionExpired } from "@/lib/backend/errorUtils";
 import { fetchSqlFileTargetOptions, namespaceOptionsAreSchemas } from "@/composables/useDatabaseOptions";
 import { requiresSqlFileTargetDatabaseSelection, supportsConnectionLevelDatabaseBootstrap } from "@/lib/connection/connectionLevelDatabaseBootstrap";
@@ -32,6 +32,7 @@ import {
   executeSqlFiles,
   refreshSqlFilePreview,
   inspectSqlFileTables,
+  listSchemas,
   listenSqlFileProgress,
   previewSqlFile,
   type SqlFilePreview,
@@ -43,11 +44,13 @@ import { activeTabExternalSqlFileTarget, rememberExternalSqlFileTarget, resolveE
 import type { SqlFileEncoding } from "@/lib/backend/tauri";
 import { TABLE_IMPORT_ENCODING_OPTIONS } from "@/lib/table/tableImport";
 import { isSqlFilePath } from "@/lib/sql/sqlFileOpen";
+import { isScrolledToBottom } from "./sqlFileProgressScroll";
 import { buildDisplayFileNames, tooltipText as computeTooltipText } from "./sqlFilePreviewLabel";
 import { parseSqlFilePathInput } from "./sqlFilePathInput";
 import { orderConnectionsForSidebarDisplay } from "@/lib/sidebar/connectionListSort";
 import SqlFileProgressIndicator from "./SqlFileProgressIndicator.vue";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
+import { readSqlFileCloseOnSuccess, writeSqlFileCloseOnSuccess } from "@/lib/sql/sqlFileExecutionOptions";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
 
@@ -75,6 +78,7 @@ const isDesktopRuntime = isTauriRuntime();
 const fileInput = ref<HTMLInputElement | null>(null);
 const previews = ref<SqlFilePreview[]>([]);
 const encoding = ref<SqlFileEncoding>("auto");
+const resolveIncludes = ref(false);
 const previewError = ref("");
 let previewGeneration = 0;
 let selectedSources: Array<string | File> = [];
@@ -145,9 +149,20 @@ const connectionId = ref("");
 const targetNamespace = ref("");
 const databaseOptions = ref<string[]>([]);
 const loadingDatabases = ref(false);
+// Second-level namespace for engines that layer schemas under a database (PostgreSQL,
+// SQL Server, ...). Empty means "whatever the connection's search_path/default is", so
+// the dialog's behaviour is unchanged until a schema is picked (#14584).
+const DEFAULT_SCHEMA_OPTION = "__dbx_default_schema__";
+const schemaOptions = ref<string[]>([]);
+const loadingSchemas = ref(false);
+const targetSchema = ref("");
 const preferredTarget = ref<ExternalSqlFileTarget>();
 const continueOnError = ref(false);
 const skipRelationalConstraints = ref(false);
+const closeOnSuccess = ref(readSqlFileCloseOnSuccess());
+watch(closeOnSuccess, (enabled) => {
+  writeSqlFileCloseOnSuccess(enabled);
+});
 const manualTransaction = ref(false);
 const txnSessionId = ref<string>();
 const commitUncertain = ref(false);
@@ -167,6 +182,50 @@ const failureDetailsExpanded = ref(false);
 const refreshedTarget = ref(false);
 const DEFAULT_WEB_SQL_FILE_BYTES = 200 * 1024 * 1024;
 const webSqlFileUploadMaxBytes = ref(DEFAULT_WEB_SQL_FILE_BYTES);
+
+// The scrollable body renders the progress block as its last child, so the
+// progress area starts below the fold once a file is selected. Execution
+// scrolls it into view on start and keeps it in view while the user stays at
+// the bottom of the body; scrolling up hands the scroll position back to the
+// user instead of fighting them.
+const scrollBodyRef = ref<HTMLElement | null>(null);
+let pinnedToBottom = true;
+
+function scrollBodyToBottom() {
+  const element = scrollBodyRef.value;
+  if (!element) return;
+  element.scrollTop = element.scrollHeight;
+}
+
+function handleScrollBodyScroll() {
+  const element = scrollBodyRef.value;
+  if (!element) return;
+  pinnedToBottom = isScrolledToBottom(element);
+}
+
+// Starting an execution reveals the progress area for the first time, so jump
+// straight to it instead of leaving the user to scroll down by hand.
+watch(
+  running,
+  (isRunning) => {
+    if (!isRunning) return;
+    pinnedToBottom = true;
+    scrollBodyToBottom();
+  },
+  { flush: "post" },
+);
+
+// The progress block grows while it runs (byte progress, per-file summary,
+// failure details), so keep it in view as long as the user has not scrolled
+// away from the bottom.
+watch(
+  [progress, running],
+  () => {
+    if (!pinnedToBottom) return;
+    scrollBodyToBottom();
+  },
+  { flush: "post" },
+);
 
 // The web server caps SQL file uploads via DBX_SQL_FILE_UPLOAD_MAX_MB; fetch the
 // effective limit once so the client-side pre-check matches the server rule.
@@ -258,7 +317,9 @@ async function finishTransaction(commit: boolean) {
         toast(t("sqlFile.completedWithErrors", { succeeded: progress.value?.successCount ?? 0, failed: failureCount }), 5000);
       } else {
         toast(t("sqlFile.executeSuccess"), 3000);
-        open.value = false;
+        if (closeOnSuccess.value) {
+          open.value = false;
+        }
       }
     }
     return true;
@@ -293,6 +354,10 @@ onBeforeUnmount(() => {
 });
 
 const restoreSelectedTables = ref(false);
+const canResolveIncludes = computed(() => isDesktopRuntime && !restoreSelectedTables.value && previews.value.length > 0 && previews.value.every((item) => !item.packageFilePaths && item.fileName.toLowerCase().endsWith(".sql")));
+watch(canResolveIncludes, (allowed) => {
+  if (!allowed) resolveIncludes.value = false;
+});
 const backupTables = ref<SqlFileTable[]>([]);
 const selectedTableKeys = ref(new Set<string>());
 const tableSearch = ref("");
@@ -454,6 +519,10 @@ function applyTarget(target: ExternalSqlFileTarget) {
   preferredTarget.value = normalizedTarget;
   connectionId.value = normalizedTarget.connectionId;
   targetNamespace.value = namespaceOptionsAreSchemas(store.getConfig(normalizedTarget.connectionId)) ? (normalizedTarget.schema ?? "") : normalizedTarget.database;
+  // The schema list itself is loaded once the database is known; remember the
+  // caller's schema (sidebar context, prefill) so that load can preselect it.
+  pendingPreferredSchema = schemaPickerApplies.value ? (normalizedTarget.schema ?? "") : "";
+  targetSchema.value = pendingPreferredSchema;
 }
 
 function chooseNamespace(names: string[], id: string) {
@@ -481,6 +550,11 @@ watch(targetNamespace, (namespace) => {
     database: optionsAreSchemas ? connection?.database?.trim() || "" : namespace.trim(),
     ...(optionsAreSchemas ? { schema: namespace.trim() } : {}),
   };
+  const database = namespace.trim();
+  if (!schemaPickerApplies.value || `${connectionId.value}\0${database}` === loadedSchemaKey) return;
+  const preferred = pendingPreferredSchema;
+  pendingPreferredSchema = "";
+  void loadSchemasForDatabase(connectionId.value, database, preferred);
 });
 
 function sqlFileExecutionTarget(): SqlFileExecutionTarget {
@@ -492,7 +566,57 @@ function sqlFileExecutionTarget(): SqlFileExecutionTarget {
       ...(namespace ? { schema: namespace } : {}),
     };
   }
-  return { database: namespace };
+  const schema = schemaPickerApplies.value ? targetSchema.value.trim() : "";
+  return schema ? { database: namespace, schema } : { database: namespace };
+}
+
+/**
+ * PostgreSQL-family (and SQL Server) engines nest schemas under a database, so the
+ * dialog needs a second namespace level there. Engines whose picker already lists
+ * schemas (Oracle, Dameng) or where schema == database (MySQL) stay single-level.
+ */
+const schemaPickerApplies = computed(() => {
+  const connection = store.getConfig(connectionId.value);
+  if (!connection || namespaceOptionsAreSchemas(connection)) return false;
+  return isSchemaAware(connection.db_type);
+});
+
+/**
+ * Oracle, Dameng and OceanBase-Oracle expose schemas directly under the connection,
+ * so their single picker *is* the schema picker. Naming it "Database" made the dialog
+ * look like it could not target a schema at all (#14584).
+ */
+const namespacePickerListsSchemas = computed(() => namespaceOptionsAreSchemas(store.getConfig(connectionId.value)));
+
+let schemaLoadToken = 0;
+// "connection\0database" whose schema list is already on screen, so re-emitting the
+// same namespace does not clear a schema the user just picked.
+let loadedSchemaKey = "";
+let pendingPreferredSchema = "";
+
+async function loadSchemasForDatabase(id: string, database: string, preferredSchema = "") {
+  const token = ++schemaLoadToken;
+  const key = `${id}\0${database}`;
+  loadedSchemaKey = key;
+  schemaOptions.value = [];
+  targetSchema.value = "";
+  if (!schemaPickerApplies.value || !database) return;
+  loadingSchemas.value = true;
+  try {
+    const names = await listSchemas(id, database, true);
+    if (token !== schemaLoadToken) return;
+    schemaOptions.value = [...names].sort((a, b) => a.localeCompare(b));
+    const wanted = preferredSchema.trim();
+    // Stay on the connection's default search_path when the preferred schema is not
+    // available, rather than silently picking an unrelated one.
+    targetSchema.value = wanted && names.includes(wanted) ? wanted : "";
+  } catch {
+    if (token !== schemaLoadToken) return;
+    schemaOptions.value = [];
+    targetSchema.value = "";
+  } finally {
+    if (token === schemaLoadToken) loadingSchemas.value = false;
+  }
 }
 
 function resetExecution() {
@@ -517,14 +641,21 @@ function resetState() {
   const initialTarget = resolveInitialTarget();
   previews.value = [];
   encoding.value = "auto";
+  resolveIncludes.value = false;
   selectingFile.value = false;
   loadingPreview.value = false;
+  // Clear the schema state before applyTarget so the target's own schema survives.
+  schemaOptions.value = [];
+  loadingSchemas.value = false;
+  loadedSchemaKey = "";
+  pendingPreferredSchema = "";
   applyTarget(initialTarget);
   databaseOptions.value = [];
   loadingDatabases.value = false;
   continueOnError.value = false;
   skipRelationalConstraints.value = false;
   manualTransaction.value = false;
+  closeOnSuccess.value = readSqlFileCloseOnSuccess();
   restoreSelectedTables.value = false;
   resetExecution();
 }
@@ -550,6 +681,14 @@ async function loadDatabasesForConnection(id: string) {
     if (token !== databaseLoadToken) return;
     databaseOptions.value = names;
     targetNamespace.value = chooseNamespace(names, id);
+    // The namespace watcher skips an unchanged value, so seed the schema list here
+    // too: opening the dialog on a prefilled target would otherwise never load it.
+    const database = targetNamespace.value.trim();
+    if (database && `${id}\0${database}` !== loadedSchemaKey) {
+      const preferred = pendingPreferredSchema;
+      pendingPreferredSchema = "";
+      void loadSchemasForDatabase(id, database, preferred);
+    }
   } catch {
     if (token !== databaseLoadToken) return;
     databaseOptions.value = [];
@@ -664,7 +803,7 @@ async function selectFile() {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       multiple: true,
-      filters: [{ name: "SQL package", extensions: ["sql", "gz", "zip"] }],
+      filters: [{ name: "SQL package", extensions: ["sql", "gz", "zip", "nb3"] }],
     });
     const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
     if (paths.length > 0) {
@@ -850,6 +989,7 @@ async function startExecution() {
           ...(target.schema ? { schema: target.schema } : {}),
           filePath: executionPaths[0]!,
           encoding: encoding.value,
+          resolveIncludes: canResolveIncludes.value && resolveIncludes.value,
           continueOnError: continueOnError.value,
           ...(txnSessionId.value ? { txnSessionId: txnSessionId.value } : {}),
           ...(restoreSelectedTables.value ? { selectedTables: selectedTables.value.map((table) => ({ ...table })) } : {}),
@@ -892,7 +1032,9 @@ async function startExecution() {
           toast(t("sqlFile.completedWithErrors", { succeeded: finalProgress?.successCount ?? 0, failed: failureCount }), 5000);
         } else {
           toast(t("sqlFile.executeSuccess"), 3000);
-          open.value = false;
+          if (closeOnSuccess.value) {
+            open.value = false;
+          }
         }
       }
     }
@@ -1001,14 +1143,14 @@ watch(
       </DialogHeader>
 
       <!-- Keep terminal actions reachable while long previews and errors scroll inside the viewport. -->
-      <div class="grid min-h-0 min-w-0 flex-1 gap-4 overflow-y-auto py-3">
+      <div ref="scrollBodyRef" data-testid="sql-file-scroll-body" class="grid min-h-0 min-w-0 flex-1 gap-4 overflow-y-auto py-3" @scroll="handleScrollBodyScroll">
         <div class="min-w-0 space-y-3">
           <div class="text-xs font-medium text-muted-foreground uppercase tracking-wider">
             {{ t("sqlFile.file") }}
           </div>
 
           <div class="flex items-center gap-2">
-            <input ref="fileInput" type="file" accept=".sql,.sql.gz,.zip,text/sql,application/gzip,application/zip" multiple class="hidden" @change="handleFileInputChange" />
+            <input ref="fileInput" type="file" accept=".sql,.sql.gz,.zip,.nb3,text/sql,application/gzip,application/zip" multiple class="hidden" @change="handleFileInputChange" />
             <Input v-if="isDesktopRuntime" v-model="pathInput" :disabled="executionLocked" class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" @keydown.enter="commitPathInputOnEnter" @blur="commitPathInput" />
             <Input v-else :model-value="filePathDisplay" readonly class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" />
             <Button variant="outline" size="sm" class="h-8 shrink-0" :disabled="executionLocked || selectingFile" @click="selectFile">
@@ -1103,18 +1245,34 @@ watch(
             </div>
 
             <div class="space-y-1.5">
-              <Label class="text-xs">{{ t("sqlFile.database") }}</Label>
+              <Label class="text-xs">{{ t(namespacePickerListsSchemas ? "sqlFile.schema" : "sqlFile.database") }}</Label>
               <Select v-if="databaseOptions.length" v-model="targetNamespace" :disabled="executionLocked || loadingDatabases">
                 <SelectTrigger class="h-8 text-xs">
-                  <SelectValue :placeholder="t('sqlFile.selectDatabase')" />
+                  <SelectValue :placeholder="t(namespacePickerListsSchemas ? 'sqlFile.schemaPlaceholder' : 'sqlFile.selectDatabase')" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem v-for="db in databaseOptions" :key="db" :value="db">{{ db }}</SelectItem>
                 </SelectContent>
               </Select>
               <div v-else class="relative">
-                <Input v-model="targetNamespace" class="h-8 text-xs" :disabled="executionLocked || loadingDatabases" :placeholder="t('sqlFile.databasePlaceholder')" />
+                <Input v-model="targetNamespace" class="h-8 text-xs" :disabled="executionLocked || loadingDatabases" :placeholder="t(namespacePickerListsSchemas ? 'sqlFile.schemaPlaceholder' : 'sqlFile.databasePlaceholder')" />
                 <Loader2 v-if="loadingDatabases" class="absolute right-2 top-2 w-3.5 h-3.5 animate-spin text-muted-foreground" />
+              </div>
+            </div>
+
+            <div v-if="schemaPickerApplies" class="space-y-1.5" data-sql-file-schema>
+              <Label class="text-xs">{{ t("sqlFile.schema") }}</Label>
+              <div class="relative">
+                <Select :model-value="targetSchema || DEFAULT_SCHEMA_OPTION" :disabled="executionLocked || loadingSchemas || !targetNamespace.trim()" @update:model-value="targetSchema = String($event) === DEFAULT_SCHEMA_OPTION ? '' : String($event)">
+                  <SelectTrigger class="h-8 text-xs">
+                    <SelectValue :placeholder="t('sqlFile.schemaPlaceholder')" />
+                  </SelectTrigger>
+                  <SelectContent position="popper">
+                    <SelectItem :value="DEFAULT_SCHEMA_OPTION">{{ t("sqlFile.schemaDefault") }}</SelectItem>
+                    <SelectItem v-for="schema in schemaOptions" :key="schema" :value="schema">{{ schema }}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Loader2 v-if="loadingSchemas" class="pointer-events-none absolute right-7 top-2 w-3.5 h-3.5 animate-spin text-muted-foreground" />
               </div>
             </div>
           </div>
@@ -1157,6 +1315,11 @@ watch(
             {{ t("toolbar.manualTransaction") }}
           </label>
           <p v-if="manualTransaction" class="text-xs text-muted-foreground">{{ t("sqlFile.manualTransactionHint") }}</p>
+          <label v-if="isDesktopRuntime" class="flex items-center gap-2 text-xs">
+            <input v-model="resolveIncludes" type="checkbox" :disabled="executionLocked || !canResolveIncludes" />
+            {{ t("sqlFile.resolveIncludes") }}
+          </label>
+          <p v-if="resolveIncludes" class="text-xs text-muted-foreground">{{ t("sqlFile.resolveIncludesHint") }}</p>
           <button type="button" class="flex items-center gap-2 text-xs text-left" :disabled="executionLocked || manualTransaction" @click="continueOnError = !continueOnError">
             <CheckSquare v-if="continueOnError" class="w-3.5 h-3.5 text-primary shrink-0" />
             <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
@@ -1166,6 +1329,11 @@ watch(
             <CheckSquare v-if="skipRelationalConstraints" class="w-3.5 h-3.5 text-primary shrink-0" />
             <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
             {{ t("sqlFile.skipRelationalConstraints") }}
+          </button>
+          <button type="button" class="flex items-center gap-2 text-xs text-left" :disabled="executionLocked" @click="closeOnSuccess = !closeOnSuccess">
+            <CheckSquare v-if="closeOnSuccess" class="w-3.5 h-3.5 text-primary shrink-0" />
+            <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
+            {{ t("sqlFile.closeOnSuccess") }}
           </button>
         </div>
 

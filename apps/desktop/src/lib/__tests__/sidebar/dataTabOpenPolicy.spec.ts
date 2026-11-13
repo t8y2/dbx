@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, dataTabOpenModeFromTreeClick, findExistingDataTabCandidate, isDataTabMetadataLifecycleStale } from "@/lib/sidebar/dataTabOpenPolicy";
+import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, dataTabOpenModeFromTreeClick, findExistingDataTabCandidate, isDataTabMetadataLifecycleStale, isSameHBaseTable, isSameTable } from "@/lib/sidebar/dataTabOpenPolicy";
 import type { QueryTab } from "@/types/database";
 
 function click(modifiers: Partial<Pick<MouseEvent, "metaKey" | "ctrlKey" | "altKey" | "shiftKey">> = {}) {
@@ -127,6 +127,34 @@ describe("dataTabOpenPolicy", () => {
 
     expect(canApplyDataTabMetadata(tab, mysqlTarget, new AbortController().signal)).toBe(true);
     expect(findExistingDataTabCandidate([tab], mysqlTarget, { openMode: "default", reuseMode: "same-table" })).toEqual({ tab, match: "same-table" });
+  });
+
+  it("matches table identity using catalog and schema fallbacks", () => {
+    const tab = dataTab("users", "display name", "");
+    tab.catalog = "fallback";
+    tab.tableMeta = { catalog: "analytics", schema: "public", tableName: "users", columns: [], primaryKeys: [] };
+    const target = { ...usersTarget, catalog: "analytics" };
+
+    expect(isSameTable(tab, target)).toBe(true);
+    expect(isSameTable(tab, { ...target, catalog: "fallback" })).toBe(false);
+    expect(isSameTable(tab, { ...target, schema: "archive" })).toBe(false);
+    tab.tableMeta.catalog = undefined;
+    expect(isSameTable(tab, { ...target, catalog: "fallback" })).toBe(true);
+    tab.schema = "archive";
+    expect(isSameTable(tab, { ...target, catalog: "fallback" })).toBe(false);
+  });
+
+  it("matches HBase tables by mode, connection, namespace and sql or title", () => {
+    const tab: QueryTab = { ...dataTab("hbase", "display name"), mode: "hbase", database: "ns", sql: "users" };
+    const target = { connectionId: "conn", database: "ns", tableName: "users" };
+
+    expect(isSameHBaseTable(tab, target)).toBe(true);
+    expect(isSameHBaseTable({ ...tab, sql: "", title: "users" }, target)).toBe(true);
+    expect(isSameHBaseTable({ ...tab, mode: "data" }, target)).toBe(false);
+    expect(isSameHBaseTable(tab, { ...target, connectionId: "other" })).toBe(false);
+    expect(isSameHBaseTable(tab, { ...target, database: "other" })).toBe(false);
+    expect(isSameHBaseTable(tab, { ...target, tableName: "display name" })).toBe(false);
+    expect(isSameHBaseTable(tab, { ...target, tableName: "orders" })).toBe(false);
   });
 
   it("rejects metadata after its request is cancelled", () => {

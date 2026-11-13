@@ -54,7 +54,7 @@ import { clipboardLineEndings, copyToClipboard, readTextFromClipboard } from "@/
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
-import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoomCommitScheduler, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
+import { clampEditorFontSize, createEditorWheelZoomController, createEditorZoomCommitScheduler } from "@/lib/editor/editorZoom";
 import { replaceFallbackKey } from "@/lib/editor/queryEditorSearchKeymap";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { matchesShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -221,7 +221,7 @@ const configEditorZoomCommitScheduler = createEditorZoomCommitScheduler((fontSiz
   if (settingsStore.editorSettings.fontSize === fontSize) return;
   settingsStore.updateEditorSettings({ fontSize });
 });
-const configEditorWheelZoomGestureGuard = createEditorWheelZoomGestureGuard();
+const configEditorWheelZoom = createEditorWheelZoomController();
 const knownConfigFormats = ref<Record<string, string>>({});
 const selectedConfigKeys = ref<string[]>([]);
 const searchOpen = ref(false);
@@ -308,8 +308,9 @@ let instanceOperationToken = 0;
 let serviceMutationSequence = 0;
 
 const NACOS_SPLIT_SIZE_KEY = "dbx-nacos-admin-split-size";
+const NACOS_MIN_SPLIT_SIZE = 28;
 const savedNacosSplitSize = Number(safeLocalStorageGet(NACOS_SPLIT_SIZE_KEY));
-const nacosSplitSize = ref(restoredUiState.nacosSplitSize ?? (savedNacosSplitSize >= 20 && savedNacosSplitSize <= 80 ? savedNacosSplitSize : 42));
+const nacosSplitSize = ref(restoredUiState.nacosSplitSize ?? (savedNacosSplitSize >= NACOS_MIN_SPLIT_SIZE && savedNacosSplitSize <= 80 ? savedNacosSplitSize : 42));
 
 trackUiState(() => ({
   activeTab: activeTab.value,
@@ -646,9 +647,9 @@ async function mountConfigEditor() {
           return selectLineEnds(eventView);
         },
         wheel(event, eventView) {
-          if (!configEditorWheelZoomGestureGuard.accepts(event)) return false;
+          const next = configEditorWheelZoom.nextFontSize(configEditorFontSize.value, event);
+          if (next === null) return false;
           event.preventDefault();
-          const next = fontSizeFromWheelDelta(configEditorFontSize.value, event.deltaY);
           if (next !== configEditorFontSize.value) {
             configEditorFontSize.value = next;
             eventView.dispatch({
@@ -843,7 +844,7 @@ async function refreshConfigEditor() {
 
 function handleNacosSplitResized(payload: { panes?: { size: number }[] }) {
   const size = payload.panes?.[0]?.size;
-  if (typeof size !== "number" || size < 20 || size > 80) return;
+  if (typeof size !== "number" || size < NACOS_MIN_SPLIT_SIZE || size > 80) return;
   nacosSplitSize.value = size;
   safeLocalStorageSet(NACOS_SPLIT_SIZE_KEY, String(size));
 }
@@ -2884,11 +2885,11 @@ useUpdateBlocker(() =>
     </div>
 
     <Splitpanes v-if="activeTab === 'configs'" class="nacos-admin-splitpanes min-h-0 flex-1" @resized="handleNacosSplitResized">
-      <Pane :size="nacosSplitSize" min-size="24">
+      <Pane :size="nacosSplitSize" :min-size="NACOS_MIN_SPLIT_SIZE">
         <div class="flex h-full min-h-0 flex-col">
           <div class="grid shrink-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto_auto] gap-2 border-b p-2">
             <div class="relative min-w-0">
-              <Input v-model="configDataId" class="h-8 min-w-0 pr-8" placeholder="dataId" @keyup.enter="loadConfigsWithRetry(1)" />
+              <Input v-model="configDataId" :class="configDataId ? 'h-8 min-w-0 pr-8' : 'h-8 min-w-0'" placeholder="dataId" @keyup.enter="loadConfigsWithRetry(1)" />
               <button
                 v-if="configDataId"
                 type="button"
@@ -2901,7 +2902,7 @@ useUpdateBlocker(() =>
               </button>
             </div>
             <div class="relative min-w-0">
-              <Input v-model="configGroup" class="h-8 min-w-0 pr-8" :placeholder="t('nacos.configListGroup')" @keyup.enter="loadConfigsWithRetry(1)" />
+              <Input v-model="configGroup" :class="configGroup ? 'h-8 min-w-0 pr-8' : 'h-8 min-w-0'" :placeholder="t('nacos.configListGroup')" @keyup.enter="loadConfigsWithRetry(1)" />
               <button
                 v-if="configGroup"
                 type="button"
@@ -2914,7 +2915,7 @@ useUpdateBlocker(() =>
               </button>
             </div>
             <div class="relative min-w-0">
-              <Input v-model="configAppName" class="h-8 min-w-0 pr-8" :placeholder="t('nacos.configListApplication')" @keyup.enter="loadConfigsWithRetry(1)" />
+              <Input v-model="configAppName" :class="configAppName ? 'h-8 min-w-0 pr-8' : 'h-8 min-w-0'" :placeholder="t('nacos.configListApplication')" @keyup.enter="loadConfigsWithRetry(1)" />
               <button
                 v-if="configAppName"
                 type="button"
@@ -3184,7 +3185,7 @@ useUpdateBlocker(() =>
     </Splitpanes>
 
     <Splitpanes v-else-if="activeTab === 'services'" class="nacos-admin-splitpanes min-h-0 flex-1" @resized="handleNacosSplitResized">
-      <Pane :size="nacosSplitSize" min-size="24">
+      <Pane :size="nacosSplitSize" :min-size="NACOS_MIN_SPLIT_SIZE">
         <div class="flex h-full min-h-0 flex-col">
           <div class="grid shrink-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto] gap-2 border-b p-2">
             <div class="relative min-w-0">

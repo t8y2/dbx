@@ -7,6 +7,7 @@ import { buildTableSelectSql, requiresEagerTableMetadataForDataOpen } from "@/li
 import { resolveTableDefaultSort, applyTableDefaultSortResult } from "@/lib/table/tableDefaultSort";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { editableRowIdentifierColumns, physicalTablePrimaryKeys, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
+import { markRowIdLocatorUnsupported, rowIdLocatorUnsupported, shouldKeepRowIdLocatorDisabled, shouldRetryWithoutRowIdLocator } from "@/lib/table/tableRowIdSupport";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
 import { beginDataTabNavigation, endDataTabNavigation, isCurrentDataTabNavigation } from "@/lib/tabs/dataTabNavigationGeneration";
@@ -217,8 +218,9 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
     }
     const eagerColumns = eagerMetadata?.metadata.columns ?? [];
     const eagerPrimaryKeys = eagerMetadata?.metadata.primaryKeys ?? [];
-    const defaultSort = resolveTableDefaultSort(settingsStore.editorSettings, effectiveDbType, physicalTablePrimaryKeys(eagerColumns, eagerMetadata?.metadata.indexes), identifierQuote);
-    const sql = await buildTableSelectSql({
+    const eagerIncludeRowId = Boolean(eagerMetadata) && shouldIncludeSyntheticRowId(effectiveDbType, eagerPrimaryKeys, targetTableType) && !rowIdLocatorUnsupported(target.connectionId);
+    const defaultSort = resolveTableDefaultSort(settingsStore.editorSettings, effectiveDbType, physicalTablePrimaryKeys(eagerColumns, eagerMetadata?.metadata.indexes, effectiveDbType), identifierQuote);
+    const tableSelectSqlOptions = {
       databaseType: effectiveDbType,
       driverProfile: config.driver_profile,
       serverVersion: connectionStore.getConfig(target.connectionId)?.database_info?.productVersion,
@@ -231,11 +233,13 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
       tableType: targetTableType,
       columns: eagerColumns.map((column) => column.name),
       primaryKeys: eagerPrimaryKeys,
+      includeRowId: eagerIncludeRowId,
       orderBy: defaultSort.orderBy,
-      ...tableDataLargeValuePreviewOptions(effectiveDbType, eagerColumns, eagerPrimaryKeys, pageLimit),
+      ...tableDataLargeValuePreviewOptions(effectiveDbType, eagerColumns, eagerPrimaryKeys, pageLimit, config.db_type === "jdbc"),
       whereInput: target.whereInput,
       limit: pageLimit,
-    });
+    };
+    const sql = await buildTableSelectSql(tableSelectSqlOptions);
     if (!isPreparationCurrent() || !isCurrentGeneration()) return;
     queryStore.updateSql(tabId, sql);
     queryStore.setTableMeta(tabId, {
@@ -262,6 +266,19 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
     const cancelRequestedDuringExecute = (tabAfterFirstExecute?.cancelRequestCount ?? 0) > cancelCountBeforeExecute;
     const firstQueryFailed = cancelRequestedDuringExecute || tabAfterFirstExecute?.isCancelling === true || (firstResult !== undefined && isQueryExecutionErrorResult(firstResult));
     if (!firstQueryFailed && targetTab) applyTableDefaultSortResult(targetTab, defaultSort, queryStore.sortTabResultLocally);
+    // 引擎拒绝合成行定位器（Hologres 等无系统列的 PG 兼容引擎拒 tableoid/
+    // ctid/xmin，#12647）：首查 SQL 带 __DBX_ROWID 而失败时，去掉定位器重试
+    // 一次，表仍可打开（只读）；成功后记住该连接，后续打开直接跳过定位器。
+    // 与侧边栏打开/数据页签刷新路径同一降级契约；用户主动停止不重试。
+    if (!cancelRequestedDuringExecute && tabAfterFirstExecute?.isCancelling !== true && shouldRetryWithoutRowIdLocator(sql, firstResult)) {
+      const fallbackSql = await buildTableSelectSql({ ...tableSelectSqlOptions, includeRowId: false });
+      if (!isCurrentTarget() || !isCurrentGeneration()) return;
+      queryStore.updateSql(tabId, fallbackSql);
+      await queryStore.executeTabSql(tabId, fallbackSql, { pagination: { limit: pageLimit, offset: 0 } });
+      if (!isCurrentTarget()) return;
+      const retryTab = queryStore.tabs.find((tab) => tab.id === tabId);
+      if (shouldKeepRowIdLocatorDisabled(retryTab?.result)) markRowIdLocatorUnsupported(target.connectionId);
+    }
     // executeTabSql surfaces query failures as an "Error" result instead of throwing.
     // A snapshot-less lake table fails the data preview above but its metadata still
     // reads fine — retry with LIMIT 0 so the user sees the table structure (columns +
@@ -307,7 +324,7 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
       // 异步窗口内 tab 可能已被复用为其他目标：旧请求的元数据不得落地、
       // 不得解除新目标的 pending
       if (!isCurrentTarget() || !isCurrentGeneration()) return;
-      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, targetTableType);
+      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, targetTableType) && !rowIdLocatorUnsupported(target.connectionId);
       queryStore.setTableMeta(tabId, {
         schema: tableSchema,
         catalog: target.catalog,
@@ -317,7 +334,7 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
         columns,
         primaryKeys,
       });
-      if (!fellBackToLimitZero && !firstQueryFailed && (useRowId || config.db_type === "tdengine")) {
+      if (!fellBackToLimitZero && !firstQueryFailed && ((useRowId && !eagerIncludeRowId) || config.db_type === "tdengine")) {
         const newSql = await buildTableSelectSql({
           databaseType: effectiveDbType,
           driverProfile: config.driver_profile,
@@ -333,6 +350,7 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
           whereInput: target.whereInput,
           primaryKeys,
           columns: columns.map((column) => column.name),
+          ...tableDataLargeValuePreviewOptions(effectiveDbType, columns, primaryKeys, pageLimit, config.db_type === "jdbc"),
           includeRowId: true,
           orderBy: defaultSort.orderBy,
           limit: pageLimit,
@@ -411,7 +429,13 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
     await openTableTarget(target);
   }
 
-  async function onStructureEditorSaved(reloadData: () => Promise<void>, toast: (msg: string, duration?: number) => void, context: { connectionId: string; database: string; schema?: string; catalog?: string; tableName: string }, commentChanged?: boolean, createdTable = false) {
+  async function onStructureEditorSaved(
+    reloadData: () => Promise<void>,
+    toast: (msg: string, duration?: number) => void,
+    context: { connectionId: string; database: string; schema?: string; catalog?: string; tableName: string; exactIdentity?: boolean },
+    commentChanged?: boolean,
+    createdTable = false,
+  ) {
     if (!context.tableName) {
       try {
         await connectionStore.refreshObjectListTreeNode(context.connectionId, context.database, context.schema || undefined);
@@ -424,11 +448,17 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
       } catch {}
     }
     connectionStore.invalidateCompletionTableCache(context.connectionId, context.database, context.tableName, context.schema, context.catalog);
-    queryStore.invalidateTableStructure(context.connectionId, context.database, context.schema, context.tableName);
+    if (context.exactIdentity) queryStore.invalidateTableStructure(context.connectionId, context.database, context.schema, context.tableName, true, context.catalog);
+    else queryStore.invalidateTableStructure(context.connectionId, context.database, context.schema, context.tableName);
     // 结构已变更：无论是否有打开的 data tab 都必须作废共享元数据缓存，否则
     // 其它 loadTableMetadata 消费者最长 30 秒拿到旧列。不带 schema/catalog
     // 维度（宁可多废，schema 形态在各消费点可能不同）
-    invalidateTableMetadataCache({ connectionId: context.connectionId, database: context.database, tableName: context.tableName });
+    invalidateTableMetadataCache({ connectionId: context.connectionId, database: context.database, tableName: context.tableName, ...(context.exactIdentity ? { schema: context.schema } : {}) });
+    try {
+      await connectionStore.refreshTableColumnsTree(context.connectionId, context.database, context.tableName, context.schema, context.catalog);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), 5000);
+    }
     const matchingDataTabs = queryStore.tabs.filter((tab) => tab.mode === "data" && tab.connectionId === context.connectionId && tab.database === context.database && tab.tableMeta?.tableName === context.tableName && (tab.schema || tab.tableMeta.schema || "") === (context.schema || ""));
     // 同一 catalog 只强制加载一次，结果分发给全部匹配 tab
     const loadedByCatalog = new Map<string, { columns: ColumnInfo[]; primaryKeys: string[] }>();

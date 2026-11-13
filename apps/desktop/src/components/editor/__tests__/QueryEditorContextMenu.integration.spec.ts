@@ -40,6 +40,7 @@ function mountMenu(layout: "full" | "grouped" = "full") {
     openFindReplaceFromContextMenu: vi.fn(),
     deleteEmptyLines: vi.fn(),
     selectAllSqlFromContextMenu: vi.fn(),
+    copyCurrentStatementFromContextMenu: vi.fn(),
     emitContextObjectAction: vi.fn(),
     openCodeSnapshot: vi.fn(),
     sendSelectionToAi: vi.fn(),
@@ -93,6 +94,19 @@ function button(label: string) {
 }
 
 describe("QueryEditor extracted context menu", () => {
+  it("offers copying the statement at the cursor next to selecting it", async () => {
+    const { state, actions, open } = mountMenu("full");
+    state.selectedSql = "SELECT 1";
+    state.executableSql = "SELECT 1";
+    await open();
+    const select = button("editor.contextMenu.selectCurrentStatement");
+    expect(select).toBeDefined();
+    const copy = button("editor.contextMenu.copyCurrentStatement");
+    expect(copy).toBeDefined();
+    copy.click();
+    expect(actions.copyCurrentStatementFromContextMenu).toHaveBeenCalledExactlyOnceWith();
+  });
+
   it("keeps primary actions direct and groups clipboard, structure and result operations", async () => {
     const { state, actions, open } = mountMenu("grouped");
     state.selectedSql = "SELECT * FROM orders";
@@ -100,15 +114,15 @@ describe("QueryEditor extracted context menu", () => {
     state.contextObjectTarget = { type: "table", name: "orders", database: "demo" };
     await open();
     const labels = [...document.querySelectorAll<HTMLButtonElement>("[data-dbx-context-menu] button")].map((entry) => entry.textContent!);
-    expect(labels.indexOf("sidebarMenu.groups.structure")).toBeLessThan(labels.indexOf("sidebarMenu.groups.execution"));
-    expect(labels.indexOf("sidebarMenu.groups.copy")).toBeLessThan(labels.indexOf("sidebarMenu.groups.execution"));
+    expect(labels).toContain("common.more");
+    expect(labels).not.toContain("sidebarMenu.groups.sqlEditor");
     expect(labels.some((label) => label.includes("editor.contextMenu.uppercaseSelection"))).toBe(true);
-    button("sidebarMenu.groups.sqlEditor").click();
+    button("common.more").click();
     await nextTick();
     button("editor.contextMenu.uppercaseSelection").click();
     expect(actions.convertSelectedSqlCase).toHaveBeenCalledExactlyOnceWith("upper");
     await open();
-    button("sidebarMenu.groups.structure").click();
+    button("common.more").click();
     await nextTick();
     button("contextMenu.editStructure").click();
     expect(actions.emitContextObjectAction).toHaveBeenCalledExactlyOnceWith("edit-table-structure");
@@ -133,7 +147,7 @@ describe("QueryEditor extracted context menu", () => {
     await nextTick();
     expect(onClose).not.toHaveBeenCalled();
     expect(button("sidebarMenu.useFull").getAttribute("aria-pressed")).toBe("false");
-    button("sidebarMenu.groups.structure").click();
+    button("common.more").click();
     await nextTick();
     expect(button("contextMenu.editStructure").disabled).toBe(false);
   });
@@ -147,9 +161,10 @@ describe("QueryEditor extracted context menu", () => {
     settings.editorSettings.sidebarMenuHiddenPrimaryActions["sql-editor"] = ["editor.contextMenu.uppercaseSelection"];
     await open();
     expect([...document.querySelectorAll("[data-dbx-context-menu] button")].some((entry) => entry.textContent === "editor.contextMenu.uppercaseSelection")).toBe(false);
-    button("sidebarMenu.groups.sqlEditor").click();
+    button("common.more").click();
     await nextTick();
-    expect(button("editor.contextMenu.uppercaseSelection").disabled).toBe(false);
+    // Opting out hides the action for good; it must not reappear in its group (#12791).
+    expect([...document.querySelectorAll("[data-dbx-context-menu] button")].some((entry) => entry.textContent === "editor.contextMenu.uppercaseSelection")).toBe(false);
   });
 
   it("promotes saved editor actions without changing the preferences of table menus", async () => {
@@ -166,7 +181,7 @@ describe("QueryEditor extracted context menu", () => {
   it("preserves disabled export guards when flattening the result submenu", async () => {
     const { open } = mountMenu("grouped");
     await open();
-    button("sidebarMenu.groups.execution").click();
+    button("common.more").click();
     await nextTick();
     expect(button("CSV").disabled).toBe(true);
   });

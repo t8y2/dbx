@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SqlFileProgress, TransferProgress, TransferRequest } from "@/lib/backend/api";
+import { reactive } from "vue";
+import { createOracleRoutineDeployment, disposeOracleRoutineDeployment } from "@/lib/schema/oracleRoutineDeploy";
 
 vi.mock("@/lib/backend/api", () => ({
   startTransfer: vi.fn(),
@@ -7,12 +9,15 @@ vi.mock("@/lib/backend/api", () => ({
   cancelDatabaseExport: vi.fn(),
   cancelSqlFileExecution: vi.fn(),
   cancelTableExport: vi.fn(),
+  updateOracleRoutineOperationReferences: vi.fn().mockResolvedValue(undefined),
 }));
 
 const mockAutoRevealExportedPathIfConfigured = vi.fn();
 vi.mock("@/lib/export/exportPath", () => ({
   autoRevealExportedPathIfConfigured: (...args: unknown[]) => mockAutoRevealExportedPathIfConfigured(...args),
 }));
+vi.mock("@/lib/metadata/objectDdlCache", () => ({ invalidateObjectDdlCache: vi.fn() }));
+vi.mock("@/lib/table/objectBrowserRowsCache", () => ({ invalidateObjectBrowserRowsCache: vi.fn() }));
 
 import * as api from "@/lib/backend/api";
 import {
@@ -24,6 +29,7 @@ import {
   MAX_TRANSFER_FAILURE_DETAIL_BYTES,
   MAX_TRANSFER_FAILURE_DETAILS,
   MAX_TRANSFER_FAILURE_ERROR_BYTES,
+  canReexecuteDataTransferTask,
   useExportTracker,
 } from "@/composables/useExportTracker";
 
@@ -98,6 +104,87 @@ afterEach(() => {
 });
 
 describe("data transfer task duration", () => {
+  it("ignores a progress packet from another transfer before changing task state", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("bound-transfer", "users", 1);
+    tracker.updateDataTransferTask(task.exportId, transferProgress(task.exportId, "running", false));
+    tracker.updateDataTransferTask(task.exportId, { ...transferProgress("different-transfer", "done"), rowsTransferred: 99 });
+    expect(task.status).toBe("Running");
+    expect(task.rowsExported).toBe(10);
+    expect(task.finishedAt).toBeUndefined();
+  });
+
+  it.each(["oraclePackageApproval", "oraclePackagePreflight"] as const)("keeps completed table rows when receiving %s", (field) => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask(`rows-${field}`, "users and packages", 1);
+    tracker.updateDataTransferTask(task.exportId, transferProgress(task.exportId, "tableDone", false));
+    const endpoint = { connectionId: "target", database: "tenant", schema: "T", databaseType: "oceanbase-oracle" as const, generation: 1 };
+    const snapshot = { endpoint, state: "complete" as const, enumerationComplete: true, objects: [], issues: [] };
+    tracker.updateDataTransferTask(task.exportId, {
+      ...transferProgress(task.exportId, field === "oraclePackagePreflight" ? "error" : "running", false),
+      table: "package objects",
+      rowsTransferred: 0,
+      totalRows: null,
+      [field]: { input: { source: snapshot, target: snapshot, drafts: [] }, skipped: [], plan: { target: endpoint, ready: false, steps: [] } },
+    });
+    expect(task.rowsExported).toBe(10);
+    expect(task.totalRows).toBe(10);
+    expect(task.finishedAt).toBeUndefined();
+    tracker.updateDataTransferTask(task.exportId, { ...transferProgress(task.exportId, "error"), table: "" });
+    expect(task.rowsExported).toBe(10);
+    expect(task.status).toBe("Error");
+  });
+
+  it("keeps the original package approvals owned by the background task until its result is removed", async () => {
+    const endpoint = { connectionId: "target", database: "tenant", schema: "T", databaseType: "oceanbase-oracle" as const, generation: 1 };
+    const snapshot = { endpoint, state: "complete" as const, enumerationComplete: true, objects: [], issues: [] };
+    const deployment = reactive(createOracleRoutineDeployment(snapshot, snapshot));
+    deployment.retainedOperationIds = ["original-package-operation"];
+    const identity = { owner: "T", name: "P", kind: "PACKAGE_BODY" as const };
+    const prepared = { operationId: "original-package-operation", target: endpoint, identity, lifecycle: "prepared" as const, dispatched: false, acknowledged: false, readback: null, error: null };
+    deployment.records = [prepared];
+    deployment.drafts = [{ identity, action: "create", objectId: "body", included: true, operation: prepared }];
+    let finish!: () => void;
+    let publish!: (progress: TransferProgress) => void;
+    vi.mocked(api.startTransfer).mockImplementationOnce(
+      (request, progress) =>
+        new Promise<void>((resolve) => {
+          publish = progress;
+          finish = () => {
+            progress(transferProgress(request.transferId, "error"));
+            resolve();
+          };
+        }),
+    );
+    const tracker = useExportTracker();
+    const cleanup = vi.fn(() => {
+      void disposeOracleRoutineDeployment(deployment);
+    });
+    const task = tracker.startDataTransferTask(transferRequest("package-reference-owner", []), "package", { oracleRoutineDeployment: deployment, onRemove: cleanup });
+    expect(task.oracleRoutineDeployment).toBe(deployment);
+    expect(deployment.executing).toBe(true);
+    expect(api.updateOracleRoutineOperationReferences).not.toHaveBeenCalled();
+    const bodyResult = {
+      ...prepared,
+      lifecycle: "terminal" as const,
+      dispatched: true,
+      acknowledged: true,
+      readback: { identity, state: "invalid" as const, exists: true, version: null, source: "full original body 中文😀", definitionMatches: true, issues: [], compilerMessages: [{ attribute: "ERROR" as const, line: 2, position: 3, text: "PLS-00323" }] },
+    };
+    publish({ ...transferProgress(task.exportId, "error", false), oracleRoutineOperation: bodyResult });
+    expect(task.status).toBe("Running");
+    expect(deployment.drafts[0].operation).toEqual(bodyResult);
+    expect(deployment.records[0].operationId).toBe("original-package-operation");
+    finish();
+    await vi.waitFor(() => expect(deployment.executing).toBe(false));
+    expect(task.status).toBe("Error");
+    expect(deployment.retainedOperationIds).toEqual(["original-package-operation"]);
+    expect(cleanup).not.toHaveBeenCalled();
+    tracker.removeTask(task.exportId);
+    await vi.waitFor(() => expect(api.updateOracleRoutineOperationReferences).toHaveBeenCalledWith([], ["original-package-operation"]));
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
   it("freezes the first successful terminal duration", () => {
     const tracker = useExportTracker();
     now = 1_000;
@@ -126,6 +213,31 @@ describe("data transfer task duration", () => {
 
     expect(task.finishedAt! - task.startedAt!).toBe(5_250);
     expect(task.status).toBe(expectedStatus);
+  });
+
+  it("shows cancelling immediately and keeps it until the backend reports the terminal state", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("cancel-pending", "many tables", 1693);
+
+    await tracker.cancelTask(task.exportId);
+    expect(api.cancelTransfer).toHaveBeenCalledWith("cancel-pending");
+    expect(task.status).toBe("Cancelling");
+
+    tracker.updateDataTransferTask(task.exportId, transferProgress(task.exportId, "running", false));
+    expect(task.status).toBe("Cancelling");
+
+    tracker.updateDataTransferTask(task.exportId, transferProgress(task.exportId, "cancelled"));
+    expect(task.status).toBe("Cancelled");
+  });
+
+  it("returns to running when the cancel request itself fails", async () => {
+    vi.mocked(api.cancelTransfer).mockRejectedValueOnce(new Error("unreachable"));
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("cancel-failed", "users", 1);
+
+    await tracker.cancelTask(task.exportId);
+
+    expect(task.status).toBe("Running");
   });
 
   it("tracks concurrent transfer durations independently", () => {
@@ -227,6 +339,97 @@ describe("data transfer task duration", () => {
 
     for (const resolve of resolvers) resolve();
     await Promise.resolve();
+  });
+
+  describe("data transfer re-execution (#13621)", () => {
+    it("determines whether a task can be re-executed", () => {
+      const tracker = useExportTracker();
+      const task = tracker.addDataTransferTask("manual", "users", 1);
+      expect(canReexecuteDataTransferTask(task)).toBe(false);
+
+      const request = transferRequest("with-req");
+      const tracked = tracker.startDataTransferTask(request, "users");
+      expect(canReexecuteDataTransferTask(tracked)).toBe(false);
+
+      tracker.updateDataTransferTask(tracked.exportId, transferProgress(tracked.exportId, "done"));
+      expect(canReexecuteDataTransferTask(tracked)).toBe(true);
+
+      tracked.status = "Error";
+      expect(canReexecuteDataTransferTask(tracked)).toBe(true);
+
+      tracked.status = "Cancelled";
+      expect(canReexecuteDataTransferTask(tracked)).toBe(true);
+
+      const tableExport = tracker.addTask("users", "csv", "/tmp/users.csv");
+      tableExport.status = "Done";
+      expect(canReexecuteDataTransferTask(tableExport)).toBe(false);
+    });
+
+    it("resets state, assigns a new transferId, and starts transfer again", async () => {
+      vi.mocked(api.startTransfer).mockImplementation(async () => {});
+
+      const tracker = useExportTracker();
+      const openedTaskIds: string[] = [];
+      const onDone = vi.fn();
+      const initialRequest = transferRequest("transfer-1");
+
+      const task = tracker.startDataTransferTask(initialRequest, "users", {
+        openTask: (id) => openedTaskIds.push(id),
+        onDone,
+      });
+
+      expect(task.exportId).toBe("transfer-1");
+      expect(task.status).toBe("Running");
+      expect(api.startTransfer).toHaveBeenCalledTimes(1);
+      // Even if started with confirmed flag, persisted request resets it to false
+      expect(task.dataTransferRequest?.dropTargetConfirmed).toBe(false);
+      // Running task cannot be re-executed
+      expect(canReexecuteDataTransferTask(task)).toBe(false);
+
+      // Finish first run with an error and failure logs
+      tracker.updateDataTransferTask(task.exportId, {
+        transferId: "transfer-1",
+        table: "users",
+        tableIndex: 0,
+        totalTables: 1,
+        rowsTransferred: 5,
+        totalRows: 10,
+        status: "error",
+        error: "connection timeout",
+        terminal: true,
+      });
+
+      expect(task.status).toBe("Error");
+      expect(task.errorMessage).toBe("connection timeout");
+      expect(canReexecuteDataTransferTask(task)).toBe(true);
+
+      // Verify onOpen invokes with task exportId
+      task.onOpen?.();
+      expect(openedTaskIds).toEqual(["transfer-1"]);
+    });
+
+    it("gates re-execution on terminal status and unconfirmed request", () => {
+      const tracker = useExportTracker();
+      const request = transferRequest("active-transfer");
+      request.dropTargetConfirmed = true;
+      const dummyDeployment = {} as any;
+      const task = tracker.startDataTransferTask(request, "users", {
+        oracleRoutineDeployment: dummyDeployment,
+      });
+
+      expect(task.status).toBe("Running");
+      expect(canReexecuteDataTransferTask(task)).toBe(false);
+      // Oracle routine deployment from executed run is not retained for re-execution
+      expect(task.dataTransferOptions?.oracleRoutineDeployment).toBeUndefined();
+      // Drop target confirmed is always reset to false in persisted request
+      expect(task.dataTransferRequest?.dropTargetConfirmed).toBe(false);
+
+      task.status = "Cancelled";
+      expect(canReexecuteDataTransferTask(task)).toBe(true);
+
+      task.status = "Done";
+      expect(canReexecuteDataTransferTask(task)).toBe(true);
+    });
   });
 
   it("keeps SQL-file backend elapsed time unchanged", () => {

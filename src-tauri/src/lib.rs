@@ -2407,6 +2407,7 @@ pub fn run() {
             commands::ai::save_ai_chat_selection,
             commands::ai::load_ai_chat_selection,
             commands::ai::save_ai_conversation,
+            commands::ai::update_ai_conversation_plugin_connections,
             commands::ai::load_ai_conversations,
             commands::ai::delete_ai_conversation,
             commands::ai::save_ai_run,

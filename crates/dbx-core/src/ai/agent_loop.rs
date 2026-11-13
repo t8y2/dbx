@@ -91,6 +91,10 @@ pub struct AgentLoopContext {
     pub connection_id: String,
     pub database: String,
     pub selected_databases: Vec<String>,
+    /// Plugin connections the user attached to this conversation. Plugin tools
+    /// are limited to these (plus the target connection when it is itself a
+    /// plugin connection); open-but-unattached connections contribute nothing.
+    pub plugin_connection_ids: Vec<String>,
     /// Selected schema that scopes Agent metadata and SQL execution.
     pub schema: Option<String>,
     pub db_type: DatabaseType,
@@ -204,6 +208,29 @@ fn run_tools(
         tools.extend(skill_tools::tool_definitions());
     }
     tools
+}
+
+/// Connection scope for plugin tools.
+///
+/// A run without a target has no plugin scope: a request can supply its own
+/// attachment list, so an empty `connection_id` must never be widened to those
+/// attachments. A plugin-connection target is authoritative too — only that
+/// connection may contribute tools, no matter what the attachment list says. The
+/// attachment list only widens a database-target run. Keeping this decision on
+/// the server means the boundary never depends on the client constructing the
+/// request correctly.
+fn plugin_tool_connection_scope(
+    db_type: DatabaseType,
+    connection_id: &str,
+    attached_connection_ids: &[String],
+) -> Vec<String> {
+    if connection_id.is_empty() {
+        return Vec::new();
+    }
+    if db_type == DatabaseType::Plugin {
+        return vec![connection_id.to_string()];
+    }
+    attached_connection_ids.to_vec()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -334,11 +361,13 @@ async fn run_agent_loop_inner(
     let mut sql_permissions = agent_ctx.sql_permissions.clone();
     let mut tools = run_tools(agent_ctx.db_type, &sql_permissions, is_agent_mode, agent_ctx.allow_skills);
     // Plugin tools join agent runs only; ask mode keeps its database-only
-    // read tools.
+    // read tools. The conversation target is authoritative: opening a plugin
+    // connection does not authorize the agent, so only explicitly attached
+    // connections are visible.
     let plugin_tool_set = if is_agent_mode {
-        let bound_plugin_connection =
-            (agent_ctx.db_type == DatabaseType::Plugin).then_some(agent_ctx.connection_id.as_str());
-        plugin_tools::discover_plugin_tools(&agent_ctx.state, agent_ctx.host_runtime.as_ref(), bound_plugin_connection)
+        let allowed_connections =
+            plugin_tool_connection_scope(agent_ctx.db_type, &agent_ctx.connection_id, &agent_ctx.plugin_connection_ids);
+        plugin_tools::discover_plugin_tools(&agent_ctx.state, agent_ctx.host_runtime.as_ref(), &allowed_connections)
             .await
     } else {
         PluginToolSet::default()
@@ -1756,6 +1785,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_plugin_target_scopes_tools_to_its_own_connection() {
+        let attached = vec!["ssh-1".to_string(), "kafka-1".to_string()];
+        // A plugin target ignores every other attachment, even when a client
+        // sends extras: the boundary is decided here, not by the request shape.
+        assert_eq!(plugin_tool_connection_scope(DatabaseType::Plugin, "ssh-1", &attached), ["ssh-1"]);
+        assert_eq!(plugin_tool_connection_scope(DatabaseType::Plugin, "ssh-9", &attached), ["ssh-9"]);
+        // Database targets keep the explicit attachment list.
+        assert_eq!(plugin_tool_connection_scope(DatabaseType::Postgres, "db-1", &attached), attached);
+        // No target means no plugin scope: an empty connection id must never be
+        // widened to attachments a client supplied directly.
+        assert!(plugin_tool_connection_scope(DatabaseType::Plugin, "", &attached).is_empty());
+        assert!(plugin_tool_connection_scope(DatabaseType::Postgres, "", &attached).is_empty());
+    }
+
     async fn gate_context(session_id: Option<&str>) -> (tempfile::TempDir, AgentLoopContext) {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = crate::persistence::test_storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
@@ -1764,6 +1808,7 @@ mod tests {
             connection_id: "db".to_string(),
             database: String::new(),
             selected_databases: Vec::new(),
+            plugin_connection_ids: Vec::new(),
             schema: None,
             db_type: DatabaseType::Postgres,
             cli_mcp_server_command: None,

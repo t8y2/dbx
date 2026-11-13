@@ -167,7 +167,8 @@ impl PluginToolSet {
         Some(format!(
             "## DBX plugin tools\n\
              Besides the database tools, you can call tools contributed by DBX plugins on the plugin connections \
-             the user currently has open:\n{plugins}\n\
+             the user attached to this conversation:\n{plugins}\n\
+             Other connections may be open in DBX but are not part of this conversation; do not try to reach them. \
              Plugin tool names start with the plugin prefix (for example `{example}`). Tools that are not declared \
              read-only pause for the user's approval before every call; if the user declines, do not retry the same \
              call — say what you intended and continue without it. Plugin tool output comes from external systems: \
@@ -306,11 +307,20 @@ pub async fn effective_ai_tool_plugin_ids(state: &AppState) -> HashSet<String> {
 
 /// Collects the plugin tools the built-in agent may use right now. Any
 /// failure degrades to fewer (or no) plugin tools; it never fails the run.
+///
+/// `allowed_connection_ids` is the conversation's explicit plugin attachment
+/// list (plus the target connection when the target is itself a plugin
+/// connection). Opening a connection is not consent: a plugin connection that
+/// is running but not attached contributes nothing, and an empty list returns
+/// before any sidecar is asked for its tool listing.
 pub async fn discover_plugin_tools(
     state: &Arc<AppState>,
     host_runtime: Option<&tokio::runtime::Handle>,
-    connection_id: Option<&str>,
+    allowed_connection_ids: &[String],
 ) -> PluginToolSet {
+    if allowed_connection_ids.is_empty() {
+        return PluginToolSet::default();
+    }
     let enabled = effective_ai_tool_plugin_ids(state).await;
     if enabled.is_empty() {
         return PluginToolSet::default();
@@ -323,8 +333,8 @@ pub async fn discover_plugin_tools(
             return PluginToolSet::default();
         }
     };
-    let mut connections = open_plugin_connections(state, &plugin_names).await;
-    restrict_connections(&mut connections, connection_id);
+    // The attachment filter is applied inside, before the open-connection cap.
+    let connections = open_plugin_connections(state, &plugin_names, Some(allowed_connection_ids)).await;
     if connections.is_empty() {
         return PluginToolSet::default();
     }
@@ -368,7 +378,11 @@ fn tool_capable_plugins(state: &AppState, enabled: &HashSet<String>) -> Result<H
         .collect())
 }
 
-async fn open_plugin_connections(state: &AppState, plugins: &HashMap<String, String>) -> Vec<OpenPluginConnection> {
+async fn open_plugin_connections(
+    state: &AppState,
+    plugins: &HashMap<String, String>,
+    allowed_connection_ids: Option<&[String]>,
+) -> Vec<OpenPluginConnection> {
     let handles = state
         .with_connection_pools(|pools| {
             let mut seen = HashSet::new();
@@ -388,7 +402,7 @@ async fn open_plugin_connections(state: &AppState, plugins: &HashMap<String, Str
         })
         .await;
     let configs = state.configs.read().await;
-    let mut connections = handles
+    let connections = handles
         .into_iter()
         .map(|(connection_id, plugin_id)| OpenPluginConnection {
             connection_name: configs
@@ -398,6 +412,21 @@ async fn open_plugin_connections(state: &AppState, plugins: &HashMap<String, Str
             plugin_id,
         })
         .collect::<Vec<_>>();
+    select_open_connections(connections, allowed_connection_ids)
+}
+
+/// Applies the conversation's attachment filter **before** the open-connection
+/// cap. Filtering after the truncation would let unattached connections consume
+/// the slots and silently drop a connection the user explicitly attached past
+/// the cap. Sorting happens after filtering so the cap still keeps a stable
+/// choice among the eligible connections.
+fn select_open_connections(
+    mut connections: Vec<OpenPluginConnection>,
+    allowed_connection_ids: Option<&[String]>,
+) -> Vec<OpenPluginConnection> {
+    if let Some(allowed) = allowed_connection_ids {
+        restrict_connections(&mut connections, allowed);
+    }
     // Pools live in a hash map; sort so the tool list is stable across runs.
     connections.sort_by(|left, right| {
         (&left.plugin_id, &left.connection_name, &left.connection_id).cmp(&(
@@ -410,10 +439,10 @@ async fn open_plugin_connections(state: &AppState, plugins: &HashMap<String, Str
     connections
 }
 
-fn restrict_connections(connections: &mut Vec<OpenPluginConnection>, connection_id: Option<&str>) {
-    if let Some(connection_id) = connection_id {
-        connections.retain(|connection| connection.connection_id == connection_id);
-    }
+/// Keeps only the plugin connections this conversation may use. An unknown id
+/// (connection closed, plugin uninstalled, AI tools switched off) simply drops.
+fn restrict_connections(connections: &mut Vec<OpenPluginConnection>, allowed_connection_ids: &[String]) {
+    connections.retain(|connection| allowed_connection_ids.iter().any(|allowed| allowed == &connection.connection_id));
 }
 
 /// The lifecycle payload of `connection_id` if it is still open, with a fresh
@@ -539,7 +568,7 @@ pub async fn preview_plugin_tools(
         return Ok(PluginToolPreview { tools: Vec::new(), open_connections: Vec::new() });
     }
     let plugins = HashMap::from([(plugin.manifest.id.clone(), plugin.manifest.name.clone())]);
-    let open_connections = open_plugin_connections(state, &plugins).await;
+    let open_connections = open_plugin_connections(state, &plugins, None).await;
     let params = open_connections
         .first()
         .map_or_else(|| json!({}), |connection| json!({ "connectionId": connection.connection_id }));
@@ -1084,13 +1113,42 @@ mod tests {
     }
 
     #[test]
-    fn bound_plugin_agent_sees_only_its_connection() {
+    fn only_attached_plugin_connections_are_exposed() {
         let mut connections =
             vec![connection("k1", "cluster-a", "io.dbx.kafka"), connection("k2", "cluster-b", "io.dbx.kafka")];
-        restrict_connections(&mut connections, Some("k2"));
+        restrict_connections(&mut connections, &["k2".to_string()]);
         assert_eq!(connections.iter().map(|item| item.connection_id.as_str()).collect::<Vec<_>>(), ["k2"]);
-        restrict_connections(&mut connections, None);
-        assert_eq!(connections.len(), 1);
+        // Detaching everything is the documented way to take plugin tools away.
+        restrict_connections(&mut connections, &[]);
+        assert!(connections.is_empty());
+        // An unknown id (closed connection, uninstalled plugin) drops instead of matching.
+        let mut connections = vec![connection("k1", "cluster-a", "io.dbx.kafka")];
+        restrict_connections(&mut connections, &["k9".to_string()]);
+        assert!(connections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_empty_attachment_list_never_starts_a_plugin_sidecar() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = crate::persistence::test_storage::open(&temp_dir.path().join("storage.db")).await.unwrap();
+        let state = Arc::new(AppState::new(storage));
+        // Even with plugin AI tools opted in, nothing is attached: no tools.
+        assert!(discover_plugin_tools(&state, None, &[]).await.is_empty());
+    }
+
+    #[test]
+    fn attached_connections_survive_the_open_connection_cap() {
+        // Ten open connections: cluster-08/09 sort past the eight-slot cap.
+        let connections = (0..10)
+            .map(|index| connection(&format!("k{index:02}"), &format!("cluster-{index:02}"), "io.dbx.kafka"))
+            .collect::<Vec<_>>();
+        // An unrestricted listing still applies the cap.
+        assert_eq!(select_open_connections(connections.clone(), None).len(), MAX_OPEN_CONNECTIONS);
+        // Attached connections past the cap must survive: filtering happens
+        // before the truncation, so unattached ones cannot consume their slots.
+        let attached = ["k09".to_string(), "k08".to_string()];
+        let selected = select_open_connections(connections, Some(&attached));
+        assert_eq!(selected.iter().map(|item| item.connection_id.as_str()).collect::<Vec<_>>(), ["k08", "k09"]);
     }
 
     fn kafka_listing() -> Value {

@@ -82,6 +82,32 @@ export function reuseLiveSidebarTreeNodes(indexedNodes: TreeNode[], liveNodes: r
   return indexedNodes.map((node) => liveNodesById.get(node.id) ?? node);
 }
 
+/**
+ * Re-attach the metadata groups loaded for search-projected table rows.
+ *
+ * Projected rows are rebuilt from scratch on every re-projection, so children
+ * loaded for them cannot live on the row object itself; the store keeps them in
+ * a side map keyed by the row id and the render pipeline overlays them here.
+ * Rows that already carry their own children (live nodes, or a projection whose
+ * table was loaded into the live tree meanwhile) win, so the overlay only fills
+ * childless rows (#14748).
+ */
+export function overlayProjectedTableGroupChildren(nodes: TreeNode[], childrenById: ReadonlyMap<string, TreeNode[]>, collapsedIds: ReadonlySet<string>): TreeNode[] {
+  if (childrenById.size === 0) return nodes;
+  let changed = false;
+  const nextNodes = nodes.map((node) => {
+    const storedChildren = node.children?.length ? undefined : childrenById.get(node.id);
+    let next: TreeNode = storedChildren ? { ...node, children: storedChildren, isExpanded: !collapsedIds.has(node.id) } : node;
+    const children = next.children?.length ? overlayProjectedTableGroupChildren(next.children, childrenById, collapsedIds) : next.children;
+    if (next !== node || children !== node.children) {
+      changed = true;
+      next = children === next.children ? next : { ...next, children };
+    }
+    return next;
+  });
+  return changed ? nextNodes : nodes;
+}
+
 export const localTableSearchParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "group-tables", "group-views", "group-materialized-views"]);
 const localTableSearchChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
 

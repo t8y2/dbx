@@ -19,6 +19,7 @@ const connectionStore = {
   connectedIds: new Set<string>(),
   canUseLoadedTreeNodeToggle: vi.fn(() => true),
   releaseCollapsedTreeNodeChildren: vi.fn(),
+  setProjectedTableGroupExpanded: vi.fn(),
   getConfig: vi.fn(() => ({ db_type: "mysql", name: "connection" })),
   getEtcdAccessCapabilities: vi.fn(() => ({ admin: true, writable: true, writePermissions: null })),
   ensureConnected: vi.fn(async () => undefined),

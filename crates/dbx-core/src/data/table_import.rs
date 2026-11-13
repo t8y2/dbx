@@ -11585,11 +11585,13 @@ mod tests {
                 source_column: "id".to_string(),
                 target_column: "id".to_string(),
                 target_data_type: None,
+                generator: None,
             },
             TableImportColumnMapping {
                 source_column: "workday".to_string(),
                 target_column: "workday".to_string(),
                 target_data_type: None,
+                generator: None,
             },
         ];
         let target_types = vec![("id".to_string(), "int".to_string()), ("workday".to_string(), "bit(1)".to_string())];

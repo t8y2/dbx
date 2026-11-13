@@ -1166,6 +1166,8 @@ export interface EditorSettings {
   /** Opens Conditions/Text filter editors initially; users can still collapse them. */
   dataGridKeepFilterEditorExpanded: boolean;
   dataGridTextFilterPanelHeight: number;
+  dataGridOrderByVisible: boolean;
+  dataGridWhereRatio: number;
   localFilterPopoverWidth: number;
   dataGridRenderMode: DataGridRenderMode;
   dataGridSearchMode: DataGridSearchMode;
@@ -1554,6 +1556,8 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridToolbarLayout: "single",
   dataGridKeepFilterEditorExpanded: false,
   dataGridTextFilterPanelHeight: DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_DEFAULT,
+  dataGridOrderByVisible: true,
+  dataGridWhereRatio: 0.5,
   localFilterPopoverWidth: 360,
   dataGridRenderMode: "canvas",
   dataGridSearchMode: "filter",
@@ -2297,6 +2301,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridToolbarLayout: normalizeDataGridToolbarLayout(settings.dataGridToolbarLayout),
     dataGridKeepFilterEditorExpanded: typeof settings.dataGridKeepFilterEditorExpanded === "boolean" ? settings.dataGridKeepFilterEditorExpanded : hasDataGridKeepFilterEditorExpanded ? false : legacyDataGridAutoHideFilterBuilder === false,
     dataGridTextFilterPanelHeight: normalizeDataGridTextFilterPanelHeight(settings.dataGridTextFilterPanelHeight),
+    dataGridOrderByVisible: settings.dataGridOrderByVisible !== false,
+    dataGridWhereRatio: typeof settings.dataGridWhereRatio === "number" && Number.isFinite(settings.dataGridWhereRatio) && settings.dataGridWhereRatio >= 0.2 && settings.dataGridWhereRatio <= 0.85 ? settings.dataGridWhereRatio : DEFAULT_EDITOR_SETTINGS.dataGridWhereRatio,
     localFilterPopoverWidth: normalizeDrawerWidth(settings.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth),
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
     dataGridSearchMode: normalizeDataGridSearchMode(settings.dataGridSearchMode),
@@ -3283,6 +3289,9 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridToolbarLayout !== undefined) editorSettings.value.dataGridToolbarLayout = normalizeDataGridToolbarLayout(partial.dataGridToolbarLayout);
     if (partial.dataGridKeepFilterEditorExpanded !== undefined) editorSettings.value.dataGridKeepFilterEditorExpanded = partial.dataGridKeepFilterEditorExpanded === true;
     if (partial.dataGridTextFilterPanelHeight !== undefined) editorSettings.value.dataGridTextFilterPanelHeight = normalizeDataGridTextFilterPanelHeight(partial.dataGridTextFilterPanelHeight);
+    if (partial.dataGridOrderByVisible !== undefined) editorSettings.value.dataGridOrderByVisible = partial.dataGridOrderByVisible !== false;
+    if (partial.dataGridWhereRatio !== undefined)
+      editorSettings.value.dataGridWhereRatio = typeof partial.dataGridWhereRatio === "number" && Number.isFinite(partial.dataGridWhereRatio) && partial.dataGridWhereRatio >= 0.2 && partial.dataGridWhereRatio <= 0.85 ? partial.dataGridWhereRatio : DEFAULT_EDITOR_SETTINGS.dataGridWhereRatio;
     if (partial.localFilterPopoverWidth !== undefined) editorSettings.value.localFilterPopoverWidth = normalizeDrawerWidth(partial.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth);
     if (partial.dataGridRenderMode !== undefined) editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
     if (partial.dataGridSearchMode !== undefined) editorSettings.value.dataGridSearchMode = normalizeDataGridSearchMode(partial.dataGridSearchMode);

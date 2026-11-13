@@ -5281,6 +5281,7 @@ export default withEnglishFallback({
     editView: "编辑视图",
     viewSource: "查看源码",
     viewDependencies: "查看依赖关系",
+    viewPostgresRowLevelSecurity: "查看行级安全策略",
     viewObject: "查看",
     changeOpenMode: "修改打开方式",
     copyDdl: "复制 DDL",

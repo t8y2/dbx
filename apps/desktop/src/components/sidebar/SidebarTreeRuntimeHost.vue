@@ -3317,6 +3317,31 @@ async function openDatabaseObjectDependencies() {
   }
 }
 
+async function openPostgresRowLevelSecurity(node: TreeNode) {
+  if (!node.connectionId || !hasTreeNodeDatabaseContext(node) || (node.type === "schema" && !node.schema)) return;
+  // An escape string keeps schema names containing backslashes safe with either
+  // setting of standard_conforming_strings.
+  const schemaFilter = node.type === "schema" && node.schema ? `\n  AND n.nspname = E'${node.schema.replaceAll("\\", "\\\\").replaceAll("'", "''")}'` : "";
+  const sql = `SELECT n.nspname AS schema_name, c.relname AS table_name,
+       c.relrowsecurity AS rls_enabled, c.relforcerowsecurity AS rls_forced,
+       p.policyname AS policy_name, p.permissive, p.roles, p.cmd AS command,
+       p.qual AS using_expression, p.with_check AS check_expression
+FROM pg_catalog.pg_class AS c
+JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+LEFT JOIN pg_catalog.pg_policies AS p ON p.schemaname = n.nspname AND p.tablename = c.relname
+WHERE (c.relrowsecurity OR c.relforcerowsecurity OR p.policyname IS NOT NULL)${schemaFilter}
+ORDER BY n.nspname, c.relname, p.policyname;`;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    const title = `${t("contextMenu.viewPostgresRowLevelSecurity")} - ${node.label}`;
+    const tabId = queryStore.createTab(node.connectionId, node.database, title, "query", node.schema, sql, node.catalog, { forceNew: true });
+    await queryStore.executeTabSql(tabId, sql);
+  } catch (error) {
+    toast(t("contextMenu.tableOperationFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
+
 async function compileXuguObject() {
   const node = activeNode.value;
   if (currentDatabaseType() !== "xugu" || !node.connectionId || !node.database) return;
@@ -7798,6 +7823,9 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push({ label: "", separator: true });
     if (canOpenObjectBrowser.value) {
       items.push({ sidebarActionId: "contextMenu.openObjectBrowser", label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });
+    }
+    if (currentDatabaseType() === "postgres" && hasTreeNodeDatabaseContext(node)) {
+      items.push({ sidebarActionId: "contextMenu.viewPostgresRowLevelSecurity", label: t("contextMenu.viewPostgresRowLevelSecurity"), action: () => openPostgresRowLevelSecurity(node), icon: ShieldCheck });
     }
     if (canCreateOracleTriggerAt(node)) items.push({ sidebarActionId: "contextMenu.createTrigger", label: t("contextMenu.createTrigger"), action: createOracleTrigger, icon: Plus });
     if (supportsConnectionQueryActions(currentDatabaseType())) {

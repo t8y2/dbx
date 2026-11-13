@@ -280,7 +280,7 @@ export function useDataGridColumnLayoutState(options: {
     flushPersistColumnLayout();
     const storedLayout = loadDataGridColumnLayout(toValue(options.layoutScopeKey), toValue(options.columnOrderKeys));
     const tableScopeKey = toValue(options.tableScopeKey);
-    const tableOrder = tableScopeKey ? loadTableDataGridColumnOrder(tableScopeKey) : [];
+    const tableOrder = tableScopeKey ? loadTableDataGridColumnOrder(tableScopeKey, toValue(options.columnOrderKeys)) : [];
     persistedColumnOrderKeys.value = tableOrder.length ? tableOrder : (storedLayout?.orderKeys ?? []);
     persistedHiddenColumnKeys.value = storedLayout?.hiddenKeys ?? [...(toValue(options.initialHiddenColumnKeys) ?? [])];
     resetColumnVisibility();
@@ -365,7 +365,7 @@ export function useDataGridColumnLayoutState(options: {
         persistColumnLayoutImmediately();
         const tableScopeKey = toValue(options.tableScopeKey);
         if (tableScopeKey) {
-          saveTableDataGridColumnOrder(tableScopeKey, snapshot);
+          saveTableDataGridColumnOrder(tableScopeKey, snapshot, toValue(options.columnOrderKeys));
           notifyTableDataGridColumnOrderChanged(tableScopeKey);
         }
       }
@@ -388,7 +388,7 @@ export function useDataGridColumnLayoutState(options: {
     persistedColumnOrderKeys.value = keys;
     persistColumnLayoutImmediately();
     if (tableScopeKey) {
-      saveTableDataGridColumnOrder(tableScopeKey, keys);
+      saveTableDataGridColumnOrder(tableScopeKey, keys, toValue(options.columnOrderKeys));
       notifyTableDataGridColumnOrderChanged(tableScopeKey);
     }
   }
@@ -441,7 +441,7 @@ export function useDataGridColumnLayoutState(options: {
     if (!(event instanceof CustomEvent)) return;
     const detail = event.detail as TableDataGridColumnOrderChangedDetail | undefined;
     if (!detail || detail.scopeKey !== toValue(options.tableScopeKey)) return;
-    persistedColumnOrderKeys.value = loadTableDataGridColumnOrder(detail.scopeKey);
+    persistedColumnOrderKeys.value = loadTableDataGridColumnOrder(detail.scopeKey, toValue(options.columnOrderKeys));
     if (options.onRefreshMetrics) nextTick(options.onRefreshMetrics);
   }
 

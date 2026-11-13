@@ -149,7 +149,7 @@ import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation
 import { PARTITION_TREE_INDENT_PX, flattenPgPartitionNodes, pgPartitionBoundText, pgPartitionKindLabelKey, pgPartitionNodeBoundText, pgPartitionRowHint, splitPgPartitionBoundValues, visiblePgPartitionRows, type PgPartitionTreeRow } from "@/lib/table/pgPartitionPresentation";
 import { formatBytes } from "@/lib/database/serverMetrics";
 import { hasTableStructureRefreshWork, unloadedTableStructureRefreshScope, visibleTableStructureRefreshScope, type TableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
-import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
+import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, localTableColumnDatabaseOrder, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
 import { sortStructureIndexesByColumns, type StructureIndexColumnSort } from "@/lib/table/structureIndexSort";
 import { getConcurrentIndexAvailability, concurrentIndexNamesInStatements, normalizeUnsupportedConcurrentIndexes, type ConcurrentIndexAvailability } from "@/lib/table/concurrentIndexAvailability";
 import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
@@ -5154,9 +5154,11 @@ const hasLocalColumnOrderChange = computed(() => {
 
 function applyStoredLocalColumnOrder(items: EditableStructureColumn[]): EditableStructureColumn[] {
   if (!usesLocalTableColumnOrder.value) return items;
-  const orderedKeys = loadTableDataGridColumnOrder(localTableColumnOrderScopeKey());
-  if (!orderedKeys.length) return items;
   const columnKeys = uniqueDataGridColumnOrderKeys(items.map((column) => column.name));
+  // `items` arrive in database order, so a table rebuilt with a new column
+  // order discards the arrangement saved against the old one.
+  const orderedKeys = loadTableDataGridColumnOrder(localTableColumnOrderScopeKey(), columnKeys);
+  if (!orderedKeys.length) return items;
   const indexes = orderedColumnIndexes({
     availableIndexes: items.map((_, index) => index),
     columnKeys,
@@ -5169,7 +5171,7 @@ function persistLocalColumnOrder(showNotice = true) {
   if (!usesLocalTableColumnOrder.value) return;
   const scopeKey = localTableColumnOrderScopeKey();
   if (hasLocalColumnOrderChange.value) {
-    saveTableDataGridColumnOrder(scopeKey, localColumnOrderKeys(columns.value));
+    saveTableDataGridColumnOrder(scopeKey, localColumnOrderKeys(columns.value), localColumnOrderKeys(localTableColumnDatabaseOrder(columns.value)));
   } else {
     removeTableDataGridColumnOrder(scopeKey);
   }

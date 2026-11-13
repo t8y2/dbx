@@ -57,6 +57,32 @@ describe("table data grid column order storage", () => {
     expect(withoutSchema).toBe(explicitMainSchema);
   });
 
+  it("drops an order saved against a database column order the table no longer has", () => {
+    const scopeKey = tableDataGridColumnOrderScopeKey({ connectionId: "oracle-1", database: "APP", schema: "APP", tableName: "REPORT" });
+    saveTableDataGridColumnOrder(scopeKey, ["ID\u00000", "LIAGRO\u00000", "NETINC\u00000", "CF_INFO\u00000"], ["ID\u00000", "NETINC\u00000", "CF_INFO\u00000", "LIAGRO\u00000"]);
+
+    // The table was dropped and recreated with CF_INFO ahead of NETINC.
+    expect(loadTableDataGridColumnOrder(scopeKey, ["ID\u00000", "CF_INFO\u00000", "NETINC\u00000", "LIAGRO\u00000"])).toEqual([]);
+    expect(loadTableDataGridColumnOrder(scopeKey)).toEqual([]);
+  });
+
+  it("keeps an order while the database only adds or drops columns", () => {
+    const scopeKey = tableDataGridColumnOrderScopeKey({ connectionId: "oracle-1", database: "APP", schema: "APP", tableName: "REPORT" });
+    const order = ["ID\u00000", "LIAGRO\u00000", "NETINC\u00000", "CF_INFO\u00000"];
+    saveTableDataGridColumnOrder(scopeKey, order, ["ID\u00000", "NETINC\u00000", "CF_INFO\u00000", "LIAGRO\u00000"]);
+
+    expect(loadTableDataGridColumnOrder(scopeKey, ["ID\u00000", "CF_INFO\u00000", "LIAGRO\u00000", "NOTE\u00000"])).toEqual(order);
+    expect(loadTableDataGridColumnOrder(scopeKey, ["ID\u00000", "NETINC\u00000", "CF_INFO\u00000", "LIAGRO\u00000", "NOTE\u00000"])).toEqual(order);
+  });
+
+  it("applies an order saved without a database column order", () => {
+    const scopeKey = tableDataGridColumnOrderScopeKey({ connectionId: "oracle-1", database: "APP", schema: "APP", tableName: "REPORT" });
+    const order = ["LIAGRO\u00000", "ID\u00000"];
+    saveTableDataGridColumnOrder(scopeKey, order);
+
+    expect(loadTableDataGridColumnOrder(scopeKey, ["ID\u00000", "LIAGRO\u00000"])).toEqual(order);
+  });
+
   it("notifies other open views when a table order changes", () => {
     const dispatchEvent = vi.fn();
     vi.stubGlobal("window", { dispatchEvent });

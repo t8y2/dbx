@@ -179,16 +179,21 @@ impl PoolKind {
 #[derive(Clone)]
 struct PoolPublication {
     identity: Arc<()>,
+    pool_identity: Arc<()>,
     transport: Option<ConnectionTransportStamp>,
 }
 
 impl PoolPublication {
     fn new() -> Self {
-        Self { identity: Arc::new(()), transport: None }
+        Self { identity: Arc::new(()), pool_identity: Arc::new(()), transport: None }
     }
 
     fn is_same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.identity, &other.identity)
+    }
+
+    fn is_same_pool(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.pool_identity, &other.pool_identity)
     }
 }
 
@@ -2600,7 +2605,8 @@ impl AppState {
                 if let Some(publication) = connections.publications.get_mut(&pool_key) {
                     if let Some(stamp) = transport.filter(|_| publication.transport.is_some()) {
                         crate::query::pl_debug::adopt_published_transport(self, &config.id, stamp);
-                        *publication = PoolPublication { identity: Arc::new(()), transport: Some(stamp.clone()) };
+                        publication.identity = Arc::new(());
+                        publication.transport = Some(stamp.clone());
                     }
                 }
                 let publication = connections.publications[&pool_key].clone();
@@ -2658,10 +2664,14 @@ impl AppState {
             routing.close_pool_with_timeout(pool_key.clone(), pool).await;
         }
         match self.pool_publication_snapshot(&pool_key).await {
-            Some(current) if !current.publication.is_same(&publication) => {
+            // A concurrent creator may adopt the same pool while its predecessor closes an
+            // unused candidate. Keep the original receipt so it cannot clean up that adoption.
+            Some(current) if !current.publication.is_same_pool(&publication) => {
                 return Err("Connection pool publication was superseded while closing the previous pool".into());
             }
-            Some(current) if current.pool.is_available_for_routing() => {}
+            Some(current) if current.pool.is_available_for_routing() => {
+                self.ensure_current_connection_attempt(&config.id, connection_attempt).await?;
+            }
             current => {
                 if current.is_some() {
                     self.remove_stale_pool_if_current(&pool_key, &publication).await;
@@ -14166,6 +14176,194 @@ for line in sys.stdin:
         assert!(current.pool.is_available_for_routing());
         state.shutdown(Duration::from_secs(1)).await;
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn oceanbase_saved_password_concurrent_creators_keep_the_same_pool_during_candidate_close() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(Some("APP"));
+        config.db_type = DatabaseType::OceanbaseOracle;
+        config.save_password = true;
+        config.keepalive_interval_secs = 0;
+        let key = "conn:APP";
+        let first = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        let second = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        let third = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        assert!(first.endpoint.is_ok() && second.endpoint.is_ok() && third.endpoint.is_ok());
+        assert!(first.stamp.same_runtime(&second.stamp));
+        assert!(first.stamp.same_runtime(&third.stamp));
+        let existing = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+            crate::db::agent_driver::AgentDriverClient::test_stub(),
+        ));
+        state
+            .publish_created_pool_with_transport(
+                key.into(),
+                PoolKind::Agent(existing.clone()),
+                &config,
+                &first.stamp,
+                None,
+            )
+            .await
+            .unwrap();
+        let candidate = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+            crate::db::agent_driver::AgentDriverClient::test_stub(),
+        ));
+        let candidate_lock = candidate.lock().await;
+        let publishing = state.publish_created_pool_with_transport(
+            key.into(),
+            PoolKind::Agent(candidate.clone()),
+            &config,
+            &second.stamp,
+            None,
+        );
+        tokio::pin!(publishing);
+        assert!(futures::poll!(publishing.as_mut()).is_pending());
+        let latest = state
+            .publish_created_pool_with_transport(key.into(), agent_pool_stub(), &config, &third.stamp, None)
+            .await
+            .unwrap();
+        drop(candidate_lock);
+        let earlier = publishing.await.expect("adopting the same live pool must not fail an in-flight creator");
+        assert!(state.pool_handle_for_receipt(&earlier).await.is_none());
+        state.discard_connection_pool_receipt(&earlier).await;
+        let current = state.pool_publication_snapshot(key).await.unwrap();
+        assert!(current.publication.is_same(&latest.publication));
+        assert!(matches!(current.pool, PoolKind::Agent(ref client) if Arc::ptr_eq(client, &existing)));
+        assert!(current.pool.is_available_for_routing());
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn pool_publisher_accepts_adoption_without_reviving_a_superseded_connection_attempt() {
+        for supersede_attempt in [false, true] {
+            let (state, dir) = test_app_state().await;
+            let mut config = mysql_config(Some("APP"));
+            config.save_password = true;
+            config.keepalive_interval_secs = 0;
+            let key = "conn:APP";
+            let previous = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+                crate::db::agent_driver::AgentDriverClient::test_stub(),
+            ));
+            state.connections.write().await.insert(key.into(), PoolKind::Agent(previous.clone()));
+            let first = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+            let second = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+            let attempt = state.begin_connection_attempt("conn").await;
+            let previous_lock = previous.lock().await;
+            let publishing = state.insert_connection_pool_inner(
+                key.into(),
+                agent_pool_stub(),
+                &config,
+                true,
+                false,
+                Some(&first.stamp),
+                Some(attempt),
+            );
+            tokio::pin!(publishing);
+            assert!(futures::poll!(publishing.as_mut()).is_pending());
+            let latest = state
+                .publish_created_pool_with_transport(key.into(), agent_pool_stub(), &config, &second.stamp, None)
+                .await
+                .unwrap();
+            if supersede_attempt {
+                state.begin_connection_attempt("conn").await;
+            }
+            drop(previous_lock);
+            if supersede_attempt {
+                assert_eq!(publishing.await.err().unwrap(), "Connection attempt was superseded by a newer attempt");
+            } else {
+                let earlier = publishing.await.expect("adoption must also preserve the first publisher");
+                assert!(state.pool_handle_for_receipt(&earlier).await.is_none());
+                state.discard_connection_pool_receipt(&earlier).await;
+            }
+            let current = state.pool_publication_snapshot(key).await.unwrap();
+            assert!(current.publication.is_same(&latest.publication));
+            assert!(current.pool.is_available_for_routing());
+            state.shutdown(Duration::from_secs(1)).await;
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_creators_still_reject_pool_replacement_and_transport_changes() {
+        for (save_password, replace_transport) in [(true, false), (false, false), (true, true)] {
+            let (state, dir) = test_app_state().await;
+            let mut config = mysql_config(Some("APP"));
+            config.save_password = save_password;
+            config.keepalive_interval_secs = 0;
+            let key = "conn:APP";
+            let first = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+            let second = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+            let existing = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+                crate::db::agent_driver::AgentDriverClient::test_stub(),
+            ));
+            state
+                .publish_created_pool_with_transport(
+                    key.into(),
+                    PoolKind::Agent(existing.clone()),
+                    &config,
+                    &first.stamp,
+                    None,
+                )
+                .await
+                .unwrap();
+            let candidate = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+                crate::db::agent_driver::AgentDriverClient::test_stub(),
+            ));
+            let closing = if save_password { &candidate } else { &existing };
+            let closing_lock = closing.lock().await;
+            let publishing = state.publish_created_pool_with_transport(
+                key.into(),
+                PoolKind::Agent(candidate.clone()),
+                &config,
+                &second.stamp,
+                None,
+            );
+            tokio::pin!(publishing);
+            assert!(futures::poll!(publishing.as_mut()).is_pending());
+            let mut replacement_config = config.clone();
+            if replace_transport {
+                replacement_config.host = "127.0.0.2".into();
+            }
+            let third = state.connection_endpoint_attempt("conn", &replacement_config).await.unwrap();
+            assert!(third.endpoint.is_ok());
+            assert_eq!(second.stamp.same_runtime(&third.stamp), !replace_transport);
+            let latest = if save_password && !replace_transport {
+                state
+                    .insert_connection_pool_inner(
+                        key.into(),
+                        agent_pool_stub(),
+                        &config,
+                        true,
+                        false,
+                        Some(&third.stamp),
+                        None,
+                    )
+                    .await
+                    .unwrap()
+            } else {
+                state
+                    .publish_created_pool_with_transport(
+                        key.into(),
+                        agent_pool_stub(),
+                        &replacement_config,
+                        &third.stamp,
+                        None,
+                    )
+                    .await
+                    .unwrap()
+            };
+            drop(closing_lock);
+            assert_eq!(
+                publishing.await.err().unwrap(),
+                "Connection pool publication was superseded while closing the previous pool"
+            );
+            let current = state.pool_publication_snapshot(key).await.unwrap();
+            assert!(current.publication.is_same(&latest.publication));
+            assert!(current.pool.is_available_for_routing());
+            state.shutdown(Duration::from_secs(1)).await;
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[tokio::test]

@@ -10,7 +10,7 @@ use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
 use dbx_core::query::{
     execute_multi_core_with_options_for_client_typed, execute_sql_statement, execute_sql_statement_with_options,
-    ExecuteMultiResult, QueryExecutionOptions,
+    ExecuteMultiResult, QueryExecutionError, QueryExecutionOptions,
 };
 use std::sync::Arc;
 
@@ -149,25 +149,265 @@ async fn run_batch_in_tab(
     sql: &str,
     preserve_explicit_transaction: bool,
 ) -> Vec<ExecuteMultiResult> {
-    execute_multi_core_with_options_for_client_typed(
+    try_run_batch_in_tab(state, config, database, client_session_id, sql, preserve_explicit_transaction, None)
+        .await
+        .expect("execute batch in tab client session")
+}
+
+// The complete execution future is large in debug builds. Erase its type here
+// so multi-step scenarios fit the default Windows test-thread stack.
+fn try_run_batch_in_tab<'a>(
+    state: &'a AppState,
+    config: &'a ConnectionConfig,
+    database: &'a str,
+    client_session_id: &'a str,
+    sql: &'a str,
+    preserve_explicit_transaction: bool,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Vec<ExecuteMultiResult>, QueryExecutionError>> + Send + 'a>,
+> {
+    Box::pin(execute_multi_core_with_options_for_client_typed(
         state,
         &config.id,
         database,
         sql,
         None,
-        None,
+        cancel,
         QueryExecutionOptions {
             client_session_id: Some(client_session_id.to_string()),
             preserve_explicit_transaction,
             ..Default::default()
         },
-    )
-    .await
-    .expect("execute batch in tab client session")
+    ))
 }
 
 fn last_result(results: &[ExecuteMultiResult]) -> &ExecuteMultiResult {
     results.last().expect("batch returns at least one result")
+}
+
+fn session_number(value: &serde_json::Value) -> u64 {
+    value.as_u64().or_else(|| value.as_str().and_then(|value| value.parse().ok())).expect("numeric session value")
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_AUTOCOMMIT_MYSQL_* pointing at an isolated writable MySQL database"]
+async fn live_mysql_use_and_toolbar_database_selection_preserve_session_variables() {
+    let config = live_config("DBX_LIVE_AUTOCOMMIT_MYSQL");
+    let original_database = config.database.clone().unwrap();
+    let (state, storage_path, table) = setup_probe(&config, "mysql-session-state").await;
+    for use_sql in [false, true] {
+        for initialize_before_use in [false, true] {
+            let session = format!("session-{}", uuid::Uuid::new_v4().simple());
+            let mut database = original_database.as_str();
+            let initialize = format!("SET @dbx_probe=12345; SET @dbx_init_cid=CONNECTION_ID(); CREATE TEMPORARY TABLE `{original_database}`.`{table}_temp` (v INT); INSERT INTO `{original_database}`.`{table}_temp` VALUES (9);");
+            if initialize_before_use {
+                run_batch_in_tab(&state, &config, database, &session, &initialize, true).await;
+            }
+            if use_sql {
+                run_batch_in_tab(&state, &config, database, &session, "USE information_schema", true).await;
+            }
+            // The toolbar passes the new target on the next execution.
+            database = "information_schema";
+            if !initialize_before_use {
+                run_batch_in_tab(&state, &config, database, &session, &initialize, true).await;
+            }
+            for _ in 0..3 {
+                let read = run_in_tab(
+                    &state,
+                    &config,
+                    database,
+                    &session,
+                    &format!("SELECT CONNECTION_ID(), DATABASE(), @dbx_init_cid, @dbx_probe, (SELECT v FROM `{original_database}`.`{table}_temp`)"),
+                )
+                .await;
+                assert_eq!(read.rows[0][1].as_str(), Some("information_schema"));
+                assert_eq!(session_number(&read.rows[0][0]), session_number(&read.rows[0][2]));
+                assert_eq!(session_number(&read.rows[0][3]), 12345);
+                assert_eq!(session_number(&read.rows[0][4]), 9);
+            }
+            let sibling = run_in_tab(&state, &config, database, &format!("{session}-other"), "SELECT @dbx_probe").await;
+            assert!(sibling.rows[0][0].is_null(), "query tabs must stay isolated");
+            state.close_client_session_pool(&config.id, Some(database), &session).await.unwrap();
+        }
+    }
+    cleanup(&state, &config, &table, storage_path).await;
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_AUTOCOMMIT_MYSQL_* pointing at an isolated writable MySQL database"]
+async fn live_mysql_transactions_survive_database_switches_and_savepoints_across_executions() {
+    for use_sql in [false, true] {
+        for commit in [false, true] {
+            let config = live_config("DBX_LIVE_AUTOCOMMIT_MYSQL");
+            let database = config.database.clone().unwrap();
+            let (state, storage_path, table) = setup_probe(&config, "mysql-use-transaction").await;
+            let session = "transaction-tab";
+            let start = run_batch_in_tab(
+                &state,
+                &config,
+                &database,
+                session,
+                "# explicit transaction\nSTART TRANSACTION",
+                true,
+            )
+            .await;
+            assert_eq!(last_result(&start).auto_commit_open_transaction, Some(true));
+            let before =
+                run_in_tab_keeping_transactions(&state, &config, &database, session, "SELECT CONNECTION_ID()").await;
+            if use_sql {
+                let switched =
+                    run_batch_in_tab(&state, &config, &database, session, "USE information_schema", true).await;
+                assert_eq!(last_result(&switched).auto_commit_open_transaction, Some(true));
+            }
+            let qualified_table = format!("`{database}`.`{table}`");
+            let write = run_batch_in_tab(&state, &config, "information_schema", session,
+                &format!("UPDATE {qualified_table} SET v=10 WHERE id=1; SAVEPOINT kept; UPDATE {qualified_table} SET v=20 WHERE id=1;"), true).await;
+            assert_eq!(last_result(&write).auto_commit_open_transaction, Some(true));
+            let partial_rollback =
+                run_batch_in_tab(&state, &config, "information_schema", session, "ROLLBACK TO SAVEPOINT kept", true)
+                    .await;
+            assert_eq!(last_result(&partial_rollback).auto_commit_open_transaction, Some(true));
+            let inside = run_in_tab_keeping_transactions(
+                &state,
+                &config,
+                "information_schema",
+                session,
+                &format!("SELECT CONNECTION_ID(), v FROM {qualified_table} WHERE id=1"),
+            )
+            .await;
+            assert_eq!(session_number(&before.rows[0][0]), session_number(&inside.rows[0][0]));
+            assert_eq!(session_number(&inside.rows[0][1]), 10);
+            assert_eq!(committed_value(&state, &config, &database, &table).await, 0);
+            let ended = run_batch_in_tab(
+                &state,
+                &config,
+                "information_schema",
+                session,
+                if commit { "/* finish */ COMMIT" } else { "ROLLBACK" },
+                true,
+            )
+            .await;
+            assert_eq!(last_result(&ended).auto_commit_open_transaction, Some(false));
+            assert_eq!(committed_value(&state, &config, &database, &table).await, if commit { 10 } else { 0 });
+            cleanup(&state, &config, &table, storage_path).await;
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_AUTOCOMMIT_MYSQL_* pointing at an isolated writable MySQL database"]
+async fn live_mysql_lost_session_cannot_commit_on_a_replacement_connection() {
+    let config = live_config("DBX_LIVE_AUTOCOMMIT_MYSQL");
+    let database = config.database.clone().unwrap();
+    let (state, storage_path, table) = setup_probe(&config, "mysql-lost-session").await;
+    let session = "lost-session-tab";
+    run_batch_in_tab(&state, &config, &database, session, &format!("BEGIN; UPDATE {table} SET v=7 WHERE id=1"), true)
+        .await;
+    let before =
+        run_in_tab_keeping_transactions(&state, &config, "information_schema", session, "SELECT CONNECTION_ID()").await;
+    let connection_id = session_number(&before.rows[0][0]);
+    execute_sql_statement(&state, &config.id, &database, &format!("KILL {connection_id}"), None, None).await.unwrap();
+    let outcome = try_run_batch_in_tab(&state, &config, "information_schema", session, "COMMIT", true, None).await;
+    let error = match outcome {
+        Err(error) => error.to_string(),
+        Ok(results) => {
+            assert!(
+                last_result(&results).execution_error,
+                "a new connection must not report the old commit as successful"
+            );
+            serde_json::to_string(&last_result(&results).result.rows).unwrap()
+        }
+    };
+    assert!(error.contains("MYSQL_CLIENT_SESSION_LOST"), "{error}");
+    assert_eq!(committed_value(&state, &config, &database, &table).await, 0);
+    let recovered = run_batch_in_tab(&state, &config, "information_schema", session, "SELECT DATABASE()", false).await;
+    assert_eq!(last_result(&recovered).result.rows[0][0].as_str(), Some("information_schema"));
+    let fresh = run_batch_in_tab(&state, &config, "information_schema", session, "BEGIN", false).await;
+    assert_eq!(last_result(&fresh).auto_commit_open_transaction, Some(false));
+    assert!(
+        last_result(&fresh).auto_commit_explicit_transaction_rolled_back,
+        "a lost session must not carry its preservation marker into a fresh transaction"
+    );
+    cleanup(&state, &config, &table, storage_path).await;
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_AUTOCOMMIT_MYSQL_* pointing at an isolated writable MySQL database"]
+async fn live_mysql_statement_error_and_implicit_commit_follow_server_transaction_state() {
+    let config = live_config("DBX_LIVE_AUTOCOMMIT_MYSQL");
+    let database = config.database.clone().unwrap();
+    let (state, storage_path, table) = setup_probe(&config, "mysql-transaction-state").await;
+    let session = "transaction-state-tab";
+    run_batch_in_tab(&state, &config, &database, session, &format!("BEGIN; UPDATE {table} SET v=7 WHERE id=1"), true)
+        .await;
+    let single_error = try_run_batch_in_tab(
+        &state,
+        &config,
+        &database,
+        session,
+        &format!("SELECT missing_column FROM {table}"),
+        true,
+        None,
+    )
+    .await;
+    assert!(single_error.unwrap_err().to_string().contains("Unknown column"));
+    let error = run_batch_in_tab(
+        &state,
+        &config,
+        &database,
+        session,
+        &format!("SELECT missing_column FROM {table}; SELECT 1"),
+        true,
+    )
+    .await;
+    assert!(last_result(&error).execution_error);
+    assert_eq!(last_result(&error).auto_commit_open_transaction, Some(true));
+    assert_eq!(committed_value(&state, &config, &database, &table).await, 0);
+    let implicit_commit =
+        run_batch_in_tab(&state, &config, &database, session, &format!("CREATE TABLE {table}_ddl (id INT)"), true)
+            .await;
+    assert_eq!(last_result(&implicit_commit).auto_commit_open_transaction, Some(false));
+    assert_eq!(committed_value(&state, &config, &database, &table).await, 7);
+    let rollback = run_batch_in_tab(&state, &config, &database, session, "ROLLBACK", true).await;
+    assert_eq!(last_result(&rollback).auto_commit_open_transaction, Some(false));
+    assert_eq!(committed_value(&state, &config, &database, &table).await, 7);
+    execute_sql_statement(&state, &config.id, &database, &format!("DROP TABLE {table}_ddl"), None, None).await.unwrap();
+    cleanup(&state, &config, &table, storage_path).await;
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_AUTOCOMMIT_MYSQL_* pointing at an isolated writable MySQL database"]
+async fn live_mysql_cancel_cannot_commit_an_old_transaction_on_a_new_session() {
+    let config = live_config("DBX_LIVE_AUTOCOMMIT_MYSQL");
+    let database = config.database.clone().unwrap();
+    let (state, storage_path, table) = setup_probe(&config, "mysql-cancel-transaction").await;
+    let session = "cancelled-transaction-tab";
+    run_batch_in_tab(&state, &config, &database, session, &format!("BEGIN; UPDATE {table} SET v=8 WHERE id=1"), true)
+        .await;
+    let before = run_in_tab_keeping_transactions(&state, &config, &database, session, "SELECT CONNECTION_ID()").await;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let execution =
+        try_run_batch_in_tab(&state, &config, &database, session, "SELECT SLEEP(1)", true, Some(cancel.clone()));
+    let cancellation = async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel.cancel();
+    };
+    let _ = tokio::join!(execution, cancellation);
+    let after =
+        try_run_batch_in_tab(&state, &config, &database, session, "SELECT CONNECTION_ID(); COMMIT", true, None).await;
+    match after {
+        Ok(results) if results.iter().all(|result| !result.execution_error) => {
+            assert_eq!(
+                session_number(&results[0].result.rows[0][0]),
+                session_number(&before.rows[0][0]),
+                "only the original physical session can commit the original transaction"
+            );
+            assert_eq!(committed_value(&state, &config, &database, &table).await, 8);
+        }
+        _ => assert_eq!(committed_value(&state, &config, &database, &table).await, 0),
+    }
+    cleanup(&state, &config, &table, storage_path).await;
 }
 
 /// Reads `v` through a separate auto-commit connection, so uncommitted changes

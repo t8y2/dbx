@@ -185,6 +185,12 @@ struct PoolPublicationSnapshot {
     publication: PoolPublication,
 }
 
+struct MysqlClientSession {
+    publication: PoolPublication,
+    physical_connection_id: u32,
+    database: String,
+}
+
 pub struct ConnectionPoolReceipt {
     pool_key: String,
     publication: PoolPublication,
@@ -483,6 +489,10 @@ pub struct AppState {
     /// pool, or a closed tab can never inherit a transaction that no longer
     /// exists.
     mysql_preserved_transactions: Arc<RwLock<HashSet<String>>>,
+    /// Physical identity and last requested database of a logical MySQL tab.
+    /// Survives automatic pool eviction so a replacement cannot silently run
+    /// COMMIT or other SQL on behalf of a session whose state was lost.
+    mysql_client_sessions: RwLock<HashMap<String, MysqlClientSession>>,
     pub transaction_sessions: Arc<RwLock<HashMap<String, TransactionSession>>>,
     pub sqlserver_transaction_ends: Arc<std::sync::Mutex<crate::query::sqlserver_manual_transaction::EndedSessions>>,
     /// `save_password=false` 连接本次运行期的临时密码（内存，进程退出即丢，
@@ -2124,6 +2134,7 @@ impl AppState {
             honor_fixed_ssh_local_ports: AtomicBool::new(false),
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
             mysql_preserved_transactions: Arc::new(RwLock::new(HashSet::new())),
+            mysql_client_sessions: RwLock::new(HashMap::new()),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
             sqlserver_transaction_ends: Arc::new(std::sync::Mutex::new(Default::default())),
             session_credentials: SessionCredentialStore::new(),
@@ -6249,6 +6260,7 @@ impl AppState {
         self.pool_activity.write().await.remove(&pool_key);
         self.postgres_cancel_contexts.write().await.remove(&pool_key);
         self.mysql_preserved_transactions.write().await.remove(&pool_key);
+        self.mysql_client_sessions.write().await.remove(&pool_key);
         let removed = self.update_connection_pools(|connections| connections.remove(&pool_key)).await;
         Ok(removed.map(|pool| (pool_key, pool)))
     }
@@ -6257,6 +6269,60 @@ impl AppState {
     /// on purpose (MySQL auto-commit tabs with `preserve_explicit_transaction`).
     pub(crate) async fn has_preserved_explicit_transaction(&self, pool_key: &str) -> bool {
         self.mysql_preserved_transactions.read().await.contains(pool_key)
+    }
+
+    pub(crate) async fn mysql_client_session_database_change(
+        &self,
+        pool_key: &str,
+        pool: &db::mysql::MySqlPool,
+        physical_connection_id: u32,
+        database: &str,
+    ) -> Result<bool, String> {
+        let snapshot = self.pool_publication_snapshot(pool_key).await.ok_or("MYSQL_CLIENT_SESSION_LOST: The original MySQL session pool is no longer available. Session state and the transaction outcome cannot be assumed to have survived.")?;
+        if !matches!(&snapshot.pool, PoolKind::Mysql(current, _) if current.is_same_pool(pool)) {
+            return Err("MYSQL_CLIENT_SESSION_LOST: The MySQL session pool was replaced. Session variables, temporary tables and the original transaction are no longer available on this connection.".to_string());
+        }
+        let mut sessions = self.mysql_client_sessions.write().await;
+        if let Some(previous) = sessions.get(pool_key) {
+            if previous.physical_connection_id != physical_connection_id
+                || !previous.publication.is_same(&snapshot.publication)
+            {
+                sessions.remove(pool_key);
+                drop(sessions);
+                self.clear_preserved_explicit_transaction(pool_key).await;
+                return Err("MYSQL_CLIENT_SESSION_LOST: The original MySQL session was lost. User variables and temporary tables are no longer available, and the previous transaction outcome may be unknown. This statement was not executed.".to_string());
+            }
+            return Ok(previous.database != database && !database.is_empty());
+        }
+        sessions.insert(
+            pool_key.to_string(),
+            MysqlClientSession {
+                publication: snapshot.publication,
+                physical_connection_id,
+                // A recycled physical connection starts with the pool's
+                // original database, which may predate the tab's latest USE.
+                // Record the requested database only after USE succeeds.
+                database: String::new(),
+            },
+        );
+        Ok(!database.is_empty())
+    }
+
+    pub(crate) async fn record_mysql_client_session_database(
+        &self,
+        pool_key: &str,
+        pool: &db::mysql::MySqlPool,
+        database: &str,
+    ) {
+        let Some(snapshot) = self.pool_publication_snapshot(pool_key).await else { return };
+        if !matches!(&snapshot.pool, PoolKind::Mysql(current, _) if current.is_same_pool(pool)) {
+            return;
+        }
+        if let Some(session) = self.mysql_client_sessions.write().await.get_mut(pool_key) {
+            if session.publication.is_same(&snapshot.publication) {
+                session.database = database.to_string();
+            }
+        }
     }
 
     pub(crate) async fn mark_preserved_explicit_transaction(&self, pool_key: &str) {
@@ -8445,12 +8511,25 @@ fn pool_key_for_session_role(
     client_session_id: Option<&str>,
     session_role: AgentSessionRole,
 ) -> String {
+    if let Some(config) = config.filter(|config| {
+        session_role == AgentSessionRole::Workload
+            && config.db_type == DatabaseType::Mysql
+            && db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()).is_none()
+            && normalize_client_session_id(client_session_id).is_some()
+    }) {
+        // USE changes the current database, not the logical session.
+        // Keep variables, temp tables and transactions on the same pool.
+        return session_scoped_pool_key(config.id.clone(), client_session_id);
+    }
     let pool_key = session_scoped_pool_key_for(config, base_pool_key, client_session_id);
     if session_role == AgentSessionRole::Metadata
         && config.is_some_and(|config| {
             database_capabilities::is_agent_type(&config.db_type)
                 || sqlserver_uses_legacy_driver(config)
                 || is_postgres_jdbc(config)
+                || (config.db_type == DatabaseType::Mysql
+                    && db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()).is_none()
+                    && normalize_client_session_id(client_session_id).is_some())
         })
     {
         // The legacy SQL Server Agent borrows one connection-level pool for metadata across
@@ -12568,6 +12647,51 @@ sleep 30
         assert_eq!(super::mysql_pool_max_connections_for_session(None), 10);
         assert_eq!(super::mysql_pool_max_connections_for_session(Some("")), 10);
         assert_eq!(super::mysql_pool_max_connections_for_session(Some("tab-1")), 1);
+    }
+
+    #[test]
+    fn mysql_workload_session_key_survives_database_changes_but_keeps_tabs_isolated() {
+        let config = mysql_config(Some("first"));
+        let key = |database: &str, session: &str, role| {
+            super::pool_key_for_session_role(Some(&config), format!("conn:{database}"), Some(session), role)
+        };
+        let workload = crate::agent_connection::AgentSessionRole::Workload;
+        let metadata = crate::agent_connection::AgentSessionRole::Metadata;
+        assert_eq!(key("first", "tab-1", workload), key("second", "tab-1", workload));
+        assert_ne!(key("first", "tab-1", workload), key("first", "tab-2", workload));
+        assert_ne!(key("first", "tab-1", metadata), key("second", "tab-1", metadata));
+        assert_ne!(key("first", "tab-1", workload), key("first", "tab-1", metadata));
+        let metadata_without_database =
+            super::pool_key_for_session_role(Some(&config), "conn".into(), Some("tab-1"), metadata);
+        assert_ne!(key("first", "tab-1", workload), metadata_without_database);
+    }
+
+    #[tokio::test]
+    async fn mysql_client_session_detects_replaced_connections_and_pool_generations() {
+        let (state, _dir) = test_app_state().await;
+        let key = "conn:session:tab-1";
+        let pool = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/first", 1);
+        state.connections.write().await.insert(key.into(), PoolKind::Mysql(pool.clone(), MysqlMode::Normal));
+        assert!(state.mysql_client_session_database_change(key, &pool, 10, "first").await.unwrap());
+        state.record_mysql_client_session_database(key, &pool, "first").await;
+        assert!(!state.mysql_client_session_database_change(key, &pool, 10, "first").await.unwrap());
+        assert!(state.mysql_client_session_database_change(key, &pool, 10, "second").await.unwrap());
+        state.record_mysql_client_session_database(key, &pool, "second").await;
+        assert!(!state.mysql_client_session_database_change(key, &pool, 10, "second").await.unwrap());
+        assert!(state
+            .mysql_client_session_database_change(key, &pool, 11, "second")
+            .await
+            .unwrap_err()
+            .contains("MYSQL_CLIENT_SESSION_LOST"));
+        assert!(state.mysql_client_session_database_change(key, &pool, 11, "second").await.unwrap());
+        let replacement = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/second", 1);
+        state.connections.write().await.insert(key.into(), PoolKind::Mysql(replacement.clone(), MysqlMode::Normal));
+        // Server connection ids can repeat after a server restart.
+        assert!(state
+            .mysql_client_session_database_change(key, &replacement, 11, "second")
+            .await
+            .unwrap_err()
+            .contains("MYSQL_CLIENT_SESSION_LOST"));
     }
 
     #[test]

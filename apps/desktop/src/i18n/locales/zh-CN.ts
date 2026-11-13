@@ -11076,6 +11076,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlways: "始终",
     tableCompletionSchemaQualificationAlwaysDescription: "元数据提供模式名时始终插入。",
     autoAliasTables: "自动添加表别名",
+    qualifyColumnCompletions: "字段补全添加表名前缀",
+    qualifyColumnCompletionsDescription: "关闭后，多表查询中无歧义的字段只插入字段名。同名字段及手动输入的前缀仍保留。",
     autoAliasTablesDescription: "补全 FROM 或 JOIN 表名时自动添加别名。",
     batchColumnSelectionIncludeComments: "批量插入字段时包含注释",
     batchColumnSelectionIncludeCommentsDescription: "从补全列表批量插入 SELECT 字段时，附带数据库字段注释。",

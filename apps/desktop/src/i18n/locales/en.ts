@@ -11114,6 +11114,8 @@ export default {
     tableCompletionSchemaQualificationAlways: "Always",
     tableCompletionSchemaQualificationAlwaysDescription: "Include the schema whenever it is available in metadata.",
     autoAliasTables: "Automatically add table aliases",
+    qualifyColumnCompletions: "Add table prefixes to column completions",
+    qualifyColumnCompletionsDescription: "When disabled, unambiguous columns in multi-table queries insert only the column name. Ambiguous names and explicitly typed prefixes remain qualified.",
     autoAliasTablesDescription: "When selecting a table completion in FROM or JOIN, insert a generated alias such as order_items AS oi.",
     batchColumnSelectionIncludeComments: "Include comments when inserting selected columns",
     batchColumnSelectionIncludeCommentsDescription: "Include database column comments when inserting SELECT columns in bulk from the completion list.",

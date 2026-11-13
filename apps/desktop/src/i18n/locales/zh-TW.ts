@@ -8732,6 +8732,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlways: "一律",
     tableCompletionSchemaQualificationAlwaysDescription: "中繼資料提供結構描述名稱時一律插入。",
     autoAliasTables: "自動加入資料表別名",
+    qualifyColumnCompletions: "欄位補全加入資料表前綴",
+    qualifyColumnCompletionsDescription: "關閉後，多表查詢中無歧義的欄位只插入欄位名稱。同名欄位及手動輸入的前綴仍保留。",
     autoAliasTablesDescription: "在 FROM 或 JOIN 中選擇資料表補全時，自動插入類似 order_items AS oi 的資料表別名。",
     batchColumnSelectionIncludeComments: "批次插入欄位時包含註解",
     batchColumnSelectionIncludeCommentsDescription: "從補全清單批次插入 SELECT 欄位時，附帶資料庫欄位註解。",

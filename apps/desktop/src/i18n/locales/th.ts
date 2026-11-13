@@ -11603,6 +11603,8 @@ export default withEnglishFallback({
     tableCompletionSchemaQualificationAlways: "เสมอ",
     tableCompletionSchemaQualificationAlwaysDescription: "รวม Schema ทุกครั้งที่มีใน Metadata",
     autoAliasTables: "เพิ่ม Alias ตารางอัตโนมัติ",
+    qualifyColumnCompletions: "เพิ่มคำนำหน้าตารางเมื่อเติมชื่อคอลัมน์",
+    qualifyColumnCompletionsDescription: "เมื่อปิดใช้งาน คอลัมน์ที่ไม่กำกวมในคำสั่งหลายตารางจะแทรกเฉพาะชื่อคอลัมน์ ชื่อที่กำกวมและคำนำหน้าที่พิมพ์ไว้จะยังคงอยู่",
     autoAliasTablesDescription: "เมื่อเลือกการเติมตารางใน FROM หรือ JOIN ให้แทรก Alias ที่สร้างขึ้น เช่น order_items AS oi",
     batchColumnSelectionIncludeComments: "รวมความคิดเห็นเมื่อแทรกคอลัมน์ที่เลือก",
     batchColumnSelectionIncludeCommentsDescription: "รวมความคิดเห็นของคอลัมน์ในฐานข้อมูลเมื่อแทรกหลายคอลัมน์ SELECT จากรายการเติมข้อความอัตโนมัติ",

@@ -297,6 +297,7 @@ enum ConnectionDatabaseInfoSource {
     },
     NativeMysql(db::mysql::MySqlPool),
     NativeGaussdbDws(deadpool_postgres::Pool),
+    NativePostgres(deadpool_postgres::Pool),
     NativeHBase(db::hbase_driver::HBaseClient),
     NativeMongo(mongodb::Client, Option<String>),
     Meilisearch(db::meilisearch_driver::MeilisearchClient),
@@ -312,6 +313,23 @@ async fn gaussdb_dws_product_version_from_pool(pool: &deadpool_postgres::Pool) -
     let result = db::postgres::execute_query_with_max_rows(pool, "SELECT version()", Some(1)).await.ok()?;
     let server_version = result.rows.first()?.first()?.as_str()?;
     crate::query::plugin_plan::gaussdb_product_version_from_server_version(server_version)
+}
+
+/// Product display name for a PostgreSQL-family `SELECT version()` string.
+/// Greenplum and Cloudberry both report as `PostgreSQL x.y (...)` with the
+/// real product inside the parentheses, so surface that name when present.
+fn postgres_family_product_name(server_version: &str) -> Option<&str> {
+    let lower = server_version.to_ascii_lowercase();
+    if lower.contains("cloudberry") {
+        return Some("Apache Cloudberry");
+    }
+    if lower.contains("greenplum") {
+        return Some("Greenplum");
+    }
+    if lower.contains("gaussdb") || lower.contains("hologres") {
+        return Some("GaussDB");
+    }
+    lower.contains("postgresql").then_some("PostgreSQL")
 }
 
 /// Held connection for a manual transaction session
@@ -6696,6 +6714,7 @@ impl AppState {
                 {
                     Some(ConnectionDatabaseInfoSource::NativeGaussdbDws(pool.clone()))
                 }
+                Some(PoolKind::Postgres(pool)) => Some(ConnectionDatabaseInfoSource::NativePostgres(pool.clone())),
                 Some(PoolKind::Mysql(pool, _)) => Some(ConnectionDatabaseInfoSource::NativeMysql(pool.clone())),
                 Some(PoolKind::HBase(client)) => Some(ConnectionDatabaseInfoSource::NativeHBase(client.clone())),
                 Some(PoolKind::MongoDb(client)) => {
@@ -6755,6 +6774,38 @@ impl AppState {
                         .map(str::to_string)
                         .or_else(|| config.effective_database().map(str::to_string)),
                     driver_name: Some("DBX PostgreSQL-compatible driver".to_string()),
+                    ..Default::default()
+                }))
+            }
+            Some(ConnectionDatabaseInfoSource::NativePostgres(pool)) => {
+                // Version discovery is optional metadata; on failure return
+                // versionless info so the frontend still sees a PostgreSQL
+                // connection. The full `SELECT version()` string is kept as
+                // `product_version` because engine sniffing (Greenplum /
+                // Cloudberry, whose AO tables reject system-column locators)
+                // depends on the product keywords it carries (#14745).
+                let product_version = db::postgres::execute_query_with_max_rows(&pool, "SELECT version()", Some(1))
+                    .await
+                    .ok()
+                    .and_then(|result| {
+                        result
+                            .rows
+                            .first()
+                            .and_then(|row| row.first())
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string)
+                    });
+                Ok(Some(DatabaseConnectionInfo {
+                    product_name: product_version
+                        .as_deref()
+                        .and_then(postgres_family_product_name)
+                        .map(str::to_string)
+                        .or_else(|| Some("PostgreSQL".to_string())),
+                    product_version,
+                    current_database: database
+                        .map(str::to_string)
+                        .or_else(|| config.effective_database().map(str::to_string)),
+                    driver_name: Some("DBX PostgreSQL driver".to_string()),
                     ..Default::default()
                 }))
             }
@@ -9032,13 +9083,13 @@ mod tests {
         gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver, kafka_loopback_local_port_error,
         kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead, metadata_connection_config,
         metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
-        prestosql_jdbc_config_for_endpoint, primary_tunnel_fixed_local_port, redact_transport_url,
-        redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
-        report_connection_liveness_lost, sqlserver_legacy_agent_config, sqlserver_legacy_driver_error,
-        sqlserver_uses_legacy_driver, ssh_local_port_config_error, task_client_session_id,
-        transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
-        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind, TxnConnection,
-        CLOUDFLARE_D1_LOCAL_PORT_ERROR, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE,
+        postgres_family_product_name, prestosql_jdbc_config_for_endpoint, primary_tunnel_fixed_local_port,
+        redact_transport_url, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
+        redis_sentinel_transport_prefix, report_connection_liveness_lost, sqlserver_legacy_agent_config,
+        sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, ssh_local_port_config_error,
+        task_client_session_id, transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool,
+        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
+        TxnConnection, CLOUDFLARE_D1_LOCAL_PORT_ERROR, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE,
         PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
@@ -16499,5 +16550,23 @@ for line in sys.stdin:
             .unwrap_or_else(|err| panic!("failed to drop KWDB test schema: {err}"));
         pool.close();
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn postgres_family_product_name_detects_greenplum_cloudberry() {
+        assert_eq!(
+            postgres_family_product_name("PostgreSQL 14.4 (Apache Cloudberry 1.2.0 build 8f2a) on x86_64"),
+            Some("Apache Cloudberry")
+        );
+        assert_eq!(
+            postgres_family_product_name(
+                "PostgreSQL 9.4.24 (Greenplum Database 6.18.2 build commit: 062eba04) on x86_64"
+            ),
+            Some("Greenplum")
+        );
+        assert_eq!(postgres_family_product_name("PostgreSQL 16.2 on aarch64"), Some("PostgreSQL"));
+        // Unrelated engines report their own strings; without a PostgreSQL
+        // marker there is no product name to claim.
+        assert_eq!(postgres_family_product_name("MySQL 8.0.33"), None);
     }
 }

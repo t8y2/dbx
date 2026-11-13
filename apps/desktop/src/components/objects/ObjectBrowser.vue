@@ -2622,10 +2622,10 @@ async function onEventSaved(savedName: string) {
   toast(t("objects.sourceSaved"));
 }
 
-async function openNewQuery(row: ObjectBrowserRow) {
+async function openNewQuery(row: ObjectBrowserRow, forceNew = false) {
   flushObjectBrowserViewport();
   const schema = row.schema || selectedSchema.value;
-  const tabId = queryStore.createTab(props.connection.id, props.database, row.name, "query", schema, undefined, props.catalog);
+  const tabId = queryStore.createTab(props.connection.id, props.database, row.name, "query", schema, undefined, props.catalog, { forceNew });
   queryStore.updateSql(
     tabId,
     await buildTableSelectSql({
@@ -7144,6 +7144,18 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
             <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
             <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ sidePanelRow?.name }}</span>
+            <Button
+              v-if="sidePanelRow && effectiveDatabaseType !== 'nebula' && (sidePanelRow.type === 'TABLE' || sidePanelRow.type === 'VIEW' || sidePanelRow.type === 'MATERIALIZED_VIEW')"
+              variant="ghost"
+              size="sm"
+              class="table-info-action-button h-6 px-2 text-xs"
+              :title="t('contextMenu.newQuery')"
+              :aria-label="t('contextMenu.newQuery')"
+              @click="openNewQuery(sidePanelRow, true)"
+            >
+              <TerminalSquare class="w-3 h-3" />
+              <span class="table-info-action-label">{{ t("contextMenu.newQuery") }}</span>
+            </Button>
             <div v-if="tableInfoTab === 'ddl' && tableMetadataCapabilities.ddl" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">
               <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :disabled="tableDdlLoading || !tableDdlLoaded" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyTableDdl">
                 <Copy class="w-3 h-3" />

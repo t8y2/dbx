@@ -704,6 +704,7 @@ const availableObjectColumnDefinitions = computed(() => [
 ]);
 const objectColumnDefinitions = computed(() => {
   const ranks = new Map(objectColumnOrder.value.map((key, index) => [key, index]));
+  // Newly available columns follow saved columns in their built-in relative order.
   return [...availableObjectColumnDefinitions.value].sort((left, right) => (ranks.get(left.key) ?? Number.MAX_SAFE_INTEGER) - (ranks.get(right.key) ?? Number.MAX_SAFE_INTEGER));
 });
 
@@ -736,6 +737,17 @@ function cancelObjectColumnDrag(): void {
   objectColumnDrag.value = undefined;
   objectColumnDropTarget.value = undefined;
   if (drag?.handle.hasPointerCapture(drag.pointerId)) drag.handle.releasePointerCapture(drag.pointerId);
+}
+
+function resetObjectColumnOrder(): void {
+  cancelObjectColumnDrag();
+  objectColumnOrder.value = [];
+  try {
+    localStorage.removeItem(objectColumnOrderStorageKey.value);
+  } catch {
+    // The current session can still use the default order without persistent storage.
+  }
+  nextTick(() => syncObjectListHeaderScroll());
 }
 
 function startObjectColumnDrag(event: PointerEvent, key: ObjectBrowserColumnKey): void {
@@ -6931,6 +6943,11 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <GripVertical class="h-3.5 w-3.5" />
                     </button>
                   </div>
+                </div>
+                <div class="mt-1 flex justify-end border-t pt-1">
+                  <Button type="button" variant="ghost" size="sm" class="h-7 px-2 text-xs" :disabled="objectColumnOrder.length === 0" @click="resetObjectColumnOrder">
+                    {{ t("grid.resetColumnOrder") }}
+                  </Button>
                 </div>
               </PopoverContent>
             </Popover>

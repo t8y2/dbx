@@ -3885,7 +3885,7 @@ export const useQueryStore = defineStore("query", () => {
     catalog?: string,
     eventName?: string,
     eventReadOnly = false,
-    initialObjectFilter?: "tables" | "events" | "indexes",
+    initialObjectFilter?: import("@/types/database").ObjectBrowserFilter,
     eventCreateRequestId?: number,
     indexRequest?: { create?: boolean; view?: import("@/types/database").SchemaIndexIdentity },
   ) {
@@ -3923,6 +3923,10 @@ export const useQueryStore = defineStore("query", () => {
           ...(indexRequest?.create ? { indexCreateRequestId: requestId, initialViewTarget: undefined, initialViewRequestId: undefined } : {}),
           ...(indexRequest?.view ? { initialViewTarget: indexRequest.view, initialViewRequestId: requestId, indexCreateRequestId: undefined } : {}),
         };
+      } else if (initialObjectFilter) {
+        // 双击分组行复用同一个对象浏览器标签：改写入参并清掉已选分类，
+        // 让 ObjectBrowser 重新按 initialObjectFilter 选中目标分类。
+        existing.objectBrowser = { ...existing.objectBrowser, initialObjectFilter, filter: undefined };
       }
       switchTab(existing.id);
       return existing.id;

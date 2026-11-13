@@ -282,7 +282,7 @@ const props = defineProps<{
   initialEventOpenRequestId?: number;
   /** 显式"新建事件"请求号：每次菜单点击递增，用于打开/重新进入 CREATE 编辑器 */
   initialEventCreateRequestId?: number;
-  initialObjectFilter?: "tables" | "events" | "indexes";
+  initialObjectFilter?: ObjectFilter;
   initialIndexCreateRequestId?: number;
   initialViewTarget?: SchemaIndexIdentity;
   initialViewRequestId?: number;
@@ -360,7 +360,10 @@ function initialObjectBrowserFilter(): ObjectFilter {
   const preferred = props.selectedObjectFilter ?? props.initialObjectFilter;
   if (preferred === "indexes") return "indexes";
   if (props.connection.db_type === "oceanbase-oracle") return preferred ?? "tables";
-  return preferred === "triggers" && oracleTriggerObjectReadOptions(props.connection, ["TRIGGER"], props.catalog) ? "triggers" : "all";
+  // 非 OceanBase-Oracle 连接：显式分类（表/视图/存储过程/函数/触发器/事件…）
+  // 都要生效，只有触发器仍需精确触发器读取能力才切到 triggers。
+  if (preferred === "triggers") return oracleTriggerObjectReadOptions(props.connection, ["TRIGGER"], props.catalog) ? "triggers" : "all";
+  return preferred ?? "all";
 }
 const objectFilter = ref<ObjectFilter>(initialObjectBrowserFilter());
 const userHasSelectedFilter = ref(false);
@@ -6011,7 +6014,10 @@ function selectObjectFilter(filter: ObjectFilter) {
 watch(
   () => props.selectedObjectFilter ?? props.initialObjectFilter,
   (filter) => {
-    if (filter && (filter === "indexes" || objectFilter.value === "indexes")) selectObjectFilter(filter);
+    if (!filter) return;
+    // 复用标签页时双击另一个分组只会改 initialObjectFilter，因此除了 indexes
+    // 的既有语义，任何显式分类也要跟着切换。
+    if (filter === "indexes" || objectFilter.value === "indexes" || filter !== "all") selectObjectFilter(filter);
   },
 );
 

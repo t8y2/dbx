@@ -8390,9 +8390,71 @@ watch(
 
     <PostgresForeignTableOptionsEditor v-if="isCreatingForeignTable" v-model="postgresForeignTable" :connection-id="props.connectionId" :database="props.database" :catalog="props.catalog" :disabled="saving" />
 
+    <div v-if="supportsMysqlEngine" class="flex flex-wrap items-center gap-2 shrink-0">
+      <div class="flex shrink-0 items-center gap-2">
+        <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.mysqlTableEngine") }}</label>
+        <SearchableSelect
+          v-model="mysqlTableEngine"
+          :options="mysqlTableEngineOptions"
+          :placeholder="t('structureEditor.mysqlTableEnginePlaceholder')"
+          :search-placeholder="t('structureEditor.mysqlTableEngineSearchPlaceholder')"
+          :empty-text="t('structureEditor.mysqlTableEngineEmpty')"
+          :loading-text="t('common.loading')"
+          :loading="mysqlTableEngineLoading"
+          :disabled="mysqlTableEngineLoading || !!mysqlTableEngineLoadError || saving"
+          :trigger-class="[structureMonoControlClass, 'w-[220px] max-w-[220px]']"
+          data-mysql-table-engine-select
+        />
+        <Loader2 v-if="mysqlTableEngineLoading" :class="[structureIconClass, 'animate-spin text-muted-foreground']" />
+        <Tooltip v-else-if="mysqlTableEngineLoadError">
+          <TooltipTrigger as-child>
+            <AlertTriangle :class="[structureIconClass, 'shrink-0 text-destructive']" />
+          </TooltipTrigger>
+          <TooltipContent>{{ t("structureEditor.mysqlTableEngineLoadFailed", { message: mysqlTableEngineLoadError }) }}</TooltipContent>
+        </Tooltip>
+      </div>
+
+      <div class="flex shrink-0 items-center gap-2">
+        <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.characterSet") }}</label>
+        <SearchableSelect
+          :model-value="mysqlTableCharset"
+          :options="mysqlCharsetOptions"
+          :placeholder="t('structureEditor.charsetPlaceholder')"
+          :search-placeholder="t('structureEditor.charsetPlaceholder')"
+          :empty-text="t('structureEditor.noMatchingType')"
+          :allow-custom="true"
+          :clearable="isCreateMode"
+          :loading="charsetMetadataLoading"
+          :loading-text="t('common.loading')"
+          :disabled="charsetMetadataLoading || saving"
+          :trigger-class="[structureMonoControlClass, 'w-[180px] max-w-[180px]']"
+          data-mysql-table-charset-select
+          @update:model-value="onMysqlTableCharsetChange"
+        />
+      </div>
+
+      <div class="flex shrink-0 items-center gap-2">
+        <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.collation") }}</label>
+        <SearchableSelect
+          v-model="mysqlTableCollation"
+          :options="collationOptionsForCharset(mysqlTableCharset)"
+          :placeholder="t('structureEditor.collationPlaceholder')"
+          :search-placeholder="t('structureEditor.collationPlaceholder')"
+          :empty-text="t('structureEditor.noMatchingType')"
+          :allow-custom="true"
+          :clearable="isCreateMode"
+          :loading="charsetMetadataLoading"
+          :loading-text="t('common.loading')"
+          :disabled="charsetMetadataLoading || saving || !mysqlTableCharset"
+          :trigger-class="[structureMonoControlClass, 'w-[220px] max-w-[220px]']"
+          data-mysql-table-collation-select
+        />
+      </div>
+    </div>
+
     <div class="flex shrink-0 items-center gap-2">
       <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.comment") }}</label>
-      <Input v-model="tableComment" :placeholder="t('structureEditor.tableCommentPlaceholder')" :class="[structureControlClass, 'max-w-[320px]']" :disabled="isTableCommentDisabled" data-table-comment-input />
+      <Input v-model="tableComment" :placeholder="t('structureEditor.tableCommentPlaceholder')" :class="[structureControlClass, 'flex-1 min-w-0 w-full']" :disabled="isTableCommentDisabled" data-table-comment-input />
       <Tooltip v-if="isTableCommentDisabled">
         <TooltipTrigger as-child>
           <Info :class="[structureIconClass, 'shrink-0 text-muted-foreground']" />
@@ -8404,66 +8466,6 @@ watch(
     <div v-if="canEditPrimaryKeyName" class="flex shrink-0 items-center gap-2">
       <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.primaryKeyName") }}</label>
       <Input v-model="primaryKeyName" :placeholder="t('structureEditor.primaryKeyNamePlaceholder')" :class="[structureControlClass, 'max-w-[320px]']" :disabled="saving || loading" data-primary-key-name-input />
-    </div>
-
-    <div v-if="supportsMysqlEngine" class="flex shrink-0 items-center gap-2">
-      <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.mysqlTableEngine") }}</label>
-      <SearchableSelect
-        v-model="mysqlTableEngine"
-        :options="mysqlTableEngineOptions"
-        :placeholder="t('structureEditor.mysqlTableEnginePlaceholder')"
-        :search-placeholder="t('structureEditor.mysqlTableEngineSearchPlaceholder')"
-        :empty-text="t('structureEditor.mysqlTableEngineEmpty')"
-        :loading-text="t('common.loading')"
-        :loading="mysqlTableEngineLoading"
-        :disabled="mysqlTableEngineLoading || !!mysqlTableEngineLoadError || saving"
-        :trigger-class="[structureMonoControlClass, 'w-[220px] max-w-[220px]']"
-        data-mysql-table-engine-select
-      />
-      <Loader2 v-if="mysqlTableEngineLoading" :class="[structureIconClass, 'animate-spin text-muted-foreground']" />
-      <Tooltip v-else-if="mysqlTableEngineLoadError">
-        <TooltipTrigger as-child>
-          <AlertTriangle :class="[structureIconClass, 'shrink-0 text-destructive']" />
-        </TooltipTrigger>
-        <TooltipContent>{{ t("structureEditor.mysqlTableEngineLoadFailed", { message: mysqlTableEngineLoadError }) }}</TooltipContent>
-      </Tooltip>
-    </div>
-
-    <div v-if="supportsMysqlEngine" class="flex shrink-0 items-center gap-2">
-      <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.characterSet") }}</label>
-      <SearchableSelect
-        :model-value="mysqlTableCharset"
-        :options="mysqlCharsetOptions"
-        :placeholder="t('structureEditor.charsetPlaceholder')"
-        :search-placeholder="t('structureEditor.charsetPlaceholder')"
-        :empty-text="t('structureEditor.noMatchingType')"
-        :allow-custom="true"
-        :clearable="isCreateMode"
-        :loading="charsetMetadataLoading"
-        :loading-text="t('common.loading')"
-        :disabled="charsetMetadataLoading || saving"
-        :trigger-class="[structureMonoControlClass, 'w-[180px] max-w-[180px]']"
-        data-mysql-table-charset-select
-        @update:model-value="onMysqlTableCharsetChange"
-      />
-    </div>
-
-    <div v-if="supportsMysqlEngine" class="flex shrink-0 items-center gap-2">
-      <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.collation") }}</label>
-      <SearchableSelect
-        v-model="mysqlTableCollation"
-        :options="collationOptionsForCharset(mysqlTableCharset)"
-        :placeholder="t('structureEditor.collationPlaceholder')"
-        :search-placeholder="t('structureEditor.collationPlaceholder')"
-        :empty-text="t('structureEditor.noMatchingType')"
-        :allow-custom="true"
-        :clearable="isCreateMode"
-        :loading="charsetMetadataLoading"
-        :loading-text="t('common.loading')"
-        :disabled="charsetMetadataLoading || saving || !mysqlTableCharset"
-        :trigger-class="[structureMonoControlClass, 'w-[220px] max-w-[220px]']"
-        data-mysql-table-collation-select
-      />
     </div>
 
     <TablePhysicalOptionsEditor v-if="isCreateMode && databaseType === 'transwarp'" v-model="physicalOptions" :config="INCEPTOR_PHYSICAL_OPTIONS" :columns="columns.filter((column) => !column.markedForDrop && !!column.name.trim())" :disabled="saving" />

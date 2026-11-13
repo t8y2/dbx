@@ -401,6 +401,29 @@ describe("QueryEditor component split integration", () => {
     expect(host.querySelector(".cm-editor")).toBe(view.dom);
   });
 
+  it("does not accumulate page styles while repeatedly restoring cached SQL tabs", async () => {
+    const { props, view, settingsStore } = await mountEditor({ modelValue: "SELECT 1;", tabId: "styles-a" });
+    settingsStore.editorSettings.theme = "cursor-light";
+    const activate = async (tabId: string, sql: string) => {
+      props.tabId = tabId;
+      props.modelValue = sql;
+      await nextTick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+    await activate("styles-b", "SELECT 2;");
+    await activate("styles-a", "SELECT 1;");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const stylesheetSize = () => [...document.head.querySelectorAll("style")].reduce((total, style) => total + (style.textContent?.length ?? 0), 0);
+    const initialSize = stylesheetSize();
+    for (let index = 0; index < 20; index += 1) {
+      await activate("styles-b", "SELECT 2;");
+      await activate("styles-a", "SELECT 1;");
+    }
+    expect(stylesheetSize() - initialSize).toBe(0);
+    view.dispatch({ selection: { anchor: 0, head: 6 } });
+    expect(view.state.sliceDoc(0, 6)).toBe("SELECT");
+  });
+
   it("connects manual completion to the provider without preselecting a candidate", async () => {
     const { view, settingsStore } = await mountEditor({ modelValue: "SEL", initialSelection: { anchor: 3, head: 3 }, connectionId: "completion-test" });
     settingsStore.editorSettings.completionTriggerMode = "manual";

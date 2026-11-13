@@ -2612,6 +2612,15 @@ const {
   onHideNullColumnsChange: (value) => settingsStore.updateEditorSettings({ dataGridHideNullColumns: value }),
   onRefreshMetrics: scheduleColumnLayoutRefresh,
 });
+const quickBuilderColumns = computed(() => {
+  if (!hasCustomColumnOrder.value) return undefined;
+  const columns = filterBuilderColumnOptions.value;
+  const available = new Set(columns);
+  const ordered = new Set(orderedDisplayableColumnIndexes.value.map((index) => props.result.columns[index]).filter((name) => available.has(name)));
+  // A field can be filterable even when it is absent from the current result.
+  for (const name of columns) ordered.add(name);
+  return [...ordered];
+});
 // The go-to-column list mirrors the column filter panel, so both follow the
 // user's local column order instead of the database order.
 const goToColumnItems = computed(() =>
@@ -15570,6 +15579,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   :show-order-by="dataGridOrderByVisible"
                   :where-pane-ratio="dataGridWhereRatio"
                   :columns="props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns"
+                  :quick-builder-columns="quickBuilderColumns"
                   :comment-by-column="columnCommentMap"
                   :condition-columns="conditionColumns"
                   :identifier-quote="conditionIdentifierQuote"

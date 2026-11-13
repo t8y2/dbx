@@ -21,6 +21,22 @@ function roundTrip(tabs: QueryTab[]) {
 }
 
 describe("openTabsPersistence originalSql round-trip", () => {
+  it("preserves the single-statement console buffer independently of the batch history", () => {
+    const [restored] = roundTrip([queryTab({ lastExecutedSql: "INSERT INTO t VALUES (1); SELECT 1;", lastConsoleSql: "SELECT 1" })]);
+    expect(restored.lastExecutedSql).toBe("INSERT INTO t VALUES (1); SELECT 1;");
+    expect(restored.lastConsoleSql).toBe("SELECT 1");
+  });
+
+  it("drops an invalid console buffer while restoring", () => {
+    const [restored] = restoreOpenTabsPayload({ tabs: [{ id: "t1", title: "query_1", connectionId: "c1", database: "db", sql: "", lastConsoleSql: 1 }] }).tabs;
+    expect(restored.lastConsoleSql).toBeUndefined();
+  });
+
+  it("does not persist console tabs (terminal history is session-scoped)", () => {
+    const saved = serializeOpenTabs([queryTab({ id: "c1-tab", mode: "console", title: "10.0.0.9 - console" })]);
+    expect(saved).toEqual([]);
+  });
+
   it("preserves retained result source connections independently of the editor connection", () => {
     const base = { title: "Result", sequence: 1, sql: "SELECT 1", createdAt: 1 };
     const [restored] = roundTrip([

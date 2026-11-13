@@ -36,6 +36,57 @@ describe("read-only write unlock", () => {
     toast.mockClear();
   });
 
+  it("cancels only the requested scope including queued readonly prompts", async () => {
+    const connection = { id: "conn", read_only: true, db_type: "mysql" as const };
+    const first = ensureReadOnlyWriteAccess({ connection, sql: "DELETE FROM a", scopeId: "console-a" });
+    const second = ensureReadOnlyWriteAccess({ connection, sql: "DELETE FROM b", scopeId: "console-b" });
+    const queued = ensureReadOnlyWriteAccess({ connection, sql: "DELETE FROM c", scopeId: "console-a" });
+    const store = await waitForPending("conn");
+    await Promise.resolve();
+    store.cancelScope("console-a");
+    await expect(first).resolves.toBe(false);
+    await expect(queued).resolves.toBe(false);
+    expect(store.pending?.scopeId).toBe("console-b");
+    store.cancel();
+    await expect(second).resolves.toBe(false);
+  });
+
+  it("does not open a late readonly prompt after its scope was cancelled during backend refresh", async () => {
+    let resolve!: (remaining: number) => void;
+    connectionWriteUnlockState.mockReturnValueOnce(
+      new Promise<number>((done) => {
+        resolve = done;
+      }),
+    );
+    const pending = ensureReadOnlyWriteAccess({ connection: { id: "conn", read_only: true }, sql: "DELETE FROM a", scopeId: "console-a" });
+    const store = useReadOnlyUnlockStore();
+    store.cancelScope("console-a");
+    resolve(0);
+    await expect(pending).resolves.toBe(false);
+    expect(store.pending).toBeUndefined();
+  });
+
+  it("does not approve another prompt when a cancelled unlock's backend request finishes", async () => {
+    let resolve!: (remaining: number) => void;
+    unlockConnectionWrites.mockReturnValueOnce(
+      new Promise<number>((done) => {
+        resolve = done;
+      }),
+    );
+    const first = ensureReadOnlyWriteAccess({ connection: { id: "first", read_only: true }, sql: "DELETE FROM a", scopeId: "console-a" });
+    const store = await waitForPending("first");
+    const confirm = store.confirm(60);
+    store.cancelScope("console-a");
+    await expect(first).resolves.toBe(false);
+    const second = ensureReadOnlyWriteAccess({ connection: { id: "second", read_only: true }, sql: "DELETE FROM b", scopeId: "console-b" });
+    await waitForPending("second");
+    resolve(0);
+    await confirm;
+    expect(store.pending?.connectionId).toBe("second");
+    store.cancel();
+    await expect(second).resolves.toBe(false);
+  });
+
   it("formats remaining time as m:ss", () => {
     expect(formatWriteUnlockRemaining(60_000)).toBe("1:00");
     expect(formatWriteUnlockRemaining(5_000)).toBe("0:05");

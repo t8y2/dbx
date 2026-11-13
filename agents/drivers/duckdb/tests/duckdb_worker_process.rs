@@ -178,19 +178,17 @@ async fn worker_process_recovers_after_registered_cancel_interrupt() {
     let execution_id = "duckdb-worker-cancel-test";
     let registered = running_queries
         .register_task(execution_id.to_string(), RunningTaskMetadata::query("duckdb-conn", "main", None));
-    let cancel_client = client.clone();
+    let cancel_token = registered.token();
+    let interrupt_token = cancel_token.clone();
     running_queries.register_interrupt(execution_id, move || {
-        let cancel_client = cancel_client.clone();
-        tokio::spawn(async move {
-            let _ = cancel_client.cancel().await;
-        });
+        interrupt_token.cancel();
     });
 
     let long_query = client.execute(
         None,
         "SELECT sum(sin(i::DOUBLE) * cos(i::DOUBLE / 3.0)) FROM range(100000000000) AS t(i)".to_string(),
         Some(10),
-        Some(registered.token()),
+        Some(cancel_token),
         Some(Duration::from_secs(30)),
     );
     tokio::pin!(long_query);

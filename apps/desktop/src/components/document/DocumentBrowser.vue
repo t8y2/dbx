@@ -527,6 +527,11 @@ const selectedDoc = computed(() => {
   if (selectedIdx.value === null) return null;
   return documents.value[selectedIdx.value] ?? null;
 });
+const documentViewerText = computed(() => {
+  if (documentStoreProvider.value.kind !== "mongodb" || selectedIdx.value === null || !mongoCopyDocumentsAvailable.value) return editJson.value;
+  const document = copyDocuments.value[selectedIdx.value];
+  return document ? formatMongoShellLiteral(document, { pretty: true }) : editJson.value;
+});
 const selectedDocumentIdLabel = computed(() => {
   if (isNew.value) return "New";
   return formatDocumentStoreIdLabel(selectedDoc.value?._id, documentStoreProvider.value.kind);
@@ -3485,7 +3490,7 @@ defineExpose({ focusSearch });
             </div>
 
             <div v-else data-document-json-viewer class="flex-1 min-h-0 select-text bg-muted/10 outline-none" @dblclick="handleDocumentViewerDoubleClick">
-              <RedisJsonEditor ref="documentJsonEditorRef" :model-value="editJson" read-only :line-numbers="false" presentation="viewer" class="h-full" />
+              <RedisJsonEditor ref="documentJsonEditorRef" :model-value="documentViewerText" read-only :line-numbers="false" presentation="viewer" class="h-full" />
             </div>
           </template>
           <div v-else class="h-full flex items-center justify-center text-muted-foreground text-sm">

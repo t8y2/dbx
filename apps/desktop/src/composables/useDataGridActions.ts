@@ -806,9 +806,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       // 与重载/翻页同一降级契约——带定位器的排序失败后去掉定位器重试一次，
       // 表仍可排序浏览（只读）；成功后才记住该连接。
       if (sql.includes("__DBX_ROWID")) {
-        await executeTableDataSqlWithRowIdFallback(tab, sql, sortOptions, () =>
-          buildTableSql(tab, { orderBy, whereInput, limit, offset: pagination.offset, includeRowId: false }),
-        );
+        await executeTableDataSqlWithRowIdFallback(tab, sql, sortOptions, () => buildTableSql(tab, { orderBy, whereInput, limit, offset: pagination.offset, includeRowId: false }));
       } else {
         await queryStore.executeTabSql(tab.id, sql, sortOptions);
       }

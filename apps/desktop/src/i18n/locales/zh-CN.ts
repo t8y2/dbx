@@ -5228,6 +5228,7 @@ export default withEnglishFallback({
     createTable: "新建表",
     createView: "新建视图",
     createProcedure: "新建存储过程",
+    createSequence: "新建序列",
     createFunction: "新建函数",
     createTrigger: "新建触发器",
     dropTable: "删除表",

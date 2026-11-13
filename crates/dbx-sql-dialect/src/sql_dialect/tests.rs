@@ -290,6 +290,27 @@ fn maps_table_pagination_strategy_by_database_type() {
     assert_eq!(table_pagination_strategy(None), TablePaginationStrategy::LimitOffset);
 }
 
+/// #14604: Teradata rejects `LIMIT`, so a user query must run unmodified and rely
+/// on the agent's row cap instead of a rewritten page.
+#[test]
+fn keeps_teradata_user_queries_unrewritten_because_it_has_no_limit_clause() {
+    assert_eq!(
+        pagination_strategy(Some(DatabaseType::Teradata), PaginationContext::UserQuery),
+        TablePaginationStrategy::AgentMaxRows
+    );
+    // Table previews and bounded reads are unchanged by this fix: they still ask
+    // for `LIMIT`, which Teradata cannot parse. Pinned here so the follow-up work
+    // is visible instead of silently assumed done.
+    assert_eq!(
+        pagination_strategy(Some(DatabaseType::Teradata), PaginationContext::TablePreview),
+        TablePaginationStrategy::LimitOffset
+    );
+    assert_eq!(
+        pagination_strategy(Some(DatabaseType::Teradata), PaginationContext::BoundedRead),
+        TablePaginationStrategy::LimitOffset
+    );
+}
+
 #[test]
 fn oscar_table_data_pages_use_one_limit_pagination_form_without_rownum() {
     let options = TableDataSelectSqlOptions {

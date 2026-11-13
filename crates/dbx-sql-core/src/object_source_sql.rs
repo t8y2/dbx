@@ -573,7 +573,12 @@ fn build_executable_object_source_statements_with_mysql_validation_name(
         return Ok(vec![executable_duckdb_view_ddl(input.schema.as_deref(), &input.name, source)]);
     }
 
-    if is_postgres_like(input.database_type) && input.object_type == ObjectSourceKind::View {
+    if (is_postgres_like(input.database_type) || input.database_type == DatabaseType::SapHana)
+        && input.object_type == ObjectSourceKind::View
+    {
+        if source.is_empty() {
+            return Ok(vec![String::new()]);
+        }
         if let Some(sql) = executable_postgres_view_ddl(source) {
             return Ok(vec![sql]);
         }
@@ -1081,7 +1086,7 @@ fn unquoted_keyword_is(token: &Token, expected: &str) -> bool {
 /// statements.
 pub fn build_editable_object_source(input: EditableObjectSourceSqlInput) -> String {
     let source = input.source.clone();
-    if is_postgres_like(input.database_type)
+    if (is_postgres_like(input.database_type) || input.database_type == DatabaseType::SapHana)
         && input.object_type == ObjectSourceKind::View
         && source_starts_with_create_or_alter(&source)
     {
@@ -1120,6 +1125,9 @@ pub fn build_editable_object_source(input: EditableObjectSourceSqlInput) -> Stri
 
 pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
     let source = input.source.trim();
+    if source.is_empty() {
+        return String::new();
+    }
     if input.database_type.is_some_and(is_mysql_like) {
         return display_mysql_view_ddl(source, &quote_mysql_identifier(&input.name));
     }
@@ -1131,7 +1139,7 @@ pub fn build_view_ddl_sql(input: BuildViewDdlInput) -> String {
     } else {
         ensure_semicolon(source)
     };
-    if Regex::new(r"(?i)^(?:CREATE|ALTER)\s+").unwrap().is_match(source) {
+    if source_starts_with_create_or_alter(source) {
         return terminated_source;
     }
 
@@ -3594,6 +3602,64 @@ mod tests {
         });
 
         assert_eq!(sql, "CREATE VIEW \"main\".\"active_users\" AS\nSELECT id FROM users;");
+    }
+
+    #[test]
+    fn saphana_view_ddl_and_editable_source_handle_catalog_and_modeled_views() {
+        let display_ddl = build_view_ddl_sql(BuildViewDdlInput {
+            database_type: Some(DatabaseType::SapHana),
+            schema: Some("APP".to_string()),
+            name: "ACTIVE_ORDERS".to_string(),
+            source: "SELECT \"ID\" FROM \"APP\".\"ORDERS\" WHERE \"ACTIVE\" = TRUE".to_string(),
+            identifier_quote: None,
+        });
+        assert_eq!(
+            display_ddl,
+            "CREATE VIEW \"APP\".\"ACTIVE_ORDERS\" AS\nSELECT \"ID\" FROM \"APP\".\"ORDERS\" WHERE \"ACTIVE\" = TRUE;"
+        );
+
+        let modeled_ddl = build_view_ddl_sql(BuildViewDdlInput {
+            database_type: Some(DatabaseType::SapHana),
+            schema: Some("_SYS_BIC".to_string()),
+            name: "pkg/CALC_ORDERS".to_string(),
+            source: "   ".to_string(),
+            identifier_quote: None,
+        });
+        assert_eq!(modeled_ddl, "");
+
+        let editable = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::SapHana,
+            object_type: ObjectSourceKind::View,
+            schema: Some("APP".to_string()),
+            name: "ACTIVE_ORDERS".to_string(),
+            source: "SELECT \"ID\" FROM \"APP\".\"ORDERS\"".to_string(),
+        });
+        assert_eq!(
+            editable,
+            "CREATE OR REPLACE VIEW \"APP\".\"ACTIVE_ORDERS\" AS\nSELECT \"ID\" FROM \"APP\".\"ORDERS\";"
+        );
+
+        let executable = build_executable_object_source_sql(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::SapHana,
+            object_type: ObjectSourceKind::View,
+            schema: Some("APP".to_string()),
+            name: "ACTIVE_ORDERS".to_string(),
+            source: "CREATE VIEW \"APP\".\"ACTIVE_ORDERS\" AS SELECT \"ID\" FROM \"APP\".\"ORDERS\"".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            executable,
+            "CREATE OR REPLACE VIEW \"APP\".\"ACTIVE_ORDERS\" AS SELECT \"ID\" FROM \"APP\".\"ORDERS\";"
+        );
+
+        let empty_editable = build_editable_object_source(EditableObjectSourceSqlInput {
+            database_type: DatabaseType::SapHana,
+            object_type: ObjectSourceKind::View,
+            schema: Some("_SYS_BIC".to_string()),
+            name: "pkg/CALC_ORDERS".to_string(),
+            source: String::new(),
+        });
+        assert_eq!(empty_editable, "");
     }
 
     #[test]

@@ -159,7 +159,9 @@ describe("useDataGridActions refreshActiveResultRun integration", () => {
       .mockResolvedValueOnce([resultOf([[2]])])
       .mockResolvedValueOnce([resultOf([[3]])])
       .mockResolvedValueOnce([resultOf([[4]])])
-      .mockResolvedValueOnce([resultOf([[5]])]);
+      .mockResolvedValueOnce([resultOf([[5]])])
+      .mockResolvedValueOnce([resultOf([[6]])])
+      .mockResolvedValueOnce([resultOf([[7]])]);
     const { useQueryStore } = await import("@/stores/queryStore");
     const { useDataGridActions } = await import("@/composables/useDataGridActions");
     const { tabId, tab } = await createAutoKeepTab();
@@ -177,16 +179,36 @@ describe("useDataGridActions refreshActiveResultRun integration", () => {
     expect(tab().resultRuns).toHaveLength(2);
     expect(tab().activeResultRunId).toBe(activeRunId);
     expect(tab().result?.rows).toEqual([[3]]);
+    const manualRefreshRevision = tab().resultColumnWidthRevision;
+    expect(manualRefreshRevision).toEqual(expect.any(String));
 
     // Auto-refresh reuses the same in-place path.
     await actions.onReloadData(tabId, "SELECT value FROM t", "", "", "", undefined, undefined, "auto-refresh");
     expect(tab().resultRuns).toHaveLength(2);
     expect(tab().activeResultRunId).toBe(activeRunId);
     expect(tab().result?.rows).toEqual([[4]]);
+    const autoRefreshRevision = tab().resultColumnWidthRevision;
+    expect(autoRefreshRevision).toEqual(expect.any(String));
+    expect(autoRefreshRevision).not.toBe(manualRefreshRevision);
+
+    mocks.prepareQueryPaginationExecutionPlan.mockImplementation(async ({ sql, pagination }) => ({
+      sqlToExecute: sql,
+      pageSql: sql,
+      pageLimit: pagination.limit,
+      pageOffset: pagination.offset,
+      useAgentResultSession: false,
+    }));
+    await actions.onPaginate(tabId, 1, 1, undefined, undefined, true);
+    expect(tab().result?.rows).toEqual([[4], [5]]);
+    expect(tab().resultColumnWidthRevision).toBe(autoRefreshRevision);
+    await actions.onPaginate(tabId, 2, 1);
+    expect(tab().result?.rows).toEqual([[6]]);
+    expect(tab().resultColumnWidthRevision).toBe(autoRefreshRevision);
+    expect(tab().activeResultRunId).toBe(activeRunId);
 
     // Run / Cmd+Enter is still an execution and adds a result run.
     await actions.onExecuteSql(tabId, "SELECT value FROM t");
     expect(tab().resultRuns).toHaveLength(3);
-    expect(tab().result?.rows).toEqual([[5]]);
+    expect(tab().result?.rows).toEqual([[7]]);
   });
 });

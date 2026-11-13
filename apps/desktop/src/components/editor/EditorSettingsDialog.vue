@@ -6,6 +6,7 @@ import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } fr
 import type { Ref } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { useI18n } from "vue-i18n";
+import SidebarActivationSettings from "@/components/editor/SidebarActivationSettings.vue";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { MAX_CONNECT_TIMEOUT_SECS, MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import {
@@ -797,6 +798,7 @@ const editShowCurrentStatementFrame = ref(settingsStore.editorSettings.showCurre
 const editShowInsertValueHints = ref(settingsStore.editorSettings.showInsertValueHints);
 const editShowConnectionGroupPath = ref(settingsStore.editorSettings.showConnectionGroupPath);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
+const editQualifyColumnCompletions = ref(settingsStore.editorSettings.qualifyColumnCompletions);
 const editBatchColumnSelectionIncludeComments = ref(settingsStore.editorSettings.batchColumnSelectionIncludeComments);
 const editTableCompletionSchemaQualification = ref<SqlTableCompletionSchemaQualification>(settingsStore.editorSettings.tableCompletionSchemaQualification);
 const tableCompletionSchemaQualificationDescription = computed(() => {
@@ -1018,6 +1020,7 @@ const editingShortcutId = ref<ShortcutActionId | null>(null);
 const modifierDoubleTapRecorder = createModifierDoubleTapShortcutController();
 watch(editingShortcutId, () => modifierDoubleTapRecorder.reset(), { flush: "sync" });
 const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation);
+const editSidebarColumnDoubleClickAction = ref(settingsStore.editorSettings.sidebarColumnDoubleClickAction);
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
 const dataTabReuseModeHelp = ref<DataTabReuseMode | null>(null);
@@ -1027,6 +1030,8 @@ const editSidebarSearchOpenedDatabasesOnly = ref(settingsStore.editorSettings.si
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
 const editSidebarPinDefaultDatabase = ref(settingsStore.editorSettings.sidebarPinDefaultDatabase);
 const editSidebarBrowseObjectsOnDatabaseActivation = ref(settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation);
+const editSidebarAutoExpandOnDatabaseActivation = ref(settingsStore.editorSettings.sidebarAutoExpandOnDatabaseActivation);
+const editSidebarTableClickNavigation = ref(settingsStore.editorSettings.sidebarTableClickNavigation);
 const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
 const editAutoReloadRestoredDataTabsOnOpen = ref(settingsStore.editorSettings.autoReloadRestoredDataTabsOnOpen);
 const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(settingsStore.editorSettings.disconnectTabHandlingMode);
@@ -1346,6 +1351,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     showInsertValueHints: editShowInsertValueHints.value,
     showConnectionGroupPath: editShowConnectionGroupPath.value,
     autoAliasTables: editAutoAliasTables.value,
+    qualifyColumnCompletions: editQualifyColumnCompletions.value,
     batchColumnSelectionIncludeComments: editBatchColumnSelectionIncludeComments.value,
     tableCompletionSchemaQualification: editTableCompletionSchemaQualification.value,
     insertSpaceAfterCompletion: editInsertSpaceAfterCompletion.value,
@@ -1433,6 +1439,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     shortcuts: editShortcuts.value,
     sqlFormatter: normalizeSqlFormatterSettings(editSqlFormatter.value),
     sidebarActivation: editSidebarActivation.value,
+    sidebarColumnDoubleClickAction: editSidebarColumnDoubleClickAction.value,
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
     routineSourceOpenMode: editRoutineSourceOpenMode.value,
     sidebarTableSearchEnabled: editSidebarTableSearchEnabled.value,
@@ -1440,6 +1447,8 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
     sidebarPinDefaultDatabase: editSidebarPinDefaultDatabase.value,
     sidebarBrowseObjectsOnDatabaseActivation: editSidebarBrowseObjectsOnDatabaseActivation.value,
+    sidebarAutoExpandOnDatabaseActivation: editSidebarAutoExpandOnDatabaseActivation.value,
+    sidebarTableClickNavigation: editSidebarTableClickNavigation.value,
     openTabsRestoreMode: editOpenTabsRestoreMode.value,
     autoReloadRestoredDataTabsOnOpen: editAutoReloadRestoredDataTabsOnOpen.value,
     disconnectTabHandlingMode: editDisconnectTabHandlingMode.value,
@@ -2061,6 +2070,7 @@ function syncEditorSettingsDraftFromStore() {
   editShowInsertValueHints.value = settingsStore.editorSettings.showInsertValueHints;
   editShowConnectionGroupPath.value = settingsStore.editorSettings.showConnectionGroupPath;
   editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
+  editQualifyColumnCompletions.value = settingsStore.editorSettings.qualifyColumnCompletions;
   editBatchColumnSelectionIncludeComments.value = settingsStore.editorSettings.batchColumnSelectionIncludeComments;
   editTableCompletionSchemaQualification.value = settingsStore.editorSettings.tableCompletionSchemaQualification;
   editInsertSpaceAfterCompletion.value = settingsStore.editorSettings.insertSpaceAfterCompletion;
@@ -2150,6 +2160,7 @@ function syncEditorSettingsDraftFromStore() {
   editSqlFormatter.value = normalizeSqlFormatterSettings(settingsStore.editorSettings.sqlFormatter);
   sqlFormatterConfigValid.value = true;
   editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
+  editSidebarColumnDoubleClickAction.value = settingsStore.editorSettings.sidebarColumnDoubleClickAction;
   editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
   editRoutineSourceOpenMode.value = settingsStore.editorSettings.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = settingsStore.editorSettings.sidebarTableSearchEnabled;
@@ -2157,6 +2168,8 @@ function syncEditorSettingsDraftFromStore() {
   editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
   editSidebarPinDefaultDatabase.value = settingsStore.editorSettings.sidebarPinDefaultDatabase;
   editSidebarBrowseObjectsOnDatabaseActivation.value = settingsStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation;
+  editSidebarAutoExpandOnDatabaseActivation.value = settingsStore.editorSettings.sidebarAutoExpandOnDatabaseActivation;
+  editSidebarTableClickNavigation.value = settingsStore.editorSettings.sidebarTableClickNavigation;
   editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
   editAutoReloadRestoredDataTabsOnOpen.value = settingsStore.editorSettings.autoReloadRestoredDataTabsOnOpen;
   editDisconnectTabHandlingMode.value = settingsStore.editorSettings.disconnectTabHandlingMode;
@@ -2252,6 +2265,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   showInsertValueHints: editShowInsertValueHints,
   showConnectionGroupPath: editShowConnectionGroupPath,
   autoAliasTables: editAutoAliasTables,
+  qualifyColumnCompletions: editQualifyColumnCompletions,
   batchColumnSelectionIncludeComments: editBatchColumnSelectionIncludeComments,
   tableCompletionSchemaQualification: editTableCompletionSchemaQualification,
   insertSpaceAfterCompletion: editInsertSpaceAfterCompletion,
@@ -2333,6 +2347,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   shortcuts: editShortcuts,
   sqlFormatter: editSqlFormatter,
   sidebarActivation: editSidebarActivation,
+  sidebarColumnDoubleClickAction: editSidebarColumnDoubleClickAction,
   sidebarObjectDisplay: editSidebarObjectDisplay,
   routineSourceOpenMode: editRoutineSourceOpenMode,
   sidebarTableSearchEnabled: editSidebarTableSearchEnabled,
@@ -2340,6 +2355,8 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode,
   sidebarPinDefaultDatabase: editSidebarPinDefaultDatabase,
   sidebarBrowseObjectsOnDatabaseActivation: editSidebarBrowseObjectsOnDatabaseActivation,
+  sidebarAutoExpandOnDatabaseActivation: editSidebarAutoExpandOnDatabaseActivation,
+  sidebarTableClickNavigation: editSidebarTableClickNavigation,
   openTabsRestoreMode: editOpenTabsRestoreMode,
   autoReloadRestoredDataTabsOnOpen: editAutoReloadRestoredDataTabsOnOpen,
   disconnectTabHandlingMode: editDisconnectTabHandlingMode,
@@ -2883,6 +2900,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
     editShowConnectionGroupPath.value = DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+    editQualifyColumnCompletions.value = DEFAULT_EDITOR_SETTINGS.qualifyColumnCompletions;
     editBatchColumnSelectionIncludeComments.value = DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments;
     editTableCompletionSchemaQualification.value = DEFAULT_EDITOR_SETTINGS.tableCompletionSchemaQualification;
     editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
@@ -2949,6 +2967,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
   } else if (tab === "navigation") {
     editSidebarTablePageSize.value = DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
     editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
+    editSidebarColumnDoubleClickAction.value = DEFAULT_EDITOR_SETTINGS.sidebarColumnDoubleClickAction;
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
     editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
     editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
@@ -2956,6 +2975,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
     editSidebarPinDefaultDatabase.value = DEFAULT_EDITOR_SETTINGS.sidebarPinDefaultDatabase;
     editSidebarBrowseObjectsOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation;
+    editSidebarAutoExpandOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarAutoExpandOnDatabaseActivation;
+    editSidebarTableClickNavigation.value = DEFAULT_EDITOR_SETTINGS.sidebarTableClickNavigation;
     editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
     editAutoReloadRestoredDataTabsOnOpen.value = DEFAULT_EDITOR_SETTINGS.autoReloadRestoredDataTabsOnOpen;
     editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
@@ -3098,6 +3119,7 @@ function resetAllDefaults() {
   editShowInsertValueHints.value = DEFAULT_EDITOR_SETTINGS.showInsertValueHints;
   editShowConnectionGroupPath.value = DEFAULT_EDITOR_SETTINGS.showConnectionGroupPath;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
+  editQualifyColumnCompletions.value = DEFAULT_EDITOR_SETTINGS.qualifyColumnCompletions;
   editBatchColumnSelectionIncludeComments.value = DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments;
   editTableCompletionSchemaQualification.value = DEFAULT_EDITOR_SETTINGS.tableCompletionSchemaQualification;
   editInsertSpaceAfterCompletion.value = DEFAULT_EDITOR_SETTINGS.insertSpaceAfterCompletion;
@@ -3184,6 +3206,7 @@ function resetAllDefaults() {
   editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
   sqlFormatterConfigValid.value = true;
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
+  editSidebarColumnDoubleClickAction.value = DEFAULT_EDITOR_SETTINGS.sidebarColumnDoubleClickAction;
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
   editRoutineSourceOpenMode.value = DEFAULT_EDITOR_SETTINGS.routineSourceOpenMode;
   editSidebarTableSearchEnabled.value = DEFAULT_EDITOR_SETTINGS.sidebarTableSearchEnabled;
@@ -3191,6 +3214,8 @@ function resetAllDefaults() {
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
   editSidebarPinDefaultDatabase.value = DEFAULT_EDITOR_SETTINGS.sidebarPinDefaultDatabase;
   editSidebarBrowseObjectsOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation;
+  editSidebarAutoExpandOnDatabaseActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarAutoExpandOnDatabaseActivation;
+  editSidebarTableClickNavigation.value = DEFAULT_EDITOR_SETTINGS.sidebarTableClickNavigation;
   editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
   editAutoReloadRestoredDataTabsOnOpen.value = DEFAULT_EDITOR_SETTINGS.autoReloadRestoredDataTabsOnOpen;
   editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
@@ -3822,6 +3847,10 @@ function setTabGroupRows(value: TabGroupRowMode) {
 
 function setSidebarActivation(value: "single" | "double") {
   editSidebarActivation.value = value;
+}
+
+function setSidebarColumnDoubleClickAction(value: "structure" | "query") {
+  editSidebarColumnDoubleClickAction.value = value;
 }
 
 // Custom AI skill root (read-only SKILL.md discovery; desktop-only, prd 09-21-public-skill-loader).
@@ -8709,6 +8738,14 @@ onUnmounted(() => {
 
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
+                    <Label for="editor-qualify-column-completions">{{ t("settings.qualifyColumnCompletions") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.qualifyColumnCompletionsDescription") }}</p>
+                  </div>
+                  <Switch id="editor-qualify-column-completions" v-model="editQualifyColumnCompletions" class="mt-0.5" />
+                </div>
+
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
                     <Label for="editor-batch-column-selection-include-comments">{{ t("settings.batchColumnSelectionIncludeComments") }}</Label>
                     <p class="text-xs text-muted-foreground">
                       {{ t("settings.batchColumnSelectionIncludeCommentsDescription") }}
@@ -9721,31 +9758,7 @@ onUnmounted(() => {
             </section>
 
             <section v-else-if="activeSettingsTab === 'navigation'" data-settings-search-id="navigation" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('navigation')]">
-              <div class="space-y-2">
-                <Label>{{ t("settings.sidebarActivation") }}</Label>
-                <div class="grid grid-cols-2 gap-2">
-                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'single' ? 'dbx-choice-selected' : ''" @click="setSidebarActivation('single')">
-                    <div class="text-left">
-                      <div class="text-sm font-medium">
-                        {{ t("settings.sidebarActivationSingle") }}
-                      </div>
-                      <div class="text-xs text-muted-foreground">
-                        {{ t("settings.sidebarActivationSingleDescription") }}
-                      </div>
-                    </div>
-                  </Button>
-                  <Button type="button" variant="outline" class="h-auto justify-start border p-3" :class="editSidebarActivation === 'double' ? 'dbx-choice-selected' : ''" @click="setSidebarActivation('double')">
-                    <div class="text-left">
-                      <div class="text-sm font-medium">
-                        {{ t("settings.sidebarActivationDouble") }}
-                      </div>
-                      <div class="text-xs text-muted-foreground">
-                        {{ t("settings.sidebarActivationDoubleDescription") }}
-                      </div>
-                    </div>
-                  </Button>
-                </div>
-              </div>
+              <SidebarActivationSettings :activation="editSidebarActivation" :column-action="editSidebarColumnDoubleClickAction" @update:activation="setSidebarActivation" @update:column-action="setSidebarColumnDoubleClickAction" />
               <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="sidebar-browse-objects-on-database-activation">{{ t("settings.sidebarBrowseObjectsOnDatabaseActivation") }}</Label>
@@ -9754,6 +9767,24 @@ onUnmounted(() => {
                   </HelpTooltip>
                 </div>
                 <Switch id="sidebar-browse-objects-on-database-activation" v-model="editSidebarBrowseObjectsOnDatabaseActivation" />
+              </div>
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="sidebar-auto-expand-on-database-activation">{{ t("settings.sidebarAutoExpandOnDatabaseActivation") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarAutoExpandOnDatabaseActivation')">
+                    {{ t("settings.sidebarAutoExpandOnDatabaseActivationDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-auto-expand-on-database-activation" v-model="editSidebarAutoExpandOnDatabaseActivation" :disabled="!editSidebarBrowseObjectsOnDatabaseActivation" />
+              </div>
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="sidebar-table-click-navigation">{{ t("settings.sidebarTableClickNavigation") }}</Label>
+                  <HelpTooltip :label="t('settings.sidebarTableClickNavigation')">
+                    {{ t("settings.sidebarTableClickNavigationDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-table-click-navigation" v-model="editSidebarTableClickNavigation" />
               </div>
               <div class="space-y-2">
                 <div class="flex items-center gap-2">

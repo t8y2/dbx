@@ -2005,6 +2005,7 @@ export interface SqlCompletionProviderInput {
   functionCase?: SqlKeywordCase;
   identifierCase?: SqlKeywordCase;
   autoAliasTables?: boolean;
+  qualifyColumnCompletions?: boolean;
   tableCompletionSchemaQualification?: SqlTableCompletionSchemaQualification;
   quoteIdentifiers?: boolean;
   functionCompletionIncludeParams?: boolean;
@@ -2031,6 +2032,7 @@ export function buildSqlCompletionItems(
     functionCase?: SqlKeywordCase;
     identifierCase?: SqlKeywordCase;
     autoAliasTables?: boolean;
+    qualifyColumnCompletions?: boolean;
     tableCompletionSchemaQualification?: SqlTableCompletionSchemaQualification;
     quoteIdentifiers?: boolean;
     functionCompletionIncludeParams?: boolean;
@@ -2188,7 +2190,7 @@ class SqlCompletionProvider {
     }
 
     if (!context.exclusiveTableSuggestions && context.suggestColumns) {
-      this.items.push(...buildColumnItems(context, this.columnsByTable, this.dialect, this.databaseType, this.input.quoteIdentifiers, this.matchMode));
+      this.items.push(...buildColumnItems(context, this.columnsByTable, this.dialect, this.databaseType, this.input.quoteIdentifiers, this.matchMode, this.input.qualifyColumnCompletions));
       this.items.push(...buildSelectAllColumnItems(context, this.columnsByTable, this.t, this.dialect, this.databaseType, this.matchMode));
       this.items.push(...buildInsertAllColumnItems(context, this.columnsByTable, this.t, this.dialect, this.input.keywordCase, this.matchMode));
       if ((this.input.sequenceCompletionEnabled ?? true) && (isOracleLikeDatabase(this.databaseType) || isSequenceCompletionDatabase(this.databaseType)) && context.qualifier && !completionQualifierIsReferencedTable(context)) {
@@ -2216,6 +2218,37 @@ class SqlCompletionProvider {
       this.items.push(...buildTableItems(context, completionTables, this.dialect, autoAliasTables, context.referencedTables, this.databaseType, this.input.currentSchema, schemaQualification, this.input.identifierCase, this.identifierDialect, this.matchMode));
       if (this.databaseType === "clickhouse") {
         this.items.push(...buildClickHouseFunctionItems(context.prefix, context.openingParenAfterCursor, "table", this.input.functionCompletionIncludeParams, this.matchMode));
+      }
+      // SQL Server table-valued functions are relation sources used directly in
+      // FROM/JOIN (`FROM dbo.Split(@csv)`), so they belong in the table
+      // candidate set alongside tables and views (#13131). The completion
+      // assistant reports the return kind through dataType: IF/TF/FT functions
+      // come back as "table" while scalar FN/FS functions carry their return
+      // type name, so only the "table" kind is admitted here and unknown
+      // categories stay conservative (#13394 review). Scalar functions remain
+      // in the routine context only.
+      if (this.databaseType === "sqlserver") {
+        // Scope the candidates the way the regular tables arrive: a typed
+        // schema qualifier narrows to that schema, otherwise the current one
+        // applies. Without this the raw object list leaks TVFs from other
+        // schemas into `FROM dbo.` (t8y2/dbx#13394 review).
+        const qualifierSchema = context.qualifierParts?.[context.qualifierParts.length - 1] ?? context.qualifier?.split(".").filter(Boolean).pop();
+        const scope = qualifierSchema ?? this.input.currentSchema;
+        const tableValuedFunctionObjects = (this.input.objects ?? []).filter((object) => object.type === "function" && object.dataType?.trim().toLowerCase() === "table" && (!scope || !object.schema || normalizeIdentifierPart(scope) === normalizeIdentifierPart(object.schema)));
+        const tableValuedFunctions = tableValuedFunctionObjects.map((object) => ({ name: object.name, schema: object.schema, type: "function" as const, detail: object.signature ?? "FUNCTION" }));
+        // Within one schema a function name is unique, so the signature lookup
+        // by name cannot cross schemas once the scope above is applied.
+        const signaturesByLabel = new Map(tableValuedFunctionObjects.map((object) => [object.name.toLowerCase(), object.signature]));
+        const tableItems = buildTableItems(context, tableValuedFunctions, this.dialect, false, context.referencedTables, this.databaseType, this.input.currentSchema, schemaQualification, this.input.identifierCase, this.identifierDialect);
+        // A table-valued function must be invoked as a call: even without a
+        // signature the insert is `Name()`, never the bare name
+        // (t8y2/dbx#13394 review).
+        this.items.push(
+          ...tableItems.map((item) => ({
+            ...item,
+            apply: buildRoutineApply(item.apply || item.label, signaturesByLabel.get(item.label.toLowerCase()), this.input.functionCompletionIncludeParams),
+          })),
+        );
       }
       if (isOracleLikeDatabase(this.databaseType)) {
         this.items.push(...buildOracleTableFunctionItems(context.prefix, this.input.keywordCase, this.input.functionCase, this.input.functionCompletionIncludeParams, this.matchMode));
@@ -3756,7 +3789,8 @@ function detectInsertColumnListContext(beforeCursor: string): { table: string; d
   const cleaned = beforeCursor.replace(/'[^']*'/g, "''");
   const identifier = '(?:"[^"]+"|`[^`]+`|\\[[^\\]]+\\]|[A-Za-z_][\\w$]*)';
   const qualifiedIdentifier = `${identifier}(?:\\.${identifier}){0,2}`;
-  const match = new RegExp(`\\binsert\\s+into\\s+(${qualifiedIdentifier})\\s*\\([^)]*$`, "i").exec(cleaned);
+  // MySQL's `INSERT IGNORE INTO` targets a table the same way as `INSERT INTO`.
+  const match = new RegExp(`\\binsert\\s+(?:ignore\\s+)?into\\s+(${qualifiedIdentifier})\\s*\\([^)]*$`, "i").exec(cleaned);
   if (!match) return null;
   const fullTable = match[1];
   if (!fullTable) return null;
@@ -5945,6 +5979,7 @@ function isInTableListContext(beforeToken: string, databaseType: DatabaseType | 
   if (lastTableIntro < 0) return false;
 
   const lastBoundary = Math.max(
+    lastTopLevelKeywordIndex(cleaned, "values"),
     lastTopLevelKeywordIndex(cleaned, "where"),
     lastTopLevelKeywordIndex(cleaned, "set"),
     lastTopLevelKeywordIndex(cleaned, "group"),
@@ -6065,7 +6100,7 @@ function columnsForInsertTarget(context: SqlCompletionContext, columnsByTable: M
   });
 }
 
-function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, dialect?: SqlCompletionApplyDialect, databaseType?: DatabaseType, quoteIdentifiers?: boolean, matchMode: SqlCompletionMatchMode = "fuzzy"): SqlCompletionItem[] {
+function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<string, SqlCompletionColumn[]>, dialect?: SqlCompletionApplyDialect, databaseType?: DatabaseType, quoteIdentifiers?: boolean, matchMode: SqlCompletionMatchMode = "fuzzy", qualifyColumns = true): SqlCompletionItem[] {
   // Build a bounded candidate pool before doing duplicate detection, ranking,
   // and completion object materialization. Canonical column arrays remain the
   // source of truth; the per-array prefix index is only a derived accelerator.
@@ -6093,9 +6128,8 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
     nameCount.set(nameKey, (nameCount.get(nameKey) || 0) + 1);
   }
 
-  // Multi-source queries always insert a qualified column. Duplicate names remain
-  // separate choices so the user can select the intended row source.
-  const qualifyAllColumns = !context.qualifier && !context.insertTable && context.referencedTables.length > 1;
+  // Keep ambiguous names qualified even when optional table prefixes are disabled.
+  const qualifyAllColumns = qualifyColumns && !context.qualifier && !context.insertTable && context.referencedTables.length > 1;
   const seen = new Set<string>();
   const uniqueColumns: Array<SqlCompletionColumn & { key: string; displayLabel: string }> = [];
   for (const c of relevantCols) {

@@ -1006,16 +1006,26 @@ function buildCursorIntent(tokens: readonly SqlSemanticToken[], cursor: number, 
 
   if (kind === "insert" && hasWordBefore(tokens, cursor, "into") && !hasWordBefore(tokens, cursor, "values")) {
     const mutationTarget = sources.find((source) => source.kind === "mutation_target");
-    return {
-      kind: "insert_column",
-      prefix: trailing.prefix,
-      replacementRange: trailing.replacementRange,
-      qualifierParts: trailing.qualifierParts,
-      targetSourceId: mutationTarget?.id,
-      expectedObjectKinds: ["column"],
-      confidence: mutationTarget ? "medium" : "low",
-      fallbackReason: mutationTarget ? undefined : "unresolved_insert_target",
-    };
+    const targetEnd = mutationTarget?.qualifiedName?.span.end;
+    if (targetEnd != null && trailing.replacementRange.start < targetEnd) {
+      return { kind: "table", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, expectedObjectKinds: ["table", "view"], confidence: "low", fallbackReason: "incomplete_insert_target" };
+    }
+    const openIndex = targetEnd == null ? -1 : tokens.findIndex((token) => token.span.start >= targetEnd);
+    const open = tokens[openIndex];
+    if (open?.text === "(" && open.span.end <= cursor) {
+      const closeIndex = findMatchingParenToken(tokens, openIndex);
+      if (closeIndex < 0 || tokens[closeIndex]!.span.start >= cursor) {
+        return {
+          kind: "insert_column",
+          prefix: trailing.prefix,
+          replacementRange: trailing.replacementRange,
+          qualifierParts: trailing.qualifierParts,
+          targetSourceId: mutationTarget?.id,
+          expectedObjectKinds: ["column"],
+          confidence: "medium",
+        };
+      }
+    }
   }
 
   // Same rule as the unqualified table slot below: the introducer is the word before the

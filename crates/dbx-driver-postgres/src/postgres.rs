@@ -8335,32 +8335,40 @@ pub async fn list_schema_infos_with_system(pool: &Pool, show_system_schemas: boo
         .collect())
 }
 
-/// Distinct user-defined type names for the structure editor's type dropdown.
-/// Same predicate as the object browser's TYPE branch (base/composite/domain/
+/// A user-defined type reference for the structure editor's type dropdown:
+/// same predicate as the object browser's TYPE branch (base/composite/domain/
 /// enum/range/multirange types outside the system schemas), so types provided
-/// by installed extensions — `vector`, `hstore`, `ltree`, … — become
-/// selectable in the create/edit column type picker (#14525).
-///
-/// Types visible through `search_path` are returned bare so they stay
-/// interchangeable with the static list; everything else comes back
-/// schema-qualified (quoted only when the identifier requires it) so the
-/// generated `CREATE TABLE` / `ALTER TABLE ... TYPE` still resolves outside
-/// the search path instead of failing with `type "..." does not exist`
-/// (#14525 review).
-pub async fn list_data_types(pool: &Pool) -> Result<Vec<String>, String> {
+/// by installed extensions — `vector`, `hstore`, `ltree`, … — reach the
+/// picker (#14525). `visible` reports whether the owning schema is in the
+/// session's `search_path`; the caller decides between the bare name and a
+/// schema-qualified one.
+#[derive(Debug)]
+pub struct PostgresUserTypeName {
+    pub schema: String,
+    pub name: String,
+    pub visible: bool,
+}
+
+pub async fn list_data_types(pool: &Pool) -> Result<Vec<PostgresUserTypeName>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let client = &EncodingClient::new(&client);
     let rows = postgres_query_cached(client, list_data_types_sql(), &[]).await.map_err(|e| e.to_string())?;
 
-    Ok(rows.iter().map(|row| pg_row_try_string(row, 0)).filter(|name| !name.is_empty()).collect())
+    Ok(rows
+        .iter()
+        .map(|row| PostgresUserTypeName {
+            schema: pg_row_try_string(row, 0),
+            name: pg_row_try_string(row, 1),
+            visible: pg_row_try_bool(row, 2).unwrap_or(false),
+        })
+        .filter(|entry| !entry.name.is_empty())
+        .collect())
 }
 
 fn list_data_types_sql() -> &'static str {
-    "SELECT DISTINCT CASE \
-       WHEN t.typname ~ '^[a-z_][a-z0-9_$]*$' AND n.nspname = ANY (current_schemas(true)) \
-         THEN t.typname \
-       ELSE format('%I.%I', n.nspname, t.typname) \
-     END AS type_name \
+    "SELECT n.nspname AS schema_name, \
+       t.typname AS type_name, \
+       (n.nspname = ANY (current_schemas(true))) AS visible \
      FROM pg_catalog.pg_type t \
      JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
      LEFT JOIN pg_catalog.pg_class c ON c.oid = t.typrelid \
@@ -8372,7 +8380,7 @@ fn list_data_types_sql() -> &'static str {
        AND n.nspname <> 'information_schema' \
        AND n.nspname NOT LIKE 'pg_toast%' \
        AND n.nspname NOT LIKE 'pg_temp%' \
-     ORDER BY type_name"
+     ORDER BY n.nspname, t.typname"
 }
 
 // Sibling of `postgres_columns_for_relations_sql`/`_compat_sql` above (~line
@@ -8440,7 +8448,7 @@ const POSTGRES_COLUMNS_SQL: &str = "SELECT a.attname AS column_name, \
                LIMIT 1 \
              ) dep ON TRUE \
              LEFT JOIN pg_sequence pseq ON pseq.seqrelid = dep.objid \
-             WHERE a.attrelid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE pg_catalog.textcat(pg_catalog.textcat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
+             WHERE a.attrelid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE concat(concat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
 
@@ -8494,7 +8502,7 @@ const POSTGRES_COLUMNS_COMPAT_SQL: &str = "SELECT a.attname AS column_name, \
                ORDER BY sequence_dep.objid \
                LIMIT 1 \
              ) AND serial_seq.relkind = 'S' \
-             WHERE a.attrelid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE pg_catalog.textcat(pg_catalog.textcat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
+             WHERE a.attrelid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE concat(concat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
              AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY a.attnum";
 
@@ -8657,6 +8665,49 @@ pub async fn get_columns_compat_first(pool: &Pool, schema: &str, table: &str) ->
     get_columns_with_tiers(pool, schema, table, false).await
 }
 
+/// Resolves the stored spelling of a relation when the requested name only
+/// matches case-insensitively.
+///
+/// PostgreSQL-compatible engines do not all fold unquoted identifiers the same
+/// way: TDSQL-PG / OpenTenBase fold them to upper case while stock PostgreSQL
+/// folds to lower. DBX resolves a query's table reference through the stock rule,
+/// so on an upper-folding engine the catalog lookup misses, the grid falls back to
+/// the result set's own columns, and the generated UPDATE quotes the lower-case
+/// guess (`"etl"."t_df_batch"`) and fails with 42P01 (#14330). The frontend always
+/// prefers `resolved_schema` / `resolved_table` when a driver reports them, so
+/// finding the real spelling here is enough to fix the write path.
+///
+/// Only an unambiguous match is returned: `"Foo"` and `foo` may coexist, and this
+/// must never silently retarget a write.
+fn postgres_relation_case_insensitive_sql() -> &'static str {
+    "SELECT n.nspname, c.relname \
+     FROM pg_catalog.pg_class c \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE c.relkind IN ('r','p','f','v','m') \
+       AND lower(c.relname) = lower($2) \
+       AND (CASE WHEN coalesce(length($1::text), 0) = 0 THEN pg_catalog.pg_table_is_visible(c.oid) \
+                 ELSE lower(n.nspname) = lower($1) END) \
+       AND 1 = (SELECT count(*) FROM pg_catalog.pg_class c2 \
+                JOIN pg_catalog.pg_namespace n2 ON n2.oid = c2.relnamespace \
+                WHERE n2.nspname = n.nspname AND lower(c2.relname) = lower(c.relname) \
+                  AND c2.relkind IN ('r','p','f','v','m')) \
+     LIMIT 1"
+}
+
+async fn resolve_relation_case_insensitive(
+    client: &deadpool_postgres::Client,
+    schema: &str,
+    table: &str,
+) -> Result<Option<(String, String)>, PgError> {
+    let client = &EncodingClient::new(client);
+    let rows = postgres_query_cached(client, postgres_relation_case_insensitive_sql(), &[&schema, &table]).await?;
+    Ok(rows.first().and_then(|row| {
+        let schema = row.try_get::<_, Option<String>>(0).ok().flatten()?;
+        let table = row.try_get::<_, Option<String>>(1).ok().flatten()?;
+        Some((schema, table))
+    }))
+}
+
 async fn get_columns_with_tiers(
     pool: &Pool,
     schema: &str,
@@ -8679,7 +8730,7 @@ async fn get_columns_with_tiers(
         }
     };
     let tiers = column_metadata_tiers(modern_tier_supported);
-    query_with_column_metadata_fallback(
+    let columns = query_with_column_metadata_fallback(
         &tiers,
         |sql| get_columns_with_sql(&client, sql, schema, table),
         total_started,
@@ -8687,7 +8738,34 @@ async fn get_columns_with_tiers(
         |error: &PgError| error.as_db_error().map(|db_error| db_error.code().code().to_string()),
         log_get_columns_tier_diagnostic,
     )
-    .await
+    .await;
+    // A tier that matched nothing means the requested spelling is not addressable
+    // on this engine. Retry once with the stored spelling and report it back so the
+    // caller writes to the real relation instead of the folded guess (#14330).
+    if columns.as_ref().is_ok_and(|columns| !columns.is_empty()) {
+        return columns;
+    }
+    let Ok(Some((resolved_schema, resolved_table))) = resolve_relation_case_insensitive(&client, schema, table).await
+    else {
+        return columns;
+    };
+    if resolved_schema == schema && resolved_table == table {
+        return columns;
+    }
+    let mut resolved = query_with_column_metadata_fallback(
+        &tiers,
+        |sql| get_columns_with_sql(&client, sql, &resolved_schema, &resolved_table),
+        total_started,
+        pg_error_to_string,
+        |error: &PgError| error.as_db_error().map(|db_error| db_error.code().code().to_string()),
+        log_get_columns_tier_diagnostic,
+    )
+    .await?;
+    for column in &mut resolved {
+        column.resolved_schema = Some(resolved_schema.clone());
+        column.resolved_table = Some(resolved_table.clone());
+    }
+    Ok(resolved)
 }
 
 pub fn pg_quote_literal(value: &str) -> String {
@@ -10049,9 +10127,15 @@ pub async fn execute_query_on_client_unnamed(
 // relation: a FOREIGN KEY stores the referenced table's unique index in
 // `conindid`, so matching on `conindid` alone marked that standalone index as
 // constraint-backed and dropped it from generated DDL (#10484).
-// The qualified name is joined with `pg_catalog.textcat` rather than `||`:
-// openGauss B mode without `pipes_as_concat` reads `||` as logical OR, and
-// indexes have no information_schema fallback to recover from it (#13873).
+// The qualified name is built with `concat()` rather than `||`: openGauss B
+// mode without `pipes_as_concat` reads `||` as logical OR, and indexes have no
+// information_schema fallback to recover from it (#13873). `concat` is also the
+// spelling every target kernel shares: CockroachDB's `pg_catalog` has no
+// `textcat`, so the earlier `pg_catalog.textcat(...)` form failed every index
+// listing there with `unknown function: pg_catalog.textcat()` (42883).
+// The calls stay nested two-argument instead of variadic `concat(a, b, c)`:
+// an Oracle-compatible GaussDB A mode can expose the two-argument Oracle
+// CONCAT, so the flat form would break exactly there.
 //
 // `AND k.attnum >= 0` skips system attributes (negative `indkey` entries such as
 // `tableoid`) that openGauss / GaussDB can carry in `pg_index.indkey`: because the
@@ -10081,7 +10165,7 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0 \
              LEFT JOIN pg_opclass oc ON oc.oid = k.class_oid \
              LEFT JOIN pg_namespace opcns ON opcns.oid = oc.opcnamespace \
-             WHERE t.oid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE pg_catalog.textcat(pg_catalog.textcat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
+             WHERE t.oid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE concat(concat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
              AND k.attnum >= 0 \
              GROUP BY i.relname, i.oid, ix.indisunique, ix.indisvalid, ix.indisprimary, ix.indpred, ix.indrelid, am.amname, ix.indnkeyatts, ix.indkey \
              ORDER BY i.relname";
@@ -10142,7 +10226,7 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              JOIN pg_class i ON i.oid = ix.indexrelid \
              JOIN pg_namespace n ON n.oid = t.relnamespace \
              JOIN pg_am am ON am.oid = i.relam \
-             WHERE t.oid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE pg_catalog.textcat(pg_catalog.textcat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
+             WHERE t.oid = (CASE WHEN coalesce(length($1::text), 0) = 0 THEN quote_ident($2) ELSE concat(concat(quote_ident($1), '.'), quote_ident($2)) END)::regclass \
              ORDER BY i.relname";
 
 const POSTGRES_OWNERS_SQL: &str =
@@ -13248,6 +13332,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postgres_columns_report_the_stored_spelling_of_an_upper_case_relation() {
+        // TDSQL-PG / OpenTenBase fold unquoted names to upper case while DBX
+        // resolves a query's table reference through the stock lower-case rule, so
+        // the grid used to write `"etl"."t_df_batch"` and fail with 42P01 (#14330).
+        // The lookup must recover the stored spelling and report it, because the
+        // frontend then targets it for every generated UPDATE/DELETE.
+        let Some(container) = start_docker_postgres().await else {
+            return;
+        };
+        let pool = connect(&container.url(), Duration::from_secs(5)).await.expect("connect postgres");
+        execute_query(&pool, "CREATE SCHEMA \"ETL\"").await.expect("create schema");
+        execute_query(
+            &pool,
+            "CREATE TABLE \"ETL\".\"T_DF_BATCH\" (\"BATCH_ID\" text PRIMARY KEY, \"BATCH_NAME\" text)",
+        )
+        .await
+        .expect("create upper-case table");
+
+        let columns = get_columns(&pool, "etl", "t_df_batch").await.expect("read columns through the folded name");
+
+        assert_eq!(columns.len(), 2, "{columns:?}");
+        assert_eq!(columns[0].name, "BATCH_ID");
+        assert!(columns[0].is_primary_key);
+        assert_eq!(columns[0].resolved_schema.as_deref(), Some("ETL"));
+        assert_eq!(columns[0].resolved_table.as_deref(), Some("T_DF_BATCH"));
+    }
+
+    #[tokio::test]
     async fn postgres_dml_returning_preserves_result_rows() {
         let Some(container) = start_docker_postgres().await else {
             return;
@@ -13538,11 +13650,11 @@ mod tests {
     #[test]
     fn list_data_types_sql_targets_user_defined_types() {
         let sql = list_data_types_sql();
-        assert!(sql.contains("DISTINCT"), "{sql}");
-        // Types visible through search_path stay bare; everything else comes back
-        // schema-qualified so generated DDL resolves outside the search path.
-        assert!(sql.contains("n.nspname = ANY (current_schemas(true))"), "{sql}");
-        assert!(sql.contains("format('%I.%I', n.nspname, t.typname)"), "{sql}");
+        // Visibility is decided per row in Rust (bare for search_path-visible
+        // simple names, schema-qualified otherwise) so reserved words keep their
+        // quotes.
+        assert!(sql.contains("(n.nspname = ANY (current_schemas(true))) AS visible"), "{sql}");
+        assert!(sql.contains("t.typname AS type_name"), "{sql}");
         assert!(sql.contains("t.typtype IN ('b', 'c', 'd', 'e', 'r', 'm')"), "{sql}");
         assert!(sql.contains("t.typisdefined"), "{sql}");
         assert!(sql.contains("t.typelem = 0"), "{sql}");
@@ -13569,12 +13681,16 @@ mod tests {
             execute_query(&pool, &format!("CREATE TYPE {schema_ident}.mood AS ENUM ('sad', 'ok')")).await?;
             // Mixed-case identifiers need the %I quoting.
             execute_query(&pool, &format!("CREATE TYPE {schema_ident}.\"Mood\" AS ENUM ('sad', 'ok')")).await?;
+            // A lowercase reserved word must come back quoted — bare `order`
+            // would break generated DDL (#14536 review follow-up).
+            execute_query(&pool, "CREATE TYPE public.\"order\" AS ENUM ('asc', 'desc')").await?;
             let qualified_mood = format!("{schema}.mood");
 
             // The returned names must be directly usable in DDL: create a column
             // from the qualified name, then ALTER it to the same-name public type.
             let probe = format!("{schema_ident}.usage_probe");
-            execute_query(&pool, &format!("CREATE TABLE {probe} (id bigint, m {qualified_mood})")).await?;
+            execute_query(&pool, &format!("CREATE TABLE {probe} (id bigint, m {qualified_mood}, r public.\"order\")"))
+                .await?;
             execute_query(
                 &pool,
                 &format!("ALTER TABLE {probe} ALTER COLUMN m TYPE public.mood USING m::text::public.mood"),
@@ -13589,14 +13705,27 @@ mod tests {
         let cleanup = execute_query(&pool, &format!("DROP SCHEMA {schema_ident} CASCADE")).await;
         cleanup.expect("drop schema");
         execute_query(&pool, "DROP TYPE IF EXISTS public.mood").await.expect("drop public.mood");
+        execute_query(&pool, "DROP TYPE IF EXISTS public.\"order\"").await.expect("drop public.order");
         let types = exercise.expect("list data types");
 
-        assert!(types.iter().any(|name| name == "hstore"), "search_path extension type stays bare: {types:?}");
-        assert!(types.iter().any(|name| name == "mood"), "public enum stays bare: {types:?}");
-        let qualified_mood = format!("{schema}.mood");
-        assert!(types.iter().any(|name| name == &qualified_mood), "off-search_path enum must be qualified: {types:?}");
-        let qualified_mixed = format!("{schema}.\"Mood\"");
-        assert!(types.iter().any(|name| name == &qualified_mixed), "mixed-case type must keep quoting: {types:?}");
+        // Raw rows drive the caller-side rendering: visible rows keep the bare
+        // name, off-search_path ones carry the schema, and reserved words stay
+        // distinct entries.
+        let find = |schema_name: &str, type_name: &str| {
+            types
+                .iter()
+                .find(|entry| entry.schema == schema_name && entry.name == type_name)
+                .unwrap_or_else(|| panic!("missing {schema_name}.{type_name} in {types:?}"))
+        };
+        let hstore = find("public", "hstore");
+        assert!(hstore.visible, "public is on the search path: {types:?}");
+        let mood = find("public", "mood");
+        assert!(mood.visible, "{types:?}");
+        let custom_mood = find(&schema, "mood");
+        assert!(!custom_mood.visible, "off-search_path schema must be flagged: {types:?}");
+        assert!(find(&schema, "Mood").name == "Mood", "mixed-case name must not be folded: {types:?}");
+        let order = find("public", "order");
+        assert!(order.visible, "{types:?}");
     }
 
     #[tokio::test]
@@ -15084,6 +15213,20 @@ mod tests {
     }
 
     #[test]
+    fn postgres_relation_case_insensitive_lookup_only_returns_an_unambiguous_match() {
+        // Upper-folding engines (TDSQL-PG / OpenTenBase) store `T_DF_BATCH` while a
+        // stock-PostgreSQL folding turns the query's reference into `t_df_batch`
+        // (#14330). The recovery lookup must never pick between `Foo` and `foo`.
+        let sql = postgres_relation_case_insensitive_sql();
+
+        assert!(sql.contains("lower(c.relname) = lower($2)"), "{sql}");
+        assert!(sql.contains("AND 1 = (SELECT count(*)"), "{sql}");
+        assert!(sql.contains("n2.nspname = n.nspname"), "{sql}");
+        assert!(sql.contains("pg_table_is_visible(c.oid)"), "{sql}");
+        assert!(sql.contains("c.relkind IN ('r','p','f','v','m')"), "{sql}");
+    }
+
+    #[test]
     fn postgres_single_relation_metadata_can_resolve_through_search_path() {
         // GaussDB A mode folds `''` to NULL, so `$1 = ''` is never true there and the
         // unqualified branch was skipped (issue #12198). `coalesce(length($1::text), 0) = 0`
@@ -15107,16 +15250,15 @@ mod tests {
         // openGauss B (MySQL) mode without `pipes_as_concat` reads `||` as logical OR, so
         // `quote_ident($1) || '.' || quote_ident($2)` became a boolean and the regclass
         // lookup failed with `relation "0" does not exist` (#13873).
+        // `concat()` is the spelling every target kernel has: CockroachDB's `pg_catalog`
+        // carries no `textcat`, which broke index listings with
+        // `unknown function: pg_catalog.textcat()` (42883).
         for sql in
             [POSTGRES_COLUMNS_SQL, POSTGRES_COLUMNS_COMPAT_SQL, POSTGRES_INDEXES_SQL, POSTGRES_INDEXES_COMPAT_SQL]
         {
-            assert!(
-                sql.contains(
-                    "pg_catalog.textcat(pg_catalog.textcat(quote_ident($1), '.'), quote_ident($2)) END)::regclass"
-                ),
-                "{sql}"
-            );
+            assert!(sql.contains("concat(concat(quote_ident($1), '.'), quote_ident($2)) END)::regclass"), "{sql}");
             assert!(!sql.contains("quote_ident($1) || '.' || quote_ident($2)"), "{sql}");
+            assert!(!sql.contains("textcat"), "{sql}");
         }
     }
 

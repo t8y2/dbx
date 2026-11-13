@@ -25,6 +25,10 @@ concurrency:
 jobs:
   create-beta:
     name: Create daily beta tag
+    # 这条流水线用上游的发布令牌去 dispatch release workflow；fork 没有这个令牌，
+    # 每天的定时触发都会失败并给 fork 拥有者发失败通知邮件。
+    # beta 版本只属于上游发布节奏，fork 不该跑它（同 contributors.yml）。
+    if: github.repository == 't8y2/dbx'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout release source

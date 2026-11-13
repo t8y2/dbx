@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { aiSchemaSelectionSupported, buildAiContext, buildSystemPrompt, resolveAiDatabaseTarget, resolveAiMentionDatabases, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream } from "@/lib/ai/ai";
 import { setLocale } from "@/i18n";
+import { XUGU_PUBLIC_SYNONYM_SCOPE, XUGU_SCHEDULER_JOB_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
 import type { AiConfig } from "@/types/ai";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
@@ -115,6 +116,53 @@ describe("SQLite AI context routing", () => {
     expect(apiMock.getColumns).toHaveBeenCalledWith("sqlite-1", "main", "main", "users");
     expect(context.tables).toEqual([expect.objectContaining({ name: "users" })]);
     expect(context.tables[0]?.database).toBeUndefined();
+  });
+});
+
+describe("Xugu AI context routing", () => {
+  const connection: ConnectionConfig = { ...postgresConnection("APPDB"), id: "xugu-1", name: "Xugu", db_type: "xugu", port: 5138 };
+  const tab = { ...queryTab("APPDB"), connectionId: connection.id };
+  const scopes = [XUGU_PUBLIC_SYNONYM_SCOPE, XUGU_SCHEDULER_JOB_SCOPE];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    apiMock.listSchemas.mockResolvedValue([...scopes, "APP_TEST", "GUEST"]);
+    apiMock.listTables.mockResolvedValue([{ name: "ORDERS", table_type: "TABLE" }]);
+    apiMock.getColumns.mockResolvedValue([]);
+    apiMock.listIndexes.mockResolvedValue([]);
+    apiMock.listForeignKeys.mockResolvedValue([]);
+  });
+
+  it("scans only real schemas and keeps same-named tables in both schemas", async () => {
+    const context = await buildAiContext(tab, connection);
+
+    expect(apiMock.listTables.mock.calls).toEqual([
+      ["xugu-1", "APPDB", "APP_TEST"],
+      ["xugu-1", "APPDB", "GUEST"],
+    ]);
+    expect(context.tables.map(({ schema, name }) => [schema, name])).toEqual([
+      ["APP_TEST", "ORDERS"],
+      ["GUEST", "ORDERS"],
+    ]);
+    expect(context.truncated).toBe(false);
+  });
+
+  it("skips synthetic scopes when resolving an unqualified table mention", async () => {
+    apiMock.listTables.mockImplementation(async (_connectionId, _database, schema) => (schema === "GUEST" ? [{ name: "ORDERS", table_type: "TABLE" }] : []));
+    const context = await buildAiContext({ ...tab, schema: "GUEST" }, connection, { mentionedTables: [{ table: "ORDERS" }] });
+
+    expect(apiMock.listTables).toHaveBeenCalledWith("xugu-1", "APPDB", "APP_TEST", "ORDERS", 10);
+    expect(apiMock.listTables.mock.calls.some(([, , schema]) => scopes.includes(schema))).toBe(false);
+    expect(apiMock.getColumns).toHaveBeenCalledWith("xugu-1", "APPDB", "GUEST", "ORDERS");
+    expect(context.schema).toBe("GUEST");
+  });
+
+  it("continues to use an explicitly selected real schema without enumerating the database", async () => {
+    const context = await buildAiContext({ ...tab, schema: "GUEST" }, connection);
+
+    expect(apiMock.listSchemas).not.toHaveBeenCalled();
+    expect(apiMock.listTables.mock.calls).toEqual([["xugu-1", "APPDB", "GUEST"]]);
+    expect(context.schema).toBe("GUEST");
   });
 });
 

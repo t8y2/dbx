@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"time"
 
 	"github.com/apache/iotdb-client-go/v2/rpc"
@@ -10,8 +11,12 @@ type SessionDataSet struct {
 	ioTDBRpcDataSet *IoTDBRpcDataSet
 }
 
-func NewSessionDataSet(sql string, columnNameList []string, columnTypeList []string, columnNameIndex map[string]int32, queryId int64, statementId int64, client *rpc.IClientRPCServiceClient, sessionId int64, queryResult [][]byte, ignoreTimestamp bool, timeout *int64, moreData bool, fetchSize int32, zoneId string, timeFactor int32, columnIndex2TsBlockColumnIndexList []int32) (*SessionDataSet, error) {
-	rpcDataSet, err := NewIoTDBRpcDataSet(sql, columnNameList, columnTypeList, columnNameIndex, ignoreTimestamp, moreData, queryId, statementId, client, sessionId, queryResult, fetchSize, timeout, zoneId, DEFAULT_TIME_FORMAT, timeFactor, columnIndex2TsBlockColumnIndexList)
+// NewSessionDataSet builds the result set. The optional interrupt func closes
+// the session transport when a paged Fetch must be aborted (see
+// IoTDBRpcDataSet.fetchResults); it is variadic so upstream callers that do not
+// need cancellation keep compiling.
+func NewSessionDataSet(sql string, columnNameList []string, columnTypeList []string, columnNameIndex map[string]int32, queryId int64, statementId int64, client *rpc.IClientRPCServiceClient, sessionId int64, queryResult [][]byte, ignoreTimestamp bool, timeout *int64, moreData bool, fetchSize int32, zoneId string, timeFactor int32, columnIndex2TsBlockColumnIndexList []int32, interrupt ...func()) (*SessionDataSet, error) {
+	rpcDataSet, err := NewIoTDBRpcDataSet(sql, columnNameList, columnTypeList, columnNameIndex, ignoreTimestamp, moreData, queryId, statementId, client, sessionId, queryResult, fetchSize, timeout, zoneId, DEFAULT_TIME_FORMAT, timeFactor, columnIndex2TsBlockColumnIndexList, interrupt...)
 	if err != nil {
 		return nil, err
 	}
@@ -19,7 +24,12 @@ func NewSessionDataSet(sql string, columnNameList []string, columnTypeList []str
 }
 
 func (s *SessionDataSet) Next() (bool, error) {
-	return s.ioTDBRpcDataSet.Next()
+	return s.ioTDBRpcDataSet.NextWithContext(context.Background())
+}
+
+// NextWithContext forwards the caller's context to the paged fetch RPCs.
+func (s *SessionDataSet) NextWithContext(ctx context.Context) (bool, error) {
+	return s.ioTDBRpcDataSet.NextWithContext(ctx)
 }
 
 func (s *SessionDataSet) Close() error {

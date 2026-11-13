@@ -3522,7 +3522,9 @@ test("enables DISTINCT inserts only for an insertable base-table target", async 
   for (const scenario of [
     { id: "table", databaseType: "postgres", tableType: "TABLE" },
     { id: "view", databaseType: "postgres", tableType: "VIEW" },
-    { id: "unsupported", databaseType: "jdbc", tableType: "TABLE" },
+    // influxdb stays non-insertable; generic JDBC became insertable (#14715),
+    // so it no longer represents an unsupported DISTINCT-insert target here.
+    { id: "unsupported", databaseType: "influxdb", tableType: "TABLE" },
     { id: "computed", databaseType: "postgres", tableType: "TABLE" },
   ] as const) {
     const restoreStorage = installMemoryStorage();

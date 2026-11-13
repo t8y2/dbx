@@ -300,6 +300,28 @@ func TestServerDisconnectClearsDegradedControlState(t *testing.T) {
 	}
 }
 
+func TestXuguControlSessionRequiresSystemLogin(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		params connectParams
+		want   bool
+	}{
+		{"system administrator", connectParams{Database: " system ", Username: "sysdba"}, true},
+		{"ordinary user in system", connectParams{Database: "SYSTEM", Username: "DBX_USER"}, false},
+		{"database-scoped administrator", connectParams{Database: "SHOP_DEMO", Username: "SYSDBA"}, false},
+		{"database-scoped native DSN", connectParams{ConnectionString: "IP=db.example.com;DB=SHOP_DEMO;USER=SYSDBA", Username: "SYSDBA"}, false},
+		{"system JDBC URL", connectParams{ConnectionString: "jdbc:xugu://db.example.com:5138/SYSTEM", Username: "SYSDBA"}, true},
+		{"selected database overrides URL", connectParams{Database: "SHOP_DEMO", ConnectionString: "jdbc:xugu://db.example.com:5138/SYSTEM", Username: "SYSDBA"}, false},
+		{"missing database", connectParams{Username: "SYSDBA"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := xuguControlSessionEligible(tc.params); got != tc.want {
+				t.Fatalf("SYSTEM control eligibility = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestXuguControlParamsForcesSystemDatabase(t *testing.T) {
 	params := connectParams{
 		Host:     "127.0.0.1",

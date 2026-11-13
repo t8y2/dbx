@@ -12463,6 +12463,9 @@ export default withEnglishFallback({
   },
   mqTopics: {
     title: "主题",
+    autoLoadKafkaTopics: "自动加载主题",
+    loadTopics: "加载主题",
+    kafkaTopicsNotLoaded: "点击「加载主题」获取列表。",
     searchPlaceholder: "搜索主题",
     includeNonPersistent: "包含非持久化主题",
     refresh: "刷新",

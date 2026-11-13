@@ -15,6 +15,7 @@ const transferReexecuteTask = ref<ExportTask | null>(null);
 const showSchemaDiffDialog = ref(false);
 const showDataCompareDialog = ref(false);
 const showSqlFileDialog = ref(false);
+const sqlFileTaskId = ref<string | null>(null);
 const showDiagramDialog = ref(false);
 const showDocsDialog = ref(false);
 const showDataDictionaryDialog = ref(false);
@@ -117,6 +118,10 @@ const databaseExportAllDatabases = ref(false);
 
 let watchersRegistered = false;
 
+export function resetDialogSourcesForTest(): void {
+  watchersRegistered = false;
+}
+
 function clearTransferPrefill() {
   transferPrefillConnectionId.value = "";
   transferPrefillDatabase.value = "";
@@ -151,6 +156,11 @@ export function reexecuteDataTransferTask(taskOrId: ExportTask | string): void {
   transferTaskId.value = null;
   transferReexecuteTask.value = task;
   showTransferDialog.value = true;
+}
+
+export function openSqlFileExecutionTask(taskId?: string): void {
+  sqlFileTaskId.value = taskId ?? null;
+  showSqlFileDialog.value = true;
 }
 
 export function openDataGenerateSession(sessionId: string, target: { connectionId: string; database: string; schema?: string; tableName?: string }): void {
@@ -257,6 +267,7 @@ export function useDialogSources() {
     // nor its connection context may leak into that session.
     watch(showSqlFileDialog, (open) => {
       if (!open) {
+        sqlFileTaskId.value = null;
         sqlFilePrefillConnectionId.value = "";
         sqlFilePrefillDatabase.value = "";
         sqlFilePrefillSchema.value = undefined;
@@ -628,6 +639,7 @@ export function useDialogSources() {
     showSchemaDiffDialog,
     showDataCompareDialog,
     showSqlFileDialog,
+    sqlFileTaskId,
     showDiagramDialog,
     showDocsDialog,
     showDataDictionaryDialog,

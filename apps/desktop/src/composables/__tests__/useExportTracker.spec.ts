@@ -679,6 +679,48 @@ describe("SQL-file failure details", () => {
     expect(replacement.sqlFileFailures).toEqual([]);
     expect(replacement.sqlFileFailuresOmitted).toBe(0);
   });
+
+  it("stores onOpen callback when provided", () => {
+    const tracker = useExportTracker();
+    const onOpen = vi.fn();
+    const task = tracker.addSqlFileTask("sql-open-id", "test.sql", "/tmp/test.sql", onOpen);
+
+    expect(task.onOpen).toBe(onOpen);
+    task.onOpen?.();
+    expect(onOpen).toHaveBeenCalledOnce();
+  });
+
+  it("stores target connection, database, schema, and previews when provided in options", () => {
+    const tracker = useExportTracker();
+    const onOpen = vi.fn();
+    const previews: api.SqlFilePreview[] = [{ fileName: "test.sql", filePath: "/tmp/test.sql", preview: "SELECT 1;", sizeBytes: 10, canExecuteWithoutSelectedDatabase: false }];
+    const task = tracker.addSqlFileTask("sql-options-id", "test.sql", "/tmp/test.sql", {
+      onOpen,
+      targetConnectionId: "conn-1",
+      targetDatabase: "db1",
+      targetSchema: "public",
+      previews,
+    });
+
+    expect(task.onOpen).toBe(onOpen);
+    expect(task.targetConnectionId).toBe("conn-1");
+    expect(task.targetDatabase).toBe("db1");
+    expect(task.targetSchema).toBe("public");
+    expect(task.sqlFilePreviews).toEqual(previews);
+  });
+
+  it("stores manual transaction and execution status on sql-file task", () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("sql-txn-id", "test.sql", "/tmp/test.sql", {
+      txnSessionId: "session-123",
+      isExecuting: true,
+      manualTransaction: true,
+    });
+
+    expect(task.sqlFileTxnSessionId).toBe("session-123");
+    expect(task.sqlFileIsExecuting).toBe(true);
+    expect(task.sqlFileManualTransaction).toBe(true);
+  });
 });
 
 describe("formatDataTransferDuration", () => {

@@ -7331,6 +7331,10 @@ export default withEnglishFallback({
     executeSuccess: "SQL 檔案執行成功",
     completedWithErrors: "執行完成：成功 {succeeded} 條，失敗 {failed} 條",
     runInBackground: "背景執行",
+    backgroundStarted: "SQL 檔案已在背景執行，可在背景任務中查看進度。",
+    viewDetails: "查看詳情",
+    backgroundCompleted: "SQL 檔案「{name}」執行完成",
+    backgroundFailed: "SQL 檔案「{name}」執行失敗",
   },
   diff: {
     progress: {

@@ -69,11 +69,14 @@ const downloadArtifacts: DownloadArtifact[] = [
   {
     id: "windows-7-offline",
     iconId: "windows-legacy",
-    labels: { en: "Windows 7 / Server\u00a02012\u00a0R2 package", cn: "Windows 7 / Server\u00a02012\u00a0R2 专用包" },
+    labels: {
+      en: "Windows 7 / Server\u00a02008\u00a0R2+",
+      cn: "Windows 7 / Server\u00a02008\u00a0R2 及以上",
+    },
     descriptions: { en: "Includes WebView2 offline runtime · Does not include", cn: "内置 WebView2 离线运行库 · 不含" },
     driverLinkLabels: { en: "offline database drivers", cn: "数据库离线驱动" },
     badges: { en: "Legacy", cn: "旧系统" },
-    suffix: "x64-win7-server2012r2-offline-setup.exe",
+    suffix: "x64-win7-server2008r2-offline-setup.exe",
   },
   {
     id: "linux",

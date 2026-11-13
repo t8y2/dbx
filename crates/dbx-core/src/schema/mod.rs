@@ -4718,6 +4718,16 @@ done
     }
 
     #[test]
+    fn only_a_missing_object_ddl_error_triggers_the_oracle_synonym_lookup() {
+        assert!(crate::schema::oracle_ddl_error_is_missing_object("object not found: HR.ORDERS_SYN"));
+        assert!(crate::schema::oracle_ddl_error_is_missing_object(
+            "ORA-31603: object \"ORDERS_SYN\" of type TABLE not found"
+        ));
+        assert!(!crate::schema::oracle_ddl_error_is_missing_object("source denied"));
+        assert!(!crate::schema::oracle_ddl_error_is_missing_object("ORA-01031: insufficient privileges"));
+    }
+
+    #[test]
     fn should_append_oracle_style_comment_ddl_for_oracle_family() {
         assert!(should_append_oracle_style_comment_ddl(Some(&test_connection_config(DatabaseType::Oracle))));
         assert!(should_append_oracle_style_comment_ddl(Some(&test_connection_config(DatabaseType::OceanbaseOracle))));
@@ -11529,7 +11539,7 @@ async fn get_table_ddl_core_with_options(
         .await
         {
             Ok(ddl) => ddl,
-            Err(error) if object_type.is_none() => {
+            Err(error) if object_type.is_none() && oracle_ddl_error_is_missing_object(&error) => {
                 match oracle_table_ddl_synonym_target(state, connection_id, database, schema, table, client_session_id)
                     .await
                 {
@@ -11572,6 +11582,15 @@ async fn get_table_ddl_core_with_options(
     } else {
         Ok(sanitize_ddl_string(ddl))
     }
+}
+
+/// Whether a table DDL failure says the name matched no table, view or materialized view, the
+/// only failure a synonym can explain. Denied access, a missing source and every other error
+/// are returned without further metadata calls. The Oracle agent reports a dictionary miss as
+/// `object not found`, and `DBMS_METADATA` reports one as `ORA-31603`.
+fn oracle_ddl_error_is_missing_object(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("object not found") || error.contains("ora-31603")
 }
 
 /// The object whose DDL stands in for a synonym's.

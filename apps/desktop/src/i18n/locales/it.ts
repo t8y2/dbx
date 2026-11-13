@@ -11728,6 +11728,9 @@ export default withEnglishFallback({
     rabbitmqPublishRate: "Pubblica",
     rabbitmqDeliverRate: "Consegna/Recupero",
     rabbitmqAckRate: "Ack",
+    autoLoadKafkaTopics: "Carica automaticamente i topic",
+    loadTopics: "Carica topic",
+    kafkaTopicsNotLoaded: "Fai clic su «Carica topic» per ottenere l'elenco.",
   },
   mqAdmin: {
     viewTenant: "Visualizza tenant",

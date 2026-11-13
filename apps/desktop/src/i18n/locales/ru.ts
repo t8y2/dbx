@@ -12764,6 +12764,9 @@ export default withEnglishFallback({
     rabbitmqPublishRate: "Публикация",
     rabbitmqDeliverRate: "Доставка/получение",
     rabbitmqAckRate: "Подтверждение",
+    autoLoadKafkaTopics: "Автоматически загружать топики",
+    loadTopics: "Загрузить топики",
+    kafkaTopicsNotLoaded: "Нажмите «Загрузить топики», чтобы получить список.",
   },
   mqExchanges: {
     searchPlaceholder: "Поиск exchange",

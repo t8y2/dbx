@@ -11701,6 +11701,9 @@ export default withEnglishFallback({
     rabbitmqPublishRate: "發布",
     rabbitmqDeliverRate: "投遞/擷取",
     rabbitmqAckRate: "確認",
+    autoLoadKafkaTopics: "自動載入主題",
+    loadTopics: "載入主題",
+    kafkaTopicsNotLoaded: "點擊「載入主題」取得清單。",
   },
   mqAdmin: {
     viewTenant: "檢視租用戶",

@@ -11753,6 +11753,9 @@ export default withEnglishFallback({
     rabbitmqPublishRate: "公開",
     rabbitmqDeliverRate: "配信/取得",
     rabbitmqAckRate: "応答",
+    autoLoadKafkaTopics: "トピックを自動読み込み",
+    loadTopics: "トピックを読み込む",
+    kafkaTopicsNotLoaded: "「トピックを読み込む」をクリックしてリストを取得します。",
   },
   mqAdmin: {
     viewTenant: "テナントを表示",

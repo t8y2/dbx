@@ -11722,6 +11722,9 @@ export default withEnglishFallback({
     rabbitmqPublishRate: "Publicar",
     rabbitmqDeliverRate: "Entrega/Obtenção",
     rabbitmqAckRate: "Ack",
+    autoLoadKafkaTopics: "Carregar tópicos automaticamente",
+    loadTopics: "Carregar tópicos",
+    kafkaTopicsNotLoaded: "Clique em “Carregar tópicos” para obter a lista.",
   },
   mqAdmin: {
     viewTenant: "Ver locatário",

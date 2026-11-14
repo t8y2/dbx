@@ -392,6 +392,12 @@ pub async fn connect_with_port_explicit(
 ) -> Result<SqlServerClient, String> {
     let host = sqlserver_host_with_url_instance(host, port, port_explicit, url_params)?;
     let host = host.as_ref();
+    if let Some(verification) = sqlserver_certificate_verification(url_params)? {
+        // A verified connection must never fall back to an unverified or unencrypted transport.
+        let encryption = tiberius::EncryptionLevel::Required;
+        return try_connect(host, port, port_explicit, user, pass, database, encryption, Some(&verification), timeout)
+            .await;
+    }
     if sqlserver_native_encryption_disabled(url_params) {
         let skipped = "encryption was disabled by encrypt=false / sqlserverEncryption=disabled".to_string();
         return try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)
@@ -399,9 +405,8 @@ pub async fn connect_with_port_explicit(
             .map_err(|fallback_errors| sqlserver_connect_failure_message(&skipped, &fallback_errors));
     }
 
-    match try_connect(host, port, port_explicit, user, pass, database, tiberius::EncryptionLevel::Required, timeout)
-        .await
-    {
+    let encryption = tiberius::EncryptionLevel::Required;
+    match try_connect(host, port, port_explicit, user, pass, database, encryption, None, timeout).await {
         Ok(client) => Ok(client),
         Err(encrypted_error) => {
             try_connect_legacy_sqlserver_encryption(host, port, port_explicit, user, pass, database, timeout)
@@ -505,7 +510,7 @@ async fn try_connect_legacy_sqlserver_encryption(
 ) -> Result<SqlServerClient, Vec<(&'static str, String)>> {
     let mut errors = Vec::new();
     for (label, encryption) in SQLSERVER_LEGACY_ENCRYPTION_FALLBACKS {
-        match try_connect(host, port, port_explicit, user, pass, database, encryption, timeout).await {
+        match try_connect(host, port, port_explicit, user, pass, database, encryption, None, timeout).await {
             Ok(client) => return Ok(client),
             Err(error) => errors.push((label, error)),
         }
@@ -532,6 +537,42 @@ fn is_sqlserver_tls_handshake_error(error: &str) -> bool {
     error.contains("tls") && (error.contains("handshake") || error.contains("eof") || error.contains("performing i/o"))
 }
 
+/// Server certificate verification requested with `trustServerCertificate=false`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SqlServerCertificateVerification {
+    /// CA certificate (`.pem`, `.crt` or `.der`) from `sslrootcert`; system roots when absent.
+    ca_file: Option<String>,
+    /// Name from `hostNameInCertificate`, used instead of the connection host for the TLS check.
+    host_name: Option<String>,
+}
+
+fn sqlserver_certificate_verification(
+    url_params: Option<&str>,
+) -> Result<Option<SqlServerCertificateVerification>, String> {
+    use dbx_types::models::connection::sqlserver_url_param;
+
+    let Some(trust) = sqlserver_url_param(url_params, "trustServerCertificate")? else {
+        return Ok(None);
+    };
+    match trust.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "1" => return Ok(None),
+        "false" | "no" | "0" => {}
+        _ => return Err("Invalid SQL Server trustServerCertificate URL parameter: expected true or false".into()),
+    }
+    if sqlserver_native_encryption_disabled(url_params) {
+        return Err("trustServerCertificate=false cannot be combined with encrypt=false".into());
+    }
+    let non_empty = |value: Option<String>| value.map(|value| value.trim().to_owned()).filter(|v| !v.is_empty());
+    let ca_file = non_empty(sqlserver_url_param(url_params, "sslrootcert")?);
+    let host_name = non_empty(sqlserver_url_param(url_params, "hostNameInCertificate")?);
+    if let Some(name) = &host_name {
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) {
+            return Err("Invalid SQL Server hostNameInCertificate URL parameter".into());
+        }
+    }
+    Ok(Some(SqlServerCertificateVerification { ca_file, host_name }))
+}
+
 async fn try_connect(
     host: &str,
     port: u16,
@@ -540,6 +581,7 @@ async fn try_connect(
     pass: &str,
     database: Option<&str>,
     encryption: tiberius::EncryptionLevel,
+    verification: Option<&SqlServerCertificateVerification>,
     timeout: Duration,
 ) -> Result<SqlServerClient, String> {
     let deadline = tokio::time::Instant::now() + timeout;
@@ -563,7 +605,25 @@ async fn try_connect(
         if let Some(db) = database {
             config.database(db);
         }
-        config.trust_cert();
+        // The TCP address is taken before `hostNameInCertificate` replaces the host used for the TLS check.
+        let addr = config.get_addr();
+        match verification {
+            Some(verification) => {
+                if let Some(ca_file) = &verification.ca_file {
+                    config.trust_cert_ca(ca_file);
+                }
+                // Routed connections are checked against the host the server redirected to.
+                if let Some(host_name) = verification.host_name.as_deref().filter(|_| redirects == 0) {
+                    if uses_named_instance_resolution {
+                        return Err("hostNameInCertificate cannot be used with a named instance resolved through \
+                                    SQL Server Browser; set the instance port explicitly"
+                            .into());
+                    }
+                    config.host(host_name);
+                }
+            }
+            None => config.trust_cert(),
+        }
         config.encryption(encryption);
 
         let remaining_connect = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -583,7 +643,7 @@ async fn try_connect(
                     }
                 })?
         } else {
-            tokio::time::timeout(remaining_connect, TcpStream::connect(config.get_addr()))
+            tokio::time::timeout(remaining_connect, TcpStream::connect(addr))
                 .await
                 .map_err(|_| format!("SQL Server connection timed out ({}s)", timeout.as_secs()))?
                 .map_err(|e| {
@@ -5257,6 +5317,62 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_certificate_verification_is_opt_in() {
+        use super::{sqlserver_certificate_verification, SqlServerCertificateVerification};
+
+        assert_eq!(sqlserver_certificate_verification(None), Ok(None));
+        assert_eq!(sqlserver_certificate_verification(Some("encrypt=true")), Ok(None));
+        assert_eq!(sqlserver_certificate_verification(Some("trustServerCertificate=true")), Ok(None));
+        assert_eq!(
+            sqlserver_certificate_verification(Some("encrypt=true;trustServerCertificate=false")),
+            Ok(Some(SqlServerCertificateVerification { ca_file: None, host_name: None }))
+        );
+        // Desktop paths may contain spaces or separators: percent-encoded and brace-quoted values both work.
+        assert_eq!(
+            sqlserver_certificate_verification(Some(
+                "TrustServerCertificate=no&sslrootcert=C%3A%5Ccerts%5Cmy%20ca.pem&hostNameInCertificate=db.example.com"
+            )),
+            Ok(Some(SqlServerCertificateVerification {
+                ca_file: Some(r"C:\certs\my ca.pem".into()),
+                host_name: Some("db.example.com".into()),
+            }))
+        );
+        assert_eq!(
+            sqlserver_certificate_verification(Some("trustServerCertificate=false;sslrootcert={/certs/a;b.crt}")),
+            Ok(Some(SqlServerCertificateVerification { ca_file: Some("/certs/a;b.crt".into()), host_name: None }))
+        );
+    }
+
+    #[test]
+    fn sqlserver_certificate_verification_rejects_contradictions() {
+        use super::sqlserver_certificate_verification;
+
+        assert!(sqlserver_certificate_verification(Some("trustServerCertificate=maybe")).is_err());
+        assert!(sqlserver_certificate_verification(Some("trustServerCertificate=false;encrypt=false")).is_err());
+        assert!(sqlserver_certificate_verification(Some(
+            "trustServerCertificate=false&hostNameInCertificate=db.example.com%2Fx"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn sqlserver_verified_connections_do_not_fall_back() {
+        let source = include_str!("sqlserver.rs");
+        let connect = source.split("pub async fn connect_with_port_explicit(").nth(1).unwrap();
+        let connect = connect.split("const SQLSERVER_LEGACY_TLS_HINT").next().unwrap();
+        let verified = connect.split("sqlserver_certificate_verification(url_params)?").nth(1).unwrap();
+        let verified = verified.split("if sqlserver_native_encryption_disabled").next().unwrap();
+        assert!(verified.contains("Some(&verification)"));
+        assert!(!verified.contains("try_connect_legacy_sqlserver_encryption"));
+
+        let try_connect = source.split("\nasync fn try_connect(").nth(1).unwrap();
+        let try_connect = try_connect.split("fn row_to_json").next().unwrap();
+        let addr = try_connect.find("let addr = config.get_addr();").unwrap();
+        assert!(addr < try_connect.find("config.host(host_name)").unwrap());
+        assert!(try_connect.contains("TcpStream::connect(addr)"));
+    }
+
+    #[test]
     fn sqlserver_legacy_encryption_modes_cover_jdbc_and_no_encryption_fallback() {
         assert_eq!(super::SQLSERVER_LEGACY_ENCRYPTION_LEVEL, tiberius::EncryptionLevel::Off);
         assert_eq!(super::SQLSERVER_UNSUPPORTED_ENCRYPTION_LEVEL, tiberius::EncryptionLevel::NotSupported);
@@ -5543,6 +5659,7 @@ mod tests {
             "password",
             None,
             tiberius::EncryptionLevel::NotSupported,
+            None,
             Duration::from_secs(3),
         )
         .await;
@@ -5604,6 +5721,7 @@ mod tests {
             "password",
             None,
             tiberius::EncryptionLevel::NotSupported,
+            None,
             Duration::from_secs(3),
         )
         .await;
@@ -5646,6 +5764,7 @@ mod tests {
             "password",
             None,
             tiberius::EncryptionLevel::NotSupported,
+            None,
             Duration::from_secs(3),
         )
         .await;

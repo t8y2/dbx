@@ -1970,23 +1970,30 @@ fn sqlserver_url_param_parts(params: Option<&str>) -> Vec<(Option<char>, &str)> 
     parts
 }
 
-pub fn sqlserver_url_instance_name(params: Option<&str>) -> Result<Option<String>, String> {
+/// Returns the value of a SQL Server URL parameter. Keys match case-insensitively and the last
+/// occurrence wins. Brace-quoted values are returned as written; other values are percent-decoded.
+pub fn sqlserver_url_param(params: Option<&str>, key: &str) -> Result<Option<String>, String> {
     let property = sqlserver_url_param_parts(params)
         .into_iter()
         .rev()
         .filter_map(|(_, part)| part.split_once('='))
-        .find(|(key, _)| percent_decode_str(key.trim()).decode_utf8_lossy().eq_ignore_ascii_case("instanceName"));
+        .find(|(part_key, _)| percent_decode_str(part_key.trim()).decode_utf8_lossy().eq_ignore_ascii_case(key));
     let Some((_, value)) = property else {
         return Ok(None);
     };
     let value = value.trim();
-    let name = if let Some(quoted) = value.strip_prefix('{').and_then(|value| value.strip_suffix('}')) {
-        quoted.to_owned()
-    } else {
-        percent_decode_str(value)
-            .decode_utf8()
-            .map_err(|_| "Invalid SQL Server instanceName URL parameter")?
-            .into_owned()
+    if let Some(quoted) = value.strip_prefix('{').and_then(|value| value.strip_suffix('}')) {
+        return Ok(Some(quoted.to_owned()));
+    }
+    percent_decode_str(value)
+        .decode_utf8()
+        .map(|value| Some(value.into_owned()))
+        .map_err(|_| format!("Invalid SQL Server {key} URL parameter"))
+}
+
+pub fn sqlserver_url_instance_name(params: Option<&str>) -> Result<Option<String>, String> {
+    let Some(name) = sqlserver_url_param(params, "instanceName")? else {
+        return Ok(None);
     };
     // A name must not be interpreted as part of the host or port.
     if name.contains(['\\', ',', ':', '{', '}']) || name.chars().any(char::is_control) {

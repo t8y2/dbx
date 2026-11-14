@@ -174,6 +174,18 @@ API Key 复用现有的加密密码存储，并遵循 **保存密码** 设置（
 
 CLI/MCP 配置中，将 `external_config.authType` 设为 `"apiKey"`，编码后的 Key 填入 `password`；不要把密钥放入 URL 参数或 `external_config`。
 
+### SQL Server 证书校验
+
+原生 SQL Server 驱动默认在服务端支持时加密、接受任何服务端证书，加密握手失败时回退到旧版加密模式。在 URL 参数中加上 `trustServerCertificate=false` 即改为校验服务端证书：
+
+| 参数 | 含义 |
+| --- | --- |
+| `trustServerCertificate=false` | 必须使用 TLS，并校验证书链和主机名；校验失败直接报错，不再回退。 |
+| `sslrootcert=<路径>` | 运行 DBX 的主机上的 CA 证书文件（`.pem`、`.crt` 或 `.der`，只含一张证书）；不填时使用系统信任库。 |
+| `hostNameInCertificate=<名称>` | 证书中的名称与连接主机不同时（例如用 IP 或经隧道连接）用来校验的名称；不支持通过 SQL Server Browser 解析的命名实例。 |
+
+`trustServerCertificate=false` 不能与 `encrypt=false` 或 `sqlserverEncryption=disabled` 同时使用。路径含 `;` 或 `&` 时可用花括号括起（`sslrootcert={C:\certs\a;b.pem}`）或做百分号编码。
+
 ## 本地测试环境
 
 仓库提供 ClickHouse、MariaDB、MongoDB、MySQL、PostgreSQL 和 Redis 的固定 Docker Compose 测试环境，适合验证连接、驱动行为和回归。详见 [数据库测试实验室](/cn/docs/database-lab)。

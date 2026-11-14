@@ -871,4 +871,26 @@ describe("promoted build recognition on the beta channel (#14739)", () => {
     expect(updater.updateCheckFailed.value).toBe(false);
     expect(displayAppVersion(build)).toBe(build);
   });
+
+  it("ignores a check disposed while its stable promotion lookup is pending", async () => {
+    const build = "0.6.69-beta.20261110.9";
+    const { beta, stable } = channelManifests(build, "0.6.69");
+    const pendingStable = deferred<typeof stable>();
+    settings.updateChannel = "beta";
+    mocks.checkForUpdates.mockImplementation(async (_locale: string, _source: string, channel: string) => (channel === "stable" ? pendingStable.promise : beta));
+    const updater = mount();
+    const check = updater.checkUpdates();
+    await flush();
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(2);
+    updater.dispose();
+    await flush();
+    const message = updater.updateCheckMessage.value;
+
+    pendingStable.resolve(stable);
+    await check;
+
+    expect(updater.updateCheckMessage.value).toBe(message);
+    expect(mocks.downloadUpdate).not.toHaveBeenCalled();
+    expect(mocks.discardDownloadedUpdate).not.toHaveBeenCalled();
+  });
 });

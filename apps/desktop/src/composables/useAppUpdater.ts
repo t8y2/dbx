@@ -326,6 +326,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       updateInfo.value = info;
       recordPromotedBuild(info);
       await recordPromotionFromStableChannel(info);
+      if (token !== generation || disposed) return;
       // Installation may have started while the check was in flight; only restore
       // the phase this check itself owns.
       if (phase.value === "checking") phase.value = downloaded.value ? "ready" : "idle";

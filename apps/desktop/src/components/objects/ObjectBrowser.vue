@@ -345,6 +345,7 @@ function refreshCreatedTrigger() {
 }
 const oracleInvalidObjectsOpen = ref(false);
 const invalidTriggerContext = shallowRef<{ target: Readonly<OracleTriggerTarget>; expectedObjectId?: string; originRevision: number }>();
+const invalidCompileFocus = shallowRef<{ schema: string; name: string; type: "PROCEDURE" | "FUNCTION" | "VIEW" }>();
 let invalidObjectsDialogGeneration = 0;
 let invalidObjectSourceRequestGeneration = 0;
 let objectBrowserUnmounted = false;
@@ -495,7 +496,28 @@ const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && p
 function setOracleInvalidObjectsOpen(open: boolean) {
   if (oracleInvalidObjectsOpen.value !== open) invalidObjectsDialogGeneration++;
   oracleInvalidObjectsOpen.value = open;
-  if (!open) invalidTriggerContext.value = undefined;
+  if (!open) {
+    invalidTriggerContext.value = undefined;
+    invalidCompileFocus.value = undefined;
+  }
+}
+
+function oracleObjectCompileMenuItem(row: ObjectBrowserRow): ContextMenuItem[] {
+  if (effectiveDatabaseType.value !== "oracle" || row.valid !== false || (row.type !== "PROCEDURE" && row.type !== "FUNCTION" && row.type !== "VIEW")) return [];
+  const schema = row.schema || selectedSchema.value;
+  if (!schema) return [];
+  const focus = { schema, name: row.name, type: row.type } as const;
+  return [
+    {
+      sidebarActionId: "contextMenu.compileObject",
+      label: t("contextMenu.compileObject"),
+      icon: Wrench,
+      action: () => {
+        invalidCompileFocus.value = focus;
+        setOracleInvalidObjectsOpen(true);
+      },
+    },
+  ];
 }
 
 function openBrowserTriggerDiagnostics() {
@@ -6293,6 +6315,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     { sidebarActionId: "contextMenu.viewData", label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
     { sidebarActionId: "contextMenu.editView", label: t("contextMenu.editView"), action: () => openSource(item), icon: PencilLine },
     { sidebarActionId: "contextMenu.viewSource", label: t("contextMenu.viewSource"), action: () => openSource(item), icon: Code2 },
+    ...oracleObjectCompileMenuItem(item),
     ...(effectiveDatabaseType.value === "dameng" && item.type === "VIEW" && buildDamengCompileViewSql({ schema: item.schema || selectedSchema.value, name: item.name })
       ? [{ sidebarActionId: "contextMenu.compileObject", label: t("contextMenu.compileObject"), action: () => compileDamengView(item), icon: Wrench }]
       : []),
@@ -6325,6 +6348,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 
 function getProcFuncMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
   return [
+    ...oracleObjectCompileMenuItem(item),
     ...(supportsPlDebugRoutine(effectiveDatabaseType.value)
       ? [
           {
@@ -6513,7 +6537,8 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     :open="oracleInvalidObjectsOpen && (!invalidTriggerContext || sidePanelGuard.isFresh(invalidTriggerContext.originRevision))"
     :connection="connection"
     :database="database"
-    :schema="selectedSchema || database"
+    :schema="invalidCompileFocus?.schema || selectedSchema || database"
+    :focus-object="invalidCompileFocus"
     :trigger-context="invalidTriggerContext"
     @update:open="setOracleInvalidObjectsOpen"
     @open-source="openInvalidObjectSource"

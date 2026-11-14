@@ -8268,7 +8268,7 @@ onUnmounted(() => {
               <Input
                 data-settings-global-search
                 v-model="settingsSearchQuery"
-                type="text"
+                type="search"
                 autocomplete="off"
                 role="combobox"
                 :aria-label="t('settings.searchSettings')"
@@ -14681,6 +14681,14 @@ LIMIT 100;</pre>
 </template>
 
 <style>
+/* The settings search is a search field, so WebKit draws its own cancel
+   button and decoration glyph; the dialog already renders its own search icon
+   and clear button, so hide the native ones to avoid doubling them. */
+[data-settings-global-search]::-webkit-search-cancel-button,
+[data-settings-global-search]::-webkit-search-decoration {
+  display: none;
+}
+
 @media (min-width: 1024px) {
   .settings-layout {
     flex-direction: row !important;

@@ -2657,6 +2657,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "선택한 행",
+    exportSelectedCellsScope: "선택 영역",
+    exportSelectedColumnsScope: "선택 열",
     exportFormat: "형식",
     exportPageScope: "현재 페이지",
     exportResultScope: "전체 결과",
@@ -7582,6 +7584,7 @@ export default withEnglishFallback({
     preview: "SQL 미리보기",
     execute: "실행",
     clearValues: "값 지우기",
+    clearHistory: "기록 지우기",
     useRawForAll: "모두 원시 SQL로 설정",
     ignore: "무시",
     kind: {
@@ -9417,7 +9420,7 @@ export default withEnglishFallback({
     sidebarTableSearchEnabledDescription: "확장된 데이터베이스, 스키마 또는 테이블 그룹 아래에 로컬 테이블 검색 상자를 표시하여 각 범위가 독립적으로 테이블을 필터링할 수 있게 합니다.",
     sidebarObjectInfoMode: "사이드바 추가 정보",
     sidebarObjectInfoModeDescription:
-      "주석, 객체 크기, 둘 다 표시하거나 추가 정보를 표시하지 않도록 선택하세요. 둘 다 표시하면 주석은 이름 뒤에, 크기는 맨 오른쪽에 표시됩니다. 해당 데이터가 없는 정보는 숨겨집니다. 데이터베이스 합계는 현재 PostgreSQL을 지원하며, 테이블 크기는 MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, ClickHouse를 지원합니다.",
+      "주석, 객체 크기, 둘 다 표시하거나 추가 정보를 표시하지 않도록 선택하세요. 둘 다 표시하면 주석은 이름 뒤에, 크기는 맨 오른쪽에 표시됩니다. 해당 데이터가 없는 정보는 숨겨집니다. 데이터베이스 합계는 현재 PostgreSQL을 지원하며, 테이블 크기는 MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, ClickHouse, Doris, StarRocks를 지원합니다.",
     sidebarObjectInfoModeCommentInline: "주석 (이름 뒤)",
     sidebarObjectInfoModeCommentAligned: "주석 (형제 정렬)",
     sidebarObjectInfoModeCommentRight: "주석 (오른쪽 정렬)",

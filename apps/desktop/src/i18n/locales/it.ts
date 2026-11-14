@@ -2659,6 +2659,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "Righe selezionate",
+    exportSelectedCellsScope: "Celle selezionate",
+    exportSelectedColumnsScope: "Colonne selezionate",
     exportFormat: "Formato",
     exportPageScope: "Pagina attuale",
     exportResultScope: "Tutti i risultati",
@@ -7554,6 +7556,7 @@ export default withEnglishFallback({
     preview: "Anteprima SQL",
     execute: "Esegui",
     clearValues: "Cancella valori",
+    clearHistory: "Cancella cronologia",
     useRawForAll: "Usa SQL non elaborato per tutti",
     ignore: "Ignora",
     kind: {
@@ -9297,7 +9300,7 @@ export default withEnglishFallback({
     sidebarTableSearchEnabledDescription: "Mostra una casella di ricerca locale sotto database, schema o gruppi di tabelle espansi per filtrare le tabelle separatamente.",
     sidebarObjectInfoMode: "Informazioni aggiuntive laterali",
     sidebarObjectInfoModeDescription:
-      "Scegli commenti, dimensioni degli oggetti, entrambi o nessuna informazione aggiuntiva. Quando sono visualizzati entrambi, il commento segue il nome e la dimensione appare all’estrema destra. Le informazioni senza dati disponibili vengono nascoste. La dimensione totale dei database supporta PostgreSQL; le dimensioni delle tabelle supportano MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng e ClickHouse.",
+      "Scegli commenti, dimensioni degli oggetti, entrambi o nessuna informazione aggiuntiva. Quando sono visualizzati entrambi, il commento segue il nome e la dimensione appare all’estrema destra. Le informazioni senza dati disponibili vengono nascoste. La dimensione totale dei database supporta PostgreSQL; le dimensioni delle tabelle supportano MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, ClickHouse, Doris e StarRocks.",
     sidebarObjectInfoModeCommentInline: "Commenti (accanto al nome)",
     sidebarObjectInfoModeCommentAligned: "Commenti (allinea livello)",
     sidebarObjectInfoModeCommentRight: "Commenti (allinea a destra)",

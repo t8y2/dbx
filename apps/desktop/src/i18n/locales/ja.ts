@@ -2679,6 +2679,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "選択行",
+    exportSelectedCellsScope: "選択セル",
+    exportSelectedColumnsScope: "選択列",
     exportFormat: "形式",
     exportPageScope: "現在のページ",
     exportResultScope: "全結果",
@@ -7564,6 +7566,7 @@ export default withEnglishFallback({
     preview: "SQLプレビュー",
     execute: "実行",
     clearValues: "値をクリア",
+    clearHistory: "履歴を消去",
     useRawForAll: "すべてを生の SQL に設定",
     ignore: "無視",
     kind: {
@@ -9294,7 +9297,7 @@ export default withEnglishFallback({
     sidebarTableSearchEnabledDescription: "展開済みのデータベース、schema、またはテーブルグループの下にローカル検索ボックスを表示し、スコープごとにテーブルを絞り込みます。",
     sidebarObjectInfoMode: "サイドバーの補足情報",
     sidebarObjectInfoModeDescription:
-      "コメント、オブジェクトサイズ、両方、または何も表示しないかを選択します。両方を表示する場合、コメントは名前の直後、サイズは右端に表示されます。対応するデータがない情報は非表示になります。データベース全体のサイズは PostgreSQL、テーブルサイズは MySQL、PostgreSQL、GaussDB、KingbaseES、GBase 8a、SQL Server、Oracle、Dameng、ClickHouse に対応しています。",
+      "コメント、オブジェクトサイズ、両方、または何も表示しないかを選択します。両方を表示する場合、コメントは名前の直後、サイズは右端に表示されます。対応するデータがない情報は非表示になります。データベース全体のサイズは PostgreSQL、テーブルサイズは MySQL、PostgreSQL、GaussDB、KingbaseES、GBase 8a、SQL Server、Oracle、Dameng、ClickHouse、Doris、StarRocks に対応しています。",
     sidebarObjectInfoModeCommentInline: "コメント（名前の直後）",
     sidebarObjectInfoModeCommentAligned: "コメント（同階層で整列）",
     sidebarObjectInfoModeCommentRight: "コメント（右揃え）",

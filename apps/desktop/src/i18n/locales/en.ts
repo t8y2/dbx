@@ -3038,6 +3038,8 @@ export default {
   },
   grid: {
     exportSelectedRowsScope: "Selected rows",
+    exportSelectedCellsScope: "Selected cells",
+    exportSelectedColumnsScope: "Selected columns",
     exportFormat: "Format",
     exportPageScope: "Current page",
     exportResultScope: "All results",
@@ -8798,6 +8800,7 @@ export default {
     preview: "SQL Preview",
     execute: "Execute",
     clearValues: "Clear Values",
+    clearHistory: "Clear History",
     useRawForAll: "Use Raw SQL for All",
     ignore: "Ignore",
     kind: {
@@ -10738,7 +10741,7 @@ export default {
     sidebarSearchOpenedDatabasesOnlyDescription: "The sidebar search loads only databases you have opened in the active connection. Turn off to search every database of the connection.",
     sidebarObjectInfoMode: "Sidebar supplementary info",
     sidebarObjectInfoModeDescription:
-      "Choose comments, object sizes, both, or no supplementary text after names. When both are enabled, the comment follows the name and the size is shown at the far right. Information with no corresponding data is hidden. Database totals currently support PostgreSQL; table sizes support MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, and ClickHouse.",
+      "Choose comments, object sizes, both, or no supplementary text after names. When both are enabled, the comment follows the name and the size is shown at the far right. Information with no corresponding data is hidden. Database totals currently support PostgreSQL; table sizes support MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, ClickHouse, Doris, and StarRocks.",
     sidebarObjectInfoModeCommentInline: "Comments (after name)",
     sidebarObjectInfoModeCommentAligned: "Comments (align siblings)",
     sidebarObjectInfoModeCommentRight: "Comments (align right)",

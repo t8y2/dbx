@@ -488,6 +488,9 @@ const supportsExactTriggerDiscovery = computed(() => !!oracleTriggerObjectReadOp
 const supportsSchemaIndexes = computed(() => supportsSchemaIndexManagement(effectiveDatabaseType.value));
 const exactIndexList = computed(() => supportsSchemaIndexes.value && objectFilter.value === "indexes");
 const usesServerObjectPaging = computed(() => props.connection.db_type === "oceanbase-oracle" || exactIndexList.value || (objectFilter.value === "triggers" && supportsExactTriggerDiscovery.value));
+// Search all loaded Oracle object kinds when Tables is only the browsing default.
+const searchAllOracleObjectKinds = computed(() => effectiveDatabaseType.value === "oracle" && !usesServerObjectPaging.value && objectFilter.value === "tables" && !userHasSelectedFilter.value && !props.selectedObjectFilter && !props.initialObjectFilter);
+const displayedObjectFilter = computed<ObjectFilter>(() => (searchAllOracleObjectKinds.value && search.value.trim() ? "all" : objectFilter.value));
 const objectPageSize = computed(() => Math.max(1, Math.min(10_000, Math.floor(settingsStore.desktopSettings?.sidebar_table_page_size || 500))));
 const OBJECT_COPY_PAGE_SIZE = 1_000;
 const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && props.connection.driver_profile?.toLowerCase() === "gaussdb-m");
@@ -523,7 +526,14 @@ const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && show
 const showMysqlTableCharsetColumns = computed(() => effectiveDatabaseType.value === "mysql" && showTableStatistics.value);
 // Only the native MySQL statistics read returns AUTO_INCREMENT (same query and gate as the collation).
 const showMysqlAutoIncrementColumn = computed(() => effectiveDatabaseType.value === "mysql" && showTableStatistics.value);
-const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
+const isTiDb = computed(() => {
+  const connection = props.connection;
+  return effectiveDatabaseType.value === "mysql" && [connection.driver_profile, connection.database_info?.productName, connection.database_info?.productVersion].some((value) => /\btidb\b/i.test(value ?? ""));
+});
+const objectRowsLabel = computed(() => {
+  if (isVictoriaMetrics.value) return t("objects.series");
+  return t(isTiDb.value ? "grid.tableInfoEstimatedRows" : "objects.rows");
+});
 
 function toggleTableDdlWordWrap() {
   settingsStore.updateEditorSettings({
@@ -694,18 +704,18 @@ const objectColumnOrderStorageKey = computed(() => `${objectColumnVisibilityStor
 const availableObjectColumnDefinitions = computed(() => [
   { key: "name" as const, label: t("objects.name") },
   { key: "type" as const, label: t("objects.type") },
+  ...(showObjectRowStats.value ? [{ key: "estimatedRows" as const, label: objectRowsLabel.value }] : []),
+  { key: "comment" as const, label: t("objects.comment") },
+  ...(showObjectSizeStats.value ? [{ key: "totalBytes" as const, label: t("objects.size") }] : []),
+  ...(hasUpdatedAt.value ? [{ key: "updated_at" as const, label: t("objects.updatedAt") }] : []),
+  ...(hasCreatedAt.value ? [{ key: "created_at" as const, label: t("objects.createdAt") }] : []),
+  ...(showMysqlAutoIncrementColumn.value ? [{ key: "autoIncrement" as const, label: t("grid.tableInfoAutoIncrement") }] : []),
   ...(showMysqlTableCharsetColumns.value
     ? [
         { key: "characterSet" as const, label: t("structureEditor.characterSet") },
         { key: "collation" as const, label: t("structureEditor.collation") },
       ]
     : []),
-  ...(showObjectRowStats.value ? [{ key: "estimatedRows" as const, label: objectRowsLabel.value }] : []),
-  ...(showObjectSizeStats.value ? [{ key: "totalBytes" as const, label: t("objects.size") }] : []),
-  ...(showMysqlAutoIncrementColumn.value ? [{ key: "autoIncrement" as const, label: t("grid.tableInfoAutoIncrement") }] : []),
-  ...(hasCreatedAt.value ? [{ key: "created_at" as const, label: t("objects.createdAt") }] : []),
-  ...(hasUpdatedAt.value ? [{ key: "updated_at" as const, label: t("objects.updatedAt") }] : []),
-  { key: "comment" as const, label: t("objects.comment") },
 ]);
 const objectColumnDefinitions = computed(() => {
   const ranks = new Map(objectColumnOrder.value.map((key, index) => [key, index]));
@@ -1079,8 +1089,9 @@ watch([sortKey, sortDirection], () => scrollObjectsToTop());
 // filtered results bear no relation to the previous scroll position.
 watch(
   search,
-  (value) => {
+  (value, previousValue) => {
     scrollObjectsToTop();
+    if (searchAllOracleObjectKinds.value && Boolean(value.trim()) !== Boolean(previousValue.trim())) clearTableSelection();
     emit("searchChange", value);
     if (usesServerObjectPaging.value) {
       clearTimeout(objectSearchTimer);
@@ -1316,17 +1327,7 @@ function toggleSort(key: ObjectBrowserSortKey) {
   sortDirection.value = initialObjectBrowserSortDirection(key);
 }
 
-const sortKeyOptions = computed<ObjectBrowserSortKey[]>(() => {
-  const options: ObjectBrowserSortKey[] = ["name", "type"];
-  if (showMysqlTableCharsetColumns.value) options.push("characterSet", "collation");
-  if (showObjectRowStats.value) options.push("estimatedRows");
-  if (showObjectSizeStats.value) options.push("totalBytes");
-  if (showMysqlAutoIncrementColumn.value) options.push("autoIncrement");
-  if (hasCreatedAt.value) options.push("created_at");
-  if (hasUpdatedAt.value) options.push("updated_at");
-  options.push("comment");
-  return options;
-});
+const sortKeyOptions = computed<ObjectBrowserSortKey[]>(() => objectColumnDefinitions.value.map((column) => column.key));
 
 watch(sortKeyOptions, (options) => {
   if (!options.includes(sortKey.value)) {
@@ -1412,7 +1413,7 @@ function rowMatchesFilter(row: ObjectBrowserRow, filter: ObjectFilter) {
 }
 
 function rowMatchesObjectFilter(row: ObjectBrowserRow) {
-  return rowMatchesFilter(row, objectFilter.value);
+  return rowMatchesFilter(row, displayedObjectFilter.value);
 }
 
 function objectBrowserPinnedTreeNodeContext() {
@@ -2622,10 +2623,10 @@ async function onEventSaved(savedName: string) {
   toast(t("objects.sourceSaved"));
 }
 
-async function openNewQuery(row: ObjectBrowserRow) {
+async function openNewQuery(row: ObjectBrowserRow, forceNew = false) {
   flushObjectBrowserViewport();
   const schema = row.schema || selectedSchema.value;
-  const tabId = queryStore.createTab(props.connection.id, props.database, row.name, "query", schema, undefined, props.catalog);
+  const tabId = queryStore.createTab(props.connection.id, props.database, row.name, "query", schema, undefined, props.catalog, { forceNew });
   queryStore.updateSql(
     tabId,
     await buildTableSelectSql({
@@ -5628,8 +5629,9 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     applyObjectBrowserRows(cached.rows);
     finishOnce();
     // 统计信息随对象列表缓存，过期时只在后台刷新统计，保留对象列表本身。
-    // MySQL 的旧缓存可能尚未合并表排序规则，即使仍新鲜也要补读一次。
-    const missingMysqlTableMetadata = showMysqlTableCharsetColumns.value && rows.value.some((row) => row.type === "TABLE" && (row.collation === undefined || row.autoIncrement === undefined));
+    // Backfill MySQL scaffolds cached before all table metadata was merged,
+    // even while fresh. Null timestamps are known to be unavailable.
+    const missingMysqlTableMetadata = showMysqlTableCharsetColumns.value && rows.value.some((row) => row.type === "TABLE" && (row.collation === undefined || row.autoIncrement === undefined || row.created_at === undefined || row.updated_at === undefined));
     const statistics = cached.stale || missingMysqlTableMetadata ? revalidateCachedObjectStatistics(request, cacheWriteToken) : undefined;
     // 缺失的注释/时间戳在统计读完后补齐，避免两条重读同时打库。
     if (detailsPassEnabled.value && !rows.value.some((row) => row.comment?.trim() || row.created_at?.trim() || row.updated_at?.trim())) {
@@ -5923,6 +5925,8 @@ function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string
       ...row,
       estimatedRows: normalizeStatisticNumber(stat.estimated_rows),
       totalBytes: normalizeStatisticNumber(stat.total_bytes),
+      created_at: stat.created_at ?? row.created_at ?? null,
+      updated_at: stat.updated_at ?? row.updated_at ?? null,
       ...(effectiveDatabaseType.value === "mysql" ? { characterSet: mysqlTableCharsetFromCollation(stat.collation) || null, collation: stat.collation?.trim() || null, autoIncrement: stat.auto_increment?.trim() || null } : {}),
     };
   });
@@ -6017,7 +6021,7 @@ function filterLabel(filter: ObjectFilter) {
 }
 
 function selectObjectFilter(filter: ObjectFilter) {
-  if (filter === objectFilter.value) return;
+  if (filter === objectFilter.value && filter === displayedObjectFilter.value) return;
   const wasServerPaged = usesServerObjectPaging.value;
   userHasSelectedFilter.value = true;
   objectFilter.value = filter;
@@ -6553,7 +6557,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             :key="filter"
             type="button"
             class="h-6 shrink-0 whitespace-nowrap rounded-sm px-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
-            :class="{ 'bg-background text-foreground shadow-sm': objectFilter === filter }"
+            :class="{ 'bg-background text-foreground shadow-sm': displayedObjectFilter === filter }"
             @click="selectObjectFilter(filter)"
           >
             {{ filterLabel(filter) }}
@@ -6713,7 +6717,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <DropdownMenuCheckboxItem :model-value="settingsStore.editorSettings.objectBrowserAutoOpenDetailPanel !== false" @select.prevent @update:model-value="toggleAutoOpenDetailPanel()">{{ t("objects.autoOpenDetailPanel") }}</DropdownMenuCheckboxItem>
         <template v-if="showObjectFilter && toolbarTier >= 2">
           <DropdownMenuSeparator />
-          <DropdownMenuCheckboxItem v-for="filter in objectFilters" :key="filter" :model-value="objectFilter === filter" @select.prevent @update:model-value="selectObjectFilter(filter)">{{ filterLabel(filter) }} </DropdownMenuCheckboxItem>
+          <DropdownMenuCheckboxItem v-for="filter in objectFilters" :key="filter" :model-value="displayedObjectFilter === filter" @select.prevent @update:model-value="selectObjectFilter(filter)">{{ filterLabel(filter) }} </DropdownMenuCheckboxItem>
         </template>
         <template v-else-if="singleKindFilter && toolbarTier >= 2">
           <DropdownMenuSeparator />
@@ -7081,9 +7085,13 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                       <span v-if="item.valid != null" class="rounded border px-1 py-px text-[10px] font-medium" :class="item.valid ? 'border-emerald-500/30 text-emerald-600' : 'border-destructive/30 text-destructive'">
                         {{ t(item.valid ? "objects.validStatus" : "objects.invalidStatus") }}
                       </span>
-                      <span v-if="showObjectRowStats && item.estimatedRows != null && item.estimatedRows > 0" class="object-browser-stat-badge object-browser-stat-badge-rows rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary">{{
-                        formatObjectBrowserCount(item.estimatedRows)
-                      }}</span>
+                      <span
+                        v-if="showObjectRowStats && item.estimatedRows != null && item.estimatedRows > 0"
+                        class="object-browser-stat-badge object-browser-stat-badge-rows rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-primary"
+                        :title="isTiDb ? t('objects.statisticsHint') : undefined"
+                      >
+                        {{ formatObjectBrowserCount(item.estimatedRows) }}
+                      </span>
                       <span v-if="showObjectSizeStats && item.totalBytes != null && item.totalBytes > 0" class="object-browser-stat-badge object-browser-stat-badge-bytes rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-muted-foreground">{{
                         formatObjectBrowserBytes(item.totalBytes)
                       }}</span>
@@ -7144,6 +7152,18 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <div class="flex items-center gap-2 px-3 py-1.5 border-b shrink-0 bg-muted/20 h-9">
             <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
             <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ sidePanelRow?.name }}</span>
+            <Button
+              v-if="sidePanelRow && effectiveDatabaseType !== 'nebula' && (sidePanelRow.type === 'TABLE' || sidePanelRow.type === 'VIEW' || sidePanelRow.type === 'MATERIALIZED_VIEW')"
+              variant="ghost"
+              size="sm"
+              class="table-info-action-button h-6 px-2 text-xs"
+              :title="t('contextMenu.newQuery')"
+              :aria-label="t('contextMenu.newQuery')"
+              @click="openNewQuery(sidePanelRow, true)"
+            >
+              <TerminalSquare class="w-3 h-3" />
+              <span class="table-info-action-label">{{ t("contextMenu.newQuery") }}</span>
+            </Button>
             <div v-if="tableInfoTab === 'ddl' && tableMetadataCapabilities.ddl" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">
               <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :disabled="tableDdlLoading || !tableDdlLoaded" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyTableDdl">
                 <Copy class="w-3 h-3" />

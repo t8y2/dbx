@@ -113,6 +113,8 @@ export type ShortcutActionId =
   | "openDataInNewTab"
   | "viewTableDdl"
   | "editSidebarTableStructure"
+  | "createSidebarTable"
+  | "createSidebarDatabase"
   | "sendSelectionToAi"
   | "sqlIntentionActions";
 
@@ -857,6 +859,18 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "F4",
   },
   {
+    id: "createSidebarTable",
+    labelKey: "contextMenu.createTable",
+    scope: "sidebar",
+    defaultShortcut: "Mod+Alt+N",
+  },
+  {
+    id: "createSidebarDatabase",
+    labelKey: "contextMenu.createDatabase",
+    scope: "sidebar",
+    defaultShortcut: "Shift+F4",
+  },
+  {
     id: "sendSelectionToAi",
     labelKey: "settings.shortcutSendSelectionToAi",
     scope: "editor",
@@ -1023,10 +1037,8 @@ function computeNormalizedShortcutSettings(settings: Partial<ShortcutSettings> |
     normalized.copyCurrentRow = LEGACY_COPY_CURRENT_ROW_DEFAULT;
   }
 
-  // gotoLine 的平台默认键（Win/Linux 为 Ctrl+G）在该动作引入前是其他动作可合法
-  // 显式绑定的自由键位；无显式配置的默认值与同作用域显式绑定同键时同样让位，
-  // 否则运行时 keymap 先注册的 gotoLine 会遮蔽用户的显式配置。
-  for (const actionId of [...TAB_NAVIGATION_HISTORY_ACTIONS, "gotoLine"] as ShortcutActionId[]) {
+  // 新增动作的默认键可能已经被用户绑定到同作用域的其他动作。保留用户的绑定。
+  for (const actionId of [...TAB_NAVIGATION_HISTORY_ACTIONS, "gotoLine", "createSidebarTable", "createSidebarDatabase"] as ShortcutActionId[]) {
     if (hasExplicitShortcut(settings, actionId)) continue;
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === actionId);
     if (!definition) continue;

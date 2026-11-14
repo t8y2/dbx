@@ -3815,6 +3815,8 @@ export default withEnglishFallback({
     queryPendingChangesMessage: "Ejecutar la consulta descartará los cambios sin confirmar del conjunto de resultados actual. Puede cancelar y confirmar los cambios primero, o descartar los cambios y ejecutar la consulta.",
     queryDiscardAndExecute: "Descartar cambios y ejecutar",
     queryWhileSaving: "Se están guardando los cambios del conjunto de resultados. Espere a que termine el guardado antes de ejecutar la consulta.",
+    filterActive: "Filtro aplicado",
+    structuredFiltersActive: "{count} filtros de condición",
   },
   exportProgress: {
     recoveryTitle: "¿Eliminar la exportación cuyo final no se ha confirmado?",

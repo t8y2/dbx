@@ -3946,6 +3946,8 @@ export default withEnglishFallback({
     queryPendingChangesMessage: "การเรียกใช้คิวรีจะละทิ้งการแก้ไขที่ยังไม่ได้คอมมิตในชุดผลลัพธ์ปัจจุบัน คุณสามารถยกเลิกแล้วคอมมิตการแก้ไขก่อน หรือละทิ้งการแก้ไขและเรียกใช้คิวรี",
     queryDiscardAndExecute: "ละทิ้งการแก้ไขและเรียกใช้คิวรี",
     queryWhileSaving: "กำลังบันทึกการแก้ไขชุดผลลัพธ์ โปรดรอให้การบันทึกเสร็จสิ้นก่อนเรียกใช้คิวรี",
+    filterActive: "ใช้ตัวกรองแล้ว",
+    structuredFiltersActive: "{count} ตัวกรองเงื่อนไข",
   },
   exportProgress: {
     recoveryTitle: "ลบการส่งออกที่ยังยืนยันไม่ได้ว่าสิ้นสุดแล้วหรือไม่",

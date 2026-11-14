@@ -3640,6 +3640,8 @@ export default withEnglishFallback({
     queryPendingChangesMessage: "쿼리를 실행하면 현재 결과 집합에 있는 커밋되지 않은 변경 사항이 버려집니다. 취소하고 먼저 변경 사항을 커밋하거나, 변경 사항을 버리고 쿼리를 실행할 수 있습니다.",
     queryDiscardAndExecute: "변경 사항을 버리고 실행",
     queryWhileSaving: "결과 집합 변경 사항을 저장하는 중입니다. 저장이 완료된 후 쿼리를 실행하세요.",
+    filterActive: "필터 적용됨",
+    structuredFiltersActive: "{count}개 조건 필터",
   },
   exportProgress: {
     recoveryTitle: "완료 여부가 확인되지 않은 내보내기를 삭제할까요?",

@@ -1,5 +1,6 @@
 import type { ConnectionConfig, QueryResult } from "@/types/database";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { quoteOracleLiteral } from "@/lib/database/oracleInvalidObjects";
 
 export type SecurityReadState = "ok" | "empty" | "denied" | "unavailable" | "error" | "unsupported";
 export interface SecurityRead<T> {
@@ -121,6 +122,25 @@ async function readDictionary<T>(query: OracleSecurityQuery, primary: string, fa
     }
   }
   return { state: "error", visibility: "limited", source: primary, rows: [], message, truncated: false };
+}
+
+export async function loadOracleTableGrants(query: OracleSecurityQuery, owner: string, tableName: string) {
+  const predicate = `TABLE_NAME = ${quoteOracleLiteral(tableName)}`;
+  const tableOwner = quoteOracleLiteral(owner);
+  const baseColumns = "GRANTEE, TABLE_NAME, GRANTOR, PRIVILEGE, GRANTABLE";
+  const order = "ORDER BY GRANTEE, PRIVILEGE, GRANTOR";
+  return Promise.all([
+    readDictionary(query, `SELECT ${baseColumns}, OWNER FROM SYS.DBA_TAB_PRIVS WHERE OWNER = ${tableOwner} AND ${predicate} ${order}`, `SELECT ${baseColumns}, TABLE_SCHEMA AS OWNER FROM SYS.ALL_TAB_PRIVS WHERE TABLE_SCHEMA = ${tableOwner} AND ${predicate} ${order}`, objectGrant),
+    readDictionary(
+      query,
+      `SELECT ${baseColumns}, OWNER, COLUMN_NAME FROM SYS.DBA_COL_PRIVS WHERE OWNER = ${tableOwner} AND ${predicate} ${order}, COLUMN_NAME`,
+      `SELECT ${baseColumns}, TABLE_SCHEMA AS OWNER, COLUMN_NAME FROM SYS.ALL_COL_PRIVS WHERE TABLE_SCHEMA = ${tableOwner} AND ${predicate} ${order}, COLUMN_NAME`,
+      (row): OracleColumnGrant => ({
+        ...objectGrant(row),
+        columnName: row.COLUMN_NAME,
+      }),
+    ),
+  ]);
 }
 
 /** Only fixed SELECTs: loading or filtering this snapshot never grants permissions. */

@@ -301,6 +301,8 @@ export default withEnglishFallback({
     navigateDiscardConfirm: "O código tem alterações não salvas. Descartá-las e abrir o objeto relacionado?",
   },
   oracleSecurity: {
+    tableGrants: "Privilégios da tabela",
+    grantor: "Concedente",
     directSqlNotice: "Apenas concessões diretas visíveis, não permissões efetivas da sessão nem um script completo para reprodução. Herança e concedentes estão nos detalhes de origem.",
     searchOwner: "Pesquisar owner/schema",
     chooseObjects: "Escolher objetos",

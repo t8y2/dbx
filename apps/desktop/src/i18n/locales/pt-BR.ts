@@ -10886,6 +10886,12 @@ export default withEnglishFallback({
     limitRowsPerTable: "Limitar linhas por tabela",
     rowsPerTableLimit: "Linhas por tabela",
     limitRowsPerTableDescription: "Exporta no máximo o número de linhas informado por tabela. A ordem das linhas segue a ordem de leitura existente na exportação; tabelas sem ordem estável podem retornar linhas diferentes em duas exportações.",
+    rowLimitSortColumn: "Campo de ordenação",
+    rowLimitSortColumnPlaceholder: "ex.: id, created_at",
+    rowLimitSortDirection: "Direção da ordenação",
+    rowLimitSortEarliestFirst: "Mais antigos primeiro",
+    rowLimitSortLatestFirst: "Mais recentes primeiro",
+    rowLimitSortDescription: "Classifique cada tabela por esse campo e pegue as primeiras N linhas. Se deixado em branco, a ordem de leitura existente da exportação será mantida; se uma tabela não tiver esse campo, o mesmo fallback será aplicado, e duas exportações poderão obter linhas diferentes.",
   },
   nacos: {
     ...nacosAccessControlMessages,

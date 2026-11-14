@@ -10917,6 +10917,12 @@ export default withEnglishFallback({
     limitRowsPerTable: "テーブルごとの行数を制限",
     rowsPerTableLimit: "テーブルごとの行数",
     limitRowsPerTableDescription: "各テーブルにつき、入力した行数までエクスポートします。行の順序はエクスポート時の既存の読み取り順序に従います。安定した順序を持たないテーブルでは、2回のエクスポートで異なる行が取得される可能性があります。",
+    rowLimitSortColumn: "並べ替えフィールド",
+    rowLimitSortColumnPlaceholder: "例: id、created_at",
+    rowLimitSortDirection: "並べ替え方向",
+    rowLimitSortEarliestFirst: "古い順",
+    rowLimitSortLatestFirst: "新しい順",
+    rowLimitSortDescription: "このフィールドで各テーブルを並べ替えて先頭 N 行を取得します。空欄の場合はエクスポートの既存の読み取り順序を使用します。テーブルにこのフィールドがない場合も同様にフォールバックするため、2 回のエクスポートで異なる行が取得される可能性があります。",
   },
   nacos: {
     ...nacosAccessControlMessages,

@@ -10892,6 +10892,12 @@ export default withEnglishFallback({
     limitRowsPerTable: "Limita righe per tabella",
     rowsPerTableLimit: "Righe per tabella",
     limitRowsPerTableDescription: "Per ogni tabella, esporta al massimo il numero di righe inserito. L'ordine delle righe segue l'ordine di lettura esistente dell'esportazione; per le tabelle prive di un ordine stabile, due esportazioni potrebbero restituire righe diverse.",
+    rowLimitSortColumn: "Campo di ordinamento",
+    rowLimitSortColumnPlaceholder: "es. id, created_at",
+    rowLimitSortDirection: "Direzione ordinamento",
+    rowLimitSortEarliestFirst: "Prima i meno recenti",
+    rowLimitSortLatestFirst: "Prima i più recenti",
+    rowLimitSortDescription: "Ordina ogni tabella in base a questo campo e poi prendi le prime N righe. Se lasciato vuoto, si mantiene l'ordine di lettura esistente dell'esportazione; lo stesso fallback si applica anche quando una tabella non ha questo campo, pertanto due esportazioni potrebbero includere righe diverse.",
   },
   nacos: {
     ...nacosAccessControlMessages,

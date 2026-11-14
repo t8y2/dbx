@@ -12840,6 +12840,12 @@ export default withEnglishFallback({
     limitRowsPerTable: "จำกัดจำนวนแถวต่อตาราง",
     rowsPerTableLimit: "จำนวนแถวต่อตาราง",
     limitRowsPerTableDescription: "ส่งออกได้สูงสุดตามจำนวนแถวที่ระบุต่อตาราง ลำดับแถวจะเป็นไปตามลำดับการอ่านที่มีอยู่ของการส่งออก ตารางที่ไม่มีลำดับที่แน่นอนอาจได้แถวต่างกันในการส่งออกสองครั้ง",
+    rowLimitSortColumn: "ฟิลด์การเรียงลำดับ",
+    rowLimitSortColumnPlaceholder: "เช่น id, created_at",
+    rowLimitSortDirection: "ทิศทางการเรียงลำดับ",
+    rowLimitSortEarliestFirst: "เก่าก่อน",
+    rowLimitSortLatestFirst: "ใหม่ก่อน",
+    rowLimitSortDescription: "เรียงลำดับแต่ละตารางตามฟิลด์นี้แล้วเลือก N แถวแรก หากเว้นว่างไว้ จะใช้ลำดับการอ่านเดิมของการส่งออก และหากตารางใดไม่มีฟิลด์นี้ก็จะย้อนกลับในลักษณะเดียวกัน การส่งออกสองครั้งอาจได้แถวที่แตกต่างกัน",
   },
   databaseBackup: {
     savedTimeZoneHint: "การเรียกใช้ครั้งถัดไปใช้เขตเวลาที่บันทึกไว้ของกำหนดการ",

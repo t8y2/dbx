@@ -11144,6 +11144,12 @@ export default withEnglishFallback({
     limitRowsPerTable: "Limitar filas por tabla",
     rowsPerTableLimit: "Filas por tabla",
     limitRowsPerTableDescription: "Para cada tabla, se exporta como máximo el número de filas indicado. El orden de las filas sigue el orden de lectura existente de la exportación; en tablas sin un orden estable, dos exportaciones pueden obtener filas diferentes.",
+    rowLimitSortColumn: "Campo de ordenación",
+    rowLimitSortColumnPlaceholder: "p. ej. id, created_at",
+    rowLimitSortDirection: "Dirección de ordenación",
+    rowLimitSortEarliestFirst: "Más antiguos primero",
+    rowLimitSortLatestFirst: "Más recientes primero",
+    rowLimitSortDescription: "Ordena cada tabla por este campo y toma las primeras N filas. Si se deja vacío, se mantiene el orden de lectura existente de la exportación; si una tabla no tiene este campo, también se aplica ese mismo respaldo, por lo que dos exportaciones podrían obtener filas diferentes.",
   },
   nacos: {
     ...nacosAccessControlMessages,

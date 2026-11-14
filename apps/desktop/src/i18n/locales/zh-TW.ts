@@ -10011,6 +10011,12 @@ export default withEnglishFallback({
     limitRowsPerTable: "限制每表資料列數",
     rowsPerTableLimit: "每表資料列數",
     limitRowsPerTableDescription: "每張表最多匯出所填資料列數。資料列順序沿用匯出時的既有讀取順序；無穩定順序的表兩次匯出可能取到不同資料列。",
+    rowLimitSortColumn: "排序欄位",
+    rowLimitSortColumnPlaceholder: "如 id、created_at",
+    rowLimitSortDirection: "排序方向",
+    rowLimitSortEarliestFirst: "較早在前",
+    rowLimitSortLatestFirst: "較新在前",
+    rowLimitSortDescription: "按該欄位對每張表排序後取前 N 列。留空則沿用匯出的既有讀取順序；某張表沒有該欄位時同樣回退，兩次匯出可能取到不同列。",
   },
   nacos: {
     ...nacosAccessControlMessages,

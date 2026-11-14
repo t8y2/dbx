@@ -12282,7 +12282,7 @@ LIMIT 100;</pre>
                 v-model:open="syncSelectionOpen"
                 :mode="syncSelectionMode"
                 :catalog="syncSelectionCatalog"
-                :default-include-secrets="syncMethodTab === 'snippet' ? snippetIncludeSecrets : syncMethodTab === 'local' ? localBackupCanIncludeSecrets : webdavSyncSecrets"
+                :default-include-secrets="syncMethodTab === 'snippet' ? (syncSelectionMode === 'restore' ? snippetRestoreSecrets : snippetIncludeSecrets) : syncMethodTab === 'local' ? localBackupCanIncludeSecrets : webdavSyncSecrets"
                 :secrets-passphrase-available="syncMethodTab !== 'local' || localBackupCanIncludeSecrets"
                 :show-local-export-path="syncMethodTab === 'local' && syncSelectionMode === 'upload'"
                 :local-export-path="localBackupPath"

@@ -27,6 +27,17 @@ export function redisKeyPassesNoExpiryFilter(key: Pick<RedisKeyInfo, "ttl">): bo
   return ttl === -1 || ttl === -2;
 }
 
+export const REDIS_KEY_TYPE_FILTER_OPTIONS = ["all", "string", "hash", "list", "set", "zset", "json", "stream", "timeseries"] as const;
+export type RedisKeyTypeFilter = (typeof REDIS_KEY_TYPE_FILTER_OPTIONS)[number];
+
+export function redisKeyMatchesType(keyType: string | undefined, filter: RedisKeyTypeFilter): boolean {
+  if (filter === "all") return true;
+  const type = keyType?.toLowerCase();
+  if (filter === "json") return type === "json" || type === "rejson-rl";
+  if (filter === "timeseries") return type === "timeseries" || type === "tsdb-type" || type === "tdis-type";
+  return type === filter;
+}
+
 export interface RedisKeyTreeLeafNode {
   kind: "leaf";
   id: string;
@@ -328,6 +339,7 @@ export async function buildRedisKeySnapshotCooperatively(
     expandAll: boolean;
     expandedGroupIds: ReadonlySet<string>;
     noExpiryOnly?: boolean;
+    keyTypeFilter?: RedisKeyTypeFilter;
   },
   options: CooperativeRedisKeySnapshotOptions = {},
 ): Promise<RedisKeySnapshot | null> {
@@ -342,6 +354,9 @@ export async function buildRedisKeySnapshotCooperatively(
   const flatKeyByRaw = new Map<string, RedisKeyInfo>();
   const loadedKeyRaws = new Set<string>();
   let filteredKeyCount = 0;
+  const keyTypeFilter = config.keyTypeFilter ?? "all";
+  const hasFilter = config.noExpiryOnly || keyTypeFilter !== "all";
+  const matchesFilter = (key: RedisKeyInfo) => redisKeyMatchesType(key.key_type, keyTypeFilter) && (!config.noExpiryOnly || redisKeyPassesNoExpiryFilter(key));
   const treeState: MutableTreeBuildState | null = config.flatRows
     ? null
     : {
@@ -350,7 +365,7 @@ export async function buildRedisKeySnapshotCooperatively(
         addedGroupIds: new Set(),
       };
   const filteredTreeState: MutableTreeBuildState | null =
-    !config.flatRows && config.noExpiryOnly
+    !config.flatRows && hasFilter
       ? {
           index: { root: [], groupById: new Map(), leafByKeyRaw: new Map(), ancestorGroupIdsByKeyRaw: new Map() },
           touchedLevels: new Set(),
@@ -368,9 +383,10 @@ export async function buildRedisKeySnapshotCooperatively(
         flatKeyByRaw.set(key.key_raw, key);
         loadedKeyRaws.add(key.key_raw);
         flatKeys.push(key);
-        if (!config.noExpiryOnly || redisKeyPassesNoExpiryFilter(key)) filteredKeyCount++;
+        const matches = !hasFilter || matchesFilter(key);
+        if (matches) filteredKeyCount++;
         if (treeState) appendRedisKeyUnsorted(treeState, key, config.db, separator);
-        if (filteredTreeState && redisKeyPassesNoExpiryFilter(key)) appendRedisKeyUnsorted(filteredTreeState, key, config.db, separator);
+        if (filteredTreeState && matches) appendRedisKeyUnsorted(filteredTreeState, key, config.db, separator);
       }
       controller.recordCompleted(end - offset);
     }
@@ -415,7 +431,7 @@ export async function buildRedisKeySnapshotCooperatively(
       const end = Math.min(offset + chunkSize, flatKeys.length);
       for (let index = offset; index < end; index++) {
         const key = flatKeys[index];
-        if (!config.noExpiryOnly || redisKeyPassesNoExpiryFilter(key)) visibleRows.push(redisKeyToFlatTreeRow(key, config.db));
+        if (!hasFilter || matchesFilter(key)) visibleRows.push(redisKeyToFlatTreeRow(key, config.db));
       }
       controller.recordCompleted(end - offset);
     }

@@ -3463,6 +3463,24 @@ fn record_export_error<W: Write>(
     }
 }
 
+fn postgres_view_comments_or_definition<W: Write>(
+    result: Result<String, String>,
+    definition: String,
+    view: &str,
+    file: &mut W,
+    fail_on_error: bool,
+    errors: &mut LenientExportErrors,
+) -> Result<String, String> {
+    match result {
+        Ok(ddl) => Ok(ddl),
+        Err(error) if error == EXPORT_CANCELLED_ERROR => Err(error),
+        Err(error) => {
+            record_export_error(file, fail_on_error, format!("reading comments for view {view}: {error}"), errors)?;
+            Ok(definition)
+        }
+    }
+}
+
 fn mysql_spatial_export_marker_expression(column: &str) -> String {
     let quoted = quote_identifier(column, &DatabaseType::Mysql);
     format!(
@@ -6185,6 +6203,34 @@ async fn export_database_sql_core_inner_with_phases(
                         &request.schema,
                         request.drop_table_if_exists,
                     );
+                    let source = if db_type == DatabaseType::Postgres && !source.is_empty() {
+                        let result = await_export_operation(
+                            &request.export_id,
+                            Box::pin(crate::schema::enrich_postgres_view_ddl_with_comments(
+                                state,
+                                &request.connection_id,
+                                &request.database,
+                                &request.schema,
+                                view_name,
+                                &source,
+                                None,
+                            )),
+                        )
+                        .await;
+                        postgres_view_comments_or_definition(
+                            result,
+                            source,
+                            view_name,
+                            &mut file,
+                            request.fail_on_error,
+                            &mut lenient_errors,
+                        )?
+                    } else {
+                        source
+                    };
+                    if is_export_cancelled(&request.export_id).await {
+                        return Err("Export cancelled".to_string());
+                    }
                     if !source.is_empty() {
                         if let Some(phases) = phases.as_deref_mut() {
                             phases.push_view(&request.schema, view_info, &source)?;
@@ -6628,6 +6674,46 @@ mod tests {
             .expect("cancellation task should not panic");
         assert_eq!(result, Err(EXPORT_CANCELLED_ERROR.to_string()));
         clear_export_cancelled(&export_id).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_pending_comment_query_cancel_is_never_a_lenient_error() {
+        for strict in [true, false] {
+            let export_id = format!("cancel-view-comments-{}", uuid::Uuid::new_v4());
+            let task_export_id = export_id.clone();
+            let (started, pending) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let result = await_export_operation(
+                    &task_export_id,
+                    Box::pin(async move {
+                        started.send(()).unwrap();
+                        std::future::pending::<Result<String, String>>().await
+                    }),
+                )
+                .await;
+                let mut file = Vec::new();
+                let mut errors = LenientExportErrors::default();
+                let result = super::postgres_view_comments_or_definition(
+                    result,
+                    "CREATE VIEW v AS SELECT 1;".into(),
+                    "v",
+                    &mut file,
+                    strict,
+                    &mut errors,
+                );
+                (result, file, errors.count)
+            });
+            pending.await.unwrap();
+            set_export_cancelled(&export_id).await;
+            let (result, file, errors) = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+                .await
+                .expect("pending comment query must cancel promptly")
+                .unwrap();
+            clear_export_cancelled(&export_id).await;
+            assert_eq!(result, Err(EXPORT_CANCELLED_ERROR.to_string()));
+            assert!(file.is_empty(), "cancellation must not write an ERROR marker or definition");
+            assert_eq!(errors, 0, "cancellation is not an incomplete metadata export");
+        }
     }
 
     #[tokio::test]
@@ -10838,6 +10924,8 @@ mod tests {
         let views = vec![
             "CREATE VIEW z.base AS SELECT id, body FROM z.items;".to_string(),
             "CREATE VIEW a.report AS SELECT id, body FROM z.base WHERE body <> ';';".to_string(),
+            "COMMENT ON VIEW a.report IS E' 中文; O''Reilly \\n \\\\path ';".to_string(),
+            "COMMENT ON COLUMN a.report.body IS E' \\t\\n ';".to_string(),
         ];
         let tail = vec![
             "CREATE FUNCTION a.answer() RETURNS integer AS $body$\nBEGIN\n  PERFORM 1;\n  RETURN 42;\nEND\n$body$ LANGUAGE plpgsql;".to_string(),

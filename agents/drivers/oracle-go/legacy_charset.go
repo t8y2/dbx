@@ -206,7 +206,9 @@ func newOracleThinConnector(params connectParams, fallback converters.IStringCon
 	} else if fallback != nil {
 		go_ora.SetStringConverter(connector, fallback, nil)
 	}
-	return oracleQueryConnector{connector}, nil
+	// The NLS wrapper stays outermost so the session settings are applied to
+	// every physical connection this connector opens.
+	return newOracleNLSConnector(oracleQueryConnector{connector}), nil
 }
 
 type oracleLegacyConnector struct {

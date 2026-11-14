@@ -267,6 +267,7 @@ const servicesError = ref("");
 const serviceGroup = ref(restoredUiState.serviceGroup ?? "");
 const serviceName = ref(restoredUiState.serviceName ?? "");
 const serviceCluster = ref(restoredUiState.serviceCluster ?? "");
+const appliedServiceCluster = ref(serviceCluster.value);
 const servicePageNo = ref(restoredUiState.servicePageNo ?? 1);
 const servicePageSize = ref(restoredUiState.servicePageSize ?? 20);
 const services = ref<NacosServiceInfo[]>([]);
@@ -277,6 +278,15 @@ const serviceDetailLoading = ref(false);
 const serviceDetailError = ref("");
 const serviceDetailExpanded = ref(restoredUiState.serviceDetailExpanded ?? false);
 const instances = ref<NacosInstanceInfo[]>([]);
+const visibleInstances = computed(() => {
+  const clusters = new Set(
+    appliedServiceCluster.value
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean),
+  );
+  return clusters.size ? instances.value.filter((instance) => clusters.has(instance.clusterName || "DEFAULT")) : instances.value;
+});
 const instancesLoading = ref(false);
 const instancesError = ref("");
 const updatingInstanceKeys = ref<Record<string, number>>({});
@@ -325,7 +335,7 @@ trackUiState(() => ({
   historyPageSize: historyPageSize.value,
   serviceGroup: serviceGroup.value,
   serviceName: serviceName.value,
-  serviceCluster: serviceCluster.value,
+  serviceCluster: appliedServiceCluster.value,
   servicePageNo: servicePageNo.value,
   servicePageSize: servicePageSize.value,
   serviceDetailExpanded: serviceDetailExpanded.value,
@@ -433,7 +443,7 @@ const serviceWriteNotice = computed(() => {
 const selectedServiceProtectionTriggered = computed(() => {
   if (selectedService.value?.triggerFlag === "true") return true;
   const threshold = selectedServiceDetail.value?.protectThreshold;
-  if (threshold == null || threshold <= 0 || serviceCluster.value.trim()) return false;
+  if (threshold == null || threshold <= 0) return false;
   const total = selectedService.value?.ipCount ?? instances.value.length;
   const healthy = selectedService.value?.healthyInstanceCount ?? instances.value.filter((instance) => instance.healthy === true).length;
   return total > 0 && healthy / total < threshold;
@@ -2317,7 +2327,6 @@ async function loadInstances() {
   const requestNamespace = namespace.value;
   const service = { ...selectedService.value };
   const selectedIdentity = serviceIdentity(service);
-  const clusters = serviceCluster.value.trim();
   instancesLoading.value = true;
   instancesError.value = "";
   try {
@@ -2325,9 +2334,8 @@ async function loadInstances() {
       namespace: requestNamespace || undefined,
       serviceName: service.serviceName,
       groupName: service.groupName || serviceGroup.value || undefined,
-      clusters: clusters || undefined,
     });
-    if (!instancesRequestGuard.isCurrent(requestId) || connectionId !== props.connectionId || requestNamespace !== namespace.value || selectedIdentity !== serviceIdentity(selectedService.value) || clusters !== serviceCluster.value.trim()) return;
+    if (!instancesRequestGuard.isCurrent(requestId) || connectionId !== props.connectionId || requestNamespace !== namespace.value || selectedIdentity !== serviceIdentity(selectedService.value)) return;
     instances.value = result;
   } catch (error) {
     if (!instancesRequestGuard.isCurrent(requestId)) return;
@@ -2335,6 +2343,10 @@ async function loadInstances() {
   } finally {
     if (instancesRequestGuard.isCurrent(requestId)) instancesLoading.value = false;
   }
+}
+
+function applyInstanceClusterFilter() {
+  appliedServiceCluster.value = serviceCluster.value;
 }
 
 async function refreshSelectedService() {
@@ -2362,7 +2374,6 @@ async function reconcileInstanceUpdate(ref: NacosInstanceRef, patch: NacosInstan
         namespace: ref.namespace,
         serviceName: ref.serviceName,
         groupName: ref.groupName,
-        clusters: serviceCluster.value.trim() || undefined,
       });
       if (updateId !== instanceUpdateSequence || serviceIdentity(selectedService.value) !== serviceIdentity(currentService)) return;
       const actual = result.find((candidate) => instanceIdentity(candidate, currentService) === instanceRefIdentity(ref));
@@ -2390,7 +2401,6 @@ async function reconcileInstancePresence(ref: NacosInstanceRef, shouldExist: boo
         namespace: ref.namespace,
         serviceName: ref.serviceName,
         groupName: ref.groupName,
-        clusters: serviceCluster.value.trim() || undefined,
       });
       if (updateId !== instanceUpdateSequence || serviceIdentity(selectedService.value) !== serviceIdentity(currentService)) return;
       const exists = result.some((candidate) => instanceIdentity(candidate, currentService) === instanceRefIdentity(ref));
@@ -3187,9 +3197,9 @@ useUpdateBlocker(() =>
     <Splitpanes v-else-if="activeTab === 'services'" class="nacos-admin-splitpanes min-h-0 flex-1" @resized="handleNacosSplitResized">
       <Pane :size="nacosSplitSize" :min-size="NACOS_MIN_SPLIT_SIZE">
         <div class="flex h-full min-h-0 flex-col">
-          <div class="grid shrink-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto] gap-2 border-b p-2">
-            <div class="relative min-w-0">
-              <Input v-model="serviceName" class="h-8 min-w-0 pr-8" :placeholder="t('nacos.service')" @keyup.enter="loadServicesWithRetry(1)" />
+          <div class="flex shrink-0 flex-wrap gap-2 border-b p-2">
+            <div class="relative min-w-0 flex-[1_0_6rem]">
+              <Input v-model="serviceName" class="h-8 min-w-0" :class="{ 'pr-8': serviceName }" :placeholder="t('nacos.service')" @keyup.enter="loadServicesWithRetry(1)" />
               <button
                 v-if="serviceName"
                 type="button"
@@ -3201,8 +3211,8 @@ useUpdateBlocker(() =>
                 <X class="h-3.5 w-3.5" />
               </button>
             </div>
-            <div class="relative min-w-0">
-              <Input v-model="serviceGroup" class="h-8 min-w-0 pr-8" :placeholder="t('nacos.allGroups')" @keyup.enter="loadServicesWithRetry(1)" />
+            <div class="relative min-w-0 flex-[1_0_6rem]">
+              <Input v-model="serviceGroup" class="h-8 min-w-0" :class="{ 'pr-8': serviceGroup }" :placeholder="t('nacos.allGroups')" @keyup.enter="loadServicesWithRetry(1)" />
               <button
                 v-if="serviceGroup"
                 type="button"
@@ -3280,8 +3290,8 @@ useUpdateBlocker(() =>
             </div>
             <div v-if="selectedService" class="nacos-service-toolbar flex flex-wrap items-center gap-x-4 gap-y-2 border-t bg-muted/30 px-4 py-2">
               <div class="nacos-service-filter-group flex min-w-0 items-center gap-1">
-                <Input v-model="serviceCluster" class="nacos-service-cluster-input h-8 min-w-0" :placeholder="t('nacos.filterInstanceCluster')" @keyup.enter="loadInstances" />
-                <Button size="sm" variant="secondary" class="h-8" :disabled="instancesLoading" @click="loadInstances">{{ t("nacos.filter") }}</Button>
+                <Input v-model="serviceCluster" class="nacos-service-cluster-input h-8 min-w-0" :placeholder="t('nacos.filterInstanceCluster')" @keyup.enter="applyInstanceClusterFilter" />
+                <Button size="sm" variant="secondary" class="h-8" :disabled="instancesLoading" @click="applyInstanceClusterFilter">{{ t("nacos.filter") }}</Button>
                 <Button
                   size="sm"
                   variant="ghost"
@@ -3290,7 +3300,7 @@ useUpdateBlocker(() =>
                   :disabled="instancesLoading || !serviceCluster"
                   @click="
                     serviceCluster = '';
-                    loadInstances();
+                    applyInstanceClusterFilter();
                   "
                   >{{ t("nacos.clear") }}</Button
                 >
@@ -3377,8 +3387,8 @@ useUpdateBlocker(() =>
           </section>
           <div v-if="instancesError" class="border-b px-3 py-2 text-xs text-destructive">{{ instancesError }}</div>
           <div class="min-h-0 flex-1 overflow-auto bg-muted/20 p-3">
-            <div v-if="instances.length" class="space-y-2">
-              <article v-for="instance in instances" :key="instanceIdentity(instance)" class="rounded-lg border bg-background p-3 shadow-sm">
+            <div v-if="visibleInstances.length" class="space-y-2">
+              <article v-for="instance in visibleInstances" :key="instanceIdentity(instance)" class="rounded-lg border bg-background p-3 shadow-sm">
                 <div class="nacos-instance-layout flex gap-3">
                   <div class="nacos-instance-main min-w-0">
                     <div class="flex flex-wrap items-center gap-2">

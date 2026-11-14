@@ -2218,6 +2218,10 @@ export async function buildEditableObjectSource(input: BuildEditableObjectSource
   return post("/api/query/build-editable-object-source", { input });
 }
 
+export async function buildOracleObjectExportSql(input: BuildEditableObjectSourceSqlInput): Promise<string> {
+  return post("/api/query/build-oracle-object-export-sql", { input });
+}
+
 export async function buildRoutineRenameObjectSourceStatements(input: BuildRoutineRenameObjectSourceInput): Promise<string[]> {
   return post("/api/query/build-routine-rename-object-source-statements", {
     input,

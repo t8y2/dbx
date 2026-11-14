@@ -798,6 +798,7 @@ const streamRows = computed<RedisStreamRow[]>(() => {
     id: `${index}:${entry.id}`,
     index,
     entry,
+    timestamp: streamEntryTimestamp(entry.id),
   }));
 });
 
@@ -1035,6 +1036,7 @@ type RedisStreamRow = {
   id: string;
   index: number;
   entry: RedisStreamEntry;
+  timestamp: number | undefined;
 };
 
 function replaceStreamEntries(value: RedisValue) {
@@ -1315,8 +1317,15 @@ function formatStreamDurationTitle(value: number | string | undefined): string {
 }
 
 function formatStreamDateTime(timestamp: number): string {
-  if (!Number.isFinite(timestamp) || timestamp <= 0) return "-";
+  if (!Number.isFinite(timestamp) || timestamp < 0 || timestamp > 8_640_000_000_000_000) return "-";
   return streamDateTimeFormatter.value.format(new Date(timestamp));
+}
+
+function streamEntryTimestamp(id: string): number | undefined {
+  const milliseconds = /^(\d+)-\d+$/.exec(id)?.[1];
+  if (milliseconds === undefined) return;
+  const timestamp = Number(milliseconds);
+  if (Number.isSafeInteger(timestamp) && timestamp <= 8_640_000_000_000_000) return timestamp;
 }
 
 function formatStreamLastDelivery(value: number | string | undefined): string {
@@ -3706,7 +3715,10 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               <template #default="{ item: row, active }">
                 <DynamicScrollerItem :item="row" :active="active" :size-dependencies="[streamFieldCount(row)]" :data-index="row.index">
                   <div data-redis-stream-entry class="dbx-editor-font-family px-4 py-2 border-b text-sm hover:bg-accent/50">
-                    <div class="mb-1 text-xs text-muted-foreground">{{ row.entry.id }}</div>
+                    <div class="mb-1 flex items-baseline gap-2 whitespace-nowrap text-xs text-muted-foreground">
+                      <span class="truncate" :title="row.entry.id">{{ row.entry.id }}</span>
+                      <time v-if="row.timestamp !== undefined" class="min-w-0 truncate tabular-nums" :title="t('redis.streamEntryTime')">{{ formatStreamDateTime(row.timestamp) }}</time>
+                    </div>
                     <div
                       v-for="(field, fieldIndex) in row.entry.fields"
                       :key="`${row.id}:${field.field}:${fieldIndex}`"

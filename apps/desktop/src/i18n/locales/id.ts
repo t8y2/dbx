@@ -7824,6 +7824,7 @@ export default withEnglishFallback({
     createFailed: "Gagal membuat file SQL: {message}",
     renameFile: "Ganti Nama",
     renameFileDescription: "Ekstensi .sql ditambahkan secara otomatis.",
+    moveFailed: "Gagal memindahkan file SQL: {message}",
     fileRenamed: "File SQL diganti namanya",
     renameFailed: "Gagal mengganti nama file SQL: {message}",
     deleteFile: "Hapus file",

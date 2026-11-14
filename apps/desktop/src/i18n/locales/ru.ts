@@ -9768,6 +9768,7 @@ export default withEnglishFallback({
     createFailed: "Не удалось создать SQL-файл: {message}",
     renameFile: "Переименовать",
     renameFileDescription: "Расширение .sql добавляется автоматически.",
+    moveFailed: "Не удалось переместить SQL-файл: {message}",
     fileRenamed: "SQL-файл переименован",
     renameFailed: "Не удалось переименовать SQL-файл: {message}",
     deleteFile: "Удалить файл",

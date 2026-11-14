@@ -7836,6 +7836,7 @@ export default withEnglishFallback({
     createFailed: "Nie udało się utworzyć pliku SQL: {message}",
     renameFile: "Zmień nazwę",
     renameFileDescription: "Rozszerzenie .sql jest dodawane automatycznie.",
+    moveFailed: "Nie udało się przenieść pliku SQL: {message}",
     fileRenamed: "Zmieniono nazwę pliku SQL",
     renameFailed: "Nie udało się zmienić nazwy pliku SQL: {message}",
     deleteFile: "Usuń plik",

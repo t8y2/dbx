@@ -11586,6 +11586,7 @@ export default withEnglishFallback({
     createFailed: "Falha ao criar o arquivo SQL: {message}",
     renameFile: "Renomear",
     renameFileDescription: "A extensão .sql é adicionada automaticamente.",
+    moveFailed: "Falha ao mover o arquivo SQL: {message}",
     fileRenamed: "Arquivo SQL renomeado",
     renameFailed: "Falha ao renomear o arquivo SQL: {message}",
     deleteFile: "Excluir arquivo",

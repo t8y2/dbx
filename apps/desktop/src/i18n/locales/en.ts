@@ -9569,6 +9569,7 @@ export default {
     createFailed: "Failed to create SQL file: {message}",
     renameFile: "Rename",
     renameFileDescription: "The .sql extension is added automatically.",
+    moveFailed: "Failed to move SQL file: {message}",
     fileRenamed: "SQL file renamed",
     renameFailed: "Failed to rename SQL file: {message}",
     deleteFile: "Delete file",

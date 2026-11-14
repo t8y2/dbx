@@ -10107,6 +10107,7 @@ export default withEnglishFallback({
     createFailed: "สร้างไฟล์ SQL ไม่สำเร็จ: {message}",
     renameFile: "เปลี่ยนชื่อ",
     renameFileDescription: "ระบบจะเพิ่มนามสกุล .sql โดยอัตโนมัติ",
+    moveFailed: "ย้ายไฟล์ SQL ไม่สำเร็จ: {message}",
     fileRenamed: "เปลี่ยนชื่อไฟล์ SQL แล้ว",
     renameFailed: "เปลี่ยนชื่อไฟล์ SQL ไม่สำเร็จ: {message}",
     deleteFile: "ลบไฟล์",

@@ -2,7 +2,7 @@ import type { StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
 import type { CreateTableDialectOptions } from "@/lib/table/starrocksPhysicalOptions";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { notifySavedSqlLibraryChanged } from "@/lib/savedSql/savedSqlLibraryEvents";
-import { Channel } from "@tauri-apps/api/core";
+import { Channel, Resource } from "@tauri-apps/api/core";
 import { SnapshotCompletionError, unwrapSnapshotCompletion } from "@/lib/export/snapshotCompletion";
 import type { MongoDumpFormat, MongoDumpSourceInput, MongoDumpCatalog, MongoRestoreSourcePreview, MongoDatabaseDumpRequest, MongoDatabaseRestoreRequest, MongoDatabaseDumpProgress } from "./mongodbDumpTypes";
 import type { MongoRestoreUpload, MongoSourceReadOptions } from "./mongodbDumpTypes";
@@ -1503,6 +1503,18 @@ export async function renameSqlFileInFolder(rootPath: string, filePath: string, 
 
 export async function deleteSqlFileInFolder(rootPath: string, filePath: string): Promise<void> {
   return invoke("delete_sql_file_in_folder", { rootPath, filePath });
+}
+
+export async function moveSqlFileInFolder(rootPath: string, filePath: string, targetRootPath: string, directoryPath: string): Promise<string> {
+  return invoke("move_sql_file_in_folder", { rootPath, filePath, targetRootPath, directoryPath });
+}
+
+export async function watchSqlFileFolder(folderPath: string, recursive: boolean, onChange: () => void): Promise<() => Promise<void>> {
+  const channel = new Channel<null>();
+  channel.onmessage = onChange;
+  const rid = await invoke<number>("watch_sql_file_folder", { folderPath, recursive, onChange: channel });
+  const resource = new Resource(rid);
+  return () => resource.close();
 }
 
 export async function createSqlFolderInFolder(rootPath: string, directoryPath: string, folderName: string): Promise<string> {

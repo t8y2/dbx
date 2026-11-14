@@ -11617,6 +11617,7 @@ export default withEnglishFallback({
     createFailed: "SQLファイルを作成できませんでした: {message}",
     renameFile: "名前を変更",
     renameFileDescription: ".sql 拡張子は自動的に追加されます。",
+    moveFailed: "SQL ファイルの移動に失敗しました：{message}",
     fileRenamed: "SQLファイル名を変更しました",
     renameFailed: "SQLファイル名を変更できませんでした: {message}",
     deleteFile: "ファイルを削除",

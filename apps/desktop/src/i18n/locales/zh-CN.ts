@@ -9535,6 +9535,7 @@ export default withEnglishFallback({
     createFailed: "新建 SQL 文件失败: {message}",
     renameFile: "重命名",
     renameFileDescription: "将自动补充 .sql 后缀。",
+    moveFailed: "移动 SQL 文件失败：{message}",
     fileRenamed: "SQL 文件已重命名",
     renameFailed: "重命名 SQL 文件失败: {message}",
     deleteFile: "删除文件",

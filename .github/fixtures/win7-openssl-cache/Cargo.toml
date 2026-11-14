@@ -5,6 +5,6 @@ edition = "2021"
 publish = false
 
 [dependencies]
-openssl-sys = { version = "=0.9.117", features = ["vendored"] }
+openssl-sys = { version = "=0.9.118", features = ["vendored"] }
 
 [workspace]

@@ -4068,6 +4068,9 @@ export default withEnglishFallback({
     exitMultiSelect: "複数選択を終了",
   },
   databaseSearch: {
+    chooseObjects: "テーブルまたはビューを選択",
+    selectedObjects: "{count} 個のオブジェクトを選択中",
+    resetObjectScope: "オブジェクトの選択を解除",
     title: "データベース検索",
     open: "データベース検索",
     keyword: "キーワード",

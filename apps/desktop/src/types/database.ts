@@ -2559,6 +2559,7 @@ export interface DatabaseSearchTableTask {
 export interface DatabaseSearchTabState {
   keyword: string;
   searchScope?: DatabaseSearchScope;
+  selectedObjects?: string[];
   perTableLimit: number;
   progressDone: number;
   progressTotal: number;

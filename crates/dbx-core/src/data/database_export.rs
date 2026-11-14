@@ -5296,6 +5296,14 @@ async fn export_database_sql_core_inner_with_phases(
         .filter(|t| t.table_type.contains("VIEW"))
         .filter(|t| request.include_objects && selection.includes_relation(&t.name))
         .collect();
+    if db_type == DatabaseType::Tdengine {
+        // TDengine child tables are declared with `USING <stable> TAGS (...)`, so the
+        // super table DDL has to be written before the DDL of its children.
+        let (stables, children): (Vec<_>, Vec<_>) = tables.into_iter().partition(|table| {
+            crate::tdengine_export_sql::is_tdengine_stable_table_type(Some(table.table_type.as_str()))
+        });
+        tables = stables.into_iter().chain(children).collect();
+    }
     if request.include_objects && db_type == DatabaseType::Mysql && views.len() > 1 {
         match list_mysql_export_view_dependencies(state, &request.connection_id, &request.database, &client_session_id)
             .await
@@ -5873,7 +5881,12 @@ async fn export_database_sql_core_inner_with_phases(
         }
 
         // Export data
-        if request.include_data {
+        // A TDengine super table only carries the shared schema and tags; its rows
+        // belong to the child tables, which are exported individually.
+        if request.include_data
+            && !(db_type == DatabaseType::Tdengine
+                && crate::tdengine_export_sql::is_tdengine_stable_table_type(Some(table_info.table_type.as_str())))
+        {
             // Get columns
             let columns_result = match prefetched_table_metadata
                 .get_mut(table_index)
@@ -5912,9 +5925,22 @@ async fn export_database_sql_core_inner_with_phases(
                     continue;
                 }
             };
-            let col_names = columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
-            let col_types = columns.iter().map(|c| Some(c.data_type.clone())).collect::<Vec<_>>();
-            let col_extras = columns.iter().map(|c| c.extra.clone()).collect::<Vec<_>>();
+            // TDengine keeps tags on the child table and restores them from the
+            // `CREATE TABLE ... USING ... TAGS` DDL, so a tag column must not be part
+            // of the INSERT column list (#14976).
+            let export_columns: Vec<_> = columns
+                .iter()
+                .filter(|column| {
+                    !(db_type == DatabaseType::Tdengine
+                        && crate::tdengine_export_sql::is_tdengine_tag_column(
+                            column.comment.as_deref(),
+                            column.extra.as_deref(),
+                        ))
+                })
+                .collect();
+            let col_names = export_columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
+            let col_types = export_columns.iter().map(|c| Some(c.data_type.clone())).collect::<Vec<_>>();
+            let col_extras = export_columns.iter().map(|c| c.extra.clone()).collect::<Vec<_>>();
 
             if table_ddl_text.is_none()
                 && db_type == DatabaseType::Dameng

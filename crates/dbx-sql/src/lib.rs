@@ -7,7 +7,7 @@ pub use dbx_sql_core::{
 };
 pub use dbx_sql_data::{
     data_grid_extractors, data_grid_sql, database_search_columns_sql, database_search_probe_sql, database_search_sql,
-    database_structure_search_sql, query_result_sql,
+    database_structure_search_sql, query_result_sql, tdengine_export_sql,
 };
 pub use dbx_sql_dialect::{dml_binding, postgres_index_key, sql_dialect};
 pub use dbx_sql_schema::{

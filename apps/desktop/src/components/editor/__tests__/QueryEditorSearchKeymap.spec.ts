@@ -10,6 +10,10 @@ import { describe, expect, it, vi } from "vitest";
 import { createQueryEditorExecutionShortcutBindings } from "@/lib/editor/queryEditorExecutionShortcut";
 // pi-lens-ignore: typescript:2307
 import { createQueryEditorReplaceShortcutBindings, createQueryEditorReplaceShortcutHandler, createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
+// pi-lens-ignore: typescript:2307
+import { searchKeymapWithoutConfigurableBindings } from "@/lib/editor/codemirrorSearchKeymap";
+// pi-lens-ignore: typescript:2307
+import { searchKeymap, searchPanelOpen } from "@codemirror/search";
 
 // CodeMirror resolves `Mod` from the *host's* `navigator.platform` once at
 // module load, so a synthetic key event cannot influence it. Spelling the
@@ -26,19 +30,17 @@ const withModifier = (bindings: readonly KeyBinding[], modifier: "Meta" | "Ctrl"
 
 describe("QueryEditor search keymap precedence", () => {
   for (const { name, modifier, event: modifierEvent } of platforms) {
-    it(`${name}: runs configured editor actions before the built-in search fallback`, () => {
+    it(`${name}: runs a configured editor action bound to Mod+F`, () => {
       const formatSql = vi.fn(() => true);
-      const openSearch = vi.fn(() => true);
       const view = new EditorView({
         parent: document.createElement("div"),
         state: EditorState.create({
-          extensions: [Prec.high(keymap.of([{ key: `${modifier}-f`, run: formatSql }, ...withModifier(createQueryEditorSearchKeymap({ openSearch, openReplace: () => true, isReadOnly: () => false }), modifier)]))],
+          extensions: [Prec.high(keymap.of([{ key: `${modifier}-f`, run: formatSql }, ...withModifier(createQueryEditorSearchKeymap({ openReplace: () => true, isReadOnly: () => false }), modifier)]))],
         }),
       });
 
       expect(runScopeHandlers(view, new KeyboardEvent("keydown", { key: "f", ...modifierEvent }), "editor")).toBe(true);
       expect(formatSql).toHaveBeenCalledOnce();
-      expect(openSearch).not.toHaveBeenCalled();
       view.destroy();
     });
 
@@ -98,19 +100,19 @@ describe("QueryEditor search keymap precedence", () => {
       view.destroy();
     });
 
-    it(`${name}: keeps the search fallback above lower-priority CodeMirror bindings`, () => {
-      const openSearch = vi.fn(() => true);
-      const lowerPrioritySearch = vi.fn(() => true);
+    it(`${name}: leaves Mod+F unhandled when the Find shortcut is cleared (#14623)`, () => {
       const view = new EditorView({
         parent: document.createElement("div"),
         state: EditorState.create({
-          extensions: [keymap.of([{ key: `${modifier}-f`, run: lowerPrioritySearch }]), Prec.high(keymap.of(withModifier(createQueryEditorSearchKeymap({ openSearch, openReplace: () => true, isReadOnly: () => false }), modifier)))],
+          extensions: [keymap.of(withModifier(searchKeymapWithoutConfigurableBindings(searchKeymap), modifier)), Prec.high(keymap.of(withModifier(createQueryEditorSearchKeymap({ openReplace: () => true, isReadOnly: () => false }), modifier)))],
         }),
       });
 
-      expect(runScopeHandlers(view, new KeyboardEvent("keydown", { key: "f", ...modifierEvent }), "editor")).toBe(true);
-      expect(openSearch).toHaveBeenCalledOnce();
-      expect(lowerPrioritySearch).not.toHaveBeenCalled();
+      const event = new KeyboardEvent("keydown", { key: "f", ...modifierEvent, bubbles: true, cancelable: true });
+      view.contentDOM.dispatchEvent(event);
+      // Not consumed: the event must reach app-level actions such as Focus search.
+      expect(event.defaultPrevented).toBe(false);
+      expect(searchPanelOpen(view.state)).toBe(false);
       view.destroy();
     });
   }

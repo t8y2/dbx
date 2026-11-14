@@ -15,3 +15,13 @@ import type { KeyBinding } from "@codemirror/view";
 export function searchKeymapWithoutModD(searchKeymap: readonly KeyBinding[]): KeyBinding[] {
   return searchKeymap.filter((binding) => binding.key !== "Mod-d");
 }
+
+/**
+ * `searchKeymap` also hard-codes `Mod-f` = `openSearchPanel`. In editors whose
+ * Find is a configurable DBX shortcut, that binding would keep opening search
+ * after the user cleared or reassigned Find, and its `preventDefault()` would
+ * hide Ctrl+F from app-level actions such as Focus search (#14623).
+ */
+export function searchKeymapWithoutConfigurableBindings(searchKeymap: readonly KeyBinding[]): KeyBinding[] {
+  return searchKeymapWithoutModD(searchKeymap).filter((binding) => binding.key !== "Mod-f");
+}

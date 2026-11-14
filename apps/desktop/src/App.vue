@@ -139,6 +139,7 @@ import { restoreGlobalNavigationEntry } from "@/lib/navigation/globalNavigationE
 
 import {
   isBrowserReloadShortcut,
+  isBrowserFindShortcut,
   isBrowserTaskManagerShortcut,
   isCaretBrowsingShortcut,
   shouldBlockCaretBrowsing,
@@ -4668,6 +4669,15 @@ function handleNativeSelectAll(e: KeyboardEvent) {
   if (shouldBlockAppNativeSelectAll(e)) e.preventDefault();
 }
 
+// Runs last, in the bubble phase, so every DBX surface (editors, grid, sidebar,
+// global shortcuts) gets the first chance to handle Mod+F. When none of them
+// consumed it — e.g. the Find shortcut was cleared or reassigned — swallow it
+// so the webview does not open its native find-in-page bar (#14623).
+function handleUnhandledBrowserFind(e: KeyboardEvent) {
+  if (e.defaultPrevented || !isBrowserFindShortcut(e)) return;
+  e.preventDefault();
+}
+
 function focusSearchInput(selector: string): boolean {
   const input = Array.from(document.querySelectorAll<HTMLInputElement>(selector)).find((candidate) => candidate.getClientRects().length > 0);
   if (!input) return false;
@@ -5410,6 +5420,7 @@ onMounted(async () => {
     copyActiveResult: () => contentAreaRef.value?.copyActiveResult() ?? false,
   }));
   window.addEventListener("keydown", handleKeydown);
+  window.addEventListener("keydown", handleUnhandledBrowserFind);
   window.addEventListener(DETACH_TAB_REQUEST_EVENT, handleDetachTabRequest as EventListener);
   window.addEventListener(DBX_VIM_ACTION_EVENT, handleVimDbxAppAction);
   window.addEventListener("keyup", handleKeyup, true);
@@ -5514,6 +5525,7 @@ onUnmounted(() => {
   window.removeEventListener("keydown", handleAuxiliarySearchKeydownCapture, true);
   unregisterCopyActiveResultShortcut?.();
   window.removeEventListener("keydown", handleKeydown);
+  window.removeEventListener("keydown", handleUnhandledBrowserFind);
   window.removeEventListener(DBX_VIM_ACTION_EVENT, handleVimDbxAppAction);
   window.removeEventListener("keyup", handleKeyup, true);
   window.removeEventListener("blur", handleTabSwitcherWindowBlur);

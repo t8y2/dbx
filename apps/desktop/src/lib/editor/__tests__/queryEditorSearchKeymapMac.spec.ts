@@ -44,7 +44,6 @@ async function createMacSearchHarness() {
   vi.resetModules();
 
   const [{ EditorState }, { EditorView, keymap }, { createQueryEditorSearchKeymap }] = await Promise.all([import("@codemirror/state"), import("@codemirror/view"), import("../../editor/queryEditorSearchKeymap")]);
-  const openSearch = vi.fn(() => true);
   const openReplace = vi.fn(() => true);
   const root = document.createElement("div");
   document.body.append(root);
@@ -53,10 +52,10 @@ async function createMacSearchHarness() {
     state: EditorState.create({
       // No explicit platform: this exercises the production wiring, where the
       // editor surface passes options only and the keymap reads the navigator.
-      extensions: [keymap.of(createQueryEditorSearchKeymap({ openSearch, openReplace, isReadOnly: () => false }))],
+      extensions: [keymap.of(createQueryEditorSearchKeymap({ openReplace, isReadOnly: () => false }))],
     }),
   });
-  return { view, openSearch, openReplace };
+  return { view, openReplace };
 }
 
 // Composed regression for the *configurable* replace path (#9068 config layer):
@@ -123,14 +122,13 @@ describe("QueryEditor search keymap on macOS", () => {
     view.destroy();
   });
 
-  it("still opens search with ⌘F", async () => {
-    const { view, openSearch } = await createMacSearchHarness();
+  it("leaves ⌘F to the configurable Find shortcut (#14623)", async () => {
+    const { view } = await createMacSearchHarness();
 
     const event = keyEvent({ key: "f", code: "KeyF", keyCode: 70, metaKey: true });
     view.contentDOM.dispatchEvent(event);
 
-    expect(openSearch).toHaveBeenCalledOnce();
-    expect(event.defaultPrevented).toBe(true);
+    expect(event.defaultPrevented).toBe(false);
     view.destroy();
   });
 

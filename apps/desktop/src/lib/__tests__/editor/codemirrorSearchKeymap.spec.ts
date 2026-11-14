@@ -4,7 +4,7 @@ import { EditorState } from "@codemirror/state";
 import { EditorView, keymap, runScopeHandlers } from "@codemirror/view";
 import { searchKeymap } from "@codemirror/search";
 import { describe, expect, it } from "vitest";
-import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
+import { searchKeymapWithoutConfigurableBindings, searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
 
 // CodeMirror resolves `Mod` from the *host's* `navigator.platform` once at
 // module load, so a synthetic key event cannot influence it. Spelling the
@@ -60,4 +60,14 @@ describe("searchKeymapWithoutModD", () => {
       view.destroy();
     });
   }
+});
+
+describe("searchKeymapWithoutConfigurableBindings", () => {
+  it("drops Mod-d and Mod-f and keeps the remaining search bindings", () => {
+    const keys = searchKeymapWithoutConfigurableBindings(searchKeymap).map((binding) => binding.key);
+    expect(keys).not.toContain("Mod-d");
+    expect(keys).not.toContain("Mod-f");
+    expect(keys).toContain("Mod-g");
+    expect(keys).toContain("F3");
+  });
 });

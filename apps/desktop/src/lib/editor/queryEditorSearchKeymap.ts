@@ -5,7 +5,6 @@ import { shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import type { KeyBinding } from "@codemirror/view";
 
 interface QueryEditorSearchKeymapOptions {
-  openSearch: () => boolean;
   openReplace: () => boolean;
   isReadOnly: () => boolean;
 }
@@ -25,13 +24,16 @@ export function replaceFallbackKey(platform = globalThis.navigator?.platform || 
   return isMacShortcutPlatform(platform) ? "Alt-Mod-f" : "Mod-h";
 }
 
+/**
+ * Built-in (non-configurable) search keys of the query editor.
+ *
+ * Find is deliberately *not* bound here: it is owned by the configurable
+ * `find` shortcut. A hard-coded `Mod-f` used to open the search panel even
+ * after the user cleared or reassigned Find, and its `preventDefault()` kept
+ * Ctrl+F from ever reaching app-level actions such as Focus search (#14623).
+ */
 export function createQueryEditorSearchKeymap(options: QueryEditorSearchKeymapOptions, platform = globalThis.navigator?.platform || ""): KeyBinding[] {
   return [
-    {
-      key: "Mod-f",
-      preventDefault: true,
-      run: options.openSearch,
-    },
     {
       key: replaceFallbackKey(platform),
       preventDefault: true,

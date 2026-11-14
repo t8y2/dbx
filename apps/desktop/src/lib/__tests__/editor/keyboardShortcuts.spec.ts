@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   eventToModifierOnlyShortcut,
   eventToShortcut,
+  isBrowserFindShortcut,
   isBrowserTaskManagerShortcut,
   isCaretBrowsingShortcut,
   shouldBlockCaretBrowsing,
@@ -364,6 +365,20 @@ describe("tabSwitcherDirectionFromShortcut", () => {
   it("honors a remapped shortcut and does not reverse when it already uses Shift", () => {
     expect(tabSwitcherDirectionFromShortcut({ key: "Tab", ctrlKey: true, shiftKey: true }, { tabSwitcher: "Shift+Ctrl+Tab" })).toBe(1);
     expect(tabSwitcherDirectionFromShortcut({ key: "Tab", ctrlKey: true }, { tabSwitcher: "Shift+Ctrl+Tab" })).toBeNull();
+  });
+});
+
+describe("isBrowserFindShortcut", () => {
+  it("matches Ctrl+F / Cmd+F only", () => {
+    expect(isBrowserFindShortcut({ key: "f", ctrlKey: true })).toBe(true);
+    expect(isBrowserFindShortcut({ key: "F", ctrlKey: true })).toBe(true);
+    expect(isBrowserFindShortcut({ key: "f", metaKey: true })).toBe(true);
+
+    expect(isBrowserFindShortcut({ key: "f" })).toBe(false);
+    expect(isBrowserFindShortcut({ key: "f", ctrlKey: true, shiftKey: true })).toBe(false);
+    expect(isBrowserFindShortcut({ key: "f", ctrlKey: true, altKey: true })).toBe(false);
+    expect(isBrowserFindShortcut({ key: "f", ctrlKey: true, isComposing: true })).toBe(false);
+    expect(isBrowserFindShortcut({ key: "g", ctrlKey: true })).toBe(false);
   });
 });
 

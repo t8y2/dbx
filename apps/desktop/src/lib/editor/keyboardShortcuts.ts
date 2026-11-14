@@ -578,6 +578,18 @@ export function isCaretBrowsingShortcut(event: ShortcutLikeEvent): boolean {
   return event.key === "F7" || event.code === "F7";
 }
 
+/**
+ * Ctrl+F / Cmd+F, which the webview (WebView2) turns into its native
+ * find-in-page bar when the page leaves the event unhandled. DBX owns Find
+ * through configurable shortcuts, so a Mod+F that no DBX surface consumed must
+ * not fall through to the browser (#14623).
+ */
+export function isBrowserFindShortcut(event: ShortcutLikeEvent): boolean {
+  if (event.isComposing || event.altKey || event.shiftKey) return false;
+  if (!event.ctrlKey && !event.metaKey) return false;
+  return normalizeKey(event.key) === "f";
+}
+
 export function isConfiguredShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
   if (!shortcuts) return false;
   const normalized = readNormalizedShortcutSettings(shortcuts, platform);

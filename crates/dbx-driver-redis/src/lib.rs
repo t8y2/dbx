@@ -1939,6 +1939,35 @@ pub async fn scan_cluster_keys_batch_in_db(
     max_iterations: usize,
     include_types: bool,
 ) -> Result<RedisScanResult, String> {
+    scan_cluster_keys_batch_in_db_with_limit(
+        pool,
+        db,
+        cursor,
+        pattern,
+        count,
+        max_iterations,
+        include_types,
+        &mut RedisScanCountLimit::new(),
+    )
+    .await
+}
+
+/// [`scan_cluster_keys_batch_in_db`] carrying the `COUNT` limit learned on this
+/// connection.
+///
+/// The masters of one cluster are configured alike, so the first node that
+/// refuses the request settles the limit for the whole scan: every later node
+/// starts at the reduced `COUNT` instead of paying for its own rejection.
+pub async fn scan_cluster_keys_batch_in_db_with_limit(
+    pool: &RedisClusterPool,
+    db: u32,
+    cursor: u64,
+    pattern: &str,
+    count: usize,
+    max_iterations: usize,
+    include_types: bool,
+    limit: &mut RedisScanCountLimit,
+) -> Result<RedisScanResult, String> {
     ensure_cluster_database(pool, db).await?;
     scan_cluster_keys_batch_in_db_with(
         &pool.scan_sessions,
@@ -1950,6 +1979,7 @@ pub async fn scan_cluster_keys_batch_in_db(
         count,
         max_iterations,
         include_types,
+        limit,
     )
     .await
 }
@@ -1982,6 +2012,7 @@ where
         count,
         max_iterations,
         include_types,
+        &mut RedisScanCountLimit::new(),
     )
     .await
 }
@@ -1996,6 +2027,7 @@ async fn scan_cluster_keys_batch_in_db_with<C, Discover, DiscoverFuture, Connect
     count: usize,
     max_iterations: usize,
     include_types: bool,
+    limit: &mut RedisScanCountLimit,
 ) -> Result<RedisScanResult, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
@@ -2032,6 +2064,7 @@ where
         max_iterations,
         include_types,
         include_total_keys,
+        limit,
     )
     .await
     {
@@ -2068,6 +2101,7 @@ async fn scan_cluster_keys_batch_on_session<C, Connect, ConnectFuture>(
     max_iterations: usize,
     include_types: bool,
     include_total_keys: bool,
+    limit: &mut RedisScanCountLimit,
 ) -> Result<RedisClusterKeyScanBatch, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
@@ -2110,6 +2144,7 @@ where
             1,
             include_types,
             false,
+            limit,
         )
         .await?;
         all_keys.extend(page.keys);
@@ -2153,6 +2188,31 @@ pub async fn scan_cluster_values_page_in_db(
     include_key_matches: bool,
     count: usize,
 ) -> Result<RedisScanResult, String> {
+    scan_cluster_values_page_in_db_with_limit(
+        pool,
+        db,
+        cursor,
+        pattern,
+        query,
+        include_key_matches,
+        count,
+        &mut RedisScanCountLimit::new(),
+    )
+    .await
+}
+
+/// [`scan_cluster_values_page_in_db`] carrying the `COUNT` limit learned on
+/// this connection.
+pub async fn scan_cluster_values_page_in_db_with_limit(
+    pool: &RedisClusterPool,
+    db: u32,
+    cursor: u64,
+    pattern: &str,
+    query: &str,
+    include_key_matches: bool,
+    count: usize,
+    limit: &mut RedisScanCountLimit,
+) -> Result<RedisScanResult, String> {
     ensure_cluster_database(pool, db).await?;
     scan_cluster_values_page_with(
         &pool.scan_sessions,
@@ -2164,6 +2224,7 @@ pub async fn scan_cluster_values_page_in_db(
         query,
         include_key_matches,
         count,
+        limit,
     )
     .await
 }
@@ -2178,6 +2239,7 @@ async fn scan_cluster_values_page_with<C, Discover, DiscoverFuture, Connect, Con
     query: &str,
     include_key_matches: bool,
     count: usize,
+    limit: &mut RedisScanCountLimit,
 ) -> Result<RedisScanResult, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
@@ -2229,6 +2291,7 @@ where
                 include_key_matches,
                 count,
                 false,
+                limit,
             )
             .await?;
             session.node_cursors[index] = page.cursor;
@@ -3136,6 +3199,137 @@ where
     Ok(RedisCommandResult { command, safety, value: redis_command_raw_to_json(raw) })
 }
 
+/// The largest `SCAN COUNT` one connection has seen the server answer.
+///
+/// Redis treats `COUNT` as a hint and caps nothing, but servers that implement
+/// the protocol with a hard per-command return limit do. TongRDS refuses any
+/// `COUNT` above its `Server.Common.MaxItemsReturned` setting (10000 by
+/// default) with `ERR the number of keys maybe greater than
+/// Server.Common.MaxItemsReturned(10000)`, and it decides on the requested
+/// count rather than on the keyspace: the rejection comes back even when the
+/// database holds two keys. `CONFIG GET Server.Common.MaxItemsReturned` answers
+/// with an empty value, so that refusal is the only place the configured limit
+/// can be read from.
+///
+/// What this keeps, however, is the `COUNT` a request finally came back at —
+/// not the number the refusal named, which is only a candidate. One value
+/// belongs to one connection: the key browser starts every page there instead
+/// of paying for the refusal again, and a server that answers the caller's own
+/// `COUNT` never stores anything, so plain Redis keeps sending 50000.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RedisScanCountLimit {
+    max_count: Option<usize>,
+}
+
+impl RedisScanCountLimit {
+    pub const fn new() -> Self {
+        Self { max_count: None }
+    }
+
+    /// A value learned earlier, so a fresh browser session starts where the
+    /// previous one ended up instead of re-negotiating.
+    pub const fn with_max_count(max_count: Option<usize>) -> Self {
+        Self { max_count }
+    }
+
+    pub const fn max_count(self) -> Option<usize> {
+        self.max_count
+    }
+
+    /// The `COUNT` to actually send: the caller's request, capped by what this
+    /// server has answered before.
+    fn wanted(self, count: usize) -> usize {
+        let count = count.max(1);
+        self.max_count.map_or(count, |limit| count.min(limit.max(1)))
+    }
+
+    /// Records a server refusing `requested` and yields the `COUNT` to retry
+    /// with, or `None` when the error is something else.
+    ///
+    /// The reduced value is not remembered here: a rejection proves only that
+    /// the request was too large, and remembering the guess would make the next
+    /// page pay for the same rejection whenever the guess still exceeds the
+    /// server's limit. The value that gets kept is the one the retry is finally
+    /// answered at (see [`Self::note_accepted`]).
+    fn observe_rejection(&mut self, requested: usize, error: &str) -> Option<usize> {
+        if !is_scan_count_rejection(error) {
+            return None;
+        }
+        // The named limit is authoritative. A rejection that names no number
+        // (or one that would not lower the request) falls back to halving, so
+        // an unrecognised variant of the same refusal still makes progress.
+        let reduced = parse_scan_count_limit(error).filter(|limit| *limit < requested).unwrap_or(requested / 2).max(1);
+        if reduced >= requested {
+            return None;
+        }
+        Some(reduced)
+    }
+
+    /// Remembers a `COUNT` the server actually answered after a retry.
+    ///
+    /// A `COUNT` that came back is an upper bound, not necessarily the server's
+    /// exact limit, so this only ever lowers the remembered value — and a
+    /// server that accepted the caller's own `COUNT` never reaches here, which
+    /// keeps plain Redis free of any cap.
+    fn note_accepted(&mut self, accepted: usize) {
+        let accepted = accepted.max(1);
+        self.max_count = Some(self.max_count.map_or(accepted, |current| current.min(accepted)));
+    }
+}
+
+/// Whether a server refused a `SCAN` because `COUNT` exceeded its own limit.
+fn is_scan_count_rejection(error: &str) -> bool {
+    error.contains("MaxItemsReturned") || error.contains("number of keys maybe greater than")
+}
+
+/// The limit a server named when it refused the request.
+fn parse_scan_count_limit(error: &str) -> Option<usize> {
+    let rest = error.split_once("MaxItemsReturned(")?.1;
+    let digits = rest.split_once(')')?.0.trim();
+    digits.parse::<usize>().ok().filter(|limit| *limit > 0)
+}
+
+/// One `SCAN` round trip, repeated at the server's own limit when the server
+/// refuses the requested `COUNT`.
+///
+/// A refused request never reached the keyspace, so repeating it at the same
+/// cursor sends exactly what the caller meant to send, only smaller.
+async fn scan_command_with_server_count_limit<C>(
+    con: &mut C,
+    cursor: u64,
+    pattern: &str,
+    count: usize,
+    limit: &mut RedisScanCountLimit,
+) -> Result<RedisRawValue, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let mut requested = limit.wanted(count);
+    let mut negotiated = false;
+    loop {
+        let response: redis::RedisResult<RedisRawValue> =
+            redis::cmd("SCAN").arg(cursor).arg("MATCH").arg(pattern).arg("COUNT").arg(requested).query_async(con).await;
+        match response {
+            Ok(raw) => {
+                if negotiated {
+                    limit.note_accepted(requested);
+                }
+                return Ok(raw);
+            }
+            Err(error) => {
+                let message = error.to_string();
+                match limit.observe_rejection(requested, &message) {
+                    Some(reduced) => {
+                        negotiated = true;
+                        requested = reduced;
+                    }
+                    None => return Err(message),
+                }
+            }
+        }
+    }
+}
+
 pub async fn scan_keys_page<C>(con: &mut C, cursor: u64, pattern: &str, count: usize) -> Result<RedisScanResult, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
@@ -3161,6 +3355,9 @@ where
 /// Performs up to `max_iterations` SCAN cycles in a single call. TYPE and TTL
 /// metadata is optional so large key-name searches can avoid extra Redis work.
 /// DBSIZE is only called on the first iteration (cursor == 0).
+///
+/// The `COUNT` is negotiated with the server per call; see
+/// [`RedisScanCountLimit`] for the variant that keeps the result.
 pub async fn scan_keys_batch<C>(
     con: &mut C,
     cursor: u64,
@@ -3172,7 +3369,35 @@ pub async fn scan_keys_batch<C>(
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    scan_keys_batch_inner(con, cursor, pattern, count, max_iterations, include_types, true).await
+    scan_keys_batch_with_limit(
+        con,
+        cursor,
+        pattern,
+        count,
+        max_iterations,
+        include_types,
+        &mut RedisScanCountLimit::new(),
+    )
+    .await
+}
+
+/// [`scan_keys_batch`] carrying the `COUNT` limit learned on this connection.
+///
+/// `limit` is read for the first request and updated when the server refuses
+/// it, so the caller can remember the value for later pages.
+pub async fn scan_keys_batch_with_limit<C>(
+    con: &mut C,
+    cursor: u64,
+    pattern: &str,
+    count: usize,
+    max_iterations: usize,
+    include_types: bool,
+    limit: &mut RedisScanCountLimit,
+) -> Result<RedisScanResult, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    scan_keys_batch_inner(con, cursor, pattern, count, max_iterations, include_types, true, limit).await
 }
 
 /// Reads the type and the TTL of one chunk of keys with a single packed pipeline.
@@ -3272,6 +3497,7 @@ async fn scan_keys_batch_inner<C>(
     max_iterations: usize,
     include_types: bool,
     include_total_keys: bool,
+    limit: &mut RedisScanCountLimit,
 ) -> Result<RedisScanResult, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
@@ -3321,15 +3547,7 @@ where
     let mut current_cursor = cursor;
 
     for iteration in 0..iterations {
-        let raw: RedisRawValue = redis::cmd("SCAN")
-            .arg(current_cursor)
-            .arg("MATCH")
-            .arg(pattern)
-            .arg("COUNT")
-            .arg(count)
-            .query_async(con)
-            .await
-            .map_err(|e| e.to_string())?;
+        let raw = scan_command_with_server_count_limit(con, current_cursor, pattern, count, limit).await?;
 
         let (next_cursor, keys) = parse_scan_keys(raw)?;
 
@@ -3425,7 +3643,33 @@ pub async fn scan_values_page<C>(
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    scan_values_page_inner(con, cursor, pattern, query, include_key_matches, count, true).await
+    scan_values_page_inner(
+        con,
+        cursor,
+        pattern,
+        query,
+        include_key_matches,
+        count,
+        true,
+        &mut RedisScanCountLimit::new(),
+    )
+    .await
+}
+
+/// [`scan_values_page`] carrying the `COUNT` limit learned on this connection.
+pub async fn scan_values_page_with_limit<C>(
+    con: &mut C,
+    cursor: u64,
+    pattern: &str,
+    query: &str,
+    include_key_matches: bool,
+    count: usize,
+    limit: &mut RedisScanCountLimit,
+) -> Result<RedisScanResult, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    scan_values_page_inner(con, cursor, pattern, query, include_key_matches, count, true, limit).await
 }
 
 async fn scan_values_page_inner<C>(
@@ -3436,6 +3680,7 @@ async fn scan_values_page_inner<C>(
     include_key_matches: bool,
     count: usize,
     include_total_keys: bool,
+    limit: &mut RedisScanCountLimit,
 ) -> Result<RedisScanResult, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
@@ -3447,16 +3692,7 @@ where
         return Ok(RedisScanResult { cursor, keys: Vec::new(), total_keys });
     }
 
-    let scan_count = count.max(1);
-    let raw: RedisRawValue = redis::cmd("SCAN")
-        .arg(cursor)
-        .arg("MATCH")
-        .arg(pattern)
-        .arg("COUNT")
-        .arg(scan_count)
-        .query_async(con)
-        .await
-        .map_err(|e| e.to_string())?;
+    let raw = scan_command_with_server_count_limit(con, cursor, pattern, count, limit).await?;
 
     let (next_cursor, keys) = parse_scan_keys(raw)?;
     let mut result = Vec::new();
@@ -5001,7 +5237,16 @@ const DELETE_KEYS_BY_PATTERN_DELETE_BATCH: usize = 512;
 /// rows leaves the rest of the subtree behind. `KEYS` or one oversized `DEL`
 /// would block the server for a large subtree, so keys are discovered with one
 /// `SCAN` cycle at a time and deleted in bounded batches.
-pub async fn delete_keys_by_pattern<C>(con: &mut C, pattern: &str, scan_count: usize) -> Result<u64, String>
+///
+/// `limit` carries the `COUNT` the connection has seen the server answer, so
+/// one delete action does not restart at the caller's `COUNT` and pay for a
+/// refusal a previous action already settled.
+pub async fn delete_keys_by_pattern<C>(
+    con: &mut C,
+    pattern: &str,
+    scan_count: usize,
+    limit: &mut RedisScanCountLimit,
+) -> Result<u64, String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
@@ -5009,7 +5254,7 @@ where
     let mut cursor = 0u64;
     let mut deleted = 0u64;
     loop {
-        let page = scan_keys_batch_inner(con, cursor, pattern, count, 1, false, false).await?;
+        let page = scan_keys_batch_inner(con, cursor, pattern, count, 1, false, false, limit).await?;
         let keys: Result<Vec<Vec<u8>>, String> =
             page.keys.iter().map(|key| redis_key_raw_to_bytes(&key.key_raw)).collect();
         for batch in keys?.chunks(DELETE_KEYS_BY_PATTERN_DELETE_BATCH) {
@@ -6092,6 +6337,7 @@ mod tests {
             "needle",
             true,
             1,
+            &mut super::RedisScanCountLimit::new(),
         )
         .await
         .unwrap();
@@ -6108,6 +6354,7 @@ mod tests {
             "needle",
             true,
             1,
+            &mut super::RedisScanCountLimit::new(),
         )
         .await
         .unwrap();
@@ -6139,6 +6386,7 @@ mod tests {
             "needle",
             false,
             1,
+            &mut super::RedisScanCountLimit::new(),
         )
         .await
         .unwrap();
@@ -6176,6 +6424,7 @@ mod tests {
                 "needle",
                 true,
                 1,
+                &mut super::RedisScanCountLimit::new(),
             )
             .await;
             assert_eq!(attempts, 2);
@@ -6204,6 +6453,7 @@ mod tests {
             "needle",
             true,
             1,
+            &mut super::RedisScanCountLimit::new(),
         )
         .await
         .unwrap_err();
@@ -6230,6 +6480,7 @@ mod tests {
             1,
             1,
             false,
+            &mut super::RedisScanCountLimit::new(),
         )
         .await;
         assert_eq!(result.unwrap_err(), super::INVALID_CLUSTER_SCAN_CURSOR_ERROR);
@@ -6244,6 +6495,7 @@ mod tests {
             1,
             1,
             false,
+            &mut super::RedisScanCountLimit::new(),
         )
         .await
         .unwrap();
@@ -6276,6 +6528,7 @@ mod tests {
                 query,
                 include_keys,
                 1,
+                &mut super::RedisScanCountLimit::new(),
             )
             .await
             .unwrap_err();
@@ -6292,6 +6545,7 @@ mod tests {
             "needle",
             false,
             1,
+            &mut super::RedisScanCountLimit::new(),
         )
         .await
         .unwrap_err();
@@ -6307,6 +6561,7 @@ mod tests {
             "needle",
             false,
             1,
+            &mut super::RedisScanCountLimit::new(),
         )
         .await
         .unwrap();
@@ -9784,6 +10039,154 @@ mod tests {
         assert!(type_offsets[0] < ttl_offsets[0]);
         assert!(ttl_offsets[0] < type_offsets[1]);
         assert!(type_offsets[1] < ttl_offsets[1]);
+    }
+
+    /// The exact refusal TongRDS answers when `COUNT` exceeds
+    /// `Server.Common.MaxItemsReturned`, as it reaches the caller.
+    fn scan_count_rejection(limit: Option<usize>) -> redis::RedisError {
+        let detail = match limit {
+            Some(limit) => format!("the number of keys maybe greater than Server.Common.MaxItemsReturned({limit})"),
+            None => "the number of keys maybe greater than the configured limit".to_string(),
+        };
+        redis::RedisError::from((redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError), "ERR", detail))
+    }
+
+    #[test]
+    fn scan_count_limit_reads_the_limit_the_server_names() {
+        let error = scan_count_rejection(Some(10000));
+
+        assert_eq!(super::parse_scan_count_limit(&error.to_string()), Some(10000));
+    }
+
+    #[test]
+    fn scan_count_limit_ignores_errors_that_are_not_a_count_refusal() {
+        let mut limit = super::RedisScanCountLimit::new();
+
+        assert_eq!(limit.observe_rejection(50_000, &noperm("scan").to_string()), None);
+        assert_eq!(limit.max_count(), None);
+    }
+
+    #[test]
+    fn scan_count_limit_halves_the_request_when_the_refusal_names_no_number() {
+        let mut limit = super::RedisScanCountLimit::new();
+
+        assert_eq!(limit.observe_rejection(50_000, &scan_count_rejection(None).to_string()), Some(25_000));
+        // A guess is not a limit: nothing is remembered until a COUNT comes back.
+        assert_eq!(limit.max_count(), None);
+
+        limit.note_accepted(25_000);
+        assert_eq!(limit.max_count(), Some(25_000));
+    }
+
+    #[test]
+    fn scan_count_limit_never_raises_a_remembered_value() {
+        let mut limit = super::RedisScanCountLimit::with_max_count(Some(10_000));
+
+        // A COUNT that worked is an upper bound, not the server's exact limit.
+        limit.note_accepted(50_000);
+        assert_eq!(limit.max_count(), Some(10_000));
+        limit.note_accepted(4_000);
+        assert_eq!(limit.max_count(), Some(4_000));
+    }
+
+    #[test]
+    fn scan_count_limit_does_not_believe_a_number_that_would_not_shrink_the_request() {
+        // A server that rejects COUNT 100 but names 100 contradicts itself; the
+        // request has to keep shrinking or the scan retries forever.
+        let mut limit = super::RedisScanCountLimit::new();
+
+        assert_eq!(limit.observe_rejection(100, &scan_count_rejection(Some(100)).to_string()), Some(50));
+        // Nothing left to reduce.
+        assert_eq!(limit.observe_rejection(1, &scan_count_rejection(Some(10_000)).to_string()), None);
+    }
+
+    #[tokio::test]
+    async fn scan_keys_batch_retries_at_the_limit_the_server_named() {
+        let mut con = FakeRedisConnection::with_results(vec![
+            Ok(RedisRawValue::Int(2)),
+            Err(scan_count_rejection(Some(10000))),
+            Ok(scan_response("0", vec!["session:a"])),
+        ]);
+        let mut limit = super::RedisScanCountLimit::new();
+
+        let result = super::scan_keys_batch_with_limit(&mut con, 0, "*", 50_000, 1, false, &mut limit).await.unwrap();
+
+        assert_eq!(result.keys.len(), 1);
+        assert_eq!(limit.max_count(), Some(10000));
+        // The refused request never reached the keyspace, so the retry is the
+        // same SCAN at the same cursor, only smaller.
+        let scans: Vec<&String> = con.commands.iter().filter(|packed| packed.contains("\r\nSCAN\r\n")).collect();
+        assert_eq!(scans.len(), 2);
+        assert!(scans[0].contains("\r\n50000\r\n"), "{:?}", scans[0]);
+        assert!(scans[1].contains("\r\n10000\r\n"), "{:?}", scans[1]);
+        assert!(scans[1].contains("\r\n0\r\n"), "{:?}", scans[1]);
+    }
+
+    #[tokio::test]
+    async fn scan_keys_batch_starts_at_a_limit_learned_earlier() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(2), scan_response("0", vec!["session:a"])]);
+        let mut limit = super::RedisScanCountLimit::with_max_count(Some(10000));
+
+        super::scan_keys_batch_with_limit(&mut con, 0, "*", 50_000, 1, false, &mut limit).await.unwrap();
+
+        let scans: Vec<&String> = con.commands.iter().filter(|packed| packed.contains("\r\nSCAN\r\n")).collect();
+        assert_eq!(scans.len(), 1);
+        assert!(scans[0].contains("\r\n10000\r\n"), "{:?}", scans[0]);
+    }
+
+    #[tokio::test]
+    async fn scan_keys_batch_leaves_the_limit_empty_when_the_server_accepts_the_count() {
+        // Redis only treats COUNT as a hint, so it answers the caller's 50000
+        // and nothing may be remembered: a stored cap would silently shrink
+        // every later page of a server that never had a limit.
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(2), scan_response("0", vec!["session:a"])]);
+        let mut limit = super::RedisScanCountLimit::new();
+
+        super::scan_keys_batch_with_limit(&mut con, 0, "*", 50_000, 1, false, &mut limit).await.unwrap();
+
+        assert_eq!(limit.max_count(), None);
+        let scans: Vec<&String> = con.commands.iter().filter(|packed| packed.contains("\r\nSCAN\r\n")).collect();
+        assert!(scans[0].contains("\r\n50000\r\n"), "{:?}", scans[0]);
+    }
+
+    #[tokio::test]
+    async fn scan_values_page_retries_at_the_limit_the_server_named() {
+        let mut con = FakeRedisConnection::with_results(vec![
+            Ok(RedisRawValue::Int(1)),
+            Err(scan_count_rejection(Some(10000))),
+            Ok(scan_response("0", vec!["needle:a"])),
+            Ok(bulk("string")),
+        ]);
+        let mut limit = super::RedisScanCountLimit::new();
+
+        let result =
+            super::scan_values_page_with_limit(&mut con, 0, "*", "needle", true, 50_000, &mut limit).await.unwrap();
+
+        assert_eq!(result.keys.len(), 1);
+        assert_eq!(limit.max_count(), Some(10000));
+        let scans: Vec<&String> = con.commands.iter().filter(|packed| packed.contains("\r\nSCAN\r\n")).collect();
+        assert_eq!(scans.len(), 2);
+        assert!(scans[1].contains("\r\n10000\r\n"), "{:?}", scans[1]);
+    }
+
+    /// Live check that a keyspace scan survives a server with a hard
+    /// per-command return limit: TongRDS refuses `COUNT` above
+    /// `Server.Common.MaxItemsReturned` (10000 by default), which is what
+    /// "fetch all" asks for (`REDIS_FETCH_ALL_SCAN_COUNT`).
+    ///
+    /// Set `DBX_TEST_REDIS_URL` to a server that enforces such a limit.
+    #[tokio::test]
+    #[ignore = "requires a server with a per-command return limit via DBX_TEST_REDIS_URL"]
+    async fn scan_fits_a_server_that_caps_the_count() {
+        let url = std::env::var("DBX_TEST_REDIS_URL").expect("DBX_TEST_REDIS_URL");
+        let mut con = super::connect(&url, std::time::Duration::from_secs(5)).await.unwrap();
+        let mut limit = super::RedisScanCountLimit::new();
+
+        let result = super::scan_keys_batch_with_limit(&mut con, 0, "*", 50_000, 1, false, &mut limit).await.unwrap();
+
+        let max_count = limit.max_count().expect("the server must have refused COUNT 50000");
+        assert!(max_count < 50_000, "{max_count}");
+        assert!(result.keys.len() <= max_count, "{} > {max_count}", result.keys.len());
     }
 
     #[tokio::test]

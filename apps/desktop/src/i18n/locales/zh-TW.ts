@@ -2640,6 +2640,8 @@ export default withEnglishFallback({
     showLabels: "顯示數值",
   },
   grid: {
+    setTablePageSizeDefault: "設為此資料表的預設值",
+    resetTablePageSizeDefault: "使用全域預設值",
     exportSelectedRowsScope: "選取列",
     exportSelectedCellsScope: "選區",
     exportSelectedColumnsScope: "選中欄",

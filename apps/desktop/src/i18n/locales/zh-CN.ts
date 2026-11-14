@@ -2971,6 +2971,8 @@ export default withEnglishFallback({
     showLabels: "显示数值",
   },
   grid: {
+    setTablePageSizeDefault: "设为此表的默认值",
+    resetTablePageSizeDefault: "使用全局默认值",
     exportSelectedRowsScope: "选中行",
     exportSelectedCellsScope: "选区",
     exportSelectedColumnsScope: "选中列",

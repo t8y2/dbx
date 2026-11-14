@@ -3041,6 +3041,8 @@ export default {
     showLabels: "Show Values",
   },
   grid: {
+    setTablePageSizeDefault: "Set default for this table",
+    resetTablePageSizeDefault: "Use global default",
     exportSelectedRowsScope: "Selected rows",
     exportSelectedCellsScope: "Selected cells",
     exportSelectedColumnsScope: "Selected columns",

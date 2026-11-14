@@ -2680,6 +2680,8 @@ export default withEnglishFallback({
     showLabels: "値を表示",
   },
   grid: {
+    setTablePageSizeDefault: "このテーブルの既定値に設定",
+    resetTablePageSizeDefault: "全体の既定値を使用",
     exportSelectedRowsScope: "選択行",
     exportSelectedCellsScope: "選択セル",
     exportSelectedColumnsScope: "選択列",

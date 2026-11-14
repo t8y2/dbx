@@ -330,6 +330,7 @@ import {
 } from "@/lib/dataGrid/dataGridColumnFilter";
 import { normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/dataGrid/paginationPageSize";
 import { dataGridPageSizeSettingsPatch, preferredDataGridPageSize, resolveDataGridPageSizePreference, type DataGridPageSizePreference } from "@/lib/dataGrid/dataGridPageSizePreference";
+import { savedTableOpenPageSize, saveTableOpenPageSize, type TableOpenPageScope } from "@/lib/table/tableOpenPageLimit";
 import { continuousQueryResultMaxRows, effectiveQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { allNullColumnIndexes, identicalValueColumnIndexes } from "@/lib/dataGrid/dataGridColumnVisibility";
 import { buildDataGridColumnLookupItems, dataGridColumnCommentFor, filterDataGridColumnLookupItems, type DataGridColumnLookupMatchMode } from "@/lib/dataGrid/dataGridColumnLookup";
@@ -3794,8 +3795,22 @@ watch([localFilterScopeKey, localFilterRestoreKey], ([, restoreKey], [, previous
 
 // --- Pagination ---
 const pageSizePreference = computed(() => resolveDataGridPageSizePreference(props.context, props.pageSizePreference));
-const defaultPageSize = computed(() => preferredDataGridPageSize(settingsStore.editorSettings, pageSizePreference.value));
-const pageSize = ref(preferredDataGridPageSize(settingsStore.editorSettings, pageSizePreference.value, props.pageLimit));
+const tablePageSizeScope = computed<TableOpenPageScope | undefined>(() => {
+  if (props.context !== "table-data" || !props.connectionId || !props.tableMeta?.tableName) return undefined;
+  const database = props.tableMeta.database ?? props.database;
+  if (database === undefined) return undefined;
+  return { connectionId: props.connectionId, database, catalog: props.tableMeta.catalog, schema: props.tableMeta.schema ?? props.schema, tableName: props.tableMeta.tableName };
+});
+const tableDefaultPageSize = ref<number>();
+watch(
+  tablePageSizeScope,
+  (scope) => {
+    tableDefaultPageSize.value = scope ? savedTableOpenPageSize(scope) : undefined;
+  },
+  { immediate: true },
+);
+const defaultPageSize = computed(() => tableDefaultPageSize.value ?? preferredDataGridPageSize(settingsStore.editorSettings, pageSizePreference.value));
+const pageSize = ref(preferredDataGridPageSize(settingsStore.editorSettings, pageSizePreference.value, props.pageLimit ?? tableDefaultPageSize.value));
 const currentPage = ref(1);
 const pageSizeOptions = computed(() => resultPageSizeMenuOptions(pageSize.value));
 const customPageSizeInput = ref(String(pageSize.value));
@@ -4496,6 +4511,19 @@ function setDefaultPageSize() {
 function applyCustomPageSizeAndSetDefault() {
   applyCustomPageSize();
   setDefaultPageSize();
+}
+
+function applyCustomPageSizeAndSaveForTable() {
+  const scope = tablePageSizeScope.value;
+  if (!scope) return;
+  applyCustomPageSize();
+  if (saveTableOpenPageSize(scope, pageSize.value)) tableDefaultPageSize.value = pageSize.value;
+}
+
+function resetTableDefaultPageSize() {
+  const scope = tablePageSizeScope.value;
+  if (!scope) return;
+  if (saveTableOpenPageSize(scope)) tableDefaultPageSize.value = undefined;
 }
 
 function applyCustomPageSize() {
@@ -17764,6 +17792,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         :can-export="result.columns.length > 0 && !(context === 'results' && hasResultToolbarActionsSlot && settingsStore.editorSettings.dataGridExportInToolbar)"
         :page-size="pageSize"
         :default-page-size="defaultPageSize"
+        :allow-table-page-size-default="!!tablePageSizeScope"
+        :has-table-page-size-default="tableDefaultPageSize !== undefined"
         :page-size-menu-items="pageSizeMenuItems"
         :export-menu-items="exportMenuItems"
         :export-warning="exportWarning"
@@ -17774,6 +17804,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         @select-page-size="selectPageSizeMenuItem"
         @apply-custom-page-size="applyCustomPageSize"
         @apply-custom-page-size-and-set-default="applyCustomPageSizeAndSetDefault"
+        @apply-custom-page-size-and-save-for-table="applyCustomPageSizeAndSaveForTable"
+        @reset-table-page-size-default="resetTableDefaultPageSize"
         @first-page="firstPage"
         @previous-page="prevPage"
         @next-page="nextPage"

@@ -3,7 +3,7 @@ import { getSqlCompletionContext, isOraclePseudoColumnName, isOracleSystemValueN
 import { tokenizeSqlSemantic, tokenIsIdentifier } from "@/lib/sql/semantic/tokens";
 import { executableStatementRanges, keepsOracleStyleBlockTogether, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { DBX_TDENGINE_TBNAME_COLUMN, isTdengineStableTableType } from "@/lib/table/tableEditing";
-import type { DatabaseType, SqlColumnReference, SqlGroupByViolation, SqlReferenceAnalysis, SqlReferenceScope, SqlTableReference, SqlTextSpan } from "@/types/database";
+import type { DatabaseType, SqlColumnReference, SqlGroupByViolation, SqlReferenceAnalysis, SqlReferenceScope, SqlTableReference, SqlTextSpan, SqlSyntaxDiagnostic } from "@/types/database";
 
 export interface SqlSemanticDiagnostic {
   span: SqlTextSpan;
@@ -468,6 +468,37 @@ function offsetToLineColumn(sql: string, offset: number): { line: number; column
   }
   const lastLine = lines[lines.length - 1] ?? "";
   return { line: lines.length, column: lastLine.length };
+}
+export function sqlSyntaxDiagnosticToSemantic(diagnostic: SqlSyntaxDiagnostic, sql?: string): SqlSemanticDiagnostic {
+  const mapped: SqlSemanticDiagnostic = { message: diagnostic.message, span: diagnostic.span, severity: diagnostic.severity };
+  if (!sql || sqlTextSpanToOffsetRange(sql, mapped.span)) return mapped;
+  const lines = sql.split(/\r?\n/);
+  const line = Math.max(1, Math.min(mapped.span.start_line, lines.length));
+  const lineStart = lines.slice(0, line - 1).reduce((sum, value) => sum + value.length + 1, 0);
+  const requested = lineStart + Math.max(0, mapped.span.start_column - 1);
+  const from = Math.max(0, Math.min(requested, sql.length - 1));
+  const start = offsetToSqlTextStartPosition(sql, from);
+  const end = offsetToSqlTextEndPosition(sql, from + 1);
+  if (start && end) mapped.span = { start_line: start.line, start_column: start.column, end_line: end.line, end_column: end.column };
+  return mapped;
+}
+
+export function appendUniqueSqlSemanticDiagnostics(target: SqlSemanticDiagnostic[], additions: readonly SqlSemanticDiagnostic[]): void {
+  for (const diagnostic of additions) {
+    if (
+      target.some(
+        (existing) =>
+          existing.message === diagnostic.message &&
+          existing.severity === diagnostic.severity &&
+          existing.span.start_line === diagnostic.span.start_line &&
+          existing.span.start_column === diagnostic.span.start_column &&
+          existing.span.end_line === diagnostic.span.end_line &&
+          existing.span.end_column === diagnostic.span.end_column,
+      )
+    )
+      continue;
+    target.push(diagnostic);
+  }
 }
 
 export function buildSqlParserErrorDiagnostic(error: unknown, sql: string): SqlSemanticDiagnostic | null {

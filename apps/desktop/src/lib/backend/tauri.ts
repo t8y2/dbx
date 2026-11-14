@@ -160,6 +160,7 @@ import type {
   EventTriggerInfo,
   QueryResult,
   SqlReferenceAnalysis,
+  SqlSyntaxDiagnostic,
   DatabaseType,
   InstalledPlugin,
   JdbcDriverInfo,
@@ -2451,6 +2452,10 @@ export async function rollbackManualTransaction(txnSessionId: string): Promise<Q
 
 export async function analyzeSqlReferences(sql: string, dialect?: string): Promise<SqlReferenceAnalysis> {
   return invoke("analyze_sql_references", { sql, dialect });
+}
+
+export async function analyzeSqlSyntax(sql: string, dialect?: string): Promise<SqlSyntaxDiagnostic[]> {
+  return invoke("analyze_sql_syntax", { sql, dialect });
 }
 
 export async function findStatementAtCursor(sql: string, cursorPos: number, databaseType?: DatabaseType): Promise<string> {

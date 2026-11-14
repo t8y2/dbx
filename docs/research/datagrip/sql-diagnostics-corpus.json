@@ -1,0 +1,623 @@
+[
+  {
+    "name": "valid_select",
+    "sql": "SELECT id, name FROM users WHERE active = true AND id > 0;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_cte_join",
+    "sql": "WITH recent AS (SELECT id, user_id FROM orders) SELECT u.id, r.user_id FROM users u JOIN recent r ON r.user_id = u.id;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_ddl",
+    "sql": "CREATE TABLE account (id INTEGER PRIMARY KEY, name TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_comments_unicode",
+    "sql": "-- 注释 😀\nSELECT id, '汉字😀' AS label FROM users;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "missing_expression",
+    "sql": "SELECT u.id FROM users u WHERE u.active = AND u.id;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 41,
+        "length": 1,
+        "message": "<expression> expected, got 'AND' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "unexpected_close",
+    "sql": "SELECT * FROM orders WHERE );\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "unclosed_parenthesis",
+    "sql": "CREATE TABLE broken (id INTEGER, name TEXT;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 42,
+        "length": 1,
+        "message": "')' or ',' expected #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "missing_comma",
+    "sql": "CREATE TABLE t (id INTEGER, name TEXT);\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "missing_select_expression",
+    "sql": "SELECT FROM users;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "unterminated_string",
+    "sql": "SELECT 'abc;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "unexpected_limit_comma",
+    "sql": "SELECT * FROM users LIMIT , 10;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 25,
+        "length": 1,
+        "message": "<expression> or ALL expected, got ',' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "multi_statement_errors",
+    "sql": "SELECT a FROM t WHERE a = AND a = 1;\nSELECT * FROM x WHERE );\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 25,
+        "length": 1,
+        "message": "<expression> expected, got 'AND' #loc"
+      },
+      {
+        "line": 2,
+        "offset": 21,
+        "length": 1,
+        "message": "<expression> expected, got ')' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "eof_expression",
+    "sql": "SELECT * FROM users WHERE id =\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "keyword_typo",
+    "sql": "SELECT * FRO users;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 13,
+        "length": 5,
+        "message": "unexpected 'value' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "invalid_join",
+    "sql": "SELECT * FROM a JOIN ON a.id = 1;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 23,
+        "length": 1,
+        "message": "'(', '*', <identifier>, AS, CROSS, FULL, INNER, JOIN, LEFT, NATURAL, ON, RIGHT, TABLESAMPLE or USING expected, got 'a' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "invalid_insert",
+    "sql": "INSERT INTO users (id, name) VALUES (1,);\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "invalid_update",
+    "sql": "UPDATE users SET name = WHERE id = 1;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "invalid_delete",
+    "sql": "DELETE FROM WHERE id = 1;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 21,
+        "length": 1,
+        "message": "RETURNING, USING or WHERE expected, got '=' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "invalid_case",
+    "sql": "SELECT CASE WHEN id > 1 THEN ELSE 1 END FROM users;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_dollar_cast",
+    "sql": "SELECT payload::jsonb->>'name' FROM events WHERE tags @> ARRAY['sql'];\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_returning",
+    "sql": "DELETE FROM orders WHERE total < 0 RETURNING id, user_id;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_numbered_parameter",
+    "sql": "SELECT * FROM users WHERE id = $1;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_select",
+    "sql": "SELECT id, name FROM users WHERE active = true AND id > 0;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_cte_join",
+    "sql": "WITH recent AS (SELECT id, user_id FROM orders) SELECT u.id, r.user_id FROM users u JOIN recent r ON r.user_id = u.id;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_ddl",
+    "sql": "CREATE TABLE account (id INTEGER PRIMARY KEY, name TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_comments_unicode",
+    "sql": "-- 注释 😀\nSELECT id, '汉字😀' AS label FROM users;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "missing_expression",
+    "sql": "SELECT u.id FROM users u WHERE u.active = AND u.id;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 41,
+        "length": 1,
+        "message": "<expression> expected, got 'AND' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "unexpected_close",
+    "sql": "SELECT * FROM orders WHERE );\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 26,
+        "length": 1,
+        "message": "<expression> expected, got ')' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "unclosed_parenthesis",
+    "sql": "CREATE TABLE broken (id INTEGER, name TEXT;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 42,
+        "length": 1,
+        "message": "')' or ',' expected #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "missing_comma",
+    "sql": "CREATE TABLE t (id INTEGER, name TEXT);\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "missing_select_expression",
+    "sql": "SELECT FROM users;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 6,
+        "length": 1,
+        "message": "<expression>, ALL, DISTINCT, DISTINCTROW, HIGH_PRIORITY, MAX_STATEMENT_TIME, SQL_BIG_RESULT, SQL_BUFFER_RESULT, SQL_CACHE, SQL_CALC_FOUND_ROWS, SQL_NO_CACHE, SQL_SMALL_RESULT or STRAIGHT_JOIN expected, got 'FROM' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "unterminated_string",
+    "sql": "SELECT 'abc;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "unexpected_limit_comma",
+    "sql": "SELECT * FROM users LIMIT , 10;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 25,
+        "length": 1,
+        "message": "<number> or <reference> expected, got ',' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "multi_statement_errors",
+    "sql": "SELECT a FROM t WHERE a = AND a = 1;\nSELECT * FROM x WHERE );\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 25,
+        "length": 1,
+        "message": "<expression> expected, got 'AND' #loc"
+      },
+      {
+        "line": 2,
+        "offset": 21,
+        "length": 1,
+        "message": "<expression> expected, got ')' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "eof_expression",
+    "sql": "SELECT * FROM users WHERE id =\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 30,
+        "length": 0,
+        "message": "<expression> expected #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "keyword_typo",
+    "sql": "SELECT * FRO users;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 13,
+        "length": 5,
+        "message": "unexpected 'value' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "invalid_join",
+    "sql": "SELECT * FROM a JOIN ON a.id = 1;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 25,
+        "length": 1,
+        "message": "'.' unexpected #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "invalid_insert",
+    "sql": "INSERT INTO users (id, name) VALUES (1,);\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "invalid_update",
+    "sql": "UPDATE users SET name = WHERE id = 1;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "invalid_delete",
+    "sql": "DELETE FROM WHERE id = 1;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "invalid_case",
+    "sql": "SELECT CASE WHEN id > 1 THEN ELSE 1 END FROM users;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 28,
+        "length": 1,
+        "message": "<expression> expected, got 'ELSE' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "valid_replace",
+    "sql": "REPLACE INTO users (id, name) VALUES (1, 'A');\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_backtick",
+    "sql": "SELECT `id` FROM `app`.`users` WHERE `name` = ?;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_select",
+    "sql": "SELECT id, name FROM users WHERE active = true AND id > 0;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_cte_join",
+    "sql": "WITH recent AS (SELECT id, user_id FROM orders) SELECT u.id, r.user_id FROM users u JOIN recent r ON r.user_id = u.id;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_ddl",
+    "sql": "CREATE TABLE account (id INTEGER PRIMARY KEY, name TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_comments_unicode",
+    "sql": "-- 注释 😀\nSELECT id, '汉字😀' AS label FROM users;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "missing_expression",
+    "sql": "SELECT u.id FROM users u WHERE u.active = AND u.id;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 41,
+        "length": 1,
+        "message": "<expression> expected, got 'AND' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "unexpected_close",
+    "sql": "SELECT * FROM orders WHERE );\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 26,
+        "length": 1,
+        "message": "<expression> expected, got ')' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "unclosed_parenthesis",
+    "sql": "CREATE TABLE broken (id INTEGER, name TEXT;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 42,
+        "length": 1,
+        "message": "')' or ',' expected #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "missing_comma",
+    "sql": "CREATE TABLE t (id INTEGER, name TEXT);\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "missing_select_expression",
+    "sql": "SELECT FROM users;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "unterminated_string",
+    "sql": "SELECT 'abc;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "unexpected_limit_comma",
+    "sql": "SELECT * FROM users LIMIT , 10;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "multi_statement_errors",
+    "sql": "SELECT a FROM t WHERE a = AND a = 1;\nSELECT * FROM x WHERE );\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "eof_expression",
+    "sql": "SELECT * FROM users WHERE id =\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "keyword_typo",
+    "sql": "SELECT * FRO users;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "invalid_join",
+    "sql": "SELECT * FROM a JOIN ON a.id = 1;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 25,
+        "length": 1,
+        "message": "'.' unexpected #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "invalid_insert",
+    "sql": "INSERT INTO users (id, name) VALUES (1,);\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "invalid_update",
+    "sql": "UPDATE users SET name = WHERE id = 1;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 23,
+        "length": 1,
+        "message": "<expression> expected, got 'WHERE' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "invalid_delete",
+    "sql": "DELETE FROM WHERE id = 1;\n",
+    "diagnostics": [
+      {
+        "line": 1,
+        "offset": 18,
+        "length": 2,
+        "message": "<indexed by clause>, AS, ORDER, RETURNING or WHERE expected, got 'id' #loc"
+      }
+    ],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": false
+  },
+  {
+    "name": "invalid_case",
+    "sql": "SELECT CASE WHEN id > 1 THEN ELSE 1 END FROM users;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_upsert",
+    "sql": "INSERT INTO users (id, name) VALUES (1, 'A') ON CONFLICT(id) DO UPDATE SET name = excluded.name;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  },
+  {
+    "name": "valid_qualified",
+    "sql": "SELECT id FROM main.users WHERE name = ?;\n",
+    "diagnostics": [],
+    "inspectionExitCode": 0,
+    "missingAnnotatorOutput": true
+  }
+]

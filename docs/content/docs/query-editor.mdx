@@ -163,6 +163,8 @@ Completion uses the active database dialect and metadata to suggest:
 
 Semantic diagnostics flag selected unresolved tables, columns, aliases, and SQL structures. They help catch mistakes early but do not guarantee that vendor extensions will be accepted or rejected; the server result remains authoritative.
 
+For PostgreSQL, MySQL, and SQLite, DBX also runs dialect-aware syntax diagnostics before execution. Errors include expected/found details and map to the offending source range, including errors in later statements. Syntax checks are separate from metadata-based semantic diagnostics and server execution errors; an unavailable backend is not itself reported as invalid SQL.
+
 <Callout type="info">Refresh connection metadata after creating or changing objects. DBX caches and lazy-loads table structure to reduce repeated requests in large schemas.</Callout>
 
 ## Table and Object Navigation

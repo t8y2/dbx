@@ -13,8 +13,8 @@ import { createSqlUnknownObjectHighlights, setSqlUnknownObjectSpans } from "@/li
 import { sqlTextSpanToOffsetRange } from "@/lib/sql/semantic/diagnostics";
 import { maskSqlParametersForAnalysis, type SqlParameterOptions } from "@/lib/sql/sqlParameters";
 
-const { analyze, buildDiagnostics } = vi.hoisted(() => ({ analyze: vi.fn(), buildDiagnostics: vi.fn() }));
-vi.mock("@/lib/backend/api", () => ({ analyzeSqlReferences: analyze }));
+const { analyze, analyzeSyntax, buildDiagnostics } = vi.hoisted(() => ({ analyze: vi.fn(), analyzeSyntax: vi.fn(), buildDiagnostics: vi.fn() }));
+vi.mock("@/lib/backend/api", () => ({ analyzeSqlReferences: analyze, analyzeSqlSyntax: analyzeSyntax }));
 vi.mock("@/lib/sql/semantic/diagnostics", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/sql/semantic/diagnostics")>()),
   buildSqlSemanticDiagnostics: buildDiagnostics,
@@ -27,6 +27,7 @@ const diagnostic: SqlSemanticDiagnostic = { message: "missing field", severity: 
 beforeEach(() => {
   vi.useFakeTimers();
   analyze.mockResolvedValue({ tables: [], columns: [] });
+  analyzeSyntax.mockResolvedValue([]);
   buildDiagnostics.mockReturnValue([diagnostic]);
 });
 

@@ -28,6 +28,8 @@ import {
   areSqlSemanticDiagnosticsEqual,
   buildSqlParserErrorDiagnostic,
   buildSqlSemanticDiagnostics,
+  appendUniqueSqlSemanticDiagnostics,
+  sqlSyntaxDiagnosticToSemantic,
   isSqlSemanticDiagnosticInputContext,
   isSqlVirtualTableReference,
   oceanBaseDiagnosticTableReference,
@@ -271,6 +273,22 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
     setSemanticDiagnostics([...retained, ...next].sort(compareSqlSemanticDiagnostics));
   }
 
+  async function loadSyntaxDiagnostics(range: SqlTextRange, fullSql: string, dialect: string): Promise<SqlSemanticDiagnostic[]> {
+    if (dialect !== "postgres" && dialect !== "mysql" && dialect !== "sqlite") return [];
+    try {
+      const diagnostics = await api.analyzeSqlSyntax(range.sql, dialect);
+      return offsetSqlSemanticDiagnostics(
+        diagnostics.map((diagnostic) => sqlSyntaxDiagnosticToSemantic(diagnostic, range.sql)),
+        range,
+        fullSql,
+      );
+    } catch {
+      // Backend transport/availability failures are not SQL syntax errors. The
+      // existing reference-analysis path keeps its own parser-error fallback.
+      return [];
+    }
+  }
+
   function compareSqlSemanticDiagnostics(left: SqlSemanticDiagnostic, right: SqlSemanticDiagnostic): number {
     return left.span.start_line - right.span.start_line || left.span.start_column - right.span.start_column || left.span.end_line - right.span.end_line || left.span.end_column - right.span.end_column || left.message.localeCompare(right.message);
   }
@@ -466,6 +484,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
       );
     }
     for (const range of diagnosticRanges) {
+      let hasSyntaxDiagnostics = false;
       if (mysqlRoutineAnalysis?.routineRanges.some((routineRange) => rangesOverlap(routineRange, range))) continue;
       try {
         const analysisSql = maskSqlParametersForAnalysis(range.sql, sqlStatementParameterOptions());
@@ -474,9 +493,13 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
           identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
           fallbackDialect: props.databaseType === "kingbase" ? (options.sqlSyntaxDialect?.() ?? sqlBehaviorDialect() ?? "postgres") : (props.formatDialect ?? props.dialect ?? "generic"),
         });
+        const syntaxDiagnostics = await loadSyntaxDiagnostics({ ...range, sql: analysisSql }, sql, referenceDialect);
+        if (runId !== semanticDiagnosticRunId) return;
+        hasSyntaxDiagnostics = syntaxDiagnostics.length > 0;
+        appendUniqueSqlSemanticDiagnostics(nextDiagnostics, syntaxDiagnostics);
         const { analysis, keywordDiagnostic } = await analyzeSqlDiagnosticReferences(analysisSql, referenceDialect, (statement) => api.analyzeSqlReferences(statement, referenceDialect));
         if (runId !== semanticDiagnosticRunId) return;
-        if (keywordDiagnostic) nextDiagnostics.push(...offsetSqlSemanticDiagnostics([keywordDiagnostic], range, sql));
+        if (keywordDiagnostic && !hasSyntaxDiagnostics) appendUniqueSqlSemanticDiagnostics(nextDiagnostics, offsetSqlSemanticDiagnostics([keywordDiagnostic], range, sql));
 
         const semanticCursor = Math.max(0, Math.min(currentView.state.selection.main.head - range.from, range.sql.length));
         const semanticModel =
@@ -525,7 +548,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
       } catch (error) {
         if (runId !== semanticDiagnosticRunId) return;
         const diagnostic = buildSqlParserErrorDiagnostic(error, range.sql);
-        if (diagnostic) nextDiagnostics.push(...offsetSqlSemanticDiagnostics([diagnostic], range, sql));
+        if (diagnostic && !hasSyntaxDiagnostics) appendUniqueSqlSemanticDiagnostics(nextDiagnostics, offsetSqlSemanticDiagnostics([diagnostic], range, sql));
       }
     }
     if (refreshOptions.preserveOutsideRanges) {
@@ -610,6 +633,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
       if (currentView.state.doc !== doc) return [];
 
       const statementSpans: SqlUnknownObjectSpan[] = [];
+      let hasSyntaxDiagnostics = false;
       try {
         const analysisSql = maskSqlParametersForAnalysis(range.sql, sqlStatementParameterOptions());
         const referenceDialect = sqlReferenceAnalysisDialectFor({
@@ -617,9 +641,16 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
           identifierQuote: connectionStore.connectionIdentifierQuote(props.connectionId),
           fallbackDialect: props.databaseType === "kingbase" ? (options.sqlSyntaxDialect?.() ?? sqlBehaviorDialect() ?? "postgres") : (props.formatDialect ?? props.dialect ?? "generic"),
         });
+        const syntaxDiagnostics = await loadSyntaxDiagnostics({ ...range, sql: analysisSql }, sql, referenceDialect);
+        if (currentView.state.doc !== doc) return [];
+        hasSyntaxDiagnostics = syntaxDiagnostics.length > 0;
+        for (const diagnostic of syntaxDiagnostics) {
+          const offsetRange = sqlTextSpanToRange(sql, diagnostic.span);
+          if (offsetRange) statementSpans.push(offsetRange);
+        }
         const { analysis, keywordDiagnostic } = await analyzeSqlDiagnosticReferences(analysisSql, referenceDialect, (statement) => api.analyzeSqlReferences(statement, referenceDialect));
         if (currentView.state.doc !== doc) return [];
-        if (keywordDiagnostic) {
+        if (keywordDiagnostic && !hasSyntaxDiagnostics) {
           const [diagnostic] = offsetSqlSemanticDiagnostics([keywordDiagnostic], range, sql);
           const offsetRange = sqlTextSpanToRange(sql, diagnostic.span);
           if (offsetRange) statementSpans.push(offsetRange);
@@ -670,7 +701,7 @@ export function useQueryEditorDiagnostics(options: QueryEditorDiagnosticsOptions
         }
       } catch (error) {
         const diagnostic = buildSqlParserErrorDiagnostic(error, range.sql);
-        if (diagnostic) {
+        if (diagnostic && !hasSyntaxDiagnostics) {
           const [offsetDiagnostic] = offsetSqlSemanticDiagnostics([diagnostic], range, sql);
           const offsetRange = sqlTextSpanToRange(sql, offsetDiagnostic.span);
           if (offsetRange) statementSpans.push(offsetRange);

@@ -124,6 +124,7 @@ pub use dbx_sql::sql_editability;
 pub use dbx_sql::sql_error_position;
 pub use dbx_sql::sql_parser;
 pub use dbx_sql::sql_risk;
+pub use dbx_sql::sql_syntax;
 pub(crate) use dbx_sql::sqlserver_temporal;
 pub use dbx_types::types;
 pub use host::update;

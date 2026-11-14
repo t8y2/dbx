@@ -10860,7 +10860,7 @@ export default withEnglishFallback({
     sidebarTableSearchEnabledDescription: "Показывать поле локального поиска таблиц под развёрнутыми базами данных, схемами или группами таблиц, чтобы в каждой области можно было фильтровать таблицы независимо.",
     sidebarObjectInfoMode: "Дополнительная информация в боковой панели",
     sidebarObjectInfoModeDescription:
-      "Выберите комментарии, размеры объектов, оба варианта или отсутствие дополнительной информации. При отображении обоих вариантов комментарий следует за именем, а размер отображается у правого края. Информация без соответствующих данных скрывается. Итоги по базе данных сейчас поддерживаются в PostgreSQL; размеры таблиц поддерживаются в MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng и ClickHouse.",
+      "Выберите комментарии, размеры объектов, оба варианта или отсутствие дополнительной информации. При отображении обоих вариантов комментарий следует за именем, а размер отображается у правого края. Информация без соответствующих данных скрывается. Итоги по базе данных сейчас поддерживаются в PostgreSQL; размеры таблиц поддерживаются в MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, ClickHouse, Doris и StarRocks.",
     sidebarObjectInfoModeCommentInline: "Комментарии (после имени)",
     sidebarObjectInfoModeCommentAligned: "Комментарии (выравнивать соседей)",
     sidebarObjectInfoModeCommentRight: "Комментарии (по правому краю)",

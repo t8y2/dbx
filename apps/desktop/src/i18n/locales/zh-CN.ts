@@ -10702,7 +10702,8 @@ export default withEnglishFallback({
     sidebarSearchOpenedDatabasesOnly: "仅搜索已打开的数据库",
     sidebarSearchOpenedDatabasesOnlyDescription: "侧边栏搜索只加载当前连接中已打开的数据库。关闭后会搜索该连接的全部数据库。",
     sidebarObjectInfoMode: "侧边栏附加信息",
-    sidebarObjectInfoModeDescription: "选择在名称后显示注释、对象大小、两者同时显示或不显示。组合模式下，注释跟随名称，大小显示在最右侧，缺少对应数据时自动隐藏。数据库总大小目前支持 PostgreSQL，表大小支持 MySQL、PostgreSQL、GaussDB、KingbaseES、GBase 8a、SQL Server、Oracle、达梦和 ClickHouse。",
+    sidebarObjectInfoModeDescription:
+      "选择在名称后显示注释、对象大小、两者同时显示或不显示。组合模式下，注释跟随名称，大小显示在最右侧，缺少对应数据时自动隐藏。数据库总大小目前支持 PostgreSQL，表大小支持 MySQL、PostgreSQL、GaussDB、KingbaseES、GBase 8a、SQL Server、Oracle、达梦、ClickHouse、Doris 和 StarRocks。",
     sidebarObjectInfoModeCommentInline: "注释（紧跟名称）",
     sidebarObjectInfoModeCommentAligned: "注释（同级对齐）",
     sidebarObjectInfoModeCommentRight: "注释（右侧对齐）",

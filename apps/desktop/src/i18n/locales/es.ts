@@ -9517,7 +9517,7 @@ export default withEnglishFallback({
     sidebarTableSearchEnabledDescription: "Muestra un buscador local bajo bases de datos, schemas o grupos de tablas expandidos para filtrar tablas por separado.",
     sidebarObjectInfoMode: "Información adicional lateral",
     sidebarObjectInfoModeDescription:
-      "Elige comentarios, tamaños de objetos, ambos o ninguna información adicional. Al mostrar ambos, el comentario aparece tras el nombre y el tamaño en el extremo derecho. La información sin datos disponibles se oculta. El tamaño total de bases admite PostgreSQL; los tamaños de tablas admiten MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng y ClickHouse.",
+      "Elige comentarios, tamaños de objetos, ambos o ninguna información adicional. Al mostrar ambos, el comentario aparece tras el nombre y el tamaño en el extremo derecho. La información sin datos disponibles se oculta. El tamaño total de bases admite PostgreSQL; los tamaños de tablas admiten MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, ClickHouse, Doris y StarRocks.",
     sidebarObjectInfoModeCommentInline: "Comentarios (junto al nombre)",
     sidebarObjectInfoModeCommentAligned: "Comentarios (alinear nivel)",
     sidebarObjectInfoModeCommentRight: "Comentarios (alinear a la derecha)",

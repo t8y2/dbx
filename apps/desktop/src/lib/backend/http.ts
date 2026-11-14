@@ -6000,8 +6000,13 @@ export async function getAppSupportInfo(): Promise<AppSupportInfo> {
 // Layout
 // ---------------------------------------------------------------------------
 
-export async function saveSidebarLayout(layout: SidebarLayout): Promise<void> {
-  return post("/api/layout/sidebar", { layout });
+export async function saveSidebarLayout(layout: SidebarLayout, expected?: SidebarLayout | null): Promise<boolean> {
+  if (expected === undefined) {
+    await post("/api/layout/sidebar", { layout });
+    return true;
+  }
+  const result = await post<{ saved: boolean }>("/api/layout/sidebar/conditional", { layout, expected });
+  return result.saved;
 }
 
 export async function loadSidebarLayout(): Promise<SidebarLayout | null> {

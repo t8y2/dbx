@@ -1483,6 +1483,15 @@ pub async fn save_sidebar_layout(state: State<'_, Arc<AppState>>, layout: serde_
 }
 
 #[tauri::command]
+pub async fn save_sidebar_layout_if_unchanged(
+    state: State<'_, Arc<AppState>>,
+    layout: serde_json::Value,
+    expected: Option<serde_json::Value>,
+) -> Result<bool, String> {
+    state.storage.replace_sidebar_layout_if_unchanged(expected.as_ref(), &layout).await
+}
+
+#[tauri::command]
 pub async fn load_sidebar_layout(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
     state.storage.load_sidebar_layout().await
 }

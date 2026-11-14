@@ -7117,6 +7117,79 @@ fn load_mcp_global_policy_in_tx(tx: &rusqlite::Transaction<'_>) -> Result<McpGlo
     })
 }
 
+fn normalize_sidebar_layout_expectation(expected: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    match expected {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(value.clone()),
+    }
+}
+
+fn replace_sidebar_layout_if_unchanged_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    expected: Option<&serde_json::Value>,
+    next: &serde_json::Value,
+) -> Result<bool, String> {
+    let next_json = serde_json::to_string(next).map_err(|error| error.to_string())?;
+    let current_json: Option<String> = tx
+        .query_row("SELECT layout_json FROM sidebar_layout WHERE id = 1", [], |row| row.get(0))
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let current = match current_json {
+        Some(current) => Some(
+            serde_json::from_str::<serde_json::Value>(&current)
+                .map_err(|error| format!("INVALID_SIDEBAR_LAYOUT: {error}"))?,
+        ),
+        None => None,
+    };
+    if current.as_ref() != expected {
+        return Ok(false);
+    }
+    tx.execute("INSERT OR REPLACE INTO sidebar_layout (id, layout_json) VALUES (1, ?1)", [next_json])
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+fn load_mcp_access_policy_in_tx(tx: &rusqlite::Transaction<'_>) -> Result<crate::mcp_access::McpAccessPolicy, String> {
+    let settings_json: Option<String> = tx
+        .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+        .optional()
+        .map_err(|error| format!("MCP_POLICY_UNAVAILABLE: {error}"))?;
+    let settings = match settings_json {
+        Some(json) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+            .map_err(|error| format!("MCP_POLICY_UNAVAILABLE: invalid app settings JSON: {error}"))?,
+        None => serde_json::Map::new(),
+    };
+    if let Some(access) =
+        saved_mcp_access_policy(&settings).map_err(|error| format!("MCP_POLICY_UNAVAILABLE: {error}"))?
+    {
+        return Ok(access);
+    }
+    Ok(crate::mcp_access::McpAccessPolicy::from_v1(&load_mcp_global_policy_in_tx(tx)?))
+}
+
+/// Reject a sidebar write when the policy has become stricter since the caller
+/// read it. This runs inside the same immediate transaction as the layout CAS,
+/// so a concurrent settings save cannot slip between the check and the write.
+fn ensure_mcp_group_mutation_allowed_in_tx(tx: &rusqlite::Transaction<'_>) -> Result<(), String> {
+    let policy = load_mcp_global_policy_in_tx(tx)?;
+    if policy.read_only {
+        return Err(
+            "MCP_READ_ONLY: DBX global MCP read-only mode is enabled. Sidebar group management is not allowed."
+                .to_string(),
+        );
+    }
+    let access = load_mcp_access_policy_in_tx(tx)?;
+    if crate::mcp_policy::policy_uses_connection_groups(&policy)
+        || access.rules.keys().any(|target| matches!(target, crate::mcp_access::McpRuleTarget::Group { .. }))
+    {
+        return Err(
+            "MCP_POLICY_MOVE_BLOCKED: The MCP policy now scopes access by sidebar group; the layout write was rejected."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn ensure_mcp_connection_change_allowed_in_tx(
     tx: &rusqlite::Transaction<'_>,
     target_connection_id: Option<&str>,
@@ -7624,12 +7697,51 @@ impl Storage {
     }
 
     pub async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        self.add_connection_for_mcp_in_group(config, None).await
+    }
+
+    /// Add a connection and, when `group_id` is set, place it in that sidebar
+    /// group in the same transaction. A missing group rolls the connection
+    /// insert back, so MCP never reports an added connection that silently
+    /// stayed ungrouped.
+    pub async fn add_connection_for_mcp_in_group(
+        &self,
+        config: ConnectionConfig,
+        group_id: Option<&str>,
+    ) -> Result<ConnectionConfig, String> {
         let config = config.canonicalized();
+        let group_id = group_id.map(str::to_string);
         let codec = self.secret_codec_for_write(connection_config_has_inline_secrets(&config)).await?;
         self.with_conn(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
-            ensure_mcp_connection_change_allowed_in_tx(&tx, None)?;
+            if group_id.is_some() {
+                ensure_mcp_group_mutation_allowed_in_tx(&tx)?;
+            } else {
+                ensure_mcp_connection_change_allowed_in_tx(&tx, None)?;
+            }
             persist_connection_in_tx(&tx, &codec, &config)?;
+            if let Some(group_id) = group_id.as_deref() {
+                let layout_json: Option<String> = tx
+                    .query_row("SELECT layout_json FROM sidebar_layout WHERE id = 1", [], |row| row.get(0))
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+                let layout = match layout_json {
+                    Some(layout) => Some(
+                        serde_json::from_str::<serde_json::Value>(&layout)
+                            .map_err(|error| format!("INVALID_SIDEBAR_LAYOUT: {error}"))?,
+                    ),
+                    None => None,
+                };
+                let next = crate::ai::sidebar_groups::append_connection(
+                    layout.as_ref(),
+                    &config.id,
+                    &crate::ai::sidebar_groups::GroupSelector::Id(group_id.to_string()),
+                )
+                .map_err(|error| error.to_string())?;
+                let next_json = serde_json::to_string(&next).map_err(|error| error.to_string())?;
+                tx.execute("INSERT OR REPLACE INTO sidebar_layout (id, layout_json) VALUES (1, ?1)", [next_json])
+                    .map_err(|error| error.to_string())?;
+            }
             tx.commit().map_err(|e| e.to_string())?;
             Ok(config)
         })
@@ -8997,6 +9109,55 @@ impl Storage {
             })
             .await?;
         json.map(|value| serde_json::from_str(&value).map_err(|e| e.to_string())).transpose()
+    }
+
+    /// Persist `next` only when the row still holds `expected`. `None` means
+    /// the caller read an absent row. The read and write share one immediate
+    /// transaction, so two MCP calls cannot silently overwrite each other's
+    /// group move; `false` tells the caller to re-read and retry.
+    ///
+    /// The comparison is semantic (parsed JSON), not textual: the desktop may
+    /// rewrite the same tree with different key order or whitespace.
+    pub async fn replace_sidebar_layout_if_unchanged(
+        &self,
+        expected: Option<&serde_json::Value>,
+        next: &serde_json::Value,
+    ) -> Result<bool, String> {
+        let expected = normalize_sidebar_layout_expectation(expected);
+        let next = next.clone();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            if !replace_sidebar_layout_if_unchanged_in_tx(&tx, expected.as_ref(), &next)? {
+                return Ok(false);
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(true)
+        })
+        .await
+    }
+
+    /// Same compare-and-swap as [`Self::replace_sidebar_layout_if_unchanged`],
+    /// but re-reads the MCP policy inside the write transaction. A policy save
+    /// that turns on read-only mode or group-scoped access after the caller's
+    /// initial check therefore rejects the move instead of letting it change a
+    /// connection's permission boundary.
+    pub async fn replace_sidebar_layout_if_unchanged_for_group_move(
+        &self,
+        expected: Option<&serde_json::Value>,
+        next: &serde_json::Value,
+    ) -> Result<bool, String> {
+        let expected = normalize_sidebar_layout_expectation(expected);
+        let next = next.clone();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            ensure_mcp_group_mutation_allowed_in_tx(&tx)?;
+            if !replace_sidebar_layout_if_unchanged_in_tx(&tx, expected.as_ref(), &next)? {
+                return Ok(false);
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(true)
+        })
+        .await
     }
 
     pub async fn save_table_vgroups(&self, scope_key: &str, layout: &serde_json::Value) -> Result<(), String> {

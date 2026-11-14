@@ -226,6 +226,113 @@ export function mergeSidebarLayout(current: SidebarLayout, imported: SidebarLayo
   return { groups, order };
 }
 
+/**
+ * Three-way merge used when a conditional save discovers that another writer
+ * (for example the MCP server) changed the layout while a local edit was in
+ * its debounce window. Local group additions, renames and connection moves win
+ * over the base snapshot; everything else keeps the remote placement so a
+ * concurrent MCP write is not reverted.
+ */
+export function mergeSidebarLayoutConflict(base: SidebarLayout | null, local: SidebarLayout, remote: SidebarLayout, connectionIds: string[]): SidebarLayout {
+  const mergedConnectionIds = new Set(connectionIds);
+  const collectConnectionIds = (entries: SidebarOrderEntry[]) => {
+    for (const entry of entries) {
+      if (entry.type === "connection") mergedConnectionIds.add(entry.id);
+      else collectConnectionIds(entryChildren(entry));
+    }
+  };
+  for (const layout of [base, local, remote]) {
+    if (layout) collectConnectionIds(layout.order);
+  }
+  const connectionIdsForMerge = [...mergedConnectionIds];
+  const baseLayout = reconcileLayout(connectionIdsForMerge, base);
+  const localLayout = reconcileLayout(connectionIdsForMerge, local);
+  let merged: SidebarLayout = {
+    groups: remote.groups.map((group) => ({ ...group })),
+    order: cloneEntries(remote.order),
+  };
+  const baseGroups = new Map(baseLayout.groups.map((group) => [group.id, group]));
+  const localGroups = new Map(localLayout.groups.map((group) => [group.id, group]));
+  const groupNameById = new Map(merged.groups.map((group) => [group.id, group.name]));
+  const remappedGroupIds = new Map<string, string>();
+
+  const childGroupByName = (parentId: string | null, name: string): string | null => {
+    let entries = merged.order;
+    if (parentId) {
+      const parent = findGroupEntry(merged.order, parentId);
+      if (!parent) return null;
+      entries = entryChildren(parent);
+    }
+    const target = name.trim().toLocaleLowerCase();
+    const found = entries.find((entry): entry is Extract<SidebarOrderEntry, { type: "group" }> => entry.type === "group" && (groupNameById.get(entry.id) ?? "").trim().toLocaleLowerCase() === target);
+    return found?.id ?? null;
+  };
+
+  const insertGroup = (group: ConnectionGroup, parentId: string | null) => {
+    merged.groups.push({ ...group });
+    groupNameById.set(group.id, group.name);
+    const entry: SidebarOrderEntry = { type: "group", id: group.id, children: [] };
+    if (parentId) {
+      const parent = findGroupEntry(merged.order, parentId);
+      if (parent) {
+        parent.children ??= [];
+        parent.children.push(entry);
+        return;
+      }
+    }
+    merged.order.push(entry);
+  };
+
+  const applyLocalGroups = (entries: SidebarOrderEntry[], parentLocalId: string | null) => {
+    for (const entry of entries) {
+      if (entry.type !== "group") continue;
+      const group = localGroups.get(entry.id);
+      if (!group) continue;
+      const parentRemoteId = parentLocalId ? (remappedGroupIds.get(parentLocalId) ?? parentLocalId) : null;
+      if (!baseGroups.has(group.id)) {
+        const existing = childGroupByName(parentRemoteId, group.name);
+        if (existing) {
+          remappedGroupIds.set(group.id, existing);
+        } else {
+          insertGroup(group, parentRemoteId);
+          remappedGroupIds.set(group.id, group.id);
+        }
+      } else {
+        const baseGroup = baseGroups.get(group.id);
+        const remoteGroup = merged.groups.find((current) => current.id === group.id);
+        if (baseGroup && remoteGroup) {
+          if (group.name !== baseGroup.name) {
+            remoteGroup.name = group.name;
+            groupNameById.set(group.id, group.name);
+          }
+          if (group.collapsed !== baseGroup.collapsed) remoteGroup.collapsed = group.collapsed;
+        }
+      }
+      applyLocalGroups(entryChildren(entry), group.id);
+    }
+  };
+  applyLocalGroups(localLayout.order, null);
+
+  // A group the user deleted locally must not come back. `deleteGroup` flattens
+  // its children into the parent, so remote-added members survive the merge.
+  for (const group of baseLayout.groups) {
+    if (localGroups.has(group.id)) continue;
+    merged = deleteGroup(merged, group.id);
+    groupNameById.delete(group.id);
+    remappedGroupIds.delete(group.id);
+  }
+
+  for (const connectionId of connectionIdsForMerge) {
+    const baseGroupId = findConnectionLocation(baseLayout, connectionId)?.groupId ?? null;
+    const localGroupId = findConnectionLocation(localLayout, connectionId)?.groupId ?? null;
+    if (localGroupId === baseGroupId) continue;
+    const targetGroupId = localGroupId ? (remappedGroupIds.get(localGroupId) ?? localGroupId) : null;
+    merged = moveConnectionToGroup(merged, connectionId, targetGroupId);
+  }
+
+  return reconcileLayout(connectionIdsForMerge, merged);
+}
+
 export function connectionSidebarSearchAliases(config: Pick<ConnectionConfig, "host" | "username">): string[] {
   return [config.host, config.username].filter((value) => value.trim().length > 0);
 }

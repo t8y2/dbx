@@ -70,6 +70,7 @@ import {
   collapseAllGroups as collapseAllGroupsOp,
   moveConnectionToGroup as moveConnectionToGroupOp,
   mergeSidebarLayout,
+  mergeSidebarLayoutConflict,
   reorderEntry as reorderEntryOp,
   reorderEntries as reorderEntriesOp,
   buildConnectionGroupPathMap,
@@ -11011,6 +11012,44 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  /** Write the layout with a compare-and-swap baseline. A conflict means the
+   *  disk changed while this snapshot was waiting in the debounce queue (for
+   *  example the MCP server created a group); re-read the row, merge the local
+   *  changes over it and retry instead of overwriting the other writer. */
+  async function saveSidebarLayoutWithMerge(layout: SidebarLayout, revision: number): Promise<{ persisted: string }> {
+    const connectionIds = connections.value.map((connection) => connection.id);
+    let candidate = revision === sidebarLayoutRevision ? layout : sidebarLayout.value;
+    let candidateRevision = revision === sidebarLayoutRevision ? revision : sidebarLayoutRevision;
+    let expected = sidebarLayoutPersisted;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const expectedLayout = expected ? (JSON.parse(expected) as SidebarLayout) : null;
+      const saved = await api.saveSidebarLayout(candidate, expectedLayout);
+      if (saved !== false) return { persisted: JSON.stringify(candidate) };
+      const remote = await api.loadSidebarLayout();
+      const remoteLayout = reconcileLayout(connectionIds, remote);
+      // A newer local edit may have landed during the conflict round-trip; merge
+      // that edit too instead of persisting the stale candidate.
+      if (candidateRevision !== sidebarLayoutRevision) {
+        // The newer edit is based on the same candidate we tried to write, so
+        // keep the original base and merge again against the fresh remote.
+        candidate = sidebarLayout.value;
+        candidateRevision = sidebarLayoutRevision;
+        continue;
+      }
+      const merged = mergeSidebarLayoutConflict(expectedLayout, candidate, remoteLayout, connectionIds);
+      candidate = merged;
+      candidateRevision = sidebarLayoutRevision;
+      expected = remote ? JSON.stringify(remote) : null;
+      if (JSON.stringify(merged) !== JSON.stringify(sidebarLayout.value)) {
+        sidebarLayout.value = merged;
+        sidebarLayoutRevision += 1;
+        candidateRevision = sidebarLayoutRevision;
+        rebuildTreeNodes();
+      }
+    }
+    throw new Error("sidebar layout conflict");
+  }
+
   /** Writes are serialized, because a save that started earlier must land before
    *  the next one: an older snapshot committing after a newer one would leave the
    *  row stale and the poll would then adopt it over the newer local layout. */
@@ -11018,13 +11057,12 @@ export const useConnectionStore = defineStore("connection", () => {
     sidebarLayoutRevision += 1;
     sidebarLayoutSaveVersion += 1;
     const version = sidebarLayoutSaveVersion;
-    const snapshot = JSON.stringify(layout);
     const revision = sidebarLayoutRevision;
-    const run = () => api.saveSidebarLayout(layout);
+    const run = () => saveSidebarLayoutWithMerge(layout, revision);
     // A write that fails once is retried before the guard opens again: the poll
     // only adopts remote layouts while memory matches the disk, so a save that
     // never retries would freeze external sync until the next local edit.
-    const write = (retriesLeft: number): Promise<void> => {
+    const write = (retriesLeft: number): Promise<{ persisted: string }> => {
       const save = sidebarLayoutSaveChain.then(run, run);
       sidebarLayoutSaveChain = save.then(
         () => undefined,
@@ -11045,11 +11083,11 @@ export const useConnectionStore = defineStore("connection", () => {
         }).then(() => write(retriesLeft - 1));
       });
     };
-    const tracked = write(3).then(() => {
-      // Only a save that still describes the current layout counts as persisted;
-      // if the user edited meanwhile, the guard stays closed until the follow-up
-      // save lands.
-      if (revision === sidebarLayoutRevision) sidebarLayoutPersisted = snapshot;
+    const tracked = write(3).then(({ persisted }) => {
+      // The watermark always describes the row this write settled. If the user
+      // edited meanwhile, memory differs from disk and the next queued save
+      // merges against this watermark before writing.
+      sidebarLayoutPersisted = persisted;
     });
     sidebarLayoutPersistInFlight = tracked;
     // Settling is not an edit: bumping the revision here would invalidate the

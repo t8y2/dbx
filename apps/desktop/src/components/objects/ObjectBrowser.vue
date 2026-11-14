@@ -694,18 +694,18 @@ const objectColumnOrderStorageKey = computed(() => `${objectColumnVisibilityStor
 const availableObjectColumnDefinitions = computed(() => [
   { key: "name" as const, label: t("objects.name") },
   { key: "type" as const, label: t("objects.type") },
+  ...(showObjectRowStats.value ? [{ key: "estimatedRows" as const, label: objectRowsLabel.value }] : []),
+  { key: "comment" as const, label: t("objects.comment") },
+  ...(showObjectSizeStats.value ? [{ key: "totalBytes" as const, label: t("objects.size") }] : []),
+  ...(hasUpdatedAt.value ? [{ key: "updated_at" as const, label: t("objects.updatedAt") }] : []),
+  ...(hasCreatedAt.value ? [{ key: "created_at" as const, label: t("objects.createdAt") }] : []),
+  ...(showMysqlAutoIncrementColumn.value ? [{ key: "autoIncrement" as const, label: t("grid.tableInfoAutoIncrement") }] : []),
   ...(showMysqlTableCharsetColumns.value
     ? [
         { key: "characterSet" as const, label: t("structureEditor.characterSet") },
         { key: "collation" as const, label: t("structureEditor.collation") },
       ]
     : []),
-  ...(showObjectRowStats.value ? [{ key: "estimatedRows" as const, label: objectRowsLabel.value }] : []),
-  ...(showObjectSizeStats.value ? [{ key: "totalBytes" as const, label: t("objects.size") }] : []),
-  ...(showMysqlAutoIncrementColumn.value ? [{ key: "autoIncrement" as const, label: t("grid.tableInfoAutoIncrement") }] : []),
-  ...(hasCreatedAt.value ? [{ key: "created_at" as const, label: t("objects.createdAt") }] : []),
-  ...(hasUpdatedAt.value ? [{ key: "updated_at" as const, label: t("objects.updatedAt") }] : []),
-  { key: "comment" as const, label: t("objects.comment") },
 ]);
 const objectColumnDefinitions = computed(() => {
   const ranks = new Map(objectColumnOrder.value.map((key, index) => [key, index]));
@@ -1316,17 +1316,7 @@ function toggleSort(key: ObjectBrowserSortKey) {
   sortDirection.value = initialObjectBrowserSortDirection(key);
 }
 
-const sortKeyOptions = computed<ObjectBrowserSortKey[]>(() => {
-  const options: ObjectBrowserSortKey[] = ["name", "type"];
-  if (showMysqlTableCharsetColumns.value) options.push("characterSet", "collation");
-  if (showObjectRowStats.value) options.push("estimatedRows");
-  if (showObjectSizeStats.value) options.push("totalBytes");
-  if (showMysqlAutoIncrementColumn.value) options.push("autoIncrement");
-  if (hasCreatedAt.value) options.push("created_at");
-  if (hasUpdatedAt.value) options.push("updated_at");
-  options.push("comment");
-  return options;
-});
+const sortKeyOptions = computed<ObjectBrowserSortKey[]>(() => objectColumnDefinitions.value.map((column) => column.key));
 
 watch(sortKeyOptions, (options) => {
   if (!options.includes(sortKey.value)) {
@@ -5628,8 +5618,9 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     applyObjectBrowserRows(cached.rows);
     finishOnce();
     // 统计信息随对象列表缓存，过期时只在后台刷新统计，保留对象列表本身。
-    // MySQL 的旧缓存可能尚未合并表排序规则，即使仍新鲜也要补读一次。
-    const missingMysqlTableMetadata = showMysqlTableCharsetColumns.value && rows.value.some((row) => row.type === "TABLE" && (row.collation === undefined || row.autoIncrement === undefined));
+    // Backfill MySQL scaffolds cached before all table metadata was merged,
+    // even while fresh. Null timestamps are known to be unavailable.
+    const missingMysqlTableMetadata = showMysqlTableCharsetColumns.value && rows.value.some((row) => row.type === "TABLE" && (row.collation === undefined || row.autoIncrement === undefined || row.created_at === undefined || row.updated_at === undefined));
     const statistics = cached.stale || missingMysqlTableMetadata ? revalidateCachedObjectStatistics(request, cacheWriteToken) : undefined;
     // 缺失的注释/时间戳在统计读完后补齐，避免两条重读同时打库。
     if (detailsPassEnabled.value && !rows.value.some((row) => row.comment?.trim() || row.created_at?.trim() || row.updated_at?.trim())) {
@@ -5923,6 +5914,8 @@ function mergeObjectStatistics(stats: ObjectStatistics[], fallbackSchema: string
       ...row,
       estimatedRows: normalizeStatisticNumber(stat.estimated_rows),
       totalBytes: normalizeStatisticNumber(stat.total_bytes),
+      created_at: stat.created_at ?? row.created_at ?? null,
+      updated_at: stat.updated_at ?? row.updated_at ?? null,
       ...(effectiveDatabaseType.value === "mysql" ? { characterSet: mysqlTableCharsetFromCollation(stat.collation) || null, collation: stat.collation?.trim() || null, autoIncrement: stat.auto_increment?.trim() || null } : {}),
     };
   });

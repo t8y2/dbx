@@ -6821,21 +6821,26 @@ mod tests {
     #[test]
     fn sorted_cap_order_expression_tiebreaks_with_primary_keys() {
         // A sort column that is the whole primary key already orders uniquely.
-        assert_eq!(sorted_cap_order_expression("id", true, &["id".to_string()], &DatabaseType::Mysql), "\"id\" DESC");
+        assert_eq!(sorted_cap_order_expression("id", true, &["id".to_string()], &DatabaseType::Mysql), "`id` DESC");
         // A non-key sort column gets the key as an ascending tiebreaker, so a tie
         // at the cap boundary keeps the same rows on every run.
         assert_eq!(
             sorted_cap_order_expression("updated_at", false, &["id".to_string()], &DatabaseType::Mysql),
-            "\"updated_at\" ASC, \"id\" ASC"
+            "`updated_at` ASC, `id` ASC"
         );
         // Composite keys contribute only the parts the sort column does not cover.
         assert_eq!(
             sorted_cap_order_expression("id", true, &["tenant".to_string(), "id".to_string()], &DatabaseType::Mysql),
-            "\"id\" DESC, \"tenant\" ASC"
+            "`id` DESC, `tenant` ASC"
         );
         // No key: the sort column alone; ties fall back to the engine order and
         // the dialog warns about run-to-run differences.
-        assert_eq!(sorted_cap_order_expression("created_at", true, &[], &DatabaseType::Mysql), "\"created_at\" DESC");
+        assert_eq!(sorted_cap_order_expression("created_at", true, &[], &DatabaseType::Mysql), "`created_at` DESC");
+        // Postgres quotes with double quotes; the tiebreak rule is dialect-agnostic.
+        assert_eq!(
+            sorted_cap_order_expression("updated_at", true, &["id".to_string()], &DatabaseType::Postgres),
+            "\"updated_at\" DESC, \"id\" ASC"
+        );
     }
 
     #[tokio::test]

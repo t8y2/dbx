@@ -20,10 +20,27 @@ export const STRUCTURE_PEEK_CASCADE = 24;
 export const STRUCTURE_PEEK_BASE_Z_INDEX = 40;
 export const STRUCTURE_PEEK_MAX_Z_INDEX = 49;
 
-/** Next z-index for a peek panel, kept inside a band strictly below dialogs. */
-export function nextStructurePeekZIndex(previous: number): number {
-  const base = Number.isFinite(previous) ? Math.max(STRUCTURE_PEEK_BASE_Z_INDEX, Math.floor(previous)) : STRUCTURE_PEEK_BASE_Z_INDEX;
-  return Math.min(base + 1, STRUCTURE_PEEK_MAX_Z_INDEX);
+/** Number of layers available inside the peek band. */
+export const STRUCTURE_PEEK_DEPTH = STRUCTURE_PEEK_MAX_Z_INDEX - STRUCTURE_PEEK_BASE_Z_INDEX + 1;
+
+/**
+ * z-indexes for `count` open panels, ordered bottom to top: the last entry is
+ * the panel the user activated most recently and always lands on
+ * STRUCTURE_PEEK_MAX_Z_INDEX, so the whole stack stays strictly below dialogs.
+ *
+ * Peek panels are re-stacked by their current order instead of being handed a
+ * monotonic counter. A counter saturates at the top of the band after a handful
+ * of activations, after which two panels share one layer and the older panel can
+ * no longer be raised above the newer one even when clicked last. With more open
+ * panels than band slots the ones furthest back share the base layer while the
+ * front STRUCTURE_PEEK_DEPTH panels keep a strict order.
+ */
+export function structurePeekZIndexesByOrder(count: number): number[] {
+  const total = Math.max(0, Math.floor(Number.isFinite(count) ? count : 0));
+  return Array.from({ length: total }, (_unused, index) => {
+    const offset = Math.max(0, index - (total - STRUCTURE_PEEK_DEPTH));
+    return STRUCTURE_PEEK_BASE_Z_INDEX + offset;
+  });
 }
 
 export function defaultStructurePeekSize(viewportWidth: number, viewportHeight: number): { width: number; height: number } {

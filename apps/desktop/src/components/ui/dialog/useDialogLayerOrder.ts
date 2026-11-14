@@ -1,7 +1,7 @@
 import { injectDialogRootContext, useForwardExpose } from "reka-ui";
 import { computed, onBeforeUnmount, onUpdated, ref, watch, watchPostEffect, type Ref } from "vue";
 
-const BASE_DIALOG_Z_INDEX = 50;
+export const BASE_DIALOG_Z_INDEX = 50;
 const DIALOG_TOP_Z_INDEX_VAR = "--dbx-dialog-top-z-index";
 const FLOATING_LAYER_Z_INDEX_VAR = "--dbx-floating-layer-z-index";
 

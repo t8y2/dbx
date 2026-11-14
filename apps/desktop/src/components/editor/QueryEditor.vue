@@ -57,7 +57,7 @@ import type { ColumnInfo } from "@/types/database";
 import { createColumnReferencePayload, tableReferenceInsertText } from "@/lib/editor/queryEditorTableDrop";
 import { clearRememberedFocusedQueryEditorView, focusedQueryEditorView, queryEditorInsertContext, registerQueryEditorInsertContext, rememberFocusedQueryEditorView, unregisterQueryEditorInsertContext } from "@/lib/editor/focusedQueryEditorView";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
-import { STRUCTURE_PEEK_BASE_Z_INDEX, nextStructurePeekZIndex, structurePeekPanelId } from "@/lib/editor/structurePeekPanel";
+import { structurePeekPanelId, structurePeekZIndexesByOrder } from "@/lib/editor/structurePeekPanel";
 import { createQueryEditorNativeSelectionGuard, parkEditorNativeSelection, type EditorNativeSelectionPark } from "@/lib/editor/queryEditorNativeSelection";
 import CodeSnapshotDialog from "@/components/codeSnapshot/CodeSnapshotDialog.vue";
 import QueryEditorContextMenu, { type QueryEditorContextMenuState, type QueryEditorContextMenuActions } from "./QueryEditorContextMenu.vue";
@@ -366,18 +366,32 @@ interface StructurePeekPanelState {
 
 const structurePeekPanels = ref<StructurePeekPanelState[]>([]);
 let structurePeekRequestSeq = 0;
-let structurePeekZIndexSeq = STRUCTURE_PEEK_BASE_Z_INDEX;
 let structurePeekCascadeSeq = 0;
 
+/**
+ * Peek panels are kept in activation order (back to front) and their z-index is
+ * derived from that order, so any number of activations keeps a strict order and
+ * the stack never leaves the band below modal dialogs.
+ */
+function restackStructurePeekPanels() {
+  const zIndexes = structurePeekZIndexesByOrder(structurePeekPanels.value.length);
+  structurePeekPanels.value.forEach((panel, index) => {
+    panel.zIndex = zIndexes[index] ?? panel.zIndex;
+  });
+}
+
 function bringStructurePeekToFront(panelId: string) {
-  const panel = structurePeekPanels.value.find((item) => item.id === panelId);
+  const index = structurePeekPanels.value.findIndex((item) => item.id === panelId);
+  if (index < 0) return;
+  const [panel] = structurePeekPanels.value.splice(index, 1);
   if (!panel) return;
-  structurePeekZIndexSeq = nextStructurePeekZIndex(structurePeekZIndexSeq);
-  panel.zIndex = structurePeekZIndexSeq;
+  structurePeekPanels.value.push(panel);
+  restackStructurePeekPanels();
 }
 
 function closeStructurePeekPanel(panelId: string) {
   structurePeekPanels.value = structurePeekPanels.value.filter((item) => item.id !== panelId);
+  restackStructurePeekPanels();
 }
 
 async function loadStructurePeekColumns(panelId: string, requestId: number, target: SqlObjectNavigationTarget, database: string, schema: string) {
@@ -427,7 +441,6 @@ async function openTableStructurePeek(target: SqlObjectNavigationTarget) {
     return;
   }
 
-  structurePeekZIndexSeq = nextStructurePeekZIndex(structurePeekZIndexSeq);
   const requestId = ++structurePeekRequestSeq;
   const cascadeIndex = structurePeekCascadeSeq++;
   const panel: StructurePeekPanelState = {
@@ -436,11 +449,12 @@ async function openTableStructurePeek(target: SqlObjectNavigationTarget) {
     columns: [],
     loading: true,
     error: "",
-    zIndex: structurePeekZIndexSeq,
+    zIndex: 0,
     cascadeIndex,
     requestId,
   };
   structurePeekPanels.value = [...structurePeekPanels.value, panel];
+  restackStructurePeekPanels();
   await loadStructurePeekColumns(id, requestId, panel.target, database, schema);
 }
 

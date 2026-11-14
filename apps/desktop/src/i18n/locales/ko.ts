@@ -11262,6 +11262,9 @@ export default withEnglishFallback({
     rabbitmqPublishRate: "게시",
     rabbitmqDeliverRate: "전달/획득",
     rabbitmqAckRate: "ACK",
+    autoLoadKafkaTopics: "토픽 자동 로드",
+    loadTopics: "토픽 로드",
+    kafkaTopicsNotLoaded: "「토픽 로드」를 클릭하여 목록을 가져오세요.",
   },
   mqExchanges: {
     searchPlaceholder: "익스체인지 검색",

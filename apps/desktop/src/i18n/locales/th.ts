@@ -13128,6 +13128,9 @@ export default withEnglishFallback({
     rabbitmqPublishRate: "Publish",
     rabbitmqDeliverRate: "Deliver/Get",
     rabbitmqAckRate: "Ack",
+    autoLoadKafkaTopics: "โหลดท็อปปิกอัตโนมัติ",
+    loadTopics: "โหลดท็อปปิก",
+    kafkaTopicsNotLoaded: "คลิก「โหลดท็อปปิก」เพื่อรับรายการ",
   },
   mqExchanges: {
     searchPlaceholder: "ค้นหา Exchange",

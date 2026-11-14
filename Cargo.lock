@@ -2584,8 +2584,11 @@ dependencies = [
 name = "dbx-formats"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "calamine",
  "chrono",
+ "flate2",
+ "num-bigint 0.4.8",
  "serde",
  "serde_json",
  "tempfile",
@@ -2599,8 +2602,10 @@ version = "0.4.143"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "dbx-core",
+ "dbx-formats",
  "dirs",
  "env_logger",
  "futures",

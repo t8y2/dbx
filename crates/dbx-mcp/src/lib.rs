@@ -8,6 +8,7 @@ pub mod http_auth;
 pub mod paths;
 pub mod plugin_tools;
 pub mod products;
+mod redis_decode;
 pub mod runtime;
 pub mod server;
 pub mod session;

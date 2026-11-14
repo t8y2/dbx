@@ -1,5 +1,12 @@
 pub mod csv_export;
 pub mod export_split_zip;
+mod redis_codec_support;
+pub mod redis_compression;
+pub mod redis_java;
+pub mod redis_msgpack;
+pub mod redis_php;
+pub mod redis_pickle;
+pub mod redis_protobuf;
 pub mod sql_file_zip_package;
 pub mod temporal_format;
 pub mod text_export;

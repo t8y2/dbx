@@ -6,6 +6,9 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
+base64 = "0.22"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+num-bigint = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision", "preserve_order"] }
 chrono = { version = "0.4", features = ["serde"] }

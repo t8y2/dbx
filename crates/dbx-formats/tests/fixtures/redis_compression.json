@@ -1,0 +1,242 @@
+[
+  {
+    "name": "gzip-msgpack-map",
+    "compression": "gzip",
+    "codec": "msgpack",
+    "hex": "1f8b08000000000002ff6b5a5292589cbd383125656959624e692a33001ed4c73611000000",
+    "expected": {
+      "task": "add",
+      "value": 3
+    }
+  },
+  {
+    "name": "zlib-msgpack-map",
+    "compression": "zlib",
+    "codec": "msgpack",
+    "hex": "789c6b5a5292589cbd383125656959624e692a3300485f076b",
+    "expected": {
+      "task": "add",
+      "value": 3
+    }
+  },
+  {
+    "name": "deflate-msgpack-map",
+    "compression": "deflate",
+    "codec": "msgpack",
+    "hex": "6b5a5292589cbd383125656959624e692a3300",
+    "expected": {
+      "task": "add",
+      "value": 3
+    }
+  },
+  {
+    "name": "gzip-pickle-protocol-4",
+    "compression": "gzip",
+    "codec": "pickle",
+    "hex": "1f8b08000000000002ff6b6099dacb0001b553347ad88a4b124b4a8ba7f4b007873a3bbb06074fe9612b4a2d2ecd299902926629492cce9ed2c39c989232a587b52c31a734758a3773690f477246664e4a516ade9458a0785a4e627a3190a5d1d1e997dac3999258921a9f929f973aa58703c42ec9cc45614e9ee2ccc5fe824d8207ec8a29ad5382a694ea010004d4850198000000",
+    "expected": {
+      "status": "SUCCESS",
+      "result": {
+        "task": "add",
+        "value": 3
+      },
+      "children": [],
+      "flags": [
+        true,
+        false,
+        null
+      ],
+      "date_done": "2024-06-24T12:00:00"
+    }
+  },
+  {
+    "name": "zlib-pickle-protocol-4",
+    "compression": "zlib",
+    "codec": "pickle",
+    "hex": "789c6b6099dacb0001b553347ad88a4b124b4a8ba7f4b007873a3bbb06074fe9612b4a2d2ecd299902926629492cce9ed2c39c989232a587b52c31a734758a3773690f477246664e4a516ade9458a0785a4e627a3190a5d1d1e997dac3999258921a9f929f973aa58703c42ec9cc45614e9ee2ccc5fe824d8207ec8a29ad5382a694ea010032da36fa",
+    "expected": {
+      "status": "SUCCESS",
+      "result": {
+        "task": "add",
+        "value": 3
+      },
+      "children": [],
+      "flags": [
+        true,
+        false,
+        null
+      ],
+      "date_done": "2024-06-24T12:00:00"
+    }
+  },
+  {
+    "name": "deflate-pickle-protocol-4",
+    "compression": "deflate",
+    "codec": "pickle",
+    "hex": "6b6099dacb0001b553347ad88a4b124b4a8ba7f4b007873a3bbb06074fe9612b4a2d2ecd299902926629492cce9ed2c39c989232a587b52c31a734758a3773690f477246664e4a516ade9458a0785a4e627a3190a5d1d1e997dac3999258921a9f929f973aa58703c42ec9cc45614e9ee2ccc5fe824d8207ec8a29ad5382a694ea0100",
+    "expected": {
+      "status": "SUCCESS",
+      "result": {
+        "task": "add",
+        "value": 3
+      },
+      "children": [],
+      "flags": [
+        true,
+        false,
+        null
+      ],
+      "date_done": "2024-06-24T12:00:00"
+    }
+  },
+  {
+    "name": "gzip-php-map",
+    "compression": "gzip",
+    "codec": "php-serialize",
+    "hex": "1f8b08000000000002ff4bb432b2aa2eb632b652ca2d4e57b22eb6b2b452ca48cdc9c9574849aa00f14dad9492f34bf34a94ac53ac0cf54cad6b01732b483b32000000",
+    "expected": {
+      "msg": "hello dbx",
+      "count": 1.5
+    }
+  },
+  {
+    "name": "zlib-php-map",
+    "compression": "zlib",
+    "codec": "php-serialize",
+    "hex": "789c4bb432b2aa2eb632b652ca2d4e57b22eb6b2b452ca48cdc9c9574849aa00f14dad9492f34bf34a94ac53ac0cf54cad6b01825f0f22",
+    "expected": {
+      "msg": "hello dbx",
+      "count": 1.5
+    }
+  },
+  {
+    "name": "deflate-php-map",
+    "compression": "deflate",
+    "codec": "php-serialize",
+    "hex": "4bb432b2aa2eb632b652ca2d4e57b22eb6b2b452ca48cdc9c9574849aa00f14dad9492f34bf34a94ac53ac0cf54cad6b01",
+    "expected": {
+      "msg": "hello dbx",
+      "count": 1.5
+    }
+  },
+  {
+    "name": "gzip-protobuf-fields",
+    "compression": "gzip",
+    "codec": "protobuf",
+    "hex": "1f8b08000000000002ffe398c628c49a919a93930f00675ec6d50a000000",
+    "expected": {
+      "1": 150,
+      "2": "hello"
+    }
+  },
+  {
+    "name": "zlib-protobuf-fields",
+    "compression": "zlib",
+    "codec": "protobuf",
+    "hex": "789ce398c628c49a919a93930f000c6b02cb",
+    "expected": {
+      "1": 150,
+      "2": "hello"
+    }
+  },
+  {
+    "name": "deflate-protobuf-fields",
+    "compression": "deflate",
+    "codec": "protobuf",
+    "hex": "e398c628c49a919a93930f00",
+    "expected": {
+      "1": 150,
+      "2": "hello"
+    }
+  },
+  {
+    "name": "gzip-string",
+    "compression": "gzip",
+    "codec": "java-serialized",
+    "hex": "1f8b08000000000002ff5bf39681b58481a3383f37b524b5a20400d2b6e6210f000000",
+    "expected": "sometext"
+  },
+  {
+    "name": "zlib-string",
+    "compression": "zlib",
+    "codec": "java-serialized",
+    "hex": "789c5bf39681b58481a3383f37b524b5a204002c240594",
+    "expected": "sometext"
+  },
+  {
+    "name": "deflate-string",
+    "compression": "deflate",
+    "codec": "java-serialized",
+    "hex": "5bf39681b58481a3383f37b524b5a20400",
+    "expected": "sometext"
+  },
+  {
+    "name": "gzip-plain-text",
+    "compression": "gzip",
+    "codec": null,
+    "hex": "1f8b08000000000002ffcb48cdc9c9574849aa000008ac025709000000",
+    "expected": "hello dbx"
+  },
+  {
+    "name": "zlib-plain-text",
+    "compression": "zlib",
+    "codec": null,
+    "hex": "789ccb48cdc9c9574849aa000011680373",
+    "expected": "hello dbx"
+  },
+  {
+    "name": "deflate-plain-text",
+    "compression": "deflate",
+    "codec": null,
+    "hex": "cb48cdc9c9574849aa0000",
+    "expected": "hello dbx"
+  },
+  {
+    "name": "gzip-binary",
+    "compression": "gzip",
+    "codec": null,
+    "hex": "1f8b08000000000002ff63f80f0072fddb6c02000000",
+    "expected": {
+      "$bytes": "AP8="
+    }
+  },
+  {
+    "name": "zlib-binary",
+    "compression": "zlib",
+    "codec": null,
+    "hex": "789c63f80f0001010100",
+    "expected": {
+      "$bytes": "AP8="
+    }
+  },
+  {
+    "name": "deflate-binary",
+    "compression": "deflate",
+    "codec": null,
+    "hex": "63f80f00",
+    "expected": {
+      "$bytes": "AP8="
+    }
+  },
+  {
+    "name": "gzip-empty",
+    "compression": "gzip",
+    "codec": null,
+    "hex": "1f8b08000000000002ff03000000000000000000",
+    "expected": ""
+  },
+  {
+    "name": "zlib-empty",
+    "compression": "zlib",
+    "codec": null,
+    "hex": "789c030000000001",
+    "expected": ""
+  },
+  {
+    "name": "deflate-empty",
+    "compression": "deflate",
+    "codec": null,
+    "hex": "0300",
+    "expected": ""
+  }
+]

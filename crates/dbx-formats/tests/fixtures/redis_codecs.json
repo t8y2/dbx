@@ -1,0 +1,290 @@
+[
+  {
+    "name": "pickle-protocol-0",
+    "codec": "pickle",
+    "hex": "286470300a567374617475730a70310a56535543434553530a70320a7356726573756c740a70330a286470340a567461736b0a70350a566164640a70360a735676616c75650a70370a49330a7373566368696c6472656e0a70380a286c70390a7356666c6167730a7031300a286c7031310a4930310a614930300a614e617356646174655f646f6e650a7031320a636461746574696d650a6461746574696d650a7031330a28635f636f646563730a656e636f64650a7031340a285607e806180c5c75303030305c75303030305c75303030305c75303030305c75303030300a7031350a566c6174696e310a7031360a747031370a527031380a747031390a527032300a732e",
+    "expected": {
+      "status": "SUCCESS",
+      "result": {
+        "task": "add",
+        "value": 3
+      },
+      "children": [],
+      "flags": [
+        true,
+        false,
+        null
+      ],
+      "date_done": "2024-06-24T12:00:00"
+    }
+  },
+  {
+    "name": "pickle-protocol-1",
+    "codec": "pickle",
+    "hex": "7d7100285806000000737461747573710158070000005355434345535371025806000000726573756c7471037d71042858040000007461736b710558030000006164647106580500000076616c756571074b037558080000006368696c6472656e71085d71095805000000666c616773710a5d710b284930310a4930300a4e655809000000646174655f646f6e65710c636461746574696d650a6461746574696d650a710d28635f636f646563730a656e636f64650a710e28580b00000007c3a806180c0000000000710f58060000006c6174696e317110747111527112747113527114752e",
+    "expected": {
+      "status": "SUCCESS",
+      "result": {
+        "task": "add",
+        "value": 3
+      },
+      "children": [],
+      "flags": [
+        true,
+        false,
+        null
+      ],
+      "date_done": "2024-06-24T12:00:00"
+    }
+  },
+  {
+    "name": "pickle-protocol-2",
+    "codec": "pickle",
+    "hex": "80027d7100285806000000737461747573710158070000005355434345535371025806000000726573756c7471037d71042858040000007461736b710558030000006164647106580500000076616c756571074b037558080000006368696c6472656e71085d71095805000000666c616773710a5d710b2888894e655809000000646174655f646f6e65710c636461746574696d650a6461746574696d650a710d635f636f646563730a656e636f64650a710e580b00000007c3a806180c0000000000710f58060000006c6174696e317110867111527112857113527114752e",
+    "expected": {
+      "status": "SUCCESS",
+      "result": {
+        "task": "add",
+        "value": 3
+      },
+      "children": [],
+      "flags": [
+        true,
+        false,
+        null
+      ],
+      "date_done": "2024-06-24T12:00:00"
+    }
+  },
+  {
+    "name": "pickle-protocol-3",
+    "codec": "pickle",
+    "hex": "80037d7100285806000000737461747573710158070000005355434345535371025806000000726573756c7471037d71042858040000007461736b710558030000006164647106580500000076616c756571074b037558080000006368696c6472656e71085d71095805000000666c616773710a5d710b2888894e655809000000646174655f646f6e65710c636461746574696d650a6461746574696d650a710d430a07e806180c0000000000710e85710f527110752e",
+    "expected": {
+      "status": "SUCCESS",
+      "result": {
+        "task": "add",
+        "value": 3
+      },
+      "children": [],
+      "flags": [
+        true,
+        false,
+        null
+      ],
+      "date_done": "2024-06-24T12:00:00"
+    }
+  },
+  {
+    "name": "pickle-protocol-4",
+    "codec": "pickle",
+    "hex": "8004958d000000000000007d94288c06737461747573948c0753554343455353948c06726573756c74947d94288c047461736b948c03616464948c0576616c7565944b03758c086368696c6472656e945d948c05666c616773945d942888894e658c09646174655f646f6e65948c086461746574696d65948c086461746574696d65949394430a07e806180c00000000009485945294752e",
+    "expected": {
+      "status": "SUCCESS",
+      "result": {
+        "task": "add",
+        "value": 3
+      },
+      "children": [],
+      "flags": [
+        true,
+        false,
+        null
+      ],
+      "date_done": "2024-06-24T12:00:00"
+    }
+  },
+  {
+    "name": "pickle-protocol-5",
+    "codec": "pickle",
+    "hex": "8005958d000000000000007d94288c06737461747573948c0753554343455353948c06726573756c74947d94288c047461736b948c03616464948c0576616c7565944b03758c086368696c6472656e945d948c05666c616773945d942888894e658c09646174655f646f6e65948c086461746574696d65948c086461746574696d65949394430a07e806180c00000000009485945294752e",
+    "expected": {
+      "status": "SUCCESS",
+      "result": {
+        "task": "add",
+        "value": 3
+      },
+      "children": [],
+      "flags": [
+        true,
+        false,
+        null
+      ],
+      "date_done": "2024-06-24T12:00:00"
+    }
+  },
+  {
+    "name": "pickle-uuid",
+    "codec": "pickle",
+    "hex": "80049530000000000000008c0475756964948c04555549449493942981947d948c03696e74948a107856341278563412785634127856341273622e",
+    "expected": "12345678-1234-5678-1234-567812345678"
+  },
+  {
+    "name": "pickle-bytes",
+    "codec": "pickle",
+    "hex": "8004950600000000000000430200ff942e",
+    "expected": {
+      "$bytes": "AP8="
+    }
+  },
+  {
+    "name": "pickle-alias",
+    "codec": "pickle",
+    "hex": "8004951f000000000000007d94288c046c656674947d948c0161944b01738c057269676874946802752e",
+    "expected": {
+      "left": {
+        "a": 1
+      },
+      "right": {
+        "$ref": true
+      }
+    }
+  },
+  {
+    "name": "msgpack-map",
+    "codec": "msgpack",
+    "hex": "82a47461736ba3616464a576616c756503",
+    "expected": {
+      "task": "add",
+      "value": 3
+    }
+  },
+  {
+    "name": "msgpack-array",
+    "codec": "msgpack",
+    "hex": "94a568656c6c6f01c0c3",
+    "expected": [
+      "hello",
+      1,
+      null,
+      true
+    ]
+  },
+  {
+    "name": "msgpack-binary",
+    "codec": "msgpack",
+    "hex": "c40200ff",
+    "expected": {
+      "$bytes": "AP8="
+    }
+  },
+  {
+    "name": "msgpack-text",
+    "codec": "msgpack",
+    "hex": "a5706c61696e",
+    "expected": "plain"
+  },
+  {
+    "name": "msgpack-nested",
+    "codec": "msgpack",
+    "hex": "82a77061796c6f616481a26f6bc3a56974656d73920102",
+    "expected": {
+      "payload": {
+        "ok": true
+      },
+      "items": [
+        1,
+        2
+      ]
+    }
+  },
+  {
+    "name": "php-array",
+    "codec": "php-serialize",
+    "hex": "613a333a7b693a303b733a393a2268656c6c6f20646278223b693a313b693a34323b693a323b623a313b7d",
+    "expected": [
+      "hello dbx",
+      42,
+      true
+    ]
+  },
+  {
+    "name": "php-object",
+    "codec": "php-serialize",
+    "hex": "4f3a383a224a6f625374617465223a323a7b733a353a227374617465223b733a343a22646f6e65223b733a373a2272657472696573223b693a303b7d",
+    "expected": {
+      "$class": "JobState",
+      "state": "done",
+      "retries": 0
+    }
+  },
+  {
+    "name": "php-unicode",
+    "codec": "php-serialize",
+    "hex": "613a313a7b733a353a226c6162656c223b733a363a22e4bda0e5a5bd223b7d",
+    "expected": {
+      "label": "你好"
+    }
+  },
+  {
+    "name": "php-null",
+    "codec": "php-serialize",
+    "hex": "4e3b",
+    "expected": null
+  },
+  {
+    "name": "php-map",
+    "codec": "php-serialize",
+    "hex": "613a323a7b733a333a226d7367223b733a393a2268656c6c6f20646278223b733a353a22636f756e74223b643a312e353b7d",
+    "expected": {
+      "msg": "hello dbx",
+      "count": 1.5
+    }
+  },
+  {
+    "name": "protobuf-fields",
+    "codec": "protobuf",
+    "hex": "089601120568656c6c6f",
+    "expected": {
+      "1": 150,
+      "2": "hello"
+    }
+  },
+  {
+    "name": "protobuf-nested",
+    "codec": "protobuf",
+    "hex": "0a020807",
+    "expected": {
+      "1": {
+        "1": 7
+      }
+    }
+  },
+  {
+    "name": "protobuf-repeated",
+    "codec": "protobuf",
+    "hex": "1a01611a0162",
+    "expected": {
+      "3": [
+        "a",
+        "b"
+      ]
+    }
+  },
+  {
+    "name": "protobuf-binary",
+    "codec": "protobuf",
+    "hex": "0a0200ff",
+    "expected": {
+      "1": {
+        "$bytes": "00ff"
+      }
+    }
+  },
+  {
+    "name": "protobuf-large",
+    "codec": "protobuf",
+    "hex": "08808080808080808040",
+    "expected": {
+      "1": "4611686018427387904"
+    }
+  },
+  {
+    "name": "protobuf-fixed",
+    "codec": "protobuf",
+    "hex": "0d78563412",
+    "expected": {
+      "1": "78563412"
+    }
+  }
+]

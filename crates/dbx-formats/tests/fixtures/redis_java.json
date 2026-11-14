@@ -1,0 +1,319 @@
+[
+  {
+    "name": "string",
+    "hex": "aced0005740008736f6d6574657874",
+    "expected": "sometext"
+  },
+  {
+    "name": "unicode",
+    "hex": "aced000574000f41c080e4bda0e5a5bdeda0bdedb880",
+    "expected": "A\u0000你好😀"
+  },
+  {
+    "name": "child",
+    "hex": "aced00057372000e4669787475726573244368696c6400000000000000010200034a00056c617267654c00046e616d657400124c6a6176612f6c616e672f537472696e673b4c000473656c667400124c6a6176612f6c616e672f4f626a6563743b7872000d466978747572657324426173650000000000000001020001490004626173657870000000077fffffffffffffff74000341646171007e0004",
+    "expected": {
+      "$id": "#1",
+      "$class": "Fixtures$Child",
+      "base": 7,
+      "large": "9223372036854775807",
+      "name": "Ada",
+      "self": {
+        "$ref": "#1"
+      },
+      "$extends": {
+        "Fixtures$Base": {
+          "base": 7
+        },
+        "Fixtures$Child": {
+          "large": "9223372036854775807",
+          "name": "Ada",
+          "self": {
+            "$ref": "#1"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "self-map",
+    "hex": "aced0005737200116a6176612e7574696c2e486173684d61700507dac1c31660d103000246000a6c6f6164466163746f724900097468726573686f6c6478703f4000000000000c7708000000100000000174000473656c6671007e000178",
+    "expected": {
+      "$id": "#1",
+      "$class": "java.util.HashMap",
+      "loadFactor": 0.75,
+      "threshold": 12,
+      "@": {
+        "$id": "#2",
+        "$values": [
+          {
+            "$blockDataHex": "0000001000000001"
+          },
+          "self",
+          {
+            "$ref": "#1"
+          }
+        ]
+      },
+      "map": {
+        "$id": "#3",
+        "$entries": [
+          {
+            "key": "self",
+            "value": {
+              "$ref": "#1"
+            }
+          }
+        ]
+      },
+      "obj": {
+        "$id": "#4",
+        "self": {
+          "$ref": "#1"
+        }
+      }
+    }
+  },
+  {
+    "name": "int-array",
+    "hex": "aced0005757200025b494dba602676eab2a5020000787000000003fffffffe000000000000002a",
+    "expected": {
+      "$id": "#1",
+      "$class": "[I",
+      "$values": [
+        -2,
+        0,
+        42
+      ]
+    }
+  },
+  {
+    "name": "long-array",
+    "hex": "aced0005757200025b4a782004b512b1759302000078700000000280000000000000007fffffffffffffff",
+    "expected": {
+      "$id": "#1",
+      "$class": "[J",
+      "$values": [
+        "-9223372036854775808",
+        "9223372036854775807"
+      ]
+    }
+  },
+  {
+    "name": "references",
+    "hex": "aced0005757200135b4c6a6176612e6c616e672e4f626a6563743b90ce589f1073296c0200007870000000037372000e4669787475726573244368696c6400000000000000010200034a00056c617267654c00046e616d657400124c6a6176612f6c616e672f537472696e673b4c000473656c667400124c6a6176612f6c616e672f4f626a6563743b7872000d466978747572657324426173650000000000000001020001490004626173657870000000077fffffffffffffff74000341646171007e000671007e000670",
+    "expected": {
+      "$id": "#1",
+      "$class": "[Ljava.lang.Object;",
+      "$values": [
+        {
+          "$id": "#2",
+          "$class": "Fixtures$Child",
+          "base": 7,
+          "large": "9223372036854775807",
+          "name": "Ada",
+          "self": {
+            "$ref": "#2"
+          },
+          "$extends": {
+            "Fixtures$Base": {
+              "base": 7
+            },
+            "Fixtures$Child": {
+              "large": "9223372036854775807",
+              "name": "Ada",
+              "self": {
+                "$ref": "#2"
+              }
+            }
+          }
+        },
+        {
+          "$ref": "#2"
+        },
+        null
+      ]
+    }
+  },
+  {
+    "name": "enum",
+    "hex": "aced00057e72000e466978747572657324436f6c6f7200000000000000001200007872000e6a6176612e6c616e672e456e756d00000000000000001200007870740003524544",
+    "expected": {
+      "$class": "Fixtures$Color",
+      "$enum": "RED"
+    }
+  },
+  {
+    "name": "list",
+    "hex": "aced0005737200136a6176612e7574696c2e41727261794c6973747881d21d99c7619d03000149000473697a657870000000027704000000027400036f6e65737200116a6176612e6c616e672e496e746567657212e2a0a4f781873802000149000576616c7565787200106a6176612e6c616e672e4e756d62657286ac951d0b94e08b02000078700000002a78",
+    "expected": {
+      "$id": "#1",
+      "$class": "java.util.ArrayList",
+      "size": 2,
+      "@": {
+        "$id": "#2",
+        "$values": [
+          {
+            "$blockDataHex": "00000002"
+          },
+          "one",
+          {
+            "$id": "#3",
+            "$class": "java.lang.Integer",
+            "value": 42,
+            "$extends": {
+              "java.lang.Number": {},
+              "java.lang.Integer": {
+                "value": 42
+              }
+            }
+          }
+        ]
+      },
+      "list": {
+        "$id": "#4",
+        "$values": [
+          "one",
+          {
+            "$ref": "#3"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "deque",
+    "hex": "aced0005737200146a6176612e7574696c2e41727261794465717565207cda2e240da08b03000078707704000000027400036f6e6574000374776f78",
+    "expected": {
+      "$id": "#1",
+      "$class": "java.util.ArrayDeque",
+      "@": {
+        "$id": "#2",
+        "$values": [
+          {
+            "$blockDataHex": "00000002"
+          },
+          "one",
+          "two"
+        ]
+      },
+      "list": {
+        "$id": "#3",
+        "$values": [
+          "one",
+          "two"
+        ]
+      }
+    }
+  },
+  {
+    "name": "set",
+    "hex": "aced0005737200116a6176612e7574696c2e48617368536574ba44859596b8b7340300007870770c000000103f400000000000027400036f6e6574000374776f78",
+    "expected": {
+      "$id": "#1",
+      "$class": "java.util.HashSet",
+      "@": {
+        "$id": "#2",
+        "$values": [
+          {
+            "$blockDataHex": "000000103f40000000000002"
+          },
+          "one",
+          "two"
+        ]
+      },
+      "set": {
+        "$id": "#3",
+        "$values": [
+          "one",
+          "two"
+        ]
+      }
+    }
+  },
+  {
+    "name": "enum-map",
+    "hex": "aced0005737200116a6176612e7574696c2e456e756d4d6170065d7df7be907ca10300014c00076b6579547970657400114c6a6176612f6c616e672f436c6173733b78707672000e466978747572657324436f6c6f7200000000000000001200007872000e6a6176612e6c616e672e456e756d000000000000000012000078707704000000017e71007e000374000352454474000372656478",
+    "expected": {
+      "$id": "#1",
+      "$class": "java.util.EnumMap",
+      "keyType": {
+        "$id": "#2",
+        "name": "Fixtures$Color",
+        "serialVersionUID": "0000000000000000",
+        "flags": 18,
+        "isEnum": true,
+        "fields": {
+          "$id": "#3",
+          "$values": []
+        },
+        "superClass": {
+          "$id": "#4",
+          "name": "java.lang.Enum",
+          "serialVersionUID": "0000000000000000",
+          "flags": 18,
+          "isEnum": true,
+          "fields": {
+            "$id": "#5",
+            "$values": []
+          },
+          "superClass": null
+        }
+      },
+      "@": {
+        "$id": "#6",
+        "$values": [
+          {
+            "$blockDataHex": "00000001"
+          },
+          {
+            "$class": "Fixtures$Color",
+            "$enum": "RED"
+          },
+          "red"
+        ]
+      },
+      "map": {
+        "$id": "#7",
+        "$entries": [
+          {
+            "key": {
+              "$class": "Fixtures$Color",
+              "$enum": "RED"
+            },
+            "value": "red"
+          }
+        ]
+      },
+      "obj": {
+        "$id": "#8",
+        "RED": "red"
+      }
+    }
+  },
+  {
+    "name": "bytes",
+    "hex": "aced0005757200025b42acf317f8060854e0020000787000000003ff007f",
+    "expected": {
+      "$id": "#1",
+      "$class": "[B",
+      "$values": [
+        -1,
+        0,
+        127
+      ]
+    }
+  },
+  {
+    "name": "booleans",
+    "hex": "aced0005757200025b5a578f203914b85de20200007870000000020100",
+    "expected": {
+      "$id": "#1",
+      "$class": "[Z",
+      "$values": [
+        true,
+        false
+      ]
+    }
+  }
+]

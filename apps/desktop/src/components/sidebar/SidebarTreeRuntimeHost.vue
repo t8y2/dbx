@@ -499,7 +499,9 @@ const props = defineProps<{
 }>();
 
 const ModelGenerateDialog = defineAsyncComponent(() => import("@/components/generate/ModelGenerateDialog.vue"));
+const OracleTableGrantsDialog = defineAsyncComponent(() => import("@/components/objects/OracleTableGrantsDialog.vue"));
 const modelGenerationTarget = shallowRef<TreeNode | null>(null);
+const oracleTableGrantsTarget = shallowRef<{ connectionId: string; database: string; schema: string; tableName: string; catalog?: string } | null>(null);
 function openModelGeneration() {
   modelGenerationTarget.value = { ...activeNode.value };
 }
@@ -8293,6 +8295,21 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {
       items.push({ sidebarActionId: "contextMenu.viewDependencies", label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
     }
+    if (node.type === "table" && currentDatabaseType() === "oracle" && node.connectionId && node.database && node.schema) {
+      const connectionId = node.connectionId;
+      const schema = node.schema;
+      const config = connectionStore.getConfig(connectionId);
+      const database = config && connectionUsesVisibleSchemaFilter(config) ? config.database || node.database : node.database;
+      const target = { connectionId, database, schema, tableName: node.objectName || node.label, catalog: node.catalog };
+      items.push({
+        sidebarActionId: "oracleSecurity.tableGrants",
+        label: t("oracleSecurity.tableGrants"),
+        action: () => {
+          oracleTableGrantsTarget.value = target;
+        },
+        icon: UsersRound,
+      });
+    }
     if (node.type === "view" || node.type === "materialized_view") {
       items.push({ sidebarActionId: "contextMenu.editView", label: t("contextMenu.editView"), action: () => openObjectSourceDialog(true), icon: Pencil });
       items.push({ sidebarActionId: "contextMenu.viewSource", label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
@@ -9277,6 +9294,7 @@ defineExpose({
   />
   <ModelGenerateDialog v-if="modelGenerationTarget" :key="modelGenerationTarget.id" :target="modelGenerationTarget" @close="modelGenerationTarget = null" />
   <SqlTemplateInsertRowsDialog v-model:open="insertTemplateRowsOpen" @confirm="confirmInsertTemplateRows" />
+  <OracleTableGrantsDialog v-if="oracleTableGrantsTarget" :target="oracleTableGrantsTarget" @close="oracleTableGrantsTarget = null" />
   <Dialog
     :open="!!pluginDialog"
     @update:open="

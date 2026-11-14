@@ -303,6 +303,8 @@ export default withEnglishFallback({
     navigateDiscardConfirm: "El código tiene cambios sin guardar. ¿Descartarlos y abrir el objeto relacionado?",
   },
   oracleSecurity: {
+    tableGrants: "Permisos de la tabla",
+    grantor: "Otorgante",
     directSqlNotice: "Solo concesiones directas visibles, no permisos efectivos de sesión ni un script completo para reproducirlas. La herencia y los otorgantes están en los detalles de origen.",
     searchOwner: "Buscar owner/schema",
     chooseObjects: "Elegir objetos",

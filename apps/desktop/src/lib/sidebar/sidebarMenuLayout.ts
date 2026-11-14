@@ -79,6 +79,7 @@ const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
     "contextMenu.viewDdl",
     "contextMenu.viewSource",
     "contextMenu.viewDependencies",
+    "oracleSecurity.tableGrants",
     "contextMenu.exportStructure",
     "contextMenu.duplicateStructure",
     "contextMenu.renameObject",

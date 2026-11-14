@@ -300,6 +300,8 @@ export default withEnglishFallback({
     navigateDiscardConfirm: "소스에 저장하지 않은 변경 사항이 있습니다. 변경 사항을 버리고 관련 객체를 여시겠습니까?",
   },
   oracleSecurity: {
+    tableGrants: "테이블 부여 권한",
+    grantor: "부여자",
     directSqlNotice: "조회 가능한 직접 부여만 표시하며 세션의 유효 권한이나 완전한 재실행 스크립트가 아닙니다. 상속과 부여자는 출처 상세 정보에 표시됩니다.",
     searchOwner: "owner/schema 검색",
     chooseObjects: "객체 선택",

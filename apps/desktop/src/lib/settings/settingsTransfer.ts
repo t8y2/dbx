@@ -136,7 +136,7 @@ export function serializeSettingsTransfer(settings: EditorSettings, meta: Settin
 const SETTINGS_TRANSFER_CATEGORY_ORDER: readonly SettingsTransferCategoryId[] = ["appearance", "editor", "formatter", "navigation", "data", "shortcuts", "snippets", "other"];
 
 const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readonly EditorSettingsDraftKey[]> = {
-  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "fontSmoothing", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "welcomePageMode", "webLogoPosition"],
+  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "fontSmoothing", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "toolbarItemOrder", "welcomePageMode", "webLogoPosition"],
   editor: [
     "executeMode",
     "defaultTransactionMode",
@@ -439,6 +439,7 @@ const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (val
   // each one must already be the boolean the UI writes, and no extra key may
   // appear.
   toolbarItems: (value) => isPlainObject(value) && Object.keys(DEFAULT_TOOLBAR_ITEMS).every((key) => typeof value[key] === "boolean") && Object.keys(value).every((key) => key in DEFAULT_TOOLBAR_ITEMS),
+  toolbarItemOrder: (value) => Array.isArray(value) && value.every((key) => typeof key === "string"),
   ...Object.fromEntries(PASS_THROUGH_BOOLEAN_KEYS.map((key) => [key, (value: unknown) => typeof value === "boolean"])),
 };
 

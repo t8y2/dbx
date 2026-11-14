@@ -1,3 +1,4 @@
+import type { ToolbarItemKey } from "@/lib/settings/toolbarCustomization";
 import { getPlatform } from "@/lib/backend/platform";
 import { SQL_VARIABLE_SYNTAX_KEYS, SQL_VARIABLE_SYNTAX_TOKENS } from "@/lib/sql/sqlVariableSyntax";
 import { APP_CUSTOM_UI_COLOR_DEFS } from "@/lib/app/appTheme";
@@ -65,11 +66,12 @@ export interface SettingsSearchRoute {
 
 export type Translate = (key: string) => string;
 
-type ToolbarVisibilityItemKey = "immediateSync" | "dataTransfer" | "driverManager" | "pluginCenter" | "sqlFile" | "schemaDiff" | "dataCompare" | "checkUpdates" | "sqlLibrary" | "sqlFileTree" | "history" | "ai" | "theme" | "github" | "alwaysOnTop";
+type ToolbarVisibilityItemKey = ToolbarItemKey;
 
 export type ToolbarVisibilityItem = ({ key: ToolbarVisibilityItemKey; titleKey: string; title?: never } | { key: ToolbarVisibilityItemKey; title: string; titleKey?: never }) & {
   /** The matching toolbar button can only exist in the desktop app, so the Web build hides the switch. */
   desktopOnly?: true;
+  webOnly?: true;
 };
 
 /**
@@ -78,6 +80,15 @@ export type ToolbarVisibilityItem = ({ key: ToolbarVisibilityItemKey; titleKey: 
  * settings search.
  */
 export const TOOLBAR_VISIBILITY_ITEMS: readonly ToolbarVisibilityItem[] = [
+  { key: "newConnection", titleKey: "toolbar.newConnection" },
+  { key: "newQuery", titleKey: "toolbar.newQuery" },
+  { key: "openSql", titleKey: "toolbar.openSql" },
+  { key: "databaseBackups", titleKey: "databaseBackup.title" },
+  { key: "mcpSettings", titleKey: "settings.openMcpSettings" },
+  { key: "exportProgress", titleKey: "settings.toolbarExportProgress" },
+  { key: "settings", titleKey: "settings.title" },
+  { key: "logout", titleKey: "auth.logout", webOnly: true },
+
   { key: "dataTransfer", titleKey: "transfer.dataTransfer" },
   { key: "driverManager", titleKey: "toolbar.driverManager" },
   { key: "pluginCenter", titleKey: "toolbar.pluginCenter" },
@@ -101,7 +112,7 @@ export function toolbarVisibilityItemLabel(item: ToolbarVisibilityItem, translat
 
 /** Desktop-only toolbar switches are hidden in the Web build, where the matching button can never render. */
 export function visibleToolbarVisibilityItems(items: readonly ToolbarVisibilityItem[], isWeb: boolean): ToolbarVisibilityItem[] {
-  return items.filter((item) => !item.desktopOnly || !isWeb);
+  return items.filter((item) => (!item.desktopOnly || !isWeb) && (!item.webOnly || isWeb));
 }
 
 export function createToolbarVisibilitySettingsSearchDefinitions(items: readonly ToolbarVisibilityItem[] = TOOLBAR_VISIBILITY_ITEMS): SettingsSearchDefinition[] {
@@ -110,7 +121,7 @@ export function createToolbarVisibilitySettingsSearchDefinitions(items: readonly
     category: "appearance",
     ...(item.titleKey ? { titleKey: item.titleKey } : { title: item.title }),
     targetId: "appearance",
-    ...(item.desktopOnly ? { visible: desktopOnly } : {}),
+    ...(item.desktopOnly ? { visible: desktopOnly } : item.webOnly ? { visible: webOnly } : {}),
   }));
 }
 
@@ -521,6 +532,7 @@ export const SETTINGS_SEARCH_DEFINITIONS: readonly SettingsSearchDefinition[] = 
   { id: "appearance-toolbar", category: "appearance", titleKey: "settings.toolbarTitle", descriptionKey: "settings.toolbarHiddenHint", targetId: "appearance" },
   { id: "appearance-exclusive-sidebar-panels", category: "appearance", titleKey: "settings.exclusiveRightSidebarPanels", descriptionKey: "settings.exclusiveRightSidebarPanelsDescription", targetId: "appearance" },
   ...createToolbarVisibilitySettingsSearchDefinitions(),
+  { id: "appearance-toolbar-order", category: "appearance", titleKey: "settings.toolbarTitle", descriptionKey: "settings.toolbarOrderHint", targetId: "appearance" },
   { id: "data-datetime", category: "data", titleKey: "settings.dateTimeSection", targetId: "data" },
   { id: "data-datetime-display-format", category: "data", titleKey: "settings.globalDateTimeDisplayFormat", descriptionKey: "settings.globalDateTimeDisplayFormatDescription", targetId: "data" },
   { id: "data-datetime-export-format", category: "data", titleKey: "settings.globalDateTimeExportFormat", descriptionKey: "settings.globalDateTimeExportFormatDescription", targetId: "data" },

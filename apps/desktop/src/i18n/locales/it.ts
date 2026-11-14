@@ -8664,6 +8664,13 @@ export default withEnglishFallback({
     exportDiffSuccess: "Differenze esportate: {path}",
   },
   settings: {
+    toolbarGroup_primary: "Azioni principali",
+    toolbarGroup_menu: "Menu Altro",
+    toolbarGroup_right: "Barra destra",
+    toolbarGroup_controls: "Azioni di sistema",
+    toolbarOrderHint: "Trascina o usa ↑/↓ per ordinare ogni gruppo. Le azioni principali e di sistema nascoste restano disponibili in Altro.",
+    toolbarReorderItem: "Trascina o usa ↑/↓ per riordinare {item}",
+    toolbarExportProgress: "Avanzamento attività",
     historyRetentionLimit: "Limite della cronologia query",
     mcpHistoryRetentionLimit: "Conservazione cronologia MCP",
     mcpHistoryRetentionDescription: "Controlla separatamente la quantità di cronologia delle chiamate MCP da quella SQL.",

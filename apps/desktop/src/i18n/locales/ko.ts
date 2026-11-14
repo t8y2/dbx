@@ -8779,6 +8779,13 @@ export default withEnglishFallback({
     exportDiffSuccess: "차이 내보내기 완료: {path}",
   },
   settings: {
+    toolbarGroup_primary: "주요 작업",
+    toolbarGroup_menu: "더 보기 메뉴",
+    toolbarGroup_right: "오른쪽 도구 모음",
+    toolbarGroup_controls: "시스템 작업",
+    toolbarOrderHint: "각 그룹에서 드래그하거나 ↑/↓ 키로 순서를 변경하세요. 숨긴 주요 작업과 시스템 작업은 더 보기에서 사용할 수 있습니다.",
+    toolbarReorderItem: "드래그 또는 ↑/↓ 키로 {item} 순서 변경",
+    toolbarExportProgress: "작업 진행 상황",
     historyRetentionLimit: "쿼리 기록 보관 개수",
     mcpHistoryRetentionLimit: "MCP 기록 보존 수",
     mcpHistoryRetentionDescription: "SQL 기록과 별도로 MCP 호출 기록 보존 수를 관리합니다.",

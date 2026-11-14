@@ -10617,6 +10617,13 @@ export default withEnglishFallback({
     exportDiffSuccess: "ส่งออกความแตกต่างแล้ว: {path}",
   },
   settings: {
+    toolbarGroup_primary: "การทำงานหลัก",
+    toolbarGroup_menu: "เมนูเพิ่มเติม",
+    toolbarGroup_right: "แถบเครื่องมือด้านขวา",
+    toolbarGroup_controls: "การทำงานของระบบ",
+    toolbarOrderHint: "ลากหรือใช้ ↑/↓ เพื่อเรียงลำดับภายในแต่ละกลุ่ม การทำงานหลักและการทำงานของระบบที่ซ่อนไว้ยังเข้าถึงได้จากเมนูเพิ่มเติม",
+    toolbarReorderItem: "ลากหรือใช้ ↑/↓ เพื่อเรียงลำดับ {item}",
+    toolbarExportProgress: "ความคืบหน้าของงาน",
     historyRetentionLimit: "จำนวนรายการประวัติ Query สูงสุด",
     mcpHistoryRetentionLimit: "จำนวนรายการประวัติ MCP สูงสุด",
     mcpHistoryRetentionDescription: "ควบคุมประวัติการเรียก MCP แยกจากประวัติ SQL",

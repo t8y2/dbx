@@ -9294,7 +9294,12 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function completionColumnsKey(connectionId: string, database: string, table: string, schema?: string, catalog?: string, context?: { tableQuoted?: boolean; schemaQuoted?: boolean }): string {
-    const databaseType = getConfig(connectionId)?.db_type;
+    const config = getConfig(connectionId);
+    const databaseType = config?.db_type;
+    if (databaseType === "dameng" || (databaseType === "jdbc" && effectiveDatabaseTypeForConnection(config) === "dameng")) {
+      const identifiers = damengCompletionColumnIdentifiers(config, table, schema, context);
+      return `${connectionId}:${database}:${catalog ?? ""}:${identifiers.schema ?? ""}:${identifiers.table}`;
+    }
     if (databaseType === "oracle" || databaseType === "oceanbase-oracle") {
       const normalizedTable = context?.tableQuoted === false ? table.toUpperCase() : table;
       const normalizedSchema = schema && context?.schemaQuoted === false ? schema.toUpperCase() : (schema ?? "");
@@ -10643,15 +10648,15 @@ export const useConnectionStore = defineStore("connection", () => {
     return deduped;
   }
 
-  /// Engines whose CURRENT SCHEMA defaults to the login identity. An unqualified
-  /// reference resolves against the login schema there, so `listCompletionColumns`
-  /// falls back to the username instead of letting its schema-required early return
-  /// discard the lookup. A query tab hits that state when it never picked a schema
-  /// (`jdbcDialect.ts` records a new query tab or a reopened `.sql` file as the
-  /// cases). Dameng was the first engine fixed for this (#8301); DB2's CURRENT
-  /// SCHEMA is documented as the authorization ID of the session user, so it needs
-  /// the same fallback.
-  const LOGIN_SCHEMA_COMPLETION_TYPES = new Set(["dameng", "db2"]);
+  function damengCompletionColumnIdentifiers(config: ConnectionConfig | undefined, table: string, schema?: string, context?: { tableQuoted?: boolean; schemaQuoted?: boolean }) {
+    const loginSchema = config?.username?.trim() || undefined;
+    // Parser-sourced identifiers carry quote flags; metadata and selection names
+    // already have the exact spelling that must be sent to the driver.
+    let owner = schema?.trim();
+    if (!owner) owner = context?.tableQuoted === undefined ? loginSchema : loginSchema?.toUpperCase();
+    else if (context?.schemaQuoted === false) owner = owner.toUpperCase();
+    return { table: context?.tableQuoted === false ? table.toUpperCase() : table, schema: owner };
+  }
 
   async function listCompletionColumns(connectionId: string, database: string, table: string, schema?: string, context?: { clientSessionId?: string; version?: number; tableQuoted?: boolean; schemaQuoted?: boolean; currentSchema?: string }, catalog?: string): Promise<SqlCompletionColumn[]> {
     const config = getConfig(connectionId);
@@ -10662,13 +10667,15 @@ export const useConnectionStore = defineStore("connection", () => {
     // schema-required early return below finds a schema, and every star
     // expansion silently returns no columns.
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
+    const damengIdentifiers = effectiveDbType === "dameng" ? damengCompletionColumnIdentifiers(config, table, schema, context) : undefined;
     const oracleIdentifier = effectiveDbType === "oracle" || effectiveDbType === "oceanbase-oracle";
     const uppercaseUnquotedIdentifier = oracleIdentifier || effectiveDbType === "saphana";
-    const completionTable = uppercaseUnquotedIdentifier && context?.tableQuoted === false ? table.toUpperCase() : table;
+    const completionTable = damengIdentifiers?.table ?? (uppercaseUnquotedIdentifier && context?.tableQuoted === false ? table.toUpperCase() : table);
     const normalizedSchema = schema?.trim();
-    const loginSchema = effectiveDbType && LOGIN_SCHEMA_COMPLETION_TYPES.has(effectiveDbType) ? config?.username?.trim() || undefined : undefined;
+    // DB2 defaults CURRENT SCHEMA to the session's authorization ID.
+    const loginSchema = effectiveDbType === "db2" ? config?.username?.trim() || undefined : undefined;
     const rawCompletionSchema = effectiveDbType === "spanner" ? normalizedSchema : normalizedSchema || loginSchema;
-    const completionSchema = uppercaseUnquotedIdentifier && rawCompletionSchema && context?.schemaQuoted === false ? rawCompletionSchema.toUpperCase() : rawCompletionSchema;
+    const completionSchema = damengIdentifiers ? damengIdentifiers.schema : uppercaseUnquotedIdentifier && rawCompletionSchema && context?.schemaQuoted === false ? rawCompletionSchema.toUpperCase() : rawCompletionSchema;
     const usesCurrentSchema = usesOracleCurrentSchemaCompletion(effectiveDbType, completionSchema);
     const hasCompletionSchema = completionSchema != null && (completionSchema !== "" || effectiveDbType === "spanner");
     if (isSchemaAwareDatabase(connectionId) && !connectionUsesDatabaseObjectTreeMode(config) && !hasCompletionSchema && !usesCurrentSchema) {

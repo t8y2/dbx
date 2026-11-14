@@ -254,7 +254,7 @@ export function useQueryEditorCompletionMetadata(options: QueryEditorCompletionM
     const scopedDatabase = scope && scope.database !== props.database ? scope.database : undefined;
     const database = supportsDatabaseSchemaQualifierCompletion() ? (table.database ?? scopedDatabase) : undefined;
     const baseKey = schema ? `${database ? `${database}.` : ""}${schema}.${table.name}` : table.name;
-    if (props.databaseType !== "postgres" || (!table.nameQuoted && !table.schemaQuoted)) return baseKey;
+    if ((props.databaseType !== "postgres" && props.databaseType !== "dameng") || (!table.nameQuoted && !table.schemaQuoted)) return baseKey;
     return `${baseKey}:quoted:s=${table.schemaQuoted ? "1" : "0"}:t=${table.nameQuoted ? "1" : "0"}`;
   }
 

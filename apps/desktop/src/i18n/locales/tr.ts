@@ -6349,6 +6349,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    reviewBeforeStart: "Aktarımı Başlat'ı seçerek veriler yazılmadan önce aktarım planını inceleyip onaylayın.",
     log: {
       title: "Yürütme günlüğü",
       tableStarted: "{table} tablosu aktarılıyor ({index}/{total})",

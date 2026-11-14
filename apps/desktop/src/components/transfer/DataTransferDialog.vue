@@ -2053,6 +2053,7 @@ async function saveConfigTask() {
       </div>
 
       <DialogFooter class="shrink-0">
+        <p v-if="canStart" class="mr-auto self-center text-xs text-muted-foreground">{{ t("transfer.reviewBeforeStart") }}</p>
         <p v-if="mysqlDataCharsetEnabled(store.getConfig(sourceConnectionId)) || mysqlDataCharsetEnabled(store.getConfig(targetConnectionId))" class="text-xs text-muted-foreground">{{ t("connection.mysqlDataCharsetExportHint") }}</p>
         <Button variant="outline" size="sm" @click="open = false">
           {{ t("transfer.cancel") }}

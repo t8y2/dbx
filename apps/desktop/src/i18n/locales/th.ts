@@ -9367,6 +9367,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    reviewBeforeStart: "เลือกเริ่มถ่ายโอนเพื่อตรวจสอบแผนและยืนยันก่อนเขียนข้อมูล",
     log: {
       title: "บันทึกการทำงาน",
       tableStarted: "กำลังถ่ายโอนตาราง {table} ({index}/{total})",

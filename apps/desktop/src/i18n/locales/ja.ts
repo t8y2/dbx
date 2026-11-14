@@ -7591,6 +7591,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    reviewBeforeStart: "「転送開始」で転送内容を確認できます。データの書き込みは確認後に始まります。",
     log: {
       title: "実行ログ",
       tableStarted: "テーブル {table} を転送中（{index}/{total}）",

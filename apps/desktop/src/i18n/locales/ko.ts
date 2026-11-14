@@ -7609,6 +7609,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    reviewBeforeStart: "전송 시작을 선택하면 전송 계획을 검토하고 확인한 후에 데이터가 기록됩니다.",
     log: {
       title: "실행 로그",
       tableStarted: "테이블 {table} 전송 중({index}/{total})",

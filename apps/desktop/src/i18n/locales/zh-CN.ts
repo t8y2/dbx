@@ -8791,6 +8791,7 @@ export default withEnglishFallback({
     },
   },
   transfer: {
+    reviewBeforeStart: "点击「开始传输」先查看传输计划，确认后才会写入数据。",
     title: "数据传输",
     reexecute: "重新执行",
     log: {

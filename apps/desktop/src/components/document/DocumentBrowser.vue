@@ -41,6 +41,7 @@ import {
   documentFieldPathOptionsFromDocuments,
   documentFieldPathTreeFromDocuments,
   flattenDocumentFieldPathTree,
+  mongoFilterDateSamplesByPathFromDocuments,
   searchDocumentFieldPathTree,
   documentFilterModeNeedsValue,
   documentFilterModeOptionsFor,
@@ -822,6 +823,12 @@ const documentFilterFieldOptions = computed(() => {
 });
 const documentFilterFieldRows = computed<DocumentFilterFieldTreeRow[]>(() => visibleDocumentFilterFieldRows(documentFilterFieldTree.value));
 const documentFilterFieldByPath = computed(() => new Map(flattenDocumentFieldPathTree(documentFilterFieldTree.value).map((node) => [node.path, node])));
+const mongoFilterDateSamplesByPath = computed(() => {
+  if (documentStoreProvider.value.kind !== "mongodb" || !mongoCopyDocumentsAvailable.value) return new Map<string, unknown>();
+  // Display documents represent BSON dates as text. Use the paired Extended JSON
+  // for date inference and keep the existing inference for other BSON types.
+  return mongoFilterDateSamplesByPathFromDocuments(copyDocuments.value);
+});
 const documentStructuredFilterCount = computed(() => {
   if (!appliedDocumentFilter.value) return 0;
   if (documentStoreProvider.value.kind !== "elasticsearch") return 1;
@@ -1472,7 +1479,7 @@ async function applyDocumentStructuredFilters() {
         rule,
         condition: buildDocumentFilterCondition(rule, {
           kind: documentStoreProvider.value.kind,
-          sampleValue: documentFilterFieldByPath.value.get(rule.fieldName)?.sampleValue,
+          sampleValue: mongoFilterDateSamplesByPath.value.get(rule.fieldName) ?? documentFilterFieldByPath.value.get(rule.fieldName)?.sampleValue,
         }),
       }))
       .filter((item): item is { rule: DocumentFilterRule; condition: Record<string, unknown> } => !!item.condition);

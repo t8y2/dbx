@@ -21,6 +21,7 @@ const props = withDefaults(
     progressPercent: number | null;
     progressText: string;
     managedJdbc: boolean;
+    compatibilityRuntime?: boolean;
     importing: boolean;
     packageBusy: boolean;
     preparingUpgradeAll: boolean;
@@ -31,6 +32,7 @@ const props = withDefaults(
     showCategoryBadge: false,
     categoryLabel: "",
     highlighted: false,
+    compatibilityRuntime: false,
   },
 );
 
@@ -69,6 +71,7 @@ const uninstallBusy = computed(() => props.installing || props.preparingUpgradeA
         <div class="truncate text-sm font-medium">{{ driver.label }}</div>
         <span v-if="driver.installed" class="driver-store-installed-badge shrink-0 rounded-full bg-green-500/15 px-2 py-0.5 text-[11px] font-medium text-green-700 dark:text-green-400">{{ t("driverStore.installedBadge") }}</span>
       </div>
+      <div v-if="compatibilityRuntime" class="text-xs text-muted-foreground">{{ t("driverStore.compatibilityBuildHint") }}</div>
     </div>
     <span v-if="showCategoryBadge && categoryLabel" class="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">{{ categoryLabel }}</span>
     <div class="driver-store-agent-meta flex shrink-0 items-center gap-1.5">
@@ -101,11 +104,11 @@ const uninstallBusy = computed(() => props.installing || props.preparingUpgradeA
         {{ t("driverStore.install") }}
       </Button>
       <Button
-        v-if="!driver.installed && !managedJdbc && !progressActive && !queued"
+        v-if="!driver.installed && (!managedJdbc || compatibilityRuntime) && !progressActive && !queued"
         size="sm"
         variant="ghost"
         class="driver-store-local-import-button h-7 w-7 rounded-md text-xs text-muted-foreground"
-        :title="importing ? t('driverStore.importing') : t('driverStore.importLocalJar')"
+        :title="importing ? t('driverStore.importing') : t(compatibilityRuntime ? 'driverStore.importCompatibilityZip' : 'driverStore.importLocalJar')"
         :disabled="preparingUpgradeAll || upgradingAll || installing || packageBusy"
         @click="emit('importFile')"
       >

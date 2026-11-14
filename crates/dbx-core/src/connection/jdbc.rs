@@ -1,3 +1,9 @@
+mod compatibility;
+pub use compatibility::{
+    install_jdbc_compatibility_runtime, install_jdbc_compatibility_runtime_from_file,
+    JDBC_COMPATIBILITY_MAX_PACKAGE_SIZE,
+};
+
 use crate::agent_service::AgentProgressEvent;
 use crate::plugins::PluginRuntimeEnv;
 use crate::plugins::{PluginManifest, SUPPORTED_PLUGIN_PROTOCOL_VERSION};
@@ -81,6 +87,7 @@ pub struct JdbcPluginStatus {
     pub version: Option<String>,
     pub protocol_version: Option<u32>,
     pub compatible: bool,
+    pub capabilities: Vec<String>,
     pub latest_version: Option<String>,
     pub latest_protocol_version: Option<u32>,
     pub update_available: bool,
@@ -159,6 +166,12 @@ pub fn delete_jdbc_driver(plugins_root: &Path, path: &str) -> Result<Vec<JdbcDri
     if !target.starts_with(&drivers_dir) {
         return Err("Driver file is outside the JDBC drivers directory".to_string());
     }
+    let bundle_id = target
+        .strip_prefix(drivers_dir.join("maven"))
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .and_then(|component| component.as_os_str().to_str());
+    let _lock = bundle_id.map(|id| compatibility::lock_bundle(plugins_root, id)).transpose()?;
     std::fs::remove_file(&target).map_err(|err| err.to_string())?;
     list_jdbc_drivers_from_dir(&drivers_dir)
 }
@@ -167,6 +180,7 @@ pub fn delete_jdbc_maven_bundle(plugins_root: &Path, bundle_id: &str) -> Result<
     if !is_safe_bundle_id(bundle_id) {
         return Err("Invalid JDBC Maven bundle id".to_string());
     }
+    let _lock = compatibility::lock_bundle(plugins_root, bundle_id)?;
     let bundles_dir = jdbc_maven_drivers_dir(plugins_root);
     let target = bundles_dir.join(bundle_id);
     if target.exists() {
@@ -361,6 +375,7 @@ pub fn import_offline_jdbc_payload(
         install_jdbc_plugin_zip(&plugin_bytes, &plugins_root.join("jdbc"))?;
 
         for (bundle_id, staged_dir) in &staged_bundles {
+            let _lock = compatibility::lock_bundle(plugins_root, bundle_id)?;
             let target = maven_dir.join(bundle_id);
             if target.exists() {
                 std::fs::remove_dir_all(&target).map_err(|err| err.to_string())?;
@@ -536,6 +551,10 @@ fn build_plugin_status(
 ) -> JdbcPluginStatus {
     let version = manifest.as_ref().and_then(|m| (!m.version.is_empty()).then_some(m.version.clone()));
     let protocol_version = manifest.as_ref().map(|m| m.protocol_version);
+    let capabilities = manifest
+        .as_ref()
+        .map(|m| m.capabilities.iter().map(|capability| capability.id.clone()).collect())
+        .unwrap_or_default();
     let compatible = match manifest.as_ref() {
         Some(m) => m.protocol_version == SUPPORTED_PLUGIN_PROTOCOL_VERSION,
         None => true,
@@ -552,6 +571,7 @@ fn build_plugin_status(
         version,
         protocol_version,
         compatible,
+        capabilities,
         latest_version,
         latest_protocol_version,
         update_available,
@@ -1077,7 +1097,10 @@ fn list_jdbc_maven_bundles_from_dir(maven_dir: &Path) -> Result<Vec<JdbcMavenBun
             continue;
         }
         let raw = std::fs::read_to_string(&manifest_path).map_err(|err| err.to_string())?;
-        bundles.push(serde_json::from_str::<JdbcMavenBundleInfo>(&raw).map_err(|err| err.to_string())?);
+        let bundle = serde_json::from_str::<JdbcMavenBundleInfo>(&raw).map_err(|err| err.to_string())?;
+        if compatibility::bundle_is_complete(maven_dir, &bundle)? {
+            bundles.push(bundle);
+        }
     }
     bundles.sort_by(|a, b| a.coordinate.cmp(&b.coordinate));
     Ok(bundles)
@@ -1092,6 +1115,7 @@ fn install_jdbc_maven_bundle(
         return Err("Maven resolver did not return any JAR artifacts".to_string());
     }
     let bundle_id = maven_bundle_id(coordinate);
+    let _lock = compatibility::lock_bundle(plugins_root, &bundle_id)?;
     let bundle_dir = jdbc_maven_drivers_dir(plugins_root).join(&bundle_id);
     let temp_dir = bundle_dir.with_extension("tmp");
     if temp_dir.exists() {
@@ -1164,6 +1188,7 @@ fn install_single_jdbc_maven_artifact(
         return Err(format!("Driver JAR does not exist: {}", source.display()));
     }
     let bundle_id = maven_bundle_id(coordinate);
+    let _lock = compatibility::lock_bundle(plugins_root, &bundle_id)?;
     let bundle_dir = jdbc_maven_drivers_dir(plugins_root).join(&bundle_id);
     let temp_dir = bundle_dir.with_extension("tmp");
     if temp_dir.exists() {
@@ -1708,6 +1733,39 @@ mod tests {
         assert_eq!(drivers[0].name, "env-driver.jar");
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plugin_status_reports_capabilities_without_changing_protocol_compatibility() {
+        let temp = tempfile::tempdir().unwrap();
+        let plugin_dir = temp.path().join("jdbc");
+        let absent = jdbc_plugin_status_from_dir_local(&plugin_dir).unwrap();
+        assert!(!absent.installed);
+        assert!(absent.capabilities.is_empty());
+        assert_eq!(serde_json::to_value(&absent).unwrap()["capabilities"], serde_json::json!([]));
+        std::fs::create_dir(&plugin_dir).unwrap();
+        let mut manifest = serde_json::json!({
+            "id": "jdbc", "name": "JDBC", "protocol_version": SUPPORTED_PLUGIN_PROTOCOL_VERSION
+        });
+        std::fs::write(plugin_dir.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let legacy = jdbc_plugin_status_from_dir_local(&plugin_dir).unwrap();
+        assert!(legacy.installed && legacy.compatible);
+        assert!(legacy.capabilities.is_empty());
+
+        let declared: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../plugins/jdbc/manifest.json")).unwrap();
+        manifest["capabilities"] = declared["capabilities"].clone();
+        std::fs::write(plugin_dir.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let capable = jdbc_plugin_status_from_dir_local(&plugin_dir).unwrap();
+        assert!(capable.installed && capable.compatible);
+        assert!(capable.capabilities.iter().any(|id| id == "jdbc.external-classpath-isolation-v1"));
+        assert_eq!(serde_json::to_value(&capable).unwrap()["capabilities"], serde_json::json!(capable.capabilities));
+
+        manifest["protocol_version"] = (SUPPORTED_PLUGIN_PROTOCOL_VERSION + 1).into();
+        std::fs::write(plugin_dir.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let incompatible = jdbc_plugin_status_from_dir_local(&plugin_dir).unwrap();
+        assert!(!incompatible.compatible);
+        assert_eq!(incompatible.capabilities, capable.capabilities);
     }
 
     #[tokio::test]

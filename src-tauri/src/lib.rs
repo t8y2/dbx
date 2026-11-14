@@ -2603,6 +2603,8 @@ pub fn run() {
             commands::plugins::list_jdbc_local_bundles,
             commands::plugins::import_jdbc_drivers,
             commands::plugins::install_jdbc_driver_from_maven,
+            commands::plugins::install_jdbc_compatibility_runtime,
+            commands::plugins::install_jdbc_compatibility_runtime_from_file,
             commands::plugins::install_prestosql_jdbc_driver,
             commands::plugins::delete_jdbc_driver,
             commands::plugins::delete_jdbc_maven_bundle,

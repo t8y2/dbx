@@ -1,5 +1,5 @@
 import type { ConnectionConfig, DatabaseType, JdbcMavenBundleInfo } from "@/types/database";
-import type { ManagedJdbcDriverDefinition } from "@/lib/database/managedJdbcDriver";
+import { jdbcBundleHasArtifacts, type ManagedJdbcDriverDefinition } from "@/lib/database/managedJdbcDriver";
 
 export type JdbcProductConnectionFields = {
   connectionString: string;
@@ -14,6 +14,15 @@ export type JdbcProductModeDefinition = {
   hintKey: string;
   defaultConnectionString: string;
   defaultDriverClass: string;
+  managedCoordinates: readonly string[];
+};
+
+export type JdbcProductRuntimeDefinition = {
+  requiredArtifactNames?: readonly string[];
+  id: string;
+  modeId: string;
+  labelKey: string;
+  managedDriverId: string;
   managedCoordinates: readonly string[];
 };
 
@@ -37,6 +46,8 @@ export type JdbcProductProfileDefinition = {
   missingDriverError: string;
   missingPluginError: string;
   modes: readonly JdbcProductModeDefinition[];
+  runtimes?: readonly JdbcProductRuntimeDefinition[];
+  isRuntimeDependencyPath?: (path: string, mode: string) => boolean;
   detectMode: (config: Partial<Pick<ConnectionConfig, "connection_string" | "jdbc_driver_class">>) => string;
   isCompatibleRuntimePath: (path: string, mode: string) => boolean;
 };
@@ -61,12 +72,12 @@ export class JdbcProductRuntimeError extends Error {
   readonly profileId: string;
   readonly managedDriverId: string;
 
-  constructor(kind: JdbcProductRuntimeErrorKind, profile: JdbcProductProfileDefinition) {
+  constructor(kind: JdbcProductRuntimeErrorKind, profile: JdbcProductProfileDefinition, managedDriverId = profile.managedDriverId) {
     super(kind === "plugin-missing" ? profile.missingPluginError : profile.missingDriverError);
     this.name = "JdbcProductRuntimeError";
     this.kind = kind;
     this.profileId = profile.id;
-    this.managedDriverId = profile.managedDriverId;
+    this.managedDriverId = managedDriverId;
   }
 }
 
@@ -138,15 +149,17 @@ export function isJdbcProductDefaultDriverClass(profile: JdbcProductProfileDefin
 }
 
 export function jdbcProductManagedCoordinates(profile: JdbcProductProfileDefinition): string[] {
-  return Array.from(new Set(profile.modes.flatMap((mode) => [...mode.managedCoordinates])));
+  return Array.from(new Set([...profile.modes.flatMap((mode) => [...mode.managedCoordinates]), ...(profile.runtimes ?? []).flatMap((runtime) => [...runtime.managedCoordinates])]));
 }
 
-export function validateJdbcProductManagedDriver(profile: JdbcProductProfileDefinition, driver: ManagedJdbcDriverDefinition | undefined): void {
-  if (!driver || driver.id !== profile.managedDriverId) {
-    throw new Error(`JDBC product profile ${profile.id} references unknown managed driver: ${profile.managedDriverId}`);
+export function validateJdbcProductManagedDriver(profile: JdbcProductProfileDefinition, driver: ManagedJdbcDriverDefinition | undefined, runtime?: JdbcProductRuntimeDefinition): void {
+  const managedDriverId = runtime?.managedDriverId ?? profile.managedDriverId;
+  if (!driver || driver.id !== managedDriverId) {
+    throw new Error(`JDBC product profile ${profile.id} references unknown managed driver: ${managedDriverId}`);
   }
   const ownedCoordinates = new Set(driver.bundles.map(({ coordinate }) => coordinate));
-  const unownedCoordinate = jdbcProductManagedCoordinates(profile).find((coordinate) => !ownedCoordinates.has(coordinate));
+  const coordinates = runtime?.managedCoordinates ?? profile.modes.flatMap((mode) => [...mode.managedCoordinates]);
+  const unownedCoordinate = coordinates.find((coordinate) => !ownedCoordinates.has(coordinate));
   if (unownedCoordinate) {
     throw new Error(`JDBC product profile ${profile.id} requires coordinate not owned by ${driver.id}: ${unownedCoordinate}`);
   }
@@ -156,15 +169,34 @@ export function isJdbcProductManagedMavenCoordinate(profile: JdbcProductProfileD
   return jdbcProductManagedCoordinates(profile).includes(coordinate);
 }
 
-export function jdbcProductManagedRuntimePaths(profile: JdbcProductProfileDefinition, bundles: readonly JdbcMavenBundleInfo[], modeId: string): string[] {
+export function jdbcProductManagedRuntimePaths(profile: JdbcProductProfileDefinition, bundles: readonly JdbcMavenBundleInfo[], modeId: string, runtimeId = ""): string[] {
   const bundleByCoordinate = new Map(bundles.map((bundle) => [bundle.coordinate, bundle]));
-  const requiredBundles = jdbcProductMode(profile, modeId).managedCoordinates.map((coordinate) => bundleByCoordinate.get(coordinate));
-  if (requiredBundles.some((bundle) => !bundle)) return [];
+  const runtime = jdbcProductRuntimeOptions(profile, modeId).find((candidate) => candidate.id === runtimeId);
+  if (!runtime) return [];
+  const requiredBundles = runtime.managedCoordinates.map((coordinate) => bundleByCoordinate.get(coordinate));
+  if (requiredBundles.some((bundle) => !jdbcBundleHasArtifacts(bundle, runtime.requiredArtifactNames))) return [];
   return requiredBundles.flatMap((bundle) => (bundle?.artifacts ?? []).map((artifact) => artifact.path).filter(Boolean));
 }
 
-export function jdbcProductRuntimeSelectionId(profile: JdbcProductProfileDefinition, modeId: string): string {
-  return `${profile.id}:${modeId}`;
+export function jdbcProductRuntimeSelectionId(profile: JdbcProductProfileDefinition, modeId: string, runtimeId = ""): string {
+  return `${profile.id}:${modeId}${runtimeId ? `:${runtimeId}` : ""}`;
+}
+
+export function jdbcProductRuntimeOptions(profile: JdbcProductProfileDefinition, modeId: string): JdbcProductRuntimeDefinition[] {
+  const mode = jdbcProductMode(profile, modeId);
+  return [{ id: "", modeId: mode.id, labelKey: profile.runtimeLabelKey, managedDriverId: profile.managedDriverId, managedCoordinates: mode.managedCoordinates }, ...(profile.runtimes ?? []).filter((runtime) => runtime.modeId === mode.id)];
+}
+
+export function jdbcProductConfiguredRuntime(profile: JdbcProductProfileDefinition, modeId: string, paths: readonly string[]): JdbcProductRuntimeDefinition {
+  const runtimes = jdbcProductRuntimeOptions(profile, modeId);
+  return runtimes.find((runtime) => runtime.id && paths.some((path) => runtime.managedCoordinates.some((coordinate) => path.replaceAll("\\", "/").split("/").includes(mavenBundleId(coordinate))))) ?? runtimes[0]!;
+}
+
+// Only an explicit picker action replaces selected runtime JARs. Config/resource
+// paths survive; existing manual classpaths are never silently migrated.
+export function selectJdbcProductRuntimePaths(profile: JdbcProductProfileDefinition, modeId: string, configuredPaths: readonly string[], runtimePaths: readonly string[]): string[] {
+  const resources = configuredPaths.filter((path) => !isJdbcProductManagedMavenPath(profile, path) && !profile.modes.some((mode) => profile.isCompatibleRuntimePath(path, mode.id)) && !profile.isRuntimeDependencyPath?.(path, modeId));
+  return Array.from(new Set([...resources, ...runtimePaths]));
 }
 
 function mavenBundleId(coordinate: string): string {
@@ -193,10 +225,11 @@ export async function ensureJdbcProductRuntimeDrivers(profile: JdbcProductProfil
   config.connection_string = config.connection_string?.trim() || defaults.connectionString;
   config.jdbc_driver_class = config.jdbc_driver_class?.trim() || defaults.driverClass;
   const configuredPaths = (config.jdbc_driver_paths ?? []).map((path) => path.trim()).filter(Boolean);
+  const runtime = jdbcProductConfiguredRuntime(profile, modeId, configuredPaths);
 
   const pluginStatus = await api.jdbcPluginStatus();
   if (!pluginStatus.installed || !pluginStatus.compatible) {
-    throw new JdbcProductRuntimeError("plugin-missing", profile);
+    throw new JdbcProductRuntimeError("plugin-missing", profile, runtime.managedDriverId);
   }
 
   const bundles = await api.listJdbcMavenBundles();
@@ -210,14 +243,14 @@ export async function ensureJdbcProductRuntimeDrivers(profile: JdbcProductProfil
   }
 
   const installedCoordinates = new Set(bundles.map((bundle) => bundle.coordinate));
-  if (mode.managedCoordinates.some((coordinate) => !installedCoordinates.has(coordinate))) {
-    throw new JdbcProductRuntimeError("driver-missing", profile);
+  if (runtime.managedCoordinates.some((coordinate) => !installedCoordinates.has(coordinate))) {
+    throw new JdbcProductRuntimeError("driver-missing", profile, runtime.managedDriverId);
   }
 
   const customPaths = configuredPaths.filter((path) => !managedPaths.has(path) && !isJdbcProductManagedMavenPath(profile, path));
-  const runtimePaths = jdbcProductManagedRuntimePaths(profile, bundles, modeId);
+  const runtimePaths = jdbcProductManagedRuntimePaths(profile, bundles, modeId, runtime.id);
   if (runtimePaths.length === 0) {
-    throw new JdbcProductRuntimeError("driver-missing", profile);
+    throw new JdbcProductRuntimeError("driver-missing", profile, runtime.managedDriverId);
   }
 
   const paths = Array.from(new Set([...customPaths, ...runtimePaths]));
@@ -227,6 +260,6 @@ export async function ensureJdbcProductRuntimeDrivers(profile: JdbcProductProfil
     mode,
     bundles,
     paths,
-    runtimeSelectionId: jdbcProductRuntimeSelectionId(profile, modeId),
+    runtimeSelectionId: jdbcProductRuntimeSelectionId(profile, modeId, runtime.id),
   };
 }

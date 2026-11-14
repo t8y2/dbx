@@ -1,0 +1,89 @@
+name: Phoenix compatibility runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the already catalog-approved bytes (requires maintainer release permission)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phoenix-compat-5.0.0-dbx.1
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: '8.0.512+9'
+      - name: Verify build and archive guards
+        run: python3 -m unittest discover -s agents/scripts/phoenix-compat -p 'test_*.py'
+      - name: Build from verified source using a locked private repository
+        run: python3 agents/scripts/phoenix-compat/build.py build --work "$RUNNER_TEMP/phoenix-compat"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phoenix-compatibility-runtime
+          compression-level: 0
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/phoenix-compat/dist/phoenix-5.0.0-hbase-2.0-dbx.1.zip
+            ${{ runner.temp }}/phoenix-compat/dist/SHA256SUMS
+            ${{ runner.temp }}/phoenix-compat/dist/catalog-candidate.json
+            ${{ runner.temp }}/phoenix-compat/dist/normalization.json
+            ${{ runner.temp }}/phoenix-compat/dist/build-provenance.json
+            ${{ runner.temp }}/phoenix-compat/dist/apache-phoenix-5.0.0-HBase-2.0-src.tar.gz
+            ${{ runner.temp }}/phoenix-compat/dist/shade-3.0.0.patch
+            ${{ runner.temp }}/phoenix-compat/dist/build.py
+            ${{ runner.temp }}/phoenix-compat/dist/repository-lock.json
+            ${{ runner.temp }}/phoenix-compat/dist/README.md
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: phoenix-compatibility-build-log
+          path: ${{ runner.temp }}/phoenix-compat/build.log
+
+  publish:
+    needs: build
+    if: inputs.publish && github.repository == 't8y2/dbx' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: phoenix-compatibility-runtime
+          path: artifact
+      - name: Publish a new immutable-identity compatibility release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tag=jdbc-compat-phoenix-5.0.0-dbx.1
+          mapfile -t archives < <(find artifact -type f -name phoenix-5.0.0-hbase-2.0-dbx.1.zip)
+          test "${#archives[@]}" = 1
+          archive="${archives[0]}"
+          cd "$(dirname "$archive")"
+          sha256sum --check SHA256SUMS
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo 'Release already exists; never overwrite approved compatibility bytes.' >&2
+            exit 1
+          fi
+          gh release create "$tag" --target "$RELEASE_COMMIT" \
+            --title 'DBX compatibility build: Phoenix 5.0.0 / HBase 2.0' \
+            --notes 'DBX compatibility rebuild, not an Apache release. See the source, locked dependency inventory, build manifest and bundled LICENSE/NOTICE. Requires the DBX JDBC isolation fix. Support is limited to documented validation.' \
+            phoenix-5.0.0-hbase-2.0-dbx.1.zip SHA256SUMS catalog-candidate.json normalization.json \
+            build-provenance.json apache-phoenix-5.0.0-HBase-2.0-src.tar.gz shade-3.0.0.patch \
+            build.py repository-lock.json README.md

@@ -44,7 +44,13 @@ impl AppError {
     }
 
     pub fn from_backend_error(error: BackendError) -> Self {
-        Self { message: error.code().to_string(), status: StatusCode::INTERNAL_SERVER_ERROR, error: Box::new(error) }
+        // SQL failures (syntax/execution errors reported by the engine) are the
+        // client's request problem, not a server fault: surface them as 422 so
+        // gateways and monitoring do not count user-side mistakes as 5xx
+        // outages. Every other backend error keeps the generic 500.
+        let status =
+            if error.is_sql_error() { StatusCode::UNPROCESSABLE_ENTITY } else { StatusCode::INTERNAL_SERVER_ERROR };
+        Self { message: error.code().to_string(), status, error: Box::new(error) }
     }
 }
 
@@ -146,6 +152,7 @@ mod tests {
         });
 
         let response = AppError::from(error).into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
@@ -153,6 +160,22 @@ mod tests {
         assert_eq!(payload["source"], "jdbcAgent");
         assert_eq!(payload["detail"], "relation customer_orders does not exist");
         assert!(payload["diagnostics"].get("agentSessionId").is_none());
+    }
+
+    #[tokio::test]
+    async fn sql_failures_map_to_422_while_other_backend_errors_stay_500() {
+        use dbx_core::db::agent_driver::{AgentErrorStage, AgentOperationOutcome};
+
+        // Native-driver SQL failure: detail is preserved and the status is 422.
+        let response =
+            AppError::from(BackendError::from_sql_detail("ERROR: relation missing does not exist")).into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Non-SQL backend failures keep the generic 500.
+        let response =
+            AppError::from(BackendError::from_canceled(AgentErrorStage::Execute, AgentOperationOutcome::Unknown))
+                .into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]

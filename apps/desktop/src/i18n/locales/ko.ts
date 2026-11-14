@@ -1863,6 +1863,12 @@ export default withEnglishFallback({
     customColorPlaceholder: "#ff0000 또는 rgba(…)",
     tursoHostPlaceholder: "your-database.turso.io 또는 libsql://your-database.turso.io",
     tursoHostHint: "libsql:// 및 https:// 프로토콜을 지원합니다. 호스트 이름만 입력해도 됩니다 (HTTPS가 자동으로 사용됨).",
+    cosmosDbEndpoint: "계정 엔드포인트",
+    cosmosDbEndpointPlaceholder: "your-account.documents.azure.com",
+    cosmosDbEndpointHint: "Azure Portal의 키 페이지에서 URI 또는 기본 연결 문자열을 붙여 넣으면 엔드포인트와 키가 자동으로 입력됩니다.",
+    cosmosDbAccountKey: "계정 키",
+    cosmosDbUrlParamsPlaceholder: "tlsverify=false (로컬 에뮬레이터 전용)",
+    cosmosDbCredentialsRequired: "Azure Cosmos DB에는 계정 엔드포인트와 계정 키가 필요합니다",
     tursoTokenHint: "다음으로 토큰을 만드세요:",
     tursoUrlParamsPlaceholder: "authToken=xxx (선택, 위의 인증 토큰 필드가 우선)",
     driverInstall: {
@@ -7313,6 +7319,11 @@ export default withEnglishFallback({
     importFailed: "가져오기 실패: {message}",
     importInvalidJson: "JSON은 객체 또는 객체 배열이어야 합니다",
     exportSearchUnsupported: "Meilisearch는 텍스트, 하이브리드 또는 점수 임계값 검색의 페이지 탐색을 제한합니다. 필터링된 모든 문서를 내보내려면 해당 옵션을 지우세요.",
+  },
+  cosmosdb: {
+    jsonReplaceHint: "JSON 저장은 문서 전체를 바꿉니다. 불러온 뒤 문서가 변경된 경우(_etag 불일치) 저장에 실패합니다. id 또는 파티션 키를 바꾸면 새 문서를 만들고 이전 문서를 삭제합니다. _id와 시스템 속성은 무시됩니다.",
+    pageCursorUnavailable: "Azure Cosmos DB 연속 토큰을 사용할 수 없습니다. 첫 페이지부터 다시 불러오세요.",
+    repeatedCursor: "Azure Cosmos DB가 같은 연속 토큰을 반환하여 내보내기를 중지했습니다.",
   },
   dynamodb: {
     tableMetadataUnavailable: "DynamoDB 테이블 메타데이터가 로드되지 않았습니다. 새로 고친 후 다시 시도하세요.",

@@ -1564,6 +1564,12 @@ export default withEnglishFallback({
     customColorPlaceholder: "#ff0000 lub rgba(…)",
     tursoHostPlaceholder: "your-database.turso.io or libsql://your-database.turso.io",
     tursoHostHint: "Obsługuje protokoły libsql:// i https://. Można też podać samą nazwę hosta (HTTPS zostanie użyty automatycznie).",
+    cosmosDbEndpoint: "Punkt końcowy konta",
+    cosmosDbEndpointPlaceholder: "your-account.documents.azure.com",
+    cosmosDbEndpointHint: "Wklej identyfikator URI lub PODSTAWOWE PARAMETRY POŁĄCZENIA ze strony Klucze w witrynie Azure Portal; punkt końcowy i klucz zostaną uzupełnione automatycznie.",
+    cosmosDbAccountKey: "Klucz konta",
+    cosmosDbUrlParamsPlaceholder: "tlsverify=false (tylko lokalny emulator)",
+    cosmosDbCredentialsRequired: "Azure Cosmos DB wymaga punktu końcowego i klucza konta",
     tursoTokenHint: "Utwórz token za pomocą:",
     tursoUrlParamsPlaceholder: "authToken=xxx (opcjonalnie; pierwszeństwo ma pole Token uwierzytelniania powyżej)",
     driverInstall: {
@@ -6844,6 +6850,11 @@ export default withEnglishFallback({
     importFailed: "Import nie powiódł się: {message}",
     importInvalidJson: "JSON musi zawierać obiekt lub tablicę obiektów",
     exportSearchUnsupported: "Pełny eksport jest niedostępny dla wyszukiwań tekstowych, hybrydowych lub z progiem wyniku, ponieważ Meilisearch ogranicza stronicowanie wyszukiwania. Wyczyść te opcje, aby wyeksportować każdy przefiltrowany dokument.",
+  },
+  cosmosdb: {
+    jsonReplaceHint: "Zapis JSON zastępuje cały dokument i kończy się błędem, jeśli dokument zmienił się od wczytania (_etag). Zmiana id lub klucza partycji tworzy nowy dokument i usuwa stary; _id i właściwości systemowe są pomijane.",
+    pageCursorUnavailable: "Token kontynuacji Azure Cosmos DB jest niedostępny. Załaduj ponownie od pierwszej strony.",
+    repeatedCursor: "Azure Cosmos DB zwrócił powtórzony token kontynuacji. Eksport został zatrzymany.",
   },
   dynamodb: {
     tableMetadataUnavailable: "Metadane tabeli DynamoDB nie są załadowane. Odśwież i spróbuj ponownie.",

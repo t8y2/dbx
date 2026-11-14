@@ -2311,6 +2311,12 @@ export default {
     customColorPlaceholder: "#ff0000 or rgba(…)",
     tursoHostPlaceholder: "your-database.turso.io or libsql://your-database.turso.io",
     tursoHostHint: "Supports the libsql:// and https:// protocols. You can also enter just the host name (HTTPS is used automatically).",
+    cosmosDbEndpoint: "Account endpoint",
+    cosmosDbEndpointPlaceholder: "your-account.documents.azure.com",
+    cosmosDbEndpointHint: "Paste the URI or the PRIMARY CONNECTION STRING from the Keys page in the Azure portal; the endpoint and key are filled in automatically.",
+    cosmosDbAccountKey: "Account key",
+    cosmosDbUrlParamsPlaceholder: "tlsverify=false (local emulator only)",
+    cosmosDbCredentialsRequired: "Azure Cosmos DB requires an account endpoint and an account key",
     tursoTokenHint: "Create a token with:",
     tursoUrlParamsPlaceholder: "authToken=xxx (optional, the Auth Token field above takes precedence)",
     driverInstall: {
@@ -8524,6 +8530,11 @@ export default {
     importFailed: "Import failed: {message}",
     importInvalidJson: "JSON must contain an object or an array of objects",
     exportSearchUnsupported: "Full export is unavailable for text, hybrid, or score-threshold searches because Meilisearch caps search pagination. Clear those options to export every filtered document.",
+  },
+  cosmosdb: {
+    jsonReplaceHint: "JSON save replaces the whole document and fails if it changed since it was loaded (_etag). Changing id or the partition key creates a new document and deletes the old one; _id and system properties are ignored.",
+    pageCursorUnavailable: "The Azure Cosmos DB continuation token is unavailable. Reload from the first page.",
+    repeatedCursor: "Azure Cosmos DB returned a repeated continuation token. Export was stopped.",
   },
   dynamodb: {
     tableMetadataUnavailable: "DynamoDB table metadata is not loaded. Refresh and try again.",

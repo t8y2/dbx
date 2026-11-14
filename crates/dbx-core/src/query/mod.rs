@@ -2316,6 +2316,21 @@ async fn do_execute_typed(
             }
             result
         }
+        PoolKind::CosmosDb(client) => {
+            let client = client.clone();
+            let sql = sql.to_string();
+            let max_rows = options.max_rows;
+            let result = wait_for_query_opt(
+                cancel_token,
+                query_timeout,
+                db::cosmosdb_driver::execute_query(&client, database, &sql, Some(query_result_row_limit(max_rows))),
+            )
+            .await;
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
+        }
         PoolKind::CouchDb(client) => {
             let client = client.clone();
             let sql = sql.to_string();
@@ -3850,6 +3865,11 @@ pub async fn close_query_session(
         PoolKind::CouchDb(client) => {
             let client = client.clone();
             db::couchdb_driver::close_cursor(&client, session_id).await?;
+            Ok(true)
+        }
+        PoolKind::CosmosDb(client) => {
+            let client = client.clone();
+            db::cosmosdb_driver::close_cursor(&client, session_id).await?;
             Ok(true)
         }
         _ => Ok(false),
@@ -5657,6 +5677,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::Easysearch(_)
         | PoolKind::Solr(_)
         | PoolKind::CouchDb(_)
+        | PoolKind::CosmosDb(_)
         | PoolKind::Meilisearch(_)
         | PoolKind::Salesforce(_)
         | PoolKind::VectorDb(_)
@@ -6051,6 +6072,7 @@ fn batch_transaction_path(pool: &PoolKind) -> BatchTransactionPath {
         | PoolKind::Easysearch(_)
         | PoolKind::Solr(_)
         | PoolKind::CouchDb(_)
+        | PoolKind::CosmosDb(_)
         | PoolKind::Meilisearch(_)
         | PoolKind::Salesforce(_)
         | PoolKind::VectorDb(_)

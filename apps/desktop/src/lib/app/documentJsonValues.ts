@@ -45,14 +45,32 @@ export function serializeDocumentStoreId(value: unknown, kind: DocumentStoreKind
   // sentinel encoding like Meilisearch's string-id marker.
   if (kind === "solr" || kind === "couchdb") return String(value);
   if (kind === "meilisearch") return typeof value === "string" ? `__dbx_meilisearch_string_id__${JSON.stringify(value)}` : String(value);
-  if (kind === "dynamodb") return stringifyJsonPreservingLargeNumbers(value);
+  // DynamoDB keys and Cosmos DB `{ id, partitionKey }` identities are JSON objects.
+  if (kind === "dynamodb" || kind === "cosmosdb") return stringifyJsonPreservingLargeNumbers(value);
   return serializeMongoDocumentId(value);
 }
 
 export function formatDocumentStoreIdLabel(value: unknown, kind: DocumentStoreKind): string {
   if (value === null || value === undefined) return "";
+  if (kind === "cosmosdb") {
+    const label = formatCosmosDbIdentityLabel(value);
+    if (label !== null) return label;
+  }
   if (typeof value === "object") return stringifyDocumentStoreValue(value, kind);
   return String(value);
+}
+
+/**
+ * Cosmos DB identities are `{ id, partitionKey: [...] }`. Show the `id`, and
+ * the partition key only when it is not simply the `id` again.
+ */
+function formatCosmosDbIdentityLabel(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { id, partitionKey } = value as { id?: unknown; partitionKey?: unknown };
+  if (typeof id !== "string" || !Array.isArray(partitionKey)) return null;
+  if (partitionKey.length === 0 || (partitionKey.length === 1 && partitionKey[0] === id)) return id;
+  const keys = partitionKey.map((part) => (part && typeof part === "object" ? "undefined" : JSON.stringify(part)));
+  return `${id} · ${keys.join(" / ")}`;
 }
 
 /**

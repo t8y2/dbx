@@ -36,6 +36,7 @@ const REMOTE_SEARCH_UNSUPPORTED_TYPES = new Set<ConnectionConfig["db_type"]>([
   "meilisearch",
   "solr",
   "couchdb",
+  "cosmosdb",
   "qdrant",
   "milvus",
   "weaviate",

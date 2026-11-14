@@ -157,6 +157,7 @@ export function connectionDisplayUrlScheme(connection: Pick<ConnectionConfig, "d
     case "rqlite":
     case "turso":
     case "dynamodb":
+    case "cosmosdb":
     case "mq":
     case "consul":
     case "salesforce":
@@ -227,6 +228,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType, driverProfile?: s
 
     case "dynamodb":
       return "https://dynamodb.us-east-1.amazonaws.com";
+
+    case "cosmosdb":
+      return "https://your-account.documents.azure.com:443/";
 
     case "clickhouse":
       return "clickhouse://user:password@host:port/database";

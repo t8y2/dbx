@@ -1525,6 +1525,12 @@ export default withEnglishFallback({
     customColorPlaceholder: "#ff0000 atau rgba(…)",
     tursoHostPlaceholder: "your-database.turso.io atau libsql://your-database.turso.io",
     tursoHostHint: "Mendukung protokol libsql:// dan https://. Anda juga dapat hanya memasukkan nama host (HTTPS digunakan secara otomatis).",
+    cosmosDbEndpoint: "Titik akhir akun",
+    cosmosDbEndpointPlaceholder: "your-account.documents.azure.com",
+    cosmosDbEndpointHint: "Tempel URI atau PRIMARY CONNECTION STRING dari halaman Keys di portal Azure; titik akhir dan kunci akan terisi otomatis.",
+    cosmosDbAccountKey: "Kunci akun",
+    cosmosDbUrlParamsPlaceholder: "tlsverify=false (hanya emulator lokal)",
+    cosmosDbCredentialsRequired: "Azure Cosmos DB memerlukan titik akhir akun dan kunci akun",
     tursoTokenHint: "Buat token dengan:",
     tursoUrlParamsPlaceholder: "authToken=xxx (opsional, kolom Auth Token di atas lebih diutamakan)",
     driverInstall: {
@@ -6817,6 +6823,11 @@ export default withEnglishFallback({
     importFailed: "Impor gagal: {message}",
     importInvalidJson: "JSON harus berisi objek atau array objek",
     exportSearchUnsupported: "Ekspor penuh tidak tersedia untuk pencarian teks, hibrida, atau ambang skor karena Meilisearch membatasi paginasi pencarian. Hapus opsi tersebut untuk mengekspor semua dokumen yang difilter.",
+  },
+  cosmosdb: {
+    jsonReplaceHint: "Menyimpan JSON mengganti seluruh dokumen dan gagal jika dokumen berubah sejak dimuat (_etag). Mengubah id atau kunci partisi membuat dokumen baru dan menghapus yang lama; _id dan properti sistem diabaikan.",
+    pageCursorUnavailable: "Token lanjutan Azure Cosmos DB tidak tersedia. Muat ulang dari halaman pertama.",
+    repeatedCursor: "Azure Cosmos DB mengembalikan token lanjutan yang berulang. Ekspor dihentikan.",
   },
   dynamodb: {
     tableMetadataUnavailable: "Metadata tabel DynamoDB belum dimuat. Segarkan dan coba lagi.",

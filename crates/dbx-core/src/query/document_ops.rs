@@ -2,7 +2,8 @@ use crate::connection::{AppState, PoolKind};
 use crate::db::agent_driver::mongo_document_id_params;
 use crate::db::document_result::DocumentQueryResult;
 use crate::db::{
-    couchdb_driver, dynamodb_driver, easysearch_driver, elasticsearch_driver, mongo_driver, solr_driver, vector_driver,
+    cosmosdb_driver, couchdb_driver, dynamodb_driver, easysearch_driver, elasticsearch_driver, mongo_driver,
+    solr_driver, vector_driver,
 };
 
 pub use crate::db::vector_driver::CollectionInfo;
@@ -65,6 +66,7 @@ pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Resul
         PoolKind::Easysearch(_) => Ok(vec!["default".to_string()]),
         PoolKind::Solr(_) => Ok(vec!["default".to_string()]),
         PoolKind::CouchDb(_) => Ok(vec!["default".to_string()]),
+        PoolKind::CosmosDb(client) => Ok(sort_names(cosmosdb_driver::list_databases(client).await?)),
         PoolKind::Meilisearch(_) => Ok(vec!["default".to_string()]),
         PoolKind::VectorDb(client) => vector_driver::list_databases(client).await,
         PoolKind::Agent(client) => {
@@ -294,6 +296,19 @@ pub async fn list_collections_core(
                     name: n.clone(),
                     id: n,
                     kind: Some("database".to_string()),
+                    ..Default::default()
+                })
+                .collect())
+        }
+        PoolKind::CosmosDb(client) => {
+            let mut containers = cosmosdb_driver::list_containers(client, database).await?;
+            containers.sort_by(|left, right| cmp_names(&left.id, &right.id));
+            Ok(containers
+                .into_iter()
+                .map(|container| CollectionInfo {
+                    name: container.id.clone(),
+                    id: container.id,
+                    kind: Some("container".to_string()),
                     ..Default::default()
                 })
                 .collect())
@@ -539,6 +554,12 @@ pub async fn find_documents_core_with_total(
                 solr_driver::find_documents(&client, collection, skip, limit, filter, sort).await
             }
         }
+        PoolKind::CosmosDb(client) => {
+            let client = client.clone();
+            // Cosmos DB pages with continuation tokens only; offsets are not used.
+            let _ = (skip, projection, collation, cursor_pagination);
+            cosmosdb_driver::find_documents(&client, database, collection, limit, filter, sort, cursor).await
+        }
         PoolKind::CouchDb(client) => {
             let client = client.clone();
             let _ = projection;
@@ -591,9 +612,26 @@ pub async fn count_document_store_documents_core(
     collection: &str,
     filter: Option<&str>,
 ) -> Result<u64, String> {
+    count_document_store_documents_in_database_core(state, connection_id, None, collection, filter).await
+}
+
+/// Document count for stores whose collections live inside a database
+/// (Azure Cosmos DB). Other stores ignore `database`.
+pub async fn count_document_store_documents_in_database_core(
+    state: &AppState,
+    connection_id: &str,
+    database: Option<&str>,
+    collection: &str,
+    filter: Option<&str>,
+) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
     let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
     match &pool {
+        PoolKind::CosmosDb(client) => {
+            let client = client.clone();
+            let database = database.filter(|db| !db.is_empty()).ok_or("Azure Cosmos DB count requires a database")?;
+            cosmosdb_driver::count_documents(&client, database, collection, filter).await
+        }
         PoolKind::DynamoDb(client) => {
             let client = client.clone();
             dynamodb_driver::count_items(&client, collection, filter).await
@@ -750,6 +788,12 @@ pub async fn insert_document_core(
             let _ = routing;
             couchdb_driver::insert_document(&client, collection, doc_json).await
         }
+        PoolKind::CosmosDb(client) => {
+            let client = client.clone();
+            // The partition key is read from the document body.
+            let _ = routing;
+            cosmosdb_driver::insert_document(&client, database, collection, doc_json).await
+        }
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
             crate::db::meilisearch_driver::insert_document(&client, collection, doc_json).await
@@ -824,6 +868,12 @@ pub async fn update_document_core(
             let _ = routing;
             couchdb_driver::update_document(&client, collection, id, doc_json).await
         }
+        PoolKind::CosmosDb(client) => {
+            let client = client.clone();
+            // `id` is the serialized `{ id, partitionKey }` identity.
+            let _ = routing;
+            cosmosdb_driver::update_document(&client, database, collection, id, doc_json).await
+        }
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
             crate::db::meilisearch_driver::update_document(&client, collection, id, doc_json).await
@@ -891,6 +941,11 @@ pub async fn delete_document_core_with_type(
             let client = client.clone();
             let _ = (document_type, routing);
             couchdb_driver::delete_document(&client, collection, id).await
+        }
+        PoolKind::CosmosDb(client) => {
+            let client = client.clone();
+            let _ = (document_type, routing);
+            cosmosdb_driver::delete_document(&client, database, collection, id).await
         }
         PoolKind::Meilisearch(client) => {
             let client = client.clone();

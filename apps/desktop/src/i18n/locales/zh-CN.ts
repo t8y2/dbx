@@ -2248,6 +2248,12 @@ export default withEnglishFallback({
     customColorPlaceholder: "#ff0000 或 rgba(…)",
     tursoHostPlaceholder: "your-database.turso.io 或 libsql://your-database.turso.io",
     tursoHostHint: "支持 libsql:// 或 https:// 协议，也可以只填主机名（自动使用 HTTPS）",
+    cosmosDbEndpoint: "账号终结点",
+    cosmosDbEndpointPlaceholder: "your-account.documents.azure.com",
+    cosmosDbEndpointHint: "可直接粘贴 Azure 门户“密钥”页中的 URI 或主连接字符串，终结点和密钥会自动填入。",
+    cosmosDbAccountKey: "账号密钥",
+    cosmosDbUrlParamsPlaceholder: "tlsverify=false（仅限本地模拟器）",
+    cosmosDbCredentialsRequired: "Azure Cosmos DB 需要填写账号终结点和账号密钥",
     tursoTokenHint: "使用以下命令创建 token：",
     tursoUrlParamsPlaceholder: "authToken=xxx（可选，优先使用上面的 Auth Token 字段）",
     driverInstall: {
@@ -8494,6 +8500,11 @@ export default withEnglishFallback({
     importFailed: "导入失败：{message}",
     importInvalidJson: "JSON 必须是对象或对象数组",
     exportSearchUnsupported: "Meilisearch 会限制文本、混合或分数阈值搜索的分页，无法保证完整导出。请清除这些选项后导出全部筛选文档。",
+  },
+  cosmosdb: {
+    jsonReplaceHint: "JSON 保存会整体替换文档，如果文档在加载后被他人修改（_etag 不一致）则保存失败。修改 id 或分区键会新建文档并删除旧文档；_id 和系统字段会被忽略。",
+    pageCursorUnavailable: "Azure Cosmos DB 续页令牌不可用，请从第一页重新加载。",
+    repeatedCursor: "Azure Cosmos DB 返回了重复的续页令牌，已停止导出。",
   },
   dynamodb: {
     tableMetadataUnavailable: "尚未加载 DynamoDB 表结构，请刷新后重试",

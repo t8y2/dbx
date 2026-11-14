@@ -341,6 +341,7 @@ const supportsExplain = computed(() => {
     dbType !== "meilisearch" &&
     dbType !== "solr" &&
     dbType !== "couchdb" &&
+    dbType !== "cosmosdb" &&
     dbType !== "qdrant" &&
     dbType !== "milvus" &&
     dbType !== "weaviate" &&

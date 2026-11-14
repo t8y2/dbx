@@ -286,7 +286,7 @@ watch(
 const pageTotal = computed(() => paginationTotal.value);
 const documentPageCount = computed(() => (pageTotal.value === undefined ? undefined : Math.max(1, Math.ceil(pageTotal.value / pageSize.value))));
 const canGoNextPage = computed(() => {
-  if (documentStoreProvider.value.kind === "dynamodb") return dynamodbHasNextCursor.value;
+  if (usesContinuationCursorPagination(documentStoreProvider.value.kind)) return dynamodbHasNextCursor.value;
   if (documentStoreProvider.value.kind === "elasticsearch") return elasticsearchHasNextCursor.value;
   return canGoNextDocumentPage({
     page: page.value,
@@ -556,6 +556,9 @@ const deleteDetails = computed(() => {
         table: props.collection,
         id: formatDocumentStoreIdLabel(id, "dynamodb"),
       });
+    }
+    if (documentStoreProvider.value.kind === "cosmosdb") {
+      return `Azure Cosmos DB container: ${props.database}/${props.collection}\nDocument: ${formatDocumentStoreIdLabel(id, "cosmosdb")}`;
     }
     const displayId = mongoDocumentIdForGrid(id);
     if (props.databaseType === "solr") {
@@ -1026,6 +1029,20 @@ function resetDocumentFilterBuilder() {
   documentFilterFieldPopoverOpen.value = {};
   documentFilterFieldSearch.value = {};
   documentFilterRules.value = documentFilterFieldOptions.value.length > 0 ? [createDocumentFilterRule()] : [];
+}
+
+/**
+ * Stores that page with opaque continuation cursors instead of offsets. The
+ * `dynamodb*` cursor and exact-count state below is shared by these stores.
+ */
+function usesContinuationCursorPagination(kind: DocumentStoreKind): boolean {
+  return kind === "dynamodb" || kind === "cosmosdb";
+}
+
+function continuationCursorUnavailableMessage(kind: DocumentStoreKind): string {
+  if (kind === "dynamodb") return t("dynamodb.pageCursorUnavailable");
+  if (kind === "cosmosdb") return t("cosmosdb.pageCursorUnavailable");
+  return "Elasticsearch page cursor unavailable; go back to the first page and page forward again";
 }
 
 function dynamodbCountFilterKey(filter: string | undefined): string {
@@ -1686,6 +1703,9 @@ async function gridSave(changes: DocumentGridChanges) {
         const normalized = prepareDynamoDbDocumentIdentity(doc);
         const writeDocument = prepareDocumentStoreWriteDocument(normalized.document, { kind, mode: "insert" });
         await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(writeDocument, kind));
+      } else if (kind === "cosmosdb") {
+        // The synthetic `_id` is derived from `id` and the partition key, so new rows always insert.
+        await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(doc, kind));
       } else if (id) {
         await api.documentUpdateDocument(props.connectionId, props.database, props.collection, id, stringifyDocumentStoreValue(doc, kind), routing);
       } else {
@@ -1699,7 +1719,7 @@ async function gridSave(changes: DocumentGridChanges) {
   }
 
   if (isEs) resetElasticsearchTotals({ preservePaginationTotal: true });
-  if (kind === "dynamodb") {
+  if (usesContinuationCursorPagination(kind)) {
     page.value = 0;
     resetDynamoDbPagination();
   }
@@ -2008,7 +2028,7 @@ async function load(options: { page?: number; append?: boolean; offset?: number;
     const collection = props.collection;
     const storeKind = documentStoreProvider.value.kind;
     const filter = currentDocumentFilter();
-    if (storeKind === "dynamodb") {
+    if (usesContinuationCursorPagination(storeKind)) {
       const countKey = dynamodbCountFilterKey(filter);
       if (dynamodbExactCountKey !== countKey) {
         dynamodbExactCountKey = countKey;
@@ -2020,15 +2040,15 @@ async function load(options: { page?: number; append?: boolean; offset?: number;
       resetElasticsearchTotals();
     }
     const sort = currentDocumentSortJson(sortInput.value);
-    const cursor = storeKind === "dynamodb" ? dynamodbPageCursors.value[requestPage] : storeKind === "elasticsearch" ? elasticsearchPageCursors.value[requestPage] : undefined;
-    if ((storeKind === "dynamodb" || storeKind === "elasticsearch") && requestPage > 0 && !cursor) {
-      throw new Error(storeKind === "dynamodb" ? t("dynamodb.pageCursorUnavailable") : "Elasticsearch page cursor unavailable; go back to the first page and page forward again");
+    const cursor = usesContinuationCursorPagination(storeKind) ? dynamodbPageCursors.value[requestPage] : storeKind === "elasticsearch" ? elasticsearchPageCursors.value[requestPage] : undefined;
+    if ((usesContinuationCursorPagination(storeKind) || storeKind === "elasticsearch") && requestPage > 0 && !cursor) {
+      throw new Error(continuationCursorUnavailableMessage(storeKind));
     }
     // Starting a fresh ES first page invalidates any previous PIT cursor stack.
     if (storeKind === "elasticsearch" && !cursor && requestPage === 0) {
       resetElasticsearchPagination();
     }
-    const skip = storeKind === "dynamodb" || storeKind === "elasticsearch" ? 0 : (options.offset ?? requestPage * pageSize.value);
+    const skip = usesContinuationCursorPagination(storeKind) || storeKind === "elasticsearch" ? 0 : (options.offset ?? requestPage * pageSize.value);
     const requestedLimit = options.limit ?? pageSize.value;
     const requestLimit = storeKind === "elasticsearch" ? Math.min(requestedLimit, ELASTICSEARCH_DEFAULT_MAX_RESULT_WINDOW) : requestedLimit;
     const result = await api.documentFindDocuments(connectionId, database, collection, skip, requestLimit, filter, undefined, sort, undefined, executionId, cursor, storeKind === "elasticsearch");
@@ -2056,7 +2076,7 @@ async function load(options: { page?: number; append?: boolean; offset?: number;
     // infinite-scroll append keeps rendering the same logical result.
     if (options.append !== true || !documentViewGeneration.value) documentViewGeneration.value = uuid();
     loadedDocumentQueryTotalCountRequest = countRequest;
-    if (storeKind === "dynamodb") {
+    if (usesContinuationCursorPagination(storeKind)) {
       const nextCursors = dynamodbPageCursors.value.slice(0, requestPage + 1);
       nextCursors[requestPage + 1] = result.next_cursor;
       dynamodbPageCursors.value = nextCursors;
@@ -2068,10 +2088,12 @@ async function load(options: { page?: number; append?: boolean; offset?: number;
       elasticsearchPageCursors.value = nextCursors;
       elasticsearchHasNextCursor.value = !!result.next_cursor;
       applyElasticsearchSearchTotal(result.total, result.total_is_exact !== false, filter);
-    } else if (storeKind === "dynamodb") {
+    } else if (usesContinuationCursorPagination(storeKind)) {
       cancelElasticsearchCount();
       const lowerBound = requestPage * pageSize.value + nextDocuments.length + (result.next_cursor ? 1 : 0);
-      const exactTotal = dynamodbExactTotal.value ?? (!result.next_cursor ? lowerBound : undefined);
+      // Cosmos DB reports the container document count when no filter is applied.
+      const serverExactTotal = storeKind === "cosmosdb" && result.total_is_exact !== false ? result.total : undefined;
+      const exactTotal = dynamodbExactTotal.value ?? serverExactTotal ?? (!result.next_cursor ? lowerBound : undefined);
       total.value = exactTotal ?? lowerBound;
       totalIsExact.value = exactTotal !== undefined;
       paginationTotal.value = exactTotal;
@@ -2115,12 +2137,17 @@ async function countExactDocumentTotal(): Promise<number | undefined> {
     paginationTotal.value = totals.paginationTotal;
     return exactCount;
   }
-  const exactCount = request.storeKind === "dynamodb" || request.storeKind === "solr" ? await api.documentCountDocuments(request.connectionId, request.collection, request.filter) : await api.mongoCountDocuments(request.connectionId, request.database, request.collection, request.filter, "accurate");
+  const exactCount =
+    request.storeKind === "cosmosdb"
+      ? await api.documentCountDocuments(request.connectionId, request.collection, request.filter, undefined, request.database)
+      : request.storeKind === "dynamodb" || request.storeKind === "solr"
+        ? await api.documentCountDocuments(request.connectionId, request.collection, request.filter)
+        : await api.mongoCountDocuments(request.connectionId, request.database, request.collection, request.filter, "accurate");
   if (!isCurrentDocumentQueryTotalCountRequest(request)) return undefined;
   if (!Number.isFinite(exactCount) || exactCount < 0) {
     throw new Error("invalid count");
   }
-  if (request.storeKind === "dynamodb") {
+  if (usesContinuationCursorPagination(request.storeKind)) {
     dynamodbExactCountKey = dynamodbCountFilterKey(request.filter);
     dynamodbExactTotal.value = exactCount;
   }
@@ -2133,7 +2160,7 @@ async function countExactDocumentTotal(): Promise<number | undefined> {
 
 async function refreshDocuments() {
   if (documentStoreProvider.value.kind === "elasticsearch") resetElasticsearchTotals({ preservePaginationTotal: true });
-  if (documentStoreProvider.value.kind === "dynamodb") resetDynamoDbExactCount();
+  if (usesContinuationCursorPagination(documentStoreProvider.value.kind)) resetDynamoDbExactCount();
   await reloadDocumentsAfterMutationOrRefresh();
 }
 
@@ -2173,14 +2200,14 @@ async function cancelDocumentLoad() {
 function applyFilter() {
   page.value = 0;
   if (documentStoreProvider.value.kind === "elasticsearch") resetElasticsearchTotals();
-  if (documentStoreProvider.value.kind === "dynamodb") resetDynamoDbPagination();
+  if (usesContinuationCursorPagination(documentStoreProvider.value.kind)) resetDynamoDbPagination();
   void load();
 }
 
 async function paginate(offset: number, limit: number) {
   const normalizedOffset = Math.max(0, Math.trunc(offset));
   const normalizedLimit = normalizeResultPageSize(limit, pageSize.value);
-  if (documentStoreProvider.value.kind !== "dynamodb" && settingsStore.editorSettings.infiniteScroll && normalizedOffset > 0 && normalizedOffset === documents.value.length) {
+  if (!usesContinuationCursorPagination(documentStoreProvider.value.kind) && settingsStore.editorSettings.infiniteScroll && normalizedOffset > 0 && normalizedOffset === documents.value.length) {
     const requestedPage = Math.floor(normalizedOffset / pageSize.value);
     const nextPage = clampDocumentPage(requestedPage, pageSize.value, paginationTotal.value);
     await load({ page: nextPage, append: true, offset: normalizedOffset, limit: normalizedLimit });
@@ -2188,9 +2215,9 @@ async function paginate(offset: number, limit: number) {
   }
   const pageSizeChanged = normalizedLimit !== pageSize.value;
   pageSize.value = normalizedLimit;
-  if (pageSizeChanged && (documentStoreProvider.value.kind === "dynamodb" || documentStoreProvider.value.kind === "elasticsearch")) {
+  if (pageSizeChanged && (usesContinuationCursorPagination(documentStoreProvider.value.kind) || documentStoreProvider.value.kind === "elasticsearch")) {
     page.value = 0;
-    if (documentStoreProvider.value.kind === "dynamodb") {
+    if (usesContinuationCursorPagination(documentStoreProvider.value.kind)) {
       resetDynamoDbPagination({ preserveExactCount: true });
     } else {
       resetElasticsearchPagination();
@@ -2200,21 +2227,21 @@ async function paginate(offset: number, limit: number) {
   }
   const requestedPage = Math.floor(normalizedOffset / normalizedLimit);
   const nextPage = clampDocumentPage(requestedPage, normalizedLimit, paginationTotal.value);
-  if (documentStoreProvider.value.kind !== "dynamodb" && documentStoreProvider.value.kind !== "elasticsearch") {
+  if (!usesContinuationCursorPagination(documentStoreProvider.value.kind) && documentStoreProvider.value.kind !== "elasticsearch") {
     await load({ page: nextPage, offset: nextPage * normalizedLimit, limit: normalizedLimit });
     return;
   }
   for (let cursorPage = 0; cursorPage <= nextPage; cursorPage += 1) {
-    const pageCursor = documentStoreProvider.value.kind === "dynamodb" ? dynamodbPageCursors.value[cursorPage] : elasticsearchPageCursors.value[cursorPage];
+    const pageCursor = usesContinuationCursorPagination(documentStoreProvider.value.kind) ? dynamodbPageCursors.value[cursorPage] : elasticsearchPageCursors.value[cursorPage];
     if (cursorPage > 0 && !pageCursor) {
-      error.value = documentStoreProvider.value.kind === "dynamodb" ? t("dynamodb.pageCursorUnavailable") : "Elasticsearch page cursor unavailable; go back to the first page and page forward again";
+      error.value = continuationCursorUnavailableMessage(documentStoreProvider.value.kind);
       return;
     }
     if (cursorPage === nextPage) {
       await load({ page: cursorPage });
       return;
     }
-    const nextCursor = documentStoreProvider.value.kind === "dynamodb" ? dynamodbPageCursors.value[cursorPage + 1] : elasticsearchPageCursors.value[cursorPage + 1];
+    const nextCursor = usesContinuationCursorPagination(documentStoreProvider.value.kind) ? dynamodbPageCursors.value[cursorPage + 1] : elasticsearchPageCursors.value[cursorPage + 1];
     if (!nextCursor) {
       await load({ page: cursorPage });
     }
@@ -2228,7 +2255,7 @@ function onSort(column: string, _columnIndex: number, direction: "asc" | "desc" 
   }
   sortInput.value = documentStoreProvider.value.sortInputForColumn(column, direction);
   page.value = 0;
-  if (documentStoreProvider.value.kind === "dynamodb") resetDynamoDbPagination({ preserveExactCount: true });
+  if (usesContinuationCursorPagination(documentStoreProvider.value.kind)) resetDynamoDbPagination({ preserveExactCount: true });
   void load();
 }
 
@@ -2598,7 +2625,7 @@ async function saveDoc() {
     documentEditMode.value = "fields";
     editFields.value = [];
     if (kind === "elasticsearch") resetElasticsearchTotals({ preservePaginationTotal: true });
-    if (kind === "dynamodb") {
+    if (usesContinuationCursorPagination(kind)) {
       page.value = 0;
       resetDynamoDbPagination();
     }
@@ -2625,7 +2652,7 @@ async function applyDeleteDoc(idx: number) {
       editJson.value = "";
     }
     if (documentStoreProvider.value.kind === "elasticsearch") resetElasticsearchTotals({ preservePaginationTotal: true });
-    if (documentStoreProvider.value.kind === "dynamodb") {
+    if (usesContinuationCursorPagination(documentStoreProvider.value.kind)) {
       page.value = 0;
       resetDynamoDbPagination();
     }
@@ -2670,8 +2697,10 @@ function nextPage() {
 
 function docPreview(doc: JsonRecord): string {
   const id = formatDocumentStoreIdLabel(doc._id, documentStoreProvider.value.kind);
+  // The Cosmos DB label already shows `id`.
+  const labelKeys = documentStoreProvider.value.kind === "cosmosdb" ? new Set(["_id", "id"]) : new Set(["_id"]);
   const keys = Object.keys(doc)
-    .filter((k) => k !== "_id")
+    .filter((k) => !labelKeys.has(k))
     .slice(0, 3);
   const preview = keys.map((k) => `${k}: ${stringifyDocumentStoreValue(doc[k], documentStoreProvider.value.kind).substring(0, 30)}`).join(", ");
   return `${id} - ${preview}`;
@@ -3476,7 +3505,7 @@ defineExpose({ focusSearch });
             </div>
 
             <div v-if="isEditing && documentEditMode === 'json' && !isNew" class="px-4 py-1.5 text-[11px] text-muted-foreground border-b bg-muted/20 shrink-0">
-              {{ t("mongo.jsonReplaceHint") }}
+              {{ documentStoreProvider.kind === "cosmosdb" ? t("cosmosdb.jsonReplaceHint") : t("mongo.jsonReplaceHint") }}
             </div>
 
             <div v-if="isEditing" class="flex-1 min-h-0 overflow-hidden bg-muted/10">

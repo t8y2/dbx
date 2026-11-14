@@ -9,9 +9,9 @@ pub use dbx_core::agent_connection::{
 pub use dbx_core::connection::{
     agent_connect_timeout, clickhouse_http_proxy, connect_bare_metadata_pool, connect_mysql_metadata_pool,
     connection_configs_pool_equivalent, connection_configs_session_credentials_compatible, connection_url_for_endpoint,
-    gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver, metadata_connection_config,
-    prestosql_jdbc_config_for_endpoint, probe_connection_endpoint, redacted_connection_url_for_endpoint, AppState,
-    MysqlMode, PoolKind,
+    cosmosdb_client_for_config, gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver,
+    metadata_connection_config, prestosql_jdbc_config_for_endpoint, probe_connection_endpoint,
+    redacted_connection_url_for_endpoint, AppState, MysqlMode, PoolKind,
 };
 use dbx_core::database_capabilities;
 use dbx_core::db;
@@ -1994,6 +1994,12 @@ async fn test_connection_with_info_impl(
                     database_info = db::couchdb_driver::database_connection_info(&client).await.ok();
                     Ok("Connection successful".to_string())
                 }
+                DatabaseType::CosmosDb => {
+                    let client = cosmosdb_client_for_config(&config, &url, runtime_proxy.as_ref(), connect_timeout)?;
+                    db::cosmosdb_driver::test_connection(&client, connect_timeout).await?;
+                    database_info = db::cosmosdb_driver::database_connection_info(&client).await.ok();
+                    Ok("Connection successful".to_string())
+                }
                 DatabaseType::Meilisearch => {
                     let client = db::meilisearch_driver::MeilisearchClient::new_for_config(
                         &url,
@@ -2574,6 +2580,11 @@ async fn connect_db_inner(
                 )?;
                 db::couchdb_driver::test_connection(&client, connect_timeout).await?;
                 PoolKind::CouchDb(client)
+            }
+            DatabaseType::CosmosDb => {
+                let client = cosmosdb_client_for_config(&db_config, &url, runtime_proxy.as_ref(), connect_timeout)?;
+                db::cosmosdb_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::CosmosDb(client)
             }
             DatabaseType::Meilisearch => {
                 let client = db::meilisearch_driver::MeilisearchClient::new_for_config(

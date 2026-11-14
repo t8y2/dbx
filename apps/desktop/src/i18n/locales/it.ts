@@ -1738,6 +1738,12 @@ export default withEnglishFallback({
     customColorPlaceholder: "#ff0000 o rgba(…)",
     tursoHostPlaceholder: "your-database.turso.io o libsql://your-database.turso.io",
     tursoHostHint: "Supporta i protocolli libsql:// e https://. È possibile inserire anche solo il nome host (HTTPS viene usato automaticamente).",
+    cosmosDbEndpoint: "Endpoint dell'account",
+    cosmosDbEndpointPlaceholder: "your-account.documents.azure.com",
+    cosmosDbEndpointHint: "Incolla l'URI o la STRINGA DI CONNESSIONE PRIMARIA dalla pagina Chiavi del portale di Azure; endpoint e chiave vengono compilati automaticamente.",
+    cosmosDbAccountKey: "Chiave dell'account",
+    cosmosDbUrlParamsPlaceholder: "tlsverify=false (solo emulatore locale)",
+    cosmosDbCredentialsRequired: "Azure Cosmos DB richiede un endpoint e una chiave dell'account",
     tursoTokenHint: "Crea un token con:",
     tursoUrlParamsPlaceholder: "authToken=xxx (opzionale, il campo Auth Token sopra ha la precedenza)",
     driverInstall: {
@@ -7363,6 +7369,11 @@ export default withEnglishFallback({
     importFailed: "Importazione non riuscita: {message}",
     importInvalidJson: "Il JSON deve contenere un oggetto o un array di oggetti",
     exportSearchUnsupported: "Meilisearch limita la paginazione delle ricerche testuali, ibride o con soglia di punteggio. Rimuovi queste opzioni per esportare tutti i documenti filtrati.",
+  },
+  cosmosdb: {
+    jsonReplaceHint: "Il salvataggio del JSON sostituisce l'intero documento e non riesce se è cambiato dopo il caricamento (_etag). Modificare id o la chiave di partizione crea un nuovo documento ed elimina quello vecchio; _id e le proprietà di sistema vengono ignorati.",
+    pageCursorUnavailable: "Il token di continuazione di Azure Cosmos DB non è disponibile. Ricarica dalla prima pagina.",
+    repeatedCursor: "Azure Cosmos DB ha restituito un token di continuazione ripetuto. L'esportazione è stata interrotta.",
   },
   dynamodb: {
     tableMetadataUnavailable: "I metadati della tabella DynamoDB non sono caricati. Aggiorna e riprova.",

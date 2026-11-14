@@ -329,9 +329,9 @@ const isRootListPartial = computed(() => sidebarFilterGuards.value.isRootListPar
 
 const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   connection: ["connection"],
-  database: ["database", "redis-db", "mq-tenant", "nacos-namespace", "consul-root", "mongo-db"],
+  database: ["database", "redis-db", "mq-tenant", "nacos-namespace", "consul-root", "mongo-db", "cosmosdb-database"],
   schema: ["schema"],
-  table: ["table", "mongo-collection", "mongo-bucket", "dynamodb-table", "vector-collection", "elasticsearch-index"],
+  table: ["table", "mongo-collection", "mongo-bucket", "dynamodb-table", "cosmosdb-container", "vector-collection", "elasticsearch-index"],
   view: ["view"],
 };
 
@@ -879,7 +879,7 @@ const sidebarCommentLabelWidths = shallowRef(new Map<string, number>());
 let sidebarCommentMeasureFrame = 0;
 const sidebarTreeContentWidth = ref(0);
 let sidebarTreeContentMeasureFrame = 0;
-const sidebarTableNameDisplayTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "mongo-collection", "dynamodb-table", "vector-collection", "elasticsearch-index"]);
+const sidebarTableNameDisplayTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "mongo-collection", "dynamodb-table", "cosmosdb-container", "vector-collection", "elasticsearch-index"]);
 const sidebarStorageDisplayTypes = new Set<TreeNodeType>(["database", "table", "materialized_view"]);
 
 function sidebarCommentLabel(node: TreeNode): string {
@@ -896,7 +896,7 @@ const sidebarTreeLeadingWidthItems = computed(() => {
     const config = node.connectionId ? store.getConfig(node.connectionId) : undefined;
     const badges: string[] = [];
     if (node.type === "column" && node.meta) badges.push(t((node.meta as ColumnInfo).is_nullable ? "structureEditor.nullable" : "structureEditor.notNull"));
-    if (["database", "redis-db", "mongo-db"].includes(node.type) && node.connectionId && typeof node.database === "string" && store.isDefaultDatabase(node.connectionId, node.database)) badges.push(t("editor.defaultDatabase"));
+    if (["database", "redis-db", "mongo-db", "cosmosdb-database"].includes(node.type) && node.connectionId && typeof node.database === "string" && store.isDefaultDatabase(node.connectionId, node.database)) badges.push(t("editor.defaultDatabase"));
     if (node.type === "schema" && node.connectionId && node.schema && store.isDefaultSchema(node.connectionId, node.schema)) badges.push(t("editor.defaultSchema"));
     if (showSidebarRowProductionBadge(node, config) && isSidebarProductionContainer(node)) badges.push("PROD");
     const secondary = sidebarTreeSecondaryValue(node, t, config ? effectiveDatabaseTypeForConnection(config) : undefined);
@@ -2001,6 +2001,8 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
         await store.loadMongoDatabases(connId);
       } else if (config.db_type === "dynamodb") {
         await store.loadDynamoDbTables(connId);
+      } else if (config.db_type === "cosmosdb") {
+        await store.loadCosmosDbDatabases(connId);
       } else if (config.db_type === "elasticsearch" || config.db_type === "easysearch" || config.db_type === "meilisearch" || config.db_type === "solr" || config.db_type === "couchdb") {
         await store.loadElasticsearchIndices(connId);
       } else if (config.db_type === "milvus") {

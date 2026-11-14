@@ -1815,6 +1815,12 @@ export default withEnglishFallback({
     customColorPlaceholder: "#ff0000 o rgba(…)",
     tursoHostPlaceholder: "your-database.turso.io o libsql://your-database.turso.io",
     tursoHostHint: "Admite los protocolos libsql:// y https://. También puede introducir solo el nombre del host (se usa HTTPS automáticamente).",
+    cosmosDbEndpoint: "Punto de conexión de la cuenta",
+    cosmosDbEndpointPlaceholder: "your-account.documents.azure.com",
+    cosmosDbEndpointHint: "Pegue el URI o la CADENA DE CONEXIÓN PRINCIPAL de la página Claves del portal de Azure; el punto de conexión y la clave se rellenan automáticamente.",
+    cosmosDbAccountKey: "Clave de la cuenta",
+    cosmosDbUrlParamsPlaceholder: "tlsverify=false (solo emulador local)",
+    cosmosDbCredentialsRequired: "Azure Cosmos DB requiere un punto de conexión y una clave de cuenta",
     tursoTokenHint: "Cree un token con:",
     tursoUrlParamsPlaceholder: "authToken=xxx (opcional, el campo Auth Token de arriba tiene prioridad)",
     driverInstall: {
@@ -7567,6 +7573,11 @@ export default withEnglishFallback({
     importFailed: "Error de importación: {message}",
     importInvalidJson: "El JSON debe contener un objeto o una matriz de objetos",
     exportSearchUnsupported: "Meilisearch limita la paginación de búsquedas de texto, híbridas o con umbral de puntuación. Borre esas opciones para exportar todos los documentos filtrados.",
+  },
+  cosmosdb: {
+    jsonReplaceHint: "Guardar el JSON reemplaza todo el documento y falla si cambió desde que se cargó (_etag). Cambiar id o la clave de partición crea un documento nuevo y elimina el anterior; _id y las propiedades del sistema se ignoran.",
+    pageCursorUnavailable: "El token de continuación de Azure Cosmos DB no está disponible. Vuelva a cargar desde la primera página.",
+    repeatedCursor: "Azure Cosmos DB devolvió un token de continuación repetido. Se detuvo la exportación.",
   },
   dynamodb: {
     tableMetadataUnavailable: "Los metadatos de la tabla DynamoDB no se han cargado. Actualice e inténtelo de nuevo.",

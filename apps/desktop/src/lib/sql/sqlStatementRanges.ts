@@ -274,6 +274,7 @@ const DATABASE_SOFT_STATEMENT_KEYWORDS: Partial<Record<DatabaseType, readonly st
   easysearch: [],
   solr: [],
   couchdb: [],
+  cosmosdb: [],
   qdrant: [],
   milvus: [],
   weaviate: [],

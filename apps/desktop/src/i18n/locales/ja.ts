@@ -1706,6 +1706,12 @@ export default withEnglishFallback({
     customColorPlaceholder: "#ff0000 または rgba(…)",
     tursoHostPlaceholder: "your-database.turso.io または libsql://your-database.turso.io",
     tursoHostHint: "libsql:// および https:// プロトコルに対応しています。ホスト名のみの入力も可能です（自動的に HTTPS を使用します）。",
+    cosmosDbEndpoint: "アカウント エンドポイント",
+    cosmosDbEndpointPlaceholder: "your-account.documents.azure.com",
+    cosmosDbEndpointHint: "Azure portal の [キー] ページの URI またはプライマリ接続文字列を貼り付けると、エンドポイントとキーが自動入力されます。",
+    cosmosDbAccountKey: "アカウント キー",
+    cosmosDbUrlParamsPlaceholder: "tlsverify=false（ローカル エミュレーターのみ）",
+    cosmosDbCredentialsRequired: "Azure Cosmos DB にはアカウント エンドポイントとアカウント キーが必要です",
     tursoTokenHint: "次のコマンドでトークンを作成します:",
     tursoUrlParamsPlaceholder: "authToken=xxx（任意、上の Auth Token 欄が優先されます）",
     driverInstall: {
@@ -7379,6 +7385,11 @@ export default withEnglishFallback({
     importFailed: "インポートに失敗しました: {message}",
     importInvalidJson: "JSON はオブジェクトまたはオブジェクトの配列である必要があります",
     exportSearchUnsupported: "Meilisearch はテキスト検索、ハイブリッド検索、スコアしきい値付き検索のページングを制限します。すべての絞り込み済みドキュメントを出力するには、これらの条件を解除してください。",
+  },
+  cosmosdb: {
+    jsonReplaceHint: "JSON の保存はドキュメント全体を置き換えます。読み込み後に変更されていた場合（_etag 不一致）は失敗します。id またはパーティション キーを変更すると新しいドキュメントを作成し、古いドキュメントを削除します。_id とシステム プロパティは無視されます。",
+    pageCursorUnavailable: "Azure Cosmos DB の継続トークンを利用できません。最初のページから再読み込みしてください。",
+    repeatedCursor: "Azure Cosmos DB が同じ継続トークンを返したため、エクスポートを停止しました。",
   },
   dynamodb: {
     tableMetadataUnavailable: "DynamoDB テーブルのメタデータが読み込まれていません。更新して再試行してください。",

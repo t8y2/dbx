@@ -1848,6 +1848,7 @@ export const useConnectionStore = defineStore("connection", () => {
       meilisearch: "Meilisearch",
       solr: "Apache Solr",
       couchdb: "Apache CouchDB",
+      cosmosdb: "Azure Cosmos DB for NoSQL",
       qdrant: "Qdrant",
       milvus: "Milvus",
       weaviate: "Weaviate",
@@ -2018,7 +2019,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (node.type === "schema") {
       return !!node.connectionId && !!node.schema && isDefaultSchema(node.connectionId, node.schema);
     }
-    if (node.type !== "database" && node.type !== "redis-db" && node.type !== "mongo-db") return false;
+    if (node.type !== "database" && node.type !== "redis-db" && node.type !== "mongo-db" && node.type !== "cosmosdb-database") return false;
     if (!settingsStore.editorSettings.sidebarPinDefaultDatabase) return false;
     return !!node.connectionId && typeof node.database === "string" && isDefaultDatabase(node.connectionId, node.database);
   }
@@ -2863,7 +2864,9 @@ export const useConnectionStore = defineStore("connection", () => {
       node.type === "type" ||
       node.type === "type-body" ||
       node.type === "trigger";
-    const tableName = isObjectLeaf ? node.objectName || node.label : node.tableName || (node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection" || node.type === "dynamodb-table" ? node.label : undefined);
+    const tableName = isObjectLeaf
+      ? node.objectName || node.label
+      : node.tableName || (node.type === "table" || node.type === "view" || node.type === "materialized_view" || node.type === "mongo-collection" || node.type === "dynamodb-table" || node.type === "cosmosdb-container" ? node.label : undefined);
     const match = {
       connectionId: node.connectionId,
       database: node.database || undefined,
@@ -5430,6 +5433,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadMongoDatabases(connectionId);
     } else if (config.db_type === "dynamodb") {
       await loadDynamoDbTables(connectionId);
+    } else if (config.db_type === "cosmosdb") {
+      await loadCosmosDbDatabases(connectionId);
     } else if (config.db_type === "elasticsearch" || config.db_type === "easysearch" || config.db_type === "meilisearch" || config.db_type === "solr" || config.db_type === "couchdb") {
       // Reload: list indices/cores.
       await loadElasticsearchIndices(connectionId);
@@ -6585,7 +6590,7 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     if (!connectedIds.value.has(connectionId)) return;
     const config = getConfig(connectionId);
-    if (!config || ["redis", "etcd", "zookeeper", "consul", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "couchdb", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos", "salesforce"].includes(config.db_type)) return;
+    if (!config || ["redis", "etcd", "zookeeper", "consul", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "solr", "couchdb", "cosmosdb", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos", "salesforce"].includes(config.db_type)) return;
     const node = findConnectionNode(connectionId);
     if (!node || node.type !== "connection" || hasConnectionMetadataChildren(node.children)) return;
     const scope = { kind: "connection-databases" as const, connectionId, driverProfile: metadataDriverProfile(config) };
@@ -6968,6 +6973,79 @@ export const useConnectionStore = defineStore("connection", () => {
             connectionId,
             database: region,
             tableName: table.name,
+            isExpanded: false,
+          })),
+      );
+      targetNode.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e, load);
+      throw e;
+    } finally {
+      finishTreeNodeLoad(load);
+    }
+  }
+
+  async function loadCosmosDbDatabases(connectionId: string) {
+    const node = findConnectionNode(connectionId);
+    if (!node) return;
+
+    let load = beginTreeNodeLoad(node);
+    try {
+      await ensureConnected(connectionId);
+      load = reclaimTreeNodeLoad(load, node);
+      const dbs = await withMetadataLoadTimeout(connectionId, api.documentListDatabases(connectionId), "Azure Cosmos DB databases");
+      const config = getConfig(connectionId);
+      const visibleDbs = filterDatabaseNamesForConnection(dbs, config);
+      const targetNode = treeNodeLoadTarget(load);
+      if (!targetNode) return;
+      recordPrimaryVisibleObjectNames(connectionId, dbs);
+      setChildren(
+        targetNode,
+        withSavedSqlRoot(
+          connectionId,
+          sortSidebarNames(visibleDbs).map((db) => ({
+            id: `${connectionId}:${db}`,
+            label: db,
+            type: "cosmosdb-database" as const,
+            connectionId,
+            database: db,
+            isExpanded: false,
+            children: [],
+          })),
+          targetNode,
+        ),
+        { trustEmptyConnectionChildren: dbs.length > 0 && visibleDbs.length === 0 },
+      );
+      targetNode.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e, load);
+      throw e;
+    } finally {
+      finishTreeNodeLoad(load);
+    }
+  }
+
+  async function loadCosmosDbContainers(connectionId: string, database: string) {
+    const nodeId = `${connectionId}:${database}`;
+    const node = findNode(treeNodes.value, nodeId);
+    if (!node) return;
+
+    const load = beginTreeNodeLoad(node);
+    try {
+      const containers = await withMetadataLoadTimeout(connectionId, api.documentListCollections(connectionId, database), "Azure Cosmos DB containers");
+      const targetNode = treeNodeLoadTarget(load);
+      if (!targetNode) return;
+      setChildren(
+        targetNode,
+        [...containers]
+          .sort((left, right) => compareSidebarNames(left.name, right.name))
+          .map((container) => ({
+            id: `${nodeId}:${container.name}`,
+            label: container.name,
+            type: "cosmosdb-container" as const,
+            connectionId,
+            database,
+            tableName: container.name,
             isExpanded: false,
           })),
       );
@@ -8986,6 +9064,8 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "dynamodb") {
         await loadDynamoDbTables(node.connectionId);
+      } else if (config?.db_type === "cosmosdb") {
+        await loadCosmosDbDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch" || config?.db_type === "meilisearch" || config?.db_type === "solr" || config?.db_type === "couchdb") {
         await loadElasticsearchIndices(node.connectionId);
       } else if (config?.db_type === "milvus") {
@@ -9005,6 +9085,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadOracleDatabaseLinks(node, options);
     } else if (node.type === "mongo-db" && node.connectionId && node.database) {
       await loadMongoCollections(node.connectionId, node.database);
+    } else if (node.type === "cosmosdb-database" && node.connectionId && node.database) {
+      await loadCosmosDbContainers(node.connectionId, node.database);
     } else if (node.type === "vector-database" && node.connectionId && node.database) {
       await loadVectorCollections(node.connectionId, node.database);
     } else if (node.type === "mongo-collection" && node.connectionId && node.database) {
@@ -12109,6 +12191,8 @@ export const useConnectionStore = defineStore("connection", () => {
     updateRedisDbKeyStats,
     loadMongoDatabases,
     loadDynamoDbTables,
+    loadCosmosDbDatabases,
+    loadCosmosDbContainers,
     loadMilvusDatabases,
     openElasticsearchConnectionTree,
     loadElasticsearchIndices,

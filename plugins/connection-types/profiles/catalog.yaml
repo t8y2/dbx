@@ -151,6 +151,13 @@ profiles:
     port: 5984
     user: ""
     category: document
+  - id: cosmosdb
+    dbType: cosmosdb
+    label: Azure Cosmos DB for NoSQL
+    icon: cosmosdb
+    port: 443
+    user: ""
+    category: document
   - id: meilisearch
     dbType: meilisearch
     label: Meilisearch

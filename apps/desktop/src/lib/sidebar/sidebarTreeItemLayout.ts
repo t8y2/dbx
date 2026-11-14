@@ -32,6 +32,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "mongo-gridfs",
   "mongo-bucket",
   "dynamodb-table",
+  "cosmosdb-container",
   "vector-collection",
   "elasticsearch-index",
   "meilisearch-system",
@@ -68,12 +69,14 @@ const pinnableTypes: Set<TreeNodeType> = new Set([
   "mongo-bucket",
   "mongo-collection",
   "dynamodb-table",
+  "cosmosdb-database",
+  "cosmosdb-container",
   "vector-collection",
   "elasticsearch-index",
   "nacos-namespace",
 ]);
 
-const commentTypes: Set<TreeNodeType> = new Set(["connection", "schema", "table", "view", "materialized_view", "column", "procedure", "function", "trigger", "sequence", "synonym", "package", "mongo-collection", "dynamodb-table", "vector-collection", "elasticsearch-index"]);
+const commentTypes: Set<TreeNodeType> = new Set(["connection", "schema", "table", "view", "materialized_view", "column", "procedure", "function", "trigger", "sequence", "synonym", "package", "mongo-collection", "dynamodb-table", "cosmosdb-container", "vector-collection", "elasticsearch-index"]);
 
 export const SIDEBAR_INDENT_DEFAULT_PX = 16;
 

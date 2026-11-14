@@ -58,9 +58,11 @@ export async function writeDocumentStoreDocument(options: { kind: DocumentStoreK
 export async function applyDocumentStoreIdentityPlan(options: { kind: DocumentStoreKind; plan: DocumentStoreIdentityPlan; document: Record<string, unknown>; apis: DocumentStoreWriteApis }): Promise<void> {
   const { kind, plan, document, apis } = options;
 
-  // DynamoDB handles both same-key replacement and key migration in the
-  // backend. Rekey uses one TransactWriteItems request, keyed by the old id.
-  if (kind === "dynamodb") {
+  // DynamoDB and Cosmos DB handle both same-key replacement and key migration
+  // in the backend, keyed by the old identity. DynamoDB rekeys with one
+  // TransactWriteItems request; Cosmos DB creates the new document first and
+  // deletes the old one only after that succeeds.
+  if (kind === "dynamodb" || kind === "cosmosdb") {
     await writeDocumentStoreDocument({
       kind,
       op: "put",
@@ -108,7 +110,7 @@ export async function applyDocumentStoreIdentityPlan(options: { kind: DocumentSt
 /** Insert a new document (optional explicit path identity uses put). */
 export async function insertDocumentStoreDocument(options: { kind: DocumentStoreKind; document: Record<string, unknown>; explicitId?: string | null; routing?: string; apis: Pick<DocumentStoreWriteApis, "insert" | "update"> }): Promise<void> {
   const { kind, document, explicitId, routing, apis } = options;
-  if (kind !== "mongodb" && kind !== "dynamodb" && explicitId) {
+  if (kind !== "mongodb" && kind !== "dynamodb" && kind !== "cosmosdb" && explicitId) {
     await writeDocumentStoreDocument({
       kind,
       op: "put",

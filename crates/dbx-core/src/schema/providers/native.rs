@@ -21,6 +21,9 @@ pub(in crate::schema) async fn list_databases(
         PoolKind::Rqlite(client) => db::rqlite_driver::list_databases(client).await,
         PoolKind::HBase(client) => db::hbase_driver::list_namespaces(client).await,
         PoolKind::Turso(client) => db::turso_driver::list_databases(client).await,
+        PoolKind::CosmosDb(client) => db::cosmosdb_driver::list_databases(client)
+            .await
+            .map(|names| names.into_iter().map(|name| db::DatabaseInfo { name, ..Default::default() }).collect()),
         _ => Ok(vec![]),
     }
 }
@@ -76,6 +79,9 @@ pub(in crate::schema) async fn list_tables(
         PoolKind::CouchDb(client) => {
             db::couchdb_driver::list_databases(client).await.map(|names| collection_names_to_tables(names, "DATABASE"))
         }
+        PoolKind::CosmosDb(client) => db::cosmosdb_driver::list_containers(client, database).await.map(|containers| {
+            collection_names_to_tables(containers.into_iter().map(|container| container.id).collect(), "CONTAINER")
+        }),
         PoolKind::Meilisearch(client) => {
             db::meilisearch_driver::list_indexes(client).await.map(|names| collection_names_to_tables(names, "INDEX"))
         }
@@ -172,6 +178,7 @@ pub(in crate::schema) async fn get_columns(
         PoolKind::Easysearch(client) => db::easysearch_driver::get_columns(client, table).await,
         PoolKind::Solr(client) => db::solr_driver::get_columns(client, table).await,
         PoolKind::CouchDb(client) => db::couchdb_driver::get_columns(client, table).await,
+        PoolKind::CosmosDb(client) => db::cosmosdb_driver::get_columns(client, database, table).await,
         PoolKind::Meilisearch(client) => db::meilisearch_driver::get_columns(client, table).await,
         PoolKind::HBase(client) => db::hbase_driver::get_columns(client, database, table).await,
         PoolKind::VectorDb(_) => Ok(vec![]),

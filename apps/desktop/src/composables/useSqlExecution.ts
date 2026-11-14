@@ -1206,7 +1206,8 @@ export function useSqlExecution(deps: {
 
 export function supportsSqlTemplateParameters(connection: Pick<ConnectionConfig, "db_type"> | undefined, sql = ""): boolean {
   if (!connection) return false;
-  if (connection.db_type === "meilisearch" || connection.db_type === "solr" || connection.db_type === "couchdb") return false;
+  // Cosmos DB SQL uses `@name` for its own query parameters.
+  if (connection.db_type === "meilisearch" || connection.db_type === "solr" || connection.db_type === "couchdb" || connection.db_type === "cosmosdb") return false;
   if (connection.db_type === "elasticsearch" || connection.db_type === "easysearch") return !isElasticsearchRestRequestText(sql);
   return connection.db_type !== "redis" && connection.db_type !== "mongodb" && connection.db_type !== "victoriametrics" && connection.db_type !== "salesforce";
 }

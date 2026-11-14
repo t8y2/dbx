@@ -105,6 +105,10 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
       return { icon: Archive, colorClass: "text-cyan-400" };
     case "mongo-collection":
       return { icon: Table, colorClass: "text-green-400" };
+    case "cosmosdb-database":
+      return { icon: Database, colorClass: "text-sky-500" };
+    case "cosmosdb-container":
+      return { icon: Table, colorClass: "text-sky-400" };
     case "vector-collection":
       return { icon: TableProperties, colorClass: "text-cyan-400" };
     case "elasticsearch-index":

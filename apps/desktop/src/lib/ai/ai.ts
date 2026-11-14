@@ -642,8 +642,13 @@ function buildVectorModePromptLines(context: AiContext, mode: AiAssistantMode, i
  * early-returns inside `buildSystemPrompt`, so touching only the normal branch
  * would silently leave vector DBs without the protocol hints.
  *
- * Keep this compact (≤200 tokens): the chart-json schema is expressed as
- * minimal JSON examples, not a TypeScript schema. Rules are asymmetric:
+ * Keep this compact (budget: ≈400 tokens per locale, up from ≈200 when only
+ * line/bar/pie were supported): the chart-json schema is expressed as a type
+ * vocabulary plus minimal JSON examples, never a TypeScript schema. The
+ * vocabulary carries the field names for every type; only the three shapes the
+ * model has never seen (reference lines, scatter's numeric axes, heatmap's
+ * long-form cells) get a full example, since those are the ones it gets wrong
+ * from prose alone. Rules are asymmetric:
  * - charts are allowed but restrained (only when a visual comparison/trend/
  *   distribution/share materially improves the answer, at most one per reply);
  * - HTML is only produced when the user explicitly asks for it (rendering
@@ -653,12 +658,16 @@ function buildRichContentPromptLines(isZh: boolean): string[] {
   return isZh
     ? [
         [
-          "你可以输出 ```chart-json 代码块来渲染图表（V1 支持 line/bar/pie）。仅在图表能实质改善回答时使用，例如视觉对比、趋势、分布或占比；一条回复最多一个。",
-          "示例（line/bar）：```chart-json",
-          `{"version":1,"type":"line","xAxis":{"values":["Jan","Feb","Mar"]},"series":[{"name":"收入","data":[120,200,150]}]}`,
+          "你可以输出 ```chart-json 代码块来渲染图表。仅在图表能实质改善回答时使用，例如视觉对比、趋势、分布或占比；一条回复最多一个。",
+          "type 词表（version 恒为 1）：line/bar 用 xAxis.values + series[].data，可选 area/step（仅 line）、stack、marks:[{name,value}]（横向参考线）；pictorialBar 同 bar，可加 symbol；pie/funnel 用 data:[{name,value}]；scatter 两轴均为数值，点为 [x,y] 或 [x,y,size]；heatmap 两轴均为分类，data:[{x,y,value}]。",
+          "示例（line + 参考线）：```chart-json",
+          `{"version":1,"type":"line","xAxis":{"values":["Jan","Feb","Mar"]},"series":[{"name":"收入","data":[120,200,150]}],"marks":[{"name":"目标","value":180}]}`,
           "```",
-          "示例（pie）：```chart-json",
-          `{"version":1,"type":"pie","data":[{"name":"A","value":40},{"name":"B","value":60}]}`,
+          "示例（scatter）：```chart-json",
+          `{"version":1,"type":"scatter","xAxis":{"label":"请求数"},"yAxis":{"label":"耗时ms"},"series":[{"name":"接口","data":[[10,20],[30,45,7]]}]}`,
+          "```",
+          "示例（heatmap）：```chart-json",
+          `{"version":1,"type":"heatmap","xAxis":{"values":["周一","周二"]},"yAxis":{"values":["9点","17点"]},"data":[{"x":"周一","y":"9点","value":12},{"x":"周二","y":"17点","value":30}]}`,
           "```",
           "图表数据必须来自当前可验证的数据上下文（查询结果、附件、用户提供的数据等），不得编造；数据应完整、不加截断符。",
           "不要输出 ```html 代码块，除非用户明确要求。",
@@ -666,12 +675,16 @@ function buildRichContentPromptLines(isZh: boolean): string[] {
       ]
     : [
         [
-          "You may emit a ```chart-json code block to render a chart (V1 supports line/bar/pie). Use it only when a visual comparison, trend, distribution, or share materially improves the answer; at most one chart per reply.",
-          "Example (line/bar): ```chart-json",
-          `{"version":1,"type":"line","xAxis":{"values":["Jan","Feb","Mar"]},"series":[{"name":"Revenue","data":[120,200,150]}]}`,
+          "You may emit a ```chart-json code block to render a chart. Use it only when a visual comparison, trend, distribution, or share materially improves the answer; at most one chart per reply.",
+          "Types (version is always 1): line/bar use xAxis.values + series[].data, with optional area/step (line only), stack, and marks:[{name,value}] horizontal reference lines; pictorialBar is bar plus an optional symbol; pie/funnel use data:[{name,value}]; scatter has two numeric axes and points [x,y] or [x,y,size]; heatmap has two category axes and data:[{x,y,value}].",
+          "Example (line + reference line): ```chart-json",
+          `{"version":1,"type":"line","xAxis":{"values":["Jan","Feb","Mar"]},"series":[{"name":"Revenue","data":[120,200,150]}],"marks":[{"name":"target","value":180}]}`,
           "```",
-          "Example (pie): ```chart-json",
-          `{"version":1,"type":"pie","data":[{"name":"A","value":40},{"name":"B","value":60}]}`,
+          "Example (scatter): ```chart-json",
+          `{"version":1,"type":"scatter","xAxis":{"label":"requests"},"yAxis":{"label":"latency ms"},"series":[{"name":"endpoint","data":[[10,20],[30,45,7]]}]}`,
+          "```",
+          "Example (heatmap): ```chart-json",
+          `{"version":1,"type":"heatmap","xAxis":{"values":["Mon","Tue"]},"yAxis":{"values":["9am","5pm"]},"data":[{"x":"Mon","y":"9am","value":12},{"x":"Tue","y":"5pm","value":30}]}`,
           "```",
           "Chart data must be grounded in actual available data (query results, attachments, provided values) and never invented; keep it complete, no truncation markers.",
           "Do not emit ```html code blocks unless the user explicitly asks for them.",

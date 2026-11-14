@@ -11149,7 +11149,8 @@ export default withEnglishFallback({
     rowLimitSortDirection: "Dirección de ordenación",
     rowLimitSortEarliestFirst: "Más antiguos primero",
     rowLimitSortLatestFirst: "Más recientes primero",
-    rowLimitSortDescription: "Ordena cada tabla por este campo y toma las primeras N filas. Si se deja vacío, se mantiene el orden de lectura existente de la exportación; si una tabla no tiene este campo, también se aplica ese mismo respaldo, por lo que dos exportaciones podrían obtener filas diferentes.",
+    rowLimitSortDescription:
+      "Ordena cada tabla por este campo y toma las primeras N filas. Si se deja vacío, se mantiene el orden de lectura existente de la exportación; si una tabla no tiene este campo, también se aplica ese mismo respaldo, por lo que dos exportaciones podrían obtener filas diferentes.",
   },
   nacos: {
     ...nacosAccessControlMessages,

@@ -10897,7 +10897,8 @@ export default withEnglishFallback({
     rowLimitSortDirection: "Direzione ordinamento",
     rowLimitSortEarliestFirst: "Prima i meno recenti",
     rowLimitSortLatestFirst: "Prima i più recenti",
-    rowLimitSortDescription: "Ordina ogni tabella in base a questo campo e poi prendi le prime N righe. Se lasciato vuoto, si mantiene l'ordine di lettura esistente dell'esportazione; lo stesso fallback si applica anche quando una tabella non ha questo campo, pertanto due esportazioni potrebbero includere righe diverse.",
+    rowLimitSortDescription:
+      "Ordina ogni tabella in base a questo campo e poi prendi le prime N righe. Se lasciato vuoto, si mantiene l'ordine di lettura esistente dell'esportazione; lo stesso fallback si applica anche quando una tabella non ha questo campo, pertanto due esportazioni potrebbero includere righe diverse.",
   },
   nacos: {
     ...nacosAccessControlMessages,

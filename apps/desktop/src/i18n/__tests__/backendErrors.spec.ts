@@ -94,6 +94,19 @@ const CASES: { name: string; message: string; key: string; params?: Record<strin
     key: "pluginPlatform.updateDowngradeRejected",
   },
   {
+    name: "plugin version needs a newer DBX",
+    // Literal emitted by crates/dbx-plugin-runtime/src/plugins/manifest.rs validate_engine_requirement.
+    message: "Plugin 'io.dbx.example' is incompatible: Plugin requires DBX >=0.7.0, but 0.6.60 is installed",
+    key: "pluginPlatform.updateBlockedByNewerDbx",
+    params: { requirement: "DBX >=0.7.0", current: "0.6.60" },
+  },
+  {
+    name: "plugin version needs a newer host API",
+    message: "Plugin 'io.dbx.example' is incompatible: Plugin requires DBX Host API ^2.0, but 1.4.0 is installed",
+    key: "pluginPlatform.updateBlockedByNewerDbx",
+    params: { requirement: "DBX Host API ^2.0", current: "1.4.0" },
+  },
+  {
     name: "connection admission waits for plugin update",
     message: "Plugin update is in progress. Please try again after it finishes.",
     key: "pluginPlatform.updateInProgress",

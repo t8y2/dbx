@@ -5705,6 +5705,7 @@ onUnmounted(() => {
                   @opened="activateMainContentSurface('query')"
                   @new-connection="openPluginConnectionDialog"
                   @plugin-runtime-replaced="refreshPluginWorkbenches"
+                  @check-app-update="checkUpdates()"
                 />
                 <EditorSettingsPage
                   v-if="settingsPageTabOpen"

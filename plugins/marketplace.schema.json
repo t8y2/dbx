@@ -10,6 +10,11 @@
     "catalogVersion": { "const": 1 },
     "repository": { "$ref": "#/$defs/repository" },
     "generatedAt": { "type": "string", "format": "date-time" },
+    "compatibility": {
+      "type": "array",
+      "description": "Per-version engine requirements, derived by the store from each package manifest. DBX annotates the matching version with the host's verdict so an outdated app can show \"requires DBX >= X\" instead of offering a broken update. Root-scoped on purpose: plugin/version objects are parsed with deny_unknown_fields by older clients, so they must not grow keys.",
+      "items": { "$ref": "#/$defs/compatibility" }
+    },
     "plugins": {
       "type": "array",
       "items": { "$ref": "#/$defs/plugin" }
@@ -30,6 +35,28 @@
         "id": { "$ref": "#/$defs/identifier" },
         "name": { "type": "string", "minLength": 1, "maxLength": 128 },
         "homepage": { "type": "string", "format": "uri" }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pluginId", "version"],
+      "properties": {
+        "pluginId": { "$ref": "#/$defs/identifier" },
+        "version": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+        },
+        "dbx": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Semver requirement matching engines.dbx from the package manifest (for example >=0.7.0)."
+        },
+        "hostApi": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Semver requirement matching engines.host_api from the package manifest (for example ^1.4)."
+        }
       }
     },
     "localization": {

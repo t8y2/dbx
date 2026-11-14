@@ -387,7 +387,7 @@ export function useSidebarDataOpenRuntime() {
       warmTabSessionPool(tabId);
       if (!config) throw new Error("Connection config not found");
 
-      const limit = tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
+      const limit = tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize, dataTabTarget);
       const defaultSortMode = settingsStore.editorSettings.tableOpenSortMode ?? "none";
       const shouldRefreshTableMeta = !cachedTableMeta;
       // Dameng metadata calls must remain serialized behind the table query.

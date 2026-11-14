@@ -2658,6 +2658,8 @@ export default withEnglishFallback({
     showLabels: "값 표시",
   },
   grid: {
+    setTablePageSizeDefault: "이 테이블의 기본값으로 설정",
+    resetTablePageSizeDefault: "전역 기본값 사용",
     exportSelectedRowsScope: "선택한 행",
     exportSelectedCellsScope: "선택 영역",
     exportSelectedColumnsScope: "선택 열",

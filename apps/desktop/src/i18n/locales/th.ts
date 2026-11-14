@@ -2898,6 +2898,8 @@ export default withEnglishFallback({
     showLabels: "แสดงค่า",
   },
   grid: {
+    setTablePageSizeDefault: "ตั้งค่าเริ่มต้นสำหรับตารางนี้",
+    resetTablePageSizeDefault: "ใช้ค่าเริ่มต้นส่วนกลาง",
     exportSelectedRowsScope: "แถวที่เลือก",
     exportSelectedCellsScope: "เซลล์ที่เลือก",
     exportSelectedColumnsScope: "คอลัมน์ที่เลือก",

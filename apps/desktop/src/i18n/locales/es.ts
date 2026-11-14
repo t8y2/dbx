@@ -2760,6 +2760,8 @@ export default withEnglishFallback({
     showLabels: "Mostrar valores",
   },
   grid: {
+    setTablePageSizeDefault: "Fijar valor predeterminado para esta tabla",
+    resetTablePageSizeDefault: "Usar el valor predeterminado global",
     exportSelectedRowsScope: "Filas seleccionadas",
     exportSelectedCellsScope: "Celdas seleccionadas",
     exportSelectedColumnsScope: "Columnas seleccionadas",

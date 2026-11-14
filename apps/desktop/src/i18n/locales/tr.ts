@@ -1915,6 +1915,8 @@ export default withEnglishFallback({
     showLabels: "Değerleri Göster",
   },
   grid: {
+    setTablePageSizeDefault: "Bu tablo için varsayılan yap",
+    resetTablePageSizeDefault: "Genel varsayılanı kullan",
     showStatusSql: "Alt Bilgide SQL Göster",
     showStatusSqlHint: "Tüm sorgu sonuçlarının ve tablo verilerinin alt bilgi çubuğunda SQL göster.",
     rows: "{count} satır",

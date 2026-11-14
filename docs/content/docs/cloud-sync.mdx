@@ -29,6 +29,12 @@ Choose a provider under **Settings → Sync**:
 Downloading replaces local connection metadata and saved SQL with the remote snapshot. Verify the snippet ID or WebDAV path before restoring.
 </Callout>
 
+### Preventing uploads from an outdated device
+
+Before updating an existing encrypted snippet, DBX compares its current content hash with the version last successfully uploaded or downloaded on this device. If they differ, or this device has no saved version, the upload stops. Back up local changes, then download and review the remote snapshot before uploading again. Inspecting the remote selection does not reset this protection. A new snippet can still be created by leaving its ID empty.
+
+This check detects changes already present when the upload reads the remote file. Snippet providers do not offer a shared atomic compare-and-swap contract, so avoid uploading from multiple devices simultaneously. Snapshots are not merged automatically.
+
 ## GitHub Gist
 
 ### Create an Access Token

@@ -122,7 +122,7 @@ import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/
 import { resolveDataGridBusyStartedAt } from "@/lib/dataGrid/dataGridBusyElapsed";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
 import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructureEditorSql";
-import { buildTableSelectSql, qualifyTableReferencesInSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
+import { buildTableSelectSql, normalizeWhereInput, qualifyTableReferencesInSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { dataGridExecutedQueryConditions } from "@/lib/dataGrid/dataGridExecutedQuery";
 import { uuid } from "@/lib/common/utils";
 import { generateCellValues, type CellValueGenerationKind, type CellValueGenerationOptions } from "@/lib/dataGrid/cellValueGeneration";
@@ -11132,7 +11132,8 @@ async function previewConditionalBulkEditMatchCount() {
   conditionalBulkEditMatchCountLoading.value = true;
   try {
     const whereInput = await currentConditionalBulkEditWhere();
-    if (!whereInput) {
+    if (requestId !== conditionalBulkEditMatchCountRequestId) return;
+    if (!normalizeWhereInput(whereInput)) {
       conditionalBulkEditMatchCountError.value = t("grid.conditionalBulkEditConditionRequired");
       return;
     }
@@ -11145,6 +11146,7 @@ async function previewConditionalBulkEditMatchCount() {
       tableName: props.tableMeta.tableName,
       whereInput,
     });
+    if (requestId !== conditionalBulkEditMatchCountRequestId) return;
     const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, undefined, undefined, dataGridCountQueryOptions(connectionStore.getConfig(props.connectionId), settingsStore.editorSettings.globalQueryTimeoutSecs));
     const count = sumGridCountValues(result.rows?.[0]);
     if (count === undefined || count < 0) throw new Error("Invalid row count returned by the database");
@@ -11167,7 +11169,7 @@ async function applyBulkEditValue() {
     }
     try {
       const whereInput = await currentConditionalBulkEditWhere();
-      if (!whereInput) {
+      if (!normalizeWhereInput(whereInput)) {
         toast(t("grid.conditionalBulkEditConditionRequired"), 5000);
         return;
       }

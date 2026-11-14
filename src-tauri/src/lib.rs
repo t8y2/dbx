@@ -1948,6 +1948,17 @@ pub fn run() {
 
     let startup_begin = Instant::now();
 
+    let context = tauri::generate_context!();
+    let default_data_dir = dirs::data_dir().expect("Failed to resolve app data dir").join(&context.config().identifier);
+    let mut data_dir_resolution = data_dir::resolve_data_dir_with_mode(default_data_dir);
+    data_dir_resolution.prepare().expect("Failed to prepare app data dir");
+    let instance_secret = data_dir_resolution.single_instance_secret();
+    let window_state_filename = if data_dir_resolution.uses_custom_data_dir() {
+        data_dir_resolution.data_dir.join(tauri_plugin_window_state::DEFAULT_FILENAME).to_string_lossy().into_owned()
+    } else {
+        tauri_plugin_window_state::DEFAULT_FILENAME.to_owned()
+    };
+
     let builder = register_deep_link_state(tauri::Builder::default())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -1958,7 +1969,7 @@ pub fn run() {
         .register_asynchronous_uri_scheme_protocol(plugin_ui_protocol::PLUGIN_UI_SCHEME, plugin_ui_protocol::handle);
 
     let builder = if should_enable_single_instance(cfg!(debug_assertions)) {
-        builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+        builder.plugin(tauri_plugin_single_instance::Builder::new().secret(instance_secret).callback(|app, args, cwd| {
             let app_open_requested = args.iter().any(|arg| commands::deep_link::is_app_open_deep_link(arg));
             let links = commands::deep_link::connection_deep_links_from_args(args.clone());
             open_connection_deep_links(app, links);
@@ -1992,7 +2003,7 @@ pub fn run() {
                     main_window_probe_state(app)
                 );
             }
-        }))
+        }).build())
     } else {
         builder
     };
@@ -2003,6 +2014,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_window_state::Builder::default()
+                .with_filename(window_state_filename)
                 .with_state_flags(window_state_guard::persisted_main_window_state_flags())
                 // The main window's geometry is restored by `window_state_guard`
                 // in logical units; the plugin's physical restore is the bug in
@@ -2029,6 +2041,7 @@ pub fn run() {
     });
 
     builder
+        .manage(data_dir_resolution)
         .manage(CloseBehaviorState::new())
         .manage(commands::plugin_file::PluginFileState::new())
         .manage(commands::plugin_media::PluginMediaState::new())
@@ -2067,9 +2080,7 @@ pub fn run() {
             }
 
             append_startup_probe("resolving app data dir");
-            let default_data_dir =
-                app.path().app_data_dir().map_err(|e| e.to_string()).expect("Failed to resolve app data dir");
-            let data_dir_resolution = data_dir::resolve_data_dir_with_mode(default_data_dir);
+            let data_dir_resolution = app.state::<data_dir::DataDirResolution>();
             let data_dir = data_dir_resolution.data_dir.clone();
             let portable_mode = data_dir_resolution.is_portable_mode();
             std::fs::create_dir_all(&data_dir).expect("Failed to create data dir");
@@ -3259,7 +3270,7 @@ pub fn run() {
             commands::tunnel_profiles::test_tunnel_profile,
             commands::tunnel_profiles::list_ssh_agent_identities,
         ])))
-        .build(tauri::generate_context!())
+        .build(context)
         .inspect(|app| {
             append_startup_probe(format!("tauri application built after {:?}", startup_begin.elapsed()));
             startup_recovery::start_watchdog(app.handle());

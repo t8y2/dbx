@@ -2178,6 +2178,7 @@ dependencies = [
  "dbx-tauri-consul",
  "dbx-tauri-schema",
  "deadpool-postgres",
+ "dirs",
  "font-kit",
  "futures",
  "grep",
@@ -9870,8 +9871,6 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-single-instance"
 version = "2.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3214becf9ef5783c0ae99a3bb25adf5353a7a16ebf53e74b909e29205735c6c"
 dependencies = [
  "serde",
  "serde_json",

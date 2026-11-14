@@ -7945,6 +7945,10 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.push(createTableMenuItem());
     }
     if (canCreateDatabaseFromNode(node)) items.push(createDatabaseMenuItem(node));
+    if (node.type === "schema" && node.connectionId) {
+      const objectTemplate = sidebarObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node);
+      if (objectTemplate) items.push({ label: t(objectTemplate.titleKey), action: createSidebarObjectTemplate, icon: Plus });
+    }
     const isSimpleDisplay = settingsStore.editorSettings.sidebarObjectDisplay === "simple";
     if (canCreateTable.value && isSimpleDisplay && isTableVGroupContainerNode(node) && !node.children?.some(isGroupLabel)) {
       items.push({

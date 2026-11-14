@@ -3590,10 +3590,8 @@ export default withEnglishFallback({
     providerCustom: "Własne",
     builtinProviders: "Obsługa wbudowana",
     partnerProviders: "Sponsorzy premium",
-    jalapenoSponsored: "1 $ darmowego kredytu",
     hualongSponsored: "1 $ darmowego kredytu",
     aicodemirrorSponsored: "8 ¥ darmowego kredytu",
-    jalapenoDescription: "    Korporacyjnej klasy AI zaufane przez wiodące zespoły jest teraz dostępne dla Ciebie! Wypróbuj najnowocześniejsze modele z 50% rabatem i zyskaj więcej bonusowych środków przy większych doładowaniach!",
     hualongDescription:
       "    Oficjalny przekaźnik modeli dla zaawansowanych programistów AI! W 100% autentyczne serie Codex i Claude z weryfikowalnym rozliczaniem na poziomie tokenów, umowami korporacyjnymi i fakturami.\n Zarejestruj się z kodem promocyjnym DBX&HUALONG, aby otrzymać 1 $ darmowego kredytu!",
     aicodemirrorDescription: "    AICodeMirror zapewnia współbieżność klasy enterprise, szybkie fakturowanie i dedykowane wsparcie 7×24; nowi użytkownicy otrzymują 8 ¥ darmowego kredytu oraz 20% zniżki na pierwsze doładowanie.",
@@ -7129,6 +7127,7 @@ export default withEnglishFallback({
     preview: "Podgląd SQL",
     execute: "Wykonaj",
     clearValues: "Wyczyść wartości",
+    clearHistory: "Wyczyść historię",
     useRawForAll: "Użyj surowego SQL dla wszystkich",
     ignore: "Ignoruj",
     kind: {
@@ -9303,7 +9302,7 @@ export default withEnglishFallback({
     sidebarSearchOpenedDatabasesOnlyDescription: "Wyszukiwanie w pasku bocznym przeszukuje tylko bazy otwarte w aktywnym połączeniu. Wyłącz, aby przeszukiwać każdą bazę połączenia.",
     sidebarObjectInfoMode: "Informacje uzupełniające na pasku bocznym",
     sidebarObjectInfoModeDescription:
-      "Choose comments, object sizes, or no supplementary text after names. Comments and sizes are mutually exclusive. Database totals currently support PostgreSQL; table sizes support MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, and ClickHouse.",
+      "Choose comments, object sizes, or no supplementary text after names. Comments and sizes are mutually exclusive. Database totals currently support PostgreSQL; table sizes support MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, ClickHouse, Doris, and StarRocks.",
     sidebarObjectInfoModeCommentInline: "Komentarze (w linii za nazwą)",
     sidebarObjectInfoModeCommentAligned: "Komentarze (wyrównaj elementy nadrzędne)",
     sidebarObjectInfoModeCommentRight: "Komentarze (wyrównaj do prawej)",

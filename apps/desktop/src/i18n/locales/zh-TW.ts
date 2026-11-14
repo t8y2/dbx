@@ -2639,6 +2639,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "選取列",
+    exportSelectedCellsScope: "選區",
+    exportSelectedColumnsScope: "選中欄",
     exportFormat: "格式",
     exportPageScope: "目前頁",
     exportResultScope: "全部結果",
@@ -4094,10 +4096,8 @@ export default withEnglishFallback({
     providerCustom: "自訂",
     builtinProviders: "內建支援",
     partnerProviders: "優質贊助商",
-    jalapenoSponsored: "$1 免費額度",
     hualongSponsored: "$1 免費額度",
     aicodemirrorSponsored: "8 元免費額度",
-    jalapenoDescription: "🎉頂尖團隊都在使用的企業級 AI，現在也為你而來！【5 折前沿模型】立即體驗！還有【儲值越多送越多】的優惠！",
     hualongDescription: "🐉 面向重度 AI 開發者的官方直連中轉！Codex/Claude 系列 100% 官方源直供，Token 級帳單可逐筆核驗，支援企業合約與發票。\n🎉用優惠碼 DBX&HUALONG 註冊即得 $1 額度！",
     aicodemirrorDescription: "⚡ AICodeMirror 支援企業級高併發、極速開票與 7×24 專屬技術支援，新人免費領 8 元額度和首充 8 折。",
     astraflowDescription: "UCloud 優刻得旗下星圖 AstraFlow 大模型平台，一個 API Key 即可呼叫 200+ 主流大模型，相容 OpenAI API。\n🎁 50 元免費額度，[立即領取](https://www.ucloud.cn/site/active/astraflow-credit?ytag=geo_waituo_dbx)！",
@@ -6661,6 +6661,7 @@ export default withEnglishFallback({
     preview: "SQL 預覽",
     execute: "執行",
     clearValues: "清空參數值",
+    clearHistory: "清空歷史",
     useRawForAll: "全部使用原始 SQL",
     ignore: "忽略",
     kind: {
@@ -8413,7 +8414,8 @@ export default withEnglishFallback({
     sidebarTableSearchEnabled: "啟用庫下資料表搜尋框",
     sidebarTableSearchEnabledDescription: "在已展開的資料庫、schema 或資料表分組下顯示局部資料表搜尋框，用於為不同庫分別篩選資料表。",
     sidebarObjectInfoMode: "側邊欄附加資訊",
-    sidebarObjectInfoModeDescription: "選擇在名稱後顯示註解、物件大小、同時顯示兩者或不顯示。組合模式下，註解跟隨名稱，大小顯示在最右側，缺少對應資料時自動隱藏。資料庫總大小目前支援 PostgreSQL，資料表大小支援 MySQL、PostgreSQL、GaussDB、KingbaseES、GBase 8a、SQL Server、Oracle、達夢和 ClickHouse。",
+    sidebarObjectInfoModeDescription:
+      "選擇在名稱後顯示註解、物件大小、同時顯示兩者或不顯示。組合模式下，註解跟隨名稱，大小顯示在最右側，缺少對應資料時自動隱藏。資料庫總大小目前支援 PostgreSQL，資料表大小支援 MySQL、PostgreSQL、GaussDB、KingbaseES、GBase 8a、SQL Server、Oracle、達夢、ClickHouse、Doris 和 StarRocks。",
     sidebarObjectInfoModeCommentInline: "註解（緊接名稱）",
     sidebarObjectInfoModeCommentAligned: "註解（同層對齊）",
     sidebarObjectInfoModeCommentRight: "註解（靠右對齊）",

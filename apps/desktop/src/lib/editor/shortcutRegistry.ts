@@ -114,6 +114,7 @@ export type ShortcutActionId =
   | "viewTableDdl"
   | "editSidebarTableStructure"
   | "createSidebarTable"
+  | "createSidebarDatabase"
   | "sendSelectionToAi"
   | "sqlIntentionActions";
 
@@ -864,6 +865,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Mod+Alt+N",
   },
   {
+    id: "createSidebarDatabase",
+    labelKey: "contextMenu.createDatabase",
+    scope: "sidebar",
+    defaultShortcut: "Shift+F4",
+  },
+  {
     id: "sendSelectionToAi",
     labelKey: "settings.shortcutSendSelectionToAi",
     scope: "editor",
@@ -1031,7 +1038,7 @@ function computeNormalizedShortcutSettings(settings: Partial<ShortcutSettings> |
   }
 
   // 新增动作的默认键可能已经被用户绑定到同作用域的其他动作。保留用户的绑定。
-  for (const actionId of [...TAB_NAVIGATION_HISTORY_ACTIONS, "gotoLine", "createSidebarTable"] as ShortcutActionId[]) {
+  for (const actionId of [...TAB_NAVIGATION_HISTORY_ACTIONS, "gotoLine", "createSidebarTable", "createSidebarDatabase"] as ShortcutActionId[]) {
     if (hasExplicitShortcut(settings, actionId)) continue;
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === actionId);
     if (!definition) continue;

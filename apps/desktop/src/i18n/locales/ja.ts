@@ -2679,6 +2679,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "選択行",
+    exportSelectedCellsScope: "選択セル",
+    exportSelectedColumnsScope: "選択列",
     exportFormat: "形式",
     exportPageScope: "現在のページ",
     exportResultScope: "全結果",
@@ -4137,10 +4139,8 @@ export default withEnglishFallback({
     providerCustom: "カスタム",
     builtinProviders: "組み込みサポート",
     partnerProviders: "優良スポンサー",
-    jalapenoSponsored: "$1相当の無料クレジット",
     hualongSponsored: "$1相当の無料クレジット",
     aicodemirrorSponsored: "8元無料クレジット",
-    jalapenoDescription: "🎉トップチームも利用するエンタープライズ向けAIが、あなたのもとへ！最先端モデルを50%オフで今すぐ体験。さらにチャージするほどボーナスも増量！",
     hualongDescription: "🐉 ヘビーなAI開発者のための公式直結リレー！Codex/Claudeシリーズは100%公式ソース、トークン単位の明細検証、法人契約・請求書対応。\n🎉プロモコード DBX&HUALONG で登録すると$1クレジット進呈！",
     aicodemirrorDescription: "⚡ AICodeMirror はエンタープライズ級の高同時実行、迅速なインボイス発行、7×24 の専任サポートを提供。新規ユーザーは 8 元の無料クレジットと初回チャージ 20% オフを獲得できます。",
     astraflowDescription: "UCloud の AstraFlow は、1 つの API キーで 200 以上の主要 AI モデルを利用できる、OpenAI API 互換のプラットフォームです。\n🎁 50元無料クレジット、[今すぐ受け取る](https://www.ucloud.cn/site/active/astraflow-credit?ytag=geo_waituo_dbx)！",
@@ -7565,6 +7565,7 @@ export default withEnglishFallback({
     preview: "SQLプレビュー",
     execute: "実行",
     clearValues: "値をクリア",
+    clearHistory: "履歴を消去",
     useRawForAll: "すべてを生の SQL に設定",
     ignore: "無視",
     kind: {
@@ -9295,7 +9296,7 @@ export default withEnglishFallback({
     sidebarTableSearchEnabledDescription: "展開済みのデータベース、schema、またはテーブルグループの下にローカル検索ボックスを表示し、スコープごとにテーブルを絞り込みます。",
     sidebarObjectInfoMode: "サイドバーの補足情報",
     sidebarObjectInfoModeDescription:
-      "コメント、オブジェクトサイズ、両方、または何も表示しないかを選択します。両方を表示する場合、コメントは名前の直後、サイズは右端に表示されます。対応するデータがない情報は非表示になります。データベース全体のサイズは PostgreSQL、テーブルサイズは MySQL、PostgreSQL、GaussDB、KingbaseES、GBase 8a、SQL Server、Oracle、Dameng、ClickHouse に対応しています。",
+      "コメント、オブジェクトサイズ、両方、または何も表示しないかを選択します。両方を表示する場合、コメントは名前の直後、サイズは右端に表示されます。対応するデータがない情報は非表示になります。データベース全体のサイズは PostgreSQL、テーブルサイズは MySQL、PostgreSQL、GaussDB、KingbaseES、GBase 8a、SQL Server、Oracle、Dameng、ClickHouse、Doris、StarRocks に対応しています。",
     sidebarObjectInfoModeCommentInline: "コメント（名前の直後）",
     sidebarObjectInfoModeCommentAligned: "コメント（同階層で整列）",
     sidebarObjectInfoModeCommentRight: "コメント（右揃え）",

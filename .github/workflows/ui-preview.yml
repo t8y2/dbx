@@ -152,9 +152,7 @@ jobs:
           npx playwright install --with-deps chromium
       - name: Record
         env:
-          PLAN_API_URL: https://api.atlascloud.ai/v1/chat/completions
           PLAN_API_KEY: ${{ secrets.PLAN_API_KEY }}
-          PLAN_MODEL: ${{ vars.UI_PREVIEW_PLAN_MODEL || 'openai/gpt-5.4-mini' }}
           DIFF_FILE: ${{ github.workspace }}/pr-info/pr.diff
           PR_BODY_FILE: ${{ github.workspace }}/pr-info/body.txt
           DIST_DIR: ${{ github.workspace }}/pr/dist

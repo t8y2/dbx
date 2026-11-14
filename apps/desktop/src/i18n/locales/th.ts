@@ -45,7 +45,7 @@ const damengDump = {
     toolNotFound: "ไม่พบเครื่องมือ Client Dameng (dexp/dimp) ใน Directory bin ที่กำหนด",
     connectionRequired: "การ Dump แบบ Native ของ dexp/dimp ใช้ได้เฉพาะกับการเชื่อมต่อ Dameng",
     passwordMissing: "การเชื่อมต่อนี้ไม่มี Password ที่บันทึกไว้ ให้เชื่อมต่อใหม่และป้อน Password ก่อน",
-    useridInvalid: "Username หรือ Password ของการเชื่อมต่อมี / หรือ {'@'} ซึ่งเข้ารหัสเป็นอาร์กิวเมนต์ USERID ของ dexp/dimp ไม่ได้ จึงยังไม่เริ่ม Task",
+    useridInvalid: "Username หรือ Password ของการเชื่อมต่อมีอักขระที่เข้ารหัสเป็นอาร์กิวเมนต์ USERID ของ dexp/dimp ไม่ได้ จึงยังไม่เริ่ม Task",
   },
 };
 
@@ -2895,6 +2895,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "แถวที่เลือก",
+    exportSelectedCellsScope: "เซลล์ที่เลือก",
+    exportSelectedColumnsScope: "คอลัมน์ที่เลือก",
     exportFormat: "รูปแบบ",
     exportPageScope: "หน้าปัจจุบัน",
     exportResultScope: "ผลลัพธ์ทั้งหมด",
@@ -4398,10 +4400,8 @@ export default withEnglishFallback({
     providerCustom: "กำหนดเอง",
     builtinProviders: "การรองรับในตัว",
     partnerProviders: "ผู้สนับสนุนระดับพรีเมียม",
-    jalapenoSponsored: "เครดิตฟรี $1",
     hualongSponsored: "เครดิตฟรี $1",
     aicodemirrorSponsored: "เครดิตฟรี ¥8",
-    jalapenoDescription: "🎉 AI ระดับองค์กรที่ทีมชั้นนำไว้วางใจพร้อมให้คุณใช้งานแล้ว! ลองใช้โมเดลล้ำสมัยในราคาลด 50% และรับเครดิตโบนัสเพิ่มเมื่อเติมเงินมากขึ้น!",
     hualongDescription: "🐉 บริการ Model Relay จากแหล่งทางการสำหรับนักพัฒนาที่ใช้งาน AI จำนวนมาก! Codex และ Claude Series ของแท้ 100% พร้อมการเรียกเก็บเงินระดับ Token ที่ตรวจสอบได้ สัญญาองค์กร และใบแจ้งหนี้\n🎉สมัครด้วย Promo Code DBX&HUALONG รับเครดิตฟรี $1!",
     aicodemirrorDescription: "⚡ AICodeMirror มอบ Concurrency ระดับองค์กร การออกใบแจ้งหนี้ที่รวดเร็ว และ Support เฉพาะตลอด 7×24 ชั่วโมง ผู้ใช้ใหม่รับเครดิตฟรี ¥8 พร้อมส่วนลด 20% สำหรับการเติมเงินครั้งแรก",
     astraflowDescription: "AstraFlow by UCloud ให้เข้าถึงโมเดล AI กระแสหลักกว่า 200 รายการด้วย API Key เดียว และเข้ากันได้กับ OpenAI API\n🎁 เครดิตฟรี ¥50 [รับเลยตอนนี้](https://www.ucloud.cn/site/active/astraflow-credit?ytag=geo_waituo_dbx)!",
@@ -9339,6 +9339,7 @@ export default withEnglishFallback({
     preview: "ตัวอย่าง SQL",
     execute: "เรียกใช้",
     clearValues: "ล้าง Values",
+    clearHistory: "ล้างประวัติ",
     useRawForAll: "ใช้ SQL ดิบทั้งหมด",
     ignore: "ละเว้น",
     kind: {
@@ -11253,7 +11254,7 @@ export default withEnglishFallback({
     sidebarSearchOpenedDatabasesOnlyDescription: "การค้นหา Sidebar จะโหลดเฉพาะฐานข้อมูลที่เปิดในการเชื่อมต่อปัจจุบัน ปิดเพื่อค้นหาทุกฐานข้อมูลของการเชื่อมต่อ",
     sidebarObjectInfoMode: "ข้อมูลเสริมของ Sidebar",
     sidebarObjectInfoModeDescription:
-      "เลือกคอมเมนต์ ขนาดออบเจ็กต์ ทั้งสองอย่าง หรือไม่แสดงข้อมูลเสริม เมื่อแสดงทั้งสองอย่าง คอมเมนต์จะอยู่หลังชื่อและขนาดจะแสดงทางขวาสุด ข้อมูลที่ไม่มีจะถูกซ่อน ขณะนี้ยอดฐานข้อมูลรองรับ PostgreSQL ส่วนขนาดตารางรองรับ MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng และ ClickHouse",
+      "เลือกคอมเมนต์ ขนาดออบเจ็กต์ ทั้งสองอย่าง หรือไม่แสดงข้อมูลเสริม เมื่อแสดงทั้งสองอย่าง คอมเมนต์จะอยู่หลังชื่อและขนาดจะแสดงทางขวาสุด ข้อมูลที่ไม่มีจะถูกซ่อน ขณะนี้ยอดฐานข้อมูลรองรับ PostgreSQL ส่วนขนาดตารางรองรับ MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, ClickHouse, Doris และ StarRocks",
     sidebarObjectInfoModeCommentInline: "คอมเมนต์ (หลังชื่อ)",
     sidebarObjectInfoModeCommentAligned: "คอมเมนต์ (จัดแนวตามรายการข้างเคียง)",
     sidebarObjectInfoModeCommentRight: "คอมเมนต์ (จัดชิดขวา)",

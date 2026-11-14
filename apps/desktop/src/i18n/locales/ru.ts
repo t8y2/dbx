@@ -2747,6 +2747,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "Выбранные строки",
+    exportSelectedCellsScope: "Выделенные ячейки",
+    exportSelectedColumnsScope: "Выделенные столбцы",
     exportFormat: "Формат",
     exportPageScope: "Текущая страница",
     exportResultScope: "Все результаты",
@@ -4216,10 +4218,8 @@ export default withEnglishFallback({
     providerCustom: "Свой",
     builtinProviders: "Встроенная поддержка",
     partnerProviders: "Премиум-спонсоры",
-    jalapenoSponsored: "$1 бесплатного кредита",
     hualongSponsored: "$1 бесплатного кредита",
     aicodemirrorSponsored: "8 юаней бесплатного кредита",
-    jalapenoDescription: "🎉 ИИ корпоративного уровня, которому доверяют ведущие команды, теперь доступен и вам! Попробуйте передовые модели со скидкой 50% и получайте больше бонусных кредитов при пополнении!",
     hualongDescription:
       "🐉 Официальный ретранслятор моделей для активных ИИ-разработчиков! 100% подлинные модели серий Codex и Claude с проверяемой токен-биллинговой детализацией, корпоративными контрактами и выставлением счетов.\n🎉Зарегистрируйтесь с промокодом DBX&HUALONG и получите $1 бесплатного кредита!",
     aicodemirrorDescription: "⚡ AICodeMirror — корпоративная масштабируемость, быстрые счета и поддержка 7×24; новые пользователи получают 8 юаней бесплатного кредита и скидку 20% на первое пополнение.",
@@ -9018,6 +9018,7 @@ export default withEnglishFallback({
     preview: "Предпросмотр SQL",
     execute: "Выполнить",
     clearValues: "Очистить значения",
+    clearHistory: "Очистить историю",
     useRawForAll: "Использовать Raw SQL для всех",
     ignore: "Игнорировать",
     kind: {
@@ -10862,7 +10863,7 @@ export default withEnglishFallback({
     sidebarTableSearchEnabledDescription: "Показывать поле локального поиска таблиц под развёрнутыми базами данных, схемами или группами таблиц, чтобы в каждой области можно было фильтровать таблицы независимо.",
     sidebarObjectInfoMode: "Дополнительная информация в боковой панели",
     sidebarObjectInfoModeDescription:
-      "Выберите комментарии, размеры объектов, оба варианта или отсутствие дополнительной информации. При отображении обоих вариантов комментарий следует за именем, а размер отображается у правого края. Информация без соответствующих данных скрывается. Итоги по базе данных сейчас поддерживаются в PostgreSQL; размеры таблиц поддерживаются в MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng и ClickHouse.",
+      "Выберите комментарии, размеры объектов, оба варианта или отсутствие дополнительной информации. При отображении обоих вариантов комментарий следует за именем, а размер отображается у правого края. Информация без соответствующих данных скрывается. Итоги по базе данных сейчас поддерживаются в PostgreSQL; размеры таблиц поддерживаются в MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, ClickHouse, Doris и StarRocks.",
     sidebarObjectInfoModeCommentInline: "Комментарии (после имени)",
     sidebarObjectInfoModeCommentAligned: "Комментарии (выравнивать соседей)",
     sidebarObjectInfoModeCommentRight: "Комментарии (по правому краю)",

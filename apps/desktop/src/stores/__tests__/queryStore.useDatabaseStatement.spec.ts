@@ -93,4 +93,20 @@ describe("queryStore USE database statement", () => {
 
     expect(store.tabs.find((tab) => tab.id === tabId)?.database).toBe("public_db");
   });
+
+  it("follows a successful USE for ClickHouse, whose HTTP sessions are stateless (#14798)", async () => {
+    // ClickHouse runs every request with an explicit database parameter, so the
+    // tab database IS the session state: a successful USE must switch it or
+    // every subsequent query silently runs against the wrong database.
+    mocks.getConfig.mockReturnValue({ id: "ch-1", name: "ClickHouse", db_type: "clickhouse", query_timeout_secs: 45 });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("ch-1", "default", "Query", "query");
+
+    await store.executeTabSql(tabId, "USE `finance_prod_dw`;");
+
+    expect(mocks.executeMulti).toHaveBeenCalledTimes(1);
+    expect(store.tabs.find((tab) => tab.id === tabId)?.database).toBe("finance_prod_dw");
+    await vi.waitFor(() => expect(mocks.closeClientConnectionSession).toHaveBeenCalled());
+  });
 });

@@ -38,6 +38,7 @@ import {
   isCancelSearchShortcut,
   isCopySidebarSelectionShortcut,
   isCreateSidebarTableShortcut,
+  isCreateSidebarDatabaseShortcut,
   isDisconnectSidebarConnectionShortcut,
   isEditSidebarConnectionShortcut,
   isEditSidebarTableStructureShortcut,
@@ -2851,6 +2852,15 @@ function onWindowKeydown(event: KeyboardEvent) {
       const selectedNodeId = store.selectedTreeNodeId;
       const node = selectedNodeId ? flatTreeIndex.value.nodeById.get(selectedNodeId) : undefined;
       if (node && store.selectedTreeNodeIds.length === 1 && sidebarTreeRuntimeHostRef.value?.createTableForSelection?.(node)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (!event.repeat && sidebarShortcutTargetAllowsAppShortcut(event.target) && isCreateSidebarDatabaseShortcut(event, settingsStore.editorSettings.shortcuts)) {
+      const selectedNodeId = store.selectedTreeNodeId;
+      const node = selectedNodeId ? flatTreeIndex.value.nodeById.get(selectedNodeId) : undefined;
+      if (node && store.selectedTreeNodeIds.length === 1 && sidebarTreeRuntimeHostRef.value?.createDatabaseForSelection?.(node)) {
         event.preventDefault();
         event.stopPropagation();
       }

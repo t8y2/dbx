@@ -2760,6 +2760,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "Filas seleccionadas",
+    exportSelectedCellsScope: "Celdas seleccionadas",
+    exportSelectedColumnsScope: "Columnas seleccionadas",
     exportFormat: "Formato",
     exportPageScope: "Página actual",
     exportResultScope: "Todos los resultados",
@@ -4264,10 +4266,8 @@ export default withEnglishFallback({
     providerCustom: "Personalizado",
     builtinProviders: "Compatibilidad integrada",
     partnerProviders: "Patrocinadores destacados",
-    jalapenoSponsored: "1 USD de crédito gratis",
     hualongSponsored: "1 USD de crédito gratis",
     aicodemirrorSponsored: "¥8 de crédito gratis",
-    jalapenoDescription: "🎉 ¡La IA de nivel empresarial que utilizan los equipos líderes ya está disponible para ti! ¡Prueba modelos de vanguardia con un 50 % de descuento y recibe más bonificaciones al recargar!",
     hualongDescription: "🐉 ¡Relay de modelos con fuente oficial para desarrolladores de IA intensivos! Serie Codex/Claude 100% oficial, facturación por token verificable, contratos y facturas. \n🎉¡Regístrate con el código promocional DBX&HUALONG y obtén 1 $ de crédito!",
     aicodemirrorDescription: "⚡ AICodeMirror ofrece concurrencia de nivel empresarial, facturación rápida y soporte dedicado 7×24; los nuevos usuarios obtienen ¥8 de crédito gratuito y un 20% de descuento en su primera recarga.",
     astraflowDescription: "AstraFlow de UCloud ofrece acceso a más de 200 modelos de IA populares con una sola clave API y es compatible con la API de OpenAI.\n🎁 ¥50 de crédito gratis, [reclámalo ahora](https://www.ucloud.cn/site/active/astraflow-credit?ytag=geo_waituo_dbx)!",
@@ -7741,6 +7741,7 @@ export default withEnglishFallback({
     preview: "Vista previa SQL",
     execute: "Ejecutar",
     clearValues: "Borrar valores",
+    clearHistory: "Borrar historial",
     useRawForAll: "Usar SQL sin procesar para todos",
     ignore: "Ignorar",
     kind: {
@@ -9519,7 +9520,7 @@ export default withEnglishFallback({
     sidebarTableSearchEnabledDescription: "Muestra un buscador local bajo bases de datos, schemas o grupos de tablas expandidos para filtrar tablas por separado.",
     sidebarObjectInfoMode: "Información adicional lateral",
     sidebarObjectInfoModeDescription:
-      "Elige comentarios, tamaños de objetos, ambos o ninguna información adicional. Al mostrar ambos, el comentario aparece tras el nombre y el tamaño en el extremo derecho. La información sin datos disponibles se oculta. El tamaño total de bases admite PostgreSQL; los tamaños de tablas admiten MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng y ClickHouse.",
+      "Elige comentarios, tamaños de objetos, ambos o ninguna información adicional. Al mostrar ambos, el comentario aparece tras el nombre y el tamaño en el extremo derecho. La información sin datos disponibles se oculta. El tamaño total de bases admite PostgreSQL; los tamaños de tablas admiten MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, ClickHouse, Doris y StarRocks.",
     sidebarObjectInfoModeCommentInline: "Comentarios (junto al nombre)",
     sidebarObjectInfoModeCommentAligned: "Comentarios (alinear nivel)",
     sidebarObjectInfoModeCommentRight: "Comentarios (alinear a la derecha)",

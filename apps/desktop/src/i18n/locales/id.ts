@@ -3540,10 +3540,8 @@ export default withEnglishFallback({
     providerCustom: "Kustom",
     builtinProviders: "Dukungan bawaan",
     partnerProviders: "Sponsor premium",
-    jalapenoSponsored: "Kredit gratis $1",
     hualongSponsored: "Kredit gratis $1",
     aicodemirrorSponsored: "Kredit gratis ¥8",
-    jalapenoDescription: "🎉 AI tingkat enterprise yang dipercaya tim-tim terkemuka kini tersedia untuk Anda! Coba model mutakhir dengan diskon 50% dan dapatkan bonus kredit lebih besar saat top up lebih banyak!",
     hualongDescription: "🐉 Relay model sumber resmi untuk developer AI berat! Seri Codex dan Claude 100% asli dengan penagihan berbasis token yang dapat diverifikasi, kontrak enterprise, dan invoicing.\n🎉Daftar dengan kode promo DBX&HUALONG untuk kredit gratis $1!",
     aicodemirrorDescription: "⚡ AICodeMirror menghadirkan konkurensi tingkat enterprise, invoicing cepat, dan dukungan khusus 7×24; pengguna baru mendapat kredit gratis ¥8 plus diskon 20% untuk top up pertama.",
     astraflowDescription: "AstraFlow dari UCloud menyediakan akses ke lebih dari 200 model AI populer dengan satu API key, kompatibel dengan API OpenAI.\n🎁 Kredit gratis ¥50, [klaim sekarang](https://www.ucloud.cn/site/active/astraflow-credit?ytag=geo_waituo_dbx)!",
@@ -7109,6 +7107,7 @@ export default withEnglishFallback({
     preview: "Pratinjau SQL",
     execute: "Jalankan",
     clearValues: "Bersihkan Nilai",
+    clearHistory: "Hapus riwayat",
     useRawForAll: "Gunakan SQL Mentah untuk Semua",
     ignore: "Abaikan",
     kind: {
@@ -8880,7 +8879,7 @@ export default withEnglishFallback({
     sidebarSearchOpenedDatabasesOnlyDescription: "Pencarian bilah sisi hanya memuat database yang sudah Anda buka pada koneksi aktif. Nonaktifkan untuk mencari semua database pada koneksi tersebut.",
     sidebarObjectInfoMode: "Info tambahan bilah sisi",
     sidebarObjectInfoModeDescription:
-      "Pilih komentar, ukuran objek, keduanya, atau tanpa info tambahan. Jika keduanya dipilih, komentar tampil setelah nama dan ukuran di paling kanan. Informasi yang datanya tidak tersedia akan disembunyikan. Total database saat ini mendukung PostgreSQL; ukuran tabel mendukung MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, dan ClickHouse.",
+      "Pilih komentar, ukuran objek, keduanya, atau tanpa info tambahan. Jika keduanya dipilih, komentar tampil setelah nama dan ukuran di paling kanan. Informasi yang datanya tidak tersedia akan disembunyikan. Total database saat ini mendukung PostgreSQL; ukuran tabel mendukung MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, ClickHouse, Doris, dan StarRocks.",
     sidebarObjectInfoModeCommentInline: "Komentar (setelah nama)",
     sidebarObjectInfoModeCommentAligned: "Komentar (sejajarkan dengan item sejenis)",
     sidebarObjectInfoModeCommentRight: "Komentar (rata kanan)",

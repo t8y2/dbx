@@ -3192,10 +3192,8 @@ export default withEnglishFallback({
     providerCustom: "Özel",
     builtinProviders: "Yerleşik destek",
     partnerProviders: "Premium sponsorlar",
-    jalapenoSponsored: "1 $ ücretsiz kredi",
     hualongSponsored: "1 $ ücretsiz kredi",
     aicodemirrorSponsored: "¥8 ücretsiz kredi",
-    jalapenoDescription: "🎉 Önde gelen ekiplerin güvendiği kurumsal düzeyde yapay zekâ artık sizin için de kullanılabilir! En yeni modelleri %50 indirimle deneyin ve daha çok yükleme yaptıkça daha çok bonus kredi kazanın!",
     hualongDescription: "🐉 Yoğun yapay zekâ geliştiricileri için resmî kaynak aktarıcı! Codex/Claude serisi %100 resmî kaynak, doğrulanabilir belirteç düzeyinde fatura, kurumsal sözleşme ve fatura. \n🎉DBX&HUALONG promosyon koduyla kayıt olun, 1$ kredi kazanın!",
     aicodemirrorDescription: "⚡ AICodeMirror, kurumsal düzeyde eşzamanlılık, hızlı faturalandırma ve 7×24 özel destek sunar; yeni kullanıcılar ¥8 ücretsiz kredi ve ilk yüklemede %20 indirim kazanır.",
     astraflowDescription: "UCloud'un AstraFlow platformu, tek bir API anahtarıyla 200'den fazla popüler yapay zekâ modeline erişim sağlar ve OpenAI API ile uyumludur.\n🎁 ¥50 ücretsiz kredi, [hemen alın](https://www.ucloud.cn/site/active/astraflow-credit?ytag=geo_waituo_dbx)!",
@@ -6340,6 +6338,7 @@ export default withEnglishFallback({
     preview: "SQL Önizlemesi",
     execute: "Çalıştır",
     clearValues: "Değerleri Temizle",
+    clearHistory: "Geçmişi temizle",
     useRawForAll: "Tümü İçin Ham SQL Kullan",
     kind: {
       string: "Dize",
@@ -8024,7 +8023,7 @@ export default withEnglishFallback({
     sidebarTableSearchEnabledDescription: "Her kapsamın tabloları bağımsız filtreleyebilmesi için genişletilmiş veritabanları, şemalar veya tablo grupları altında yerel bir tablo arama kutusu göster.",
     sidebarObjectInfoMode: "Kenar çubuğu ek bilgisi",
     sidebarObjectInfoModeDescription:
-      "Açıklamaları, nesne boyutlarını, her ikisini göstermeyi veya ek bilgileri gizlemeyi seçin. Her ikisi seçildiğinde açıklama adın ardından, boyut ise en sağda gösterilir. Verisi bulunmayan bilgiler gizlenir. Veritabanı toplamları şu anda PostgreSQL'i destekler; tablo boyutları MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng ve ClickHouse'u destekler.",
+      "Açıklamaları, nesne boyutlarını, her ikisini göstermeyi veya ek bilgileri gizlemeyi seçin. Her ikisi seçildiğinde açıklama adın ardından, boyut ise en sağda gösterilir. Verisi bulunmayan bilgiler gizlenir. Veritabanı toplamları şu anda PostgreSQL'i destekler; tablo boyutları MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, ClickHouse, Doris ve StarRocks'u destekler.",
     sidebarObjectInfoModeCommentInline: "Açıklamalar (addan sonra)",
     sidebarObjectInfoModeCommentAligned: "Açıklamalar (kardeşlerle hizalı)",
     sidebarObjectInfoModeCommentRight: "Açıklamalar (sağa hizalı)",

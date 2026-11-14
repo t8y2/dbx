@@ -1,4 +1,6 @@
 import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+import { sqlSemanticDialectFor } from "@/lib/sql/semantic/dialect";
+import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 import type { DatabaseType } from "@/types/database";
 
 const STORAGE_PREFIX = "dbx-data-grid-column-layout:";
@@ -19,6 +21,7 @@ export interface DataGridColumnLayoutScope {
   tableSchema?: string;
   tableName?: string;
   sql?: string;
+  databaseType?: DatabaseType;
   columns: readonly string[];
   sourceColumns?: readonly (string | undefined)[];
 }
@@ -72,10 +75,43 @@ function normalizeSql(sql?: string): string {
   return (sql ?? "").replace(/\s+/g, " ").trim();
 }
 
-export function dataGridColumnLayoutScopeKey(scope: DataGridColumnLayoutScope): string {
+function queryLayoutSql(sql: string, databaseType?: DatabaseType): string {
+  const dialect = sqlSemanticDialectFor({ databaseType }).id;
+  const mysql = dialect === "mysql" || dialect === "doris";
+  const tokens = tokenizeSqlSemantic(sql, dialect, { mysqlDashCommentRequiresWhitespace: mysql, mysqlBackslashEscape: mysql }).filter((token) => token.depth === 0 && token.kind !== "comment");
+  if (tokens[0]?.normalized !== "select" && tokens[0]?.normalized !== "with") return sql;
+  if (tokens.some((token, index) => (token.text === ";" && index !== tokens.length - 1) || (token.kind === "word" && ["union", "intersect", "except", "minus"].includes(token.normalized)))) return sql;
+  const from = tokens.findIndex((token) => token.kind === "word" && token.normalized === "from");
+  if (from === -1) return sql;
+  const where = tokens.findIndex((token, index) => index > from && token.kind === "word" && token.normalized === "where");
+  if (where === -1) return sql;
+  const end = tokens.find((token, index) => {
+    if (index <= where) return false;
+    if (token.text === ";") return true;
+    if (token.kind !== "word" || tokens[index - 1]?.text === "." || tokens[index + 1]?.text === ".") return false;
+    if (token.normalized === "group" || token.normalized === "order") return tokens[index + 1]?.normalized === "by";
+    return ["having", "window", "qualify", "limit", "offset", "fetch", "for", "option", "settings", "format", "returning"].includes(token.normalized);
+  });
+  return `${sql.slice(0, tokens[where]!.span.start)}WHERE${end ? ` ${sql.slice(end.span.start)}` : ""}`;
+}
+
+export function dataGridColumnLayoutScopeKey(scope: DataGridColumnLayoutScope, preserveFilter = false): string {
   const columnSignature = scope.columns.join("\0");
   const sourceSignature = (scope.sourceColumns ?? []).map((column) => column ?? "").join("\0");
-  return [scope.connectionId ?? "", scope.database ?? "", scope.schema ?? "", scope.context ?? "", scope.tableSchema ?? "", scope.tableName ?? "", scope.tableName ? "" : normalizeSql(scope.sql), columnSignature, sourceSignature].join("\u0001");
+  const sql = scope.context === "results" && scope.sql && !scope.tableName && !preserveFilter ? queryLayoutSql(scope.sql, scope.databaseType) : scope.sql;
+  return [scope.connectionId ?? "", scope.database ?? "", scope.schema ?? "", scope.context ?? "", scope.tableSchema ?? "", scope.tableName ?? "", scope.tableName ? "" : normalizeSql(sql), columnSignature, sourceSignature].join("\u0001");
+}
+
+export function migrateDataGridColumnLayout(scopeKey: string, previousScopeKey: string, columnKeys: readonly string[]): DataGridColumnLayout | null {
+  const existing = loadDataGridColumnLayout(scopeKey, columnKeys);
+  if (existing || scopeKey === previousScopeKey) return existing;
+  const previous = loadDataGridColumnLayout(previousScopeKey, columnKeys);
+  const frozen = loadDataGridColumnFrozenState(previousScopeKey);
+  if (!previous && frozen.frozenCount === 0) return null;
+  const layout = previous ?? { orderKeys: [], hiddenKeys: [] };
+  saveDataGridColumnLayout(scopeKey, layout);
+  if (frozen.frozenCount > 0) saveDataGridColumnFrozenCount(scopeKey, frozen.frozenCount, frozen.orderBeforeFreeze);
+  return layout;
 }
 
 export function documentDataGridColumnLayoutScopeKey(scope: DocumentDataGridColumnLayoutScope): string {

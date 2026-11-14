@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import { CaseSensitive, ChevronDown, ChevronRight, ChevronUp, Search, X } from "@lucide/vue";
+import { computed, ref, watch } from "vue";
+import { useEventListener, useResizeObserver } from "@vueuse/core";
+import { CaseSensitive, ChevronDown, ChevronRight, ChevronUp, GripVertical, Search, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { vNamingStyleSupport } from "@/directives/vNamingStyleSupport";
 import type { DataGridReplaceScope } from "@/lib/dataGrid/dataGridReplace";
@@ -43,6 +44,62 @@ const emit = defineEmits<{
 }>();
 
 const searchInput = ref<HTMLInputElement>();
+const overlay = ref<HTMLElement>();
+const overlayParent = computed(() => overlay.value?.parentElement);
+const position = ref<{ x: number; y: number }>();
+const overlayStyle = computed(() => (position.value ? { left: `${position.value.x}px`, top: `${position.value.y}px`, right: "auto" } : undefined));
+let drag: { pointerId: number; startX: number; startY: number; x: number; y: number } | undefined;
+
+function moveOverlay(x: number, y: number) {
+  const el = overlay.value;
+  const parent = overlayParent.value;
+  if (!el || !parent) return;
+  const bounds = parent.getBoundingClientRect();
+  const maxX = Math.min(parent.clientWidth, window.innerWidth - bounds.left - parent.clientLeft) - el.offsetWidth;
+  const maxY = Math.min(parent.clientHeight, window.innerHeight - bounds.top - parent.clientTop) - el.offsetHeight;
+  position.value = {
+    x: Math.max(0, Math.min(x, maxX)),
+    y: Math.max(0, Math.min(y, maxY)),
+  };
+}
+
+function keepOverlayVisible() {
+  if (position.value) moveOverlay(position.value.x, position.value.y);
+}
+
+useResizeObserver([overlay, overlayParent], keepOverlayVisible);
+useEventListener("resize", keepOverlayVisible);
+
+watch(
+  () => props.open,
+  (open) => {
+    if (open) return;
+    drag = undefined;
+    position.value = undefined;
+  },
+);
+
+function startDrag(event: PointerEvent) {
+  const el = overlay.value;
+  if (!el || event.button !== 0 || !event.isPrimary) return;
+  event.preventDefault();
+  drag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: el.offsetLeft, y: el.offsetTop };
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+
+function updateDrag(event: PointerEvent) {
+  if (drag?.pointerId !== event.pointerId) return;
+  moveOverlay(drag.x + event.clientX - drag.startX, drag.y + event.clientY - drag.startY);
+}
+
+function endDrag(event: PointerEvent) {
+  if (drag?.pointerId === event.pointerId) drag = undefined;
+}
+
+function nudgeOverlay(dx: number, dy: number) {
+  const el = overlay.value;
+  if (el) moveOverlay(el.offsetLeft + dx, el.offsetTop + dy);
+}
 
 function onSuggestionMouseDown(event: MouseEvent, index: number) {
   event.preventDefault();
@@ -95,8 +152,25 @@ defineExpose({
 
 <template>
   <Transition enter-active-class="transition-opacity duration-150" leave-active-class="transition-opacity duration-100" enter-from-class="opacity-0" leave-to-class="opacity-0">
-    <div v-if="props.open" data-grid-search-bar class="absolute top-1 right-2 z-20 max-w-[calc(100%-1rem)] px-2 py-1 bg-background focus-within:bg-background-solid border rounded-md shadow-md" @keydown.esc.stop.prevent="emit('close')">
+    <div v-if="props.open" ref="overlay" data-grid-search-bar class="absolute top-1 right-2 z-20 w-max max-w-[calc(100%-1rem)] px-2 py-1 bg-background focus-within:bg-background-solid border rounded-md shadow-md" :style="overlayStyle" @keydown.esc.stop.prevent="emit('close')">
       <div class="flex items-center gap-1 min-w-0">
+        <button
+          type="button"
+          class="flex h-5 w-4 shrink-0 cursor-grab touch-none select-none items-center justify-center rounded text-muted-foreground hover:text-foreground active:cursor-grabbing"
+          :title="t('editor.structurePeek.drag')"
+          :aria-label="t('editor.structurePeek.drag')"
+          @pointerdown.stop="startDrag"
+          @pointermove.stop="updateDrag"
+          @pointerup.stop="endDrag"
+          @pointercancel="endDrag"
+          @lostpointercapture="endDrag"
+          @keydown.left.stop.prevent="nudgeOverlay(-16, 0)"
+          @keydown.right.stop.prevent="nudgeOverlay(16, 0)"
+          @keydown.up.stop.prevent="nudgeOverlay(0, -16)"
+          @keydown.down.stop.prevent="nudgeOverlay(0, 16)"
+        >
+          <GripVertical class="h-3.5 w-3.5" />
+        </button>
         <button
           v-if="props.replaceAvailable !== undefined"
           data-grid-replace-toggle

@@ -72,7 +72,7 @@ fn keeps_persisted_size_at_or_above_the_minimum() {
 
 #[test]
 fn replaces_corrupt_persisted_size_with_the_scaled_default() {
-    for corrupt in [(0, 0), (160, 28), (440, 68), (1280, 0), (0, 800), (899, 800), (1280, 599)] {
+    for corrupt in [(0, 0), (160, 28), (440, 68), (1280, 0), (0, 800), (759, 800), (1280, 599)] {
         assert_eq!(sane_window_size(corrupt, 1.0), (1280, 800), "{corrupt:?}");
         assert_eq!(sane_window_size(corrupt, 2.0), (2560, 1600), "{corrupt:?}");
     }

@@ -6338,6 +6338,7 @@ export default withEnglishFallback({
     preview: "SQL Önizlemesi",
     execute: "Çalıştır",
     clearValues: "Değerleri Temizle",
+    clearHistory: "Geçmişi temizle",
     useRawForAll: "Tümü İçin Ham SQL Kullan",
     kind: {
       string: "Dize",
@@ -8022,7 +8023,7 @@ export default withEnglishFallback({
     sidebarTableSearchEnabledDescription: "Her kapsamın tabloları bağımsız filtreleyebilmesi için genişletilmiş veritabanları, şemalar veya tablo grupları altında yerel bir tablo arama kutusu göster.",
     sidebarObjectInfoMode: "Kenar çubuğu ek bilgisi",
     sidebarObjectInfoModeDescription:
-      "Açıklamaları, nesne boyutlarını, her ikisini göstermeyi veya ek bilgileri gizlemeyi seçin. Her ikisi seçildiğinde açıklama adın ardından, boyut ise en sağda gösterilir. Verisi bulunmayan bilgiler gizlenir. Veritabanı toplamları şu anda PostgreSQL'i destekler; tablo boyutları MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng ve ClickHouse'u destekler.",
+      "Açıklamaları, nesne boyutlarını, her ikisini göstermeyi veya ek bilgileri gizlemeyi seçin. Her ikisi seçildiğinde açıklama adın ardından, boyut ise en sağda gösterilir. Verisi bulunmayan bilgiler gizlenir. Veritabanı toplamları şu anda PostgreSQL'i destekler; tablo boyutları MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, ClickHouse, Doris ve StarRocks'u destekler.",
     sidebarObjectInfoModeCommentInline: "Açıklamalar (addan sonra)",
     sidebarObjectInfoModeCommentAligned: "Açıklamalar (kardeşlerle hizalı)",
     sidebarObjectInfoModeCommentRight: "Açıklamalar (sağa hizalı)",
@@ -8433,6 +8434,8 @@ export default withEnglishFallback({
     shortcutSaveSql: "SQL'i Kaydet",
     shortcutAcceptCompletion: "Tamamlamayı kabul et",
     shortcutTriggerCompletion: "Tamamlamayı tetikle",
+    shortcutPreviousCompletion: "Önceki tamamlama önerisi",
+    shortcutNextCompletion: "Sonraki tamamlama önerisi",
     shortcutFormatSql: "SQL'i Biçimlendir",
     shortcutExpandSelectStar: "* ifadesini sütunlara genişlet",
     shortcutToggleLineComment: "Satır yorumunu aç/kapat",

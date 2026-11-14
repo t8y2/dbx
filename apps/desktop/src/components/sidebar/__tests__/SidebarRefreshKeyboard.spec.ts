@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import i18n from "@/i18n";
 import type { TreeNode } from "@/types/database";
 import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.vue";
+import { isSidebarRefreshShortcut } from "@/lib/editor/keyboardShortcuts";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 
@@ -143,6 +144,12 @@ describe("Sidebar F5 refresh shortcut and connection database reload (#12246)", 
     const appSource = readFileSync(resolve(cwd, "apps/desktop/src/App.vue"), "utf8");
     const appSidebarSource = readFileSync(resolve(cwd, "apps/desktop/src/components/layout/AppSidebar.vue"), "utf8");
     const connectionTreeSource = readFileSync(resolve(cwd, "apps/desktop/src/components/sidebar/ConnectionTree.vue"), "utf8");
+    const sidebarTreeHostSource = readFileSync(resolve(cwd, "apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue"), "utf8");
+
+    // #14919: the sidebar tree must not keep its own F5 / Mod+R fallbacks, otherwise
+    // remapping the refresh shortcut leaves the old keys working.
+    expect(sidebarTreeHostSource).toContain("isSidebarRefreshShortcut(event, settingsStore.editorSettings.shortcuts)");
+    expect(sidebarTreeHostSource).not.toContain('event.key === "F5"');
 
     // In App.vue: refreshData shortcut checks isSidebarFocusedTarget and delegates to appSidebarRef.value?.refreshSidebar()
     expect(appSource).toContain("isRefreshDataShortcut(e, shortcuts)");
@@ -158,5 +165,28 @@ describe("Sidebar F5 refresh shortcut and connection database reload (#12246)", 
     expect(connectionTreeSource).toContain("isRefreshDataShortcut(event, settingsStore.editorSettings.shortcuts)");
     expect(connectionTreeSource).toContain("requestSelectedSidebarRefresh()");
     expect(connectionTreeSource).toContain("refreshSidebar: requestSelectedSidebarRefresh");
+  });
+});
+
+describe("sidebar refresh shortcut customization (#14919)", () => {
+  const F5 = { key: "F5" };
+  const modR = { key: "r", ctrlKey: true };
+
+  it("keeps the default F5 binding and its legacy Mod+R alias", () => {
+    expect(isSidebarRefreshShortcut(F5, { refreshData: "F5" })).toBe(true);
+    expect(isSidebarRefreshShortcut(modR, { refreshData: "F5" })).toBe(true);
+  });
+
+  it("stops the old keys once refreshData is remapped", () => {
+    const shortcuts = { refreshData: "Mod+F5" };
+
+    expect(isSidebarRefreshShortcut(F5, shortcuts)).toBe(false);
+    expect(isSidebarRefreshShortcut(modR, shortcuts)).toBe(false);
+    expect(isSidebarRefreshShortcut({ key: "F5", ctrlKey: true }, shortcuts)).toBe(true);
+  });
+
+  it("stops every key when the refresh shortcut is cleared", () => {
+    expect(isSidebarRefreshShortcut(F5, { refreshData: "" })).toBe(false);
+    expect(isSidebarRefreshShortcut(modR, { refreshData: "" })).toBe(false);
   });
 });

@@ -1269,6 +1269,16 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
     return shouldTriggerSqlCompletionForPosition(fullDoc, position);
   }
 
+  function searchesAcrossPostgresSchemas(completionContext: SqlCompletionContext, scope: CompletionMetadataScope): boolean {
+    return props.databaseType === "postgres" && !scope.schema && completionContext.suggestTables && !completionContext.qualifier;
+  }
+
+  function tableSchemaQualification(completionContext: SqlCompletionContext, scope: CompletionMetadataScope) {
+    const mode = settingsStore.editorSettings.tableCompletionSchemaQualification;
+    // In an unscoped PostgreSQL lookup, even a unique name may be outside search_path.
+    return searchesAcrossPostgresSchemas(completionContext, scope) && mode !== "never" ? "always" : mode;
+  }
+
   function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getSqlCompletionContext>, fullDoc: string, position: number, scope: CompletionMetadataScope) {
     if (!props.connectionId || props.database == null) return null;
     const databaseNames = localCompletionDatabaseNames(completionContext);
@@ -1425,7 +1435,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       identifierCase: settingsStore.editorSettings.sqlFormatter.identifierCase,
       autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       qualifyColumnCompletions: settingsStore.editorSettings.qualifyColumnCompletions,
-      tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
+      tableCompletionSchemaQualification: tableSchemaQualification(completionContext, scope),
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
       sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,
@@ -1460,17 +1470,22 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       knownDatabases: databaseNames,
     });
     if (!localOnlyMetadata && !schemaLookupDatabase && (completionContext.suggestTables || (!!completionContext.qualifier && !isReferencedTableQualifier(completionContext)))) {
-      const globalOracleTableSearch = isOracleCompletionDatabase(props.databaseType) && completionContext.suggestTables && !completionContext.qualifier;
+      const crossSchemaSearch = searchesAcrossPostgresSchemas(completionContext, scope);
+      const globalTableSearch = crossSchemaSearch || (isOracleCompletionDatabase(props.databaseType) && completionContext.suggestTables && !completionContext.qualifier);
+      const localTableKeys = crossSchemaSearch ? new Set(connectionStore.lookupLocalCompletionTables(connectionId, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, undefined, props.catalog).map((table) => JSON.stringify([table.schema, table.name]))) : undefined;
       const refreshEpoch = completionEpoch;
       queueTableCompletionRefresh(async () => {
         if (refreshEpoch !== completionEpoch) return;
         try {
-          const tables = await connectionStore.refreshCompletionTables(connectionId, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, tableLookupTarget.schema, globalOracleTableSearch, scope.schema, props.catalog);
+          const tables = await connectionStore.refreshCompletionTables(connectionId, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, tableLookupTarget.schema, globalTableSearch, scope.schema, props.catalog);
           if (refreshEpoch !== completionEpoch) return;
           const scopedTables = tables.map((table) => ({ ...table, database: table.database ?? tableLookupTarget.database }));
           completionMetadata.cachedTables = mergeCompletionTables(completionMetadata.cachedTables, scopedTables);
           if (completionContext.suggestJoinConditions && completionContext.referencedTables.length > 0) {
             void ensureForeignKeysForTables(completionContext.referencedTables);
+          }
+          if (localTableKeys && tables.some((table) => !localTableKeys.has(JSON.stringify([table.schema, table.name])))) {
+            void refreshActiveSqlCompletion(fullDoc, position, completionContext);
           }
         } catch {
           // Local candidates remain available when the remote refresh fails.
@@ -1728,12 +1743,13 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       knownDatabases: databaseNames,
     });
     const globalOracleTableSearch = isOracleCompletionDatabase(props.databaseType) && completionContext.suggestTables && !completionContext.qualifier;
+    const globalTableSearch = globalOracleTableSearch || searchesAcrossPostgresSchemas(completionContext, scope);
     let tables = schemaLookupDatabase
       ? []
       : shouldLoadTables
         ? localOnlyMetadata
           ? connectionStore.lookupLocalCompletionTables(props.connectionId!, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, globalOracleTableSearch ? undefined : tableLookupTarget.schema, props.catalog)
-          : await listCompletionTablesWithLatencyBudget(props.connectionId!, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, tableLookupTarget.schema, globalOracleTableSearch, props.catalog, scope.schema)
+          : await listCompletionTablesWithLatencyBudget(props.connectionId!, tableLookupTarget.database, tableLookupTarget.filter, MAX_COMPLETION_TABLES, tableLookupTarget.schema, globalTableSearch, props.catalog, scope.schema)
         : completionMetadata.cachedTables;
     if (localOnlyMetadata && tables.length === 0 && supportsDatabaseSchemaQualifierCompletion() && (completionContext.qualifierParts?.length ?? 0) >= 2 && allowsOnDemandQualifiedTableCompletion(completionContext.prefix)) {
       tables = await listCompletionTablesWithLatencyBudget(props.connectionId!, tableLookupTarget.database, tableLookupTarget.filter, PRESTO_ON_DEMAND_TABLE_COMPLETION_LIMIT, tableLookupTarget.schema, false, props.catalog, scope.schema);
@@ -1966,7 +1982,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       identifierCase: settingsStore.editorSettings.sqlFormatter.identifierCase,
       autoAliasTables: settingsStore.editorSettings.autoAliasTables,
       qualifyColumnCompletions: settingsStore.editorSettings.qualifyColumnCompletions,
-      tableCompletionSchemaQualification: settingsStore.editorSettings.tableCompletionSchemaQualification,
+      tableCompletionSchemaQualification: tableSchemaQualification(completionContext, scope),
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       functionCompletionIncludeParams: settingsStore.editorSettings.functionCompletionIncludeParams,
       sequenceCompletionEnabled: settingsStore.editorSettings.sequenceCompletionEnabled,

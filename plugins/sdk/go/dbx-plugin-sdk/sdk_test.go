@@ -61,6 +61,37 @@ func TestServerInitializesAndDispatches(t *testing.T) {
 	}
 }
 
+// A plugin built without capabilities must answer plugin/initialize with an
+// empty array, not JSON null (#14972): the host rejects null where it
+// expects a sequence, which fails the whole plugin initialization.
+func TestServerInitializesWithNilCapabilities(t *testing.T) {
+	input := bytes.NewBufferString(
+		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"plugin/initialize\",\"params\":{\"host\":{\"protocolVersions\":[1]}}}\n",
+	)
+	var output bytes.Buffer
+	server := NewServer(
+		Metadata{ID: "sample.plugin", Version: "1.0.0"},
+		HandlerFunc(func(_ RequestContext, _ string, _ json.RawMessage, _ *Emitter) (any, *PluginError) {
+			return nil, nil
+		}),
+	).WithIO(input, &output, &bytes.Buffer{})
+	if err := server.Serve(); err != nil {
+		t.Fatal(err)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &response); err != nil {
+		t.Fatal(err)
+	}
+	initialize := response["result"].(map[string]any)
+	capabilities, ok := initialize["capabilities"].([]any)
+	if !ok || capabilities == nil {
+		t.Fatalf("expected capabilities to encode as an empty array, got %#v", initialize["capabilities"])
+	}
+	if len(capabilities) != 0 {
+		t.Fatalf("expected no capabilities, got %#v", capabilities)
+	}
+}
+
 func TestEmitterWritesEvents(t *testing.T) {
 	var output bytes.Buffer
 	emitter := &Emitter{writer: &output, mutex: &sync.Mutex{}}

@@ -1014,6 +1014,13 @@ pub fn build_editable_object_source(
 }
 
 #[tauri::command]
+pub fn build_oracle_object_export_sql(
+    input: dbx_core::object_source_sql::EditableObjectSourceSqlInput,
+) -> Result<String, String> {
+    dbx_core::object_source_sql::build_oracle_object_export_sql(input)
+}
+
+#[tauri::command]
 pub fn build_routine_rename_object_source_statements(
     input: dbx_core::object_source_sql::RoutineRenameObjectSourceInput,
 ) -> Result<Vec<String>, String> {

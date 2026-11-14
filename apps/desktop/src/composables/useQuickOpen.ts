@@ -2,6 +2,8 @@ import { computed, ref, watch, type Ref } from "vue";
 import type { ConnectionConfig } from "@/types/database";
 import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
+import { runSqlCatalogStructureSearch, structureHitPreview } from "@/lib/database/databaseStructureSearch";
+import { uuid } from "@/lib/common/utils";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import * as api from "@/lib/backend/api";
@@ -322,6 +324,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
   const searchQuery = ref("");
   const selectedIndex = ref(0);
   const remoteItems = ref<QuickOpenItem[]>([]);
+  const remoteStructureItems = ref<QuickOpenItem[]>([]);
   const sqlFileItems = ref<QuickOpenItem[]>([]);
   let remoteSearchGeneration = 0;
   let remoteSearchTimer: ReturnType<typeof setTimeout> | undefined;
@@ -907,8 +910,9 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
 
   async function runRemoteSearch(query: string, generation: number, contexts: Array<{ conn: ConnectionConfig; database: string }>): Promise<void> {
     const groups = contexts.map(() => [] as QuickOpenItem[]);
-    await Promise.all(
-      contexts.map(async ({ conn, database }, index) => {
+    const structureGroups = contexts.map(() => [] as QuickOpenItem[]);
+    await Promise.all([
+      ...contexts.map(async ({ conn, database }, index) => {
         const acquired = await acquireRemoteRequestSlot(generation);
         if (!acquired) return;
         try {
@@ -919,12 +923,47 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
           groups[index] = tables.slice(0, REMOTE_SEARCH_RESULTS_PER_REQUEST).map((table) => remoteTableItem(table, conn, database));
           remoteItems.value = groups.flat().slice(0, REMOTE_SEARCH_MAX_RESULTS);
         } catch {
-          return;
+          // The name lookup can fail independently of the catalog search.
         } finally {
           releaseRemoteRequestSlot();
         }
       }),
-    );
+      ...contexts.map(async ({ conn, database }, index) => {
+        if (conn.db_type !== "mysql" || contentMode.value || !connectionStore.connectedIds.has(conn.id)) return;
+        if (!(await acquireRemoteRequestSlot(generation))) return;
+        try {
+          const shouldAbort = () => generation !== remoteSearchGeneration || contentMode.value || !connectionStore.connectedIds.has(conn.id);
+          const hits = await runSqlCatalogStructureSearch({
+            connectionId: conn.id,
+            databaseType: conn.db_type,
+            driverProfile: conn.driver_profile,
+            database,
+            term: query,
+            limit: REMOTE_SEARCH_RESULTS_PER_REQUEST,
+            executionId: `quick-open-${uuid()}`,
+            shouldAbort,
+            executeQuery: (sql, executionId) => api.executeQuery(conn.id, database, sql, undefined, executionId, { timeoutSecs: 5 }),
+          });
+          if (shouldAbort()) return;
+          const matches = new Map<string, QuickOpenItem>();
+          for (const hit of hits) {
+            if (hit.tableType !== "BASE TABLE" && hit.tableType !== "VIEW") continue;
+            const type = hit.tableType === "VIEW" ? "view" : "table";
+            const item = remoteTableItem({ name: hit.tableName, type }, conn, database);
+            const key = quickOpenItemKey(item);
+            if (matches.has(key)) continue;
+            const preview = structureHitPreview(hit);
+            matches.set(key, { ...item, description: `${item.description} · ${preview}`, searchText: `${item.searchText} ${hit.columnName ?? ""} ${hit.columnComment ?? ""} ${hit.tableComment ?? ""}` });
+          }
+          structureGroups[index] = [...matches.values()].slice(0, REMOTE_SEARCH_RESULTS_PER_REQUEST);
+          remoteStructureItems.value = structureGroups.flat().slice(0, REMOTE_SEARCH_MAX_RESULTS);
+        } catch {
+          // A metadata permission error still leaves existing name matches visible.
+        } finally {
+          releaseRemoteRequestSlot();
+        }
+      }),
+    ]);
   }
 
   /**
@@ -950,6 +989,7 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     if (remoteSearchTimer) clearTimeout(remoteSearchTimer);
     remoteSearchTimer = undefined;
     remoteItems.value = [];
+    remoteStructureItems.value = [];
 
     const normalizedQuery = rawQuery.trim();
     if (normalizedQuery.length < REMOTE_SEARCH_MIN_QUERY_LENGTH) return;
@@ -1005,14 +1045,14 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
 
     const seen = new Set<string>();
     // When searching, include ALL SQL library files and external SQL files
-    for (const item of [...allItems.value, ...sqlLibraryAllItems.value, ...sqlFileItems.value, ...remoteItems.value, ...(extraItems?.value ?? [])]) {
+    for (const item of [...allItems.value, ...sqlLibraryAllItems.value, ...sqlFileItems.value, ...remoteItems.value, ...remoteStructureItems.value, ...(extraItems?.value ?? [])]) {
       const key = quickOpenItemKey(item);
       if (seen.has(key)) continue;
-      seen.add(key);
       const labelMatch = matchQuickOpenText(searchQuery.value, item.label);
       const metadataMatch = labelMatch ? null : matchQuickOpenMetadata(searchQuery.value, item.searchText);
       const result = labelMatch ?? metadataMatch;
       if (result) {
+        seen.add(key);
         matched.push({
           ...item,
           matchScore: result.score + (labelMatch ? 0 : 1000),

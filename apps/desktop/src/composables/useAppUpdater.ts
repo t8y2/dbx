@@ -8,7 +8,7 @@ import type { UpdateDownloadProgress } from "@/lib/backend/tauri";
 import { currentLocale } from "@/i18n";
 import { shouldBlockAppUpdate } from "@/lib/app/appUpdateTaskGuard";
 import { isUpdatePreparationError, UpdatePreparationError } from "@/lib/app/updatePreparation";
-import { displayAppVersion, recordPromotedBuild } from "@/lib/app/promotedBuild";
+import { displayAppVersion, isPrereleaseBuild, isPromotedBuild, recordPromotedBuild } from "@/lib/app/promotedBuild";
 import { uuid } from "@/lib/common/utils";
 import { isUpdatePreviewMockEnabled, previewAppUpdateInfo } from "@/lib/updates/updatePreviewMock";
 
@@ -281,6 +281,27 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     if (message.toLowerCase().includes("powershell")) return t("updates.portableHelperFailed", { error: message });
     return t("updates.installFailed", { error: message });
   }
+  /**
+   * A beta build promoted to stable is not rebuilt, so the installed binary
+   * keeps its beta version and only the stable manifest names the promotion
+   * (`promoted_from`). A beta-channel check never reads that manifest, so a
+   * user who installs the stable build by hand keeps seeing the beta version
+   * forever (#14739): no update check they can run records the promotion.
+   * When the running build is still a prerelease and the channel check did
+   * not prove a promotion, ask the stable manifest directly. Best-effort:
+   * the channel check already succeeded, and the next hourly check retries.
+   * The stable result never replaces the channel's update info; it only
+   * teaches the app that this build is the stable release.
+   */
+  async function recordPromotionFromStableChannel(info: api.UpdateInfo) {
+    if (updateChannel.value !== "beta" || !isPrereleaseBuild(info.current_version) || isPromotedBuild(info.current_version)) return;
+    try {
+      const stableInfo = await api.checkForUpdates(currentLocale(), normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), "stable");
+      recordPromotedBuild(stableInfo);
+    } catch {
+      /* Promotion lookup is best-effort; the channel check already succeeded. */
+    }
+  }
   async function checkUpdates(checkOptions: { silent?: boolean } = {}) {
     if (updaterDisabled || disposed || isIgnoringUpdate.value) return;
     if (checkOptions.silent && !updateEntryVisible.value) return;
@@ -304,6 +325,8 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       if (token !== generation || disposed) return;
       updateInfo.value = info;
       recordPromotedBuild(info);
+      await recordPromotionFromStableChannel(info);
+      if (token !== generation || disposed) return;
       // Installation may have started while the check was in flight; only restore
       // the phase this check itself owns.
       if (phase.value === "checking") phase.value = downloaded.value ? "ready" : "idle";

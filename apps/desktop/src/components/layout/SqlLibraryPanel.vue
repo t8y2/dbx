@@ -15,7 +15,7 @@ import {
   Clock,
   Database,
   Download,
-  FilePlus,
+  FilePlus2,
   FileText,
   FolderCog,
   FolderClosed,
@@ -1276,7 +1276,7 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
     const hasSortOptions = unfiledFiles.length > 1 || rootFolders.length > 1 || savedSqlStore.allFiles.length > 1;
     return [
       { label: t("savedSql.newFolder"), action: openNewFolderInput, icon: FolderPlus },
-      { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(), icon: FilePlus },
+      { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(), icon: FilePlus2 },
       {
         label: t("savedSql.pasteFile"),
         action: () => pasteLibraryFiles("panel"),
@@ -1367,7 +1367,7 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
   const directFolders = childFolders(target.id);
   return [
     { label: t("savedSql.newSubfolder"), action: () => openNewFolderInput(target.id), icon: FolderPlus },
-    { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(target), icon: FilePlus },
+    { label: t("savedSql.newQuery"), action: () => openNewQueryInFolder(target), icon: FilePlus2 },
     {
       label: t("savedSql.pasteFile"),
       action: () => pasteLibraryFiles(target),

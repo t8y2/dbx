@@ -6244,6 +6244,7 @@ async function confirmPasteTableImpl() {
             targetName,
             tableComment: entry.tableComment,
             identifierQuote: entry.identifierQuote,
+            copyData,
           }));
         sourceColumns = plan.sourceColumns;
         if (plan.oceanbaseClone) {

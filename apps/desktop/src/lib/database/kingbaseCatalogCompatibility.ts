@@ -1,3 +1,5 @@
+import { formatError } from "@/lib/backend/errorUtils";
+
 type KingbaseCatalogObjectKind = "relation" | "function";
 
 function errorCode(error: unknown): string {
@@ -41,4 +43,16 @@ export function isMissingKingbaseSysRelation(error: unknown, names: readonly str
 
 export function isMissingKingbaseSysFunction(error: unknown, names: readonly string[]): boolean {
   return isMissingKingbaseCatalogObject(error, "function", names);
+}
+
+export function isMissingKingbaseCatalogOid(error: unknown): boolean {
+  const message = formatError(error).replace(/^Agent RPC error \(-1\):\s*/i, "");
+  if (message.startsWith("KINGBASE_CATALOG_OID_UNAVAILABLE:")) return true;
+
+  // Installed agents predating the capability marker forward the original driver message.
+  return /^kb:\s*(?:column\s+"?(?:c|rel)\.oid"?\s+does not exist|列\s*"?(?:c|rel)\.oid"?\s*不存在)(?:\s|[.:。]|$)/i.test(message);
+}
+
+export function isUnsupportedKingbaseTableComment(error: unknown): boolean {
+  return /^(?:Agent RPC error \(-1\):\s*)?unknown method: get_table_comment$/i.test(formatError(error).trim());
 }

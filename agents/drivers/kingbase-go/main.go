@@ -420,6 +420,14 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		return result, false, err
 	case "get_columns":
 		result, err := s.getColumns(stringParam(params, "schema"), stringParam(params, "table"))
+		if err != nil {
+			// Keep the capability error identifiable through the string-based metadata API.
+			var driverErr *gokb.Error
+			if errors.As(err, &driverErr) && driverErr.Code == "42703" &&
+				(isUndefinedColumn(err, "c.oid") || isUndefinedColumn(err, "rel.oid")) {
+				err = fmt.Errorf("KINGBASE_CATALOG_OID_UNAVAILABLE: %w", err)
+			}
+		}
 		return result, false, err
 	case "list_indexes":
 		result, err := s.listIndexes(stringParam(params, "schema"), stringParam(params, "table"))

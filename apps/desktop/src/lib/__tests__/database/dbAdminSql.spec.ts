@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { BackendErrorException } from "@/lib/backend/errorUtils";
 
 const apiMock = vi.hoisted(() => ({
   getColumns: vi.fn(),
@@ -29,7 +30,7 @@ import {
 } from "@/lib/database/dbAdminSql";
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
 });
 
 describe("MySQL AUTO_INCREMENT administration", () => {
@@ -549,6 +550,72 @@ describe("buildDuplicateTableStructurePlan", () => {
 
     await expect(buildDuplicateTableStructurePlan({ connectionId: "oscar-1", database: "osrdb", databaseType: "oscar", sourceName: "source", targetName: "copy" })).rejects.toBe(error);
     expect(apiMock.getColumns).toHaveBeenCalledExactlyOnceWith("oscar-1", "osrdb", "", "source", undefined);
+    expect(apiMock.buildDuplicateTableStructureSql).not.toHaveBeenCalled();
+  });
+
+  const kingbaseClone = { connectionId: "kingbase-1", database: "app", databaseType: "kingbase", schema: "public", sourceName: "source", targetName: "copy" } as const;
+
+  it.each([
+    ["Web", new BackendErrorException("Agent RPC error (-1): KINGBASE_CATALOG_OID_UNAVAILABLE: kb: column c.oid does not exist")],
+    ["desktop with an older agent", 'Agent RPC error (-1): kb: column "rel.oid" does not exist'],
+  ])("clones Kingbase structure when the catalog OID is unavailable on %s", async (_transport, error) => {
+    apiMock.getColumns.mockRejectedValueOnce(error);
+    const sql = 'CREATE TABLE "copy" AS SELECT * FROM "source" WHERE 1=0;\nCOMMENT ON TABLE "copy" IS \'table note\';';
+    apiMock.buildDuplicateTableStructureSql.mockResolvedValueOnce(sql);
+
+    await expect(buildDuplicateTableStructurePlan({ ...kingbaseClone, tableComment: "table note" })).resolves.toEqual({ sql, sourceColumns: undefined, executeAsScript: true });
+    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ tableComment: "table note", columnComments: [] }));
+  });
+
+  it.each(["Agent RPC error (-1): kb: permission denied for relation sys_class", "Agent RPC error (-1): kb: column a.attnum does not exist", "column query timed out"])("surfaces unrelated Kingbase column errors: %s", async (message) => {
+    apiMock.getColumns.mockRejectedValueOnce(new Error(message));
+
+    await expect(buildDuplicateTableStructurePlan({ ...kingbaseClone, tableComment: "table note" })).rejects.toThrow(message);
+    expect(apiMock.buildDuplicateTableStructureSql).not.toHaveBeenCalled();
+  });
+
+  it("requires Kingbase column metadata to plan a clone with data", async () => {
+    const error = new Error("Agent RPC error (-1): KINGBASE_CATALOG_OID_UNAVAILABLE: kb: column c.oid does not exist");
+    apiMock.getColumns.mockRejectedValueOnce(error);
+
+    await expect(buildDuplicateTableStructurePlan({ ...kingbaseClone, tableComment: "table note", copyData: true })).rejects.toBe(error);
+    expect(apiMock.buildDuplicateTableStructureSql).not.toHaveBeenCalled();
+  });
+
+  it("rejects a Kingbase clone with no writable columns before building SQL", async () => {
+    await expect(buildDuplicateTableStructurePlan({ ...kingbaseClone, tableComment: "table note", copyData: true, sourceColumns: [] })).rejects.toThrow("No writable columns");
+    expect(apiMock.buildDuplicateTableStructureSql).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [false, "Agent RPC error (-1): unknown method: get_table_comment"],
+    [true, new BackendErrorException("unknown method: get_table_comment")],
+  ] as const)("keeps planning a Kingbase clone with copyData=%s when the old agent lacks table comments", async (copyData, error) => {
+    apiMock.getTableComment.mockRejectedValueOnce(error);
+    const columns = [{ name: "note", comment: "column note", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false }];
+    const sql = "CREATE TABLE copy AS SELECT * FROM source WHERE 1=0;\nCOMMENT ON COLUMN copy.note IS 'column note';";
+    apiMock.getColumns.mockResolvedValueOnce(columns);
+    apiMock.buildDuplicateTableStructureSql.mockResolvedValueOnce(sql);
+
+    await expect(buildDuplicateTableStructurePlan({ ...kingbaseClone, copyData })).resolves.toEqual({ sql, sourceColumns: columns, executeAsScript: true });
+    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ tableComment: null, columnComments: [{ name: "note", comment: "column note" }] }));
+  });
+
+  it("clones only the structure when both Kingbase comment lookups are unavailable", async () => {
+    apiMock.getTableComment.mockRejectedValueOnce("unknown method: get_table_comment");
+    apiMock.getColumns.mockRejectedValueOnce("Agent RPC error (-1): kb: column c.oid does not exist");
+    const sql = "CREATE TABLE copy AS SELECT * FROM source WHERE 1=0;";
+    apiMock.buildDuplicateTableStructureSql.mockResolvedValueOnce(sql);
+
+    await expect(buildDuplicateTableStructurePlan(kingbaseClone)).resolves.toEqual({ sql, sourceColumns: undefined, executeAsScript: false });
+    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ tableComment: null, columnComments: [] }));
+  });
+
+  it.each(["Agent RPC error (-1): kb: permission denied for relation sys_class", "get_table_comment timed out", "Agent RPC error (-1): unknown method: get_columns"])("surfaces unrelated Kingbase table-comment errors: %s", async (message) => {
+    const error = new Error(message);
+    apiMock.getTableComment.mockRejectedValueOnce(error);
+
+    await expect(buildDuplicateTableStructurePlan({ ...kingbaseClone, sourceColumns: [] })).rejects.toBe(error);
     expect(apiMock.buildDuplicateTableStructureSql).not.toHaveBeenCalled();
   });
 

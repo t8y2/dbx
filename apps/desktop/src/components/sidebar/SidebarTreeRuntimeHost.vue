@@ -194,7 +194,7 @@ import { schemaIndexIsSameOwner, schemaIndexNodeIdentity } from "@/lib/table/sch
 import { mongoCollectionTableTypeFromNode, mongoCreateDatabasePreview, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
 import { dataTabOpenModeFromTreeClick, isSameHBaseTable, isSameTable, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { supersedeSidebarDataNavigation } from "@/lib/sidebar/sidebarDataOpenCoordinator";
-import { isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isEditSidebarTableStructureShortcut, isModRShortcut, isPasteSidebarSelectionShortcut, isRefreshDataShortcut } from "@/lib/editor/keyboardShortcuts";
+import { isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isEditSidebarTableStructureShortcut, isPasteSidebarSelectionShortcut, isSidebarRefreshShortcut } from "@/lib/editor/keyboardShortcuts";
 import { handleSidebarTreeDeleteShortcut } from "@/lib/sidebar/sidebarTreeDeleteShortcut";
 import { sidebarNodeSupportsStructureEdit } from "@/lib/sidebar/sidebarTreeStructureShortcut";
 import { dataTableDoubleClickAction } from "@/lib/tabs/dataTabActivation";
@@ -1511,7 +1511,7 @@ function onKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     return;
   }
-  if (isRefreshDataShortcut(event, settingsStore.editorSettings.shortcuts) || isModRShortcut(event) || (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "F5")) {
+  if (isSidebarRefreshShortcut(event, settingsStore.editorSettings.shortcuts)) {
     if (!requestRefreshSelectedNode()) return;
     event.preventDefault();
     event.stopPropagation();
@@ -7347,7 +7347,7 @@ const shortcutDisconnectConnection = computed(() => settingsStore.editorSettings
 
 const shortcutRename = "F2";
 
-const shortcutRefresh = computed(() => settingsStore.editorSettings.shortcuts.refreshData || "F5");
+const shortcutRefresh = computed(() => settingsStore.editorSettings.shortcuts.refreshData);
 
 const shortcutDelete = "Delete";
 

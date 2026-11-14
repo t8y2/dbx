@@ -216,7 +216,8 @@ import { driverProfileObjectTreeProfileForConnection } from "@/lib/database/driv
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadTraceLogger } from "@/lib/metadata/metadataLoadCoordinator";
 import type { MetadataScopeInput } from "@/lib/metadata/metadataLoadScope";
 import { MetadataResultCache, type MetadataCacheInvalidation } from "@/lib/metadata/metadataResultCache";
-import { invalidateTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
+import { invalidateTableMetadataCache, loadTableIndexes } from "@/lib/metadata/tableMetadataCache";
+import { buildColumnIndexMap, columnIndexNameKey } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 import { cancelObjectDdlLoadsForConnection, cancelObjectDdlLoadsForDatabase, invalidateObjectDdlCache } from "@/lib/metadata/objectDdlCache";
 import { cancelObjectMetadataLoadsForConnection, cancelObjectMetadataLoadsForDatabase } from "@/lib/metadata/objectMetadataCache";
 import { metadataLoadBudgetMs } from "@/lib/metadata/metadataLoadBudget";
@@ -8699,22 +8700,39 @@ export const useConnectionStore = defineStore("connection", () => {
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
       const connConfig = getConfig(connectionId);
-      const isGaussdbM = effectiveDatabaseTypeForConnection(connConfig) === "gaussdb" && connConfig?.driver_profile?.toLowerCase() === "gaussdb-m";
-      setLoadedTableMetadataChildren(
-        targetNode,
-        columns.map((col) => ({
-          id: `${parentId}:${col.name}`,
-          label: `${col.name} (${isGaussdbM ? gaussdbMTypeDisplayName(col.data_type) : col.data_type})`,
-          type: "column" as const,
-          connectionId,
-          database,
-          schema,
-          catalog: catalog || targetNode.catalog,
-          tableName: table,
-          meta: col,
-        })),
-      );
+      const databaseType = effectiveDatabaseTypeForConnection(connConfig);
+      const isGaussdbM = databaseType === "gaussdb" && connConfig?.driver_profile?.toLowerCase() === "gaussdb-m";
+      const columnNodes: TreeNode[] = columns.map((col) => ({
+        id: `${parentId}:${col.name}`,
+        label: `${col.name} (${isGaussdbM ? gaussdbMTypeDisplayName(col.data_type) : col.data_type})`,
+        type: "column",
+        connectionId,
+        database,
+        schema,
+        catalog: catalog || targetNode.catalog,
+        tableName: table,
+        meta: col,
+        columnIndexKind: col.is_primary_key ? "primary" : undefined,
+      }));
+      setLoadedTableMetadataChildren(targetNode, columnNodes);
       if (!options?.preserveExpansion) targetNode.isExpanded = true;
+
+      if (databaseType && columns.length && getTableMetadataCapabilities(databaseType).indexes) {
+        void loadTableIndexes({ connectionId, database, schema: querySchema, catalog, tableName: table, databaseType, driverProfile: connConfig?.driver_profile })
+          .then((indexes) => {
+            const current = treeNodeLoadTarget(load);
+            if (!current || !indexes.length) return;
+            const indexByName = buildColumnIndexMap(indexes);
+            const indexedColumns = columnNodes.map((node, index) => {
+              const indexKind = node.columnIndexKind ?? indexByName.get(columnIndexNameKey(columns[index].name));
+              return indexKind && indexKind !== "none" ? { ...node, columnIndexKind: indexKind } : node;
+            });
+            setLoadedTableMetadataChildren(current, indexedColumns);
+          })
+          .catch(() => {
+            // Index visibility and permissions vary. The column list is already usable.
+          });
+      }
     } catch (e) {
       recordMetadataLoadError(connectionId, e, load);
       throw e;

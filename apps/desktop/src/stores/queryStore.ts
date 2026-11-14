@@ -6896,9 +6896,12 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.database === database) return;
     if (tab.isExplaining) void cancelTabExplain(id);
-    rollbackTabTransaction(tab);
+    const connection = useConnectionStore().getConfig(tab.connectionId);
+    const preserveMysqlSession = tab.mode === "query" && tab.autoCommit !== false && connection?.db_type === "mysql" && effectiveDatabaseTypeForConnection(connection) === "mysql";
+    if (preserveMysqlSession) invalidateManualTransactionTarget(tab);
+    else rollbackTabTransaction(tab);
     void closeResultSession(tab);
-    void closeClientConnectionSession(tab);
+    if (!preserveMysqlSession) void closeClientConnectionSession(tab);
     tab.database = database;
     tab.schema = undefined;
     tab.schemaQualifiesSql = undefined;
@@ -9949,9 +9952,10 @@ export const useQueryStore = defineStore("query", () => {
           console.warn("[DBX] Failed to resolve SAP HANA CURRENT_SCHEMA", error);
         }
       }
-      if (tab.autoCommit !== false) applyAutoCommitTransactionReport(tab, results);
       const current = findExecutionTab(id);
       if (current?.executionId === executionId && manualTransactionTargetEpoch(current) === executionTargetEpoch) {
+        if (current.autoCommit !== false) applyAutoCommitTransactionReport(current, results);
+        if (results.some((result) => result.execution_error === true && result.rows.some((row) => row.some((cell) => typeof cell === "string" && cell.includes("MYSQL_CLIENT_SESSION_LOST"))))) clearAutoCommitOpenTransaction(current);
         if (captureResultRun && current.isCancelling && restorePendingResultRun(current, executionId)) return false;
         if (successfulOracleSchemaChanges > 0) {
           current.completionContextVersion = (current.completionContextVersion ?? 0) + successfulOracleSchemaChanges;
@@ -9967,12 +9971,13 @@ export const useQueryStore = defineStore("query", () => {
           current.schema = undefined;
         }
         if (mysqlUseDatabase && !usesExternalExecutionTarget && current.database !== mysqlUseDatabase) {
-          // 切库后旧库的池（池按「连接 + 库」分桶）不再被这个标签复用，旧会话却已经在
-          // server 端停在新库上；不关掉它，用户切回旧库时会被重新用上，出现「标签写着 A、
-          // 实际在 B」的错配。标签上挂着的显式事务在切库后同样不可达，一并收掉（与 SQL
-          // Server 分支一致）。
-          rollbackTabTransaction(current);
-          void closeClientConnectionSession(current);
+          // Native MySQL workload sessions follow the tab, not its selected
+          // database. USE only updates the namespace; closing here loses user
+          // variables, temporary tables and an explicitly preserved transaction.
+          if (conn?.db_type !== "mysql" || effectiveDbType !== "mysql") {
+            rollbackTabTransaction(current);
+            void closeClientConnectionSession(current);
+          }
           current.database = mysqlUseDatabase;
           current.schema = undefined;
         }
@@ -10203,6 +10208,7 @@ export const useQueryStore = defineStore("query", () => {
       // Sync connection state if the error indicates a lost connection
       useConnectionStore().recordConnectionLostError(executionConnectionId ?? tab.connectionId, e);
       if (findExecutionTab(id) !== tab || tab.executionId !== executionId || manualTransactionTargetEpoch(tab) !== executionTargetEpoch) return false;
+      if (String(e?.message ?? e).includes("MYSQL_CLIENT_SESSION_LOST")) clearAutoCommitOpenTransaction(tab);
       // Handle manual transaction auto-rollback (idle timeout only for the banner;
       // other statement failures still clear the session without the 5-minute notice).
       if (tab.autoCommit === false && isSqlServerTransactionTab(tab)) {

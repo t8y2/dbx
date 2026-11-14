@@ -1,6 +1,6 @@
 ---
 title: 连接导入
-description: 从 Navicat、DBeaver、DataGrip、RedisDesktopManager 和 Another Redis Desktop Manager 导入连接与分组。
+description: 从 SQLark、Navicat、DBeaver、DataGrip、RedisDesktopManager 和 Another Redis Desktop Manager 导入连接与分组。
 ---
 
 DBX 可以从其他数据库工具导入连接，在切换工具时无需手动重新创建大量连接。
@@ -12,10 +12,11 @@ DBX 可以从其他数据库工具导入连接，在切换工具时无需手动�
 | Navicat | `.ncx` 导出文件 | 主机、端口、用户名、数据库类型、连接名称 |
 | DBeaver | 连接配置文件    | 主机、端口、用户名、数据库类型、连接名称 |
 | DataGrip | `dataSources.xml` 等项目/全局配置 | JDBC URL、驱动、连接名称、分组和可读取凭据 |
+| SQLark | `V4.1_SQLark配置_*.zip` 配置备份包 | 主机、端口、用户名、数据库类型、名称、颜色、分组和已保存的密码 |
 | RedisDesktopManager | JSON 导出文件 | Redis 连接、嵌套分组、认证、TLS 和 SSH 配置 |
 | Another Redis Desktop Manager | `.ano` 导出文件 | Redis 连接、分组、ACL、SSH/TLS、Sentinel 和 Cluster 配置 |
 
-<Callout type="info">导入的连接保留原始连接名称和类型。其他工具以加密格式存储的密码无法解密——导入后需要重新输入密码。</Callout>
+<Callout type="info">导入的连接保留原始连接名称和类型。多数工具以私有加密格式存储密码、无法解密，导入后需要重新输入；例外情况见各自的导入说明（SQLark 备份包和 DataGrip 钥匙串可读取）。</Callout>
 
 ## 导入 Navicat 连接
 
@@ -104,6 +105,37 @@ DBX 可以从其他数据库工具导入连接，在切换工具时无需手动�
   </Step>
 </Steps>
 
+## 导入 SQLark 连接
+
+<Steps>
+  <Step>
+    ### 从 SQLark 导出
+
+    在 SQLark 中使用「导出配置」，至少勾选数据库连接这一类，保存生成的 `.zip` 文件。
+
+  </Step>
+  <Step>
+    ### 打开导入入口
+
+    在 DBX 侧边栏或欢迎页的导入菜单中选择**导入 SQLark 配置**。
+
+  </Step>
+  <Step>
+    ### 选择备份包
+
+    选择 `V4.1_SQLark配置_*.zip` 文件。DBX 会解密包内的 `sqlark_setting.bak`，还原连接、连接分组以及 SQLark 记住的密码。
+
+  </Step>
+  <Step>
+    ### 检查并完成
+
+    DBX 不支持的数据库类型会被跳过并给出提示。确认导入的分组结构后，逐个测试连接。
+
+  </Step>
+</Steps>
+
+该备份包只做了加密、没有签名，DBX 读取的是 SQLark 4.1 的格式：其他大版本的备份会直接报错，而不是导入残缺数据。备份包只包含导出时勾选的类别，没有勾选数据库连接的备份无法导入。包内的 SSH 隧道、驱动文件和偏好设置不会导入。
+
 ## 导入 RedisDesktopManager 连接
 
 从 RedisDesktopManager 导出 JSON，在侧边栏或欢迎页的导入菜单选择 **导入 RedisDesktopManager**。检查连接选择预览，再选择需要迁移的连接并确认导入。连接和嵌套分组会一起迁移，原有连接不会被覆盖。
@@ -134,7 +166,7 @@ TLS 的 CA、客户端证书和私钥路径会保留，但不会读取或复制�
 
 | 设置           | 原因                                             |
 | -------------- | ------------------------------------------------ |
-| 加密密码       | 每个工具使用各自的加密方式，密码需要重新输入     |
+| 加密密码       | 多数工具使用私有加密且没有可互操作的格式；SQLark 备份包是例外 |
 | SSH 隧道密钥   | 密钥文件路径可能因机器而异，需要重新选择密钥文件 |
 | 自定义驱动配置 | 驱动路径和版本是工具特定的                       |
 | 代理设置       | 在连接的代理标签页中重新配置                     |

@@ -1317,6 +1317,7 @@ export default withEnglishFallback({
     locateTargetNotFound: "รายการนี้ไม่พร้อมใช้งานในแถบด้านข้าง อาจถูกลบหรือซ่อนไว้",
     locateSqlFile: "ค้นหาในรายการไฟล์ SQL",
     locateActiveTab: "ค้นหาในแถบด้านข้าง",
+    importSqlark: "นำเข้าการตั้งค่า SQLark",
   },
   savedSql: {
     openDefaultQuery: "เปิดคำสั่งค้นหาเริ่มต้น",
@@ -4399,6 +4400,8 @@ export default withEnglishFallback({
     next: "ถัดไป",
     importSelected: "นำเข้า {count}",
     noConnections: "ไม่มีการเชื่อมต่อที่ใช้ได้",
+    importSqlarkSuccess: "นำเข้า {count} การเชื่อมต่อ SQLark แล้ว และกู้คืนรหัสผ่าน {passwords} รายการ",
+    importSqlarkSkipped: "มีการเชื่อมต่อ SQLark {count} รายการที่เป็นประเภทฐานข้อมูลซึ่งยังไม่รองรับ จึงข้ามไปแล้ว",
   },
   ai: {
     noConfig: "ยังไม่ได้กำหนดค่า AI ตั้งค่า AI Provider ใน Settings > AI",

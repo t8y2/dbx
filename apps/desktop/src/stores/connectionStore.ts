@@ -352,7 +352,7 @@ function isFlatMqConnection(config: ConnectionConfig | undefined): boolean {
   return kind === "kafka" || kind === "rocketmq" || kind === "rabbitmq";
 }
 
-type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis";
+type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "sqlark" | "rdm" | "another-redis";
 
 interface LocateTableTarget {
   catalog?: string;
@@ -726,6 +726,8 @@ export const useConnectionStore = defineStore("connection", () => {
   const sidebarLayout = ref<SidebarLayout>(emptyLayout());
   const tableVGroupLayouts = ref<Record<string, TableVGroupLayout>>({});
   const lastDataGripFallbackUsernamesCount = ref(0);
+  /** Recovered SQLark passwords / skipped connection count from the last SQLark import. */
+  const lastSqlarkImportStats = ref({ passwords: 0, skipped: 0 });
   const dirtyTableVGroupScopeKeys = new Set<string>();
   let tableVGroupPersistTimer: ReturnType<typeof setTimeout> | null = null;
   const connectionGroupPaths = computed(() => buildConnectionGroupPathMap(sidebarLayout.value));
@@ -11697,7 +11699,45 @@ export const useConnectionStore = defineStore("connection", () => {
     };
   }
 
+  async function readSqlarkImportFile(): Promise<{ content: string; encrypted: boolean } | null> {
+    let zipBase64: string;
+
+    if (isTauriRuntime()) {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const { readFile } = await import("@tauri-apps/plugin-fs");
+      const path = await open({
+        filters: [{ name: "SQLark 配置备份", extensions: ["zip"] }],
+        multiple: false,
+      });
+      if (!path) return null;
+      // The backup is a ZIP, so it must be read as bytes: the parser needs the
+      // raw member bytes, not a decoded text form.
+      zipBase64 = bytesToBase64(await readFile(path as string));
+    } else {
+      zipBase64 = await new Promise<string>((resolve, reject) => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".zip";
+        input.onchange = () => {
+          const file = input.files?.[0];
+          if (!file) {
+            reject(new Error("No file selected"));
+            return;
+          }
+          file
+            .arrayBuffer()
+            .then((buffer) => resolve(bytesToBase64(new Uint8Array(buffer))))
+            .catch(reject);
+        };
+        input.click();
+      });
+    }
+
+    return { content: JSON.stringify({ format: "sqlark-import", zipBase64 }), encrypted: false };
+  }
+
   async function readImportFile(source: ImportSource = "dbx"): Promise<{ content: string; encrypted: boolean } | null> {
+    if (source === "sqlark") return readSqlarkImportFile();
     if (source === "dbeaver") return readDbeaverImportFile();
     if (source === "datagrip") return readDataGripImportFile();
 
@@ -11764,6 +11804,12 @@ export const useConnectionStore = defineStore("connection", () => {
         if (!("content" in payload) || typeof payload.content !== "string") throw new Error("RedisDesktopManager: invalid import payload.");
         const { parseRedisDesktopManagerImport } = await import("@/lib/imports/redisDesktopManagerImport");
         return parseRedisDesktopManagerImport(payload.content);
+      }
+      const { isSqlarkImportPayload, parseSqlarkImport } = await import("@/lib/imports/sqlarkImport");
+      if (isSqlarkImportPayload(payload)) {
+        const result = await parseSqlarkImport(payload);
+        lastSqlarkImportStats.value = { passwords: result.passwordCount, skipped: result.skippedCount };
+        return { connections: result.connections, layout: result.layout };
       }
       const { isDbeaverImportPayload, parseDbeaverImport } = await import("@/lib/imports/dbeaverImport");
       const { isDataGripImportPayload, parseDataGripImport } = await import("@/lib/imports/datagripImport");
@@ -12186,6 +12232,7 @@ export const useConnectionStore = defineStore("connection", () => {
     importConnectionsFromFile,
     applyDataGripKeychainPasswords,
     lastDataGripFallbackUsernamesCount,
+    lastSqlarkImportStats,
     applySidebarLayout,
     transferSource,
     schemaDiffSource,

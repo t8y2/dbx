@@ -27,7 +27,7 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
-  import: [source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis"];
+  import: [source: "dbx" | "navicat" | "dbeaver" | "datagrip" | "sqlark" | "rdm" | "another-redis"];
   export: [];
   startResize: [event: PointerEvent];
   collapse: [];
@@ -37,7 +37,7 @@ const emit = defineEmits<{
   "open-dependency-object": [context: ObjectDependencyTarget, target: SqlObjectNavigationTarget];
 }>();
 
-type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "rdm" | "another-redis";
+type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip" | "sqlark" | "rdm" | "another-redis";
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
@@ -54,6 +54,7 @@ const importSourceItems = computed(() => [
   { value: "navicat", label: t("sidebar.importNavicat") },
   { value: "dbeaver", label: t("sidebar.importDbeaver") },
   { value: "datagrip", label: t("sidebar.importDatagrip") },
+  { value: "sqlark", label: t("sidebar.importSqlark"), tooltip: "SQLark" },
   { value: "rdm", label: t("sidebar.importRdm"), tooltip: "RedisDesktopManager" },
   { value: "another-redis", label: t("sidebar.importAnotherRedis"), tooltip: "Another Redis Desktop Manager" },
 ]);

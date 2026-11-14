@@ -1,6 +1,6 @@
 ---
 title: Connection Import
-description: Import connections and groups from Navicat, DBeaver, DataGrip, RedisDesktopManager, and Another Redis Desktop Manager.
+description: Import connections and groups from SQLark, Navicat, DBeaver, DataGrip, RedisDesktopManager, and Another Redis Desktop Manager.
 ---
 
 DBX can import connections from other database tools, saving you from manually re-creating dozens of connections when switching tools.
@@ -12,10 +12,11 @@ DBX can import connections from other database tools, saving you from manually r
 | Navicat | `.ncx` export files            | Host, port, username, database type, connection name |
 | DBeaver | Connection configuration files | Host, port, username, database type, connection name |
 | DataGrip | Project or global files such as `dataSources.xml` | JDBC URL, driver, connection name, groups, and readable credentials |
+| SQLark | `V4.1_SQLark配置_*.zip` configuration backup | Host, port, username, database type, name, colour, groups, and saved passwords |
 | RedisDesktopManager | JSON export | Redis connections, nested groups, authentication, TLS, and SSH settings |
 | Another Redis Desktop Manager | `.ano` export | Redis connections, groups, ACL, SSH/TLS, Sentinel, and Cluster settings |
 
-<Callout type="info">Imported connections preserve the original connection name and type. Passwords stored in encrypted format by other tools cannot be decrypted — you will need to re-enter passwords after import.</Callout>
+<Callout type="info">Imported connections preserve the original connection name and type. Passwords stored in encrypted format by other tools usually cannot be decrypted, so you may need to re-enter them — see each importer for exceptions (SQLark backups and DataGrip Keychain entries are readable).</Callout>
 
 ## Import Navicat Connections
 
@@ -104,6 +105,37 @@ DBX can import connections from other database tools, saving you from manually r
   </Step>
 </Steps>
 
+## Import SQLark Connections
+
+<Steps>
+  <Step>
+    ### Export from SQLark
+
+    In SQLark, open the configuration export, select at least the database connections category, and save the generated `.zip`.
+
+  </Step>
+  <Step>
+    ### Open Import Dialog
+
+    In DBX, choose **Import SQLark Config** in the sidebar or welcome-page import menu.
+
+  </Step>
+  <Step>
+    ### Select the Backup Archive
+
+    Choose the `V4.1_SQLark配置_*.zip` file. DBX decrypts `sqlark_setting.bak` inside the archive and restores the connections, their group tree, and the passwords SQLark remembered.
+
+  </Step>
+  <Step>
+    ### Review and Complete
+
+    Connections whose database type DBX does not support are skipped and reported. Confirm the imported group layout, then test each connection.
+
+  </Step>
+</Steps>
+
+The archive is only encrypted, not signed, and DBX reads the layout SQLark 4.1 writes: a backup from another major version fails with an explicit message instead of importing partial data. The export contains only the categories selected in SQLark, so a backup without the database-connections category has nothing to import. SSH tunnels, driver files, and user preferences stored in the archive are not imported.
+
 ## Import RedisDesktopManager Connections
 
 Export a JSON file from RedisDesktopManager, then choose **Import RedisDesktopManager** from the sidebar or welcome-page import menu. Review the connection selector, select the connections to migrate, and confirm. Connections and nested groups are imported without overwriting existing connections.
@@ -134,7 +166,7 @@ Imported connections appear in the sidebar alongside manually created ones. You 
 
 | Setting                      | Reason                                                              |
 | ---------------------------- | ------------------------------------------------------------------- |
-| Encrypted passwords          | Each tool uses proprietary encryption; passwords must be re-entered |
+| Encrypted passwords          | Most tools use proprietary encryption without an interoperable format; SQLark backups are the exception |
 | SSH tunnel keys              | Key file paths may differ between machines; re-select the key file  |
 | Custom driver configurations | Driver paths and versions are tool-specific                         |
 | Proxy settings               | Re-configure in the connection's Proxy tab                          |

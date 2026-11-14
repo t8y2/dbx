@@ -9018,6 +9018,7 @@ export default withEnglishFallback({
     preview: "Предпросмотр SQL",
     execute: "Выполнить",
     clearValues: "Очистить значения",
+    clearHistory: "Очистить историю",
     useRawForAll: "Использовать Raw SQL для всех",
     ignore: "Игнорировать",
     kind: {

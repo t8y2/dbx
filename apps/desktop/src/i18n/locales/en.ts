@@ -8799,6 +8799,7 @@ export default {
     preview: "SQL Preview",
     execute: "Execute",
     clearValues: "Clear Values",
+    clearHistory: "Clear History",
     useRawForAll: "Use Raw SQL for All",
     ignore: "Ignore",
     kind: {

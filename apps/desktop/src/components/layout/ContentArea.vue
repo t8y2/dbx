@@ -3184,6 +3184,8 @@ defineExpose({
                 context="results"
                 :reveal-column-request="activeTab.gridRevealColumnRequest"
                 :auto-transpose-single-row="settingsStore.editorSettings.dataGridAutoTransposeSingleRow"
+                :result-transpose-enabled="activeTab.uiState?.resultTransposeEnabled"
+                @update:result-transpose-enabled="(resultTransposeEnabled) => queryStore.updateTabUiState(activeTab.id, { resultTransposeEnabled })"
                 :database-type="activeEffectiveDatabaseType"
                 :connection-id="activeResultConnectionId"
                 :database="activeResultDatabase"

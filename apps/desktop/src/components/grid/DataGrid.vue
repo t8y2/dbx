@@ -333,7 +333,7 @@ import { dataGridPageSizeSettingsPatch, preferredDataGridPageSize, resolveDataGr
 import { continuousQueryResultMaxRows, effectiveQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { allNullColumnIndexes, identicalValueColumnIndexes } from "@/lib/dataGrid/dataGridColumnVisibility";
 import { buildDataGridColumnLookupItems, dataGridColumnCommentFor, filterDataGridColumnLookupItems, type DataGridColumnLookupMatchMode } from "@/lib/dataGrid/dataGridColumnLookup";
-import { uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
+import { columnNamesInIndexOrder, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { dataGridColumnLayoutScopeKey, TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { createPendingSelectionSummary, formatSelectionAggregate, formatSelectionAverage, summarizeSelection, type SelectionSummaryOptions } from "@/lib/dataGrid/gridSelection";
 import { captureDataGridSelection, restoreDataGridSelection, type CaptureDataGridSelectionOptions, type PersistedDataGridSelection } from "@/lib/dataGrid/dataGridSelectionPersistence";
@@ -2613,6 +2613,14 @@ const {
   onHideNullColumnsChange: (value) => settingsStore.updateEditorSettings({ dataGridHideNullColumns: value }),
   onRefreshMetrics: scheduleColumnLayoutRefresh,
 });
+// The WHERE field dropdown follows the grid's custom column order instead of the
+// stored result order, so it matches what the user sees after reordering columns
+// (#14836). Falls back to the table/result columns when nothing is displayable yet.
+const whereFilterColumns = computed<string[]>(() => {
+  const ordered = columnNamesInIndexOrder(props.result.columns, orderedDisplayableColumnIndexes.value);
+  return ordered.length ? ordered : (props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns);
+});
+
 // The go-to-column list mirrors the column filter panel, so both follow the
 // user's local column order instead of the database order.
 const goToColumnItems = computed(() =>
@@ -15577,7 +15585,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   :filter-editor-view="filterEditorView"
                   :show-order-by="dataGridOrderByVisible"
                   :where-pane-ratio="dataGridWhereRatio"
-                  :columns="props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns"
+                  :columns="whereFilterColumns"
                   :comment-by-column="columnCommentMap"
                   :condition-columns="conditionColumns"
                   :identifier-quote="conditionIdentifierQuote"

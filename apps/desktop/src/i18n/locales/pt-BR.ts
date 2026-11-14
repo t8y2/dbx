@@ -2659,6 +2659,8 @@ export default withEnglishFallback({
   },
   grid: {
     exportSelectedRowsScope: "Linhas selecionadas",
+    exportSelectedCellsScope: "Células selecionadas",
+    exportSelectedColumnsScope: "Colunas selecionadas",
     exportFormat: "Formato",
     exportPageScope: "Página atual",
     exportResultScope: "Todos os resultados",

@@ -3038,6 +3038,8 @@ export default {
   },
   grid: {
     exportSelectedRowsScope: "Selected rows",
+    exportSelectedCellsScope: "Selected cells",
+    exportSelectedColumnsScope: "Selected columns",
     exportFormat: "Format",
     exportPageScope: "Current page",
     exportResultScope: "All results",

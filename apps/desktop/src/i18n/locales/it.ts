@@ -4046,6 +4046,9 @@ export default withEnglishFallback({
     exitMultiSelect: "Esci dalla selezione multipla",
   },
   databaseSearch: {
+    chooseObjects: "Scegli tabelle o viste",
+    selectedObjects: "{count} oggetti selezionati",
+    resetObjectScope: "Azzera la selezione degli oggetti",
     title: "Cerca nel Database",
     open: "Cerca nel Database",
     keyword: "Parola chiave",

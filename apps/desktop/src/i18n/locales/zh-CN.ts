@@ -4417,6 +4417,9 @@ export default withEnglishFallback({
     deselectGroup: "取消选择分组",
   },
   databaseSearch: {
+    chooseObjects: "选择表或视图",
+    selectedObjects: "已选 {count} 个对象",
+    resetObjectScope: "清除对象选择",
     title: "在数据库中查找",
     open: "在数据库中查找",
     keyword: "关键词",

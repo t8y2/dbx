@@ -4025,6 +4025,9 @@ export default withEnglishFallback({
     exitMultiSelect: "退出多選",
   },
   databaseSearch: {
+    chooseObjects: "選擇資料表或檢視表",
+    selectedObjects: "已選 {count} 個物件",
+    resetObjectScope: "清除物件選擇",
     title: "搜尋資料庫",
     open: "搜尋資料庫",
     keyword: "關鍵字",

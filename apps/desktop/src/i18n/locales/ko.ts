@@ -3997,6 +3997,9 @@ export default withEnglishFallback({
     deselectGroup: "그룹 선택 해제",
   },
   databaseSearch: {
+    chooseObjects: "테이블 또는 뷰 선택",
+    selectedObjects: "개체 {count}개 선택됨",
+    resetObjectScope: "개체 선택 초기화",
     title: "데이터베이스 검색",
     open: "데이터베이스 검색",
     keyword: "키워드",

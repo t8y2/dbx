@@ -4146,6 +4146,9 @@ export default withEnglishFallback({
     deselectGroup: "Снять выбор с группы",
   },
   databaseSearch: {
+    chooseObjects: "Выбрать таблицы или представления",
+    selectedObjects: "Выбрано объектов: {count}",
+    resetObjectScope: "Сбросить выбор объектов",
     title: "Поиск по базе данных",
     open: "Поиск по базе данных",
     keyword: "Ключевое слово",

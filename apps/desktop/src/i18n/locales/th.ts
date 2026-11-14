@@ -4331,6 +4331,9 @@ export default withEnglishFallback({
     deselectGroup: "ยกเลิกการเลือกกลุ่ม",
   },
   databaseSearch: {
+    chooseObjects: "เลือกตารางหรือมุมมอง",
+    selectedObjects: "เลือกแล้ว {count} ออบเจ็กต์",
+    resetObjectScope: "ล้างการเลือกออบเจ็กต์",
     title: "ค้นหาฐานข้อมูล",
     open: "ค้นหาฐานข้อมูล",
     keyword: "คีย์เวิร์ด",

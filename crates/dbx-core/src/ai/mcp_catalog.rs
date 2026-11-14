@@ -213,6 +213,8 @@ pub const TOOLS: &[McpToolDescriptor] = &[
         "workbench",
         McpCoverage::Capability { capability: DatabaseCapability::QueryExecution, exclude: &[] },
     ),
+    tool("dbx_list_sidebar_groups", "admin.connections", Read, McpCoverage::None),
+    tool("dbx_move_connections_to_group", "admin.connections", Write, McpCoverage::None),
     tool("dbx_add_connection", "admin.connections", Write, McpCoverage::None),
     tool("dbx_duplicate_connection", "admin.connections", Write, McpCoverage::None),
     tool("dbx_remove_connection", "admin.connections", Full, McpCoverage::None),

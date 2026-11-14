@@ -106,7 +106,6 @@ impl MySqlPool {
     /// generation. Pool options are not an identity: a reconnect creates a new
     /// pool with identical options, and a late health probe for the old pool
     /// must not be allowed to remove that replacement from routing.
-    #[cfg(any(test, feature = "test-support"))]
     pub fn is_same_pool(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.inner.metrics(), &other.inner.metrics())
     }
@@ -2581,6 +2580,13 @@ pub async fn apply_catalog_database_context(
         conn.query_drop(&query).await.map_err(|error| format!("Failed to select query catalog/database: {error}"))?;
     }
     Ok(())
+}
+
+/// Selects a database without resetting the connection or committing a transaction.
+pub async fn select_session_database(conn: &mut mysql_async::Conn, database: &str) -> Result<(), String> {
+    conn.query_drop(format!("USE {}", quote_identifier(database)))
+        .await
+        .map_err(|error| format!("Failed to select query database: {error}"))
 }
 
 fn should_enable_explicit_timestamp_defaults(sql: &str) -> bool {

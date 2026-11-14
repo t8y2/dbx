@@ -160,6 +160,20 @@ pub fn sql_file_upload_max_bytes_from_value(value: Option<&str>) -> usize {
     mb.clamp(SQL_FILE_UPLOAD_MIN_BYTES, SQL_FILE_UPLOAD_MAX_BYTES_LIMIT)
 }
 
+/// Failure-log owner for the Web runtime (dbx#11619): the authenticated
+/// session token when one exists. Deployments that disable password protection
+/// (`DBX_DISABLE_PASSWORD`) never log in, so the browser carries no
+/// `dbx_session` cookie even though the auth middleware lets every API call
+/// through; without this fallback those deployments could not execute SQL
+/// files at all ("Not authenticated"), while every other feature worked.
+/// Anonymous deployments share one owner, exactly how the desktop runtime
+/// shares "desktop": with no sessions there is nothing to isolate.
+const ANONYMOUS_FAILURE_LOG_OWNER: &str = "web-shared";
+
+fn web_failure_log_owner(headers: &HeaderMap) -> String {
+    crate::auth::session_token_from_headers(headers).unwrap_or_else(|| ANONYMOUS_FAILURE_LOG_OWNER.to_string())
+}
+
 pub fn sql_file_upload_hard_cap_bytes() -> usize {
     SQL_FILE_UPLOAD_MAX_BYTES_LIMIT.saturating_add(1024 * 1024)
 }
@@ -331,8 +345,7 @@ pub async fn execute_sql_file(
     }
     // The failure log of this run belongs to the session that started it: the
     // export/copy routes look it up by this owner, never by path (dbx#11619).
-    let log_owner = crate::auth::session_token_from_headers(&headers)
-        .ok_or_else(|| AppError::from("Not authenticated".to_string()))?;
+    let log_owner = web_failure_log_owner(&headers);
 
     let requested_paths = if body.file_paths.is_empty() { vec![req.file_path.clone()] } else { body.file_paths };
     let file_paths = requested_paths
@@ -560,8 +573,7 @@ pub async fn sql_file_failure_log_info(
     AxumPath(execution_id): AxumPath<String>,
     headers: HeaderMap,
 ) -> Result<Json<Option<serde_json::Value>>, AppError> {
-    let owner = crate::auth::session_token_from_headers(&headers)
-        .ok_or_else(|| AppError::from("Not authenticated".to_string()))?;
+    let owner = web_failure_log_owner(&headers);
     let info = state.sql_file_failure_logs.info(&owner, &execution_id);
     Ok(Json(info.map(|info| {
         serde_json::json!({
@@ -586,8 +598,7 @@ pub async fn sql_file_failure_log_download(
     Query(query): Query<SqlFileFailureLogDownloadQuery>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let owner = crate::auth::session_token_from_headers(&headers)
-        .ok_or_else(|| AppError::from("Not authenticated".to_string()))?;
+    let owner = web_failure_log_owner(&headers);
     let format = match query.format.as_deref() {
         Some(value) => SqlFileFailureLogFormat::parse(value)
             .ok_or_else(|| AppError::from(format!("Unsupported log format: {value}")))?,
@@ -644,8 +655,7 @@ pub async fn sql_file_failure_log_text(
     headers: HeaderMap,
     Json(body): Json<SqlFileFailureLogTextRequest>,
 ) -> Result<Json<SqlFileFailureLogTextResponse>, AppError> {
-    let owner = crate::auth::session_token_from_headers(&headers)
-        .ok_or_else(|| AppError::from("Not authenticated".to_string()))?;
+    let owner = web_failure_log_owner(&headers);
     let format = match body.format.as_deref() {
         Some(value) => SqlFileFailureLogFormat::parse(value)
             .ok_or_else(|| AppError::from(format!("Unsupported log format: {value}")))?,
@@ -973,6 +983,82 @@ mod tests {
         assert!(source.exists());
         assert!(!token.is_cancelled());
         assert!(state.sql_file_executions.read().await.contains_key("existing-job"));
+    }
+
+    #[test]
+    fn failure_log_owner_falls_back_to_a_shared_owner_without_a_session_cookie() {
+        // Deployments with password protection disabled never log in, so the
+        // browser sends no `dbx_session`; everything must still work.
+        assert_eq!(web_failure_log_owner(&HeaderMap::new()), ANONYMOUS_FAILURE_LOG_OWNER);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, "dbx_session=session-token-1".parse().unwrap());
+        assert_eq!(web_failure_log_owner(&headers), "session-token-1");
+    }
+
+    #[tokio::test]
+    async fn anonymous_deployment_executes_sql_files_without_a_session_cookie() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(restore_state(directory.path()).await);
+        let upload_dir = directory.path().join("tmp").join("sql_file");
+        std::fs::create_dir_all(&upload_dir).unwrap();
+        let file = upload_dir.join("upload-anon.sql");
+        std::fs::write(&file, "SELECT 1;").unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "executionId": "anon-run", "connectionId": "missing", "database": "app",
+            "filePath": file, "continueOnError": false
+        }))
+        .unwrap();
+        let response = execute_sql_file(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SqlFileExecuteWrapper { request, file_paths: vec![] }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.0["executionId"], "anon-run");
+        // Drain the spawned run; the connection id does not exist, so it fails
+        // immediately and registers its (empty) failure log under the shared owner.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !state.sql_file_executions.read().await.contains_key("anon-run") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(state.sql_file_failure_logs.info(ANONYMOUS_FAILURE_LOG_OWNER, "anon-run").is_some());
+    }
+
+    #[tokio::test]
+    async fn failure_log_info_without_a_session_reads_the_shared_owner_log() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(restore_state(directory.path()).await);
+        let log_dir = directory.path().join("sql-file-logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let path = log_dir.join("exec-anon.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        let handle = dbx_core::sql_file_import::SqlFileFailureLogHandle::unavailable("test".to_string());
+        state.sql_file_failure_logs.register(
+            ANONYMOUS_FAILURE_LOG_OWNER,
+            "exec-anon",
+            Some(path),
+            handle.status_probe(),
+        );
+        let response =
+            sql_file_failure_log_info(State(state.clone()), AxumPath("exec-anon".to_string()), HeaderMap::new())
+                .await
+                .unwrap();
+        assert!(response.0.is_some());
+
+        // A real session token still scopes lookups to that session.
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, "dbx_session=session-token-2".parse().unwrap());
+        let response =
+            sql_file_failure_log_info(State(state), AxumPath("exec-anon".to_string()), headers).await.unwrap();
+        assert!(response.0.is_none());
     }
 
     #[test]

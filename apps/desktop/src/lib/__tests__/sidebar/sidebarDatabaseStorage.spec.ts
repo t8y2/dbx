@@ -12,7 +12,7 @@ describe("sidebar database storage", () => {
     expect(supportsSidebarDatabaseStorage(config("mysql"))).toBe(false);
     expect(supportsSidebarDatabaseStorage({ ...config("postgres"), driver_profile: "cockroachdb" })).toBe(false);
 
-    for (const dbType of ["mysql", "postgres", "sqlserver", "oracle", "clickhouse", "dameng", "gaussdb", "kingbase", "gbase"] as const) {
+    for (const dbType of ["mysql", "postgres", "sqlserver", "oracle", "clickhouse", "dameng", "gaussdb", "kingbase", "gbase", "doris", "starrocks"] as const) {
       expect(supportsSidebarTableStorage(config(dbType))).toBe(true);
     }
     expect(supportsSidebarTableStorage(config("jdbc"))).toBe(false);
@@ -61,5 +61,19 @@ describe("sidebar database storage", () => {
     const table: TreeNode = { id: "products", label: "products", type: "table", connectionId: "connection", database: "shop" };
     expect(applySidebarTableStorage([table], { connectionId: "connection", database: "shop", schema: "" }, [{ name: "products", schema: "shop", total_bytes: 49152 }])).toBe(true);
     expect(table.sizeBytes).toBe(49152);
+  });
+
+  it("sizes Doris/StarRocks tables in the internal catalog without touching external catalogs", () => {
+    const internalTable: TreeNode = { id: "orders", label: "orders", type: "table", connectionId: "connection", database: "shop" };
+    const externalTable: TreeNode = { id: "orders-catalog", label: "orders", type: "table", connectionId: "connection", database: "shop", catalog: "hive" };
+
+    // The statistics RPC has no catalog dimension, so only internal-catalog
+    // tables become scopes; external catalogs would otherwise read a same-named
+    // database from the default catalog.
+    expect(sidebarTableStorageScopes([internalTable, externalTable])).toEqual([{ connectionId: "connection", database: "shop", schema: "" }]);
+
+    expect(applySidebarTableStorage([internalTable, externalTable], { connectionId: "connection", database: "shop", schema: "" }, [{ name: "orders", total_bytes: 4096 }])).toBe(true);
+    expect(internalTable.sizeBytes).toBe(4096);
+    expect(externalTable.sizeBytes).toBeUndefined();
   });
 });

@@ -14,6 +14,13 @@ describe("query editor pointer selection", () => {
     expect(startsQueryEditorRectangularSelection({ altKey: false, button: 0 })).toBe(false);
   });
 
+  it("leaves compound Alt gestures to CodeMirror's multi-range handler", () => {
+    expect(startsQueryEditorRectangularSelection({ altKey: true, button: 0, ctrlKey: true, metaKey: false })).toBe(false);
+    expect(startsQueryEditorRectangularSelection({ altKey: true, button: 0, ctrlKey: false, metaKey: true })).toBe(false);
+    expect(startsQueryEditorSelectionDrag({ altKey: true, ctrlKey: true, detail: 1, shiftKey: false })).toBe(false);
+    expect(startsQueryEditorSelectionDrag({ altKey: true, metaKey: true, detail: 1, shiftKey: false })).toBe(false);
+  });
+
   it("leaves multi-click and Shift selection gestures to CodeMirror", () => {
     expect(startsQueryEditorSelectionDrag({ detail: 0, shiftKey: false })).toBe(true);
     expect(startsQueryEditorSelectionDrag({ detail: 1, shiftKey: false })).toBe(true);

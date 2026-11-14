@@ -107,3 +107,16 @@ export function isDefaultColumnOrder(availableIndexes: readonly number[], ordere
   if (availableIndexes.length !== orderedIndexes.length) return false;
   return availableIndexes.every((index, position) => orderedIndexes[position] === index);
 }
+
+/**
+ * Column names laid out in the grid's current custom order.
+ *
+ * `orderedIndexes` is the layout's display order (the same list the grid renders
+ * columns in). Used so field pickers — the WHERE editor's field dropdown — follow
+ * the order the user arranged the columns into instead of the stored/result order
+ * (#14836). Indexes without a name are skipped, so a layout that outlives a column
+ * rename degrades to "drop the missing one" rather than rendering an undefined.
+ */
+export function columnNamesInIndexOrder(columns: readonly string[], orderedIndexes: readonly number[]): string[] {
+  return orderedIndexes.map((index) => columns[index]).filter((name): name is string => typeof name === "string" && name.length > 0);
+}

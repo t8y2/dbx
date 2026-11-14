@@ -500,6 +500,10 @@ export default withEnglishFallback({
     pickFormatPlaceholder: "Seleziona un formato…",
     radixHint: "Solo interi. Inserisci cifre senza prefissi 0x, 0o o 0b; è ammesso un segno facoltativo.",
     urlHint: "Codifica dei componenti URL in UTF-8. La decodifica mantiene + come segno più.",
+    pluginCodec: "Decodificatore",
+    pluginCodecPlaceholder: "Scegli un decodificatore…",
+    pluginHint: "Alla conversione viene inviato al plugin selezionato solo il valore di questa cella. Il risultato è un'anteprima di sola lettura e non viene mai riscritto.",
+    pluginDecoding: "Decodifica in corso…",
     kinds: {
       timestamp: "Timestamp → data/ora",
       json: "Formatta JSON",
@@ -513,6 +517,7 @@ export default withEnglishFallback({
       urlEncode: "Codifica componente URL",
       urlDecode: "Decodifica componente URL",
       radix: "Conversione di base degli interi",
+      plugin: "Decodifica con plugin",
     },
     units: {
       auto: "Automatica (10/13 cifre)",
@@ -530,6 +535,10 @@ export default withEnglishFallback({
       invalidInteger: "Inserisci un intero valido per la base di origine, senza prefisso.",
       invalidBase64: "Inserisci un Base64 valido il cui contenuto decodificato sia testo UTF-8 valido.",
       invalidBase64Binary: "Contenuto Base64 non valido: i dati potrebbero essere troncati o contenere caratteri non consentiti.",
+      pluginNoCodec: "Scegli prima un decodificatore.",
+      pluginTooLarge: "Il valore supera il limite di 2 MiB della decodifica con plugin.",
+      pluginUndecodableBinary: "Impossibile leggere i byte originali di questo valore binario.",
+      pluginFailed: "Decodifica con plugin non riuscita: {message}",
     },
   },
   customType: {
@@ -3258,6 +3267,7 @@ export default withEnglishFallback({
     collapseCellDetailMetadata: "Comprimi metadati cella",
     expandCellDetailMetadata: "Espandi metadati cella",
     openCellDetailsDialog: "Apri Dettagli Cella",
+    pluginDecode: "Decodifica con plugin",
     rowDetails: "Dettagli Riga",
     rowDetailsFor: "Dettagli Riga {row}",
     openRowDetailsDialog: "Apri Dettagli Riga",

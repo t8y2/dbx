@@ -499,6 +499,10 @@ export default withEnglishFallback({
     pickFormatPlaceholder: "형식을 선택하세요…",
     radixHint: "정수만 지원합니다. 0x, 0o, 0b 접두사 없이 입력하세요. 부호는 사용할 수 있습니다.",
     urlHint: "URL 구성 요소를 UTF-8로 인코딩하거나 디코딩합니다. 디코딩 시 +를 공백으로 바꾸지 않습니다.",
+    pluginCodec: "디코더",
+    pluginCodecPlaceholder: "디코더 선택…",
+    pluginHint: "변환할 때 이 셀의 값만 선택한 플러그인에 보냅니다. 결과는 읽기 전용 미리보기이며 다시 쓰지 않습니다.",
+    pluginDecoding: "디코딩 중…",
     kinds: {
       timestamp: "타임스탬프 → 날짜/시간",
       json: "JSON 서식 지정",
@@ -512,6 +516,7 @@ export default withEnglishFallback({
       urlEncode: "URL 구성 요소 인코딩",
       urlDecode: "URL 구성 요소 디코딩",
       radix: "정수 진법 변환",
+      plugin: "플러그인 디코딩",
     },
     units: {
       auto: "자동(10/13자리)",
@@ -529,6 +534,10 @@ export default withEnglishFallback({
       invalidInteger: "선택한 원본 진법에 맞는 정수를 접두사 없이 입력하세요.",
       invalidBase64: "유효한 Base64를 입력하세요. 디코딩 결과는 UTF-8 텍스트여야 합니다.",
       invalidBase64Binary: "Base64 내용이 유효하지 않습니다. 데이터가 잘려 있거나 Base64 문자가 아닌 문자가 포함되어 있습니다.",
+      pluginNoCodec: "먼저 디코더를 선택하세요.",
+      pluginTooLarge: "값이 플러그인 디코딩 한도 2 MiB를 초과합니다.",
+      pluginUndecodableBinary: "이 바이너리 값의 원본 바이트를 읽을 수 없습니다.",
+      pluginFailed: "플러그인 디코딩 실패: {message}",
     },
   },
   customType: {
@@ -3379,6 +3388,7 @@ export default withEnglishFallback({
     collapseCellDetailMetadata: "셀 메타데이터 접기",
     expandCellDetailMetadata: "셀 메타데이터 펼치기",
     openCellDetailsDialog: "셀 상세 열기",
+    pluginDecode: "플러그인으로 디코딩",
     rowDetails: "행 상세",
     rowDetailsFor: "{row}행 상세",
     openRowDetailsDialog: "행 상세 열기",

@@ -164,6 +164,10 @@ export default withEnglishFallback({
     pickFormatPlaceholder: "Bir biçim seçin…",
     radixHint: "Yalnızca tam sayılar. 0x, 0o veya 0b öneki olmadan rakam girin; isteğe bağlı işaret kullanılabilir.",
     urlHint: "URL bileşenleri UTF-8 ile kodlanır veya çözülür. Çözme işlemi + işaretini boşluğa dönüştürmez.",
+    pluginCodec: "Çözücü",
+    pluginCodecPlaceholder: "Bir çözücü seçin…",
+    pluginHint: "Dönüştürdüğünüzde yalnızca bu hücrenin değeri seçili eklentiye gönderilir. Sonuç salt okunur bir önizlemedir ve asla geri yazılmaz.",
+    pluginDecoding: "Çözülüyor…",
     kinds: {
       timestamp: "Zaman damgası → tarih/saat",
       json: "JSON biçimlendir",
@@ -177,6 +181,7 @@ export default withEnglishFallback({
       urlEncode: "URL bileşenini kodla",
       urlDecode: "URL bileşeninin kodunu çöz",
       radix: "Tam sayı taban dönüşümü",
+      plugin: "Eklentiyle çöz",
     },
     units: {
       auto: "Otomatik (10/13 hane)",
@@ -194,6 +199,10 @@ export default withEnglishFallback({
       invalidInteger: "Kaynak tabana uygun bir tam sayıyı öneksiz girin.",
       invalidBase64: "Geçerli bir Base64 girin; çözülen içerik geçerli UTF-8 metni olmalıdır.",
       invalidBase64Binary: "Geçersiz Base64 içeriği: veri kesilmiş olabilir veya Base64 dışı karakterler içeriyor.",
+      pluginNoCodec: "Önce bir çözücü seçin.",
+      pluginTooLarge: "Değer, eklentiyle çözme için 2 MiB sınırını aşıyor.",
+      pluginUndecodableBinary: "Bu ikili değerin özgün baytları okunamıyor.",
+      pluginFailed: "Eklentiyle çözme başarısız: {message}",
     },
   },
   customType: {
@@ -2550,6 +2559,7 @@ export default withEnglishFallback({
     collapseCellDetailMetadata: "Hücre meta verisini daralt",
     expandCellDetailMetadata: "Hücre meta verisini genişlet",
     openCellDetailsDialog: "Hücre Ayrıntılarını Aç",
+    pluginDecode: "Eklentiyle çöz",
     rowDetails: "Satır Ayrıntıları",
     rowDetailsFor: "{row}. Satırın Ayrıntıları",
     openRowDetailsDialog: "Satır Ayrıntılarını Aç",

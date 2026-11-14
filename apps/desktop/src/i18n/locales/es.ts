@@ -502,6 +502,10 @@ export default withEnglishFallback({
     pickFormatPlaceholder: "Selecciona un formato…",
     radixHint: "Solo enteros. Introduce dígitos sin los prefijos 0x, 0o o 0b; se admite un signo opcional.",
     urlHint: "Codificación de componentes URL en UTF-8. La decodificación conserva + como signo más.",
+    pluginCodec: "Decodificador",
+    pluginCodecPlaceholder: "Elige un decodificador…",
+    pluginHint: "Al convertir, solo se envía el valor de esta celda al plugin seleccionado. El resultado es una vista previa de solo lectura y nunca se escribe de vuelta.",
+    pluginDecoding: "Decodificando…",
     kinds: {
       timestamp: "Marca de tiempo → fecha/hora",
       json: "Formatear JSON",
@@ -515,6 +519,7 @@ export default withEnglishFallback({
       urlEncode: "Codificar componente URL",
       urlDecode: "Decodificar componente URL",
       radix: "Conversión de base de enteros",
+      plugin: "Decodificar con plugin",
     },
     units: {
       auto: "Automática (10/13 dígitos)",
@@ -532,6 +537,10 @@ export default withEnglishFallback({
       invalidInteger: "Introduce un entero válido para la base de origen, sin prefijo.",
       invalidBase64: "Introduce un Base64 válido cuyo contenido decodificado sea texto UTF-8 válido.",
       invalidBase64Binary: "Contenido Base64 no válido: los datos pueden estar truncados o contener caracteres no admitidos.",
+      pluginNoCodec: "Elige primero un decodificador.",
+      pluginTooLarge: "El valor supera el límite de 2 MiB de la decodificación con plugin.",
+      pluginUndecodableBinary: "No se pueden leer los bytes originales de este valor binario.",
+      pluginFailed: "Falló la decodificación con plugin: {message}",
     },
   },
   customType: {
@@ -3364,6 +3373,7 @@ export default withEnglishFallback({
     collapseCellDetailMetadata: "Contraer metadatos de celda",
     expandCellDetailMetadata: "Expandir metadatos de celda",
     openCellDetailsDialog: "Abrir detalles de celda",
+    pluginDecode: "Decodificar con plugin",
     rowDetails: "Detalles de fila",
     rowDetailsFor: "Detalles de fila {row}",
     openRowDetailsDialog: "Abrir detalles de fila",

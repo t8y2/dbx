@@ -262,7 +262,7 @@ LEFT JOIN ALL_SOURCE s
   ON s.OWNER = t.OWNER
  AND s.NAME = t.TRIGGER_NAME
  AND s.TYPE = 'TRIGGER'
-WHERE t.OWNER = :1
+WHERE t.TABLE_OWNER = :1
   AND t.TABLE_NAME = :2
   AND t.BASE_OBJECT_TYPE IN ('TABLE', 'VIEW')
 ORDER BY t.TRIGGER_NAME, s.LINE`
@@ -355,6 +355,9 @@ type queryOptions struct {
 	FetchSize   int    `json:"fetchSize"`
 	TimeoutSecs int    `json:"timeoutSecs"`
 	DeferLOBs   bool   `json:"deferLobs"`
+	// ReportCompilationErrors is opt-in because SQL file imports and transfers
+	// legitimately create objects that stay INVALID until their dependencies exist.
+	ReportCompilationErrors bool `json:"reportCompilationErrors"`
 }
 
 const largeValueBytesColumnPrefix = "__DBX_LARGE_VALUE_BYTES_"
@@ -1336,9 +1339,26 @@ func openConfiguredSessionDB(params connectParams, timeout time.Duration) (*sql.
 	if err != nil {
 		return nil, err
 	}
+	if !usesOCIProfile(params) {
+		// oracleNLSConnector initializes every physical thin connection, so
+		// the one that answered the ping already carries the session settings.
+		return db, nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if _, err := db.ExecContext(ctx, "ALTER SESSION SET NLS_LANGUAGE='AMERICAN'"); err != nil {
+	// OCI connects through godror directly; pin one connection so both ALTERs
+	// land on the same session.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("pin Oracle session for NLS setup: %w", err)
+	}
+	defer conn.Close()
+	dateLanguage, fallbackDateLanguage := sessionNLSDateLanguages()
+	if err := applyOracleSessionNLS(func(query string) error {
+		_, err := conn.ExecContext(ctx, query)
+		return err
+	}, dateLanguage, fallbackDateLanguage); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -2352,6 +2372,7 @@ func (s *server) listObjects(schema string, constraints metadataListConstraints)
 		return nil, err
 	}
 	s.closeRows(rows)
+	s.enrichObjectComments(result, schema, useSessionUser)
 	if constraints.Exact {
 		s.enrichExactTriggerObjects(result, schema)
 	}
@@ -4974,6 +4995,9 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	var err error
 	messages := s.withStatementDBMSOutput(opts.SQL, func() error {
 		result, err = s.executeQueryWithoutOutput(opts)
+		if err == nil && opts.ReportCompilationErrors {
+			err = s.compilationErrorForStatement(trimStatementSQL(opts.SQL))
+		}
 		return err
 	})
 	result.Messages = append(result.Messages, messages...)
@@ -6514,6 +6538,11 @@ func isOraclePlSQLBlock(sqlText string) bool {
 
 func isQuerySQL(sqlText string) bool {
 	executable := trimLeadingSQLComments(sqlText)
+	// Only unwrap the prefix for classification so the driver's SQL keeps
+	// its grouping and comments, including inside nested parentheses.
+	for strings.HasPrefix(executable, "(") {
+		executable = trimLeadingSQLComments(executable[1:])
+	}
 	return startsWithSQLKeyword(executable, "select") || startsWithSQLKeyword(executable, "with")
 }
 

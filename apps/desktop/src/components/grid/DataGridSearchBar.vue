@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import { CaseSensitive, ChevronDown, ChevronRight, ChevronUp, Search, X } from "@lucide/vue";
+import { computed, ref, watch } from "vue";
+import { useEventListener, useResizeObserver } from "@vueuse/core";
+import { CaseSensitive, ChevronDown, ChevronRight, ChevronUp, GripVertical, Search, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { vNamingStyleSupport } from "@/directives/vNamingStyleSupport";
 import type { DataGridReplaceScope } from "@/lib/dataGrid/dataGridReplace";
+import { isReplaceAllShortcut } from "@/lib/editor/replaceAllShortcut";
+import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 
 const { t } = useI18n();
 
@@ -41,6 +44,62 @@ const emit = defineEmits<{
 }>();
 
 const searchInput = ref<HTMLInputElement>();
+const overlay = ref<HTMLElement>();
+const overlayParent = computed(() => overlay.value?.parentElement);
+const position = ref<{ x: number; y: number }>();
+const overlayStyle = computed(() => (position.value ? { left: `${position.value.x}px`, top: `${position.value.y}px`, right: "auto" } : undefined));
+let drag: { pointerId: number; startX: number; startY: number; x: number; y: number } | undefined;
+
+function moveOverlay(x: number, y: number) {
+  const el = overlay.value;
+  const parent = overlayParent.value;
+  if (!el || !parent) return;
+  const bounds = parent.getBoundingClientRect();
+  const maxX = Math.min(parent.clientWidth, window.innerWidth - bounds.left - parent.clientLeft) - el.offsetWidth;
+  const maxY = Math.min(parent.clientHeight, window.innerHeight - bounds.top - parent.clientTop) - el.offsetHeight;
+  position.value = {
+    x: Math.max(0, Math.min(x, maxX)),
+    y: Math.max(0, Math.min(y, maxY)),
+  };
+}
+
+function keepOverlayVisible() {
+  if (position.value) moveOverlay(position.value.x, position.value.y);
+}
+
+useResizeObserver([overlay, overlayParent], keepOverlayVisible);
+useEventListener("resize", keepOverlayVisible);
+
+watch(
+  () => props.open,
+  (open) => {
+    if (open) return;
+    drag = undefined;
+    position.value = undefined;
+  },
+);
+
+function startDrag(event: PointerEvent) {
+  const el = overlay.value;
+  if (!el || event.button !== 0 || !event.isPrimary) return;
+  event.preventDefault();
+  drag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: el.offsetLeft, y: el.offsetTop };
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+
+function updateDrag(event: PointerEvent) {
+  if (drag?.pointerId !== event.pointerId) return;
+  moveOverlay(drag.x + event.clientX - drag.startX, drag.y + event.clientY - drag.startY);
+}
+
+function endDrag(event: PointerEvent) {
+  if (drag?.pointerId === event.pointerId) drag = undefined;
+}
+
+function nudgeOverlay(dx: number, dy: number) {
+  const el = overlay.value;
+  if (el) moveOverlay(el.offsetLeft + dx, el.offsetTop + dy);
+}
 
 function onSuggestionMouseDown(event: MouseEvent, index: number) {
   event.preventDefault();
@@ -50,6 +109,37 @@ function onSuggestionMouseDown(event: MouseEvent, index: number) {
 function keepSearchInputFocused(event: MouseEvent) {
   // Pointer navigation should not move focus away from the search input; keyboard activation still uses click.
   event.preventDefault();
+}
+
+/** Same gates as the Replace All button, mirrored for its keyboard accelerator. */
+function canReplaceAll(): boolean {
+  return !!props.replaceAvailable && !props.replaceBusy && !!props.replaceMatchCount;
+}
+
+function onSearchInputKeydown(event: KeyboardEvent) {
+  if (isReplaceAllShortcut(event)) {
+    // Handled here: the forwarded keydown would run Enter = navigate-next in
+    // the grid host. A closed replace row must not fire with hidden (possibly
+    // stale) replacement text — swallow the combo either way.
+    event.preventDefault();
+    if (replaceOpen.value && canReplaceAll()) emit("replaceAll");
+    return;
+  }
+  emit("keydown", event);
+}
+
+function onReplacementKeydown(event: KeyboardEvent) {
+  if (isReplaceAllShortcut(event)) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (canReplaceAll()) emit("replaceAll");
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    event.stopPropagation();
+    if (props.replaceAvailable && !props.replaceBusy && props.canReplaceCurrent) emit("replaceCurrent");
+  }
 }
 
 defineExpose({
@@ -62,8 +152,25 @@ defineExpose({
 
 <template>
   <Transition enter-active-class="transition-opacity duration-150" leave-active-class="transition-opacity duration-100" enter-from-class="opacity-0" leave-to-class="opacity-0">
-    <div v-if="props.open" data-grid-search-bar class="absolute top-1 right-2 z-20 max-w-[calc(100%-1rem)] px-2 py-1 bg-background focus-within:bg-background-solid border rounded-md shadow-md" @keydown.esc.stop.prevent="emit('close')">
+    <div v-if="props.open" ref="overlay" data-grid-search-bar class="absolute top-1 right-2 z-20 w-max max-w-[calc(100%-1rem)] px-2 py-1 bg-background focus-within:bg-background-solid border rounded-md shadow-md" :style="overlayStyle" @keydown.esc.stop.prevent="emit('close')">
       <div class="flex items-center gap-1 min-w-0">
+        <button
+          type="button"
+          class="flex h-5 w-4 shrink-0 cursor-grab touch-none select-none items-center justify-center rounded text-muted-foreground hover:text-foreground active:cursor-grabbing"
+          :title="t('editor.structurePeek.drag')"
+          :aria-label="t('editor.structurePeek.drag')"
+          @pointerdown.stop="startDrag"
+          @pointermove.stop="updateDrag"
+          @pointerup.stop="endDrag"
+          @pointercancel="endDrag"
+          @lostpointercapture="endDrag"
+          @keydown.left.stop.prevent="nudgeOverlay(-16, 0)"
+          @keydown.right.stop.prevent="nudgeOverlay(16, 0)"
+          @keydown.up.stop.prevent="nudgeOverlay(0, -16)"
+          @keydown.down.stop.prevent="nudgeOverlay(0, 16)"
+        >
+          <GripVertical class="h-3.5 w-3.5" />
+        </button>
         <button
           v-if="props.replaceAvailable !== undefined"
           data-grid-replace-toggle
@@ -90,7 +197,7 @@ defineExpose({
           spellcheck="false"
           class="w-48 h-5 min-w-0 flex-1 text-xs bg-transparent outline-none placeholder:text-muted-foreground"
           :placeholder="t('grid.search')"
-          @keydown="emit('keydown', $event)"
+          @keydown="onSearchInputKeydown"
         />
         <button
           v-if="replaceOpen"
@@ -156,12 +263,21 @@ defineExpose({
           class="h-6 min-w-0 w-48 flex-1 text-xs bg-transparent outline-none border rounded px-1.5"
           :placeholder="t('grid.replaceText')"
           :aria-label="t('grid.replaceText')"
-          @keydown.enter.stop.prevent="props.replaceAvailable && !props.replaceBusy && props.canReplaceCurrent && emit('replaceCurrent')"
+          @keydown="onReplacementKeydown"
         />
         <button data-grid-replace-current type="button" class="h-6 border rounded px-2 text-xs disabled:opacity-40" :disabled="!props.replaceAvailable || props.replaceBusy || !props.canReplaceCurrent" :title="t('grid.replaceCurrentCell')" @click="emit('replaceCurrent')">
           {{ t("editor.search.replace") }}
         </button>
-        <button data-grid-replace-all type="button" class="h-6 border rounded px-2 text-xs disabled:opacity-40" :disabled="!props.replaceAvailable || props.replaceBusy || !props.replaceMatchCount" @click="emit('replaceAll')">{{ t("editor.search.replaceAll") }}</button>
+        <button
+          data-grid-replace-all
+          type="button"
+          class="h-6 border rounded px-2 text-xs disabled:opacity-40"
+          :disabled="!props.replaceAvailable || props.replaceBusy || !props.replaceMatchCount"
+          :title="`${t('editor.search.replaceAll')} (${formatShortcutDisplay('Mod+Alt+Enter')})`"
+          @click="emit('replaceAll')"
+        >
+          {{ t("editor.search.replaceAll") }}
+        </button>
       </div>
       <div v-if="replaceOpen" class="flex flex-wrap items-center gap-1 mt-1 text-xs">
         <select v-model="replaceScope" data-grid-replace-scope class="min-w-0 h-6 max-w-full rounded border bg-background focus:bg-background-solid px-1" :aria-label="t('grid.replaceScope')">

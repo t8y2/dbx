@@ -204,6 +204,7 @@ export const deleteSavedSqlFile = forward("deleteSavedSqlFile");
 export const savedSqlStorageDir = forward("savedSqlStorageDir");
 export const openSavedSqlStorageDir = forward("openSavedSqlStorageDir");
 export const revealPathInFileManager = forward("revealPathInFileManager");
+export const openPathWithDefaultApp = forward("openPathWithDefaultApp");
 export const deleteDatabaseBackupFiles = forward("deleteDatabaseBackupFiles");
 export const databaseBackupCommand = forward("databaseBackupCommand");
 export const databaseBackupBackground = forward("databaseBackupBackground");
@@ -368,6 +369,7 @@ export const prepareOracleTriggerSql = forward("prepareOracleTriggerSql");
 export const fingerprintOracleRoutineObjectSource = forward("fingerprintOracleRoutineObjectSource");
 export const buildExecutableObjectSourceSql = forward("buildExecutableObjectSourceSql");
 export const buildEditableObjectSource = forward("buildEditableObjectSource");
+export const buildOracleObjectExportSql = forward("buildOracleObjectExportSql");
 export const buildRoutineRenameObjectSourceStatements = forward("buildRoutineRenameObjectSourceStatements");
 export const rewriteOracleRoutineReferences = forward("rewriteOracleRoutineReferences");
 export const rewriteOracleTableReferences = forward("rewriteOracleTableReferences");
@@ -1249,6 +1251,7 @@ export type {
   MongoExportProgress,
   MongoExportSummary,
   DatabaseExportRequest,
+  DatabaseExportSelectedObject,
   ExportProgress,
   TableExportProgress,
   TableExportStatus,
@@ -1277,3 +1280,6 @@ export const mqttGetTopicTree = forward("mqttGetTopicTree");
 export const mqttGetMessages = forward("mqttGetMessages");
 export const mqttClearMessages = forward("mqttClearMessages");
 export const mqttDeleteMessage = forward("mqttDeleteMessage");
+
+export const migrationPrepareCredentialReset = forward("migrationPrepareCredentialReset");
+export const migrationResetCredentials = forward("migrationResetCredentials");

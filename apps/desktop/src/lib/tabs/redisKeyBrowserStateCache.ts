@@ -1,3 +1,5 @@
+import type { RedisKeyTypeFilter } from "@/lib/redis/redisKeyTree";
+
 export type RedisKeyBrowserSearchMode = "key" | "value" | "all";
 
 export interface RedisKeyBrowserStateSnapshot {
@@ -11,6 +13,7 @@ export interface RedisKeyBrowserStateSnapshot {
   fuzzyKeySearch: boolean;
   /** Local filter: only show keys with TTL = -1 in the loaded result set. */
   noExpiryOnly: boolean;
+  keyTypeFilter?: RedisKeyTypeFilter;
 }
 
 // ContentArea renders only the active tab, so RedisKeyBrowser is unmounted on

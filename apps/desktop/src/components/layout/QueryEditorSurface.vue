@@ -23,6 +23,7 @@ const bindings = computed(() => ({ ...surfaceProps.value, ...contentEmits }));
 const contentAreaRef = ref<InstanceType<typeof ContentArea> | null>(null);
 
 defineExpose<QueryEditorSurfaceHandle>({
+  focusSqlEditor: () => contentAreaRef.value?.focusSqlEditor() ?? false,
   focusSearch: (target: Element | null = null) => contentAreaRef.value?.focusSearch(target) ?? false,
   focusWhere: () => contentAreaRef.value?.focusWhere() ?? false,
   openGoToColumn: () => contentAreaRef.value?.openGoToColumn() ?? false,
@@ -48,6 +49,7 @@ defineExpose<QueryEditorSurfaceHandle>({
   focusStatementRange: (range: StatementRange | null) => contentAreaRef.value?.focusStatementRange(range) ?? false,
   focusErrorPosition: (offset: number) => contentAreaRef.value?.focusErrorPosition(offset) ?? false,
   foldAll: () => contentAreaRef.value?.foldAll() ?? false,
+  toggleLineComment: () => contentAreaRef.value?.toggleLineComment() ?? false,
   unfoldAll: () => contentAreaRef.value?.unfoldAll() ?? false,
 });
 </script>

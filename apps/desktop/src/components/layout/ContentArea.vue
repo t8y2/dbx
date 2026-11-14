@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
+import { computed, ref, shallowRef, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab, restoredDataTabReloadFilters } from "@/lib/table/tableDataRefresh";
@@ -11,7 +11,7 @@ import { extractGraphCells, graphPropertyFromUpdateResult, type GraphEdge, type 
 import { graphAdapterForDatabase } from "@/lib/graph/graphAdapters";
 import { queryResultMessages } from "@/lib/query/queryResultMessages";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
-import { hasQueryOutput as tabHasQueryOutput } from "@/lib/query/queryOutput";
+import { hasFocusableQueryResult, hasQueryOutput as tabHasQueryOutput } from "@/lib/query/queryOutput";
 import { batchResultInsertRequest } from "@/lib/query/queryResultBatchInsert";
 import { batchSqlRecoveryState, type BatchSqlRecoveryAction } from "@/lib/query/batchSqlRecovery";
 import type { CSSProperties } from "vue";
@@ -221,6 +221,7 @@ import { isDataGridToolbarCompact, type DataGridReloadIntent, type DataGridToolb
 import { useTabScroll } from "@/composables/useTabScroll";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
+import { formatQueryDuration } from "@/lib/format/duration";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
@@ -250,6 +251,8 @@ type DataGridHandle = DataGridColumnLayoutHandle & {
   onToolbarRefresh: () => Promise<void> | void;
   focusSearch: (target?: Element | null) => boolean;
   focusWhere: () => boolean;
+  focusGrid: () => boolean;
+  copyActiveResult: (isValid?: () => boolean) => Promise<boolean>;
   openGoToColumn: () => boolean;
   openCellDetailSearch: () => boolean;
   nullColumnsHidden: boolean;
@@ -341,6 +344,7 @@ function groupedQueryReadonlyColumnIndexes(tab: QueryTab): number[] | undefined 
   return tab.querySourceColumns.flatMap((column, index) => (column && primaryKeys.has(column) ? [index] : []));
 }
 const settingsStore = useSettingsStore();
+const hideToolbarLabels = computed(() => settingsStore.editorSettings.dataGridHideToolbarLabels);
 const booleanDisplayMode = computed(() => settingsStore.editorSettings.dataGridBooleanDisplayMode);
 const setBooleanDisplayMode = (mode: "checkbox" | "dropdown") => settingsStore.updateEditorSettings({ dataGridBooleanDisplayMode: mode });
 const booleanValueStyle = computed(() => settingsStore.editorSettings.dataGridBooleanValueStyle);
@@ -805,6 +809,10 @@ const resultRunFallbackLabel = (sequence: number) => t(resultTabNamingMode.value
 const activeResultGridCacheKey = computed(() => resultGridCacheKey(props.activeTab));
 const activeResultGridColumnWidthCacheKey = computed(() => resultGridColumnWidthCacheKey(props.activeTab));
 const activeResultGridInstanceKey = computed(() => resultGridInstanceKey(props.activeTab));
+const activeResultColumnWidthKey = computed(() => {
+  const revision = props.activeTab.resultColumnWidthRevision;
+  return revision ? `${activeResultGridInstanceKey.value}:${revision}` : activeResultGridInstanceKey.value;
+});
 const hasNeo4jNodes = computed(() => activeEffectiveDatabaseType.value === "neo4j" && !!props.activeTab.result?.neo4j_node_cells?.length);
 const neo4jNodeTable = useNeo4jNodeTableResult(
   computed(() => props.activeTab.result),
@@ -1186,6 +1194,89 @@ function toggleResultsPane(): boolean {
   resultsPaneOpen.value = !resultsPaneOpen.value;
   return true;
 }
+
+function focusSqlEditor(): boolean {
+  return props.activeTab.mode === "query" && !props.resultOnly && (queryEditorRef.value?.focusEditor?.() ?? false);
+}
+
+const pendingGridCopy = shallowRef<{ isValid: () => boolean; started: boolean }>();
+let gridCopyRequest = 0;
+function copyActiveResult(isWorkspaceValid: () => boolean = () => true): boolean {
+  if (props.editorOnly || !hasFocusableQueryResult(props.activeTab) || activeElasticsearchJsonResponse.value || redisResultViewMode.value !== "grid" || !isWorkspaceValid()) return false;
+  const request = ++gridCopyRequest;
+  const tabId = props.activeTab.id;
+  const result = props.activeTab.result;
+  const generation = props.activeTab.resultViewGeneration;
+  const isValid = () => request === gridCopyRequest && isWorkspaceValid() && props.activeTab.id === tabId && props.activeTab.result === result && props.activeTab.resultViewGeneration === generation && props.activeOutputView === "result";
+  pendingGridCopy.value = { isValid, started: false };
+  if (!props.resultOnly) resultsPaneOpen.value = true;
+  showElasticsearchRawJson.value = false;
+  selectOutputView(tabId, "result");
+  return true;
+}
+
+watch(
+  [pendingGridCopy, dataGridRef, () => props.activeTab.id, () => props.activeTab.result, () => props.activeTab.resultViewGeneration, () => props.activeOutputView],
+  () => {
+    const request = pendingGridCopy.value;
+    if (!request) return;
+    if (!request.isValid()) {
+      ++gridCopyRequest;
+      pendingGridCopy.value = undefined;
+      return;
+    }
+    const grid = dataGridRef.value;
+    if (!grid || request.started) return;
+    request.started = true;
+    void grid
+      .copyActiveResult(request.isValid)
+      .catch((error: unknown) => {
+        if (request.isValid()) toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+      })
+      .finally(() => {
+        if (pendingGridCopy.value === request) pendingGridCopy.value = undefined;
+      });
+  },
+  { flush: "post" },
+);
+onUnmounted(() => {
+  ++gridCopyRequest;
+  pendingGridCopy.value = undefined;
+});
+
+const pendingGridFocus = shallowRef<{ tabId: string; result: QueryResult; source: Element | null }>();
+function cancelResultGridFocus() {
+  pendingGridFocus.value = undefined;
+}
+
+function focusResultGrid(): boolean {
+  if (props.editorOnly || !hasFocusableQueryResult(props.activeTab) || activeElasticsearchJsonResponse.value || redisResultViewMode.value !== "grid") return false;
+  pendingGridFocus.value = { tabId: props.activeTab.id, result: props.activeTab.result!, source: document.activeElement };
+  if (!props.resultOnly) resultsPaneOpen.value = true;
+  showElasticsearchRawJson.value = false;
+  selectOutputView(props.activeTab.id, "result");
+  return true;
+}
+
+// The grid is async and may not exist until a collapsed pane or another output
+// view has rendered. Fulfil only the current request, without stealing focus
+// after the user switches tabs, results, or another control.
+watch(
+  [pendingGridFocus, dataGridRef, () => props.activeTab.id, () => props.activeTab.result, () => props.activeOutputView],
+  () => {
+    const request = pendingGridFocus.value;
+    if (!request) return;
+    if (props.activeTab.id !== request.tabId || props.activeTab.result !== request.result || props.activeOutputView !== "result" || (document.activeElement !== request.source && document.activeElement !== document.body)) {
+      cancelResultGridFocus();
+      return;
+    }
+    if (dataGridRef.value) {
+      cancelResultGridFocus();
+      dataGridRef.value.focusGrid();
+    }
+  },
+  { flush: "post" },
+);
 
 /**
  * The "hide results" chevron. In the shared result surface (result-only) the
@@ -1915,14 +2006,16 @@ function dispatchBeforeResultTabSwitch() {
 }
 
 /**
- * 点击结果标签：切换显示的同时切换固定状态（issue #9975、#13306）。
+ * 点击结果标签：切换显示的同时固定该结果（issue #9975、#13306、#14599）。
  * 未固定的结果会被下一次普通查询复用/覆盖，点击后固定即可保留下来；
- * 点击已固定的结果则直接取消固定，无需再打开右键菜单。
+ * 再次点击当前已固定的结果会取消固定，无需再打开右键菜单；
+ * 从其他结果标签切换过来时只切换显示，不会取消已有的固定。
  */
 async function selectResultRunFromTab(runId: string) {
+  const wasActive = runId === props.activeTab.activeResultRunId;
   if (!(await selectResultRun(runId))) return;
   const run = resultRuns.value.find((item) => item.id === runId);
-  if (shouldPinResultRunOnClick(run, settingsStore.editorSettings.pinResultTabOnClick)) toggleResultRunPinned(runId);
+  if (shouldPinResultRunOnClick(run, settingsStore.editorSettings.pinResultTabOnClick, wasActive)) toggleResultRunPinned(runId);
 }
 
 async function focusResultRunByIndex(index: number) {
@@ -2056,6 +2149,11 @@ function foldAll(): boolean {
   return queryEditorRef.value?.foldAll?.() ?? false;
 }
 
+function toggleLineComment(): boolean {
+  if (!sourceSectionActive.value) return false;
+  return queryEditorRef.value?.toggleLineComment?.() ?? false;
+}
+
 function unfoldAll(): boolean {
   return queryEditorRef.value?.unfoldAll?.() ?? false;
 }
@@ -2185,6 +2283,10 @@ function locateExecutionSummaryError(item: ExecutionSummaryItem) {
 }
 
 defineExpose({
+  copyActiveResult,
+  focusSqlEditor,
+  focusResultGrid,
+  cancelResultGridFocus,
   focusSearch,
   focusWhere,
   openGoToColumn,
@@ -2211,6 +2313,7 @@ defineExpose({
   focusErrorPosition,
   locateActiveResultError,
   foldAll,
+  toggleLineComment,
   unfoldAll,
 });
 </script>
@@ -2497,7 +2600,7 @@ defineExpose({
               </template>
               <div class="ml-auto flex shrink-0 items-center gap-1">
                 <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson">
-                  <DataGridColumnLayoutPopover :grid="dataGridRef" trigger-class="px-1.5" />
+                  <DataGridColumnLayoutPopover :grid="dataGridRef" trigger-class="px-1.5" :compact="hideToolbarLabels" />
                   <LightTooltip v-if="dataGridRef?.goToColumnToolbarCapability?.visible" :text="dataGridRef.goToColumnToolbarCapability.tooltip ?? dataGridRef.goToColumnToolbarCapability.label" side="bottom" nowrap>
                     <Button
                       data-toolbar-action="navigation"
@@ -2510,7 +2613,7 @@ defineExpose({
                       @click="dataGridRef.goToColumnToolbarCapability.onTrigger()"
                     >
                       <Columns3 class="h-3.5 w-3.5" />
-                      {{ dataGridRef.goToColumnToolbarCapability.label }}
+                      <span v-if="!hideToolbarLabels">{{ dataGridRef.goToColumnToolbarCapability.label }}</span>
                     </Button>
                   </LightTooltip>
                   <LightTooltip v-if="dataGridRef?.tableInfoToolbarCapability?.visible" :text="t('contextMenu.viewDdl')" side="bottom" nowrap>
@@ -2525,7 +2628,7 @@ defineExpose({
                       @click="dataGridRef.tableInfoToolbarCapability.onTrigger()"
                     >
                       <TableProperties class="h-3.5 w-3.5" />
-                      DDL
+                      <span v-if="!hideToolbarLabels">DDL</span>
                     </Button>
                   </LightTooltip>
                 </template>
@@ -2853,7 +2956,7 @@ defineExpose({
                 :can-show-profile="canShowProfile"
                 :can-export-archive="canExportResultArchive && settingsStore.editorSettings.showSaveResult"
                 :archive-exporting="resultArchiveExporting"
-                :compact="standaloneResultToolbarCompact"
+                :compact="standaloneResultToolbarCompact || hideToolbarLabels"
                 :has-result="!!activeTab.result"
                 @select-explain="selectOutputView(activeTab.id, 'explain')"
                 @select-profile="selectOutputView(activeTab.id, 'profile')"
@@ -2861,7 +2964,14 @@ defineExpose({
                 @open-result-view="openPluginResultView"
               >
                 <template v-if="activeOutputView === 'result' && redisResultViewMode === 'grid' && hasTabularResult && !activeElasticsearchJsonResponse && !showElasticsearchRawJson && dataGridRef">
-                  <DataGridExportMenu v-if="settingsStore.editorSettings.dataGridExportInToolbar" :items="dataGridRef.exportMenuItems" :warning="dataGridRef.exportWarning" :label="t('grid.export')" :compact="standaloneResultToolbarCompact" :on-select="dataGridRef.selectExportMenuItem" />
+                  <DataGridExportMenu
+                    v-if="settingsStore.editorSettings.dataGridExportInToolbar"
+                    :items="dataGridRef.exportMenuItems"
+                    :warning="dataGridRef.exportWarning"
+                    :label="t('grid.export')"
+                    :compact="standaloneResultToolbarCompact || hideToolbarLabels"
+                    :on-select="dataGridRef.selectExportMenuItem"
+                  />
                   <Button
                     v-if="settingsStore.editorSettings.dataGridLoadAllInToolbar && dataGridRef.loadAllToolbarState?.visible"
                     variant="ghost"
@@ -2872,7 +2982,7 @@ defineExpose({
                     :aria-label="t('grid.loadAllAndGoToLastRow')"
                     @click="dataGridRef.loadAllRowsAndGoToLast()"
                   >
-                    <ChevronsDown class="h-3.5 w-3.5" /><span v-if="!standaloneResultToolbarCompact">{{ t("grid.loadAllRows") }}</span>
+                    <ChevronsDown class="h-3.5 w-3.5" /><span v-if="!standaloneResultToolbarCompact && !hideToolbarLabels">{{ t("grid.loadAllRows") }}</span>
                   </Button>
                 </template>
               </QueryResultToolbarActions>
@@ -3015,7 +3125,7 @@ defineExpose({
                         </span>
                       </div>
                       <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.status === "pending" || item.status === "running" || item.status === "skipped" ? "—" : item.rowCount.toLocaleString() }}</div>
-                      <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.executionTimeMs > 0 || item.status === "success" || item.status === "error" ? `${item.executionTimeMs}ms` : "—" }}</div>
+                      <div class="pointer-events-none relative z-[1] text-right tabular-nums">{{ item.executionTimeMs > 0 || item.status === "success" || item.status === "error" ? formatQueryDuration(item.executionTimeMs) : "—" }}</div>
                     </div>
                   </DynamicScrollerItem>
                 </DynamicScroller>
@@ -3037,6 +3147,7 @@ defineExpose({
                 :key="activeResultGridInstanceKey"
                 :cache-key="activeResultGridCacheKey"
                 :column-width-cache-key="activeResultGridColumnWidthCacheKey"
+                :column-width-result-key="activeResultColumnWidthKey"
                 :pending-state-key="activeResultGridInstanceKey"
                 :tab-id="activeTab.id"
                 :view-generation="activeTab.resultViewGeneration"
@@ -3156,10 +3267,12 @@ defineExpose({
                       class="inline-flex h-5 shrink-0 items-center gap-1 rounded-sm border border-transparent px-2 text-xs leading-none transition-colors"
                       :class="activeOutputView === 'profile' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'"
                       :aria-pressed="activeOutputView === 'profile'"
+                      :aria-label="t('profile.title')"
+                      :title="t('profile.title')"
                       @click="selectOutputView(activeTab.id, activeOutputView === 'profile' ? 'result' : 'profile')"
                     >
                       <Gauge class="h-3.5 w-3.5" />
-                      {{ t("profile.title") }}
+                      <span v-if="!hideToolbarLabels">{{ t("profile.title") }}</span>
                     </button>
                   </template>
                 </template>
@@ -3278,10 +3391,10 @@ defineExpose({
           <LightTooltip v-if="dataGridRef?.canOpenTableStructureEditor" :text="t('contextMenu.editStructure')" side="bottom" nowrap>
             <Button data-edit-table-structure variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :aria-label="t('contextMenu.editStructure')" @click="dataGridRef?.openTableStructureEditor('columns')">
               <PencilRuler class="h-3.5 w-3.5" />
-              <span v-if="!dataToolbarCompact">{{ t("contextMenu.editStructure") }}</span>
+              <span v-if="!dataToolbarCompact && !hideToolbarLabels">{{ t("contextMenu.editStructure") }}</span>
             </Button>
           </LightTooltip>
-          <DataGridColumnLayoutPopover v-if="activeTab.result?.columns.length" :grid="dataGridRef" trigger-class="px-1.5" />
+          <DataGridColumnLayoutPopover v-if="activeTab.result?.columns.length" :grid="dataGridRef" trigger-class="px-1.5" :compact="hideToolbarLabels" />
           <LightTooltip v-if="dataGridRef?.goToColumnToolbarCapability?.visible" :text="dataGridRef.goToColumnToolbarCapability.tooltip ?? dataGridRef.goToColumnToolbarCapability.label" side="bottom" nowrap>
             <Button
               data-toolbar-action="navigation"
@@ -3293,16 +3406,24 @@ defineExpose({
               :aria-pressed="dataGridRef.goToColumnToolbarCapability.active"
               @click="dataGridRef.goToColumnToolbarCapability.onTrigger()"
             >
-              <Columns3 class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact">{{ dataGridRef.goToColumnToolbarCapability.label }}</span>
+              <Columns3 class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact && !hideToolbarLabels">{{ dataGridRef.goToColumnToolbarCapability.label }}</span>
             </Button>
           </LightTooltip>
-          <Button v-if="activeTab.result && activeDataTabTableMeta && activeTab.connectionId" variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :class="{ 'bg-accent': dataGridRef?.showDdl }" :title="dataToolbarCompact ? t('grid.tableInfo') : undefined" @click="dataGridRef?.toggleDdl()"
-            ><TableProperties class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact">{{ t("grid.tableInfo") }}</span></Button
+          <Button
+            v-if="activeTab.result && activeDataTabTableMeta && activeTab.connectionId"
+            variant="ghost"
+            size="sm"
+            class="h-5 text-xs px-1.5 shrink-0"
+            :class="{ 'bg-accent': dataGridRef?.showDdl }"
+            :title="dataToolbarCompact || hideToolbarLabels ? t('grid.tableInfo') : undefined"
+            :aria-label="t('grid.tableInfo')"
+            @click="dataGridRef?.toggleDdl()"
+            ><TableProperties class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact && !hideToolbarLabels">{{ t("grid.tableInfo") }}</span></Button
           >
           <DropdownMenu v-if="activeTab.result && activeDataTabTableMeta && activeTab.connectionId">
             <DropdownMenuTrigger as-child>
-              <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :title="t('tableToolbox.title')"
-                ><Toolbox class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact">{{ t("tableToolbox.title") }}</span></Button
+              <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :title="t('tableToolbox.title')" :aria-label="t('tableToolbox.title')"
+                ><Toolbox class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact && !hideToolbarLabels">{{ t("tableToolbox.title") }}</span></Button
               >
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" class="w-max min-w-44 gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-xl">

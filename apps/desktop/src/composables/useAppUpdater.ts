@@ -3,11 +3,12 @@ import { useI18n } from "vue-i18n";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import * as api from "@/lib/backend/api";
 import { useSettingsStore } from "@/stores/settingsStore";
-import type { UpdateDownloadSource as SettingsUpdateDownloadSource } from "@/stores/settingsStore";
+import type { UpdateChannel as SettingsUpdateChannel, UpdateDownloadSource as SettingsUpdateDownloadSource } from "@/stores/settingsStore";
 import type { UpdateDownloadProgress } from "@/lib/backend/tauri";
 import { currentLocale } from "@/i18n";
 import { shouldBlockAppUpdate } from "@/lib/app/appUpdateTaskGuard";
 import { isUpdatePreparationError, UpdatePreparationError } from "@/lib/app/updatePreparation";
+import { displayAppVersion, isPrereleaseBuild, isPromotedBuild, recordPromotedBuild } from "@/lib/app/promotedBuild";
 import { uuid } from "@/lib/common/utils";
 import { isUpdatePreviewMockEnabled, previewAppUpdateInfo } from "@/lib/updates/updatePreviewMock";
 
@@ -107,8 +108,16 @@ export function isNewerRemoteVersion(latest: string, cached: string): boolean {
  * update cache, and the badge then advertises a version the app already runs
  * (#13562). An unknown version is never treated as obsolete.
  */
-export function isPreparedUpdateObsolete(preparedVersion: string, currentVersion: string): boolean {
+export function isPreparedUpdateObsolete(preparedVersion: string, currentVersion: string, channel: SettingsUpdateChannel = "stable"): boolean {
   if (!preparedVersion || !currentVersion) return false;
+  const prepared = parseUpdateVersion(preparedVersion);
+  const current = parseUpdateVersion(currentVersion);
+  if (prepared && current && prepared.core.join(".") === current.core.join(".")) {
+    if (channel === "beta" && prepared.prerelease.length && !current.prerelease.length) return false;
+    // Promotion keeps the beta binary, so a stable manifest with the same
+    // base version does not represent a package the running build needs.
+    if (channel === "stable" && !prepared.prerelease.length && current.prerelease.length) return true;
+  }
   return !isNewerRemoteVersion(preparedVersion, currentVersion);
 }
 
@@ -124,9 +133,12 @@ export function tagVersion(version: string): string {
 }
 
 export function resolveUpdateReleaseUrl(info: api.UpdateInfo | null, source: unknown, fallbackUrl: string): string {
+  // Beta releases are mirrored to CNB only after promotion to stable.
+  if (info?.channel === "beta") return info.release_url || fallbackUrl;
   const normalizedSource = normalizeUpdateDownloadSource(source);
-  if (normalizedSource === "cnb" && info?.latest_version) {
-    return `https://cnb.cool/dbxio.com/dbx/-/releases/tag/${tagVersion(info.latest_version)}`;
+  if (normalizedSource === "cnb" && (info?.release_tag || info?.latest_version)) {
+    const tag = info.release_tag ?? tagVersion(info.latest_version);
+    return `https://cnb.cool/dbxio.com/dbx/-/releases/tag/${encodeURIComponent(tag)}`;
   }
   if (normalizedSource === "cnb") return "https://cnb.cool/dbxio.com/dbx/-/releases";
   return info?.release_url || fallbackUrl;
@@ -176,6 +188,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const updateReady = computed(() => phase.value === "restart");
   const activeTaskCount = computed(() => Math.max(0, Math.trunc(options.getActiveTaskCount?.() ?? 0)));
   const autoUpdateEnabled = computed(() => settingsStore.editorSettings.autoUpdateApp !== false);
+  const updateChannel = computed<SettingsUpdateChannel>(() => settingsStore.editorSettings.updateChannel ?? "stable");
   // Hiding the toolbar update entry opts the app out of background update
   // nagging (#11041): silent startup/hourly/retry checks stop, while the
   // explicit "Check for updates" action in settings keeps working.
@@ -183,6 +196,14 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const hasUpdateAvailable = computed(() => (updateDownloaded.value || updateReady.value || updateInfo.value?.update_available === true) && !isUpdateIgnored(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion));
   /** What the update dialog renders: an ignored release stops offering itself. */
   const visibleUpdateInfo = computed(() => effectiveUpdateInfo(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion, updateDownloaded.value || updateReady.value));
+  /**
+   * The ignored version that is currently suppressing an available release.
+   * Without it the dialog fell through to "up to date", which is untrue while a
+   * newer release exists (#13880), and there was no way to undo the ignore.
+   */
+  // `isUpdateIgnored` is only a version comparison, so it also matches once the user
+  // has upgraded past the ignored version; require a release that is actually on offer.
+  const ignoredReleaseVersion = computed(() => (updateDownloaded.value || updateReady.value || updateInfo.value?.update_available !== true || !isUpdateIgnored(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion) ? "" : (settingsStore.editorSettings.ignoredUpdateVersion ?? "")));
   const latestReleaseUrl = "https://github.com/t8y2/dbx/releases/latest";
   let generation = 0;
   let activeDownload: Promise<void> | undefined;
@@ -230,6 +251,9 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       release_name: tagVersion(cache.version),
       release_url: cache.release_url,
       release_notes: cache.release_notes,
+      channel: cache.channel ?? "stable",
+      release_tag: cache.release_tag ?? tagVersion(cache.version),
+      is_promoted: cache.is_promoted ?? cache.channel !== "beta",
     };
     phase.value = "ready";
     downloadProgress.value = 100;
@@ -257,6 +281,27 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     if (message.toLowerCase().includes("powershell")) return t("updates.portableHelperFailed", { error: message });
     return t("updates.installFailed", { error: message });
   }
+  /**
+   * A beta build promoted to stable is not rebuilt, so the installed binary
+   * keeps its beta version and only the stable manifest names the promotion
+   * (`promoted_from`). A beta-channel check never reads that manifest, so a
+   * user who installs the stable build by hand keeps seeing the beta version
+   * forever (#14739): no update check they can run records the promotion.
+   * When the running build is still a prerelease and the channel check did
+   * not prove a promotion, ask the stable manifest directly. Best-effort:
+   * the channel check already succeeded, and the next hourly check retries.
+   * The stable result never replaces the channel's update info; it only
+   * teaches the app that this build is the stable release.
+   */
+  async function recordPromotionFromStableChannel(info: api.UpdateInfo) {
+    if (updateChannel.value !== "beta" || !isPrereleaseBuild(info.current_version) || isPromotedBuild(info.current_version)) return;
+    try {
+      const stableInfo = await api.checkForUpdates(currentLocale(), normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), "stable");
+      recordPromotedBuild(stableInfo);
+    } catch {
+      /* Promotion lookup is best-effort; the channel check already succeeded. */
+    }
+  }
   async function checkUpdates(checkOptions: { silent?: boolean } = {}) {
     if (updaterDisabled || disposed || isIgnoringUpdate.value) return;
     if (checkOptions.silent && !updateEntryVisible.value) return;
@@ -276,21 +321,24 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
         phase.value = "idle";
         return;
       }
-      const info = await api.checkForUpdates(currentLocale(), normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource));
+      const info = await api.checkForUpdates(currentLocale(), normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), updateChannel.value);
       if (token !== generation || disposed) return;
       updateInfo.value = info;
+      recordPromotedBuild(info);
+      await recordPromotionFromStableChannel(info);
+      if (token !== generation || disposed) return;
       // Installation may have started while the check was in flight; only restore
       // the phase this check itself owns.
       if (phase.value === "checking") phase.value = downloaded.value ? "ready" : "idle";
       if (!info.update_available) {
-        updateCheckMessage.value = t("updates.upToDate", { version: info.current_version });
+        updateCheckMessage.value = t("updates.upToDate", { version: displayAppVersion(info.current_version) });
         // The remote no longer offers a newer release, but a package from an
         // earlier download can still sit in the cache. Drop it once the running
         // build already satisfies it, otherwise the update badge never clears
         // and the dialog claims an update is downloaded with no way to install
         // it (#13562).
         const prepared = downloaded.value;
-        if (prepared && isPreparedUpdateObsolete(prepared.version, info.current_version)) {
+        if (prepared && isPreparedUpdateObsolete(prepared.version, info.current_version, info.channel)) {
           await discardSupersededUpdate(prepared);
           if (token !== generation || disposed) return;
         }
@@ -351,7 +399,9 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
           downloadProgress.value = payload.total && payload.total > 0 ? Math.min(100, Math.round((payload.downloaded / payload.total) * 100)) : null;
         });
         if (token !== generation || disposed) return;
-        const cache = await api.downloadUpdate(normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), version, attemptId, updateInfo.value?.release_notes);
+        const source = normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource);
+        const releaseTag = updateInfo.value?.release_tag;
+        const cache = releaseTag ? await api.downloadUpdate(source, version, attemptId, updateInfo.value?.release_notes, updateChannel.value, releaseTag) : await api.downloadUpdate(source, version, attemptId, updateInfo.value?.release_notes, updateChannel.value);
         if (token !== generation || disposed) return;
         if (cache.version !== version) throw new Error("Downloaded update version changed; check for updates again.");
         setDownloaded(cache);
@@ -415,6 +465,21 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       fail(error);
     }
   }
+  async function changeUpdateChannel(channel: SettingsUpdateChannel) {
+    if (isIgnoringUpdate.value || isInstallingUpdate.value) return;
+    try {
+      await cancelDownload();
+      const cache = downloaded.value;
+      downloaded.value = null;
+      updateInfo.value = null;
+      phase.value = "idle";
+      if (cache) await api.discardDownloadedUpdate(cache.cache_id);
+      if (updateChannel.value !== channel) await settingsStore.updateEditorSettingsAndPersist({ updateChannel: channel });
+      await checkUpdates();
+    } catch (error) {
+      fail(error);
+    }
+  }
   async function ignoreCurrentVersion() {
     const version = updateInfo.value?.latest_version;
     if (!version || isIgnoringUpdate.value || isInstallingUpdate.value || updateReady.value) return;
@@ -432,6 +497,23 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     } finally {
       isIgnoringUpdate.value = false;
     }
+  }
+  /** Undoes "ignore this version" so the release is offered again (#13880). */
+  async function restoreIgnoredVersion() {
+    if (!settingsStore.editorSettings.ignoredUpdateVersion || isIgnoringUpdate.value) return;
+    isIgnoringUpdate.value = true;
+    try {
+      await settingsStore.updateEditorSettingsAndPersist({ ignoredUpdateVersion: "" });
+    } catch (error) {
+      fail(error);
+      return;
+    } finally {
+      isIgnoringUpdate.value = false;
+    }
+    // Release the guard first: checkUpdates() returns early while isIgnoringUpdate is set,
+    // and a silent check is skipped when the toolbar entry is hidden. The dialog is open
+    // here, so a normal check cannot surprise anyone.
+    await checkUpdates();
   }
   async function performInstall(restartOnly: boolean) {
     if (!isTauriRuntime() || isInstallingUpdate.value || isIgnoringUpdate.value || (!restartOnly && !downloaded.value)) return;
@@ -503,16 +585,20 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
         const cache = await api.getDownloadedUpdate();
         if (disposed) return;
         if (cache) {
-          const ignored = isUpdateIgnored({ latest_version: cache.version } as api.UpdateInfo, settingsStore.editorSettings.ignoredUpdateVersion);
-          if (ignored) await api.discardDownloadedUpdate(cache.cache_id);
-          else {
-            setDownloaded(cache);
-            updateInfo.value!.current_version = await api.getAppVersion();
-            // An upgrade that happened outside this process leaves the previous
-            // package in the cache. Adopting it would pin the dialog to "already
-            // up to date" while still advertising a downloaded update (#13562).
-            if (isPreparedUpdateObsolete(cache.version, updateInfo.value!.current_version)) {
-              await discardSupersededUpdate(cache);
+          if ((cache.channel ?? "stable") !== updateChannel.value) {
+            await api.discardDownloadedUpdate(cache.cache_id);
+          } else {
+            const ignored = isUpdateIgnored({ latest_version: cache.version } as api.UpdateInfo, settingsStore.editorSettings.ignoredUpdateVersion);
+            if (ignored) await api.discardDownloadedUpdate(cache.cache_id);
+            else {
+              setDownloaded(cache);
+              updateInfo.value!.current_version = await api.getAppVersion();
+              // An upgrade that happened outside this process leaves the previous
+              // package in the cache. Adopting it would pin the dialog to "already
+              // up to date" while still advertising a downloaded update (#13562).
+              if (isPreparedUpdateObsolete(cache.version, updateInfo.value!.current_version, cache.channel ?? "stable")) {
+                await discardSupersededUpdate(cache);
+              }
             }
           }
         }
@@ -545,6 +631,12 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       })
       .catch(fail);
   });
+  const stopChannelWatch = watch(updateChannel, (channel, previous) => {
+    // Startup restores persisted settings after this composable is created.
+    // initialize() owns the first silent check; hydration is not a user switch.
+    if (!initialized || disposed || channel === previous || isIgnoringUpdate.value) return;
+    void changeUpdateChannel(channel).catch(fail);
+  });
   // Hiding the toolbar entry mid-session must also stop background activity,
   // and re-showing it resumes the silent checks.
   const stopUpdateEntryWatch = watch(updateEntryVisible, (visible) => {
@@ -566,6 +658,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     clearRetry();
     clearInterval(hourlyTimer);
     stopSettingsWatch();
+    stopChannelWatch();
     stopUpdateEntryWatch();
     updatePreparationRelease?.();
     updatePreparationRelease = undefined;
@@ -596,7 +689,10 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     formatUpdateError,
     openLatestRelease,
     changeUpdateDownloadSource,
+    changeUpdateChannel,
     ignoreCurrentVersion,
+    restoreIgnoredVersion,
+    ignoredReleaseVersion,
     downloadUpdateInBackground,
     cancelDownload,
     installDownloadedUpdate,

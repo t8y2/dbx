@@ -698,6 +698,7 @@ include!(concat!(env!("OUT_DIR"), "/database_type.rs"));
 #[serde(rename_all = "kebab-case")]
 pub enum JdbcDialectHint {
     OceanbaseOracle,
+    Oracle,
 }
 
 /// Connection data returned to a client, with response-only metadata flattened into the JSON.
@@ -727,9 +728,16 @@ pub fn jdbc_dialect_hint(config: &ConnectionConfig) -> Option<JdbcDialectHint> {
         return None;
     }
     let url = config.connection_string.as_deref()?.trim();
-    url.get(.."jdbc:oceanbase:oracle://".len())
-        .filter(|prefix| prefix.eq_ignore_ascii_case("jdbc:oceanbase:oracle://"))
-        .map(|_| JdbcDialectHint::OceanbaseOracle)
+    if url
+        .get(.."jdbc:oceanbase:oracle://".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("jdbc:oceanbase:oracle://"))
+    {
+        return Some(JdbcDialectHint::OceanbaseOracle);
+    }
+    if url.get(.."jdbc:oracle:".len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case("jdbc:oracle:")) {
+        return Some(JdbcDialectHint::Oracle);
+    }
+    None
 }
 
 #[derive(Deserialize)]
@@ -1960,6 +1968,31 @@ fn sqlserver_url_param_parts(params: Option<&str>) -> Vec<(Option<char>, &str)> 
 
     parts.push((separator, &source[start..]));
     parts
+}
+
+pub fn sqlserver_url_instance_name(params: Option<&str>) -> Result<Option<String>, String> {
+    let property = sqlserver_url_param_parts(params)
+        .into_iter()
+        .rev()
+        .filter_map(|(_, part)| part.split_once('='))
+        .find(|(key, _)| percent_decode_str(key.trim()).decode_utf8_lossy().eq_ignore_ascii_case("instanceName"));
+    let Some((_, value)) = property else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    let name = if let Some(quoted) = value.strip_prefix('{').and_then(|value| value.strip_suffix('}')) {
+        quoted.to_owned()
+    } else {
+        percent_decode_str(value)
+            .decode_utf8()
+            .map_err(|_| "Invalid SQL Server instanceName URL parameter")?
+            .into_owned()
+    };
+    // A name must not be interpreted as part of the host or port.
+    if name.contains(['\\', ',', ':', '{', '}']) || name.chars().any(char::is_control) {
+        return Err("Invalid SQL Server instanceName URL parameter".to_owned());
+    }
+    Ok((!name.is_empty()).then_some(name))
 }
 
 fn sqlserver_legacy_compatibility_part(part: &str) -> bool {
@@ -3237,7 +3270,7 @@ mod tests {
     };
 
     #[test]
-    fn connection_response_derives_only_oceanbase_oracle_from_explicit_jdbc_url() {
+    fn connection_response_derives_approved_hints_from_explicit_jdbc_url() {
         let mut config = mysql_config("root", "", None);
         config.db_type = DatabaseType::Jdbc;
         config.connection_string = Some(" JDBC:OCEANBASE:ORACLE://host/service ".into());
@@ -3248,6 +3281,12 @@ mod tests {
         assert_eq!(response.config, config);
 
         config.connection_string = Some("jdbc:oracle:thin:@host/service".into());
+        let oracle_response = ConnectionResponse::from_config(config.clone());
+        let oracle_value = serde_json::to_value(&oracle_response).unwrap();
+        assert_eq!(oracle_value["jdbc_dialect"], "oracle");
+        assert_eq!(oracle_value["db_type"], "jdbc");
+
+        config.connection_string = Some("jdbc:mysql://host:3306/service".into());
         assert!(serde_json::to_value(ConnectionResponse::from_config(config.clone()))
             .unwrap()
             .get("jdbc_dialect")

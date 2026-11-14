@@ -16,6 +16,8 @@ export type ShortcutActionId =
   | "saveSql"
   | "acceptCompletion"
   | "triggerCompletion"
+  | "previousCompletion"
+  | "nextCompletion"
   | "indentMore"
   | "indentLess"
   | "insertLineBelow"
@@ -35,6 +37,9 @@ export type ShortcutActionId =
   | "previousStatement"
   | "nextStatement"
   | "statementStart"
+  | "toggleBookmark"
+  | "nextBookmark"
+  | "previousBookmark"
   | "extendSelection"
   | "addNextSelectionOccurrence"
   | "selectAllSelectionOccurrences"
@@ -43,6 +48,7 @@ export type ShortcutActionId =
   | "lowercaseSelection"
   | "toggleCaseSelection"
   | "convertNamingStyle"
+  | "convertSelectionToDelimited"
   | "exPasteSqlInCondition"
   | "toggleFold"
   | "foldAll"
@@ -94,6 +100,9 @@ export type ShortcutActionId =
   | "replace"
   | "refreshData"
   | "toggleResultsPane"
+  | "focusResultGrid"
+  | "focusSqlEditor"
+  | "copyActiveResult"
   | "toggleTranspose"
   | "cancelSearch"
   | "toggleSidebar"
@@ -106,6 +115,8 @@ export type ShortcutActionId =
   | "openDataInNewTab"
   | "viewTableDdl"
   | "editSidebarTableStructure"
+  | "createSidebarTable"
+  | "createSidebarDatabase"
   | "sendSelectionToAi"
   | "sqlIntentionActions";
 
@@ -275,6 +286,18 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Alt+/",
   },
   {
+    id: "previousCompletion",
+    labelKey: "settings.shortcutPreviousCompletion",
+    scope: "editor",
+    defaultShortcut: "Ctrl+P",
+  },
+  {
+    id: "nextCompletion",
+    labelKey: "settings.shortcutNextCompletion",
+    scope: "editor",
+    defaultShortcut: "Ctrl+N",
+  },
+  {
     id: "indentMore",
     labelKey: "settings.shortcutIndentMore",
     scope: "editor",
@@ -377,6 +400,24 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Alt+Home",
   },
   {
+    id: "toggleBookmark",
+    labelKey: "settings.shortcutToggleBookmark",
+    scope: "editor",
+    defaultShortcut: "Mod+F2",
+  },
+  {
+    id: "nextBookmark",
+    labelKey: "settings.shortcutNextBookmark",
+    scope: "editor",
+    defaultShortcut: "F2",
+  },
+  {
+    id: "previousBookmark",
+    labelKey: "settings.shortcutPreviousBookmark",
+    scope: "editor",
+    defaultShortcut: "Shift+F2",
+  },
+  {
     id: "extendSelection",
     labelKey: "settings.shortcutExtendSelection",
     scope: "editor",
@@ -423,6 +464,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutConvertNamingStyle",
     scope: "editor",
     defaultShortcut: "Shift+Alt+C",
+  },
+  {
+    id: "convertSelectionToDelimited",
+    labelKey: "settings.shortcutConvertSelectionToDelimited",
+    scope: "editor",
+    defaultShortcut: "Mod+Alt+,",
   },
   {
     id: "exPasteSqlInCondition",
@@ -735,6 +782,24 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "",
   },
   {
+    id: "focusResultGrid",
+    labelKey: "settings.shortcutFocusResultGrid",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "focusSqlEditor",
+    labelKey: "settings.shortcutFocusSqlEditor",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
+    id: "copyActiveResult",
+    labelKey: "settings.shortcutCopyActiveResult",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
     id: "toggleTranspose",
     labelKey: "settings.shortcutToggleTranspose",
     scope: "grid",
@@ -806,6 +871,18 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutEditSidebarTableStructure",
     scope: "sidebar",
     defaultShortcut: "F4",
+  },
+  {
+    id: "createSidebarTable",
+    labelKey: "contextMenu.createTable",
+    scope: "sidebar",
+    defaultShortcut: "Mod+Alt+N",
+  },
+  {
+    id: "createSidebarDatabase",
+    labelKey: "contextMenu.createDatabase",
+    scope: "sidebar",
+    defaultShortcut: "Shift+F4",
   },
   {
     id: "sendSelectionToAi",
@@ -974,10 +1051,8 @@ function computeNormalizedShortcutSettings(settings: Partial<ShortcutSettings> |
     normalized.copyCurrentRow = LEGACY_COPY_CURRENT_ROW_DEFAULT;
   }
 
-  // gotoLine 的平台默认键（Win/Linux 为 Ctrl+G）在该动作引入前是其他动作可合法
-  // 显式绑定的自由键位；无显式配置的默认值与同作用域显式绑定同键时同样让位，
-  // 否则运行时 keymap 先注册的 gotoLine 会遮蔽用户的显式配置。
-  for (const actionId of [...TAB_NAVIGATION_HISTORY_ACTIONS, "gotoLine"] as ShortcutActionId[]) {
+  // 新增动作的默认键可能已经被用户绑定到同作用域的其他动作。保留用户的绑定。
+  for (const actionId of [...TAB_NAVIGATION_HISTORY_ACTIONS, "gotoLine", "createSidebarTable", "createSidebarDatabase"] as ShortcutActionId[]) {
     if (hasExplicitShortcut(settings, actionId)) continue;
     const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === actionId);
     if (!definition) continue;

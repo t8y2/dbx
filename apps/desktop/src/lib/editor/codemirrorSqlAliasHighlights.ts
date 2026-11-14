@@ -7,6 +7,17 @@ import type { SqlSemanticBuildOptions } from "@/lib/sql/semantic/types";
 
 const refreshAliasHighlights = StateEffect.define<null>();
 const aliasMark = Decoration.mark({ class: "cm-sqlAliasHighlight" });
+const aliasHighlightTheme = EditorView.baseTheme({
+  ".cm-sqlAliasHighlight": {
+    backgroundColor: "rgb(34 139 74 / 0.16)",
+    boxShadow: "inset 0 0 0 1px rgb(34 139 74 / 0.28)",
+    borderRadius: "2px",
+  },
+  "&dark .cm-sqlAliasHighlight": {
+    backgroundColor: "rgb(110 231 183 / 0.18)",
+    boxShadow: "inset 0 0 0 1px rgb(110 231 183 / 0.32)",
+  },
+});
 
 export function createSqlAliasHighlights(options: SqlSemanticBuildOptions & { enabled: boolean }): Extension {
   if (!options.enabled) return [];
@@ -81,16 +92,6 @@ export function createSqlAliasHighlights(options: SqlSemanticBuildOptions & { en
       },
       { decorations: (plugin) => plugin.decorations },
     ),
-    EditorView.baseTheme({
-      ".cm-sqlAliasHighlight": {
-        backgroundColor: "rgb(34 139 74 / 0.16)",
-        boxShadow: "inset 0 0 0 1px rgb(34 139 74 / 0.28)",
-        borderRadius: "2px",
-      },
-      "&dark .cm-sqlAliasHighlight": {
-        backgroundColor: "rgb(110 231 183 / 0.18)",
-        boxShadow: "inset 0 0 0 1px rgb(110 231 183 / 0.32)",
-      },
-    }),
+    aliasHighlightTheme,
   ];
 }

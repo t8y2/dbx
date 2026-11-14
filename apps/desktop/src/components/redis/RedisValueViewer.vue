@@ -46,6 +46,7 @@ import {
   isRedisJsonContainerValue,
   parseRedisJsonDetail,
   REDIS_VALUE_FORMAT_DISPLAY_ORDER,
+  redisBlobDisplayPreview,
   redisBlobText,
   redisJsonValueText,
   normalizeRedisJsonDraft,
@@ -114,6 +115,7 @@ const REDIS_AUTO_REFRESH_ENABLED_STORAGE_KEY = "dbx-redis-auto-refresh-enabled-v
 const REDIS_AUTO_REFRESH_INTERVAL_STORAGE_KEY = "dbx-redis-auto-refresh-interval-seconds-v2";
 const REDIS_AUTO_REFRESH_INTERVAL_OPTIONS = [1, 3, 5, 10] as const;
 const REDIS_COLLECTION_ROW_HEIGHT = 32;
+const HASH_EAGER_DETAIL_BASE64_LIMIT = Math.ceil((64 * 1024) / 3) * 4;
 const REDIS_STREAM_MIN_ROW_HEIGHT = 96;
 const data = ref<RedisValue | null>(null);
 const loading = ref(false);
@@ -499,6 +501,9 @@ const isStringValueTruncated = computed(() => {
 });
 const stringValueDetail = computed(() => (stringBlob.value ? formatRedisMemberDetail(stringBlob.value, { allowJsonText: !isBitmapKind.value }) : null));
 const selectedMemberDetail = computed(() => formatRedisMemberDetail(selectedMemberRaw.value, { allowJsonText: true }));
+// Issue #14384: JSON-shaped text strict JSON rejects gets a read-only JSON view of the raw bytes, so no codec may be active.
+const stringLooseJsonText = computed(() => (stringValueCodec.value === "none" ? (stringValueDetail.value?.looseJsonText ?? null) : null));
+const memberLooseJsonText = computed(() => (memberValueCodec.value === "none" ? (selectedMemberDetail.value.looseJsonText ?? null) : null));
 
 // Decompression depends on the value/codec refs above, so these watchers and
 // computeds live here rather than next to the state declarations.
@@ -662,7 +667,8 @@ const redisJsonAppearance = computed(() => (isDark.value ? "dark" : "light"));
 const isBinaryStringValue = computed(() => Boolean(stringValueDetail.value?.binary));
 const selectedMemberCanEdit = computed(() => selectedMemberContext.value?.canEdit ?? false);
 // kvrocks 位图不是字符串，写回会成为字符串，因此位图详情只读
-const canEditCurrentStringFormat = computed(() => !isBitmapKind.value && !isStringValueTruncated.value && Boolean(stringValueDetail.value?.editable) && (stringValueView.value === "utf8" || stringValueView.value === "json"));
+// The JSON view edits only strictly parsed JSON; loosely indented text (#14384) is read-only there.
+const canEditCurrentStringFormat = computed(() => !isBitmapKind.value && !isStringValueTruncated.value && Boolean(stringValueDetail.value?.editable) && (stringValueView.value === "utf8" || (stringValueView.value === "json" && Boolean(stringValueDetail.value?.json))));
 const showStringEditActions = computed(() => !stringPluginCodecView.value && canEditCurrentStringFormat.value);
 const originalStringEditValue = computed(() => (stringBlob.value ? rawRedisValueText(stringBlob.value) : ""));
 const stringJsonRawBaseline = ref("");
@@ -792,6 +798,7 @@ const streamRows = computed<RedisStreamRow[]>(() => {
     id: `${index}:${entry.id}`,
     index,
     entry,
+    timestamp: streamEntryTimestamp(entry.id),
   }));
 });
 
@@ -1029,6 +1036,7 @@ type RedisStreamRow = {
   id: string;
   index: number;
   entry: RedisStreamEntry;
+  timestamp: number | undefined;
 };
 
 function replaceStreamEntries(value: RedisValue) {
@@ -1309,8 +1317,15 @@ function formatStreamDurationTitle(value: number | string | undefined): string {
 }
 
 function formatStreamDateTime(timestamp: number): string {
-  if (!Number.isFinite(timestamp) || timestamp <= 0) return "-";
+  if (!Number.isFinite(timestamp) || timestamp < 0 || timestamp > 8_640_000_000_000_000) return "-";
   return streamDateTimeFormatter.value.format(new Date(timestamp));
+}
+
+function streamEntryTimestamp(id: string): number | undefined {
+  const milliseconds = /^(\d+)-\d+$/.exec(id)?.[1];
+  if (milliseconds === undefined) return;
+  const timestamp = Number(milliseconds);
+  if (Number.isSafeInteger(timestamp) && timestamp <= 8_640_000_000_000_000) return timestamp;
 }
 
 function formatStreamLastDelivery(value: number | string | undefined): string {
@@ -1620,6 +1635,9 @@ function setStringValueFormat(format: RedisValueFormat) {
       if (!(stringDraftFormat.value === "json" && isStringDraftDirty("json"))) stringDraftFormat.value = "utf8";
     }
     rememberRedisValueFormat(format);
+  } else if (format === "json" && stringLooseJsonText.value != null) {
+    // Read-only loose JSON has no draft to convert, but picking the view is still a preference.
+    rememberRedisValueFormat(format);
   }
 }
 
@@ -1648,6 +1666,8 @@ function setMemberValueFormat(format: RedisValueFormat) {
         memberDraftFormat.value = "utf8";
       }
     }
+    rememberRedisValueFormat(format);
+  } else if (format === "json" && memberLooseJsonText.value != null) {
     rememberRedisValueFormat(format);
   }
 }
@@ -1716,6 +1736,7 @@ function isTextRedisFormat(format: RedisValueFormat): boolean {
 function canRenderStringValueView(format: RedisValueFormat): boolean {
   if (!isJsonDerivedView(format)) return true;
   if (stringValueDetail.value?.json) return true;
+  if (format === "json" && stringLooseJsonText.value != null) return true;
   if (activeStructuredStringDetail.value) return true;
   if (stringValueCodec.value === "base64") return stringBase64Detail.value?.json != null;
   return isDecompressCodec(stringValueCodec.value) && decompressedState.value.status === "success" && decompressedJsonDetail.value != null;
@@ -1724,6 +1745,7 @@ function canRenderStringValueView(format: RedisValueFormat): boolean {
 function canRenderMemberValueView(format: RedisValueFormat): boolean {
   if (!isJsonDerivedView(format)) return true;
   if (selectedMemberDetail.value.json) return true;
+  if (format === "json" && memberLooseJsonText.value != null) return true;
   if (activeStructuredMemberDetail.value) return true;
   if (memberValueCodec.value === "base64") return memberBase64Detail.value?.json != null;
   return isDecompressCodec(memberValueCodec.value) && decompressedState.value.status === "success" && decompressedJsonDetail.value != null;
@@ -1746,7 +1768,7 @@ function detailTextForFormat(detail: ReturnType<typeof formatRedisMemberDetail>,
     case "binary":
       return detail.binaryText;
     case "json":
-      return detail.json?.formattedText ?? detail.rawText;
+      return detail.json?.formattedText ?? detail.looseJsonText ?? detail.rawText;
     case "unicodejson":
       return detail.json ? decodeJsonUnicodeEscapes(detail.json.formattedText) : detail.rawText;
     case "yaml":
@@ -1892,7 +1914,7 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
       stringJsonRawBaseline.value = detail.json?.formattedText ?? "";
       stringJsonDraftBaseline.value = jsonDraftBaseline(stringJsonRawBaseline.value, redisJsonDecoded.value);
       editValue.value = stringValueView.value === "json" && detail.json ? stringJsonDraftBaseline.value : detail.rawText;
-      stringDraftFormat.value = stringValueView.value === "json" ? "json" : "utf8";
+      stringDraftFormat.value = stringValueView.value === "json" && detail.json ? "json" : "utf8";
       clearSelectedMember();
     } else if (loadedValue.data.kind === "json") {
       const pair = jsonDraftPairForEditor(redisJsonValueText(loadedValue.data));
@@ -2234,7 +2256,7 @@ function clearSelectedMember() {
 }
 
 function isSelectedMember(title: string, value: unknown, identity?: string) {
-  return selectedMemberKey.value === getRedisMemberSelectionKey(title, value, identity);
+  return selectedMemberKey.value !== "" && selectedMemberKey.value === getRedisMemberSelectionKey(title, value, identity);
 }
 
 function viewMember(title: string, value: unknown, context: RedisMemberContext, identity?: string) {
@@ -2371,7 +2393,8 @@ async function saveZsetInlineEdit(item: RedisZsetItem) {
 
     resetZsetInlineEdit();
     try {
-      await load();
+      // Keep an active member search across the post-save reload (#14322).
+      await reloadPreservingCollectionSearch();
     } catch (error) {
       toast(t("redis.updateAppliedRefreshFailed", { message: errorMessage(error) }), 5000);
     }
@@ -2459,7 +2482,8 @@ async function saveMemberEdit() {
     }
     const editedValue = writeValue;
     isEditingMember.value = false;
-    await load({ selectDefaultMember: false });
+    // Saving a member must not drop the "search fields and values" filter (#14322).
+    await reloadPreservingCollectionSearch();
     restoreSelectedMember(nextContext, editedValue);
   } finally {
     savingMember.value = false;
@@ -2482,6 +2506,8 @@ function selectDefaultMember(redisValue: RedisValue) {
     case "hash": {
       const first = redisValue.data.items[0];
       if (!first) return clearSelectedMember();
+      // Keep full detail work for when the user opens a large hash member.
+      if (!showMemberDetail.value && first.value.raw_base64.length > HASH_EAGER_DETAIL_BASE64_LIMIT) return clearSelectedMember();
       const field = redisBlobText(first.field);
       return selectMember(formatValue(first.field), first.value, { kind: "hash", field, canEdit: field != null && canEditRedisMemberDetail("hash", first.value) });
     }
@@ -3198,7 +3224,10 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           <Badge v-if="stringValueDetectionLabel" variant="outline" class="shrink-0 text-xs text-muted-foreground" :title="t('redis.detectedBadgeTitle')" :aria-label="t('redis.detectedBadgeTitle')">{{ stringValueDetectionLabel }}</Badge>
           <FileArchive v-if="!isStringValueTruncated && stringGzipBadge && stringValueCodec === 'none'" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')" />
           <span class="flex-1" />
-          <label v-if="!stringPluginCodecView && (isTextRedisFormat(stringValueView) || activeStructuredStringDetail || isDecompressCodec(stringValueCodec))" class="flex items-center gap-1.5 text-muted-foreground">
+          <!-- Issue #14653: keep the toggle on one line. Without shrink-0 the label is the only
+               shrinkable item in this row and gets squeezed to min-content (one CJK glyph per
+               line), overflowing over the 视图 row; the codec strip already scrolls itself. -->
+          <label v-if="!stringPluginCodecView && (isTextRedisFormat(stringValueView) || activeStructuredStringDetail || isDecompressCodec(stringValueCodec))" class="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-muted-foreground">
             <WrapText class="h-3.5 w-3.5" />
             {{ t("redis.wordWrap") }}
             <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
@@ -3260,6 +3289,10 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <span>{{ searchPreviewNotice }}</span>
             <Button v-if="!(showMemberDetail ? memberCodecMismatch : stringCodecMismatch) && decompressedState.status === 'error' && decompressedState.reason !== 'limit'" variant="outline" size="sm" @click="retryDecompressAsDeflate">{{ t("redis.decompressedRetryAsDeflate") }}</Button>
           </div>
+        </div>
+        <div v-else-if="stringValueView === 'json' && stringLooseJsonText != null" data-redis-loose-json class="min-h-0 flex-1 flex flex-col overflow-hidden">
+          <RedisJsonEditor :model-value="stringLooseJsonText" read-only presentation="viewer" class="min-h-0 flex-1" :word-wrap="redisJsonWordWrap" :search-highlights="stringSearchHighlights" :enable-builtin-find="false" />
+          <div class="flex shrink-0 items-center gap-2 border-t px-4 py-2 text-xs text-muted-foreground">{{ t("redis.looseJsonHint") }}</div>
         </div>
         <div v-else-if="activeStructuredStringDetail && stringValueView !== 'hex' && stringValueView !== 'base64'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
           <JsonTree
@@ -3366,7 +3399,8 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': !redisJsonDecoded }" @click="setRedisJsonUnicodeMode('raw')">{{ t("redis.jsonViewRaw") }}</Button>
             <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': redisJsonDecoded }" @click="setRedisJsonUnicodeMode('decoded')">{{ t("redis.jsonViewDecoded") }}</Button>
           </div>
-          <label class="flex items-center gap-1.5 text-muted-foreground">
+          <!-- Issue #14653: same one-line contract as the codec row toggle. -->
+          <label class="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-muted-foreground">
             <WrapText class="h-3.5 w-3.5" />
             {{ t("redis.wordWrap") }}
             <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
@@ -3517,7 +3551,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               @click="viewMember(formatValue(row.value.field), row.value.value, { kind: 'hash', field: redisBlobText(row.value.field), canEdit: redisBlobText(row.value.field) != null && canEditRedisMemberDetail('hash', row.value.value) })"
             >
               <div class="px-3 py-1.5 text-blue-500 truncate border-r">{{ formatValue(row.value.field) }}</div>
-              <div class="px-3 py-1.5 truncate text-muted-foreground">{{ formatValue(row.value.value) }}</div>
+              <div class="px-3 py-1.5 truncate text-muted-foreground">{{ redisBlobDisplayPreview(row.value.value) }}</div>
               <div v-if="hashFieldTtlSupported" class="px-2 py-1 flex items-center min-w-0">
                 <Button
                   v-if="redisBlobText(row.value.field) && row.value.field_ttl !== undefined"
@@ -3681,7 +3715,10 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               <template #default="{ item: row, active }">
                 <DynamicScrollerItem :item="row" :active="active" :size-dependencies="[streamFieldCount(row)]" :data-index="row.index">
                   <div data-redis-stream-entry class="dbx-editor-font-family px-4 py-2 border-b text-sm hover:bg-accent/50">
-                    <div class="mb-1 text-xs text-muted-foreground">{{ row.entry.id }}</div>
+                    <div class="mb-1 flex items-baseline gap-2 whitespace-nowrap text-xs text-muted-foreground">
+                      <span class="truncate" :title="row.entry.id">{{ row.entry.id }}</span>
+                      <time v-if="row.timestamp !== undefined" class="min-w-0 truncate tabular-nums" :title="t('redis.streamEntryTime')">{{ formatStreamDateTime(row.timestamp) }}</time>
+                    </div>
                     <div
                       v-for="(field, fieldIndex) in row.entry.fields"
                       :key="`${row.id}:${field.field}:${fieldIndex}`"
@@ -4059,7 +4096,8 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
               <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': memberPluginCodecView }" :disabled="hasUnsavedRedisDraft" @click="memberPluginCodecView = true">{{ t("redis.pluginCodecLabel") }}</Button>
             </RedisHorizontalScrollbar>
             <span class="flex-1" />
-            <label v-if="!memberPluginCodecView && (isTextRedisFormat(memberValueView) || activeStructuredMemberDetail || isDecompressCodec(memberValueCodec))" class="flex items-center gap-1.5 text-muted-foreground">
+            <!-- Issue #14653: the member dialog narrows with the viewport, same one-line contract. -->
+            <label v-if="!memberPluginCodecView && (isTextRedisFormat(memberValueView) || activeStructuredMemberDetail || isDecompressCodec(memberValueCodec))" class="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-muted-foreground">
               <WrapText class="h-3.5 w-3.5" />
               {{ t("redis.wordWrap") }}
               <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
@@ -4121,6 +4159,10 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           </div>
           <div v-else-if="memberValueView === 'json' && selectedMemberDetail.json && memberValueCodec === 'none'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
             <JsonTree ref="memberSearchTreeRef" :search-matches="showMemberDetail ? treeSearchMatches : []" :active-search-index="contentSearchActiveIndex" :value="selectedMemberDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" virtualized />
+          </div>
+          <div v-else-if="memberValueView === 'json' && memberLooseJsonText != null" data-redis-loose-json class="min-h-0 flex-1 flex flex-col overflow-hidden">
+            <RedisJsonEditor :model-value="memberLooseJsonText" read-only presentation="viewer" class="min-h-0 flex-1" :word-wrap="redisJsonWordWrap" :search-highlights="memberSearchHighlights" :enable-builtin-find="false" />
+            <div class="flex shrink-0 items-center gap-2 border-t px-5 py-2 text-xs text-muted-foreground">{{ t("redis.looseJsonHint") }}</div>
           </div>
           <div v-else-if="activeStructuredMemberDetail && memberValueView !== 'hex' && memberValueView !== 'base64'" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
             <JsonTree

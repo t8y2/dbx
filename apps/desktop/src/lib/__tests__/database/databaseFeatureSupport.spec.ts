@@ -5,6 +5,7 @@ import { buildGetDatabaseCommentSql } from "@/lib/database/dbAdminSql";
 import {
   defaultAutoCommitForDbType,
   isSchemaAware,
+  pagesTablePartitionsWithRootPage,
   supportsConnectionQueryActions,
   supportsConnectionScopedQueryExecution,
   supportsConnectionDatabaseBrowser,
@@ -265,11 +266,11 @@ describe("usesProvenReadOnlyStickyTransactionState", () => {
     expect(usesProvenReadOnlyStickyTransactionState("postgres")).toBe(true);
     expect(usesProvenReadOnlyStickyTransactionState("gaussdb")).toBe(true);
     expect(usesProvenReadOnlyStickyTransactionState("opengauss")).toBe(true);
+    expect(usesProvenReadOnlyStickyTransactionState("kingbase")).toBe(true);
   });
 
   it("keeps databases without manual-transaction support on the legacy toolbar", () => {
     expect(usesProvenReadOnlyStickyTransactionState("doris")).toBe(false);
-    expect(usesProvenReadOnlyStickyTransactionState("kingbase")).toBe(false);
     expect(usesProvenReadOnlyStickyTransactionState("jdbc")).toBe(false);
     expect(usesProvenReadOnlyStickyTransactionState("redis")).toBe(false);
     expect(usesProvenReadOnlyStickyTransactionState(undefined)).toBe(false);
@@ -278,7 +279,7 @@ describe("usesProvenReadOnlyStickyTransactionState", () => {
   it("only enables sticky state where manual mode is reachable", () => {
     // The sticky UX gates commit/rollback in manual mode; a member without
     // transaction support could never reach it. Guards against drift.
-    for (const dbType of ["oracle", "oceanbase-oracle", "mysql", "postgres", "gaussdb", "opengauss"]) {
+    for (const dbType of ["oracle", "oceanbase-oracle", "mysql", "postgres", "gaussdb", "opengauss", "kingbase"]) {
       expect(supportsTransaction(dbType)).toBe(true);
     }
   });
@@ -459,5 +460,23 @@ describe("database namespace creation", () => {
     expect(databaseNodeNamespaceCreationTarget({ db_type: "goldendb" }, { type: "database", database: "app" })).toBeNull();
     expect(databaseNodeNamespaceCreationTarget({ db_type: "duckdb" }, { type: "database", database: "main" })).toBeNull();
     expect(databaseNodeNamespaceCreationTarget({ db_type: "jdbc" }, { type: "database", database: "main" })).toBeNull();
+  });
+});
+
+describe("root-paged table partitions", () => {
+  it("enables root paging only for native PostgreSQL-protocol drivers", () => {
+    for (const dbType of ["postgres", "redshift", "gaussdb", "kwdb", "opengauss"] as const) {
+      expect(pagesTablePartitionsWithRootPage({ db_type: dbType })).toBe(true);
+    }
+    expect(pagesTablePartitionsWithRootPage({ db_type: "postgres", driver_profile: "cloudberry" })).toBe(true);
+    expect(pagesTablePartitionsWithRootPage({ db_type: "mysql" })).toBe(false);
+    expect(pagesTablePartitionsWithRootPage({ db_type: "kingbase" })).toBe(false);
+    expect(pagesTablePartitionsWithRootPage(undefined)).toBe(false);
+  });
+
+  it("keeps GaussDB's external M/JDBC driver on row-based paging", () => {
+    expect(pagesTablePartitionsWithRootPage({ db_type: "gaussdb", driver_profile: "gaussdb-m" })).toBe(false);
+    expect(pagesTablePartitionsWithRootPage({ db_type: "gaussdb", driver_profile: "GAUSSDB-M" })).toBe(false);
+    expect(pagesTablePartitionsWithRootPage({ db_type: "gaussdb", driver_profile: "gaussdb" })).toBe(true);
   });
 });

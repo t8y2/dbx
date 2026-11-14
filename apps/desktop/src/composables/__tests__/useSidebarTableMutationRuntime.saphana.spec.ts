@@ -37,7 +37,7 @@ const actions: Array<{ action: ConfirmAction; builder: typeof mocks.buildDropTab
   { action: "confirmTruncateTable", builder: mocks.buildTruncateTableSql, sql: 'TRUNCATE TABLE "APP"."ORDERS";' },
 ];
 
-function tableNode(database: string | null | undefined): TreeNode {
+function tableNode(database: string | null | undefined, overrides: Partial<TreeNode> = {}): TreeNode {
   return {
     id: "hana-1::APP:ORDERS",
     label: "ORDERS",
@@ -46,11 +46,12 @@ function tableNode(database: string | null | undefined): TreeNode {
     database,
     schema: "APP",
     isExpanded: false,
+    ...overrides,
   } as TreeNode;
 }
 
-function runtime(database: string | null | undefined, config: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile">> = { db_type: "saphana" }, databaseType: DatabaseType = "saphana", historyStore?: any) {
-  const node = tableNode(database);
+function runtime(database: string | null | undefined, config: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile">> = { db_type: "saphana" }, databaseType: DatabaseType = "saphana", historyStore?: any, nodeOverrides: Partial<TreeNode> = {}) {
+  const node = tableNode(database, nodeOverrides);
   const activeNode = shallowRef(node);
   const connectionStore = {
     ensureConnected: mocks.ensureConnected,
@@ -131,6 +132,18 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
     expect(mocks.buildDropTableSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "informix", schema: undefined, tableName: "ORDERS" }));
   });
 
+  /**
+   * #14717: PostgreSQL rejects `DROP TABLE` on a foreign table ("is not a table"),
+   * so the drop statement has to follow the relation kind the sidebar reported.
+   */
+  it("asks for a foreign-table drop when the node is a foreign table", async () => {
+    const { feature } = runtime("", { db_type: "postgres" }, "postgres", undefined, { tableType: "FOREIGN TABLE" });
+
+    await feature.confirmDropTable();
+
+    expect(mocks.buildDropTableSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "postgres", tableName: "ORDERS", foreignTable: true }));
+  });
+
   it.each(["confirmEmptyTable", "confirmTruncateTable"] as const)("refreshes data tabs after %s", async (action) => {
     const { feature, node } = runtime("");
 
@@ -176,7 +189,7 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
     expect(mocks.closeDroppedTableObjectTabsForNode).not.toHaveBeenCalled();
     expect(mocks.removeTreeNode).not.toHaveBeenCalled();
     expect(mocks.releaseActiveNodeReference).not.toHaveBeenCalled();
-    expect(mocks.toast).toHaveBeenCalledWith("contextMenu.tableOperationFailed", 5000);
+    expect(mocks.toast).toHaveBeenCalledWith("contextMenu.tableOperationFailed", { persistent: true });
   });
 
   it("reports execution failures without refreshing data tabs", async () => {
@@ -186,7 +199,7 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
     await feature.confirmTruncateTable();
 
     expect(mocks.refreshMutatedTableDataTabsForNode).not.toHaveBeenCalled();
-    expect(mocks.toast).toHaveBeenCalledWith("contextMenu.tableOperationFailed", 5000);
+    expect(mocks.toast).toHaveBeenCalledWith("contextMenu.tableOperationFailed", { persistent: true });
   });
 
   it("registers a running-execution cancel handler while empty table is in flight, and clears it afterward", async () => {
@@ -211,8 +224,8 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
 
     await feature.confirmEmptyTable();
 
-    expect(mocks.toast).toHaveBeenCalledWith("contextMenu.tableOperationTimedOut", 8000);
-    expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationFailed", 5000);
+    expect(mocks.toast).toHaveBeenCalledWith("contextMenu.tableOperationTimedOut", { persistent: true });
+    expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationFailed", { persistent: true });
     // A client-observed timeout must not remove the user's ability to cancel
     // — the underlying operation may still be running on the database.
     expect(sidebarDangerRunningExecutionId.value).not.toBe("");
@@ -243,8 +256,8 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
 
     await feature.confirmEmptyTable();
 
-    expect(mocks.toast).toHaveBeenCalledWith("contextMenu.tableOperationTimedOut", 8000);
-    expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationFailed", 5000);
+    expect(mocks.toast).toHaveBeenCalledWith("contextMenu.tableOperationTimedOut", { persistent: true });
+    expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationFailed", { persistent: true });
     // The cancel entry point must stay live for this database family too.
     expect(sidebarDangerRunningExecutionId.value).not.toBe("");
     expect(sidebarDangerRunningCancel.value).toBeTypeOf("function");
@@ -263,8 +276,8 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
 
     expect(mocks.cancelQuery).toHaveBeenCalledOnce();
     expect(mocks.toast).toHaveBeenCalledWith("contextMenu.tableOperationCancelled", 3000);
-    expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationTimedOut", 8000);
-    expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationFailed", 5000);
+    expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationTimedOut", { persistent: true });
+    expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationFailed", { persistent: true });
     expect(sidebarDangerRunningExecutionId.value).toBe("");
     expect(sidebarDangerRunningCancel.value).toBeNull();
   });
@@ -292,12 +305,12 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
     const operationPromise = feature.confirmEmptyTable();
     await cancelStarted;
 
-    expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationCancelUnconfirmed", 8000);
+    expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationCancelUnconfirmed", { persistent: true });
     resolveCancel(true);
     await operationPromise;
 
     expect(mocks.toast).toHaveBeenCalledWith("contextMenu.tableOperationCancelled", 3000);
-    expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationCancelUnconfirmed", 8000);
+    expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationCancelUnconfirmed", { persistent: true });
     expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationCancelPending", 6000);
     expect(sidebarDangerRunningExecutionId.value).toBe("");
     expect(sidebarDangerRunningCancel.value).toBeNull();
@@ -317,7 +330,7 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
     expect(mocks.executeWithProductionGuard).not.toHaveBeenCalled();
     expect(mocks.cancelQuery).not.toHaveBeenCalled();
     expect(mocks.toast).toHaveBeenCalledWith("contextMenu.tableOperationCancelled", 3000);
-    expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationFailed", 5000);
+    expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationFailed", { persistent: true });
     expect(sidebarDangerRunningExecutionId.value).toBe("");
     expect(sidebarDangerRunningCancel.value).toBeNull();
   });
@@ -339,9 +352,9 @@ describe("useSidebarTableMutationRuntime SAP HANA schema-scoped actions", () => 
     // confirmation window gives up (before the underlying operation later
     // settles and reports tableOperationCancelUnconfirmed).
     expect(mocks.toast).toHaveBeenCalledWith("contextMenu.tableOperationCancelPending", 6000);
-    expect(mocks.toast).toHaveBeenCalledWith("contextMenu.tableOperationCancelUnconfirmed", 8000);
+    expect(mocks.toast).toHaveBeenCalledWith("contextMenu.tableOperationCancelUnconfirmed", { persistent: true });
     expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationCancelled", 3000);
-    expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationFailed", 5000);
+    expect(mocks.toast).not.toHaveBeenCalledWith("contextMenu.tableOperationFailed", { persistent: true });
     expect(sidebarDangerRunningExecutionId.value).toBe("");
   });
 

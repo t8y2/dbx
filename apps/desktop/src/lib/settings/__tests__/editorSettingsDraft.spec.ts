@@ -71,6 +71,13 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(editorSettingsPatchFromDraft(draft, editorSettingsDraftFromSettings(settings))).toEqual({ globalConnectTimeoutSecs: 300, globalQueryTimeoutSecs: 0 });
   });
 
+  it("tracks enabling and disabling database activation auto-expansion in the draft", () => {
+    const base = editorSettingsDraftFromSettings(makeSettings({ sidebarAutoExpandOnDatabaseActivation: false }));
+    const draft = editorSettingsDraftFromSettings(makeSettings({ sidebarAutoExpandOnDatabaseActivation: true }));
+    expect(editorSettingsPatchFromDraft(draft, base)).toEqual({ sidebarAutoExpandOnDatabaseActivation: true });
+    expect(editorSettingsPatchFromDraft(base, draft)).toEqual({ sidebarAutoExpandOnDatabaseActivation: false });
+  });
+
   it("includes showLineNumbers", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("showLineNumbers");
   });
@@ -684,4 +691,11 @@ describe("editorSettingsDraft - tabMaxWidth", () => {
     const patch = editorSettingsPatchFromDraft(draft, base);
     expect(patch.tabMaxWidth).toBe(240);
   });
+});
+
+it("tracks sidebar hover drafts and normalizes delay before applying", () => {
+  const base = editorSettingsDraftFromSettings(makeSettings({ sidebarHoverEnabled: true, sidebarHoverDelay: 300 }));
+  const changed = { ...base, sidebarHoverEnabled: false, sidebarHoverDelay: 750 };
+  expect(editorSettingsPatchFromDraft(changed, base)).toEqual({ sidebarHoverEnabled: false, sidebarHoverDelay: 750 });
+  expect(editorSettingsPatchFromDraft({ ...base, sidebarHoverDelay: 9999 }, base)).toEqual({ sidebarHoverDelay: 2000 });
 });

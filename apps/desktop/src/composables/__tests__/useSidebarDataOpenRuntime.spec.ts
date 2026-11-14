@@ -173,6 +173,7 @@ vi.mock("@/lib/table/tableEditing", () => ({
   },
   usesSyntheticRowIdKey: () => false,
   shouldIncludeSyntheticRowId: () => mocks.includeSyntheticRowId,
+  postgresTupleLocatorUnsupportedEngine: () => false,
 }));
 vi.mock("@/lib/table/tableOpenPageLimit", () => ({ tableOpenPageLimit: () => 100 }));
 vi.mock("@/lib/tabs/dataTabActivation", () => ({ canActivateExistingDataTableTab: () => false }));
@@ -729,6 +730,24 @@ describe("useSidebarDataOpenRuntime", () => {
     await useSidebarDataOpenRuntime().openData(tableNode);
 
     expect(mocks.tabs).toHaveLength(2);
+  });
+
+  it("does not open an HBase tab when navigation is superseded while connecting", async () => {
+    mocks.databaseType = "hbase";
+    let finishConnection!: () => void;
+    mocks.ensureConnected.mockImplementation(() => new Promise<void>((resolve) => (finishConnection = resolve)));
+    const controller = new AbortController();
+    const pending = useSidebarDataOpenRuntime().openData(tableNode, {
+      isCurrent: () => !controller.signal.aborted,
+      signal: controller.signal,
+      registerCancel: vi.fn(),
+    });
+
+    controller.abort();
+    finishConnection();
+    await pending;
+
+    expect(mocks.tabs).toHaveLength(0);
   });
 
   it("keeps different HBase tables independent in same-table mode", async () => {

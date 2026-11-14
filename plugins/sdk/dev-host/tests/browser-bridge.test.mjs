@@ -5,6 +5,40 @@ import { JSDOM } from "jsdom";
 import { sandboxDocument } from "../browser-bridge.mjs";
 import { hostMessage, pluginInitMessage } from "../ui/messages.js";
 
+test("image copy sends the selected bytes and rejects on unsupported Dev Host", async (t) => {
+  const dom = new JSDOM(sandboxDocument("<html><head></head><body></body></html>", "image"), { runScripts: "dangerously" });
+  t.after(() => dom.window.close());
+  const w = dom.window;
+  let message;
+  w.postMessage = (value) => {
+    if (value.type === "request") message = value;
+  };
+  const bytes = new w.Uint8Array([99, 1, 2, 3, 99]);
+  const request = w.dbxPlugin.copyImage({ contentType: "image/png" }, bytes.subarray(1, 4));
+  assert.equal(message.method, "host.copyImage");
+  assert.equal(message.params.contentType, "image/png");
+  assert.equal(message.params.dataBase64, "AQID");
+  w.dispatchEvent(new w.MessageEvent("message", { source: w, data: hostMessage("image", { type: "response", id: message.id, error: { message: "Host clipboard image write is unavailable" } }) }));
+  await assert.rejects(request, /unavailable/);
+  assert.equal(w.dbxPlugin.capabilities?.clipboardImageWrite, undefined);
+});
+
+test("external URL requests use the host protocol and preserve rejection on unsupported hosts", async (t) => {
+  const dom = new JSDOM(sandboxDocument("<html><head></head><body></body></html>", "generation"), { runScripts: "dangerously" });
+  t.after(() => dom.window.close());
+  const w = dom.window;
+  let message;
+  w.postMessage = (value) => {
+    if (value.type === "request") message = value;
+  };
+  const request = w.dbxPlugin.openUrl("https://example.com/guide");
+  assert.equal(message.method, "host.openUrl");
+  assert.equal(message.params.url, "https://example.com/guide");
+  w.dispatchEvent(new w.MessageEvent("message", { source: w, data: hostMessage("generation", { type: "response", id: message.id, error: { message: "Host URL opening is unavailable" } }) }));
+  await assert.rejects(request, /Host URL opening is unavailable/);
+  assert.equal(w.dbxPlugin.capabilities?.openUrl, undefined);
+});
+
 test("bridge delivers host-compatible environment, lifecycle and binary events", async (t) => {
   const dom = new JSDOM(sandboxDocument("<head></head>", "test"), { runScripts: "dangerously" });
   t.after(() => dom.window.close());

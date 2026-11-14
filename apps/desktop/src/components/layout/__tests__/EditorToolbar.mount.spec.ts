@@ -14,7 +14,8 @@ vi.mock("@/components/ui/button", () => ({
 vi.mock("@/components/ui/searchable-select", () => ({
   SearchableSelect: {
     name: "SearchableSelectStub",
-    template: `<div />`,
+    props: ["options"],
+    template: `<div><slot v-for="option in options" name="option-action" :option="option" :label="option" /></div>`,
   },
 }));
 
@@ -90,6 +91,10 @@ vi.mock("@/components/common/ProductionContextBadge.vue", () => ({
   },
 }));
 
+const clipboard = vi.hoisted(() => ({ copy: vi.fn() }));
+vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: clipboard.copy }));
+
+import { useToast } from "@/composables/useToast";
 import EditorToolbar from "../EditorToolbar.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -108,6 +113,7 @@ describe("EditorToolbar mount contract", () => {
   let i18n: ReturnType<typeof createI18n>;
 
   beforeEach(() => {
+    clipboard.copy.mockReset().mockResolvedValue(undefined);
     document.body.innerHTML = "";
     pinia = createPinia();
     setActivePinia(pinia);
@@ -116,6 +122,83 @@ describe("EditorToolbar mount contract", () => {
       locale: "en",
       messages: { en: {} },
     });
+  });
+
+  it("copies the current raw database name without switching databases and reports failures", async () => {
+    const host = createHost();
+    const tab = reactive({ id: "tab-copy", title: "SQL", connectionId: "conn-copy", database: "数据库 with spaces", sql: "", mode: "query", isExecuting: false });
+    const onChangeDatabase = vi.fn();
+    const app = createApp({ render: () => h(EditorToolbar, { activeTab: tab as never, activeConnection: { id: "conn-copy", name: "Connection", db_type: "mysql" } as never, onChangeDatabase }) });
+    app.use(pinia).use(i18n).mount(host);
+    await nextTick();
+    const button = () => host.querySelector<HTMLButtonElement>("[data-copy-database-name]");
+    try {
+      expect(button()).not.toBeNull();
+      button()!.click();
+      await nextTick();
+      expect(clipboard.copy).toHaveBeenLastCalledWith("数据库 with spaces");
+      expect(onChangeDatabase).not.toHaveBeenCalled();
+      expect(useToast().message.value).toBe("connection.copied");
+      tab.database = "another_db";
+      await nextTick();
+      clipboard.copy.mockRejectedValueOnce(new Error("permission denied"));
+      button()!.click();
+      await nextTick();
+      expect(clipboard.copy).toHaveBeenLastCalledWith("another_db");
+      expect(useToast().message.value).toBe("grid.copyFailed");
+      tab.database = "";
+      await nextTick();
+      expect(button()).toBeNull();
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it.each([
+    ["mysql", "CREATE PROCEDURE p() BEGIN SELECT 1; END;"],
+    ["postgres", "CREATE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN NULL; END $$;"],
+    ["sqlserver", "CREATE PROCEDURE dbo.p AS SELECT 1;"],
+    ["oracle", "CREATE PROCEDURE p AS BEGIN NULL; END;"],
+    ["firebird", "CREATE OR ALTER PROCEDURE P AS BEGIN END;"],
+  ])("offers a separate database save action for %s routines", async (dbType, sql) => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "conn", db_type: dbType, color: "" } as never];
+    const tab = reactive({ id: "tab-1", title: "SQL", connectionId: "conn-1", database: "db", sql, mode: "query", isExecuting: false, isCancelling: false, isExplaining: false });
+    const saveRoutine = vi.fn(),
+      saveSql = vi.fn();
+    const host = createHost();
+    const app = createApp(EditorToolbar, {
+      activeTab: tab,
+      activeConnection: store.getConfig("conn-1"),
+      hasExecutableSql: true,
+      executableSqlMayContainDml: false,
+      explainMode: "explain",
+      blockDangerousRedisCommands: false,
+      sqlKeywordCase: "preserve",
+      databaseRequiredSignal: 0,
+      autoCommit: true,
+      onSaveRoutineToDatabase: saveRoutine,
+      onSaveSql: saveSql,
+    });
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    await nextTick();
+
+    const button = host.querySelector<HTMLButtonElement>('[aria-label="toolbar.saveRoutineToDatabase"]')!;
+    expect(button).not.toBeNull();
+    button.click();
+    expect(saveRoutine).toHaveBeenCalledExactlyOnceWith("tab-1");
+    expect(saveSql).not.toHaveBeenCalled();
+    tab.isExecuting = true;
+    await nextTick();
+    expect(button.disabled).toBe(true);
+    tab.isExecuting = false;
+    tab.sql = "SELECT 1;";
+    await nextTick();
+    expect(host.querySelector('[aria-label="toolbar.saveRoutineToDatabase"]')).toBeNull();
+    app.unmount();
+    host.remove();
   });
 
   it("emits toolbarExecute instead of execute when the run button is clicked", async () => {
@@ -789,10 +872,12 @@ describe("EditorToolbar mount contract", () => {
     host.remove();
   });
 
-  it("renders the active connection group path and sanitized detail preview", async () => {
+  it("keeps the complete deep group path available in the sanitized detail preview", async () => {
     const connectionStore = useConnectionStore();
     const settingsStore = useSettingsStore();
     settingsStore.editorSettings.showConnectionGroupPath = true;
+    const longGroupName = "Production".repeat(30);
+    const fullGroupPath = `${longGroupName}/Asia Pacific/Orders`;
     const connection = {
       id: "conn-grouped",
       name: "orders",
@@ -808,14 +893,15 @@ describe("EditorToolbar mount contract", () => {
     connectionStore.connections = [connection];
     connectionStore.sidebarLayout = {
       groups: [
-        { id: "group-prod", name: "Production", collapsed: false },
+        { id: "group-prod", name: longGroupName, collapsed: false },
+        { id: "group-region", name: "Asia Pacific", collapsed: false },
         { id: "group-orders", name: "Orders", collapsed: false },
       ],
       order: [
         {
           type: "group",
           id: "group-prod",
-          children: [{ type: "group", id: "group-orders", children: [{ type: "connection", id: connection.id }] }],
+          children: [{ type: "group", id: "group-region", children: [{ type: "group", id: "group-orders", children: [{ type: "connection", id: connection.id }] }] }],
         },
       ],
     };
@@ -852,33 +938,58 @@ describe("EditorToolbar mount contract", () => {
     await nextTick();
 
     const groupPath = host.querySelector<HTMLElement>("[data-connection-group-path]");
-    expect(groupPath?.textContent).toContain("Production / Orders /");
-    expect(groupPath?.classList.contains("min-w-0")).toBe(true);
-    expect(groupPath?.classList.contains("flex-1")).toBe(false);
-    expect(groupPath?.classList.contains("max-w-[50%]")).toBe(true);
-    expect(groupPath?.classList.contains("shrink")).toBe(true);
-    expect(groupPath?.classList.contains("truncate")).toBe(true);
-    const connectionName = groupPath?.nextElementSibling;
-    expect(connectionName?.classList.contains("shrink")).toBe(true);
-    expect(connectionName?.classList.contains("flex-1")).toBe(false);
+    expect(groupPath?.parentElement?.parentElement?.getAttribute("aria-label")).toBe(`${fullGroupPath}/orders`);
+    expect(groupPath?.textContent).toBe(fullGroupPath);
+    expect(groupPath?.classList.contains("shrink-0")).toBe(true);
+    expect(groupPath?.classList.contains("max-w-[50%]")).toBe(false);
+    expect(groupPath?.nextElementSibling?.textContent).toBe("/");
+    const connectionName = groupPath?.nextElementSibling?.nextElementSibling;
+    expect(connectionName?.classList.contains("truncate")).toBe(true);
+    expect(connectionName?.classList.contains("flex-1")).toBe(true);
     expect(host.textContent).toContain("orders");
     expect(host.textContent).toContain("postgres://alice:***@db.example.com:5432/app");
     expect(host.textContent).not.toContain("postgres://alice:secret@db.example.com:5432/app");
+    const detailPath = host.querySelector<HTMLElement>("[data-connection-detail-group-path]");
+    expect(detailPath?.textContent).toBe(fullGroupPath);
+    expect(detailPath?.previousElementSibling?.textContent).toBe("connection.groupPath");
+    expect(detailPath?.parentElement?.classList.contains("border-b")).toBe(false);
+    expect(detailPath?.classList.contains("truncate")).toBe(false);
+    expect(detailPath?.classList.contains("[overflow-wrap:anywhere]")).toBe(true);
+    const detailPanel = detailPath?.parentElement?.parentElement;
+    expect(detailPanel?.classList.contains("max-w-[min(22rem,calc(100vw-24px))]")).toBe(true);
+    expect(detailPanel?.classList.contains("max-w-[min(28rem,calc(100vw-24px))]")).toBe(false);
+    expect(detailPanel?.classList.contains("overflow-y-auto")).toBe(true);
+    expect(detailPanel?.classList.contains("max-h-[min(32rem,calc(100vh-24px))]")).toBe(true);
 
     settingsStore.editorSettings.showConnectionGroupPath = false;
     await nextTick();
     expect(host.querySelector("[data-connection-group-path]")).toBeNull();
+    expect(host.querySelector("[data-connection-detail-group-path]")).toBeNull();
+    expect(host.textContent).not.toContain(longGroupName);
     expect(host.textContent).toContain("orders");
 
     const tooltip = host.querySelector<HTMLElement>('[data-test="connection-tooltip"]');
     const pickerToggle = host.querySelector<HTMLButtonElement>('[data-test="toggle-connection-picker"]');
     expect(tooltip?.dataset.disabled).toBe("false");
+    settingsStore.editorSettings.showConnectionGroupPath = true;
+    await nextTick();
+    expect(host.querySelector("[data-connection-detail-group-path]")?.textContent).toBe(fullGroupPath);
     pickerToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await nextTick();
     expect(tooltip?.dataset.disabled).toBe("true");
     pickerToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await nextTick();
     expect(tooltip?.dataset.disabled).toBe("false");
+
+    connectionStore.sidebarLayout.groups[0]!.name = "Staging";
+    await nextTick();
+    expect(host.querySelector("[data-connection-detail-group-path]")?.textContent).toBe("Staging/Asia Pacific/Orders");
+
+    connectionStore.sidebarLayout.order = [{ type: "connection", id: connection.id }];
+    await nextTick();
+    expect(host.querySelector("[data-connection-group-path]")).toBeNull();
+    expect(host.querySelector("[data-connection-detail-group-path]")).toBeNull();
+    expect(host.textContent).toContain("postgres://alice:***@db.example.com:5432/app");
 
     app.unmount();
     host.remove();

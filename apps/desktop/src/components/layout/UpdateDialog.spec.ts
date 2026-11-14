@@ -67,6 +67,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
   const downloadInBackground = vi.fn();
   const cancelDownload = vi.fn();
   const ignoreVersion = vi.fn();
+  const restoreIgnoredVersion = vi.fn();
   const container = document.createElement("div");
   document.body.append(container);
   const app = createApp(
@@ -117,6 +118,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
             "onCancel-download": cancelDownload,
             "onInstall-downloaded": handleInstallDownloaded,
             "onIgnore-version": ignoreVersion,
+            "onRestore-ignored-version": restoreIgnoredVersion,
           });
       },
     }),
@@ -126,7 +128,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
   app.mount(container);
   await flushDialog();
 
-  return { state, downloadInBackground, cancelDownload, installDownloaded, ignoreVersion };
+  return { state, downloadInBackground, cancelDownload, installDownloaded, ignoreVersion, restoreIgnoredVersion };
 }
 
 function buttonWithText(text: string): HTMLButtonElement | undefined {
@@ -169,6 +171,22 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
+describe("UpdateDialog initial focus", () => {
+  it("focuses the dialog container on open and reopen instead of a tab or action", async () => {
+    const { state } = await mountDialog(0);
+
+    expect(document.activeElement).toBe(document.querySelector('[role="dialog"]'));
+    expect(document.querySelector('[data-update-tab="app"]')?.getAttribute("aria-selected")).toBe("true");
+
+    state.open = false;
+    await flushDialog();
+    state.open = true;
+    await flushDialog();
+
+    expect(document.activeElement).toBe(document.querySelector('[role="dialog"]'));
+  });
+});
+
 describe("UpdateDialog web runtime", () => {
   it("keeps web updates as Docker instructions without desktop install controls", async () => {
     runtimeState.tauri = false;
@@ -180,6 +198,81 @@ describe("UpdateDialog web runtime", () => {
     expect(buttonWithText("Open Release")).toBeDefined();
     expect(downloadButton()).toBeUndefined();
     expect(installDownloadedButton()).toBeUndefined();
+  });
+});
+
+describe("UpdateDialog update channels", () => {
+  it("marks beta updates and explains when switching back cannot downgrade", async () => {
+    await mountDialog(
+      0,
+      {},
+      vi.fn(async () => {}),
+      {
+        updateInfo: {
+          current_version: "0.6.60-beta.20261028.1",
+          latest_version: "0.6.59",
+          update_available: false,
+          portable_mode: false,
+          manual_update_only: false,
+          release_name: "DBX v0.6.59",
+          release_url: "https://github.com/t8y2/dbx/releases/tag/v0.6.59",
+          release_notes: "",
+          channel: "stable",
+          release_tag: "v0.6.59",
+          is_promoted: true,
+        },
+      },
+    );
+
+    expect(document.body.textContent).toContain("stable channel is older");
+
+    for (const app of mountedApps.splice(0)) app.unmount();
+    document.body.innerHTML = "";
+    await mountDialog(
+      0,
+      {},
+      vi.fn(async () => {}),
+      {
+        updateInfo: {
+          current_version: "0.6.60-beta.20261028.1",
+          latest_version: "0.6.60",
+          update_available: false,
+          portable_mode: false,
+          manual_update_only: false,
+          release_name: "DBX v0.6.60",
+          release_url: "https://github.com/t8y2/dbx/releases/tag/v0.6.60",
+          release_notes: "",
+          channel: "stable",
+          release_tag: "v0.6.60",
+          is_promoted: true,
+        },
+      },
+    );
+    expect(document.body.textContent).not.toContain("stable channel is older");
+
+    for (const app of mountedApps.splice(0)) app.unmount();
+    document.body.innerHTML = "";
+    await mountDialog(
+      0,
+      {},
+      vi.fn(async () => {}),
+      {
+        updateInfo: {
+          current_version: "0.6.59",
+          latest_version: "0.6.60-beta.20261028.1",
+          update_available: true,
+          portable_mode: false,
+          manual_update_only: false,
+          release_name: "DBX v0.6.60-beta.20261028.1",
+          release_url: "https://github.com/t8y2/dbx/releases/tag/v0.6.60-beta.20261028.1",
+          release_notes: "",
+          channel: "beta",
+          release_tag: "v0.6.60-beta.20261028.1",
+          is_promoted: false,
+        },
+      },
+    );
+    expect(document.body.textContent).toContain("Dev Beta channel");
   });
 });
 
@@ -271,21 +364,26 @@ describe("UpdateDialog prepared package without a remote update (#13562)", () =>
 });
 
 describe("UpdateDialog download progress", () => {
-  it("keeps the downloading button at a fixed width as progress changes", async () => {
+  it("shows a progress bar at a fixed width as progress changes", async () => {
     const { state } = await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: 9 });
 
-    expect(buttonWithText("Downloading 9%")?.classList.contains("w-52")).toBe(true);
+    const filler = document.body.querySelector<HTMLElement>("[data-download-progress-fill]");
+    expect(filler?.style.width).toBe("9%");
+    expect(filler?.closest(".w-52")).not.toBeNull();
 
     state.downloadProgress = 100;
     await flushDialog();
 
-    expect(buttonWithText("Downloading 100%")?.classList.contains("w-52")).toBe(true);
+    expect(document.body.querySelector<HTMLElement>("[data-download-progress-fill]")?.style.width).toBe("100%");
   });
 
-  it("falls back to 0% while the download size is unknown", async () => {
+  it("falls back to an indeterminate bar while the download size is unknown", async () => {
     await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: null });
 
-    expect(buttonWithText("Downloading 0%")).toBeDefined();
+    // A 0% bar looks stuck; the unknown-total case gets motion instead.
+    expect(document.body.querySelector("[data-download-progress-fill]")).toBeNull();
+    expect(document.body.querySelector("[data-download-progress-indeterminate]")).not.toBeNull();
+    expect(document.body.textContent).not.toContain("Downloading 0%");
   });
 });
 
@@ -575,6 +673,27 @@ describe("UpdateDialog older versions", () => {
     expect(historyRegion()).toBeNull();
   });
 
+  it("keeps a promoted beta tag out of the rollback list (#14739)", async () => {
+    // The 0.6.63 release was promoted from its beta build without being
+    // renamed, so the changelog index still carries the beta tag for it.
+    // The running build is the promoted 0.6.69 beta binary.
+    updateMocks.fetchChangelogIndex.mockResolvedValue({
+      updatedAt: "2026-11-11",
+      releases: [release("v0.6.69", "2026-11-10"), release("v0.6.68", "2026-11-07"), release("v0.6.64", "2026-11-02"), release("v0.6.63-beta.20261101.3", "2026-11-01"), release("v0.6.62", "2026-10-30")],
+    });
+
+    await mountDialog(0, {}, undefined, { updateInfo: { ...upToDateInfo, current_version: "0.6.69-beta.20261110.1", latest_version: "0.6.69" }, updateCheckMessage: "DBX is up to date (0.6.69)." });
+    await flushDialog();
+
+    historyButton("Older versions")?.click();
+    await flushDialog();
+
+    const region = historyRegion();
+    expect(region?.textContent).toContain("v0.6.68");
+    expect(region?.textContent).toContain("v0.6.62");
+    expect(region?.textContent).not.toContain("beta");
+  });
+
   it("surfaces a changelog load failure instead of hiding it silently", async () => {
     updateMocks.fetchChangelogIndex.mockRejectedValue(new Error("offline"));
 
@@ -812,5 +931,21 @@ describe("UpdateDialog aggregate update center", () => {
     // Footer button shows batch progress Upgrading (1/3) or Updating (1/3)
     const footer = document.body.querySelector("[data-update-footer]");
     expect(footer?.textContent).toMatch(/1\/3/);
+  });
+
+  it("says the version is ignored instead of claiming it is up to date, and can undo it", async () => {
+    // App.vue passes visibleUpdateInfo, i.e. the ignored release already reports update_available: false.
+    const { restoreIgnoredVersion } = await mountDialog(0, {}, undefined, {
+      ignoredReleaseVersion: "0.5.61",
+      updateInfo: { current_version: "0.5.60", latest_version: "0.5.61", update_available: false, portable_mode: false, manual_update_only: false, release_name: "v0.5.61", release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.61", release_notes: "" },
+    });
+
+    expect(document.body.textContent).toContain("DBX 0.5.61 is ignored.");
+    expect(document.body.textContent).not.toContain("up to date");
+
+    document.querySelector<HTMLButtonElement>("[data-update-restore-ignored]")!.click();
+    await flushDialog();
+
+    expect(restoreIgnoredVersion).toHaveBeenCalledOnce();
   });
 });

@@ -1,11 +1,21 @@
 //! A single committed update. The directory rename is the commit point; partial writes are never read.
+//!
+//! Security software opens a freshly written package to scan it, which makes Windows reject
+//! directory removal and the commit rename for a moment. `commit` retries that transient lock
+//! so a scan cannot turn a finished download into a failed one.
+use dbx_platform::fs_retry::{retry_transient_lock, TRANSIENT_LOCK_RETRY_DELAYS};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
+
+fn default_is_promoted() -> bool {
+    true
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DownloadedUpdate {
@@ -15,6 +25,14 @@ pub struct DownloadedUpdate {
     pub release_url: String,
     pub release_notes: String,
     pub downloaded_at: u64,
+    #[serde(default)]
+    pub channel: dbx_core::update::UpdateChannel,
+    #[serde(default)]
+    pub release_tag: Option<String>,
+    // Caches written before channel metadata existed were stable updates. Keep
+    // their compatibility metadata consistent with that historical meaning.
+    #[serde(default = "default_is_promoted")]
+    pub is_promoted: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,6 +66,18 @@ fn write_synced(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 pub(super) fn commit(root: &Path, record: &CacheRecord, bytes: &[u8]) -> Result<(), String> {
+    commit_with(root, record, bytes, &TRANSIENT_LOCK_RETRY_DELAYS, |src, dst| fs::rename(src, dst))
+}
+
+/// `commit` with an injectable rename so tests can prove the transient-lock retry without
+/// racing a real antivirus scan.
+fn commit_with(
+    root: &Path,
+    record: &CacheRecord,
+    bytes: &[u8],
+    retry_delays: &[Duration],
+    mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
     let metadata = serde_json::to_vec(record).map_err(|e| e.to_string())?;
     if metadata.len() > 4 * 1024 * 1024 || bytes.len() > 512 * 1024 * 1024 {
         return Err("Cached update exceeds size limits.".into());
@@ -63,11 +93,14 @@ pub(super) fn commit(root: &Path, record: &CacheRecord, bytes: &[u8]) -> Result<
         #[cfg(unix)]
         fs::File::open(&staging).and_then(|dir| dir.sync_all()).map_err(|e| e.to_string())?;
         let ready = root.join("ready");
-        // Windows cannot rename onto an existing directory: `fs::rename` fails with
-        // `os error 5` when `ready` is still present from an earlier attempt. Clear
-        // it first so the commit is idempotent and does not need a manual retry.
-        discard(root)?;
-        fs::rename(&staging, &ready)
+        // Windows cannot rename onto an existing directory, and a scanner can hold that
+        // previous tree open with the same access-denied error as the commit rename.
+        discard_with(root, retry_delays, remove_cache_entry)?;
+        // A real-time antivirus/EDR scanner opens the freshly written package for a moment.
+        // While that handle exists Windows rejects the directory rename with `os error 5`,
+        // even though the scan releases it shortly after, so wait out the scan instead of
+        // failing the download and making the user transfer the package again.
+        retry_transient_lock(retry_delays, || rename(&staging, &ready))
             .map_err(|error| context("Failed to finalize the DBX update cache", &ready, error))?;
         #[cfg(unix)]
         fs::File::open(root).and_then(|dir| dir.sync_all()).map_err(|e| e.to_string())?;
@@ -163,16 +196,27 @@ pub(super) fn cleanup_partial(root: &Path) -> Result<(), String> {
 }
 
 pub(super) fn discard(root: &Path) -> Result<(), String> {
-    let ready = root.join("ready");
-    let result = if fs::symlink_metadata(&ready).is_ok_and(|m| !m.file_type().is_dir()) {
-        fs::remove_file(&ready)
+    discard_with(root, &TRANSIENT_LOCK_RETRY_DELAYS, remove_cache_entry)
+}
+
+fn remove_cache_entry(path: &Path) -> std::io::Result<()> {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.file_type().is_dir()) {
+        fs::remove_file(path)
     } else {
-        fs::remove_dir_all(&ready)
-    };
-    match result {
+        fs::remove_dir_all(path)
+    }
+}
+
+fn discard_with(
+    root: &Path,
+    retry_delays: &[Duration],
+    mut remove: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let ready = root.join("ready");
+    match retry_transient_lock(retry_delays, || remove(&ready)) {
         Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(context("Failed to clear the previous DBX update cache", &ready, e)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(context("Failed to clear the previous DBX update cache", &ready, error)),
     }
 }
 
@@ -184,6 +228,47 @@ pub(super) fn root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    fn record_for(bytes: &[u8]) -> CacheRecord {
+        CacheRecord {
+            schema_version: 1,
+            package_kind: "test".into(),
+            package_length: bytes.len() as u64,
+            package_sha256: digest(bytes),
+            info: DownloadedUpdate {
+                cache_id: "test".into(),
+                version: "99.0.0".into(),
+                portable_mode: false,
+                release_url: String::new(),
+                release_notes: String::new(),
+                downloaded_at: 1,
+                channel: dbx_core::update::UpdateChannel::Stable,
+                release_tag: None,
+                is_promoted: true,
+            },
+            os: std::env::consts::OS.into(),
+            arch: std::env::consts::ARCH.into(),
+            manifest: None,
+            signature: None,
+        }
+    }
+
+    #[test]
+    fn legacy_stable_cache_defaults_to_promoted() {
+        let legacy = r#"{
+            "cache_id":"legacy",
+            "version":"0.6.59",
+            "portable_mode":false,
+            "release_url":"",
+            "release_notes":"",
+            "downloaded_at":1
+        }"#;
+        let info: DownloadedUpdate = serde_json::from_str(legacy).unwrap();
+        assert_eq!(info.channel, dbx_core::update::UpdateChannel::Stable);
+        assert!(info.is_promoted);
+        assert!(info.release_tag.is_none());
+    }
 
     // User screenshots only carry the message, so a cache failure has to name
     // the step and the exact path to be actionable.
@@ -239,6 +324,9 @@ mod tests {
                 release_url: String::new(),
                 release_notes: String::new(),
                 downloaded_at: 1,
+                channel: dbx_core::update::UpdateChannel::Stable,
+                release_tag: None,
+                is_promoted: true,
             },
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),
@@ -248,6 +336,108 @@ mod tests {
         commit(&root, &record, b"payload").unwrap();
         assert_eq!(read(&root).unwrap().unwrap().1, b"payload");
         assert_eq!(fs::read(stale.join("package")).unwrap(), b"payload");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    // A real-time scanner can hold the freshly written package open for a moment, which
+    // makes Windows reject the commit rename with `os error 5`; the download must survive it.
+    #[test]
+    #[cfg(windows)]
+    fn commit_retries_a_transient_rename_lock_until_the_scan_releases_the_package() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        let record = record_for(b"payload");
+        let mut attempts = 0;
+        commit_with(&root, &record, b"payload", &[Duration::ZERO; 2], |src, dst| {
+            attempts += 1;
+            if attempts <= 2 {
+                return Err(std::io::Error::from_raw_os_error(5));
+            }
+            fs::rename(src, dst)
+        })
+        .unwrap();
+        assert_eq!(attempts, 3);
+        assert_eq!(read(&root).unwrap().unwrap().1, b"payload");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn commit_keeps_the_original_error_after_transient_lock_retries_are_exhausted() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        let record = record_for(b"payload");
+        let mut attempts = 0;
+        let error = commit_with(&root, &record, b"payload", &[Duration::ZERO], |_, _| {
+            attempts += 1;
+            Err(std::io::Error::from_raw_os_error(32))
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 2);
+        assert!(error.contains("Failed to finalize the DBX update cache"), "{error}");
+        assert!(error.contains("ready"), "{error}");
+        assert!(!root.join("ready").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn discard_retries_a_transient_lock_and_then_removes_the_cache() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        fs::create_dir_all(root.join("ready")).unwrap();
+        fs::write(root.join("ready/package"), b"stale").unwrap();
+        let mut attempts = 0;
+        discard_with(&root, &[Duration::ZERO; 2], |path| {
+            attempts += 1;
+            if attempts <= 2 {
+                return Err(std::io::Error::from_raw_os_error(5));
+            }
+            fs::remove_dir_all(path)
+        })
+        .unwrap();
+        assert_eq!(attempts, 3);
+        assert!(!root.join("ready").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discard_does_not_retry_an_unrelated_removal_error() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        fs::create_dir_all(root.join("ready")).unwrap();
+        let mut attempts = 0;
+        let error = discard_with(&root, &[Duration::ZERO; 3], |_| {
+            attempts += 1;
+            Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "busy"))
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert!(error.contains("Failed to clear the previous DBX update cache"), "{error}");
+        assert!(root.join("ready").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discard_treats_a_missing_cache_as_success_without_retrying() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        let mut attempts = 0;
+        discard_with(&root, &[Duration::ZERO; 3], |_| {
+            attempts += 1;
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
+        })
+        .unwrap();
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn commit_does_not_retry_a_rename_error_that_is_not_a_windows_lock() {
+        let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        let record = record_for(b"payload");
+        let mut attempts = 0;
+        let error = commit_with(&root, &record, b"payload", &[Duration::ZERO; 3], |_, _| {
+            attempts += 1;
+            Err(std::io::Error::from_raw_os_error(2))
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert!(error.contains("Failed to finalize the DBX update cache"), "{error}");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -268,6 +458,9 @@ mod tests {
                 release_url: String::new(),
                 release_notes: String::new(),
                 downloaded_at: 1,
+                channel: dbx_core::update::UpdateChannel::Stable,
+                release_tag: None,
+                is_promoted: true,
             },
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),

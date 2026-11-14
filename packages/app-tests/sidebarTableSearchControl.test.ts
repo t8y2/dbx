@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { insertSidebarTableSearchControls } from "../../apps/desktop/src/lib/sidebar/sidebarTableSearchControl.ts";
+import { insertSidebarTableSearchControls, resolveLocalTableSearchParent } from "../../apps/desktop/src/lib/sidebar/sidebarTableSearchControl.ts";
 import { appendFlatTreeRenderKey, type FlatTreeNode } from "../../apps/desktop/src/composables/useFlatTree.ts";
 import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 
@@ -238,4 +238,66 @@ test("does not insert local table search controls when the user setting is disab
     nodes.map((item) => item.node.type),
     ["group-tables"],
   );
+});
+
+test("resolves local table search parent from active tree node id", () => {
+  const tree: TreeNode = {
+    id: "conn",
+    label: "conn",
+    type: "connection",
+    connectionId: "conn",
+    children: [
+      {
+        id: "conn:db1",
+        label: "db1",
+        type: "database",
+        connectionId: "conn",
+        database: "db1",
+        children: [{ id: "conn:db1:tbl", label: "tbl", type: "table", connectionId: "conn", database: "db1" }],
+      },
+      {
+        id: "conn:db2",
+        label: "db2",
+        type: "database",
+        connectionId: "conn",
+        database: "db2",
+        children: [
+          {
+            id: "conn:db2:__tables",
+            label: "tables",
+            type: "group-tables",
+            connectionId: "conn",
+            database: "db2",
+            children: [{ id: "conn:db2:orders", label: "orders", type: "table", connectionId: "conn", database: "db2" }],
+          },
+        ],
+      },
+      {
+        id: "conn:db_routines",
+        label: "db_routines",
+        type: "database",
+        connectionId: "conn",
+        database: "db_routines",
+        children: [
+          {
+            id: "conn:db_routines:__procs",
+            label: "procedures",
+            type: "group-procedures",
+            connectionId: "conn",
+            database: "db_routines",
+            children: [{ id: "conn:db_routines:p1", label: "p1", type: "procedure", connectionId: "conn", database: "db_routines" }],
+          },
+        ],
+      },
+    ],
+  };
+
+  assert.equal(resolveLocalTableSearchParent([tree], "conn:db1:tbl", "simple")?.id, "conn:db1");
+  assert.equal(resolveLocalTableSearchParent([tree], "conn:db1", "simple")?.id, "conn:db1");
+  assert.equal(resolveLocalTableSearchParent([tree], "conn:db2:orders", "grouped")?.id, "conn:db2:__tables");
+  assert.equal(resolveLocalTableSearchParent([tree], "conn:db2", "grouped")?.id, "conn:db2:__tables");
+  assert.equal(resolveLocalTableSearchParent([tree], "conn:db_routines", "grouped"), null);
+  assert.equal(resolveLocalTableSearchParent([tree], "conn:db_routines:__procs", "grouped"), null);
+  assert.equal(resolveLocalTableSearchParent([tree], "conn:db_routines:p1", "grouped"), null);
+  assert.equal(resolveLocalTableSearchParent([tree], "conn", "simple"), null);
 });

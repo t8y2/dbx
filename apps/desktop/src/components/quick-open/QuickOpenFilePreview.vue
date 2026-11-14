@@ -5,9 +5,8 @@ import { Compartment, EditorState, type Text } from "@codemirror/state";
 import { Decoration, drawSelection, EditorView, keymap, lineNumbers } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { sql } from "@codemirror/lang-sql";
-import { Copy, Pencil, Save } from "@lucide/vue";
+import { Pencil, Save } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
-import { copyToClipboard } from "@/lib/common/clipboard";
 import { editorClipboardLineEndingsExtension } from "@/lib/editor/editorClipboardLineEndings";
 import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
 import * as api from "@/lib/backend/api";
@@ -43,18 +42,6 @@ let view: EditorView | null = null;
 // Match the global-search file-size bound. The backend checks the limit before reading.
 const MAX_PREVIEW_BYTES = 32 * 1024 * 1024;
 
-async function copyPreview(): Promise<void> {
-  if (loading.value || failed.value || content.value === null) return;
-  const selection = view?.state.selection;
-  const text = view && selection && !selection.main.empty ? view.state.sliceDoc(selection.main.from, selection.main.to) : view ? view.state.sliceDoc() : content.value;
-  try {
-    await copyToClipboard(text);
-    toast(t("grid.copied"));
-  } catch (error) {
-    toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
-  }
-}
-
 async function startEditing(): Promise<void> {
   if (loading.value || failed.value || !snapshot || editing.value) return;
   saveError.value = "";
@@ -72,7 +59,7 @@ function finishEditing(): void {
   editing.value = false;
   dirty.value = false;
   saveError.value = "";
-  view?.dispatch({ effects: [editability.reconfigure([EditorState.readOnly.of(true), EditorView.editable.of(false)]), undoHistory.reconfigure([])] });
+  view?.dispatch({ effects: [editability.reconfigure(EditorState.readOnly.of(true)), undoHistory.reconfigure([])] });
   emit("editing", false);
 }
 
@@ -93,7 +80,7 @@ async function savePreview(): Promise<void> {
   const text = view.state.doc.toString().replace(/\n/g, lineEnding);
   saving.value = true;
   saveError.value = "";
-  view.dispatch({ effects: editability.reconfigure([EditorState.readOnly.of(true), EditorView.editable.of(false)]) });
+  view.dispatch({ effects: editability.reconfigure(EditorState.readOnly.of(true)) });
   try {
     const result = await api.writeExternalSqlFile(props.item.filePath, text, { expectedContentHash: snapshot.version.contentHash, encoding: snapshot.encoding === "auto" ? "utf8" : snapshot.encoding });
     if (result.kind !== "written") {
@@ -185,7 +172,9 @@ watch(
       state: EditorState.create({
         doc: text,
         extensions: [
-          editability.of([EditorState.readOnly.of(true), EditorView.editable.of(false)]),
+          // Keep a native editing host for mouse selection and clipboard shortcuts in WebView2.
+          // CodeMirror's readOnly facet blocks edits without disabling selection/copy.
+          editability.of(EditorState.readOnly.of(true)),
           undoHistory.of([]),
           EditorView.contentAttributes.of({ tabindex: "0", "aria-label": props.item.filePath || fileName.value }),
           lineNumbers(),
@@ -249,7 +238,9 @@ watch(
             "&": { height: "100%", backgroundColor: "var(--background)", color: "var(--foreground)" },
             ".cm-scroller": { overflow: "auto" },
             ".cm-gutters": { backgroundColor: "var(--muted)", color: "var(--muted-foreground)", border: "none" },
-            ".cm-selectionLayer .cm-selectionBackground": { display: "block" },
+            // The shared font theme hides this layer for the main editor's custom selection
+            // renderer. This preview uses drawSelection(), so its layer must stay visible.
+            ".cm-selectionLayer .cm-selectionBackground": { display: "block !important" },
             ".cm-preview-match-line": { backgroundColor: "var(--info-bg)", boxShadow: "inset 3px 0 0 var(--info)" },
             ".cm-preview-match": { backgroundColor: "var(--warning-bg)", color: "var(--foreground)", borderRadius: "2px" },
           }),
@@ -302,7 +293,6 @@ onBeforeUnmount(() => {
       <span v-if="dirty" class="shrink-0 text-warning" :title="t('editor.unsavedChangesTitle')" :aria-label="t('editor.unsavedChangesTitle')">●</span>
       <span class="min-w-0 flex-1 truncate" :title="item.filePath">{{ item.filePath || fileName }}</span>
       <span v-if="item.line && item.line > 0" class="shrink-0 font-mono">{{ item.line }}:{{ item.column || 1 }}</span>
-      <Button variant="ghost" size="icon-sm" :title="t('common.copy')" :aria-label="t('common.copy')" :disabled="loading || failed || content === null" @click="copyPreview"><Copy class="h-3.5 w-3.5" /></Button>
       <template v-if="editing">
         <Button variant="ghost" size="xs" :disabled="saving" @click="savePreview"><Save class="h-3.5 w-3.5" />{{ t("common.save") }}</Button>
         <Button variant="ghost" size="xs" :disabled="saving" @click="cancelEditing">{{ t("common.cancel") }}</Button>

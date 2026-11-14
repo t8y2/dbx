@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::models::connection::ConnectionConfig;
-use crate::production_safety::sql_references_disallowed_database;
+use crate::production_safety::sql_references_disallowed_database_for_connection;
 use crate::storage::McpGlobalPolicy;
 use serde::Deserialize;
 use serde_json::Value;
@@ -193,9 +193,9 @@ pub fn ensure_sql_database_execution_scope(
         return Ok(());
     };
     if rule.database_policies.is_empty()
-        || !sql_references_disallowed_database(
+        || !sql_references_disallowed_database_for_connection(
             sql,
-            &connection.db_type,
+            connection,
             active_database,
             &[active_database.to_string()],
         )

@@ -7,6 +7,8 @@ import { setSearchQuery, openSearchPanel as cmOpenSearchPanel, findNext as cmFin
 import { ChevronUp, ChevronDown, ChevronRight, TextSelect, X } from "@lucide/vue";
 import { collectEditorSearchMatches, countEditorSearchMatches, createEditorSearchQuery, replaceEditorSearchMatches, type EditorSearchMatch } from "@/lib/editor/editorSearchQuery";
 import { appendSearchMatchSelection, findSearchMatch, isSearchAddSelectionModifier, selectionRangesForSearchMatches, type EditorSearchSelectionDirection } from "@/lib/editor/editorSearchSelection";
+import { isReplaceAllShortcut } from "@/lib/editor/replaceAllShortcut";
+import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { vNamingStyleSupport } from "@/directives/vNamingStyleSupport";
 
@@ -477,12 +479,32 @@ function onSearchKeydown(e: KeyboardEvent) {
   if (e.key === "Escape") {
     e.preventDefault();
     closeSearch();
+  } else if (isReplaceAllShortcut(e)) {
+    // Replace All instead of find-next, but only with the replace row
+    // expanded — a collapsed panel must not replace with hidden (possibly
+    // stale) replace text. The combo is swallowed either way so it never
+    // falls into the Enter = find-next branches below.
+    e.preventDefault();
+    if (showReplace.value) doReplaceAll();
   } else if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     nextMatch();
   } else if (e.key === "Enter" && e.shiftKey) {
     e.preventDefault();
     prevMatch();
+  }
+}
+
+function onReplaceKeydown(e: KeyboardEvent) {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeSearch();
+  } else if (isReplaceAllShortcut(e)) {
+    e.preventDefault();
+    doReplaceAll();
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    doReplace();
   }
 }
 
@@ -592,14 +614,13 @@ defineExpose({
             spellcheck="false"
             class="h-full min-w-0 flex-1 bg-transparent px-2 text-sm text-foreground outline-none placeholder:text-muted-foreground"
             :placeholder="t('editor.search.replace')"
-            @keydown.enter.prevent="doReplace"
-            @keydown.escape.prevent="closeSearch"
+            @keydown="onReplaceKeydown"
           />
         </div>
         <button class="flex h-7 items-center justify-center rounded-md border border-border px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="t('editor.search.replace')" @click="doReplace">
           {{ t("editor.search.replace") }}
         </button>
-        <button class="flex h-7 items-center justify-center rounded-md border border-border px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="t('editor.search.replaceAll')" @click="doReplaceAll">
+        <button class="flex h-7 items-center justify-center rounded-md border border-border px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" :title="`${t('editor.search.replaceAll')} (${formatShortcutDisplay('Mod+Alt+Enter')})`" @click="doReplaceAll">
           {{ t("editor.search.replaceAll") }}
         </button>
       </div>

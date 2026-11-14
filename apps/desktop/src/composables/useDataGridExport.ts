@@ -10,7 +10,7 @@ import { notifyExportComplete } from "@/lib/export/exportReveal";
 import { dropsSchemaQualifier } from "@/lib/table/tableSelectSql";
 import * as api from "@/lib/backend/api";
 import { type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
-import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, type DataGridCopyExtractorId, type DataGridExtractRequest, type DataGridExtractorOptions, type DataGridPrimaryKeyMode } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, type DataGridCopyExtractorId, type DataGridCopyPreference, type DataGridExtractRequest, type DataGridExtractorOptions, type DataGridPrimaryKeyMode } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { useToast } from "@/composables/useToast";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { clipboardCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
@@ -27,6 +27,7 @@ import { resolveSqlExportColumnIndexes, sqlExportColumnChoices } from "@/lib/exp
 import { summarizeExportRows } from "@/lib/export/exportDiagnostics";
 import { appendDebugLog, appendNativeProcessMemoryLog, getBrowserMemorySnapshot, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { uuid } from "@/lib/common/utils";
+import { isManualTransactionSessionExpired } from "@/lib/backend/errorUtils";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { csvNullLiteralForMode } from "@/lib/export/csvNullMode";
 import { expandNestedJsonStringsForCopy } from "@/lib/common/jsonCopyValue";
@@ -43,10 +44,11 @@ import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import i18n from "@/i18n";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, xlsxHeaderUsesCommentRows, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import { isPartiallyLoadedCopy, partialLoadCopyHintKey, type PartialLoadCopyInfo } from "@/lib/dataGrid/copyPartialLoadHint";
-import { showExportExecutionModeDialog } from "@/lib/export/exportExecutionMode";
+import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
 import type { CapturedLegacyLargeValueExport } from "@/lib/dataGrid/legacyLargeValueExport";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useQueryStore } from "@/stores/queryStore";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 import type { ManualExportMode } from "@/lib/export/manualExportQueue";
 
@@ -223,6 +225,8 @@ interface CopyInsertData {
   sourceColumns?: Array<string | undefined>;
   columnTypes?: Array<string | undefined>;
   rows: RowItem[];
+  spatialColumns?: QueryResult["spatial_columns"];
+  spatialValues?: QueryResult["spatial_values"];
 }
 
 export function useDataGridExport(options: UseDataGridExportOptions) {
@@ -305,7 +309,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   const visibleColumnIndexes = visibleColumnIndexesOption ?? computed(() => columns.value.map((_, index) => index));
   const hasColumnSelection = hasColumnSelectionOption ?? computed(() => false);
 
-  async function copyText(text: string, gridCopy?: { rows: readonly (readonly unknown[])[]; header?: readonly unknown[] }, richHtml?: string) {
+  async function copyText(text: string, gridCopy?: { rows: readonly (readonly unknown[])[]; header?: readonly unknown[] }, richHtml?: string, notify = true) {
     const copiedRows = gridCopy?.rows.map((row) => [...row]);
     const copiedHeader = gridCopy?.header ? [...gridCopy.header] : undefined;
     clearDataGridClipboardCopy();
@@ -315,7 +319,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       // Remember the text as it now sits on the clipboard, so a paste back into
       // the grid still matches and keeps its null-cell metadata.
       if (copiedRows) rememberDataGridClipboardCopy(clipboardLineEndings(text), copiedRows, copiedHeader);
-      toast(t("grid.copied"));
+      if (notify) toast(t("grid.copied"));
       return true;
     } catch (e: any) {
       toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
@@ -451,6 +455,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       const app = createApp(XlsxHeaderDialog, {
         open: true,
         showExecutionMode,
+        initialExecutionMode: showExecutionMode ? getDefaultExportExecutionMode() : "immediate",
         showHeaderOptions: hasXlsxHeaderComments(allXlsxColumnComments.value) || hasXlsxHeaderComments(visibleXlsxColumnComments.value),
         onConfirm: (exportOptions: XlsxExportOptions) => {
           resolve(exportOptions);
@@ -820,6 +825,18 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (selectedColumns.length !== matrix.columnIndexes.length) return null;
     const selectedSourceColumns = sourceColumns.value?.length === columns.value.length ? matrix.columnIndexes.map((columnIndex) => sourceColumns.value?.[columnIndex]) : undefined;
     const selectedColumnTypes = columnTypes.value?.length === columns.value.length ? matrix.columnIndexes.map((columnIndex) => columnTypes.value?.[columnIndex] ?? undefined) : undefined;
+    const visibleIndexes = visibleColumnIndexesOption?.value ?? columns.value.map((_, index) => index);
+    const targetSourceIndexes = matrix.columnIndexes.map((targetIdx) => visibleIndexes[targetIdx] ?? targetIdx);
+    const targetIndexBySource = new Map<number, number>();
+    targetSourceIndexes.forEach((sourceIdx, targetIdx) => {
+      targetIndexBySource.set(sourceIdx, targetIdx);
+    });
+    const spatialColumns = spatialColumnsOption?.value?.flatMap((column) => {
+      const targetIndex = targetIndexBySource.get(column.column_index);
+      return targetIndex === undefined ? [] : [{ column_index: targetIndex, srid: column.srid }];
+    });
+    const allSpatialValues = spatialValuesOption?.value;
+    const spatialValues = allSpatialValues?.length ? selectedRows.map((item, rowIndex) => targetSourceIndexes.map((sourceIdx) => allSpatialValues[item.sourceIndex ?? rowIndex]?.[sourceIdx] ?? null)) : undefined;
     return {
       columns: selectedColumns,
       sourceColumns: selectedSourceColumns,
@@ -829,6 +846,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         data: matrix.columnIndexes.map((columnIndex) => item.data[columnIndex] ?? null),
         isDirtyCol: matrix.columnIndexes.map((columnIndex) => item.isDirtyCol[columnIndex] ?? false),
       })),
+      spatialColumns: spatialColumns?.length ? spatialColumns : undefined,
+      spatialValues: spatialValues?.length ? spatialValues : undefined,
     };
   }
 
@@ -856,6 +875,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       rows: data.rows.map((item) => item.data),
       primaryKeyMode,
       insertMode,
+      spatialColumns: data.spatialColumns,
+      spatialValues: data.spatialValues,
     });
   }
 
@@ -971,14 +992,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }).length;
   }
 
-  async function buildMongoExtractorInsert(extractorOptions: DataGridExtractorOptions, rowLimit?: number): Promise<string | undefined> {
+  async function buildMongoExtractorInsert(extractorOptions: DataGridExtractorOptions, rowLimit?: number, allRows?: RowItem[]): Promise<string | undefined> {
     const data: CopyInsertData | null =
-      hasRowSelection.value || !hasCellSelection.value
+      allRows || hasRowSelection.value || !hasCellSelection.value
         ? {
             columns: columns.value,
             sourceColumns: sourceColumns.value,
             columnTypes: columnTypes.value?.map((type) => type ?? undefined),
-            rows: insertEligibleRows(),
+            rows: allRows ?? insertEligibleRows(),
           }
         : selectionInsertData();
     if (!data) return undefined;
@@ -998,11 +1019,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       .filter((index) => index >= 0);
   }
 
-  async function buildMongoExtractorUpdate(request: DataGridExtractRequest, rowLimit?: number): Promise<string | undefined> {
+  async function buildMongoExtractorUpdate(request: DataGridExtractRequest, rowLimit?: number, allRows?: RowItem[]): Promise<string | undefined> {
     const target = options.mongoUpdateTarget?.value;
     const documents = options.mongoDocuments?.value;
     if (!target || !documents) return undefined;
-    const rows = updateEligibleRows();
+    const rows = allRows ?? updateEligibleRows();
     if (rows.length === 0) return undefined;
     const limitedRows = rowLimit === undefined ? rows : rows.slice(0, rowLimit);
     const allCopyColumns = effectiveColumns(sourceColumns.value, columns.value).map((column) => column ?? "");
@@ -1030,10 +1051,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return statements.length > 0 ? statements.join("\n") : undefined;
   }
 
-  function canBuildMongoExtractorUpdate(request: DataGridExtractRequest): boolean {
+  function canBuildMongoExtractorUpdate(request: DataGridExtractRequest, allRows?: RowItem[]): boolean {
     const target = options.mongoUpdateTarget?.value;
     const documents = options.mongoDocuments?.value;
-    const rows = updateEligibleRows();
+    const rows = allRows ?? updateEligibleRows();
     if (!target || !documents || rows.length === 0) return false;
 
     const normalizedIdColumn = normalizeColumnName(target.idColumn);
@@ -1047,7 +1068,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
   }
 
-  const { extractWithExtractor, copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor } = useDataGridExtractor({
+  const extractorConfig: Parameters<typeof useDataGridExtractor>[0] = {
     allowExtractor: (extractor) => !options.mysqlDataCharsetReadOnly?.value || (!extractor.startsWith("sql-") && extractor !== "where-clause"),
     columns,
     displayItems,
@@ -1073,6 +1094,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     selectedRowIds,
     resolveSourceValues,
     copyText,
+    spatialColumns: options.spatialColumns,
+    spatialValues: options.spatialValues,
     canCopySqlInsert: (request) => {
       const selectedColumns = request.selectedColumnIndexes.map((index) => request.columns[index]?.sourceName ?? request.columns[index]?.displayName).filter((column): column is string => !!column);
       return request.rows.length > 0 && insertableCopyColumnCount(request.options.sql.primaryKeyMode, selectedColumns, request.options) > 0;
@@ -1091,7 +1114,48 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     },
     contextCell,
     contextSelectionIsSynthetic,
+  };
+  const { extractWithExtractor, copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor } = useDataGridExtractor(extractorConfig);
+
+  // A separate, read-only selection describes Copy all without touching the
+  // grid's cell/row selection or its right-click target. Use the same visible,
+  // loaded rows as the existing Copy all action; do not fetch another page.
+  const allVisibleCellMatrix = computed<CellSelectionMatrix>(() => {
+    const rowIndexes: number[] = [];
+    const rows: SelectionData["rows"] = [];
+    displayItems.value.forEach((item, index) => {
+      if (item.isDraft) return;
+      rowIndexes.push(index);
+      rows.push(item.data);
+    });
+    return { rowIndexes, columnIndexes: columns.value.map((_, index) => index), columns: columns.value, rows };
   });
+  const allVisibleUpdateRows = () => displayItems.value.filter((item) => !item.isDraft && !item.isNew && !item.isDeleted);
+  const wholeResultExtractor = useDataGridExtractor({
+    ...extractorConfig,
+    hasCellSelection: computed(() => allVisibleCellMatrix.value.rows.length > 0 && columns.value.length > 0),
+    selectedCells: allVisibleCellMatrix,
+    selectedCellMatrix: allVisibleCellMatrix,
+    hasRowSelection: computed(() => false),
+    hasColumnSelection: computed(() => false),
+    selectedRowIds: computed(() => new Set<number>()),
+    contextCell: computed(() => null),
+    contextSelectionIsSynthetic: computed(() => false),
+    buildMongoInsert: (extractorOptions, rowLimit) =>
+      buildMongoExtractorInsert(
+        extractorOptions,
+        rowLimit,
+        displayItems.value.filter((item) => !item.isDraft),
+      ),
+    buildMongoUpdate: (request, rowLimit) => buildMongoExtractorUpdate(request, rowLimit, allVisibleUpdateRows()),
+    canBuildMongoUpdate: (request) => canBuildMongoExtractorUpdate(request, allVisibleUpdateRows()),
+    copyText: (text, gridCopy, richHtml) => copyText(text, gridCopy, richHtml, false),
+    onCopied: (result) => toast(t("grid.copiedRows", { count: result.rowCount })),
+  });
+
+  function copyAllWithPreference(preference: DataGridCopyPreference, isSessionValid?: () => boolean): Promise<boolean> {
+    return wholeResultExtractor.copyWithPreference(preference, extractorOptionsOption?.value ?? DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, () => !scopeDisposed && (isSessionValid?.() ?? true));
+  }
 
   async function copyAll() {
     const rows = (await resolveVisibleRowValues(displayItems.value.filter((item) => !item.isDraft))).map((item) => item.data);
@@ -1237,8 +1301,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     };
     const fileFormat = FORMAT_META[format]!;
     let outputPath = full && (format === "txt" || format === "sql") ? exportFileName(tableMeta.value?.tableName || "export", fileFormat.ext, { preferFallback: true }) : exportFileName(full ? "export" : "export-page", fileFormat.ext, { page: !full });
-    const mode = exportOptions.openAfterExport ? "immediate" : (exportOptions.xlsx?.executionMode ?? exportOptions.sql?.executionMode ?? (await showExportExecutionModeDialog()));
-    if (mode === null) return true;
+    const mode = exportOptions.openAfterExport ? "immediate" : (exportOptions.xlsx?.executionMode ?? exportOptions.sql?.executionMode ?? getDefaultExportExecutionMode());
     if (native) {
       const path = exportOptions.openAfterExport ? await api.createQueryResultTempFile(fileFormat.ext) : await promptExportSavePath({ defaultFileName: outputPath, filters: [{ name: fileFormat.label, extensions: [fileFormat.ext] }], preferredPath: editorSettings.preferredExportPath });
       if (!path) return true;
@@ -1282,6 +1345,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             return await (native ? api.readLargeValueChunk(request, true) : api.readLargeValueChunk(request));
           } catch (error) {
             nativeUnknown = native && (!(error instanceof SnapshotCompletionError) || error.status === "unknown");
+            if (request.txnSessionId && isManualTransactionSessionExpired(error)) {
+              useQueryStore().noteExpiredManualTransaction(request.txnSessionId, error);
+              throw new Error(t("exportProgress.transactionUnavailable"));
+            }
             throw error;
           }
         };
@@ -1325,7 +1392,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           if (writeWorkbook) assertSnapshotXlsxCellLengths(selected.rows as CellValue[][]);
           onProgress(progress("Writing"));
           let writing: Promise<void>;
-          if (format === "csv" && !hasLocators) writing = api.exportQueryResultCsv(outputPath, names, selected.rows as CellValue[][], editorSettings.csvQuoteMode, csvNullLiteralForMode(editorSettings.csvNullMode));
+          if (format === "csv" && !hasLocators) writing = api.exportQueryResultCsv(outputPath, names, selected.rows as CellValue[][], editorSettings.csvQuoteMode, csvNullLiteralForMode(editorSettings.csvNullMode), editorSettings.csvWithoutBom);
           else if (format === "json" && !hasLocators) writing = api.exportQueryResultJson(outputPath, names, selected.rows as CellValue[][]);
           else if (format === "csv" || format === "json") {
             const request = { ...selected, context: { ...selected.context, executionId }, format, quoteMode: editorSettings.csvQuoteMode, nullLiteral: csvNullLiteralForMode(editorSettings.csvNullMode) };
@@ -1431,8 +1498,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         : undefined;
     const isCurrent = () => !scopeDisposed && (completeLocalResult?.value ?? options.snapshotResult?.value) === original && connectionId.value === originalConnection && database.value === originalDatabase;
     if (!isCurrent()) throw new Error("Export result context changed");
-    const mode = exportOptions.openAfterExport ? "immediate" : (xlsxOptions?.executionMode ?? sqlOptions?.executionMode ?? (await showExportExecutionModeDialog()));
-    if (mode === null) return true;
+    const mode = exportOptions.openAfterExport ? "immediate" : (xlsxOptions?.executionMode ?? sqlOptions?.executionMode ?? getDefaultExportExecutionMode());
     const outputPath = exportOptions.openAfterExport ? await api.createQueryResultTempFile(meta.ext) : await promptExportSavePath({ defaultFileName: fileName, filters: [{ name: meta.label, extensions: [meta.ext] }], preferredPath: settings.preferredExportPath });
     if (!outputPath) return true;
     if (!isCurrent()) throw new Error("Export result context changed");
@@ -1477,7 +1543,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         const sqlData = insertOptions ? captureSqlInsertExportData(result, selectedSqlColumns, sqlContext)(result.rows) : undefined;
         onProgress({ exportId, tableName: title, rowsExported: result.rows.length, totalRows: result.rows.length, status: "Writing" });
         if (writeWorkbook) await writeWorkbook(outputPath, result);
-        else if (format === "csv") await api.exportQueryResultCsv(outputPath, result.columns, result.rows, settings.csvQuoteMode, csvNullLiteralForMode(settings.csvNullMode));
+        else if (format === "csv") await api.exportQueryResultCsv(outputPath, result.columns, result.rows, settings.csvQuoteMode, csvNullLiteralForMode(settings.csvNullMode), settings.csvWithoutBom);
         else if (format === "json") await api.exportQueryResultJson(outputPath, result.columns, result.rows);
         else if (format === "markdown") await api.exportQueryResultMarkdown(outputPath, result.columns, result.rows);
         else if (format === "html") await api.exportQueryResultHtml(outputPath, title, result.columns, result.rows);
@@ -1551,7 +1617,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           }
           outputPath = path;
         }
-        await api.exportQueryResultCsv(outputPath, result.columns, result.rows, useSettingsStore().editorSettings.csvQuoteMode, csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode));
+        await api.exportQueryResultCsv(outputPath, result.columns, result.rows, useSettingsStore().editorSettings.csvQuoteMode, csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode), useSettingsStore().editorSettings.csvWithoutBom);
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
@@ -1592,7 +1658,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           outputPath = path;
         }
         const result = await resultToExport({ columnIndexes }, undefined, false);
-        await api.exportQueryResultCsv(outputPath, result.columns, result.rows, useSettingsStore().editorSettings.csvQuoteMode, csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode));
+        await api.exportQueryResultCsv(outputPath, result.columns, result.rows, useSettingsStore().editorSettings.csvQuoteMode, csvNullLiteralForMode(useSettingsStore().editorSettings.csvNullMode), useSettingsStore().editorSettings.csvWithoutBom);
         notifyExportSuccess(outputPath);
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
@@ -2017,8 +2083,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const exportOptions = await showXlsxHeaderDialog(true);
     if (exportOptions === null) return true;
     if (!isCurrent()) throw new Error("Export result context changed");
-    const mode = exportOptions.executionMode ?? (await showExportExecutionModeDialog());
-    if (mode === null) return true;
+    const mode = exportOptions.executionMode ?? getDefaultExportExecutionMode();
     const outputPath = await promptExportSavePath({ defaultFileName: fileName, filters: [{ name: "Excel", extensions: ["xlsx"] }], preferredPath: settings.preferredExportPath });
     if (!outputPath) return true;
     if (!isCurrent()) throw new Error("Export result context changed");
@@ -2070,6 +2135,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             return await api.readLargeValueChunk(request, true);
           } catch (error) {
             unknown ||= !(error instanceof SnapshotCompletionError) || error.status === "unknown";
+            if (request.txnSessionId && isManualTransactionSessionExpired(error)) {
+              useQueryStore().noteExpiredManualTransaction(request.txnSessionId, error);
+              throw new Error(t("exportProgress.transactionUnavailable"));
+            }
             throw error;
           }
         };
@@ -2233,6 +2302,83 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     await exportResultSheetsXlsxResult(undefined, true);
   }
 
+  /**
+   * 把本次执行的全部结果集堆叠进同一个 XLSX worksheet（issue #13370）：每个结果
+   * 块输出「标题行 + 列头行 + 数据行」，块间以空行分隔，让数据来源一眼可见。
+   * 两条写入路径（Tauri/Rust 与 Web/本地构建）都按 columns.length 生成每行单元格，
+   * 因此标题/列头/数据行统一 pad 到最大列宽，columns 本身承载首个标题行。
+   * 合并表没有统一列语义，列头模式/自动筛选等 sheet 级选项不适用，故跳过
+   * 列头选项对话框，直接以纯行数据导出。
+   */
+  async function exportAllResultsMergedXlsxResult(includeSqlSheet: boolean) {
+    await runExclusiveExport(async () => {
+      try {
+        const sheets = (allExportResults?.value ?? []).filter((sheet) => sheet.result.columns.length > 0);
+        if (sheets.length === 0) return;
+
+        let outputPath = exportFileName("query-results", "xlsx", { allResults: true });
+        if (isTauriRuntime()) {
+          const path = await promptExportSavePath({
+            defaultFileName: outputPath,
+            filters: [{ name: "Excel", extensions: ["xlsx"] }],
+            preferredPath: useSettingsStore().editorSettings.preferredExportPath,
+          });
+          if (!path) return;
+          outputPath = path;
+        }
+
+        const exportPattern = useSettingsStore().editorSettings.globalDateTimeExportFormat;
+        // 先按各结果集自身的列类型做时间格式化，再统一 pad 进合并表
+        const blocks: Array<{ title: string; header: string[]; rows: CellValue[][] }> = [];
+        for (const [index, sheet] of sheets.entries()) {
+          const sourceRows = sheet.result.rows;
+          const rows = await materializeExportSnapshot(sheet.result, () => sheet.result.rows === sourceRows && !!allExportResults?.value?.includes(sheet));
+          if (sheet.result.large_value_refs?.length || sheet.result.large_value_cells?.some((cell) => cell.value_ref)) assertSnapshotXlsxCellLengths(rows);
+          blocks.push({
+            title: `${index + 1}. ${sheet.sheetName}`,
+            header: [...sheet.result.columns],
+            rows: formatTemporalRowsForExport(rows, sheet.result.column_types ?? [], exportPattern),
+          });
+        }
+
+        const width = blocks.reduce((width, block) => block.rows.reduce((width, row) => Math.max(width, row.length), Math.max(width, block.header.length)), 1);
+        // 列宽取所有块的最大列数；不足的行用 null 补齐成空单元格，
+        // 保证任一写入路径都不会把超宽行的尾部列截掉
+        const padRow = (row: CellValue[]): CellValue[] => (row.length >= width ? row : [...row, ...Array<null>(width - row.length).fill(null)]);
+        const mergedRows: CellValue[][] = [];
+        for (const [index, block] of blocks.entries()) {
+          // The first title is already the worksheet header (`columns`).
+          if (index > 0) {
+            mergedRows.push(padRow([]));
+            mergedRows.push(padRow([block.title]));
+          }
+          mergedRows.push(padRow(block.header));
+          for (const row of block.rows) mergedRows.push(padRow([...row]));
+        }
+        const merged = {
+          sheetName: t("grid.exportAllResultsSingleSheetName"),
+          columns: [blocks[0]!.title, ...Array<string>(width - 1).fill("")],
+          rows: mergedRows,
+          autoFilter: false,
+        };
+
+        const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet(sheets.map((sheet) => ({ resultName: sheet.sheetName, sql: sheet.sql || sheet.result.sourceStatement || "" }))) : undefined;
+        await api.exportQueryResultsXlsx(outputPath, sqlWorksheet ? [merged, { ...sqlWorksheet, autoFilter: false }] : [merged], false, exportPattern || undefined);
+        notifyExportSuccess(outputPath);
+      } catch (e: any) {
+        toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
+      }
+    });
+  }
+
+  async function exportAllResultsMergedXlsx() {
+    await exportAllResultsMergedXlsxResult(false);
+  }
+
+  async function exportAllResultsMergedXlsxWithSql() {
+    await exportAllResultsMergedXlsxResult(true);
+  }
+
   /** SQL 文件导出与 SQL INSERT 复制共用同一主键处理模式。 */
   function sqlExportExcludedColumns(columnNames?: readonly string[]): string[] | undefined {
     return captureSqlExportExcludedColumns()(columnNames);
@@ -2317,7 +2463,16 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const meta = tableMeta.value;
     // The backend table exporter currently builds two-part table names. External
     // Doris/StarRocks catalogs need the data-tab paginator's three-part SQL.
-    if (rowIds !== undefined || columnIndexes !== undefined || context.value !== "table-data" || !meta || meta.catalog || !connectionId.value || !database.value) {
+    if (rowIds !== undefined || context.value !== "table-data" || !meta || meta.catalog || !connectionId.value || !database.value) {
+      return false;
+    }
+    // A grid column subset still streams from the backend: SQL INSERT exports
+    // project through `selectedColumns` and every other format narrows the
+    // SELECT column list. Bailing here would push the export onto the local
+    // per-page re-execution path, which re-runs the query once per page
+    // (issue #14732).
+    const projectedColumns = columnIndexes === undefined ? undefined : columnIndexes.map((index) => ({ index, name: columns.value[index] })).filter((entry): entry is { index: number; name: string } => entry.name !== undefined);
+    if (projectedColumns !== undefined && projectedColumns.length === 0) {
       return false;
     }
     if (format !== "sql" && hasActiveColumnFormatters(columnIndexes)) {
@@ -2326,7 +2481,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
     const editorSettings = { ...useSettingsStore().editorSettings };
     const exportId = uuid();
-    const exportedColumns = format === "sql" ? effectiveColumns(sourceColumns.value, columns.value).map((column, index) => column ?? columns.value[index]!) : [...columns.value];
+    const exportedColumns = format === "sql" ? effectiveColumns(sourceColumns.value, columns.value).map((column, index) => column ?? columns.value[index]!) : (projectedColumns?.map((entry) => entry.name) ?? [...columns.value]);
     const request: api.TableExportRequest = {
       exportId,
       connectionId: connectionId.value,
@@ -2344,12 +2499,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             omitDatabaseQualifier: dropsSchemaQualifier(databaseType.value, options.includeDatabaseName?.value, meta.catalog),
           }
         : {}),
+      csvWithoutBom: editorSettings.csvWithoutBom,
       csvQuoteMode: editorSettings.csvQuoteMode,
       nullLiteral: csvNullLiteralForMode(editorSettings.csvNullMode),
       columns: exportedColumns,
-      columnTypes: columnTypes.value ? [...columnTypes.value] : undefined,
+      columnTypes: columnTypes.value ? (projectedColumns?.map((entry) => columnTypes.value?.[entry.index]) ?? [...columnTypes.value]) : undefined,
       ...(format === "sql" ? { columnExtras: sqlExportColumnExtras(exportedColumns) } : {}),
-      columnComments: format === "xlsx" ? buildXlsxHeaderOverrides(columns.value, visibleXlsxColumnComments.value, headerMode) : undefined,
+      columnComments: format === "xlsx" ? buildXlsxHeaderOverrides(projectedColumns?.map((entry) => entry.name) ?? columns.value, projectedColumns ? projectedColumns.map((entry) => visibleXlsxColumnComments.value?.[entry.index]) : visibleXlsxColumnComments.value, headerMode) : undefined,
       headerCommentRows: format === "xlsx" ? xlsxHeaderUsesCommentRows(headerMode) : undefined,
       primaryKeys: meta.primaryKeys ? [...meta.primaryKeys] : undefined,
       ...sqlExportPrimaryKeyOptions(format),
@@ -2365,8 +2521,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const preparingStore = isTauriRuntime() && getActivePinia() ? useConnectionStore() : undefined;
     const originalConfig = preparingStore?.getConfig(request.connectionId);
     const fingerprint = originalConfig ? connectionConfigFingerprint(originalConfig) : undefined;
-    const mode = openAfterExport ? "immediate" : (selectedMode ?? sqlExportOptions?.executionMode ?? (await showExportExecutionModeDialog()));
-    if (mode === null) return true;
+    const mode = openAfterExport ? "immediate" : (selectedMode ?? sqlExportOptions?.executionMode ?? getDefaultExportExecutionMode());
     const connStore = mode === "queued" ? useConnectionStore() : undefined;
     const fmt = FORMAT_META[format];
     const splitSqlOutput = format === "sql" && request.splitMaxMb !== undefined;
@@ -2561,7 +2716,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     columnIndexes?: number[],
     selectedMode?: ManualExportMode,
   ): Promise<boolean> {
-    if (rowIds !== undefined || columnIndexes !== undefined || context.value !== "results" || !queryResultExportRequest) {
+    // SQL keeps the backend streaming path for a grid column subset: the
+    // INSERT projection travels in `selectedColumns` and the query runs once.
+    // Other formats have no write-side projection, so a subset stays local.
+    if (rowIds !== undefined || (columnIndexes !== undefined && format !== "sql") || context.value !== "results" || !queryResultExportRequest) {
       return false;
     }
     if (format !== "sql" && hasActiveColumnFormatters(columnIndexes)) {
@@ -2593,6 +2751,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     };
     const requestOptions = {
       ...(format === "sql" ? { selectedColumns: sqlExportOptions?.selectedColumns?.map((column) => ({ ...column })) } : {}),
+      csvWithoutBom: editorSettings.csvWithoutBom,
       csvQuoteMode: editorSettings.csvQuoteMode,
       nullLiteral: csvNullLiteralForMode(editorSettings.csvNullMode),
       ...sqlExportPrimaryKeyOptions(format),
@@ -2606,8 +2765,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const extension = fmt?.ext ?? format;
     const filterName = fmt?.label ?? format.toUpperCase();
     let outputPath = exportFileName("query-result", extension);
-    const mode = openAfterExport ? "immediate" : (selectedMode ?? sqlExportOptions?.executionMode ?? (await showExportExecutionModeDialog()));
-    if (mode === null) return true;
+    const mode = openAfterExport ? "immediate" : (selectedMode ?? sqlExportOptions?.executionMode ?? getDefaultExportExecutionMode());
     if (isTauriRuntime()) {
       if (openAfterExport) outputPath = await api.createQueryResultTempFile(extension);
       else {
@@ -2634,6 +2792,17 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     };
     let request: QueryResultExportRequest | undefined;
     if (mode === "immediate") request = await build();
+    const startExport = async (onProgress: (progress: api.TableExportProgress) => void) => {
+      try {
+        return await (isTauriRuntime() ? api.startQueryResultExport(request!, onProgress, true) : api.startQueryResultExport(request!, onProgress));
+      } catch (error) {
+        if (request?.txnSessionId && isManualTransactionSessionExpired(error)) {
+          useQueryStore().noteExpiredManualTransaction(request.txnSessionId, error);
+          throw new Error(t("exportProgress.transactionUnavailable"));
+        }
+        throw error;
+      }
+    };
     await submitBackendExport({
       exportId,
       tableName: "Query Result",
@@ -2648,14 +2817,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
               request = await build();
             }
           : undefined,
-      start: (onProgress) => (isTauriRuntime() ? api.startQueryResultExport(request!, onProgress, true) : api.startQueryResultExport(request!, onProgress)),
+      start: startExport,
       cancel: () => api.cancelQueryResultExport(exportId, request!.executionId),
     });
     return true;
   }
 
   async function exportQueryResultSqlViaBackend(rowIds: number[] | undefined, sqlExportOptions: SqlExportOptions, columnIndexes?: number[]): Promise<boolean> {
-    if (!isTauriRuntime() || columnIndexes !== undefined) return false;
+    if (!isTauriRuntime()) return false;
     return exportQueryResultViaBackend("sql", rowIds, false, "name", true, sqlExportOptions, false, columnIndexes);
   }
 
@@ -2909,6 +3078,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     copyRowCount,
     canCopyRow,
     copyAll,
+    copyAllWithPreference,
     copyWithExtractor,
     copyWithPreference,
     previewWithExtractor,
@@ -2933,6 +3103,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     exportCurrentPageXlsxWithSql,
     exportAllResultsXlsx,
     exportAllResultsXlsxWithSql,
+    exportAllResultsMergedXlsx,
+    exportAllResultsMergedXlsxWithSql,
     exportResultSheetsXlsx: (sheets: DataGridExportSheet[]) => exportResultSheetsXlsxResult(sheets, false),
     exportSql,
     exportCurrentPageSql,

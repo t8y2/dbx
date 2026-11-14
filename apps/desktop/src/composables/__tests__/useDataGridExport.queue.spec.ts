@@ -7,7 +7,6 @@ import type { QueryResult } from "@/types/database";
 import "../useDataGridExport";
 
 const mocks = vi.hoisted(() => ({
-  mode: vi.fn(),
   start: vi.fn(),
   queryStart: vi.fn(),
   queryCancel: vi.fn(),
@@ -26,7 +25,6 @@ const mocks = vi.hoisted(() => ({
   config: { id: "oracle-1", name: "Oracle", db_type: "oracle", host: "test-instance" },
 }));
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
-vi.mock("@/lib/export/exportExecutionMode", () => ({ showExportExecutionModeDialog: mocks.mode }));
 vi.mock("@/lib/export/sqlInsertMode", () => ({ showSqlInsertModeDialog: mocks.sqlMode }));
 vi.mock("@/lib/export/exportPath", () => ({ promptExportSavePath: mocks.save, autoRevealExportedPathIfConfigured: vi.fn() }));
 vi.mock("@/lib/backend/api", () => ({
@@ -49,7 +47,7 @@ vi.mock("@/lib/backend/api", () => ({
 }));
 vi.mock("@tauri-apps/plugin-fs", () => ({ writeTextFile: mocks.memoryWrite }));
 vi.mock("@/stores/connectionStore", () => ({ useConnectionStore: () => ({ getConfig: () => mocks.config, ensureConnected: mocks.ensure, connectionStateRevision: () => 0, isCurrentConnectionStateRevision: () => true }) }));
-vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { exportBatchSize: 1000, exportRowLimitEnabled: false, csvQuoteMode: "minimal", csvNullMode: "empty", numericColumnRightAlign: true } }) }));
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { defaultExportMode: "queued", exportBatchSize: 1000, exportRowLimitEnabled: false, csvQuoteMode: "minimal", csvNullMode: "empty", numericColumnRightAlign: true } }) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/i18n", () => ({ default: { install() {} } }));
@@ -102,7 +100,6 @@ describe("data grid queued table export", () => {
     pending.length = 0;
     snapshots.length = 0;
     reads.length = 0;
-    mocks.mode.mockResolvedValue("queued");
     let file = 0;
     mocks.save.mockImplementation(async () => `C:/exports/report-${++file}.csv`);
     mocks.cancel.mockResolvedValue(undefined);
@@ -706,7 +703,6 @@ describe("data grid queued table export", () => {
     memory.options.completeLocalResult = computed(() => original.value);
     mocks.sqlMode.mockResolvedValue({ insertMode: "single", executionMode: "queued" });
     await useDataGridExport(memory.options).exportSql();
-    expect(mocks.mode).toHaveBeenCalledTimes(1);
     expect(mocks.buildInsert).not.toHaveBeenCalled();
     expect(mocks.memoryWrite).not.toHaveBeenCalled();
     memory.source.table = "OTHER";
@@ -786,7 +782,6 @@ describe("data grid queued table export", () => {
     const grid = useDataGridExport(memory.options);
     const opening = format === "xlsx" ? grid.openXlsx() : grid.exportHtml(undefined, true);
     await vi.waitFor(() => expect(mocks.memoryWrite).toHaveBeenCalledOnce());
-    expect(mocks.mode).toHaveBeenCalledOnce();
     expect(mocks.createTemp).toHaveBeenCalledWith(format);
     await useDataGridExport(fixture().options).exportCsv();
     finish(0);
@@ -1047,7 +1042,6 @@ describe("data grid queued table export", () => {
     );
     const opening = useDataGridExport(lobFixture().options).openXlsx();
     await vi.waitFor(() => expect(reads).toHaveLength(1));
-    expect(mocks.mode).toHaveBeenCalledTimes(1);
     expect(mocks.createTemp).toHaveBeenCalledWith("xlsx");
     await useDataGridExport(fixture().options).exportCsv();
     finish(0);

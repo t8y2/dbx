@@ -797,7 +797,13 @@ function querySourceRanges(tokens: readonly SqlSemanticToken[], cursor: number):
 }
 
 function parseRowSources(state: ParseState, cursor: number): SqlSemanticRowSource[] {
-  const ranges = querySourceRanges(state.tokens, cursor);
+  // Inside a CTE body only that body's query blocks and the CTEs declared before it
+  // are in scope. The CTE being defined is only a source where the body references
+  // it (recursive CTEs), and the outer query's sources are not visible (#14109).
+  const enclosingCteIndex = state.cteSources.findIndex((source) => !!source.bodySpan && cursor > source.bodySpan.start && cursor < source.bodySpan.end);
+  const enclosingBody = enclosingCteIndex >= 0 ? state.cteSources[enclosingCteIndex]?.bodySpan : undefined;
+  const ranges = querySourceRanges(state.tokens, cursor).filter((range) => !enclosingBody || (state.tokens[range.startIndex]?.span.start ?? -1) > enclosingBody.start);
+  const visibleCteSources = enclosingCteIndex >= 0 ? state.cteSources.slice(0, enclosingCteIndex) : state.cteSources;
   const sources: SqlSemanticRowSource[] = [];
   for (const range of ranges) {
     const scopedState = {
@@ -806,7 +812,7 @@ function parseRowSources(state: ParseState, cursor: number): SqlSemanticRowSourc
     };
     sources.push(...parseRowSourcesAtDepth(scopedState, range.depth, sources.length));
   }
-  return dedupeSources([...sources, ...state.cteSources]);
+  return dedupeSources([...sources, ...visibleCteSources]);
 }
 
 function dedupeSources(sources: SqlSemanticRowSource[]): SqlSemanticRowSource[] {
@@ -928,7 +934,15 @@ function nearestPreviousSyntaxWord(tokens: readonly SqlSemanticToken[]): string 
 function isTableListContinuation(tokens: readonly SqlSemanticToken[], position: number): boolean {
   const before = tokens.filter((item) => item.span.end <= position && item.kind !== "comment");
   let commaIndex = before.length - 1;
-  while (commaIndex >= 0 && (tokenIsIdentifier(before[commaIndex]) || before[commaIndex]?.text === ".")) commaIndex -= 1;
+  while (commaIndex >= 0 && (tokenIsIdentifier(before[commaIndex]) || before[commaIndex]?.text === ".")) {
+    // A clause keyword after the comma-separated sources (`FROM a, b WHERE`) closes the
+    // table slot: the cursor sits in the new clause even though a comma precedes it.
+    // Without this guard `WHERE`/`GROUP`… are skipped as identifiers and the implicit
+    // join keeps reporting a table context, so the WHERE clause never offers columns.
+    const token = before[commaIndex];
+    if (token?.kind === "word" && (CLAUSE_BOUNDARIES.has(token.normalized) || token.normalized === "select")) return false;
+    commaIndex -= 1;
+  }
   const comma = before[commaIndex];
   if (comma?.text !== ",") return false;
   const depth = comma.depth;
@@ -998,16 +1012,26 @@ function buildCursorIntent(tokens: readonly SqlSemanticToken[], cursor: number, 
 
   if (kind === "insert" && hasWordBefore(tokens, cursor, "into") && !hasWordBefore(tokens, cursor, "values")) {
     const mutationTarget = sources.find((source) => source.kind === "mutation_target");
-    return {
-      kind: "insert_column",
-      prefix: trailing.prefix,
-      replacementRange: trailing.replacementRange,
-      qualifierParts: trailing.qualifierParts,
-      targetSourceId: mutationTarget?.id,
-      expectedObjectKinds: ["column"],
-      confidence: mutationTarget ? "medium" : "low",
-      fallbackReason: mutationTarget ? undefined : "unresolved_insert_target",
-    };
+    const targetEnd = mutationTarget?.qualifiedName?.span.end;
+    if (targetEnd != null && trailing.replacementRange.start < targetEnd) {
+      return { kind: "table", prefix: trailing.prefix, replacementRange: trailing.replacementRange, qualifierParts: trailing.qualifierParts, expectedObjectKinds: ["table", "view"], confidence: "low", fallbackReason: "incomplete_insert_target" };
+    }
+    const openIndex = targetEnd == null ? -1 : tokens.findIndex((token) => token.span.start >= targetEnd);
+    const open = tokens[openIndex];
+    if (open?.text === "(" && open.span.end <= cursor) {
+      const closeIndex = findMatchingParenToken(tokens, openIndex);
+      if (closeIndex < 0 || tokens[closeIndex]!.span.start >= cursor) {
+        return {
+          kind: "insert_column",
+          prefix: trailing.prefix,
+          replacementRange: trailing.replacementRange,
+          qualifierParts: trailing.qualifierParts,
+          targetSourceId: mutationTarget?.id,
+          expectedObjectKinds: ["column"],
+          confidence: "medium",
+        };
+      }
+    }
   }
 
   // Same rule as the unqualified table slot below: the introducer is the word before the

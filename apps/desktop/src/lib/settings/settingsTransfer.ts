@@ -1,3 +1,4 @@
+import { SIDEBAR_HOVER_DELAY_MIN, SIDEBAR_HOVER_DELAY_MAX } from "@/lib/sidebar/sidebarHoverSettings";
 import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, type EditorSettingsDraftKey } from "./editorSettingsDraft";
 import { DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS, DEFAULT_DESKTOP_SETTINGS, DEFAULT_EDITOR_SETTINGS, DEFAULT_TOOLBAR_ITEMS, normalizeDesktopSettings, normalizeEditorSettings, type DesktopSettings, type EditorSettings } from "@/stores/settingsStore";
 import type { AppThemeMode } from "@/lib/app/appTheme";
@@ -149,6 +150,8 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "showInsertValueHints",
     "showConnectionGroupPath",
     "autoAliasTables",
+    "qualifyColumnCompletions",
+    "batchColumnSelectionIncludeComments",
     "tableCompletionSchemaQualification",
     "insertSpaceAfterCompletion",
     "sqlServerSpaceConfirmsCompletion",
@@ -157,6 +160,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "sortCompletionColumnsAlphabetically",
     "selectFirstCompletionOnOpen",
     "completionTriggerMode",
+    "completionMatchMode",
     "excludedCompletionItems",
     "wordWrap",
     "showWhitespace",
@@ -193,8 +197,10 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "colorizeConnectionTabsScope",
     "tabSortMode",
     "tabMaxWidth",
+    "tabDoubleClickAction",
     "tabGroupRows",
     "sidebarActivation",
+    "sidebarColumnDoubleClickAction",
     "sidebarObjectDisplay",
     "routineSourceOpenMode",
     "sidebarTableSearchEnabled",
@@ -202,12 +208,15 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "autoSelectActiveSidebarNode",
     "sidebarPinDefaultDatabase",
     "sidebarBrowseObjectsOnDatabaseActivation",
+    "sidebarAutoExpandOnDatabaseActivation",
+    "sidebarTableClickNavigation",
     "openTabsRestoreMode",
     "autoReloadRestoredDataTabsOnOpen",
     "disconnectTabHandlingMode",
     "deleteConnectionTabHandlingMode",
     "rememberConnectionDatabaseOnDelete",
     "deepLinkConnectionConfirmMode",
+    "duplicateTabTitleMode",
     "dataTabReuseMode",
     "openDataTabsNextToActive",
     "openTablesInDetachedWindow",
@@ -215,6 +224,9 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "objectBrowserAutoOpenDetailPanel",
     "sidebarObjectInfoMode",
     "sidebarAllowHorizontalScroll",
+    "sidebarShowConnectionEndpoints",
+    "sidebarHoverEnabled",
+    "sidebarHoverDelay",
     "sidebarShowTooltips",
     "sidebarIndent",
     "sidebarFontSize",
@@ -243,6 +255,8 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "dataGridKeepFilterEditorExpanded",
     "dataGridTextFilterPanelHeight",
     "dataGridToolbarLayout",
+    "dataGridOrderByVisible",
+    "dataGridWhereRatio",
     "defaultAutoKeepResults",
     "pinResultTabOnClick",
     "multiStatementDefaultView",
@@ -277,6 +291,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "damengClientBinDir",
     "autoOpenExportFolder",
     "applyColumnFormattersOnExport",
+    "csvWithoutBom",
     "csvQuoteMode",
     "csvNullMode",
     "queryResultExportFileNameSource",
@@ -291,7 +306,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
   ],
   shortcuts: ["shortcuts", "sqlShortcuts"],
   snippets: ["snippets", "snippetTriggerKey"],
-  other: ["updateDownloadSource", "updateNotificationsEnabled", "autoDownloadUpdates", "autoUpdateApp", "autoUpdateDrivers", "autoUpdateJdbc", "autoUpdateMcp", "autoUpdatePlugins"],
+  other: ["updateDownloadSource", "updateChannel", "updateNotificationsEnabled", "autoDownloadUpdates", "autoUpdateApp", "autoUpdateDrivers", "autoUpdateJdbc", "autoUpdateMcp", "autoUpdatePlugins"],
 };
 
 const KEY_TO_CATEGORY = new Map<string, SettingsTransferCategoryId>();
@@ -368,10 +383,12 @@ const EXPECTED_JSON_KINDS = new Map<string, string>(EDITOR_SETTINGS_DRAFT_KEYS.m
  * enum or a non-boolean flag refuses the whole file instead.
  */
 const PASS_THROUGH_BOOLEAN_KEYS = [
+  "sidebarTableClickNavigation",
   "wordWrap",
   "showWhitespace",
   "showExecutionTargetPicker",
   "autoAliasTables",
+  "qualifyColumnCompletions",
   "functionCompletionIncludeParams",
   "sequenceCompletionEnabled",
   "fontSmoothing",
@@ -396,6 +413,7 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
   "autoSelectActiveSidebarNode",
   "sidebarPinDefaultDatabase",
   "sidebarAllowHorizontalScroll",
+  "sidebarHoverEnabled",
   "sidebarShowTooltips",
   "updateNotificationsEnabled",
   "autoDownloadUpdates",
@@ -407,6 +425,7 @@ const PASS_THROUGH_BOOLEAN_KEYS = [
 ] as const satisfies readonly EditorSettingsDraftKey[];
 
 const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: unknown) => boolean>> = {
+  sidebarHoverDelay: (value) => typeof value === "number" && Number.isInteger(value) && value >= SIDEBAR_HOVER_DELAY_MIN && value <= SIDEBAR_HOVER_DELAY_MAX,
   // The editor font slider and the Ctrl+wheel zoom both clamp to this range.
   fontSize: (value) => typeof value === "number" && Number.isFinite(value) && value >= EDITOR_MIN_FONT_SIZE && value <= EDITOR_MAX_FONT_SIZE,
   welcomePageMode: (value) => value === "intro" || value === "workspace",

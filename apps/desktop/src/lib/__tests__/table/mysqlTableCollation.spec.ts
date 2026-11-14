@@ -1,12 +1,26 @@
 import { describe, expect, it } from "vitest";
 import type { QueryResult } from "@/types/database";
-import { mysqlTableCollationSql, parseMysqlTableCharset, parseMysqlTableCollation } from "@/lib/table/mysqlTableCollation";
+import { mysqlTableCharsetFromCollation, mysqlTableCollationSql, parseMysqlTableCharset, parseMysqlTableCollation } from "@/lib/table/mysqlTableCollation";
 
 function result(columns: string[], rows: QueryResult["rows"]): QueryResult {
   return { columns, rows, affected_rows: 0, execution_time_ms: 1 };
 }
 
 describe("mysqlTableCollation", () => {
+  it.each([
+    ["utf8mb4_0900_ai_ci", "utf8mb4"],
+    [" utf8_general_ci ", "utf8"],
+    ["utf8mb3_general_ci", "utf8mb3"],
+    ["latin1_swedish_ci", "latin1"],
+    ["gbk_chinese_ci", "gbk"],
+    ["binary", "binary"],
+    [null, ""],
+    [undefined, ""],
+    ["", ""],
+  ])("resolves the table charset for collation %s", (collation, expected) => {
+    expect(mysqlTableCharsetFromCollation(collation)).toBe(expected);
+  });
+
   it("builds mode-independent lookup SQL for quoted and Unicode names", () => {
     const sql = mysqlTableCollationSql("db'x", "订单\\archive");
     expect(sql).toContain("TABLE_COLLATION AS table_collation");

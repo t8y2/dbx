@@ -72,6 +72,78 @@
       "enabled": false
     },
     {
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "tiberius",
+        "rumqttc",
+        "tauri",
+        "tauri-build",
+        "tauri-plugin*",
+        "webview2-com",
+        "webview2-com-sys",
+        "windows",
+        "windows-core",
+        "aws-lc-sys"
+      ],
+      "enabled": false,
+      "description": "Pinned to the vendored [patch.crates-io] copies and the Win7 WebView2 alignment comments in src-tauri/Cargo.toml; tauri/tauri-build/tauri-plugin* move in lockstep with that vendored stack — a registry tauri minor pulls wry/webview2-com/windows copies alongside vendor/ and breaks both Windows builds (#14049, #12000 rounds 1-8)"
+    },
+    {
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "duckdb"
+      ],
+      "enabled": false,
+      "description": "duckdb crate minor bumps bundle DuckDB engine releases (1.20000.1 = engine 2.0.0 with breaking Arrow streaming API changes); move it in a dedicated PR with source adaptation, not in the cargo minor/patch batch (#14049)"
+    },
+    {
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "mysql_async"
+      ],
+      "enabled": false,
+      "description": "mysql_async is pinned to the zipg/mysql_async fork rev (Doris/EOF handshake patches); the fork publishes no version tags so renovate artifact updates always fail — bump the rev manually with the lockfile (#14049)"
+    },
+    {
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "reqwest"
+      ],
+      "allowedVersions": "<0.13",
+      "description": "reqwest 0.13 renamed the rustls-tls feature to rustls/rustls-no-provider while 12+ manifests still request rustls-tls; 0.12.x keeps flowing and 0.13 needs a dedicated migration PR"
+    },
+    {
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchCurrentVersion": "<1.0.0",
+      "matchUpdateTypes": [
+        "minor"
+      ],
+      "enabled": false,
+      "description": "0.x minor bumps are semver-breaking (RustCrypto digest wave, calamine, quick-xml, windows-core) and need source adaptation; keep them out of the cargo minor/patch batch (#12000)"
+    },
+    {
+      "matchManagers": [
+        "npm"
+      ],
+      "matchPackageNames": [
+        "vue-tsc",
+        "@vue/language-core",
+        "@volar/*"
+      ],
+      "enabled": false,
+      "description": "Pinned 2026-11: vue-tsc 3.3.14 / @volar 2.4.30 surfaced 78 template '.value on boolean' type errors (#13677); re-enable only after the template ref typing cleanup in a single verified batch"
+    },
+    {
       "packageNames": [
         "@tauri-apps/api",
         "@tauri-apps/cli",
@@ -130,16 +202,11 @@
       "description": "pnpm comes from packageManager in package.json; the action-setup version input must not drift from it (#11932 rounds 1-6)"
     },
     {
-      "matchManagers": [
-        "github-actions"
-      ],
-      "matchPackageNames": [
-        "go",
-        "rust",
-        "sccache"
-      ],
       "enabled": false,
-      "description": "uses-with tool inputs move only with deliberate toolchain bumps: Go 1.20.14 is the last Windows 7 release (#11926), sccache 0.19.0 breaks the win7 build-std rustc invocation with os error 206, and the nightly pin is keyed by WIN7_NIGHTLY_TOOLCHAIN for the prebuilt win7 artifacts (#13436)"
+      "description": "Action tool inputs (depType uses-with: go/rust toolchains, sccache, nightly pins) move only with deliberate toolchain bumps: Go 1.20.14 is the last Windows 7 release (#11926), sccache 0.19.0 breaks the win7 build-std rustc invocation with os error 206, and the nightly pin is keyed by WIN7_NIGHTLY_TOOLCHAIN for the prebuilt win7 artifacts (#13436). Verified from #14051's dependency table that these deps carry the literal depType 'uses-with' — both matchPackageNames [go, rust, sccache] and matchDepTypes [go, rust, sccache] failed to match them.",
+      "matchDepTypes": [
+        "uses-with"
+      ]
     },
     {
       "matchManagers": [

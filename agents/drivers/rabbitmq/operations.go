@@ -296,11 +296,14 @@ func consumersFromQueueInfo(info jsonObject) []jsonObject {
 		}
 		consumer := jsonObject(consumerMap)
 		channelName := ""
+		address := ""
 		if channelDetails := objectOrNil(consumer, "channel_details"); channelDetails != nil {
 			channelName = stringOrEmpty(channelDetails, "name")
+			address = stringOrEmpty(channelDetails, "peer_host")
 		}
 		entry := jsonObject{
 			"name":        channelName,
+			"address":     address,
 			"tag":         stringOrEmpty(consumer, "consumer_tag"),
 			"active":      boolOrDefault(consumer, "active", false),
 			"ackRequired": boolOrDefault(consumer, "ack_required", false),
@@ -1210,10 +1213,11 @@ func (s *server) peekMessages(params jsonObject) (any, error) {
 			return nil, err
 		}
 	}
+	decodePayload := boolOrDefault(params, "decode", false) || boolOrDefault(params, "decodePayload", false) || boolOrDefault(params, "decode_payload", false)
 	messageCapacity := peekMessageCapacity(len(fetched), offset, count)
 	messages := make([]jsonObject, 0, messageCapacity)
 	for index := offset; index < int64(len(fetched)) && len(messages) < count; index++ {
-		messages = append(messages, peekedMessageFromDelivery(queue, index, fetched[index]))
+		messages = append(messages, peekedMessageFromDelivery(queue, index, fetched[index], decodePayload))
 	}
 	return jsonObject{"messages": messages}, nil
 }
@@ -1257,7 +1261,7 @@ func resolveRoutingKey(params jsonObject, queue string) string {
 	return routingKey
 }
 
-func peekedMessageFromDelivery(queue string, index int64, delivery amqp.Delivery) jsonObject {
+func peekedMessageFromDelivery(queue string, index int64, delivery amqp.Delivery, decodePayload ...bool) jsonObject {
 	message := jsonObject{
 		"topic":         queue,
 		"offset":        index,
@@ -1276,7 +1280,7 @@ func peekedMessageFromDelivery(queue string, index int64, delivery amqp.Delivery
 	if !delivery.Timestamp.IsZero() {
 		message["timestamp"] = delivery.Timestamp.UnixMilli()
 	}
-	if text, ok := decodeDeliveryPayloadText(delivery.Body); ok {
+	if text, ok := decodeDeliveryPayloadText(delivery.Body, decodePayload...); ok {
 		message["payloadText"] = text
 	}
 	return message

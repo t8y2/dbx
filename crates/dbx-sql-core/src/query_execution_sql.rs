@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sqlparser::dialect::{GenericDialect, MsSqlDialect, PostgreSqlDialect};
+use sqlparser::dialect::{GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect};
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::models::connection::DatabaseType;
@@ -953,6 +953,11 @@ fn is_write_sql_statement(
         return !is_safe_read_pragma(&upper);
     }
 
+    // Special handling for SET: allow safe variable assignments and session configuration
+    if !starts_with_read && starts_with_keyword(&upper, "SET") {
+        return !is_safe_read_only_set(&upper, &cleaned) || contains_dangerous_sql_keyword(sql);
+    }
+
     // SHOW CREATE returns object metadata; CREATE is part of its read-only syntax.
     if starts_with_show_create(&upper) {
         return false;
@@ -1045,6 +1050,143 @@ fn is_safe_read_pragma(upper_stripped: &str) -> bool {
     false
 }
 
+/// Check if a SET statement is a safe read-only variable assignment or session setting.
+///
+/// Allows:
+/// - User variables: `SET @var = 1`, `SET @var := 1`, `SET @begin_id = 0, @end_id = 100`
+/// - Session variables: `SET @@session.var = 1`, `SET SESSION var = 1`, `SET var = 1`
+/// - Safe character set/encoding: `SET NAMES 'utf8mb4'`, `SET CHARSET utf8mb4`, `SET CHARACTER SET utf8mb4`
+/// - Safe search path / timezone: `SET search_path TO public`, `SET TIME ZONE 'UTC'`, `SET search_path = public`
+///
+/// Blocks:
+/// - Global / persistent modifications: `SET GLOBAL ...`, `SET @@global...`, `SET PERSIST...`, `SET @@persist...`
+/// - Password modifications: `SET PASSWORD...`
+/// - File exports: `INTO OUTFILE`, `INTO DUMPFILE`
+/// - Executable verbs: `CALL`, `EXEC`, `EXECUTE`
+/// - Dangerous write/DDL keywords: `DELETE`, `UPDATE`, `INSERT`, `DROP`, `ALTER`, `TRUNCATE`, `CREATE`, `MERGE`
+fn is_safe_read_only_set(upper: &str, cleaned: &str) -> bool {
+    if !starts_with_keyword(upper, "SET") {
+        return false;
+    }
+
+    let tokens = tokenize_set_statement(cleaned);
+    if tokens.is_empty() || !tokens[0].eq_ignore_ascii_case("SET") {
+        return false;
+    }
+
+    let mut has_assignment = false;
+    let after_set = &tokens[1..];
+
+    for token in after_set {
+        let norm = token.to_ascii_uppercase();
+
+        // Forbidden global or persistent modifications
+        if norm == "GLOBAL" || norm == "PERSIST" || norm == "PERSIST_ONLY" {
+            return false;
+        }
+        if norm.starts_with("@@GLOBAL") || norm.starts_with("@@PERSIST") {
+            return false;
+        }
+
+        // Forbidden password changes
+        if norm == "PASSWORD" {
+            return false;
+        }
+
+        // Forbidden file exports
+        if norm == "OUTFILE" || norm == "DUMPFILE" {
+            return false;
+        }
+
+        // Forbidden stored procedure / command executions
+        if norm == "CALL" || norm == "EXEC" || norm == "EXECUTE" {
+            return false;
+        }
+
+        // Dangerous DML/DDL keywords
+        if matches!(norm.as_str(), "DROP" | "DELETE" | "TRUNCATE" | "ALTER" | "UPDATE" | "MERGE" | "CREATE") {
+            return false;
+        }
+
+        if norm == "=" || norm == ":=" || norm == "TO" {
+            has_assignment = true;
+        }
+    }
+
+    if has_assignment {
+        return true;
+    }
+
+    // Check non-assignment safe session keywords
+    let first = after_set.first().map(|s| s.to_ascii_uppercase());
+    let second = after_set.get(1).map(|s| s.to_ascii_uppercase());
+
+    if matches!(first.as_deref(), Some("NAMES" | "CHARSET")) {
+        return true;
+    }
+    if first.as_deref() == Some("CHARACTER") && second.as_deref() == Some("SET") {
+        return true;
+    }
+    if first.as_deref() == Some("TIME") && second.as_deref() == Some("ZONE") {
+        return true;
+    }
+
+    false
+}
+
+fn tokenize_set_statement(cleaned: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut chars = cleaned.chars().peekable();
+
+    while let Some(&ch) = chars.peek() {
+        if ch.is_ascii_whitespace() {
+            chars.next();
+            continue;
+        }
+
+        if ch == ':' {
+            chars.next();
+            if chars.peek() == Some(&'=') {
+                chars.next();
+                tokens.push(":=".to_string());
+            } else {
+                tokens.push(":".to_string());
+            }
+            continue;
+        }
+
+        if ch == '=' {
+            chars.next();
+            tokens.push("=".to_string());
+            continue;
+        }
+
+        if ch == '(' || ch == ')' || ch == ',' || ch == ';' {
+            chars.next();
+            tokens.push(ch.to_string());
+            continue;
+        }
+
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '@' || ch == '$' || ch == '#' {
+            let mut word = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '@' || c == '$' || c == '#' || c == '.' {
+                    word.push(c);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            tokens.push(word);
+            continue;
+        }
+
+        chars.next();
+    }
+
+    tokens
+}
+
 /// True when `upper` starts with `keyword` followed by a non-alphanumeric byte
 /// (or nothing). `upper` must already be ASCII-uppercased. Shared with the
 /// Oracle manual-transaction proof in [`crate::sql_risk`].
@@ -1064,21 +1206,25 @@ pub(crate) fn starts_with_keyword(upper: &str, keyword: &str) -> bool {
 /// is reported as "not an opener" so the caller falls back to the historical
 /// cleanup instead of keeping a transaction open by accident.
 pub fn mysql_statement_opens_explicit_transaction(sql: &str) -> bool {
-    let cleaned = strip_sql_comments(sql);
-    let mut parts = cleaned.split(';');
-    let statement = parts.next().unwrap_or_default().trim();
-    if statement.is_empty() || parts.any(|part| !part.trim().is_empty()) {
+    if !crate::sql::starts_with_executable_sql_keyword_for_database(sql, &["BEGIN", "START"], DatabaseType::Mysql) {
         return false;
     }
-    let upper = statement.to_ascii_uppercase();
-    let mut tokens = upper.split_whitespace();
-    match tokens.next() {
-        Some("BEGIN") => matches!(tokens.next(), None | Some("WORK")),
+    let Ok(tokens) = Tokenizer::new(&MySqlDialect {}, sql).tokenize() else { return false };
+    let mut tokens: Vec<_> = tokens.into_iter().filter(|token| !matches!(token, Token::Whitespace(_))).collect();
+    while tokens.last() == Some(&Token::SemiColon) {
+        tokens.pop();
+    }
+    if tokens.iter().any(|token| matches!(token, Token::SemiColon)) {
+        return false;
+    }
+    let word_is = |index: usize, expected: &str| matches!(tokens.get(index), Some(Token::Word(word)) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(expected));
+    if word_is(0, "BEGIN") {
+        tokens.len() == 1 || (tokens.len() == 2 && word_is(1, "WORK"))
+    } else {
         // Modifiers (`READ ONLY`, `READ WRITE`, `WITH CONSISTENT SNAPSHOT`) are
         // optional and are verified by the server; a malformed one fails the
         // statement, so no transaction is left open for this execution.
-        Some("START") => tokens.next() == Some("TRANSACTION"),
-        _ => false,
+        word_is(0, "START") && word_is(1, "TRANSACTION")
     }
 }
 
@@ -2961,6 +3107,55 @@ mod tests {
     }
 
     #[test]
+    fn check_read_only_allows_safe_session_variables_and_blocks_unsafe_set() {
+        // Safe variable assignments and session configuration
+        for sql in [
+            "SET @begin_id = 0",
+            "SET @end_id = @begin_id + 100000;",
+            "SET @begin_id = 0;\nSET @end_id = @begin_id + 100000;",
+            "SET @var := 1",
+            "SET @a = 1, @b = 2;",
+            "SET NAMES utf8mb4",
+            "SET CHARSET utf8mb4",
+            "SET CHARACTER SET utf8mb4",
+            "SET @@session.sort_buffer_size = 10000",
+            "SET @@sort_buffer_size = 10000",
+            "SET SESSION sort_buffer_size = 10000",
+            "SET sort_buffer_size = 10000",
+            "SET @val = REPLACE('hello', 'l', 'w')",
+            "SET @val = INSERT('hello', 1, 2, 'hi')",
+            "SET @val = 'DELETE FROM users'",
+        ] {
+            assert_eq!(check_read_only(sql, "readonly", DatabaseType::Mysql), Ok(()), "expected allowed SET: {sql}");
+        }
+
+        // PostgreSQL search_path and timezone
+        assert_eq!(check_read_only("SET search_path TO public, \"$user\"", "readonly", DatabaseType::Postgres), Ok(()));
+        assert_eq!(check_read_only("SET search_path = public", "readonly", DatabaseType::Postgres), Ok(()));
+        assert_eq!(check_read_only("SET TIME ZONE 'UTC'", "readonly", DatabaseType::Postgres), Ok(()));
+
+        // Unsafe SET statements
+        for sql in [
+            "SET GLOBAL max_connections = 100",
+            "SET @@global.max_connections = 100",
+            "SET @@GLOBAL.sort_buffer_size = 1000",
+            "SET PERSIST max_connections = 100",
+            "SET @@persist.max_connections = 100",
+            "SET @@persist_only.max_connections = 100",
+            "SET PASSWORD = 'secret'",
+            "SET PASSWORD FOR 'user'@'localhost' = 'secret'",
+            "SET @x = (DELETE FROM users)",
+            "SET @x = (UPDATE users SET a = 1)",
+            "SET @x = (DROP TABLE users)",
+            "SET @x = (ALTER TABLE users ADD c INT)",
+            "SET @x = (TRUNCATE TABLE users)",
+            "SET @begin_id = 0; DROP TABLE users",
+        ] {
+            assert!(check_read_only(sql, "readonly", DatabaseType::Mysql).is_err(), "expected blocked SET: {sql}");
+        }
+    }
+
+    #[test]
     fn check_read_only_only_treats_executable_comments_as_writes_for_mysql_compatible_connections() {
         let mysql_executable_comment = "SELECT 3156 /*!50000 INTO OUTFILE '/var/lib/mysql-files/dbx_ro_probe.txt' */";
         let mariadb_executable_comment =
@@ -3308,6 +3503,8 @@ mod tests {
             "BEGIN WORK",
             "BEGIN WORK;",
             "-- open a transaction\nBEGIN",
+            "# open a transaction\nBEGIN WORK;",
+            "START/* start */TRANSACTION;",
             "/* keep */ START TRANSACTION",
             "START TRANSACTION",
             "start transaction;",
@@ -3331,6 +3528,11 @@ mod tests {
             "BEGIN;\nUPDATE t SET a = 1;",
             "BEGIN\nDECLARE x INT;\nEND",
             "BEGIN END",
+            "BEGIN WORK SELECT 1",
+            "CREATE PROCEDURE p() BEGIN SELECT 'START TRANSACTION'; END",
+            "SELECT 'COMMIT; BEGIN'",
+            "/* START TRANSACTION */ SELECT 1",
+            "ROLLBACK TO SAVEPOINT s",
             "START REPLICA",
             "SET autocommit = 0",
             "SELECT 'BEGIN' FROM t",

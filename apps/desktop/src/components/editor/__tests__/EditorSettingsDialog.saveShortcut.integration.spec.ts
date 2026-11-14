@@ -128,33 +128,37 @@ describe("Ctrl+S on the settings page (exposed apply entrypoint)", () => {
   });
 });
 
-describe("connection group path setting", () => {
+describe.each([
+  { key: "showConnectionGroupPath" as const, toggleId: "editor-show-connection-group-path", defaultValue: false },
+  { key: "batchColumnSelectionIncludeComments" as const, toggleId: "editor-batch-column-selection-include-comments", defaultValue: true },
+])("$key setting", ({ key, toggleId, defaultValue }) => {
   it("applies both toggle values and reloads them when old settings have no field", async () => {
     backend.saved = {};
     const { store } = await mountPage();
-    const toggle = host.querySelector<HTMLButtonElement>("#editor-show-connection-group-path")!;
+    const toggle = host.querySelector<HTMLButtonElement>(`#${toggleId}`)!;
     const apply = [...host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === i18n.global.t("settings.apply"))!;
 
-    expect(store.editorSettings.showConnectionGroupPath).toBe(false);
-    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(store.editorSettings[key]).toBe(defaultValue);
+    expect(toggle.getAttribute("aria-checked")).toBe(String(defaultValue));
     expect(apply.disabled).toBe(true);
 
-    for (const enabled of [true, false]) {
+    for (const enabled of [!defaultValue, defaultValue]) {
       backend.saves.mockClear();
       toggle.click();
       await settle();
       expect(toggle.getAttribute("aria-checked")).toBe(String(enabled));
       expect(apply.disabled).toBe(false);
+      expect(store.editorSettings[key]).toBe(!enabled);
 
       apply.click();
       await settle();
-      expect(store.editorSettings.showConnectionGroupPath).toBe(enabled);
-      expect(backend.saves).toHaveBeenCalledWith(expect.objectContaining({ showConnectionGroupPath: enabled }));
+      expect(store.editorSettings[key]).toBe(enabled);
+      expect(backend.saves).toHaveBeenCalledWith(expect.objectContaining({ [key]: enabled }));
       expect(apply.disabled).toBe(true);
 
       const reloadedStore = useSettingsStore(createPinia());
       await reloadedStore.initEditorSettings();
-      expect(reloadedStore.editorSettings.showConnectionGroupPath).toBe(enabled);
+      expect(reloadedStore.editorSettings[key]).toBe(enabled);
     }
   });
 });

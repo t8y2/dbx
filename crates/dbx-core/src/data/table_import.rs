@@ -35,6 +35,9 @@ use crate::transfer::{
     supports_primary_key_upsert, SqlBatchLimits,
 };
 
+mod delimited_reader;
+use delimited_reader::DelimitedReader;
+
 pub const DEFAULT_PREVIEW_LIMIT: usize = 50;
 pub const DEFAULT_BATCH_SIZE: usize = 500;
 pub const CREATE_TABLE_INFERENCE_ROWS: usize = 100;
@@ -110,7 +113,7 @@ pub struct ImportSqlBatch {
     pub row_count: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TableImportGenerator {
     Uuid,
@@ -122,10 +125,18 @@ pub enum TableImportGenerator {
     CurrentDate,
     #[serde(rename = "sequence", alias = "autoIncrement", alias = "auto_increment")]
     Sequence,
+    /// 用户手填的固定常量，线路编码为 `fixed:<value>`（issue #14503）。
+    Fixed(String),
 }
 
 impl TableImportGenerator {
     pub fn parse(raw: &str) -> Option<Self> {
+        // 固定值必须原样保留（大小写、空格、连字符），先于下面的归一化处理
+        if let Some(prefix) = raw.get(..6) {
+            if prefix.eq_ignore_ascii_case("fixed:") {
+                return Some(Self::Fixed(raw[6..].to_string()));
+            }
+        }
         let trimmed = raw.trim().to_ascii_lowercase().replace('-', "_");
         match trimmed.as_str() {
             "uuid" | "uuid_v4" => Some(Self::Uuid),
@@ -146,6 +157,7 @@ impl TableImportGenerator {
             }
             Self::CurrentDate => serde_json::Value::String(chrono::Local::now().format("%Y-%m-%d").to_string()),
             Self::Sequence => serde_json::json!(sequence),
+            Self::Fixed(value) => serde_json::Value::String(value.clone()),
         }
     }
 }
@@ -817,7 +829,7 @@ fn unique_import_headers(headers: impl IntoIterator<Item = String>) -> Vec<Strin
 
 #[derive(Debug, Clone)]
 pub struct DelimitedParseConfig {
-    pub delimiter: u8,
+    pub delimiter: Vec<u8>,
     pub decimal_separator: char,
     pub trim_values: bool,
     pub empty_string_as_null: bool,
@@ -869,20 +881,17 @@ pub fn effective_delimited_config(
     options: &TableImportParseOptions,
 ) -> Result<DelimitedParseConfig, String> {
     let default_delimiter = match source_format {
-        TableImportSourceFormat::Tsv => b'\t',
-        _ => b',',
+        TableImportSourceFormat::Tsv => b"\t",
+        _ => b",",
     };
-    let delimiter = match options.delimiter.as_deref() {
+    let delimiter: &[u8] = match options.delimiter.as_deref() {
         None | Some("") => default_delimiter,
-        Some("\\t") | Some("tab") | Some("TAB") => b'\t',
-        Some(value) => {
-            let bytes = value.as_bytes();
-            if bytes.len() != 1 {
-                return Err("Delimiter must be a single-byte character".to_string());
-            }
-            bytes[0]
-        }
+        Some("\\t") | Some("tab") | Some("TAB") => b"\t",
+        Some(value) => value.as_bytes(),
     };
+    if delimiter.len() > 1 && delimiter.iter().any(|byte| matches!(byte, b'"' | b'\r' | b'\n')) {
+        return Err("A multi-character delimiter cannot contain a double quote or a line break".to_string());
+    }
 
     let null_literal = effective_delimited_null_literal(options.null_literal.as_deref());
     let decimal_separator = match options.decimal_separator.as_deref() {
@@ -892,7 +901,7 @@ pub fn effective_delimited_config(
     };
 
     Ok(DelimitedParseConfig {
-        delimiter,
+        delimiter: delimiter.to_vec(),
         decimal_separator,
         trim_values: options.trim_values.unwrap_or(false),
         // 配了 NULL 字面量时空字段一律是空串：否则字面量刚把 NULL 和空串分开，
@@ -949,7 +958,7 @@ pub fn csv_value(value: &str) -> serde_json::Value {
     csv_value_with_config(
         value,
         &DelimitedParseConfig {
-            delimiter: b',',
+            delimiter: b",".to_vec(),
             decimal_separator: '.',
             trim_values: false,
             empty_string_as_null: true,
@@ -1278,15 +1287,14 @@ fn open_delimited_csv_reader_with_progress(
     source_format: TableImportSourceFormat,
     options: &TableImportParseOptions,
     on_encoding_progress: impl FnMut(u64),
-) -> Result<(csv::Reader<StrictTranscodingReader<File>>, DelimitedParseConfig, TableImportTextEncoding), String> {
+) -> Result<(DelimitedReader<StrictTranscodingReader<File>>, DelimitedParseConfig, TableImportTextEncoding), String> {
     let config = effective_delimited_config(source_format, options)?;
     let (encoding, bom_len) =
         resolve_text_encoding_from_file_with_progress(path, options.encoding, on_encoding_progress)?;
     let mut file = File::open(path).map_err(|error| error.to_string())?;
     file.seek(SeekFrom::Start(bom_len as u64)).map_err(|error| error.to_string())?;
     let transcoded = StrictTranscodingReader::new(file, encoding)?;
-    let reader =
-        csv::ReaderBuilder::new().delimiter(config.delimiter).has_headers(false).flexible(true).from_reader(transcoded);
+    let reader = DelimitedReader::new(transcoded, &config.delimiter);
     Ok((reader, config, encoding))
 }
 
@@ -1304,8 +1312,7 @@ fn parse_decoded_delimited_reader<R: IoRead>(
     preview_limit: usize,
     effective_encoding: TableImportTextEncoding,
 ) -> Result<ParsedImportFile, String> {
-    let reader =
-        csv::ReaderBuilder::new().delimiter(config.delimiter).has_headers(false).flexible(true).from_reader(reader);
+    let reader = DelimitedReader::new(reader, &config.delimiter);
     parse_csv_reader(reader, config, preview_limit, effective_encoding)
 }
 
@@ -1362,7 +1369,7 @@ pub fn parse_delimited_file_with_options(
 }
 
 fn parse_csv_reader<R: IoRead>(
-    mut reader: csv::Reader<R>,
+    mut reader: DelimitedReader<R>,
     config: &DelimitedParseConfig,
     preview_limit: usize,
     effective_encoding: TableImportTextEncoding,
@@ -1371,16 +1378,16 @@ fn parse_csv_reader<R: IoRead>(
 }
 
 fn parse_csv_reader_bounded<R: IoRead>(
-    mut reader: csv::Reader<R>,
+    reader: impl Into<DelimitedReader<R>>,
     config: &DelimitedParseConfig,
     preview_limit: usize,
     effective_encoding: TableImportTextEncoding,
 ) -> Result<ParsedImportFile, String> {
-    parse_csv_reader_inner(&mut reader, config, preview_limit.max(1), effective_encoding, false)
+    parse_csv_reader_inner(&mut reader.into(), config, preview_limit.max(1), effective_encoding, false)
 }
 
 fn parse_csv_reader_inner<R: IoRead>(
-    reader: &mut csv::Reader<R>,
+    reader: &mut DelimitedReader<R>,
     config: &DelimitedParseConfig,
     preview_limit: usize,
     effective_encoding: TableImportTextEncoding,
@@ -1391,7 +1398,7 @@ fn parse_csv_reader_inner<R: IoRead>(
     let mut columns = Vec::new();
     let mut record = csv::StringRecord::new();
     let mut index = 0usize;
-    while reader.read_record(&mut record).map_err(|e| e.to_string())? {
+    while reader.read_record(&mut record)? {
         index += 1;
         let row_number = index;
         if config.row_range.title_row == Some(row_number) {
@@ -5167,6 +5174,17 @@ fn import_value_rows_sql(
                     TableImportGenerator::Sequence => {
                         values.push_str(&row_sequence.to_string());
                     }
+                    TableImportGenerator::Fixed(value) => {
+                        let owned = serde_json::Value::String(value.clone());
+                        let normalized = normalize_import_value_cow(
+                            &owned,
+                            data_type,
+                            db_type,
+                            kingbase_oracle_mode,
+                            date_time_format,
+                        );
+                        values.push_str(&escape_value_typed(normalized.as_ref(), db_type, data_type));
+                    }
                 },
             }
         }
@@ -5801,6 +5819,13 @@ fn build_import_create_table_plan_with_identifier_quote(
                         Some(TableImportGenerator::CurrentTimestamp) => ImportInferredType::Timestamp,
                         Some(TableImportGenerator::CurrentDate) => ImportInferredType::Date,
                         Some(TableImportGenerator::Sequence) => ImportInferredType::Integer,
+                        Some(TableImportGenerator::Fixed(value)) => {
+                            if value.trim().parse::<i64>().is_ok() {
+                                ImportInferredType::Integer
+                            } else {
+                                ImportInferredType::Text
+                            }
+                        }
                         None => ImportInferredType::Text,
                     },
                 };
@@ -7080,13 +7105,14 @@ fn delimited_record_to_row(
 }
 
 fn delimited_columns_and_first_record<R: std::io::Read>(
-    reader: &mut csv::Reader<R>,
+    reader: &mut DelimitedReader<R>,
     config: &DelimitedParseConfig,
 ) -> Result<(Vec<String>, Option<csv::StringRecord>), String> {
     let mut columns = Vec::new();
-    for (index, record) in reader.records().enumerate() {
-        let record = record.map_err(|e| e.to_string())?;
-        let row_number = index + 1;
+    let mut record = csv::StringRecord::new();
+    let mut row_number = 0;
+    while reader.read_record(&mut record)? {
+        row_number += 1;
         if config.row_range.title_row == Some(row_number) {
             columns = unique_import_headers(
                 record
@@ -7144,7 +7170,7 @@ fn stream_delimited_rows_to_channel(
             record
         } else {
             let mut record = csv::StringRecord::new();
-            if !reader.read_record(&mut record).map_err(|error| error.to_string())? {
+            if !reader.read_record(&mut record)? {
                 break;
             }
             record
@@ -15997,6 +16023,50 @@ mod tests {
     }
 
     #[test]
+    fn xugu_import_insert_batches_preserve_backslashes_and_json_text() {
+        let columns = vec!["V".to_string(), "L".to_string(), "J".to_string()];
+        let types = vec![
+            ("V".to_string(), "VARCHAR(500)".to_string()),
+            ("L".to_string(), "CLOB".to_string()),
+            ("J".to_string(), "JSON".to_string()),
+        ];
+        let mappings = columns
+            .iter()
+            .map(|name| TableImportColumnMapping {
+                source_column: name.clone(),
+                target_column: name.clone(),
+                target_data_type: None,
+                generator: None,
+            })
+            .collect::<Vec<_>>();
+        let text = "中文\\path\\o'clock\\\nnext\tline";
+        let document = r#"{"path":"C:\\tmp\\file","line":"a\nb","quote":"\"O'Brien\""}"#;
+        let data = ParsedImportFile {
+            columns,
+            rows: vec![
+                vec![serde_json::json!(text), serde_json::json!(text), serde_json::json!(document)],
+                vec![serde_json::json!(""), serde_json::Value::Null, serde_json::Value::Null],
+            ],
+            total_rows: 2,
+            effective_encoding: None,
+        };
+        let batches =
+            build_import_insert_batches(&data, &mappings, &types, "ESCAPE_TEST", "APP", &DatabaseType::Xugu, 500)
+                .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].row_count, 2);
+        assert_eq!(
+            batches[0].sql,
+            format!(
+                "INSERT INTO \"APP\".\"ESCAPE_TEST\" (\"V\", \"L\", \"J\") VALUES\n({}, {}, {})\n('', NULL, NULL)",
+                crate::transfer::quote_string_literal(text),
+                crate::transfer::quote_string_literal(text),
+                crate::transfer::quote_string_literal(document)
+            )
+        );
+    }
+
+    #[test]
     fn table_import_generator_parses_supported_keys() {
         assert_eq!(TableImportGenerator::parse("uuid"), Some(TableImportGenerator::Uuid));
         assert_eq!(TableImportGenerator::parse("uuid_v4"), Some(TableImportGenerator::Uuid));
@@ -16008,6 +16078,104 @@ mod tests {
         assert_eq!(TableImportGenerator::parse("sequence"), Some(TableImportGenerator::Sequence));
         assert_eq!(TableImportGenerator::parse("auto_increment"), Some(TableImportGenerator::Sequence));
         assert_eq!(TableImportGenerator::parse("unknown_gen"), None);
+    }
+
+    #[test]
+    fn table_import_fixed_generator_preserves_value_verbatim() {
+        // 固定值不做大小写/连字符归一化，冒号后的内容原样保留（issue #14503）
+        assert_eq!(
+            TableImportGenerator::parse("fixed:Hello-World"),
+            Some(TableImportGenerator::Fixed("Hello-World".to_string()))
+        );
+        assert_eq!(TableImportGenerator::parse("fixed:a:b:c"), Some(TableImportGenerator::Fixed("a:b:c".to_string())));
+        assert_eq!(TableImportGenerator::parse("fixed: x "), Some(TableImportGenerator::Fixed(" x ".to_string())));
+        assert_eq!(TableImportGenerator::parse("fixed:"), Some(TableImportGenerator::Fixed(String::new())));
+        assert_eq!(TableImportGenerator::parse("FIXED:x"), Some(TableImportGenerator::Fixed("x".to_string())));
+        assert_eq!(TableImportGenerator::parse("fixed"), None);
+        assert_eq!(TableImportGenerator::Fixed("42".to_string()).generate_value(7), serde_json::json!("42"));
+    }
+
+    #[test]
+    fn import_fixed_generator_writes_escaped_constant_for_every_row() {
+        let columns = vec!["name".to_string()];
+        let mappings = vec![
+            TableImportColumnMapping {
+                source_column: "name".to_string(),
+                target_column: "name".to_string(),
+                target_data_type: None,
+                generator: None,
+            },
+            TableImportColumnMapping {
+                source_column: "".to_string(),
+                target_column: "tag".to_string(),
+                target_data_type: None,
+                generator: Some("fixed:O'Brien-x".to_string()),
+            },
+            TableImportColumnMapping {
+                source_column: "".to_string(),
+                target_column: "num".to_string(),
+                target_data_type: None,
+                generator: Some("fixed:42".to_string()),
+            },
+        ];
+        let plan = compile_import_plan(&columns, &mappings, &[("num".to_string(), "integer".to_string())]).unwrap();
+        let rows = vec![vec![serde_json::json!("Alice")], vec![serde_json::json!("Bob")]];
+        let batches = build_import_insert_batches_with_plan(
+            &rows,
+            &plan,
+            "users",
+            "public",
+            &DatabaseType::Postgres,
+            false,
+            TableImportConflictPolicy::Error,
+            &[],
+            None,
+            None,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].row_count, 2);
+        let sql = &batches[0].sql;
+        assert_eq!(sql.matches("'O''Brien-x'").count(), 2, "sql: {sql}");
+        // 与源数据单元格同一套字面量规则：文本形式的数字按字符串字面量写入，由数据库隐式转换
+        assert_eq!(sql.matches("'42'").count(), 2, "sql: {sql}");
+    }
+
+    #[test]
+    fn import_create_table_plan_infers_types_for_fixed_generator() {
+        let data = ParsedImportFile {
+            columns: vec!["username".to_string()],
+            rows: vec![vec![serde_json::json!("alice")]],
+            total_rows: 1,
+            effective_encoding: None,
+        };
+        let mappings = vec![
+            TableImportColumnMapping {
+                source_column: "".to_string(),
+                target_column: "num".to_string(),
+                target_data_type: None,
+                generator: Some("fixed:42".to_string()),
+            },
+            TableImportColumnMapping {
+                source_column: "".to_string(),
+                target_column: "tag".to_string(),
+                target_data_type: None,
+                generator: Some("fixed:batch-A".to_string()),
+            },
+        ];
+        let plan = build_import_create_table_plan(&data, &mappings, "accounts", "", &DatabaseType::Mysql).unwrap();
+        assert_eq!(
+            plan.columns,
+            vec![
+                ImportCreateTableColumn {
+                    name: "num".to_string(),
+                    data_type: integer_data_type(&DatabaseType::Mysql).to_string()
+                },
+                ImportCreateTableColumn { name: "tag".to_string(), data_type: "TEXT".to_string() },
+            ]
+        );
     }
 
     #[test]

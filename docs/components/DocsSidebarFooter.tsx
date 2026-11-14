@@ -95,7 +95,7 @@ export function DocsSidebarFooter({ lang }: { lang: DocsLang }) {
           <a className={iconButton} href="https://discord.gg/W7NyVDRt6a" target="_blank" rel="noreferrer" aria-label="Discord">
             <DiscordIcon />
           </a>
-          <a className={iconButton} href="https://qm.qq.com/cgi-bin/qm/qr?k=&group_code=1087880322" target="_blank" rel="noreferrer" aria-label="QQ">
+          <a className={iconButton} href="https://qm.qq.com/cgi-bin/qm/qr?k=&group_code=244975070" target="_blank" rel="noreferrer" aria-label="QQ">
             <QQIcon />
           </a>
           <a className={iconButton} href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank" rel="noreferrer" aria-label="WeChat">

@@ -53,7 +53,7 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           sparse-checkout: .github/ui-preview
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - id: detect
@@ -115,7 +115,7 @@ jobs:
       - uses: pnpm/action-setup@v6
         with:
           package_json_file: pr/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -152,9 +152,7 @@ jobs:
           npx playwright install --with-deps chromium
       - name: Record
         env:
-          PLAN_API_URL: https://api.atlascloud.ai/v1/chat/completions
           PLAN_API_KEY: ${{ secrets.PLAN_API_KEY }}
-          PLAN_MODEL: ${{ vars.UI_PREVIEW_PLAN_MODEL || 'openai/gpt-5.4-mini' }}
           DIFF_FILE: ${{ github.workspace }}/pr-info/pr.diff
           PR_BODY_FILE: ${{ github.workspace }}/pr-info/body.txt
           DIST_DIR: ${{ github.workspace }}/pr/dist
@@ -181,7 +179,7 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           sparse-checkout: .github/ui-preview
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - uses: actions/download-artifact@v4

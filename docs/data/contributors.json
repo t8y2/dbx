@@ -1,13 +1,13 @@
 {
   "repository": "t8y2/dbx",
-  "generatedAt": "2026-10-25T18:11:04.170Z",
-  "stars": 27735,
+  "generatedAt": "2026-11-08T18:07:23.126Z",
+  "stars": 29560,
   "contributors": [
     {
       "login": "t8y2",
       "avatarUrl": "https://avatars.githubusercontent.com/u/77960507?v=4",
       "profileUrl": "https://github.com/t8y2",
-      "commits": 4055,
+      "commits": 4152,
       "mergedPullRequests": 35,
       "firstContributionAt": "2026-04-30T08:14:51Z",
       "latestContributionAt": "2026-10-04T17:13:55Z"
@@ -16,37 +16,37 @@
       "login": "zipg",
       "avatarUrl": "https://avatars.githubusercontent.com/u/4047349?v=4",
       "profileUrl": "https://github.com/zipg",
-      "commits": 1134,
-      "mergedPullRequests": 1128,
+      "commits": 1171,
+      "mergedPullRequests": 1165,
       "firstContributionAt": "2026-06-22T06:10:59Z",
-      "latestContributionAt": "2026-10-22T19:37:00Z"
+      "latestContributionAt": "2026-11-07T10:01:02Z"
     },
     {
       "login": "eryajf",
       "avatarUrl": "https://avatars.githubusercontent.com/u/33259379?v=4",
       "profileUrl": "https://github.com/eryajf",
-      "commits": 393,
-      "mergedPullRequests": 393,
+      "commits": 408,
+      "mergedPullRequests": 406,
       "firstContributionAt": "2026-06-08T11:45:45Z",
-      "latestContributionAt": "2026-10-23T17:46:04Z"
+      "latestContributionAt": "2026-11-07T11:48:04Z"
     },
     {
       "login": "lxk955",
       "avatarUrl": "https://avatars.githubusercontent.com/u/164191365?v=4",
       "profileUrl": "https://github.com/lxk955",
-      "commits": 235,
-      "mergedPullRequests": 229,
+      "commits": 275,
+      "mergedPullRequests": 269,
       "firstContributionAt": "2026-10-01T06:24:16Z",
-      "latestContributionAt": "2026-10-25T15:31:05Z"
+      "latestContributionAt": "2026-11-08T06:06:33Z"
     },
     {
       "login": "Abeautifulsnow",
       "avatarUrl": "https://avatars.githubusercontent.com/u/28704977?v=4",
       "profileUrl": "https://github.com/Abeautifulsnow",
-      "commits": 170,
-      "mergedPullRequests": 158,
+      "commits": 173,
+      "mergedPullRequests": 161,
       "firstContributionAt": "2026-05-06T03:16:57Z",
-      "latestContributionAt": "2026-10-23T04:07:39Z"
+      "latestContributionAt": "2026-11-07T10:02:31Z"
     },
     {
       "login": "q396921921",
@@ -70,55 +70,64 @@
       "login": "CN-Scars",
       "avatarUrl": "https://avatars.githubusercontent.com/u/57054419?v=4",
       "profileUrl": "https://github.com/CN-Scars",
-      "commits": 109,
-      "mergedPullRequests": 109,
+      "commits": 118,
+      "mergedPullRequests": 118,
       "firstContributionAt": "2026-05-30T10:02:05Z",
-      "latestContributionAt": "2026-10-20T02:25:30Z"
+      "latestContributionAt": "2026-11-05T12:17:42Z"
     },
     {
       "login": "onenewcode",
       "avatarUrl": "https://avatars.githubusercontent.com/u/94808747?v=4",
       "profileUrl": "https://github.com/onenewcode",
-      "commits": 108,
-      "mergedPullRequests": 108,
+      "commits": 114,
+      "mergedPullRequests": 114,
       "firstContributionAt": "2026-06-30T01:53:31Z",
-      "latestContributionAt": "2026-10-21T15:04:08Z"
+      "latestContributionAt": "2026-11-04T07:13:06Z"
     },
     {
       "login": "yiqiui",
       "avatarUrl": "https://avatars.githubusercontent.com/u/49514152?v=4",
       "profileUrl": "https://github.com/yiqiui",
-      "commits": 86,
-      "mergedPullRequests": 86,
+      "commits": 98,
+      "mergedPullRequests": 98,
       "firstContributionAt": "2026-09-15T06:20:25Z",
-      "latestContributionAt": "2026-10-25T16:05:54Z"
+      "latestContributionAt": "2026-11-08T06:11:03Z"
     },
     {
       "login": "thailoc-dev",
       "avatarUrl": "https://avatars.githubusercontent.com/u/113083148?v=4",
       "profileUrl": "https://github.com/thailoc-dev",
-      "commits": 84,
-      "mergedPullRequests": 84,
+      "commits": 96,
+      "mergedPullRequests": 97,
       "firstContributionAt": "2026-09-10T02:47:44Z",
-      "latestContributionAt": "2026-10-25T11:02:12Z"
+      "latestContributionAt": "2026-11-07T17:00:59Z"
     },
     {
       "login": "efeire",
       "avatarUrl": "https://avatars.githubusercontent.com/u/15682810?v=4",
       "profileUrl": "https://github.com/efeire",
-      "commits": 66,
-      "mergedPullRequests": 66,
+      "commits": 77,
+      "mergedPullRequests": 77,
       "firstContributionAt": "2026-09-17T13:51:54Z",
-      "latestContributionAt": "2026-10-25T17:00:20Z"
+      "latestContributionAt": "2026-11-02T16:14:15Z"
+    },
+    {
+      "login": "dienaso",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/4003733?v=4",
+      "profileUrl": "https://github.com/dienaso",
+      "commits": 74,
+      "mergedPullRequests": 74,
+      "firstContributionAt": "2026-07-24T03:23:39Z",
+      "latestContributionAt": "2026-11-07T17:05:33Z"
     },
     {
       "login": "mapan0424",
       "avatarUrl": "https://avatars.githubusercontent.com/u/45232878?v=4",
       "profileUrl": "https://github.com/mapan0424",
-      "commits": 58,
-      "mergedPullRequests": 58,
+      "commits": 61,
+      "mergedPullRequests": 61,
       "firstContributionAt": "2026-07-17T05:42:50Z",
-      "latestContributionAt": "2026-10-23T10:14:36Z"
+      "latestContributionAt": "2026-11-02T14:56:14Z"
     },
     {
       "login": "serenez",
@@ -130,15 +139,6 @@
       "latestContributionAt": "2026-07-20T15:31:27Z"
     },
     {
-      "login": "dienaso",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/4003733?v=4",
-      "profileUrl": "https://github.com/dienaso",
-      "commits": 53,
-      "mergedPullRequests": 53,
-      "firstContributionAt": "2026-07-24T03:23:39Z",
-      "latestContributionAt": "2026-10-25T15:06:30Z"
-    },
-    {
       "login": "onceMisery",
       "avatarUrl": "https://avatars.githubusercontent.com/u/37446017?v=4",
       "profileUrl": "https://github.com/onceMisery",
@@ -148,13 +148,31 @@
       "latestContributionAt": "2026-10-18T04:27:35Z"
     },
     {
+      "login": "jeff377",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/16026012?v=4",
+      "profileUrl": "https://github.com/jeff377",
+      "commits": 48,
+      "mergedPullRequests": 48,
+      "firstContributionAt": "2026-10-08T08:26:42Z",
+      "latestContributionAt": "2026-11-04T16:36:36Z"
+    },
+    {
       "login": "Tong-bit-art",
       "avatarUrl": "https://avatars.githubusercontent.com/u/239565928?v=4",
       "profileUrl": "https://github.com/Tong-bit-art",
-      "commits": 41,
-      "mergedPullRequests": 41,
+      "commits": 47,
+      "mergedPullRequests": 47,
       "firstContributionAt": "2026-10-01T14:01:45Z",
-      "latestContributionAt": "2026-10-23T16:04:49Z"
+      "latestContributionAt": "2026-11-05T14:39:44Z"
+    },
+    {
+      "login": "jinpy666",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/5868671?v=4",
+      "profileUrl": "https://github.com/jinpy666",
+      "commits": 42,
+      "mergedPullRequests": 42,
+      "firstContributionAt": "2026-09-14T08:30:13Z",
+      "latestContributionAt": "2026-10-28T14:42:21Z"
     },
     {
       "login": "Illuminated2020",
@@ -166,24 +184,6 @@
       "latestContributionAt": "2026-05-12T09:22:36Z"
     },
     {
-      "login": "jinpy666",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/5868671?v=4",
-      "profileUrl": "https://github.com/jinpy666",
-      "commits": 39,
-      "mergedPullRequests": 39,
-      "firstContributionAt": "2026-09-14T08:30:13Z",
-      "latestContributionAt": "2026-10-19T13:56:22Z"
-    },
-    {
-      "login": "jeff377",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/16026012?v=4",
-      "profileUrl": "https://github.com/jeff377",
-      "commits": 36,
-      "mergedPullRequests": 36,
-      "firstContributionAt": "2026-10-08T08:26:42Z",
-      "latestContributionAt": "2026-10-23T04:07:09Z"
-    },
-    {
       "login": "Eve-z1",
       "avatarUrl": "https://avatars.githubusercontent.com/u/92513238?v=4",
       "profileUrl": "https://github.com/Eve-z1",
@@ -191,6 +191,15 @@
       "mergedPullRequests": 33,
       "firstContributionAt": "2026-09-01T05:03:42Z",
       "latestContributionAt": "2026-09-14T12:00:42Z"
+    },
+    {
+      "login": "HighBigSky",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/113153113?v=4",
+      "profileUrl": "https://github.com/HighBigSky",
+      "commits": 33,
+      "mergedPullRequests": 33,
+      "firstContributionAt": "2026-08-05T09:25:09Z",
+      "latestContributionAt": "2026-11-02T16:23:10Z"
     },
     {
       "login": "gggaiitx",
@@ -220,15 +229,6 @@
       "latestContributionAt": "2026-10-21T06:15:00Z"
     },
     {
-      "login": "HighBigSky",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/113153113?v=4",
-      "profileUrl": "https://github.com/HighBigSky",
-      "commits": 28,
-      "mergedPullRequests": 28,
-      "firstContributionAt": "2026-08-05T09:25:09Z",
-      "latestContributionAt": "2026-10-25T15:05:15Z"
-    },
-    {
       "login": "lexmin0412",
       "avatarUrl": "https://avatars.githubusercontent.com/u/24385370?v=4",
       "profileUrl": "https://github.com/lexmin0412",
@@ -245,6 +245,15 @@
       "mergedPullRequests": 27,
       "firstContributionAt": "2026-07-13T23:36:43Z",
       "latestContributionAt": "2026-10-20T12:24:00Z"
+    },
+    {
+      "login": "hongshuo-wang",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/66150472?v=4",
+      "profileUrl": "https://github.com/hongshuo-wang",
+      "commits": 26,
+      "mergedPullRequests": 26,
+      "firstContributionAt": "2026-10-11T07:25:43Z",
+      "latestContributionAt": "2026-11-05T12:15:46Z"
     },
     {
       "login": "ma123456mai",
@@ -265,6 +274,24 @@
       "latestContributionAt": "2026-07-10T10:15:25Z"
     },
     {
+      "login": "Acd-kk",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/248843626?v=4",
+      "profileUrl": "https://github.com/Acd-kk",
+      "commits": 24,
+      "mergedPullRequests": 24,
+      "firstContributionAt": "2026-10-19T12:34:48Z",
+      "latestContributionAt": "2026-11-08T14:20:05Z"
+    },
+    {
+      "login": "mr-dadong",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/102886401?v=4",
+      "profileUrl": "https://github.com/mr-dadong",
+      "commits": 23,
+      "mergedPullRequests": 23,
+      "firstContributionAt": "2026-08-17T07:04:42Z",
+      "latestContributionAt": "2026-11-02T16:36:43Z"
+    },
+    {
       "login": "ptma",
       "avatarUrl": "https://avatars.githubusercontent.com/u/1761883?v=4",
       "profileUrl": "https://github.com/ptma",
@@ -272,6 +299,15 @@
       "mergedPullRequests": 23,
       "firstContributionAt": "2026-06-09T08:33:11Z",
       "latestContributionAt": "2026-09-04T05:42:30Z"
+    },
+    {
+      "login": "xiaou61",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/113765024?v=4",
+      "profileUrl": "https://github.com/xiaou61",
+      "commits": 23,
+      "mergedPullRequests": 23,
+      "firstContributionAt": "2026-08-14T09:19:51Z",
+      "latestContributionAt": "2026-11-05T12:47:42Z"
     },
     {
       "login": "rarnu",
@@ -292,31 +328,13 @@
       "latestContributionAt": "2026-07-16T17:17:49Z"
     },
     {
-      "login": "mr-dadong",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/102886401?v=4",
-      "profileUrl": "https://github.com/mr-dadong",
-      "commits": 22,
-      "mergedPullRequests": 22,
-      "firstContributionAt": "2026-08-17T07:04:42Z",
-      "latestContributionAt": "2026-10-15T06:45:50Z"
-    },
-    {
-      "login": "hongshuo-wang",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/66150472?v=4",
-      "profileUrl": "https://github.com/hongshuo-wang",
-      "commits": 21,
-      "mergedPullRequests": 21,
-      "firstContributionAt": "2026-10-11T07:25:43Z",
-      "latestContributionAt": "2026-10-21T14:21:48Z"
-    },
-    {
       "login": "Mo-Moore",
       "avatarUrl": "https://avatars.githubusercontent.com/u/33098900?v=4",
       "profileUrl": "https://github.com/Mo-Moore",
-      "commits": 21,
-      "mergedPullRequests": 21,
+      "commits": 22,
+      "mergedPullRequests": 22,
       "firstContributionAt": "2026-08-27T05:54:45Z",
-      "latestContributionAt": "2026-10-20T16:53:30Z"
+      "latestContributionAt": "2026-11-02T14:51:02Z"
     },
     {
       "login": "amwps290",
@@ -355,6 +373,15 @@
       "latestContributionAt": "2026-05-20T08:10:15Z"
     },
     {
+      "login": "CSXFanMeng",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/105690322?v=4",
+      "profileUrl": "https://github.com/CSXFanMeng",
+      "commits": 16,
+      "mergedPullRequests": 16,
+      "firstContributionAt": "2026-07-02T10:52:18Z",
+      "latestContributionAt": "2026-11-02T15:47:32Z"
+    },
+    {
       "login": "linjianlin",
       "avatarUrl": "https://avatars.githubusercontent.com/u/46356519?v=4",
       "profileUrl": "https://github.com/linjianlin",
@@ -391,6 +418,15 @@
       "latestContributionAt": "2026-09-09T14:36:14Z"
     },
     {
+      "login": "hanxuanyu",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/21254318?v=4",
+      "profileUrl": "https://github.com/hanxuanyu",
+      "commits": 15,
+      "mergedPullRequests": 15,
+      "firstContributionAt": "2026-08-08T05:23:28Z",
+      "latestContributionAt": "2026-11-07T10:00:34Z"
+    },
+    {
       "login": "jischeng",
       "avatarUrl": "https://avatars.githubusercontent.com/u/49861575?v=4",
       "profileUrl": "https://github.com/jischeng",
@@ -398,6 +434,24 @@
       "mergedPullRequests": 15,
       "firstContributionAt": "2026-06-24T12:52:59Z",
       "latestContributionAt": "2026-07-29T12:41:10Z"
+    },
+    {
+      "login": "lcq928",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/30230002?v=4",
+      "profileUrl": "https://github.com/lcq928",
+      "commits": 14,
+      "mergedPullRequests": 15,
+      "firstContributionAt": "2026-10-22T07:15:39Z",
+      "latestContributionAt": "2026-11-07T17:01:52Z"
+    },
+    {
+      "login": "imcman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/108491624?v=4",
+      "profileUrl": "https://github.com/imcman",
+      "commits": 14,
+      "mergedPullRequests": 14,
+      "firstContributionAt": "2026-10-28T10:41:36Z",
+      "latestContributionAt": "2026-11-08T04:18:55Z"
     },
     {
       "login": "juvevood",
@@ -418,13 +472,13 @@
       "latestContributionAt": "2026-09-21T04:28:32Z"
     },
     {
-      "login": "hanxuanyu",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/21254318?v=4",
-      "profileUrl": "https://github.com/hanxuanyu",
+      "login": "OOMEcho",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/53035350?v=4",
+      "profileUrl": "https://github.com/OOMEcho",
       "commits": 13,
       "mergedPullRequests": 13,
-      "firstContributionAt": "2026-08-08T05:23:28Z",
-      "latestContributionAt": "2026-10-25T10:21:29Z"
+      "firstContributionAt": "2026-09-24T05:41:20Z",
+      "latestContributionAt": "2026-10-29T03:07:53Z"
     },
     {
       "login": "SpencerZhang",
@@ -436,15 +490,6 @@
       "latestContributionAt": "2026-07-20T08:54:52Z"
     },
     {
-      "login": "xiaou61",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/113765024?v=4",
-      "profileUrl": "https://github.com/xiaou61",
-      "commits": 13,
-      "mergedPullRequests": 13,
-      "firstContributionAt": "2026-08-14T09:19:51Z",
-      "latestContributionAt": "2026-10-23T12:09:17Z"
-    },
-    {
       "login": "DengQingNian",
       "avatarUrl": "https://avatars.githubusercontent.com/u/117324885?v=4",
       "profileUrl": "https://github.com/DengQingNian",
@@ -452,6 +497,24 @@
       "mergedPullRequests": 15,
       "firstContributionAt": "2026-06-02T16:19:01Z",
       "latestContributionAt": "2026-10-10T13:10:59Z"
+    },
+    {
+      "login": "ericbyz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/111882299?v=4",
+      "profileUrl": "https://github.com/ericbyz",
+      "commits": 12,
+      "mergedPullRequests": 12,
+      "firstContributionAt": "2026-10-16T16:29:30Z",
+      "latestContributionAt": "2026-11-05T12:31:35Z"
+    },
+    {
+      "login": "Gaiokane",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/10814413?v=4",
+      "profileUrl": "https://github.com/Gaiokane",
+      "commits": 12,
+      "mergedPullRequests": 12,
+      "firstContributionAt": "2026-10-22T02:20:03Z",
+      "latestContributionAt": "2026-11-06T04:28:52Z"
     },
     {
       "login": "GIWTO",
@@ -463,15 +526,6 @@
       "latestContributionAt": "2026-08-26T13:38:10Z"
     },
     {
-      "login": "OOMEcho",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/53035350?v=4",
-      "profileUrl": "https://github.com/OOMEcho",
-      "commits": 12,
-      "mergedPullRequests": 12,
-      "firstContributionAt": "2026-09-24T05:41:20Z",
-      "latestContributionAt": "2026-09-30T11:48:53Z"
-    },
-    {
       "login": "ordinary-s",
       "avatarUrl": "https://avatars.githubusercontent.com/u/59008530?v=4",
       "profileUrl": "https://github.com/ordinary-s",
@@ -479,6 +533,15 @@
       "mergedPullRequests": 12,
       "firstContributionAt": "2026-08-18T11:36:48Z",
       "latestContributionAt": "2026-10-24T08:27:46Z"
+    },
+    {
+      "login": "yaoxinghuo",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/69723?v=4",
+      "profileUrl": "https://github.com/yaoxinghuo",
+      "commits": 12,
+      "mergedPullRequests": 12,
+      "firstContributionAt": "2026-07-24T11:33:29Z",
+      "latestContributionAt": "2026-10-29T17:19:23Z"
     },
     {
       "login": "aiLi0617",
@@ -499,15 +562,6 @@
       "latestContributionAt": "2026-09-07T17:21:09Z"
     },
     {
-      "login": "CSXFanMeng",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/105690322?v=4",
-      "profileUrl": "https://github.com/CSXFanMeng",
-      "commits": 11,
-      "mergedPullRequests": 11,
-      "firstContributionAt": "2026-07-02T10:52:18Z",
-      "latestContributionAt": "2026-10-25T13:02:55Z"
-    },
-    {
       "login": "dafeng-001",
       "avatarUrl": "https://avatars.githubusercontent.com/u/67090734?v=4",
       "profileUrl": "https://github.com/dafeng-001",
@@ -515,6 +569,15 @@
       "mergedPullRequests": 11,
       "firstContributionAt": "2026-06-21T01:57:56Z",
       "latestContributionAt": "2026-10-08T05:55:27Z"
+    },
+    {
+      "login": "Ezreal-byte",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/71426102?v=4",
+      "profileUrl": "https://github.com/Ezreal-byte",
+      "commits": 11,
+      "mergedPullRequests": 11,
+      "firstContributionAt": "2026-09-23T01:51:41Z",
+      "latestContributionAt": "2026-10-27T04:38:09Z"
     },
     {
       "login": "guoyongchang",
@@ -553,13 +616,13 @@
       "latestContributionAt": "2026-10-01T07:16:38Z"
     },
     {
-      "login": "yaoxinghuo",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/69723?v=4",
-      "profileUrl": "https://github.com/yaoxinghuo",
+      "login": "ThugKd",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19286886?v=4",
+      "profileUrl": "https://github.com/ThugKd",
       "commits": 11,
       "mergedPullRequests": 11,
-      "firstContributionAt": "2026-07-24T11:33:29Z",
-      "latestContributionAt": "2026-10-20T17:23:34Z"
+      "firstContributionAt": "2026-11-05T07:52:24Z",
+      "latestContributionAt": "2026-11-08T14:18:50Z"
     },
     {
       "login": "Bacon2994",
@@ -569,6 +632,15 @@
       "mergedPullRequests": 7,
       "firstContributionAt": "2026-04-30T09:05:18Z",
       "latestContributionAt": "2026-05-09T06:42:25Z"
+    },
+    {
+      "login": "caiyq925-cell",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/294055896?v=4",
+      "profileUrl": "https://github.com/caiyq925-cell",
+      "commits": 10,
+      "mergedPullRequests": 10,
+      "firstContributionAt": "2026-10-22T10:01:23Z",
+      "latestContributionAt": "2026-11-04T07:33:20Z"
     },
     {
       "login": "dal1wg",
@@ -587,15 +659,6 @@
       "mergedPullRequests": 10,
       "firstContributionAt": "2026-07-31T04:15:42Z",
       "latestContributionAt": "2026-10-14T07:44:10Z"
-    },
-    {
-      "login": "Ezreal-byte",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/71426102?v=4",
-      "profileUrl": "https://github.com/Ezreal-byte",
-      "commits": 10,
-      "mergedPullRequests": 10,
-      "firstContributionAt": "2026-09-23T01:51:41Z",
-      "latestContributionAt": "2026-10-24T08:28:52Z"
     },
     {
       "login": "jeeinn",
@@ -625,6 +688,15 @@
       "latestContributionAt": "2026-10-05T03:10:25Z"
     },
     {
+      "login": "heeeex100",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/35334194?v=4",
+      "profileUrl": "https://github.com/heeeex100",
+      "commits": 8,
+      "mergedPullRequests": 8,
+      "firstContributionAt": "2026-10-21T11:15:54Z",
+      "latestContributionAt": "2026-11-02T14:15:57Z"
+    },
+    {
       "login": "Lan-zk",
       "avatarUrl": "https://avatars.githubusercontent.com/u/68137514?v=4",
       "profileUrl": "https://github.com/Lan-zk",
@@ -641,15 +713,6 @@
       "mergedPullRequests": 8,
       "firstContributionAt": "2026-07-22T06:48:07Z",
       "latestContributionAt": "2026-08-11T13:33:16Z"
-    },
-    {
-      "login": "Acd-kk",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/248843626?v=4",
-      "profileUrl": "https://github.com/Acd-kk",
-      "commits": 7,
-      "mergedPullRequests": 7,
-      "firstContributionAt": "2026-10-19T12:34:48Z",
-      "latestContributionAt": "2026-10-25T15:31:43Z"
     },
     {
       "login": "czs208112",
@@ -677,6 +740,15 @@
       "mergedPullRequests": 7,
       "firstContributionAt": "2026-09-30T07:13:21Z",
       "latestContributionAt": "2026-10-08T13:32:00Z"
+    },
+    {
+      "login": "javalover123",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9191388?v=4",
+      "profileUrl": "https://github.com/javalover123",
+      "commits": 7,
+      "mergedPullRequests": 7,
+      "firstContributionAt": "2026-09-19T14:48:01Z",
+      "latestContributionAt": "2026-11-07T17:03:20Z"
     },
     {
       "login": "Jinmoli",
@@ -751,6 +823,15 @@
       "latestContributionAt": "2026-07-01T11:05:45Z"
     },
     {
+      "login": "peakxy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/110726416?v=4",
+      "profileUrl": "https://github.com/peakxy",
+      "commits": 6,
+      "mergedPullRequests": 6,
+      "firstContributionAt": "2026-10-09T05:08:00Z",
+      "latestContributionAt": "2026-10-26T23:47:31Z"
+    },
+    {
       "login": "possebon",
       "avatarUrl": "https://avatars.githubusercontent.com/u/257745?v=4",
       "profileUrl": "https://github.com/possebon",
@@ -769,15 +850,6 @@
       "latestContributionAt": "2026-07-10T11:27:07Z"
     },
     {
-      "login": "caiyq925-cell",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/294055896?v=4",
-      "profileUrl": "https://github.com/caiyq925-cell",
-      "commits": 5,
-      "mergedPullRequests": 5,
-      "firstContributionAt": "2026-10-22T10:01:23Z",
-      "latestContributionAt": "2026-10-25T17:13:48Z"
-    },
-    {
       "login": "ChunMengLu",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2115440?v=4",
       "profileUrl": "https://github.com/ChunMengLu",
@@ -794,15 +866,6 @@
       "mergedPullRequests": 5,
       "firstContributionAt": "2026-09-11T05:36:59Z",
       "latestContributionAt": "2026-10-23T15:36:14Z"
-    },
-    {
-      "login": "ericbyz",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/111882299?v=4",
-      "profileUrl": "https://github.com/ericbyz",
-      "commits": 5,
-      "mergedPullRequests": 5,
-      "firstContributionAt": "2026-10-16T16:29:30Z",
-      "latestContributionAt": "2026-10-22T15:20:53Z"
     },
     {
       "login": "fraluc06",
@@ -832,15 +895,6 @@
       "latestContributionAt": "2026-08-18T15:17:24Z"
     },
     {
-      "login": "lcq928",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/30230002?v=4",
-      "profileUrl": "https://github.com/lcq928",
-      "commits": 5,
-      "mergedPullRequests": 5,
-      "firstContributionAt": "2026-10-22T07:15:39Z",
-      "latestContributionAt": "2026-10-25T10:19:52Z"
-    },
-    {
       "login": "lizzzzz777",
       "avatarUrl": "https://avatars.githubusercontent.com/u/72645313?v=4",
       "profileUrl": "https://github.com/lizzzzz777",
@@ -850,13 +904,13 @@
       "latestContributionAt": "2026-08-25T06:46:25Z"
     },
     {
-      "login": "peakxy",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/110726416?v=4",
-      "profileUrl": "https://github.com/peakxy",
+      "login": "seaways1015-afk",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/296356369?v=4",
+      "profileUrl": "https://github.com/seaways1015-afk",
       "commits": 5,
       "mergedPullRequests": 5,
-      "firstContributionAt": "2026-10-09T05:08:00Z",
-      "latestContributionAt": "2026-10-21T13:01:20Z"
+      "firstContributionAt": "2026-10-30T02:06:05Z",
+      "latestContributionAt": "2026-11-06T04:29:04Z"
     },
     {
       "login": "Staroon",
@@ -904,6 +958,15 @@
       "latestContributionAt": "2026-09-24T10:25:24Z"
     },
     {
+      "login": "AndreasK79",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/6977712?v=4",
+      "profileUrl": "https://github.com/AndreasK79",
+      "commits": 4,
+      "mergedPullRequests": 4,
+      "firstContributionAt": "2026-10-24T16:22:23Z",
+      "latestContributionAt": "2026-11-05T12:37:40Z"
+    },
+    {
       "login": "azens",
       "avatarUrl": "https://avatars.githubusercontent.com/u/14170526?v=4",
       "profileUrl": "https://github.com/azens",
@@ -949,15 +1012,6 @@
       "latestContributionAt": "2026-08-13T14:31:14Z"
     },
     {
-      "login": "heeeex100",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/35334194?v=4",
-      "profileUrl": "https://github.com/heeeex100",
-      "commits": 4,
-      "mergedPullRequests": 4,
-      "firstContributionAt": "2026-10-21T11:15:54Z",
-      "latestContributionAt": "2026-10-25T10:22:51Z"
-    },
-    {
       "login": "James-Leong",
       "avatarUrl": "https://avatars.githubusercontent.com/u/109658865?v=4",
       "profileUrl": "https://github.com/James-Leong",
@@ -992,6 +1046,24 @@
       "mergedPullRequests": 4,
       "firstContributionAt": "2026-09-11T09:28:07Z",
       "latestContributionAt": "2026-09-18T09:54:46Z"
+    },
+    {
+      "login": "PanSHIgg",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/165797598?v=4",
+      "profileUrl": "https://github.com/PanSHIgg",
+      "commits": 4,
+      "mergedPullRequests": 4,
+      "firstContributionAt": "2026-09-12T03:29:36Z",
+      "latestContributionAt": "2026-11-02T17:32:24Z"
+    },
+    {
+      "login": "saefulrahman",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/6184154?v=4",
+      "profileUrl": "https://github.com/saefulrahman",
+      "commits": 4,
+      "mergedPullRequests": 4,
+      "firstContributionAt": "2026-10-04T13:57:38Z",
+      "latestContributionAt": "2026-11-02T16:22:50Z"
     },
     {
       "login": "wuxiemian",
@@ -1055,6 +1127,15 @@
       "mergedPullRequests": 3,
       "firstContributionAt": "2026-10-22T20:55:16Z",
       "latestContributionAt": "2026-10-23T06:10:03Z"
+    },
+    {
+      "login": "alanslengkoan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/36220456?v=4",
+      "profileUrl": "https://github.com/alanslengkoan",
+      "commits": 3,
+      "mergedPullRequests": 3,
+      "firstContributionAt": "2026-10-25T09:34:14Z",
+      "latestContributionAt": "2026-11-05T12:00:20Z"
     },
     {
       "login": "AspBamboo",
@@ -1129,6 +1210,15 @@
       "latestContributionAt": "2026-08-21T10:38:54Z"
     },
     {
+      "login": "Evvvvvvvan",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/230067833?v=4",
+      "profileUrl": "https://github.com/Evvvvvvvan",
+      "commits": 3,
+      "mergedPullRequests": 3,
+      "firstContributionAt": "2026-10-27T10:04:27Z",
+      "latestContributionAt": "2026-11-07T10:00:00Z"
+    },
+    {
       "login": "fengyuwusong",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16892891?v=4",
       "profileUrl": "https://github.com/fengyuwusong",
@@ -1147,15 +1237,6 @@
       "latestContributionAt": "2026-08-20T01:28:40Z"
     },
     {
-      "login": "Gaiokane",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/10814413?v=4",
-      "profileUrl": "https://github.com/Gaiokane",
-      "commits": 3,
-      "mergedPullRequests": 3,
-      "firstContributionAt": "2026-10-22T02:20:03Z",
-      "latestContributionAt": "2026-10-24T16:30:44Z"
-    },
-    {
       "login": "HolyeTyrone",
       "avatarUrl": "https://avatars.githubusercontent.com/u/43714994?v=4",
       "profileUrl": "https://github.com/HolyeTyrone",
@@ -1163,15 +1244,6 @@
       "mergedPullRequests": 3,
       "firstContributionAt": "2026-09-08T03:33:05Z",
       "latestContributionAt": "2026-09-11T06:38:34Z"
-    },
-    {
-      "login": "javalover123",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/9191388?v=4",
-      "profileUrl": "https://github.com/javalover123",
-      "commits": 3,
-      "mergedPullRequests": 3,
-      "firstContributionAt": "2026-09-19T14:48:01Z",
-      "latestContributionAt": "2026-10-24T16:32:22Z"
     },
     {
       "login": "kir1ito",
@@ -1210,13 +1282,13 @@
       "latestContributionAt": "2026-09-18T10:16:14Z"
     },
     {
-      "login": "PanSHIgg",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/165797598?v=4",
-      "profileUrl": "https://github.com/PanSHIgg",
+      "login": "pengwow",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/22185821?v=4",
+      "profileUrl": "https://github.com/pengwow",
       "commits": 3,
       "mergedPullRequests": 3,
-      "firstContributionAt": "2026-09-12T03:29:36Z",
-      "latestContributionAt": "2026-10-20T02:20:05Z"
+      "firstContributionAt": "2026-10-29T08:15:36Z",
+      "latestContributionAt": "2026-11-07T09:59:33Z"
     },
     {
       "login": "polemp",
@@ -1228,6 +1300,24 @@
       "latestContributionAt": "2026-07-29T12:48:40Z"
     },
     {
+      "login": "poncosh",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/74602380?v=4",
+      "profileUrl": "https://github.com/poncosh",
+      "commits": 3,
+      "mergedPullRequests": 3,
+      "firstContributionAt": "2026-10-06T05:19:19Z",
+      "latestContributionAt": "2026-10-27T07:05:31Z"
+    },
+    {
+      "login": "r9yn",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3170158?v=4",
+      "profileUrl": "https://github.com/r9yn",
+      "commits": 3,
+      "mergedPullRequests": 3,
+      "firstContributionAt": "2026-11-01T04:59:57Z",
+      "latestContributionAt": "2026-11-04T15:17:07Z"
+    },
+    {
       "login": "rihkddd",
       "avatarUrl": "https://avatars.githubusercontent.com/u/2656576?v=4",
       "profileUrl": "https://github.com/rihkddd",
@@ -1237,15 +1327,6 @@
       "latestContributionAt": "2026-08-10T16:08:18Z"
     },
     {
-      "login": "saefulrahman",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/6184154?v=4",
-      "profileUrl": "https://github.com/saefulrahman",
-      "commits": 3,
-      "mergedPullRequests": 3,
-      "firstContributionAt": "2026-10-04T13:57:38Z",
-      "latestContributionAt": "2026-10-06T13:59:38Z"
-    },
-    {
       "login": "scstc",
       "avatarUrl": "https://avatars.githubusercontent.com/u/17975927?v=4",
       "profileUrl": "https://github.com/scstc",
@@ -1253,6 +1334,15 @@
       "mergedPullRequests": 3,
       "firstContributionAt": "2026-08-18T10:01:35Z",
       "latestContributionAt": "2026-08-20T13:01:23Z"
+    },
+    {
+      "login": "spiritlord",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/56630467?v=4",
+      "profileUrl": "https://github.com/spiritlord",
+      "commits": 3,
+      "mergedPullRequests": 3,
+      "firstContributionAt": "2026-10-28T06:39:06Z",
+      "latestContributionAt": "2026-11-02T14:35:06Z"
     },
     {
       "login": "StaravenX",
@@ -1289,6 +1379,15 @@
       "mergedPullRequests": 3,
       "firstContributionAt": "2026-04-30T06:28:17Z",
       "latestContributionAt": "2026-04-30T09:48:13Z"
+    },
+    {
+      "login": "wnyr",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/8221975?v=4",
+      "profileUrl": "https://github.com/wnyr",
+      "commits": 3,
+      "mergedPullRequests": 3,
+      "firstContributionAt": "2026-07-06T03:39:01Z",
+      "latestContributionAt": "2026-11-02T14:54:39Z"
     },
     {
       "login": "yanguibao1997",
@@ -1334,6 +1433,15 @@
       "mergedPullRequests": 2,
       "firstContributionAt": "2026-10-16T12:20:31Z",
       "latestContributionAt": "2026-10-21T14:27:07Z"
+    },
+    {
+      "login": "adminkk",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/31362054?v=4",
+      "profileUrl": "https://github.com/adminkk",
+      "commits": 2,
+      "mergedPullRequests": 2,
+      "firstContributionAt": "2026-11-06T03:40:17Z",
+      "latestContributionAt": "2026-11-06T10:20:26Z"
     },
     {
       "login": "ahua8522",
@@ -1408,6 +1516,33 @@
       "latestContributionAt": "2026-06-20T16:04:52Z"
     },
     {
+      "login": "Chow-Code",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/6522316?v=4",
+      "profileUrl": "https://github.com/Chow-Code",
+      "commits": 2,
+      "mergedPullRequests": 2,
+      "firstContributionAt": "2026-10-22T05:52:32Z",
+      "latestContributionAt": "2026-10-28T10:31:17Z"
+    },
+    {
+      "login": "chukui2005",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/144649155?v=4",
+      "profileUrl": "https://github.com/chukui2005",
+      "commits": 2,
+      "mergedPullRequests": 2,
+      "firstContributionAt": "2026-11-04T12:50:06Z",
+      "latestContributionAt": "2026-11-05T12:37:50Z"
+    },
+    {
+      "login": "colabhoangbui2110",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/165826708?v=4",
+      "profileUrl": "https://github.com/colabhoangbui2110",
+      "commits": 2,
+      "mergedPullRequests": 2,
+      "firstContributionAt": "2026-10-23T10:45:59Z",
+      "latestContributionAt": "2026-11-02T17:49:24Z"
+    },
+    {
       "login": "cunkz",
       "avatarUrl": "https://avatars.githubusercontent.com/u/44666470?v=4",
       "profileUrl": "https://github.com/cunkz",
@@ -1415,6 +1550,15 @@
       "mergedPullRequests": 2,
       "firstContributionAt": "2026-10-01T07:34:31Z",
       "latestContributionAt": "2026-10-04T18:22:39Z"
+    },
+    {
+      "login": "dd-xiaozhi",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/83541888?v=4",
+      "profileUrl": "https://github.com/dd-xiaozhi",
+      "commits": 2,
+      "mergedPullRequests": 2,
+      "firstContributionAt": "2026-10-28T08:33:32Z",
+      "latestContributionAt": "2026-11-02T17:08:27Z"
     },
     {
       "login": "debugzhao",
@@ -1442,6 +1586,24 @@
       "mergedPullRequests": 2,
       "firstContributionAt": "2026-06-10T08:32:55Z",
       "latestContributionAt": "2026-06-11T09:29:40Z"
+    },
+    {
+      "login": "FrankChan8",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/28721268?v=4",
+      "profileUrl": "https://github.com/FrankChan8",
+      "commits": 2,
+      "mergedPullRequests": 2,
+      "firstContributionAt": "2026-10-27T15:11:32Z",
+      "latestContributionAt": "2026-11-05T12:30:25Z"
+    },
+    {
+      "login": "gibbsfreeenergy",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/44790286?v=4",
+      "profileUrl": "https://github.com/gibbsfreeenergy",
+      "commits": 2,
+      "mergedPullRequests": 2,
+      "firstContributionAt": "2026-10-23T07:02:10Z",
+      "latestContributionAt": "2026-11-02T14:35:46Z"
     },
     {
       "login": "githubasda",
@@ -1532,6 +1694,15 @@
       "mergedPullRequests": 2,
       "firstContributionAt": "2026-07-12T13:29:00Z",
       "latestContributionAt": "2026-07-13T09:03:34Z"
+    },
+    {
+      "login": "jingouzhui",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/188188255?v=4",
+      "profileUrl": "https://github.com/jingouzhui",
+      "commits": 2,
+      "mergedPullRequests": 2,
+      "firstContributionAt": "2026-10-28T07:14:27Z",
+      "latestContributionAt": "2026-11-02T15:23:48Z"
     },
     {
       "login": "JinRudy",
@@ -1633,6 +1804,33 @@
       "latestContributionAt": "2026-08-02T08:35:04Z"
     },
     {
+      "login": "MingZhe1008",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/126999332?v=4",
+      "profileUrl": "https://github.com/MingZhe1008",
+      "commits": 2,
+      "mergedPullRequests": 2,
+      "firstContributionAt": "2026-10-28T07:23:32Z",
+      "latestContributionAt": "2026-11-02T14:35:25Z"
+    },
+    {
+      "login": "misxzaiz",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/108251808?v=4",
+      "profileUrl": "https://github.com/misxzaiz",
+      "commits": 2,
+      "mergedPullRequests": 2,
+      "firstContributionAt": "2026-10-28T09:25:44Z",
+      "latestContributionAt": "2026-10-29T16:15:25Z"
+    },
+    {
+      "login": "MomentarySixthSense",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/179086595?v=4",
+      "profileUrl": "https://github.com/MomentarySixthSense",
+      "commits": 2,
+      "mergedPullRequests": 2,
+      "firstContributionAt": "2026-10-28T07:59:32Z",
+      "latestContributionAt": "2026-10-30T04:47:57Z"
+    },
+    {
       "login": "ninggc",
       "avatarUrl": "https://avatars.githubusercontent.com/u/16892791?v=4",
       "profileUrl": "https://github.com/ninggc",
@@ -1651,13 +1849,13 @@
       "latestContributionAt": "2026-07-10T05:27:11Z"
     },
     {
-      "login": "poncosh",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/74602380?v=4",
-      "profileUrl": "https://github.com/poncosh",
+      "login": "Pius-x",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/22451519?v=4",
+      "profileUrl": "https://github.com/Pius-x",
       "commits": 2,
       "mergedPullRequests": 2,
-      "firstContributionAt": "2026-10-06T05:19:19Z",
-      "latestContributionAt": "2026-10-22T07:28:00Z"
+      "firstContributionAt": "2026-10-22T07:49:21Z",
+      "latestContributionAt": "2026-10-28T12:49:53Z"
     },
     {
       "login": "qkzsky",
@@ -1732,6 +1930,15 @@
       "latestContributionAt": "2026-08-06T06:09:21Z"
     },
     {
+      "login": "TaroXin",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19855713?v=4",
+      "profileUrl": "https://github.com/TaroXin",
+      "commits": 2,
+      "mergedPullRequests": 2,
+      "firstContributionAt": "2026-10-27T11:19:51Z",
+      "latestContributionAt": "2026-11-03T14:58:17Z"
+    },
+    {
       "login": "thanhthai3010",
       "avatarUrl": "https://avatars.githubusercontent.com/u/7280732?v=4",
       "profileUrl": "https://github.com/thanhthai3010",
@@ -1802,15 +2009,6 @@
       "mergedPullRequests": 2,
       "firstContributionAt": "2026-07-27T08:55:20Z",
       "latestContributionAt": "2026-07-30T07:13:36Z"
-    },
-    {
-      "login": "wnyr",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/8221975?v=4",
-      "profileUrl": "https://github.com/wnyr",
-      "commits": 2,
-      "mergedPullRequests": 2,
-      "firstContributionAt": "2026-07-06T03:39:01Z",
-      "latestContributionAt": "2026-09-04T16:54:00Z"
     },
     {
       "login": "xcstatus",
@@ -1894,6 +2092,15 @@
       "latestContributionAt": "2026-09-14T10:31:28Z"
     },
     {
+      "login": "zhongtait",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/191844472?v=4",
+      "profileUrl": "https://github.com/zhongtait",
+      "commits": 2,
+      "mergedPullRequests": 2,
+      "firstContributionAt": "2026-10-16T07:33:45Z",
+      "latestContributionAt": "2026-11-04T11:30:55Z"
+    },
+    {
       "login": "zhwq1216",
       "avatarUrl": "https://avatars.githubusercontent.com/u/9948390?v=4",
       "profileUrl": "https://github.com/zhwq1216",
@@ -1919,6 +2126,24 @@
       "mergedPullRequests": 2,
       "firstContributionAt": "2026-07-30T10:58:25Z",
       "latestContributionAt": "2026-10-20T12:25:57Z"
+    },
+    {
+      "login": "0scar07",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/180706703?v=4",
+      "profileUrl": "https://github.com/0scar07",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-11-03T22:13:04Z",
+      "latestContributionAt": "2026-11-05T14:25:44Z"
+    },
+    {
+      "login": "0xvectr",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/57480598?v=4",
+      "profileUrl": "https://github.com/0xvectr",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-11-04T20:48:06Z",
+      "latestContributionAt": "2026-11-05T05:12:23Z"
     },
     {
       "login": "2090230619-syq",
@@ -1975,15 +2200,6 @@
       "latestContributionAt": "2026-09-20T04:17:52Z"
     },
     {
-      "login": "alanslengkoan",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/36220456?v=4",
-      "profileUrl": "https://github.com/alanslengkoan",
-      "commits": 1,
-      "mergedPullRequests": 1,
-      "firstContributionAt": "2026-10-25T09:34:14Z",
-      "latestContributionAt": "2026-10-25T13:19:33Z"
-    },
-    {
       "login": "anandghegde",
       "avatarUrl": "https://avatars.githubusercontent.com/u/470771?v=4",
       "profileUrl": "https://github.com/anandghegde",
@@ -2011,6 +2227,15 @@
       "latestContributionAt": "2026-08-31T14:55:42Z"
     },
     {
+      "login": "arnann",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/106525831?v=4",
+      "profileUrl": "https://github.com/arnann",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-10-13T02:02:11Z",
+      "latestContributionAt": "2026-11-02T17:32:41Z"
+    },
+    {
       "login": "athoune",
       "avatarUrl": "https://avatars.githubusercontent.com/u/74048?v=4",
       "profileUrl": "https://github.com/athoune",
@@ -2018,6 +2243,15 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-06-14T12:51:26Z",
       "latestContributionAt": "2026-06-14T14:53:10Z"
+    },
+    {
+      "login": "ayang875",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/76422858?v=4",
+      "profileUrl": "https://github.com/ayang875",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-10-28T06:36:50Z",
+      "latestContributionAt": "2026-10-28T12:10:46Z"
     },
     {
       "login": "B022MC",
@@ -2036,6 +2270,15 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-05-21T01:48:37Z",
       "latestContributionAt": "2026-05-21T02:24:47Z"
+    },
+    {
+      "login": "bercedev",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/75228263?v=4",
+      "profileUrl": "https://github.com/bercedev",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-10-28T13:07:00Z",
+      "latestContributionAt": "2026-10-28T14:20:55Z"
     },
     {
       "login": "bigdogcome",
@@ -2119,15 +2362,6 @@
       "latestContributionAt": "2026-08-26T05:21:51Z"
     },
     {
-      "login": "Chow-Code",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/6522316?v=4",
-      "profileUrl": "https://github.com/Chow-Code",
-      "commits": 1,
-      "mergedPullRequests": 1,
-      "firstContributionAt": "2026-10-22T05:52:32Z",
-      "latestContributionAt": "2026-10-22T12:01:43Z"
-    },
-    {
       "login": "cl1107",
       "avatarUrl": "https://avatars.githubusercontent.com/u/21985353?v=4",
       "profileUrl": "https://github.com/cl1107",
@@ -2144,15 +2378,6 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-07-02T05:59:24Z",
       "latestContributionAt": "2026-07-02T06:21:53Z"
-    },
-    {
-      "login": "colabhoangbui2110",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/165826708?v=4",
-      "profileUrl": "https://github.com/colabhoangbui2110",
-      "commits": 1,
-      "mergedPullRequests": 1,
-      "firstContributionAt": "2026-10-23T10:45:59Z",
-      "latestContributionAt": "2026-10-24T15:19:26Z"
     },
     {
       "login": "ColdSand803",
@@ -2189,6 +2414,33 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-10-15T08:04:31Z",
       "latestContributionAt": "2026-10-15T11:40:05Z"
+    },
+    {
+      "login": "dajiaohuang",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/108231307?v=4",
+      "profileUrl": "https://github.com/dajiaohuang",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-11-03T16:13:15Z",
+      "latestContributionAt": "2026-11-03T17:16:14Z"
+    },
+    {
+      "login": "davids-dot",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/19329937?v=4",
+      "profileUrl": "https://github.com/davids-dot",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-11-04T05:53:23Z",
+      "latestContributionAt": "2026-11-04T15:16:55Z"
+    },
+    {
+      "login": "DeanCen",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/241120292?v=4",
+      "profileUrl": "https://github.com/DeanCen",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-11-05T10:30:41Z",
+      "latestContributionAt": "2026-11-05T13:17:48Z"
     },
     {
       "login": "Dhevenddra",
@@ -2234,15 +2486,6 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-07-08T09:14:47Z",
       "latestContributionAt": "2026-07-08T10:53:49Z"
-    },
-    {
-      "login": "duminga",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/91080718?v=4",
-      "profileUrl": "https://github.com/duminga",
-      "commits": 1,
-      "mergedPullRequests": 1,
-      "firstContributionAt": "2026-08-20T17:21:17Z",
-      "latestContributionAt": "2026-08-21T04:21:38Z"
     },
     {
       "login": "easton-shi",
@@ -2378,6 +2621,15 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-07-23T06:23:37Z",
       "latestContributionAt": "2026-08-03T07:50:44Z"
+    },
+    {
+      "login": "fwrq41251",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/6220591?v=4",
+      "profileUrl": "https://github.com/fwrq41251",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-10-29T05:30:47Z",
+      "latestContributionAt": "2026-11-06T01:22:47Z"
     },
     {
       "login": "gaoruiqiang2017",
@@ -2578,6 +2830,15 @@
       "latestContributionAt": "2026-09-09T04:30:53Z"
     },
     {
+      "login": "JASON-QWeb",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/175815458?v=4",
+      "profileUrl": "https://github.com/JASON-QWeb",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-11-01T14:58:13Z",
+      "latestContributionAt": "2026-11-02T14:25:06Z"
+    },
+    {
       "login": "JeaceLiu",
       "avatarUrl": "https://avatars.githubusercontent.com/u/31269749?v=4",
       "profileUrl": "https://github.com/JeaceLiu",
@@ -2612,6 +2873,15 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-10-20T08:21:49Z",
       "latestContributionAt": "2026-10-21T14:08:18Z"
+    },
+    {
+      "login": "jiejie1133",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/116809768?v=4",
+      "profileUrl": "https://github.com/jiejie1133",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-11-05T10:58:57Z",
+      "latestContributionAt": "2026-11-06T05:36:39Z"
     },
     {
       "login": "JoAdo07",
@@ -2650,6 +2920,15 @@
       "latestContributionAt": "2026-07-28T17:29:20Z"
     },
     {
+      "login": "khalil-shao",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/64495949?v=4",
+      "profileUrl": "https://github.com/khalil-shao",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-10-30T03:44:47Z",
+      "latestContributionAt": "2026-10-31T09:38:33Z"
+    },
+    {
       "login": "koco-co",
       "avatarUrl": "https://avatars.githubusercontent.com/u/227195474?v=4",
       "profileUrl": "https://github.com/koco-co",
@@ -2657,6 +2936,15 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-07-14T12:44:05Z",
       "latestContributionAt": "2026-07-28T20:27:08Z"
+    },
+    {
+      "login": "L494264Tt",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/181556911?v=4",
+      "profileUrl": "https://github.com/L494264Tt",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-10-28T06:28:35Z",
+      "latestContributionAt": "2026-10-28T13:56:58Z"
     },
     {
       "login": "lanlan-wzz",
@@ -2704,6 +2992,15 @@
       "latestContributionAt": "2026-06-17T14:12:59Z"
     },
     {
+      "login": "liuchaowu12",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/26702415?v=4",
+      "profileUrl": "https://github.com/liuchaowu12",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-11-04T04:17:00Z",
+      "latestContributionAt": "2026-11-04T07:28:18Z"
+    },
+    {
       "login": "lok1688",
       "avatarUrl": "https://avatars.githubusercontent.com/u/12622411?v=4",
       "profileUrl": "https://github.com/lok1688",
@@ -2720,6 +3017,24 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-05-25T03:02:18Z",
       "latestContributionAt": "2026-05-25T03:10:17Z"
+    },
+    {
+      "login": "luckdewei",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/206799298?v=4",
+      "profileUrl": "https://github.com/luckdewei",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-10-30T02:48:28Z",
+      "latestContributionAt": "2026-11-07T17:11:18Z"
+    },
+    {
+      "login": "M-Tesla",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/9055877?v=4",
+      "profileUrl": "https://github.com/M-Tesla",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-10-13T01:32:00Z",
+      "latestContributionAt": "2026-10-26T05:16:43Z"
     },
     {
       "login": "Maaran-dev",
@@ -2785,6 +3100,15 @@
       "latestContributionAt": "2026-07-28T20:32:27Z"
     },
     {
+      "login": "mingruankeji",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/125786535?v=4",
+      "profileUrl": "https://github.com/mingruankeji",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-10-21T14:01:00Z",
+      "latestContributionAt": "2026-10-28T14:22:02Z"
+    },
+    {
       "login": "mmorella-dev",
       "avatarUrl": "https://avatars.githubusercontent.com/u/4561733?v=4",
       "profileUrl": "https://github.com/mmorella-dev",
@@ -2810,6 +3134,15 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-09-30T08:43:18Z",
       "latestContributionAt": "2026-09-30T13:55:30Z"
+    },
+    {
+      "login": "MuY-DG",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/204658699?v=4",
+      "profileUrl": "https://github.com/MuY-DG",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-11-03T04:42:19Z",
+      "latestContributionAt": "2026-11-05T14:25:34Z"
     },
     {
       "login": "niubinJD",
@@ -2875,15 +3208,6 @@
       "latestContributionAt": "2026-10-14T04:21:23Z"
     },
     {
-      "login": "Pius-x",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/22451519?v=4",
-      "profileUrl": "https://github.com/Pius-x",
-      "commits": 1,
-      "mergedPullRequests": 1,
-      "firstContributionAt": "2026-10-22T07:49:21Z",
-      "latestContributionAt": "2026-10-22T12:01:17Z"
-    },
-    {
       "login": "private20",
       "avatarUrl": "https://avatars.githubusercontent.com/u/89687927?v=4",
       "profileUrl": "https://github.com/private20",
@@ -2927,6 +3251,15 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-09-30T09:16:02Z",
       "latestContributionAt": "2026-10-03T06:14:12Z"
+    },
+    {
+      "login": "reginaldoroge",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/6708495?v=4",
+      "profileUrl": "https://github.com/reginaldoroge",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-10-27T05:14:06Z",
+      "latestContributionAt": "2026-11-04T11:30:05Z"
     },
     {
       "login": "Resheba",
@@ -2981,6 +3314,15 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-10-01T11:46:29Z",
       "latestContributionAt": "2026-10-01T15:45:13Z"
+    },
+    {
+      "login": "sedax90",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/5001801?v=4",
+      "profileUrl": "https://github.com/sedax90",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-10-24T07:19:30Z",
+      "latestContributionAt": "2026-10-28T12:50:08Z"
     },
     {
       "login": "seth-shi",
@@ -3127,6 +3469,15 @@
       "latestContributionAt": "2026-10-21T15:58:42Z"
     },
     {
+      "login": "tiktalk945",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/351293509?v=4",
+      "profileUrl": "https://github.com/tiktalk945",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-11-02T02:48:18Z",
+      "latestContributionAt": "2026-11-02T03:40:41Z"
+    },
+    {
       "login": "TuZaaaaa",
       "avatarUrl": "https://avatars.githubusercontent.com/u/70996583?v=4",
       "profileUrl": "https://github.com/TuZaaaaa",
@@ -3235,6 +3586,15 @@
       "latestContributionAt": "2026-08-20T04:24:04Z"
     },
     {
+      "login": "wubx",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/320680?v=4",
+      "profileUrl": "https://github.com/wubx",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-11-04T08:16:18Z",
+      "latestContributionAt": "2026-11-04T09:24:16Z"
+    },
+    {
       "login": "wushuang3625",
       "avatarUrl": "https://avatars.githubusercontent.com/u/26515655?v=4",
       "profileUrl": "https://github.com/wushuang3625",
@@ -3323,6 +3683,15 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-08-23T09:06:00Z",
       "latestContributionAt": "2026-08-23T10:29:36Z"
+    },
+    {
+      "login": "xingxingshese",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/185892855?v=4",
+      "profileUrl": "https://github.com/xingxingshese",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-11-03T09:46:54Z",
+      "latestContributionAt": "2026-11-03T14:58:40Z"
     },
     {
       "login": "xiSage",
@@ -3433,6 +3802,15 @@
       "latestContributionAt": "2026-08-05T15:57:51Z"
     },
     {
+      "login": "yyn0210",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/3253098?v=4",
+      "profileUrl": "https://github.com/yyn0210",
+      "commits": 1,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-11-04T06:04:04Z",
+      "latestContributionAt": "2026-11-04T17:06:21Z"
+    },
+    {
       "login": "zdzfeer",
       "avatarUrl": "https://avatars.githubusercontent.com/u/20592016?v=4",
       "profileUrl": "https://github.com/zdzfeer",
@@ -3460,15 +3838,6 @@
       "latestContributionAt": "2026-09-17T17:48:28Z"
     },
     {
-      "login": "zhongtait",
-      "avatarUrl": "https://avatars.githubusercontent.com/u/191844472?v=4",
-      "profileUrl": "https://github.com/zhongtait",
-      "commits": 1,
-      "mergedPullRequests": 1,
-      "firstContributionAt": "2026-10-16T07:33:45Z",
-      "latestContributionAt": "2026-10-17T07:59:04Z"
-    },
-    {
       "login": "ZhongYanZhiShi",
       "avatarUrl": "https://avatars.githubusercontent.com/u/74604296?v=4",
       "profileUrl": "https://github.com/ZhongYanZhiShi",
@@ -3494,6 +3863,15 @@
       "mergedPullRequests": 1,
       "firstContributionAt": "2026-09-09T05:04:07Z",
       "latestContributionAt": "2026-09-09T06:22:07Z"
+    },
+    {
+      "login": "duminga",
+      "avatarUrl": "https://avatars.githubusercontent.com/u/91080718?v=4",
+      "profileUrl": "https://github.com/duminga",
+      "commits": 0,
+      "mergedPullRequests": 1,
+      "firstContributionAt": "2026-08-20T17:21:17Z",
+      "latestContributionAt": "2026-08-21T04:21:38Z"
     },
     {
       "login": "lizhian",

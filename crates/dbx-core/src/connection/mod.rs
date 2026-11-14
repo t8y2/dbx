@@ -5,8 +5,10 @@ pub mod parameters;
 pub mod runtime_config;
 pub mod session_credentials;
 pub mod task_supervisor;
+mod zookeeper_transport;
+pub use zookeeper_transport::ZooKeeperTransportCancellation;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -22,7 +24,7 @@ use crate::agent_connection::{
     is_h2_file_connection, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
     oracle_alternate_connect_config_labels, oracle_alternate_connect_configs, oracle_error_with_driver_hint,
     pick_legacy_postgres_like_database, should_retry_mongo_with_legacy_driver, trino_like_jdbc_connection_string,
-    AgentSessionRole,
+    with_zookeeper_endpoint_routes, zookeeper_connection_endpoints, zookeeper_endpoint_address, AgentSessionRole,
 };
 use crate::agent_manager::{AgentManager, JavaRuntimeMode, DEFAULT_JRE_KEY};
 use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
@@ -96,6 +98,19 @@ fn oceanbase_mysql_setup_queries(config: &ConnectionConfig) -> Vec<String> {
 
 fn mysql_pool_setup_queries(config: &ConnectionConfig, url: &str) -> Vec<String> {
     let mut queries = oceanbase_mysql_setup_queries(config);
+    let native_mysql = config.db_type == DatabaseType::Mysql
+        && config.driver_profile.as_deref().is_none_or(|profile| {
+            let profile = profile.trim();
+            profile.is_empty() || profile.eq_ignore_ascii_case("mysql") || profile.eq_ignore_ascii_case("mariadb")
+        });
+    if native_mysql {
+        // A server with global autocommit=0 otherwise makes ordinary writes
+        // disappear when the auto-commit execution path cleans up the session.
+        // Pool setup also runs after COM_RESET_CONNECTION, before any user SQL.
+        if let Some(query) = db::mysql::default_autocommit_setup_query(url) {
+            queries.push(query.to_string());
+        }
+    }
     if let Some(dialect) = db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()) {
         if let Some(query) = db::mysql::catalog_setup_query_for_url(dialect, url) {
             queries.push(query);
@@ -164,16 +179,21 @@ impl PoolKind {
 #[derive(Clone)]
 struct PoolPublication {
     identity: Arc<()>,
+    pool_identity: Arc<()>,
     transport: Option<ConnectionTransportStamp>,
 }
 
 impl PoolPublication {
     fn new() -> Self {
-        Self { identity: Arc::new(()), transport: None }
+        Self { identity: Arc::new(()), pool_identity: Arc::new(()), transport: None }
     }
 
     fn is_same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.identity, &other.identity)
+    }
+
+    fn is_same_pool(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.pool_identity, &other.pool_identity)
     }
 }
 
@@ -181,6 +201,12 @@ impl PoolPublication {
 struct PoolPublicationSnapshot {
     pool: PoolKind,
     publication: PoolPublication,
+}
+
+struct MysqlClientSession {
+    publication: PoolPublication,
+    physical_connection_id: u32,
+    database: String,
 }
 
 pub struct ConnectionPoolReceipt {
@@ -277,6 +303,7 @@ enum ConnectionDatabaseInfoSource {
     },
     NativeMysql(db::mysql::MySqlPool),
     NativeGaussdbDws(deadpool_postgres::Pool),
+    NativePostgres(deadpool_postgres::Pool),
     NativeHBase(db::hbase_driver::HBaseClient),
     NativeMongo(mongodb::Client, Option<String>),
     Meilisearch(db::meilisearch_driver::MeilisearchClient),
@@ -292,6 +319,23 @@ async fn gaussdb_dws_product_version_from_pool(pool: &deadpool_postgres::Pool) -
     let result = db::postgres::execute_query_with_max_rows(pool, "SELECT version()", Some(1)).await.ok()?;
     let server_version = result.rows.first()?.first()?.as_str()?;
     crate::query::plugin_plan::gaussdb_product_version_from_server_version(server_version)
+}
+
+/// Product display name for a PostgreSQL-family `SELECT version()` string.
+/// Greenplum and Cloudberry both report as `PostgreSQL x.y (...)` with the
+/// real product inside the parentheses, so surface that name when present.
+fn postgres_family_product_name(server_version: &str) -> Option<&str> {
+    let lower = server_version.to_ascii_lowercase();
+    if lower.contains("cloudberry") {
+        return Some("Apache Cloudberry");
+    }
+    if lower.contains("greenplum") {
+        return Some("Greenplum");
+    }
+    if lower.contains("gaussdb") || lower.contains("hologres") {
+        return Some("GaussDB");
+    }
+    lower.contains("postgresql").then_some("PostgreSQL")
 }
 
 /// Held connection for a manual transaction session
@@ -455,14 +499,14 @@ pub struct AppState {
     pub configs: RwLock<HashMap<String, ConnectionConfig>>,
     pub running_queries: RunningQueries,
     pub routine_operations: crate::schema::oracle_routines::RoutineOperationRegistry,
-    pub tunnels: TunnelManager,
-    pub proxy_tunnels: ProxyTunnelManager,
-    pub http_tunnels: HttpTunnelManager,
+    pub tunnels: Arc<TunnelManager>,
+    pub proxy_tunnels: Arc<ProxyTunnelManager>,
+    pub http_tunnels: Arc<HttpTunnelManager>,
     pub storage: Storage,
     pub plugins: PluginRegistry,
     pub plugin_host: PluginHost,
     pub agent_manager: crate::agent_manager::AgentManager,
-    pub pl_debug: crate::query::pl_debug::PlDebugRegistry,
+    pub pl_debug: Arc<crate::query::pl_debug::PlDebugRegistry>,
     pub nacos_registry: crate::nacos::NacosAdminRegistry,
     duckdb_worker_process_isolation: AtomicBool,
     duckdb_worker_max_processes: AtomicUsize,
@@ -481,6 +525,10 @@ pub struct AppState {
     /// pool, or a closed tab can never inherit a transaction that no longer
     /// exists.
     mysql_preserved_transactions: Arc<RwLock<HashSet<String>>>,
+    /// Physical identity and last requested database of a logical MySQL tab.
+    /// Survives automatic pool eviction so a replacement cannot silently run
+    /// COMMIT or other SQL on behalf of a session whose state was lost.
+    mysql_client_sessions: RwLock<HashMap<String, MysqlClientSession>>,
     pub transaction_sessions: Arc<RwLock<HashMap<String, TransactionSession>>>,
     pub sqlserver_transaction_ends: Arc<std::sync::Mutex<crate::query::sqlserver_manual_transaction::EndedSessions>>,
     /// `save_password=false` 连接本次运行期的临时密码（内存，进程退出即丢，
@@ -547,6 +595,7 @@ fn static_tunnel_bypass(config: &ConnectionConfig, plugin_proxy_route: Option<&s
     let (kind, route) = match config.db_type {
         DatabaseType::Sqlite => ("SQLite", "a remote worker over SSH"),
         DatabaseType::ClickHouse => ("ClickHouse", "a SOCKS5 route"),
+        DatabaseType::Consul => ("Consul", "a SOCKS5 route"),
         DatabaseType::Turso => ("Turso", "a SOCKS5 route"),
         DatabaseType::Redis if config.uses_redis_cluster() => ("Redis Cluster", "per-node tunnels"),
         DatabaseType::Redis if config.uses_redis_sentinel() => ("Redis Sentinel", "per-node tunnels"),
@@ -745,6 +794,10 @@ impl Eq for ConnectionTransportPlan {}
 
 #[derive(Clone, PartialEq, Eq)]
 enum ConnectionTransportRoute {
+    ZooKeeper {
+        endpoints: Vec<(String, u16)>,
+        fixed_local_port: Option<u16>,
+    },
     SqliteWorker {
         host: String,
         port: u16,
@@ -2100,9 +2153,9 @@ impl AppState {
             configs: RwLock::new(HashMap::new()),
             running_queries: RunningQueries::default(),
             routine_operations: crate::schema::oracle_routines::RoutineOperationRegistry::default(),
-            tunnels: TunnelManager::new(data_dir),
-            proxy_tunnels: ProxyTunnelManager::new(),
-            http_tunnels: HttpTunnelManager::new(),
+            tunnels: Arc::new(TunnelManager::new(data_dir)),
+            proxy_tunnels: Arc::new(ProxyTunnelManager::new()),
+            http_tunnels: Arc::new(HttpTunnelManager::new()),
             storage,
             plugins,
             plugin_host,
@@ -2110,13 +2163,14 @@ impl AppState {
                 agent_dir,
                 app_version,
             ),
-            pl_debug: crate::query::pl_debug::PlDebugRegistry::default(),
+            pl_debug: Arc::new(crate::query::pl_debug::PlDebugRegistry::default()),
             nacos_registry: crate::nacos::NacosAdminRegistry::new(),
             duckdb_worker_process_isolation: AtomicBool::new(false),
             duckdb_worker_max_processes: AtomicUsize::new(DUCKDB_WORKER_MAX_PROCESSES_DEFAULT),
             honor_fixed_ssh_local_ports: AtomicBool::new(false),
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
             mysql_preserved_transactions: Arc::new(RwLock::new(HashSet::new())),
+            mysql_client_sessions: RwLock::new(HashMap::new()),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
             sqlserver_transaction_ends: Arc::new(std::sync::Mutex::new(Default::default())),
             session_credentials: SessionCredentialStore::new(),
@@ -2404,10 +2458,11 @@ impl AppState {
             .with_database_info(database_info_from_protocol_value(&response)));
         }
 
+        // A static tunnel has already chosen the TCP port, even if it is 1433.
         db::sqlserver::connect_with_port_explicit(
             host,
             port,
-            config.sqlserver_port_explicit(),
+            config.sqlserver_port_explicit() || config.has_effective_transport_layers(),
             &config.username,
             &config.password,
             config.database.as_deref(),
@@ -2448,7 +2503,7 @@ impl AppState {
         let client = db::sqlserver::connect_with_port_explicit(
             host,
             port,
-            config.sqlserver_port_explicit(),
+            config.sqlserver_port_explicit() || config.has_effective_transport_layers(),
             &config.username,
             &config.password,
             config.database.as_deref(),
@@ -2579,7 +2634,8 @@ impl AppState {
                 if let Some(publication) = connections.publications.get_mut(&pool_key) {
                     if let Some(stamp) = transport.filter(|_| publication.transport.is_some()) {
                         crate::query::pl_debug::adopt_published_transport(self, &config.id, stamp);
-                        *publication = PoolPublication { identity: Arc::new(()), transport: Some(stamp.clone()) };
+                        publication.identity = Arc::new(());
+                        publication.transport = Some(stamp.clone());
                     }
                 }
                 let publication = connections.publications[&pool_key].clone();
@@ -2637,10 +2693,14 @@ impl AppState {
             routing.close_pool_with_timeout(pool_key.clone(), pool).await;
         }
         match self.pool_publication_snapshot(&pool_key).await {
-            Some(current) if !current.publication.is_same(&publication) => {
+            // A concurrent creator may adopt the same pool while its predecessor closes an
+            // unused candidate. Keep the original receipt so it cannot clean up that adoption.
+            Some(current) if !current.publication.is_same_pool(&publication) => {
                 return Err("Connection pool publication was superseded while closing the previous pool".into());
             }
-            Some(current) if current.pool.is_available_for_routing() => {}
+            Some(current) if current.pool.is_available_for_routing() => {
+                self.ensure_current_connection_attempt(&config.id, connection_attempt).await?;
+            }
             current => {
                 if current.is_some() {
                     self.remove_stale_pool_if_current(&pool_key, &publication).await;
@@ -3329,6 +3389,7 @@ impl AppState {
         self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
         let plan = self.prepare_connection_transport_with_claimant(connection_id, &db_config, claimant).await?;
         let attempt = self.start_connection_transport_attempt(connection_id, &plan, claimant).await?;
+        let mut cancellation = ZooKeeperTransportCancellation::new(self, connection_id, &attempt);
         let transport_stamp = attempt.stamp;
         let result = async {
             let endpoint = attempt.endpoint?;
@@ -3336,7 +3397,10 @@ impl AppState {
             if let Some(database) = self.resolve_legacy_postgres_like_database(connection_id, &db_config).await {
                 db_config.database = Some(database);
             }
-            if db_config.db_type != DatabaseType::Plugin && endpoint.proxy.is_none() {
+            if db_config.db_type != DatabaseType::Plugin
+                && endpoint.proxy.is_none()
+                && endpoint.zookeeper_endpoint_routes.is_none()
+            {
                 probe_connection_endpoint(&db_config, &endpoint.host, endpoint.port).await?;
             }
             self.ensure_current_connection_attempt(connection_id, connection_attempt).await?;
@@ -3351,6 +3415,9 @@ impl AppState {
             })
         }
         .await;
+        if result.is_ok() {
+            cancellation.disarm();
+        }
         result.map_err(|message| ConnectionPreparationFailure { message, transport_stamp: Some(transport_stamp) })
     }
 
@@ -3508,6 +3575,8 @@ impl AppState {
         let PreparedConnectionRuntime { config: db_config, endpoint, url, connect_timeout, transport_stamp } = self
             .prepare_connection_runtime(connection_id, &config, database, catalog, connection_attempt, None)
             .await?;
+        let _cancellation =
+            ZooKeeperTransportCancellation::for_endpoint(self, connection_id, &transport_stamp, Some(&endpoint));
         let (host, port) = (endpoint.host, endpoint.port);
         let runtime_proxy = endpoint.proxy;
         let idle_timeout = std::time::Duration::from_secs(db_config.idle_timeout_secs);
@@ -3914,24 +3983,19 @@ impl AppState {
                 PoolKind::Nacos
             }
             DatabaseType::Consul => {
-                let mut consul_config = crate::consul::ConsulConfig::from_connection(&db_config)?;
-                let original_host = consul_config.base_url.host_str().unwrap_or_default();
-                let original_port = consul_config.base_url.port_or_known_default().unwrap_or(db_config.port);
-                if host != original_host || port != original_port {
-                    consul_config = consul_config.with_connect_override(&host, port);
-                }
-                let client = crate::consul::ConsulClient::new(consul_config).await?;
+                let consul_config = consul_config_for_endpoint(&db_config, &host, port, runtime_proxy.as_ref())?;
+                let client = crate::consul::ConsulClient::new_with_proxy(consul_config, runtime_proxy).await?;
                 client.probe().await?;
                 PoolKind::Consul(client)
             }
             agent_connection_pool_database_type!() => {
-                let connect_params = agent_connect_params_with_role(
+                let connect_params = with_zookeeper_endpoint_routes(agent_connect_params_with_role(
                     &db_config,
                     &host,
                     port,
                     db_config.effective_database().unwrap_or(""),
                     session_role,
-                )?;
+                )?, endpoint.zookeeper_endpoint_routes.as_ref());
                 if db_config.db_type != DatabaseType::ZooKeeper {
                     let agent_session_id = uuid::Uuid::new_v4().simple().to_string();
                     let agent_env = transport_stamp.agent_launch_env();
@@ -4413,6 +4477,12 @@ impl AppState {
         config: &ConnectionConfig,
     ) -> Result<(String, u16), String> {
         let endpoint = self.connection_endpoint(connection_id, config).await?;
+        if let Some(routes) = &endpoint.zookeeper_endpoint_routes {
+            let logical = zookeeper_endpoint_address(&endpoint.host, endpoint.port);
+            let dial = routes.get(&logical).ok_or("ZooKeeper primary endpoint has no transport route")?;
+            let (host, port) = dial.rsplit_once(':').ok_or("Invalid ZooKeeper transport route")?;
+            return Ok((host.to_owned(), port.parse().map_err(|_| "Invalid ZooKeeper transport port")?));
+        }
         Ok((endpoint.host, endpoint.port))
     }
 
@@ -4593,8 +4663,10 @@ impl AppState {
             }
         }
         let resolved_transport = ResolvedTransportLayers::resolve(&transport_layers)?;
-        if matches!(config.db_type, DatabaseType::ClickHouse | DatabaseType::CloudflareD1 | DatabaseType::Turso)
-            && matches!(transport_layers.last(), Some(TransportLayerConfig::Ssh(_) | TransportLayerConfig::Proxy(_)))
+        if matches!(
+            config.db_type,
+            DatabaseType::ClickHouse | DatabaseType::CloudflareD1 | DatabaseType::Turso | DatabaseType::Consul
+        ) && matches!(transport_layers.last(), Some(TransportLayerConfig::Ssh(_) | TransportLayerConfig::Proxy(_)))
         {
             return Ok(ConnectionTransportPlan {
                 source_profile_ids,
@@ -4661,6 +4733,17 @@ impl AppState {
             );
         }
         let fixed_local_port = self.static_tunnel_fixed_local_port(connection_id, config, &transport_layers)?;
+        if config.db_type == DatabaseType::ZooKeeper {
+            return Ok(ConnectionTransportPlan {
+                source_profile_ids,
+                agent_env,
+                layers: resolved_transport,
+                route: ConnectionTransportRoute::ZooKeeper {
+                    endpoints: zookeeper_connection_endpoints(config)?,
+                    fixed_local_port,
+                },
+            });
+        }
         Ok(ConnectionTransportPlan {
             source_profile_ids,
             agent_env,
@@ -4707,6 +4790,45 @@ impl AppState {
         plan: &ConnectionTransportPlan,
     ) -> Result<ConnectionEndpoint, String> {
         match &plan.route {
+            ConnectionTransportRoute::ZooKeeper { endpoints, fixed_local_port } => {
+                let guard = Arc::new(zookeeper_transport::ZooKeeperTransportGuard::new(
+                    connection_id,
+                    self.tunnels.clone(),
+                    self.proxy_tunnels.clone(),
+                    self.http_tunnels.clone(),
+                ));
+                let mut routes = BTreeMap::new();
+                for (index, (host, port)) in endpoints.iter().enumerate() {
+                    let local_port = match plan
+                        .layers
+                        .start_with_final_ssh_local_port(
+                            &guard.endpoint_id(index),
+                            host,
+                            *port,
+                            if index == 0 { *fixed_local_port } else { None },
+                            &self.tunnels,
+                            &self.proxy_tunnels,
+                            &self.http_tunnels,
+                        )
+                        .await
+                    {
+                        Ok(port) => port,
+                        Err(error) => {
+                            guard.stop().await;
+                            return Err(error);
+                        }
+                    };
+                    routes.insert(zookeeper_endpoint_address(host, *port), format!("127.0.0.1:{local_port}"));
+                }
+                let (host, port) = endpoints.first().ok_or("ZooKeeper connect string contains no servers")?;
+                Ok(ConnectionEndpoint {
+                    host: host.clone(),
+                    port: *port,
+                    proxy: None,
+                    zookeeper_endpoint_routes: Some(routes),
+                    _zookeeper_transport: Some(guard),
+                })
+            }
             ConnectionTransportRoute::Direct { host, port, .. }
             | ConnectionTransportRoute::SqliteWorker { host, port, .. } => {
                 Ok(ConnectionEndpoint::direct(host.clone(), *port))
@@ -4740,14 +4862,14 @@ impl AppState {
                     .clickhouse_proxy_for_transport_layers(connection_id, &plan.layers)
                     .await?
                     .expect("prepared HTTP client proxy has an SSH or proxy final layer");
-                Ok(ConnectionEndpoint { host: host.clone(), port: *port, proxy: Some(proxy) })
+                Ok(ConnectionEndpoint { proxy: Some(proxy), ..ConnectionEndpoint::direct(host.clone(), *port) })
             }
             ConnectionTransportRoute::SocksProxy { host, port } => {
                 let proxy = self
                     .socks5_route_for_transport_layers(connection_id, &plan.layers)
                     .await?
                     .expect("prepared SOCKS route has an SSH or SOCKS5 final layer");
-                Ok(ConnectionEndpoint { host: host.clone(), port: *port, proxy: Some(proxy) })
+                Ok(ConnectionEndpoint { proxy: Some(proxy), ..ConnectionEndpoint::direct(host.clone(), *port) })
             }
             #[cfg(feature = "mq-admin")]
             ConnectionTransportRoute::RocketMqProxy { host, port } => {
@@ -6179,6 +6301,7 @@ impl AppState {
         self.pool_activity.write().await.remove(&pool_key);
         self.postgres_cancel_contexts.write().await.remove(&pool_key);
         self.mysql_preserved_transactions.write().await.remove(&pool_key);
+        self.mysql_client_sessions.write().await.remove(&pool_key);
         let removed = self.update_connection_pools(|connections| connections.remove(&pool_key)).await;
         Ok(removed.map(|pool| (pool_key, pool)))
     }
@@ -6187,6 +6310,60 @@ impl AppState {
     /// on purpose (MySQL auto-commit tabs with `preserve_explicit_transaction`).
     pub(crate) async fn has_preserved_explicit_transaction(&self, pool_key: &str) -> bool {
         self.mysql_preserved_transactions.read().await.contains(pool_key)
+    }
+
+    pub(crate) async fn mysql_client_session_database_change(
+        &self,
+        pool_key: &str,
+        pool: &db::mysql::MySqlPool,
+        physical_connection_id: u32,
+        database: &str,
+    ) -> Result<bool, String> {
+        let snapshot = self.pool_publication_snapshot(pool_key).await.ok_or("MYSQL_CLIENT_SESSION_LOST: The original MySQL session pool is no longer available. Session state and the transaction outcome cannot be assumed to have survived.")?;
+        if !matches!(&snapshot.pool, PoolKind::Mysql(current, _) if current.is_same_pool(pool)) {
+            return Err("MYSQL_CLIENT_SESSION_LOST: The MySQL session pool was replaced. Session variables, temporary tables and the original transaction are no longer available on this connection.".to_string());
+        }
+        let mut sessions = self.mysql_client_sessions.write().await;
+        if let Some(previous) = sessions.get(pool_key) {
+            if previous.physical_connection_id != physical_connection_id
+                || !previous.publication.is_same_pool(&snapshot.publication)
+            {
+                sessions.remove(pool_key);
+                drop(sessions);
+                self.clear_preserved_explicit_transaction(pool_key).await;
+                return Err("MYSQL_CLIENT_SESSION_LOST: The original MySQL session was lost. User variables and temporary tables are no longer available, and the previous transaction outcome may be unknown. This statement was not executed.".to_string());
+            }
+            return Ok(previous.database != database && !database.is_empty());
+        }
+        sessions.insert(
+            pool_key.to_string(),
+            MysqlClientSession {
+                publication: snapshot.publication,
+                physical_connection_id,
+                // A recycled physical connection starts with the pool's
+                // original database, which may predate the tab's latest USE.
+                // Record the requested database only after USE succeeds.
+                database: String::new(),
+            },
+        );
+        Ok(!database.is_empty())
+    }
+
+    pub(crate) async fn record_mysql_client_session_database(
+        &self,
+        pool_key: &str,
+        pool: &db::mysql::MySqlPool,
+        database: &str,
+    ) {
+        let Some(snapshot) = self.pool_publication_snapshot(pool_key).await else { return };
+        if !matches!(&snapshot.pool, PoolKind::Mysql(current, _) if current.is_same_pool(pool)) {
+            return;
+        }
+        if let Some(session) = self.mysql_client_sessions.write().await.get_mut(pool_key) {
+            if session.publication.is_same_pool(&snapshot.publication) {
+                session.database = database.to_string();
+            }
+        }
     }
 
     pub(crate) async fn mark_preserved_explicit_transaction(&self, pool_key: &str) {
@@ -6603,6 +6780,7 @@ impl AppState {
                 {
                     Some(ConnectionDatabaseInfoSource::NativeGaussdbDws(pool.clone()))
                 }
+                Some(PoolKind::Postgres(pool)) => Some(ConnectionDatabaseInfoSource::NativePostgres(pool.clone())),
                 Some(PoolKind::Mysql(pool, _)) => Some(ConnectionDatabaseInfoSource::NativeMysql(pool.clone())),
                 Some(PoolKind::HBase(client)) => Some(ConnectionDatabaseInfoSource::NativeHBase(client.clone())),
                 Some(PoolKind::MongoDb(client)) => {
@@ -6662,6 +6840,38 @@ impl AppState {
                         .map(str::to_string)
                         .or_else(|| config.effective_database().map(str::to_string)),
                     driver_name: Some("DBX PostgreSQL-compatible driver".to_string()),
+                    ..Default::default()
+                }))
+            }
+            Some(ConnectionDatabaseInfoSource::NativePostgres(pool)) => {
+                // Version discovery is optional metadata; on failure return
+                // versionless info so the frontend still sees a PostgreSQL
+                // connection. The full `SELECT version()` string is kept as
+                // `product_version` because engine sniffing (Greenplum /
+                // Cloudberry, whose AO tables reject system-column locators)
+                // depends on the product keywords it carries (#14745).
+                let product_version = db::postgres::execute_query_with_max_rows(&pool, "SELECT version()", Some(1))
+                    .await
+                    .ok()
+                    .and_then(|result| {
+                        result
+                            .rows
+                            .first()
+                            .and_then(|row| row.first())
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string)
+                    });
+                Ok(Some(DatabaseConnectionInfo {
+                    product_name: product_version
+                        .as_deref()
+                        .and_then(postgres_family_product_name)
+                        .map(str::to_string)
+                        .or_else(|| Some("PostgreSQL".to_string())),
+                    product_version,
+                    current_database: database
+                        .map(str::to_string)
+                        .or_else(|| config.effective_database().map(str::to_string)),
+                    driver_name: Some("DBX PostgreSQL driver".to_string()),
                     ..Default::default()
                 }))
             }
@@ -6825,6 +7035,10 @@ impl AppState {
     }
 
     async fn stop_connection_transport_layers(&self, connection_id: &str, layer_count: usize) {
+        let zookeeper_prefix = zookeeper_transport::transport_prefix(connection_id);
+        self.tunnels.stop_tunnels_with_prefix(&zookeeper_prefix).await;
+        self.proxy_tunnels.stop_tunnels_with_prefix(&zookeeper_prefix).await;
+        self.http_tunnels.stop_tunnels_with_prefix(&zookeeper_prefix).await;
         let redis_cluster_prefix = redis_cluster_transport_prefix(connection_id);
         self.tunnels.stop_tunnels_with_prefix(&redis_cluster_prefix).await;
         self.proxy_tunnels.stop_tunnels_with_prefix(&redis_cluster_prefix).await;
@@ -7940,11 +8154,24 @@ pub struct ConnectionEndpoint {
     pub host: String,
     pub port: u16,
     pub proxy: Option<PluginRuntimeProxy>,
+    pub zookeeper_endpoint_routes: Option<BTreeMap<String, String>>,
+    // Keep cleanup ownership through startup, publication and any in-flight endpoint clones.
+    _zookeeper_transport: Option<Arc<zookeeper_transport::ZooKeeperTransportGuard>>,
 }
 
 impl ConnectionEndpoint {
+    pub(crate) fn mark_zookeeper_transport_published(&self) {
+        if let Some(guard) = &self._zookeeper_transport {
+            guard.mark_published();
+        }
+    }
+
+    pub(crate) fn has_unpublished_zookeeper_transport(&self) -> bool {
+        self._zookeeper_transport.as_ref().is_some_and(|guard| !guard.is_published())
+    }
+
     fn direct(host: String, port: u16) -> Self {
-        Self { host, port, proxy: None }
+        Self { host, port, proxy: None, zookeeper_endpoint_routes: None, _zookeeper_transport: None }
     }
 }
 
@@ -8070,6 +8297,30 @@ fn parse_consul_server_host_port(config: &ConnectionConfig) -> Option<(String, u
     }
     let url = reqwest::Url::parse(value).ok()?;
     Some((url.host_str()?.to_string(), url.port_or_known_default()?))
+}
+
+fn consul_config_for_endpoint(
+    config: &ConnectionConfig,
+    host: &str,
+    port: u16,
+    runtime_proxy: Option<&PluginRuntimeProxy>,
+) -> Result<crate::consul::ConsulConfig, String> {
+    let consul_config = crate::consul::ConsulConfig::from_connection(config)?;
+    let original_host = consul_config.base_url.host_str().unwrap_or_default();
+    let original_port = consul_config.base_url.port_or_known_default().unwrap_or(config.port);
+
+    // Proxy routes preserve the logical URL and therefore work for both host
+    // names and IP literals. Keep the override marker as a transport safety
+    // signal even though the proxy client does not use it for DNS routing.
+    if runtime_proxy.is_some()
+        || config.has_effective_transport_layers()
+        || host != original_host
+        || port != original_port
+    {
+        Ok(consul_config.with_connect_override(host, port))
+    } else {
+        Ok(consul_config)
+    }
 }
 
 fn parse_mqtt_broker_host_port(config: &ConnectionConfig) -> Option<(String, u16)> {
@@ -8334,12 +8585,25 @@ fn pool_key_for_session_role(
     client_session_id: Option<&str>,
     session_role: AgentSessionRole,
 ) -> String {
+    if let Some(config) = config.filter(|config| {
+        session_role == AgentSessionRole::Workload
+            && config.db_type == DatabaseType::Mysql
+            && db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()).is_none()
+            && normalize_client_session_id(client_session_id).is_some()
+    }) {
+        // USE changes the current database, not the logical session.
+        // Keep variables, temp tables and transactions on the same pool.
+        return session_scoped_pool_key(config.id.clone(), client_session_id);
+    }
     let pool_key = session_scoped_pool_key_for(config, base_pool_key, client_session_id);
     if session_role == AgentSessionRole::Metadata
         && config.is_some_and(|config| {
             database_capabilities::is_agent_type(&config.db_type)
                 || sqlserver_uses_legacy_driver(config)
                 || is_postgres_jdbc(config)
+                || (config.db_type == DatabaseType::Mysql
+                    && db::mysql::mysql_catalog_dialect(config.db_type, config.driver_profile.as_deref()).is_none()
+                    && normalize_client_session_id(client_session_id).is_some())
         })
     {
         // The legacy SQL Server Agent borrows one connection-level pool for metadata across
@@ -8893,11 +9157,12 @@ mod tests {
     use super::{
         agent_connect_timeout, clickhouse_http_proxy, connection_configs_pool_equivalent,
         connection_configs_session_credentials_compatible, connection_probe_endpoints, connection_remote_endpoint,
-        connection_url_for_endpoint, database_connection_config, database_connection_config_with_catalog,
-        gaussdb_identifier_quote_from_query_result, gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver,
-        kafka_loopback_local_port_error, kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead,
-        metadata_connection_config, metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries,
-        oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint, primary_tunnel_fixed_local_port,
+        connection_url_for_endpoint, consul_config_for_endpoint, database_connection_config,
+        database_connection_config_with_catalog, gaussdb_identifier_quote_from_query_result,
+        gaussdb_m_jdbc_config_for_endpoint, gaussdb_uses_m_jdbc_driver, kafka_loopback_local_port_error,
+        kafka_single_loopback_bootstrap_endpoint, keepalive_failure_proves_pool_dead, metadata_connection_config,
+        metadata_pool_database, mysql_metadata_fallback_url, mysql_pool_setup_queries, oceanbase_mysql_setup_queries,
+        postgres_family_product_name, prestosql_jdbc_config_for_endpoint, primary_tunnel_fixed_local_port,
         redact_transport_url, redacted_connection_url_for_endpoint, redis_sentinel_transport_id,
         redis_sentinel_transport_prefix, report_connection_liveness_lost, sqlserver_legacy_agent_config,
         sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver, ssh_local_port_config_error,
@@ -9827,6 +10092,37 @@ mod tests {
     }
 
     #[test]
+    fn native_mysql_pool_setup_initializes_autocommit() {
+        let mut config = mysql_config(Some("dbx"));
+        for profile in [None, Some(""), Some("mysql"), Some("MariaDB")] {
+            config.driver_profile = profile.map(str::to_string);
+            assert_eq!(
+                mysql_pool_setup_queries(&config, "mysql://root:secret@localhost/dbx"),
+                vec!["SET SESSION autocommit = 1"]
+            );
+            assert!(mysql_pool_setup_queries(
+                &config,
+                "mysql://root:secret@localhost/dbx?sessionVariables=autocommit%3D0"
+            )
+            .is_empty());
+        }
+    }
+
+    #[test]
+    fn mysql_compatible_profiles_keep_their_transaction_setup() {
+        let mut config = mysql_config(Some("dbx"));
+        for profile in ["doris", "selectdb", "starrocks", "manticoresearch", "oceanbase", "tidb", "dolt"] {
+            config.driver_profile = Some(profile.to_string());
+            assert!(
+                mysql_pool_setup_queries(&config, "mysql://root:secret@localhost/dbx")
+                    .iter()
+                    .all(|query| !query.contains("autocommit")),
+                "{profile}"
+            );
+        }
+    }
+
+    #[test]
     fn starrocks_pool_setup_uses_set_catalog_for_configured_catalog() {
         let mut config = mysql_config(Some("bi"));
         config.db_type = DatabaseType::StarRocks;
@@ -10690,6 +10986,7 @@ mod tests {
                 None,
                 unsupported("ClickHouse", "a SOCKS5 route"),
             ),
+            ("consul", single(config_of_type(DatabaseType::Consul)), None, unsupported("Consul", "a SOCKS5 route")),
             (
                 "cloudflare d1",
                 single(config_of_type(DatabaseType::CloudflareD1)),
@@ -10876,13 +11173,166 @@ mod tests {
     #[test]
     fn ssh_local_port_is_rejected_for_exactly_the_connection_types_without_a_static_tunnel() {
         let layers = [ssh_layer_with_port(Some(4059), "")];
-        let rejected =
-            [DatabaseType::Sqlite, DatabaseType::ClickHouse, DatabaseType::CloudflareD1, DatabaseType::Turso];
+        let rejected = [
+            DatabaseType::Sqlite,
+            DatabaseType::ClickHouse,
+            DatabaseType::Consul,
+            DatabaseType::CloudflareD1,
+            DatabaseType::Turso,
+        ];
 
         for db_type in DatabaseType::ALL {
             let result = ssh_local_port_config_error(&config_of_type(*db_type), &layers, None);
             assert_eq!(result.is_err(), rejected.contains(db_type), "{db_type:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn zookeeper_canceled_test_retires_route_and_stale_cleanup_preserves_replacement() {
+        let (state, _dir) = test_app_state().await;
+        let state = Arc::new(state);
+        let mut config = config_of_type(DatabaseType::ZooKeeper);
+        config.connection_string = Some("zk1,zk2".into());
+        let mut proxy = proxy_layer("proxy", "");
+        proxy.host = "127.0.0.1".into();
+        proxy.port = 1;
+        config.transport_layers = vec![TransportLayerConfig::Proxy(proxy)];
+        let pending_state = state.clone();
+        let pending_config = config.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let pending = tokio::spawn(async move {
+            let first = pending_state.connection_endpoint_attempt(&pending_config.id, &pending_config).await.unwrap();
+            assert_eq!(first.endpoint.as_ref().unwrap().zookeeper_endpoint_routes.as_ref().unwrap().len(), 2);
+            let _cleanup = super::ZooKeeperTransportCancellation::new(&pending_state, &pending_config.id, &first);
+            ready_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        ready_rx.await.unwrap();
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while crate::query::pl_debug::current_transport(&state, &config.id).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let old = state.connection_endpoint_attempt(&config.id, &config).await.unwrap();
+        let cleanup = super::ZooKeeperTransportCancellation::new(&state, &config.id, &old);
+        config.connection_string = Some("zk2,zk3".into());
+        let replacement = state.connection_endpoint_attempt(&config.id, &config).await.unwrap();
+        drop(old);
+        drop(cleanup);
+        tokio::task::yield_now().await;
+        let current = crate::query::pl_debug::current_transport(&state, &config.id).unwrap();
+        assert!(current.same_token(&replacement.stamp));
+        let reused = state.connection_endpoint_attempt(&config.id, &config).await.unwrap();
+        assert_eq!(
+            replacement.endpoint.as_ref().unwrap().zookeeper_endpoint_routes,
+            reused.endpoint.as_ref().unwrap().zookeeper_endpoint_routes
+        );
+        let cleanup = super::ZooKeeperTransportCancellation::new(&state, &config.id, &reused);
+        crate::query::pl_debug::adopt_published_transport(&state, &config.id, &reused.stamp);
+        drop(cleanup);
+        assert!(crate::query::pl_debug::current_transport(&state, &config.id).is_some());
+        state.reset_connection_transport_if_current(&config.id, &reused.stamp).await;
+        assert!(crate::query::pl_debug::current_transport(&state, &config.id).is_none());
+    }
+
+    #[tokio::test]
+    async fn zookeeper_cancellation_waits_for_in_flight_pool_publication() {
+        for publish in [true, false] {
+            let (state, _dir) = test_app_state().await;
+            let mut config = config_of_type(DatabaseType::ZooKeeper);
+            config.connection_string = Some("zk1,zk2".into());
+            let mut proxy = proxy_layer("proxy", "");
+            proxy.host = "127.0.0.1".into();
+            proxy.port = 1;
+            config.transport_layers = vec![TransportLayerConfig::Proxy(proxy)];
+            let older = state.connection_endpoint_attempt(&config.id, &config).await.unwrap();
+            let newer = state.connection_endpoint_attempt(&config.id, &config).await.unwrap();
+            assert!(older.stamp.same_runtime(&newer.stamp));
+            assert!(!older.stamp.same_token(&newer.stamp));
+            let routes = older.endpoint.as_ref().unwrap().zookeeper_endpoint_routes.clone().unwrap();
+            let cancellation = super::ZooKeeperTransportCancellation::new(&state, &config.id, &newer);
+            // Hold the actual pool map lock. Polling insertion to Pending acquires
+            // the publication gate first, reproducing the review's precise race.
+            let pool_map = state.connections.write().await;
+            let pool = PoolKind::Sqlite(db::sqlite::connect_path(":memory:").await.unwrap());
+            let mut publishing = Box::pin(state.insert_connection_pool_inner(
+                config.id.clone(),
+                pool,
+                &config,
+                false,
+                false,
+                Some(&older.stamp),
+                None,
+            ));
+            assert!(futures::poll!(publishing.as_mut()).is_pending());
+            drop(cancellation);
+            tokio::task::yield_now().await;
+            assert!(crate::query::pl_debug::current_transport(&state, &config.id).is_some());
+            if publish {
+                drop(pool_map);
+                publishing.await.unwrap();
+                drop(older);
+                drop(newer);
+                tokio::task::yield_now().await;
+                let current = crate::query::pl_debug::current_transport(&state, &config.id).unwrap();
+                assert!(state.pool_handle(&config.id).await.is_some());
+                for address in routes.values() {
+                    assert!(tokio::net::TcpStream::connect(address).await.is_ok());
+                }
+                state.remove_connection_pools(&config.id).await;
+                state.reset_connection_transport_if_current(&config.id, &current).await;
+            } else {
+                drop(publishing);
+                drop(pool_map);
+                drop(older);
+                drop(newer);
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while crate::query::pl_debug::current_transport(&state, &config.id).is_some() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(state.pool_handle(&config.id).await.is_none());
+            }
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let mut all_closed = true;
+                    for address in routes.values() {
+                        all_closed &= tokio::net::TcpStream::connect(address).await.is_err();
+                    }
+                    if all_closed {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn zookeeper_transport_plan_tracks_every_endpoint_and_order() {
+        let (state, _dir) = test_app_state().await;
+        let mut config = config_of_type(DatabaseType::ZooKeeper);
+        config.connection_string = Some("zk1,zk2:2281,zk3/app".into());
+        config.transport_layers = vec![unreachable_ssh_layer(4059)];
+        let original = state.prepare_connection_transport(&config.id, &config).await.unwrap();
+        let super::ConnectionTransportRoute::ZooKeeper { endpoints, .. } = &original.route else {
+            panic!("expected ensemble route");
+        };
+        assert_eq!(endpoints, &vec![("zk1".into(), 2181), ("zk2".into(), 2281), ("zk3".into(), 2181)]);
+        config.connection_string = Some("zk1,zk3,zk2:2281/app".into());
+        let reordered = state.prepare_connection_transport(&config.id, &config).await.unwrap();
+        assert!(original != reordered);
+        config.transport_layers.clear();
+        let direct = state.prepare_connection_transport(&config.id, &config).await.unwrap();
+        assert!(matches!(direct.route, super::ConnectionTransportRoute::Direct { .. }));
     }
 
     #[tokio::test]
@@ -12223,7 +12673,7 @@ sleep 30
     }
 
     #[test]
-    fn non_agent_metadata_role_preserves_existing_pool_keys() {
+    fn mysql_client_session_metadata_role_is_isolated_from_workload() {
         let config = mysql_config(Some("analytics"));
 
         let workload = super::pool_key_for_session_role(
@@ -12239,8 +12689,40 @@ sleep 30
             crate::agent_connection::AgentSessionRole::Metadata,
         );
 
-        assert_eq!(metadata, workload);
-        assert_eq!(metadata, "conn:analytics:session:task_1");
+        assert_eq!(workload, "conn:session:task_1");
+        assert_eq!(metadata, "conn:analytics:session:task_1:role:metadata");
+        assert_ne!(metadata, workload);
+
+        let base_metadata = super::pool_key_for_session_role(
+            Some(&config),
+            "conn:analytics".to_string(),
+            None,
+            crate::agent_connection::AgentSessionRole::Metadata,
+        );
+        assert_eq!(base_metadata, "conn:analytics");
+    }
+
+    #[test]
+    fn non_mysql_non_agent_metadata_role_preserves_existing_pool_keys() {
+        for db_type in [DatabaseType::Postgres, DatabaseType::SqlServer] {
+            let mut config = mysql_config(Some("analytics"));
+            config.db_type = db_type;
+            let workload = super::pool_key_for_session_role(
+                Some(&config),
+                "conn:analytics".to_string(),
+                Some("task:1"),
+                crate::agent_connection::AgentSessionRole::Workload,
+            );
+            let metadata = super::pool_key_for_session_role(
+                Some(&config),
+                "conn:analytics".to_string(),
+                Some("task:1"),
+                crate::agent_connection::AgentSessionRole::Metadata,
+            );
+
+            assert_eq!(metadata, workload);
+            assert_eq!(metadata, "conn:analytics:session:task_1");
+        }
     }
 
     #[test]
@@ -12302,6 +12784,55 @@ sleep 30
         assert_eq!(super::mysql_pool_max_connections_for_session(None), 10);
         assert_eq!(super::mysql_pool_max_connections_for_session(Some("")), 10);
         assert_eq!(super::mysql_pool_max_connections_for_session(Some("tab-1")), 1);
+    }
+
+    #[test]
+    fn mysql_workload_session_key_survives_database_changes_but_keeps_tabs_isolated() {
+        let config = mysql_config(Some("first"));
+        let key = |database: &str, session: &str, role| {
+            super::pool_key_for_session_role(Some(&config), format!("conn:{database}"), Some(session), role)
+        };
+        let workload = crate::agent_connection::AgentSessionRole::Workload;
+        let metadata = crate::agent_connection::AgentSessionRole::Metadata;
+        assert_eq!(key("first", "tab-1", workload), key("second", "tab-1", workload));
+        assert_ne!(key("first", "tab-1", workload), key("first", "tab-2", workload));
+        assert_ne!(key("first", "tab-1", metadata), key("second", "tab-1", metadata));
+        assert_ne!(key("first", "tab-1", workload), key("first", "tab-1", metadata));
+        let metadata_without_database =
+            super::pool_key_for_session_role(Some(&config), "conn".into(), Some("tab-1"), metadata);
+        assert_ne!(key("first", "tab-1", workload), metadata_without_database);
+    }
+
+    #[tokio::test]
+    async fn mysql_client_session_detects_replaced_connections_and_pool_generations() {
+        let (state, _dir) = test_app_state().await;
+        let key = "conn:session:tab-1";
+        let pool = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/first", 1);
+        state.connections.write().await.insert(key.into(), PoolKind::Mysql(pool.clone(), MysqlMode::Normal));
+        assert!(state.mysql_client_session_database_change(key, &pool, 10, "first").await.unwrap());
+        state.record_mysql_client_session_database(key, &pool, "first").await;
+        assert!(!state.mysql_client_session_database_change(key, &pool, 10, "first").await.unwrap());
+        // Adopting an existing pool changes its publication receipt, but keeps
+        // the same physical session and must not lose its database context.
+        state.connections.write().await.publications.get_mut(key).unwrap().identity = std::sync::Arc::new(());
+        assert!(!state.mysql_client_session_database_change(key, &pool, 10, "first").await.unwrap());
+        assert!(state.mysql_client_session_database_change(key, &pool, 10, "second").await.unwrap());
+        state.record_mysql_client_session_database(key, &pool, "second").await;
+        assert!(!state.mysql_client_session_database_change(key, &pool, 10, "second").await.unwrap());
+        assert!(state
+            .mysql_client_session_database_change(key, &pool, 11, "second")
+            .await
+            .unwrap_err()
+            .contains("MYSQL_CLIENT_SESSION_LOST"));
+        assert!(state.mysql_client_session_database_change(key, &pool, 11, "second").await.unwrap());
+        let replacement = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/second", 1);
+        state.connections.write().await.insert(key.into(), PoolKind::Mysql(replacement.clone(), MysqlMode::Normal));
+        // Server connection ids can repeat after a server restart.
+        assert!(state
+            .mysql_client_session_database_change(key, &replacement, 11, "second")
+            .await
+            .unwrap_err()
+            .contains("MYSQL_CLIENT_SESSION_LOST"));
     }
 
     #[test]
@@ -13859,6 +14390,194 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn oceanbase_saved_password_concurrent_creators_keep_the_same_pool_during_candidate_close() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(Some("APP"));
+        config.db_type = DatabaseType::OceanbaseOracle;
+        config.save_password = true;
+        config.keepalive_interval_secs = 0;
+        let key = "conn:APP";
+        let first = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        let second = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        let third = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+        assert!(first.endpoint.is_ok() && second.endpoint.is_ok() && third.endpoint.is_ok());
+        assert!(first.stamp.same_runtime(&second.stamp));
+        assert!(first.stamp.same_runtime(&third.stamp));
+        let existing = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+            crate::db::agent_driver::AgentDriverClient::test_stub(),
+        ));
+        state
+            .publish_created_pool_with_transport(
+                key.into(),
+                PoolKind::Agent(existing.clone()),
+                &config,
+                &first.stamp,
+                None,
+            )
+            .await
+            .unwrap();
+        let candidate = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+            crate::db::agent_driver::AgentDriverClient::test_stub(),
+        ));
+        let candidate_lock = candidate.lock().await;
+        let publishing = state.publish_created_pool_with_transport(
+            key.into(),
+            PoolKind::Agent(candidate.clone()),
+            &config,
+            &second.stamp,
+            None,
+        );
+        tokio::pin!(publishing);
+        assert!(futures::poll!(publishing.as_mut()).is_pending());
+        let latest = state
+            .publish_created_pool_with_transport(key.into(), agent_pool_stub(), &config, &third.stamp, None)
+            .await
+            .unwrap();
+        drop(candidate_lock);
+        let earlier = publishing.await.expect("adopting the same live pool must not fail an in-flight creator");
+        assert!(state.pool_handle_for_receipt(&earlier).await.is_none());
+        state.discard_connection_pool_receipt(&earlier).await;
+        let current = state.pool_publication_snapshot(key).await.unwrap();
+        assert!(current.publication.is_same(&latest.publication));
+        assert!(matches!(current.pool, PoolKind::Agent(ref client) if Arc::ptr_eq(client, &existing)));
+        assert!(current.pool.is_available_for_routing());
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn pool_publisher_accepts_adoption_without_reviving_a_superseded_connection_attempt() {
+        for supersede_attempt in [false, true] {
+            let (state, dir) = test_app_state().await;
+            let mut config = mysql_config(Some("APP"));
+            config.save_password = true;
+            config.keepalive_interval_secs = 0;
+            let key = "conn:APP";
+            let previous = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+                crate::db::agent_driver::AgentDriverClient::test_stub(),
+            ));
+            state.connections.write().await.insert(key.into(), PoolKind::Agent(previous.clone()));
+            let first = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+            let second = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+            let attempt = state.begin_connection_attempt("conn").await;
+            let previous_lock = previous.lock().await;
+            let publishing = state.insert_connection_pool_inner(
+                key.into(),
+                agent_pool_stub(),
+                &config,
+                true,
+                false,
+                Some(&first.stamp),
+                Some(attempt),
+            );
+            tokio::pin!(publishing);
+            assert!(futures::poll!(publishing.as_mut()).is_pending());
+            let latest = state
+                .publish_created_pool_with_transport(key.into(), agent_pool_stub(), &config, &second.stamp, None)
+                .await
+                .unwrap();
+            if supersede_attempt {
+                state.begin_connection_attempt("conn").await;
+            }
+            drop(previous_lock);
+            if supersede_attempt {
+                assert_eq!(publishing.await.err().unwrap(), "Connection attempt was superseded by a newer attempt");
+            } else {
+                let earlier = publishing.await.expect("adoption must also preserve the first publisher");
+                assert!(state.pool_handle_for_receipt(&earlier).await.is_none());
+                state.discard_connection_pool_receipt(&earlier).await;
+            }
+            let current = state.pool_publication_snapshot(key).await.unwrap();
+            assert!(current.publication.is_same(&latest.publication));
+            assert!(current.pool.is_available_for_routing());
+            state.shutdown(Duration::from_secs(1)).await;
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_creators_still_reject_pool_replacement_and_transport_changes() {
+        for (save_password, replace_transport) in [(true, false), (false, false), (true, true)] {
+            let (state, dir) = test_app_state().await;
+            let mut config = mysql_config(Some("APP"));
+            config.save_password = save_password;
+            config.keepalive_interval_secs = 0;
+            let key = "conn:APP";
+            let first = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+            let second = state.connection_endpoint_attempt("conn", &config).await.unwrap();
+            let existing = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+                crate::db::agent_driver::AgentDriverClient::test_stub(),
+            ));
+            state
+                .publish_created_pool_with_transport(
+                    key.into(),
+                    PoolKind::Agent(existing.clone()),
+                    &config,
+                    &first.stamp,
+                    None,
+                )
+                .await
+                .unwrap();
+            let candidate = Arc::new(crate::db::agent_driver::PooledAgentClient::new(
+                crate::db::agent_driver::AgentDriverClient::test_stub(),
+            ));
+            let closing = if save_password { &candidate } else { &existing };
+            let closing_lock = closing.lock().await;
+            let publishing = state.publish_created_pool_with_transport(
+                key.into(),
+                PoolKind::Agent(candidate.clone()),
+                &config,
+                &second.stamp,
+                None,
+            );
+            tokio::pin!(publishing);
+            assert!(futures::poll!(publishing.as_mut()).is_pending());
+            let mut replacement_config = config.clone();
+            if replace_transport {
+                replacement_config.host = "127.0.0.2".into();
+            }
+            let third = state.connection_endpoint_attempt("conn", &replacement_config).await.unwrap();
+            assert!(third.endpoint.is_ok());
+            assert_eq!(second.stamp.same_runtime(&third.stamp), !replace_transport);
+            let latest = if save_password && !replace_transport {
+                state
+                    .insert_connection_pool_inner(
+                        key.into(),
+                        agent_pool_stub(),
+                        &config,
+                        true,
+                        false,
+                        Some(&third.stamp),
+                        None,
+                    )
+                    .await
+                    .unwrap()
+            } else {
+                state
+                    .publish_created_pool_with_transport(
+                        key.into(),
+                        agent_pool_stub(),
+                        &replacement_config,
+                        &third.stamp,
+                        None,
+                    )
+                    .await
+                    .unwrap()
+            };
+            drop(closing_lock);
+            assert_eq!(
+                publishing.await.err().unwrap(),
+                "Connection pool publication was superseded while closing the previous pool"
+            );
+            let current = state.pool_publication_snapshot(key).await.unwrap();
+            assert!(current.publication.is_same(&latest.publication));
+            assert!(current.pool.is_available_for_routing());
+            state.shutdown(Duration::from_secs(1)).await;
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[tokio::test]
     async fn reclaimed_pool_restoration_preserves_original_transport_without_requiring_config() {
         for has_config in [false, true] {
             let (state, dir) = test_app_state().await;
@@ -15045,6 +15764,67 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn consul_transport_uses_runtime_endpoint_even_when_logical_address_matches() {
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::Consul;
+        config.host = "consul.internal".to_string();
+        config.port = 8500;
+        config.external_config = Some(serde_json::json!({
+            "serverAddr": "http://consul.internal:8500"
+        }));
+        config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            profile_id: String::new(),
+            id: "proxy".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_string(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+        })];
+
+        let consul_config = consul_config_for_endpoint(&config, "127.0.0.1", 59292, None).unwrap();
+
+        assert_eq!(consul_config.base_url.as_str(), "http://consul.internal:8500/");
+        assert_eq!(consul_config.connect_override, Some(("127.0.0.1".to_string(), 59292)));
+    }
+
+    #[test]
+    fn consul_proxy_route_preserves_ip_literal_for_tls_and_host_routing() {
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::Consul;
+        config.host = "192.0.2.51".to_string();
+        config.port = 10840;
+        config.ssl = true;
+        config.external_config = Some(serde_json::json!({
+            "serverAddr": "https://192.0.2.51:10840"
+        }));
+        let proxy = PluginRuntimeProxy::socks5("127.0.0.1".to_string(), 59292, String::new(), String::new());
+
+        let consul_config = consul_config_for_endpoint(&config, "192.0.2.51", 10840, Some(&proxy)).unwrap();
+
+        assert_eq!(consul_config.base_url.as_str(), "https://192.0.2.51:10840/");
+        assert_eq!(consul_config.connect_override, Some(("192.0.2.51".to_string(), 10840)));
+    }
+
+    #[test]
+    fn consul_without_transport_preserves_direct_endpoint() {
+        let mut config = mysql_config(None);
+        config.db_type = DatabaseType::Consul;
+        config.host = "consul.internal".to_string();
+        config.port = 8500;
+        config.external_config = Some(serde_json::json!({
+            "serverAddr": "http://consul.internal:8500"
+        }));
+
+        let consul_config = consul_config_for_endpoint(&config, "consul.internal", 8500, None).unwrap();
+
+        assert_eq!(consul_config.connect_override, None);
+    }
+
+    #[test]
     fn mq_remote_endpoint_comes_from_admin_url_when_host_fields_are_empty() {
         let mut config = mysql_config(None);
         config.db_type = DatabaseType::MessageQueue;
@@ -15930,5 +16710,23 @@ for line in sys.stdin:
             .unwrap_or_else(|err| panic!("failed to drop KWDB test schema: {err}"));
         pool.close();
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn postgres_family_product_name_detects_greenplum_cloudberry() {
+        assert_eq!(
+            postgres_family_product_name("PostgreSQL 14.4 (Apache Cloudberry 1.2.0 build 8f2a) on x86_64"),
+            Some("Apache Cloudberry")
+        );
+        assert_eq!(
+            postgres_family_product_name(
+                "PostgreSQL 9.4.24 (Greenplum Database 6.18.2 build commit: 062eba04) on x86_64"
+            ),
+            Some("Greenplum")
+        );
+        assert_eq!(postgres_family_product_name("PostgreSQL 16.2 on aarch64"), Some("PostgreSQL"));
+        // Unrelated engines report their own strings; without a PostgreSQL
+        // marker there is no product name to claim.
+        assert_eq!(postgres_family_product_name("MySQL 8.0.33"), None);
     }
 }

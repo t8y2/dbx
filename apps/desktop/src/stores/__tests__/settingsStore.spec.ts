@@ -27,10 +27,49 @@ import {
   COMPACT_TAB_TITLE_DEFAULT_VERSION,
 } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
-import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
+import { DATA_GRID_DEFAULT_VISIBLE_COPY_EXTRACTORS, DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION, DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { DEFAULT_MONO_FONT_FAMILY } from "@/lib/app/appFonts";
 
 describe("normalizeEditorSettings", () => {
+  it("defaults sidebar hover to enabled with a 300ms delay and validates saved values", () => {
+    const defaults = { sidebarHoverEnabled: true, sidebarHoverDelay: 300 };
+    expect(DEFAULT_EDITOR_SETTINGS).toMatchObject(defaults);
+    expect(normalizeEditorSettings({})).toMatchObject(defaults);
+    expect(normalizeEditorSettings({ sidebarHoverEnabled: false, sidebarHoverDelay: 750 })).toMatchObject({ sidebarHoverEnabled: false, sidebarHoverDelay: 750 });
+    expect(normalizeEditorSettings({ sidebarHoverEnabled: "false", sidebarHoverDelay: "500" } as any)).toMatchObject(defaults);
+    for (const invalid of [NaN, Infinity, null]) expect(normalizeEditorSettings({ sidebarHoverDelay: invalid } as any).sidebarHoverDelay).toBe(300);
+    expect(normalizeEditorSettings({ sidebarHoverDelay: 0 }).sidebarHoverDelay).toBe(100);
+    expect(normalizeEditorSettings({ sidebarHoverDelay: 9999 }).sidebarHoverDelay).toBe(2000);
+    expect(normalizeEditorSettings({ sidebarHoverDelay: 499.7 }).sidebarHoverDelay).toBe(500);
+  });
+
+  it("keeps manual export and toolbar preferences across updates and reloads", async () => {
+    const defaults = { defaultExportMode: "immediate", dataGridHideToolbarLabels: false };
+    expect(DEFAULT_EDITOR_SETTINGS).toMatchObject(defaults);
+    expect(normalizeEditorSettings({})).toMatchObject(defaults);
+    expect(normalizeEditorSettings({ defaultExportMode: "invalid", dataGridHideToolbarLabels: "true" } as any)).toMatchObject(defaults);
+    setActivePinia(createPinia());
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const settings = useSettingsStore();
+    const changes = { defaultExportMode: "queued" as const, dataGridHideToolbarLabels: true };
+    settings.updateEditorSettings(changes);
+    expect(normalizeEditorSettings(JSON.parse(JSON.stringify(settings.editorSettings)))).toMatchObject(changes);
+    settings.updateEditorSettings(defaults as { defaultExportMode: "immediate"; dataGridHideToolbarLabels: boolean });
+    expect(settings.editorSettings).toMatchObject(defaults);
+  });
+
+  it("defaults dataGridOrderByVisible to true and dataGridWhereRatio to 0.5", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.dataGridOrderByVisible).toBe(true);
+    expect(DEFAULT_EDITOR_SETTINGS.dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({}).dataGridOrderByVisible).toBe(true);
+    expect(normalizeEditorSettings({}).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridOrderByVisible: false }).dataGridOrderByVisible).toBe(false);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.7 }).dataGridWhereRatio).toBe(0.7);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.1 as any }).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: 0.95 as any }).dataGridWhereRatio).toBe(0.5);
+    expect(normalizeEditorSettings({ dataGridWhereRatio: "0.7" as any }).dataGridWhereRatio).toBe(0.5);
+  });
+
   it("defaults the selection statistic to sum and validates every saved metric", () => {
     expect(DEFAULT_EDITOR_SETTINGS.dataGridSelectionSummaryMetric).toBe("sum");
     expect(normalizeEditorSettings({}).dataGridSelectionSummaryMetric).toBe("sum");
@@ -465,6 +504,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sidebarShowConnectionNotes: false }).sidebarShowConnectionNotes).toBe(false);
   });
 
+  it("hides connection endpoints by default and normalizes non-boolean values", () => {
+    expect(normalizeEditorSettings({}).sidebarShowConnectionEndpoints).toBe(false);
+    expect(normalizeEditorSettings({ sidebarShowConnectionEndpoints: true }).sidebarShowConnectionEndpoints).toBe(true);
+    expect(normalizeEditorSettings({ sidebarShowConnectionEndpoints: false }).sidebarShowConnectionEndpoints).toBe(false);
+    expect(normalizeEditorSettings({ sidebarShowConnectionEndpoints: "yes" } as any).sidebarShowConnectionEndpoints).toBe(false);
+  });
+
   it("shows sidebar tooltips by default and preserves an explicit opt-out", () => {
     expect(normalizeEditorSettings({}).sidebarShowTooltips).toBe(true);
     expect(normalizeEditorSettings({ sidebarShowTooltips: false }).sidebarShowTooltips).toBe(false);
@@ -490,6 +536,13 @@ describe("normalizeEditorSettings", () => {
 
   it("enables automatic table aliases by default", () => {
     expect(normalizeEditorSettings({}).autoAliasTables).toBe(true);
+  });
+
+  it("preserves legacy column comments by default and accepts an explicit opt-out", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.batchColumnSelectionIncludeComments).toBe(true);
+    expect(normalizeEditorSettings({}).batchColumnSelectionIncludeComments).toBe(true);
+    expect(normalizeEditorSettings({ batchColumnSelectionIncludeComments: false }).batchColumnSelectionIncludeComments).toBe(false);
+    expect(normalizeEditorSettings({ batchColumnSelectionIncludeComments: "false" as any }).batchColumnSelectionIncludeComments).toBe(true);
   });
 
   it("preserves disabled automatic table aliases", () => {
@@ -664,6 +717,18 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ deepLinkConnectionConfirmMode: "sometimes" } as any).deepLinkConnectionConfirmMode).toBe("always");
   });
 
+  it("keeps duplicate tab titles on ordinal by default and accepts the connection-name mode", () => {
+    // 老配置文件没有这个字段时保持历史行为（序号），升级不该改变已有标签栏。
+    expect(normalizeEditorSettings({}).duplicateTabTitleMode).toBe("ordinal");
+    expect(DEFAULT_EDITOR_SETTINGS.duplicateTabTitleMode).toBe("ordinal");
+    expect(normalizeEditorSettings({ duplicateTabTitleMode: "ordinal" }).duplicateTabTitleMode).toBe("ordinal");
+    expect(normalizeEditorSettings({ duplicateTabTitleMode: "connection" }).duplicateTabTitleMode).toBe("connection");
+    // 非法值（含旧版布尔/数字）一律回落默认值。
+    for (const invalid of ["connection-name", "", null, true, 1] as unknown[]) {
+      expect(normalizeEditorSettings({ duplicateTabTitleMode: invalid } as any).duplicateTabTitleMode).toBe("ordinal");
+    }
+  });
+
   it("remembers connection databases by default and sanitizes the stored map", () => {
     expect(normalizeEditorSettings({}).rememberConnectionDatabaseOnDelete).toBe(true);
     expect(normalizeEditorSettings({ rememberConnectionDatabaseOnDelete: false }).rememberConnectionDatabaseOnDelete).toBe(false);
@@ -755,9 +820,24 @@ describe("normalizeEditorSettings", () => {
     expect(configured.dsv.quotePolicy).toBe("always");
     expect(configured.sql.insertMode).toBe("row-by-row");
     expect(configured.json.pretty).toBe(false);
-    const visible = normalizeEditorSettings({ dataGridVisibleCopyExtractors: ["php", "php", "unknown"] }).dataGridVisibleCopyExtractors;
+    const visible = normalizeEditorSettings({ dataGridVisibleCopyExtractorsMigrationVersion: DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION, dataGridVisibleCopyExtractors: ["php", "php", "unknown"] }).dataGridVisibleCopyExtractors;
     expect(visible).toEqual(["php"]);
     expect(normalizeEditorSettings({ dataGridVisibleCopyExtractors: [] }).dataGridVisibleCopyExtractors).toEqual([]);
+  });
+
+  it("adds SQL DELETE to legacy visible copy formats without restoring hidden formats", () => {
+    const legacy = normalizeEditorSettings({ dataGridVisibleCopyExtractors: ["raw", "php"] });
+    expect(legacy.dataGridVisibleCopyExtractors).toEqual(["raw", "sql-deletes", "php"]);
+    expect(legacy.dataGridVisibleCopyExtractorsMigrationVersion).toBe(DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION);
+
+    const current = normalizeEditorSettings({
+      dataGridVisibleCopyExtractorsMigrationVersion: DATA_GRID_VISIBLE_COPY_EXTRACTORS_MIGRATION_VERSION,
+      dataGridVisibleCopyExtractors: ["raw", "php"],
+    });
+    expect(current.dataGridVisibleCopyExtractors).toEqual(["raw", "php"]);
+
+    const intentionallyEmpty = normalizeEditorSettings({ dataGridVisibleCopyExtractors: [] });
+    expect(intentionallyEmpty.dataGridVisibleCopyExtractors).toEqual([]);
   });
 
   it("migrates the legacy NULL clipboard sentinel once", () => {
@@ -1017,6 +1097,13 @@ describe("normalizeDesktopSettings", () => {
     expect(normalizeDesktopSettings({ metadata_cache_max_memory_mb: 1 }).metadata_cache_max_memory_mb).toBe(16);
     expect(normalizeDesktopSettings({ metadata_cache_max_memory_mb: 384 }).metadata_cache_max_memory_mb).toBe(384);
     expect(normalizeDesktopSettings({ metadata_cache_max_memory_mb: 513 }).metadata_cache_max_memory_mb).toBe(64);
+  });
+
+  it("falls back non-positive sidebar table page sizes to the default", () => {
+    expect(normalizeDesktopSettings({}).sidebar_table_page_size).toBe(1000);
+    expect(normalizeDesktopSettings({ sidebar_table_page_size: 500 }).sidebar_table_page_size).toBe(500);
+    expect(normalizeDesktopSettings({ sidebar_table_page_size: 0 }).sidebar_table_page_size).toBe(1000);
+    expect(normalizeDesktopSettings({ sidebar_table_page_size: -10 }).sidebar_table_page_size).toBe(1000);
   });
 
   it("defaults DuckDB worker process isolation to disabled for old settings", () => {
@@ -1468,10 +1555,6 @@ describe("settingsStore AI API key normalization", () => {
   });
 
   it("provides the current partner default models", () => {
-    expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "jalapeno-cloud")).toMatchObject({
-      model: "GLM-5.3",
-      models: [{ name: "GLM-5.3" }, { name: "DeepSeek-V4-Pro" }, { name: "MiniMax-M3" }],
-    });
     expect(AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === "hualong-ai")).toMatchObject({
       model: "deepseek-v4.1-flash",
       models: [{ name: "deepseek-v4.1-flash" }],
@@ -1740,6 +1823,29 @@ describe("settingsStore persisted settings initialization", () => {
   beforeEach(() => {
     vi.resetModules();
     setActivePinia(createPinia());
+  });
+
+  it("persists sidebar hover preferences across restarts and restores defaults", async () => {
+    let saved: Record<string, unknown> | null = null;
+    vi.doMock("@/lib/backend/api", () => ({
+      loadEditorSettings: async () => saved,
+      saveEditorSettings: async (settings: Record<string, unknown>) => {
+        saved = JSON.parse(JSON.stringify(settings));
+      },
+    }));
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+    store.updateEditorSettings({ sidebarHoverEnabled: false, sidebarHoverDelay: 750 });
+    await store.persistEditorSettings();
+    setActivePinia(createPinia());
+    const restarted = useSettingsStore();
+    await restarted.initEditorSettings();
+    expect(restarted.editorSettings).toMatchObject({ sidebarHoverEnabled: false, sidebarHoverDelay: 750 });
+    restarted.updateEditorSettings({ sidebarHoverDelay: 9999 });
+    expect(restarted.editorSettings.sidebarHoverDelay).toBe(2000);
+    restarted.updateEditorSettings({ sidebarHoverEnabled: DEFAULT_EDITOR_SETTINGS.sidebarHoverEnabled, sidebarHoverDelay: DEFAULT_EDITOR_SETTINGS.sidebarHoverDelay });
+    expect(restarted.editorSettings).toMatchObject({ sidebarHoverEnabled: true, sidebarHoverDelay: 300 });
   });
 
   it("persists and restores the chosen selection statistic after restarting the store", async () => {
@@ -2280,6 +2386,20 @@ describe("settingsStore persisted settings initialization", () => {
     expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarShowConnectionNotes: true }));
   });
 
+  it("persists sidebarShowConnectionEndpoints update", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue({ sidebarShowConnectionEndpoints: false });
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    await store.updateEditorSettingsAndPersist({ sidebarShowConnectionEndpoints: true });
+    expect(store.editorSettings.sidebarShowConnectionEndpoints).toBe(true);
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarShowConnectionEndpoints: true }));
+  });
+
   it("persists preferredExportPath update", async () => {
     const loadEditorSettings = vi.fn().mockResolvedValue({ preferredExportPath: "" });
     const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
@@ -2368,6 +2488,7 @@ describe("settingsStore editor settings persistence", () => {
   it("rolls back a failed atomic update and allows retry", async () => {
     const loadEditorSettings = vi.fn().mockResolvedValue({
       ignoredUpdateVersion: "",
+      updateChannel: "stable",
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
@@ -2417,6 +2538,7 @@ describe("settingsStore editor settings persistence", () => {
     let resolveFirstSave!: () => void;
     const loadEditorSettings = vi.fn().mockResolvedValue({
       ignoredUpdateVersion: "",
+      updateChannel: "stable",
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
@@ -2454,6 +2576,7 @@ describe("settingsStore editor settings persistence", () => {
     let rejectFirstSave!: (error: Error) => void;
     const loadEditorSettings = vi.fn().mockResolvedValue({
       ignoredUpdateVersion: "",
+      updateChannel: "stable",
       theme: "system",
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,

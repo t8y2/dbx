@@ -15,6 +15,7 @@ import { isUpdatePreviewMockEnabled } from "@/lib/updates/updatePreviewMock";
 import { canDownloadAndInstallUpdate, isNewerRemoteVersion, resolveReleaseTagUrl } from "@/composables/useAppUpdater";
 import type { ComponentUpdateCategory } from "@/composables/useComponentUpdates";
 import { currentLocale } from "@/i18n";
+import { displayAppVersion } from "@/lib/app/promotedBuild";
 import { changelogLangFromLocale, createLatestRequestGuard, fetchChangelogIndex, type ChangelogReleaseSummary } from "@/lib/app/changelog";
 import DriverInstallProgressCircle from "@/components/config/DriverInstallProgressCircle.vue";
 import ChangelogPanel from "@/components/settings/ChangelogPanel.vue";
@@ -32,6 +33,8 @@ const props = withDefaults(
     downloadProgress: number | null;
     updateDownloaded: boolean;
     updateDownloadedVersion?: string;
+    /** Version the user ignored that is currently suppressing an available release. */
+    ignoredReleaseVersion?: string;
     isInstallingUpdate: boolean;
     isPreparingUpdate?: boolean;
     updateReady: boolean;
@@ -67,6 +70,7 @@ const props = withDefaults(
     updatingComponent: null,
     isUpdatingAll: false,
     updateDownloadedVersion: "",
+    ignoredReleaseVersion: "",
   },
 );
 
@@ -78,6 +82,7 @@ const emit = defineEmits<{
   "install-downloaded": [];
   restart: [];
   "ignore-version": [];
+  "restore-ignored-version": [];
   "change-download-source": [source: UpdateDownloadSource];
   "install-component-updates": [category: ComponentUpdateCategory];
   "update-all": [];
@@ -110,11 +115,18 @@ const historyRequest = createLatestRequestGuard();
 const fallbackVersion = ref("");
 const changelogLang = computed(() => changelogLangFromLocale(locale.value || currentLocale()));
 const currentVersion = computed(() => props.updateInfo?.current_version || fallbackVersion.value);
+const stableDowngradeBlocked = computed(() => {
+  const current = currentVersion.value.trim().replace(/^v/i, "");
+  const latest = (props.updateInfo?.latest_version ?? "").trim().replace(/^v/i, "");
+  const currentBase = current.split(/[+-]/, 1)[0];
+  const latestBase = latest.split(/[+-]/, 1)[0];
+  return props.updateInfo?.channel === "stable" && current.includes("-") && !props.updateInfo.update_available && Boolean(currentBase && latestBase) && isNewerRemoteVersion(currentBase, latestBase);
+});
 // 只保留低于当前版本的发布记录：新版本走“客户端更新”，这里专用于回退
 const olderReleases = computed(() => {
   const current = currentVersion.value;
   if (!current) return [];
-  return historyReleases.value.filter((release) => isNewerRemoteVersion(current, release.tag));
+  return historyReleases.value.filter((release) => !release.tag.includes("-beta.") && isNewerRemoteVersion(current, release.tag));
 });
 const visibleOlderReleases = computed(() => olderReleases.value.slice(0, historyVisibleCount.value));
 const hasMoreOlderReleases = computed(() => historyVisibleCount.value < olderReleases.value.length);
@@ -170,6 +182,22 @@ const updatingButtonText = computed(() => {
   }
   return t("updates.updating");
 });
+
+/**
+ * "Update all" runs several categories in sequence and only the driver batch
+ * reports a total, so the bar is determinate exactly when that count exists and
+ * indeterminate otherwise instead of freezing at 0%.
+ */
+const updateAllProgress = computed(() => {
+  if (props.driverBatchTotal <= 0) return null;
+  return Math.min(100, Math.round((props.driverBatchCompleted / props.driverBatchTotal) * 100));
+});
+/**
+ * A download with no Content-Length reports `null`; the bar then pulses at a
+ * fixed width so the user still sees motion, which is what the old disabled
+ * "下载中 0%" button failed to convey.
+ */
+const downloadProgressWidth = computed(() => (props.downloadProgress === null ? null : Math.max(2, Math.min(100, props.downloadProgress))));
 // Component update tasks are owned by the app-level composable. Closing the
 // dialog only leaves them running in the background; replacing an app update
 // is the only operation that must keep the modal open.
@@ -211,6 +239,15 @@ function handleOpenChange(nextOpen: boolean) {
   }
   if (isCloseBlocked.value) return;
   open.value = false;
+}
+
+function handleOpenAutoFocus(event: Event) {
+  // Opening the center should not make a tab or update action look selected by
+  // keyboard focus. Keep focus inside the dialog; Tab still reaches its controls.
+  if (event.target instanceof HTMLElement) {
+    event.preventDefault();
+    event.target.focus({ preventScroll: true });
+  }
 }
 
 function openExternalUrl(url: string) {
@@ -319,7 +356,9 @@ watch(
     <DialogContent
       class="sm:max-w-[700px]"
       :class="'flex max-h-[min(720px,calc(var(--dbx-viewport-height)-48px))] flex-col gap-0 overflow-hidden p-0'"
+      portal-class="place-items-start justify-items-center pt-[max(24px,calc((var(--dbx-viewport-height)-720px)/2))]"
       :show-close-button="!isCloseBlocked"
+      @open-auto-focus="handleOpenAutoFocus"
       @interact-outside="
         (e: Event) => {
           if (blocksImplicitDismiss) e.preventDefault();
@@ -331,7 +370,7 @@ watch(
         }
       "
     >
-      <DialogHeader class="border-b py-4 pl-5 pr-12">
+      <DialogHeader class="shrink-0 border-b py-4 pl-5 pr-12">
         <div class="flex items-center justify-between gap-4">
           <DialogTitle class="flex min-w-0 items-center gap-2">
             <span>{{ t("updates.centerTitle") }}</span>
@@ -343,10 +382,22 @@ watch(
             {{ t("updates.updateAll") }}
           </Button>
         </div>
+        <!-- "Update all" used to be a bare spinner: no target, no position in the
+             queue. Say what is running and how far the batch got. -->
+        <div v-if="props.isUpdatingAll" data-update-all-progress class="mt-2.5 space-y-1">
+          <div class="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+            <span class="truncate">{{ updatingButtonText }}</span>
+            <span v-if="updateAllProgress !== null" class="shrink-0 tabular-nums">{{ updateAllProgress }}%</span>
+          </div>
+          <div class="h-1 w-full overflow-hidden rounded-full bg-muted">
+            <div v-if="updateAllProgress !== null" class="h-full rounded-full bg-primary transition-[width] duration-300" :style="{ width: `${updateAllProgress}%` }" />
+            <div v-else class="h-full w-1/2 animate-pulse rounded-full bg-primary/70" />
+          </div>
+        </div>
       </DialogHeader>
 
-      <div class="flex min-h-0 flex-1 flex-col">
-        <div v-if="tabs.length" class="px-5 pb-2.5 pt-1.5">
+      <div class="flex min-h-0 flex-auto flex-col">
+        <div v-if="tabs.length" class="shrink-0 px-5 pb-2.5 pt-1.5">
           <div role="tablist" :aria-label="t('updates.centerTitle')" class="inline-flex h-9 w-full items-center gap-1 overflow-x-auto">
             <button
               v-for="tab in tabs"
@@ -356,7 +407,7 @@ watch(
               :aria-selected="selectedTab === tab.id"
               :data-state="selectedTab === tab.id ? 'active' : 'inactive'"
               :data-update-tab="tab.id"
-              class="relative inline-flex h-full select-none items-center gap-1.5 whitespace-nowrap px-2.5 text-sm font-medium transition-colors after:absolute after:inset-x-2.5 after:bottom-0 after:h-0.5 after:rounded-full after:bg-foreground after:opacity-0 after:transition-opacity hover:text-foreground focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50"
+              class="relative inline-flex h-full select-none items-center gap-1.5 whitespace-nowrap px-2.5 text-sm font-medium transition-colors after:absolute after:inset-x-2.5 after:bottom-0 after:h-0.5 after:rounded-full after:bg-foreground after:opacity-0 after:transition-opacity hover:text-foreground focus-visible:outline-1 focus-visible:-outline-offset-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50"
               :class="selectedTab === tab.id ? 'text-foreground after:opacity-100' : 'text-foreground/60'"
               @click="selectTab(tab.id)"
             >
@@ -366,20 +417,32 @@ watch(
           </div>
         </div>
 
-        <div data-update-scroll-region class="min-h-0 flex-1 overflow-auto px-5 py-4 text-sm">
+        <div :key="selectedTab" data-update-scroll-region class="min-h-0 flex-auto overflow-auto px-5 py-4 text-sm">
           <ChangelogPanel v-if="selectedTab === 'changelog'" :checking-updates="checkingUpdates || isInstallingUpdate" @check-updates="emit('check-updates')" />
           <template v-else-if="selectedTab === 'app'">
             <div class="space-y-3">
+              <div v-if="updateInfo?.channel === 'beta'" class="inline-flex rounded-full bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-300">
+                {{ t("updates.betaChannelBadge") }}
+              </div>
+              <p v-if="stableDowngradeBlocked" class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                {{ t("updates.stableDowngradeBlocked") }}
+              </p>
               <p v-if="updateInfo?.update_available">
                 {{
                   t("updates.availableMessage", {
-                    current: updateInfo.current_version,
+                    current: displayAppVersion(updateInfo.current_version),
                     latest: updateInfo.latest_version,
                   })
                 }}
               </p>
               <p v-else-if="!checkingUpdates && !updateDownloaded && !updateReady" class="text-muted-foreground">
-                {{ updateCheckMessage || t("updates.upToDate", { version: updateInfo?.current_version || "" }) }}
+                <template v-if="ignoredReleaseVersion">
+                  {{ t("updates.versionIgnored", { version: ignoredReleaseVersion }) }}
+                  <button type="button" data-update-restore-ignored class="text-primary underline underline-offset-2 hover:text-primary/80" :disabled="isIgnoringUpdate" @click="emit('restore-ignored-version')">
+                    {{ t("updates.restoreIgnoredVersion") }}
+                  </button>
+                </template>
+                <template v-else>{{ updateCheckMessage || t("updates.upToDate", { version: displayAppVersion(updateInfo?.current_version || "") }) }}</template>
               </p>
               <div
                 v-if="updateInfo?.update_available && updateInfo.release_notes"
@@ -512,7 +575,7 @@ watch(
           </template>
         </div>
 
-        <DialogFooter v-if="selectedTab === 'app'" data-update-footer class="mx-0 mb-0 min-w-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
+        <DialogFooter v-if="selectedTab === 'app'" data-update-footer class="mx-0 mb-0 min-w-0 shrink-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
           <div v-if="!updateReady && !isInstallingUpdate && !updateDownloaded && (updateInfo?.update_available || updateCheckFailed)" class="flex items-center gap-1.5 self-start sm:mr-auto sm:self-center">
             <span class="text-xs text-muted-foreground">{{ t("updates.source") }}</span>
             <Select :model-value="updateDownloadSource" :disabled="checkingUpdates || isIgnoringUpdate" @update:model-value="(value) => value && emit('change-download-source', value as UpdateDownloadSource)">
@@ -541,10 +604,13 @@ watch(
               </Button>
               <template v-else-if="isDownloadingUpdate">
                 <Button variant="ghost" class="shrink-0" @click="emit('cancel-download')">{{ t("updates.cancelDownload") }}</Button>
-                <Button class="w-52 shrink-0 tabular-nums" disabled>
-                  <Loader2 class="h-4 w-4 animate-spin" />
-                  {{ t("updates.downloading", { progress: downloadProgress ?? 0 }) }}
-                </Button>
+                <div class="flex w-52 shrink-0 flex-col gap-1">
+                  <span class="self-end text-xs tabular-nums text-muted-foreground">{{ downloadProgress === null ? t("updates.updating") : t("updates.downloading", { progress: downloadProgress }) }}</span>
+                  <div class="h-1.5 w-full overflow-hidden rounded-full bg-muted" data-download-progress-track>
+                    <div v-if="downloadProgressWidth !== null" data-download-progress-fill class="h-full rounded-full bg-primary transition-[width] duration-200" :style="{ width: `${downloadProgressWidth}%` }" />
+                    <div v-else data-download-progress-indeterminate class="h-full w-1/2 animate-pulse rounded-full bg-primary/70" />
+                  </div>
+                </div>
               </template>
               <Button v-else-if="updateDownloaded" class="shrink-0" :disabled="activeTaskCount > 0 || isIgnoringUpdate || isUpdatingAll" @click="emit('install-downloaded')">{{ t("updates.restartAndUpdate") }}</Button>
               <Button v-else-if="!checkingUpdates" class="shrink-0" :disabled="isIgnoringUpdate" @click="emit('download-in-background')">{{ t(updateCheckFailed ? "updates.retryDownload" : "updates.downloadInBackground") }}</Button>
@@ -557,7 +623,7 @@ watch(
           </template>
         </DialogFooter>
 
-        <DialogFooter v-else-if="selectedCategory" data-update-footer class="mx-0 mb-0 min-w-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
+        <DialogFooter v-else-if="selectedCategory" data-update-footer class="mx-0 mb-0 min-w-0 shrink-0 rounded-none border-t px-[22px] pb-2.5 pt-2.5 sm:items-center sm:justify-end">
           <template v-if="isAnyComponentUpdating">
             <Button variant="ghost" class="shrink-0" @click="handleOpenChange(false)">{{ t("updates.updateInBackground") }}</Button>
             <Button class="shrink-0" disabled>

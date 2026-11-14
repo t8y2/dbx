@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   native: false,
   exportQueryResultsXlsx: vi.fn(),
   startQueryResultExport: vi.fn().mockResolvedValue({ exportId: "export-1", tableName: "Query Result", rowsExported: 1, totalRows: 1, status: "Done" }),
+  startTableExport: vi.fn().mockResolvedValue({ exportId: "export-2", tableName: "users", rowsExported: 1, totalRows: 1, status: "Done" }),
   toast: vi.fn(),
 }));
 
@@ -62,6 +63,8 @@ vi.mock("@/lib/backend/api", () => ({
   exportQueryResultsXlsx: mocks.exportQueryResultsXlsx,
   startQueryResultExport: mocks.startQueryResultExport,
   cancelQueryResultExport: vi.fn(),
+  startTableExport: mocks.startTableExport,
+  cancelTableExport: vi.fn(),
 }));
 
 function queryResult(columns: string[], rows: QueryResult["rows"]): QueryResult {
@@ -74,7 +77,7 @@ function queryResult(columns: string[], rows: QueryResult["rows"]): QueryResult 
   };
 }
 
-function createOptions(): UseDataGridExportOptions {
+function createOptions(overrides: Partial<UseDataGridExportOptions> = {}): UseDataGridExportOptions {
   return {
     columns: computed(() => ["id"]),
     displayItems: computed(() => []),
@@ -109,6 +112,7 @@ function createOptions(): UseDataGridExportOptions {
       { sheetName: "Ids", result: queryResult(["id"], [[1]]) },
       { sheetName: "Names", result: queryResult(["name"], [["Ada"]]) },
     ]),
+    ...overrides,
   };
 }
 
@@ -117,6 +121,21 @@ describe("useDataGridExport XLSX headers", () => {
     vi.clearAllMocks();
     const tracker = useExportTracker();
     for (const task of tracker.tasks.value) tracker.removeTask(task.exportId);
+  });
+
+  it("projects a grid column subset onto the backend table export with aligned header comments (issue #14732)", async () => {
+    const state = useDataGridExport(
+      createOptions({
+        context: computed(() => "table-data"),
+        columns: computed(() => ["id", "name"]),
+        sourceColumns: computed(() => ["id", "name"]),
+        columnTypes: computed(() => ["int", "varchar"]),
+      }),
+    );
+
+    await state.exportXlsx({ columnIndexes: [1] });
+
+    expect(mocks.startTableExport).toHaveBeenCalledWith(expect.objectContaining({ format: "xlsx", tableName: "users", columns: ["name"], columnTypes: ["varchar"], columnComments: ["name (Display name)"] }), expect.any(Function));
   });
 
   it("maps combined headers independently for every result sheet", async () => {

@@ -354,4 +354,36 @@ describe("useNavigationTargets openTableTarget", () => {
     // 无取消请求：元数据落地后按既有行为执行第二次查询
     expect(mocks.executeTabSql).toHaveBeenCalledTimes(2);
   });
+
+  it("retries without the synthetic row-id locator when the engine rejects system columns (Hologres, #12647)", async () => {
+    const { resetRowIdLocatorStateForTests, rowIdLocatorUnsupported } = await import("@/lib/table/tableRowIdSupport");
+    resetRowIdLocatorStateForTests();
+    expect(rowIdLocatorUnsupported("connection-1")).toBe(false);
+    // Hologres-like: keyless PostgreSQL base table; the engine rejects every
+    // locator-bearing SELECT (tableoid/ctid/xmin do not exist there).
+    mocks.databaseType = "postgres";
+    mocks.getColumns.mockResolvedValue([{ ...column("payload"), is_primary_key: false }]);
+    mocks.listIndexes.mockResolvedValue([]);
+    mocks.buildTableSelectSql.mockImplementation(async ({ tableName, includeRowId }: { tableName: string; includeRowId?: boolean }) => (includeRowId ? `SELECT tableoid::text || ':' || ctid::text || ':' || xmin::text AS "__DBX_ROWID", * FROM ${tableName}` : `SELECT * FROM ${tableName}`));
+    mocks.executeTabSql.mockImplementation(async (id: string, sql?: string) => {
+      const tab = mocks.tabs.find((item) => item.id === id);
+      if (!tab || typeof sql !== "string") return;
+      if (sql.includes("__DBX_ROWID")) {
+        tab.result = { columns: ["db error"], rows: [['ERROR: column "tableoid" does not exist']], affected_rows: 0, execution_time_ms: 1, execution_error: true } as QueryTab["result"];
+      } else {
+        tab.result = { columns: ["payload"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 } as QueryTab["result"];
+      }
+    });
+
+    await useNavigationTargets(dialogs).openTableTarget({ connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" });
+
+    const executedSql = mocks.executeTabSql.mock.calls.map((call) => String(call[1]));
+    expect(executedSql.some((sql) => sql.includes("__DBX_ROWID"))).toBe(true);
+    // Same degradation contract as the sidebar open path: replay once without
+    // the locator so the table still opens (read-only), then remember the
+    // connection so later opens skip the locator up front.
+    expect(executedSql.some((sql) => !sql.includes("__DBX_ROWID") && sql.includes("FROM users"))).toBe(true);
+    expect(rowIdLocatorUnsupported("connection-1")).toBe(true);
+    resetRowIdLocatorStateForTests();
+  });
 });

@@ -190,8 +190,9 @@ const patterns: [RegExp, string][] = [
   // Filesystem (src-tauri/src/commands/fs_open.rs)
   [/^file does not exist: (.+)$/, "common.fileNotFound"],
 
-  // Web auth rate limiting (crates/dbx-web/src/auth.rs)
+  // Web auth rate limiting and captcha gate (crates/dbx-web/src/auth.rs)
   [/^Please try again in (\d+)s$/, "auth.rateLimited"],
+  [/^captcha_invalid$/, "auth.captchaInvalid"],
 
   // Dameng native dexp/dimp dump (crates/dbx-core/src/data/dameng_dump.rs)
   [/^\[damengToolNotFound\]/, "damengDump.errors.toolNotFound"],

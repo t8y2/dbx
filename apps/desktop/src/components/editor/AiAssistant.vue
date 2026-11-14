@@ -177,7 +177,7 @@ import { isAiConfigModelCandidate, isCliProvider } from "@/lib/ai/aiConfigCandid
 import { deleteConversationWithCancellation, stopAiGenerationWithFallback } from "@/lib/ai/aiConversationLifecycle";
 import { AiGenerationGuard } from "@/lib/ai/aiGenerationGuard";
 import { applyStatusEvent, createGenerationStatus, createStatusTicker, liveAnnouncementText, markCancelling, shouldShowLongRunningHint, statusText, toolLabel, STATUS_IDLE_THRESHOLD_MS, type AiGenerationStatus } from "@/lib/ai/aiGenerationStatus";
-import { supportsBackgroundAiRuns } from "@/lib/ai/aiRuntimeStrategy";
+import { resolveAiRuntimeStrategy, supportsBackgroundAiRuns } from "@/lib/ai/aiRuntimeStrategy";
 import {
   acquireDesktopAiRunSlot,
   activeDesktopAiRuns,
@@ -299,7 +299,8 @@ const { openTableTarget } = useNavigationTargets({
 const { toast } = useToast();
 const { isDark } = useTheme();
 const supportsCliProviders = isTauriRuntime();
-const backgroundAiRunsEnabled = supportsBackgroundAiRuns();
+const aiRuntimeStrategy = resolveAiRuntimeStrategy();
+const backgroundAiRunsEnabled = supportsBackgroundAiRuns(aiRuntimeStrategy);
 
 type AiMessageMention =
   | {
@@ -368,7 +369,7 @@ interface ChatMessage {
    *  `writeSqlConfirmation` / `productionWriteBlocked` mark backend-generated,
    *  localized confirmation/block messages so the UI does not re-detect them
    *  from text phrasing. */
-  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked";
+  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked" | "outputTruncated";
   /** Per-message token stats from the last agent run; ephemeral, not persisted. */
   tokens?: { input: number; output: number };
   /**
@@ -685,7 +686,9 @@ const aiContextTarget = computed<AiContextTarget>(() => aiContextTargetFor(conve
 function restoreInitialConversation() {
   if (!assistantViewMounted || initialConversationRestored || !initialConversationStateLoaded || !settings.isAiConfigLoaded) return;
   initialConversationRestored = true;
-  if (settings.restoreLastConversation && conversations.value[0]) {
+  // A new detached editor starts its own chat instead of implicitly adopting
+  // a conversation that may still be running in the main window.
+  if (aiRuntimeStrategy !== "desktop-cancel-on-close" && settings.restoreLastConversation && conversations.value[0]) {
     selectConversation(conversations.value[0]);
   }
 }
@@ -2150,8 +2153,32 @@ async function resolveAutoAction(text: string, mode: AiAssistantMode, showProgre
 /** Messages visible in the chat UI (excludes hidden context summaries). */
 const visibleMessages = computed(() => messages.value.filter((m) => m.kind !== "contextSummary"));
 const pendingApprovalSteps = useAiToolApprovalDock(() => visibleMessages.value);
+const truncatedReply = computed(() => {
+  const last = visibleMessages.value[visibleMessages.value.length - 1];
+  return last?.role === "assistant" && last.kind === "outputTruncated" && !last.failed ? last : null;
+});
+
+function continueTruncatedReply(message: ChatMessage) {
+  if (message !== truncatedReply.value || isGenerating.value || isAttachmentProcessing.value || currentQueuedInput.value || !activeFullConfig.value) return;
+  clearPendingWriteGrant();
+  // Reuse the normal send lifecycle, while keeping the composer's unsent draft
+  // and attachments out of this follow-up. The reply retains its original target.
+  pendingAutoSends.push({
+    conversationId: conversationId.value,
+    text: t("ai.continueGenerationPrompt"),
+    messages: messages.value,
+    mode: "ask",
+    action: "general",
+    pluginContext: pluginContext.value,
+    binding: message.sourceBinding ?? conversationBinding.value,
+  });
+  void send();
+}
 
 function messagesForAgentHistory(historyMessages: ChatMessage[]): AiMessage[] {
+  // Some reasoning models spend the entire budget before emitting visible text.
+  // Replaying an empty assistant turn is rejected by several provider APIs.
+  historyMessages = historyMessages.filter((message) => message.role !== "assistant" || message.kind !== "outputTruncated" || !!message.content);
   const toModelMessage = (message: ChatMessage): AiMessage => ({
     role: message.role,
     content: messageContentForModel(message),
@@ -2265,7 +2292,7 @@ const proposalConfirmMessage = computed<ChatMessage | null>(() => {
     const msg = messages.value[i];
     if (msg.kind === "contextSummary") continue;
     if (msg.role !== "assistant") return null;
-    if (!msg.content) return null;
+    if (!msg.content || msg.kind === "outputTruncated") return null;
     // Backend-generated write confirmations are localized, so the English/Chinese
     // phrase detectors cannot recognize them; the `kind` marker plus one exact
     // SQL block is the structural proof of actionability.
@@ -4637,12 +4664,10 @@ async function send() {
         else appendAssistantReasoning(assistantIdx, event.delta);
       }
       if (event.type === "output_truncated") {
-        // The provider cut the answer off at its output limit; without this the card
-        // would look like a finished reply. Appended in the user's own locale, like
-        // every other string the panel writes.
-        const notice = `\n\n[${t("ai.outputTruncated")}]`;
-        if (detachedDeltaBuffer) detachedDeltaBuffer.appendText(assistantIdx, notice);
-        else appendAssistantDelta(assistantIdx, notice);
+        // Keep UI notices out of model history and unfinished Markdown fences.
+        // `kind` already survives conversation snapshots and reloads.
+        const msg = runMessages[assistantIdx];
+        if (msg) msg.kind = "outputTruncated";
       }
       if (event.type === "agent_end") {
         // End the card's "思考过程" spinner at the terminal event rather than
@@ -4822,6 +4847,7 @@ async function send() {
       if (msg) {
         msg.content = `${t("ai.requestFailed")}\n\n${translateBackendError(t, message)}`;
         msg.failed = true;
+        if (msg.kind === "outputTruncated") msg.kind = undefined;
       }
       if (detachedRun) finishDesktopAiRun(detachedRun, "failed");
     }
@@ -6675,7 +6701,14 @@ function focusSearch(): boolean {
   return true;
 }
 
-defineExpose({ openPluginConversation, openExternalContext, triggerAction, clearContextReferences, selectConversationById, focusSearch, reportAiSqlAction });
+async function prepareForWindowClose() {
+  if (backgroundAiRunsEnabled) return;
+  flushAssistantDeltas();
+  if (isGenerating.value) abandonInFlightRequest();
+  await persistConversation();
+}
+
+defineExpose({ openPluginConversation, openExternalContext, triggerAction, clearContextReferences, selectConversationById, focusSearch, reportAiSqlAction, prepareForWindowClose });
 
 const messageRenderer = computed(() => {
   const appearance = aiCodeAppearance.value;
@@ -7077,7 +7110,7 @@ async function openExternalUrl(url: string) {
             </div>
 
             <!-- Keep the metadata row as wide as the reply card so its export action stays right-aligned. -->
-            <div v-else-if="msg.content || msg.reasoning || msg.isThinking" class="flex w-full max-w-[95%] min-w-0 flex-col">
+            <div v-else-if="msg.content || msg.reasoning || msg.isThinking || msg.kind === 'outputTruncated'" class="flex w-full max-w-[95%] min-w-0 flex-col">
               <div data-ai-assistant-message-content class="ai-conversation-text w-full rounded-lg bg-muted px-3 py-2 text-xs leading-relaxed [overflow-wrap:anywhere]">
                 <div v-if="msg.reasoning || msg.isThinking" class="mb-2">
                   <button class="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors" @click="toggleReasoning()">
@@ -7202,6 +7235,13 @@ async function openExternalUrl(url: string) {
                     </div>
                   </div>
                 </template>
+                <div v-if="msg.kind === 'outputTruncated'" data-ai-output-truncated role="status" class="mt-2 space-y-2 border-t border-border pt-2 text-muted-foreground">
+                  <p>{{ t("ai.outputTruncated") }}</p>
+                  <Button v-if="msg === truncatedReply" data-ai-continue-generation type="button" size="sm" variant="outline" class="h-7 gap-1 text-[11px]" :disabled="isGenerating || isAttachmentProcessing || !!currentQueuedInput || !activeFullConfig" @click="continueTruncatedReply(msg)">
+                    <Play class="h-3 w-3" />
+                    {{ t("ai.continueGeneration") }}
+                  </Button>
+                </div>
                 <div v-if="msg === proposalConfirmMessage" class="mt-2 flex gap-2" :title="t('ai.proposalConfirmTitle')">
                   <Button size="sm" variant="default" class="h-7 gap-1 text-[11px]" @click="sendProposalReply(true)">
                     <Check class="h-3 w-3" />

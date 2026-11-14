@@ -46,12 +46,11 @@ pub fn build_database_structure_search_sql(
 
     let database_type = options.database_type?;
     let sql = match database_type {
-        DatabaseType::Mysql
-        | DatabaseType::Doris
-        | DatabaseType::StarRocks
-        | DatabaseType::ManticoreSearch
-        | DatabaseType::Goldendb => {
-            mysql_family_structure_search_sql(&options.database, options.schema.as_deref(), &pattern_literal, limit)
+        DatabaseType::Mysql => {
+            mysql_family_structure_search_sql(&options.database, options.schema.as_deref(), &pattern, limit, true)
+        }
+        DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch | DatabaseType::Goldendb => {
+            mysql_family_structure_search_sql(&options.database, options.schema.as_deref(), &pattern, limit, false)
         }
         DatabaseType::Postgres
         | DatabaseType::Kingbase
@@ -85,10 +84,10 @@ pub fn build_database_structure_search_sql(
         // GBase 8s is its own `Gbase8s` type (Informix-compatible, no information_schema)
         // and falls through to the data search; only MySQL-dialect Gbase 8a takes this path.
         DatabaseType::Gbase => {
-            gbase_structure_search_sql(&options.database, options.schema.as_deref(), &pattern_literal, limit)
+            gbase_structure_search_sql(&options.database, options.schema.as_deref(), &pattern, limit)
         }
         DatabaseType::Jdbc if driver_profile_is_mysql(options.driver_profile.as_deref()) => {
-            mysql_family_structure_search_sql(&options.database, options.schema.as_deref(), &pattern_literal, limit)
+            mysql_family_structure_search_sql(&options.database, options.schema.as_deref(), &pattern, limit, false)
         }
         DatabaseType::Jdbc if driver_profile_is_postgres(options.driver_profile.as_deref()) => {
             postgres_family_structure_search_sql(options.schema.as_deref(), &pattern_literal, limit)
@@ -125,16 +124,24 @@ fn driver_profile_is_oracle(profile: Option<&str>) -> bool {
 fn mysql_family_structure_search_sql(
     database: &str,
     schema: Option<&str>,
-    pattern_literal: &str,
+    pattern: &str,
     limit: usize,
+    include_object_type: bool,
 ) -> String {
-    let schema_filter = if let Some(schema) = schema.filter(|value| !value.trim().is_empty()) {
-        format!(" AND TABLE_SCHEMA = {}", sql_string_literal(schema))
+    let columns_source = if include_object_type {
+        "information_schema.COLUMNS AS c LEFT JOIN information_schema.TABLES AS t \
+         ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME"
     } else {
-        format!(" AND TABLE_SCHEMA = {}", sql_string_literal(database))
+        "information_schema.COLUMNS AS c"
     };
+    let column_object_type = if include_object_type { ", t.TABLE_TYPE AS object_type" } else { "" };
+    let table_object_type = if include_object_type { ", TABLE_TYPE AS object_type" } else { "" };
+    let schema = schema.filter(|value| !value.trim().is_empty()).unwrap_or(database);
+    let string_literal = if include_object_type { mysql_metadata_string } else { sql_string_literal };
+    let schema_literal = string_literal(schema);
+    let pattern_literal = string_literal(pattern);
     let comment_match = format!(" OR LOWER(COLUMN_COMMENT) LIKE LOWER({}) ESCAPE '~'", pattern_literal);
-    let system_schemas = "TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')";
+    let system_schemas = "NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')";
     // 表注释分支单独限额，避免字段命中占满共享 LIMIT 后把表注释命中挤掉。
     let table_limit = table_comment_search_limit(limit);
     // 结构搜索同时覆盖「字段名/字段注释」与「表自身注释」两类命中：
@@ -142,23 +149,23 @@ fn mysql_family_structure_search_sql(
     // 两个分支各自用子查询限额后再用 UNION ALL 合并统一排序，表级命中行的 column_name 为 NULL。
     format!(
         "SELECT * FROM ( \
-         SELECT TABLE_SCHEMA AS object_schema, TABLE_NAME AS object_name, COLUMN_NAME AS column_name, \
-         COLUMN_COMMENT AS column_comment, NULL AS table_comment \
-         FROM information_schema.COLUMNS \
+         SELECT c.TABLE_SCHEMA AS object_schema, c.TABLE_NAME AS object_name, c.COLUMN_NAME AS column_name, \
+         c.COLUMN_COMMENT AS column_comment, NULL AS table_comment{column_object_type} \
+         FROM {columns_source} \
          WHERE (LOWER(COLUMN_NAME) LIKE LOWER({}) ESCAPE '~'{}) \
-         {schema_filter} \
-         AND {system_schemas} \
+         AND c.TABLE_SCHEMA = {schema_literal} \
+         AND c.TABLE_SCHEMA {system_schemas} \
          ORDER BY object_schema, object_name, column_name \
          LIMIT {limit} ) AS field_hits \
          UNION ALL \
          SELECT * FROM ( \
          SELECT TABLE_SCHEMA AS object_schema, TABLE_NAME AS object_name, NULL AS column_name, \
-         NULL AS column_comment, TABLE_COMMENT AS table_comment \
+         NULL AS column_comment, TABLE_COMMENT AS table_comment{table_object_type} \
          FROM information_schema.TABLES \
          WHERE TABLE_TYPE = 'BASE TABLE' \
          AND LOWER(COALESCE(TABLE_COMMENT, '')) LIKE LOWER({}) ESCAPE '~' \
-         {schema_filter} \
-         AND {system_schemas} \
+         AND TABLE_SCHEMA = {schema_literal} \
+         AND TABLE_SCHEMA {system_schemas} \
          ORDER BY object_schema, object_name \
          LIMIT {table_limit} ) AS table_hits \
          ORDER BY object_schema, object_name, column_name \
@@ -170,6 +177,17 @@ fn mysql_family_structure_search_sql(
         table_limit = table_limit,
         total_limit = limit + table_limit,
     )
+}
+
+fn mysql_metadata_string(value: &str) -> String {
+    // Hex avoids backslash escaping differences when NO_BACKSLASH_ESCAPES changes.
+    let mut literal = String::from("CONVERT(X'");
+    for byte in value.bytes() {
+        use std::fmt::Write;
+        let _ = write!(literal, "{byte:02x}");
+    }
+    literal.push_str("' USING utf8mb4)");
+    literal
 }
 
 fn postgres_family_structure_search_sql(schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
@@ -434,9 +452,9 @@ fn snowflake_structure_search_sql(schema: Option<&str>, pattern_literal: &str, l
     )
 }
 
-fn gbase_structure_search_sql(database: &str, schema: Option<&str>, pattern_literal: &str, limit: usize) -> String {
+fn gbase_structure_search_sql(database: &str, schema: Option<&str>, pattern: &str, limit: usize) -> String {
     let database = if database.trim().is_empty() { "gbase" } else { database };
-    mysql_family_structure_search_sql(database, schema, pattern_literal, limit)
+    mysql_family_structure_search_sql(database, schema, pattern, limit, false)
 }
 
 fn clean_term(term: &str) -> String {

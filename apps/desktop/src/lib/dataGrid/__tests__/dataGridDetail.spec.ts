@@ -134,6 +134,33 @@ describe("buildDeleteRowConfirmDetails", () => {
   });
 });
 
+describe("data grid column detail comments", () => {
+  it("prefers the result-ordinal comment over the source name map", () => {
+    const detail = buildDataGridColumnDetail({
+      rows: [{ rowIndex: 0, rowId: 1, row: ["2026-11-02 08:48:06"] }],
+      columns: ["updated_at"],
+      columnIndex: 0,
+      commentByColumn: new Map([["updated_at", "stale metadata comment"]]),
+      comment: "记录最近实际修改时间",
+      displayValue: (value) => displayCellValue(value),
+    });
+
+    expect(detail?.comment).toBe("记录最近实际修改时间");
+  });
+
+  it("falls back to the source name map when the ordinal carries no comment", () => {
+    const detail = buildDataGridColumnDetail({
+      rows: [{ rowIndex: 0, rowId: 1, row: ["2026-11-02 08:48:06"] }],
+      columns: ["updated_at"],
+      columnIndex: 0,
+      commentByColumn: new Map([["updated_at", "记录最近实际修改时间"]]),
+      displayValue: (value) => displayCellValue(value),
+    });
+
+    expect(detail?.comment).toBe("记录最近实际修改时间");
+  });
+});
+
 describe("data grid detail TSV", () => {
   it("leaves NULL cells empty while preserving literal NULL text", () => {
     const fields = [{ value: null }, { value: "NULL" }] as unknown as DataGridRowDetail["fields"];

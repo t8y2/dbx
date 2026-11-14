@@ -5,6 +5,8 @@ import {
   loadDataGridColumnLayout,
   loadDataGridColumnFrozenState,
   loadTableDataGridColumnOrder,
+  loadTableDataGridColumnOrderEntry,
+  migrateDataGridColumnLayout,
   notifyTableDataGridColumnOrderChanged,
   removeDataGridColumnFrozenCount,
   removeTableDataGridColumnOrder,
@@ -115,6 +117,7 @@ export function useDataGridColumnLayoutState(options: {
   hideEmptyColumns?: MaybeRefOrGetter<boolean>;
   columnOrderKeys: MaybeRefOrGetter<readonly string[]>;
   layoutScopeKey: MaybeRefOrGetter<string>;
+  legacyLayoutScopeKey?: MaybeRefOrGetter<string | undefined>;
   tableScopeKey: MaybeRefOrGetter<string>;
   initialHiddenColumnKeys?: MaybeRefOrGetter<readonly string[] | undefined>;
   hideNullColumns?: MaybeRefOrGetter<boolean>;
@@ -135,6 +138,7 @@ export function useDataGridColumnLayoutState(options: {
   let columnLayoutPersistTimer: ReturnType<typeof setTimeout> | undefined;
   let columnLayoutPersistPending = false;
   let pendingColumnLayoutScopeKey = "";
+  let layoutOrderResetByTableRebuild = false;
   const orderedDisplayableColumnIndexes = computed(() => orderedColumnIndexes({ availableIndexes: toValue(options.displayableColumnIndexes), columnKeys: toValue(options.columnOrderKeys), orderedKeys: persistedColumnOrderKeys.value }));
   const visibleColumnIndexes = computed(() => visibleColumnIndexesForFilter(orderedDisplayableColumnIndexes.value, hiddenColumnIndexes.value));
   // The global preference is a rendering floor, never a per-layout persisted freeze.
@@ -278,19 +282,31 @@ export function useDataGridColumnLayoutState(options: {
 
   function loadColumnLayout() {
     flushPersistColumnLayout();
-    const storedLayout = loadDataGridColumnLayout(toValue(options.layoutScopeKey), toValue(options.columnOrderKeys));
+    const scopeKey = toValue(options.layoutScopeKey);
+    const legacyScopeKey = toValue(options.legacyLayoutScopeKey);
+    const columnKeys = toValue(options.columnOrderKeys);
+    const storedLayout = legacyScopeKey && legacyScopeKey !== scopeKey ? migrateDataGridColumnLayout(scopeKey, legacyScopeKey, columnKeys) : loadDataGridColumnLayout(scopeKey, columnKeys);
     const tableScopeKey = toValue(options.tableScopeKey);
-    const tableOrder = tableScopeKey ? loadTableDataGridColumnOrder(tableScopeKey) : [];
-    persistedColumnOrderKeys.value = tableOrder.length ? tableOrder : (storedLayout?.orderKeys ?? []);
+    const tableOrder = tableScopeKey ? loadTableDataGridColumnOrderEntry(tableScopeKey, toValue(options.columnOrderKeys)) : null;
+    // The layout keeps its own copy of the table order. It only stands in for
+    // tables without an entry; an empty entry means the table was rebuilt in a
+    // new order and the copy is stale, so it is dropped with the entry while
+    // hidden columns are kept.
+    const layoutOrderIsStale = tableOrder?.length === 0 && !!storedLayout?.orderKeys.length;
+    layoutOrderResetByTableRebuild = tableOrder?.length === 0;
+    persistedColumnOrderKeys.value = tableOrder ?? storedLayout?.orderKeys ?? [];
     persistedHiddenColumnKeys.value = storedLayout?.hiddenKeys ?? [...(toValue(options.initialHiddenColumnKeys) ?? [])];
     resetColumnVisibility();
-    if (!storedLayout && persistedHiddenColumnKeys.value.length > 0) schedulePersistColumnLayout();
+    if (layoutOrderIsStale || (!storedLayout && persistedHiddenColumnKeys.value.length > 0)) schedulePersistColumnLayout();
   }
 
   function loadFrozenColumnCount() {
     const state = loadDataGridColumnFrozenState(toValue(options.layoutScopeKey));
     manualFrozenColumnCount.value = Math.min(state.frozenCount, visibleColumnIndexes.value.length);
-    columnOrderSnapshotBeforeFreeze.value = state.orderBeforeFreeze;
+    // Unfreezing restores this snapshot, which would bring back the order the rebuild discarded.
+    const staleSnapshot = layoutOrderResetByTableRebuild && !!state.orderBeforeFreeze?.length;
+    columnOrderSnapshotBeforeFreeze.value = staleSnapshot ? [] : state.orderBeforeFreeze;
+    if (staleSnapshot && state.frozenCount > 0) saveDataGridColumnFrozenCount(toValue(options.layoutScopeKey), state.frozenCount, []);
   }
   function setFrozenColumnCount(count: number) {
     const clampedCount = Math.max(0, Math.min(count, visibleColumnIndexes.value.length));
@@ -365,7 +381,7 @@ export function useDataGridColumnLayoutState(options: {
         persistColumnLayoutImmediately();
         const tableScopeKey = toValue(options.tableScopeKey);
         if (tableScopeKey) {
-          saveTableDataGridColumnOrder(tableScopeKey, snapshot);
+          saveTableDataGridColumnOrder(tableScopeKey, snapshot, toValue(options.columnOrderKeys));
           notifyTableDataGridColumnOrderChanged(tableScopeKey);
         }
       }
@@ -388,7 +404,7 @@ export function useDataGridColumnLayoutState(options: {
     persistedColumnOrderKeys.value = keys;
     persistColumnLayoutImmediately();
     if (tableScopeKey) {
-      saveTableDataGridColumnOrder(tableScopeKey, keys);
+      saveTableDataGridColumnOrder(tableScopeKey, keys, toValue(options.columnOrderKeys));
       notifyTableDataGridColumnOrderChanged(tableScopeKey);
     }
   }
@@ -441,7 +457,7 @@ export function useDataGridColumnLayoutState(options: {
     if (!(event instanceof CustomEvent)) return;
     const detail = event.detail as TableDataGridColumnOrderChangedDetail | undefined;
     if (!detail || detail.scopeKey !== toValue(options.tableScopeKey)) return;
-    persistedColumnOrderKeys.value = loadTableDataGridColumnOrder(detail.scopeKey);
+    persistedColumnOrderKeys.value = loadTableDataGridColumnOrder(detail.scopeKey, toValue(options.columnOrderKeys));
     if (options.onRefreshMetrics) nextTick(options.onRefreshMetrics);
   }
 
@@ -593,6 +609,13 @@ export function useDataGridColumnLayout(options: {
   }
 
   const columnHeaderDragState = ref<ColumnHeaderDragState | null>(null);
+  // A press on a header creates the drag state before anything has moved. Header rendering must only
+  // follow the state once the pointer really dragged: reading the raw state would re-render every
+  // header on pointerdown and again on pointerup, i.e. twice for each plain click (sorting, selecting).
+  const columnHeaderActiveDrag = computed(() => {
+    const state = columnHeaderDragState.value;
+    return state?.dragging ? state : null;
+  });
   const columnHeaderResizeActive = ref(false);
   let columnHeaderDragClickGuardUntil = 0;
   let columnHeaderSuppressNextClick = false;
@@ -604,7 +627,7 @@ export function useDataGridColumnLayout(options: {
 
   const columnHeaderTooltipsDisabled = computed(() =>
     columnHeaderTooltipDisabled({
-      columnDragActive: columnHeaderDragState.value !== null,
+      columnDragActive: columnHeaderActiveDrag.value !== null,
       columnResizeActive: columnHeaderResizeActive.value,
     }),
   );
@@ -965,13 +988,18 @@ export function useDataGridColumnLayout(options: {
     return true;
   }
 
+  // Shared objects: a fresh literal per call would make every header's `dragClass` prop look changed on
+  // every parent render.
+  const COLUMN_HEADER_DRAG_HIDDEN_CLASS = { "opacity-0 pointer-events-none": true };
+  const COLUMN_HEADER_DRAG_VISIBLE_CLASS = { "opacity-0 pointer-events-none": false };
+
   function columnHeaderDragClass(visibleColIdx: number) {
-    const state = columnHeaderDragState.value;
-    return { "opacity-0 pointer-events-none": state?.dragging && !state.referenceMode && state.sourceVisibleIndex === visibleColIdx };
+    const state = columnHeaderActiveDrag.value;
+    return state && !state.referenceMode && state.sourceVisibleIndex === visibleColIdx ? COLUMN_HEADER_DRAG_HIDDEN_CLASS : COLUMN_HEADER_DRAG_VISIBLE_CLASS;
   }
 
   function columnHeaderPreviewOffset(visibleColIdx: number): number {
-    const state = columnHeaderDragState.value;
+    const state = columnHeaderActiveDrag.value;
     if (!state || state.referenceMode) return 0;
     const scrollCompensation = state.sourceVisibleIndex < frozenColumnCount.value ? 0 : state.currentScrollLeft - state.startScrollLeft;
     return columnHeaderPreviewOffsetForColumn({
@@ -985,7 +1013,14 @@ export function useDataGridColumnLayout(options: {
     });
   }
 
+  // Built once per layout change rather than per render, so unchanged headers receive the same style object.
+  const columnHeaderStyles = computed(() => toValue(options.renderedColumnWidths).map((_, visibleColIdx) => buildColumnHeaderStyle(visibleColIdx)));
+
   function columnHeaderStyle(visibleColIdx: number) {
+    return columnHeaderStyles.value[visibleColIdx] ?? buildColumnHeaderStyle(visibleColIdx);
+  }
+
+  function buildColumnHeaderStyle(visibleColIdx: number) {
     const style = renderedColumnStyle(visibleColIdx);
     const offset = columnHeaderPreviewOffset(visibleColIdx);
     // 冻结列头需要更高 z-index（与列头行号 z-20 一致）以覆盖非冻结列头

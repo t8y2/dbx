@@ -21,10 +21,10 @@ export function sidebarMenuScope(type: SidebarMenuTargetType): SidebarMenuScope 
 }
 
 const primaryActions: Record<SidebarMenuScope, readonly string[]> = {
-  connection: ["connection.cancelConnecting", "contextMenu.openConnection", "contextMenu.disconnectConnection", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.openDatabaseBrowser", "contextMenu.editConnection", "contextMenu.refreshChildren"],
+  connection: ["connection.cancelConnecting", "contextMenu.openConnection", "contextMenu.disconnectConnection", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.openDatabaseBrowser", "contextMenu.createDatabase", "contextMenu.editConnection", "contextMenu.refreshChildren"],
   // Closing a database hides itself once the database is already closed, so it leads the database menu
   // and "browse objects" stays first for databases that cannot be closed.
-  database: ["contextMenu.closeDatabaseConnection", "contextMenu.openObjectBrowser", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.createTable", "contextMenu.refreshChildren"],
+  database: ["contextMenu.closeDatabaseConnection", "contextMenu.openObjectBrowser", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.createTable", "contextMenu.createDatabase", "contextMenu.refreshChildren"],
   schema: ["contextMenu.openObjectBrowser", "contextMenu.newQuery", "savedSql.openDefaultQuery", "contextMenu.createTable", "contextMenu.refreshChildren"],
   table: ["contextMenu.viewData", "contextMenu.openInNewDataTab", "contextMenu.editStructure", "contextMenu.newQuery", "contextMenu.refreshChildren"],
   view: ["contextMenu.viewData", "contextMenu.openInNewDataTab", "contextMenu.editView", "contextMenu.newQuery", "contextMenu.refreshChildren"],
@@ -33,10 +33,10 @@ const primaryActions: Record<SidebarMenuScope, readonly string[]> = {
 
 const recommendedPrimaryActions: Partial<Record<SidebarMenuScope, readonly string[]>> = {
   connection: ["contextMenu.serverDashboard", "contextMenu.processList", "contextMenu.sqlServerTrace", "contextMenu.instanceInfo", "contextMenu.damengJobAdmin", "contextMenu.configureVisibleObjects", "visibleSchemas.title"],
-  database: ["sidebar.togglePinnedObject", "visibleSchemas.title"],
-  schema: ["sidebar.togglePinnedObject"],
-  table: ["sidebar.togglePinnedObject"],
-  view: ["sidebar.togglePinnedObject"],
+  database: ["contextMenu.exportDatabase", "sidebar.togglePinnedObject", "visibleSchemas.title"],
+  schema: ["contextMenu.exportDatabase", "sidebar.togglePinnedObject"],
+  table: ["contextMenu.exportDatabase", "sidebar.togglePinnedObject"],
+  view: ["contextMenu.exportDatabase", "sidebar.togglePinnedObject"],
   "sql-editor": ["toolbar.explainPlan", "editor.contextMenu.uppercaseSelection", "editor.contextMenu.lowercaseSelection", "editor.contextMenu.screenshotSelection"],
 };
 
@@ -79,6 +79,9 @@ const groupActions: Partial<Record<MenuGroup, readonly string[]>> = {
     "contextMenu.viewDdl",
     "contextMenu.viewSource",
     "contextMenu.viewDependencies",
+    "oracleSecurity.tableGrants",
+    "tree.aggregateFunctions",
+    "contextMenu.viewPostgresRowLevelSecurity",
     "contextMenu.exportStructure",
     "contextMenu.duplicateStructure",
     "contextMenu.renameObject",

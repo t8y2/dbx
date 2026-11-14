@@ -931,6 +931,26 @@ pub async fn get_table_partitioning(
         .map_err(AppError::from)
 }
 
+pub async fn list_doris_partitions(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<dbx_core::db::DorisPartitionsResult>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let table = q.table.as_deref().unwrap_or("");
+    dbx_core::schema::list_doris_partitions_core(
+        &state.app,
+        &q.connection_id,
+        database,
+        schema,
+        table,
+        q.catalog.as_deref(),
+    )
+    .await
+    .map(Json)
+    .map_err(AppError::from)
+}
+
 pub async fn list_invalid_indexes(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,

@@ -10658,6 +10658,45 @@ pub async fn get_table_partitioning_core(
     .await
 }
 
+/// Read-only Doris partition listing used by the "Partitions & Buckets" tab.
+///
+/// Doris `SHOW PARTITIONS` works for internal-catalog tables. External catalogs
+/// need a session-level `SET CATALOG`, which must not leak into a pooled
+/// connection, so they are reported as unsupported instead of returning an
+/// empty list that would look like "no partitions".
+pub async fn list_doris_partitions_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    catalog: Option<&str>,
+) -> Result<db::DorisPartitionsResult, String> {
+    if catalog.is_some_and(|value| !value.trim().is_empty() && !value.eq_ignore_ascii_case("internal")) {
+        return Ok(db::doris::unsupported_partitions("external_catalog"));
+    }
+    let config = connection_config(state, connection_id).await;
+    if !config.as_ref().is_some_and(db::doris::is_config) {
+        return Ok(db::doris::unsupported_partitions("not_doris"));
+    }
+    // MySQL-family connections carry the database in either field depending on
+    // the caller; Doris has no separate schema namespace.
+    let effective_database = if schema.trim().is_empty() { database } else { schema };
+    retry_metadata_connection(state, connection_id, Some(effective_database), || async {
+        let pool_key =
+            state.get_or_create_metadata_pool_for_session(connection_id, Some(effective_database), None).await?;
+        let pool_handle = state.pool_handle(&pool_key).await;
+        match pool_handle.as_ref() {
+            Some(PoolKind::Mysql(pool, _)) => {
+                let partitions = db::doris::list_table_partitions(pool, effective_database, table).await?;
+                Ok(db::DorisPartitionsResult { supported: true, reason: None, partitions })
+            }
+            _ => Ok(db::doris::unsupported_partitions("not_doris")),
+        }
+    })
+    .await
+}
+
 /// Same-table index names whose `pg_index.indisvalid` is `false` (left behind
 /// by a cancelled `CREATE INDEX CONCURRENTLY`). Empty for non-PostgreSQL pools.
 pub async fn list_invalid_indexes_core(

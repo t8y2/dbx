@@ -16,6 +16,7 @@ describe("tableMetadataCapabilities", () => {
       constraints: false,
       triggers: false,
       partitions: false,
+      layout: false,
       ddl: false,
     });
   });
@@ -31,6 +32,7 @@ describe("tableMetadataCapabilities", () => {
       constraints: false,
       triggers: false,
       partitions: false,
+      layout: false,
       ddl: false,
     });
   });
@@ -58,6 +60,15 @@ describe("tableMetadataCapabilities", () => {
     expect(getTableMetadataCapabilities("vastbase").partitions).toBe(false);
     expect(getTableMetadataCapabilities("gaussdb").partitions).toBe(false);
     expect(getTableMetadataCapabilities(undefined).partitions).toBe(false);
+  });
+
+  it("exposes the Doris partition/bucket layout tab without enabling PG partitions", () => {
+    const doris = getTableMetadataCapabilities("doris");
+    expect(doris.layout).toBe(true);
+    expect(doris.partitions).toBe(false);
+    expect(isStructureMetadataTabSupported("layout", doris, false)).toBe(true);
+    expect(isStructureMetadataTabSupported("layout", getTableMetadataCapabilities("mysql"), false)).toBe(false);
+    expect(isStructureMetadataTabSupported("layout", getTableMetadataCapabilities("starrocks"), false)).toBe(false);
   });
 
   it("shows the Partitions tab for PostgreSQL in both edit and create mode only", () => {

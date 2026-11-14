@@ -1189,6 +1189,68 @@ pub struct PgTablePartitioning {
     pub server_version_num: Option<i32>,
 }
 
+/// One row of Doris `SHOW PARTITIONS FROM db.table`.
+///
+/// Doris adds columns over time; every field is optional except the partition
+/// name so a newer server cannot break older clients. Values are read by column
+/// name, never by position.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DorisPartitionInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_id: Option<i64>,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_version: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_version_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution_key: Option<String>,
+    /// Parsed integer when `Buckets` is numeric; `None` for `AUTO` / composite text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buckets: Option<u32>,
+    /// Raw `Buckets` text, kept so `AUTO` and `1/3` forms stay diagnosable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buckets_raw: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replication_num: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_medium: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_size: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_mutable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_in_memory: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_allocation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_consistency_check_time: Option<String>,
+}
+
+/// Result of the read-only Doris partition listing.
+///
+/// `supported = false` means the current object/catalog is not handled (for
+/// example an external catalog), which must stay distinguishable from an OLAP
+/// table that simply has no partitions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DorisPartitionsResult {
+    pub supported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub partitions: Vec<DorisPartitionInfo>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FunctionInfo {

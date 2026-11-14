@@ -100,6 +100,7 @@ import DataGridTextFilterWorkbench from "@/components/grid/DataGridTextFilterWor
 import DataGridSortWorkbench from "@/components/grid/DataGridSortWorkbench.vue";
 import DataGridTextSortWorkbench from "@/components/grid/DataGridTextSortWorkbench.vue";
 import DataGridTableInfoPanels from "@/components/grid/DataGridTableInfoPanels.vue";
+import { loadDorisTableLayout } from "@/lib/table/dorisLayout";
 import DataGridColumnFilterPopover from "@/components/grid/DataGridColumnFilterPopover.vue";
 import DataGridCellDetailHeader from "@/components/grid/DataGridCellDetailHeader.vue";
 import DataGridCellDetailHexViewer from "@/components/grid/DataGridCellDetailHexViewer.vue";
@@ -110,7 +111,7 @@ import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPane
 import { objectDependencyTarget, type ObjectDependencyTarget, type ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import GridSnapshotDialog from "@/components/grid/GridSnapshotDialog.vue";
-import type { QueryResult, ColumnInfo, ConstraintInfo, DatabaseType, ForeignKeyInfo, IndexInfo, ObjectStatistics, PgTablePartitioning, TriggerInfo, TableInfoTab, QueryResultSourceColumnRef, QueryPageJumpProgress } from "@/types/database";
+import type { QueryResult, ColumnInfo, ConstraintInfo, DatabaseType, DorisTableLayout, ForeignKeyInfo, IndexInfo, ObjectStatistics, PgTablePartitioning, TriggerInfo, TableInfoTab, QueryResultSourceColumnRef, QueryPageJumpProgress } from "@/types/database";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { shouldNavigateFromTableInfoColumnClick } from "@/lib/table/tableInfoColumnNavigation";
 import { tableInfoTabForDrawerToggle } from "@/lib/table/tableInfoTabPreference";
@@ -13618,6 +13619,11 @@ const partitioningLoaded = ref(false);
 const partitioningLoading = ref(false);
 const partitioningError = ref("");
 const partitioningRequestGeneration = ref(0);
+const dorisLayout = ref<DorisTableLayout | null>(null);
+const dorisLayoutLoading = ref(false);
+const dorisLayoutLoaded = ref(false);
+const dorisLayoutError = ref("");
+const dorisLayoutRequestGeneration = ref(0);
 // The Partitions tab is only offered for tables that actually are partitioned
 // (a partitioned parent or a member partition). Probed lazily with the cheap
 // partition-status query, not the full tree.
@@ -13635,6 +13641,7 @@ const activeTableInfoLoading = computed(() => {
   if (activeTableInfoTab.value === "foreignKeys") return foreignKeysLoading.value;
   if (activeTableInfoTab.value === "constraints") return constraintsLoading.value;
   if (activeTableInfoTab.value === "partitions") return partitioningLoading.value;
+  if (activeTableInfoTab.value === "layout") return dorisLayoutLoading.value;
   return activeTableInfoTab.value === "triggers" && triggersLoading.value;
 });
 const cellDetailPanelLayout = computed(() => settingsStore.editorSettings.cellDetailPanelLayout);
@@ -13924,6 +13931,14 @@ const tableInfoTabs = computed(() => {
       count: partitioning.value?.partitions.length,
     });
   }
+  if (tableMetadataCapabilities.value.layout && !isDataGridViewTable(props.tableMeta?.tableType)) {
+    tabs.push({
+      id: "layout",
+      label: t("dorisLayout.tab"),
+      icon: Network,
+      count: dorisLayout.value?.partitions.length,
+    });
+  }
   if (tableDependencyTarget.value) tabs.push({ id: "relations", label: t("objectRelations.title"), icon: Network });
   return tabs;
 });
@@ -13964,6 +13979,35 @@ async function selectTableInfoTab(tab: TableInfoTab) {
   else if (nextTab === "constraints") await fetchConstraints();
   else if (nextTab === "triggers") await fetchTriggers();
   else if (nextTab === "partitions") await fetchPartitions();
+  else if (nextTab === "layout") await fetchDorisLayout();
+}
+
+async function fetchDorisLayout(force = false) {
+  if (!tableMetadataCapabilities.value.layout || !props.connectionId || !props.tableMeta?.tableName) return;
+  if (dorisLayoutLoaded.value && !force) return;
+  const generation = ++dorisLayoutRequestGeneration.value;
+  dorisLayoutLoading.value = true;
+  dorisLayoutError.value = "";
+  try {
+    const value = await loadDorisTableLayout({
+      connectionId: props.connectionId,
+      database: props.database ?? props.tableMeta.database ?? "",
+      schema: props.tableMeta.schema || props.tableMeta.database || props.database || "",
+      tableName: props.tableMeta.tableName,
+      catalog: props.tableMeta.catalog,
+      queryTimeoutSecs: connectionStore.getConfig(props.connectionId)?.query_timeout_secs,
+      forceDdl: force,
+    });
+    if (generation !== dorisLayoutRequestGeneration.value) return;
+    dorisLayout.value = value;
+    dorisLayoutLoaded.value = true;
+  } catch (error) {
+    if (generation !== dorisLayoutRequestGeneration.value) return;
+    dorisLayout.value = null;
+    dorisLayoutError.value = String((error as Error)?.message ?? error);
+  } finally {
+    if (generation === dorisLayoutRequestGeneration.value) dorisLayoutLoading.value = false;
+  }
 }
 
 watch(
@@ -14008,6 +14052,9 @@ async function refreshActiveTableInfo() {
   } else if (activeTableInfoTab.value === "partitions") {
     partitioningLoaded.value = false;
     await fetchPartitions(true);
+  } else if (activeTableInfoTab.value === "layout") {
+    dorisLayoutLoaded.value = false;
+    await fetchDorisLayout(true);
   }
 }
 
@@ -14061,6 +14108,11 @@ watch(
     partitioningLoading.value = false;
     partitioningError.value = "";
     partitioningRequestGeneration.value += 1;
+    dorisLayout.value = null;
+    dorisLayoutLoaded.value = false;
+    dorisLayoutLoading.value = false;
+    dorisLayoutError.value = "";
+    dorisLayoutRequestGeneration.value += 1;
     isPartitionedTable.value = false;
     partitionStatusResolved.value = false;
     // 表身份变更后，主动触发索引加载，确保索引指示器在切换表后立即可见
@@ -17433,6 +17485,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               :partitioning="partitioning"
               :partitions-loading="partitioningLoading"
               :partitions-error="partitioningError"
+              :layout="dorisLayout"
+              :layout-loading="dorisLayoutLoading"
+              :layout-error="dorisLayoutError"
               :is-protected-mongo-index="isProtectedMongoIndex"
               :format-column-type="gaussdbMColumnType"
               @table-info-column-click="onTableInfoColumnClick"

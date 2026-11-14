@@ -846,6 +846,7 @@ async fn serve() -> Result<(), String> {
         .route("/schema/partitions", get(routes::schema::list_partitions))
         .route("/schema/table-partition-status", get(routes::schema::get_table_partition_status))
         .route("/schema/table-partitioning", get(routes::schema::get_table_partitioning))
+        .route("/schema/doris-partitions", get(routes::schema::list_doris_partitions))
         .route("/schema/invalid-indexes", get(routes::schema::list_invalid_indexes))
         .route("/schema/subpartitions", get(routes::schema::list_subpartitions))
         .route("/schema/functions", get(routes::schema::list_functions))

@@ -1515,6 +1515,10 @@ export async function getTablePartitioning(connectionId: string, database: strin
   return get(`/api/schema/table-partitioning?${qs({ connection_id: connectionId, database, schema, table })}`);
 }
 
+export async function listDorisPartitions(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<import("@/types/database").DorisPartitionsResult> {
+  return get(`/api/schema/doris-partitions?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
+}
+
 export async function listInvalidIndexes(connectionId: string, database: string, schema: string, table: string): Promise<string[]> {
   return get(`/api/schema/invalid-indexes?${qs({ connection_id: connectionId, database, schema, table })}`);
 }

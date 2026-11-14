@@ -61,6 +61,7 @@ define_registry![
     list_partitions,
     get_table_partition_status,
     get_table_partitioning,
+    list_doris_partitions,
     list_invalid_indexes,
     list_subpartitions,
     get_table_ddl,
@@ -104,7 +105,7 @@ mod tests {
 
     #[test]
     fn handles_only_schema_commands_including_native_jobs() {
-        assert_eq!(COMMANDS.len(), 68);
+        assert_eq!(COMMANDS.len(), 69);
         assert!(handles("list_databases"));
         assert!(handles("load_schema_diff_routines"));
         assert!(handles("prepare_oracle_routine_save"));

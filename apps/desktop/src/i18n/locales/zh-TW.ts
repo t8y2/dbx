@@ -8411,7 +8411,8 @@ export default withEnglishFallback({
     sidebarTableSearchEnabled: "啟用庫下資料表搜尋框",
     sidebarTableSearchEnabledDescription: "在已展開的資料庫、schema 或資料表分組下顯示局部資料表搜尋框，用於為不同庫分別篩選資料表。",
     sidebarObjectInfoMode: "側邊欄附加資訊",
-    sidebarObjectInfoModeDescription: "選擇在名稱後顯示註解、物件大小、同時顯示兩者或不顯示。組合模式下，註解跟隨名稱，大小顯示在最右側，缺少對應資料時自動隱藏。資料庫總大小目前支援 PostgreSQL，資料表大小支援 MySQL、PostgreSQL、GaussDB、KingbaseES、GBase 8a、SQL Server、Oracle、達夢和 ClickHouse。",
+    sidebarObjectInfoModeDescription:
+      "選擇在名稱後顯示註解、物件大小、同時顯示兩者或不顯示。組合模式下，註解跟隨名稱，大小顯示在最右側，缺少對應資料時自動隱藏。資料庫總大小目前支援 PostgreSQL，資料表大小支援 MySQL、PostgreSQL、GaussDB、KingbaseES、GBase 8a、SQL Server、Oracle、達夢、ClickHouse、Doris 和 StarRocks。",
     sidebarObjectInfoModeCommentInline: "註解（緊接名稱）",
     sidebarObjectInfoModeCommentAligned: "註解（同層對齊）",
     sidebarObjectInfoModeCommentRight: "註解（靠右對齊）",

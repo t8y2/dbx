@@ -9293,7 +9293,7 @@ export default withEnglishFallback({
     sidebarTableSearchEnabledDescription: "Mostra uma busca local sob bancos, schemas ou grupos de tabelas expandidos para filtrar tabelas separadamente.",
     sidebarObjectInfoMode: "Informações adicionais laterais",
     sidebarObjectInfoModeDescription:
-      "Escolha comentários, tamanhos de objetos, ambos ou nenhuma informação adicional. Ao exibir ambos, o comentário aparece após o nome e o tamanho na extremidade direita. Informações sem dados disponíveis são ocultadas. O tamanho total dos bancos aceita PostgreSQL; os tamanhos das tabelas aceitam MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng e ClickHouse.",
+      "Escolha comentários, tamanhos de objetos, ambos ou nenhuma informação adicional. Ao exibir ambos, o comentário aparece após o nome e o tamanho na extremidade direita. Informações sem dados disponíveis são ocultadas. O tamanho total dos bancos aceita PostgreSQL; os tamanhos das tabelas aceitam MySQL, PostgreSQL, GaussDB, KingbaseES, GBase 8a, SQL Server, Oracle, Dameng, ClickHouse, Doris e StarRocks.",
     sidebarObjectInfoModeCommentInline: "Comentários (junto ao nome)",
     sidebarObjectInfoModeCommentAligned: "Comentários (alinhar nível)",
     sidebarObjectInfoModeCommentRight: "Comentários (alinhar à direita)",

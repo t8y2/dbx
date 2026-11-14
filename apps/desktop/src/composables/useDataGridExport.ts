@@ -43,6 +43,7 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import i18n from "@/i18n";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, xlsxHeaderUsesCommentRows, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
+import { xlsxDataSheetName, xlsxRequestSheetName } from "@/lib/export/xlsxSheetName";
 import { isPartiallyLoadedCopy, partialLoadCopyHintKey, type PartialLoadCopyInfo } from "@/lib/dataGrid/copyPartialLoadHint";
 import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
@@ -723,7 +724,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   function currentXlsxSheetName(): string {
-    return currentResultLabel?.value || tableMeta.value?.tableName || "Export";
+    return xlsxDataSheetName(useSettingsStore().editorSettings.xlsxSheetName, currentResultLabel?.value || tableMeta.value?.tableName || "Export");
   }
 
   function currentExportTitle(): string {
@@ -2507,6 +2508,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       ...(format === "sql" ? { columnExtras: sqlExportColumnExtras(exportedColumns) } : {}),
       columnComments: format === "xlsx" ? buildXlsxHeaderOverrides(projectedColumns?.map((entry) => entry.name) ?? columns.value, projectedColumns ? projectedColumns.map((entry) => visibleXlsxColumnComments.value?.[entry.index]) : visibleXlsxColumnComments.value, headerMode) : undefined,
       headerCommentRows: format === "xlsx" ? xlsxHeaderUsesCommentRows(headerMode) : undefined,
+      sheetName: xlsxRequestSheetName(editorSettings.xlsxSheetName, format),
       primaryKeys: meta.primaryKeys ? [...meta.primaryKeys] : undefined,
       ...sqlExportPrimaryKeyOptions(format),
       whereInput: whereInput.value,
@@ -2759,6 +2761,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       numericColumnRightAlign: editorSettings.numericColumnRightAlign ?? true,
       columnComments: format === "xlsx" ? buildXlsxHeaderOverrides(allColumns.value, allXlsxColumnComments.value, headerMode) : undefined,
       headerCommentRows: format === "xlsx" && xlsxHeaderUsesCommentRows(headerMode),
+      sheetName: xlsxRequestSheetName(editorSettings.xlsxSheetName, format),
       autoFilter: format === "xlsx" ? autoFilter : undefined,
     };
     const fmt = FORMAT_META[format];

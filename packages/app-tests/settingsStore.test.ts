@@ -840,6 +840,15 @@ test("normalizes global datetime display and transfer formats", () => {
   assert.equal(settings.globalDateTimeImportFormat, "");
 });
 
+test("normalizes the fixed XLSX sheet name", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.xlsxSheetName, "");
+  assert.equal(normalizeEditorSettings({}).xlsxSheetName, "");
+  assert.equal(normalizeEditorSettings({ xlsxSheetName: "  Report  " }).xlsxSheetName, "Report");
+  assert.equal(normalizeEditorSettings({ xlsxSheetName: "a/b:c*d?e[f]g\\h" }).xlsxSheetName, "a b c d e f g h");
+  assert.equal(normalizeEditorSettings({ xlsxSheetName: "x".repeat(40) }).xlsxSheetName, "x".repeat(31));
+  assert.equal(normalizeEditorSettings({ xlsxSheetName: 123 } as any).xlsxSheetName, "");
+});
+
 test("keeps only valid saved column formatter configs", () => {
   const settings = normalizeEditorSettings({
     columnFormatters: {

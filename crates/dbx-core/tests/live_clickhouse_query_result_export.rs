@@ -117,6 +117,7 @@ async fn live_clickhouse_query_result_export_xlsx_streams_random_order_query_onc
         numeric_column_right_align: false,
         primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
+        sheet_name: None,
     };
     let done_seen = AtomicBool::new(false);
     let result = export_query_result_core(&state, &request, None, |progress| {

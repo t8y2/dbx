@@ -22,6 +22,7 @@ import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
 import { dropsSchemaQualifier } from "@/lib/table/tableSelectSql";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, xlsxHeaderUsesCommentRows, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
+import { xlsxDataSheetName, xlsxRequestSheetName } from "@/lib/export/xlsxSheetName";
 import {
   isLoadingStructurePreview,
   showStructureDocCopyDialog,
@@ -74,6 +75,7 @@ interface SidebarTableExportTarget {
   primaryKeyMode: api.TableExportRequest["primaryKeyMode"];
   omitDatabaseQualifier: boolean;
   dateTimeFormat?: string;
+  xlsxSheetName?: string;
   connectionFingerprint: string;
   connectionType: string;
   queryTimeoutSecs?: number;
@@ -536,6 +538,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       primaryKeyMode: editorSettings.dataGridExtractorOptions.sql.primaryKeyMode,
       omitDatabaseQualifier: dropsSchemaQualifier(effectiveDatabaseTypeForConnection(config), editorSettings.generateSqlIncludeDatabaseName, node.catalog),
       dateTimeFormat: editorSettings.globalDateTimeExportFormat || undefined,
+      xlsxSheetName: editorSettings.xlsxSheetName || undefined,
       connectionFingerprint: connectionConfigFingerprint(config),
       connectionType: config.db_type,
       queryTimeoutSecs: config.query_timeout_secs,
@@ -586,7 +589,9 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         } else {
           const comments = result.columns.map((name) => exportColumnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
           const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
-          await read(() => api.exportQueryResultXlsx(outputPath, target.tableName, result.columns, result.column_types ?? result.columns.map(() => ""), headerOverrides, result.rows, undefined, autoFilter, target.dateTimeFormat, xlsxHeaderUsesCommentRows(headerMode)));
+          await read(() =>
+            api.exportQueryResultXlsx(outputPath, xlsxDataSheetName(target.xlsxSheetName, target.tableName), result.columns, result.column_types ?? result.columns.map(() => ""), headerOverrides, result.rows, undefined, autoFilter, target.dateTimeFormat, xlsxHeaderUsesCommentRows(headerMode)),
+          );
         }
         currentTask.status = "Done";
         currentTask.rowsExported = result.rows.length;
@@ -630,6 +635,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         columns: queryColumns,
         columnComments,
         headerCommentRows: format === "xlsx" ? xlsxHeaderUsesCommentRows(headerMode) : undefined,
+        sheetName: xlsxRequestSheetName(target.xlsxSheetName, format),
         autoFilter: format === "xlsx" ? autoFilter : undefined,
         primaryKeys,
         primaryKeyMode: target.primaryKeyMode,

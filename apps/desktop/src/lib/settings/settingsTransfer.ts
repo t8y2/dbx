@@ -300,6 +300,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "queryExportKeysetOptimizationEnabled",
     "globalDateTimeDisplayFormat",
     "globalDateTimeExportFormat",
+    "xlsxSheetName",
     "globalDateTimeImportFormat",
     "globalConnectTimeoutSecs",
     "globalQueryTimeoutSecs",

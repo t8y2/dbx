@@ -492,6 +492,7 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
         numeric_column_right_align: false,
         primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
+        sheet_name: None,
     };
     let done_seen = AtomicBool::new(false);
     let result = export_query_result_core(&state, &request, None, |progress| {
@@ -592,6 +593,7 @@ async fn live_mysql_csv_temporal_export_round_trip_preserves_dbx_force_text_valu
         numeric_column_right_align: false,
         primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
+        sheet_name: None,
     };
     export_query_result_core(&state, &request, None, |_| {}).await.expect("export fixture");
 
@@ -717,6 +719,7 @@ async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arrivi
         numeric_column_right_align: false,
         primary_key_mode: dbx_core::data_grid_sql::DataGridPrimaryKeyMode::Include,
         primary_keys: Vec::new(),
+        sheet_name: None,
     };
     let rows_exported = AtomicU64::new(0);
     let done_seen = AtomicBool::new(false);

@@ -169,6 +169,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { autoRevealExportedPathIfConfigured, promptExportSavePath } from "@/lib/export/exportPath";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, xlsxHeaderUsesCommentRows, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
+import { xlsxDataSheetName, xlsxRequestSheetName } from "@/lib/export/xlsxSheetName";
 import { showSqlInsertModeDialog, type SqlInsertDialect, type SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { getDefaultExportExecutionMode } from "@/lib/export/exportExecutionMode";
 import type { ManualExportMode } from "@/lib/export/manualExportQueue";
@@ -4315,7 +4316,20 @@ async function exportTableData(
         } else {
           const comments = result.columns.map((name) => columnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
           const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
-          await read(() => api.exportQueryResultXlsx(filePath, tableName, result.columns, result.column_types ?? result.columns.map(() => ""), headerOverrides, result.rows, undefined, autoFilter, settings.globalDateTimeExportFormat || undefined, xlsxHeaderUsesCommentRows(headerMode)));
+          await read(() =>
+            api.exportQueryResultXlsx(
+              filePath,
+              xlsxDataSheetName(settings.xlsxSheetName, tableName),
+              result.columns,
+              result.column_types ?? result.columns.map(() => ""),
+              headerOverrides,
+              result.rows,
+              undefined,
+              autoFilter,
+              settings.globalDateTimeExportFormat || undefined,
+              xlsxHeaderUsesCommentRows(headerMode),
+            ),
+          );
         }
         if (task) {
           task.status = "Done";
@@ -4371,6 +4385,7 @@ async function exportTableData(
         columns,
         columnComments: format === "xlsx" ? columnComments : undefined,
         headerCommentRows: format === "xlsx" ? xlsxHeaderUsesCommentRows(headerMode) : undefined,
+        sheetName: xlsxRequestSheetName(settings.xlsxSheetName, format),
         autoFilter: format === "xlsx" ? autoFilter : undefined,
         batchSize: settings.exportBatchSize,
         skipCount: format === "sql",

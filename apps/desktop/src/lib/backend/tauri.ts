@@ -6802,6 +6802,8 @@ export interface TableExportRequest {
   columnComments?: Array<string | null> | null;
   /** xlsx 专用：注释作为第二行表头（第 1 行列名、第 2 行注释、数据从第 3 行开始）。 */
   headerCommentRows?: boolean;
+  /** xlsx 专用：固定的数据工作表名称；缺省时沿用表名（查询结果导出为 Result）。 */
+  sheetName?: string;
   primaryKeys?: string[];
   /** SQL INSERT 导出使用的数据提取器主键模式。 */
   primaryKeyMode?: "include" | "exclude-generated" | "exclude-all";
@@ -6888,6 +6890,8 @@ export interface QueryResultExportRequest {
   columnComments?: Array<string | null> | null;
   /** xlsx 专用：注释作为第二行表头（第 1 行列名、第 2 行注释、数据从第 3 行开始）。 */
   headerCommentRows?: boolean;
+  /** xlsx 专用：固定的数据工作表名称；缺省时沿用表名（查询结果导出为 Result）。 */
+  sheetName?: string;
   autoFilter?: boolean;
   identifierQuote?: string;
   /** SQL INSERT 导出使用的数据提取器主键模式。 */

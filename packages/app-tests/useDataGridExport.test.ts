@@ -484,6 +484,29 @@ test("complete local query result XLSX export does not re-execute the query", as
   assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0]?.slice(1, 6), ["Export", ["id", "name"], ["int4", "text"], undefined, completeLocalResult.rows]);
 });
 
+test("local XLSX export names the data sheet with the fixed sheet name (#14225)", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    const completeLocalResult: QueryResult = {
+      columns: ["id"],
+      column_types: ["int4"],
+      rows: [[1]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+      truncated: false,
+      has_more: false,
+    };
+    useSettingsStore().updateEditorSettings({ xlsxSheetName: "Report" });
+    const { composable } = buildExportHarness({ completeLocalResult });
+
+    await composable.exportXlsx();
+
+    assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0]?.[1], "Report");
+  } finally {
+    restoreStorage();
+  }
+});
+
 test("MySQL joined query SQL export keeps result aliases instead of source column names", async () => {
   const download = installTextDownloadCapture();
   const completeLocalResult: QueryResult = {
@@ -1274,6 +1297,29 @@ test("table data export passes the global date time export format", async () => 
     await composable.exportCsv();
 
     assert.equal(apiMock.startTableExport.mock.calls[0][0].dateTimeFormat, "YYYY/MM/DD HH:mm:ss");
+  } finally {
+    restoreStorage();
+  }
+});
+
+test("table data export passes the fixed XLSX sheet name only for xlsx exports (#14225)", async () => {
+  const restoreStorage = installMemoryStorage();
+  try {
+    useSettingsStore().updateEditorSettings({ xlsxSheetName: "Report" });
+    const { composable } = buildTableDataExportHarness();
+
+    await composable.exportCsv();
+    assert.equal(apiMock.startTableExport.mock.calls[0][0].sheetName, undefined);
+
+    apiMock.startTableExport.mockClear();
+    await composable.exportXlsx();
+    assert.equal(apiMock.startTableExport.mock.calls[0][0].format, "xlsx");
+    assert.equal(apiMock.startTableExport.mock.calls[0][0].sheetName, "Report");
+
+    apiMock.startTableExport.mockClear();
+    useSettingsStore().updateEditorSettings({ xlsxSheetName: "" });
+    await composable.exportXlsx();
+    assert.equal(apiMock.startTableExport.mock.calls[0][0].sheetName, undefined);
   } finally {
     restoreStorage();
   }

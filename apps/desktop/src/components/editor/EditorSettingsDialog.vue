@@ -56,6 +56,7 @@ import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { XLSX_SHEET_NAME_MAX_LENGTH } from "@/lib/export/xlsxSheetName";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
 import { Label } from "@/components/ui/label";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -1098,6 +1099,7 @@ const editCsvNullMode = ref<CsvNullMode>(settingsStore.editorSettings.csvNullMod
 const editQueryResultExportFileNameSource = ref<QueryResultExportFileNameSource>(settingsStore.editorSettings.queryResultExportFileNameSource);
 const editGlobalDateTimeDisplayFormat = ref(settingsStore.editorSettings.globalDateTimeDisplayFormat);
 const editGlobalDateTimeExportFormat = ref(settingsStore.editorSettings.globalDateTimeExportFormat);
+const editXlsxSheetName = ref(settingsStore.editorSettings.xlsxSheetName);
 const editGlobalDateTimeImportFormat = ref(settingsStore.editorSettings.globalDateTimeImportFormat);
 /** Empty first option restores default (raw/auto); avoids using tab-wide "reset defaults". */
 const globalDateTimeFormatOptions = ["", ...DateTimePatterns];
@@ -1502,6 +1504,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     queryResultExportFileNameSource: editQueryResultExportFileNameSource.value,
     globalDateTimeDisplayFormat: editGlobalDateTimeDisplayFormat.value,
     globalDateTimeExportFormat: editGlobalDateTimeExportFormat.value,
+    xlsxSheetName: editXlsxSheetName.value,
     globalDateTimeImportFormat: editGlobalDateTimeImportFormat.value,
     exportRowLimitEnabled: editExportRowLimitEnabled.value,
     exportRowLimit: editExportRowLimit.value,
@@ -2224,6 +2227,7 @@ function syncEditorSettingsDraftFromStore() {
   editQueryResultExportFileNameSource.value = settingsStore.editorSettings.queryResultExportFileNameSource;
   editGlobalDateTimeDisplayFormat.value = settingsStore.editorSettings.globalDateTimeDisplayFormat;
   editGlobalDateTimeExportFormat.value = settingsStore.editorSettings.globalDateTimeExportFormat;
+  editXlsxSheetName.value = settingsStore.editorSettings.xlsxSheetName;
   editGlobalDateTimeImportFormat.value = settingsStore.editorSettings.globalDateTimeImportFormat;
   editExportRowLimitEnabled.value = settingsStore.editorSettings.exportRowLimitEnabled;
   editExportRowLimit.value = settingsStore.editorSettings.exportRowLimit;
@@ -2417,6 +2421,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   queryExportKeysetOptimizationEnabled: editQueryExportKeysetOptimizationEnabled,
   globalDateTimeDisplayFormat: editGlobalDateTimeDisplayFormat,
   globalDateTimeExportFormat: editGlobalDateTimeExportFormat,
+  xlsxSheetName: editXlsxSheetName,
   globalDateTimeImportFormat: editGlobalDateTimeImportFormat,
   updateDownloadSource: editUpdateDownloadSource,
   updateChannel: editUpdateChannel,
@@ -3080,6 +3085,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editQueryResultExportFileNameSource.value = DEFAULT_EDITOR_SETTINGS.queryResultExportFileNameSource;
     editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
     editGlobalDateTimeExportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeExportFormat;
+    editXlsxSheetName.value = DEFAULT_EDITOR_SETTINGS.xlsxSheetName;
     editGlobalDateTimeImportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeImportFormat;
     editExportRowLimitEnabled.value = DEFAULT_EDITOR_SETTINGS.exportRowLimitEnabled;
     editExportRowLimit.value = DEFAULT_EDITOR_SETTINGS.exportRowLimit;
@@ -3275,6 +3281,7 @@ function resetAllDefaults() {
   editQueryResultExportFileNameSource.value = DEFAULT_EDITOR_SETTINGS.queryResultExportFileNameSource;
   editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
   editGlobalDateTimeExportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeExportFormat;
+  editXlsxSheetName.value = DEFAULT_EDITOR_SETTINGS.xlsxSheetName;
   editGlobalDateTimeImportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeImportFormat;
   editExportRowLimitEnabled.value = DEFAULT_EDITOR_SETTINGS.exportRowLimitEnabled;
   editExportRowLimit.value = DEFAULT_EDITOR_SETTINGS.exportRowLimit;
@@ -11282,6 +11289,15 @@ onUnmounted(() => {
                       <SelectItem value="tab-title">{{ t("settings.queryResultExportFileNameSourceTabTitle") }}</SelectItem>
                     </SelectContent>
                   </Select>
+                </div>
+                <div data-settings-search-id="data-export-xlsx-sheet-name" :class="['flex items-start justify-between gap-4', settingsSearchTargetClass('data-export-xlsx-sheet-name')]">
+                  <div class="min-w-0 space-y-0.5">
+                    <Label for="export-xlsx-sheet-name">{{ t("settings.xlsxSheetName") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.xlsxSheetNameDescription") }}
+                    </p>
+                  </div>
+                  <Input id="export-xlsx-sheet-name" v-model="editXlsxSheetName" :placeholder="t('settings.xlsxSheetNamePlaceholder')" :maxlength="XLSX_SHEET_NAME_MAX_LENGTH" class="h-8 w-56 shrink-0" />
                 </div>
                 <div data-settings-search-id="data-export-preferred-path" :class="['space-y-2', settingsSearchTargetClass('data-export-preferred-path')]">
                   <Label for="export-preferred-path">{{ t("settings.preferredExportPath") }}</Label>

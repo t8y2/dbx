@@ -94,7 +94,7 @@ function selectConnection(connectionId: string) {
 
 function highlightSelectedConnection() {
   const selectedIndex = selectableRows.value.findIndex((row) => row.id === props.modelValue);
-  highlightIndex.value = selectedIndex >= 0 ? selectedIndex : 0;
+  highlightIndex.value = selectedIndex >= 0 ? selectedIndex : selectableRows.value.length ? 0 : -1;
 }
 
 async function scrollHighlightedRowIntoView() {
@@ -128,14 +128,17 @@ watch(open, async (value) => {
   void scrollHighlightedRowIntoView();
 });
 
-watch(searchText, () => {
-  highlightIndex.value = selectableRows.value.length ? 0 : -1;
+watch([selectableRows, searchText], ([nextRows, nextSearch], [previousRows, previousSearch]) => {
+  if (!open.value) return;
+  if (nextSearch !== previousSearch) {
+    highlightIndex.value = nextRows.length ? 0 : -1;
+  } else {
+    // Keep the keyboard target when connections move or disconnect. If it is
+    // gone, require a new choice instead of letting Enter select another row.
+    const highlightedId = previousRows[highlightIndex.value]?.id;
+    highlightIndex.value = highlightedId === undefined ? -1 : nextRows.findIndex((row) => row.id === highlightedId);
+  }
   void scrollHighlightedRowIntoView();
-});
-
-watch(selectableRows, () => {
-  if (!open.value || searchText.value) return;
-  highlightSelectedConnection();
 });
 
 function rowIndent(depth: number) {

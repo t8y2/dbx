@@ -25,6 +25,7 @@ import {
   buildOracleObjectErrorsSql,
   buildOracleObjectIdentitySql,
   buildOracleObjectStatusSql,
+  quoteOracleLiteral,
   mapOracleInvalidObjects,
   mapOracleObjectErrors,
   readAllOracleInvalidObjects,
@@ -32,7 +33,14 @@ import {
   type OracleObjectError,
 } from "@/lib/database/oracleInvalidObjects";
 
-const props = defineProps<{ open: boolean; connection: ConnectionConfig; database: string; schema: string; triggerContext?: { target: Readonly<OracleTriggerTarget>; expectedObjectId?: string; originTabId?: string; originRevision?: number } }>();
+const props = defineProps<{
+  open: boolean;
+  connection: ConnectionConfig;
+  database: string;
+  schema: string;
+  focusObject?: { name: string; type: "PROCEDURE" | "FUNCTION" | "VIEW" };
+  triggerContext?: { target: Readonly<OracleTriggerTarget>; expectedObjectId?: string; originTabId?: string; originRevision?: number };
+}>();
 const emit = defineEmits<{
   "update:open": [open: boolean];
   "open-source": [object: OracleInvalidObject, location?: Pick<OracleObjectError, "line" | "position">];
@@ -397,9 +405,30 @@ async function loadList(existingToken?: number, options?: { allowLastDdlTimeChan
       showTriggerSnapshot(snapshot);
       return;
     }
-    const result = await query(buildOracleInvalidObjectsSql(props.schema, 501), 501);
+    const focus = props.focusObject;
+    const sql = focus
+      ? `SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, OBJECT_ID, TO_CHAR(LAST_DDL_TIME, 'YYYY-MM-DD HH24:MI:SS') AS LAST_DDL_TIME FROM ALL_OBJECTS WHERE OWNER = ${quoteOracleLiteral(props.schema)} AND OBJECT_NAME = ${quoteOracleLiteral(focus.name)} AND OBJECT_TYPE = ${quoteOracleLiteral(focus.type)} AND STATUS = 'INVALID'`
+      : buildOracleInvalidObjectsSql(props.schema, 501);
+    const result = await query(sql, focus ? 2 : 501);
     if (!isCurrent(token) || readId !== listLoadGeneration) return;
     const rows = mapOracleInvalidObjects(result.rows, props.schema);
+    if (focus) {
+      const row = !result.truncated && result.rows.length === 1 ? rows[0] : undefined;
+      const target = row?.owner === props.schema && row.name === focus.name && row.type === focus.type && /^[1-9]\d*$/.test(row.objectId) && row.lastDdlTime ? row : undefined;
+      objects.value = target ? [target] : [];
+      currentView.value = "detail";
+      if (!selected.value && target) {
+        selectObject(target);
+      } else if (target && selected.value && options?.allowLastDdlTimeChange && sameObject(target, selected.value)) {
+        selected.value = target;
+      } else {
+        const previous = selected.value;
+        if (!options?.allowLastDdlTimeChange && (!target || !previous || !sameObject(target, previous) || target.lastDdlTime !== previous.lastDdlTime)) {
+          loadError.value = t("processList.oracleInvalidObjects.targetChanged");
+        }
+      }
+      return;
+    }
     mergeDictionaryRows(rows, false, verifyMissingOnNextRead.value);
     truncated.value = result.truncated === true || rows.length >= 501;
     if (selected.value) {
@@ -741,7 +770,7 @@ async function compileSingle() {
       }
       compiling.value = false;
       if (currentView.value === "detail" && selected.value && !sameObject(selected.value, target) && !unverifiedKeys.value.has(selectionKey(selected.value)) && !rowBatchItem(selected.value)) void loadErrors(selected.value, token);
-      void startFullRead(token);
+      if (!props.focusObject) void startFullRead(token);
     }
   }
 }
@@ -1124,9 +1153,9 @@ function close() {
 }
 
 watch(
-  () => [props.open, JSON.stringify(props.connection), props.database, props.schema, JSON.stringify(props.triggerContext)] as const,
+  () => [props.open, JSON.stringify(props.connection), props.database, props.schema, JSON.stringify(props.triggerContext), JSON.stringify(props.focusObject)] as const,
   ([open], previous) => {
-    const scopeChanged = !!previous && (previous[1] !== JSON.stringify(props.connection) || previous[2] !== props.database || previous[3] !== props.schema || previous[4] !== JSON.stringify(props.triggerContext));
+    const scopeChanged = !!previous && (previous[1] !== JSON.stringify(props.connection) || previous[2] !== props.database || previous[3] !== props.schema || previous[4] !== JSON.stringify(props.triggerContext) || previous[5] !== JSON.stringify(props.focusObject));
     if (scopeChanged || !open) {
       singleCompilationGeneration++;
       batchExecutionGeneration++;
@@ -1184,7 +1213,7 @@ onBeforeUnmount(() => {
       <DialogHeader class="shrink-0 border-b px-5 py-4">
         <DialogTitle>{{ t("processList.oracleInvalidObjects.title") }} · {{ connection.name }} · {{ schema }}</DialogTitle>
       </DialogHeader>
-      <section v-if="currentView === 'list'" class="flex min-h-0 flex-1 flex-col overflow-hidden" :aria-label="t('processList.oracleInvalidObjects.listLabel')" data-list-heading tabindex="-1">
+      <section v-if="currentView === 'list' && !focusObject" class="flex min-h-0 flex-1 flex-col overflow-hidden" :aria-label="t('processList.oracleInvalidObjects.listLabel')" data-list-heading tabindex="-1">
         <div class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-3 py-2 text-xs">
           <span class="text-muted-foreground"
             >{{ hasFilters ? t("processList.oracleInvalidObjects.filterCount", { matched: filteredObjects.length, total: displayedObjects.length }) : t("processList.oracleInvalidObjects.listCount", { count: displayedObjects.length })
@@ -1298,6 +1327,7 @@ onBeforeUnmount(() => {
           <Button v-if="oracleInvalidObjectSourceKind(selected.type)" variant="outline" size="sm" class="h-7 shrink-0 gap-1.5 text-xs" :disabled="compiling" @click="emit('open-source', selected)"><Wrench class="h-3.5 w-3.5" />{{ t("processList.oracleInvalidObjects.openSource") }}</Button>
         </div>
         <div class="min-h-0 flex-1 overflow-auto px-4 py-3">
+          <p v-if="focusObject" class="mb-3 text-xs text-muted-foreground">{{ t("processList.oracleInvalidObjects.ddlWarning") }}</p>
           <div class="mb-2 text-xs font-medium">{{ t("processList.oracleInvalidObjects.errorsTitle") }}</div>
           <div v-if="errorLoadError" class="rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">{{ errorLoadError }}</div>
           <p v-if="!errorLoadError && errorsTruncated" class="mb-2 rounded border bg-muted/30 p-2 text-xs text-muted-foreground">{{ t("processList.oracleInvalidObjects.errorsTruncated") }}</p>
@@ -1334,12 +1364,13 @@ onBeforeUnmount(() => {
           <p v-if="outcome" class="mt-3 rounded border bg-muted/20 p-3 text-xs" role="status">{{ outcome }}</p>
         </div>
         <DialogFooter class="mx-0 mb-0 shrink-0 border-t px-4 py-3">
-          <Button v-if="!triggerContext" variant="outline" @click="returnFromDetail">{{ t("processList.oracleInvalidObjects.batchCurrentList") }}</Button>
-          <Button v-else variant="outline" :disabled="loading || compiling" @click="loadList()"><RefreshCw class="mr-1.5 size-4" :class="{ 'animate-spin': loading }" />{{ t("oracleTrigger.verifyReadOnly") }}</Button>
+          <Button v-if="!triggerContext && !focusObject" variant="outline" @click="returnFromDetail">{{ t("processList.oracleInvalidObjects.batchCurrentList") }}</Button>
+          <Button v-else-if="triggerContext" variant="outline" :disabled="loading || compiling" @click="loadList()"><RefreshCw class="mr-1.5 size-4" :class="{ 'animate-spin': loading }" />{{ t("oracleTrigger.verifyReadOnly") }}</Button>
           <Button variant="outline" :disabled="compiling" @click="close">{{ t("common.close") }}</Button>
           <Button variant="destructive" :disabled="!!unsupportedReason || compiling || !!loadError || !singleTargetPresent" @click="compileSingle"><Loader2 v-if="compiling" class="mr-1.5 h-3.5 w-3.5 animate-spin" />{{ t("processList.oracleInvalidObjects.compile") }}</Button>
         </DialogFooter>
       </section>
+      <p v-else-if="focusObject" class="px-4 py-6 text-sm" role="status">{{ loadError || t("common.loading") }}</p>
     </DialogContent>
   </Dialog>
 </template>

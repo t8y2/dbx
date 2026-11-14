@@ -2905,7 +2905,7 @@ async function openSaveSqlDialog(tabId?: string) {
 }
 
 async function saveActiveObjectSource(tab: QueryTab): Promise<boolean> {
-  return saveObjectSourceTab(tab, { connection: connectionStore.getConfig(tab.connectionId), queryStore, t, toast });
+  return saveObjectSourceTab(tab, { connection: connectionStore.getConfig(tab.connectionId), queryStore, t, toast, identifierQuote: connectionStore.connectionIdentifierQuote?.(tab.connectionId) });
 }
 
 function saveSqlFolderDisplayName(id: string) {
@@ -4363,6 +4363,7 @@ async function handleQuickOpenSelect(item: any) {
         databaseType,
         sqlFormatter: settingsStore.editorSettings.sqlFormatter,
         signature: item.signature,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(item.connectionId),
       });
       const tabId = queryStore.createTab(item.connectionId, item.database, `Source - ${objectName}`, "query", undefined, undefined, undefined, { sourceView: true });
       queryStore.updateSql(tabId, editableSource);

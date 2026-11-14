@@ -2549,6 +2549,7 @@ async function loadSourcePanel(row: ObjectBrowserRow, options?: { preserveEditin
             schema,
             name: row.name,
             source: result.source,
+            identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
           }),
           metadataLoadBudgetMs(props.connection.query_timeout_secs),
         )
@@ -2983,6 +2984,7 @@ async function refreshRenamePreviewSql() {
       schema: row.schema || selectedSchema.value,
       oldName: row.name,
       newName,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
     });
     if (requestId === renamePreviewRequestId) renamePreviewSqlText.value = sql;
   } catch (error) {
@@ -3132,6 +3134,7 @@ async function confirmRename() {
         name: row.name,
         newName,
         source: source.source,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       });
       const executed = await executeObjectBrowserSqlWithProductionGuard(statements.join(";\n"), async () => {
         for (const sql of statements) {
@@ -3147,6 +3150,7 @@ async function confirmRename() {
         schema,
         oldName: row.name,
         newName,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       });
       const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => {
         tableRenameFreeze?.markDispatched();
@@ -5116,6 +5120,7 @@ async function refreshVacuumPreviewSql() {
     tableName: row.name,
     full: vacuumTableFull.value,
     analyze: vacuumTableAnalyze.value,
+    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
   }).catch(() => "");
 }
 
@@ -5142,6 +5147,7 @@ async function confirmVacuumTable() {
         tableName: row.name,
         full: vacuumTableFull.value,
         analyze: vacuumTableAnalyze.value,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
       }));
     const executed = await executeObjectBrowserSqlWithProductionGuard(sql, () => api.executeQuery(props.connection.id, props.database, sql, row.schema || selectedSchema.value));
     if (!executed) return;
@@ -5294,6 +5300,7 @@ async function saveSource() {
       schema,
       name: row.name,
       source: sourceDraft.value,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connection.id),
     });
     save = await prepareObjectSourceSave(connectionId, database, databaseType, statements, schema, { objectType: row.type as ObjectSourceKind, name: row.name });
     const preparedSave = save;

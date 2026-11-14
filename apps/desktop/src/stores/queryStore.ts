@@ -3459,6 +3459,7 @@ export const useQueryStore = defineStore("query", () => {
         databaseType,
         sqlFormatter: settingsStore.editorSettings.sqlFormatter,
         signature: objectSource.signature,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId),
       });
       // 期间 tab 可能被关闭、被复用或已被编辑：身份没变且用户没改过内容时才回填
       const current = tabs.value.find((candidate) => candidate.id === id);
@@ -3596,6 +3597,7 @@ export const useQueryStore = defineStore("query", () => {
         sqlFormatter: settingsStore.editorSettings.sqlFormatter,
         signature: request.signature,
         metadataReadOptions: triggerOptions,
+        identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId),
       });
       if (tabs.value.find((candidate) => candidate.id === id)?.sourceLoad !== sourceLoad) return;
       if (tab.connectionId !== connectionId || tab.database !== database || (tab.schema || tab.database) !== schema) throw new Error(i18n.global.t("objects.sourceIdentityChanged"));

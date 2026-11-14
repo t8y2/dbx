@@ -1709,6 +1709,7 @@ fn mysql_object_replacement_statements(
             schema: Some(target_database.to_string()),
             name: name.to_string(),
             source: ddl.to_string(),
+            identifier_quote: None,
         };
         let statements = match validation_name {
             Some(validation_name) => build_mysql_routine_replacement_statements(input, validation_name)?,
@@ -11466,6 +11467,7 @@ async fn build_rebuild_preview(
                     schema: if request.target_schema.is_empty() { None } else { Some(request.target_schema.clone()) },
                     old_name: target_table.clone(),
                     new_name: backup.clone(),
+                    identifier_quote: None,
                 })?;
             rename_statements.push(rename_sql);
             let drop_sql = crate::db_admin_sql::build_drop_table_sql(crate::db_admin_sql::TableAdminSqlOptions {
@@ -12822,6 +12824,7 @@ where
                     schema: if request.target_schema.is_empty() { None } else { Some(request.target_schema.clone()) },
                     old_name: target_table.clone(),
                     new_name: backup_name.clone(),
+                    identifier_quote: None,
                 })?;
 
             execute_on_pool(state, target_pool_key, &rename_sql).await.map_err(|e| {
@@ -14969,6 +14972,7 @@ where
             schema: Some(request.target_schema.clone()),
             name: object.name.clone(),
             source: rewritten_source,
+            identifier_quote: None,
         })?;
         for statement in statements {
             execute_on_pool(state, target_pool_key, &statement)

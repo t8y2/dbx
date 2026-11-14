@@ -646,6 +646,9 @@ export interface SortedQuerySqlOptions {
   column: string;
   direction: QuerySortDirection;
   tieBreakerColumnIndexes?: number[];
+  /** Quote character reported by the connected server, for types whose quote is not fixed by the
+   * database type alone (GaussDB M/B/MYSQL mode reports a backtick). */
+  identifierQuote?: string;
 }
 
 export interface QuerySqlBuildResult {
@@ -2554,12 +2557,13 @@ export async function buildRenameObjectSql(options: BuildRenameObjectSqlOptions)
   return invoke("build_rename_object_sql", { options });
 }
 
-export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean }): Promise<string> {
+export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean; identifierQuote?: string }): Promise<string> {
   return invoke("build_rename_database_sql", {
     databaseType: options.databaseType,
     oldName: options.oldName,
     newName: options.newName,
     terminateConnections: options.terminateConnections,
+    identifierQuote: options.identifierQuote,
   });
 }
 

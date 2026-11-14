@@ -2457,14 +2457,20 @@ pub fn build_database_sql_export(options: BuildDatabaseSqlExportOptions) -> Resu
 /// identifiers for every engine that already accepts them (SQL Server, PostgreSQL
 /// family, Oracle, …). It only deviates to the source engine's native quoting for
 /// the backtick family (MySQL, Hive family, Neo4j/Nebula, …) where a double quote
-/// is a string literal and ANSI output cannot be replayed at all (#12158). This
-/// keeps the fix's blast radius on exactly the engines that were broken.
+/// is a string literal and ANSI output cannot be replayed at all (#12158), and for
+/// a PostgreSQL-family connection whose server reports a backtick identifier quote
+/// (GaussDB MySQL-compatible mode): there the double quote is a string literal too,
+/// so the connection's own quote character keeps the exported statements replayable.
+/// This keeps the fix's blast radius on exactly the engines that were broken.
 fn standard_export_identifier(
     database_type: Option<DatabaseType>,
     name: &str,
     identifier_quote: Option<&str>,
 ) -> String {
-    if crate::sql_dialect::uses_backtick_identifier_quoting(database_type) {
+    if crate::sql_dialect::uses_backtick_identifier_quoting(database_type)
+        || (identifier_quote.is_some()
+            && matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Postgres)))
+    {
         crate::sql_dialect::quote_table_data_identifier(database_type, name, identifier_quote)
     } else {
         crate::sql_dialect::quote_table_identifier(None, name)
@@ -10270,6 +10276,49 @@ mod tests {
             sql,
             r#"INSERT INTO "public"."users_role" ("id", "permissions", "tricky", "empty", "meta") VALUES (1, '{"add_issue","view_issues"}', '{"say \"hi\"","a,b",NULL,"C:\\tmp","it''s"}', '{}', '{"k": [1]}');"#
         );
+    }
+
+    #[test]
+    fn standard_sql_insert_gaussdb_mysql_mode_uses_connection_backtick_quotes() {
+        // GaussDB in M/B/MYSQL compatibility mode reports a backtick identifier
+        // quote through the connection; the Standard SQL exports must use it
+        // instead of double quotes (which are string literals there).
+        let options: BuildExportSqlInsertOptions = serde_json::from_value(json!({
+            "databaseType": "gaussdb",
+            "identifierQuote": "`",
+            "insertDialect": "standard",
+            "schema": "app",
+            "tableName": "order items",
+            "columns": ["id", "select", "full`name"],
+            "rows": [
+                [1, "x", "y"],
+                [2, "z", "w"]
+            ],
+            "batchSize": 10
+        }))
+        .expect("deserialize Standard SQL INSERT payload");
+
+        let sql = build_export_sql_insert(options).expect("build Standard SQL INSERT");
+
+        assert_eq!(
+            sql,
+            "INSERT INTO app.`order items` (id, `select`, `full``name`) VALUES\n(1, 'x', 'y'),\n(2, 'z', 'w');"
+        );
+
+        // Without a connection quote the ANSI double quote is kept.
+        let plain: BuildExportSqlInsertOptions = serde_json::from_value(json!({
+            "databaseType": "gaussdb",
+            "insertDialect": "standard",
+            "schema": "app",
+            "tableName": "order items",
+            "columns": ["id", "select"],
+            "rows": [[1, "x"]],
+            "batchSize": 10
+        }))
+        .expect("deserialize Standard SQL INSERT payload");
+
+        let plain_sql = build_export_sql_insert(plain).expect("build Standard SQL INSERT");
+        assert_eq!(plain_sql, "INSERT INTO \"app\".\"order items\" (\"id\", \"select\") VALUES (1, 'x');");
     }
 
     #[test]

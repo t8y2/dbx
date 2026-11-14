@@ -254,6 +254,7 @@ fn draft(name: &str, body: &str) -> SelectedFinalDraft {
         schema: Some(identity.owner.clone()),
         name: identity.name.clone(),
         source: format!("CREATE FUNCTION \"OWNER\".\"{name}\" RETURN NUMBER AS {body}"),
+        identifier_quote: None,
     });
     assert!(analysis.complete, "{:?}", analysis.issues);
     SelectedFinalDraft { identity, analysis: Some(analysis) }
@@ -267,6 +268,7 @@ fn package_draft(source: &str) -> SelectedFinalDraft {
         schema: Some(identity.owner.clone()),
         name: identity.name.clone(),
         source: source.into(),
+        identifier_quote: None,
     });
     assert!(analysis.complete, "{:?}", analysis.issues);
     SelectedFinalDraft { identity, analysis: Some(analysis) }
@@ -286,6 +288,7 @@ fn package_body(body: &str) -> SelectedFinalDraft {
         schema: Some("OWNER".into()),
         name: "PKG".into(),
         source: specification.into(),
+        identifier_quote: None,
     };
     let analysis = dbx_sql::object_source_sql::analyze_oracle_package_body_draft(
         EditableObjectSourceSqlInput {
@@ -509,6 +512,7 @@ async fn package_body_depends_on_final_spec_and_resolves_external_exception_role
         schema: Some("OWNER".into()),
         name: "PKG".into(),
         source: "CREATE PACKAGE \"OWNER\".PKG AS PROCEDURE run; END PKG;".into(),
+        identifier_quote: None,
     };
     let analysis = dbx_sql::object_source_sql::analyze_oracle_package_body_draft(EditableObjectSourceSqlInput {
         object_type: db::ObjectSourceKind::PackageBody, source: "CREATE PACKAGE BODY \"OWNER\".PKG AS PROCEDURE run IS BEGIN NULL; EXCEPTION WHEN OTHER.P.e THEN RAISE OTHER.P.e; END run; END PKG;".into(), ..spec.clone()
@@ -543,8 +547,15 @@ async fn package_body_depends_on_final_spec_and_resolves_external_exception_role
 
 #[tokio::test]
 async fn package_sql_columns_precede_member_roles_and_expired_locals_but_do_not_hide_missing_bindings() {
-    let spec = EditableObjectSourceSqlInput { database_type: endpoint().database_type, object_type: db::ObjectSourceKind::Package,
-        schema: Some("OWNER".into()), name: "PKG".into(), source: "CREATE PACKAGE \"OWNER\".PKG AS PROCEDURE run; FUNCTION f(x NUMBER) RETURN NUMBER; e EXCEPTION; v NUMBER; END PKG;".into() };
+    let spec = EditableObjectSourceSqlInput {
+        database_type: endpoint().database_type,
+        object_type: db::ObjectSourceKind::Package,
+        schema: Some("OWNER".into()),
+        name: "PKG".into(),
+        source: "CREATE PACKAGE \"OWNER\".PKG AS PROCEDURE run; FUNCTION f(x NUMBER) RETURN NUMBER; e EXCEPTION; v NUMBER; END PKG;"
+            .into(),
+        identifier_quote: None,
+    };
     let analysis = dbx_sql::object_source_sql::analyze_oracle_package_body_draft(EditableObjectSourceSqlInput {
         object_type: db::ObjectSourceKind::PackageBody,
         source: "CREATE PACKAGE BODY \"OWNER\".PKG AS FUNCTION f(x NUMBER) RETURN NUMBER IS BEGIN RETURN x; END f; PROCEDURE run IS n NUMBER; BEGIN DECLARE retired NUMBER; BEGIN NULL; END; SELECT f,e,v,retired INTO n,n,n,n FROM T; END run; END PKG;".into(), ..spec.clone()

@@ -216,6 +216,7 @@ fn claim_approvals<'a>(
                     schema: Some(draft.identity.owner.clone()),
                     name: draft.identity.name.clone(),
                     source: sql.clone(),
+                    identifier_quote: None,
                 },
                 Some(false),
             )?;
